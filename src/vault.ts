@@ -91,7 +91,7 @@ export async function syncVault() {
       );
     }
     const [{ n: retiredProfiles }] = await tx.query<{ n: number }>(
-      "WITH u AS (UPDATE developer_profiles SET active = false WHERE active AND NOT (slug = ANY($1)) RETURNING 1) SELECT count(*) AS n FROM u",
+      "WITH u AS (UPDATE developer_profiles SET active = false WHERE active AND source = 'vault' AND NOT (slug = ANY($1)) RETURNING 1) SELECT count(*) AS n FROM u",
       [profileSlugs],
     );
     const [{ n: retiredTasks }] = await tx.query<{ n: number }>(

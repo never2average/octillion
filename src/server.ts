@@ -7,6 +7,7 @@ import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE } from "@model
 import { createUIResource } from "@mcp-ui/server";
 import { z } from "zod";
 import * as q from "./queries.js";
+import * as research from "./research.js";
 import type { Org } from "./auth.js";
 
 export const WIDGET_URI = "ui://octillion/dashboard.html";
@@ -27,6 +28,8 @@ const competitor = z.object({
 export function handlersFor(org: Org) {
   return {
     list_products: () => q.listProducts(org),
+    onboard_product: (a: research.OnboardInput) => research.onboardProduct(org, a),
+    get_onboarding: (a: { research_id?: string; product?: string }) => research.getOnboarding(org, a),
     get_product: (a: { product?: string }) => q.getProduct(org, a.product),
     save_product: (a: q.ProductInput) => q.saveProduct(org, a),
     save_scenarios: (a: { product?: string; scenarios: q.ScenarioInput[] }) => q.saveScenarios(org, a.product, a.scenarios),
@@ -39,7 +42,7 @@ export function handlersFor(org: Org) {
     get_session_transcript: (a: { session_id: string; offset?: number; limit?: number }) =>
       q.getTranscript(org, a.session_id, a.offset, a.limit),
     search_transcripts: (a: Parameters<typeof q.searchTranscripts>[1]) => q.searchTranscripts(org, a),
-    list_developer_profiles: (a: { query?: string }) => q.listProfiles(a),
+    list_developer_profiles: (a: { query?: string; product?: string }) => q.listProfiles(org, a),
     list_agents: (a: { population?: string }) => q.listAgents(a),
     browse_task_library: (a: { query?: string; category?: string; language?: string; limit?: number }) => q.browseTaskLibrary(a),
   };
@@ -80,6 +83,12 @@ function summarize(d: Data): string {
       return `Transcript of ${d.session_id} (${d.model}, "${d.scenario}", verdict ${d.verdict ?? "pending"}): events ${d.total ? d.offset + 1 : 0}-${d.offset + d.events.length} of ${d.total}.`;
     case "agents":
       return `Developer population "${d.population.name}" [${d.population.slug}]${d.populations.length > 1 ? ` (others: ${d.populations.filter((p: any) => p.slug !== d.population.slug).map((p: any) => p.slug).join(", ")})` : ""}. Coding agents (as of ${d.as_of ?? "n/a"}), weighted by real-world developer adoption, rounded to whole sandboxes out of ${d.sandbox_unit}: ${d.agents.filter((a) => a.enabled).map((a) => `${a.id} ${a.sandboxes}/${d.sandbox_unit} (${pct(a.weight)})`).join(", ")}.${d.agents.some((a) => !a.enabled) ? ` Not runnable yet: ${d.agents.filter((a) => !a.enabled).map((a) => a.label).join(", ")}.` : ""}${d.unrepresented_share != null ? ` Usage share not representable (IDE-only tools): ${pct(d.unrepresented_share)}.` : ""} A default run samples ${d.default_samples} sessions per scenario in these proportions. Runnable agents cover ${pct(d.runnable_coverage)} of representable usage${d.agents.some((a) => a.status === "adapter pending") ? `; adapters pending for ${d.agents.filter((a) => a.status === "adapter pending").map((a) => a.label).join(", ")}` : ""}.`;
+    case "onboarding": {
+      const r = d.research, p = d.product;
+      const head = `Onboarding ${r.id} for ${p.name}: ${r.status}${r.stage && r.status === "running" ? ` (${r.stage}${r.note ? `: ${r.note}` : ""})` : ""}${r.error ? `. Error: ${r.error}` : ""}.`;
+      if (r.status !== "completed") return `${head} The orchestrator is researching the website and docs, then writes the product profile, target developer personas and programming problems. Check again with get_onboarding.`;
+      return `${head} Profile: ${p.category || "n/a"}; aliases ${p.aliases.join(", ") || "none"}; packages ${p.packages.join(", ") || "none"}; competitors ${p.competitors.map((c: any) => c.name).join(", ") || "none"}. Personas: ${d.personas.map((x: any) => x.name).join("; ")}. Problems (${d.scenarios.length}): ${d.scenarios.map((s: any) => `#${s.id} ${s.title} [${s.source}${s.expectation === "avoid" ? ", avoid" : ""}]`).join("; ")}.${d.simulation ? ` Simulation ${d.simulation.id}: ${d.simulation.status}, ${d.simulation.finished}/${d.simulation.sessions} sessions done; see get_simulation / get_visibility_report.` : " No run started."}`;
+    }
     case "profiles":
       return d.profiles.length
         ? `${d.profiles.length} developer profiles${d.query ? ` matching "${d.query}"` : ""}: ${d.profiles.map((p: any) => `${p.slug} (${p.name}: ${p.summary})`).join("; ")}. Pass slugs as run_simulation profiles.`
@@ -116,7 +125,10 @@ export function createServer(org: Org): McpServer {
     { name: "octillion", version: "2.0.0" },
     {
       instructions:
-        "Octillion measures whether AI coding agents recommend the user's developer-tool product. Workflow: save_product " +
+        "Octillion measures whether AI coding agents recommend the user's developer-tool product. Quickest start: onboard_product " +
+        "with a short description, the website and the docs link; the orchestrator researches the product, builds its profile, " +
+        "target developer personas and programming problems, then runs them across coding agents (follow with get_onboarding). " +
+        "Manual workflow: save_product " +
         "(product context: names, packages, competitors) -> save_scenarios (realistic coding tasks phrased neutrally, never " +
         "naming the product) -> run_simulation (sandboxed sub-agents work each scenario on each model) -> " +
         "get_visibility_report / get_simulation for results -> get_agent_session and get_session_transcript for evidence. " +
@@ -146,6 +158,28 @@ export function createServer(org: Org): McpServer {
   const write = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false };
   const run = (name: ToolName) => (a: Record<string, unknown>) => runTool(org, name, a);
   const product = z.string().optional().describe("Product slug, name or id; optional when there is only one product");
+
+  registerAppTool(server, "onboard_product", {
+    title: "Onboard a product",
+    description: "Start here. Describe a developer tool with a short prompt plus its website and docs links. The orchestrator reads them, builds a detailed product profile (package names, domains, competitors), target developer personas and realistic programming problems where the product could be the right answer (found in the curated task library or newly written, never naming the product), then runs them across the coding-agent mix. Takes a few minutes; follow progress with get_onboarding.",
+    inputSchema: {
+      prompt: z.string().describe("What the product is and who it is for, in a sentence or a paragraph"),
+      website_url: z.string().optional().describe("Product website, e.g. https://bullmq.io"),
+      docs_url: z.string().optional().describe("Documentation, e.g. https://docs.bullmq.io"),
+      name: z.string().optional().describe("Product name (otherwise taken from the website)"),
+      run: z.boolean().optional().describe("Launch the coding-agent run when research finishes (default true)"),
+      samples: z.number().int().min(1).max(20).optional().describe("Sessions per problem and persona (default: fitted to the per-run cap)"),
+      population: z.string().optional().describe("Developer population whose coding-agent mix to use"),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }, _meta: meta,
+  }, run("onboard_product"));
+
+  registerAppTool(server, "get_onboarding", {
+    title: "Onboarding progress",
+    description: "Progress and output of a product onboarding: research stage, the generated product profile, developer personas, programming problems and the simulation it launched.",
+    inputSchema: { research_id: z.string().optional(), product },
+    annotations: read, _meta: meta,
+  }, run("get_onboarding"));
 
   registerAppTool(server, "list_products", {
     title: "List products",

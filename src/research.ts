@@ -1,0 +1,241 @@
+import { getDb } from "./db.js";
+import { randomId, type Org } from "./auth.js";
+import { config, getProduct, resolveProduct, runSimulation, saveProduct, browseTaskLibrary } from "./queries.js";
+import type { Tool } from "./scoring.js";
+
+/**
+ * Product onboarding (docs/onboarding.md). A customer gives a prompt, a website and docs; the orchestrator's Pi
+ * researches the product and submits a profile, target developer personas and programming problems; the server
+ * validates (blindness + counts), applies them and launches a representative run.
+ */
+
+export const LIMITS = { max_personas: 4, max_scenarios: 10, min_scenarios: 3, max_competitors: 6 };
+const STALE_MINUTES = () => Number(process.env.OCTILLION_RESEARCH_STALE_MINUTES ?? 20);
+const MAX_ATTEMPTS = 6;
+
+export interface ResearchResult {
+  product: { name: string; description?: string; category?: string; website_url?: string; docs_url?: string; features?: string[];
+             aliases?: string[]; packages?: string[]; domains?: string[]; competitors?: Tool[] };
+  personas: { name: string; summary?: string; attributes?: Record<string, unknown>; instructions?: string }[];
+  scenarios: { title?: string; prompt: string; language?: string; tags?: string[]; expectation?: "recommend" | "avoid";
+               rationale?: string; library_task_id?: number; repo_url?: string | null }[];
+  sources?: { url: string; title?: string }[];
+}
+
+const slugify = (s: string) => s.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const httpUrl = (u: unknown) => typeof u === "string" && /^https?:\/\/[^\s/]+\.[^\s]+/.test(u);
+/** Names (whole word, case-insensitive) of `words` that occur in `text`. */
+function named(text: string, words: string[]) {
+  return words.filter((w) => w && w.length > 1 && new RegExp(`(?<![\\w-])${escapeRe(w)}(?![\\w-])`, "i").test(text));
+}
+
+// ---------- customer side ----------
+
+export interface OnboardInput { prompt: string; website_url?: string; docs_url?: string; name?: string; run?: boolean; samples?: number; population?: string }
+
+export async function onboardProduct(org: Org, input: OnboardInput) {
+  const prompt = input.prompt?.trim() ?? "";
+  if (prompt.length < 20) throw new Error("Describe the product in a sentence or two (prompt): what it does and who it is for.");
+  for (const k of ["website_url", "docs_url"] as const)
+    if (input[k] !== undefined && !httpUrl(input[k])) throw new Error(`${k} must be an http(s) URL`);
+  if (!input.website_url && !input.docs_url) throw new Error("Give at least a website_url or a docs_url so the orchestrator can research the product.");
+
+  const host = (u?: string) => (u ? new URL(u).hostname.replace(/^(www|docs)\./, "") : "");
+  const name = input.name?.trim() || host(input.website_url) || host(input.docs_url);
+  const existing = await resolveProduct(org, slugify(name)).catch(() => null);
+  const product = existing
+    ? await saveProduct(org, { product: existing.slug, website_url: input.website_url, docs_url: input.docs_url })
+    : await saveProduct(org, { name, description: prompt, website_url: input.website_url, docs_url: input.docs_url });
+  const db = await getDb();
+  await db.query("UPDATE products SET prompt = $2 WHERE id = $1", [product.product.id, prompt]);
+
+  const id = randomId("rsh_");
+  await db.query(
+    `INSERT INTO product_research (id, org_id, product_id, input, run) VALUES ($1, $2, $3, $4, $5)`,
+    [id, org.orgId, product.product.id, JSON.stringify({ name: input.name ?? null, prompt, website_url: input.website_url ?? null, docs_url: input.docs_url ?? null }),
+     input.run === false ? null : JSON.stringify({ samples: input.samples ?? null, population: input.population ?? null })],
+  );
+  return getOnboarding(org, { research_id: id });
+}
+
+export async function getOnboarding(org: Org, input: { research_id?: string; product?: string }) {
+  const db = await getDb();
+  const [job] = input.research_id
+    ? await db.query<any>("SELECT * FROM product_research WHERE id = $1 AND org_id = $2", [input.research_id, org.orgId])
+    : await db.query<any>("SELECT * FROM product_research WHERE org_id = $1 AND product_id = $2 ORDER BY created_at DESC LIMIT 1",
+                          [org.orgId, (await resolveProduct(org, input.product)).id]);
+  if (!job) throw new Error(input.research_id ? `No onboarding ${input.research_id}` : "This product has not been onboarded yet; use onboard_product.");
+  const product = await getProduct(org, String(job.product_id));
+  const personas = await db.query(
+    `SELECT slug, name, summary, attributes FROM developer_profiles WHERE org_id = $1 AND product_id = $2 AND active ORDER BY id`,
+    [org.orgId, job.product_id]);
+  const [sim] = job.simulation_id
+    ? await db.query<any>(
+        `SELECT sim.id, sim.status, count(s.id) AS sessions, count(*) FILTER (WHERE s.status IN ('completed','failed','timeout','cancelled')) AS finished
+           FROM simulations sim LEFT JOIN agent_sessions s ON s.simulation_id = sim.id WHERE sim.id = $1 GROUP BY sim.id`, [job.simulation_id])
+    : [];
+  return {
+    view: "onboarding" as const,
+    research: { id: job.id, status: job.status, stage: job.stage, note: job.note, error: job.error, input: job.input,
+                created_at: job.created_at, finished_at: job.finished_at, sources: job.result?.sources ?? [] },
+    product: product.product,
+    personas,
+    scenarios: product.scenarios.filter((s: any) => s.active),
+    simulation: sim ?? null,
+    warnings: product.warnings,
+  };
+}
+
+// ---------- orchestrator side ----------
+
+export async function claimResearch(workerId: string, limit = 1) {
+  const db = await getDb();
+  // Stalled jobs (no heartbeat) go back to the queue.
+  await db.query(
+    `UPDATE product_research SET status = 'queued', worker_id = NULL WHERE status = 'running' AND heartbeat_at < now() - make_interval(mins => $1)`,
+    [STALE_MINUTES()]);
+  const rows = await db.query<{ id: string; input: any }>(
+    `UPDATE product_research SET status = 'running', worker_id = $1, started_at = coalesce(started_at, now()), heartbeat_at = now(), stage = 'reading'
+      WHERE id IN (SELECT id FROM product_research WHERE status = 'queued' ORDER BY created_at LIMIT $2 FOR UPDATE SKIP LOCKED)
+      RETURNING id, input`,
+    [workerId, Math.min(Math.max(limit, 1), 5)]);
+  return rows.map((r) => ({ research_id: r.id, input: r.input, limits: LIMITS }));
+}
+
+async function runningJob(id: string) {
+  const [job] = await (await getDb()).query<any>("SELECT * FROM product_research WHERE id = $1", [id]);
+  if (!job) throw Object.assign(new Error(`No research job ${id}`), { status: 404 });
+  if (job.status !== "running") throw Object.assign(new Error(`Research ${id} is ${job.status}, not running`), { status: 409 });
+  return job;
+}
+
+export async function researchProgress(id: string, stage: string, note?: string) {
+  await runningJob(id);
+  await (await getDb()).query("UPDATE product_research SET stage = $2, note = $3, heartbeat_at = now() WHERE id = $1", [id, String(stage).slice(0, 40), note?.slice(0, 500) ?? null]);
+}
+
+export function libraryTasks(q: { query?: string; category?: string; language?: string; limit?: number }) {
+  return browseTaskLibrary(q).then((r) => ({ tasks: r.tasks, categories: r.categories }));
+}
+
+/** Everything wrong with a result, as short sentences the model can act on. */
+export function validateResearch(r: ResearchResult | undefined): string[] {
+  const issues: string[] = [];
+  if (!r || typeof r !== "object") return ["result is missing"];
+  const p = r.product;
+  if (!p?.name?.trim()) issues.push("product.name is required");
+  const productWords = [p?.name, ...(p?.aliases ?? []), ...(p?.packages ?? []), ...(p?.domains ?? [])].filter(Boolean) as string[];
+  const competitors = (p?.competitors ?? []).filter((c) => c?.name);
+  const competitorWords = competitors.flatMap((c) => [c.name, ...(c.aliases ?? []), ...(c.packages ?? [])]);
+  if (!(p?.aliases?.length || p?.packages?.length || p?.domains?.length))
+    issues.push("product needs at least one alias, package or domain besides the name (used to detect it in transcripts)");
+  if (competitors.length > LIMITS.max_competitors) issues.push(`at most ${LIMITS.max_competitors} competitors`);
+  const clash = competitors.filter((c) => p?.name && c.name.toLowerCase() === p.name.toLowerCase());
+  if (clash.length) issues.push("a competitor has the same name as the product");
+
+  const personas = Array.isArray(r.personas) ? r.personas : [];
+  if (personas.length < 1 || personas.length > LIMITS.max_personas) issues.push(`give 1-${LIMITS.max_personas} personas (got ${personas.length})`);
+  personas.forEach((x, i) => {
+    if (!x?.name?.trim()) issues.push(`personas[${i}].name is required`);
+    const leak = named(`${x?.name ?? ""} ${x?.summary ?? ""} ${x?.instructions ?? ""} ${JSON.stringify(x?.attributes ?? {})}`, [...productWords, ...competitorWords]);
+    if (leak.length) issues.push(`personas[${i}] mentions ${leak.join(", ")}; personas must not know the product or its competitors`);
+  });
+
+  const scenarios = Array.isArray(r.scenarios) ? r.scenarios : [];
+  if (scenarios.length < LIMITS.min_scenarios || scenarios.length > LIMITS.max_scenarios)
+    issues.push(`give ${LIMITS.min_scenarios}-${LIMITS.max_scenarios} scenarios (got ${scenarios.length})`);
+  if (!scenarios.some((s) => (s?.expectation ?? "recommend") === "recommend")) issues.push("at least one scenario must expect a recommendation");
+  scenarios.forEach((s, i) => {
+    const prompt = s?.prompt?.trim() ?? "";
+    if (prompt.length < 40 || prompt.length > 2000) issues.push(`scenarios[${i}].prompt must be 40-2000 characters (got ${prompt.length})`);
+    if (s?.expectation && !["recommend", "avoid"].includes(s.expectation)) issues.push(`scenarios[${i}].expectation must be recommend or avoid`);
+    const leak = named(`${s?.title ?? ""} ${prompt}`, [...productWords, ...competitorWords]);
+    if (leak.length) issues.push(`scenarios[${i}] names ${leak.join(", ")}; rephrase it as a neutral task that never names the product or competitors`);
+  });
+  return issues;
+}
+
+export async function validateResearchJob(id: string, result: ResearchResult) {
+  await runningJob(id);
+  const issues = validateResearch(result);
+  return { ok: issues.length === 0, issues };
+}
+
+/** Apply a completed research result (or record a failure). Returns 422-style issues when invalid. */
+export async function completeResearch(id: string, body: { status?: string; error?: string; result?: ResearchResult }) {
+  const job = await runningJob(id);
+  const db = await getDb();
+  if (body.status === "failed") {
+    await db.query("UPDATE product_research SET status = 'failed', error = $2, finished_at = now() WHERE id = $1", [id, String(body.error ?? "failed").slice(0, 2000)]);
+    return { status: "failed" };
+  }
+  const issues = validateResearch(body.result);
+  if (issues.length) {
+    const [{ attempts }] = await db.query<{ attempts: number }>(
+      "UPDATE product_research SET attempts = attempts + 1, heartbeat_at = now(), stage = 'validating' WHERE id = $1 RETURNING attempts", [id]);
+    if (attempts >= MAX_ATTEMPTS)
+      await db.query("UPDATE product_research SET status = 'failed', error = $2, finished_at = now() WHERE id = $1", [id, `invalid after ${attempts} attempts: ${issues.join("; ")}`]);
+    throw Object.assign(new Error("invalid research result"), { status: 422, issues });
+  }
+
+  const r = body.result!;
+  const [o] = await db.query<{ id: number; slug: string; name: string }>("SELECT id, slug, name FROM organizations WHERE id = $1", [job.org_id]);
+  const org: Org = { orgId: o.id, slug: o.slug, name: o.name };
+  const [prod] = await db.query<{ slug: string }>("SELECT slug FROM products WHERE id = $1", [job.product_id]);
+  const p = r.product;
+  await saveProduct(org, {
+    product: prod.slug, name: p.name, description: p.description, category: p.category,
+    website_url: p.website_url ?? job.input.website_url ?? undefined, docs_url: p.docs_url ?? job.input.docs_url ?? undefined,
+    aliases: p.aliases ?? [], packages: p.packages ?? [], domains: p.domains ?? [], competitors: p.competitors ?? [],
+  });
+  await db.query("UPDATE products SET features = $2, research = $3 WHERE id = $1",
+    [job.product_id, JSON.stringify(p.features ?? []), JSON.stringify({ research_id: id, sources: r.sources ?? [], at: new Date().toISOString() })]);
+
+  const personaSlugs: string[] = [];
+  await db.transaction(async (tx) => {
+    // A new research replaces the previous generated personas and problems (kept for history, inactive).
+    await tx.query("UPDATE developer_profiles SET active = false WHERE product_id = $1 AND source = 'generated'", [job.product_id]);
+    await tx.query("UPDATE scenarios SET active = false, updated_at = now() WHERE product_id = $1 AND source IN ('generated', 'library')", [job.product_id]);
+    for (const x of r.personas) {
+      const slug = `p${job.product_id}-${slugify(x.name)}-${randomId("", 3).toLowerCase().replace(/[^a-z0-9]/g, "x")}`;
+      personaSlugs.push(slug);
+      await tx.query(
+        `INSERT INTO developer_profiles (slug, name, summary, attributes, instructions, org_id, product_id, source, active)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'generated', true)`,
+        [slug, x.name.trim(), x.summary ?? "", JSON.stringify(x.attributes ?? {}), x.instructions ?? "", job.org_id, job.product_id]);
+    }
+    for (const s of r.scenarios) {
+      const prompt = s.prompt.trim();
+      await tx.query(
+        `INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, library_task_id, source, rationale)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $9, $10)`,
+        [job.product_id, s.title?.trim() || prompt.slice(0, 80), prompt, s.repo_url ?? null, s.language ?? null, s.tags ?? [],
+         s.expectation ?? "recommend", s.library_task_id ?? null, s.library_task_id ? "library" : "generated", s.rationale ?? null]);
+    }
+    await tx.query(
+      "UPDATE product_research SET status = 'completed', stage = 'done', result = $2, finished_at = now(), heartbeat_at = now() WHERE id = $1",
+      [id, JSON.stringify(r)]);
+  });
+
+  // Launch the representative run unless the customer opted out; fit it under the per-run session cap.
+  let simulation_id: string | null = null;
+  let run_error: string | null = null;
+  if (job.run) {
+    const cap = config.maxSessionsPerRun();
+    const n = r.scenarios.length;
+    let profiles = personaSlugs;
+    if (n * profiles.length > cap) profiles = profiles.slice(0, Math.max(1, Math.floor(cap / n)));
+    const samples = job.run.samples ?? Math.max(1, Math.min(config.defaultSamples(), Math.floor(cap / (n * profiles.length))));
+    try {
+      const sim = await runSimulation(org, { product: prod.slug, profiles, samples, population: job.run.population ?? undefined,
+                                             name: `Onboarding: ${p.name}` });
+      simulation_id = sim.simulation.id;
+      await db.query("UPDATE product_research SET simulation_id = $2 WHERE id = $1", [id, simulation_id]);
+    } catch (e) {
+      run_error = (e as Error).message;
+      await db.query("UPDATE product_research SET note = $2 WHERE id = $1", [id, `run not started: ${run_error}`.slice(0, 500)]);
+    }
+  }
+  return { status: "completed", product: prod.slug, personas: personaSlugs, scenarios: r.scenarios.length, simulation_id, run_error };
+}

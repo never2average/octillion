@@ -277,3 +277,35 @@ CREATE TABLE IF NOT EXISTS developer_population_agents (
 );
 
 ALTER TABLE simulations ADD COLUMN IF NOT EXISTS population_id INT REFERENCES developer_populations(id) ON DELETE SET NULL;
+
+-- Product onboarding (docs/onboarding.md): prompt + link + docs -> orchestrator research -> profile, personas, problems.
+ALTER TABLE products  ADD COLUMN IF NOT EXISTS prompt   TEXT;              -- what the customer said the product is
+ALTER TABLE products  ADD COLUMN IF NOT EXISTS features JSONB NOT NULL DEFAULT '[]';
+ALTER TABLE products  ADD COLUMN IF NOT EXISTS research JSONB;            -- sources and notes from the last research
+ALTER TABLE scenarios ADD COLUMN IF NOT EXISTS source    TEXT NOT NULL DEFAULT 'manual';  -- manual | library | generated
+ALTER TABLE scenarios ADD COLUMN IF NOT EXISTS rationale TEXT;            -- why the product fits (or should not)
+-- Personas generated for one product live next to the shared vault profiles, scoped to that org + product.
+ALTER TABLE developer_profiles ADD COLUMN IF NOT EXISTS org_id     INT REFERENCES organizations(id) ON DELETE CASCADE;
+ALTER TABLE developer_profiles ADD COLUMN IF NOT EXISTS product_id INT REFERENCES products(id) ON DELETE CASCADE;
+ALTER TABLE developer_profiles ADD COLUMN IF NOT EXISTS source     TEXT NOT NULL DEFAULT 'vault';  -- vault | generated
+
+CREATE TABLE IF NOT EXISTS product_research (
+  id             TEXT PRIMARY KEY,           -- rsh_<random>
+  org_id         INT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  product_id     INT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  status         TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'completed', 'failed')),
+  stage          TEXT,
+  note           TEXT,
+  input          JSONB NOT NULL,             -- {name?, prompt, website_url?, docs_url?}
+  run            JSONB,                      -- null = don't auto-run; else {samples?, population?}
+  result         JSONB,
+  error          TEXT,
+  attempts       INT NOT NULL DEFAULT 0,     -- complete() calls rejected by validation
+  worker_id      TEXT,
+  simulation_id  TEXT REFERENCES simulations(id) ON DELETE SET NULL,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  started_at     TIMESTAMPTZ,
+  heartbeat_at   TIMESTAMPTZ,
+  finished_at    TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS product_research_queue_idx ON product_research (created_at) WHERE status = 'queued';

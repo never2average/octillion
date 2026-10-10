@@ -146,7 +146,7 @@ export async function getProduct(org: Org, ref?: string) {
   const p = await resolveProduct(org, ref);
   const db = await getDb();
   const scenarios = await db.query(
-    `SELECT sc.id, sc.title, sc.prompt, sc.repo_url, sc.language, sc.tags, sc.expectation, sc.active,
+    `SELECT sc.id, sc.title, sc.prompt, sc.repo_url, sc.language, sc.tags, sc.expectation, sc.active, sc.source, sc.rationale,
             count(s.id) AS sessions, count(*) FILTER (WHERE ${HIT}) AS hits,
             mode() WITHIN GROUP (ORDER BY s.winner) FILTER (WHERE s.winner IS NOT NULL) AS usual_winner
        FROM scenarios sc
@@ -247,7 +247,8 @@ export async function runSimulation(org: Org, input: RunInput) {
   let profiles: { id: number }[] = [];
   if (input.profiles?.length) {
     const wanted = [...new Set(input.profiles.map((x) => x.toLowerCase()))];
-    profiles = await db.query<{ id: number; slug: string }>("SELECT id, slug FROM developer_profiles WHERE active AND slug = ANY($1) ORDER BY id", [wanted]);
+    profiles = await db.query<{ id: number; slug: string }>(
+      "SELECT id, slug FROM developer_profiles WHERE active AND slug = ANY($1) AND (org_id IS NULL OR org_id = $2) ORDER BY id", [wanted, org.orgId]);
     const missing = wanted.filter((w) => !profiles.some((p: any) => p.slug === w));
     if (missing.length) throw new Error(`Unknown developer profile(s): ${missing.join(", ")}. See list_developer_profiles.`);
   }
@@ -487,13 +488,18 @@ export async function getReport(org: Org, input: { product?: string; days?: numb
 
 // ---------- vault: developer profiles + task library (shared across orgs) ----------
 
-export async function listProfiles(input: { query?: string } = {}) {
+/** Shared vault profiles plus this org's own generated personas (never another org's). */
+export async function listProfiles(org: Org, input: { query?: string; product?: string } = {}) {
   const db = await getDb();
   const q = input.query?.trim();
+  const params: unknown[] = [org.orgId];
+  let where = "active AND (org_id IS NULL OR org_id = $1)";
+  if (q) params.push(`%${q}%`), (where += ` AND (name ILIKE $${params.length} OR summary ILIKE $${params.length} OR attributes::text ILIKE $${params.length})`);
+  if (input.product) params.push((await resolveProduct(org, input.product)).id), (where += ` AND product_id = $${params.length}`);
   const profiles = await db.query(
-    `SELECT id, slug, name, summary, attributes FROM developer_profiles
-      WHERE active ${q ? "AND (name ILIKE $1 OR summary ILIKE $1 OR attributes::text ILIKE $1)" : ""} ORDER BY name LIMIT 200`,
-    q ? [`%${q}%`] : [],
+    `SELECT id, slug, name, summary, attributes, source, product_id FROM developer_profiles WHERE ${where}
+      ORDER BY (org_id IS NULL), name LIMIT 200`,
+    params,
   );
   return { view: "profiles" as const, query: q ?? null, profiles };
 }

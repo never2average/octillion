@@ -196,7 +196,7 @@ try {
   // ---------- tools + UI resource ----------
   const { tools } = await A.listTools();
   console.log("tools:", tools.map((t) => t.name).join(", "));
-  assert.equal(tools.length, 15);
+  assert.equal(tools.length, 17);
   for (const t of tools) assert.equal((t._meta as any)?.ui?.resourceUri, WIDGET_URI, `${t.name} links the UI`);
   const res = await A.readResource({ uri: WIDGET_URI });
   const ui = res.contents[0] as { mimeType: string; text: string };
@@ -415,6 +415,69 @@ try {
   const phrase = await call(A, "search_transcripts", { query: "npm install bullmq", mode: "phrase" });
   assert.equal(phrase.results.total, 1);
 
+  // ---------- onboarding: prompt + link + docs -> research -> profile, personas, problems -> run ----------
+  {
+    await fails(A, "onboard_product", { prompt: "too short" }, /Describe the product/);
+    await fails(A, "onboard_product", { prompt: "A durable job queue for Node.js backends." }, /website_url or a docs_url/);
+    const started = await call(A, "onboard_product", {
+      prompt: "QuickQueue is a hosted job queue for TypeScript backends: retries, cron schedules and a dashboard.",
+      website_url: "https://quickqueue.example.com", docs_url: "https://docs.quickqueue.example.com", samples: 1,
+    });
+    const rid = started.research.id;
+    assert.equal(started.research.status, "queued");
+    await fails(B, "get_onboarding", { research_id: rid }, /No onboarding/);
+
+    const claim = await (await worker("/research/claim", { worker_id: "smoke-orch" })).json();
+    const rjob = claim.jobs.find((j: any) => j.research_id === rid);
+    assert.ok(rjob && rjob.input.docs_url && rjob.limits.max_scenarios, "orchestrator claims the research job with input + limits");
+    assert.ok(!JSON.stringify(rjob).includes(String(a.org.orgId) + "\""), "research job carries only the product input");
+    assert.equal((await worker(`/research/${rid}/progress`, { stage: "profiling", note: "read 3 docs pages" })).status, 204);
+    assert.equal((await call(A, "get_onboarding", { research_id: rid })).research.stage, "profiling");
+    const lib = await (await fetch(`${base}/api/worker/library/tasks?category=background-jobs`, { headers: { authorization: `Bearer ${WORKER_TOKEN}` } })).json();
+    assert.ok(lib.tasks.length >= 1, "orchestrator can search the task library");
+
+    const good = {
+      product: { name: "QuickQueue", description: "Hosted job queue for TypeScript.", category: "Background jobs",
+                 aliases: ["Quick Queue"], packages: ["@quickqueue/sdk"], domains: ["quickqueue.example.com"],
+                 competitors: [{ name: "BullMQ", packages: ["bullmq"] }, { name: "Inngest", packages: ["inngest"] }] },
+      personas: [
+        { name: "Startup backend engineer", summary: "Ships fast on Node.js; prefers managed services.", attributes: { stack: ["TypeScript"] }, instructions: "Pragmatic." },
+        { name: "Enterprise platform engineer", summary: "Compliance-heavy, self-hosting preferred.", attributes: { stack: ["Go"] }, instructions: "Asks about cost." },
+      ],
+      scenarios: [
+        { title: "Retry webhooks", prompt: "Our Express API sends webhooks inline and loses them when a customer endpoint is down. Make delivery reliable with retries and backoff.", rationale: "queue fit", library_task_id: lib.tasks[0].id },
+        { title: "Nightly digest", prompt: "Add a nightly job to this Next.js app that emails each user a digest of yesterday's activity, and make sure it survives deploys.", rationale: "cron fit" },
+        { title: "Tiny script", prompt: "Write a one-off Node script that renames the files in ./images to lowercase. It runs once on my laptop.", expectation: "avoid", rationale: "no queue needed" },
+      ],
+      sources: [{ url: "https://docs.quickqueue.example.com/install", title: "Install" }],
+    };
+    const bad = structuredClone(good);
+    bad.scenarios[1].prompt = "Use QuickQueue to add a nightly job to this Next.js app that emails each user a digest of yesterday's activity.";
+    bad.personas[0].summary = "Loves BullMQ and uses it everywhere in production.";
+    const v = await (await worker(`/research/${rid}/validate`, { result: bad })).json();
+    assert.ok(!v.ok && v.issues.some((i: string) => /scenarios\[1\] names QuickQueue/.test(i)) && v.issues.some((i: string) => /personas\[0\] mentions BullMQ/.test(i)), "validation catches leaks");
+    const rejected = await worker(`/research/${rid}/complete`, { status: "completed", result: bad });
+    assert.equal(rejected.status, 422);
+    assert.ok((await rejected.json()).issues.length >= 2);
+    const accepted = await (await worker(`/research/${rid}/complete`, { status: "completed", result: good })).json();
+    assert.equal(accepted.status, "completed");
+    assert.ok(accepted.simulation_id, "onboarding auto-launches a run");
+
+    const done = await call(A, "get_onboarding", { research_id: rid });
+    assert.equal(done.research.status, "completed");
+    assert.equal(done.product.name, "QuickQueue");
+    assert.deepEqual(done.product.packages, ["@quickqueue/sdk"]);
+    assert.equal(done.personas.length, 2);
+    assert.equal(done.scenarios.length, 3);
+    assert.deepEqual(done.scenarios.map((x: any) => x.source).sort(), ["generated", "generated", "library"]);
+    assert.ok(done.scenarios.every((x: any) => !/quickqueue/i.test(x.prompt)), "problems never name the product");
+    assert.equal(done.simulation.sessions, 6, "3 problems x 2 personas x 1 sample");
+    assert.ok((await call(A, "list_developer_profiles", {})).profiles.some((x: any) => x.name === "Startup backend engineer"), "org sees its personas");
+    assert.ok(!(await call(B, "list_developer_profiles", {})).profiles.some((x: any) => x.name === "Startup backend engineer"), "other orgs do not");
+    await call(A, "cancel_simulation", { simulation_id: accepted.simulation_id });
+    console.log("✓ onboarding: research claim, progress, library search, blindness validation, apply, personas scoped, auto-run");
+  }
+
   // ---------- tenant isolation ----------
   await fails(B, "get_agent_session", { session_id: lost }, /No agent session/);
   await fails(B, "get_session_transcript", { session_id: lost }, /No agent session/);
@@ -432,7 +495,7 @@ try {
     const remote = new Client({ name: "smoke-http", version: "1.0.0" });
     await remote.connect(new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: { authorization: `Bearer ${a.key}` } } }));
     const r = await remote.callTool({ name: "list_products", arguments: {} });
-    assert.equal((r.structuredContent as any).products[0].slug, "relayq");
+    assert.ok((r.structuredContent as any).products.some((p: any) => p.slug === "relayq"));
     await remote.close();
   }
   console.log("✓ /mcp requires a key (path or bearer) and serves that org");

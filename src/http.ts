@@ -9,6 +9,7 @@ import { parseJsonl, transcripts, type RawEvent } from "./transcripts.js";
 import { appendEvents, claimJobs, completeSession, heartbeat } from "./worker.js";
 import { fleetCheckin, fleetLeave, fleetStatus } from "./fleet.js";
 import { brokerOrchestratorCredentials, brokerSessionCredentials, gatewayHandler } from "./gateway.js";
+import * as research from "./research.js";
 import * as kv from "./keyvault.js";
 import * as populations from "./populations.js";
 import { createHash, timingSafeEqual } from "node:crypto";
@@ -126,6 +127,30 @@ export function createApp() {
     res.status(204).end();
   });
   worker.get("/fleet", async (_req, res) => void res.json(await fleetStatus()));
+  // Product onboarding research (docs/onboarding.md).
+  worker.post("/research/claim", async (req, res) => {
+    const { worker_id, limit } = req.body ?? {};
+    if (typeof worker_id !== "string" || !worker_id) return void res.status(400).json({ error: "worker_id is required" });
+    res.json({ jobs: await research.claimResearch(worker_id, limit) });
+  });
+  worker.post("/research/:id/progress", async (req, res) => {
+    await research.researchProgress(String(req.params.id), String(req.body?.stage ?? "working"), req.body?.note);
+    res.status(204).end();
+  });
+  worker.post("/research/:id/validate", async (req, res) => void res.json(await research.validateResearchJob(String(req.params.id), req.body?.result)));
+  worker.post("/research/:id/complete", async (req, res) => {
+    try { res.json(await research.completeResearch(String(req.params.id), req.body ?? {})); }
+    catch (e) {
+      const err = e as Error & { status?: number; issues?: string[] };
+      if (err.status === 422) return void res.status(422).json({ error: err.message, issues: err.issues });
+      throw e;
+    }
+  });
+  worker.get("/library/tasks", async (req, res) => {
+    const q = req.query as Record<string, string | undefined>;
+    res.json(await research.libraryTasks({ query: q.query, category: q.category, language: q.language, limit: q.limit ? Number(q.limit) : undefined }));
+  });
+
   // Credential broker: the orchestrator holds no provider keys; it asks per orchestrator and per session.
   worker.post("/orchestrator/credentials", async (req, res) => {
     const id = req.body?.orchestrator_id;
