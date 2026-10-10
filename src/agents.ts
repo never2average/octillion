@@ -13,6 +13,7 @@ export interface AgentSpec {
   id: string; harness: string; label: string; model: string; weight: number; enabled: boolean;
   vendor?: string; harness_version?: string; event_format?: string;
   image?: { docker?: string; boat_snapshot?: string }; requires_env?: string[]; notes?: string;
+  worker_adapter?: "supported" | "todo" | string;  // whether orchestrator workers can run this harness yet
 }
 export interface Registry { version: number; as_of?: string; unrepresented_share?: number; sources?: unknown[]; agents: AgentSpec[] }
 
@@ -34,9 +35,18 @@ export function registry(): Registry {
   return reg;
 }
 
-/** Enabled agents with weights renormalised to sum to 1. */
+export const isRunnable = (a: AgentSpec) => a.enabled !== false && a.weight > 0 && a.worker_adapter !== "todo";
+
+/** Share of enabled (representable) usage that workers can run today, 0..1. */
+export function runnableCoverage(): number {
+  const enabled = registry().agents.filter((a) => a.enabled !== false && a.weight > 0);
+  const total = enabled.reduce((s, a) => s + a.weight, 0);
+  return total ? enabled.filter(isRunnable).reduce((s, a) => s + a.weight, 0) / total : 0;
+}
+
+/** Runnable agents (enabled, with a worker adapter) with weights renormalised to sum to 1. */
 export function enabledAgents(): AgentSpec[] {
-  const agents = registry().agents.filter((a) => a.enabled !== false && a.weight > 0);
+  const agents = registry().agents.filter(isRunnable);
   const total = agents.reduce((s, a) => s + a.weight, 0) || 1;
   return agents.map((a) => ({ ...a, weight: a.weight / total }));
 }

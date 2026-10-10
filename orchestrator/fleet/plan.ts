@@ -22,7 +22,7 @@ export function loadRegistry(file = process.env.OCTILLION_REGISTRY ?? "harnesses
 
 export function planFleet(size: number, agents: RegistryAgent[] = loadRegistry().agents): PodGroup[] {
   const groups = new Map<string, PodGroup>();
-  for (const a of agents.filter((x) => x.enabled !== false && x.weight > 0)) {
+  for (const a of agents.filter((x) => x.enabled !== false && x.weight > 0 && (x as { worker_adapter?: string }).worker_adapter !== "todo")) {
     const g = groups.get(a.harness) ?? {
       harness: a.harness, weight: 0, pods: 0, version: a.harness_version, agents: [], requires_env: [],
       image: a.image?.docker ?? `octillion/agent-${a.harness}:${a.harness_version ?? "latest"}`,

@@ -2,7 +2,7 @@ import { getDb, type Queryable } from "./db.js";
 import { randomId, type Org } from "./auth.js";
 import { transcripts, type SearchParams } from "./transcripts.js";
 import type { Tool } from "./scoring.js";
-import { enabledAgents, findAgent, registry, representativePlan, type AgentSpec } from "./agents.js";
+import { enabledAgents, findAgent, isRunnable, registry, representativePlan, runnableCoverage, type AgentSpec } from "./agents.js";
 
 const agentLabel = (id: string) => findAgent(id)?.label ?? id;
 
@@ -13,10 +13,12 @@ export function listAgents() {
     view: "agents" as const,
     as_of: r.as_of ?? null,
     unrepresented_share: r.unrepresented_share ?? null,
+    runnable_coverage: runnableCoverage(),
     sources: r.sources ?? [],
     agents: r.agents.map((a) => ({ id: a.id, label: a.label, vendor: a.vendor ?? null, harness: a.harness, model: a.model,
                                     harness_version: a.harness_version ?? null, weight: a.enabled === false ? 0 : a.weight,
-                                    enabled: a.enabled !== false, notes: a.notes ?? null })),
+                                    enabled: isRunnable(a), status: isRunnable(a) ? "running" : a.enabled === false ? "not runnable headless" : "adapter pending",
+                                    notes: a.notes ?? null })),
     default_samples: config.defaultSamples(),
   };
 }

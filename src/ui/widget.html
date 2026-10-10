@@ -558,8 +558,8 @@
     return `<div class="stack"><div class="spread"><div><h1>Coding agents we simulate</h1><div class="sub">Weighted by real-world developer adoption${d.as_of ? ` · as of ${esc(d.as_of)}` : ""}</div></div>${go("list_developer_profiles", {}, "Developer profiles →")}</div>
       <div class="card"><div class="hbars">${d.agents.filter((a) => a.enabled).map((a) => `
         <div>${esc(a.label)}</div><div class="track"><span class="bar target" style="width:${(a.weight / max) * 100}%" data-tip="${esc(`${a.harness} ${a.harness_version || ""} · ${a.model}${a.notes ? `\n${a.notes}` : ""}`)}"></span></div><div class="val">${pct(a.weight)}</div>`).join("")}</div>
-        ${d.unrepresented_share != null ? `<p class="muted" style="font-size:12px;margin-top:10px">${pct(d.unrepresented_share)} of developer usage is in tools that can't run headless (IDE-only) and isn't represented.</p>` : ""}</div>
-      ${d.agents.some((a) => !a.enabled) ? `<div class="card"><h2>Not runnable yet</h2>${chips(d.agents.filter((a) => !a.enabled).map((a) => a.label))}</div>` : ""}
+        <p class="muted" style="font-size:12px;margin-top:10px">Agents running today cover ${pct(d.runnable_coverage)} of representable usage.${d.unrepresented_share != null ? ` ${pct(d.unrepresented_share)} of developer usage is in tools that can't run headless and isn't represented.` : ""}</p></div>
+      ${d.agents.some((a) => !a.enabled) ? `<div class="card"><h2>Not running yet</h2>${chips(d.agents.filter((a) => !a.enabled).map((a) => `${a.label} · ${a.status}`))}</div>` : ""}
       ${d.sources.length ? `<div class="card"><h2>Sources</h2>${d.sources.map((x) => `<div style="font-size:13px;margin:4px 0">${esc(x.title || x.id)}${x.note ? ` <span class="muted">· ${esc(x.note)}</span>` : ""}</div>`).join("")}</div>` : ""}
     </div>`;
   }

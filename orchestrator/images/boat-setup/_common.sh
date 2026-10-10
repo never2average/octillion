@@ -1,0 +1,84 @@
+# Shared helpers for boat-setup/<harness>.sh. Sourced, not executed.
+#
+# These scripts run INSIDE a fresh boat.dev VM (Ubuntu 24.04, default user `user` with passwordless sudo,
+# Node 24 via nvm in /home/user/.nvm). They install one pinned harness SYSTEM-WIDE (/usr/local, /opt), so the
+# unprivileged `agent` user the worker creates per session can run it, and so the install is captured by a
+# named snapshot (boat snapshots capture changes under /usr, /opt, /etc, /root, /srv and /home/user).
+#
+# Nothing here writes API keys, config files, rules files or MCP servers: the snapshot must stay neutral.
+set -euo pipefail
+
+log() { printf '[octillion-setup] %s\n' "$*" >&2; }
+die() { log "ERROR: $*"; exit 1; }
+
+SUDO=""
+if [ "$(id -u)" -ne 0 ]; then
+  command -v sudo >/dev/null || die "need root or sudo"
+  SUDO="sudo"
+fi
+
+# Find a Node >= 22 (nvm's newest first, then PATH) and make sure /usr/local/bin/node is >= 22, because npm-installed
+# CLIs start with `#!/usr/bin/env node` and the agent user runs them under `env -i` with a minimal PATH.
+ensure_node() {
+  local cand="" d
+  for d in $(ls -d /home/*/.nvm/versions/node/v*/bin /root/.nvm/versions/node/v*/bin 2>/dev/null | sort -V -r); do
+    [ -x "$d/node" ] && { cand="$d"; break; }
+  done
+  [ -n "$cand" ] || cand="$(dirname "$(command -v node 2>/dev/null || echo /nonexistent/node)")"
+  [ -x "$cand/node" ] || die "no node found (expected nvm node on boat VMs)"
+  local major; major="$("$cand/node" -p 'process.versions.node.split(".")[0]')"
+  [ "$major" -ge 22 ] || die "node $("$cand/node" --version) at $cand is < 22"
+  NODE_DIR="$cand"
+  local sys_major=0
+  [ -x /usr/local/bin/node ] && sys_major="$(/usr/local/bin/node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+  if [ "$sys_major" -lt 22 ]; then
+    log "installing node $("$cand/node" --version) to /usr/local/bin/node (was: ${sys_major:-none})"
+    $SUDO install -m 0755 "$cand/node" /usr/local/bin/node
+  fi
+  export PATH="/usr/local/bin:$NODE_DIR:$PATH"
+}
+
+# npm_pin <package> <version>: install a pinned npm package globally into /usr/local (bins in /usr/local/bin).
+# --force replaces a preinstalled bin of the same name (boat ships some harnesses preinstalled).
+npm_pin() {
+  local pkg="$1" ver="$2"; shift 2
+  ensure_node
+  log "npm install -g $pkg@$ver -> /usr/local"
+  $SUDO env "PATH=$PATH" npm install -g --prefix /usr/local --no-fund --no-audit --force "$@" "$pkg@$ver" >&2
+}
+
+# download_tarball <url> <dest-dir> [sha512]: download a release tarball over https into a fresh dir.
+download_tarball() {
+  local url="$1" dest="$2" sha="${3:-}" tmp; tmp="$(mktemp -d)"
+  log "downloading $url"
+  curl -fsSL -o "$tmp/pkg.tgz" "$url"
+  if [ -n "$sha" ]; then echo "$sha  $tmp/pkg.tgz" | sha512sum -c - >&2; fi
+  $SUDO rm -rf "$dest"; $SUDO mkdir -p "$dest"
+  $SUDO tar -xzf "$tmp/pkg.tgz" -C "$dest" "${@:4}"
+  rm -rf "$tmp"
+}
+
+linux_arch() {
+  case "$(uname -m)" in x86_64|amd64) echo x64;; aarch64|arm64) echo arm64;; *) die "unsupported arch $(uname -m)";; esac
+}
+
+# verify <harness> <bin> <version>: run `<bin> --version` the way the worker will (as an unprivileged user, env -i,
+# minimal PATH), check the pinned version, and record a manifest at /etc/octillion/harnesses/<harness>.json.
+verify() {
+  local harness="$1" bin="$2" ver="$3" out path
+  path="$(PATH=/usr/local/bin:/usr/bin:/bin command -v "$bin")" || die "$bin not on /usr/local/bin:/usr/bin:/bin"
+  out="$($SUDO -u nobody env -i HOME=/tmp PATH=/usr/local/bin:/usr/bin:/bin "$bin" --version 2>&1 | head -n 1)" \
+    || die "$bin --version failed as nobody: $out"
+  case "$out" in *"$ver"*) ;; *) die "$bin reports '$out', expected $ver (another $bin earlier on PATH?)";; esac
+  $SUDO mkdir -p /etc/octillion/harnesses
+  printf '{"harness":"%s","bin":"%s","path":"%s","version":"%s","reported":"%s","installed_at":"%s"}\n' \
+    "$harness" "$bin" "$path" "$ver" "${out//\"/\'}" "$(date -u +%FT%TZ)" | $SUDO tee "/etc/octillion/harnesses/$harness.json" >/dev/null
+  log "OK $harness: $path -> $out"
+}
+
+# Leave nothing session-specific in the snapshot.
+cleanup() {
+  $SUDO npm cache clean --force >/dev/null 2>&1 || true
+  rm -rf "$HOME/.npm/_cacache" "$HOME/.cache" 2>/dev/null || true
+  $SUDO rm -rf /root/.npm/_cacache /root/.cache 2>/dev/null || true
+}
