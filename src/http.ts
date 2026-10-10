@@ -10,6 +10,7 @@ import { appendEvents, claimJobs, completeSession, heartbeat } from "./worker.js
 import { fleetCheckin, fleetLeave, fleetStatus } from "./fleet.js";
 import { brokerOrchestratorCredentials, brokerSessionCredentials, gatewayHandler } from "./gateway.js";
 import * as research from "./research.js";
+import { usageReport } from "./usage.js";
 import * as kv from "./keyvault.js";
 import * as populations from "./populations.js";
 import { createHash, timingSafeEqual } from "node:crypto";
@@ -185,6 +186,10 @@ export function createApp() {
   admin.delete("/keyvault/credentials/:id", async (req, res) => {
     await kv.deleteCredential(Number(req.params.id));
     res.status(204).end();
+  });
+  admin.get("/usage/models", async (req, res) => {
+    const q = req.query as Record<string, string | undefined>;
+    res.json(await usageReport({ days: q.days ? Number(q.days) : undefined, model: q.model }));
   });
   admin.get("/gateway/usage", async (_req, res) => {
     const rows = await (await getDb()).query(

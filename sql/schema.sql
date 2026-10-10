@@ -314,3 +314,47 @@ CREATE INDEX IF NOT EXISTS product_research_queue_idx ON product_research (creat
 -- (backend_config: {project_id, region ('global' | 'us' | 'eu' | a region), model_map?}); the credential is a service-account JSON key.
 ALTER TABLE vault_providers ADD COLUMN IF NOT EXISTS backend TEXT NOT NULL DEFAULT 'direct' CHECK (backend IN ('direct', 'vertex'));
 ALTER TABLE vault_providers ADD COLUMN IF NOT EXISTS backend_config JSONB NOT NULL DEFAULT '{}';
+
+-- Per-model inference usage and cost (src/usage.ts): every gateway request is attributed to the model the provider
+-- reports, per day and consumer (orchestrator brain vs agent sessions), priced from model_prices at request time.
+CREATE TABLE IF NOT EXISTS model_prices (
+  model                        TEXT PRIMARY KEY,
+  input_per_mtok               NUMERIC(10, 4) NOT NULL,
+  cached_input_per_mtok        NUMERIC(10, 4) NOT NULL,
+  output_per_mtok              NUMERIC(10, 4) NOT NULL,
+  long_context_threshold       INT,                  -- input tokens above which the long-context prices apply
+  long_input_per_mtok          NUMERIC(10, 4),
+  long_cached_input_per_mtok   NUMERIC(10, 4),
+  long_output_per_mtok         NUMERIC(10, 4),
+  source                       TEXT NOT NULL DEFAULT '',
+  updated_at                   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+INSERT INTO model_prices (model, input_per_mtok, cached_input_per_mtok, output_per_mtok, long_context_threshold,
+                          long_input_per_mtok, long_cached_input_per_mtok, long_output_per_mtok, source) VALUES
+  ('gpt-6.1-sol',       2.00, 0.10, 10.00, 272000, 4.00, 0.20, 15.00, 'OpenAI API pricing, standard tier, 2026-10-10'),
+  ('gpt-4.1-nano',      0.10, 0.025, 0.40, NULL, NULL, NULL, NULL,   'OpenAI API pricing, standard tier, 2026-10-10'),
+  ('claude-opus-5-5',   4.00, 0.20, 20.00, NULL, NULL, NULL, NULL,   'Anthropic list price; Vertex global billed by Google, verify on the GCP invoice'),
+  ('claude-sonnet-5-5', 2.00, 0.20, 10.00, NULL, NULL, NULL, NULL,   'Anthropic list price; Vertex global billed by Google, verify on the GCP invoice')
+ON CONFLICT (model) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS gateway_model_usage (
+  day                  DATE NOT NULL,
+  provider             TEXT NOT NULL,
+  model                TEXT NOT NULL,
+  consumer             TEXT NOT NULL CHECK (consumer IN ('session', 'orchestrator')),
+  requests             INT NOT NULL DEFAULT 0,
+  errors               INT NOT NULL DEFAULT 0,
+  input_tokens         BIGINT NOT NULL DEFAULT 0,   -- all input, cached included
+  cached_input_tokens  BIGINT NOT NULL DEFAULT 0,
+  output_tokens        BIGINT NOT NULL DEFAULT 0,
+  cost_usd             NUMERIC(14, 6) NOT NULL DEFAULT 0,
+  priced               BOOLEAN NOT NULL DEFAULT true,  -- false when a request's model had no price
+  PRIMARY KEY (day, provider, model, consumer)
+);
+
+CREATE TABLE IF NOT EXISTS usage_alerts (
+  day    DATE NOT NULL,
+  model  TEXT NOT NULL,
+  sent_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (day, model)
+);

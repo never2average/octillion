@@ -5,6 +5,7 @@ import { getDb } from "./db.js";
 import { findAgent } from "./agents.js";
 import { getProvider, providersForEnv, useCredential, VERTEX_LABEL, type ProviderRow } from "./keyvault.js";
 import { toVertex, vertexAccessToken } from "./vertex.js";
+import { recordModelUsage } from "./usage.js";
 
 /**
  * Inference gateway + credential broker (docs/credentials.md).
@@ -127,7 +128,7 @@ const gwError = (res: Response, status: number, type: string, message: string) =
 
 /** Pulls token usage out of JSON or SSE bodies from Anthropic, OpenAI (chat + responses) and Gemini. */
 class UsageMeter {
-  input = 0; output = 0; bytes = 0;
+  input = 0; output = 0; cached = 0; bytes = 0; model = "";
   private buf = "";
   private sse: boolean;
   constructor(contentType: string) { this.sse = /event-stream/.test(contentType); }
@@ -145,16 +146,25 @@ class UsageMeter {
     if (!text || text === "[DONE]") return;
     let e: any;
     try { e = JSON.parse(text); } catch { return; }
+    // The model the provider actually served (OpenAI chat/responses, Anthropic message_start, Gemini modelVersion).
+    const model = e?.model ?? e?.message?.model ?? e?.response?.model ?? e?.modelVersion ?? (Array.isArray(e) ? e.at(-1)?.modelVersion : undefined);
+    if (typeof model === "string" && model) this.model = model;
     const u = e?.usage ?? e?.message?.usage ?? e?.response?.usage ?? null;
     if (u) {
       // Anthropic: message_start carries input, message_delta the cumulative output; OpenAI: prompt/completion or input/output.
       const inp = u.input_tokens ?? u.prompt_tokens ?? 0;
       const out = u.output_tokens ?? u.completion_tokens ?? 0;
-      if (inp) this.input = Math.max(this.input, inp + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0));
+      const anthropicCache = (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
+      if (inp) this.input = Math.max(this.input, inp + anthropicCache);
       if (out) this.output = Math.max(this.output, out);
+      const cached = u.cache_read_input_tokens ?? u.input_tokens_details?.cached_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0;
+      if (cached) this.cached = Math.max(this.cached, cached);
     }
     const g = e?.usageMetadata ?? (Array.isArray(e) ? e.at(-1)?.usageMetadata : null);
-    if (g) { this.input = Math.max(this.input, g.promptTokenCount ?? 0); this.output = Math.max(this.output, g.candidatesTokenCount ?? 0); }
+    if (g) {
+      this.input = Math.max(this.input, g.promptTokenCount ?? 0); this.output = Math.max(this.output, g.candidatesTokenCount ?? 0);
+      this.cached = Math.max(this.cached, g.cachedContentTokenCount ?? 0);
+    }
   }
 }
 
@@ -198,6 +208,8 @@ export async function gatewayHandler(req: Request, res: Response) {
   // Where and what to send: straight through to upstream_url, or rewritten for Google Cloud Vertex AI.
   let upstream: string;
   let body: BodyInit | undefined;
+  let requestModel = "";                                  // fallback when the response does not name the model
+  const isCountTokens = /\/count_tokens$/.test(rest);       // free endpoint: never billed as usage
   const hasBody = !["GET", "HEAD"].includes(req.method);
   if (p.backend === "vertex") {
     try {
@@ -207,6 +219,7 @@ export async function gatewayHandler(req: Request, res: Response) {
       const v = toVertex(p.backend_config, rest, Buffer.concat(chunks), String(req.headers["anthropic-beta"] ?? ""));
       upstream = v.url;
       body = v.body;
+      requestModel = decodeURIComponent(v.url.match(/\/models\/([^/:]+):/)?.[1] ?? "");
       headers.delete("anthropic-version"); // carried in the body on Vertex
       headers.delete("anthropic-beta");
       headers.delete("content-length");
@@ -233,7 +246,7 @@ export async function gatewayHandler(req: Request, res: Response) {
       signal: AbortSignal.timeout(Number(process.env.OCTILLION_GATEWAY_TIMEOUT_MS ?? 600_000)),
     });
   } catch (e) {
-    await record(hash, slug, t, { requests: 1, errors: 1, input: 0, output: 0, bytes: 0 });
+    await record(hash, slug, t, { requests: 1, errors: 1, input: 0, cached: 0, output: 0, bytes: 0, model: requestModel });
     return gwError(res, 502, "api_error", `Upstream ${slug} unreachable: ${(e as Error).message}`);
   }
 
@@ -249,12 +262,17 @@ export async function gatewayHandler(req: Request, res: Response) {
   } finally {
     meter.end();
     res.end();
-    await record(hash, slug, t, { requests: 1, errors: up.status >= 400 ? 1 : 0, input: meter.input, output: meter.output, bytes: meter.bytes });
+    const billed = !isCountTokens;
+    await record(hash, slug, t, { requests: 1, errors: up.status >= 400 ? 1 : 0, input: billed ? meter.input : 0, cached: billed ? meter.cached : 0,
+                                  output: billed ? meter.output : 0, bytes: meter.bytes, model: meter.model || requestModel });
   }
 }
 
-async function record(hash: string, provider: string, t: { session_id: string | null; orchestrator_id: string | null },
-                      u: { requests: number; errors: number; input: number; output: number; bytes: number }) {
+async function record(hash: string, provider: string, t: { kind: string; session_id: string | null; orchestrator_id: string | null },
+                      u: { requests: number; errors: number; input: number; cached: number; output: number; bytes: number; model: string }) {
+  await recordModelUsage(provider, u.model || "unknown", t.kind === "orchestrator" ? "orchestrator" : "session",
+                         { requests: u.requests, errors: u.errors, input: u.input, cached: u.cached, output: u.output })
+    .catch((e) => console.error("model usage record failed:", (e as Error).message));
   await (await getDb()).query(
     `INSERT INTO gateway_usage (token_hash, provider, session_id, orchestrator_id, requests, errors, input_tokens, output_tokens, bytes, last_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())

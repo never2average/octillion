@@ -434,6 +434,17 @@ try {
     const [vu] = await db.query<{ requests: number; input_tokens: number; output_tokens: number }>(
       "SELECT sum(requests) AS requests, sum(input_tokens) AS input_tokens, sum(output_tokens) AS output_tokens FROM gateway_usage WHERE orchestrator_id = 'smoke-vertex'");
     assert.ok(Number(vu.input_tokens) >= 81 && Number(vu.output_tokens) >= 11, `Vertex calls metered (${vu.input_tokens}/${vu.output_tokens})`);
+    // Per-model usage: attributed to the Vertex model from the URL, priced, count_tokens never billed.
+    const [mu] = await db.query<any>(
+      "SELECT sum(requests) AS requests, sum(input_tokens) AS input, sum(output_tokens) AS output, sum(cost_usd) AS cost, bool_and(priced) AS priced FROM gateway_model_usage WHERE day = current_date AND model = 'claude-opus-5-5' AND consumer = 'orchestrator'");
+    assert.ok(Number(mu.requests) === 1 && Number(mu.input) === 70 && Number(mu.output) === 9 && mu.priced, `Vertex usage attributed to claude-opus-5-5 (${JSON.stringify(mu)})`);
+    assert.ok(Math.abs(Number(mu.cost) - (Number(mu.input) * 4 + Number(mu.output) * 20) / 1e6) < 1e-9, "priced at the Opus list price");
+    const { costOf } = await import("../src/usage.js");
+    assert.ok(Math.abs((await costOf("gpt-6.1-sol", { input: 200_000, cached: 80_000, output: 10_000 }))! - (120_000 * 2 + 80_000 * 0.1 + 10_000 * 10) / 1e6) < 1e-12, "gpt-6.1-sol: cached input at the cached rate");
+    assert.equal(await costOf("gpt-6.1-sol", { input: 300_000, cached: 0, output: 0 }), 300_000 * 4 / 1e6, "gpt-6.1-sol long-context tier above 272K input");
+    assert.equal(await costOf("no-such-model", { input: 1, cached: 0, output: 1 }), null, "unknown models are not priced");
+    const report = await (await fetch(`${base}/api/admin/usage/models?days=1&model=claude-opus-5-5`, { headers: { authorization: "Bearer smoke-admin-token" } })).json();
+    assert.ok(report.totals[0]?.model === "claude-opus-5-5", "admin usage report");
     fakeGoogle.close();
     await db.query("DELETE FROM gateway_tokens WHERE orchestrator_id = 'smoke-vertex'");
     console.log("✓ Anthropic via Vertex AI: SA JWT -> Google token, rawPredict/streamRawPredict/count-tokens rewrite, betas, metering");
