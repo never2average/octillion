@@ -34,13 +34,13 @@ export function handlersFor(org: Org) {
     list_simulations: (a: { product?: string }) => q.listSimulations(org, a.product),
     get_simulation: (a: { simulation_id: string }) => q.getSimulation(org, a.simulation_id),
     cancel_simulation: (a: { simulation_id: string }) => q.cancelSimulation(org, a.simulation_id),
-    get_visibility_report: (a: { product?: string; days?: number; model?: string }) => q.getReport(org, a),
+    get_visibility_report: (a: { product?: string; days?: number; model?: string; population?: string }) => q.getReport(org, a),
     get_agent_session: (a: { session_id: string }) => q.getSession(org, a.session_id),
     get_session_transcript: (a: { session_id: string; offset?: number; limit?: number }) =>
       q.getTranscript(org, a.session_id, a.offset, a.limit),
     search_transcripts: (a: Parameters<typeof q.searchTranscripts>[1]) => q.searchTranscripts(org, a),
     list_developer_profiles: (a: { query?: string }) => q.listProfiles(a),
-    list_agents: () => Promise.resolve(q.listAgents()),
+    list_agents: (a: { population?: string }) => q.listAgents(a),
     browse_task_library: (a: { query?: string; category?: string; language?: string; limit?: number }) => q.browseTaskLibrary(a),
   };
 }
@@ -79,7 +79,7 @@ function summarize(d: Data): string {
     case "transcript":
       return `Transcript of ${d.session_id} (${d.model}, "${d.scenario}", verdict ${d.verdict ?? "pending"}): events ${d.total ? d.offset + 1 : 0}-${d.offset + d.events.length} of ${d.total}.`;
     case "agents":
-      return `Worker agents (registry as of ${d.as_of ?? "n/a"}), weighted by real-world developer adoption, rounded to whole sandboxes out of ${d.sandbox_unit}: ${d.agents.filter((a) => a.enabled).map((a) => `${a.id} ${a.sandboxes}/${d.sandbox_unit} (${pct(a.weight)})`).join(", ")}.${d.agents.some((a) => !a.enabled) ? ` Not runnable yet: ${d.agents.filter((a) => !a.enabled).map((a) => a.label).join(", ")}.` : ""}${d.unrepresented_share != null ? ` Usage share not representable (IDE-only tools): ${pct(d.unrepresented_share)}.` : ""} A default run samples ${d.default_samples} sessions per scenario in these proportions. Runnable agents cover ${pct(d.runnable_coverage)} of representable usage${d.agents.some((a) => a.status === "adapter pending") ? `; adapters pending for ${d.agents.filter((a) => a.status === "adapter pending").map((a) => a.label).join(", ")}` : ""}.`;
+      return `Developer population "${d.population.name}" [${d.population.slug}]${d.populations.length > 1 ? ` (others: ${d.populations.filter((p: any) => p.slug !== d.population.slug).map((p: any) => p.slug).join(", ")})` : ""}. Coding agents (as of ${d.as_of ?? "n/a"}), weighted by real-world developer adoption, rounded to whole sandboxes out of ${d.sandbox_unit}: ${d.agents.filter((a) => a.enabled).map((a) => `${a.id} ${a.sandboxes}/${d.sandbox_unit} (${pct(a.weight)})`).join(", ")}.${d.agents.some((a) => !a.enabled) ? ` Not runnable yet: ${d.agents.filter((a) => !a.enabled).map((a) => a.label).join(", ")}.` : ""}${d.unrepresented_share != null ? ` Usage share not representable (IDE-only tools): ${pct(d.unrepresented_share)}.` : ""} A default run samples ${d.default_samples} sessions per scenario in these proportions. Runnable agents cover ${pct(d.runnable_coverage)} of representable usage${d.agents.some((a) => a.status === "adapter pending") ? `; adapters pending for ${d.agents.filter((a) => a.status === "adapter pending").map((a) => a.label).join(", ")}` : ""}.`;
     case "profiles":
       return d.profiles.length
         ? `${d.profiles.length} developer profiles${d.query ? ` matching "${d.query}"` : ""}: ${d.profiles.map((p: any) => `${p.slug} (${p.name}: ${p.summary})`).join("; ")}. Pass slugs as run_simulation profiles.`
@@ -208,6 +208,7 @@ export function createServer(org: Org): McpServer {
       agents: z.array(z.string()).optional().describe("Explicit worker agent ids (list_agents), e.g. 'claude-code/sonnet'"),
       models: z.array(z.string()).optional().describe("Explicit: only agents using these models"),
       samples: z.number().int().min(1).max(100).optional().describe("Representative mode: sessions per scenario (default 10)"),
+      population: z.string().optional().describe("Developer population whose coding-agent mix to sample (list_agents); default population if omitted"),
       profiles: z.array(z.string()).optional().describe("Developer profile slugs (list_developer_profiles); every scenario runs once per profile. Omit for a generic developer"),
       repeats: z.number().int().min(1).max(10).optional().describe("Explicit mode: runs per scenario and agent (default 3)"),
       name: z.string().optional(),
@@ -243,6 +244,7 @@ export function createServer(org: Org): McpServer {
       product,
       days: z.number().int().min(1).max(365).optional().describe("Look-back window (default 30)"),
       model: z.string().optional().describe("Only this model"),
+      population: z.string().optional().describe("Developer population for usage shares and the adoption-weighted rate"),
     },
     annotations: read, _meta: meta,
   }, run("get_visibility_report"));
@@ -291,8 +293,8 @@ export function createServer(org: Org): McpServer {
 
   registerAppTool(server, "list_agents", {
     title: "Worker agents",
-    description: "The coding agents Octillion simulates (harness, model, pinned version) and each one's weight: its share of real-world developer usage, with sources. Default simulations sample agents in these proportions.",
-    inputSchema: {},
+    description: "A developer population's coding-agent mix: the agents Octillion simulates (harness, model, pinned version) and each one's share, in whole sandboxes out of 20, from real-world developer usage with sources. Lists the available populations (e.g. global, enterprise). Default simulations sample agents in these proportions.",
+    inputSchema: { population: z.string().optional().describe("Developer population slug; default population if omitted") },
     annotations: read, _meta: meta,
   }, run("list_agents"));
 

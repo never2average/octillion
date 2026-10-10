@@ -10,6 +10,7 @@ import { appendEvents, claimJobs, completeSession, heartbeat } from "./worker.js
 import { fleetCheckin, fleetLeave, fleetStatus } from "./fleet.js";
 import { brokerOrchestratorCredentials, brokerSessionCredentials, gatewayHandler } from "./gateway.js";
 import * as kv from "./keyvault.js";
+import * as populations from "./populations.js";
 import { createHash, timingSafeEqual } from "node:crypto";
 
 const PORT = Number(process.env.PORT ?? 3333);
@@ -166,6 +167,23 @@ export function createApp() {
          FROM gateway_usage ORDER BY last_at DESC LIMIT 500`);
     res.json({ usage: rows });
   });
+  // Developer populations: the coding-agent mix per population (shares, pauses, sandbox unit).
+  admin.get("/populations", async (_req, res) => void res.json({ populations: await populations.listPopulations() }));
+  admin.get("/populations/:slug", async (req, res) => void res.json(await populations.getPopulation(String(req.params.slug))));
+  admin.post("/populations", async (req, res) => {
+    const { slug, name, from, description } = req.body ?? {};
+    if (typeof slug !== "string" || typeof name !== "string") return void res.status(400).json({ error: "slug and name are required" });
+    res.status(201).json(await populations.createPopulation(slug, name, { from, description }));
+  });
+  admin.patch("/populations/:slug", async (req, res) => void res.json(await populations.updatePopulation(String(req.params.slug), req.body ?? {})));
+  admin.put("/populations/:slug/agents/:agent", async (req, res) => {
+    const slug = String(req.params.slug), agent = decodeURIComponent(String(req.params.agent));
+    const { market_share, paused, paused_reason, notes } = req.body ?? {};
+    if (market_share !== undefined) await populations.setShare(slug, agent, Number(market_share), notes);
+    if (paused !== undefined) await populations.setPaused(slug, agent, Boolean(paused), paused_reason);
+    res.json(await populations.getPopulation(slug));
+  });
+  admin.post("/populations/:slug/default", async (req, res) => void res.json(await populations.setDefaultPopulation(String(req.params.slug))));
   app.use("/api/admin", admin);
 
   // ---------- local preview of the widget (development only) ----------

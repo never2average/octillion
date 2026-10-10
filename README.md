@@ -78,7 +78,7 @@ realistic scenarios where a developer would need a job queue, and run a simulati
 | `save_product` | Create/update product context: aliases, packages, domains, competitors |
 | `save_scenarios` | Add/edit/retire scenarios (`expectation`: `recommend` or `avoid`) |
 | `run_simulation` | Default: `samples` sessions per scenario (10), agents mixed by adoption weight. Explicit: `agents`/`models` × `repeats`. Optional developer `profiles` |
-| `list_agents` | The worker-agent registry: harness, model, version, adoption weight, sources |
+| `list_agents` | A developer population's coding-agent mix (whole sandboxes out of 20), sources, and the available populations |
 | `list_developer_profiles`, `browse_task_library` | Curated developer personas and real-world tasks from the vault |
 | `list_simulations`, `get_simulation`, `cancel_simulation` | Progress, scenario × model matrix, sessions |
 | `get_visibility_report` | Hit rate (+95% CI), adoption, losses, share of voice, by model/scenario, daily trend |
@@ -104,6 +104,26 @@ Jobs carry only the task. The sub-agent never learns which company is asking. Ev
 format. Send a post-run `git diff` as a `file_edit` event, because Codex's stream doesn't include file contents.
 Sessions with no heartbeat for `OCTILLION_LEASE_MINUTES` (30) are timed out. A reference worker using boat.dev
 sandboxes lives in [`orchestrator/`](orchestrator/README.md).
+
+## Developer populations
+
+The coding-agent mix lives in Postgres as **developer populations**: `developer_populations` holds name, sources,
+as-of date, sandbox unit and the min-one switch, and `developer_population_agents` holds each agent's market share
+and pause switch.
+
+- **Default population.** It is `global`, seeded once from `harnesses/registry.json`. After that the database is
+  the source of truth.
+- **Other populations.** You can define others, such as enterprise developers, and pass one to
+  `run_simulation` / `get_visibility_report` / `list_agents` as `population`.
+- **Agent definitions** (images, versions, adapters) stay in the registry file.
+
+```bash
+npm run population -- show                      # mix in whole sandboxes out of 20
+npm run population -- share global codex/default 0.21
+npm run population -- pause global cursor/auto "no credentials yet"   # resume global cursor/auto
+npm run population -- create enterprise "Enterprise developers" --from global
+```
+Admin API: `/api/admin/populations[/:slug[/agents/:agent]]` with `OCTILLION_ADMIN_TOKEN`.
 
 ## Orchestrators and the pod fleet
 

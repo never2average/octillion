@@ -1,5 +1,6 @@
 import { getDb } from "./db.js";
 import { apportion, scheduledAgents } from "./agents.js";
+import { getPopulation } from "./populations.js";
 
 /**
  * Global pod fleet across horizontally scaled orchestrators.
@@ -18,9 +19,9 @@ const STALE_SECONDS = () => Number(process.env.OCTILLION_FLEET_STALE_SECONDS ?? 
 
 export interface AgentShare { agent_id: string; harness: string; model: string; weight: number; image?: string; version?: string }
 
-/** One pod group per runnable registry agent (harness + model), weighted by usage. */
-export function agentShares(): AgentShare[] {
-  return scheduledAgents()
+/** One pod group per scheduled agent (harness + model) of the default developer population, weighted by its sandboxes. */
+export async function agentShares(): Promise<AgentShare[]> {
+  return scheduledAgents(await getPopulation())
     .map((a) => ({ agent_id: a.id, harness: a.harness, model: a.model, weight: a.weight, image: a.image?.docker, version: a.harness_version }))
     .sort((a, b) => b.weight - a.weight || a.agent_id.localeCompare(b.agent_id));
 }
@@ -30,7 +31,7 @@ export function agentShares(): AgentShare[] {
  * left with zero pods gets one, taken from whichever harness is most over its exact share (so no harness's
  * sessions starve, and the big shares stay exact: 200 pods at 40% -> 80).
  */
-export function planPods(total: number, shares: AgentShare[] = agentShares()): (AgentShare & { pods: number })[] {
+export function planPods(total: number, shares: AgentShare[]): (AgentShare & { pods: number })[] {
   const plan = apportion(shares, total).map(({ item, count }) => ({ ...item, pods: count }));
   if (total >= plan.length)
     for (const empty of plan.filter((p) => p.pods === 0)) {
@@ -103,7 +104,7 @@ export async function fleetStatus(orchestratorId?: string) {
     [STALE_SECONDS()],
   );
   const total = live.reduce((s, o) => s + Number(o.capacity), 0);
-  const plan = planPods(total);
+  const plan = planPods(total, await agentShares());
   const dealt = assign(plan, live.map((o) => ({ id: o.id, capacity: Number(o.capacity) })));
   const [queue] = await db.query<{ queued: number; running: number }>(
     "SELECT count(*) FILTER (WHERE status = 'queued') AS queued, count(*) FILTER (WHERE status = 'running') AS running FROM agent_sessions",

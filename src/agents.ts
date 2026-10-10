@@ -4,8 +4,8 @@ import path from "node:path";
 
 /**
  * The worker-agent registry (harnesses/registry.json): every coding agent we can run (harness + model + pinned
- * image) and its weight, i.e. its share of real-world developer usage. A default ("representative") simulation
- * samples agents in proportion to these weights, so results reflect what developers actually run.
+ * image + adapter). Its `weight`s are only the cited seed for the default developer population; the live mix
+ * (shares, pauses, sandbox unit) is in Postgres under developer populations (src/populations.ts).
  * Without a registry file, agents come from OCTILLION_MODELS x OCTILLION_HARNESS with equal weights.
  */
 
@@ -38,33 +38,41 @@ export function registry(): Registry {
 
 export const isRunnable = (a: AgentSpec) => a.enabled !== false && a.weight > 0 && a.worker_adapter !== "todo" && !a.paused;
 
-/** Share of enabled (representable) usage that workers can run today, 0..1. */
-export function runnableCoverage(): number {
-  const enabled = registry().agents.filter((a) => a.enabled !== false && a.weight > 0);
+/**
+ * A developer population (src/populations.ts): registry agents with this population's market shares (`weight`) and
+ * pause switches, plus its sandbox unit. Everything below is pure math over a population.
+ */
+export interface Population {
+  id: number; slug: string; name: string; description: string; as_of: string | null; methodology: string;
+  sources: unknown[]; unrepresented_share: number | null; sandbox_unit: number; min_one_sandbox: boolean; is_default: boolean;
+  agents: AgentSpec[];
+}
+
+/** Share of representable usage (enabled agents with a share) that workers can run today, 0..1. */
+export function runnableCoverage(pop: Population): number {
+  const enabled = pop.agents.filter((a) => a.enabled !== false && a.weight > 0);
   const total = enabled.reduce((s, a) => s + a.weight, 0);
   return total ? enabled.filter(isRunnable).reduce((s, a) => s + a.weight, 0) / total : 0;
 }
 
-/** Runnable agents (enabled, with a worker adapter) with weights renormalised to sum to 1. */
-export function enabledAgents(): AgentSpec[] {
-  const agents = registry().agents.filter(isRunnable);
+/** Runnable agents (enabled, adapter, not paused, share > 0) with shares renormalised to sum to 1. */
+export function enabledAgents(pop: Population): AgentSpec[] {
+  const agents = pop.agents.filter(isRunnable);
   const total = agents.reduce((s, a) => s + a.weight, 0) || 1;
   return agents.map((a) => ({ ...a, weight: a.weight / total }));
 }
 
 /**
- * The sandbox unit: the running mix expressed in whole sandboxes out of OCTILLION_SANDBOX_UNIT (20), so every share
- * is runnable (multiples of 5% at 20). Largest-remainder rounding of the renormalised usage keeps the total exact:
- * Opus 43.5% -> 8.7 -> 9 sandboxes (45%). Agents that round to 0 sit out unless OCTILLION_MIN_ONE_SANDBOX=1, which
- * gives every running agent at least one sandbox (taken from whoever is most over their exact share).
- * This unit drives everything: displayed shares, run sampling and pod plans (N orchestrators = N x the unit).
+ * The sandbox unit: the running mix in whole sandboxes out of the population's `sandbox_unit` (20), so every share
+ * is runnable (multiples of 5% at 20). Largest-remainder rounding keeps the total exact: Opus 43.5% -> 8.7 -> 9.
+ * Agents that round to 0 sit out unless the population sets `min_one_sandbox`, which gives every running agent at
+ * least one (taken from whoever is most over their exact share). This unit drives displayed shares, run sampling
+ * and pod plans: N orchestrators run N x the unit.
  */
-export const SANDBOX_UNIT = () => Math.max(1, Math.trunc(Number(process.env.OCTILLION_SANDBOX_UNIT ?? 20)));
-
-export function sandboxMix(unit = SANDBOX_UNIT()): { agent: AgentSpec; sandboxes: number; exact: number }[] {
-  const agents = enabledAgents();
-  const rows = apportion(agents, unit).map(({ item, count }) => ({ agent: item, sandboxes: count, exact: item.weight * unit }));
-  if (process.env.OCTILLION_MIN_ONE_SANDBOX === "1" && unit >= rows.length)
+export function sandboxMix(pop: Population): { agent: AgentSpec; sandboxes: number; exact: number }[] {
+  const unit = pop.sandbox_unit;
+  const rows = apportion(enabledAgents(pop), unit).map(({ item, count }) => ({ agent: item, sandboxes: count, exact: item.weight * unit }));
+  if (pop.min_one_sandbox && unit >= rows.length)
     for (const empty of rows.filter((r) => r.sandboxes === 0)) {
       const donor = rows.filter((r) => r.sandboxes > 1).sort((a, b) => (b.sandboxes - b.exact) - (a.sandboxes - a.exact))[0];
       if (!donor) break;
@@ -75,9 +83,8 @@ export function sandboxMix(unit = SANDBOX_UNIT()): { agent: AgentSpec; sandboxes
 }
 
 /** Agents in the sandbox unit, weighted by their whole-sandbox share (sandboxes / unit; sums to 1). */
-export function scheduledAgents(): AgentSpec[] {
-  const unit = SANDBOX_UNIT();
-  return sandboxMix(unit).filter((r) => r.sandboxes > 0).map((r) => ({ ...r.agent, weight: r.sandboxes / unit }));
+export function scheduledAgents(pop: Population): AgentSpec[] {
+  return sandboxMix(pop).filter((r) => r.sandboxes > 0).map((r) => ({ ...r.agent, weight: r.sandboxes / pop.sandbox_unit }));
 }
 
 export function findAgent(id: string): AgentSpec | undefined {
@@ -103,7 +110,7 @@ export function apportion<T extends { weight: number }>(items: T[], n: number): 
  * Spread a run's agent sessions over its slots (scenario x profile x sample) so every scenario gets a mix close to the
  * overall weights: apportion over the whole run, then deal agents out in a strided order.
  */
-export function representativePlan(slots: number, agents: AgentSpec[] = enabledAgents()): AgentSpec[] {
+export function representativePlan(slots: number, agents: AgentSpec[]): AgentSpec[] {
   // Each agent's sessions sit at evenly spaced positions (i + 0.5) / count, so no agent is bunched on a few scenarios.
   return apportion(agents, slots)
     .flatMap(({ item, count }) => Array.from({ length: count }, (_, i) => ({ item, key: (i + 0.5) / count })))

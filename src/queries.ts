@@ -2,22 +2,25 @@ import { getDb, type Queryable } from "./db.js";
 import { randomId, type Org } from "./auth.js";
 import { transcripts, type SearchParams } from "./transcripts.js";
 import type { Tool } from "./scoring.js";
-import { enabledAgents, findAgent, isRunnable, registry, representativePlan, runnableCoverage, SANDBOX_UNIT, sandboxMix, scheduledAgents, type AgentSpec } from "./agents.js";
+import { enabledAgents, findAgent, isRunnable, representativePlan, runnableCoverage, sandboxMix, scheduledAgents, type AgentSpec } from "./agents.js";
+import { getPopulation, listPopulations } from "./populations.js";
 
 const agentLabel = (id: string) => findAgent(id)?.label ?? id;
 
-/** The worker-agent registry as customers see it: who we simulate and how much each counts. */
-export function listAgents() {
-  const r = registry();
-  const unit = SANDBOX_UNIT();
-  const mix = new Map(sandboxMix(unit).map((r) => [r.agent.id, r])); // whole sandboxes out of the unit
+/** A developer population's coding-agent mix as customers see it: who we simulate and how much each counts. */
+export async function listAgents(input: { population?: string } = {}) {
+  const pop = await getPopulation(input.population);
+  const unit = pop.sandbox_unit;
+  const mix = new Map(sandboxMix(pop).map((r) => [r.agent.id, r])); // whole sandboxes out of the unit
   return {
     view: "agents" as const,
-    as_of: r.as_of ?? null,
-    unrepresented_share: r.unrepresented_share ?? null,
-    runnable_coverage: runnableCoverage(),
-    sources: r.sources ?? [],
-    agents: r.agents.map((a) => ({ id: a.id, label: a.label, vendor: a.vendor ?? null, harness: a.harness, model: a.model,
+    population: { slug: pop.slug, name: pop.name, description: pop.description, is_default: pop.is_default },
+    populations: await listPopulations(),
+    as_of: pop.as_of,
+    unrepresented_share: pop.unrepresented_share,
+    runnable_coverage: runnableCoverage(pop),
+    sources: pop.sources,
+    agents: pop.agents.filter((a) => a.weight > 0 || a.enabled === false).map((a) => ({ id: a.id, label: a.label, vendor: a.vendor ?? null, harness: a.harness, model: a.model,
                                     harness_version: a.harness_version ?? null, weight: (mix.get(a.id)?.sandboxes ?? 0) / unit,
                                     sandboxes: mix.get(a.id)?.sandboxes ?? 0, exact_sandboxes: mix.get(a.id)?.exact ?? 0,
                                     market_share: a.enabled === false ? 0 : a.weight,
@@ -34,8 +37,8 @@ export function listAgents() {
  */
 
 export const config = {
-  models: () => [...new Set(enabledAgents().map((a) => a.model))],
-  agents: () => scheduledAgents().map((a) => ({ id: a.id, label: a.label, model: a.model, harness: a.harness, weight: a.weight })),
+  models: async () => [...new Set(enabledAgents(await getPopulation()).map((a) => a.model))],
+  agents: async () => scheduledAgents(await getPopulation()).map((a) => ({ id: a.id, label: a.label, model: a.model, harness: a.harness, weight: a.weight })),
   defaultSamples: () => Number(process.env.OCTILLION_DEFAULT_SAMPLES ?? 10),
   maxSessionsPerRun: () => Number(process.env.OCTILLION_MAX_SESSIONS_PER_RUN ?? 100),
 };
@@ -164,8 +167,8 @@ export async function getProduct(org: Org, ref?: string) {
     scenarios: scenarios.map((s: any) => ({ ...s, hit_rate: rate(s.hits, s.sessions) })),
     simulations,
     warnings,
-    models: config.models(),
-    agents: config.agents(),
+    models: await config.models(),
+    agents: await config.agents(),
   };
 }
 
@@ -220,6 +223,7 @@ export async function saveScenarios(org: Org, productRef: string | undefined, it
 
 export interface RunInput {
   product?: string; scenario_ids?: number[]; profiles?: string[]; name?: string;
+  population?: string;                                      // developer population (default: the default one)
   agents?: string[]; models?: string[]; repeats?: number;  // explicit: these agents x repeats on every scenario
   samples?: number;                                         // representative (default): sessions per scenario, mixed by adoption
 }
@@ -227,8 +231,9 @@ export interface RunInput {
 export async function runSimulation(org: Org, input: RunInput) {
   const p = await resolveProduct(org, input.product);
   const db = await getDb();
-  const enabled = enabledAgents();
-  if (!enabled.length) throw new Error("No worker agents are enabled in the registry");
+  const pop = await getPopulation(input.population);
+  const enabled = enabledAgents(pop);
+  if (!enabled.length) throw new Error(`No coding agents are running in developer population ${pop.slug}`);
 
   const scenarios = await db.query<{ id: number }>(
     input.scenario_ids?.length
@@ -269,7 +274,7 @@ export async function runSimulation(org: Org, input: RunInput) {
     }
     plan = slots.flatMap((slot) => chosen.flatMap((agent) => Array.from({ length: repeats }, (_, i) => ({ ...slot, agent, attempt: i + 1 }))));
   } else {
-    const agents = representativePlan(slots.length * samples, scheduledAgents());
+    const agents = representativePlan(slots.length * samples, scheduledAgents(pop));
     plan = slots.flatMap((slot, si) => Array.from({ length: samples }, (_, i) => ({ ...slot, agent: agents[si * samples + i], attempt: i + 1 })));
   }
   if (plan.length > config.maxSessionsPerRun())
@@ -280,10 +285,10 @@ export async function runSimulation(org: Org, input: RunInput) {
   const name = input.name?.trim() || `${p.name} · ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC`;
   await db.transaction(async (tx) => {
     await tx.query(
-      `INSERT INTO simulations (id, org_id, product_id, name, models, harness, repeats, profile_ids, mode, agent_ids)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      `INSERT INTO simulations (id, org_id, product_id, name, models, harness, repeats, profile_ids, mode, agent_ids, population_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
       [id, org.orgId, p.id, name, [...new Set(used.map((a) => a.model))], [...new Set(used.map((a) => a.harness))].join(", "),
-       explicit ? repeats : samples, profiles.map((x) => x.id), explicit ? "explicit" : "representative", used.map((a) => a.id)],
+       explicit ? repeats : samples, profiles.map((x) => x.id), explicit ? "explicit" : "representative", used.map((a) => a.id), pop.id],
     );
     for (const x of plan)
       await tx.query(
@@ -384,7 +389,7 @@ export async function cancelSimulation(org: Org, simulationId: string) {
 
 // ---------- visibility report ----------
 
-export async function getReport(org: Org, input: { product?: string; days?: number; model?: string }) {
+export async function getReport(org: Org, input: { product?: string; days?: number; model?: string; population?: string }) {
   const p = await resolveProduct(org, input.product);
   const db = await getDb();
   const days = input.days ?? 30;
@@ -432,10 +437,12 @@ export async function getReport(org: Org, input: { product?: string; days?: numb
        FROM ${from} GROUP BY 1`,
     params,
   );
-  const running = new Map(scheduledAgents().map((x) => [x.id, x.weight])); // whole-sandbox shares, sum to 1
+  const pop = await getPopulation(input.population);
+  const running = new Map(scheduledAgents(pop).map((x) => [x.id, x.weight])); // whole-sandbox shares, sum to 1
+  const market = new Map(pop.agents.map((x) => [x.id, x.weight]));
   const agentRows = byAgent.map((a) => {
     const spec = findAgent(a.agent_id);
-    return { ...a, label: agentLabel(a.agent_id), weight: running.get(a.agent_id) ?? 0, market_share: spec?.enabled === false ? 0 : spec?.weight ?? 0,
+    return { ...a, label: agentLabel(a.agent_id), weight: running.get(a.agent_id) ?? 0, market_share: spec?.enabled === false ? 0 : market.get(a.agent_id) ?? 0,
              hit_rate: rate(a.hits, a.sessions), hit_ci: wilson(a.hits, a.sessions) };
   }).sort((a, b) => b.weight - a.weight);
   // What a randomly chosen developer's agent would do: per-agent hit rates weighted by real-world adoption.
@@ -465,7 +472,7 @@ export async function getReport(org: Org, input: { product?: string; days?: numb
     view: "report" as const,
     product: { id: p.id, slug: p.slug, name: p.name },
     filters: { days, model: input.model ?? null },
-    models: config.models(),
+    models: await config.models(),
     totals: { ...t, hit_rate: rate(t.hits, n), hit_ci: wilson(t.hits, n), weighted_hit_rate: weighted,
               adoption_coverage: weightSum, adoption_rate: rate(t.adopted, n), competitor_rate: rate(t.competitor, n) },
     share_of_voice: voice.map((v) => ({ ...v, share: rate(v.recommended, n) })),

@@ -25,8 +25,11 @@ console.log(`database: ${db.kind}, transcripts: ${transcripts().kind}`);
 // ---------- agent apportionment (no I/O) ----------
 {
   const { apportion, representativePlan, enabledAgents } = await import("../src/agents.js");
+  const { getPopulation } = await import("../src/populations.js");
   assert.deepEqual(apportion([{ weight: 0.5 }, { weight: 0.3 }, { weight: 0.2 }], 7).map((x) => x.count), [4, 2, 1]);
-  const agents = enabledAgents();
+  const globalPop = await getPopulation();
+  assert.equal(globalPop.slug, "global", "default population seeded from the registry");
+  const agents = enabledAgents(globalPop);
   assert.equal(agents.length, 3, "disabled agents excluded");
   const plan = representativePlan(20, agents);
   const counts = Object.fromEntries(agents.map((a) => [a.id, plan.filter((x) => x.id === a.id).length]));
@@ -247,6 +250,28 @@ try {
     { "claude-code/sonnet": 10, "codex/default": 6, "cursor-agent/default": 4 }, "agents sampled by adoption weight");
   await call(A, "cancel_simulation", { simulation_id: rep.simulation.id });
 
+  // Developer populations live in the DB: a second population with its own mix drives sampling when chosen.
+  {
+    const popSlug = `smoke-ent-${stamp}`.toLowerCase().replace(/[^a-z0-9-]/g, "");
+    const admin = (method: string, path: string, body?: unknown) => fetch(`${base}/api/admin${path}`, {
+      method, headers: { authorization: "Bearer smoke-admin-token", "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+    assert.equal((await fetch(`${base}/api/admin/populations`)).status, 401);
+    assert.equal((await admin("POST", "/populations", { slug: popSlug, name: "Smoke enterprise", from: "global" })).status, 201);
+    await admin("PUT", `/populations/${popSlug}/agents/${encodeURIComponent("codex/default")}`, { market_share: 0.6 });
+    await admin("PUT", `/populations/${popSlug}/agents/${encodeURIComponent("claude-code/sonnet")}`, { market_share: 0.4 });
+    await admin("PUT", `/populations/${popSlug}/agents/${encodeURIComponent("cursor-agent/default")}`, { paused: true, paused_reason: "smoke" });
+    const ent = await call(A, "list_agents", { population: popSlug });
+    assert.equal(ent.population.slug, popSlug);
+    assert.deepEqual(Object.fromEntries(ent.agents.filter((a: any) => a.sandboxes).map((a: any) => [a.id, a.sandboxes])), { "codex/default": 12, "claude-code/sonnet": 8 });
+    assert.ok(ent.agents.find((a: any) => a.id === "cursor-agent/default").status.startsWith("paused"), "paused in this population only");
+    const entRun = await call(A, "run_simulation", { samples: 5, population: popSlug, name: "enterprise" });
+    assert.deepEqual(Object.fromEntries(entRun.by_agent.map((a: any) => [a.agent_id, a.sessions])), { "codex/default": 12, "claude-code/sonnet": 8 }, "sampling follows the chosen population");
+    await call(A, "cancel_simulation", { simulation_id: entRun.simulation.id });
+    assert.equal((await call(A, "list_agents")).population.slug, "global", "default population unchanged");
+    await db.query("DELETE FROM developer_populations WHERE slug = $1", [popSlug]);
+    console.log("✓ developer populations in the DB: per-population mix, pauses and sampling");
+  }
+
   // ---------- launch ----------
   const sim = await call(A, "run_simulation", { models: ["claude-sonnet-5-5"], repeats: 1, name: "smoke", profiles: ["example-solo-indie"] });
   assert.equal(sim.totals.sessions, 4);
@@ -370,7 +395,7 @@ try {
   assert.equal(report.by_agent[0].agent_id, "claude-code/sonnet");
   assert.equal(report.totals.weighted_hit_rate, 0.5, "only one agent ran, so weighted == its rate");
   assert.equal(report.by_profile[0].avg_user_turns, 1, "simulated developer turns counted");
-  assert.equal((await call(A, "list_simulations")).simulations.length, 2);
+  assert.equal((await call(A, "list_simulations")).simulations.length, 3);
   assert.equal((await call(A, "list_products")).products[0].sessions_30d, 4);
 
   const lost = report.recent_losses[0].id;

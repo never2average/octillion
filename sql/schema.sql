@@ -244,3 +244,36 @@ CREATE TABLE IF NOT EXISTS gateway_usage (
   last_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (token_hash, provider)
 );
+
+-- Developer populations: the coding-agent (harness x model) mix a simulation should represent, e.g. the global
+-- developer population or an enterprise subset. Agent definitions (images, adapters) stay in harnesses/registry.json;
+-- the mix lives here. The default population is seeded from the registry's cited weights on first boot.
+CREATE TABLE IF NOT EXISTS developer_populations (
+  id                   SERIAL PRIMARY KEY,
+  slug                 TEXT UNIQUE NOT NULL,
+  name                 TEXT NOT NULL,
+  description          TEXT NOT NULL DEFAULT '',
+  as_of                DATE,
+  methodology          TEXT NOT NULL DEFAULT '',
+  sources              JSONB NOT NULL DEFAULT '[]',
+  unrepresented_share  REAL,                    -- usage in tools that cannot run headless
+  sandbox_unit         INT NOT NULL DEFAULT 20 CHECK (sandbox_unit > 0),
+  min_one_sandbox      BOOLEAN NOT NULL DEFAULT false,
+  is_default           BOOLEAN NOT NULL DEFAULT false,
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS developer_populations_one_default ON developer_populations (is_default) WHERE is_default;
+
+CREATE TABLE IF NOT EXISTS developer_population_agents (
+  population_id  INT NOT NULL REFERENCES developer_populations(id) ON DELETE CASCADE,
+  agent_id       TEXT NOT NULL,               -- registry agent id, e.g. claude-code/opus
+  market_share   REAL NOT NULL CHECK (market_share >= 0),  -- share of this population's agentic coding usage
+  paused         BOOLEAN NOT NULL DEFAULT false,
+  paused_reason  TEXT,
+  notes          TEXT,
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (population_id, agent_id)
+);
+
+ALTER TABLE simulations ADD COLUMN IF NOT EXISTS population_id INT REFERENCES developer_populations(id) ON DELETE SET NULL;
