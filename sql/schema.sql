@@ -167,3 +167,12 @@ ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS user_turns INT NOT NULL DEFA
 ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS agent_id TEXT;              -- registry id, e.g. claude-code/sonnet
 ALTER TABLE simulations    ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'explicit';  -- representative | explicit
 ALTER TABLE simulations    ADD COLUMN IF NOT EXISTS agent_ids TEXT[] NOT NULL DEFAULT '{}';
+
+-- Orchestrators (each runs up to OCTILLION_PODS_PER_ORCHESTRATOR warm pods); the server plans the global pod mix (src/fleet.ts).
+CREATE TABLE IF NOT EXISTS orchestrators (
+  id             TEXT PRIMARY KEY,
+  capacity       INT NOT NULL,
+  meta           JSONB NOT NULL DEFAULT '{}',
+  registered_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_seen      TIMESTAMPTZ NOT NULL DEFAULT now()
+);

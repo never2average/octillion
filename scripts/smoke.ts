@@ -33,6 +33,26 @@ console.log(`database: ${db.kind}, transcripts: ${transcripts().kind}`);
   console.log("✓ agent apportionment");
 }
 
+// ---------- global pod fleet (no I/O) ----------
+{
+  const { planPods, assign } = await import("../src/fleet.js");
+  const shares = [
+    { harness: "claude-code", weight: 0.4, agents: [] }, { harness: "cursor", weight: 0.25, agents: [] },
+    { harness: "codex", weight: 0.2, agents: [] }, { harness: "copilot", weight: 0.1, agents: [] }, { harness: "aider", weight: 0.05, agents: [] },
+  ];
+  const plan = planPods(200, shares); // 10 orchestrators x 20 pods
+  assert.equal(plan.reduce((s, p) => s + p.pods, 0), 200);
+  assert.equal(plan[0].pods, 80, "Claude Code at 40% gets 80 of 200 pods");
+  const orchs = Array.from({ length: 10 }, (_, i) => ({ id: `orch-${String(i).padStart(2, "0")}`, capacity: 20 }));
+  const dealt = assign(plan, orchs);
+  for (const [, m] of dealt) {
+    assert.equal([...m.values()].reduce((s, n) => s + n, 0), 20, "each orchestrator filled to 20");
+    assert.equal(m.get("claude-code"), 8, "each orchestrator carries ~40% Claude Code");
+  }
+  assert.equal(planPods(10, shares)[0].pods, 4, "10 pods -> 4 Claude Code");
+  console.log("✓ fleet: 10 orchestrators x 20 = 200 pods in usage proportion");
+}
+
 // ---------- scoring unit checks (no I/O) ----------
 {
   const target = { name: "RelayQ", aliases: ["Relay Queue"], packages: ["@relayq/client", "relayq"], domains: ["relayq.example.com"] };
@@ -175,6 +195,19 @@ try {
     const score = await (await worker(`/sessions/${job.session_id}/complete`, { status: "completed", cost_usd: 0.5, tokens_in: 1000, tokens_out: 200 })).json();
     assert.equal(score.verdict, outcomes[i], `session ${i} scored ${score.verdict}`);
     assert.equal((await worker(`/sessions/${job.session_id}/events`, { events: [{ type: "late" }] })).status, 409, "finished sessions are read-only");
+  }
+
+  // ---------- fleet check-in over HTTP ----------
+  {
+    const ids = [`smoke-orch-a-${stamp}`, `smoke-orch-b-${stamp}`];
+    assert.equal((await worker("/fleet", { orchestrator_id: ids[0] }, { token: "wrong" })).status, 401);
+    await worker("/fleet", { orchestrator_id: ids[0], capacity: 20 });
+    const b = await (await worker("/fleet", { orchestrator_id: ids[1], capacity: 50 })).json();
+    assert.ok(b.orchestrators >= 2 && b.assignment.reduce((s: number, x: any) => s + x.pods, 0) <= 20, "capacity capped at 20 pods per orchestrator");
+    const a = await (await worker("/fleet", { orchestrator_id: ids[0], capacity: 20 })).json();
+    assert.ok(a.assignment.every((x: any) => x.image || x.harness), "assignment names harnesses");
+    for (const id of ids) assert.equal((await fetch(`${base}/api/worker/fleet/${id}`, { method: "DELETE", headers: { authorization: `Bearer ${WORKER_TOKEN}` } })).status, 204);
+    console.log("✓ fleet check-in, capacity cap, leave");
   }
 
   // ---------- results ----------

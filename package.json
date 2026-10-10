@@ -13,7 +13,8 @@
     "demo:seed": "tsx --env-file-if-exists=.env scripts/seed-demo.ts",
     "smoke": "tsx --env-file-if-exists=.env scripts/smoke.ts",
     "typecheck": "tsc --noEmit",
-    "vault:sync": "tsx --env-file-if-exists=.env scripts/vault-sync.ts"
+    "vault:sync": "tsx --env-file-if-exists=.env scripts/vault-sync.ts",
+    "fleet:status": "tsx --env-file-if-exists=.env scripts/fleet-status.ts"
   },
   "description": "Octillion: measure whether AI coding agents recommend your developer tool. MCP server + dashboard for Claude and ChatGPT.",
   "dependencies": {

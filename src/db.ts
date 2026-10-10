@@ -89,6 +89,6 @@ export function getDb(): Promise<Db> {
 /** Destructive: drop every table, then recreate the schema. Local development only. */
 export async function resetDb(db: Db): Promise<void> {
   await db.exec(`DROP TABLE IF EXISTS access_requests, transcript_events, agent_sessions, simulations, scenarios,
-                 products, api_keys, organizations, developer_profiles, library_tasks CASCADE`);
+                 products, api_keys, organizations, developer_profiles, library_tasks, orchestrators CASCADE`);
   await db.exec(await readFile(path.join(SQL_DIR, "schema.sql"), "utf8"));
 }

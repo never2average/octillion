@@ -7,6 +7,7 @@ import { bearer, isWorkerToken, resolveKey, type Org } from "./auth.js";
 import { getDb } from "./db.js";
 import { parseJsonl, transcripts, type RawEvent } from "./transcripts.js";
 import { appendEvents, claimJobs, completeSession, heartbeat } from "./worker.js";
+import { fleetCheckin, fleetLeave, fleetStatus } from "./fleet.js";
 
 const PORT = Number(process.env.PORT ?? 3333);
 const HOST = process.env.HOST ?? "127.0.0.1";
@@ -106,6 +107,17 @@ export function createApp() {
     if (!["completed", "failed", "timeout"].includes(status)) return void res.status(400).json({ error: "status must be completed, failed or timeout" });
     res.json((await completeSession(String(req.params.id), { ...req.body, status })) ?? { verdict: null });
   });
+  // Fleet: orchestrators check in every ~30s and get their share of the global, usage-proportional pod plan.
+  worker.post("/fleet", async (req, res) => {
+    const { orchestrator_id, capacity, meta } = req.body ?? {};
+    if (typeof orchestrator_id !== "string" || !orchestrator_id) return void res.status(400).json({ error: "orchestrator_id is required" });
+    res.json(await fleetCheckin(orchestrator_id, capacity, meta));
+  });
+  worker.delete("/fleet/:id", async (req, res) => {
+    await fleetLeave(String(req.params.id));
+    res.status(204).end();
+  });
+  worker.get("/fleet", async (_req, res) => void res.json(await fleetStatus()));
   app.use("/api/worker", worker);
 
   // ---------- local preview of the widget (development only) ----------
