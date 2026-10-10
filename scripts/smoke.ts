@@ -510,7 +510,7 @@ try {
     const good = {
       product: { name: "QuickQueue", description: "Hosted job queue for TypeScript.", category: "Background jobs",
                  aliases: ["Quick Queue"], packages: ["@quickqueue/sdk"], domains: ["quickqueue.example.com"],
-                 competitors: [{ name: "BullMQ", packages: ["bullmq"] }, { name: "Inngest", packages: ["inngest"] }] },
+                 competitors: [{ name: "BullMQ", packages: ["bullmq"] }, { name: "Inngest", packages: ["inngest"] }, { name: "Trigger.dev", packages: ["@trigger.dev/sdk"] }] },
       personas: [
         { name: "Startup backend engineer", summary: "Ships fast on Node.js; prefers managed services.", attributes: { stack: ["TypeScript"] }, instructions: "Pragmatic." },
         { name: "Enterprise platform engineer", summary: "Compliance-heavy, self-hosting preferred.", attributes: { stack: ["Go"] }, instructions: "Asks about cost." },
@@ -525,8 +525,11 @@ try {
     const bad = structuredClone(good);
     bad.scenarios[1].prompt = "Use QuickQueue to add a nightly job to this Next.js app that emails each user a digest of yesterday's activity.";
     bad.personas[0].summary = "Loves BullMQ and uses it everywhere in production.";
+    bad.product.packages = ["@quickqueue/sdk", "QuickQueue"];
+    bad.product.competitors = bad.product.competitors.slice(0, 2);
     const v = await (await worker(`/research/${rid}/validate`, { result: bad })).json();
-    assert.ok(!v.ok && v.issues.some((i: string) => /scenarios\[1\] names QuickQueue/.test(i)) && v.issues.some((i: string) => /personas\[0\] mentions BullMQ/.test(i)), "validation catches leaks");
+    assert.ok(!v.ok && v.issues.some((i: string) => /scenarios\[1\] names QuickQueue/.test(i)) && v.issues.some((i: string) => /personas\[0\] mentions BullMQ/.test(i)) &&
+              v.issues.some((i: string) => /not display names: QuickQueue/.test(i)) && v.issues.some((i: string) => /3-6 competitors/.test(i)), "validation catches leaks, display-name packages and too few competitors");
     const rejected = await worker(`/research/${rid}/complete`, { status: "completed", result: bad });
     assert.equal(rejected.status, 422);
     assert.ok((await rejected.json()).issues.length >= 2);

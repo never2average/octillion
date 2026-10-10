@@ -9,7 +9,7 @@ import type { Tool } from "./scoring.js";
  * validates (blindness + counts), applies them and launches a representative run.
  */
 
-export const LIMITS = { max_personas: 4, max_scenarios: 10, min_scenarios: 3, max_competitors: 6 };
+export const LIMITS = { max_personas: 4, max_scenarios: 10, min_scenarios: 3, min_competitors: 3, max_competitors: 6 };
 const STALE_MINUTES = () => Number(process.env.OCTILLION_RESEARCH_STALE_MINUTES ?? 20);
 const MAX_ATTEMPTS = 6;
 
@@ -130,7 +130,12 @@ export function validateResearch(r: ResearchResult | undefined): string[] {
   const competitorWords = competitors.flatMap((c) => [c.name, ...(c.aliases ?? []), ...(c.packages ?? [])]);
   if (!(p?.aliases?.length || p?.packages?.length || p?.domains?.length))
     issues.push("product needs at least one alias, package or domain besides the name (used to detect it in transcripts)");
-  if (competitors.length > LIMITS.max_competitors) issues.push(`at most ${LIMITS.max_competitors} competitors`);
+  if (competitors.length < LIMITS.min_competitors || competitors.length > LIMITS.max_competitors)
+    issues.push(`give ${LIMITS.min_competitors}-${LIMITS.max_competitors} competitors, including the most widely used alternatives (got ${competitors.length})`);
+  // Packages are install/import identifiers (npm, PyPI, crates, Go modules), never display names with spaces/capitals.
+  const badPkg = (p?.packages ?? []).filter((x) => !/^(@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._\/-]*$/i.test(x) || /\s/.test(x) ||
+                                                   (p?.name && x === p.name && /[A-Z]/.test(x)));
+  if (badPkg.length) issues.push(`packages must be real install identifiers confirmed on a registry, not display names: ${badPkg.join(", ")}`);
   const clash = competitors.filter((c) => p?.name && c.name.toLowerCase() === p.name.toLowerCase());
   if (clash.length) issues.push("a competitor has the same name as the product");
 

@@ -20,12 +20,13 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { CFG, ORCH } from "../core/config.js";
+import { CFG, ORCH, env } from "../core/config.js";
 import type { Runner } from "../core/runners.js";
-import type { Job } from "../core/session.js";
+import { isShuttingDown, markShuttingDown, type Job } from "../core/session.js";
 import { log } from "../core/util.js";
 import { claimLoop, runDeterministic } from "../worker.js";
 import { CREDENTIALS_MODE, orchestratorCredentials, redact } from "../core/credentials.js";
+import { researchLoop } from "./research.js";
 import { createOctillionExtension, OCTILLION_TOOLS, OctillionRegistry } from "./index.js";
 import { jobPrompt, ORCHESTRATOR_SYSTEM_PROMPT } from "./prompt.js";
 
@@ -155,9 +156,21 @@ if (process.argv[1] && /pi-octillion[\\/]main\.(ts|js)$/.test(process.argv[1])) 
     const brain = await createBrain();
     if (!brain.apiKey) log("warning: no orchestrator LLM credentials; every job will use the deterministic fallback");
     log(`orchestrator brain ${brain.provider}/${brain.modelId}${brain.baseUrl ? ` via ${brain.baseUrl}` : ""} thinking=${ORCH.thinking} credentials=${CREDENTIALS_MODE}`);
-    await claimLoop(async (job, runner) => {
+    const fresh = async () => {
       await refreshBrain(brain).catch((e) => log("orchestrator credential refresh failed (using the current token):", redact(String(e))));
-      return runJobWithPi(job, runner, brain);
-    }, "orchestrator");
+      return brain;
+    };
+    // ORCHESTRATOR_MODE=research: a research-only worker (never claims coding-agent sessions).
+    if (env.ORCHESTRATOR_MODE === "research") {
+      const stop = () => { if (isShuttingDown()) process.exit(1); markShuttingDown(); log("stopping research worker"); };
+      process.on("SIGINT", stop); process.on("SIGTERM", stop);
+      log("research-only mode");
+      return researchLoop(fresh);
+    }
+    // Coding-agent sessions and product-onboarding research jobs, claimed side by side on the same brain.
+    await Promise.all([
+      claimLoop(async (job, runner) => runJobWithPi(job, runner, await fresh()), "orchestrator"),
+      researchLoop(fresh),
+    ]);
   })().catch((e) => { console.error(e); process.exit(1); });
 }

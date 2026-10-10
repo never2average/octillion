@@ -66,6 +66,7 @@ export type FinishHint = { status?: string; note?: string; orchestrator?: Record
 export const activeSessions = new Set<WorkerSession>();
 let shuttingDown = false;
 export function markShuttingDown() { shuttingDown = true; }
+export const isShuttingDown = () => shuttingDown;
 
 const TEXT_CAP = 8000;
 

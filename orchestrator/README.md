@@ -352,6 +352,32 @@ signal within 3s is ignored, because npx and tsx both forward it. A 404 or 409 f
 - **Gateway tokens are not real keys.** Codex sent the `ogw_` token to api.openai.com when only `OPENAI_BASE_URL` was set, which is why the mapping
   uses `openai_base_url`. A misconfigured harness leaks at most a gateway token, never a vault key.
 
+## Product onboarding research (`pi-octillion/research.ts`, docs/onboarding.md)
+
+The orchestrator also claims research jobs: `POST /api/worker/research/claim`, polled next to the agent-session claims.
+`ORCHESTRATOR_MODE=research` runs a research-only worker that never claims coding-agent sessions.
+Each job gets a dedicated Pi session on the same broker brain (`openai/gpt-6.1-sol` via the gateway). It has research-only tools and no shell or file access:
+
+| tool | what it does |
+|---|---|
+| `fetch_url(url)` | `core/safe-fetch.ts`: GET → readable text (scripts and styles stripped, ≤ `RESEARCH_FETCH_MAX_CHARS`, default 40k) plus fetchable same-site links. **Allowlist:** the job's website and docs hosts and their subdomains, registry.npmjs.org, pypi.org, crates.io, pkg.go.dev, and github.com / raw.githubusercontent.com for owners linked from the product's own pages. **SSRF:** DNS is resolved inside the socket's `lookup`. Private, loopback, link-local/metadata, CGNAT, multicast and reserved addresses are refused, and the checked address is the one connected to. Redirects are re-checked each hop (max 5). ≤ 25 fetches per job |
+| `search_library(query, category?, language?)` | `GET /api/worker/library/tasks` |
+| `report_progress(stage, note)` | `POST /research/:id/progress`. Also sent as a heartbeat every 60s |
+| `validate(result_json)` | `POST /research/:id/validate` → `{ok, issues}` |
+| `submit(result_json)` | `POST /research/:id/complete`. A 422 returns its issues to the model to fix. After 4 attempts (`RESEARCH_MAX_SUBMITS`) the job completes `failed` with the issues |
+
+- **Prompt.** `pi-octillion/research-prompt.ts` (`RESEARCH_SYSTEM_PROMPT`, exported for tuning) tells the model to:
+  - read the docs for real install commands, packages, import paths and domains;
+  - pick 2-5 real competitors;
+  - write 2-4 blind personas;
+  - prefer library tasks, then write neutral, specific developer-voice problems: a stack, existing-app context and a concrete goal;
+  - include 1-2 `avoid` problems;
+  - never name the product, competitors, packages or domains in prompts;
+  - give a rationale for each problem.
+- **No LLM, no research.** If the broker gives no LLM, or the LLM errors (`LLM unavailable: …`), the job is completed `failed` with that error. Research is never invented.
+- **Guards.** `RESEARCH_MAX_COST_USD` (default 2) aborts a job above that spend. Also `RESEARCH_MAX_MINUTES` (20), `RESEARCH_MAX_FETCHES` (25) and `RESEARCH_CONCURRENCY` (1).
+- **Hermetic test.** `npx tsx orchestrator/test/research.ts` (about 30s). It uses the real server on PGlite, the real orchestrator, a fake product site (`RESEARCH_TEST_DNS` / `RESEARCH_TRUST_PRIVATE_HOSTS`, tests only), and a fake OpenAI Responses endpoint as the vault upstream, scripted to call every tool. It asserts the allowlist, blocking of private, metadata, off-allowlist and redirect targets, validate → 422 → revise → accepted, the saved profile, personas and scenarios, the LLM-unavailable failure, and that the brain went through the gateway.
+
 ## Integration test (real server, `orchestrator/test/integration.ts`)
 
 ```bash
