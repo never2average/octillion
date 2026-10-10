@@ -269,6 +269,8 @@ CREATE TABLE IF NOT EXISTS gateway_usage (
   last_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (token_hash, provider)
 );
+-- Priced per request at record time (long-context tiers apply per request, not to a session's summed input).
+ALTER TABLE gateway_usage ADD COLUMN IF NOT EXISTS cost_usd NUMERIC(12, 6) NOT NULL DEFAULT 0;
 
 -- Developer populations: the coding-agent (harness x model) mix a simulation should represent, e.g. the global
 -- developer population or an enterprise subset. Agent definitions (images, adapters) stay in harnesses/registry.json;

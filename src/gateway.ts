@@ -5,7 +5,7 @@ import { getDb } from "./db.js";
 import { findAgent } from "./agents.js";
 import { getProvider, providersForEnv, useCredential, VERTEX_LABEL, type ProviderRow } from "./keyvault.js";
 import { toVertex, vertexAccessToken } from "./vertex.js";
-import { recordModelUsage } from "./usage.js";
+import { costOf, recordModelUsage } from "./usage.js";
 
 /**
  * Inference gateway + credential broker (docs/credentials.md).
@@ -101,12 +101,14 @@ export async function revokeSessionTokens(sessionId: string) {
 
 /** Gateway-metered usage for a session (summed over providers). */
 export async function sessionGatewayUsage(sessionId: string) {
-  const [u] = await (await getDb()).query<{ requests: number; input_tokens: number; output_tokens: number }>(
+  const [u] = await (await getDb()).query<{ requests: number; input_tokens: number; output_tokens: number; cost_usd: number }>(
     `SELECT coalesce(sum(requests), 0) AS requests, coalesce(sum(input_tokens), 0) AS input_tokens,
-            coalesce(sum(output_tokens), 0) AS output_tokens FROM gateway_usage WHERE session_id = $1`,
+            coalesce(sum(output_tokens), 0) AS output_tokens, coalesce(sum(cost_usd), 0) AS cost_usd
+       FROM gateway_usage WHERE session_id = $1`,
     [sessionId],
   );
-  return { requests: Number(u.requests), input_tokens: Number(u.input_tokens), output_tokens: Number(u.output_tokens) };
+  return { requests: Number(u.requests), input_tokens: Number(u.input_tokens), output_tokens: Number(u.output_tokens),
+           cost_usd: Number(u.cost_usd) };
 }
 
 // ---------- the proxy ----------
@@ -273,12 +275,14 @@ async function record(hash: string, provider: string, t: { kind: string; session
   await recordModelUsage(provider, u.model || "unknown", t.kind === "orchestrator" ? "orchestrator" : "session",
                          { requests: u.requests, errors: u.errors, input: u.input, cached: u.cached, output: u.output })
     .catch((e) => console.error("model usage record failed:", (e as Error).message));
+  const cost = (await costOf(u.model || "unknown", u).catch(() => null)) ?? 0;
   await (await getDb()).query(
-    `INSERT INTO gateway_usage (token_hash, provider, session_id, orchestrator_id, requests, errors, input_tokens, output_tokens, bytes, last_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+    `INSERT INTO gateway_usage (token_hash, provider, session_id, orchestrator_id, requests, errors, input_tokens, output_tokens, bytes, cost_usd, last_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
      ON CONFLICT (token_hash, provider) DO UPDATE SET requests = gateway_usage.requests + excluded.requests,
        errors = gateway_usage.errors + excluded.errors, input_tokens = gateway_usage.input_tokens + excluded.input_tokens,
-       output_tokens = gateway_usage.output_tokens + excluded.output_tokens, bytes = gateway_usage.bytes + excluded.bytes, last_at = now()`,
-    [hash, provider, t.session_id, t.orchestrator_id, u.requests, u.errors, u.input, u.output, u.bytes],
+       output_tokens = gateway_usage.output_tokens + excluded.output_tokens, bytes = gateway_usage.bytes + excluded.bytes,
+       cost_usd = gateway_usage.cost_usd + excluded.cost_usd, last_at = now()`,
+    [hash, provider, t.session_id, t.orchestrator_id, u.requests, u.errors, u.input, u.output, u.bytes, cost],
   ).catch((e) => console.error("gateway usage record failed:", e.message));
 }

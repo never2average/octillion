@@ -84,22 +84,29 @@ export const AGENT_HOME = "/home/agent"; // same layout in boat and docker
 export const AGENT_WORKDIR = `${AGENT_HOME}/work`;
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
+/** Lockfiles: their content (every transitive package name) stays out of the scored diff; only a name line. */
+export const LOCKFILES = ["package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "bun.lock", "poetry.lock", "Pipfile.lock", "uv.lock", "go.sum", "Cargo.lock", "Gemfile.lock", "composer.lock"];
+const LOCK_EXCLUDE = LOCKFILES.map((f) => `':(exclude,glob)**/${f}'`).join(" ");
+const LOCK_ONLY = LOCKFILES.map((f) => `':(glob)**/${f}'`).join(" ");
+
 /**
  * Diff script, parameterized by env WORK, SNAP (git dir used when the workdir is not a repo; kept outside the
  * workdir so the agent never sees a .git it did not create) and BASE (cloned commit, optional).
+ * Lockfile changes are listed by name only ("# lockfile changed: ...").
  */
 export const DIFF_SCRIPT = `cd "$WORK" 2>/dev/null || exit 0
 G="git -c core.quotepath=off -c safe.directory=*"
 if [ -d .git ]; then
-  $G add -A >/dev/null 2>&1
-  $G diff --cached --no-color --no-ext-diff "\${BASE:-${EMPTY_TREE}}"
+  B="\${BASE:-${EMPTY_TREE}}"
 else
   export GIT_DIR="$SNAP" GIT_WORK_TREE="$WORK"
   rm -rf "$GIT_DIR"; git init -q
   printf "node_modules/\\n.venv/\\nvenv/\\n__pycache__/\\n" > "$GIT_DIR/info/exclude"
-  $G add -A >/dev/null 2>&1
-  $G diff --cached --no-color --no-ext-diff ${EMPTY_TREE}
-fi`;
+  B=${EMPTY_TREE}
+fi
+$G add -A >/dev/null 2>&1
+$G diff --cached --no-color --no-ext-diff "$B" -- . ${LOCK_EXCLUDE}
+$G diff --cached --name-only "$B" -- ${LOCK_ONLY} | sed 's/^/# lockfile changed (content omitted): /'`;
 
 export function capDiff(d: string): string {
   return d.length > BOAT.diffMaxBytes ? d.slice(0, BOAT.diffMaxBytes) + "\n[diff truncated by worker]\n" : d;

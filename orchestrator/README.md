@@ -389,9 +389,10 @@ Each orchestrator runs up to `POD_CAPACITY` (≤ 20) warm Docker pods. N orchest
   - at `MAX_AGENT_TURNS` (100), counted in harness terms (`core/turns.ts`), summed across resumes and enforced natively where possible (Claude `--max-turns`), otherwise by SIGTERM to the CLI;
   - at `MAX_SESSION_MINUTES`;
   - after `GIVE_UP_RUNS` (3) nudged runs that change nothing.
+- Lockfile content stays out of the scored diff (one "# lockfile changed" line instead), so transitive package names are never scored as mentions.
 - `completed_reason` (done | turn_cap | time_cap | agent_gave_up | error) goes to `/complete`, the `agent_sessions.completed_reason` column, `get_agent_session` and `get_simulation`.
 
-Test: `npx tsx orchestrator/test/run-until-done.ts` (fake Codex CLI on the local runner, mock worker API, 12 checks).
+Test: `npx tsx orchestrator/test/run-until-done.ts` (fake Codex CLI on the local runner, mock worker API, 13 checks).
 
 ## Transcript sink (`TRANSCRIPT_SINK`)
 

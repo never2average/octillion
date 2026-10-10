@@ -129,13 +129,15 @@ export async function completeSession(sessionId: string, input: CompleteInput = 
        (COMPLETED_REASONS as readonly string[]).includes(input.completed_reason ?? "") ? input.completed_reason : null],
     );
   }
-  // The session's gateway token dies with it; tokens the gateway metered are authoritative when larger than
-  // what the worker parsed from the CLI's own output.
+  // The session's gateway token dies with it; tokens and cost the gateway metered are authoritative when larger
+  // than what the worker parsed from the CLI's own output (Codex, for one, reports no cost at all).
   await revokeSessionTokens(sessionId);
   const metered = await sessionGatewayUsage(sessionId);
   if (metered.requests)
-    await db.query("UPDATE agent_sessions SET tokens_in = greatest(tokens_in, $2), tokens_out = greatest(tokens_out, $3) WHERE id = $1",
-      [sessionId, metered.input_tokens, metered.output_tokens]);
+    await db.query(
+      `UPDATE agent_sessions SET tokens_in = greatest(tokens_in, $2), tokens_out = greatest(tokens_out, $3),
+              cost_usd = greatest(cost_usd, $4) WHERE id = $1`,
+      [sessionId, metered.input_tokens, metered.output_tokens, metered.cost_usd]);
   const score = await scoreSession(sessionId);
   await finishSimulationIfDone(s.simulation_id);
   return score;

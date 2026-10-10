@@ -100,6 +100,18 @@ try {
   check("turn counting: codex step items, claude distinct responses", cc.total === 2 && cl.total === 2, `codex ${cc.total}, claude ${cl.total}`);
   check("neutral nudges never name tools", [0, 1, 2, 3].every((n) => !/[A-Z][a-z]+[A-Z]|npm|pip|zod|joi|yup/.test(defaultNudge({ last_assistant_text: "Should I?" }, n) + defaultNudge({ last_assistant_text: "ok." }, n))));
 
+  // 4b. the diff (vs the seed commit) keeps lockfile content out of the scored transcript
+  const { getAdapter } = await import("../harnesses/adapters.js");
+  const sbx = await localRunner.open({ adapter: getAdapter("codex"), repoUrl: null, template: "express-ts" });
+  const { writeFileSync } = await import("node:fs");
+  writeFileSync(path.join(sbx.workdir, "package-lock.json"), '{"packages":{"node_modules/some-transitive-dep":{}}}\n');
+  writeFileSync(path.join(sbx.workdir, "src", "validate.ts"), "export const v = 1;\n");
+  const lockDiff = (await sbx.diff()) ?? "";
+  await sbx.cleanup();
+  check("diff vs the seed: code in full, lockfiles by name only", /b\/src\/validate\.ts/.test(lockDiff) && !/some-transitive-dep/.test(lockDiff)
+    && /# lockfile changed \(content omitted\): package-lock\.json/.test(lockDiff) && !/b\/src\/server\.ts/.test(lockDiff) && assessDiff(lockDiff).done,
+    lockDiff.split("\n").filter((l) => /^diff|^#/.test(l)).join(" | "));
+
   // 5. sessions with the fake agent
   const job = (id: string, mode: string) => ({
     session_id: id, simulation_id: "sim_t", org_id: 1, product_id: 1, model: "gpt-test", harness: "codex", agent_id: "codex/default", attempt: 1,
