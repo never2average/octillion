@@ -43,7 +43,9 @@ export function planFleet(size: number, agents: RegistryAgent[] = loadRegistry()
     if (left-- <= 0) break;
     r.g.pods++;
   }
-  if (size >= list.length)
+  // Same as the server's sandbox unit: honest rounding by default (agents may round to 0 sandboxes); with
+  // OCTILLION_MIN_ONE_SANDBOX=1 every agent gets at least one, taken from whoever is most over its exact share.
+  if (process.env.OCTILLION_MIN_ONE_SANDBOX === "1" && size >= list.length)
     for (const empty of list.filter((g) => g.pods === 0)) {
       const donor = list.filter((g) => g.pods > 1).sort((a, b) => (b.pods - b.weight * size) - (a.pods - a.weight * size))[0];
       if (!donor) break;

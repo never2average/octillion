@@ -2,14 +2,15 @@ import { getDb, type Queryable } from "./db.js";
 import { randomId, type Org } from "./auth.js";
 import { transcripts, type SearchParams } from "./transcripts.js";
 import type { Tool } from "./scoring.js";
-import { enabledAgents, findAgent, isRunnable, registry, representativePlan, runnableCoverage, type AgentSpec } from "./agents.js";
+import { enabledAgents, findAgent, isRunnable, registry, representativePlan, runnableCoverage, SANDBOX_UNIT, sandboxMix, scheduledAgents, type AgentSpec } from "./agents.js";
 
 const agentLabel = (id: string) => findAgent(id)?.label ?? id;
 
 /** The worker-agent registry as customers see it: who we simulate and how much each counts. */
 export function listAgents() {
   const r = registry();
-  const share = new Map(enabledAgents().map((a) => [a.id, a.weight])); // renormalised over running agents
+  const unit = SANDBOX_UNIT();
+  const mix = new Map(sandboxMix(unit).map((r) => [r.agent.id, r])); // whole sandboxes out of the unit
   return {
     view: "agents" as const,
     as_of: r.as_of ?? null,
@@ -17,10 +18,13 @@ export function listAgents() {
     runnable_coverage: runnableCoverage(),
     sources: r.sources ?? [],
     agents: r.agents.map((a) => ({ id: a.id, label: a.label, vendor: a.vendor ?? null, harness: a.harness, model: a.model,
-                                    harness_version: a.harness_version ?? null, weight: share.get(a.id) ?? 0, market_share: a.enabled === false ? 0 : a.weight,
+                                    harness_version: a.harness_version ?? null, weight: (mix.get(a.id)?.sandboxes ?? 0) / unit,
+                                    sandboxes: mix.get(a.id)?.sandboxes ?? 0, exact_sandboxes: mix.get(a.id)?.exact ?? 0,
+                                    market_share: a.enabled === false ? 0 : a.weight,
                                     enabled: isRunnable(a), status: isRunnable(a) ? "running" : a.enabled === false ? "not runnable headless" : a.paused ? `paused${a.paused_reason ? `: ${a.paused_reason}` : ""}` : "adapter pending",
                                     notes: a.notes ?? null })),
     default_samples: config.defaultSamples(),
+    sandbox_unit: unit,
   };
 }
 
@@ -31,7 +35,7 @@ export function listAgents() {
 
 export const config = {
   models: () => [...new Set(enabledAgents().map((a) => a.model))],
-  agents: () => enabledAgents().map((a) => ({ id: a.id, label: a.label, model: a.model, harness: a.harness, weight: a.weight })),
+  agents: () => scheduledAgents().map((a) => ({ id: a.id, label: a.label, model: a.model, harness: a.harness, weight: a.weight })),
   defaultSamples: () => Number(process.env.OCTILLION_DEFAULT_SAMPLES ?? 10),
   maxSessionsPerRun: () => Number(process.env.OCTILLION_MAX_SESSIONS_PER_RUN ?? 100),
 };
@@ -265,7 +269,7 @@ export async function runSimulation(org: Org, input: RunInput) {
     }
     plan = slots.flatMap((slot) => chosen.flatMap((agent) => Array.from({ length: repeats }, (_, i) => ({ ...slot, agent, attempt: i + 1 }))));
   } else {
-    const agents = representativePlan(slots.length * samples, enabled);
+    const agents = representativePlan(slots.length * samples, scheduledAgents());
     plan = slots.flatMap((slot, si) => Array.from({ length: samples }, (_, i) => ({ ...slot, agent: agents[si * samples + i], attempt: i + 1 })));
   }
   if (plan.length > config.maxSessionsPerRun())
@@ -428,7 +432,7 @@ export async function getReport(org: Org, input: { product?: string; days?: numb
        FROM ${from} GROUP BY 1`,
     params,
   );
-  const running = new Map(enabledAgents().map((x) => [x.id, x.weight])); // shares of running agents, sum to 1
+  const running = new Map(scheduledAgents().map((x) => [x.id, x.weight])); // whole-sandbox shares, sum to 1
   const agentRows = byAgent.map((a) => {
     const spec = findAgent(a.agent_id);
     return { ...a, label: agentLabel(a.agent_id), weight: running.get(a.agent_id) ?? 0, market_share: spec?.enabled === false ? 0 : spec?.weight ?? 0,

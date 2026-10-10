@@ -52,6 +52,34 @@ export function enabledAgents(): AgentSpec[] {
   return agents.map((a) => ({ ...a, weight: a.weight / total }));
 }
 
+/**
+ * The sandbox unit: the running mix expressed in whole sandboxes out of OCTILLION_SANDBOX_UNIT (20), so every share
+ * is runnable (multiples of 5% at 20). Largest-remainder rounding of the renormalised usage keeps the total exact:
+ * Opus 43.5% -> 8.7 -> 9 sandboxes (45%). Agents that round to 0 sit out unless OCTILLION_MIN_ONE_SANDBOX=1, which
+ * gives every running agent at least one sandbox (taken from whoever is most over their exact share).
+ * This unit drives everything: displayed shares, run sampling and pod plans (N orchestrators = N x the unit).
+ */
+export const SANDBOX_UNIT = () => Math.max(1, Math.trunc(Number(process.env.OCTILLION_SANDBOX_UNIT ?? 20)));
+
+export function sandboxMix(unit = SANDBOX_UNIT()): { agent: AgentSpec; sandboxes: number; exact: number }[] {
+  const agents = enabledAgents();
+  const rows = apportion(agents, unit).map(({ item, count }) => ({ agent: item, sandboxes: count, exact: item.weight * unit }));
+  if (process.env.OCTILLION_MIN_ONE_SANDBOX === "1" && unit >= rows.length)
+    for (const empty of rows.filter((r) => r.sandboxes === 0)) {
+      const donor = rows.filter((r) => r.sandboxes > 1).sort((a, b) => (b.sandboxes - b.exact) - (a.sandboxes - a.exact))[0];
+      if (!donor) break;
+      donor.sandboxes--;
+      empty.sandboxes++;
+    }
+  return rows.sort((a, b) => b.sandboxes - a.sandboxes || b.exact - a.exact);
+}
+
+/** Agents in the sandbox unit, weighted by their whole-sandbox share (sandboxes / unit; sums to 1). */
+export function scheduledAgents(): AgentSpec[] {
+  const unit = SANDBOX_UNIT();
+  return sandboxMix(unit).filter((r) => r.sandboxes > 0).map((r) => ({ ...r.agent, weight: r.sandboxes / unit }));
+}
+
 export function findAgent(id: string): AgentSpec | undefined {
   return registry().agents.find((a) => a.id === id);
 }

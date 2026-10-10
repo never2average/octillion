@@ -1,5 +1,5 @@
 import { getDb } from "./db.js";
-import { apportion, enabledAgents } from "./agents.js";
+import { apportion, scheduledAgents } from "./agents.js";
 
 /**
  * Global pod fleet across horizontally scaled orchestrators.
@@ -20,7 +20,7 @@ export interface AgentShare { agent_id: string; harness: string; model: string; 
 
 /** One pod group per runnable registry agent (harness + model), weighted by usage. */
 export function agentShares(): AgentShare[] {
-  return enabledAgents()
+  return scheduledAgents()
     .map((a) => ({ agent_id: a.id, harness: a.harness, model: a.model, weight: a.weight, image: a.image?.docker, version: a.harness_version }))
     .sort((a, b) => b.weight - a.weight || a.agent_id.localeCompare(b.agent_id));
 }
