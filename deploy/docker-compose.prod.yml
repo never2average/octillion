@@ -70,6 +70,7 @@ services:
 
   octillion:
     build: { context: .., dockerfile: Dockerfile }
+    init: true   # tini as PID 1 forwards SIGTERM to node for a graceful stop
     restart: unless-stopped
     depends_on:
       postgres: { condition: service_healthy }
