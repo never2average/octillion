@@ -3,7 +3,8 @@ import { Readable } from "node:stream";
 import type { Request, Response } from "express";
 import { getDb } from "./db.js";
 import { findAgent } from "./agents.js";
-import { getProvider, providersForEnv, useCredential, type ProviderRow } from "./keyvault.js";
+import { getProvider, providersForEnv, useCredential, VERTEX_LABEL, type ProviderRow } from "./keyvault.js";
+import { toVertex, vertexAccessToken } from "./vertex.js";
 
 /**
  * Inference gateway + credential broker (docs/credentials.md).
@@ -170,7 +171,7 @@ export async function gatewayHandler(req: Request, res: Response) {
   // Some CLIs (Codex) probe a WebSocket transport first; refuse fast so they fall back to HTTP immediately.
   if (req.headers.upgrade) return gwError(res, 426, "invalid_request_error", "WebSocket is not supported by the Octillion gateway; use HTTP");
   const p: ProviderRow | null = await getProvider(slug);
-  if (!p?.enabled || p.mode !== "gateway" || !p.upstream_url) return gwError(res, 404, "not_found_error", `No gateway provider ${slug}`);
+  if (!p?.enabled || p.mode !== "gateway" || (!p.upstream_url && p.backend !== "vertex")) return gwError(res, 404, "not_found_error", `No gateway provider ${slug}`);
 
   const [used] = await db.query<{ requests: number; tokens: number }>(
     "SELECT coalesce(sum(requests), 0) AS requests, coalesce(sum(input_tokens + output_tokens), 0) AS tokens FROM gateway_usage WHERE token_hash = $1", [hash]);
@@ -178,14 +179,14 @@ export async function gatewayHandler(req: Request, res: Response) {
     return gwError(res, 429, "octillion_budget_exceeded", "This session's gateway budget is used up");
 
   let cred: { id: number; secret: string };
-  try { cred = await useCredential(slug); }
+  // Vertex uses the provider's service-account key (label "vertex"); direct mode never does.
+  try { cred = await useCredential(slug, p.backend === "vertex" ? { label: VERTEX_LABEL } : { excludeLabel: VERTEX_LABEL }); }
   catch (e) { return gwError(res, 503, "api_error", (e as Error).message); }
 
   // Path after /gw/<provider>, query without our `key` parameter.
   const url = new URL(req.originalUrl, "http://x");
   url.searchParams.delete("key");
   const rest = url.pathname.replace(new RegExp(`^/gw/${slug}`), "") || "/";
-  const upstream = `${p.upstream_url.replace(/\/$/, "")}${rest}${url.search}`;
 
   const headers = new Headers();
   for (const [k, v] of Object.entries(req.headers)) {
@@ -193,18 +194,42 @@ export async function gatewayHandler(req: Request, res: Response) {
     headers.set(k, Array.isArray(v) ? v.join(", ") : v);
   }
   headers.set("accept-encoding", "identity"); // keep the body readable for metering
-  headers.set(p.auth_header, `${p.auth_prefix}${cred.secret}`);
-  // Anthropic's OpenAI-compatible endpoint (used by Cline) is called with OpenAI-style auth; give it both forms.
-  if (slug === "anthropic" && /\/chat\/completions$/.test(rest)) headers.set("authorization", `Bearer ${cred.secret}`);
 
+  // Where and what to send: straight through to upstream_url, or rewritten for Google Cloud Vertex AI.
+  let upstream: string;
+  let body: BodyInit | undefined;
   const hasBody = !["GET", "HEAD"].includes(req.method);
+  if (p.backend === "vertex") {
+    try {
+      const chunks: Buffer[] = [];
+      let size = 0;
+      for await (const c of req) { size += (c as Buffer).length; if (size > 30 * 1024 * 1024) throw Object.assign(new Error("Request exceeds Vertex's 30 MB limit"), { status: 413 }); chunks.push(c as Buffer); }
+      const v = toVertex(p.backend_config, rest, Buffer.concat(chunks), String(req.headers["anthropic-beta"] ?? ""));
+      upstream = v.url;
+      body = v.body;
+      headers.delete("anthropic-version"); // carried in the body on Vertex
+      headers.delete("anthropic-beta");
+      headers.delete("content-length");
+      headers.set("content-type", "application/json");
+      headers.set("authorization", `Bearer ${await vertexAccessToken(cred.id, cred.secret)}`);
+    } catch (e) {
+      const err = e as Error & { status?: number };
+      return gwError(res, err.status ?? 502, err.status && err.status < 500 ? "invalid_request_error" : "api_error", err.message);
+    }
+  } else {
+    upstream = `${p.upstream_url!.replace(/\/$/, "")}${rest}${url.search}`;
+    headers.set(p.auth_header, `${p.auth_prefix}${cred.secret}`);
+    // Anthropic's OpenAI-compatible endpoint (used by Cline) is called with OpenAI-style auth; give it both forms.
+    if (slug === "anthropic" && /\/chat\/completions$/.test(rest)) headers.set("authorization", `Bearer ${cred.secret}`);
+    body = hasBody ? (Readable.toWeb(req) as ReadableStream) : undefined;
+  }
+
   let up: globalThis.Response;
   try {
     up = await fetch(upstream, {
-      method: req.method, headers, redirect: "manual",
-      body: hasBody ? (Readable.toWeb(req) as ReadableStream) : undefined,
+      method: req.method, headers, redirect: "manual", body,
       // @ts-expect-error Node's fetch needs duplex for streamed request bodies
-      duplex: hasBody ? "half" : undefined,
+      duplex: body instanceof ReadableStream ? "half" : undefined,
       signal: AbortSignal.timeout(Number(process.env.OCTILLION_GATEWAY_TIMEOUT_MS ?? 600_000)),
     });
   } catch (e) {

@@ -368,6 +368,77 @@ try {
   assert.equal(Number(gwUse.output_tokens), 60);
   upstream.close();
 
+  // ---------- Anthropic via Google Cloud Vertex AI behind the same gateway ----------
+  {
+    const crypto = await import("node:crypto");
+    const { publicKey, privateKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const vseen: { path: string; auth: string; body: any; beta?: string }[] = [];
+    let tokenCalls = 0;
+    const fakeGoogle = http.createServer((req, res) => {
+      let raw = "";
+      req.on("data", (c) => (raw += c));
+      req.on("end", () => {
+        if (req.url === "/token") {
+          tokenCalls++;
+          const assertion = new URLSearchParams(raw).get("assertion") ?? "";
+          const [h, c, sig] = assertion.split(".");
+          const ok = crypto.createVerify("RSA-SHA256").update(`${h}.${c}`).verify(publicKey, Buffer.from(sig, "base64url"));
+          const claims = JSON.parse(Buffer.from(c, "base64url").toString());
+          if (!ok || claims.scope !== "https://www.googleapis.com/auth/cloud-platform" || !String(claims.aud).endsWith("/token")) {
+            res.writeHead(401, { "content-type": "application/json" }); return void res.end('{"error":"invalid_grant"}');
+          }
+          res.writeHead(200, { "content-type": "application/json" });
+          return void res.end(JSON.stringify({ access_token: "ya29.smoke", expires_in: 3600, token_type: "Bearer" }));
+        }
+        const body = raw ? JSON.parse(raw) : {};
+        vseen.push({ path: req.url ?? "", auth: String(req.headers.authorization ?? ""), body, beta: req.headers["anthropic-beta"] as string | undefined });
+        if (req.url?.endsWith("count-tokens:rawPredict")) { res.writeHead(200, { "content-type": "application/json" }); return void res.end('{"input_tokens":42}'); }
+        if (req.url?.endsWith(":streamRawPredict")) {
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          res.write(`event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":70,"output_tokens":1}}}\n\n`);
+          return void res.end(`event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":9}}\n\n`);
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ type: "message", role: "assistant", content: [{ type: "text", text: "ok" }], usage: { input_tokens: 11, output_tokens: 2 } }));
+      });
+    });
+    await new Promise<void>((r) => fakeGoogle.listen(0, "127.0.0.1", r));
+    const gbase = `http://127.0.0.1:${(fakeGoogle.address() as AddressInfo).port}`;
+    const sa = { type: "service_account", client_email: "octillion@proj-test.iam.gserviceaccount.com",
+                 private_key: privateKey.export({ type: "pkcs8", format: "pem" }), token_uri: `${gbase}/token` };
+    await kv.upsertProvider({ slug: "smoke_llm", backend: "vertex", backend_config: { project_id: "proj-test", region: "global", endpoint: gbase } });
+    await kv.setCredential("smoke_llm", JSON.stringify(sa), { label: "vertex" });
+    process.env.ORCHESTRATOR_PROVIDER = "smoke_llm"; // mint a gateway token scoped to smoke_llm via the orchestrator broker
+    const o = await (await worker("/orchestrator/credentials", { orchestrator_id: "smoke-vertex" })).json();
+    delete process.env.ORCHESTRATOR_PROVIDER;
+    const vcall = (path: string, body: unknown, headers: Record<string, string> = {}) =>
+      fetch(`${base}/gw/smoke_llm${path}`, { method: "POST", headers: { "x-api-key": o.llm.api_key, "content-type": "application/json", "anthropic-version": "2023-06-01", ...headers }, body: JSON.stringify(body) });
+
+    const streamed = await vcall("/v1/messages", { model: "claude-opus-5-5", max_tokens: 16, stream: true, messages: [{ role: "user", content: "hi" }] }, { "anthropic-beta": "x-beta-1" });
+    assert.equal(streamed.status, 200);
+    assert.ok((await streamed.text()).includes('"output_tokens":9'), "Vertex SSE streamed through");
+    const v1 = vseen.at(-1)!;
+    assert.equal(v1.path, "/v1/projects/proj-test/locations/global/publishers/anthropic/models/claude-opus-5-5:streamRawPredict");
+    assert.equal(v1.auth, "Bearer ya29.smoke", "Google access token from the service-account JWT");
+    assert.ok(!("model" in v1.body) && v1.body.anthropic_version === "vertex-2023-10-16", "model moved to the URL, anthropic_version in the body");
+    assert.deepEqual(v1.body.anthropic_beta, ["x-beta-1"], "anthropic-beta header moved into the body");
+    assert.ok(!JSON.stringify(v1).includes(o.llm.api_key) && !JSON.stringify(v1).includes("BEGIN PRIVATE KEY"), "no ogw_ token or key material upstream");
+    const plain = await (await vcall("/v1/messages", { model: "claude-sonnet-5-5", max_tokens: 16, messages: [{ role: "user", content: "hi" }] })).json();
+    assert.equal(plain.content[0].text, "ok");
+    assert.ok(vseen.at(-1)!.path.endsWith("/models/claude-sonnet-5-5:rawPredict"));
+    const counted = await (await vcall("/v1/messages/count_tokens", { model: "claude-opus-5-5", messages: [{ role: "user", content: "hi" }] })).json();
+    assert.equal(counted.input_tokens, 42);
+    assert.ok(vseen.at(-1)!.path.endsWith("/models/count-tokens:rawPredict") && vseen.at(-1)!.body.model === "claude-opus-5-5", "count_tokens keeps model in the body");
+    assert.equal(tokenCalls, 1, "Google token cached across calls");
+    assert.equal((await fetch(`${base}/gw/smoke_llm/v1/models`, { headers: { "x-api-key": o.llm.api_key } })).status, 404, "unsupported paths fail clearly on Vertex");
+    const [vu] = await db.query<{ requests: number; input_tokens: number; output_tokens: number }>(
+      "SELECT sum(requests) AS requests, sum(input_tokens) AS input_tokens, sum(output_tokens) AS output_tokens FROM gateway_usage WHERE orchestrator_id = 'smoke-vertex'");
+    assert.ok(Number(vu.input_tokens) >= 81 && Number(vu.output_tokens) >= 11, `Vertex calls metered (${vu.input_tokens}/${vu.output_tokens})`);
+    fakeGoogle.close();
+    await db.query("DELETE FROM gateway_tokens WHERE orchestrator_id = 'smoke-vertex'");
+    console.log("✓ Anthropic via Vertex AI: SA JWT -> Google token, rawPredict/streamRawPredict/count-tokens rewrite, betas, metering");
+  }
+
   // ---------- fleet check-in over HTTP ----------
   {
     const ids = [`smoke-orch-a-${stamp}`, `smoke-orch-b-${stamp}`];

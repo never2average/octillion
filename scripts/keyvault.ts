@@ -6,6 +6,9 @@
 //   npm run keyvault -- set boat --from-file /secure/boat.env      (KEY=value files: the value is used)
 //   npm run keyvault -- list | disable <id> | enable <id> | delete <id> | rekey | usage
 //   npm run keyvault -- provider <slug> --mode gateway --upstream https://... --header x-api-key --prefix "" --env FOO_API_KEY
+//   npm run keyvault -- provider anthropic --backend vertex --vertex-project my-gcp-project [--vertex-region global]
+//   npm run keyvault -- set anthropic --label vertex < service-account.json     (the Vertex credential)
+//   npm run keyvault -- provider anthropic --backend direct                     (back to api.anthropic.com)
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { getDb } from "../src/db.js";
@@ -44,6 +47,8 @@ async function main() {
       console.log(await kv.upsertProvider({
         slug: rest[0], mode: flag("mode") as "gateway" | "direct" | undefined, upstream_url: flag("upstream"),
         auth_header: flag("header"), auth_prefix: flag("prefix"), env_vars: env ? env.split(",") : undefined,
+        backend: flag("backend") as "direct" | "vertex" | undefined,
+        backend_config: flag("vertex-project") ? { project_id: flag("vertex-project"), region: flag("vertex-region") ?? "global" } : undefined,
       }));
       return;
     }

@@ -103,6 +103,27 @@ while IFS='|' read -r provider var what; do
   key=""
 done <<< "$PROVIDERS"
 
+# Anthropic through Google Cloud Vertex AI (optional): the gateway rewrites Claude calls to Vertex and signs in
+# with a service-account key (roles/aiplatform.user; Claude models enabled in Model Garden).
+#   interactive: answer the prompts;  --from-env: VERTEX_PROJECT_ID, VERTEX_REGION (default global), VERTEX_SA_FILE
+if [ "$MODE" = env ]; then
+  project="${VERTEX_PROJECT_ID:-}" region="${VERTEX_REGION:-global}" safile="${VERTEX_SA_FILE:-}"
+else
+  echo "- vertex: route Anthropic (Claude) through Google Cloud Vertex AI"
+  read -r -p "  GCP project id (Enter to skip): " project </dev/tty
+  region=global safile=""
+  if [ -n "$project" ]; then
+    read -r -p "  Vertex location [global]: " r </dev/tty; region="${r:-global}"
+    read -r -p "  path to the service-account JSON key: " safile </dev/tty
+  fi
+fi
+if [ -n "${project:-}" ]; then
+  [ -r "$safile" ] || { echo "    cannot read service-account key at '$safile'" >&2; exit 1; }
+  docker compose -p "$PROJECT" exec -T octillion node --import tsx scripts/keyvault.ts set anthropic --label vertex < "$safile" | sed 's/^/    /'
+  docker compose -p "$PROJECT" exec -T octillion node --import tsx scripts/keyvault.ts provider anthropic --backend vertex \
+    --vertex-project "$project" --vertex-region "$region" >/dev/null && echo "    anthropic now routes through Vertex AI ($project, $region)"
+fi
+
 echo
 echo "Vault now holds (hints only):"
 vault list

@@ -13,6 +13,8 @@ import { getDb } from "./db.js";
 export interface ProviderRow {
   slug: string; mode: "gateway" | "direct"; upstream_url: string | null; auth_header: string; auth_prefix: string;
   env_vars: string[]; enabled: boolean;
+  /** direct = forward to upstream_url; vertex = Anthropic Messages via Google Cloud Vertex AI (src/vertex.ts). */
+  backend: "direct" | "vertex"; backend_config: { project_id?: string; region?: string; model_map?: Record<string, string>; endpoint?: string };
 }
 
 function parseKey(v: string | undefined): Buffer | null {
@@ -55,12 +57,12 @@ export const hint = (secret: string) => (secret.length <= 10 ? "…" : `${secret
 // ---------- providers ----------
 
 export async function listProviders(): Promise<ProviderRow[]> {
-  return (await getDb()).query<ProviderRow>("SELECT slug, mode, upstream_url, auth_header, auth_prefix, env_vars, enabled FROM vault_providers ORDER BY slug");
+  return (await getDb()).query<ProviderRow>("SELECT slug, mode, upstream_url, auth_header, auth_prefix, env_vars, enabled, backend, backend_config FROM vault_providers ORDER BY slug");
 }
 
 export async function getProvider(slug: string): Promise<ProviderRow | null> {
   const [row] = await (await getDb()).query<ProviderRow>(
-    "SELECT slug, mode, upstream_url, auth_header, auth_prefix, env_vars, enabled FROM vault_providers WHERE slug = $1",
+    "SELECT slug, mode, upstream_url, auth_header, auth_prefix, env_vars, enabled, backend, backend_config FROM vault_providers WHERE slug = $1",
     [slug],
   );
   return row ?? null;
@@ -70,13 +72,23 @@ export async function upsertProvider(p: Partial<ProviderRow> & { slug: string })
   if (!/^[a-z0-9_]{2,40}$/.test(p.slug)) throw new Error("provider slug must be lowercase letters, digits or _");
   if (p.mode && !["gateway", "direct"].includes(p.mode)) throw new Error("mode must be gateway or direct");
   if (p.upstream_url && !/^https?:\/\//.test(p.upstream_url)) throw new Error("upstream_url must be http(s)");
+  if (p.backend && !["direct", "vertex"].includes(p.backend)) throw new Error("backend must be direct or vertex");
+  if (p.backend === "vertex") {
+    const c = p.backend_config ?? {};
+    if (!c.project_id || !/^[a-z][a-z0-9-]{4,29}$/.test(c.project_id)) throw new Error("vertex backend needs backend_config.project_id (a GCP project id)");
+    if (c.region && !/^[a-z0-9-]{2,30}$/.test(c.region)) throw new Error("backend_config.region must be global, us, eu or a region like us-east5");
+    p.backend_config = { ...c, region: c.region ?? "global" };
+  }
   await (await getDb()).query(
-    `INSERT INTO vault_providers (slug, mode, upstream_url, auth_header, auth_prefix, env_vars, enabled)
-     VALUES ($1, coalesce($2, 'gateway'), $3, coalesce($4, 'authorization'), coalesce($5, 'Bearer '), coalesce($6::text[], '{}'), coalesce($7, true))
+    `INSERT INTO vault_providers (slug, mode, upstream_url, auth_header, auth_prefix, env_vars, enabled, backend, backend_config)
+     VALUES ($1, coalesce($2, 'gateway'), $3, coalesce($4, 'authorization'), coalesce($5, 'Bearer '), coalesce($6::text[], '{}'), coalesce($7, true),
+             coalesce($8, 'direct'), coalesce($9::jsonb, '{}'))
      ON CONFLICT (slug) DO UPDATE SET mode = coalesce($2, vault_providers.mode), upstream_url = coalesce($3, vault_providers.upstream_url),
        auth_header = coalesce($4, vault_providers.auth_header), auth_prefix = coalesce($5, vault_providers.auth_prefix),
-       env_vars = coalesce($6::text[], vault_providers.env_vars), enabled = coalesce($7, vault_providers.enabled), updated_at = now()`,
-    [p.slug, p.mode ?? null, p.upstream_url ?? null, p.auth_header?.toLowerCase() ?? null, p.auth_prefix ?? null, p.env_vars ?? null, p.enabled ?? null],
+       env_vars = coalesce($6::text[], vault_providers.env_vars), enabled = coalesce($7, vault_providers.enabled),
+       backend = coalesce($8, vault_providers.backend), backend_config = coalesce($9::jsonb, vault_providers.backend_config), updated_at = now()`,
+    [p.slug, p.mode ?? null, p.upstream_url ?? null, p.auth_header?.toLowerCase() ?? null, p.auth_prefix ?? null, p.env_vars ?? null, p.enabled ?? null,
+     p.backend ?? null, p.backend_config ? JSON.stringify(p.backend_config) : null],
   );
   return getProvider(p.slug);
 }
@@ -85,7 +97,7 @@ export async function upsertProvider(p: Partial<ProviderRow> & { slug: string })
 export async function providersForEnv(envVars: string[]): Promise<ProviderRow[]> {
   if (!envVars.length) return [];
   return (await getDb()).query<ProviderRow>(
-    "SELECT slug, mode, upstream_url, auth_header, auth_prefix, env_vars, enabled FROM vault_providers WHERE enabled AND env_vars && $1 ORDER BY slug",
+    "SELECT slug, mode, upstream_url, auth_header, auth_prefix, env_vars, enabled, backend, backend_config FROM vault_providers WHERE enabled AND env_vars && $1 ORDER BY slug",
     [envVars],
   );
 }
@@ -131,16 +143,22 @@ export async function deleteCredential(id: number) {
  * The secret to use for a provider now: highest priority first, least recently used among equals (spreads load
  * and rate limits across several keys). Throws when none is configured.
  */
-export async function useCredential(provider: string): Promise<{ id: number; secret: string }> {
+/** Label of the Google service-account key a provider uses when its backend is Vertex AI. */
+export const VERTEX_LABEL = "vertex";
+
+export async function useCredential(provider: string, opts: { label?: string; excludeLabel?: string } = {}): Promise<{ id: number; secret: string }> {
   const db = await getDb();
   const [row] = await db.query<{ id: number; ciphertext: string; iv: string; tag: string; key_id: string }>(
     `UPDATE vault_credentials SET uses = uses + 1, last_used_at = now()
       WHERE id = (SELECT id FROM vault_credentials WHERE provider = $1 AND enabled
+                     AND ($2::text IS NULL OR label = $2) AND ($3::text IS NULL OR label <> $3)
                    ORDER BY priority DESC, last_used_at ASC NULLS FIRST, id LIMIT 1)
       RETURNING id, ciphertext, iv, tag, key_id`,
-    [provider],
+    [provider, opts.label ?? null, opts.excludeLabel ?? null],
   );
-  if (!row) throw Object.assign(new Error(`No ${provider} credential in the vault`), { status: 503 });
+  if (!row) throw Object.assign(new Error(opts.label === VERTEX_LABEL
+    ? `No Vertex service-account key for ${provider}: store one with label "${VERTEX_LABEL}" (keyvault set ${provider} --label ${VERTEX_LABEL} < key.json)`
+    : `No ${provider} credential in the vault`), { status: 503 });
   return { id: row.id, secret: decrypt(row) };
 }
 

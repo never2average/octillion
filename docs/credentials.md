@@ -62,3 +62,31 @@ The token is valid for 12h; refetch on 401 or near expiry.
   `{"error": {"type": "octillion_budget_exceeded"}}`.
 - **Metering:** usage is recorded per session and provider: requests, input/output tokens parsed from JSON or SSE,
   and bytes.
+
+## Anthropic through Google Cloud Vertex AI
+
+The `anthropic` provider can switch from api.anthropic.com to Vertex AI without changing any harness. Agents keep
+calling `/gw/anthropic/v1/messages` with their `ogw_` token. The gateway rewrites each call
+(`src/vertex.ts`, from Anthropic's "Claude on Google Cloud" docs):
+
+| Agent calls | Gateway sends |
+|---|---|
+| `POST /v1/messages` | `POST {host}/v1/projects/{project}/locations/{region}/publishers/anthropic/models/{model}:rawPredict`, or `:streamRawPredict` when `stream` is true |
+| `POST /v1/messages/count_tokens` | `POST …/publishers/anthropic/models/count-tokens:rawPredict` |
+
+What changes in the request:
+- **Body:** `model` moves into the URL (it stays in the body for count-tokens), `anthropic_version: "vertex-2023-10-16"` is added, and `anthropic-beta` header values move into the body's `anthropic_beta`.
+- **Model IDs:** current models use the first-party IDs (`claude-opus-5-5`, `claude-sonnet-5-5`). `backend_config.model_map` can override them.
+- **Host:** `aiplatform.googleapis.com` for `global` (recommended), `aiplatform.{us|eu}.rep.googleapis.com` for multi-region, and `{region}-aiplatform.googleapis.com` for a single region. Single regions only serve Sonnet 4.6 and older models.
+- **Auth:** a Google OAuth access token, minted from a service-account JSON key stored in the vault as the `anthropic` credential with label `vertex`. It is cached for about an hour. Pods never see Google credentials.
+- **Other paths:** anything else (for example `/v1/models`) returns 404 on Vertex.
+
+```bash
+cd deploy && ./load-keys.sh          # answer the "vertex" prompts: project id, location, path to the key JSON
+# or by hand:
+npm run keyvault -- set anthropic --label vertex < service-account.json
+npm run keyvault -- provider anthropic --backend vertex --vertex-project my-project --vertex-region global
+npm run keyvault -- provider anthropic --backend direct      # switch back to api.anthropic.com
+```
+GCP prerequisites: a service account with `roles/aiplatform.user`, and the Claude models you run (Opus 5.5, Sonnet 5.5)
+enabled for the project in Vertex AI Model Garden.

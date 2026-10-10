@@ -309,3 +309,8 @@ CREATE TABLE IF NOT EXISTS product_research (
   finished_at    TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS product_research_queue_idx ON product_research (created_at) WHERE status = 'queued';
+
+-- Gateway backends: 'direct' forwards to upstream_url; 'vertex' rewrites Anthropic Messages calls to Google Cloud Vertex AI
+-- (backend_config: {project_id, region ('global' | 'us' | 'eu' | a region), model_map?}); the credential is a service-account JSON key.
+ALTER TABLE vault_providers ADD COLUMN IF NOT EXISTS backend TEXT NOT NULL DEFAULT 'direct' CHECK (backend IN ('direct', 'vertex'));
+ALTER TABLE vault_providers ADD COLUMN IF NOT EXISTS backend_config JSONB NOT NULL DEFAULT '{}';
