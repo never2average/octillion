@@ -1,0 +1,17 @@
+{
+  "name": "octillion-orchestrator",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Octillion orchestrator: Pi (pi.dev) agent that drives coding-agent harnesses in boat.dev sandboxes and role-plays the developer.",
+  "scripts": {
+    "start": "tsx pi-octillion/main.ts",
+    "worker": "tsx worker.ts"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "1.1.0"
+  }
+}
