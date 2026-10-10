@@ -37,15 +37,40 @@ export function segments(raw: RawEvent): { kind: "message" | "action"; text: str
   // Partial / in-progress events repeat what the final event says; counting them would double up.
   if (type === "stream_event" || type === "item.started" || type === "item.updated") return out;
   if (type === "tool_call" && raw.subtype === "completed") return out; // Cursor repeats the call on completion
+  // Pi --mode json: message_end is authoritative; message_start/_update and turn_end repeat (parts of) it.
+  if (type === "message_start" || type === "message_update" || type === "turn_end") return out;
+
+  // GitHub Copilot CLI --output-format json: {type: "assistant.message", data: {content, toolRequests: [{name, arguments}]}}.
+  if (type === "assistant.message") {
+    const data = (raw.data ?? {}) as { content?: unknown; toolRequests?: { name?: string; arguments?: unknown }[] };
+    if (typeof data.content === "string" && data.content) out.push({ kind: "message", text: data.content });
+    for (const t of Array.isArray(data.toolRequests) ? data.toolRequests : []) out.push({ kind: "action", text: `${t?.name ?? ""}\n${str(t?.arguments)}` });
+    return out;
+  }
+  // Cline CLI --json: {type: "agent_event", event: {type: "content_start" (tool, with input) | "content_end" (text)}}.
+  if (type === "agent_event" && raw.event && typeof raw.event === "object") {
+    const e = raw.event as { type?: string; contentType?: string; toolName?: string; input?: unknown; text?: string };
+    if (e.type === "content_start" && e.contentType === "tool") return [{ kind: "action", text: `${e.toolName ?? ""}\n${str(e.input)}` }];
+    if (e.type === "content_end" && e.contentType === "text") return [{ kind: "message", text: e.text ?? "" }];
+    return out;
+  }
+  // Antigravity CLI stream-json: {event: "step_update", step_update: {step_type: "tool" | "agent_response", ...}} (no `type`).
+  if (raw.event === "step_update" && raw.step_update && typeof raw.step_update === "object") {
+    const st = raw.step_update as { step_type?: string; state?: string; tool_info?: { name?: string; parameters?: unknown }; text_delta?: string };
+    if (st.step_type === "tool" && st.tool_info) return [{ kind: "action", text: `${st.tool_info.name ?? ""}\n${str(st.tool_info.parameters)}` }];
+    if (st.step_type === "agent_response" && st.state === "DONE" && st.text_delta) return [{ kind: "message", text: st.text_delta }];
+    return out;
+  }
 
   // Claude Code / Amp / Cursor stream-json, Anthropic message shape: content blocks of text and tool_use.
   if (msg?.role === "assistant" || (type === "assistant" && msg)) {
     const content = msg?.content;
     if (typeof content === "string") out.push({ kind: "message", text: content });
     else if (Array.isArray(content))
-      for (const b of content as { type?: string; text?: string; name?: string; input?: unknown }[]) {
+      for (const b of content as { type?: string; text?: string; name?: string; input?: unknown; arguments?: unknown }[]) {
         if (b?.type === "text") out.push({ kind: "message", text: b.text ?? "" });
         else if (b?.type === "tool_use") out.push({ kind: "action", text: `${b.name ?? ""}\n${str(b.input)}` });
+        else if (b?.type === "toolCall") out.push({ kind: "action", text: `${b.name ?? ""}\n${str(b.arguments)}` }); // Pi
       }
     return out;
   }
@@ -69,11 +94,13 @@ export function segments(raw: RawEvent): { kind: "message" | "action"; text: str
   }
   // Gemini CLI stream-json: {type: "message", role: "assistant", content} and {type: "tool_use", tool_name, parameters}.
   if (type === "tool_use" && "tool_name" in raw) return [{ kind: "action", text: `${str(raw.tool_name)}\n${str(raw.parameters)}` }];
-  if (type === "message") return raw.role === "assistant" ? [{ kind: "message", text: str(raw.content) }] : [];
+  // (Factory droid uses the same shape with `text` instead of `content`.)
+  if (type === "message") return raw.role === "assistant" ? [{ kind: "message", text: str(raw.content ?? raw.text) }] : [];
   // Octillion's own format (also what an orchestrator should use for e.g. a post-run `git diff`: type file_edit).
   if (type === "assistant_message" || raw.role === "assistant") return [{ kind: "message", text: str(raw.content ?? raw.text) }];
+  // (Factory droid: {type: "tool_call", toolName, parameters}.)
   if (/^(tool_call|tool_use|function_call|command|exec|file_edit|file_write)$/.test(type))
-    return [{ kind: "action", text: `${str(raw.name)}\n${str(raw.input ?? raw.command ?? raw.arguments ?? raw.content)}` }];
+    return [{ kind: "action", text: `${str(raw.name ?? raw.toolName)}\n${str(raw.input ?? raw.parameters ?? raw.command ?? raw.arguments ?? raw.content)}` }];
   return out;
 }
 

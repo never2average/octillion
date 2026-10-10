@@ -108,8 +108,38 @@ and a digest that extracts `{lastText, commands, files, sessionId, error}` from 
 The flags were checked against the installed CLIs (claude 2.1.296 `--help`, codex 0.162 `exec resume --help`).
 - **Claude Code:** `--no-session-persistence` is dropped, because resume needs the stored session.
 - **Codex:** `--ephemeral` is dropped, because it disables the rollout file that resume reads. `exec resume` has no `-C` or `--color`, so the runner starts it in the workdir.
-- **Other harnesses:** `cursor-agent`, `gemini`/`gemini-cli`, `agy`, `copilot`, `opencode`, `amp`, `pi`, `aider`, and any other id in `harnesses/registry.json`, throw
-  "not yet supported" stubs. The pool never claims jobs for harnesses without an adapter and a key.
+- **Other harnesses** (added 2026-10-10). Flags were checked against each pinned CLI's `--help` in `orchestrator/images`.
+  Every adapter except Cursor and Amp also ran end to end, launch and resume, through the same `docker exec -u agent env -i` path
+  against a scripted mock LLM. The captured stdout is in `harnesses/fixtures/<harness>.jsonl`, and `scripts/smoke.ts` replays it
+  through the digest and the server scorer. Cursor's and Amp's fixtures are built from the vendor docs and the CLI's own source,
+  because their backends can't be mocked. `bash -c 'exec "$@" "$(cat)"'` below means the CLI only takes the prompt as an argument,
+  so stdin becomes the last argv element.
+
+| harness | launch (input on stdin) | resume | id from |
+|---|---|---|---|
+| `copilot` | `copilot --output-format json --allow-all-tools --no-auto-update --model M` | `... --resume <id>` | `result.sessionId` |
+| `cursor` | `bash -c 'exec "$@" "$(cat)"' cursor-agent -p --output-format stream-json --force --trust --model M --` | `... --resume <id> --` | `session_id` |
+| `opencode`, `kilo` | `opencode run --format json --auto -m provider/model` (`kilo run ...`) | `... -s <id>` | `sessionID` |
+| `gemini-cli` | `gemini -o stream-json --approval-mode yolo --skip-trust [-m M]` | `... --resume <id>` | `init.session_id` |
+| `qwen-code` | `qwen -o stream-json --yolo --auth-type openai -m M` (DashScope key as `OPENAI_API_KEY`) | `... --resume <id>` | `session_id` |
+| `antigravity` | `bash -c '<write modelProvider=gemini settings once>; exec "$@" "$(cat)"' agy --output-format stream-json --dangerously-skip-permissions -p` | `... --conversation <id> -p` | `conversation_id` |
+| `pi` | `pi -p --mode json --model provider/model` | `... --session <id>` | `session` header `id` |
+| `amp` | `amp -x --stream-json [--mode M]` (settings `amp.dangerouslyAllowAll` written once) | `amp threads continue <id> -x --stream-json` | `session_id` (thread) |
+| `droid` | `droid exec -o stream-json --skip-permissions-unsafe -m M` | `... -s <id>` | `session_id` |
+| `cline` | `bash -c 'exec "$@" -k "$ANTHROPIC_API_KEY" -- "$(cat)"' cline --json --auto-approve true -P anthropic -m M` | **not supported** | none |
+
+- **Cline cannot resume headlessly.** In 3.0.70, `cline --id <session> --json <prompt>` fails with "JSON output mode requires a
+  prompt", and the JSON stream does not carry the session id. Its adapter has `canResume: false` and never reports a session id,
+  so Cline sessions report `can_reply=false` and the orchestrator offers no simulated-developer replies. Cline also rejects a
+  one-word prompt as an unknown command.
+- **Keys.** The keys beyond `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` are read from the worker env: `COPILOT_GITHUB_TOKEN`
+  (or `GH_TOKEN`), `CURSOR_API_KEY`, `GEMINI_API_KEY`, `DASHSCOPE_API_KEY`, `AMP_API_KEY` and `FACTORY_API_KEY`. OpenCode,
+  Kilo, Pi and Cline get the Anthropic key, because the registry models for them are `anthropic/...`.
+- **Usage accounting** below still understands only the Claude and Codex formats. Token counts for the other harnesses stay
+  in their raw events.
+- **Boat:** only `claude`, `codex`, `pi`, `opencode` and `cursor-agent` are preinstalled on boat VMs. The others need the
+  per-harness named snapshots (`orchestrator/images/boat-snapshot.sh`) wired into sandbox creation. Until then, run them with
+  `RUNNER=pool` or `RUNNER=docker`.
 
 Usage: Claude's `result` events are **summed across runs**, because each resume reports its own usage and cost. Codex sums
 `turn.completed.usage` and reports no cost.
@@ -216,6 +246,7 @@ Heartbeats and `/complete` always go to the API. The server recounts events from
 |---|---|---|
 | `OCTILLION_URL`, `OCTILLION_WORKER_TOKEN` | `http://localhost:3000`, - | worker API. The token never enters a sandbox or pod |
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` | - | harness keys. Each sandbox gets only its harness's key (`CODEX_API_KEY` for codex) |
+| `COPILOT_GITHUB_TOKEN`, `CURSOR_API_KEY`, `GEMINI_API_KEY`, `DASHSCOPE_API_KEY`, `AMP_API_KEY`, `FACTORY_API_KEY` | - | keys for copilot, cursor, gemini-cli + antigravity, qwen-code, amp, droid |
 | `RUNNER` | `boat` | `boat`, `pool`, `docker` or `local` |
 | `WORKER_CONCURRENCY` | `2` | parallel sessions for boat, docker and local. For the pool, capacity is the pod count |
 | `MAX_SESSION_MINUTES` | `45` | hard kill (all runs + replies), then reported as `timeout` |

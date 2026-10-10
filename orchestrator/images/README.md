@@ -45,8 +45,8 @@ Every `Dockerfile.<harness>` follows the same contract, which `orchestrator/flee
   `--start-interval=5s`, which needs Docker 25+.
 - **No auto-update:** `DISABLE_AUTOUPDATER=1` (Claude), `COPILOT_AUTO_UPDATE=false` and
   `OPENCODE_DISABLE_AUTOUPDATE=true`. Cursor and Antigravity binaries are pinned by build id.
-- **Labels:** `OCTILLION_HARNESS` and `OCTILLION_HARNESS_VERSION` env, plus `dev.octillion.*` labels from
-  `build.sh`.
+- **Labels, not env:** `dev.octillion.harness` and `dev.octillion.harness_version` are image LABELs (also set by
+  `build.sh`). They used to be env vars, which the agent could read; nothing Octillion-specific is in the env now.
 
 ### build.sh
 
@@ -158,7 +158,7 @@ The boat runner currently creates sandboxes without `from`. To use the snapshots
 1. Confirm it is runnable: Linux, non-interactive, auto-approve, env-var auth and a JSON event stream.
 2. Add the agent(s) to `registry.json`, with `cli`, `headless`, `event_format` and `requires_env`.
 3. Copy the closest `Dockerfile.<harness>` (npm-based, or tarball-based like cursor and antigravity) and change
-   the install step, the `cli` in the healthcheck and the `OCTILLION_HARNESS` env.
+   the install step, the `cli` in the healthcheck and the `dev.octillion.harness` LABEL.
 4. Copy the closest `boat-setup/<harness>.sh`.
 5. Run `build.sh <harness>`, then `boat-snapshot.sh <harness>`, then `npx tsx orchestrator/fleet/plan.ts 10`.
 6. Add the adapter in `orchestrator/harnesses/adapters.ts` and set `worker_adapter: "supported"`.

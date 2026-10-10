@@ -23,9 +23,10 @@ USER agent
 ENV HOME=/home/agent \
     NPM_CONFIG_PREFIX=/home/agent/.npm-global \
     PATH=/home/agent/.npm-global/bin:/home/agent/.local/bin:$PATH \
-    PIP_BREAK_SYSTEM_PACKAGES=1 \
-    OCTILLION_HARNESS=droid \
-    OCTILLION_HARNESS_VERSION=${HARNESS_VERSION}
+    PIP_BREAK_SYSTEM_PACKAGES=1
+# Metadata as labels, not env: env would be visible to the agent and leak context into its session.
+LABEL dev.octillion.harness="droid" \
+      dev.octillion.harness_version="${HARNESS_VERSION}"
 WORKDIR /home/agent/work
 # Healthcheck prints the harness version (docker inspect --format '{{json .State.Health}}' <c>).
 HEALTHCHECK --interval=5m --timeout=30s --start-period=30s --start-interval=5s --retries=2 CMD droid --version || exit 1

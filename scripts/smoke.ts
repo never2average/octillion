@@ -70,7 +70,83 @@ console.log(`database: ${db.kind}, transcripts: ${transcripts().kind}`);
   assert.equal(both.verdict, "competitor", "adopting a competitor beats recommending us");
   assert.equal(both.winner, "BullMQ");
   assert.equal(s([{ type: "assistant_message", content: "Use the relayqueue-lite lib." }]).verdict, "none", "no partial-word matches");
+  // Native formats of the other harnesses (see orchestrator/harnesses/fixtures for full captured streams).
+  assert.equal(s([{ type: "assistant.message", data: { content: "", toolRequests: [{ name: "bash", arguments: { command: "npm install bullmq" } }] } }]).verdict, "competitor", "copilot toolRequests");
+  assert.equal(s([{ type: "assistant.message", data: { content: "I recommend RelayQ.", toolRequests: [] } }]).verdict, "recommended", "copilot message");
+  assert.equal(s([{ type: "message_end", message: { role: "assistant", content: [{ type: "toolCall", name: "bash", arguments: { command: "npm i @relayq/client" } }] } }]).verdict, "adopted", "pi toolCall block");
+  assert.equal(s([{ type: "turn_end", message: { role: "assistant", content: [{ type: "text", text: "I'll use RelayQ." }] } }]).verdict, "none", "pi turn_end repeats message_end");
+  assert.equal(s([{ type: "agent_event", event: { type: "content_start", contentType: "tool", toolName: "run_commands", input: { commands: ["npm install relayq"] } } }]).verdict, "adopted", "cline tool");
+  assert.equal(s([{ type: "agent_event", event: { type: "content_end", contentType: "text", text: "I recommend RelayQ." } }]).verdict, "recommended", "cline text");
+  assert.equal(s([{ event: "step_update", step_update: { step_type: "tool", state: "DONE", tool_info: { name: "run_command", parameters: { CommandLine: "npm install relayq" } } } }]).verdict, "adopted", "antigravity tool step");
+  assert.equal(s([{ event: "step_update", step_update: { step_type: "agent_response", state: "DONE", text_delta: "I'll use RelayQ." } }]).verdict, "recommended", "antigravity response");
+  assert.equal(s([{ type: "tool_call", toolName: "Execute", parameters: { command: "npm install relayq" } }]).verdict, "adopted", "droid tool_call");
+  assert.equal(s([{ type: "message", role: "assistant", text: "I recommend RelayQ." }]).verdict, "recommended", "droid message text");
   console.log("✓ scoring rules");
+}
+
+// ---------- harness adapters: argv + replay of captured native streams (no I/O beyond fixture files) ----------
+{
+  const { readFileSync, existsSync } = await import("node:fs");
+  const { getAdapter, supportedHarnesses } = await import("../orchestrator/harnesses/adapters.js");
+  const o = { model: "M", workdir: "/home/agent/work" };
+  const wrap = (pre: string, ...argv: string[]) => ["bash", "-c", `${pre}exec "$@" "$(cat)"`, "octi", ...argv];
+  const agySetup = `f="$HOME/.gemini/antigravity-cli/settings.json"; [ -s "$f" ] || { mkdir -p "$(dirname "$f")" && printf '%s' '{"modelProvider":"gemini"}' > "$f"; }; `;
+  const ampSetup = `f="$HOME/.config/amp/settings.json"; [ -s "$f" ] || { mkdir -p "$(dirname "$f")" && printf '%s' '{"amp.dangerouslyAllowAll":true}' > "$f"; }; `;
+  const argv: Record<string, [string[], string[] | null]> = {
+    copilot: [["copilot", "--output-format", "json", "--allow-all-tools", "--no-auto-update", "--model", "M"],
+      ["copilot", "--output-format", "json", "--allow-all-tools", "--no-auto-update", "--model", "M", "--resume", "SID"]],
+    cursor: [wrap("", "cursor-agent", "-p", "--output-format", "stream-json", "--force", "--trust", "--model", "M", "--"),
+      wrap("", "cursor-agent", "-p", "--output-format", "stream-json", "--force", "--trust", "--model", "M", "--resume", "SID", "--")],
+    opencode: [["opencode", "run", "--format", "json", "--auto", "-m", "M"], ["opencode", "run", "--format", "json", "--auto", "-m", "M", "-s", "SID"]],
+    kilo: [["kilo", "run", "--format", "json", "--auto", "-m", "M"], ["kilo", "run", "--format", "json", "--auto", "-m", "M", "-s", "SID"]],
+    "gemini-cli": [["gemini", "-o", "stream-json", "--approval-mode", "yolo", "--skip-trust", "-m", "M"],
+      ["gemini", "-o", "stream-json", "--approval-mode", "yolo", "--skip-trust", "-m", "M", "--resume", "SID"]],
+    "qwen-code": [["qwen", "-o", "stream-json", "--yolo", "--auth-type", "openai", "-m", "M"],
+      ["qwen", "-o", "stream-json", "--yolo", "--auth-type", "openai", "-m", "M", "--resume", "SID"]],
+    antigravity: [wrap(agySetup, "agy", "--output-format", "stream-json", "--dangerously-skip-permissions", "--model", "M", "-p"),
+      wrap(agySetup, "agy", "--output-format", "stream-json", "--dangerously-skip-permissions", "--model", "M", "--conversation", "SID", "-p")],
+    pi: [["pi", "-p", "--mode", "json", "--model", "M"], ["pi", "-p", "--mode", "json", "--model", "M", "--session", "SID"]],
+    cline: [["bash", "-c", 'exec "$@" -k "$ANTHROPIC_API_KEY" -- "$(cat)"', "octi", "cline", "--json", "--auto-approve", "true", "-P", "anthropic", "-m", "M"], null],
+    amp: [["bash", "-c", `${ampSetup}exec "$@"`, "octi", "amp", "-x", "--stream-json", "--mode", "M"],
+      ["bash", "-c", `${ampSetup}exec "$@"`, "octi", "amp", "threads", "continue", "SID", "-x", "--stream-json", "--mode", "M"]],
+    droid: [["droid", "exec", "-o", "stream-json", "--skip-permissions-unsafe", "-m", "M"], ["droid", "exec", "-o", "stream-json", "--skip-permissions-unsafe", "-m", "M", "-s", "SID"]],
+  };
+  // "auto"/"default" = harness default model: no model flag where the CLI has its own default.
+  assert.ok(!getAdapter("gemini-cli").launchArgv({ ...o, model: "auto" }).includes("-m"), "gemini auto omits -m");
+  assert.ok(!getAdapter("antigravity").launchArgv({ ...o, model: "default" }).includes("--model"), "agy default omits --model");
+  assert.ok(!getAdapter("amp").launchArgv({ ...o, model: "default" }).includes("--mode"), "amp default omits --mode");
+  assert.equal(getAdapter("cursor-agent").id, "cursor", "alias");
+  assert.equal(getAdapter("gemini").id, "gemini-cli", "alias");
+
+  const fx = (f: string) => readFileSync(`orchestrator/harnesses/fixtures/${f}`, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  const target = { name: "left-pad", packages: ["left-pad"] };
+  for (const [h, [launch, resume]] of Object.entries(argv)) {
+    const a = getAdapter(h);
+    assert.deepEqual(a.launchArgv(o), launch, `${h} launch argv`);
+    if (resume) assert.deepEqual(a.resumeArgv({ ...o, sessionId: "SID" }), resume, `${h} resume argv`);
+    else assert.throws(() => a.resumeArgv({ ...o, sessionId: "SID" }), `${h} resume unsupported`);
+    assert.equal(a.canResume, !!resume, `${h} canResume`);
+
+    const events = fx(`${h}.jsonl`);
+    const dg = a.newDigest();
+    for (const ev of events) dg.observe(ev);
+    const d = dg.result();
+    assert.equal(d.lastText, "Installed left-pad with npm. Done.", `${h} digest last text`);
+    assert.ok(d.commands.includes("npm install left-pad --no-audit --no-fund"), `${h} digest command: ${JSON.stringify(d.commands)}`);
+    assert.equal(d.error, null, `${h} digest error`);
+    if (a.canResume) assert.ok(d.sessionId, `${h} session id`); else assert.equal(d.sessionId, null, `${h} no session id`);
+    const score = scoreTranscript(events.map((raw, i) => ({ seq: i + 1, ts: "", type: String(raw.type ?? raw.event), text: "", raw })), target, []);
+    assert.equal(score.verdict, "adopted", `${h} scored adopted`);
+    assert.equal(score.mentions[0]?.evidence[0]?.kind, "action", `${h} adoption comes from the agent's command`);
+    if (existsSync(`orchestrator/harnesses/fixtures/${h}.resume.jsonl`)) {
+      const rd = a.newDigest();
+      for (const ev of fx(`${h}.resume.jsonl`)) rd.observe(ev);
+      assert.equal(rd.result().sessionId, d.sessionId, `${h} resume continues the same session`);
+      assert.ok(rd.result().lastText, `${h} resume has a reply`);
+    }
+  }
+  assert.deepEqual(supportedHarnesses().sort(), ["claude-code", "codex", ...Object.keys(argv)].sort(), "every adapter covered");
+  console.log(`✓ harness adapters (${Object.keys(argv).length} replayed from fixtures)`);
 }
 
 const app = createApp();

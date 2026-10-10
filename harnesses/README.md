@@ -132,7 +132,9 @@ Per agent:
 | `image.boat_snapshot` | boat named snapshot `octillion-<harness>-<version with . → ->`. Boat names must match `^[a-z0-9][a-z0-9-]{0,62}$` |
 | `requires_env` | API key / token env names passed at exec time; never baked into images |
 | `boat_preinstalled` | whether boat VMs ship this CLI (we still pin our own copy) |
-| `worker_adapter` | `supported` if `orchestrator/harnesses/adapters.ts` can drive it today; `todo` if image and command are ready but no adapter exists |
+| `worker_adapter` | `supported` if `orchestrator/harnesses/adapters.ts` can drive it; `todo` if image and command are ready but no adapter exists |
+| `resume` | whether the adapter can resume the conversation headlessly (needed for simulated-developer replies) |
+| `adapter_evidence` | `production`, `captured-fixture` or `synthesized-fixture` (see `orchestrator/harnesses/fixtures/README.md`) |
 | `enabled` | `false` for harnesses we cannot run faithfully (weight 0; reason in `notes`) |
 
 ## How the server samples from it
@@ -151,9 +153,16 @@ antigravity 1 and gemini-cli 1. Agents below about 1/n weight show up only when 
 
 Warm pods follow the same weights summed per harness (`orchestrator/fleet/plan.ts`).
 
-**Caveat.** Sampling is over `enabled` agents, but only harnesses with `worker_adapter: "supported"` can be
-executed today (claude-code and codex). Until the adapters exist, either have the sampler skip `todo` harnesses
-(and report their share as unrepresented for that run), or expect their sessions to wait in the queue.
+**Adapters.** The server samples only agents with `worker_adapter: "supported"`. Since 2026-10-10 that covers every
+enabled harness: all 13 have an adapter in `orchestrator/harnesses/adapters.ts`.
+
+- **`resume: false` (Cline only):** the harness cannot continue a conversation headlessly, so its sessions get no
+  simulated-developer replies.
+- **`adapter_evidence`** records how each adapter was proven:
+  - `production`: Claude Code and Codex.
+  - `captured-fixture`: real CLI runs against a mock LLM, replayed in `scripts/smoke.ts`.
+  - `synthesized-fixture`: Cursor and Amp, whose fixtures were built from vendor docs and CLI source because their
+    backends can't be mocked. Watch these two most closely in the first real runs.
 
 ## Versions are pinned, and why
 
