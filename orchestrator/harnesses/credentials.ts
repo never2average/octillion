@@ -91,8 +91,27 @@ export const CRED_SPECS: Record<string, CredSpec> = {
     map: (p) => ({ env: { CURSOR_API_KEY: need(p, "cursor").api_key }, setup: "" }),
   },
   opencode: {
-    providers: ["anthropic"], mode: "gateway", how: "OPENCODE_CONFIG_CONTENT provider.anthropic.options.baseURL (<base>/v1) + ANTHROPIC_API_KEY",
-    map(p) {
+    providers: ["anthropic"], mode: "gateway",
+    how: "OPENCODE_CONFIG_CONTENT provider.anthropic.options.baseURL (<base>/v1) + ANTHROPIC_API_KEY; models `cloudflare/@cf/...` use a custom " +
+         "OpenAI-compatible provider (Cloudflare Workers AI) at <gateway>/cloudflare/v1 with the token in CLOUDFLARE_API_TOKEN ({env:} in config)",
+    map(p, o) {
+      // Open models on Cloudflare Workers AI: OpenCode custom provider "cloudflare" (@ai-sdk/openai-compatible) pointed
+      // at the gateway; the config only references the env var, the ogw_ token itself travels in env at exec time.
+      if (o.model.startsWith("cloudflare/")) {
+        const c = need(p, "cloudflare");
+        const modelId = o.model.slice("cloudflare/".length);
+        if (!c.base_url) return { env: { CLOUDFLARE_API_TOKEN: c.api_key }, setup: "" };
+        const config = {
+          provider: {
+            cloudflare: {
+              npm: "@ai-sdk/openai-compatible", name: "Cloudflare Workers AI",
+              options: { baseURL: withSuffix(c.base_url, "/v1"), apiKey: "{env:CLOUDFLARE_API_TOKEN}" },
+              models: { [modelId]: { name: modelId, tool_call: true } },
+            },
+          },
+        };
+        return { env: { CLOUDFLARE_API_TOKEN: c.api_key, OPENCODE_CONFIG_CONTENT: JSON.stringify(config) }, setup: "" };
+      }
       const { c, env } = anthropicEnv(p);
       if (c.base_url) env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ provider: { anthropic: { options: { baseURL: withSuffix(c.base_url, "/v1") } } } });
       return { env, setup: "" };

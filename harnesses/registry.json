@@ -867,6 +867,98 @@
       "requires_env": [],
       "enabled": false,
       "notes": "`cn -p --format json` returns one JSON blob, not an event stream; tiny agent usage (4k npm/wk)."
+    },
+    {
+      "id": "opencode/cf-kimi-k2.7-code",
+      "harness": "opencode",
+      "label": "OpenCode · Kimi K2.7 Code (Cloudflare)",
+      "vendor": "Cloudflare Workers AI (open model)",
+      "model": "cloudflare/@cf/moonshotai/kimi-k2.7-code",
+      "model_verified": true,
+      "harness_version": "1.18.35",
+      "weight": 0,
+      "weight_source": [],
+      "headless": "opencode run --format json --auto -m <model>  (prompt on stdin)",
+      "event_format": "opencode-json",
+      "image": {
+        "docker": "octillion/agent-opencode:1.18.35",
+        "boat_snapshot": "octillion-opencode-1-18-35"
+      },
+      "requires_env": [
+        "CLOUDFLARE_API_TOKEN"
+      ],
+      "enabled": true,
+      "worker_adapter": "supported",
+      "notes": "Open model on Cloudflare Workers AI via the Octillion gateway (provider 'cloudflare'). 262K context; function calling: yes (Cloudflare model page, 2026-10-10). Weight 0 in the global seed: use the 'open-models' developer population or pick it explicitly."
+    },
+    {
+      "id": "opencode/cf-glm-5.3",
+      "harness": "opencode",
+      "label": "OpenCode · GLM 5.3 (Cloudflare)",
+      "vendor": "Cloudflare Workers AI (open model)",
+      "model": "cloudflare/@cf/zai-org/glm-5.3",
+      "model_verified": true,
+      "harness_version": "1.18.35",
+      "weight": 0,
+      "weight_source": [],
+      "headless": "opencode run --format json --auto -m <model>  (prompt on stdin)",
+      "event_format": "opencode-json",
+      "image": {
+        "docker": "octillion/agent-opencode:1.18.35",
+        "boat_snapshot": "octillion-opencode-1-18-35"
+      },
+      "requires_env": [
+        "CLOUDFLARE_API_TOKEN"
+      ],
+      "enabled": true,
+      "worker_adapter": "supported",
+      "notes": "Open model on Cloudflare Workers AI via the Octillion gateway (provider 'cloudflare'). 1M context; function calling: yes (Cloudflare model page, 2026-10-10). Weight 0 in the global seed: use the 'open-models' developer population or pick it explicitly."
+    },
+    {
+      "id": "opencode/cf-deepseek-v4-pro",
+      "harness": "opencode",
+      "label": "OpenCode · DeepSeek V4 Pro (Cloudflare)",
+      "vendor": "Cloudflare Workers AI (open model)",
+      "model": "cloudflare/@cf/deepseek-ai/deepseek-v4-pro-0813",
+      "model_verified": true,
+      "harness_version": "1.18.35",
+      "weight": 0,
+      "weight_source": [],
+      "headless": "opencode run --format json --auto -m <model>  (prompt on stdin)",
+      "event_format": "opencode-json",
+      "image": {
+        "docker": "octillion/agent-opencode:1.18.35",
+        "boat_snapshot": "octillion-opencode-1-18-35"
+      },
+      "requires_env": [
+        "CLOUDFLARE_API_TOKEN"
+      ],
+      "enabled": true,
+      "worker_adapter": "supported",
+      "notes": "Open model on Cloudflare Workers AI via the Octillion gateway (provider 'cloudflare'). 1M context; function calling: yes (Cloudflare model page, 2026-10-10). Weight 0 in the global seed: use the 'open-models' developer population or pick it explicitly."
+    },
+    {
+      "id": "opencode/cf-gpt-oss-120b",
+      "harness": "opencode",
+      "label": "OpenCode · gpt-oss-120b (Cloudflare)",
+      "vendor": "Cloudflare Workers AI (open model)",
+      "model": "cloudflare/@cf/openai/gpt-oss-120b",
+      "model_verified": true,
+      "harness_version": "1.18.35",
+      "weight": 0,
+      "weight_source": [],
+      "headless": "opencode run --format json --auto -m <model>  (prompt on stdin)",
+      "event_format": "opencode-json",
+      "image": {
+        "docker": "octillion/agent-opencode:1.18.35",
+        "boat_snapshot": "octillion-opencode-1-18-35"
+      },
+      "requires_env": [
+        "CLOUDFLARE_API_TOKEN"
+      ],
+      "enabled": true,
+      "worker_adapter": "supported",
+      "notes": "Open model on Cloudflare Workers AI via the Octillion gateway (provider 'cloudflare'). 128K context; function calling: yes (Cloudflare model page, 2026-10-10). Weight 0 in the global seed: use the 'open-models' developer population or pick it explicitly."
     }
   ]
 }

@@ -358,3 +358,17 @@ CREATE TABLE IF NOT EXISTS usage_alerts (
   sent_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (day, model)
 );
+
+-- Cloudflare Workers AI (open models for OpenCode). Disabled until configured with the account's upstream:
+--   npm run keyvault -- provider cloudflare --upstream https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai --enable
+INSERT INTO vault_providers (slug, mode, upstream_url, auth_header, auth_prefix, env_vars, enabled)
+VALUES ('cloudflare', 'gateway', NULL, 'authorization', 'Bearer ', '{CLOUDFLARE_API_TOKEN}', false)
+ON CONFLICT (slug) DO NOTHING;
+
+-- Cloudflare Workers AI open models (per-model pages, 2026-10-10).
+INSERT INTO model_prices (model, input_per_mtok, cached_input_per_mtok, output_per_mtok, source) VALUES
+  ('@cf/moonshotai/kimi-k2.7-code',        0.95, 0.19,  4.00, 'Cloudflare Workers AI pricing, 2026-10-10'),
+  ('@cf/zai-org/glm-5.3',                  1.40, 0.26,  4.40, 'Cloudflare Workers AI pricing, 2026-10-10'),
+  ('@cf/deepseek-ai/deepseek-v4-pro-0813', 1.32, 0.044, 3.96, 'Cloudflare Workers AI pricing, 2026-10-10'),
+  ('@cf/openai/gpt-oss-120b',              0.35, 0.35,  0.75, 'Cloudflare Workers AI pricing, 2026-10-10 (no cached rate listed)')
+ON CONFLICT (model) DO NOTHING;

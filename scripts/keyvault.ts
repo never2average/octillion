@@ -48,6 +48,7 @@ async function main() {
         slug: rest[0], mode: flag("mode") as "gateway" | "direct" | undefined, upstream_url: flag("upstream"),
         auth_header: flag("header"), auth_prefix: flag("prefix"), env_vars: env ? env.split(",") : undefined,
         backend: flag("backend") as "direct" | "vertex" | undefined,
+        enabled: rest.includes("--enable") ? true : rest.includes("--disable") ? false : undefined,
         backend_config: flag("vertex-project") ? { project_id: flag("vertex-project"), region: flag("vertex-region") ?? "global" } : undefined,
       }));
       return;
