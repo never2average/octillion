@@ -29,7 +29,7 @@ export function ensureDefaultPopulation(): Promise<void> {
                  $1, $2, $3, $4, $5, $6, true)
          ON CONFLICT (slug) DO NOTHING RETURNING id`,
         [reg.as_of ?? null, reg.methodology ?? "", JSON.stringify(reg.sources ?? []), reg.unrepresented_share ?? null,
-         Math.max(1, Math.trunc(Number(process.env.OCTILLION_SANDBOX_UNIT ?? 20))), process.env.OCTILLION_MIN_ONE_SANDBOX === "1"],
+         Math.max(1, Math.trunc(Number(process.env.OCTILLION_SANDBOX_UNIT ?? 20))), process.env.OCTILLION_MIN_ONE_SANDBOX !== "0"],
       );
       if (!pop) return; // another process seeded concurrently
       for (const a of reg.agents.filter((x) => x.enabled !== false && x.weight > 0))

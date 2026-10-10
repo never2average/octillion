@@ -29,6 +29,7 @@ console.log(`database: ${db.kind}, transcripts: ${transcripts().kind}`);
   assert.deepEqual(apportion([{ weight: 0.5 }, { weight: 0.3 }, { weight: 0.2 }], 7).map((x) => x.count), [4, 2, 1]);
   const globalPop = await getPopulation();
   assert.equal(globalPop.slug, "global", "default population seeded from the registry");
+  assert.equal(globalPop.min_one_sandbox, true, "seeded with at least one sandbox per running agent");
   const agents = enabledAgents(globalPop);
   assert.equal(agents.length, 3, "disabled agents excluded");
   const plan = representativePlan(20, agents);
