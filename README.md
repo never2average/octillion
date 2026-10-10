@@ -43,7 +43,8 @@ flowchart LR
 ## Quick start
 
 ```bash
-npm install
+npm install && npm run orchestrator:install   # server + orchestrator (Pi) deps
+npm run typecheck      # server and orchestrator
 npm run smoke          # end-to-end test (embedded Postgres, no Docker needed)
 
 cp .env.example .env
