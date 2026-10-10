@@ -52,7 +52,17 @@ export function decrypt(row: { ciphertext: string; iv: string; tag: string; key_
   return Buffer.concat([decipher.update(Buffer.from(row.ciphertext, "base64")), decipher.final()]).toString("utf8");
 }
 
-export const hint = (secret: string) => (secret.length <= 10 ? "…" : `${secret.slice(0, 6)}…${secret.slice(-4)}`);
+export function hint(secret: string): string {
+  // Google service-account keys: show the account and key id, never fragments of the JSON.
+  if (secret.trimStart().startsWith("{")) {
+    try {
+      const j = JSON.parse(secret) as { client_email?: string; private_key_id?: string };
+      if (j.client_email) return `${j.client_email}${j.private_key_id ? ` (key ${j.private_key_id.slice(0, 8)}…)` : ""}`;
+    } catch { /* not JSON: fall through */ }
+    return "JSON credential";
+  }
+  return secret.length <= 10 ? "…" : `${secret.slice(0, 6)}…${secret.slice(-4)}`;
+}
 
 // ---------- providers ----------
 
