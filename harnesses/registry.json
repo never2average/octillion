@@ -237,7 +237,7 @@
       "label": "Codex CLI · GPT-6.1-Sol",
       "vendor": "OpenAI",
       "model": "gpt-6.1-sol",
-      "model_verified": false,
+      "model_verified": true,
       "harness_version": "0.162.1",
       "weight": 0.1965,
       "usage_share": 0.18,
@@ -264,7 +264,8 @@
       "adapter_evidence": "production",
       "enabled": true,
       "notes": "Share covers Codex CLI + IDE extension + cloud (same agent core). Model: gpt-6.1-sol is priority 1 ('Latest workhorse model for coding') in the model catalog bundled in codex 0.162.1; gpt-6-astra (frontier) is priority 2. The server may override the default, so unverified. No public data to split by model.",
-      "model_mix": "Model mix: not split. Only evidence is the OpenRouter-routed slice (gpt-6-luna 20.4%, gpt-6-astra 18.6%, gpt-6.1-sol 6.0%, ~30% non-OpenAI), which excludes ChatGPT-login usage, the bulk of Codex. Too skewed to split on; revisit if OpenAI or Amplifying publish a mix."
+      "model_mix": "Model mix: not split. Only evidence is the OpenRouter-routed slice (gpt-6-luna 20.4%, gpt-6-astra 18.6%, gpt-6.1-sol 6.0%, ~30% non-OpenAI), which excludes ChatGPT-login usage, the bulk of Codex. Too skewed to split on; revisit if OpenAI or Amplifying publish a mix.",
+      "model_verified_note": "gpt-6.1-sol listed by the OpenAI API (/v1/models) on a production account, 2026-10-10"
     },
     {
       "id": "copilot/auto",
