@@ -96,9 +96,9 @@ export function createApp() {
   worker.use(express.text({ type: ["application/x-ndjson", "application/jsonl", "text/plain"], limit: "32mb" }));
 
   worker.post("/claim", async (req, res) => {
-    const { worker_id, limit, models, harness } = req.body ?? {};
+    const { worker_id, limit, models, harness, agent_ids } = req.body ?? {};
     if (typeof worker_id !== "string" || !worker_id) return void res.status(400).json({ error: "worker_id is required" });
-    res.json({ jobs: await claimJobs(worker_id, { limit, models, harness }) });
+    res.json({ jobs: await claimJobs(worker_id, { limit, models, harness, agent_ids }) });
   });
   worker.post("/sessions/:id/events", async (req, res) => {
     const events: RawEvent[] = typeof req.body === "string" ? parseJsonl(req.body) : req.body?.events;

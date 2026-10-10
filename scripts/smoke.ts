@@ -38,10 +38,8 @@ console.log(`database: ${db.kind}, transcripts: ${transcripts().kind}`);
 // ---------- global pod fleet (no I/O) ----------
 {
   const { planPods, assign } = await import("../src/fleet.js");
-  const shares = [
-    { harness: "claude-code", weight: 0.4, agents: [] }, { harness: "cursor", weight: 0.25, agents: [] },
-    { harness: "codex", weight: 0.2, agents: [] }, { harness: "copilot", weight: 0.1, agents: [] }, { harness: "aider", weight: 0.05, agents: [] },
-  ];
+  const share = (agent_id: string, weight: number) => ({ agent_id, harness: agent_id.split("/")[0], model: agent_id.split("/")[1], weight });
+  const shares = [share("claude-code/opus", 0.4), share("cursor/auto", 0.25), share("codex/default", 0.2), share("copilot/auto", 0.1), share("aider/x", 0.05)];
   const plan = planPods(200, shares); // 10 orchestrators x 20 pods
   assert.equal(plan.reduce((s, p) => s + p.pods, 0), 200);
   assert.equal(plan[0].pods, 80, "Claude Code at 40% gets 80 of 200 pods");
@@ -49,10 +47,13 @@ console.log(`database: ${db.kind}, transcripts: ${transcripts().kind}`);
   const dealt = assign(plan, orchs);
   for (const [, m] of dealt) {
     assert.equal([...m.values()].reduce((s, n) => s + n, 0), 20, "each orchestrator filled to 20");
-    assert.equal(m.get("claude-code"), 8, "each orchestrator carries ~40% Claude Code");
+    assert.equal(m.get("claude-code/opus"), 8, "each orchestrator carries ~40% Claude Code · Opus");
   }
   assert.equal(planPods(10, shares)[0].pods, 4, "10 pods -> 4 Claude Code");
-  console.log("✓ fleet: 10 orchestrators x 20 = 200 pods in usage proportion");
+  // Same harness, two popular models -> two pod groups, each sized by its own share.
+  const split = planPods(20, [share("claude-code/opus", 0.3), share("claude-code/sonnet", 0.1), share("codex/default", 0.6)]);
+  assert.deepEqual(Object.fromEntries(split.map((p) => [p.agent_id, p.pods])), { "codex/default": 12, "claude-code/opus": 6, "claude-code/sonnet": 2 });
+  console.log("✓ fleet: 10 orchestrators x 20 = 200 pods in usage proportion; per-model pod groups");
 }
 
 // ---------- scoring unit checks (no I/O) ----------

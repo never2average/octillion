@@ -28,13 +28,14 @@ export interface Job {
   profile: { slug: string; name: string; summary: string; attributes: Record<string, unknown>; instructions: string } | null;
 }
 
-export async function claimJobs(workerId: string, opts: { limit?: number; models?: string[]; harness?: string } = {}): Promise<Job[]> {
+export async function claimJobs(workerId: string, opts: { limit?: number; models?: string[]; harness?: string; agent_ids?: string[] } = {}): Promise<Job[]> {
   await sweepStale();
   const db = await getDb();
   const params: unknown[] = [workerId, Math.min(Math.max(opts.limit ?? 1, 1), 50)];
   let filter = "";
   if (opts.models?.length) params.push(opts.models), (filter += ` AND model = ANY($${params.length})`);
   if (opts.harness) params.push(opts.harness), (filter += ` AND harness = $${params.length}`);
+  if (opts.agent_ids?.length) params.push(opts.agent_ids), (filter += ` AND agent_id = ANY($${params.length})`);
   const jobs = await db.transaction(async (tx) => {
     const rows = await tx.query<Omit<Job, "max_user_turns" | "profile" | "agent"> & { profile_id: number | null }>(
       `UPDATE agent_sessions s SET status = 'running', worker_id = $1, started_at = now(), heartbeat_at = now()

@@ -5,6 +5,6 @@ import { fleetStatus } from "../src/fleet.js";
 
 const s = await fleetStatus();
 console.log(`${s.orchestrators} live orchestrators, ${s.total_pods} pods; queue: ${s.queue.queued} queued, ${s.queue.running} running`);
-console.table(s.plan.map((p) => ({ harness: p.harness, usage: `${(p.weight * 100).toFixed(1)}%`, pods: p.pods })));
+console.table(s.plan.map((p) => ({ agent: p.agent_id, harness: p.harness, model: p.model, usage: `${(p.weight * 100).toFixed(1)}%`, pods: p.pods })));
 if ("assignments" in s) console.table(s.assignments);
 await (await getDb()).close();
