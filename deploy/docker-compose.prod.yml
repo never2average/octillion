@@ -1,0 +1,112 @@
+# Octillion production stack, self-hosted: Postgres + ClickHouse + server + Caddy (TLS).
+#   cd deploy && ./bootstrap.sh            # generates .env with strong secrets (once)
+#   docker compose -f docker-compose.prod.yml --env-file .env up -d --build
+# Only Caddy publishes ports (80/443). Postgres and ClickHouse are reachable inside the compose network only.
+
+name: octillion
+
+services:
+  postgres:
+    image: docker.io/postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: octillion
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run bootstrap.sh}
+      POSTGRES_DB: octillion
+      TZ: UTC
+    command: >
+      postgres -c shared_buffers=512MB -c max_connections=200 -c wal_compression=on
+               -c log_min_duration_statement=1000 -c password_encryption=scram-sha-256
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U octillion -d octillion"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Nightly logical backups (custom format), 7 days kept. Restore: pg_restore -d octillion <file>.
+  pg-backup:
+    image: docker.io/postgres:17
+    restart: unless-stopped
+    depends_on: { postgres: { condition: service_healthy } }
+    environment:
+      PGHOST: postgres
+      PGUSER: octillion
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: octillion
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-7}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          f=/backups/octillion-$$(date -u +%Y%m%dT%H%M%SZ).dump
+          pg_dump -Fc -f "$$f" && echo "backup ok: $$f" || echo "backup FAILED"
+          find /backups -name 'octillion-*.dump' -mtime +$${BACKUP_KEEP_DAYS} -delete
+          sleep 86400
+        done
+    volumes:
+      - pg_backups:/backups
+
+  clickhouse:
+    image: docker.io/clickhouse/clickhouse-server:25.12
+    restart: unless-stopped
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: octillion
+      CLICKHOUSE_USER: octillion
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?run bootstrap.sh}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "0"
+    volumes:
+      - ../docker/clickhouse/users.d-fulltext.xml:/etc/clickhouse-server/users.d/fulltext.xml:ro
+      - ch_data:/var/lib/clickhouse
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  octillion:
+    build: { context: .., dockerfile: Dockerfile }
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3333
+      PUBLIC_URL: ${PUBLIC_URL:?set PUBLIC_URL, e.g. https://octillion.example.com}
+      DATABASE_URL: postgres://octillion:${POSTGRES_PASSWORD}@postgres:5432/octillion
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: octillion
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DATABASE: octillion
+      OCTILLION_VAULT_KEY: ${OCTILLION_VAULT_KEY:?run bootstrap.sh}
+      OCTILLION_ADMIN_TOKEN: ${OCTILLION_ADMIN_TOKEN:?run bootstrap.sh}
+      OCTILLION_WORKER_TOKEN: ${OCTILLION_WORKER_TOKEN:?run bootstrap.sh}
+      ACCESS_REQUEST_WEBHOOK_URL: ${ACCESS_REQUEST_WEBHOOK_URL:-}
+      VAULT_URL: ${VAULT_URL:-}
+      VAULT_TOKEN: ${VAULT_TOKEN:-}
+    expose: ["3333"]
+
+  caddy:
+    image: docker.io/caddy:2
+    restart: unless-stopped
+    depends_on: [octillion]
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    command: caddy reverse-proxy --from ${DOMAIN:-localhost} --to octillion:3333
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - caddy_data:/data
+
+volumes:
+  pg_data:
+  pg_backups:
+  ch_data:
+  caddy_data:

@@ -9,6 +9,7 @@ COPY sql ./sql
 COPY src ./src
 COPY scripts ./scripts
 COPY public ./public
+COPY harnesses ./harnesses
 USER node
 EXPOSE 3333
 HEALTHCHECK --interval=30s --timeout=5s CMD node -e "fetch('http://127.0.0.1:3333/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"

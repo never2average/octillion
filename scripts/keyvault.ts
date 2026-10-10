@@ -25,7 +25,9 @@ async function secretInput(): Promise<string> {
     return kvLine ? kvLine.slice(kvLine.indexOf("=") + 1).trim() : text;
   }
   if (process.stdin.isTTY) throw new Error("Pipe the secret on stdin, or use --from-env VAR / --from-file PATH");
-  return (await readStdin()).trim();
+  const text = (await readStdin()).trim();
+  const kvLine = text.split("\n").find((l) => /^[A-Z0-9_]+=/.test(l));
+  return kvLine ? kvLine.slice(kvLine.indexOf("=") + 1).trim() : text;
 }
 
 async function main() {
