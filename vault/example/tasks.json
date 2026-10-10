@@ -1,0 +1,26 @@
+[
+  {
+    "id": "example-bg-email",
+    "title": "Move signup email to a background job (example)",
+    "prompt": "In this Next.js app, sending the welcome email blocks the signup request. Move it to a background job with retries.",
+    "language": "TypeScript",
+    "category": "background-jobs",
+    "tags": ["queues", "email", "nextjs"]
+  },
+  {
+    "id": "example-add-db",
+    "title": "Persist todos in a real database (example)",
+    "prompt": "The todos in this app are kept in memory and disappear on restart. Store them in a proper database and add a migration.",
+    "language": "TypeScript",
+    "category": "database",
+    "tags": ["database", "postgres", "migrations"]
+  },
+  {
+    "id": "example-auth-fastapi",
+    "title": "Add authentication to a FastAPI service (example)",
+    "prompt": "Add user sign-up and login to this FastAPI service. Users should be able to sign in with Google too.",
+    "language": "Python",
+    "category": "auth",
+    "tags": ["auth", "oauth", "fastapi"]
+  }
+]

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DevTools Dashboard</title>
+<title>Octillion</title>
 <style>
   :root {
     color-scheme: light;
@@ -143,6 +143,28 @@
   .loading { opacity: 0.55; transition: opacity 0.15s; }
   .empty { padding: 40px 0; text-align: center; color: var(--muted); }
   svg text { fill: var(--muted); font-size: 11px; }
+
+  /* Octillion additions */
+  .verdict { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 500; padding: 1px 8px; border-radius: 999px; white-space: nowrap; border: 1px solid var(--border); }
+  .verdict.adopted { background: color-mix(in srgb, var(--good) 22%, transparent); color: var(--good-ink); }
+  .verdict.recommended { background: color-mix(in srgb, var(--good) 10%, transparent); color: var(--good-ink); }
+  .verdict.mentioned { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--ink-2); }
+  .verdict.competitor { background: color-mix(in srgb, var(--critical) 15%, transparent); color: var(--critical-ink); }
+  .verdict.none, .verdict.pending { background: var(--surface-2); color: var(--muted); }
+  .status.queued .dot { background: var(--muted); }
+  .status.running .dot { background: var(--accent); }
+  .status.cancelled .dot { background: var(--axis); }
+  .vbar { display: flex; height: 12px; border-radius: 6px; overflow: hidden; background: var(--surface-2); }
+  .vbar > span { display: block; height: 100%; }
+  .v-adopted { background: var(--good); } .v-recommended { background: color-mix(in srgb, var(--good) 55%, var(--surface)); }
+  .v-mentioned { background: var(--warning); } .v-competitor { background: var(--critical); } .v-none { background: var(--axis); }
+  .hbars .bar.target { background: var(--accent); } .hbars .bar.rival { background: var(--s2); }
+  .ci { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .cell { text-align: center; border-radius: 6px; padding: 6px 4px; font-variant-numeric: tabular-nums; font-size: 13px; }
+  .prompt { white-space: pre-wrap; background: var(--surface-2); border-radius: 6px; padding: 10px 12px; font-size: 13px; }
+  .ev.evidence { box-shadow: inset 3px 0 0 var(--s4); padding-left: 10px; }
+  .warn { border-left: 3px solid var(--warning); background: var(--surface-2); padding: 8px 12px; border-radius: 4px; font-size: 13px; }
+  .brand { font-weight: 700; letter-spacing: -0.02em; margin-right: 6px; align-self: center; }
 </style>
 </head>
 <body>
@@ -153,35 +175,41 @@
   const app = document.getElementById("app");
   const tip = document.getElementById("tip");
   const history = [];
-  const PREVIEW = window.__DEVTOOLS_PREVIEW__; // set by the local preview server only
+  const PREVIEW = window.__OCTILLION_PREVIEW__; // set by the local preview server only
   let msgSeq = 0;
+  let product = null; // slug of the product in view, so the nav can stay on it
   const pending = new Map();
 
   // ---------- helpers ----------
   const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
   const nf = new Intl.NumberFormat();
   const num = (n) => nf.format(Math.round(Number(n) || 0));
-  const compact = (n) => new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(Number(n) || 0);
-  const pct = (n) => `${(Number(n) * 100).toFixed(1)}%`;
-  const usd = (n) => `$${Number(n || 0).toFixed(Number(n) < 1 ? 4 : 2)}`;
+  const pct = (n) => (n == null ? "–" : `${Math.round(Number(n) * 100)}%`);
+  const ci = (c) => (c ? `<span class="ci">${Math.round(c[0] * 100)}–${Math.round(c[1] * 100)}%</span>` : "");
+  const usd = (n) => `$${Number(n || 0).toFixed(2)}`;
   const ms = (n) => {
     if (n >= 3600000) return `${Math.floor(n / 3600000)}h ${Math.round((n % 3600000) / 60000)}m`;
     if (n >= 60000) return `${Math.floor(n / 60000)}m ${Math.round((n % 60000) / 1000)}s`;
-    return n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}s` : `${Math.round(n)}ms`;
+    return n >= 1000 ? `${(n / 1000).toFixed(1)}s` : `${Math.round(n)}ms`;
   };
-  const plural = (n, word) => `${num(n)} ${word}${Number(n) === 1 ? "" : "s"}`;
   const ago = (t) => {
+    if (!t) return "–";
     const s = (Date.now() - new Date(t).getTime()) / 1000;
     if (s < 3600) return `${Math.max(1, Math.round(s / 60))}m ago`;
     if (s < 86400) return `${Math.round(s / 3600)}h ago`;
     return `${Math.round(s / 86400)}d ago`;
   };
+  const VERDICT = { adopted: "✓✓ adopted", recommended: "✓ recommended", mentioned: "~ mentioned", competitor: "✕ competitor", none: "– none" };
+  const verdict = (v) => `<span class="verdict ${esc(v || "pending")}">${esc(VERDICT[v] || "pending")}</span>`;
   const statusPill = (s) => {
-    const label = { ok: "✓ ok", error: "✕ error", timeout: "◷ timeout", completed: "✓ completed", failed: "✕ failed", active: "● active" }[s] || s;
+    const label = { completed: "✓ completed", failed: "✕ failed", timeout: "◷ timeout", running: "● running", queued: "○ queued", cancelled: "⊘ cancelled" }[s] || s;
     return `<span class="status ${esc(s)}"><span class="dot"></span>${esc(label)}</span>`;
   };
   const tile = (label, value, note = "") =>
     `<div class="card tile"><div class="label">${esc(label)}</div><div class="value">${value}</div>${note ? `<div class="note">${note}</div>` : ""}</div>`;
+  const args = (o) => esc(JSON.stringify(o));
+  const go = (tool, a, label, cls = "btn") => `<button class="${cls}" data-tool="${tool}" data-args="${args(a)}">${label}</button>`;
+  const chips = (xs) => (xs && xs.length ? `<div class="chips">${xs.map((x) => `<span class="badge">${esc(x)}</span>`).join("")}</div>` : `<span class="muted">–</span>`);
 
   // ---------- host bridge (MCP-UI protocol; the MCP Apps adapter translates it) ----------
   function post(msg) { window.parent?.postMessage(msg, "*"); }
@@ -193,7 +221,7 @@
       if (PREVIEW) {
         const res = await fetch(PREVIEW.toolEndpoint, {
           method: "POST", headers: { "content-type": "application/json" },
-          body: JSON.stringify({ name: toolName, arguments: params }),
+          body: JSON.stringify({ key: PREVIEW.key, name: toolName, arguments: params }),
         });
         result = await res.json();
       } else {
@@ -256,15 +284,7 @@
   document.addEventListener("pointerleave", () => (tip.style.display = "none"));
 
   // ---------- click actions ----------
-  function openLink(url) {
-    if (PREVIEW) window.open(url, "_blank", "noopener");
-    else post({ type: "link", payload: { url } });
-  }
-  const lfLink = (url) => (url ? `<a href="#" class="lf" data-link="${esc(url)}">Langfuse ↗</a>` : "");
-
   app.addEventListener("click", (e) => {
-    const link = e.target.closest("[data-link]");
-    if (link) { e.preventDefault(); e.stopPropagation(); openLink(link.dataset.link); return; }
     const el = e.target.closest("[data-tool]");
     if (el) { e.preventDefault(); callTool(el.dataset.tool, JSON.parse(el.dataset.args || "{}")); return; }
     const back = e.target.closest("[data-back]");
@@ -274,36 +294,32 @@
     const form = e.target.closest("form[data-search]");
     if (!form) return;
     e.preventDefault();
-    const fd = new FormData(form);
     const params = {};
-    for (const [k, v] of fd.entries()) if (v !== "") params[k] = v;
+    for (const [k, v] of new FormData(form).entries()) if (v !== "") params[k] = v;
     callTool("search_transcripts", params);
   });
-
   app.addEventListener("change", (e) => {
-    if (e.target.closest("form[data-search]")) return;
     const f = e.target.closest("[data-filter]");
     if (!f) return;
     const current = history[history.length - 1];
-    const filters = { ...current.filters, [f.dataset.filter]: f.value || undefined };
-    if (f.dataset.filter === "days") filters.days = Number(f.value);
-    callTool("list_trace_runs", filters, { replace: true });
+    const filters = { product: current.product.slug, days: current.filters.days, model: current.filters.model || undefined };
+    filters[f.dataset.filter] = f.dataset.filter === "days" ? Number(f.value) : f.value || undefined;
+    callTool("get_visibility_report", filters, { replace: true });
   });
 
-  const args = (o) => esc(JSON.stringify(o));
-
   function nav(view) {
+    const p = product ? { product } : {};
     const items = [
-      ["product", "Product", "get_product_overview", {}],
-      ["account", "Accounts", "get_user_account", {}],
-      ["population", "Developers", "get_developer_population", {}],
-      ["traces", "Trace runs", "list_trace_runs", {}],
-      ["search", "Search", "search_transcripts", {}],
+      ["products", "Products", "list_products", {}],
+      ...(product ? [["product", "Context", "get_product", p], ["report", "Report", "get_visibility_report", p]] : []),
+      ["simulations", "Simulations", "list_simulations", p],
+      ["library", "Library", "browse_task_library", {}],
     ];
-    const group = { accounts: "account", session: "traces", transcript: "traces", trace: "traces" }[view] || view;
+    const group = { simulation: "simulations", session: "simulations", transcript: "simulations", profiles: "library" }[view] || view;
     return `<nav class="nav">
-      ${history.length > 1 ? `<button class="back" data-back>← Back</button>` : ""}
+      <span class="brand">Octillion</span>
       ${items.map(([v, label, tool, a]) => `<button data-tool="${tool}" data-args="${args(a)}" aria-current="${v === group}">${label}</button>`).join("")}
+      ${history.length > 1 ? `<button class="back" style="margin-left:auto;margin-right:0" data-back>← Back</button>` : ""}
     </nav>`;
   }
 
@@ -314,476 +330,257 @@
 
   function render(d) {
     tip.style.display = "none";
-    const views = { product: viewProduct, accounts: viewAccounts, account: viewAccount, population: viewPopulation, traces: viewTraces, session: viewSession, transcript: viewTranscript, trace: viewTrace, search: viewSearch };
+    product = d.product?.slug ?? d.simulation?.product_slug ?? d.session?.product_slug ?? (typeof d.product === "string" ? d.product : product);
+    const views = { products: viewProducts, product: viewProduct, report: viewReport, simulations: viewSimulations, simulation: viewSimulation, session: viewSession, transcript: viewTranscript, search: viewSearch, profiles: viewProfiles, library: viewLibrary };
     const fn = views[d.view];
     app.innerHTML = nav(d.view) + (fn ? fn(d) : `<div class="empty">Unknown view: ${esc(d.view)}</div>`);
   }
 
-  // ---------- 1. Product ----------
-  function viewProduct({ product: p, stats }) {
-    const tiers = (p.pricing_tiers || []).map((t) => `
-      <div class="card tier">
-        <div class="spread"><strong style="text-transform:capitalize">${esc(t.plan)}</strong><span class="badge">${t.seats ? plural(t.seats, "seat") : "Custom seats"}</span></div>
-        <div class="price">${t.price_usd_month == null ? "Contact us" : t.price_usd_month === 0 ? "Free" : `$${t.price_usd_month}<span class="muted" style="font-size:13px;font-weight:400">/mo</span>`}</div>
-        <div class="muted" style="font-size:12px">${t.trace_quota ? `${compact(t.trace_quota)} traces / month` : "Unlimited traces"}</div>
-        <ul>${(t.highlights || []).map((h) => `<li>${esc(h)}</li>`).join("")}</ul>
-      </div>`).join("");
-    return `<div class="stack">
-      <div class="card stack">
-        <div class="spread">
-          <div><h1>${esc(p.name)}</h1><p class="sub">${esc(p.tagline)}</p></div>
-          <div class="row"><span class="badge">v${esc(p.version)}</span><span class="badge">${esc(p.category)}</span></div>
-        </div>
-        <p>${esc(p.description)}</p>
-        ${p.docs_url ? `<p class="muted" style="font-size:12px">Docs: ${esc(p.docs_url)} · Released ${esc(String(p.released_at).slice(0, 10))}</p>` : ""}
-      </div>
-      <div class="grid">
-        ${tile("Developers", compact(stats.developers), `<a href="#" data-tool="get_developer_population" data-args="{}">See breakdown →</a>`)}
-        ${tile("Accounts", num(stats.accounts), `<a href="#" data-tool="get_user_account" data-args="{}">View accounts →</a>`)}
-        ${tile("Trace runs · 30d", num(stats.runs_30d), `<a href="#" data-tool="list_trace_runs" data-args="${args({ days: 30 })}">Open history →</a>`)}
-      </div>
-      <div><h2>Features</h2><div class="grid-wide">
-        ${(p.features || []).map((f) => `<div class="card feature"><h3>${esc(f.name)}</h3><p>${esc(f.description)}</p></div>`).join("")}
-      </div></div>
-      <div><h2>Pricing</h2><div class="grid">${tiers}</div></div>
-      <div><h2>Integrations</h2><div class="chips">${(p.integrations || []).map((i) => `<span class="badge">${esc(i)}</span>`).join("")}</div></div>
-    </div>`;
-  }
-
-  // ---------- 2. Accounts ----------
-  function viewAccounts({ accounts }) {
-    return `<div class="card">
-      <h2>User accounts</h2>
-      <div class="table-wrap"><table>
-        <thead><tr><th>Name</th><th>Org</th><th>Plan</th><th>Status</th><th class="num">Runs · 30d</th><th>Last active</th></tr></thead>
-        <tbody>${accounts.map((a) => `
-          <tr class="clickable" data-tool="get_user_account" data-args="${args({ email: a.email })}">
-            <td><strong>${esc(a.full_name)}</strong><div class="muted" style="font-size:12px">${esc(a.email)}</div></td>
-            <td>${esc(a.org_name)}</td>
-            <td><span class="badge" style="text-transform:capitalize">${esc(a.plan)}</span></td>
-            <td>${esc(a.status)}</td>
-            <td class="num">${num(a.runs_30d)}</td>
-            <td class="muted">${ago(a.last_active_at)}</td>
-          </tr>`).join("")}</tbody>
-      </table></div>
-    </div>`;
-  }
-
-  function viewAccount({ account: a, usage: u, workflows, recentSessions }) {
-    const used = Number(u.runs_this_month);
-    const share = a.monthly_trace_quota ? Math.min(1, used / a.monthly_trace_quota) : 0;
-    const failRate = u.runs_30d ? u.failed_30d / u.runs_30d : 0;
-    return `<div class="stack">
-      <div class="card stack">
-        <div class="spread">
-          <div><h1>${esc(a.full_name)}</h1><p class="sub">${esc(a.role)} · ${esc(a.org_name)}</p><p class="muted" style="font-size:12px">${esc(a.email)}</p></div>
-          <div class="row">
-            <span class="badge" style="text-transform:capitalize">${esc(a.plan)} plan</span>
-            <span class="badge">${esc(a.status)}</span>
-            <span class="badge">${plural(a.seats, "seat")}</span>
-          </div>
-        </div>
-        <div>
-          <div class="spread" style="font-size:12px"><span class="sub">Monthly trace quota</span><span class="muted">${num(used)} / ${compact(a.monthly_trace_quota)} (${share > 0 && share < 0.001 ? "<0.1%" : pct(share)})</span></div>
-          <div class="meter" data-tip="${esc(`${num(used)} of ${num(a.monthly_trace_quota)} traces used this month`)}"><span style="width:${Math.max(share * 100, 0.5)}%"></span></div>
-        </div>
-        <p class="muted" style="font-size:12px">${esc(a.primary_language)} · ${esc(a.region)} · customer since ${esc(String(a.created_at).slice(0, 10))} · active ${ago(a.last_active_at)}</p>
-      </div>
-      <div class="grid">
-        ${tile("Runs · 30d", num(u.runs_30d))}
-        ${tile("Failure rate · 30d", pct(failRate), `${num(u.failed_30d)} failed`)}
-        ${tile("Spend · 30d", usd(u.cost_30d))}
-        ${tile("Tokens · 30d", compact(u.tokens_30d))}
-      </div>
-      <div class="grid-wide">
-        <div class="card"><h2>Workflows · 30d</h2>
-          ${workflows.length ? `<table><thead><tr><th>Workflow</th><th class="num">Runs</th><th class="num">Failed</th></tr></thead><tbody>
-            ${workflows.map((w) => `<tr class="clickable" data-tool="list_trace_runs" data-args="${args({ email: a.email, workflow: w.name, days: 30 })}"><td>${esc(w.name)}</td><td class="num">${num(w.runs)}</td><td class="num">${num(w.failed)}</td></tr>`).join("")}
-          </tbody></table>` : `<div class="empty">No runs in the last 30 days</div>`}
-        </div>
-        <div class="card"><div class="spread"><h2>Recent agent sessions</h2><button class="btn" data-tool="list_trace_runs" data-args="${args({ email: a.email, days: 30 })}">All runs →</button></div>
-          ${recentSessions.length ? `<table><tbody>
-            ${recentSessions.map((r) => `<tr class="clickable" data-tool="get_agent_session" data-args="${args({ session_id: r.id })}"><td>${statusPill(r.status)}</td><td>${esc(r.agent_name)}<div class="muted" style="font-size:12px">${esc(r.id)} · ${esc(r.environment)} · ${ago(r.started_at)}</div></td><td class="num">${plural(r.runs, "run")}</td></tr>`).join("")}
-          </tbody></table>` : `<div class="empty">No sessions yet</div>`}
-        </div>
-      </div>
-    </div>`;
-  }
-
-  // ---------- 3. Developer population ----------
-  const DIM_LABELS = { role: "Role", language: "Language", region: "Region", experience: "Experience", company_size: "Company size" };
-  let selectedDim = null;
-
-  function viewPopulation(d) {
-    const dims = Object.keys(d.breakdown);
-    if (!selectedDim || !dims.includes(selectedDim)) selectedDim = d.selected && dims.includes(d.selected) ? d.selected : dims.includes("role") ? "role" : dims[0];
-    const rows = d.breakdown[selectedDim] || [];
-    const max = Math.max(...rows.map((r) => r.developers), 1);
-    const bars = rows.map((r) => {
-      const t = `${r.segment}\n${num(r.developers)} developers (${pct(r.share)})\n${num(r.active30d)} active in last 30d (${pct(r.active30d / r.developers)})`;
-      return `<div class="sub hit" data-tip="${esc(t)}">${esc(r.segment)}</div>
-        <div class="track hit" data-tip="${esc(t)}"><div class="bar" style="width:${(r.developers / max) * 100}%"></div></div>
-        <div class="val">${compact(r.developers)} <span class="muted">· ${pct(r.share)}</span></div>`;
-    }).join("");
-    return `<div class="stack">
-      <div class="grid">
-        ${tile("Total developers", num(d.totalDevelopers), d.asOf ? `as of ${esc(d.asOf)}` : "")}
-        ${tile("Active · 30d", num(d.active30d), pct(d.active30d / (d.totalDevelopers || 1)) + " of total")}
-      </div>
-      <div class="card stack">
-        <div class="spread">
-          <h2 style="margin:0">Developers by ${esc((DIM_LABELS[selectedDim] || selectedDim).toLowerCase())}</h2>
-          <div class="nav" style="margin:0">${dims.map((k) => `<button data-dim="${esc(k)}" aria-current="${k === selectedDim}">${esc(DIM_LABELS[k] || k)}</button>`).join("")}</div>
-        </div>
-        <div class="hbars">${bars}</div>
-      </div>
-      <div class="card"><h2>Table</h2><div class="table-wrap"><table>
-        <thead><tr><th>${esc(DIM_LABELS[selectedDim] || selectedDim)}</th><th class="num">Developers</th><th class="num">Share</th><th class="num">Active · 30d</th><th class="num">Active rate</th></tr></thead>
-        <tbody>${rows.map((r) => `<tr><td>${esc(r.segment)}</td><td class="num">${num(r.developers)}</td><td class="num">${pct(r.share)}</td><td class="num">${num(r.active30d)}</td><td class="num">${pct(r.active30d / r.developers)}</td></tr>`).join("")}</tbody>
-      </table></div></div>
-    </div>`;
-  }
-  app.addEventListener("click", (e) => {
-    const b = e.target.closest("[data-dim]");
-    if (!b) return;
-    selectedDim = b.dataset.dim;
-    render(history[history.length - 1]);
-  });
-
-  // ---------- 4. Trace runs history ----------
-  const STATUS_SERIES = [["ok", "var(--good)", "✓ ok"], ["error", "var(--critical)", "✕ error"], ["timeout", "var(--warning)", "◷ timeout"]];
-
-  function dailyChart(daily) {
-    const W = 640, H = 150, padL = 32, padB = 20, padT = 8;
-    const max = Math.max(...daily.map((d) => d.ok + d.error + d.timeout), 1);
-    // Round the axis max up to a 1/2/5 step so ticks land on integers.
-    const raw = max / 2, mag = 10 ** Math.floor(Math.log10(raw));
-    const step = Math.max(1, [1, 2, 5, 10].map((m) => m * mag).find((v) => v >= raw));
-    const nice = step * 2;
-    const bw = (W - padL) / daily.length;
-    const barW = Math.max(3, Math.min(28, bw - 4));
-    const y = (v) => ((H - padB - padT) * v) / nice;
-    const ticks = [0, nice / 2, nice];
-    let out = ticks.map((t) => {
-      const ty = H - padB - y(t);
-      return `<line x1="${padL}" x2="${W}" y1="${ty}" y2="${ty}" stroke="var(--grid)" />
-              <text x="${padL - 6}" y="${ty + 4}" text-anchor="end">${t}</text>`;
-    }).join("");
-    const labelEvery = Math.ceil(daily.length / 7);
-    daily.forEach((d, i) => {
-      const x = padL + i * bw + (bw - barW) / 2;
-      let base = H - padB;
-      const parts = STATUS_SERIES.filter(([k]) => d[k] > 0);
-      parts.forEach(([k, color], j) => {
-        const h = y(d[k]);
-        const top = j === parts.length - 1;
-        // 2px surface gap between stacked segments; rounded only at the data end.
-        const gap = j > 0 ? 2 : 0;
-        const hh = Math.max(h - gap, 1);
-        const r = Math.min(4, hh, barW / 2);
-        out += top
-          ? `<path d="M${x},${base - gap} v${-(hh - r)} q0,${-r} ${r},${-r} h${barW - 2 * r} q${r},0 ${r},${r} v${hh - r} z" fill="${color}" />`
-          : `<rect x="${x}" y="${base - gap - hh}" width="${barW}" height="${hh}" fill="${color}" />`;
-        base -= h;
-      });
-      const total = d.ok + d.error + d.timeout;
-      const date = new Date(d.day + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" });
-      const t = `${date}\n${total} runs\n✓ ok ${d.ok} · ✕ error ${d.error} · ◷ timeout ${d.timeout}`;
-      out += `<rect x="${padL + i * bw}" y="${padT}" width="${bw}" height="${H - padB - padT}" fill="transparent" data-tip="${esc(t)}" />`;
-      if (i % labelEvery === 0) out += `<text x="${x + barW / 2}" y="${H - 5}" text-anchor="middle">${esc(date)}</text>`;
-    });
-    out += `<line x1="${padL}" x2="${W}" y1="${H - padB}" y2="${H - padB}" stroke="var(--axis)" />`;
-    return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Runs per day by status">${out}</svg>`;
-  }
-
-  function viewTraces({ filters: f, summary: s, daily, runs }) {
-    const errRate = s.runs ? (s.error + s.timeout) / s.runs : 0;
-    const opt = (name, values, current, allLabel) =>
-      `<select data-filter="${name}">${allLabel ? `<option value="">${allLabel}</option>` : ""}${values.map(([v, l]) => `<option value="${esc(v)}" ${String(current ?? "") === String(v) ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
-    const scope = [f.email && `account ${f.email}`, f.workflow && `workflow ${f.workflow}`, f.session_id && `session ${f.session_id}`].filter(Boolean).join(" · ");
-    return `<div class="stack">
-      <div class="spread">
-        <div><h1>Trace runs</h1><p class="sub">${scope ? esc(scope) : "All accounts"}</p></div>
-        <div class="row">
-          ${opt("days", [[7, "Last 7 days"], [14, "Last 14 days"], [30, "Last 30 days"]], f.days)}
-          ${opt("status", [["ok", "✓ ok"], ["error", "✕ error"], ["timeout", "◷ timeout"]], f.status, "Any status")}
-          ${opt("environment", [["production", "production"], ["staging", "staging"], ["dev", "dev"]], f.environment, "Any env")}
-        </div>
-      </div>
-      <div class="grid">
-        ${tile("Runs", num(s.runs))}
-        ${tile("Failure rate", pct(errRate), `${num(s.error)} errors · ${num(s.timeout)} timeouts`)}
-        ${tile("Latency p50 / p95", `${ms(s.p50_ms)} <span class="muted" style="font-size:16px">/ ${ms(s.p95_ms)}</span>`)}
-        ${tile("Spend", usd(s.cost_usd), `${compact(s.tokens)} tokens`)}
-      </div>
-      <div class="card">
-        <div class="spread"><h2>Runs per day</h2>
-          <div class="legend">${STATUS_SERIES.map(([, c, l]) => `<span><i style="background:${c}"></i>${l}</span>`).join("")}</div>
-        </div>
-        ${dailyChart(daily)}
-      </div>
-      <div class="card"><h2>Latest ${runs.length} runs</h2>
-        ${runs.length ? `<div class="table-wrap"><table>
-          <thead><tr><th>Status</th><th>Run</th><th>Account</th><th>Env</th><th class="num">Duration</th><th class="num">Tokens</th><th class="num">Cost</th><th>Started</th><th></th></tr></thead>
-          <tbody>${runs.map((r) => `
-            <tr class="clickable" data-tool="get_agent_session" data-args="${args({ session_id: r.session_id })}" ${r.error_message ? `data-tip="${esc(r.error_message)}"` : ""}>
-              <td>${statusPill(r.status)}</td>
-              <td><strong>${esc(r.name)}</strong><div class="muted" style="font-size:12px">${esc(r.id)} · ${esc(r.session_id)}</div></td>
-              <td class="sub">${esc(r.email)}</td>
-              <td>${esc(r.environment)}</td>
-              <td class="num">${ms(r.duration_ms)}</td>
-              <td class="num">${compact(r.tokens)}</td>
-              <td class="num">${usd(r.cost_usd)}</td>
-              <td class="muted">${ago(r.started_at)}</td>
-              <td>${lfLink(r.langfuse_url)}</td>
-            </tr>`).join("")}</tbody>
-        </table></div>` : `<div class="empty">No runs match these filters</div>`}
-      </div>
-    </div>`;
-  }
-
-  // ---------- Agent session (timeline of runs; span detail lives in Langfuse) ----------
-  const RUN_COLORS = { ok: "var(--good)", error: "var(--critical)", timeout: "var(--warning)" };
-
-  function viewSession({ session: s, runs }) {
-    const t0 = runs.length ? new Date(runs[0].started_at).getTime() : 0;
-    const end = Math.max(...runs.map((r) => new Date(r.started_at).getTime() + r.duration_ms - t0), 1);
-    const lanes = runs.map((r, i) => {
-      const off = new Date(r.started_at).getTime() - t0;
-      const t = `Turn ${i + 1} · ${r.id}\n${{ ok: "✓ ok", error: "✕ error", timeout: "◷ timeout" }[r.status]} · starts +${ms(off)} · ${ms(r.duration_ms)}${r.error_message ? "\n" + r.error_message : ""}`;
-      return `<div class="name">${esc(r.id)}</div>
-        <div class="lane" data-tip="${esc(t)}"><div class="span" style="left:${(off / end) * 100}%;width:${Math.max((r.duration_ms / end) * 100, 0.6)}%;background:${RUN_COLORS[r.status]}"></div></div>
-        <div class="num muted" style="text-align:right;font-variant-numeric:tabular-nums">${ms(r.duration_ms)}</div>`;
-    }).join("");
-    const wall = s.ended_at ? new Date(s.ended_at) - new Date(s.started_at) : Date.now() - new Date(s.started_at);
-    const statuses = [...new Set(runs.map((r) => r.status))];
-    return `<div class="stack">
-      <div class="card stack">
-        <div class="spread">
-          <div><h1>${esc(s.agent_name)}</h1><p class="sub">${esc(s.id)} · ${esc(s.environment)} · <a href="#" data-tool="get_user_account" data-args="${args({ email: s.email })}">${esc(s.email)}</a>${s.end_user_id ? ` · end user ${esc(s.end_user_id)}` : ""}</p></div>
-          <div class="row">${statusPill(s.status)}<span class="badge">${new Date(s.started_at).toLocaleString()}</span>${lfLink(s.langfuse_url)}</div>
-        </div>
-        ${s.transcript_status === "none" ? `<p class="muted" style="font-size:12px">No transcript recorded</p>` : `
-        <div class="spread" style="align-items:center">
-          <p class="sub" style="font-size:13px">Transcript: <strong>${esc(s.transcript_status)}</strong>${s.transcript_status === "sealed" ? ` · ${plural(s.transcript_lines, "event")} · ${compact(s.transcript_bytes)}B gzipped · <code style="font-size:11px">${esc(s.transcript_key)}</code>` : ""}</p>
-          <button class="btn" data-tool="get_session_transcript" data-args="${args({ session_id: s.id })}">Open transcript →</button>
-        </div>`}
-      </div>
-      <div class="grid">
-        ${tile("Runs", num(s.runs), `${num(s.failed_runs)} failed`)}
-        ${tile(s.ended_at ? "Session length" : "Running for", ms(wall), `${ms(s.busy_ms)} in runs`)}
-        ${tile("Tokens", compact(s.tokens_in + s.tokens_out), `${compact(s.tokens_in)} in · ${compact(s.tokens_out)} out`)}
-        ${tile("Cost", usd(s.cost_usd))}
-      </div>
-      <div class="card stack">
-        <div class="spread"><h2 style="margin:0">Run timeline</h2>
-          <div class="legend">${statuses.map((k) => `<span><i style="background:${RUN_COLORS[k]}"></i>${{ ok: "✓ ok", error: "✕ error", timeout: "◷ timeout" }[k]}</span>`).join("")}</div>
-        </div>
-        <div class="wf">${lanes}</div>
-        <div class="muted" style="font-size:12px">Gridlines at 25% intervals of ${ms(end)}</div>
-      </div>
-      <div class="card"><h2>Runs</h2><div class="table-wrap"><table>
-        <thead><tr><th>Turn</th><th>Status</th><th>Run</th><th class="num">Duration</th><th class="num">Tokens</th><th class="num">Cost</th><th>Trace</th></tr></thead>
-        <tbody>${runs.map((r, i) => `<tr class="clickable" data-tool="get_run_trace" data-args="${args({ run_id: r.id })}">
-          <td class="num">${i + 1}</td>
-          <td>${statusPill(r.status)}${r.error_message ? `<div class="muted" style="font-size:12px">${esc(r.error_message)}</div>` : ""}</td>
-          <td>${esc(r.id)}</td>
-          <td class="num">${ms(r.duration_ms)}</td>
-          <td class="num">${compact(r.tokens_in + r.tokens_out)}</td>
-          <td class="num">${usd(r.cost_usd)}</td>
-          <td><span class="row" style="gap:10px"><span class="lf">Spans →</span>${lfLink(r.langfuse_url)}</span></td>
-        </tr>`).join("")}</tbody>
-      </table></div></div>
-    </div>`;
-  }
-
-  // ---------- Session transcript (JSONL from object storage) ----------
-  const EVENT_LABELS = { session_start: "Session start", user_message: "User", tool_call: "Tool call", tool_result: "Tool result",
-                         assistant_message: "Assistant", run_end: "Run end", session_end: "Session end" };
-
-  function eventBody(e) {
-    const json = (v) => `<pre class="code">${esc(typeof v === "string" ? v : JSON.stringify(v, null, 2))}</pre>`;
-    switch (e.type) {
-      case "user_message": case "assistant_message":
-        return `<div>${esc(e.content)}</div>${e.model ? `<div class="muted" style="font-size:12px">${esc(e.model)} · ${num(e.usage?.input_tokens)} in · ${num(e.usage?.output_tokens)} out</div>` : ""}`;
-      case "tool_call": return `<div><code>${esc(e.name)}</code></div>${json(e.input)}`;
-      case "tool_result": return e.error ? `<div class="err-box">${esc(e.error)}</div>` : `<div><code>${esc(e.name)}</code></div>${json(e.output)}`;
-      case "run_end": return `<div class="row">${statusPill(e.status)}<span class="muted">${esc(e.run_id)} · ${ms(e.duration_ms)}</span>${e.error ? `<span class="sub">${esc(e.error)}</span>` : ""}</div>`;
-      case "session_start": return `<div class="muted">${esc(e.agent)}${e.end_user_id ? ` · end user ${esc(e.end_user_id)}` : ""}</div>`;
-      case "session_end": return `<div>${statusPill(e.status)}</div>`;
-      default: return json(e);
-    }
-  }
-
-  function viewTranscript(t) {
-    const t0 = t.events[0] ? new Date(t.events[0].ts).getTime() : 0;
-    const pager = (off, label) => `<button class="btn" data-tool="get_session_transcript" data-args="${args({ session_id: t.session_id, offset: off, limit: t.limit })}">${label}</button>`;
-    const rows = t.events.map((e) => `
-      <div class="ev ev-${esc(e.type)}">
-        <div class="ev-meta"><span class="ev-type">${esc(EVENT_LABELS[e.type] || e.type)}</span><span class="muted">#${e.seq} · +${ms(new Date(e.ts).getTime() - t0)}</span></div>
-        <div class="ev-body">${eventBody(e)}</div>
-      </div>`).join("");
-    return `<div class="stack">
-      <div class="card stack">
-        <div class="spread">
-          <div><h1>Transcript</h1><p class="sub"><a href="#" data-tool="get_agent_session" data-args="${args({ session_id: t.session_id })}">${esc(t.session_id)}</a> · ${esc(t.status)}</p></div>
-          <div class="row">${t.download_url ? `<a href="#" class="lf" data-link="${esc(t.download_url)}">Download .jsonl.gz ↗</a>` : ""}</div>
-        </div>
-        ${t.key ? `<p class="muted" style="font-size:12px"><code>${esc(t.key)}</code> · ${compact(t.bytes)}B · sha256 ${esc(String(t.sha256).slice(0, 12))}…</p>` : `<p class="muted" style="font-size:12px">${t.status === "streaming" ? "Session still running; reading live parts" : "No transcript stored"}</p>`}
-      </div>
-      <div class="card">
-        <div class="spread"><h2>Events ${t.total ? `${t.offset + 1}–${t.offset + t.events.length} of ${t.total}` : ""}</h2>
-          <div class="row">${t.offset > 0 ? pager(Math.max(0, t.offset - t.limit), "← Prev") : ""}${t.offset + t.events.length < t.total ? pager(t.offset + t.limit, "Next →") : ""}</div>
-        </div>
-        ${rows || `<div class="empty">No events</div>`}
-      </div>
-    </div>`;
-  }
-
-  // ---------- Run trace (span waterfall fetched live from Langfuse) ----------
-  const OBS_COLORS = { AGENT: "var(--s1)", SPAN: "var(--s1)", GENERATION: "var(--s2)", TOOL: "var(--s3)", RETRIEVER: "var(--s4)" };
-
-  function viewTrace({ run: r, trace, observations }) {
-    const t0 = new Date(trace.timestamp).getTime();
-    const endOf = (o) => (o.endTime ? new Date(o.endTime).getTime() : new Date(o.startTime).getTime());
-    const total = Math.max(...observations.map((o) => endOf(o) - t0), r.duration_ms, 1);
-    const depth = new Map();
-    const byId = new Map(observations.map((o) => [o.id, o]));
-    const d = (o) => (depth.has(o.id) ? depth.get(o.id) : (depth.set(o.id, o.parentObservationId && byId.has(o.parentObservationId) ? d(byId.get(o.parentObservationId)) + 1 : 0), depth.get(o.id)));
-    const sorted = [...observations].sort((a, b) => new Date(a.startTime) - new Date(b.startTime) || d(a) - d(b));
-    const rows = sorted.map((o) => {
-      const start = new Date(o.startTime).getTime() - t0;
-      const dur = endOf(o) - new Date(o.startTime).getTime();
-      const err = o.level === "ERROR";
-      const usage = o.usageDetails && (o.usageDetails.input || o.usageDetails.output) ? `\n${num(o.usageDetails.input)} in · ${num(o.usageDetails.output)} out tokens` : "";
-      const t = `${o.name} (${o.type.toLowerCase()})\n${err ? "✕ error" : "✓ ok"} · starts +${ms(start)} · ${ms(dur)}${o.model ? "\n" + o.model : ""}${usage}${o.statusMessage ? "\n" + o.statusMessage : ""}`;
-      return `<div class="name" style="padding-left:${d(o) * 14}px" title="${esc(o.name)}">${err ? "✕ " : ""}${esc(o.name)}</div>
-        <div class="lane" data-tip="${esc(t)}"><div class="span" style="left:${(start / total) * 100}%;width:${Math.max((dur / total) * 100, 0.5)}%;background:${OBS_COLORS[o.type] || "var(--muted)"};${err ? "outline:2px solid var(--critical);outline-offset:1px" : ""}"></div></div>
-        <div class="num muted" style="text-align:right;font-variant-numeric:tabular-nums">${ms(dur)}</div>`;
-    }).join("");
-    const types = [...new Set(observations.map((o) => o.type))];
-    return `<div class="stack">
-      <div class="card stack">
-        <div class="spread">
-          <div><h1>${esc(trace.name || r.name)}</h1><p class="sub">${esc(r.id)} · <a href="#" data-tool="get_agent_session" data-args="${args({ session_id: r.session_id })}">${esc(r.session_id)}</a> · ${esc(r.environment)}</p></div>
-          <div class="row">${statusPill(r.status)}${lfLink(r.langfuse_url)}</div>
-        </div>
-        ${r.error_message ? `<div class="err-box">${esc(r.error_message)}</div>` : ""}
-      </div>
-      <div class="card stack">
-        <div class="spread"><h2 style="margin:0">Spans · from Langfuse</h2>
-          <div class="legend">${types.map((k) => `<span><i style="background:${OBS_COLORS[k] || "var(--muted)"}"></i>${esc(k.toLowerCase())}</span>`).join("")}</div>
-        </div>
-        ${observations.length ? `<div class="wf">${rows}</div><div class="muted" style="font-size:12px">Gridlines at 25% intervals of ${ms(total)}</div>` : `<div class="empty">Langfuse has no spans for this trace yet</div>`}
-      </div>
-    </div>`;
-  }
-
-  // ---------- Transcript search (ClickHouse full-text index over the bucket) ----------
-  const EVENT_TYPES = ["user_message", "assistant_message", "tool_call", "tool_result", "run_end", "session_start", "session_end"];
-
-  /** Escape text and wrap query tokens in <mark>, matching case-insensitively on the raw text. */
-  function highlight(text, query) {
-    const tokens = [...new Set(String(query).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean))];
-    if (!tokens.length) return esc(text);
-    const re = new RegExp(tokens.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "giu");
-    let out = "", last = 0;
-    for (const m of String(text).matchAll(re)) {
-      out += esc(text.slice(last, m.index)) + `<mark>${esc(m[0])}</mark>`;
-      last = m.index + m[0].length;
-    }
-    return out + esc(text.slice(last));
-  }
-
-  /** Window of text around the first match, so long tool payloads stay readable. */
-  function snippet(text, query, width = 240) {
-    const lower = text.toLowerCase();
-    const first = String(query).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean)
-      .map((t) => lower.indexOf(t)).filter((i) => i >= 0).sort((a, b) => a - b)[0] ?? 0;
-    const start = Math.max(0, first - width / 3);
-    return (start > 0 ? "…" : "") + text.slice(start, start + width) + (start + width < text.length ? "…" : "");
-  }
-
-  function viewSearch(d) {
-    const f = d.filters || {};
-    const opt = (v, l, cur) => `<option value="${esc(v)}" ${String(cur ?? "") === String(v) ? "selected" : ""}>${esc(l)}</option>`;
-    const keep = (extra) => ({ query: d.query, mode: f.mode, email: f.email, agent: f.agent, environment: f.environment, type: f.type, days: f.days, ...extra });
-    const form = `<form class="card stack" data-search>
-        <div class="row" style="gap:8px">
-          <input name="query" type="search" value="${esc(d.query)}" placeholder="Search transcripts, e.g. RateLimitError or parental leave" style="flex:1;min-width:220px" autofocus>
-          <select name="mode">${opt("all", "All words", f.mode)}${opt("any", "Any word", f.mode)}${opt("phrase", "Exact phrase", f.mode)}</select>
-          <button class="btn" type="submit">Search</button>
-        </div>
-        <div class="row" style="gap:8px">
-          <select name="type">${opt("", "Any event")}${EVENT_TYPES.map((t) => opt(t, t.replace("_", " "), f.type)).join("")}</select>
-          <select name="environment">${opt("", "Any env")}${["production", "staging", "dev"].map((e) => opt(e, e, f.environment)).join("")}</select>
-          <select name="days">${opt("", "All time")}${[[1, "Last 24h"], [7, "Last 7 days"], [30, "Last 30 days"]].map(([v, l]) => opt(v, l, f.days)).join("")}</select>
-          ${f.agent ? `<input type="hidden" name="agent" value="${esc(f.agent)}"><span class="badge">agent: ${esc(f.agent)}</span>` : ""}
-          ${f.email ? `<input type="hidden" name="email" value="${esc(f.email)}"><span class="badge">${esc(f.email)}</span>` : ""}
-        </div>
-      </form>`;
-
-    if (!d.results) {
-      const ix = d.index;
-      const byAccount = new Map();
-      for (const r of ix.folders) {
-        const a = byAccount.get(r.account_id) || { files: 0, months: new Set(), envs: new Set(), agents: new Set() };
-        a.files += r.files; a.months.add(r.month.slice(0, 7)); a.envs.add(r.env); a.agents.add(r.agent);
-        byAccount.set(r.account_id, a);
-      }
-      return `<div class="stack">${form}
-        <div class="grid">
-          ${tile("Indexed events", num(ix.events))}
-          ${tile("Sealed sessions", num(ix.sessions))}
-          ${tile("Full-text index", `${compact(ix.index_bytes)}B`, "ClickHouse text index")}
-          ${tile("Partitions", num(ix.partitions.length), ix.partitions.map((p) => p.partition).join(" · "))}
-        </div>
+  // ---------- products ----------
+  function viewProducts({ org, products }) {
+    if (!products.length)
+      return `<div class="card stack"><h1>Welcome, ${esc(org.name)}</h1>
+        <p class="sub">No products yet. Ask me to add one, e.g. <em>"Add our product Acme Queue (npm @acme/queue) with competitors BullMQ and Inngest"</em>, then add a few realistic coding scenarios and run a simulation.</p></div>`;
+    return `<div class="stack"><div class="spread"><h1>${esc(org.name)}</h1><span class="muted">${products.length} product${products.length === 1 ? "" : "s"}</span></div>
+      <div class="grid-wide">${products.map((p) => `
         <div class="card stack">
-          <h2 style="margin:0">Bucket layout</h2>
-          <p class="sub" style="font-size:13px">Transcripts are filed under Hive-style partition folders. The indexer takes account, date, env and agent from the path and pushes events into ClickHouse${ix.clickhouse ? ` (${esc(ix.clickhouse)})` : ""}, so a reindex for one account or month only walks that part of the tree.</p>
-          <pre class="code">transcripts/
-  sessions/account_id=&lt;id&gt;/date=&lt;yyyy-mm-dd&gt;/env=&lt;env&gt;/agent=&lt;agent&gt;/&lt;session&gt;.jsonl.gz   sealed, indexed
-  parts/account_id=…/date=…/env=…/agent=…/&lt;session&gt;/part-00001.jsonl.gz                   live sessions</pre>
-          <div class="table-wrap"><table>
-            <thead><tr><th>account_id=</th><th class="num">Files</th><th>Months</th><th>env=</th><th>agent=</th></tr></thead>
-            <tbody>${[...byAccount].map(([id, a]) => `<tr>
-              <td>${id}</td><td class="num">${num(a.files)}</td><td>${[...a.months].sort().join(", ")}</td>
-              <td class="sub">${[...a.envs].sort().join(", ")}</td><td class="sub">${[...a.agents].sort().join(", ")}</td></tr>`).join("")}</tbody>
-          </table></div>
-        </div>
-      </div>`;
-    }
+          <div class="spread"><div><h1 style="font-size:17px">${esc(p.name)}</h1><div class="muted" style="font-size:12px">${esc(p.category || p.slug)}</div></div>
+            <div style="text-align:right"><div style="font-size:22px;font-weight:600">${pct(p.hit_rate_30d)}</div><div class="muted" style="font-size:11px">hit rate · 30d · n=${num(p.sessions_30d)}</div></div></div>
+          <div class="muted" style="font-size:12px">${num(p.scenarios)} scenarios · ${num(p.competitors)} competitors · last run ${ago(p.last_run_at)}</div>
+          <div class="row">${go("get_visibility_report", { product: p.slug }, "Report")}${go("get_product", { product: p.slug }, "Context")}${go("list_simulations", { product: p.slug }, "Simulations")}</div>
+        </div>`).join("")}</div></div>`;
+  }
 
-    const r = d.results;
-    const chips = (key, items) => items.map((it) => `<button class="btn" data-tool="search_transcripts" data-args="${args(keep({ [key]: it.value }))}" aria-current="${f[key] === it.value}">${esc(it.value.replace("_", " "))} <span class="muted">${num(it.count)}</span></button>`).join("");
-    const hits = r.hits.map((h) => `
-      <div class="ev clickable" data-tool="get_session_transcript" data-args="${args({ session_id: h.session_id, offset: Math.max(0, h.seq - 3), limit: 20 })}" style="cursor:pointer">
-        <div class="ev-meta">
-          <span class="ev-type">${esc(EVENT_LABELS[h.type] || h.type)}</span>
-          <span class="muted">${esc(h.session_id)} #${h.seq}</span>
-          <span class="muted">${ago(h.ts)}</span>
-        </div>
-        <div class="ev-body">
-          <div style="word-break:break-word">${highlight(snippet(h.text, d.query), d.query)}</div>
-          <div class="muted" style="font-size:12px;margin-top:4px">${esc(h.agent)} · ${esc(h.environment)} · ${esc(h.email || `account ${h.account_id}`)}${h.run_id ? ` · ${esc(h.run_id)}` : ""}</div>
-        </div>
-      </div>`).join("");
-    return `<div class="stack">${form}
+  // ---------- product context ----------
+  function viewProduct({ product: p, scenarios, simulations, warnings, models }) {
+    const comps = p.competitors.length
+      ? p.competitors.map((c) => `<tr><td>${esc(c.name)}</td><td>${chips(c.aliases)}</td><td>${chips(c.packages)}</td><td>${chips(c.domains)}</td></tr>`).join("")
+      : `<tr><td colspan="4" class="muted">No competitors configured</td></tr>`;
+    return `<div class="stack">
       <div class="card stack">
-        <div class="spread" style="align-items:center">
-          <h2 style="margin:0">${num(r.total)} matching events</h2>
-          <span class="muted" style="font-size:12px">${r.stats.ms}ms · ${compact(r.stats.rows_read)} rows read</span>
+        <div class="spread"><div><h1>${esc(p.name)}</h1><div class="sub">${esc(p.category)}</div></div>
+          <div class="row">${go("get_visibility_report", { product: p.slug }, "Visibility report →")}</div></div>
+        ${p.description ? `<p class="sub">${esc(p.description)}</p>` : ""}
+        <div class="grid-wide">
+          <div><h2>Aliases</h2>${chips(p.aliases)}</div><div><h2>Packages</h2>${chips(p.packages)}</div><div><h2>Domains</h2>${chips(p.domains)}</div>
         </div>
-        ${r.facets.agent.length > 1 || f.agent ? `<div class="row" style="gap:6px"><span class="muted" style="font-size:12px;width:44px">Agent</span>${chips("agent", r.facets.agent)}${f.agent ? `<button class="btn" data-tool="search_transcripts" data-args="${args(keep({ agent: undefined }))}">✕ clear</button>` : ""}</div>` : ""}
-        ${r.facets.type.length > 1 || f.type ? `<div class="row" style="gap:6px"><span class="muted" style="font-size:12px;width:44px">Event</span>${chips("type", r.facets.type)}${f.type ? `<button class="btn" data-tool="search_transcripts" data-args="${args(keep({ type: undefined }))}">✕ clear</button>` : ""}</div>` : ""}
       </div>
-      <div class="card">${hits || `<div class="empty">No transcript events match</div>`}
-        ${r.total > r.hits.length ? `<p class="muted" style="font-size:12px;margin-top:10px">Showing the ${r.hits.length} most recent of ${num(r.total)}. Narrow with filters.</p>` : ""}
+      ${warnings.map((w) => `<div class="warn">⚠ ${esc(w)}</div>`).join("")}
+      <div class="card"><h2>Competitors</h2><div class="table-wrap"><table><thead><tr><th>Name</th><th>Aliases</th><th>Packages</th><th>Domains</th></tr></thead><tbody>${comps}</tbody></table></div></div>
+      <div class="card"><h2>Scenarios</h2><div class="table-wrap"><table>
+        <thead><tr><th>#</th><th>Scenario</th><th>Expect</th><th class="num">Hit rate</th><th>Usually picks</th></tr></thead>
+        <tbody>${scenarios.map((s) => `<tr${s.active ? "" : ' style="opacity:.5"'} data-tip="${esc(s.prompt)}">
+          <td class="muted">${s.id}</td><td>${esc(s.title)}${s.active ? "" : ' <span class="badge">retired</span>'}${s.language ? ` <span class="badge">${esc(s.language)}</span>` : ""}</td>
+          <td>${s.expectation === "avoid" ? '<span class="badge">avoid</span>' : '<span class="badge">recommend</span>'}</td>
+          <td class="num">${pct(s.hit_rate)} <span class="ci">n=${num(s.sessions)}</span></td><td>${esc(s.usual_winner || "–")}</td></tr>`).join("") || `<tr><td colspan="5" class="muted">No scenarios yet</td></tr>`}</tbody>
+      </table></div></div>
+      <div class="card"><h2>Recent simulations</h2>${simulations.length ? `<div class="table-wrap"><table><tbody>${simulations.map((s) => `
+        <tr class="clickable" data-tool="get_simulation" data-args="${args({ simulation_id: s.id })}"><td>${esc(s.name)}</td><td>${statusPill(s.status)}</td><td class="muted">${esc(s.models.join(", "))}</td><td class="muted">${ago(s.created_at)}</td></tr>`).join("")}</tbody></table></div>`
+        : `<p class="muted">None yet. Available models: ${esc(models.join(", "))}</p>`}</div>
+    </div>`;
+  }
+
+  // ---------- visibility report ----------
+  function verdictBar(t) {
+    const n = Number(t.sessions) || 1;
+    const parts = ["adopted", "recommended", "mentioned", "competitor", "none"].map((k) => [k, Number(t[k]) || 0]).filter(([, v]) => v);
+    return `<div class="vbar">${parts.map(([k, v]) => `<span class="v-${k}" style="width:${(v / n) * 100}%" data-tip="${esc(VERDICT[k])}: ${v} of ${n}"></span>`).join("")}</div>
+      <div class="legend" style="margin-top:8px">${parts.map(([k, v]) => `<span><i class="v-${k}"></i>${esc(VERDICT[k])} ${v}</span>`).join("")}</div>`;
+  }
+
+  function trendChart(daily) {
+    const W = 640, H = 140, pad = 24, bw = (W - pad) / daily.length;
+    const bars = daily.map((d, i) => {
+      const h = d.hit_rate == null ? 0 : d.hit_rate * (H - 30);
+      const x = pad + i * bw;
+      return `<rect x="${x + 1}" y="${H - 18 - h}" width="${Math.max(1, bw - 3)}" height="${h}" rx="2" fill="var(--s1)" data-tip="${esc(d.day)}: ${pct(d.hit_rate)} of ${d.sessions} sessions"></rect>
+        ${d.sessions ? "" : `<rect x="${x + 1}" y="${H - 20}" width="${Math.max(1, bw - 3)}" height="2" fill="var(--grid)"></rect>`}`;
+    }).join("");
+    const grid = [0, 0.5, 1].map((v) => `<line x1="${pad}" x2="${W}" y1="${H - 18 - v * (H - 30)}" y2="${H - 18 - v * (H - 30)}" stroke="var(--grid)"></line><text x="0" y="${H - 14 - v * (H - 30)}">${v * 100}%</text>`).join("");
+    const labels = daily.filter((_, i) => i % Math.ceil(daily.length / 6) === 0).map((d) => `<text x="${pad + daily.indexOf(d) * bw}" y="${H - 2}">${esc(d.day.slice(5))}</text>`).join("");
+    return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Daily hit rate">${grid}${bars}${labels}</svg>`;
+  }
+
+  function viewReport(d) {
+    const t = d.totals;
+    const max = Math.max(1, ...d.share_of_voice.map((v) => Number(v.share) || 0));
+    const sel = (name, opts, cur) => `<select data-filter="${name}">${opts.map(([v, l]) => `<option value="${esc(v)}"${String(v) === String(cur ?? "") ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
+    if (!Number(t.sessions))
+      return `<div class="stack"><h1>${esc(d.product.name)}</h1><div class="card empty">No scored agent sessions in the last ${d.filters.days} days.<br>Run a simulation to see how coding agents treat ${esc(d.product.name)}.</div></div>`;
+    return `<div class="stack">
+      <div class="spread"><div><h1>${esc(d.product.name)}</h1><div class="sub">Do coding agents pick ${esc(d.product.name)}?</div></div>
+        <div class="row">${sel("model", [["", "All models"], ...d.models.map((m) => [m, m])], d.filters.model)}${sel("days", [[7, "7 days"], [30, "30 days"], [90, "90 days"]], d.filters.days)}</div></div>
+      <div class="grid">
+        ${tile("Hit rate", pct(t.hit_rate), `${ci(t.hit_ci)} 95% CI · n=${num(t.sessions)}`)}
+        ${tile("Adopted", pct(t.adoption_rate), "installed or imported it")}
+        ${tile("Lost to competitor", pct(t.competitor_rate), `${num(t.competitor)} sessions`)}
+        ${tile("Agent spend", usd(t.cost_usd), `${num(t.sessions)} sessions`)}
       </div>
+      <div class="card"><h2>Verdicts</h2>${verdictBar(t)}</div>
+      <div class="grid-wide">
+        <div class="card"><h2>Share of voice</h2><div class="hbars">${d.share_of_voice.map((v) => `
+          <div class="hit" style="${v.target ? "font-weight:600" : ""}">${esc(v.tool)}</div>
+          <div class="track"><span class="bar ${v.target ? "target" : "rival"}" style="width:${((Number(v.share) || 0) / max) * 100}%" data-tip="${esc(v.tool)}: recommended or adopted in ${v.recommended} sessions, mentioned in ${v.mentioned}"></span></div>
+          <div class="val">${pct(v.share)}</div>`).join("") || '<span class="muted">No tools detected</span>'}</div>
+          <p class="muted" style="font-size:12px;margin-top:8px">Share of sessions where the agent recommended or adopted each tool.</p></div>
+        <div class="card"><h2>By model</h2><table><thead><tr><th>Model</th><th class="num">Hit rate</th><th class="num">Lost</th></tr></thead><tbody>${d.by_model.map((m) => `
+          <tr class="clickable" data-tool="get_visibility_report" data-args="${args({ product: d.product.slug, days: d.filters.days, model: m.model })}"><td>${esc(m.model)}</td><td class="num">${pct(m.hit_rate)} ${ci(m.hit_ci)}</td><td class="num">${num(m.competitor)}/${num(m.sessions)}</td></tr>`).join("")}</tbody></table></div>
+      </div>
+      ${d.by_profile.length ? `<div class="card"><h2>By developer profile</h2><table><thead><tr><th>Profile</th><th class="num">Hit rate</th><th class="num">n</th><th class="num">Questions answered</th></tr></thead><tbody>${d.by_profile.map((p) => `
+        <tr><td>${esc(p.name)}</td><td class="num">${pct(p.hit_rate)} ${ci(p.hit_ci)}</td><td class="num">${num(p.sessions)}</td><td class="num">${Number(p.avg_user_turns || 0).toFixed(1)} avg</td></tr>`).join("")}</tbody></table></div>` : ""}
+      <div class="card"><h2>Daily hit rate</h2>${trendChart(d.daily)}</div>
+      <div class="card"><h2>By scenario (weakest first)</h2><div class="table-wrap"><table>
+        <thead><tr><th>Scenario</th><th class="num">Hit rate</th><th class="num">n</th><th>Usually picks</th></tr></thead>
+        <tbody>${d.by_scenario.map((s) => `<tr><td>${esc(s.title)}${s.expectation === "avoid" ? ' <span class="badge">avoid</span>' : ""}</td><td class="num">${pct(s.hit_rate)} ${ci(s.hit_ci)}</td><td class="num">${num(s.sessions)}</td><td>${esc(s.usual_winner || "–")}</td></tr>`).join("")}</tbody>
+      </table></div></div>
+      ${d.recent_losses.length ? `<div class="card"><h2>Recent losses</h2><table><tbody>${d.recent_losses.map((l) => `
+        <tr class="clickable" data-tool="get_agent_session" data-args="${args({ session_id: l.id })}"><td>${esc(l.scenario)}</td><td class="muted">${esc(l.model)}</td><td>${verdict("competitor")} ${esc(l.winner || "")}</td><td class="muted">${ago(l.ended_at)}</td></tr>`).join("")}</tbody></table></div>` : ""}
+    </div>`;
+  }
+
+  // ---------- simulations ----------
+  function viewSimulations({ simulations }) {
+    if (!simulations.length) return `<div class="card empty">No simulations yet. Ask me to run one.</div>`;
+    return `<div class="card"><h2>Simulations</h2><div class="table-wrap"><table>
+      <thead><tr><th>Name</th><th>Product</th><th>Status</th><th class="num">Progress</th><th class="num">Hit rate</th><th>Started</th></tr></thead>
+      <tbody>${simulations.map((s) => `<tr class="clickable" data-tool="get_simulation" data-args="${args({ simulation_id: s.id })}">
+        <td>${esc(s.name)}</td><td>${esc(s.product)}</td><td>${statusPill(s.status)}</td><td class="num">${num(s.finished)}/${num(s.sessions)}</td><td class="num">${pct(s.hit_rate)}</td><td class="muted">${ago(s.created_at)}</td></tr>`).join("")}</tbody>
+    </table></div></div>`;
+  }
+
+  function viewSimulation(d) {
+    const s = d.simulation, t = d.totals;
+    const finished = ["completed", "failed", "timeout", "cancelled"].reduce((a, k) => a + (d.status[k] || 0), 0);
+    const cellColor = (c) => (c.hit_rate == null ? "var(--surface-2)" : `color-mix(in srgb, var(--good) ${Math.round(c.hit_rate * 45)}%, color-mix(in srgb, var(--critical) ${Math.round((1 - c.hit_rate) * 25)}%, var(--surface)))`);
+    return `<div class="stack">
+      <div class="spread"><div><h1>${esc(s.name)}</h1><div class="sub">${esc(s.product)} · ${esc(s.harness)} · ${s.repeats}× per scenario and model</div></div>
+        <div class="row">${statusPill(s.status)}${s.status === "queued" || s.status === "running" ? go("get_simulation", { simulation_id: s.id }, "↻ Refresh") : ""}</div></div>
+      <div class="card"><div class="spread"><h2>Progress</h2><span class="muted">${finished}/${t.sessions} sessions finished</span></div>
+        <div class="meter"><span style="width:${(finished / Math.max(1, t.sessions)) * 100}%"></span></div>
+        <div class="legend" style="margin-top:8px">${Object.entries(d.status).map(([k, v]) => `<span>${statusPill(k)} ${v}</span>`).join("")}</div></div>
+      <div class="grid">
+        ${tile("Hit rate", pct(t.hit_rate), `${ci(t.hit_ci)} n=${t.scored}`)}
+        ${d.by_model.map((m) => tile(m.model, pct(m.hit_rate), `${ci(m.hit_ci)} n=${m.scored}`)).join("")}
+        ${tile("Agent spend", usd(t.cost_usd))}
+      </div>
+      ${d.by_profile.length ? `<div class="grid">${d.by_profile.map((p) => tile(p.profile, pct(p.hit_rate), `${ci(p.hit_ci)} n=${p.scored}`)).join("")}</div>` : ""}
+      <div class="card"><h2>Scenario × model</h2><div class="table-wrap"><table>
+        <thead><tr><th>Scenario</th>${s.models.map((m) => `<th class="num">${esc(m)}</th>`).join("")}</tr></thead>
+        <tbody>${d.matrix.map((r) => `<tr><td>${esc(r.scenario)}${r.expectation === "avoid" ? ' <span class="badge">avoid</span>' : ""}</td>${r.cells.map((c) => `<td><div class="cell" style="background:${cellColor(c)}" data-tip="${esc(c.model)}: ${c.hits} hits of ${c.scored} scored (${c.sessions} sessions)">${c.scored ? `${c.hits}/${c.scored}` : "…"}</div></td>`).join("")}</tr>`).join("")}</tbody>
+      </table></div></div>
+      <div class="card"><h2>Agent sessions</h2><div class="table-wrap"><table>
+        <thead><tr><th>Scenario</th><th>Model</th><th>Profile</th><th>#</th><th>Status</th><th>Verdict</th><th>Went with</th></tr></thead>
+        <tbody>${d.sessions.map((x) => `<tr class="clickable" data-tool="get_agent_session" data-args="${args({ session_id: x.id })}">
+          <td>${esc(x.scenario)}</td><td class="muted">${esc(x.model)}</td><td class="muted">${esc(x.profile || "–")}</td><td class="muted">${x.attempt}</td><td>${statusPill(x.status)}</td><td>${x.verdict ? verdict(x.verdict) : '<span class="muted">–</span>'}</td><td>${esc(x.winner || "–")}</td></tr>`).join("")}</tbody>
+      </table></div></div>
+    </div>`;
+  }
+
+  // ---------- session ----------
+  function viewSession({ session: s }) {
+    const dur = s.started_at && s.ended_at ? ms(new Date(s.ended_at) - new Date(s.started_at)) : "–";
+    const mentions = (s.mentions || []).map((m) => `
+      <div class="card stack">
+        <div class="spread"><strong>${esc(m.tool)}${m.target ? ' <span class="badge">your product</span>' : ""}</strong>${verdict(m.level)}</div>
+        ${m.evidence.map((e) => `<div class="ev clickable" data-tool="get_session_transcript" data-args="${args({ session_id: s.id, offset: Math.max(0, e.seq - 3), limit: 20 })}">
+          <div class="ev-meta"><span class="ev-type">${esc(e.level)}</span><span class="muted">event #${e.seq} · ${esc(e.kind)}</span></div>
+          <div class="ev-body"><code>${esc(e.snippet)}</code></div></div>`).join("")}
+      </div>`).join("");
+    return `<div class="stack">
+      <div class="spread"><div><h1>${esc(s.scenario)}</h1><div class="sub">${esc(s.model)} · ${esc(s.harness)} · run ${s.attempt} of ${esc(s.simulation)}${s.profile ? ` · as ${esc(s.profile)}` : ""}</div></div>
+        <div class="row">${statusPill(s.status)}${verdict(s.verdict)}</div></div>
+      <div class="grid">
+        ${tile("Went with", esc(s.winner || "–"))}
+        ${tile("Duration", dur)}
+        ${tile("Events", num(s.events), `${num(s.user_turns)} questions answered by the developer`)}
+        ${tile("Cost", usd(s.cost_usd), `${num(s.tokens_in)} in · ${num(s.tokens_out)} out`)}
+      </div>
+      ${s.error_message ? `<div class="err-box">${esc(s.error_message)}</div>` : ""}
+      <div class="card stack"><h2>Task given to the agent</h2><div class="prompt">${esc(s.prompt)}</div>${s.repo_url ? `<div class="muted">Starter repo: <code>${esc(s.repo_url)}</code></div>` : ""}</div>
+      ${s.profile ? `<div class="card"><h2>Simulated developer</h2><strong>${esc(s.profile)}</strong><p class="sub">${esc(s.profile_summary || "")}</p></div>` : ""}
+      <div class="spread"><h2 style="margin:0">Evidence</h2>${go("get_session_transcript", { session_id: s.id }, "Full transcript →")}</div>
+      ${mentions || `<div class="card empty">${s.verdict ? "No tracked product was mentioned by the agent." : "Not scored yet."}</div>`}
+    </div>`;
+  }
+
+  // ---------- transcript ----------
+  const str = (v) => (typeof v === "string" ? v : JSON.stringify(v, null, 2));
+  function eventParts(e) {
+    const m = e.message;
+    if (m && Array.isArray(m.content)) return m.content.map((b) => b.type === "text" ? ["text", b.text] : b.type === "tool_use" ? ["code", `${b.name} ${str(b.input)}`] : b.type === "tool_result" ? ["out", str(b.content)] : ["out", str(b)]);
+    if (m && typeof m.content === "string") return [["text", m.content]];
+    if (e.item) return [[e.item.type === "agent_message" ? "text" : "code", e.item.text ?? e.item.command ?? str(e.item)]];
+    if (e.type === "assistant_message" || e.type === "user_message" || e.type === "simulated_user") return [["text", str(e.content)]];
+    if (e.type === "tool_call") return [["code", `${e.name ?? ""} ${str(e.input)}`]];
+    const { seq, ts, type, ...rest } = e;
+    return [["out", str(rest)]];
+  }
+  function viewTranscript(t) {
+    const evidence = new Set(t.evidence_seqs);
+    const pager = `<div class="row">
+      ${t.offset > 0 ? go("get_session_transcript", { session_id: t.session_id, offset: Math.max(0, t.offset - t.limit), limit: t.limit }, "← Earlier") : ""}
+      <span class="muted">${t.total ? t.offset + 1 : 0}–${t.offset + t.events.length} of ${t.total}</span>
+      ${t.offset + t.events.length < t.total ? go("get_session_transcript", { session_id: t.session_id, offset: t.offset + t.limit, limit: t.limit }, "Later →") : ""}</div>`;
+    const rows = t.events.map((e) => {
+      const role = e.message?.role || e.role || "";
+      return `<div class="ev ${evidence.has(e.seq) ? "evidence" : ""}">
+        <div class="ev-meta"><span class="ev-type">${esc(e.type)}${role && role !== e.type ? ` · ${esc(role)}` : ""}</span><span class="muted">#${e.seq}${evidence.has(e.seq) ? " · evidence" : ""}</span></div>
+        <div class="ev-body">${eventParts(e).map(([k, v]) => k === "text" ? `<div style="white-space:pre-wrap">${esc(v)}</div>` : `<pre class="code">${esc(String(v).slice(0, 4000))}</pre>`).join("")}</div>
+      </div>`;
+    }).join("");
+    return `<div class="stack">
+      <div class="spread"><div><h1>Transcript</h1><div class="sub">${esc(t.scenario)} · ${esc(t.model)}</div></div>
+        <div class="row">${verdict(t.verdict)}${go("get_agent_session", { session_id: t.session_id }, "Session")}</div></div>
+      ${pager}<div class="card">${rows || '<div class="empty">No events yet</div>'}</div>${pager}</div>`;
+  }
+
+  // ---------- vault: profiles + task library ----------
+  function viewProfiles({ profiles, query }) {
+    return `<div class="stack"><div class="spread"><h1>Developer profiles</h1>${go("browse_task_library", {}, "Task library →")}</div>
+      ${profiles.length ? `<div class="grid-wide">${profiles.map((p) => `<div class="card stack">
+        <div><strong>${esc(p.name)}</strong> <span class="badge">${esc(p.slug)}</span></div>
+        <p class="sub" style="font-size:13px">${esc(p.summary)}</p>
+        ${chips(Object.entries(p.attributes || {}).filter(([, v]) => typeof v !== "object" || Array.isArray(v)).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(", ") : v}`))}
+      </div>`).join("")}</div>` : `<div class="card empty">No profiles${query ? ` matching "${esc(query)}"` : " synced from the vault yet"}.</div>`}</div>`;
+  }
+  function viewLibrary({ tasks, categories, filters }) {
+    return `<div class="stack"><div class="spread"><h1>Task library</h1>${go("list_developer_profiles", {}, "Developer profiles →")}</div>
+      <div class="row">${categories.map((c) => go("browse_task_library", { category: c.category }, `${esc(c.category || "uncategorized")} · ${c.tasks}`, filters.category === c.category ? "btn\" aria-current=\"true" : "btn")).join("")}</div>
+      <div class="card">${tasks.map((t) => `<div class="ev" data-tip="${esc(t.prompt)}">
+        <div class="ev-meta"><span class="ev-type">#${t.id}</span><span class="muted">${esc(t.category || "")}</span><span class="muted">${esc(t.language || "")}</span></div>
+        <div class="ev-body"><strong>${esc(t.title)}</strong><div class="sub" style="font-size:13px;margin-top:2px">${esc(t.prompt)}</div>${chips(t.tags)}</div></div>`).join("") || '<div class="empty">No tasks</div>'}</div></div>`;
+  }
+
+  // ---------- search ----------
+  function highlight(text, query) {
+    const words = String(query || "").toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+    let out = esc(text);
+    for (const w of words) out = out.replace(new RegExp(`(${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "gi"), "<mark>$1</mark>");
+    return out;
+  }
+  function snippet(text, query, width = 260) {
+    const w = String(query || "").toLowerCase().split(/\s+/)[0] || "";
+    const i = Math.max(0, text.toLowerCase().indexOf(w) - width / 3);
+    return (i > 0 ? "…" : "") + text.slice(i, i + width) + (i + width < text.length ? "…" : "");
+  }
+  function viewSearch(d) {
+    const f = d.filters, r = d.results;
+    const form = `<form data-search class="row card">
+      <input type="search" name="query" value="${esc(d.query)}" placeholder="Search agent transcripts" style="flex:1;min-width:180px">
+      <select name="mode">${["all", "any", "phrase"].map((m) => `<option${m === f.mode ? " selected" : ""}>${m}</option>`).join("")}</select>
+      ${product ? `<input type="hidden" name="product" value="${esc(f.product || "")}">` : ""}
+      <button class="btn" type="submit">Search</button></form>`;
+    return `<div class="stack">${form}
+      <div class="card"><div class="spread"><h2 style="margin:0">${num(r.total)} matching events</h2><span class="muted" style="font-size:12px">${r.stats.ms}ms · ${esc(r.stats.backend)}</span></div></div>
+      <div class="card">${r.hits.map((h) => `
+        <div class="ev clickable" data-tool="get_session_transcript" data-args="${args({ session_id: h.session_id, offset: Math.max(0, h.seq - 3), limit: 20 })}">
+          <div class="ev-meta"><span class="ev-type">${esc(h.type)}</span><span class="muted">${esc(h.model)} · #${h.seq}</span><span class="muted">${ago(h.ts)}</span></div>
+          <div class="ev-body" style="word-break:break-word">${highlight(snippet(h.text, d.query), d.query)}</div></div>`).join("") || '<div class="empty">No transcript events match</div>'}</div>
     </div>`;
   }
 
   // ---------- boot ----------
+  if (PREVIEW?.error) flash(PREVIEW.error.map((c) => c.text).join(" "));
   if (PREVIEW?.data) show(PREVIEW.data, true);
   post({ type: "ui-lifecycle-iframe-ready" });
   post({ type: "ui-request-render-data", messageId: "render-data" });

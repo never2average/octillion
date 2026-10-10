@@ -1,190 +1,312 @@
-import { createHash } from "node:crypto";
-import { gunzipSync, gzipSync } from "node:zlib";
-import type { Db, Queryable } from "./db.js";
-import { getStore } from "./storage.js";
-import { indexSealedTranscript, searchEnabled } from "./search.js";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+import { createClient, type ClickHouseClient } from "@clickhouse/client";
+import { getDb } from "./db.js";
 
 /**
- * Session transcripts are gzipped JSONL in object storage; Postgres keeps the pointer.
- * Keys use Hive-style partition folders so ClickHouse (and lifecycle rules) can prune by path:
+ * Raw sub-agent transcripts: one JSONL line per event, stored verbatim.
  *
- *   streaming: parts/account_id=<id>/date=<yyyy-mm-dd>/env=<env>/agent=<agent>/<session>/part-00001.jsonl.gz
- *              plus a session_transcript_parts row per part.
- *   sealed:    sessions/account_id=<id>/date=<yyyy-mm-dd>/env=<env>/agent=<agent>/<session>.jsonl.gz
- *              (parts compacted and deduped by seq), agent_sessions.transcript_* filled in, parts deleted,
- *              then the events are indexed into ClickHouse for full-text search.
+ * Production: ClickHouse (`octillion.transcript_events`), one row per event, with a full-text index on a
+ * lowercased copy of the searchable text. Retried writes are collapsed by ReplacingMergeTree on
+ * (org_id, session_id, seq) and reads take one row per seq.
+ * Local dev / tests: when CLICKHOUSE_URL is unset the same rows go to Postgres (`transcript_events`).
  *
- * Sealed objects and in-flight parts live under different top-level prefixes, so a glob over
- * sessions/** only ever matches complete transcripts. date is the session's UTC start date.
+ * Events are whatever the harness emits (Claude Code stream-json, Codex, our own format...). We only need
+ * `type`; `seq` and `ts` are filled in when missing, and searchable text is pulled from every string field.
  */
-export interface TranscriptEvent {
-  seq: number;
-  ts: string;
-  type: string;
-  run_id?: string;
-  langfuse_trace_id?: string;
-  [key: string]: unknown;
+
+export interface RawEvent { seq?: number; ts?: string; type?: string; [k: string]: unknown }
+export interface StoredEvent { seq: number; ts: string; type: string; text: string; raw: RawEvent }
+export interface SessionRef { id: string; org_id: number; product_id: number; simulation_id: string; model: string }
+
+export interface SearchParams {
+  orgId: number;
+  query: string;
+  mode?: "all" | "any" | "phrase";
+  productId?: number;
+  simulationId?: string;
+  sessionId?: string;
+  model?: string;
+  type?: string;
+  days?: number;
+  limit?: number;
 }
-export type NewTranscriptEvent = Omit<TranscriptEvent, "seq"> & { seq?: number };
-
-const JSONL_GZ = "application/x-ndjson";
-
-interface SessionKeyRow {
-  id: string; account_id: number; agent_name: string; environment: string; started_at: Date; transcript_status: string;
-}
-
-async function sessionRow(q: Queryable, sessionId: string): Promise<SessionKeyRow> {
-  const [row] = await q.query<SessionKeyRow>(
-    "SELECT id, account_id, agent_name, environment, started_at, transcript_status FROM agent_sessions WHERE id = $1",
-    [sessionId],
-  );
-  if (!row) throw new Error(`No agent session ${sessionId}`);
-  return row;
-}
-
-/** Partition folder values must be path- and Hive-safe. */
-const folderValue = (v: string) => v.toLowerCase().replace(/[^a-z0-9_-]+/g, "-");
-
-export function partitionPath(s: Pick<SessionKeyRow, "account_id" | "agent_name" | "environment" | "started_at">): string {
-  const date = new Date(s.started_at).toISOString().slice(0, 10);
-  return `account_id=${s.account_id}/date=${date}/env=${folderValue(s.environment)}/agent=${folderValue(s.agent_name)}`;
+export interface SearchHit { session_id: string; simulation_id: string; product_id: number; model: string; seq: number; ts: string; type: string; text: string }
+export interface SearchResult {
+  total: number;
+  hits: SearchHit[];
+  facets: { model: { value: string; count: number }[]; type: { value: string; count: number }[] };
+  stats: { ms: number; backend: string };
 }
 
-const sealedKey = (s: SessionKeyRow) => `sessions/${partitionPath(s)}/${s.id}.jsonl.gz`;
-const partKey = (s: SessionKeyRow, partNo: number) =>
-  `parts/${partitionPath(s)}/${s.id}/part-${String(partNo).padStart(5, "0")}.jsonl.gz`;
+interface TranscriptStore {
+  kind: "clickhouse" | "postgres";
+  append(s: SessionRef, events: StoredEvent[]): Promise<void>;
+  read(orgId: number, sessionId: string, offset: number, limit: number): Promise<{ total: number; events: StoredEvent[] }>;
+  search(p: SearchParams): Promise<SearchResult>;
+}
 
-const encode = (events: TranscriptEvent[]) =>
-  gzipSync(Buffer.from(events.map((e) => JSON.stringify(e)).join("\n") + "\n"));
+// ---------- normalisation ----------
 
-const decode = (buf: Buffer): TranscriptEvent[] =>
-  gunzipSync(buf).toString("utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+const SKIP_KEYS = new Set(["seq", "ts", "timestamp", "type", "id", "uuid", "session_id", "parent_uuid", "signature", "run_id", "usage", "cost_usd"]);
+const MAX_TEXT = 50_000;
 
-/** Append events to a session's transcript as one new part. Events without `seq` are numbered after the last one. */
-export async function appendTranscript(db: Db, sessionId: string, events: NewTranscriptEvent[]) {
-  if (!events.length) return null;
-  const session = await sessionRow(db, sessionId);
-  if (session.transcript_status === "sealed" || session.transcript_status === "expired")
-    throw new Error(`Transcript for ${sessionId} is ${session.transcript_status}; cannot append`);
+/** Every string in the event (message text, tool names, commands, file contents...), depth-first. */
+export function eventText(e: unknown): string {
+  const out: string[] = [];
+  let len = 0;
+  const walk = (v: unknown, key?: string) => {
+    if (len > MAX_TEXT || (key && SKIP_KEYS.has(key))) return;
+    if (typeof v === "string") { out.push(v); len += v.length; }
+    else if (Array.isArray(v)) v.forEach((x) => walk(x));
+    else if (v && typeof v === "object") for (const [k, x] of Object.entries(v)) walk(x, k);
+  };
+  walk(e);
+  return out.join(" ").slice(0, MAX_TEXT);
+}
 
-  const [{ part_no, last_seq }] = await db.query<{ part_no: number; last_seq: number }>(
-    `SELECT coalesce(max(part_no), 0) + 1 AS part_no, coalesce(max(last_seq), 0) AS last_seq
-       FROM session_transcript_parts WHERE session_id = $1`,
-    [sessionId],
-  );
-  let next = last_seq;
-  const numbered = events.map(({ seq, ...rest }) => ({ seq: seq ?? ++next, ...rest }) as TranscriptEvent);
-  const body = encode(numbered);
-  const objectKey = partKey(session, part_no);
-
-  // Object first, then the row: a crash in between leaves an orphan object, never a dangling row.
-  const store = await getStore();
-  await store.put(objectKey, body, JSONL_GZ);
-  await db.transaction(async (tx) => {
-    await tx.query(
-      `INSERT INTO session_transcript_parts (session_id, part_no, object_key, first_seq, last_seq, lines, bytes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [sessionId, part_no, objectKey, numbered[0].seq, numbered.at(-1)!.seq, numbered.length, body.length],
-    );
-    await tx.query(
-      "UPDATE agent_sessions SET transcript_status = 'streaming' WHERE id = $1 AND transcript_status = 'none'",
-      [sessionId],
-    );
+/** Assign seq (continuing from `lastSeq`) and ts where missing, and extract searchable text. */
+export function normalize(events: RawEvent[], lastSeq: number): StoredEvent[] {
+  let next = lastSeq;
+  return events.map((raw) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Each transcript event must be a JSON object");
+    const seq = Number.isInteger(raw.seq) && Number(raw.seq) > 0 ? Number(raw.seq) : next + 1;
+    next = Math.max(next, seq);
+    const ts = typeof raw.ts === "string" ? raw.ts : typeof raw.timestamp === "string" ? raw.timestamp : new Date().toISOString();
+    const type = typeof raw.type === "string" && raw.type ? raw.type : "event";
+    return { seq, ts: new Date(ts).toISOString(), type, text: eventText(raw), raw: { ...raw, seq, ts, type } };
   });
-  return { part_no, object_key: objectKey, lines: numbered.length };
 }
 
-async function readParts(q: Queryable, sessionId: string) {
-  const parts = await q.query<{ object_key: string }>(
-    "SELECT object_key FROM session_transcript_parts WHERE session_id = $1 ORDER BY part_no",
-    [sessionId],
-  );
-  const store = await getStore();
-  const bodies = await Promise.all(parts.map((p) => store.get(p.object_key)));
-  // Retried appends can repeat a seq; keep the first copy and order by seq.
-  const bySeq = new Map<number, TranscriptEvent>();
-  for (const e of bodies.flatMap(decode)) if (!bySeq.has(e.seq)) bySeq.set(e.seq, e);
-  return { keys: parts.map((p) => p.object_key), events: [...bySeq.values()].sort((a, b) => a.seq - b.seq) };
+/** Parse a JSONL body (blank lines ignored). */
+export function parseJsonl(body: string): RawEvent[] {
+  return body.split("\n").map((l) => l.trim()).filter(Boolean).map((line, i) => {
+    try { return JSON.parse(line) as RawEvent; }
+    catch { throw new Error(`Line ${i + 1} is not valid JSON`); }
+  });
 }
+
+// ---------- ClickHouse ----------
+
+interface ClickHouseConfig { url: string; username: string; password: string; database: string }
 
 /**
- * Compact all parts into the final object, record the pointer on agent_sessions, then index it for search.
- * Pass { index: false } when bulk-loading and run reindexTranscripts() once at the end instead.
+ * CLICKHOUSE_URL plus CLICKHOUSE_USER / CLICKHOUSE_PASSWORD, or a gitignored CLICKHOUSE_CREDENTIALS_FILE with
+ * "Username: ..." / "Password: ..." (and optionally "Host: ...") lines, which wins.
  */
-export async function sealTranscript(db: Db, sessionId: string, { index = true } = {}) {
-  const session = await sessionRow(db, sessionId);
-  if (session.transcript_status !== "streaming") throw new Error(`Transcript for ${sessionId} is ${session.transcript_status}; nothing to seal`);
-
-  const { keys, events } = await readParts(db, sessionId);
-  const body = encode(events);
-  const key = sealedKey(session);
-  const sha256 = createHash("sha256").update(body).digest("hex");
-
-  const store = await getStore();
-  await store.put(key, body, JSONL_GZ);
-  await db.transaction(async (tx) => {
-    await tx.query(
-      `UPDATE agent_sessions
-          SET transcript_status = 'sealed', transcript_key = $2, transcript_lines = $3,
-              transcript_bytes = $4, transcript_sha256 = $5, transcript_sealed_at = now()
-        WHERE id = $1`,
-      [sessionId, key, events.length, body.length, sha256],
-    );
-    await tx.query("DELETE FROM session_transcript_parts WHERE session_id = $1", [sessionId]);
-  });
-  await store.delete(keys); // after commit; a failure here only leaves orphaned parts
-
-  // Search indexing is best-effort: a failure leaves transcript_indexed_at NULL for `npm run search:reindex`.
-  let indexed = false;
-  if (index && searchEnabled()) {
-    try {
-      await indexSealedTranscript(db, sessionId, key);
-      indexed = true;
-    } catch (err) {
-      console.error(`search: failed to index ${sessionId}: ${(err as Error).message}`);
+function chConfig(): ClickHouseConfig | null {
+  const file: Record<string, string> = {};
+  const credFile = process.env.CLICKHOUSE_CREDENTIALS_FILE;
+  if (credFile) {
+    const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+    for (const line of readFileSync(path.resolve(root, credFile), "utf8").split(/\r?\n/)) {
+      const m = line.match(/^\s*([A-Za-z_ ]+?)\s*[:=]\s*(.*?)\s*$/);
+      if (m) file[m[1].toLowerCase()] = m[2];
     }
   }
-  return { key, lines: events.length, bytes: body.length, sha256, indexed };
+  const host = file.url ?? file.host;
+  const url = process.env.CLICKHOUSE_URL || (host ? (/^https?:\/\//.test(host) ? host : `https://${host}:8443`) : "");
+  if (!url) return null;
+  return {
+    url,
+    username: file.username ?? file.user ?? process.env.CLICKHOUSE_USER ?? "default",
+    password: file.password ?? process.env.CLICKHOUSE_PASSWORD ?? "",
+    database: process.env.CLICKHOUSE_DATABASE ?? "octillion",
+  };
 }
 
-/** Page through a transcript, whether it's still streaming or sealed. */
-export async function readTranscript(db: Db, sessionId: string, offset = 0, limit = 50) {
-  const [row] = await db.query<{
-    transcript_status: string; transcript_key: string | null; transcript_lines: number | null;
-    transcript_bytes: number | null; transcript_sha256: string | null; transcript_sealed_at: Date | null;
-  }>(
-    `SELECT transcript_status, transcript_key, transcript_lines, transcript_bytes, transcript_sha256, transcript_sealed_at
-       FROM agent_sessions WHERE id = $1`,
-    [sessionId],
-  );
-  if (!row) throw new Error(`No agent session ${sessionId}`);
+function clickhouseStore(cfg: ClickHouseConfig): TranscriptStore {
+  const TABLE = `${cfg.database}.transcript_events`;
+  const client: ClickHouseClient = createClient({
+    url: cfg.url, username: cfg.username, password: cfg.password,
+    request_timeout: 60_000,
+    clickhouse_settings: { enable_full_text_index: 1, date_time_input_format: "best_effort" },
+  });
+  const columns = `
+    org_id         UInt32,
+    product_id     UInt32,
+    simulation_id  String,
+    session_id     String,
+    model          LowCardinality(String),
+    seq            UInt32,
+    ts             DateTime64(3, 'UTC'),
+    type           LowCardinality(String),
+    text           String,
+    text_lc        String MATERIALIZED lower(text),
+    raw            String CODEC(ZSTD(3)),
+    ingested_at    DateTime64(3, 'UTC') DEFAULT now64(3)`;
+  const engine = `ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(ts) ORDER BY (org_id, session_id, seq)`;
 
-  let events: TranscriptEvent[] = [];
-  let downloadUrl: string | null = null;
-  if (row.transcript_status === "sealed" && row.transcript_key) {
-    const store = await getStore();
-    const body = await store.get(row.transcript_key);
-    const actual = createHash("sha256").update(body).digest("hex");
-    if (row.transcript_sha256 && actual !== row.transcript_sha256)
-      throw new Error(`Transcript ${row.transcript_key} failed its sha256 check`);
-    events = decode(body);
-    downloadUrl = await store.signedUrl(row.transcript_key);
-  } else if (row.transcript_status === "streaming") {
-    events = (await readParts(db, sessionId)).events;
-  }
+  let ready: Promise<boolean> | undefined; // resolves to whether the full-text index exists
+  const ensure = () => {
+    ready ??= (async () => {
+      await client.command({ query: `CREATE DATABASE IF NOT EXISTS ${cfg.database}` });
+      try {
+        await client.command({
+          query: `CREATE TABLE IF NOT EXISTS ${TABLE} (${columns},
+                    INDEX text_idx text_lc TYPE text(tokenizer = splitByNonAlpha)) ${engine}`,
+        });
+      } catch (err) {
+        // Older or differently configured servers lack the `text` index type: search falls back to scans.
+        console.error(`clickhouse: full-text index unavailable (${(err as Error).message.split("\n")[0]}); using scans`);
+        await client.command({ query: `CREATE TABLE IF NOT EXISTS ${TABLE} (${columns}) ${engine}` });
+      }
+      const [idx] = await (await client.query({
+        query: `SELECT count() AS n FROM system.data_skipping_indices
+                 WHERE database = {db:String} AND table = 'transcript_events' AND name = 'text_idx'`,
+        query_params: { db: cfg.database }, format: "JSONEachRow",
+      })).json<{ n: string }>();
+      return Number(idx?.n) > 0;
+    })().catch((err) => { ready = undefined; throw err; });
+    return ready;
+  };
 
   return {
-    view: "transcript" as const,
-    session_id: sessionId,
-    status: row.transcript_status,
-    key: row.transcript_key,
-    bytes: row.transcript_bytes,
-    sha256: row.transcript_sha256,
-    sealed_at: row.transcript_sealed_at,
-    total: events.length,
-    offset,
-    limit,
-    events: events.slice(offset, offset + limit),
-    download_url: downloadUrl,
+    kind: "clickhouse",
+    async append(s, events) {
+      await ensure();
+      await client.insert({
+        table: TABLE, format: "JSONEachRow",
+        values: events.map((e) => ({
+          org_id: s.org_id, product_id: s.product_id, simulation_id: s.simulation_id, session_id: s.id, model: s.model,
+          seq: e.seq, ts: e.ts, type: e.type, text: e.text, raw: JSON.stringify(e.raw),
+        })),
+      });
+    },
+    async read(orgId, sessionId, offset, limit) {
+      await ensure();
+      const params = { org: orgId, session: sessionId, offset, limit };
+      const [{ total }] = await (await client.query({
+        query: `SELECT uniqExact(seq) AS total FROM ${TABLE} WHERE org_id = {org:UInt32} AND session_id = {session:String}`,
+        query_params: params, format: "JSONEachRow",
+      })).json<{ total: string }>();
+      const rows = await (await client.query({
+        query: `SELECT seq, ts, type, text, raw FROM ${TABLE}
+                 WHERE org_id = {org:UInt32} AND session_id = {session:String}
+                 ORDER BY seq, ingested_at DESC LIMIT 1 BY seq
+                 LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
+        query_params: params, format: "JSONEachRow",
+      })).json<{ seq: number; ts: string; type: string; text: string; raw: string }>();
+      return {
+        total: Number(total),
+        events: rows.map((r) => ({ seq: Number(r.seq), ts: new Date(r.ts.replace(" ", "T") + "Z").toISOString(), type: r.type, text: r.text, raw: JSON.parse(r.raw) })),
+      };
+    },
+    async search(p) {
+      const hasIndex = await ensure();
+      const started = Date.now();
+      const q = p.query.trim().toLowerCase();
+      const params: Record<string, unknown> = { org: p.orgId, q, tokens: q.split(/[^\p{L}\p{N}]+/u).filter(Boolean) };
+      const where = ["org_id = {org:UInt32}"];
+      if (q) {
+        if (hasIndex) where.push(p.mode === "any" ? "hasAnyTokens(text_lc, {q:String})" : "hasAllTokens(text_lc, {q:String})");
+        else where.push(p.mode === "any" ? "arrayExists(t -> position(text_lc, t) > 0, {tokens:Array(String)})"
+                                         : "arrayAll(t -> position(text_lc, t) > 0, {tokens:Array(String)})");
+        if (p.mode === "phrase") where.push("position(text_lc, {q:String}) > 0");
+      }
+      if (p.productId !== undefined) where.push("product_id = {product:UInt32}"), (params.product = p.productId);
+      if (p.simulationId) where.push("simulation_id = {sim:String}"), (params.sim = p.simulationId);
+      if (p.sessionId) where.push("session_id = {session:String}"), (params.session = p.sessionId);
+      if (p.model) where.push("model = {model:String}"), (params.model = p.model);
+      if (p.type) where.push("type = {type:String}"), (params.type = p.type);
+      if (p.days) where.push("ts >= now() - toIntervalDay({days:UInt32})"), (params.days = p.days);
+      const from = `${TABLE} FINAL WHERE ${where.join(" AND ")}`;
+      const hits = await (await client.query({
+        query: `SELECT session_id, simulation_id, product_id, model, seq, ts, type, substring(text, 1, 2000) AS text
+                  FROM ${from} ORDER BY ts DESC LIMIT {limit:UInt32}`,
+        query_params: { ...params, limit: p.limit ?? 25 }, format: "JSONEachRow",
+      })).json<SearchHit>();
+      const facetRows = await (await client.query({
+        query: `SELECT model, type, count() AS n FROM ${from} GROUP BY model, type`,
+        query_params: params, format: "JSONEachRow",
+      })).json<{ model: string; type: string; n: string }>();
+      return {
+        total: facetRows.reduce((s, r) => s + Number(r.n), 0),
+        hits: hits.map((h) => ({ ...h, seq: Number(h.seq), product_id: Number(h.product_id) })),
+        facets: facets(facetRows),
+        stats: { ms: Date.now() - started, backend: hasIndex ? "clickhouse (full-text index)" : "clickhouse (scan)" },
+      };
+    },
   };
+}
+
+function facets(rows: { model: string; type: string; n: string | number }[]) {
+  const count = (key: "model" | "type") => {
+    const m = new Map<string, number>();
+    for (const r of rows) m.set(r[key], (m.get(r[key]) ?? 0) + Number(r.n));
+    return [...m].map(([value, count]) => ({ value, count })).sort((a, b) => b.count - a.count);
+  };
+  return { model: count("model"), type: count("type") };
+}
+
+// ---------- Postgres fallback ----------
+
+const postgresStore: TranscriptStore = {
+  kind: "postgres",
+  async append(s, events) {
+    const db = await getDb();
+    for (const e of events)
+      await db.query(
+        `INSERT INTO transcript_events (session_id, seq, ts, type, text, raw) VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (session_id, seq) DO NOTHING`,
+        [s.id, e.seq, e.ts, e.type, e.text, JSON.stringify(e.raw)],
+      );
+  },
+  async read(orgId, sessionId, offset, limit) {
+    const db = await getDb();
+    const owned = "session_id = $1 AND EXISTS (SELECT 1 FROM agent_sessions s WHERE s.id = $1 AND s.org_id = $2)";
+    const [{ total }] = await db.query<{ total: number }>(`SELECT count(*) AS total FROM transcript_events WHERE ${owned}`, [sessionId, orgId]);
+    const rows = await db.query<{ seq: number; ts: Date; type: string; text: string; raw: RawEvent }>(
+      `SELECT seq, ts, type, text, raw FROM transcript_events WHERE ${owned} ORDER BY seq LIMIT $3 OFFSET $4`,
+      [sessionId, orgId, limit, offset],
+    );
+    return { total, events: rows.map((r) => ({ ...r, ts: new Date(r.ts).toISOString() })) };
+  },
+  async search(p) {
+    const db = await getDb();
+    const started = Date.now();
+    const params: unknown[] = [p.orgId];
+    const where = ["s.org_id = $1"];
+    const add = (sql: string, v: unknown) => { params.push(v); where.push(sql.replace("?", `$${params.length}`)); };
+    const q = p.query.trim();
+    if (q) {
+      if (p.mode === "phrase") add("e.text ILIKE ?", `%${q}%`);
+      else {
+        const tokens = q.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+        const conds = tokens.map((t) => { params.push(`%${t}%`); return `e.text ILIKE $${params.length}`; });
+        if (conds.length) where.push(`(${conds.join(p.mode === "any" ? " OR " : " AND ")})`);
+      }
+    }
+    if (p.productId !== undefined) add("s.product_id = ?", p.productId);
+    if (p.simulationId) add("s.simulation_id = ?", p.simulationId);
+    if (p.sessionId) add("s.id = ?", p.sessionId);
+    if (p.model) add("s.model = ?", p.model);
+    if (p.type) add("e.type = ?", p.type);
+    if (p.days) add("e.ts > now() - make_interval(days => ?)", p.days);
+    const from = `transcript_events e JOIN agent_sessions s ON s.id = e.session_id WHERE ${where.join(" AND ")}`;
+    const hits = await db.query<SearchHit>(
+      `SELECT e.session_id, s.simulation_id, s.product_id, s.model, e.seq, e.ts, e.type, left(e.text, 2000) AS text
+         FROM ${from} ORDER BY e.ts DESC, e.seq DESC LIMIT ${Math.trunc(p.limit ?? 25)}`,
+      params,
+    );
+    const facetRows = await db.query<{ model: string; type: string; n: number }>(
+      `SELECT s.model, e.type, count(*) AS n FROM ${from} GROUP BY s.model, e.type`, params,
+    );
+    return {
+      total: facetRows.reduce((s, r) => s + Number(r.n), 0),
+      hits,
+      facets: facets(facetRows),
+      stats: { ms: Date.now() - started, backend: "postgres" },
+    };
+  },
+};
+
+let store: TranscriptStore | undefined;
+export function transcripts(): TranscriptStore {
+  if (!store) {
+    const cfg = chConfig();
+    store = cfg ? clickhouseStore(cfg) : postgresStore;
+  }
+  return store;
 }

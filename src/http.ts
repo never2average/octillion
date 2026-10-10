@@ -1,52 +1,152 @@
-import express from "express";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import express, { type NextFunction, type Request, type Response } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { createServer, handlers, runTool, WIDGET_HTML, type ToolName } from "./server.js";
+import { createServer, runTool, TOOL_NAMES, WIDGET_HTML, type ToolName } from "./server.js";
+import { bearer, isWorkerToken, resolveKey, type Org } from "./auth.js";
 import { getDb } from "./db.js";
+import { parseJsonl, transcripts, type RawEvent } from "./transcripts.js";
+import { appendEvents, claimJobs, completeSession, heartbeat } from "./worker.js";
 
 const PORT = Number(process.env.PORT ?? 3333);
 const HOST = process.env.HOST ?? "127.0.0.1";
+const PUBLIC_URL = (process.env.PUBLIC_URL ?? `http://${HOST}:${PORT}`).replace(/\/$/, "");
+const PUBLIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "public");
 
-const db = await getDb();
-const app = express();
-app.use(express.json());
+export function createApp() {
+  const app = express();
+  app.set("trust proxy", true);
+  app.disable("x-powered-by");
 
-// Streamable HTTP MCP endpoint (stateless: a fresh server + transport per request).
-app.post("/mcp", async (req, res) => {
-  const server = createServer();
-  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-  res.on("close", () => {
-    transport.close();
-    server.close();
+  app.get("/healthz", async (_req, res) => {
+    await (await getDb()).query("SELECT 1");
+    res.json({ ok: true, transcripts: transcripts().kind });
   });
-  await server.connect(transport);
-  await transport.handleRequest(req, res, req.body);
-});
-app.all("/mcp", (_req, res) => {
-  res.status(405).json({ jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed" }, id: null });
-});
 
-// ---- Local preview: renders the widget in a browser without an MCP host ----
-const isTool = (n: string): n is ToolName => Object.hasOwn(handlers, n);
+  // ---------- landing page + access requests ----------
+  app.use(express.static(PUBLIC_DIR, { extensions: ["html"], maxAge: "5m" }));
 
-app.post("/preview/api/tool", async (req, res) => {
-  const { name, arguments: args = {} } = req.body ?? {};
-  if (!isTool(name)) return void res.status(404).json({ isError: true, content: [{ type: "text", text: `Unknown tool ${name}` }] });
-  res.json(await runTool(name, args));
-});
+  const recent = new Map<string, number[]>();
+  app.post("/api/access-requests", express.json({ limit: "16kb" }), async (req, res) => {
+    const ip = req.ip ?? "?";
+    const now = Date.now();
+    const hits = (recent.get(ip) ?? []).filter((t) => now - t < 60 * 60_000);
+    if (hits.length >= 5) return void res.status(429).json({ error: "Too many requests, try again later." });
+    recent.set(ip, [...hits, now]);
 
-app.get(["/", "/preview"], (_req, res) => res.redirect("/preview/get_product_overview"));
+    const s = (v: unknown, max: number) => (typeof v === "string" ? v.trim().slice(0, max) : "");
+    const email = s(req.body?.email, 200), company = s(req.body?.company, 200);
+    const productUrl = s(req.body?.product_url, 500), message = s(req.body?.message, 4000);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return void res.status(400).json({ error: "Please enter a valid email." });
+    if (!company) return void res.status(400).json({ error: "Please tell us your company." });
+    await (await getDb()).query(
+      "INSERT INTO access_requests (email, company, product_url, message) VALUES ($1, $2, $3, $4)",
+      [email, company, productUrl || null, message || null],
+    );
+    const hook = process.env.ACCESS_REQUEST_WEBHOOK_URL; // e.g. a Slack incoming webhook
+    if (hook)
+      fetch(hook, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: `New Octillion access request: ${company} <${email}> ${productUrl}\n${message}` }),
+        signal: AbortSignal.timeout(5000),
+      }).catch((err) => console.error("access-request webhook failed:", err.message));
+    res.status(201).json({ ok: true });
+  });
 
-app.get("/preview/:tool", async (req, res) => {
-  const name = req.params.tool;
-  if (!isTool(name)) return void res.status(404).send(`Unknown tool ${name}`);
-  const result = await runTool(name, req.query as Record<string, unknown>);
-  const boot = JSON.stringify({ toolEndpoint: "/preview/api/tool", data: result.structuredContent ?? null })
-    .replace(/</g, "\\u003c");
-  res.type("html").send(WIDGET_HTML.replace("<script>", `<script>window.__DEVTOOLS_PREVIEW__ = ${boot};</script>\n<script>`));
-});
+  // ---------- MCP (per-organization API key) ----------
+  // Keys arrive as `Authorization: Bearer oct_...` or in the connector URL, /mcp/oct_..., for hosts that
+  // only take a URL. Stateless: a fresh server per request, bound to the caller's org.
+  const mcp = async (req: Request, res: Response, org: Org) => {
+    const server = createServer(org);
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    res.on("close", () => { transport.close(); server.close(); });
+    await server.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+  };
+  const unauthorized = (res: Response) =>
+    res.status(401).set("WWW-Authenticate", 'Bearer realm="octillion"').json({
+      jsonrpc: "2.0", id: null,
+      error: { code: -32001, message: `Missing or invalid Octillion API key. Request access at ${PUBLIC_URL}` },
+    });
+  const methodNotAllowed = (_req: Request, res: Response) =>
+    void res.status(405).json({ jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed" }, id: null });
 
-app.listen(PORT, HOST, () => {
-  console.error(`devtools-mcp (${db.kind}) listening:`);
-  console.error(`  MCP endpoint  http://${HOST}:${PORT}/mcp`);
-  console.error(`  UI preview    http://${HOST}:${PORT}/preview`);
-});
+  app.post("/mcp", express.json({ limit: "4mb" }), async (req, res) => {
+    const org = await resolveKey(bearer(req.headers.authorization));
+    org ? await mcp(req, res, org) : unauthorized(res);
+  });
+  app.post("/mcp/:key", express.json({ limit: "4mb" }), async (req, res) => {
+    const org = await resolveKey(String(req.params.key));
+    org ? await mcp(req, res, org) : unauthorized(res);
+  });
+  app.all(["/mcp", "/mcp/:key"], methodNotAllowed);
+
+  // ---------- orchestrator worker API (shared OCTILLION_WORKER_TOKEN) ----------
+  const worker = express.Router();
+  worker.use((req, res, next) => (isWorkerToken(bearer(req.headers.authorization)) ? next() : void res.status(401).json({ error: "Invalid worker token" })));
+  worker.use(express.json({ limit: "32mb" }));
+  worker.use(express.text({ type: ["application/x-ndjson", "application/jsonl", "text/plain"], limit: "32mb" }));
+
+  worker.post("/claim", async (req, res) => {
+    const { worker_id, limit, models, harness } = req.body ?? {};
+    if (typeof worker_id !== "string" || !worker_id) return void res.status(400).json({ error: "worker_id is required" });
+    res.json({ jobs: await claimJobs(worker_id, { limit, models, harness }) });
+  });
+  worker.post("/sessions/:id/events", async (req, res) => {
+    const events: RawEvent[] = typeof req.body === "string" ? parseJsonl(req.body) : req.body?.events;
+    if (!Array.isArray(events)) return void res.status(400).json({ error: "Send JSONL (application/x-ndjson) or {events: [...]}" });
+    res.json(await appendEvents(String(req.params.id), events));
+  });
+  worker.post("/sessions/:id/heartbeat", async (req, res) => {
+    await heartbeat(String(req.params.id));
+    res.status(204).end();
+  });
+  worker.post("/sessions/:id/complete", async (req, res) => {
+    const status = req.body?.status ?? "completed";
+    if (!["completed", "failed", "timeout"].includes(status)) return void res.status(400).json({ error: "status must be completed, failed or timeout" });
+    res.json((await completeSession(String(req.params.id), { ...req.body, status })) ?? { verdict: null });
+  });
+  app.use("/api/worker", worker);
+
+  // ---------- local preview of the widget (development only) ----------
+  if (process.env.OCTILLION_PREVIEW === "1") {
+    const isTool = (n: string): n is ToolName => (TOOL_NAMES as string[]).includes(n);
+    const keyOf = (req: Request) => String(req.query.key ?? req.body?.key ?? "");
+    app.post("/preview/api/tool", express.json(), async (req, res) => {
+      const org = await resolveKey(keyOf(req));
+      const { name, arguments: args = {} } = req.body ?? {};
+      if (!org) return void res.status(401).json({ isError: true, content: [{ type: "text", text: "Invalid key" }] });
+      if (!isTool(name)) return void res.status(404).json({ isError: true, content: [{ type: "text", text: `Unknown tool ${name}` }] });
+      res.json(await runTool(org, name, args));
+    });
+    app.get("/preview/:tool", async (req, res) => {
+      const org = await resolveKey(keyOf(req));
+      const name = req.params.tool;
+      if (!org) return void res.status(401).send("Pass ?key=<org API key>");
+      if (!isTool(name)) return void res.status(404).send(`Unknown tool ${name}`);
+      const { key: _key, ...args } = req.query as Record<string, unknown>;
+      for (const k of ["days", "offset", "limit", "repeats"]) if (args[k] !== undefined) args[k] = Number(args[k]);
+      const result = await runTool(org, name, args);
+      const boot = JSON.stringify({ toolEndpoint: "/preview/api/tool", key: keyOf(req), data: result.structuredContent ?? null, error: result.isError ? result.content : null })
+        .replace(/</g, "\\u003c");
+      res.type("html").send(WIDGET_HTML.replace("<script>", `<script>window.__OCTILLION_PREVIEW__ = ${boot};</script>\n<script>`));
+    });
+  }
+
+  app.use((err: Error & { status?: number }, _req: Request, res: Response, _next: NextFunction) => {
+    const status = err.status ?? 500;
+    if (status >= 500) console.error(err);
+    res.status(status).json({ error: status >= 500 ? "Internal error" : err.message });
+  });
+  return app;
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const db = await getDb();
+  createApp().listen(PORT, HOST, () => {
+    console.error(`octillion (${db.kind}, transcripts in ${transcripts().kind}) listening on http://${HOST}:${PORT}`);
+    console.error(`  landing page  ${PUBLIC_URL}/`);
+    console.error(`  MCP endpoint  ${PUBLIC_URL}/mcp/<api key>   (or /mcp with Authorization: Bearer <api key>)`);
+    console.error(`  worker API    ${PUBLIC_URL}/api/worker/*${process.env.OCTILLION_WORKER_TOKEN ? "" : "   (disabled: set OCTILLION_WORKER_TOKEN)"}`);
+  });
+}

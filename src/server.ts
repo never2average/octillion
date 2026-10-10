@@ -7,70 +7,96 @@ import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE } from "@model
 import { createUIResource } from "@mcp-ui/server";
 import { z } from "zod";
 import * as q from "./queries.js";
+import type { Org } from "./auth.js";
 
-export const WIDGET_URI = "ui://devtools/dashboard.html";
+export const WIDGET_URI = "ui://octillion/dashboard.html";
 export const WIDGET_HTML = readFileSync(
   path.join(path.dirname(fileURLToPath(import.meta.url)), "ui", "widget.html"),
   "utf8",
 );
 
-/** Tool name -> handler. Shared by the MCP server and the local browser preview. */
-export const handlers = {
-  get_product_overview: (a: { slug?: string }) => q.getProduct(a.slug),
-  get_user_account: (a: { email?: string }) => (a.email ? q.getAccount(a.email) : q.listAccounts()),
-  get_developer_population: (a: { dimension?: q.Dimension }) => q.getPopulation(a.dimension),
-  list_trace_runs: (a: q.TraceFilter) => q.listTraceRuns(a),
-  get_agent_session: (a: { session_id: string }) => q.getAgentSession(a.session_id),
-  get_session_transcript: (a: { session_id: string; offset?: number; limit?: number }) =>
-    q.getSessionTranscript(a.session_id, a.offset, a.limit),
-  get_run_trace: (a: { run_id: string }) => q.getRunTrace(a.run_id),
-  search_transcripts: ({ session_id, ...a }: q.TranscriptSearchInput & { session_id?: string }) =>
-    q.searchSessionTranscripts({ ...a, sessionId: a.sessionId ?? session_id }),
-} as const;
-export type ToolName = keyof typeof handlers;
+const pct = (x: number | null | undefined) => (x == null ? "n/a" : `${Math.round(x * 100)}%`);
+const competitor = z.object({
+  name: z.string().min(1),
+  aliases: z.array(z.string()).optional(),
+  packages: z.array(z.string()).optional(),
+  domains: z.array(z.string()).optional(),
+});
 
-/** One-line, model-readable summary placed in the text content next to the structured data. */
-function summarize(data: Awaited<ReturnType<(typeof handlers)[ToolName]>>): string {
-  switch (data.view) {
-    case "product":
-      return `${data.product.name} v${data.product.version}: ${data.product.tagline}. ${data.stats.developers} developers, ${data.stats.accounts} accounts, ${data.stats.runs_30d} trace runs in the last 30 days.`;
-    case "accounts":
-      return `${data.accounts.length} user accounts.`;
-    case "account":
-      return `${data.account.full_name} (${data.account.email}), ${data.account.plan} plan, ${data.account.status}. ${data.usage.runs_30d} runs in 30d, ${data.usage.failed_30d} failed, $${Number(data.usage.cost_30d).toFixed(2)} spend.`;
-    case "population":
-      return `${data.totalDevelopers} developers (${data.active30d} active in 30d), broken down by ${Object.keys(data.breakdown).join(", ")}.`;
-    case "traces": {
-      const s = data.summary;
-      return `${s.runs} runs in the last ${data.filters.days} days: ${s.ok} ok, ${s.error} error, ${s.timeout} timeout. p50 ${s.p50_ms}ms, p95 ${s.p95_ms}ms, $${Number(s.cost_usd).toFixed(2)} spend.`;
+/** Tool name -> handler, for one organization. Shared by the MCP server and the local preview. */
+export function handlersFor(org: Org) {
+  return {
+    list_products: () => q.listProducts(org),
+    get_product: (a: { product?: string }) => q.getProduct(org, a.product),
+    save_product: (a: q.ProductInput) => q.saveProduct(org, a),
+    save_scenarios: (a: { product?: string; scenarios: q.ScenarioInput[] }) => q.saveScenarios(org, a.product, a.scenarios),
+    run_simulation: (a: q.RunInput) => q.runSimulation(org, a),
+    list_simulations: (a: { product?: string }) => q.listSimulations(org, a.product),
+    get_simulation: (a: { simulation_id: string }) => q.getSimulation(org, a.simulation_id),
+    cancel_simulation: (a: { simulation_id: string }) => q.cancelSimulation(org, a.simulation_id),
+    get_visibility_report: (a: { product?: string; days?: number; model?: string }) => q.getReport(org, a),
+    get_agent_session: (a: { session_id: string }) => q.getSession(org, a.session_id),
+    get_session_transcript: (a: { session_id: string; offset?: number; limit?: number }) =>
+      q.getTranscript(org, a.session_id, a.offset, a.limit),
+    search_transcripts: (a: Parameters<typeof q.searchTranscripts>[1]) => q.searchTranscripts(org, a),
+    list_developer_profiles: (a: { query?: string }) => q.listProfiles(a),
+    browse_task_library: (a: { query?: string; category?: string; language?: string; limit?: number }) => q.browseTaskLibrary(a),
+  };
+}
+type Handlers = ReturnType<typeof handlersFor>;
+export type ToolName = keyof Handlers;
+type Data = Awaited<ReturnType<Handlers[ToolName]>>;
+
+/** Model-readable summary placed in the text content next to the structured data. */
+function summarize(d: Data): string {
+  switch (d.view) {
+    case "products":
+      return d.products.length
+        ? `${d.org.name} has ${d.products.length} product(s): ${d.products.map((p: any) => `${p.name} [${p.slug}] (${p.scenarios} scenarios, ${p.sessions_30d} scored runs in 30d, hit rate ${pct(p.hit_rate_30d)})`).join("; ")}.`
+        : `${d.org.name} has no products yet. Use save_product to describe one (name, description, aliases, packages, competitors).`;
+    case "product": {
+      const p = d.product;
+      return `${p.name} [${p.slug}]: ${p.description || "(no description)"} Category: ${p.category || "n/a"}. Aliases: ${p.aliases.join(", ") || "none"}. Packages: ${p.packages.join(", ") || "none"}. Competitors: ${p.competitors.map((c) => c.name).join(", ") || "none"}. ${d.scenarios.length} scenarios (${d.scenarios.filter((s: any) => s.active).length} active)${d.scenarios.length ? `: ${d.scenarios.map((s: any) => `#${s.id} ${s.title} (${s.expectation}, hit ${pct(s.hit_rate)} of ${s.sessions})`).join("; ")}` : ""}. Models available: ${d.models.join(", ")}.${d.warnings.length ? ` Warnings: ${d.warnings.join(" ")}` : ""}`;
+    }
+    case "simulations":
+      return d.simulations.length
+        ? `${d.simulations.length} simulations: ${d.simulations.slice(0, 10).map((s: any) => `${s.id} "${s.name}" ${s.status} ${s.finished}/${s.sessions} done, hit ${pct(s.hit_rate)}`).join("; ")}.`
+        : "No simulations yet. Launch one with run_simulation.";
+    case "simulation": {
+      const s = d.simulation;
+      return `Simulation ${s.id} "${s.name}" for ${s.product}: ${s.status}. ${d.totals.sessions} agent sessions (${Object.entries(d.status).map(([k, v]) => `${v} ${k}`).join(", ")}). Hit rate ${pct(d.totals.hit_rate)} over ${d.totals.scored} scored. Verdicts: ${Object.entries(d.verdicts).map(([k, v]) => `${k} ${v}`).join(", ") || "none yet"}. By model: ${d.by_model.map((m: any) => `${m.model} ${pct(m.hit_rate)}`).join(", ")}.`;
+    }
+    case "report": {
+      const t = d.totals;
+      return `${d.product.name}, last ${d.filters.days} days${d.filters.model ? ` (${d.filters.model})` : ""}: ${t.sessions} scored agent sessions. Hit rate ${pct(t.hit_rate)}${t.hit_ci ? ` (95% CI ${pct(t.hit_ci[0])}-${pct(t.hit_ci[1])})` : ""}, adopted ${pct(t.adoption_rate)}, lost to a competitor ${pct(t.competitor_rate)}. Share of voice: ${d.share_of_voice.map((v: any) => `${v.tool} ${pct(v.share)}`).join(", ") || "n/a"}. By model: ${d.by_model.map((m: any) => `${m.model} ${pct(m.hit_rate)}`).join(", ") || "n/a"}. ${d.by_profile.length ? `By developer profile: ${d.by_profile.map((p: any) => `${p.name} ${pct(p.hit_rate)}`).join(", ")}. ` : ""}Weakest scenarios: ${d.by_scenario.slice(0, 3).map((s: any) => `#${s.id} ${s.title} ${pct(s.hit_rate)}${s.usual_winner ? ` (usually ${s.usual_winner})` : ""}`).join("; ") || "n/a"}.`;
     }
     case "session": {
-      const s = data.session;
-      const errors = data.runs.filter((r) => r.error_message).map((r) => `${r.id}: ${r.error_message}`);
-      return `Session ${s.id} (${s.agent_name}, ${s.environment}) ${s.status}: ${s.runs} runs, ${s.failed_runs} failed, $${Number(s.cost_usd).toFixed(4)} spend.${errors.length ? ` Errors: ${errors.join("; ")}.` : ""} Transcript: ${s.transcript_status}${s.transcript_lines ? ` (${s.transcript_lines} events)` : ""}. Span-level traces are in Langfuse${s.langfuse_url ? ` (${s.langfuse_url})` : ` under session id ${s.id}`}.`;
+      const s = d.session;
+      const ev = (s.mentions ?? []).map((m: any) => `${m.tool}: ${m.level}${m.evidence[0] ? ` (#${m.evidence[0].seq} "${m.evidence[0].snippet}")` : ""}`);
+      return `Session ${s.id}: ${s.model} on "${s.scenario}" (${s.product})${s.profile ? ` as ${s.profile}` : ""}, ${s.status}, ${s.user_turns} questions answered by the simulated developer. Verdict: ${s.verdict ?? "not scored yet"}${s.winner ? `, went with ${s.winner}` : ""}. ${s.events} transcript events.${ev.length ? ` Evidence: ${ev.join("; ")}.` : ""}${s.error_message ? ` Error: ${s.error_message}.` : ""}`;
     }
     case "transcript":
-      return `Transcript for ${data.session_id} (${data.status}): events ${data.total ? data.offset + 1 : 0}-${data.offset + data.events.length} of ${data.total}.${data.download_url ? ` Download: ${data.download_url}` : ""}`;
+      return `Transcript of ${d.session_id} (${d.model}, "${d.scenario}", verdict ${d.verdict ?? "pending"}): events ${d.total ? d.offset + 1 : 0}-${d.offset + d.events.length} of ${d.total}.`;
+    case "profiles":
+      return d.profiles.length
+        ? `${d.profiles.length} developer profiles${d.query ? ` matching "${d.query}"` : ""}: ${d.profiles.map((p: any) => `${p.slug} (${p.name}: ${p.summary})`).join("; ")}. Pass slugs as run_simulation profiles.`
+        : "No developer profiles synced from the vault yet.";
+    case "library":
+      return d.tasks.length
+        ? `${d.tasks.length} library tasks: ${d.tasks.map((t: any) => `#${t.id} ${t.title} [${t.category ?? "uncategorized"}${t.language ? `, ${t.language}` : ""}]`).join("; ")}. Categories: ${d.categories.map((c: any) => `${c.category ?? "uncategorized"} (${c.tasks})`).join(", ")}. Add one to a product with save_scenarios {library_task_id}.`
+        : "No matching tasks in the library.";
     case "search": {
-      if (!data.results)
-        return `Transcript search index: ${data.index.events} events from ${data.index.sessions} sealed sessions across ${data.index.partitions.length} monthly partitions and ${data.index.folders.length} bucket folders (account_id/date/env/agent). Pass a query to search.`;
-      const r = data.results;
-      const top = r.hits.slice(0, 5).map((h) => `${h.session_id}#${h.seq} (${h.type}, ${h.agent}): ${h.text.slice(0, 120)}`);
-      return `${r.total} transcript events match "${data.query}" (${data.filters.mode}).${top.length ? ` Top: ${top.join(" | ")}` : ""}`;
-    }
-    case "trace": {
-      const errs = data.observations.filter((o) => o.level === "ERROR").map((o) => `${o.name}: ${o.statusMessage}`);
-      return `Run ${data.run.id} (${data.run.name}) ${data.run.status}: ${data.observations.length} spans in Langfuse trace ${data.trace.id}.${errs.length ? ` Errors: ${errs.join("; ")}.` : ""}`;
+      const r = d.results;
+      return `${r.total} transcript events match "${d.query}" (${d.filters.mode}).${r.hits.length ? ` Top: ${r.hits.slice(0, 5).map((h) => `${h.session_id}#${h.seq} (${h.type}, ${h.model}): ${h.text.slice(0, 120)}`).join(" | ")}` : ""}`;
     }
   }
 }
 
 /** Run a handler and shape its output as an MCP tool result (text for the model, structured data for the UI). */
-export async function runTool(name: ToolName, args: Record<string, unknown>): Promise<CallToolResult> {
+export async function runTool(org: Org, name: ToolName, args: Record<string, unknown>): Promise<CallToolResult> {
   try {
-    const data = await (handlers[name] as (a: unknown) => ReturnType<(typeof handlers)[ToolName]>)(args);
-    // JSON round-trip turns Date objects into ISO strings.
-    const structured = JSON.parse(JSON.stringify(data));
+    const data = await (handlersFor(org)[name] as (a: unknown) => Promise<Data>)(args ?? {});
+    const structured = JSON.parse(JSON.stringify(data)); // Dates -> ISO strings
     return {
       content: [{ type: "text", text: `${summarize(data)}\n\n${JSON.stringify(structured)}` }],
       structuredContent: structured,
@@ -80,14 +106,27 @@ export async function runTool(name: ToolName, args: Record<string, unknown>): Pr
   }
 }
 
-export function createServer(): McpServer {
-  const server = new McpServer({ name: "devtools-mcp", version: "1.0.0" });
+export const TOOL_NAMES = Object.keys(handlersFor({ orgId: 0, slug: "", name: "" })) as ToolName[];
+
+export function createServer(org: Org): McpServer {
+  const server = new McpServer(
+    { name: "octillion", version: "2.0.0" },
+    {
+      instructions:
+        "Octillion measures whether AI coding agents recommend the user's developer-tool product. Workflow: save_product " +
+        "(product context: names, packages, competitors) -> save_scenarios (realistic coding tasks phrased neutrally, never " +
+        "naming the product) -> run_simulation (sandboxed sub-agents work each scenario on each model) -> " +
+        "get_visibility_report / get_simulation for results -> get_agent_session and get_session_transcript for evidence. " +
+        "browse_task_library offers curated real-world tasks to turn into scenarios; list_developer_profiles lists the developer " +
+        "personas the orchestrator role-plays when a sub-agent asks questions (pass them to run_simulation as profiles).",
+    },
+  );
 
   registerAppResource(
     server,
-    "DevTools dashboard",
+    "Octillion dashboard",
     WIDGET_URI,
-    { description: "Interactive views for product, accounts, developer population and trace runs", mimeType: RESOURCE_MIME_TYPE },
+    { description: "Interactive views for products, scenarios, simulations, visibility reports and agent transcripts", mimeType: RESOURCE_MIME_TYPE },
     async () => {
       const ui = createUIResource({
         uri: WIDGET_URI,
@@ -99,94 +138,163 @@ export function createServer(): McpServer {
     },
   );
 
-  const ui = { ui: { resourceUri: WIDGET_URI } };
-  const readOnly = { readOnlyHint: true, openWorldHint: false };
+  const meta = { ui: { resourceUri: WIDGET_URI }, "openai/outputTemplate": WIDGET_URI };
+  const read = { readOnlyHint: true, openWorldHint: false };
+  const write = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false };
+  const run = (name: ToolName) => (a: Record<string, unknown>) => runTool(org, name, a);
+  const product = z.string().optional().describe("Product slug, name or id; optional when there is only one product");
 
-  registerAppTool(server, "get_product_overview", {
-    title: "DevTools product overview",
-    description: "Describe the DevTools product: what it does, features, pricing tiers, integrations and headline usage stats.",
-    inputSchema: { slug: z.string().optional().describe("Product slug; defaults to the primary product") },
-    annotations: readOnly,
-    _meta: ui,
-  }, (a) => runTool("get_product_overview", a));
+  registerAppTool(server, "list_products", {
+    title: "List products",
+    description: "List the organization's products with scenario counts and their 30-day recommendation hit rate.",
+    inputSchema: {},
+    annotations: read, _meta: meta,
+  }, run("list_products"));
 
-  registerAppTool(server, "get_user_account", {
-    title: "User account",
-    description: "Look up a user account by email: profile, plan, quota usage, 30-day run stats, workflows and recent runs. Omit email to list all accounts.",
-    inputSchema: { email: z.string().email().optional().describe("Account email, e.g. priya@acme.dev") },
-    annotations: readOnly,
-    _meta: ui,
-  }, (a) => runTool("get_user_account", a));
+  registerAppTool(server, "get_product", {
+    title: "Product context",
+    description: "Show a product's configured context (description, aliases, package names, domains, competitors), its scenarios with per-scenario hit rate, and recent simulations.",
+    inputSchema: { product },
+    annotations: read, _meta: meta,
+  }, run("get_product"));
 
-  registerAppTool(server, "get_developer_population", {
-    title: "Developer population breakdown",
-    description: "Break down the developer population using the product by role, language, region, experience or company size, with 30-day active counts.",
-    inputSchema: { dimension: z.enum(q.DIMENSIONS).optional().describe("Limit to one dimension; omit for all") },
-    annotations: readOnly,
-    _meta: ui,
-  }, (a) => runTool("get_developer_population", a));
-
-  registerAppTool(server, "list_trace_runs", {
-    title: "Trace runs history",
-    description: "Trace run history with summary stats (failure rate, p50/p95 latency, spend), runs per day by status, and the latest runs. Filter by account email, status, environment, workflow and time window.",
+  registerAppTool(server, "save_product", {
+    title: "Create or update product",
+    description: "Create a product, or update one when `product` names an existing one. This is the context used to detect the product in agent transcripts: list every alias, package name (npm/PyPI/crates/Go module) and domain, and the competitors with theirs. List fields replace the stored list.",
     inputSchema: {
-      email: z.string().optional().describe("Only runs from this account"),
-      session_id: z.string().optional().describe("Only runs in this agent session, e.g. ses_00042"),
-      status: z.enum(["ok", "error", "timeout"]).optional(),
-      environment: z.enum(["production", "staging", "dev"]).optional(),
-      workflow: z.string().optional().describe("Workflow name, e.g. support-agent"),
-      days: z.number().int().min(1).max(90).optional().describe("Look-back window in days (default 14)"),
-      limit: z.number().int().min(1).max(200).optional().describe("Max runs to list (default 25)"),
+      product: z.string().optional().describe("Existing product slug to update; omit to create"),
+      name: z.string().optional().describe("Product name, e.g. 'Neon'"),
+      description: z.string().optional().describe("What it does and who it is for"),
+      category: z.string().optional().describe("e.g. 'Serverless Postgres'"),
+      website_url: z.string().optional(),
+      docs_url: z.string().optional(),
+      aliases: z.array(z.string()).optional().describe("Other names, e.g. ['Neon Postgres', 'neon.tech']"),
+      packages: z.array(z.string()).optional().describe("Package names, e.g. ['@neondatabase/serverless']"),
+      domains: z.array(z.string()).optional().describe("e.g. ['neon.tech']"),
+      competitors: z.array(competitor).optional().describe("Competing products with their aliases, packages and domains"),
     },
-    annotations: readOnly,
-    _meta: ui,
-  }, (a) => runTool("list_trace_runs", a));
+    annotations: write, _meta: meta,
+  }, run("save_product"));
+
+  registerAppTool(server, "save_scenarios", {
+    title: "Add or edit scenarios",
+    description: "Add scenarios (omit id) or edit existing ones (pass id). A scenario is a realistic coding task handed verbatim to a sandboxed coding agent, e.g. 'Add a Postgres database to this Next.js app and persist the todos'. Phrase it the way a developer would and never name the product. expectation 'recommend' (default) means the product should be picked; 'avoid' means it should not. Set active=false to retire one.",
+    inputSchema: {
+      product,
+      scenarios: z.array(z.object({
+        id: z.number().int().optional(),
+        library_task_id: z.number().int().optional().describe("Start from a curated task (browse_task_library); its prompt, title, repo and language are copied unless given"),
+        title: z.string().optional(),
+        prompt: z.string().optional().describe("The task given to the agent"),
+        repo_url: z.string().optional().describe("Optional starter git repo cloned into the sandbox"),
+        language: z.string().optional(),
+        tags: z.array(z.string()).optional(),
+        expectation: z.enum(["recommend", "avoid"]).optional(),
+        active: z.boolean().optional(),
+      })).min(1),
+    },
+    annotations: write, _meta: meta,
+  }, run("save_scenarios"));
+
+  registerAppTool(server, "run_simulation", {
+    title: "Run simulation",
+    description: "Launch sandboxed coding sub-agents: every selected scenario x model x repeat becomes one agent session. Runs asynchronously; check progress with get_simulation. Defaults: all active scenarios, all available models, 3 repeats.",
+    inputSchema: {
+      product,
+      scenario_ids: z.array(z.number().int()).optional(),
+      models: z.array(z.string()).optional().describe("Subset of the available models (see get_product)"),
+      profiles: z.array(z.string()).optional().describe("Developer profile slugs (list_developer_profiles); every scenario runs once per profile. Omit for a generic developer"),
+      repeats: z.number().int().min(1).max(10).optional().describe("Runs per scenario and model (default 3)"),
+      name: z.string().optional(),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }, _meta: meta,
+  }, run("run_simulation"));
+
+  registerAppTool(server, "list_simulations", {
+    title: "List simulations",
+    description: "Recent simulations with progress and hit rate.",
+    inputSchema: { product },
+    annotations: read, _meta: meta,
+  }, run("list_simulations"));
+
+  registerAppTool(server, "get_simulation", {
+    title: "Simulation results",
+    description: "One simulation: progress, verdict counts, hit rate by model, a scenario x model matrix and every agent session.",
+    inputSchema: { simulation_id: z.string().describe("e.g. sim_Ab3...") },
+    annotations: read, _meta: meta,
+  }, run("get_simulation"));
+
+  registerAppTool(server, "cancel_simulation", {
+    title: "Cancel simulation",
+    description: "Cancel a simulation's queued sessions. Sessions already running finish normally.",
+    inputSchema: { simulation_id: z.string() },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }, _meta: meta,
+  }, run("cancel_simulation"));
+
+  registerAppTool(server, "get_visibility_report", {
+    title: "Visibility report",
+    description: "How often coding agents pick the product: hit rate, adoption rate, losses to competitors, share of voice against each competitor, breakdown by model and by scenario, a daily trend and recent losses with links to the evidence.",
+    inputSchema: {
+      product,
+      days: z.number().int().min(1).max(365).optional().describe("Look-back window (default 30)"),
+      model: z.string().optional().describe("Only this model"),
+    },
+    annotations: read, _meta: meta,
+  }, run("get_visibility_report"));
 
   registerAppTool(server, "get_agent_session", {
     title: "Agent session",
-    description: "One agent session: status, totals and the timeline of trace runs (turns) in it, with errors. Span-level detail lives in Langfuse; runs carry their Langfuse trace ids and links.",
-    inputSchema: { session_id: z.string().describe("Session id, e.g. ses_00042") },
-    annotations: readOnly,
-    _meta: ui,
-  }, (a) => runTool("get_agent_session", a));
+    description: "One sub-agent session: scenario, model, status, cost, verdict, the tool it went with and the transcript evidence for every product it mentioned.",
+    inputSchema: { session_id: z.string().describe("e.g. ses_Ab3...") },
+    annotations: read, _meta: meta,
+  }, run("get_agent_session"));
 
   registerAppTool(server, "get_session_transcript", {
-    title: "Agent session transcript",
-    description: "Read an agent session's JSONL transcript (user/assistant messages, tool calls and results, run boundaries) from object storage, a page at a time. Works for sealed and still-streaming sessions.",
+    title: "Session transcript",
+    description: "Read a sub-agent session's raw JSONL transcript (messages, tool calls, commands, results), a page at a time.",
     inputSchema: {
-      session_id: z.string().describe("Session id, e.g. ses_00042"),
+      session_id: z.string(),
       offset: z.number().int().min(0).optional().describe("Index of the first event (default 0)"),
       limit: z.number().int().min(1).max(500).optional().describe("Events per page (default 50)"),
     },
-    annotations: readOnly,
-    _meta: ui,
-  }, (a) => runTool("get_session_transcript", a));
+    annotations: read, _meta: meta,
+  }, run("get_session_transcript"));
 
   registerAppTool(server, "search_transcripts", {
-    title: "Search session transcripts",
-    description: "Full-text search across all sealed agent-session transcripts (user and assistant messages, tool calls and results, errors), backed by a ClickHouse full-text index fed from the transcript bucket. Case-insensitive. mode 'all' needs every word, 'any' needs one, 'phrase' needs the exact phrase. Omit query to see index stats and the bucket's partition folders.",
+    title: "Search transcripts",
+    description: "Full-text search across this organization's agent transcripts. Case-insensitive; mode 'all' (default) needs every word, 'any' one of them, 'phrase' the exact phrase.",
     inputSchema: {
-      query: z.string().optional().describe("Words to search for, e.g. 'RateLimitError' or 'parental leave'"),
-      mode: z.enum(["all", "any", "phrase"]).optional().describe("Default 'all'"),
-      email: z.string().optional().describe("Only this account's sessions"),
-      agent: z.string().optional().describe("Agent name, e.g. support-agent"),
-      environment: z.enum(["production", "staging", "dev"]).optional(),
-      type: z.enum(["user_message", "assistant_message", "tool_call", "tool_result", "run_end", "session_start", "session_end"]).optional(),
+      query: z.string().describe("e.g. 'prisma migrate' or a competitor's name"),
+      mode: z.enum(["all", "any", "phrase"]).optional(),
+      product,
+      simulation_id: z.string().optional(),
       session_id: z.string().optional(),
-      days: z.number().int().min(1).max(365).optional().describe("Only sessions started in the last N days"),
+      model: z.string().optional(),
+      type: z.string().optional().describe("Event type, e.g. assistant_message or tool_call"),
+      days: z.number().int().min(1).max(365).optional(),
       limit: z.number().int().min(1).max(200).optional().describe("Max hits (default 25)"),
     },
-    annotations: readOnly,
-    _meta: ui,
-  }, (a) => runTool("search_transcripts", a));
+    annotations: read, _meta: meta,
+  }, (a) => runTool(org, "search_transcripts", { ...a, simulationId: a.simulation_id, sessionId: a.session_id }));
 
-  registerAppTool(server, "get_run_trace", {
-    title: "Run trace (Langfuse)",
-    description: "Fetch a run's span tree live from Langfuse (agent steps, LLM generations with model/tokens, tool calls, retrievals, errors) and show it as a waterfall.",
-    inputSchema: { run_id: z.string().describe("Run id, e.g. run_00042") },
-    annotations: { readOnlyHint: true, openWorldHint: true },
-    _meta: ui,
-  }, (a) => runTool("get_run_trace", a));
+  registerAppTool(server, "list_developer_profiles", {
+    title: "Developer profiles",
+    description: "Curated developer personas (role, experience, company size, stack, constraints) from the vault. During a run the orchestrator role-plays the chosen profile whenever the coding agent asks a question.",
+    inputSchema: { query: z.string().optional().describe("Filter, e.g. 'enterprise' or 'Python'") },
+    annotations: read, _meta: meta,
+  }, run("list_developer_profiles"));
+
+  registerAppTool(server, "browse_task_library", {
+    title: "Task library",
+    description: "Browse the curated library of real-world developer tasks. Turn one into a scenario with save_scenarios {library_task_id}.",
+    inputSchema: {
+      query: z.string().optional(),
+      category: z.string().optional(),
+      language: z.string().optional(),
+      limit: z.number().int().min(1).max(200).optional(),
+    },
+    annotations: read, _meta: meta,
+  }, run("browse_task_library"));
 
   return server;
 }

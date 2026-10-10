@@ -1,116 +1,164 @@
--- DevTools MCP schema: four contexts
---   1. products            - DevTools product description
---   2. user_accounts       - user account
---   3. developer_segments  - developer population breakdown
---   4. agent_sessions / trace_runs - trace runs history
--- Span-level trace detail lives in Langfuse; rows here carry the Langfuse ids to link out.
--- Session transcripts (JSONL) live in object storage; agent_sessions holds the pointer.
+-- Octillion schema. Idempotent: every statement is IF NOT EXISTS, so it runs on every boot.
+--
+--   organizations / api_keys     dev-tool companies (tenants) and the keys their MCP connectors use
+--   products                     product context a company configures: names, packages, competitors
+--   scenarios                    real-world coding tasks where the product should (or should not) come up
+--   simulations                  one launch: scenarios x models x repeats
+--   agent_sessions               one sandboxed sub-agent working one scenario; doubles as the worker job queue
+--                                and carries the scored verdict
+--   transcript_events            raw JSONL events, only when ClickHouse is not configured (local dev fallback)
+--   access_requests              landing-page sign-ups
 
-DROP TABLE IF EXISTS session_transcript_parts;
-DROP TABLE IF EXISTS trace_spans;
-DROP TABLE IF EXISTS trace_runs;
-DROP TABLE IF EXISTS agent_sessions;
-DROP TABLE IF EXISTS developer_segments;
-DROP TABLE IF EXISTS user_accounts;
-DROP TABLE IF EXISTS products;
+CREATE TABLE IF NOT EXISTS organizations (
+  id          SERIAL PRIMARY KEY,
+  slug        TEXT UNIQUE NOT NULL,
+  name        TEXT NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
-CREATE TABLE products (
+CREATE TABLE IF NOT EXISTS api_keys (
+  id           SERIAL PRIMARY KEY,
+  org_id       INT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  label        TEXT NOT NULL DEFAULT 'default',
+  key_prefix   TEXT NOT NULL,                 -- first characters, safe to show
+  key_hash     TEXT UNIQUE NOT NULL,          -- sha256 of the full key; the key itself is never stored
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_used_at TIMESTAMPTZ,
+  revoked_at   TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS products (
+  id            SERIAL PRIMARY KEY,
+  org_id        INT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  slug          TEXT NOT NULL,
+  name          TEXT NOT NULL,
+  description   TEXT NOT NULL DEFAULT '',
+  category      TEXT NOT NULL DEFAULT '',
+  website_url   TEXT,
+  docs_url      TEXT,
+  -- How the product shows up in agent output; all matched case-insensitively.
+  aliases       TEXT[] NOT NULL DEFAULT '{}',  -- other names, e.g. "Neon Postgres"
+  packages      TEXT[] NOT NULL DEFAULT '{}',  -- npm/PyPI/crate/module names, e.g. "@neondatabase/serverless"
+  domains       TEXT[] NOT NULL DEFAULT '{}',  -- e.g. "neon.tech"
+  competitors   JSONB NOT NULL DEFAULT '[]',   -- [{name, aliases[], packages[], domains[]}]
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (org_id, slug)
+);
+
+CREATE TABLE IF NOT EXISTS scenarios (
+  id           SERIAL PRIMARY KEY,
+  product_id   INT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  title        TEXT NOT NULL,
+  prompt       TEXT NOT NULL,                 -- the task given to the sub-agent, verbatim; never names the customer
+  repo_url     TEXT,                          -- optional starter repo cloned into the sandbox
+  language     TEXT,
+  tags         TEXT[] NOT NULL DEFAULT '{}',
+  expectation  TEXT NOT NULL DEFAULT 'recommend' CHECK (expectation IN ('recommend', 'avoid')),
+  active       BOOLEAN NOT NULL DEFAULT true,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS scenarios_product_idx ON scenarios (product_id);
+
+CREATE TABLE IF NOT EXISTS simulations (
+  id           TEXT PRIMARY KEY,              -- sim_<random>
+  org_id       INT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  product_id   INT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  name         TEXT NOT NULL,
+  models       TEXT[] NOT NULL,
+  harness      TEXT NOT NULL,
+  repeats      INT NOT NULL,
+  status       TEXT NOT NULL DEFAULT 'queued'
+               CHECK (status IN ('queued', 'running', 'completed', 'cancelled')),
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  started_at   TIMESTAMPTZ,
+  finished_at  TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS simulations_product_idx ON simulations (product_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS agent_sessions (
+  id              TEXT PRIMARY KEY,           -- ses_<random>
+  simulation_id   TEXT NOT NULL REFERENCES simulations(id) ON DELETE CASCADE,
+  org_id          INT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  product_id      INT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  scenario_id     INT NOT NULL REFERENCES scenarios(id) ON DELETE CASCADE,
+  model           TEXT NOT NULL,
+  harness         TEXT NOT NULL,
+  attempt         INT NOT NULL DEFAULT 1,     -- repeat number within the simulation
+  status          TEXT NOT NULL DEFAULT 'queued'
+                  CHECK (status IN ('queued', 'running', 'completed', 'failed', 'timeout', 'cancelled')),
+  worker_id       TEXT,
+  sandbox_id      TEXT,
+  queued_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  started_at      TIMESTAMPTZ,
+  heartbeat_at    TIMESTAMPTZ,
+  ended_at        TIMESTAMPTZ,
+  tokens_in       BIGINT NOT NULL DEFAULT 0,
+  tokens_out      BIGINT NOT NULL DEFAULT 0,
+  cost_usd        NUMERIC(12, 4) NOT NULL DEFAULT 0,
+  error_message   TEXT,
+  metadata        JSONB NOT NULL DEFAULT '{}',
+  events          INT NOT NULL DEFAULT 0,     -- transcript events received
+  -- Scoring, filled when the session finishes (see src/scoring.ts).
+  verdict         TEXT CHECK (verdict IN ('adopted', 'recommended', 'mentioned', 'competitor', 'none')),
+  winner          TEXT,                       -- tool the agent went with (target or competitor name), if any
+  mentions        JSONB,                      -- [{tool, target, level, first_seq, evidence: [{seq, kind, snippet}]}]
+  scored_at       TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS agent_sessions_queue_idx ON agent_sessions (queued_at) WHERE status = 'queued';
+CREATE INDEX IF NOT EXISTS agent_sessions_sim_idx ON agent_sessions (simulation_id);
+CREATE INDEX IF NOT EXISTS agent_sessions_product_idx ON agent_sessions (product_id, ended_at DESC);
+
+CREATE TABLE IF NOT EXISTS transcript_events (
+  session_id  TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
+  seq         INT NOT NULL,
+  ts          TIMESTAMPTZ NOT NULL,
+  type        TEXT NOT NULL,
+  text        TEXT NOT NULL,
+  raw         JSONB NOT NULL,
+  PRIMARY KEY (session_id, seq)
+);
+
+CREATE TABLE IF NOT EXISTS access_requests (
+  id           SERIAL PRIMARY KEY,
+  email        TEXT NOT NULL,
+  company      TEXT NOT NULL,
+  product_url  TEXT,
+  message      TEXT,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Developer profiles and the task library, synced from the vault (`npm run vault:sync`, src/vault.ts).
+-- A profile is who the orchestrator role-plays when a sub-agent asks a question; it never names a customer product.
+CREATE TABLE IF NOT EXISTS developer_profiles (
   id            SERIAL PRIMARY KEY,
   slug          TEXT UNIQUE NOT NULL,
+  external_id   TEXT,                         -- id in the vault
   name          TEXT NOT NULL,
-  tagline       TEXT NOT NULL,
-  description   TEXT NOT NULL,
-  category      TEXT NOT NULL,
-  version       TEXT NOT NULL,
-  released_at   DATE NOT NULL,
-  docs_url      TEXT,
-  features      JSONB NOT NULL DEFAULT '[]',   -- [{name, description}]
-  pricing_tiers JSONB NOT NULL DEFAULT '[]',   -- [{plan, price_usd_month, trace_quota, seats, highlights[]}]
-  integrations  TEXT[] NOT NULL DEFAULT '{}'
+  summary       TEXT NOT NULL DEFAULT '',
+  attributes    JSONB NOT NULL DEFAULT '{}',  -- role, experience, company_size, stack, constraints, tone, ...
+  instructions  TEXT NOT NULL DEFAULT '',     -- how this developer answers the agent's questions
+  active        BOOLEAN NOT NULL DEFAULT true,
+  synced_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE user_accounts (
-  id              SERIAL PRIMARY KEY,
-  product_id      INT NOT NULL REFERENCES products(id),
-  email           TEXT UNIQUE NOT NULL,
-  full_name       TEXT NOT NULL,
-  org_name        TEXT NOT NULL,
-  role            TEXT NOT NULL,
-  plan            TEXT NOT NULL CHECK (plan IN ('free', 'pro', 'team', 'enterprise')),
-  status          TEXT NOT NULL CHECK (status IN ('active', 'trialing', 'suspended')),
-  seats           INT NOT NULL DEFAULT 1,
-  monthly_trace_quota INT NOT NULL,
-  primary_language TEXT NOT NULL,
-  region          TEXT NOT NULL,
-  created_at      TIMESTAMPTZ NOT NULL,
-  last_active_at  TIMESTAMPTZ NOT NULL
+CREATE TABLE IF NOT EXISTS library_tasks (
+  id            SERIAL PRIMARY KEY,
+  slug          TEXT UNIQUE NOT NULL,
+  external_id   TEXT,
+  title         TEXT NOT NULL,
+  prompt        TEXT NOT NULL,
+  repo_url      TEXT,
+  language      TEXT,
+  category      TEXT,
+  tags          TEXT[] NOT NULL DEFAULT '{}',
+  attributes    JSONB NOT NULL DEFAULT '{}',
+  active        BOOLEAN NOT NULL DEFAULT true,
+  synced_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE developer_segments (
-  id              SERIAL PRIMARY KEY,
-  product_id      INT NOT NULL REFERENCES products(id),
-  dimension       TEXT NOT NULL CHECK (dimension IN ('role', 'language', 'region', 'experience', 'company_size')),
-  segment         TEXT NOT NULL,
-  developer_count INT NOT NULL,
-  active_30d      INT NOT NULL,
-  as_of           DATE NOT NULL,
-  UNIQUE (product_id, dimension, segment, as_of)
-);
-
-CREATE TABLE agent_sessions (
-  id            TEXT PRIMARY KEY,               -- e.g. ses_00042; also used as the Langfuse session id
-  account_id    INT NOT NULL REFERENCES user_accounts(id),
-  agent_name    TEXT NOT NULL,                  -- e.g. support-agent
-  environment   TEXT NOT NULL CHECK (environment IN ('production', 'staging', 'dev')),
-  status        TEXT NOT NULL CHECK (status IN ('active', 'completed', 'failed')),
-  end_user_id   TEXT,                           -- the account's own end user, if they pass one
-  started_at    TIMESTAMPTZ NOT NULL,
-  ended_at      TIMESTAMPTZ,                    -- NULL while active
-  metadata      JSONB NOT NULL DEFAULT '{}',
-  -- Transcript pointer. The key is relative to the configured bucket (or .transcripts/ on disk) and uses
-  -- Hive-style partition folders, e.g. sessions/account_id=1/date=2026-10-09/env=production/agent=rag-qa/ses_00091.jsonl.gz
-  transcript_status    TEXT NOT NULL DEFAULT 'none'
-                       CHECK (transcript_status IN ('none', 'streaming', 'sealed', 'expired')),
-  transcript_key       TEXT,                    -- set once sealed
-  transcript_lines     INT,
-  transcript_bytes     BIGINT,                  -- compressed size
-  transcript_sha256    TEXT,                    -- of the compressed object
-  transcript_sealed_at TIMESTAMPTZ,
-  transcript_indexed_at TIMESTAMPTZ,            -- when its events landed in ClickHouse search
-  CHECK ((transcript_status = 'sealed') = (transcript_key IS NOT NULL))
-);
-CREATE INDEX agent_sessions_account_started_idx ON agent_sessions (account_id, started_at DESC);
-
--- Gzipped JSONL parts written while a session is streaming; compacted into one object and
--- deleted when the session is sealed.
-CREATE TABLE session_transcript_parts (
-  session_id  TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
-  part_no     INT  NOT NULL,
-  object_key  TEXT NOT NULL,
-  first_seq   INT  NOT NULL,
-  last_seq    INT  NOT NULL,
-  lines       INT  NOT NULL,
-  bytes       INT  NOT NULL,
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (session_id, part_no)
-);
-
-CREATE TABLE trace_runs (
-  id            TEXT PRIMARY KEY,               -- e.g. run_000123
-  session_id    TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
-  account_id    INT NOT NULL REFERENCES user_accounts(id),
-  langfuse_trace_id TEXT NOT NULL,
-  name          TEXT NOT NULL,                  -- workflow / agent name
-  environment   TEXT NOT NULL CHECK (environment IN ('production', 'staging', 'dev')),
-  status        TEXT NOT NULL CHECK (status IN ('ok', 'error', 'timeout')),
-  started_at    TIMESTAMPTZ NOT NULL,
-  duration_ms   INT NOT NULL,
-  tokens_in     INT NOT NULL DEFAULT 0,
-  tokens_out    INT NOT NULL DEFAULT 0,
-  cost_usd      NUMERIC(10, 4) NOT NULL DEFAULT 0,
-  error_message TEXT,
-  tags          TEXT[] NOT NULL DEFAULT '{}'
-);
-CREATE INDEX trace_runs_account_started_idx ON trace_runs (account_id, started_at DESC);
-CREATE INDEX trace_runs_started_idx ON trace_runs (started_at DESC);
-CREATE INDEX trace_runs_session_idx ON trace_runs (session_id, started_at);
+ALTER TABLE scenarios      ADD COLUMN IF NOT EXISTS library_task_id INT REFERENCES library_tasks(id) ON DELETE SET NULL;
+ALTER TABLE simulations    ADD COLUMN IF NOT EXISTS profile_ids INT[] NOT NULL DEFAULT '{}';
+ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS profile_id INT REFERENCES developer_profiles(id) ON DELETE SET NULL;
+ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS user_turns INT NOT NULL DEFAULT 0;  -- questions answered by the simulated developer

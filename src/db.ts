@@ -76,23 +76,19 @@ async function createDb(): Promise<Db> {
 
 let dbPromise: Promise<Db> | undefined;
 
-/** Shared connection; creates schema + seed data on first use if the DB is empty. */
+/** Shared connection. Applies the (idempotent) schema on first use. */
 export function getDb(): Promise<Db> {
   dbPromise ??= (async () => {
     const db = await createDb();
-    const [{ exists }] = await db.query<{ exists: boolean }>(
-      "SELECT to_regclass('public.products') IS NOT NULL AS exists",
-    );
-    if (!exists) await resetDb(db);
+    await db.exec(await readFile(path.join(SQL_DIR, "schema.sql"), "utf8"));
     return db;
   })();
   return dbPromise;
 }
 
-/** Drop and recreate all tables, then load the sample data (including session transcripts). */
+/** Destructive: drop every table, then recreate the schema. Local development only. */
 export async function resetDb(db: Db): Promise<void> {
+  await db.exec(`DROP TABLE IF EXISTS access_requests, transcript_events, agent_sessions, simulations, scenarios,
+                 products, api_keys, organizations, developer_profiles, library_tasks CASCADE`);
   await db.exec(await readFile(path.join(SQL_DIR, "schema.sql"), "utf8"));
-  await db.exec(await readFile(path.join(SQL_DIR, "seed.sql"), "utf8"));
-  const { seedTranscripts } = await import("./seed-transcripts.js");
-  await seedTranscripts(db);
 }
