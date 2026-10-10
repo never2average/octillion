@@ -59,7 +59,13 @@ export const CRED_SPECS: Record<string, CredSpec> = {
     providers: ["anthropic"], mode: "gateway", how: "ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY (sent as x-api-key)",
     map(p) {
       const { c, env } = anthropicEnv(p);
-      if (c.base_url) env.ANTHROPIC_BASE_URL = trim(c.base_url);
+      if (c.base_url) {
+        env.ANTHROPIC_BASE_URL = trim(c.base_url);
+        // The gateway's Claude upstream is Vertex, which rejects Claude Code 2.1.296's beta body params
+        // ("400 context_management: Extra inputs are not permitted", seen live 2026-10-10). This flag drops them
+        // (verified: the request body then has no context_management). Native Anthropic would accept them.
+        env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS = "1";
+      }
       return { env, setup: "" };
     },
   },

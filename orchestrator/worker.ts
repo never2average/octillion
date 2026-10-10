@@ -15,6 +15,8 @@ import { RUNNERS, checkRunner, type Runner } from "./core/runners.js";
 import { activeSessions, adapterFor, claimJobs, markShuttingDown, WorkerSession, type Job } from "./core/session.js";
 import { log, sleep } from "./core/util.js";
 import { CREDENTIALS_MODE, orchestratorCredentials, redact } from "./core/credentials.js";
+import { assertOrchestratorHost } from "./core/host-guard.js";
+import { FLEET, FleetMembership } from "./core/fleet-client.js";
 
 /** Launch -> wait -> finish. Also the fallback path of the Pi orchestrator. */
 export async function runDeterministic(job: Job, runner: Runner, orchestrator: Record<string, unknown> = { orchestrator: "none" }): Promise<void> {
@@ -31,6 +33,8 @@ export async function runDeterministic(job: Job, runner: Runner, orchestrator: R
  * Other runners: claims up to WORKER_CONCURRENCY free slots.
  */
 export async function claimLoop(runJob: (job: Job, runner: Runner) => Promise<void>, label: string): Promise<void> {
+  // Production: only inside a boat orchestrator sandbox, only RUNNER=boat (OCTILLION_DEV_ALLOW_LOCAL=1: tests).
+  assertOrchestratorHost(CFG.runner);
   if (!CFG.token) throw new Error("OCTILLION_WORKER_TOKEN is required");
   // Broker mode: the boat key and the orchestrator LLM token come from the server (docs/credentials.md).
   await orchestratorCredentials().catch((e) => {
@@ -38,6 +42,7 @@ export async function claimLoop(runJob: (job: Job, runner: Runner) => Promise<vo
     log("orchestrator credentials unavailable:", redact(String(e)));
   });
   let pool: PodPool | null = null;
+  let fleet: FleetMembership | null = null;
   let runner: Runner;
   if (CFG.runner === "pool") {
     pool = new PodPool();
@@ -48,9 +53,11 @@ export async function claimLoop(runJob: (job: Job, runner: Runner) => Promise<vo
     if (!r) throw new Error(`RUNNER must be one of ${[...Object.keys(RUNNERS), "pool"].join(", ")}`);
     await checkRunner(r);
     runner = r;
+    // RUNNER=boat: the fleet assignment caps concurrent (ephemeral) worker sandboxes per agent group.
+    if (r.name === "boat" && FLEET.mode !== "off") { fleet = new FleetMembership(); await fleet.start(); }
   }
-  const capacity = pool ? POOL.capacity : CFG.concurrency; // pool: also bounded by idle pods per harness
-  log(`${label} ${CFG.workerId} runner=${runner.name}${pool ? ` fleet=${pool.mode} orchestrator_id=${pool.orchestratorId}` : ""} capacity=${capacity} url=${CFG.url} max=${CFG.maxSessionMs / 60000}m`);
+  const capacity = pool ? POOL.capacity : fleet ? fleet.capacity : CFG.concurrency;
+  log(`${label} ${CFG.workerId} runner=${runner.name}${pool ? ` fleet=${pool.mode} orchestrator_id=${pool.orchestratorId}` : fleet ? ` fleet=${fleet.mode} orchestrator_id=${fleet.orchestratorId}` : ""} capacity=${capacity} url=${CFG.url} max=${CFG.maxSessionMs / 60000}m`);
 
   let stopping = false;
   let stoppedAt = 0;
@@ -65,8 +72,9 @@ export async function claimLoop(runJob: (job: Job, runner: Runner) => Promise<vo
     markShuttingDown();
     log(`${sig}: stopping ${activeSessions.size} session(s)`);
     await Promise.all([...activeSessions].map((s) => s.kill()));
-    await Promise.allSettled(tasks);
+    await Promise.allSettled(tasks); // every session's finish() deletes its worker sandbox
     await pool?.drain();
+    await fleet?.leave();
   };
   process.on("SIGINT", () => void stop("SIGINT"));
   process.on("SIGTERM", () => void stop("SIGTERM"));
@@ -75,7 +83,27 @@ export async function claimLoop(runJob: (job: Job, runner: Runner) => Promise<vo
   const runnable = (h: string) => { try { adapterFor({ harness: h }); return true; } catch { return false; } };
   const skippedLogged = new Set<string>();
 
+  const groupOf = new Map<string, string>(); // session_id -> agent group holding a boat slot
   const claim = async (): Promise<Job[]> => {
+    if (fleet) {
+      const out: Job[] = [];
+      // One claim per agent group: {agent_ids:[id]}, limit = that group's free worker-sandbox slots.
+      for (const g of fleet.groups()) {
+        if (CFG.harness && getAdapterId(g.harness) !== getAdapterId(CFG.harness)) continue;
+        if (!runnable(g.harness)) {
+          if (!skippedLogged.has(g.agent_id)) { skippedLogged.add(g.agent_id); log(`fleet: not claiming for ${g.agent_id} (no adapter)`); }
+          continue;
+        }
+        const free = fleet.free(g.agent_id);
+        if (!free) continue;
+        for (const job of await claimJobs(free, { agentIds: [g.agent_id] })) {
+          fleet.acquire(g.agent_id);
+          groupOf.set(job.session_id, g.agent_id);
+          out.push(job);
+        }
+      }
+      return out;
+    }
     if (!pool) return claimJobs(capacity - tasks.size);
     const out: Job[] = [];
     // One claim per pod group (registry agent): {agent_ids:[id]}, limit = that group's idle pods.
@@ -104,10 +132,16 @@ export async function claimLoop(runJob: (job: Job, runner: Runner) => Promise<vo
     for (const job of jobs) {
       const t: Promise<void> = runJob(job, runner)
         .catch((e) => log(`[${job.session_id}] crashed:`, e))
-        .finally(() => { tasks.delete(t); pool?.release(job.session_id); });
+        .finally(() => {
+          tasks.delete(t);
+          pool?.release(job.session_id);
+          const g = groupOf.get(job.session_id);
+          if (g) { fleet?.release(g); groupOf.delete(job.session_id); }
+        });
       tasks.add(t);
     }
     if (pool && jobs.length) log(`pool: ${pool.summary()}`);
+    if (fleet && jobs.length) log(`fleet: ${fleet.summary()}`);
     if (!jobs.length) await Promise.race([sleep(CFG.pollMs), ...tasks]);
   }
   await Promise.allSettled(tasks);

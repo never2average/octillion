@@ -1,0 +1,80 @@
+/**
+ * Fleet membership for RUNNER=boat: the server's per-agent assignment (`pods`) is the MAX number of concurrent
+ * worker sandboxes per agent group on this orchestrator. Sandboxes are ephemeral: one fresh boat VM per session,
+ * deleted when it ends, so nothing is paid for while no agent runs.
+ *
+ *  - server (default): POST /api/worker/fleet {orchestrator_id, capacity} at start and every next_checkin_seconds;
+ *    unreachable -> keep the last assignment and retry in 10s. SIGTERM -> DELETE /api/worker/fleet/:id.
+ *  - standalone: fleet/plan.ts planFleet(capacity).
+ */
+import { planFleet } from "../fleet/plan.js";
+import { CFG, env, num } from "./config.js";
+import { api, log } from "./util.js";
+
+export interface GroupTarget { agent_id: string; harness: string; model: string; pods: number }
+
+export const FLEET = {
+  capacity: Math.max(1, Math.min(20, num(env.POD_CAPACITY ?? env.FLEET_SIZE, 20))),
+  mode: (env.FLEET_MODE === "standalone" ? "standalone" : env.FLEET_MODE === "off" ? "off" : "server") as "server" | "standalone" | "off",
+};
+
+export class FleetMembership {
+  targets = new Map<string, GroupTarget>();
+  private running = new Map<string, number>();
+  private timer: NodeJS.Timeout | null = null;
+  private left = false;
+
+  constructor(readonly opts: { capacity?: number; mode?: "server" | "standalone"; orchestratorId?: string } = {}) {}
+  get capacity() { return this.opts.capacity ?? FLEET.capacity; }
+  get mode() { return this.opts.mode ?? (FLEET.mode === "standalone" ? "standalone" : "server"); }
+  get orchestratorId() { return this.opts.orchestratorId ?? CFG.orchestratorId; }
+
+  async start(): Promise<void> {
+    await this.refresh();
+    log(`fleet[${this.orchestratorId}] ${this.mode}: ${this.summary()}`);
+  }
+
+  async refresh(): Promise<void> {
+    if (this.timer) clearTimeout(this.timer);
+    let next = 30;
+    try {
+      if (this.mode === "standalone") {
+        this.set(planFleet(this.capacity).map((g) => ({ agent_id: g.agent_id, harness: g.harness, model: g.model, pods: g.pods })));
+      } else {
+        const r = (await api("/api/worker/fleet", {
+          json: { orchestrator_id: this.orchestratorId, capacity: this.capacity, meta: { worker_id: CFG.workerId, runner: "boat", running: Object.fromEntries(this.running) } },
+        })) as { assignment?: GroupTarget[]; next_checkin_seconds?: number };
+        this.set((r.assignment ?? []).map((a) => ({ agent_id: a.agent_id, harness: a.harness, model: a.model, pods: a.pods })));
+        next = Math.max(5, Number(r.next_checkin_seconds ?? 30));
+      }
+    } catch (e) {
+      next = 10;
+      log(`fleet[${this.orchestratorId}] check-in failed (keeping the last assignment, retry in ${next}s):`, String(e));
+    }
+    if (!this.left) this.timer = setTimeout(() => void this.refresh(), next * 1000);
+  }
+
+  private set(list: GroupTarget[]) {
+    this.targets = new Map(list.filter((t) => t.pods > 0 && t.agent_id).map((t) => [t.agent_id, t]));
+  }
+
+  /** Free worker-sandbox slots of a group (assignment minus sessions running in it). */
+  free(agentId: string): number { return Math.max(0, (this.targets.get(agentId)?.pods ?? 0) - (this.running.get(agentId) ?? 0)); }
+  groups(): GroupTarget[] { return [...this.targets.values()]; }
+  acquire(agentId: string) { this.running.set(agentId, (this.running.get(agentId) ?? 0) + 1); }
+  release(agentId: string) { this.running.set(agentId, Math.max(0, (this.running.get(agentId) ?? 0) - 1)); }
+  runningCount(): number { return [...this.running.values()].reduce((a, b) => a + b, 0); }
+
+  summary(): string {
+    return this.groups().map((g) => `${g.agent_id} ${this.running.get(g.agent_id) ?? 0}/${g.pods}`).join(", ") || "no assignment";
+  }
+
+  /** Graceful leave (server mode): the server re-deals this orchestrator's share at once. */
+  async leave(): Promise<void> {
+    this.left = true;
+    if (this.timer) clearTimeout(this.timer);
+    if (this.mode === "server")
+      await api(`/api/worker/fleet/${encodeURIComponent(this.orchestratorId)}`, { method: "DELETE" })
+        .catch((e) => log("fleet leave failed (the server drops us after 90s anyway):", String(e)));
+  }
+}

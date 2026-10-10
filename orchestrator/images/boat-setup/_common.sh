@@ -29,6 +29,14 @@ ensure_node() {
   local major; major="$("$cand/node" -p 'process.versions.node.split(".")[0]')"
   [ "$major" -ge 22 ] || die "node $("$cand/node" --version) at $cand is < 22"
   NODE_DIR="$cand"
+  # Boat VMs ship /usr/local/bin/node as a SYMLINK into /home/user/.nvm (seen 2026-10-10). /home/user is 0750, so for
+  # every other user (the worker's `agent`, `nobody` in verify) node resolves to /usr/bin/node v20 instead, which
+  # breaks pi and makes cline warn. Replace the symlink with a real, world-executable copy.
+  local real; real="$(readlink -f /usr/local/bin/node 2>/dev/null || true)"
+  case "$real" in /home/*|/root/*)
+    log "replacing /usr/local/bin/node (symlink to $real, unreadable for other users) with a copy"
+    $SUDO cp --remove-destination "$real" /usr/local/bin/node && $SUDO chmod 0755 /usr/local/bin/node ;;
+  esac
   local sys_major=0
   [ -x /usr/local/bin/node ] && sys_major="$(/usr/local/bin/node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
   if [ "$sys_major" -lt 22 ]; then

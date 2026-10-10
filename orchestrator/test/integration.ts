@@ -231,7 +231,7 @@ async function main() {
 
   // Orchestrator: only the URL and worker token as secrets; the rest is plain config.
   const orchEnv = { PATH: process.env.PATH, HOME: process.env.HOME, OCTILLION_URL: BASE, OCTILLION_WORKER_TOKEN: WORKER_TOKEN,
-    RUNNER: "pool", POD_CAPACITY: "3", ORCHESTRATOR_ID: ORCH_ID, POLL_INTERVAL_SECONDS: "1", HEARTBEAT_SECONDS: "15" };
+    RUNNER: "pool", POD_CAPACITY: "3", ORCHESTRATOR_ID: ORCH_ID, OCTILLION_DEV_ALLOW_LOCAL: "1" /* test only: local pods */, POLL_INTERVAL_SECONDS: "1", HEARTBEAT_SECONDS: "15" };
   orch = spawn(TSX, ["orchestrator/pi-octillion/main.ts"], { cwd: ROOT, env: orchEnv, stdio: ["ignore", openSync(path.join(tmp, "orchestrator.log"), "a"), openSync(path.join(tmp, "orchestrator.log"), "a")] });
   log(`orchestrator ${ORCH_ID} started (env keys: ${Object.keys(orchEnv).join(", ")})`);
 

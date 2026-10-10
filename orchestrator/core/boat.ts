@@ -3,6 +3,7 @@ import { BOAT } from "./config.js";
 import { HttpError, sleep } from "./util.js";
 
 export class BoatError extends HttpError {
+  retryAfterMs?: number;
   constructor(status: number, public code: string, msg: string, public retryable?: boolean) { super(status, msg); }
 }
 
@@ -18,7 +19,57 @@ async function boatErrorFrom(res: Response, what: string): Promise<BoatError> {
   try { d = JSON.parse(text); } catch { /* not JSON */ }
   const code = String(d?.code ?? d?.error?.code ?? "");
   const msg = d?.message ?? d?.error?.message ?? text.slice(0, 300);
-  return new BoatError(res.status, code, `boat ${what} -> ${res.status} ${code}: ${msg}`, d?.error?.details?.retryable);
+  const e = new BoatError(res.status, code, `boat ${what} -> ${res.status} ${code}: ${msg}`, d?.error?.details?.retryable);
+  const ra = Number(res.headers.get("retry-after"));
+  if (Number.isFinite(ra) && ra > 0) e.retryAfterMs = ra * 1000;
+  return e;
+}
+
+/**
+ * Client-side start gate: boat counts every create/fork/resume as a "start" (plan: 12/min, 60/h, 200/day on $20).
+ * Every orchestrator paces its own creates below the account limits; 429s are still handled by boatCreate.
+ */
+export class StartGate {
+  private times: number[] = [];
+  constructor(public perMinute: number, public perHour: number) {}
+  /** Milliseconds to wait before the next start is allowed (0 = now). */
+  waitMs(now = Date.now()): number {
+    this.times = this.times.filter((t) => now - t < 3600_000);
+    const lastMin = this.times.filter((t) => now - t < 60_000);
+    let w = 0;
+    if (lastMin.length >= this.perMinute) w = Math.max(w, lastMin[lastMin.length - this.perMinute]! + 60_000 - now);
+    if (this.times.length >= this.perHour) w = Math.max(w, this.times[this.times.length - this.perHour]! + 3600_000 - now);
+    return w;
+  }
+  async acquire(): Promise<void> {
+    for (let w = this.waitMs(); w > 0; w = this.waitMs()) await sleep(Math.min(w + 50, 60_000));
+    this.times.push(Date.now());
+  }
+}
+export const startGate = new StartGate(
+  Math.max(1, Number(process.env.BOAT_STARTS_PER_MINUTE ?? 10)), Math.max(1, Number(process.env.BOAT_STARTS_PER_HOUR ?? 50)));
+
+/**
+ * POST /sandboxes through the start gate. 429 (rate_limited / limit_reached) and 503 no_ready_machine back off
+ * (Retry-After, else exponential 5s..2min with jitter) and retry with the SAME Idempotency-Key, so a lost response
+ * never creates a second billable sandbox.
+ */
+export async function boatCreate(json: Record<string, unknown>, opts: { maxTries?: number; onBackoff?: (ms: number, e: BoatError) => void } = {}): Promise<any> {
+  const idem = crypto.randomUUID();
+  const maxTries = opts.maxTries ?? 10;
+  for (let i = 0; ; i++) {
+    await startGate.acquire();
+    try {
+      return await boatApi("/sandboxes", { method: "POST", headers: { "Idempotency-Key": idem }, json, timeoutMs: 120_000 });
+    } catch (e) {
+      const retryable = e instanceof BoatError && (e.status === 429 || e.status >= 500 || e.code === "idempotency_in_progress" || e.code === "no_ready_machine");
+      if (!retryable || i >= maxTries - 1) throw e;
+      const base = Math.min(5000 * 2 ** i, 120_000);
+      const ms = Math.max((e as BoatError).retryAfterMs ?? 0, base) + Math.floor(Math.random() * 1000);
+      opts.onBackoff?.(ms, e as BoatError);
+      await sleep(ms);
+    }
+  }
 }
 
 /** Set by the credential layer: refetch the boat key after a 401 (rotated key). Returns true if it changed. */

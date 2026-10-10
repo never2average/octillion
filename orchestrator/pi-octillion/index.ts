@@ -19,6 +19,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { CFG } from "../core/config.js";
 import { RUNNERS, type Runner } from "../core/runners.js";
+import { assertOrchestratorHost } from "../core/host-guard.js";
 import { claimJobs, WorkerSession, type Job } from "../core/session.js";
 import { jobPrompt } from "./prompt.js";
 
@@ -141,6 +142,7 @@ export function createOctillionExtension(reg: OctillionRegistry, opts: { allowCl
 
 /** Default export for `pi -e ./orchestrator/pi-octillion`: manager mode with claim_jobs. */
 export default function octillion(pi: ExtensionAPI) {
+  assertOrchestratorHost(CFG.runner); // manual Pi CLI use is agent work too: boat orchestrator sandboxes only
   const runner = RUNNERS[CFG.runner];
   if (!runner) throw new Error(`RUNNER must be one of ${Object.keys(RUNNERS).join(", ")}`);
   return createOctillionExtension(new OctillionRegistry(runner), { allowClaim: true })(pi);

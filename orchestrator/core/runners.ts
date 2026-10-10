@@ -12,13 +12,16 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, rm, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { loadRegistry } from "../fleet/plan.js";
 import { randomUUID } from "node:crypto";
 import { PassThrough, type Readable } from "node:stream";
 import type { HarnessAdapter } from "../harnesses/adapters.js";
 import { BOAT, BOAT_PRICE_PER_HOUR, CFG } from "./config.js";
 import { HttpError, log, sh, shq, sleep, withRetry } from "./util.js";
-import { boatApi, boatCommandRetry, boatExec, boatExecStream, boatSandboxPath, BoatError } from "./boat.js";
+import { boatApi, boatCommandRetry, boatCreate, boatExec, boatExecStream, boatSandboxPath, BoatError } from "./boat.js";
 
 export interface RunExit { code: number | null; signal: string | null; error?: string }
 
@@ -305,28 +308,66 @@ ${boatRunAs()} env -i HOME=${AGENT_HOME} PATH="$(cat ${BOAT_DIR}/path)" WORK=${A
 `;
 }
 
+/** Worker sandbox name: lets `boat-orchestrators status` attribute worker sandboxes to their orchestrator. */
+export function workerSandboxName(agentId: string): string {
+  return `octi-w-${CFG.orchestratorId}-${agentId}`.toLowerCase().replace(/[^a-z0-9-]+/g, "-").slice(0, 60);
+}
+
+/** Pinned harness version from the registry (by agent id, else the first agent of that harness). */
+export function harnessPin(agentId: string | undefined, harness: string): string | null {
+  try {
+    const agents = loadRegistry().agents;
+    return (agents.find((a) => a.id === agentId) ?? agents.find((a) => a.harness === harness))?.harness_version ?? null;
+  } catch { return null; }
+}
+
+const SETUP_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "images", "boat-setup");
+
+/** orchestrator/images/boat-setup/<harness>.sh + _common.sh, if this harness has one. */
+export function boatSetupScripts(harness: string): { common: string; script: string } | null {
+  try { return { common: readFileSync(join(SETUP_DIR, "_common.sh"), "utf8"), script: readFileSync(join(SETUP_DIR, `${harness}.sh`), "utf8") }; }
+  catch { return null; }
+}
+
+/** Keep the preinstalled CLI if it reports the pinned version; else install it with its boat-setup script. */
+export function boatEnsureHarnessScript(harness: string, bin: string, pin: string | null, hasSetup: boolean): string {
+  return `set -uo pipefail
+# Boat VMs ship /usr/local/bin/node as a symlink into /home/user/.nvm (0750): the agent user would fall back to
+# /usr/bin/node v20 (breaks pi, cline warns). Make it a real, world-executable copy first.
+real="$(readlink -f /usr/local/bin/node 2>/dev/null || true)"
+case "$real" in /home/*|/root/*) sudo -n cp --remove-destination "$real" /usr/local/bin/node && sudo -n chmod 0755 /usr/local/bin/node ;; esac
+cur="$( (sudo -n -u nobody env -i HOME=/tmp PATH=/usr/local/bin:/usr/bin:/bin ${shq(bin)} --version 2>/dev/null || true) | grep -v -i -E '^(warning|\\[|\\(node)' | head -n1)"
+pin=${shq(pin ?? "")}
+if [ -n "$cur" ] && { [ -z "$pin" ] || printf '%s' "$cur" | grep -qF -- "$pin"; }; then echo "harness ${harness}: preinstalled ($cur)"; exit 0; fi
+${hasSetup
+    ? `echo "harness ${harness}: installing pinned \${pin:-latest} (found: \${cur:-none})" >&2
+bash ${BOAT_DIR}/setup/${harness}.sh "$pin" >&2 || exit 1
+now="$( (sudo -n -u nobody env -i HOME=/tmp PATH=/usr/local/bin:/usr/bin:/bin ${shq(bin)} --version 2>/dev/null || true) | grep -v -i -E '^(warning|\\[|\\(node)' | head -n1)"
+printf '%s' "$now" | grep -qF -- "$pin" || { echo "harness ${harness}: after install, unprivileged --version reports '$now', expected $pin" >&2; exit 1; }
+echo "harness ${harness}: installed ($now)"`
+    : `echo "harness ${harness}: ${bin} is \${cur:-missing}, expected \${pin:-any}, and there is no boat-setup script" >&2; exit 1`}
+`;
+}
+
 export const boatRunner: Runner = {
   name: "boat",
   async open(spec) {
-    const idemKey = randomUUID(); // same key on retries -> a lost response never creates a second billable VM
-    const created = await withRetry(async () => {
-      try {
-        return await boatApi("/sandboxes", {
-          method: "POST",
-          headers: { "Idempotency-Key": idemKey },
-          json: { type: BOAT.size, ttlSeconds: BOAT.ttlSeconds, noEnv: true, snapshots: false, ...(BOAT.org ? { org: BOAT.org } : {}) },
-          timeoutMs: 120_000,
-        });
-      } catch (e) {
-        if (e instanceof BoatError && e.code === "idempotency_in_progress") throw new HttpError(503, e.message); // retryable
-        // Seen live (2026-10-10): a key scoped without sandbox.create gets 403 api_key_action_forbidden.
-        if (e instanceof BoatError && e.code === "api_key_action_forbidden")
-          throw new Error(`boat key is not allowed to create sandboxes (${e.message}). Store a key with the ci preset (sandbox.create + delete-own + exec + files) in the vault.`);
-        throw e;
-      }
-    });
+    // Start gate + 429/503 backoff, same Idempotency-Key on retries (a lost response never creates a second VM).
+    let created: any;
+    try {
+      created = await boatCreate(
+        { type: BOAT.size, ttlSeconds: BOAT.ttlSeconds, noEnv: true, snapshots: false, ...(BOAT.org ? { org: BOAT.org } : {}) },
+        { onBackoff: (ms, e) => log(`boat create backing off ${Math.round(ms / 1000)}s (${e.status} ${e.code})`) });
+    } catch (e) {
+      // Seen live (2026-10-10): a key scoped without sandbox.create gets 403 api_key_action_forbidden.
+      if (e instanceof BoatError && e.code === "api_key_action_forbidden")
+        throw new Error(`boat key is not allowed to create sandboxes (${e.message}). Store a key with the ci preset (sandbox.create + delete-own + exec + files) in the vault.`);
+      throw e;
+    }
     const id: string = created?.sandbox?.id;
     if (!id) throw new Error(`boat create returned no sandbox id: ${JSON.stringify(created).slice(0, 300)}`);
+    // A recognisable name, so `status` / cleanup can attribute worker sandboxes (best effort).
+    void boatApi(boatSandboxPath(id), { method: "PATCH", json: { name: workerSandboxName(spec.agentId ?? spec.adapter.id) } }).catch(() => {});
     const createdAt = Date.now();
     let destroyedAt: number | null = null;
     let destroying: Promise<void> | null = null;
@@ -362,6 +403,16 @@ export const boatRunner: Runner = {
       }
       const mk = await boatExec(id, `install -d -m 700 ${BOAT_DIR}`, 30);
       if (mk.exitCode !== 0) throw new Error(`mkdir ${BOAT_DIR} failed: ${mk.stderr.slice(-300)}`);
+      // Harness pinned by the registry: keep boat's preinstalled CLI when it is the pinned version, otherwise
+      // install it system-wide with orchestrator/images/boat-setup/<harness>.sh (which verifies `--version`).
+      const pin = harnessPin(spec.agentId, spec.adapter.id);
+      const setup = boatSetupScripts(spec.adapter.id);
+      if (setup) {
+        await put(`${BOAT_DIR}/setup/_common.sh`, setup.common);
+        await put(`${BOAT_DIR}/setup/${spec.adapter.id}.sh`, setup.script);
+      }
+      const ensure = await boatExec(id, boatEnsureHarnessScript(spec.adapter.id, spec.adapter.bin, pin, !!setup), 600);
+      if (ensure.exitCode !== 0) throw new Error(`harness ${spec.adapter.id}${pin ? `@${pin}` : ""} not available: ${(ensure.stderr || ensure.stdout).slice(-800)}`);
       await put(`${BOAT_DIR}/prepare.sh`, boatPrepareScript(spec.adapter.bin, spec.repoUrl));
       await put(`${BOAT_DIR}/diff.sh`, boatDiffScript());
       const prep = await boatExec(id, `bash ${BOAT_DIR}/prepare.sh`, 600);

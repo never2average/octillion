@@ -213,7 +213,7 @@ async function main() {
   // --- orchestrator: URL + worker token only (+ test DNS knobs); no agent jobs exist (run:false), RUNNER=local
   orch = spawn(TSX, ["orchestrator/pi-octillion/main.ts"], {
     cwd: ROOT, stdio: ["ignore", openSync(path.join(tmp, "orchestrator.log"), "a"), openSync(path.join(tmp, "orchestrator.log"), "a")],
-    env: { PATH: process.env.PATH, HOME: process.env.HOME, OCTILLION_URL: BASE, OCTILLION_WORKER_TOKEN: WORKER_TOKEN, RUNNER: "local",
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, OCTILLION_URL: BASE, OCTILLION_WORKER_TOKEN: WORKER_TOKEN, RUNNER: "local", OCTILLION_DEV_ALLOW_LOCAL: "1", // test only
       ORCHESTRATOR_ID: "rtest", POLL_INTERVAL_SECONDS: "1", RESEARCH_TEST_DNS: TEST_DNS, RESEARCH_TRUST_PRIVATE_HOSTS: TRUSTED },
   });
 
