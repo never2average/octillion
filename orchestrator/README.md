@@ -352,6 +352,33 @@ signal within 3s is ignored, because npx and tsx both forward it. A 404 or 409 f
 - **Gateway tokens are not real keys.** Codex sent the `ogw_` token to api.openai.com when only `OPENAI_BASE_URL` was set, which is why the mapping
   uses `openai_base_url`. A misconfigured harness leaks at most a gateway token, never a vault key.
 
+## Integration test (real server, `orchestrator/test/integration.ts`)
+
+```bash
+orchestrator/images/build.sh claude-code          # once: the pinned Claude Code image
+npx tsx orchestrator/test/integration.ts          # about 2 minutes, no API spend; ITEST_KEEP=1 keeps the logs
+```
+
+This runs the **real committed server** (`src/http.ts`) on a fresh PGlite, with `PUBLIC_URL` on the Docker bridge so pods can reach
+`/gw`. It also runs the **real orchestrator** (Pi, `RUNNER=pool`, server fleet mode, `POD_CAPACITY=3`) on the real Claude Code image.
+The orchestrator's environment holds only `OCTILLION_URL` and `OCTILLION_WORKER_TOKEN` as secrets.
+Only the LLM vendor is fake. The vault's `anthropic` provider points at a local Anthropic-compatible server, set up with `npm run keyvault -- provider anthropic --upstream …`.
+That server holds a random `sk-ant-canary-…` key, stored with `keyvault set`. It scripts the harness (one `Bash npm install left-pad`, then a final
+text, with SSE usage) and Pi (start → wait → finish).
+The org comes from `scripts/create-org.ts`. The product `left-pad` (package `left-pad`), 2 scenarios and `run_simulation`
+(explicit `claude-code/opus` + `claude-code/sonnet`, 4 sessions) go through the real MCP endpoint.
+
+| assertion | how |
+|---|---|
+| sessions complete, verdict `adopted` | `get_agent_session` for all 4 sessions |
+| `gateway_usage` per session and for Pi | `GET /api/admin/gateway/usage`: requests, input and output tokens > 0 |
+| session tokens revoked on completion | A token minted while the session ran returns 200 on `/gw/anthropic/v1/models`. After `/complete` it returns 401 `Gateway token is invalid, expired or revoked` |
+| no canary leak | `/proc/*/environ` of the pods' processes (`ANTHROPIC_API_KEY=ogw_…` is seen there), container env and every transcript are free of the canary. The fake vendor only ever saw the canary in `x-api-key`, never an `ogw_` token |
+| pod groups | The fleet plan and assignment are `{opus: 2, sonnet: 1}`. Pod labels match. Every session's `metadata.pool_agent` and `pool_model` equal its own `agent_id` and `model` |
+| shutdown | SIGTERM → `DELETE /api/worker/fleet/:id`, 0 pods, 0 orchestrators registered |
+
+The rig spawns `node_modules/.bin/tsx` directly, not `npx tsx`: `npx` exits on SIGTERM without forwarding it, which orphans the server and orchestrator processes.
+
 ## Verification
 
 Local mocks, no live spend:

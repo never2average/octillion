@@ -13,4 +13,4 @@ COPY harnesses ./harnesses
 USER node
 EXPOSE 3333
 HEALTHCHECK --interval=30s --timeout=5s CMD node -e "fetch('http://127.0.0.1:3333/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
-CMD ["npx", "tsx", "src/http.ts"]
+CMD ["node_modules/.bin/tsx", "src/http.ts"]
