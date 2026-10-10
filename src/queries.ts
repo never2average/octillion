@@ -9,6 +9,7 @@ const agentLabel = (id: string) => findAgent(id)?.label ?? id;
 /** The worker-agent registry as customers see it: who we simulate and how much each counts. */
 export function listAgents() {
   const r = registry();
+  const share = new Map(enabledAgents().map((a) => [a.id, a.weight])); // renormalised over running agents
   return {
     view: "agents" as const,
     as_of: r.as_of ?? null,
@@ -16,7 +17,7 @@ export function listAgents() {
     runnable_coverage: runnableCoverage(),
     sources: r.sources ?? [],
     agents: r.agents.map((a) => ({ id: a.id, label: a.label, vendor: a.vendor ?? null, harness: a.harness, model: a.model,
-                                    harness_version: a.harness_version ?? null, weight: a.enabled === false ? 0 : a.weight,
+                                    harness_version: a.harness_version ?? null, weight: share.get(a.id) ?? 0, market_share: a.enabled === false ? 0 : a.weight,
                                     enabled: isRunnable(a), status: isRunnable(a) ? "running" : a.enabled === false ? "not runnable headless" : a.paused ? `paused${a.paused_reason ? `: ${a.paused_reason}` : ""}` : "adapter pending",
                                     notes: a.notes ?? null })),
     default_samples: config.defaultSamples(),
@@ -427,9 +428,10 @@ export async function getReport(org: Org, input: { product?: string; days?: numb
        FROM ${from} GROUP BY 1`,
     params,
   );
+  const running = new Map(enabledAgents().map((x) => [x.id, x.weight])); // shares of running agents, sum to 1
   const agentRows = byAgent.map((a) => {
     const spec = findAgent(a.agent_id);
-    return { ...a, label: agentLabel(a.agent_id), weight: spec?.enabled === false ? 0 : spec?.weight ?? 0,
+    return { ...a, label: agentLabel(a.agent_id), weight: running.get(a.agent_id) ?? 0, market_share: spec?.enabled === false ? 0 : spec?.weight ?? 0,
              hit_rate: rate(a.hits, a.sessions), hit_ci: wilson(a.hits, a.sessions) };
   }).sort((a, b) => b.weight - a.weight);
   // What a randomly chosen developer's agent would do: per-agent hit rates weighted by real-world adoption.

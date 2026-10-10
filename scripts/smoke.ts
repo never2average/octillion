@@ -234,6 +234,8 @@ try {
 
   const agentsView = await call(A, "list_agents");
   assert.equal(agentsView.agents.filter((a: any) => a.enabled).length, 3);
+  const shareSum = agentsView.agents.filter((a: any) => a.enabled).reduce((s: number, a: any) => s + a.weight, 0);
+  assert.ok(Math.abs(shareSum - 1) < 1e-9, "running agents' usage shares are renormalised to 100%");
   await fails(A, "run_simulation", { agents: ["nope/x"] }, /Unknown or disabled agent/);
   const rep = await call(A, "run_simulation", { samples: 5, name: "representative" });
   assert.equal(rep.simulation.mode, "representative");
