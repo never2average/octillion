@@ -104,6 +104,29 @@ format. Send a post-run `git diff` as a `file_edit` event, because Codex's strea
 Sessions with no heartbeat for `OCTILLION_LEASE_MINUTES` (30) are timed out. A reference worker using boat.dev
 sandboxes lives in [`orchestrator/`](orchestrator/README.md).
 
+## Orchestrators and the pod fleet
+
+The orchestrator ([`orchestrator/`](orchestrator/README.md)) is [Pi](https://pi.dev) with an Octillion extension.
+It runs one Pi session per job, restricted to Octillion tools: start the worker, wait for its turn, reply as the
+developer, and finish.
+
+- **Pods.** Each orchestrator runs up to **20 warm worker pods**. A pod is a container from
+  `orchestrator/images/Dockerfile.<harness>`, with the harness version pinned. A pod is recycled after every
+  session, so each run starts clean. Provider keys are injected per exec. The worker token and the orchestrator's
+  LLM key never enter a pod.
+- **Fleet mix.** Orchestrators check in with `POST /api/worker/fleet`. The server apportions the total fleet,
+  live orchestrators × 20, across harnesses by real-world usage and deals each orchestrator an even share.
+  10 orchestrators make 200 pods; Claude Code at 40% gets 80 of them, 8 per orchestrator. Every runnable harness
+  keeps at least one pod. Run `npm run fleet:status` to see the live plan.
+- **Sampling.** Sessions are sampled with the same weights, so pod capacity matches demand. Only harnesses with a
+  worker adapter are sampled. `list_agents` reports how much of real usage that covers.
+
+```bash
+cd orchestrator && npm install
+OCTILLION_URL=https://<host> OCTILLION_WORKER_TOKEN=... ANTHROPIC_API_KEY=... OPENAI_API_KEY=... \
+ORCHESTRATOR_ID=orch-1 RUNNER=pool POD_CAPACITY=20 npm start
+```
+
 ## Deploy
 
 `Dockerfile` runs the server (`HOST=0.0.0.0`, port 3333, `/healthz`). It needs `DATABASE_URL`, `CLICKHOUSE_URL`
