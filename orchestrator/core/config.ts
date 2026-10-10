@@ -60,9 +60,10 @@ export const BOAT_PRICE_PER_HOUR: Record<string, number> = { small: 0.018, defau
 
 /** The orchestrator brain (Pi). Its key is used only in this process and never reaches a sandbox. */
 export const ORCH = {
-  provider: env.ORCHESTRATOR_PROVIDER ?? "anthropic",
-  model: env.ORCHESTRATOR_MODEL ?? "claude-opus-5-5",
-  apiKey: env.ORCHESTRATOR_API_KEY ?? env.ANTHROPIC_API_KEY ?? "",
+  // Fallbacks only: with CREDENTIALS_MODE=broker (default) the server's broker decides provider + model.
+  provider: env.ORCHESTRATOR_PROVIDER ?? "openai",
+  model: env.ORCHESTRATOR_MODEL ?? "gpt-6.1-sol",
+  apiKey: env.ORCHESTRATOR_API_KEY ?? ((env.ORCHESTRATOR_PROVIDER ?? "openai") === "openai" ? env.OPENAI_API_KEY : env.ANTHROPIC_API_KEY) ?? "",
   apiUrl: env.ORCHESTRATOR_API_URL || undefined, // override the provider base URL (proxy, gateway, test mock)
   thinking: (env.ORCHESTRATOR_THINKING ?? "low") as "off" | "minimal" | "low" | "medium" | "high",
   maxRetries: num(env.ORCHESTRATOR_MAX_RETRIES, 3),

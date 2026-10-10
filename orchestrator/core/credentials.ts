@@ -15,7 +15,7 @@ export const CREDENTIALS_MODE = (env.CREDENTIALS_MODE === "env" ? "env" : "broke
 
 export interface OrchestratorCreds {
   boat: { api_key: string } | null;
-  llm: { provider: string; base_url: string; api_key: string; expires_at?: string } | null;
+  llm: { provider: string; model?: string; base_url: string; api_key: string; expires_at?: string } | null;
 }
 
 export interface SessionCreds { providers: Providers; expires_at: string | null }
@@ -34,7 +34,7 @@ export async function orchestratorCredentials(force = false): Promise<Orchestrat
   if (CREDENTIALS_MODE === "env") {
     return {
       boat: BOAT.apiKey ? { api_key: BOAT.apiKey } : null,
-      llm: ORCH.apiKey ? { provider: ORCH.provider, base_url: ORCH.apiUrl ?? "", api_key: ORCH.apiKey } : null,
+      llm: ORCH.apiKey ? { provider: ORCH.provider, model: ORCH.model, base_url: ORCH.apiUrl ?? "", api_key: ORCH.apiKey } : null,
     };
   }
   if (orch && !force && !expiresSoon(orch.llm?.expires_at)) return orch;
@@ -43,7 +43,7 @@ export async function orchestratorCredentials(force = false): Promise<Orchestrat
       const r = (await withRetry(() => api("/api/worker/orchestrator/credentials", { json: { orchestrator_id: CFG.orchestratorId } }), 4)) as OrchestratorCreds;
       orch = { boat: r?.boat ?? null, llm: r?.llm ?? null };
       if (orch.boat?.api_key) BOAT.apiKey = orch.boat.api_key;
-      log(`credentials: orchestrator ${CFG.orchestratorId}: boat=${orch.boat ? "yes" : "no"} llm=${orch.llm ? `${orch.llm.provider} via gateway (expires ${orch.llm.expires_at ?? "?"})` : "none"}`);
+      log(`credentials: orchestrator ${CFG.orchestratorId}: boat=${orch.boat ? "yes" : "no"} llm=${orch.llm ? `${orch.llm.provider}/${orch.llm.model ?? "?"} via gateway (expires ${orch.llm.expires_at ?? "?"})` : "none"}`);
       return orch;
     } finally { orchFetching = null; }
   })();

@@ -305,7 +305,7 @@ Heartbeats and `/complete` always go to the API. The server recounts events from
 | `POLL_INTERVAL_SECONDS` (5), `FLUSH_INTERVAL_MS` (2000), `HEARTBEAT_SECONDS` (60) | | |
 | `ORCHESTRATOR_ID` | hostname | stable identity for orchestrator credentials, fleet check-in and the pod owner label |
 | **orchestrator (Pi)** | | |
-| `ORCHESTRATOR_MODEL` | `claude-opus-5-5` | Pi model id. The provider, base URL and token come from the broker |
+| `ORCHESTRATOR_MODEL` | `gpt-6.1-sol` | Fallback only. With `CREDENTIALS_MODE=broker` (default) the server decides the brain: its `ORCHESTRATOR_PROVIDER`/`ORCHESTRATOR_MODEL` (default `openai`/`gpt-6.1-sol`) come back from the broker with the gateway base URL and token |
 | `ORCHESTRATOR_THINKING` (`low`), `ORCHESTRATOR_MAX_RETRIES` (3) | | |
 | `ORCHESTRATOR_PROVIDER`, `ORCHESTRATOR_API_KEY`, `ORCHESTRATOR_API_URL` | | `CREDENTIALS_MODE=env` only |
 | **transcripts** | | |

@@ -336,7 +336,8 @@ try {
   assert.equal((await llm({ "x-api-key": REAL_LLM_KEY })).status, 401, "raw provider keys are not accepted by the gateway");
   assert.equal((await llm({ "x-api-key": gw.api_key }, "/gw/smoke_vendor/x")).status, 403, "token is scoped to its providers");
   const orch = await (await worker("/orchestrator/credentials", { orchestrator_id: "smoke-orch" })).json();
-  assert.ok(orch.llm?.api_key.startsWith("ogw_") && orch.llm.base_url.endsWith("/gw/anthropic"), "orchestrator LLM goes through the gateway");
+  assert.ok(orch.llm?.api_key.startsWith("ogw_") && orch.llm.base_url.endsWith("/gw/openai/v1"), "orchestrator LLM goes through the gateway (OpenAI SDK base with /v1)");
+  assert.equal(`${orch.llm.provider}/${orch.llm.model}`, "openai/gpt-6.1-sol", "broker decides the orchestrator brain: GPT by default");
   assert.equal((await fetch(`${base}/api/admin/keyvault/credentials`)).status, 401);
   const listed = await (await fetch(`${base}/api/admin/keyvault/credentials`, { headers: { authorization: "Bearer smoke-admin-token" } })).text();
   assert.ok(listed.includes(stored.hint) && !listed.includes(REAL_LLM_KEY) && !listed.includes(REAL_VENDOR_KEY), "admin API shows hints only");

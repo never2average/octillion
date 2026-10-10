@@ -151,6 +151,7 @@ const serverEnv: NodeJS.ProcessEnv = {
   PATH: process.env.PATH, HOME: process.env.HOME,
   PGLITE_DIR: path.join(tmp, "pglite"), HOST: "0.0.0.0", PORT: String(PORT), PUBLIC_URL: `http://${BRIDGE}:${PORT}`,
   OCTILLION_WORKER_TOKEN: WORKER_TOKEN, OCTILLION_VAULT_KEY: VAULT_KEY, OCTILLION_ADMIN_TOKEN: ADMIN_TOKEN,
+  ORCHESTRATOR_PROVIDER: "anthropic", ORCHESTRATOR_MODEL: "claude-opus-5-5", // hermetic: Pi talks to the fake Anthropic upstream
   OCTILLION_REGISTRY: path.join(tmp, "registry.json"),
 };
 

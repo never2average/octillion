@@ -72,14 +72,23 @@ export async function brokerSessionCredentials(sessionId: string) {
   return { expires_at: expiresAt.toISOString(), providers: out, env };
 }
 
+/** What the orchestrator's brain (Pi) runs on; one place for every orchestrator. Default: GPT via the gateway. */
+export const orchestratorBrain = () => ({
+  provider: process.env.ORCHESTRATOR_PROVIDER ?? "openai",
+  model: process.env.ORCHESTRATOR_MODEL ?? "gpt-6.1-sol",
+});
+/** Path SDKs expect after the provider's host (OpenAI-style clients append /responses, /chat/completions to .../v1). */
+const SDK_BASE_SUFFIX: Record<string, string> = { openai: "/v1", dashscope: "/compatible-mode/v1" };
+
 /** The orchestrator's own access: boat.dev key (if in the vault) and gateway access for its LLM. */
 export async function brokerOrchestratorCredentials(orchestratorId: string) {
-  const llmProvider = process.env.ORCHESTRATOR_PROVIDER ?? "anthropic";
+  const { provider: llmProvider, model: llmModel } = orchestratorBrain();
   const p = await getProvider(llmProvider);
   const expiresAt = new Date(Date.now() + 12 * 3600_000);
   const boat = await useCredential("boat").then((c) => ({ api_key: c.secret })).catch(() => null);
   const llm = p?.mode === "gateway" && p.enabled
-    ? { provider: llmProvider, base_url: `${PUBLIC_URL()}/gw/${llmProvider}`, api_key: await mintToken("orchestrator", [llmProvider], expiresAt, { orchestratorId }), expires_at: expiresAt.toISOString() }
+    ? { provider: llmProvider, model: llmModel, base_url: `${PUBLIC_URL()}/gw/${llmProvider}${SDK_BASE_SUFFIX[llmProvider] ?? ""}`,
+        api_key: await mintToken("orchestrator", [llmProvider], expiresAt, { orchestratorId }), expires_at: expiresAt.toISOString() }
     : null;
   return { boat, llm };
 }

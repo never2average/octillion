@@ -33,8 +33,10 @@ side. Use it only for vendor-hosted agents that can't take a custom base URL.
 `POST /api/worker/orchestrator/credentials` `{orchestrator_id}` →
 ```json
 { "boat": {"api_key": "boat_…"} | null,
-  "llm": {"provider": "anthropic", "base_url": "https://host/gw/anthropic", "api_key": "ogw_…", "expires_at": "…"} }
+  "llm": {"provider": "openai", "model": "gpt-6.1-sol", "base_url": "https://host/gw/openai/v1", "api_key": "ogw_…", "expires_at": "…"} }
 ```
+The server chooses the orchestrators' brain with `ORCHESTRATOR_PROVIDER` / `ORCHESTRATOR_MODEL` (default
+`openai` / `gpt-6.1-sol`). `base_url` already includes the path SDKs expect: `/v1` for OpenAI.
 The token is valid for 12h; refetch on 401 or near expiry.
 
 `POST /api/worker/sessions/:id/credentials` (the session must be `running`) →
