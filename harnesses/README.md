@@ -84,6 +84,53 @@ measures this directly, so we triangulated:
    Amplifying.ai model mix of Claude-attributed public commits (Aug 10–Oct 4 2026) gives Opus 74.1% and
    Sonnet 25.3%; Haiku's 0.5% is folded into Sonnet. Every other harness runs its default model.
 
+### Splitting a harness by model
+
+The fleet runs one pod group per registry agent, so each popular model inside a harness should be its own agent. A
+harness is split only when both of these hold:
+
+- A cited source shows a **second model with at least 20%** of that harness's usage.
+- That source covers a **representative slice** of the harness's users, not just one gateway's traffic.
+
+When a harness is split:
+
+- Its agents are named `<harness>/<model-slug>`.
+- Their weights sum to the harness's previous weight.
+- Each split carries its own `weight_source`.
+- All splits share `image`, `requires_env`, `event_format` and `worker_adapter`.
+- Each model id must be confirmed selectable in the pinned CLI before `model_verified` is set.
+
+Review on 2026-10-10 (each agent's `model_mix` field holds the details):
+
+| harness | decision | why |
+|---|---|---|
+| claude-code | **split** Opus 0.2993 / Sonnet 0.1046 | Amplifying.ai commit model mix: 74.1% / 25.9% |
+| opencode | not split (best candidate) | OpenCode's own stats show hosted Zen/Go traffic led by DeepSeek V4.1 Flash, a stealth model and Muse Spark (~25% each). BYOK usage such as Anthropic is invisible there, so the hosted/BYOK ratio is unknown. A hosted-model split would also need the adapter to pass an OpenCode or DeepSeek key |
+| codex | not split | Only the OpenRouter-routed slice is visible (gpt-6-luna 20.4%, gpt-6-astra 18.6%, gpt-6.1-sol 6%). That slice excludes ChatGPT-login usage, which is most of Codex |
+| pi, cline, kilo | not split | OpenRouter slices only. They are led by DeepSeek or a stealth model, with no stable second model at or above 20% |
+| cursor, copilot, gemini-cli, amp, droid, qwen-code, antigravity | not split | No published per-model shares. Gemini's Auto and Cursor's Auto already route between models server-side |
+
+Selectability was checked in the pinned images:
+
+| harness | command | ids confirmed |
+|---|---|---|
+| copilot | `copilot help config` | claude-sonnet-5.5, gpt-6.1-sol, gemini-3.8-flash, … |
+| opencode, kilo | `opencode models`, `kilo models` | anthropic/claude-*-5-5, openai/gpt-6.1-sol |
+| pi | `pi --list-models` | claude-opus-5-5, gpt-6.1-sol |
+| codex | bundled catalog | gpt-6.1-sol, gpt-6-astra, gpt-6-luna |
+| gemini-cli | bundle constants | gemini-3.1-pro-preview, gemini-3.x-flash |
+
+Any future split can use these ids directly. Cursor's model slugs come from its server and could not be checked
+offline.
+
+The usual sources of model-mix evidence are below. Recheck them each quarter:
+
+- **OpenRouter app pages** (`openrouter.ai/apps/<app>`). These show only traffic routed through OpenRouter, and they skew
+  toward free and cheap models.
+- **opencode.ai/stats**. This counts hosted models only.
+- **Amplifying.ai** commit trailers. These exist for Claude Code only.
+- Vendor announcements.
+
 **What we did not use.** The Amplifying.ai "picks" studies and the Armature study (`armature2026`) measure what
 agents *choose*, not how much they are used. They are relevant to Octillion's product but not to weights.
 Menlo's enterprise LLM-API share (`menlo2025`) is model-vendor share and is used only as a cross-check.

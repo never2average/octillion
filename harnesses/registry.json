@@ -3,6 +3,7 @@
   "as_of": "2026-10-10",
   "next_review": "2027-01-10",
   "methodology": "Target quantity: share of developers' agentic-coding usage by harness, Oct 2026. 1) Anchor on JetBrains DevEco 2026 work adoption (largest reweighted professional sample, May-Jul 2026), normalized. 2) Adjust for intensity using SO 2026 (Claude Code 66% vs Copilot 59% of agent users), Pragmatic Engineer 2026, vendor WAU/ARR, and public-GitHub attribution (Amplifying.ai): Claude Code and Codex up, Copilot and Cursor (breadth, lighter agent use) down. 3) Tools absent from surveys (Pi, Amp, droid, Qwen Code, Aider, Augment, Continue, Warp, Trae) share a ~3-5% long tail, ranked by npm/PyPI downloads; these are +/-100%. 4) Midpoints: Claude Code 37 (30-44), Codex 18 (13-24), Copilot 13 (9-18), Cursor 10 (7-14), OpenCode 5 (3-7), Antigravity 3 + Gemini CLI 1.5 (2.5-7 combined), Junie 2.5 (1.5-4), Cline/Roo/Kilo 2 (1-3), Pi 1.5 (0.5-3), Windsurf/Devin 1.5 (0.5-3), Kiro 1 (0.3-2), Jules 0.8 (0.3-1.5), long tail 3.2 (2-5). 5) A harness is runnable if it installs on Linux, runs non-interactively with tool auto-approval and API-key auth, and emits a JSON event stream. Copilot, Cursor, Antigravity, Cline and Kilo are mostly IDE products; their own headless CLIs stand in for them (proxy_represented_share). 6) weight = usage share / sum of runnable shares (rounded to 4 dp, sums to 1). Non-runnable share is unrepresented_share. 7) Within-harness model splits only where data exists (Claude Code Opus/Sonnet from Amplifying.ai commit model mix); elsewhere the harness default.",
+  "model_split_methodology": "A harness is split into one agent per model only when a cited source shows a second model with >=20% of that harness's usage, on a slice representative of the harness's users (not only a gateway's traffic). Split weights sum to the harness's weight; splits share image, requires_env, event_format and worker_adapter. As of 2026-10-10 only Claude Code qualifies. Gateway data (OpenRouter app pages, OpenCode stats) shows other mixes but covers only the usage routed through those gateways. See each agent's model_mix note.",
   "unrepresented_share": 0.084,
   "proxy_represented_share": 0.275,
   "unrepresented_breakdown": {
@@ -126,6 +127,36 @@
       "title": "Octillion: inspection of pinned harness builds (2026-10-10)",
       "url": "harnesses/README.md#verification",
       "note": "Model ids/defaults read from the pinned binaries: claude-opus-5-5 and claude-sonnet-5-5 in Claude Code 2.1.296; Codex 0.162.1 bundled catalog priority 1 = gpt-6.1-sol; `droid exec --help` default gpt-6-sol."
+    },
+    {
+      "id": "openrouter-apps-2026-10",
+      "title": "OpenRouter app rankings: model mix per app (this month, fetched 2026-10-10)",
+      "url": "https://openrouter.ai/apps/codex",
+      "note": "Top-20 model token shares parsed from each app page (codex, pi, cline, kilo-code, roo-code). Codex: gpt-6-luna 20.4%, gpt-6-astra 18.6%, deepseek-v4.1-flash 15.5%, gpt-5.6-sol 9.4%, gpt-6.1-sol 6.0%. Pi: deepseek-v4.1-flash 40.4%, glm-5.3-flash 15.7%, claude-opus-5.5 2.7%. Cline: space-bunny-alpha (stealth) 43.3%, muse-spark-1.3 13.3%. Kilo: space-bunny-alpha 33.8%, nemotron-3-ultra 17.0%. Only traffic routed via OpenRouter: excludes subscriptions (ChatGPT login, Claude Max) and direct BYOK, so heavily skewed to cheap/free/stealth models. Not used for splits."
+    },
+    {
+      "id": "opencode-stats-2026-10",
+      "title": "OpenCode public stats (7 days to 2026-10-10)",
+      "url": "https://opencode.ai/stats",
+      "note": "~148T tokens on OpenCode-hosted models (Zen/Go/free): deepseek-v4.1-flash ~26%, space-bunny (stealth) ~26%, muse-spark-1.3 ~25%, mimo-v2.6-flash ~8%, gpt-6-luna <1%. Anthropic is absent because BYOK/direct traffic is not counted; the hosted vs BYOK share of OpenCode usage is unknown."
+    },
+    {
+      "id": "amp-chronicle-2026",
+      "title": "Amp chronicle (mode to model mapping)",
+      "url": "https://ampcode.com/chronicle",
+      "note": "Modes low/medium/high/ultra since 2026-07-09; medium = Claude Opus 5.5 (2026-09-28), ultra = Claude Fable 5.1. No usage shares by mode published."
+    },
+    {
+      "id": "cursor-models-2026",
+      "title": "Cursor: available models and Auto routing",
+      "url": "https://cursor.com/help/models-and-usage/available-models",
+      "note": "Auto routes between Cursor models (Composer 2.5) and other providers; no usage shares published."
+    },
+    {
+      "id": "copilot-cli-models",
+      "title": "Copilot CLI 1.0.95 model catalog (`copilot help config`)",
+      "url": "https://docs.github.com/en/copilot/reference/cli-command-reference",
+      "note": "Selectable ids include claude-sonnet-5.5, claude-opus-5.5, gpt-6.1-sol, gpt-6-astra, gemini-3.8-flash and auto. GitHub publishes no per-model usage shares."
     }
   ],
   "agents": [
@@ -161,7 +192,8 @@
       "resume": true,
       "adapter_evidence": "production",
       "enabled": true,
-      "notes": "Opus share of Claude Code = 74.1% (Amplifying.ai model mix of Claude-attributed public commits, Aug 10-Oct 4 2026; Haiku 0.5% folded into Sonnet). Public-commit mix skews to heavy users; Opus is reportedly the default for most plans since ~v2.1.280 (secondary sources). Model id seen in the 2.1.296 binary."
+      "notes": "Opus share of Claude Code = 74.1% (Amplifying.ai model mix of Claude-attributed public commits, Aug 10-Oct 4 2026; Haiku 0.5% folded into Sonnet). Public-commit mix skews to heavy users; Opus is reportedly the default for most plans since ~v2.1.280 (secondary sources). Model id seen in the 2.1.296 binary.",
+      "model_mix": "Split by model: Opus 74.1% / Sonnet+Haiku 25.9% of Claude-attributed public commits (Amplifying.ai, 2026-08-10..10-04)."
     },
     {
       "id": "claude-code/sonnet",
@@ -195,7 +227,8 @@
       "resume": true,
       "adapter_evidence": "production",
       "enabled": true,
-      "notes": "Sonnet (+Haiku) = 25.9% of Claude Code usage (Amplifying.ai model mix). Model id seen in the 2.1.296 binary."
+      "notes": "Sonnet (+Haiku) = 25.9% of Claude Code usage (Amplifying.ai model mix). Model id seen in the 2.1.296 binary.",
+      "model_mix": "Split by model: Opus 74.1% / Sonnet+Haiku 25.9% of Claude-attributed public commits (Amplifying.ai, 2026-08-10..10-04)."
     },
     {
       "id": "codex/default",
@@ -213,7 +246,8 @@
         "codex-wau-2026",
         "npm-2026-10",
         "amplifying-index",
-        "pe2026"
+        "pe2026",
+        "openrouter-apps-2026-10"
       ],
       "headless": "codex exec --json --model <model> --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral --color never -C <workdir> -  (prompt on stdin)",
       "event_format": "codex-exec-jsonl",
@@ -229,7 +263,8 @@
       "resume": true,
       "adapter_evidence": "production",
       "enabled": true,
-      "notes": "Share covers Codex CLI + IDE extension + cloud (same agent core). Model: gpt-6.1-sol is priority 1 ('Latest workhorse model for coding') in the model catalog bundled in codex 0.162.1; gpt-6-astra (frontier) is priority 2. The server may override the default, so unverified. No public data to split by model."
+      "notes": "Share covers Codex CLI + IDE extension + cloud (same agent core). Model: gpt-6.1-sol is priority 1 ('Latest workhorse model for coding') in the model catalog bundled in codex 0.162.1; gpt-6-astra (frontier) is priority 2. The server may override the default, so unverified. No public data to split by model.",
+      "model_mix": "Model mix: not split. Only evidence is the OpenRouter-routed slice (gpt-6-luna 20.4%, gpt-6-astra 18.6%, gpt-6.1-sol 6.0%, ~30% non-OpenAI), which excludes ChatGPT-login usage, the bulk of Codex. Too skewed to split on; revisit if OpenAI or Amplifying publish a mix."
     },
     {
       "id": "copilot/auto",
@@ -247,7 +282,8 @@
         "so2026",
         "pe2026",
         "copilot-users",
-        "npm-2026-10"
+        "npm-2026-10",
+        "copilot-cli-models"
       ],
       "headless": "copilot --output-format json --allow-all-tools --no-auto-update --model <model>  (prompt on stdin)",
       "event_format": "copilot-jsonl",
@@ -263,7 +299,8 @@
       "resume": true,
       "adapter_evidence": "captured-fixture",
       "enabled": true,
-      "notes": "PROXY: most Copilot agent usage is VS Code agent mode / the cloud coding agent, which cannot run headless. The Copilot CLI is GitHub's terminal agent with the same models and is used here as the stand-in for the whole Copilot share. 'auto' is a documented --model value; the CLI's own default model is not documented. Token must belong to an account with a Copilot seat."
+      "notes": "PROXY: most Copilot agent usage is VS Code agent mode / the cloud coding agent, which cannot run headless. The Copilot CLI is GitHub's terminal agent with the same models and is used here as the stand-in for the whole Copilot share. 'auto' is a documented --model value; the CLI's own default model is not documented. Token must belong to an account with a Copilot seat.",
+      "model_mix": "Model mix: not split, no public per-model shares. Claude Sonnet 5.5, GPT-6.1-Sol and Gemini 3.8 Flash are all selectable via --model (verified in the 1.0.95 catalog)."
     },
     {
       "id": "cursor/auto",
@@ -280,7 +317,8 @@
         "jb2026",
         "pe2026",
         "so2025tech",
-        "cursor-arr-2026"
+        "cursor-arr-2026",
+        "cursor-models-2026"
       ],
       "headless": "cursor-agent -p --output-format stream-json --force --trust --model <model> -- <prompt>",
       "event_format": "cursor-stream-json",
@@ -296,7 +334,8 @@
       "resume": true,
       "adapter_evidence": "synthesized-fixture",
       "enabled": true,
-      "notes": "PROXY: most Cursor usage is the IDE agent; cursor-agent is Cursor's own headless agent and stands in for it. Auto is the IDE default; Auto routes mostly to Composer 2.x (vantage.sh, artificialanalysis.ai), but the routing mix is not public. Version is Cursor's build id; image downloads the pinned tarball from downloads.cursor.com."
+      "notes": "PROXY: most Cursor usage is the IDE agent; cursor-agent is Cursor's own headless agent and stands in for it. Auto is the IDE default; Auto routes mostly to Composer 2.x (vantage.sh, artificialanalysis.ai), but the routing mix is not public. Version is Cursor's build id; image downloads the pinned tarball from downloads.cursor.com.",
+      "model_mix": "Model mix: not split, no public shares; Auto routes between Composer and frontier models server-side. Model slugs come from Cursor's server (`cursor-agent models` needs auth), so other slugs could not be verified offline."
     },
     {
       "id": "opencode/sonnet",
@@ -313,7 +352,8 @@
         "jb2026",
         "npm-2026-10",
         "opencode-users-2026",
-        "pe2026"
+        "pe2026",
+        "opencode-stats-2026-10"
       ],
       "headless": "opencode run --format json --auto -m <model>  (prompt on stdin)",
       "event_format": "opencode-json",
@@ -329,7 +369,8 @@
       "resume": true,
       "adapter_evidence": "captured-fixture",
       "enabled": true,
-      "notes": "Provider-agnostic; no public data on which model OpenCode users pick (its Go/Zen subscriptions also push open-weight models). Sonnet chosen as a plausible, comparable default; unverified."
+      "notes": "Provider-agnostic; no public data on which model OpenCode users pick (its Go/Zen subscriptions also push open-weight models). Sonnet chosen as a plausible, comparable default; unverified.",
+      "model_mix": "Model mix: the strongest candidate for a split, but NOT split. OpenCode's own stats show hosted Zen/Go traffic led by deepseek-v4.1-flash (~26%), a stealth model (~26%) and muse-spark-1.3 (~25%), but BYOK/direct-provider usage (e.g. Anthropic) is invisible there, so the hosted vs BYOK ratio is unknown. A hosted-model split would also need the adapter to pass an OpenCode/DeepSeek key (it passes only ANTHROPIC_API_KEY today). anthropic/claude-sonnet-5-5 verified selectable via `opencode models` (1.18.35)."
     },
     {
       "id": "antigravity/default",
@@ -361,7 +402,8 @@
       "resume": true,
       "adapter_evidence": "captured-fixture",
       "enabled": true,
-      "notes": "PROXY for the Antigravity IDE (JetBrains: 6% work adoption). 'default' = omit --model. API-key auth needs modelProvider \"gemini\" in ~/.gemini/antigravity-cli/settings.json (docs); write it at session setup. Verified headless with no TTY (docker exec -i) against a mock endpoint on 2026-10-10; with no --model it called gemini-3.1-pro-preview.3.3-5524738307653632 with sha512."
+      "notes": "PROXY for the Antigravity IDE (JetBrains: 6% work adoption). 'default' = omit --model. API-key auth needs modelProvider \"gemini\" in ~/.gemini/antigravity-cli/settings.json (docs); write it at session setup. Verified headless with no TTY (docker exec -i) against a mock endpoint on 2026-10-10; with no --model it called gemini-3.1-pro-preview.3.3-5524738307653632 with sha512.",
+      "model_mix": "Model mix: not split; no published shares (with no --model, our mock run called gemini-3.1-pro-preview)."
     },
     {
       "id": "gemini-cli/auto",
@@ -393,7 +435,8 @@
       "resume": true,
       "adapter_evidence": "captured-fixture",
       "enabled": true,
-      "notes": "Google is steering users to Antigravity; Gemini CLI npm downloads fell ~40% since April 2026. 'auto' lets the CLI route between Pro/Flash (its default)."
+      "notes": "Google is steering users to Antigravity; Gemini CLI npm downloads fell ~40% since April 2026. 'auto' lets the CLI route between Pro/Flash (its default).",
+      "model_mix": "Model mix: not split. Default Auto routes each prompt between Pro and Flash (gemini-3.1-pro-preview and gemini-3.x-flash ids present in 0.63.0); no usage shares published, and Auto already reflects the default mix."
     },
     {
       "id": "pi/opus",
@@ -408,7 +451,8 @@
       "usage_share": 0.015,
       "weight_source": [
         "npm-2026-10",
-        "amplifying-index"
+        "amplifying-index",
+        "openrouter-apps-2026-10"
       ],
       "headless": "pi -p --mode json --model <provider/model>  (prompt on stdin)",
       "event_format": "pi-json",
@@ -424,7 +468,8 @@
       "resume": true,
       "adapter_evidence": "captured-fixture",
       "enabled": true,
-      "notes": "No survey coverage; share from npm downloads (0.6M/wk, Amplifying npm demand share 7.9% of CLIs) discounted heavily because CLI-download share overstates terminal-only tools. Package moved to @earendil-works/pi-coding-agent (old @mariozechner name deprecated at 0.73.1). Model choice unverified."
+      "notes": "No survey coverage; share from npm downloads (0.6M/wk, Amplifying npm demand share 7.9% of CLIs) discounted heavily because CLI-download share overstates terminal-only tools. Package moved to @earendil-works/pi-coding-agent (old @mariozechner name deprecated at 0.73.1). Model choice unverified.",
+      "model_mix": "Model mix: not split. OpenRouter slice: deepseek-v4.1-flash 40.4%, glm-5.3-flash 15.7%, claude-opus-5.5 2.7%; no second model >=20%, and BYOK Anthropic/OpenAI usage is invisible, so the Opus choice remains an assumption. claude-opus-5-5 verified in `pi --list-models` (1.1.0)."
     },
     {
       "id": "cline/sonnet",
@@ -439,7 +484,8 @@
       "usage_share": 0.01,
       "weight_source": [
         "so2025tech",
-        "npm-2026-10"
+        "npm-2026-10",
+        "openrouter-apps-2026-10"
       ],
       "headless": "cline --json --auto-approve true -P anthropic -m <model> -k $ANTHROPIC_API_KEY -- <prompt>",
       "event_format": "cline-json",
@@ -455,7 +501,8 @@
       "resume": false,
       "adapter_evidence": "captured-fixture",
       "enabled": true,
-      "notes": "Cline+Roo+Kilo 2.2% of SO2025 IDE respondents; split Cline 1.0 / Roo 0.5 / Kilo 0.5 (judgement, unverified). Cline is mostly a VS Code extension; the CLI is a proxy. Key passed per run with -P anthropic -k (from env). No headless resume (cline --id fails with --json in 3.0.70), so no simulated-developer replies. `-p` means plan mode, not print."
+      "notes": "Cline+Roo+Kilo 2.2% of SO2025 IDE respondents; split Cline 1.0 / Roo 0.5 / Kilo 0.5 (judgement, unverified). Cline is mostly a VS Code extension; the CLI is a proxy. Key passed per run with -P anthropic -k (from env). No headless resume (cline --id fails with --json in 3.0.70), so no simulated-developer replies. `-p` means plan mode, not print.",
+      "model_mix": "Model mix: not split. OpenRouter slice is led by a stealth model (space-bunny-alpha 43.3%, not a stable target) and muse-spark-1.3 13.3%; no stable second model >=20%; Cline-provider and BYOK usage is invisible."
     },
     {
       "id": "kilo/sonnet",
@@ -470,7 +517,8 @@
       "usage_share": 0.005,
       "weight_source": [
         "so2025tech",
-        "npm-2026-10"
+        "npm-2026-10",
+        "openrouter-apps-2026-10"
       ],
       "headless": "kilo run --format json --auto -m <model>  (prompt on stdin)",
       "event_format": "opencode-json",
@@ -486,7 +534,8 @@
       "resume": true,
       "adapter_evidence": "captured-fixture",
       "enabled": true,
-      "notes": "OpenCode fork (same run/--format json interface). Mostly a VS Code extension; CLI is a proxy. Share is a judgement split of the Cline/Roo/Kilo bucket."
+      "notes": "OpenCode fork (same run/--format json interface). Mostly a VS Code extension; CLI is a proxy. Share is a judgement split of the Cline/Roo/Kilo bucket.",
+      "model_mix": "Model mix: not split. OpenRouter slice: space-bunny-alpha (stealth) 33.8%, nemotron-3-ultra 17.0%; no stable second model >=20%. anthropic/claude-sonnet-5-5 verified in `kilo models` (7.8.8)."
     },
     {
       "id": "amp/default",
@@ -501,7 +550,8 @@
       "usage_share": 0.004,
       "weight_source": [
         "npm-2026-10",
-        "amplifying-index"
+        "amplifying-index",
+        "amp-chronicle-2026"
       ],
       "headless": "amp -x --stream-json [--mode <mode>]  (prompt on stdin; settings amp.dangerouslyAllowAll=true)",
       "event_format": "claude-stream-json",
@@ -517,7 +567,8 @@
       "resume": true,
       "adapter_evidence": "synthesized-fixture",
       "enabled": true,
-      "notes": "Long-tail share (~0.4%, ±100%): no survey coverage, 20k npm downloads/wk. Amp picks the model via its mode (low/medium/high/ultra); 'default' = omit --mode. --stream-json is documented as Claude Code-compatible. Amp does not ask for tool approval. npm name is now @ampcode/cli."
+      "notes": "Long-tail share (~0.4%, ±100%): no survey coverage, 20k npm downloads/wk. Amp picks the model via its mode (low/medium/high/ultra); 'default' = omit --mode. --stream-json is documented as Claude Code-compatible. Amp does not ask for tool approval. npm name is now @ampcode/cli.",
+      "model_mix": "Model mix: not split. Amp maps modes to models (medium = Claude Opus 5.5, ultra = Claude Fable 5.1) but publishes no mode shares."
     },
     {
       "id": "droid/default",
@@ -547,7 +598,8 @@
       "resume": true,
       "adapter_evidence": "captured-fixture",
       "enabled": true,
-      "notes": "Long-tail share (~0.4%, ±100%), mostly enterprise; most installs use the curl script, so npm (11k/wk) undercounts. Default model gpt-6-sol per `droid exec --help` in 0.238.0."
+      "notes": "Long-tail share (~0.4%, ±100%), mostly enterprise; most installs use the curl script, so npm (11k/wk) undercounts. Default model gpt-6-sol per `droid exec --help` in 0.238.0.",
+      "model_mix": "Model mix: not split. No published shares (Amplifying lists Factory as unmeasured); default gpt-6-sol per --help."
     },
     {
       "id": "qwen-code/default",
@@ -577,7 +629,8 @@
       "resume": true,
       "adapter_evidence": "captured-fixture",
       "enabled": true,
-      "notes": "Gemini CLI fork. Western surveys miss Chinese usage, so this is likely an undercount. Qwen OAuth free tier ended 2026-04-15; use a DashScope key (or OPENAI_API_KEY+OPENAI_BASE_URL+OPENAI_MODEL). Model qwen3-coder-plus via the DashScope OpenAI-compatible endpoint (adapter sets OPENAI_BASE_URL); unverified as the most-used choice."
+      "notes": "Gemini CLI fork. Western surveys miss Chinese usage, so this is likely an undercount. Qwen OAuth free tier ended 2026-04-15; use a DashScope key (or OPENAI_API_KEY+OPENAI_BASE_URL+OPENAI_MODEL). Model qwen3-coder-plus via the DashScope OpenAI-compatible endpoint (adapter sets OPENAI_BASE_URL); unverified as the most-used choice.",
+      "model_mix": "Model mix: not split; no published shares."
     },
     {
       "id": "junie",
