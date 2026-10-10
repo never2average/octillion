@@ -6,7 +6,7 @@ import type { AddressInfo } from "node:net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { createServer, WIDGET_URI } from "../src/server.js";
+import { createServer, WIDGET_URI, fitPayload, STRUCTURED_BUDGET } from "../src/server.js";
 import { createOrg, type Org } from "../src/auth.js";
 import { getDb } from "../src/db.js";
 import { transcripts } from "../src/transcripts.js";
@@ -202,6 +202,62 @@ try {
   const ui = res.contents[0] as { mimeType: string; text: string };
   assert.equal(ui.mimeType, "text/html;profile=mcp-app");
   assert.ok(ui.text.includes("Octillion"));
+  // MCP Apps bridge (JSON-RPC over postMessage), not the legacy MCP-UI protocol or an injected adapter.
+  for (const m of ["ui/initialize", "ui/notifications/initialized", "ui/notifications/tool-result", "tools/call", "ui/notifications/size-changed", "ui/notifications/host-context-changed", "ui/open-link"])
+    assert.ok(ui.text.includes(`"${m}"`), `widget speaks ${m}`);
+  assert.ok(!/ui-lifecycle-iframe|ui-request-render-data|mcp-ui/i.test(ui.text), "no legacy MCP-UI protocol");
+  assert.equal((ui.text.match(/<script\b/g) ?? []).length, 1, "single inline script, no external fetches");
+  assert.ok(!/<script[^>]+src=|<link[^>]+href=/i.test(ui.text), "no external assets");
+  const uiMeta = (res.contents[0] as any)._meta;
+  assert.equal(uiMeta?.ui?.prefersBorder, true);
+  assert.deepEqual(uiMeta?.ui?.csp, { connectDomains: [], resourceDomains: [] });
+  assert.ok(uiMeta?.["openai/widgetDescription"]?.length > 20);
+  const { resources } = await A.listResources();
+  assert.ok(resources.some((r) => r.uri === WIDGET_URI && r.mimeType === "text/html;profile=mcp-app"), "UI resource listed");
+  for (const t of tools) {
+    const m = t._meta as any;
+    assert.ok(t.title && t.description && t.description.length > 30, `${t.name} has a title and description`);
+    assert.equal(m["openai/outputTemplate"], WIDGET_URI);
+    for (const k of ["openai/toolInvocation/invoking", "openai/toolInvocation/invoked"])
+      assert.ok(typeof m[k] === "string" && m[k].length > 0 && m[k].length <= 64, `${t.name} ${k}`);
+    assert.equal(typeof t.annotations?.readOnlyHint, "boolean", `${t.name} readOnlyHint`);
+    assert.equal(typeof t.annotations?.destructiveHint, "boolean", `${t.name} destructiveHint`);
+    if (t.annotations?.readOnlyHint) assert.equal(t.annotations.destructiveHint, false);
+  }
+  assert.equal(tools.find((t) => t.name === "cancel_simulation")?.annotations?.destructiveHint, true);
+  assert.equal(tools.find((t) => t.name === "get_visibility_report")?.annotations?.readOnlyHint, true);
+  console.log("✓ UI resource: MCP Apps bridge, CSP/border meta, tool status strings and annotations");
+
+  // ---------- prompts (slash commands) ----------
+  const { prompts } = await A.listPrompts();
+  assert.deepEqual(prompts.map((p) => p.name).sort(), ["compare_models", "explain_loss", "onboard_product", "visibility_report", "weekly_digest"]);
+  const promptArgs = Object.fromEntries(prompts.map((p) => [p.name, (p.arguments ?? []).map((x) => `${x.name}${x.required ? "" : "?"}`)]));
+  assert.deepEqual(promptArgs.onboard_product, ["prompt", "website_url", "docs_url"]);
+  assert.deepEqual(promptArgs.explain_loss, ["session_id"]);
+  assert.deepEqual(promptArgs.visibility_report, ["product?", "days?"]);
+  assert.deepEqual(promptArgs.compare_models, ["product?"]);
+  assert.deepEqual(promptArgs.weekly_digest, []);
+  const onboardPrompt = await A.getPrompt({ name: "onboard_product", arguments: { prompt: "A Redis job queue", website_url: "https://bullmq.io", docs_url: "https://docs.bullmq.io" } });
+  const onboardText = (onboardPrompt.messages[0].content as any).text as string;
+  assert.ok(onboardText.includes("onboard_product") && onboardText.includes("get_onboarding") && onboardText.includes("https://docs.bullmq.io"));
+  const lossText = ((await A.getPrompt({ name: "explain_loss", arguments: { session_id: "ses_x1" } })).messages[0].content as any).text as string;
+  assert.ok(lossText.includes("ses_x1") && lossText.includes("get_session_transcript"));
+  const reportText = ((await A.getPrompt({ name: "visibility_report", arguments: { product: "relayq", days: "14" } })).messages[0].content as any).text as string;
+  assert.ok(reportText.includes('"days":14') && reportText.includes('"product":"relayq"'));
+  await A.getPrompt({ name: "weekly_digest" });
+  console.log("✓ prompts: onboard_product, visibility_report, explain_loss, compare_models, weekly_digest");
+
+  // ---------- payload budget (Claude stops passing results to the app above ~150k characters) ----------
+  const bigEvents = Array.from({ length: 300 }, (_, i) => ({ seq: i, type: "tool_result", output: "x".repeat(5000) }));
+  const fitted = fitPayload({ view: "transcript", session_id: "ses_x", offset: 0, limit: 300, total: 300, events: bigEvents });
+  assert.ok(JSON.stringify(fitted).length <= STRUCTURED_BUDGET, "transcript fits the budget");
+  assert.equal(fitted.truncated, true);
+  assert.ok(fitted.events.length > 1 && fitted.events.length < 300 && fitted.limit === fitted.events.length, "pager continues after the last kept event");
+  const fittedSearch = fitPayload({ view: "search", query: "q", results: { total: 5000, hits: Array.from({ length: 5000 }, (_, i) => ({ session_id: `ses_${i}`, seq: i, text: "y".repeat(400) })) } });
+  assert.ok(JSON.stringify(fittedSearch).length <= STRUCTURED_BUDGET && fittedSearch.results.total === 5000);
+  const small = { view: "products", products: [] };
+  assert.equal(fitPayload(small), small, "small payloads pass through untouched");
+  console.log("✓ structuredContent stays under the host size budget");
 
   // ---------- configure ----------
   assert.equal((await call(A, "list_products")).products.length, 0);

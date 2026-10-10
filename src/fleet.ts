@@ -95,6 +95,8 @@ export async function fleetCheckin(orchestratorId: string, capacity?: number, me
 export async function fleetLeave(orchestratorId: string) {
   const db = await getDb();
   await db.query("DELETE FROM orchestrators WHERE id = $1", [orchestratorId]);
+  // On-demand orchestrators leave when idle (or on SIGTERM): the autoscaler deletes their sandbox on its next tick.
+  await db.query("UPDATE orchestrator_sandboxes SET state = 'draining', last_seen = now() WHERE orchestrator_id = $1 AND state IN ('booting', 'running')", [orchestratorId]);
 }
 
 export async function fleetStatus(orchestratorId?: string) {

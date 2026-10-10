@@ -5,28 +5,32 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Octillion</title>
 <style>
+  /* Colour tokens. Host style variables (MCP Apps hostContext.styles.variables, e.g. --color-text-primary)
+     take precedence when the host sends them; our palette is the fallback for both themes. */
   :root {
     color-scheme: light;
-    --page: #f9f9f7;
-    --surface: #fcfcfb;
-    --surface-2: #f0efec;
-    --ink: #0b0b0b;
-    --ink-2: #52514e;
-    --muted: #898781;
+    --page: var(--color-background-primary, #f9f9f7);
+    --surface: var(--color-background-primary, #fcfcfb);
+    --surface-2: var(--color-background-secondary, #f0efec);
+    --ink: var(--color-text-primary, #0b0b0b);
+    --ink-2: var(--color-text-secondary, #52514e);
+    --muted: var(--color-text-tertiary, #898781);
     --grid: #e1e0d9;
     --axis: #c3c2b7;
-    --border: rgba(11, 11, 11, 0.10);
+    --border: var(--color-border-secondary, rgba(11, 11, 11, 0.10));
     --accent: #2a78d6;
     --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4;
     --good: #0ca30c; --warning: #fab219; --critical: #d03b3b;
     --good-ink: #006300; --critical-ink: #b42f2f;
+    --sans: var(--font-sans, system-ui, -apple-system, "Segoe UI", sans-serif);
+    --mono: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
       color-scheme: dark;
-      --page: #0d0d0d; --surface: #1a1a19; --surface-2: #262624;
-      --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
-      --grid: #2c2c2a; --axis: #383835; --border: rgba(255, 255, 255, 0.10);
+      --page: var(--color-background-primary, #0d0d0d); --surface: var(--color-background-primary, #1a1a19); --surface-2: var(--color-background-secondary, #262624);
+      --ink: var(--color-text-primary, #ffffff); --ink-2: var(--color-text-secondary, #c3c2b7); --muted: var(--color-text-tertiary, #898781);
+      --grid: #2c2c2a; --axis: #383835; --border: var(--color-border-secondary, rgba(255, 255, 255, 0.10));
       --accent: #3987e5;
       --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181;
       --good-ink: #0ca30c; --critical-ink: #e66767;
@@ -34,19 +38,22 @@
   }
   :root[data-theme="dark"] {
     color-scheme: dark;
-    --page: #0d0d0d; --surface: #1a1a19; --surface-2: #262624;
-    --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
-    --grid: #2c2c2a; --axis: #383835; --border: rgba(255, 255, 255, 0.10);
+    --page: var(--color-background-primary, #0d0d0d); --surface: var(--color-background-primary, #1a1a19); --surface-2: var(--color-background-secondary, #262624);
+    --ink: var(--color-text-primary, #ffffff); --ink-2: var(--color-text-secondary, #c3c2b7); --muted: var(--color-text-tertiary, #898781);
+    --grid: #2c2c2a; --axis: #383835; --border: var(--color-border-secondary, rgba(255, 255, 255, 0.10));
     --accent: #3987e5;
     --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181;
     --good-ink: #0ca30c; --critical-ink: #e66767;
   }
+  /* Host fixed the container height (containerDimensions.height): fill it and scroll inside. */
+  :root.fixed-height, :root.fixed-height body { height: 100%; }
+  :root.fixed-height body { overflow: auto; }
 
   * { box-sizing: border-box; }
   html, body { margin: 0; }
   body {
     background: var(--page); color: var(--ink);
-    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+    font: 14px/1.45 var(--sans);
     padding: 16px;
   }
   h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
@@ -119,7 +126,7 @@
   .legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--ink-2); }
   .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
 
-  .err-box { border-left: 3px solid var(--critical); background: var(--surface-2); padding: 8px 12px; border-radius: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .err-box { border-left: 3px solid var(--critical); background: var(--surface-2); padding: 8px 12px; border-radius: 4px; font-family: var(--mono); font-size: 12px; }
   select { font: inherit; font-size: 13px; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); color: var(--ink); }
 
   .ev { display: grid; grid-template-columns: 130px 1fr; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--grid); }
@@ -129,7 +136,7 @@
   .ev-body { min-width: 0; }
   .ev-run_end, .ev-session_start, .ev-session_end { background: var(--surface-2); padding-left: 8px; padding-right: 8px; border-radius: 6px; }
   pre.code { margin: 4px 0 0; padding: 8px; background: var(--surface-2); border-radius: 6px; font-size: 12px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
-  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  code { font-family: var(--mono); font-size: 12px; }
   @media (max-width: 560px) { .ev { grid-template-columns: 1fr; gap: 4px; } }
   mark { background: color-mix(in srgb, var(--s4) 35%, transparent); color: inherit; border-radius: 3px; padding: 0 1px; }
   input[type="search"] { font: inherit; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); color: var(--ink); }
@@ -176,9 +183,7 @@
   const tip = document.getElementById("tip");
   const history = [];
   const PREVIEW = window.__OCTILLION_PREVIEW__; // set by the local preview server only
-  let msgSeq = 0;
   let product = null; // slug of the product in view, so the nav can stay on it
-  const pending = new Map();
 
   // ---------- helpers ----------
   const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -211,36 +216,190 @@
   const go = (tool, a, label, cls = "btn") => `<button class="${cls}" data-tool="${tool}" data-args="${args(a)}">${label}</button>`;
   const chips = (xs) => (xs && xs.length ? `<div class="chips">${xs.map((x) => `<span class="badge">${esc(x)}</span>`).join("")}</div>` : `<span class="muted">–</span>`);
 
-  // ---------- host bridge (MCP-UI protocol; the MCP Apps adapter translates it) ----------
-  function post(msg) { window.parent?.postMessage(msg, "*"); }
+  // ---------- host bridge ----------
+  // MCP Apps (SEP-1865, spec 2026-01-26): the view is a JSON-RPC 2.0 peer of the host over postMessage.
+  // ui/initialize -> ui/notifications/initialized handshake; tool data arrives as ui/notifications/tool-input and
+  // ui/notifications/tool-result; drill-downs are tools/call requests the host proxies to this MCP server;
+  // size, links, display mode and model context go through ui/* requests and notifications.
+  const PROTOCOL_VERSION = "2026-01-26";
+  const APP_INFO = { name: "octillion-dashboard", version: "2.1.0" };
+  const host = { connected: false, capabilities: {}, info: null, context: {} };
+  const rpcPending = new Map();
+  let rpcSeq = 0;
+
+  const send = (msg) => window.parent.postMessage({ jsonrpc: "2.0", ...msg }, "*");
+  const notify = (method, params) => send(params === undefined ? { method } : { method, params });
+  function request(method, params, timeoutMs = 120000) {
+    const id = ++rpcSeq;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { rpcPending.delete(id); reject(new Error(`${method} timed out`)); }, timeoutMs);
+      rpcPending.set(id, { resolve, reject, timer });
+      send({ id, method, params });
+    });
+  }
+
+  const hostRequests = {
+    ping: () => ({}),
+    "ui/resource-teardown": () => ({}),
+  };
+  const hostNotifications = {
+    "ui/notifications/tool-input": () => {
+      if (!history.length) loadingView(host.context.toolInfo?.tool?.name);
+    },
+    "ui/notifications/tool-input-partial": () => {},
+    "ui/notifications/tool-result": (result) => showResult(result),
+    "ui/notifications/tool-cancelled": ({ reason }) => flash(`Tool call cancelled${reason ? `: ${reason}` : ""}`),
+    "ui/notifications/host-context-changed": (ctx) => {
+      host.context = { ...host.context, ...ctx };
+      applyHostContext(ctx);
+    },
+  };
+
+  window.addEventListener("message", (ev) => {
+    if (ev.source !== window.parent) return;
+    const m = ev.data;
+    if (!m || typeof m !== "object" || m.jsonrpc !== "2.0") return;
+    if (m.method === undefined) { // response to one of our requests
+      const p = rpcPending.get(m.id);
+      if (!p) return;
+      rpcPending.delete(m.id);
+      clearTimeout(p.timer);
+      if (m.error) p.reject(Object.assign(new Error(m.error.message || "Host error"), { code: m.error.code }));
+      else p.resolve(m.result);
+    } else if (m.id !== undefined) { // request from the host
+      const handler = hostRequests[m.method];
+      Promise.resolve()
+        .then(() => (handler ? handler(m.params ?? {}) : Promise.reject(Object.assign(new Error(`Method not found: ${m.method}`), { code: -32601 }))))
+        .then((result) => send({ id: m.id, result: result ?? {} }),
+              (e) => send({ id: m.id, error: { code: typeof e.code === "number" ? e.code : -32603, message: String(e.message || e) } }));
+    } else {
+      hostNotifications[m.method]?.(m.params ?? {});
+    }
+  });
+
+  function applyHostContext(ctx) {
+    const root = document.documentElement;
+    if (ctx.theme === "dark" || ctx.theme === "light") {
+      root.dataset.theme = ctx.theme;
+      root.style.colorScheme = ctx.theme;
+    }
+    for (const [k, v] of Object.entries(ctx.styles?.variables ?? {})) if (v != null) root.style.setProperty(k, v);
+    const fonts = ctx.styles?.css?.fonts;
+    if (fonts && !document.getElementById("host-fonts")) {
+      const style = document.createElement("style");
+      style.id = "host-fonts";
+      style.textContent = fonts;
+      document.head.appendChild(style);
+    }
+    const dims = ctx.containerDimensions;
+    if (dims) root.classList.toggle("fixed-height", "height" in dims);
+    if (ctx.locale) root.lang = ctx.locale;
+    if (ctx.displayMode && history.length) render(history[history.length - 1]);
+  }
+
+  // Report the content size so the host can size the iframe (ui/notifications/size-changed), as the SDK's autoResize does.
+  function startSizeReporting() {
+    let scheduled = false, lastW = 0, lastH = 0;
+    const measure = () => {
+      if (scheduled) return;
+      scheduled = true;
+      requestAnimationFrame(() => {
+        scheduled = false;
+        const html = document.documentElement;
+        const prev = html.style.height;
+        html.style.height = "max-content";
+        const height = Math.ceil(html.getBoundingClientRect().height);
+        html.style.height = prev;
+        const width = Math.ceil(window.innerWidth);
+        if (width !== lastW || height !== lastH) {
+          lastW = width; lastH = height;
+          notify("ui/notifications/size-changed", { width, height });
+        }
+      });
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(document.documentElement);
+    ro.observe(document.body);
+  }
+
+  async function connect() {
+    if (window.parent === window) throw new Error("not embedded in an MCP Apps host");
+    const res = await request("ui/initialize", {
+      appInfo: APP_INFO,
+      appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] },
+      protocolVersion: PROTOCOL_VERSION,
+    }, 15000);
+    host.capabilities = res?.hostCapabilities ?? {};
+    host.info = res?.hostInfo ?? null;
+    host.context = res?.hostContext ?? {};
+    applyHostContext(host.context);
+    notify("ui/notifications/initialized");
+    host.connected = true;
+    document.documentElement.dataset.bridge = "connected"; // observable by tests
+    startSizeReporting();
+  }
+
+  async function invokeTool(name, params) {
+    if (PREVIEW) {
+      const res = await fetch(PREVIEW.toolEndpoint, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ key: PREVIEW.key, name, arguments: params }),
+      });
+      return res.json();
+    }
+    if (host.connected) return request("tools/call", { name, arguments: params });
+    if (window.openai?.callTool) return window.openai.callTool(name, params); // pre-MCP-Apps ChatGPT runtime
+    throw new Error("Not connected to the host yet");
+  }
 
   async function callTool(toolName, params = {}, { replace = false } = {}) {
     app.classList.add("loading");
     try {
-      let result;
-      if (PREVIEW) {
-        const res = await fetch(PREVIEW.toolEndpoint, {
-          method: "POST", headers: { "content-type": "application/json" },
-          body: JSON.stringify({ key: PREVIEW.key, name: toolName, arguments: params }),
-        });
-        result = await res.json();
-      } else {
-        const messageId = `m${++msgSeq}`;
-        result = await new Promise((resolve, reject) => {
-          pending.set(messageId, { resolve, reject });
-          post({ type: "tool", messageId, payload: { toolName, params } });
-          setTimeout(() => pending.has(messageId) && (pending.delete(messageId), reject(new Error("Timed out"))), 30000);
-        });
-      }
+      const result = await invokeTool(toolName, params);
       const data = result?.structuredContent;
       if (result?.isError || !data) throw new Error(result?.content?.[0]?.text || "Tool returned no data");
       if (replace) history.pop();
       show(data, true);
+      // Tell the model what the user is now looking at, so follow-up questions have context.
+      if (host.connected && host.capabilities.updateModelContext) {
+        const summary = String(result.content?.find((c) => c.type === "text")?.text ?? "").split("\n\n")[0].slice(0, 4000);
+        request("ui/update-model-context", { content: [{ type: "text", text: `The user opened ${toolName} ${JSON.stringify(params)} in the Octillion dashboard. ${summary}` }] }).catch(() => {});
+      }
     } catch (e) {
       flash(String(e.message || e));
     } finally {
       app.classList.remove("loading");
     }
+  }
+
+  function showResult(result) {
+    if (result?.isError) { flash(result.content?.[0]?.text || "Tool failed"); return; }
+    const data = result?.structuredContent;
+    if (!data || !data.view) return;
+    const top = history[history.length - 1];
+    if (top && JSON.stringify(top) === JSON.stringify(data)) return; // same payload delivered twice
+    show(data, true);
+  }
+
+  function openLink(url) {
+    if (host.connected && host.capabilities.openLinks) return request("ui/open-link", { url }).catch((e) => flash(String(e.message || e)));
+    if (window.openai?.openExternal) return window.openai.openExternal({ href: url });
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+
+  async function toggleFullscreen() {
+    const mode = host.context.displayMode === "fullscreen" ? "inline" : "fullscreen";
+    try {
+      const res = await request("ui/request-display-mode", { mode });
+      host.context.displayMode = res?.mode ?? host.context.displayMode;
+      if (history.length) render(history[history.length - 1]);
+    } catch (e) { flash(String(e.message || e)); }
+  }
+  const canFullscreen = () => host.connected && (host.context.availableDisplayModes ?? []).includes("fullscreen");
+
+  function loadingView(tool) {
+    app.innerHTML = `<div class="empty">Loading${tool ? ` ${esc(tool.replace(/_/g, " "))}` : ""}…</div>`;
   }
 
   function flash(text) {
@@ -250,26 +409,6 @@
     el.textContent = text;
     app.prepend(el);
   }
-
-  window.addEventListener("message", (ev) => {
-    const msg = ev.data;
-    if (!msg || typeof msg !== "object") return;
-    if (msg.type === "ui-lifecycle-iframe-render-data") {
-      const rd = msg.payload?.renderData || {};
-      if (rd.theme === "dark" || rd.theme === "light") document.documentElement.dataset.theme = rd.theme;
-      const out = rd.toolOutput;
-      const data = out?.structuredContent ?? (out && out.view ? out : null);
-      if (data) { history.length = 0; show(data, true); }
-    } else if (msg.type === "ui-message-response") {
-      const p = pending.get(msg.payload?.messageId);
-      if (!p) return;
-      pending.delete(msg.payload.messageId);
-      msg.payload.error ? p.reject(new Error(JSON.stringify(msg.payload.error))) : p.resolve(msg.payload.response);
-    }
-  });
-
-  new ResizeObserver(() => post({ type: "ui-size-change", payload: { height: document.documentElement.scrollHeight } }))
-    .observe(document.body);
 
   // ---------- tooltips ----------
   document.addEventListener("pointermove", (e) => {
@@ -287,6 +426,9 @@
   app.addEventListener("click", (e) => {
     const el = e.target.closest("[data-tool]");
     if (el) { e.preventDefault(); callTool(el.dataset.tool, JSON.parse(el.dataset.args || "{}")); return; }
+    const link = e.target.closest("a[href^='http']");
+    if (link) { e.preventDefault(); openLink(link.href); return; }
+    if (e.target.closest("[data-fullscreen]")) { toggleFullscreen(); return; }
     const back = e.target.closest("[data-back]");
     if (back && history.length > 1) { history.pop(); render(history[history.length - 1]); }
   });
@@ -319,7 +461,9 @@
     return `<nav class="nav">
       <span class="brand">Octillion</span>
       ${items.map(([v, label, tool, a]) => `<button data-tool="${tool}" data-args="${args(a)}" aria-current="${v === group}">${label}</button>`).join("")}
-      ${history.length > 1 ? `<button class="back" style="margin-left:auto;margin-right:0" data-back>← Back</button>` : ""}
+      <span style="margin-left:auto"></span>
+      ${history.length > 1 ? `<button class="back" style="margin-right:0" data-back>← Back</button>` : ""}
+      ${canFullscreen() ? `<button data-fullscreen title="Toggle fullscreen">${host.context.displayMode === "fullscreen" ? "Exit fullscreen" : "⤢ Expand"}</button>` : ""}
     </nav>`;
   }
 
@@ -333,7 +477,8 @@
     product = d.product?.slug ?? d.simulation?.product_slug ?? d.session?.product_slug ?? (typeof d.product === "string" ? d.product : product);
     const views = { products: viewProducts, product: viewProduct, report: viewReport, simulations: viewSimulations, simulation: viewSimulation, session: viewSession, transcript: viewTranscript, search: viewSearch, profiles: viewProfiles, library: viewLibrary, agents: viewAgents, onboarding: viewOnboarding };
     const fn = views[d.view];
-    app.innerHTML = nav(d.view) + (fn ? fn(d) : `<div class="empty">Unknown view: ${esc(d.view)}</div>`);
+    const note = d.truncated ? `<div class="warn" style="margin-bottom:12px">Result shortened to fit the host's size limit. Page through it or narrow the filters to see the rest.</div>` : "";
+    app.innerHTML = nav(d.view) + note + (fn ? fn(d) : `<div class="empty">Unknown view: ${esc(d.view)}</div>`);
   }
 
   // ---------- products ----------
@@ -361,6 +506,7 @@
         <div class="spread"><div><h1>${esc(p.name)}</h1><div class="sub">${esc(p.category)}</div></div>
           <div class="row">${go("get_visibility_report", { product: p.slug }, "Visibility report →")}</div></div>
         ${p.description ? `<p class="sub">${esc(p.description)}</p>` : ""}
+        ${[["Website", p.website_url], ["Docs", p.docs_url]].filter(([, u]) => /^https?:\/\//.test(u || "")).map(([l, u]) => `<a href="${esc(u)}" rel="noopener">${l} ↗</a>`).join(" · ")}
         <div class="grid-wide">
           <div><h2>Aliases</h2>${chips(p.aliases)}</div><div><h2>Packages</h2>${chips(p.packages)}</div><div><h2>Domains</h2>${chips(p.domains)}</div>
         </div>
@@ -619,8 +765,13 @@
   // ---------- boot ----------
   if (PREVIEW?.error) flash(PREVIEW.error.map((c) => c.text).join(" "));
   if (PREVIEW?.data) show(PREVIEW.data, true);
-  post({ type: "ui-lifecycle-iframe-ready" });
-  post({ type: "ui-request-render-data", messageId: "render-data" });
+  if (!PREVIEW) {
+    // ChatGPT also exposes window.openai.toolOutput before load; render it right away if present.
+    if (window.openai?.toolOutput?.view) show(window.openai.toolOutput, true);
+    connect().catch((e) => {
+      if (!history.length) app.innerHTML = `<div class="empty">Could not connect to the host: ${esc(e.message || e)}</div>`;
+    });
+  }
 })();
 </script>
 </body>

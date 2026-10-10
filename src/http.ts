@@ -8,6 +8,7 @@ import { getDb } from "./db.js";
 import { parseJsonl, transcripts, type RawEvent } from "./transcripts.js";
 import { appendEvents, claimJobs, completeSession, heartbeat } from "./worker.js";
 import { fleetCheckin, fleetLeave, fleetStatus } from "./fleet.js";
+import { autoscalerStatus, startAutoscaler } from "./autoscaler.js";
 import { brokerOrchestratorCredentials, brokerSessionCredentials, gatewayHandler } from "./gateway.js";
 import * as research from "./research.js";
 import { usageReport } from "./usage.js";
@@ -214,6 +215,7 @@ export function createApp() {
     res.json(await populations.getPopulation(slug));
   });
   admin.post("/populations/:slug/default", async (req, res) => void res.json(await populations.setDefaultPopulation(String(req.params.slug))));
+  admin.get("/autoscaler", async (_req, res) => void res.json(await autoscalerStatus()));
   app.use("/api/admin", admin);
 
   // ---------- local preview of the widget (development only) ----------
@@ -256,5 +258,12 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     console.error(`  landing page  ${PUBLIC_URL}/`);
     console.error(`  MCP endpoint  ${PUBLIC_URL}/mcp/<api key>   (or /mcp with Authorization: Bearer <api key>)`);
     console.error(`  worker API    ${PUBLIC_URL}/api/worker/*${process.env.OCTILLION_WORKER_TOKEN ? "" : "   (disabled: set OCTILLION_WORKER_TOKEN)"}`);
+    // On-demand orchestrators (boat sandboxes launched/reaped by the server). Needs the public https URL the
+    // sandboxes reach us on, the worker token and a boat key in the vault. OCTILLION_AUTOSCALE=off disables it.
+    const autoscale = (process.env.OCTILLION_AUTOSCALE ?? "on").toLowerCase() !== "off";
+    if (autoscale && /^https:\/\//.test(PUBLIC_URL) && process.env.OCTILLION_WORKER_TOKEN) {
+      startAutoscaler();
+      console.error("  autoscaler    on (orchestrators on demand; OCTILLION_AUTOSCALE=off to disable)");
+    } else console.error(`  autoscaler    off (${autoscale ? "needs an https PUBLIC_URL and OCTILLION_WORKER_TOKEN" : "OCTILLION_AUTOSCALE=off"})`);
   });
 }

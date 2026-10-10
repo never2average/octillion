@@ -30,7 +30,7 @@ orchestrator/
 | where | what runs there |
 |---|---|
 | **Main VM** | Only the server stack: Postgres, ClickHouse, the Octillion server and Caddy. It may run the launcher (`npm run boat-orchestrators -- …`), which only calls APIs. **No orchestrator, Pi, harness or pod.** |
-| **Orchestrator sandboxes** (boat, `small`, 30-day TTL, `octi-orch-*`) | One orchestrator each (Pi brain + claim loop + research loop) under systemd (`Restart=always`). The env file (0600) holds only `OCTILLION_URL`, `OCTILLION_WORKER_TOKEN`, `ORCHESTRATOR_ID`, `RUNNER=boat`, `POD_CAPACITY`, `OCTILLION_HOST_ROLE` and boat's own `BOAT_ID`. The boat key and the GPT brain come from the broker at runtime. |
+| **Orchestrator sandboxes** (boat, `small`, 30-day TTL, `octi-orch-*`) | One orchestrator each (Pi brain + claim loop + research loop) under systemd (`Restart=on-failure`; a clean idle exit is final). The env file (0600) holds only `OCTILLION_URL`, `OCTILLION_WORKER_TOKEN`, `ORCHESTRATOR_ID`, `RUNNER=boat`, `POD_CAPACITY`, `OCTILLION_HOST_ROLE` and boat's own `BOAT_ID`. The boat key and the GPT brain come from the broker at runtime. |
 | **Worker sandboxes** (boat, `default`, ephemeral, `octi-w-<orchestrator>-<agent>`) | One fresh VM per agent session, created **from inside** the orchestrator sandbox and deleted when the session ends. Resume and simulated-developer turns stay in it. It holds only per-session gateway tokens, **never the worker token**. |
 
 - **Host guard** (`core/host-guard.ts`). The orchestrator refuses to start unless all of the following hold:
@@ -71,6 +71,40 @@ It needs only `OCTILLION_URL` (the **public** server URL) and `OCTILLION_WORKER_
 - Each orchestrator needs 1 + `POD_CAPACITY` (20) = 21, so **at most 4 orchestrators** (84 sandboxes). `up 5` is refused (105 > 100).
 - **Throughput ceiling: ~196 agent sessions/day.** Every session is one fresh worker sandbox, which counts as one boat start, against 200 starts/day.
 - The $100 plan gives 300 concurrent and 840 starts/day.
+
+### On-demand orchestrators (server autoscaler, `src/autoscaler.ts`)
+
+In production nobody runs `up`. The server starts orchestrators when there is work and they go away when idle. The launcher shares its code with the autoscaler through `deploy/boat-lib.ts`.
+
+- **Leader.** One server instance acts at a time, via a lease row in `autoscaler_lease` (renewed every tick, expires after 3 ticks). An advisory lock wouldn't work: session locks are per connection, and xact locks can't span a launch.
+- **Demand, every `OCTILLION_AUTOSCALE_TICK_SECONDS` (15).** Counts queued and running `agent_sessions` (only agents the fleet schedules) plus queued and running `product_research`.
+  - With no demand, desired = 0. Otherwise desired = `ceil(sessions / OCTILLION_POD_CAPACITY)`, and at least 1 if there is research.
+  - Desired is clamped to `OCTILLION_MAX_ORCHESTRATORS` (4) and to the live boat budget (`(1 + capacity) × n ≤ plan concurrency`), with at most 2 launches per tick.
+- **Launch.** Uses the vault boat key (`useCredential("boat")`). A `booting` row is written in `orchestrator_sandboxes` first, so a crash can't double-launch. The launch path is the same as `up`: code tarball, `npm ci`, env file, marker, unit and preflight. The worker token goes only into that sandbox's 0600 env file.
+- **Scale down.** An orchestrator with no claimable work for `OCTILLION_ORCH_IDLE_MINUTES` (10) SIGTERMs itself. It leaves the fleet (the row becomes `draining`) and exits 0, so systemd doesn't restart it. The next tick deletes the sandbox.
+- **Reaping, each tick, against boat's listing by the `octi-orch-` prefix:**
+  - sandbox gone or draining → delete;
+  - no fleet check-in for `OCTILLION_ORCH_STALE_MINUTES` (5) → delete;
+  - stuck booting for more than `OCTILLION_ORCH_BOOT_MINUTES` (10) → delete;
+  - TTL nearly expired → delete;
+  - `octi-orch-*` sandboxes with no row (orphans) → delete;
+  - leftover `octi-w-<orch>-*` workers of reaped orchestrators → delete.
+- **Cold start (measured live 2026-10-10).**
+  - Code upload + `npm ci`: service active in **~8s** (create 0.5s, ready 0.7s, code 3.7s).
+  - From a named snapshot (`OCTILLION_ORCH_SNAPSHOT=on`): **~22s**, because restoring the image is slower than this small install, plus ~170s per build.
+  - Snapshots are therefore opt-in. The first session additionally waits for its worker sandbox.
+- **Visibility.**
+  - `get_simulation` / `get_onboarding` return `capacity` (e.g. "starting orchestrator…") while work is queued.
+  - `GET /api/admin/autoscaler` and `npm run fleet:status` show the knobs, demand, the last tick and the sandbox table.
+- **Kill switch.** `OCTILLION_AUTOSCALE=off` stops all launches and deletes. Running orchestrators still idle out. The autoscaler also stays off unless `PUBLIC_URL` is https and `OCTILLION_WORKER_TOKEN` is set.
+- **Tests.** `npx tsx orchestrator/test/autoscaler.ts` (PGlite + mock boat, 15 checks) covers:
+  - launch on queue;
+  - no double launch with two instances;
+  - idle → drain → delete;
+  - stale and stuck reaping (and their leftover workers);
+  - orphans;
+  - the cap;
+  - the kill switch.
 
 **Go-live needs a public HTTPS URL for the server** (domain + Caddy TLS). Orchestrator and worker sandboxes reach `/api/worker/*` and `/gw/*` over the internet. Until then, `up` stops at preflight.
 

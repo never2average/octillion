@@ -2,6 +2,7 @@ import { getDb } from "./db.js";
 import { randomId, type Org } from "./auth.js";
 import { config, getProduct, resolveProduct, runSimulation, saveProduct, browseTaskLibrary } from "./queries.js";
 import type { Tool } from "./scoring.js";
+import { capacityStatus } from "./autoscaler.js";
 
 /**
  * Product onboarding (docs/onboarding.md). A customer gives a prompt, a website and docs; the orchestrator's Pi
@@ -77,6 +78,7 @@ export async function getOnboarding(org: Org, input: { research_id?: string; pro
     : [];
   return {
     view: "onboarding" as const,
+    capacity: job.status === "queued" ? await capacityStatus() : null, // "starting orchestrator…" while waiting
     research: { id: job.id, status: job.status, stage: job.stage, note: job.note, error: job.error, input: job.input,
                 created_at: job.created_at, finished_at: job.finished_at, sources: job.result?.sources ?? [] },
     product: product.product,

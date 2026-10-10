@@ -4,6 +4,7 @@ import { transcripts, type SearchParams } from "./transcripts.js";
 import type { Tool } from "./scoring.js";
 import { enabledAgents, findAgent, isRunnable, representativePlan, runnableCoverage, sandboxMix, scheduledAgents, type AgentSpec } from "./agents.js";
 import { getPopulation, listPopulations } from "./populations.js";
+import { capacityStatus } from "./autoscaler.js";
 
 const agentLabel = (id: string) => findAgent(id)?.label ?? id;
 
@@ -358,8 +359,11 @@ export async function getSimulation(org: Org, simulationId: string) {
     scenario_id: Number(scenarioId), scenario: xs[0].scenario, expectation: xs[0].expectation,
     cells: agentIds.map((id) => ({ agent_id: id, label: agentLabel(id), ...summarize(xs.filter((x) => (x.agent_id ?? x.model) === id)) })),
   }));
+  // On-demand orchestrators: while sessions wait in the queue, say what capacity is doing ("starting orchestrator…").
+  const capacity = sessions.some((s) => s.status === "queued") ? await capacityStatus() : null;
   return {
     view: "simulation" as const,
+    capacity,
     simulation: sim,
     totals: { ...summarize(sessions), cost_usd: sessions.reduce((a, s) => a + Number(s.cost_usd), 0) },
     status: statusCounts,

@@ -4,13 +4,13 @@ import path from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
-import { createUIResource } from "@mcp-ui/server";
 import { z } from "zod";
 import * as q from "./queries.js";
 import * as research from "./research.js";
 import type { Org } from "./auth.js";
 
-export const WIDGET_URI = "ui://octillion/dashboard.html";
+/** Hosts (ChatGPT in particular) cache the template by URI: bump the version on breaking HTML/JS changes. */
+export const WIDGET_URI = "ui://octillion/dashboard-v2.html";
 export const WIDGET_HTML = readFileSync(
   path.join(path.dirname(fileURLToPath(import.meta.url)), "ui", "widget.html"),
   "utf8",
@@ -68,7 +68,7 @@ function summarize(d: Data): string {
         : "No simulations yet. Launch one with run_simulation.";
     case "simulation": {
       const s = d.simulation;
-      return `Simulation ${s.id} "${s.name}" for ${s.product}: ${s.status}. ${d.totals.sessions} agent sessions (${Object.entries(d.status).map(([k, v]) => `${v} ${k}`).join(", ")}). Hit rate ${pct(d.totals.hit_rate)} over ${d.totals.scored} scored. Verdicts: ${Object.entries(d.verdicts).map(([k, v]) => `${k} ${v}`).join(", ") || "none yet"}. By agent: ${d.by_agent.map((a: any) => `${a.label} ${pct(a.hit_rate)} (n=${a.scored})`).join(", ")}.`;
+      return `Simulation ${s.id} "${s.name}" for ${s.product}: ${s.status}. ${d.totals.sessions} agent sessions (${Object.entries(d.status).map(([k, v]) => `${v} ${k}`).join(", ")}). Hit rate ${pct(d.totals.hit_rate)} over ${d.totals.scored} scored. Verdicts: ${Object.entries(d.verdicts).map(([k, v]) => `${k} ${v}`).join(", ") || "none yet"}. By agent: ${d.by_agent.map((a: any) => `${a.label} ${pct(a.hit_rate)} (n=${a.scored})`).join(", ")}.${d.capacity ? ` Capacity: ${d.capacity.message}` : ""}`;
     }
     case "report": {
       const t = d.totals;
@@ -86,6 +86,7 @@ function summarize(d: Data): string {
     case "onboarding": {
       const r = d.research, p = d.product;
       const head = `Onboarding ${r.id} for ${p.name}: ${r.status}${r.stage && r.status === "running" ? ` (${r.stage}${r.note ? `: ${r.note}` : ""})` : ""}${r.error ? `. Error: ${r.error}` : ""}.`;
+      if (r.status === "queued" && d.capacity) return `${head} Capacity: ${d.capacity.message} Check again with get_onboarding.`;
       if (r.status !== "completed") return `${head} The orchestrator is researching the website and docs, then writes the product profile, target developer personas and programming problems. Check again with get_onboarding.`;
       return `${head} Profile: ${p.category || "n/a"}; aliases ${p.aliases.join(", ") || "none"}; packages ${p.packages.join(", ") || "none"}; competitors ${p.competitors.map((c: any) => c.name).join(", ") || "none"}. Personas: ${d.personas.map((x: any) => x.name).join("; ")}. Problems (${d.scenarios.length}): ${d.scenarios.map((s: any) => `#${s.id} ${s.title} [${s.source}${s.expectation === "avoid" ? ", avoid" : ""}]`).join("; ")}.${d.simulation ? ` Simulation ${d.simulation.id}: ${d.simulation.status}, ${d.simulation.finished}/${d.simulation.sessions} sessions done; see get_simulation / get_visibility_report.` : " No run started."}`;
     }
@@ -104,19 +105,96 @@ function summarize(d: Data): string {
   }
 }
 
+/**
+ * Character budget for structuredContent. Claude (web/desktop) stops passing a tool result inline to the app above
+ * ~150k characters, and the text content repeats the JSON for the model, so each half stays well under half of that.
+ */
+export const STRUCTURED_BUDGET = 50_000;
+
+const capStrings = (v: unknown, cap: number): unknown =>
+  typeof v === "string"
+    ? v.length > cap ? `${v.slice(0, cap)}… [${v.length - cap} more characters]` : v
+    : Array.isArray(v) ? v.map((x) => capStrings(x, cap))
+    : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, capStrings(x, cap)]))
+    : v;
+
+function largestArray(v: unknown): unknown[] | null {
+  let best: unknown[] | null = null, bestSize = 0;
+  const walk = (x: unknown) => {
+    if (Array.isArray(x)) {
+      const size = JSON.stringify(x).length;
+      if (x.length > 1 && size > bestSize) { best = x; bestSize = size; }
+      x.forEach(walk);
+    } else if (x && typeof x === "object") Object.values(x).forEach(walk);
+  };
+  walk(v);
+  return best;
+}
+
+/**
+ * Shrink a JSON payload to the budget: first cap long strings (transcript tool output, prompts), then drop trailing
+ * items from the largest arrays (transcript events, search hits, session lists). Marks the result `truncated: true`.
+ */
+export function fitPayload<T extends Record<string, any>>(data: T, budget = STRUCTURED_BUDGET): T & { truncated?: true } {
+  if (JSON.stringify(data).length <= budget) return data;
+  let d = data as Record<string, any>;
+  for (const cap of [4000, 1000, 300]) {
+    d = capStrings(d, cap) as Record<string, any>;
+    if (JSON.stringify(d).length <= budget) break;
+  }
+  const events = Array.isArray(d.events) ? d.events.length : null;
+  for (let size = JSON.stringify(d).length; size > budget; size = JSON.stringify(d).length) {
+    const arr = largestArray(d);
+    if (!arr) break;
+    arr.length = Math.max(1, Math.floor(arr.length * Math.min(0.9, budget / size)));
+  }
+  // A shortened transcript page must continue right after its last event.
+  if (d.view === "transcript" && events != null && d.events.length < events) d.limit = d.events.length;
+  return { ...d, truncated: true } as unknown as T & { truncated: true };
+}
+
 /** Run a handler and shape its output as an MCP tool result (text for the model, structured data for the UI). */
 export async function runTool(org: Org, name: ToolName, args: Record<string, unknown>): Promise<CallToolResult> {
   try {
     const data = await (handlersFor(org)[name] as (a: unknown) => Promise<Data>)(args ?? {});
-    const structured = JSON.parse(JSON.stringify(data)); // Dates -> ISO strings
+    const structured = fitPayload(JSON.parse(JSON.stringify(data))); // Dates -> ISO strings
+    const note = structured.truncated
+      ? " (Result shortened to fit the host's size limit: page with offset/limit, lower limit, or narrow the filters for the rest.)"
+      : "";
     return {
-      content: [{ type: "text", text: `${summarize(data)}\n\n${JSON.stringify(structured)}` }],
+      content: [{ type: "text", text: `${summarize(structured as Data)}${note}\n\n${JSON.stringify(structured)}` }],
       structuredContent: structured,
     };
   } catch (err) {
     return { isError: true, content: [{ type: "text", text: (err as Error).message }] };
   }
 }
+
+const WIDGET_DESCRIPTION =
+  "Interactive Octillion dashboard showing the result of the last tool call: products, onboarding progress, " +
+  "visibility reports (hit rate, share of voice, losses to competitors), simulations, agent sessions and transcripts. " +
+  "The user can drill down by clicking; the numbers are already visible to them, so summarise insights rather than restating tables.";
+
+/** ChatGPT status strings shown while a tool runs and after it finishes (max 64 characters each). */
+export const TOOL_STATUS: Record<ToolName, [string, string]> = {
+  onboard_product: ["Starting product research…", "Onboarding started"],
+  get_onboarding: ["Checking onboarding progress…", "Onboarding status ready"],
+  list_products: ["Loading products…", "Products loaded"],
+  get_product: ["Loading product context…", "Product context ready"],
+  save_product: ["Saving product…", "Product saved"],
+  save_scenarios: ["Saving scenarios…", "Scenarios saved"],
+  run_simulation: ["Launching coding agents…", "Simulation launched"],
+  list_simulations: ["Loading simulations…", "Simulations loaded"],
+  get_simulation: ["Loading simulation results…", "Simulation results ready"],
+  cancel_simulation: ["Cancelling simulation…", "Simulation cancelled"],
+  get_visibility_report: ["Building visibility report…", "Visibility report ready"],
+  get_agent_session: ["Loading agent session…", "Agent session loaded"],
+  get_session_transcript: ["Reading transcript…", "Transcript loaded"],
+  search_transcripts: ["Searching transcripts…", "Search complete"],
+  list_developer_profiles: ["Loading developer profiles…", "Developer profiles loaded"],
+  list_agents: ["Loading agent mix…", "Agent mix loaded"],
+  browse_task_library: ["Browsing task library…", "Task library loaded"],
+};
 
 export const TOOL_NAMES = Object.keys(handlersFor({ orgId: 0, slug: "", name: "" })) as ToolName[];
 
@@ -137,24 +215,31 @@ export function createServer(org: Org): McpServer {
     },
   );
 
+  // The UI template: raw HTML speaking the MCP Apps bridge itself (no MCP-UI adapter needed).
+  const resourceMeta = {
+    ui: { prefersBorder: true, csp: { connectDomains: [], resourceDomains: [] } }, // fully inline: no external origins
+    "openai/widgetPrefersBorder": true,
+    "openai/widgetDescription": WIDGET_DESCRIPTION,
+  };
   registerAppResource(
     server,
     "Octillion dashboard",
     WIDGET_URI,
-    { description: "Interactive views for products, scenarios, simulations, visibility reports and agent transcripts", mimeType: RESOURCE_MIME_TYPE },
-    async () => {
-      const ui = createUIResource({
-        uri: WIDGET_URI,
-        content: { type: "rawHtml", htmlString: WIDGET_HTML },
-        encoding: "text",
-        adapters: { mcpApps: { enabled: true } },
-      });
-      return { contents: [ui.resource] };
-    },
+    { description: WIDGET_DESCRIPTION, mimeType: RESOURCE_MIME_TYPE, _meta: resourceMeta },
+    async () => ({ contents: [{ uri: WIDGET_URI, mimeType: RESOURCE_MIME_TYPE, text: WIDGET_HTML, _meta: resourceMeta }] }),
   );
 
-  const meta = { ui: { resourceUri: WIDGET_URI }, "openai/outputTemplate": WIDGET_URI };
-  const read = { readOnlyHint: true, openWorldHint: false };
+  // Every tool renders in the dashboard and stays callable from it (drill-downs go through the host's tools/call).
+  const meta = (name: ToolName) => ({
+    ui: { resourceUri: WIDGET_URI, visibility: ["model", "app"] as ("model" | "app")[] },
+    "openai/outputTemplate": WIDGET_URI,
+    "openai/widgetAccessible": true,
+    "openai/toolInvocation/invoking": TOOL_STATUS[name][0],
+    "openai/toolInvocation/invoked": TOOL_STATUS[name][1],
+  });
+  const read = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
+  // Updates replace stored fields and lists, so they count as destructive (hosts may ask the user to confirm).
+  // Saves update product context in place (scenarios are retired, never deleted): not destructive, so ChatGPT does not ask to confirm each save.
   const write = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false };
   const run = (name: ToolName) => (a: Record<string, unknown>) => runTool(org, name, a);
   const product = z.string().optional().describe("Product slug, name or id; optional when there is only one product");
@@ -171,28 +256,28 @@ export function createServer(org: Org): McpServer {
       samples: z.number().int().min(1).max(20).optional().describe("Sessions per problem and persona (default: fitted to the per-run cap)"),
       population: z.string().optional().describe("Developer population whose coding-agent mix to use"),
     },
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }, _meta: meta,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }, _meta: meta("onboard_product"),
   }, run("onboard_product"));
 
   registerAppTool(server, "get_onboarding", {
     title: "Onboarding progress",
     description: "Progress and output of a product onboarding: research stage, the generated product profile, developer personas, programming problems and the simulation it launched.",
     inputSchema: { research_id: z.string().optional(), product },
-    annotations: read, _meta: meta,
+    annotations: read, _meta: meta("get_onboarding"),
   }, run("get_onboarding"));
 
   registerAppTool(server, "list_products", {
     title: "List products",
     description: "List the organization's products with scenario counts and their 30-day recommendation hit rate.",
     inputSchema: {},
-    annotations: read, _meta: meta,
+    annotations: read, _meta: meta("list_products"),
   }, run("list_products"));
 
   registerAppTool(server, "get_product", {
     title: "Product context",
     description: "Show a product's configured context (description, aliases, package names, domains, competitors), its scenarios with per-scenario hit rate, and recent simulations.",
     inputSchema: { product },
-    annotations: read, _meta: meta,
+    annotations: read, _meta: meta("get_product"),
   }, run("get_product"));
 
   registerAppTool(server, "save_product", {
@@ -210,7 +295,7 @@ export function createServer(org: Org): McpServer {
       domains: z.array(z.string()).optional().describe("e.g. ['neon.tech']"),
       competitors: z.array(competitor).optional().describe("Competing products with their aliases, packages and domains"),
     },
-    annotations: write, _meta: meta,
+    annotations: write, _meta: meta("save_product"),
   }, run("save_product"));
 
   registerAppTool(server, "save_scenarios", {
@@ -230,7 +315,7 @@ export function createServer(org: Org): McpServer {
         active: z.boolean().optional(),
       })).min(1),
     },
-    annotations: write, _meta: meta,
+    annotations: write, _meta: meta("save_scenarios"),
   }, run("save_scenarios"));
 
   registerAppTool(server, "run_simulation", {
@@ -247,28 +332,28 @@ export function createServer(org: Org): McpServer {
       repeats: z.number().int().min(1).max(10).optional().describe("Explicit mode: runs per scenario and agent (default 3)"),
       name: z.string().optional(),
     },
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }, _meta: meta,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }, _meta: meta("run_simulation"),
   }, run("run_simulation"));
 
   registerAppTool(server, "list_simulations", {
     title: "List simulations",
     description: "Recent simulations with progress and hit rate.",
     inputSchema: { product },
-    annotations: read, _meta: meta,
+    annotations: read, _meta: meta("list_simulations"),
   }, run("list_simulations"));
 
   registerAppTool(server, "get_simulation", {
     title: "Simulation results",
     description: "One simulation: progress, verdict counts, hit rate by model, a scenario x model matrix and every agent session.",
     inputSchema: { simulation_id: z.string().describe("e.g. sim_Ab3...") },
-    annotations: read, _meta: meta,
+    annotations: read, _meta: meta("get_simulation"),
   }, run("get_simulation"));
 
   registerAppTool(server, "cancel_simulation", {
     title: "Cancel simulation",
     description: "Cancel a simulation's queued sessions. Sessions already running finish normally.",
     inputSchema: { simulation_id: z.string() },
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }, _meta: meta,
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }, _meta: meta("cancel_simulation"),
   }, run("cancel_simulation"));
 
   registerAppTool(server, "get_visibility_report", {
@@ -280,14 +365,14 @@ export function createServer(org: Org): McpServer {
       model: z.string().optional().describe("Only this model"),
       population: z.string().optional().describe("Developer population for usage shares and the adoption-weighted rate"),
     },
-    annotations: read, _meta: meta,
+    annotations: read, _meta: meta("get_visibility_report"),
   }, run("get_visibility_report"));
 
   registerAppTool(server, "get_agent_session", {
     title: "Agent session",
     description: "One sub-agent session: scenario, model, status, cost, verdict, the tool it went with and the transcript evidence for every product it mentioned.",
     inputSchema: { session_id: z.string().describe("e.g. ses_Ab3...") },
-    annotations: read, _meta: meta,
+    annotations: read, _meta: meta("get_agent_session"),
   }, run("get_agent_session"));
 
   registerAppTool(server, "get_session_transcript", {
@@ -298,7 +383,7 @@ export function createServer(org: Org): McpServer {
       offset: z.number().int().min(0).optional().describe("Index of the first event (default 0)"),
       limit: z.number().int().min(1).max(500).optional().describe("Events per page (default 50)"),
     },
-    annotations: read, _meta: meta,
+    annotations: read, _meta: meta("get_session_transcript"),
   }, run("get_session_transcript"));
 
   registerAppTool(server, "search_transcripts", {
@@ -315,21 +400,21 @@ export function createServer(org: Org): McpServer {
       days: z.number().int().min(1).max(365).optional(),
       limit: z.number().int().min(1).max(200).optional().describe("Max hits (default 25)"),
     },
-    annotations: read, _meta: meta,
+    annotations: read, _meta: meta("search_transcripts"),
   }, (a) => runTool(org, "search_transcripts", { ...a, simulationId: a.simulation_id, sessionId: a.session_id }));
 
   registerAppTool(server, "list_developer_profiles", {
     title: "Developer profiles",
     description: "Curated developer personas (role, experience, company size, stack, constraints) from the vault. During a run the orchestrator role-plays the chosen profile whenever the coding agent asks a question.",
     inputSchema: { query: z.string().optional().describe("Filter, e.g. 'enterprise' or 'Python'") },
-    annotations: read, _meta: meta,
+    annotations: read, _meta: meta("list_developer_profiles"),
   }, run("list_developer_profiles"));
 
   registerAppTool(server, "list_agents", {
     title: "Worker agents",
     description: "A developer population's coding-agent mix: the agents Octillion simulates (harness, model, pinned version) and each one's share, in whole sandboxes out of 20, from real-world developer usage with sources. Lists the available populations (e.g. global, enterprise). Default simulations sample agents in these proportions.",
     inputSchema: { population: z.string().optional().describe("Developer population slug; default population if omitted") },
-    annotations: read, _meta: meta,
+    annotations: read, _meta: meta("list_agents"),
   }, run("list_agents"));
 
   registerAppTool(server, "browse_task_library", {
@@ -341,8 +426,79 @@ export function createServer(org: Org): McpServer {
       language: z.string().optional(),
       limit: z.number().int().min(1).max(200).optional(),
     },
-    annotations: read, _meta: meta,
+    annotations: read, _meta: meta("browse_task_library"),
   }, run("browse_task_library"));
 
+  registerPrompts(server);
   return server;
+}
+
+const say = (text: string) => ({ messages: [{ role: "user" as const, content: { type: "text" as const, text } }] });
+const productArg = z.string().optional().describe("Product slug or name; omit when the organization has one product");
+const forProduct = (product?: string) => (product ? `{ product: ${JSON.stringify(product)} }` : "{} (if list_products shows several products, ask which one first)");
+
+/** Slash commands: short, actionable playbooks that chain the tools above. */
+export function registerPrompts(server: McpServer) {
+  server.registerPrompt("onboard_product", {
+    title: "Onboard a product",
+    description: "Research a developer tool from its website and docs, build its profile, personas and problems, and start a coding-agent run.",
+    argsSchema: {
+      prompt: z.string().describe("What the product is and who it is for"),
+      website_url: z.string().describe("Product website, e.g. https://bullmq.io"),
+      docs_url: z.string().describe("Documentation, e.g. https://docs.bullmq.io"),
+    },
+  }, ({ prompt, website_url, docs_url }) => say(
+    `Onboard this developer tool in Octillion.\n` +
+    `1. Call onboard_product with ${JSON.stringify({ prompt, website_url, docs_url })}.\n` +
+    `2. Poll get_onboarding with the returned research_id about once a minute until status is "completed" or "failed" (research takes a few minutes). Give a one-line progress update per poll; don't call other tools meanwhile.\n` +
+    `3. When completed, summarise: the product profile (category, aliases, packages, competitors), each developer persona in one line, and the programming problems (flag any with expectation "avoid"), then the simulation it launched and that get_visibility_report will show results once sessions finish.\n` +
+    `If it failed, report the error and offer to set the product up manually with save_product.`,
+  ));
+
+  server.registerPrompt("visibility_report", {
+    title: "Visibility report",
+    description: "Summarise how often coding agents pick the product, where it loses and what to do next.",
+    argsSchema: { product: productArg, days: z.string().optional().describe("Look-back window in days (default 30)") },
+  }, ({ product, days }) => {
+    const a = { ...(product ? { product } : {}), ...(days && Number(days) > 0 ? { days: Math.round(Number(days)) } : {}) };
+    return say(
+      `Call get_visibility_report with ${JSON.stringify(a)}${product ? "" : " (if it reports several products, call list_products and ask which one)"}.\n` +
+      `Then summarise in at most 8 bullets: hit rate with its 95% CI and sample size, adoption rate, share lost to competitors, the competitor with the most share of voice, the strongest and weakest coding agents, the three weakest scenarios with the tool that usually wins them, and the trend direction.\n` +
+      `Treat samples under 10 sessions as inconclusive. End with 2-3 concrete next steps, e.g. run explain_loss on one of the recent losses (give its session id) or add scenarios where coverage is thin.`,
+    );
+  });
+
+  server.registerPrompt("explain_loss", {
+    title: "Explain a loss",
+    description: "Read one agent session's evidence and explain why the coding agent chose a competitor.",
+    argsSchema: { session_id: z.string().describe("Agent session id, e.g. ses_Ab3...") },
+  }, ({ session_id }) => say(
+    `Explain why the coding agent in session ${session_id} did not pick our product.\n` +
+    `1. Call get_agent_session { session_id: ${JSON.stringify(session_id)} }: note the scenario, model, verdict, the tool it went with and the evidence event numbers (#seq).\n` +
+    `2. Call get_session_transcript around the first evidence event (offset about 5 before it, limit 30); read from offset 0 too if the decision happened earlier.\n` +
+    `3. Explain the decisive moment: what the agent was trying to do, which options it considered, and why it chose the winner. Quote the events with their #seq. Separate what the transcript shows from your inference.\n` +
+    `4. Recommend 2-3 specific changes for the product team (docs, examples, package naming, error messages, llms.txt) that would change this outcome.\n` +
+    `If the verdict is not a loss to a competitor, say so and explain what happened instead.`,
+  ));
+
+  server.registerPrompt("compare_models", {
+    title: "Compare coding agents",
+    description: "Compare how each coding agent and model treats the product.",
+    argsSchema: { product: productArg },
+  }, ({ product }) => say(
+    `Call get_visibility_report with ${forProduct(product)}.\n` +
+    `Compare the coding agents (by_agent) in a compact table: hit rate with CI, sessions, adoption and the competitor each one picks most when it doesn't choose the product. For the agent-by-scenario detail, open the most recent finished simulation with list_simulations then get_simulation.\n` +
+    `Call out agents with fewer than 10 sessions as inconclusive and suggest a run_simulation with those agents to close the gap. Finish with the single biggest difference between agents and a hypothesis for it.`,
+  ));
+
+  server.registerPrompt("weekly_digest", {
+    title: "Weekly digest",
+    description: "A short weekly digest across all products: movement, notable losses, runs and actions.",
+  }, () => say(
+    `Write this week's Octillion digest.\n` +
+    `1. Call list_products.\n` +
+    `2. For each product, call get_visibility_report with days 7, and again with days 30 as the baseline.\n` +
+    `3. Call list_simulations to see runs from the last 7 days.\n` +
+    `Report per product: the 7-day hit rate against the 30-day baseline (with the change in points, marked inconclusive under 10 sessions), the competitor gaining most, one or two notable losses with session ids, and simulations finished or still running. Close with the top 3 actions. Keep it under 250 words.`,
+  ));
 }

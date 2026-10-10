@@ -18,6 +18,7 @@ import { fetchReadable, FetchPolicy } from "../core/safe-fetch.js";
 import { isShuttingDown } from "../core/session.js";
 import { api, HttpError, log, sleep, withRetry } from "../core/util.js";
 import { RESEARCH_SYSTEM_PROMPT, researchPrompt, type ResearchInput, type ResearchLimits } from "./research-prompt.js";
+import { holdBusy } from "../core/activity.js";
 
 export interface ResearchJob { research_id: string; input: ResearchInput; limits?: ResearchLimits }
 
@@ -254,9 +255,10 @@ export async function researchLoop(getBrain: () => Promise<BrainLike>): Promise<
     }
     for (const job of jobs) {
       log(`[${job.research_id}] research claimed: ${job.input?.website_url ?? ""} ${job.input?.docs_url ?? ""}`);
+      const release = holdBusy(); // keeps an on-demand orchestrator from idling out mid-research
       const t: Promise<unknown> = getBrain().then((b) => runResearchJob(job, b))
         .catch((e) => log(`[${job.research_id}] research crashed:`, e))
-        .finally(() => running.delete(t));
+        .finally(() => { running.delete(t); release(); });
       running.add(t);
     }
     if (!jobs.length) await Promise.race([sleep(CFG.pollMs), ...running]);

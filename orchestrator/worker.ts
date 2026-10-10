@@ -16,6 +16,7 @@ import { activeSessions, adapterFor, claimJobs, markShuttingDown, WorkerSession,
 import { log, sleep } from "./core/util.js";
 import { CREDENTIALS_MODE, orchestratorCredentials, redact } from "./core/credentials.js";
 import { assertOrchestratorHost } from "./core/host-guard.js";
+import { holdBusy, markBusy, startIdleWatcher } from "./core/activity.js";
 import { FLEET, FleetMembership } from "./core/fleet-client.js";
 
 /** Launch -> wait -> finish. Also the fallback path of the Pi orchestrator. */
@@ -129,10 +130,13 @@ export async function claimLoop(runJob: (job: Job, runner: Runner) => Promise<vo
     let jobs: Job[] = [];
     try { jobs = await claim(); }
     catch (e) { log("claim failed:", String(e)); }
+    if (jobs.length || tasks.size) markBusy();
     for (const job of jobs) {
+      const releaseBusy = holdBusy(); // a running session keeps an on-demand orchestrator from idling out
       const t: Promise<void> = runJob(job, runner)
         .catch((e) => log(`[${job.session_id}] crashed:`, e))
         .finally(() => {
+          releaseBusy();
           tasks.delete(t);
           pool?.release(job.session_id);
           const g = groupOf.get(job.session_id);
@@ -154,5 +158,8 @@ function getAdapterId(h: string): string {
 
 // Run only when executed directly (pi-octillion imports runDeterministic/claimLoop).
 if (process.argv[1] && /worker\.(ts|js)$/.test(process.argv[1])) {
-  claimLoop((job, runner) => runDeterministic(job, runner), "worker").catch((e) => { console.error(e); process.exit(1); });
+  startIdleWatcher();
+  claimLoop((job, runner) => runDeterministic(job, runner), "worker")
+    .then(() => process.exit(0))
+    .catch((e) => { console.error(e); process.exit(1); });
 }

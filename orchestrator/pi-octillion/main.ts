@@ -27,6 +27,7 @@ import { log } from "../core/util.js";
 import { claimLoop, runDeterministic } from "../worker.js";
 import { CREDENTIALS_MODE, orchestratorCredentials, redact } from "../core/credentials.js";
 import { researchLoop } from "./research.js";
+import { startIdleWatcher } from "../core/activity.js";
 import { assertOrchestratorHost } from "../core/host-guard.js";
 import { createOctillionExtension, OCTILLION_TOOLS, OctillionRegistry } from "./index.js";
 import { jobPrompt, ORCHESTRATOR_SYSTEM_PROMPT } from "./prompt.js";
@@ -168,12 +169,17 @@ if (process.argv[1] && /pi-octillion[\\/]main\.(ts|js)$/.test(process.argv[1])) 
       const stop = () => { if (isShuttingDown()) process.exit(1); markShuttingDown(); log("stopping research worker"); };
       process.on("SIGINT", stop); process.on("SIGTERM", stop);
       log("research-only mode");
-      return researchLoop(fresh);
+      startIdleWatcher();
+      await researchLoop(fresh);
+      process.exit(0);
     }
     // Coding-agent sessions and product-onboarding research jobs, claimed side by side on the same brain.
+    // On demand: idle for OCTILLION_ORCH_IDLE_MINUTES -> graceful SIGTERM path -> leave the fleet -> exit 0.
+    startIdleWatcher();
     await Promise.all([
       claimLoop(async (job, runner) => runJobWithPi(job, runner, await fresh()), "orchestrator"),
       researchLoop(fresh),
     ]);
+    process.exit(0);
   })().catch((e) => { console.error(e); process.exit(1); });
 }

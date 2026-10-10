@@ -177,6 +177,31 @@ CREATE TABLE IF NOT EXISTS orchestrators (
   last_seen      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- On-demand orchestrators (src/autoscaler.ts): every boat orchestrator sandbox the server launched, reconciled
+-- against boat's own listing (name prefix octi-orch-) so nothing leaks across server restarts.
+CREATE TABLE IF NOT EXISTS orchestrator_sandboxes (
+  id               SERIAL PRIMARY KEY,
+  sandbox_id       TEXT UNIQUE,
+  orchestrator_id  TEXT,
+  state            TEXT NOT NULL DEFAULT 'booting' CHECK (state IN ('booting', 'running', 'draining', 'deleted')),
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  ready_at         TIMESTAMPTZ,
+  last_seen        TIMESTAMPTZ,
+  deleted_at       TIMESTAMPTZ,
+  error            TEXT,
+  from_image       TEXT,
+  timings          JSONB
+);
+CREATE INDEX IF NOT EXISTS orchestrator_sandboxes_live_idx ON orchestrator_sandboxes (state) WHERE state <> 'deleted';
+
+-- Single-leader lease for the autoscaler across server replicas; `state` holds the leader's last tick for status.
+CREATE TABLE IF NOT EXISTS autoscaler_lease (
+  name        TEXT PRIMARY KEY,
+  holder      TEXT NOT NULL,
+  expires_at  TIMESTAMPTZ NOT NULL,
+  state       JSONB NOT NULL DEFAULT '{}'
+);
+
 -- Key vault + inference gateway (src/keyvault.ts, src/gateway.ts; docs/credentials.md).
 -- Provider credentials are AES-256-GCM encrypted with OCTILLION_VAULT_KEY; only ciphertext is stored.
 CREATE TABLE IF NOT EXISTS vault_providers (
