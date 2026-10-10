@@ -11,6 +11,8 @@ export const CFG = {
   url: (env.OCTILLION_URL ?? "http://localhost:3000").replace(/\/+$/, ""),
   token: env.OCTILLION_WORKER_TOKEN ?? "",
   workerId: env.WORKER_ID ?? `${hostname()}-${process.pid}`,
+  /** Stable orchestrator identity (fleet check-in, orchestrator credentials, pod owner label). */
+  orchestratorId: env.ORCHESTRATOR_ID || hostname(),
   concurrency: Math.max(1, num(env.WORKER_CONCURRENCY, 2)),
   runner: (env.RUNNER ?? "boat") as RunnerName,
   maxSessionMs: num(env.MAX_SESSION_MINUTES, 45) * 60_000,

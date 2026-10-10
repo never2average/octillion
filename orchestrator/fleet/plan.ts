@@ -3,16 +3,20 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
- * Fleet plan: how many warm worker pods each coding harness gets. Pods are apportioned by the harness's share of
- * real-world developer usage (sum of its registry agents' weights), largest remainder, at least one pod per
- * enabled harness when the fleet is big enough. With FLEET_SIZE=10 and Claude Code at 40%, Claude Code gets 4 pods.
+ * Standalone fleet plan (FLEET_MODE=standalone; in server mode the server plans globally, src/fleet.ts).
+ * One pod group per runnable registry AGENT (harness + model), e.g. "Claude Code · Opus" and "Claude Code · Sonnet",
+ * each sized by its own usage share: largest remainder, then any agent left with zero pods takes one from whichever
+ * agent is most over its exact share, when the fleet can afford one pod per agent. Same rule as the server's planPods.
  */
 
 export interface RegistryAgent {
   id: string; harness: string; label: string; model: string; weight: number; enabled?: boolean;
   harness_version?: string; image?: { docker?: string; boat_snapshot?: string }; requires_env?: string[];
 }
-export interface PodGroup { harness: string; weight: number; pods: number; image: string; version?: string; requires_env: string[]; agents: string[] }
+export interface PodGroup {
+  agent_id: string; harness: string; model: string; weight: number; pods: number;
+  image: string; version?: string; requires_env: string[]; agents: string[];
+}
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -21,23 +25,17 @@ export function loadRegistry(file = process.env.OCTILLION_REGISTRY ?? "harnesses
 }
 
 export function planFleet(size: number, agents: RegistryAgent[] = loadRegistry().agents): PodGroup[] {
-  const groups = new Map<string, PodGroup>();
-  for (const a of agents.filter((x) => x.enabled !== false && x.weight > 0 && (x as { worker_adapter?: string }).worker_adapter !== "todo")) {
-    const g = groups.get(a.harness) ?? {
-      harness: a.harness, weight: 0, pods: 0, version: a.harness_version, agents: [], requires_env: [],
+  const list: PodGroup[] = agents
+    .filter((x) => x.enabled !== false && x.weight > 0 && (x as { worker_adapter?: string }).worker_adapter !== "todo")
+    .map((a) => ({
+      agent_id: a.id, harness: a.harness, model: a.model, weight: a.weight, pods: 0, version: a.harness_version,
       image: a.image?.docker ?? `octillion/agent-${a.harness}:${a.harness_version ?? "latest"}`,
-    };
-    g.weight += a.weight;
-    g.agents.push(a.id);
-    g.requires_env = [...new Set([...g.requires_env, ...(a.requires_env ?? [])])];
-    groups.set(a.harness, g);
-  }
-  const list = [...groups.values()].sort((a, b) => b.weight - a.weight);
+      requires_env: [...(a.requires_env ?? [])], agents: [a.id],
+    }))
+    .sort((a, b) => b.weight - a.weight || a.agent_id.localeCompare(b.agent_id));
   const total = list.reduce((s, g) => s + g.weight, 0) || 1;
   for (const g of list) g.weight /= total;
 
-  // Same rule as the server (src/fleet.ts planPods): strictly proportional by largest remainder, then a harness left
-  // with zero pods takes one from whichever harness is most over its exact share, when the fleet can afford it.
   const rows = list.map((g) => ({ g, exact: g.weight * size }));
   for (const r of rows) r.g.pods = Math.floor(r.exact);
   let left = size - rows.reduce((s, r) => s + r.g.pods, 0);
@@ -56,10 +54,10 @@ export function planFleet(size: number, agents: RegistryAgent[] = loadRegistry()
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const size = Number(process.argv[2] ?? process.env.FLEET_SIZE ?? 10);
+  const size = Number(process.argv[2] ?? process.env.POD_CAPACITY ?? process.env.FLEET_SIZE ?? 10);
   const plan = planFleet(size);
-  console.table(plan.map((g) => ({ harness: g.harness, usage: `${(g.weight * 100).toFixed(1)}%`, pods: g.pods, image: g.image })));
+  console.table(plan.map((g) => ({ agent: g.agent_id, harness: g.harness, model: g.model, usage: `${(g.weight * 100).toFixed(1)}%`, pods: g.pods, image: g.image })));
   console.log(`${plan.reduce((s, g) => s + g.pods, 0)} pods total`);
-  const starved = plan.filter((g) => !g.pods).map((g) => g.harness);
-  if (starved.length) console.warn(`Warning: no pod for ${starved.join(", ")}; their sessions will wait. Use FLEET_SIZE >= ${plan.length}.`);
+  const starved = plan.filter((g) => !g.pods).map((g) => g.agent_id);
+  if (starved.length) console.warn(`Warning: no pod for ${starved.join(", ")}; their sessions will wait. Use a fleet of >= ${plan.length} pods.`);
 }

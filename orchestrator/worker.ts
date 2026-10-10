@@ -14,6 +14,7 @@ import { PodPool, POOL } from "./core/pool.js";
 import { RUNNERS, checkRunner, type Runner } from "./core/runners.js";
 import { activeSessions, adapterFor, claimJobs, markShuttingDown, WorkerSession, type Job } from "./core/session.js";
 import { log, sleep } from "./core/util.js";
+import { CREDENTIALS_MODE, orchestratorCredentials, redact } from "./core/credentials.js";
 
 /** Launch -> wait -> finish. Also the fallback path of the Pi orchestrator. */
 export async function runDeterministic(job: Job, runner: Runner, orchestrator: Record<string, unknown> = { orchestrator: "none" }): Promise<void> {
@@ -31,6 +32,11 @@ export async function runDeterministic(job: Job, runner: Runner, orchestrator: R
  */
 export async function claimLoop(runJob: (job: Job, runner: Runner) => Promise<void>, label: string): Promise<void> {
   if (!CFG.token) throw new Error("OCTILLION_WORKER_TOKEN is required");
+  // Broker mode: the boat key and the orchestrator LLM token come from the server (docs/credentials.md).
+  await orchestratorCredentials().catch((e) => {
+    if (CREDENTIALS_MODE === "broker" && CFG.runner === "boat") throw new Error(`orchestrator credentials: ${redact(String(e))}`);
+    log("orchestrator credentials unavailable:", redact(String(e)));
+  });
   let pool: PodPool | null = null;
   let runner: Runner;
   if (CFG.runner === "pool") {
@@ -65,22 +71,25 @@ export async function claimLoop(runJob: (job: Job, runner: Runner) => Promise<vo
   process.on("SIGINT", () => void stop("SIGINT"));
   process.on("SIGTERM", () => void stop("SIGTERM"));
 
-  // Only claim harnesses this worker can actually run (adapter + provider key), so jobs aren't burned.
-  const runnable = (h: string) => { try { adapterFor({ harness: h } as Job); return true; } catch { return false; } };
-  if (pool) {
-    const skipped = pool.harnesses().filter((h) => !runnable(h));
-    if (skipped.length) log(`pool: not claiming for ${skipped.join(", ")} (no adapter or no provider key); their pods stay idle`);
-  }
+  // Only claim harnesses this worker can actually run (adapter; in env mode also the provider keys).
+  const runnable = (h: string) => { try { adapterFor({ harness: h }); return true; } catch { return false; } };
+  const skippedLogged = new Set<string>();
 
   const claim = async (): Promise<Job[]> => {
     if (!pool) return claimJobs(capacity - tasks.size);
     const out: Job[] = [];
-    for (const h of pool.harnesses()) {
-      if (CFG.harness && getAdapterId(h) !== getAdapterId(CFG.harness)) continue;
-      const idle = pool.idle(h);
-      if (!idle || !runnable(h)) continue;
-      for (const job of await claimJobs(idle, h)) {
-        if (!pool.reserve(job.session_id, job.harness)) log(`[${job.session_id}] no idle ${job.harness} pod for a claimed job; it will fail fast`);
+    // One claim per pod group (registry agent): {agent_ids:[id]}, limit = that group's idle pods.
+    for (const g of pool.groups()) {
+      if (CFG.harness && getAdapterId(g.harness) !== getAdapterId(CFG.harness)) continue;
+      if (!runnable(g.harness)) {
+        if (!skippedLogged.has(g.agent_id)) { skippedLogged.add(g.agent_id); log(`pool: not claiming for ${g.agent_id} (no adapter or credentials); its pods stay idle`); }
+        continue;
+      }
+      const idle = pool.idle(g.agent_id);
+      if (!idle) continue;
+      for (const job of await claimJobs(idle, { agentIds: [g.agent_id] })) {
+        if (job.agent_id && job.agent_id !== g.agent_id) log(`[${job.session_id}] server returned agent ${job.agent_id} for a ${g.agent_id} claim`);
+        if (!pool.reserve(job.session_id, job.agent_id ?? g.agent_id)) log(`[${job.session_id}] no idle ${g.agent_id} pod for a claimed job; it will fail fast`);
         out.push(job);
       }
     }

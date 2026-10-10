@@ -10,6 +10,8 @@ import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import { getAdapter, type HarnessAdapter, type TurnDigest } from "../harnesses/adapters.js";
 import { CFG } from "./config.js";
+import { CREDENTIALS_MODE, redact, sessionCredentials, sessionCredsExpiring, type SessionCreds } from "./credentials.js";
+import { harnessCredentials, withCredentialSetup, providersFromEnv, CRED_SPECS } from "../harnesses/credentials.js";
 import type { Runner, Sandbox, RunExit } from "./runners.js";
 import { EventSink } from "./sink.js";
 import { UsageTracker } from "./usage.js";
@@ -30,6 +32,8 @@ export interface Job {
   product_id?: number;
   model: string;
   harness: string;
+  /** Registry agent (harness + model), e.g. "claude-code/opus". */
+  agent_id?: string | null;
   attempt: number;
   prompt: string;
   repo_url: string | null;
@@ -65,10 +69,17 @@ export function markShuttingDown() { shuttingDown = true; }
 
 const TEXT_CAP = 8000;
 
-/** Validate harness + key without touching a sandbox. */
-export function adapterFor(job: Job): HarnessAdapter {
+/**
+ * Validate the harness without touching a sandbox. Broker mode: the server decides per session (it returns the
+ * providers or fails). Env mode (dev): the worker's env must have every provider the harness needs.
+ */
+export function adapterFor(job: Pick<Job, "harness">): HarnessAdapter {
   const a = getAdapter(job.harness);
-  if (!a.hasKey({ anthropic: CFG.anthropicKey, openai: CFG.openaiKey })) throw new Error(`Worker has no API key for ${a.id}`);
+  if (CREDENTIALS_MODE === "env") {
+    const have = providersFromEnv();
+    const missing = (CRED_SPECS[a.id]?.providers ?? []).filter((p) => !have[p]);
+    if (missing.length) throw new Error(`Worker has no ${missing.join(", ")} credentials for ${a.id} (CREDENTIALS_MODE=env)`);
+  }
   return a;
 }
 
@@ -81,9 +92,10 @@ export async function completeJob(sessionId: string, body: Record<string, unknow
   }
 }
 
-export async function claimJobs(limit: number, harness: string | undefined = CFG.harness): Promise<Job[]> {
+/** Claim queued jobs. Pool groups claim with `agentIds: [agent_id]` so a group only gets its own agent's sessions. */
+export async function claimJobs(limit: number, filter: { harness?: string; agentIds?: string[] } = { harness: CFG.harness }): Promise<Job[]> {
   const res = (await api("/api/worker/claim", {
-    json: { worker_id: CFG.workerId, limit: Math.max(1, Math.min(limit, 50)), models: CFG.models, harness },
+    json: { worker_id: CFG.workerId, limit: Math.max(1, Math.min(limit, 50)), models: CFG.models, harness: filter.harness, agent_ids: filter.agentIds },
   })) as { jobs?: Job[] };
   return res?.jobs ?? [];
 }
@@ -100,6 +112,7 @@ export class WorkerSession {
   private current: Promise<{ exit: RunExit; digest: TurnDigest }> | null = null;
   private last: { exit: RunExit; digest: TurnDigest } | null = null;
   private resumeId: string | null = null;
+  private creds: SessionCreds | null = null;
   private stderrTail = "";
   private finishing: Promise<{ status: string; skipped: boolean }> | null = null;
   runs = 0;
@@ -142,7 +155,10 @@ export class WorkerSession {
     }, CFG.heartbeatMs);
     s.deadline = setTimeout(() => { s.timedOut = true; log(`[${job.session_id}] max duration hit; killing`); void s.sandbox?.kill(); }, CFG.maxSessionMs);
     try {
-      s.sandbox = await runner.open({ adapter, harness: job.harness, jobKey: job.session_id, repoUrl: job.repo_url, env: adapter.env({ anthropic: CFG.anthropicKey, openai: CFG.openaiKey }) });
+      // Credentials first: no point opening a sandbox the broker won't serve.
+      s.creds = await sessionCredentials(job.session_id).catch((e) => { throw new Error(`credentials: ${redact(String(e instanceof Error ? e.message : e))}`); });
+      harnessCredentials(adapter, s.creds.providers, job.model); // validate the mapping before paying for a sandbox
+      s.sandbox = await runner.open({ adapter, harness: job.harness, jobKey: job.session_id, agentId: job.agent_id ?? undefined, model: job.model, repoUrl: job.repo_url });
       log(`[${job.session_id}] ${s.handle} started ${adapter.id}/${job.model} in ${s.sandbox.id}${job.repo_url ? ` repo=${job.repo_url}` : ""}`);
       await s.launch(job.prompt, null);
     } catch (e) {
@@ -168,10 +184,14 @@ export class WorkerSession {
   private async launch(input: string, resumeId: string | null): Promise<void> {
     const sb = this.sandbox!;
     const o = { model: this.job.model, workdir: sb.workdir, maxBudgetUsd: CFG.maxBudgetUsd, bin: this.argvBin() };
-    const argv = resumeId ? this.adapter.resumeArgv({ ...o, sessionId: resumeId }) : this.adapter.launchArgv(o);
+    // Session tokens are short-lived: refetch before a run when close to expiry (e.g. a late resume).
+    if (!this.creds || sessionCredsExpiring(this.creds)) this.creds = await sessionCredentials(this.job.session_id);
+    const hc = harnessCredentials(this.adapter, this.creds.providers, this.job.model);
+    const base = resumeId ? this.adapter.resumeArgv({ ...o, sessionId: resumeId }) : this.adapter.launchArgv(o);
+    const argv = withCredentialSetup(base, hc.setup, hc.argv);
     const run = ++this.runs;
     const digest = this.adapter.newDigest();
-    const turn = await sb.runTurn(argv, input);
+    const turn = await sb.runTurn(argv, input, hc.env);
     let tail = "";
     turn.stderr.on("data", (d: Buffer | string) => { tail = (tail + d.toString()).slice(-8000); });
     const rl = createInterface({ input: turn.stdout, crlfDelay: Infinity });

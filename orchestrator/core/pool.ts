@@ -1,31 +1,27 @@
 /**
- * RUNNER=pool: a warm pool of per-harness Docker pods, sized in proportion to real-world usage.
+ * RUNNER=pool: warm Docker pods in POD GROUPS, one group per registry agent (harness + model), e.g.
+ * "claude-code/opus" and "claude-code/sonnet" each sized by its own usage share. Groups of one harness share its image.
  *
  * Sizing (FLEET_MODE):
  *  - server (default): the Octillion server plans the GLOBAL fleet across all orchestrators. Each orchestrator
  *    checks in (POST /api/worker/fleet {orchestrator_id, capacity}) at start and every next_checkin_seconds and
- *    reconciles its pool to the returned `assignment`. N orchestrators x POD_CAPACITY (<= 20) pods, proportions
- *    hold globally. Server unreachable -> keep the current pool and retry. SIGTERM -> DELETE /api/worker/fleet/:id.
- *  - standalone: fleet/plan.ts planFleet(POD_CAPACITY) from harnesses/registry.json, no server planning.
+ *    reconciles to its `assignment` ([{agent_id, harness, model, pods, image, version}]). Server unreachable ->
+ *    keep the current pool and retry. SIGTERM -> DELETE /api/worker/fleet/:id.
+ *  - standalone: fleet/plan.ts planFleet(POD_CAPACITY), the same per-agent rule, locally.
  *
- * Reconcile: scale up by starting warm pods; scale down only idle pods; busy pods over target are retired when
- * their session ends (not replaced).
+ * Reconcile: start missing pods; remove surplus IDLE pods; busy pods over target retire when their session ends.
  *
  * Pods: `orchestrator/images/Dockerfile.<harness>` images idling on `sleep infinity` (user agent, workdir
- * /home/agent/work), with the docker runner's cpu/memory/pids/network limits and labels octillion.pool=1,
- * octillion.harness=<h>, octillion.pool.owner=<ORCHESTRATOR_ID>. Busy pods are renamed octi-busy-* (idle:
- * octi-pool-*), so `docker ps` and fleet/status.ts show the state.
+ * /home/agent/work), docker-runner limits, labels octillion.pool=1, octillion.agent=<agent_id>,
+ * octillion.harness=<h>, octillion.pool.owner=<ORCHESTRATOR_ID>. Busy pods are renamed octi-busy-*.
  *
- * Jobs: claims per harness with limit = idle pods of that harness; one reserved pod per job. Each harness run is
- * `docker exec -u agent` + `env -i` with the image's non-OCTILLION env and only that harness's provider key
- * (by name with `-e`, never in argv, the image or the container env). The worker token and the orchestrator key
- * never enter pods. Resumes run in the same pod. After the session the pod is destroyed and (if still within
- * target) a fresh one is started, so every session starts clean.
+ * Jobs: each group claims with {agent_ids:[agent_id]} and limit = its idle pods, so an Opus pod only gets Opus
+ * sessions; the job's model must equal the group's model (asserted). Every run is `docker exec -u agent` +
+ * `env -i` with the image's non-OCTILLION env and this session's brokered credentials (values via `-e NAME`).
+ * Resumes run in the same pod. After the session the pod is destroyed and re-created while under target.
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { hostname } from "node:os";
-import { normalizeHarnessId } from "../harnesses/adapters.js";
 import { planFleet } from "../fleet/plan.js";
 import { CFG, env, num } from "./config.js";
 import type { Runner, Sandbox, RunExit, Turn } from "./runners.js";
@@ -35,22 +31,25 @@ import { api, log, sh } from "./util.js";
 export const POOL = {
   capacity: Math.max(1, Math.min(20, num(env.POD_CAPACITY ?? env.FLEET_SIZE, 20))),
   mode: (env.FLEET_MODE === "standalone" ? "standalone" : "server") as "server" | "standalone",
-  orchestratorId: env.ORCHESTRATOR_ID || hostname(),
-  /** Dev/test only: run every harness's pods from this image. */
+  orchestratorId: CFG.orchestratorId,
+  /** Dev/test only: run every group's pods from this image. */
   imageOverride: env.POOL_IMAGE_OVERRIDE || undefined,
 };
 
 interface Pod {
   id: string;
   name: string;
+  agentId: string;
   harness: string;
+  model: string;
   image: string;
   state: "starting" | "idle" | "reserved" | "busy";
   /** Non-secret image env (HOME, PATH, NPM_CONFIG_PREFIX...), OCTILLION_* removed. */
   baseEnv: string[];
 }
 
-export interface Target { harness: string; pods: number; image: string }
+/** One pod group: a registry agent (harness + model). */
+export interface Target { agent_id: string; harness: string; model: string; pods: number; image: string }
 
 function limits(): string[] {
   const a = ["--cpus", CFG.dockerCpus, "--memory", CFG.dockerMemory, "--pids-limit", "1024", "--security-opt", "no-new-privileges", "--cap-drop", "ALL"];
@@ -61,9 +60,14 @@ function limits(): string[] {
 const imageFor = (harness: string, image?: string | null, version?: string | null) =>
   POOL.imageOverride ?? image ?? `octillion/agent-${harness}:${version ?? "latest"}`;
 
+/** Docker-label-safe form of an agent id ("claude-code/opus" -> "claude-code_opus") for container names. */
+const slug = (s: string) => s.replace(/[^a-zA-Z0-9_.-]+/g, "_");
+
+export class ModelMismatchError extends Error {}
+
 export class PodPool {
   readonly pods = new Map<string, Pod>();
-  targets = new Map<string, Target>();
+  targets = new Map<string, Target>(); // agent_id -> target
   private reservations = new Map<string, Pod>(); // job session_id -> pod
   private envCache = new Map<string, string[]>();
   private draining = false;
@@ -90,13 +94,13 @@ export class PodPool {
     let next = 30;
     try {
       if (this.mode === "standalone") {
-        this.setTargets(planFleet(this.capacity).map((g) => ({ harness: g.harness, pods: g.pods, image: imageFor(g.harness, g.image) })));
+        this.setTargets(planFleet(this.capacity).map((g) => ({ agent_id: g.agent_id, harness: g.harness, model: g.model, pods: g.pods, image: imageFor(g.harness, g.image) })));
       } else {
         const r = (await api("/api/worker/fleet", {
           json: { orchestrator_id: this.orchestratorId, capacity: this.capacity, meta: { worker_id: CFG.workerId, runner: "pool", pods: this.pods.size } },
-        })) as { assignment?: { harness: string; pods: number; image?: string | null; version?: string | null }[]; next_checkin_seconds?: number };
+        })) as { assignment?: { agent_id: string; harness: string; model: string; pods: number; image?: string | null; version?: string | null }[]; next_checkin_seconds?: number };
         this.lastCheckin = r as Record<string, unknown>;
-        this.setTargets((r.assignment ?? []).map((a) => ({ harness: a.harness, pods: a.pods, image: imageFor(a.harness, a.image, a.version) })));
+        this.setTargets((r.assignment ?? []).map((a) => ({ agent_id: a.agent_id, harness: a.harness, model: a.model, pods: a.pods, image: imageFor(a.harness, a.image, a.version) })));
         next = Math.max(5, Number(r.next_checkin_seconds ?? 30));
       }
       await this.reconcile();
@@ -108,24 +112,21 @@ export class PodPool {
   }
 
   setTargets(list: Target[]) {
-    this.targets = new Map(list.filter((t) => t.pods > 0).map((t) => [t.harness, t]));
+    this.targets = new Map(list.filter((t) => t.pods > 0 && t.agent_id).map((t) => [t.agent_id, t]));
   }
 
-  private podsOf(h: string) { return [...this.pods.values()].filter((p) => p.harness === h); }
+  private podsOf(agentId: string) { return [...this.pods.values()].filter((p) => p.agentId === agentId); }
 
   /** Converge pods to targets: start missing, remove surplus idle pods (busy ones retire after their session). */
   reconcile(): Promise<void> {
     this.reconciling ??= (async () => {
       const work: Promise<void>[] = [];
       for (const t of this.targets.values()) {
-        for (let i = this.podsOf(t.harness).length; i < t.pods; i++) work.push(this.spawnPod(t));
+        for (let i = this.podsOf(t.agent_id).length; i < t.pods; i++) work.push(this.spawnPod(t));
       }
-      const harnesses = new Set([...this.pods.values()].map((p) => p.harness));
-      for (const h of harnesses) {
-        const want = this.targets.get(h)?.pods ?? 0;
-        const ps = this.podsOf(h);
-        let surplus = ps.length - want;
-        for (const p of ps) {
+      for (const a of new Set([...this.pods.values()].map((p) => p.agentId))) {
+        let surplus = this.podsOf(a).length - (this.targets.get(a)?.pods ?? 0);
+        for (const p of this.podsOf(a)) {
           if (surplus <= 0) break;
           if (p.state !== "idle") continue;
           this.pods.delete(p.id);
@@ -141,31 +142,36 @@ export class PodPool {
   private async spawnPod(t: Target): Promise<void> {
     if (this.draining) return;
     const id = randomUUID().slice(0, 8);
-    const pod: Pod = { id, name: `octi-pool-${t.harness}-${id}`, harness: t.harness, image: t.image, state: "starting", baseEnv: [] };
+    const pod: Pod = { id, name: `octi-pool-${slug(t.agent_id)}-${id}`, agentId: t.agent_id, harness: t.harness, model: t.model, image: t.image, state: "starting", baseEnv: [] };
     this.pods.set(id, pod);
     try {
       if (!this.envCache.has(t.image)) this.envCache.set(t.image, await imageEnv(t.image));
       pod.baseEnv = this.envCache.get(t.image)!;
-      const labels = ["--label", "octillion.pool=1", "--label", `octillion.harness=${t.harness}`, "--label", `octillion.pool.owner=${this.orchestratorId}`];
+      const labels = ["--label", "octillion.pool=1", "--label", `octillion.agent=${t.agent_id}`, "--label", `octillion.harness=${t.harness}`,
+        "--label", `octillion.model=${t.model}`, "--label", `octillion.pool.owner=${this.orchestratorId}`];
       const r = await sh("docker", ["run", "-d", "--init", "--name", pod.name, ...labels, ...limits(), "-w", AGENT_WORKDIR, t.image, "sleep", "infinity"]);
       if (r.code !== 0) throw new Error(r.out.slice(-300));
       if (this.draining || !this.pods.has(id)) { await sh("docker", ["rm", "-f", pod.name]); return; }
       pod.state = "idle";
     } catch (e) {
       this.pods.delete(id);
-      log(`pool: could not start a ${t.harness} pod (${t.image}; build it with orchestrator/images/build.sh): ${String(e instanceof Error ? e.message : e).slice(0, 300)}`);
+      log(`pool: could not start a ${t.agent_id} pod (${t.image}; build it with orchestrator/images/build.sh): ${String(e instanceof Error ? e.message : e).slice(0, 300)}`);
     }
   }
 
-  idle(harness: string): number { return this.podsOf(harness).filter((p) => p.state === "idle").length; }
+  idle(agentId: string): number { return this.podsOf(agentId).filter((p) => p.state === "idle").length; }
 
-  /** Harnesses that currently have pods or targets. */
-  harnesses(): string[] { return [...new Set([...this.targets.keys(), ...[...this.pods.values()].map((p) => p.harness)])]; }
+  /** Pod groups (agent ids) that currently have pods or targets, with their harness. */
+  groups(): { agent_id: string; harness: string; model: string }[] {
+    const m = new Map<string, { agent_id: string; harness: string; model: string }>();
+    for (const t of this.targets.values()) m.set(t.agent_id, { agent_id: t.agent_id, harness: t.harness, model: t.model });
+    for (const p of this.pods.values()) if (!m.has(p.agentId)) m.set(p.agentId, { agent_id: p.agentId, harness: p.harness, model: p.model });
+    return [...m.values()];
+  }
 
-  /** Reserve an idle pod of `harness` for a claimed job. */
-  reserve(jobKey: string, harness: string): boolean {
-    const h = normalizeHarnessId(harness);
-    const pod = [...this.pods.values()].find((p) => p.state === "idle" && normalizeHarnessId(p.harness) === h);
+  /** Reserve an idle pod of the job's group (by agent_id). */
+  reserve(jobKey: string, agentId: string): boolean {
+    const pod = [...this.pods.values()].find((p) => p.state === "idle" && p.agentId === agentId);
     if (!pod) return false;
     pod.state = "reserved";
     this.reservations.set(jobKey, pod);
@@ -179,18 +185,22 @@ export class PodPool {
     if (pod && pod.state === "reserved") pod.state = "idle";
   }
 
-  /** Take the reserved pod for a job (or any idle pod of the harness) and mark it busy. */
-  async take(jobKey: string | undefined, harness: string): Promise<Pod> {
+  /** Take the job's reserved pod, assert the model matches the group, mark it busy. */
+  async take(jobKey: string | undefined, agentId: string | undefined, model: string | undefined): Promise<Pod> {
     let pod = jobKey ? this.reservations.get(jobKey) : undefined;
-    if (!pod && jobKey && this.reserve(jobKey, harness)) pod = this.reservations.get(jobKey);
-    if (!pod) throw new Error(`no idle pod for harness ${harness}`);
+    if (!pod && jobKey && agentId && this.reserve(jobKey, agentId)) pod = this.reservations.get(jobKey);
+    if (!pod) throw new Error(`no idle pod for agent ${agentId ?? "?"}`);
+    if (model !== undefined && pod.model !== model) {
+      this.release(jobKey!);
+      throw new ModelMismatchError(`pod group ${pod.agentId} runs model ${pod.model}, but the job asks for ${model}`);
+    }
     pod.state = "busy";
-    const busy = `octi-busy-${pod.harness}-${pod.id}`;
+    const busy = `octi-busy-${slug(pod.agentId)}-${pod.id}`;
     if ((await sh("docker", ["rename", pod.name, busy])).code === 0) pod.name = busy;
     return pod;
   }
 
-  /** Destroy a used pod; reconcile starts a fresh one if the harness is still below target (else it retires). */
+  /** Destroy a used pod; reconcile starts a fresh one if the group is still below target (else it retires). */
   async recycle(pod: Pod): Promise<void> {
     for (const [k, p] of this.reservations) if (p === pod) this.reservations.delete(k);
     this.pods.delete(pod.id);
@@ -218,17 +228,18 @@ export class PodPool {
     log(`pool[${this.orchestratorId}]: drained`);
   }
 
-  counts(): Record<string, { idle: number; busy: number; target: number }> {
-    const out: Record<string, { idle: number; busy: number; target: number }> = {};
-    for (const h of this.harnesses()) {
-      const ps = this.podsOf(h);
-      out[h] = { idle: ps.filter((p) => p.state === "idle").length, busy: ps.filter((p) => p.state === "reserved" || p.state === "busy").length, target: this.targets.get(h)?.pods ?? 0 };
+  counts(): Record<string, { harness: string; model: string; idle: number; busy: number; target: number }> {
+    const out: Record<string, { harness: string; model: string; idle: number; busy: number; target: number }> = {};
+    for (const g of this.groups()) {
+      const ps = this.podsOf(g.agent_id);
+      out[g.agent_id] = { harness: g.harness, model: g.model, idle: ps.filter((p) => p.state === "idle").length,
+        busy: ps.filter((p) => p.state === "reserved" || p.state === "busy").length, target: this.targets.get(g.agent_id)?.pods ?? 0 };
     }
     return out;
   }
 
   summary(): string {
-    return Object.entries(this.counts()).map(([h, c]) => `${h} ${c.idle} idle/${c.busy} busy (target ${c.target})`).join(", ") || "no pods";
+    return Object.entries(this.counts()).map(([a, c]) => `${a} ${c.idle} idle/${c.busy} busy (target ${c.target})`).join(", ") || "no pods";
   }
 
   runner(): Runner {
@@ -236,7 +247,7 @@ export class PodPool {
     return {
       name: "pool",
       async open(spec): Promise<Sandbox> {
-        const pod = await pool.take(spec.jobKey, spec.harness ?? spec.adapter.id);
+        const pod = await pool.take(spec.jobKey, spec.agentId, spec.model);
         let base = "";
         const exec = (args: string[]) => sh("docker", ["exec", "-u", "agent", ...args]);
         try {
@@ -246,15 +257,14 @@ export class PodPool {
             base = (await exec([pod.name, "git", "-C", AGENT_WORKDIR, "rev-parse", "HEAD"])).out.trim();
           }
         } catch (e) { await pool.recycle(pod); throw e; }
-        const keys = Object.keys(spec.env);
         let current: ChildProcess | null = null;
         let gone = false;
         const destroy = async () => { if (gone) return; gone = true; current?.kill("SIGKILL"); await pool.recycle(pod); };
         return {
-          id: `pool:${pod.harness}-${pod.id}`,
+          id: `pool:${pod.agentId}-${pod.id}`,
           workdir: AGENT_WORKDIR,
-          async runTurn(argv: string[], input: string): Promise<Turn> {
-            const child = spawn("docker", dockerExecHarness(pod.name, pod.baseEnv, keys, argv), { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...spec.env } });
+          async runTurn(argv: string[], input: string, env: Record<string, string>): Promise<Turn> {
+            const child = spawn("docker", dockerExecHarness(pod.name, pod.baseEnv, Object.keys(env), argv), { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...env } });
             current = child;
             child.stdin!.end(input);
             const exited = new Promise<RunExit>((resolve) => {
@@ -269,7 +279,7 @@ export class PodPool {
           },
           kill: destroy,
           cleanup: destroy,
-          meta: () => ({ pool_harness: pod.harness, pool_image: pod.image, pool_orchestrator: pool.orchestratorId }),
+          meta: () => ({ pool_agent: pod.agentId, pool_harness: pod.harness, pool_model: pod.model, pool_image: pod.image, pool_orchestrator: pool.orchestratorId }),
         };
       },
     };

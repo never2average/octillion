@@ -35,7 +35,11 @@ export interface Sandbox {
   /** Absolute harness workdir inside the sandbox. */
   workdir: string;
   /** Run the harness once: argv[0] is the binary, `input` goes to stdin byte-for-byte. One turn at a time. */
-  runTurn(argv: string[], input: string): Promise<Turn>;
+  /**
+   * `env` = the harness credentials + flags for THIS run (from the broker). Injected only at exec time under
+   * `env -i`; never written into the image, the container env or argv.
+   */
+  runTurn(argv: string[], input: string, env: Record<string, string>): Promise<Turn>;
   /** Unified diff of everything the agent changed (vs the cloned commit, or vs empty). null if unavailable. */
   diff(): Promise<string | null>;
   /** Hard-stop (idempotent). */
@@ -48,12 +52,13 @@ export interface Sandbox {
 export interface OpenSpec {
   adapter: HarnessAdapter;
   repoUrl: string | null;
-  /** Harness env (API key etc.), from adapter.env(). */
-  env: Record<string, string>;
   /** Raw job harness id (pool runner picks a pod by it). */
   harness?: string;
   /** Host-side job key (Octillion session id) for pool reservations. Never passed into a sandbox. */
   jobKey?: string;
+  /** Registry agent id (pool group) and the job's model; the pool asserts the group's model matches. */
+  agentId?: string;
+  model?: string;
 }
 
 export interface Runner {
@@ -133,7 +138,6 @@ export const dockerRunner: Runner = {
     if (CFG.dockerNetwork) args.push("--network", CFG.dockerNetwork);
     args.push(CFG.dockerImage, "sleep", "infinity");
     const baseEnv = await imageEnv(CFG.dockerImage);
-    const keys = Object.keys(spec.env); // passed per exec, never into the container env
     const r = await sh("docker", args);
     if (r.code !== 0) throw new Error(`docker run failed: ${r.out.slice(-500)}`);
     const rmContainer = () => sh("docker", ["rm", "-f", name]).then(() => {});
@@ -148,8 +152,9 @@ export const dockerRunner: Runner = {
     return {
       id: `docker:${name}`,
       workdir: AGENT_WORKDIR,
-      async runTurn(argv, input) {
-        const child = spawn("docker", dockerExecHarness(name, baseEnv, keys, argv), { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...spec.env } });
+      async runTurn(argv, input, env) {
+        // Key values travel as `docker exec -e NAME` from our env (never argv, never the container env).
+        const child = spawn("docker", dockerExecHarness(name, baseEnv, Object.keys(env), argv), { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...env } });
         current = child;
         child.stdin!.end(input);
         return childTurn(child);
@@ -192,7 +197,6 @@ export const localRunner: Runner = {
       HOME: home,
       CODEX_HOME: join(home, ".codex"),
       TMPDIR: root,
-      ...spec.env,
     };
     let base = "";
     if (spec.repoUrl) {
@@ -210,9 +214,9 @@ export const localRunner: Runner = {
     return {
       id: `local:${root}`,
       workdir: work,
-      async runTurn(argv, input) {
+      async runTurn(argv, input, env) {
         const [cmd, ...args] = argv;
-        const child = spawn(cmd!, args, { cwd: work, env: baseEnv, stdio: ["pipe", "pipe", "pipe"], detached: true });
+        const child = spawn(cmd!, args, { cwd: work, env: { ...baseEnv, ...env }, stdio: ["pipe", "pipe", "pipe"], detached: true });
         current = child;
         child.stdin!.end(input);
         return childTurn(child);
@@ -273,9 +277,7 @@ for b in claude codex node npm npx git python3 pip3 uv; do
 done
 echo "$AH/.npm-global/bin:$AH/.local/bin:$P" > "$O/path"
 $RUN mkdir -p "$W" "$AH/.npm-global" "$AH/.codex"
-# Harness env (its own API key + quiet flags) for every turn; readable only by the agent user.
-sudo -n install -o "$OWNER" -m 600 "$O/env" "$AH/.octi-env"
-rm -f "$O/env"
+echo "$OWNER" > "$O/owner"
 ${clone}
 $RUN env -i HOME="$AH" PATH="$(cat "$O/path")" bash -c 'command -v ${bin}' >/dev/null || { echo "${bin} is not on the agent PATH ($(cat "$O/path")); try BOAT_AGENT_USER=user" >&2; exit 127; }
 `;
@@ -286,8 +288,10 @@ function boatLaunchScript(n: number, argv: string[]): string {
   return `cd /
 O=${BOAT_DIR}; AH=${AGENT_HOME}
 U=${BOAT.agentUser === "agent" ? "agent" : "$(id -un)"}
+# This run's credentials: handed to the agent user (0600), sourced and deleted before the harness execs.
+sudo -n install -o "$(cat "$O/owner")" -m 600 "$O/env-${n}" "$AH/.octi-env-${n}" && rm -f "$O/env-${n}"
 ${boatRunAs()} env -i HOME="$AH" USER="$U" LOGNAME="$U" SHELL=/bin/bash LANG=C.UTF-8 TERM=dumb PATH="$(cat "$O/path")" \\
-  bash -c 'set -a; . "$HOME/.octi-env"; set +a; cd "$HOME/work" && exec timeout -k 30 ${hardLimit} "$@"' octi ${argv.map(shq).join(" ")} \\
+  bash -c 'set -a; . "$HOME/.octi-env-${n}"; set +a; rm -f "$HOME/.octi-env-${n}"; cd "$HOME/work" && exec timeout -k 30 ${hardLimit} "$@"' octi ${argv.map(shq).join(" ")} \\
   < "$O/in-${n}.txt" > "$O/out-${n}.jsonl" 2> "$O/err-${n}.log"
 c=$?
 echo "$c" > "$O/exit-${n}"
@@ -315,6 +319,9 @@ export const boatRunner: Runner = {
         });
       } catch (e) {
         if (e instanceof BoatError && e.code === "idempotency_in_progress") throw new HttpError(503, e.message); // retryable
+        // Seen live (2026-10-10): a key scoped without sandbox.create gets 403 api_key_action_forbidden.
+        if (e instanceof BoatError && e.code === "api_key_action_forbidden")
+          throw new Error(`boat key is not allowed to create sandboxes (${e.message}). Store a key with the ci preset (sandbox.create + delete-own + exec + files) in the vault.`);
         throw e;
       }
     });
@@ -355,7 +362,6 @@ export const boatRunner: Runner = {
       }
       const mk = await boatExec(id, `install -d -m 700 ${BOAT_DIR}`, 30);
       if (mk.exitCode !== 0) throw new Error(`mkdir ${BOAT_DIR} failed: ${mk.stderr.slice(-300)}`);
-      await put(`${BOAT_DIR}/env`, Object.entries(spec.env).map(([k, v]) => `${k}=${shq(v)}`).join("\n") + "\n");
       await put(`${BOAT_DIR}/prepare.sh`, boatPrepareScript(spec.adapter.bin, spec.repoUrl));
       await put(`${BOAT_DIR}/diff.sh`, boatDiffScript());
       const prep = await boatExec(id, `bash ${BOAT_DIR}/prepare.sh`, 600);
@@ -371,10 +377,11 @@ export const boatRunner: Runner = {
     return {
       id: `boat:${id}`,
       workdir: AGENT_WORKDIR,
-      async runTurn(argv, input) {
+      async runTurn(argv, input, env) {
         const n = ++turnNo;
         argv = [...argv];
         argv[0] = argv[0]!.split("/").pop()!; // host bin overrides don't apply in the VM
+        await put(`${BOAT_DIR}/env-${n}`, Object.entries(env).map(([k, v]) => `${k}=${shq(v)}`).join("\n") + "\n");
         await put(`${BOAT_DIR}/in-${n}.txt`, input); // byte-for-byte; fed to the CLI on stdin
         await put(`${BOAT_DIR}/launch-${n}.sh`, boatLaunchScript(n, argv));
         const started = await boatCommandRetry(() => boatApi(`${boatSandboxPath(id)}/commands`, {

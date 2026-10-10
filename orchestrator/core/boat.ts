@@ -21,7 +21,11 @@ async function boatErrorFrom(res: Response, what: string): Promise<BoatError> {
   return new BoatError(res.status, code, `boat ${what} -> ${res.status} ${code}: ${msg}`, d?.error?.details?.retryable);
 }
 
-export async function boatApi(path: string, init: { method?: string; json?: unknown; headers?: Record<string, string>; timeoutMs?: number; signal?: AbortSignal } = {}): Promise<any> {
+/** Set by the credential layer: refetch the boat key after a 401 (rotated key). Returns true if it changed. */
+let refreshBoatKey: (() => Promise<boolean>) | null = null;
+export function onBoatUnauthorized(fn: () => Promise<boolean>) { refreshBoatKey = fn; }
+
+export async function boatApi(path: string, init: { method?: string; json?: unknown; headers?: Record<string, string>; timeoutMs?: number; signal?: AbortSignal } = {}, retried = false): Promise<any> {
   const method = init.method ?? "GET";
   const headers = boatHeaders(init.headers);
   let body: string | undefined;
@@ -29,6 +33,7 @@ export async function boatApi(path: string, init: { method?: string; json?: unkn
   const signals = [AbortSignal.timeout(init.timeoutMs ?? 60_000)];
   if (init.signal) signals.push(init.signal);
   const res = await fetch(BOAT.apiUrl + path, { method, headers, body, signal: AbortSignal.any(signals) });
+  if (res.status === 401 && !retried && refreshBoatKey && await refreshBoatKey().catch(() => false)) return boatApi(path, init, true);
   if (!res.ok) throw await boatErrorFrom(res, `${method} ${path}`);
   const text = await res.text();
   return text ? JSON.parse(text) : null;

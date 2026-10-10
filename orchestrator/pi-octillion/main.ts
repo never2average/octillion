@@ -25,6 +25,7 @@ import type { Runner } from "../core/runners.js";
 import type { Job } from "../core/session.js";
 import { log } from "../core/util.js";
 import { claimLoop, runDeterministic } from "../worker.js";
+import { CREDENTIALS_MODE, orchestratorCredentials, redact } from "../core/credentials.js";
 import { createOctillionExtension, OCTILLION_TOOLS, OctillionRegistry } from "./index.js";
 import { jobPrompt, ORCHESTRATOR_SYSTEM_PROMPT } from "./prompt.js";
 
@@ -32,20 +33,42 @@ interface Brain {
   modelRuntime: ModelRuntime;
   model: NonNullable<ReturnType<ModelRuntime["getModel"]>>;
   dir: string;
+  provider: string;
+  apiKey: string;
+  baseUrl: string | null;
 }
 
-/** Model runtime isolated from the operator's ~/.pi (own auth.json/models.json in a temp dir). */
+/**
+ * Model runtime isolated from the operator's ~/.pi (own auth.json/models.json in a temp dir).
+ * CREDENTIALS_MODE=broker (default): provider, base URL (the Octillion gateway) and ogw_ token come from
+ * POST /api/worker/orchestrator/credentials. env: ORCHESTRATOR_PROVIDER / ORCHESTRATOR_API_KEY / ORCHESTRATOR_API_URL.
+ */
 export async function createBrain(): Promise<Brain> {
+  const c = await orchestratorCredentials();
+  const provider = c.llm?.provider || ORCH.provider;
+  const baseUrl = c.llm?.base_url || ORCH.apiUrl || null;
+  const apiKey = c.llm?.api_key ?? "";
   const dir = await mkdtemp(join(tmpdir(), "octillion-pi-"));
   await mkdir(join(dir, "cwd"), { recursive: true });
   const modelsPath = join(dir, "models.json");
-  // ORCHESTRATOR_API_URL: point the provider at a gateway/proxy/test mock; built-in models are kept.
-  await writeFile(modelsPath, JSON.stringify({ providers: ORCH.apiUrl ? { [ORCH.provider]: { baseUrl: ORCH.apiUrl } } : {} }));
+  // Point the provider at the gateway (or a proxy/test mock); Pi keeps its built-in model metadata.
+  await writeFile(modelsPath, JSON.stringify({ providers: baseUrl ? { [provider]: { baseUrl } } : {} }));
   const modelRuntime = await ModelRuntime.create({ authPath: join(dir, "auth.json"), modelsPath, allowModelNetwork: false });
-  if (ORCH.apiKey) await modelRuntime.setRuntimeApiKey(ORCH.provider, ORCH.apiKey);
-  const model = modelRuntime.getModel(ORCH.provider, ORCH.model);
-  if (!model) throw new Error(`Pi has no model ${ORCH.provider}/${ORCH.model} (ORCHESTRATOR_PROVIDER / ORCHESTRATOR_MODEL)`);
-  return { modelRuntime, model, dir };
+  if (apiKey) await modelRuntime.setRuntimeApiKey(provider, apiKey);
+  const model = modelRuntime.getModel(provider, ORCH.model);
+  if (!model) throw new Error(`Pi has no model ${provider}/${ORCH.model} (ORCHESTRATOR_MODEL)`);
+  return { modelRuntime, model, dir, provider, apiKey, baseUrl };
+}
+
+/** Refetch the orchestrator token near expiry (or after a 401) and hand it to Pi's runtime. */
+export async function refreshBrain(brain: Brain, force = false): Promise<void> {
+  const c = await orchestratorCredentials(force);
+  const key = c.llm?.api_key;
+  if (key && key !== brain.apiKey) {
+    await brain.modelRuntime.setRuntimeApiKey(brain.provider, key);
+    brain.apiKey = key;
+    log("orchestrator LLM token refreshed");
+  }
 }
 
 /** Run one job with a fresh Pi session; fall back to the deterministic path on any Pi/LLM failure. */
@@ -110,7 +133,8 @@ export async function runJobWithPi(job: Job, runner: Runner, brain: Brain): Prom
     ...(stats ? { orchestrator_cost_usd: Number(stats.cost.toFixed(6)), orchestrator_tokens_in: stats.tokens_in, orchestrator_tokens_out: stats.tokens_out, orchestrator_llm_calls: stats.calls } : {}),
     ...(piError ? { orchestrator_error: piError.slice(0, 500) } : {}),
   };
-  if (piError) log(`[${job.session_id}] ${piError}; deterministic fallback`);
+  if (piError) log(`[${job.session_id}] ${redact(piError)}; deterministic fallback`);
+  if (piError && /\b401\b|unauthori[sz]ed|invalid.*(key|token)/i.test(piError)) await refreshBrain(brain, true).catch((e) => log("orchestrator credential refresh failed:", redact(String(e))));
 
   // Deterministic fallback / safety net.
   const s = reg.sessionByJob.get(jobId);
@@ -126,9 +150,12 @@ export async function runJobWithPi(job: Job, runner: Runner, brain: Brain): Prom
 
 if (process.argv[1] && /pi-octillion[\\/]main\.(ts|js)$/.test(process.argv[1])) {
   (async () => {
-    if (!ORCH.apiKey) log("warning: no ORCHESTRATOR_API_KEY/ANTHROPIC_API_KEY; every job will use the deterministic fallback");
     const brain = await createBrain();
-    log(`orchestrator brain ${ORCH.provider}/${ORCH.model}${ORCH.apiUrl ? ` via ${ORCH.apiUrl}` : ""} thinking=${ORCH.thinking}`);
-    await claimLoop((job, runner) => runJobWithPi(job, runner, brain), "orchestrator");
+    if (!brain.apiKey) log("warning: no orchestrator LLM credentials; every job will use the deterministic fallback");
+    log(`orchestrator brain ${brain.provider}/${ORCH.model}${brain.baseUrl ? ` via ${brain.baseUrl}` : ""} thinking=${ORCH.thinking} credentials=${CREDENTIALS_MODE}`);
+    await claimLoop(async (job, runner) => {
+      await refreshBrain(brain).catch((e) => log("orchestrator credential refresh failed (using the current token):", redact(String(e))));
+      return runJobWithPi(job, runner, brain);
+    }, "orchestrator");
   })().catch((e) => { console.error(e); process.exit(1); });
 }

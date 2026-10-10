@@ -158,6 +158,8 @@ export async function gatewayHandler(req: Request, res: Response) {
     "SELECT kind, session_id, orchestrator_id, providers, expires_at, revoked_at FROM gateway_tokens WHERE token_hash = $1", [hash]);
   if (!t || t.revoked_at || new Date(t.expires_at) < new Date()) return gwError(res, 401, "authentication_error", "Gateway token is invalid, expired or revoked");
   if (!t.providers.includes(slug)) return gwError(res, 403, "permission_error", `Token is not allowed to use ${slug}`);
+  // Some CLIs (Codex) probe a WebSocket transport first; refuse fast so they fall back to HTTP immediately.
+  if (req.headers.upgrade) return gwError(res, 426, "invalid_request_error", "WebSocket is not supported by the Octillion gateway; use HTTP");
   const p: ProviderRow | null = await getProvider(slug);
   if (!p?.enabled || p.mode !== "gateway" || !p.upstream_url) return gwError(res, 404, "not_found_error", `No gateway provider ${slug}`);
 
@@ -183,6 +185,8 @@ export async function gatewayHandler(req: Request, res: Response) {
   }
   headers.set("accept-encoding", "identity"); // keep the body readable for metering
   headers.set(p.auth_header, `${p.auth_prefix}${cred.secret}`);
+  // Anthropic's OpenAI-compatible endpoint (used by Cline) is called with OpenAI-style auth; give it both forms.
+  if (slug === "anthropic" && /\/chat\/completions$/.test(rest)) headers.set("authorization", `Bearer ${cred.secret}`);
 
   const hasBody = !["GET", "HEAD"].includes(req.method);
   let up: globalThis.Response;
