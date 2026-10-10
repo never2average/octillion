@@ -2,6 +2,7 @@ import { getDb } from "./db.js";
 import { normalize, transcripts, type RawEvent, type SessionRef, type StoredEvent } from "./transcripts.js";
 import { scoreTranscript, type Tool } from "./scoring.js";
 import { findAgent } from "./agents.js";
+import { revokeSessionTokens, sessionGatewayUsage } from "./gateway.js";
 
 /**
  * The orchestrator's side: agent_sessions rows are the job queue.
@@ -120,6 +121,13 @@ export async function completeSession(sessionId: string, input: CompleteInput = 
        input.tokens_out ?? null, input.cost_usd ?? null, JSON.stringify(input.metadata ?? {})],
     );
   }
+  // The session's gateway token dies with it; tokens the gateway metered are authoritative when larger than
+  // what the worker parsed from the CLI's own output.
+  await revokeSessionTokens(sessionId);
+  const metered = await sessionGatewayUsage(sessionId);
+  if (metered.requests)
+    await db.query("UPDATE agent_sessions SET tokens_in = greatest(tokens_in, $2), tokens_out = greatest(tokens_out, $3) WHERE id = $1",
+      [sessionId, metered.input_tokens, metered.output_tokens]);
   const score = await scoreSession(sessionId);
   await finishSimulationIfDone(s.simulation_id);
   return score;

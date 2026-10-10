@@ -15,7 +15,8 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p orchestrator",
     "vault:sync": "tsx --env-file-if-exists=.env scripts/vault-sync.ts",
     "fleet:status": "tsx --env-file-if-exists=.env scripts/fleet-status.ts",
-    "orchestrator:install": "npm --prefix orchestrator ci"
+    "orchestrator:install": "npm --prefix orchestrator ci",
+    "keyvault": "tsx --env-file-if-exists=.env scripts/keyvault.ts"
   },
   "description": "Octillion: measure whether AI coding agents recommend your developer tool. MCP server + dashboard for Claude and ChatGPT.",
   "dependencies": {

@@ -176,3 +176,71 @@ CREATE TABLE IF NOT EXISTS orchestrators (
   registered_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   last_seen      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Key vault + inference gateway (src/keyvault.ts, src/gateway.ts; docs/credentials.md).
+-- Provider credentials are AES-256-GCM encrypted with OCTILLION_VAULT_KEY; only ciphertext is stored.
+CREATE TABLE IF NOT EXISTS vault_providers (
+  slug          TEXT PRIMARY KEY,
+  mode          TEXT NOT NULL CHECK (mode IN ('gateway', 'direct')),
+  upstream_url  TEXT,                         -- gateway mode: where /gw/<slug>/... is forwarded
+  auth_header   TEXT NOT NULL DEFAULT 'authorization',
+  auth_prefix   TEXT NOT NULL DEFAULT 'Bearer ',
+  env_vars      TEXT[] NOT NULL DEFAULT '{}', -- registry requires_env names this provider satisfies
+  enabled       BOOLEAN NOT NULL DEFAULT true,
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+INSERT INTO vault_providers (slug, mode, upstream_url, auth_header, auth_prefix, env_vars) VALUES
+  ('anthropic',      'gateway', 'https://api.anthropic.com',                 'x-api-key',      '',        '{ANTHROPIC_API_KEY}'),
+  ('openai',         'gateway', 'https://api.openai.com',                    'authorization',  'Bearer ', '{OPENAI_API_KEY,CODEX_API_KEY}'),
+  ('google',         'gateway', 'https://generativelanguage.googleapis.com', 'x-goog-api-key', '',        '{GEMINI_API_KEY,GOOGLE_API_KEY}'),
+  ('dashscope',      'gateway', 'https://dashscope-intl.aliyuncs.com',       'authorization',  'Bearer ', '{DASHSCOPE_API_KEY}'),
+  ('github_copilot', 'direct',  NULL, 'authorization', 'Bearer ', '{COPILOT_GITHUB_TOKEN}'),
+  ('cursor',         'direct',  NULL, 'authorization', 'Bearer ', '{CURSOR_API_KEY}'),
+  ('amp',            'direct',  NULL, 'authorization', 'Bearer ', '{AMP_API_KEY}'),
+  ('factory',        'direct',  NULL, 'authorization', 'Bearer ', '{FACTORY_API_KEY}'),
+  ('boat',           'direct',  'https://boat.dev/api/v1', 'authorization', 'Bearer ', '{BOAT_API_KEY}')
+ON CONFLICT (slug) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS vault_credentials (
+  id            SERIAL PRIMARY KEY,
+  provider      TEXT NOT NULL REFERENCES vault_providers(slug) ON DELETE CASCADE,
+  label         TEXT NOT NULL DEFAULT 'default',
+  ciphertext    TEXT NOT NULL,                -- base64
+  iv            TEXT NOT NULL,
+  tag           TEXT NOT NULL,
+  key_id        TEXT NOT NULL,                -- which master key encrypted it (rotation)
+  hint          TEXT NOT NULL,                -- e.g. "sk-ant…9xQ2", safe to display
+  priority      INT NOT NULL DEFAULT 0,       -- higher first; equal priorities rotate
+  enabled       BOOLEAN NOT NULL DEFAULT true,
+  uses          BIGINT NOT NULL DEFAULT 0,
+  last_used_at  TIMESTAMPTZ,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  rotated_at    TIMESTAMPTZ,
+  UNIQUE (provider, label)
+);
+
+CREATE TABLE IF NOT EXISTS gateway_tokens (
+  token_hash       TEXT PRIMARY KEY,          -- sha256 of ogw_...; the token itself is never stored
+  kind             TEXT NOT NULL CHECK (kind IN ('session', 'orchestrator')),
+  session_id       TEXT REFERENCES agent_sessions(id) ON DELETE CASCADE,
+  orchestrator_id  TEXT,
+  providers        TEXT[] NOT NULL,
+  expires_at       TIMESTAMPTZ NOT NULL,
+  revoked_at       TIMESTAMPTZ,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS gateway_tokens_session_idx ON gateway_tokens (session_id);
+
+CREATE TABLE IF NOT EXISTS gateway_usage (
+  token_hash     TEXT NOT NULL,
+  provider       TEXT NOT NULL,
+  session_id     TEXT,
+  orchestrator_id TEXT,
+  requests       INT NOT NULL DEFAULT 0,
+  errors         INT NOT NULL DEFAULT 0,
+  input_tokens   BIGINT NOT NULL DEFAULT 0,
+  output_tokens  BIGINT NOT NULL DEFAULT 0,
+  bytes          BIGINT NOT NULL DEFAULT 0,
+  last_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (token_hash, provider)
+);

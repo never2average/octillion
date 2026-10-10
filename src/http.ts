@@ -8,6 +8,9 @@ import { getDb } from "./db.js";
 import { parseJsonl, transcripts, type RawEvent } from "./transcripts.js";
 import { appendEvents, claimJobs, completeSession, heartbeat } from "./worker.js";
 import { fleetCheckin, fleetLeave, fleetStatus } from "./fleet.js";
+import { brokerOrchestratorCredentials, brokerSessionCredentials, gatewayHandler } from "./gateway.js";
+import * as kv from "./keyvault.js";
+import { createHash, timingSafeEqual } from "node:crypto";
 
 const PORT = Number(process.env.PORT ?? 3333);
 const HOST = process.env.HOST ?? "127.0.0.1";
@@ -23,6 +26,10 @@ export function createApp() {
     await (await getDb()).query("SELECT 1");
     res.json({ ok: true, transcripts: transcripts().kind });
   });
+
+  // ---------- inference gateway: /gw/<provider>/... (ogw_ session tokens, real keys from the vault) ----------
+  // Mounted before any body parser: requests and responses stream straight through.
+  app.use("/gw/:provider", (req, res, next) => void gatewayHandler(req, res).catch(next));
 
   // ---------- landing page + access requests ----------
   app.use(express.static(PUBLIC_DIR, { extensions: ["html"], maxAge: "5m" }));
@@ -118,7 +125,48 @@ export function createApp() {
     res.status(204).end();
   });
   worker.get("/fleet", async (_req, res) => void res.json(await fleetStatus()));
+  // Credential broker: the orchestrator holds no provider keys; it asks per orchestrator and per session.
+  worker.post("/orchestrator/credentials", async (req, res) => {
+    const id = req.body?.orchestrator_id;
+    if (typeof id !== "string" || !id) return void res.status(400).json({ error: "orchestrator_id is required" });
+    res.json(await brokerOrchestratorCredentials(id));
+  });
+  worker.post("/sessions/:id/credentials", async (req, res) => void res.json(await brokerSessionCredentials(String(req.params.id))));
   app.use("/api/worker", worker);
+
+  // ---------- key vault admin API (OCTILLION_ADMIN_TOKEN) ----------
+  const admin = express.Router();
+  const adminOk = (t: string | null) => {
+    const want = process.env.OCTILLION_ADMIN_TOKEN;
+    if (!want || !t) return false;
+    const h = (x: string) => createHash("sha256").update(x).digest();
+    return timingSafeEqual(h(t), h(want));
+  };
+  admin.use((req, res, next) => (adminOk(bearer(req.headers.authorization)) ? next() : void res.status(401).json({ error: "Invalid admin token" })));
+  admin.use(express.json({ limit: "64kb" }));
+  admin.get("/keyvault/providers", async (_req, res) => void res.json({ providers: await kv.listProviders() }));
+  admin.put("/keyvault/providers/:slug", async (req, res) => void res.json(await kv.upsertProvider({ ...req.body, slug: String(req.params.slug) })));
+  admin.get("/keyvault/credentials", async (_req, res) => void res.json({ credentials: await kv.listCredentials() }));
+  admin.post("/keyvault/credentials", async (req, res) => {
+    const { provider, secret, label, priority } = req.body ?? {};
+    if (typeof provider !== "string" || typeof secret !== "string") return void res.status(400).json({ error: "provider and secret are required" });
+    res.status(201).json(await kv.setCredential(provider, secret, { label, priority }));
+  });
+  admin.patch("/keyvault/credentials/:id", async (req, res) => {
+    await kv.setCredentialEnabled(Number(req.params.id), Boolean(req.body?.enabled));
+    res.status(204).end();
+  });
+  admin.delete("/keyvault/credentials/:id", async (req, res) => {
+    await kv.deleteCredential(Number(req.params.id));
+    res.status(204).end();
+  });
+  admin.get("/gateway/usage", async (_req, res) => {
+    const rows = await (await getDb()).query(
+      `SELECT provider, coalesce(session_id, orchestrator_id) AS consumer, requests, errors, input_tokens, output_tokens, bytes, last_at
+         FROM gateway_usage ORDER BY last_at DESC LIMIT 500`);
+    res.json({ usage: rows });
+  });
+  app.use("/api/admin", admin);
 
   // ---------- local preview of the widget (development only) ----------
   if (process.env.OCTILLION_PREVIEW === "1") {

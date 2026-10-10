@@ -14,6 +14,8 @@ import { scoreTranscript } from "../src/scoring.js";
 import { DEMO_PRODUCT, DEMO_SCENARIOS, demoTranscript } from "./demo-data.js";
 
 process.env.OCTILLION_WORKER_TOKEN ??= "smoke-worker-token";
+process.env.OCTILLION_VAULT_KEY ??= (await import("node:crypto")).randomBytes(32).toString("base64");
+process.env.OCTILLION_ADMIN_TOKEN ??= "smoke-admin-token";
 process.env.OCTILLION_REGISTRY = "scripts/fixtures/registry.json"; // fixed weights, independent of the live registry
 const WORKER_TOKEN = process.env.OCTILLION_WORKER_TOKEN;
 const { createApp } = await import("../src/http.js");
@@ -257,6 +259,57 @@ try {
   assert.ok(jobs.every((j) => j.prompt && !/relayq/i.test(JSON.stringify(j))), "jobs carry the task, not the customer");
   assert.ok(jobs.every((j) => j.profile?.slug === "example-solo-indie" && j.profile.instructions && j.max_user_turns > 0), "jobs carry the developer profile");
   assert.ok(jobs.every((j) => j.agent_id === "claude-code/sonnet" && j.agent?.image?.boat_snapshot), "jobs carry the worker agent and its image");
+  // ---------- key vault + inference gateway ----------
+  const kv = await import("../src/keyvault.js");
+  const http = await import("node:http");
+  const REAL_LLM_KEY = `sk-smoke-real-${stamp}-llm`, REAL_VENDOR_KEY = `vendor-real-${stamp}-token`;
+  const seen: { auth?: string; path?: string; body?: string }[] = [];
+  const upstream = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      seen.push({ auth: String(req.headers["x-api-key"] ?? ""), path: req.url, body });
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(`event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":120,"output_tokens":1}}}\n\n`);
+      res.write(`event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"text":"hi"}}\n\n`);
+      res.end(`event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":30}}\n\n`);
+    });
+  });
+  await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", r));
+  process.env.PUBLIC_URL = base;
+  await kv.upsertProvider({ slug: "smoke_llm", mode: "gateway", upstream_url: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`,
+                            auth_header: "x-api-key", auth_prefix: "", env_vars: ["SMOKE_LLM_API_KEY"] });
+  await kv.upsertProvider({ slug: "smoke_vendor", mode: "direct", env_vars: ["SMOKE_VENDOR_TOKEN"] });
+  await kv.setCredential("smoke_llm", REAL_LLM_KEY);
+  await kv.setCredential("smoke_vendor", REAL_VENDOR_KEY);
+  const [stored] = await db.query<{ ciphertext: string; hint: string }>("SELECT ciphertext, hint FROM vault_credentials WHERE provider = 'smoke_llm'");
+  assert.ok(!stored.ciphertext.includes("smoke-real") && !Buffer.from(stored.ciphertext, "base64").toString().includes("smoke-real"), "stored encrypted");
+
+  const creds = await (await worker(`/sessions/${jobs[0].session_id}/credentials`, {})).json();
+  const gw = creds.providers.smoke_llm;
+  assert.equal(gw.mode, "gateway");
+  assert.ok(gw.api_key.startsWith("ogw_") && gw.base_url === `${base}/gw/smoke_llm`, "gateway providers get a scoped token + base URL");
+  assert.equal(creds.providers.smoke_vendor.api_key, REAL_VENDOR_KEY, "direct providers get the real key for this session");
+  assert.equal(creds.env.SMOKE_VENDOR_TOKEN, REAL_VENDOR_KEY);
+  assert.ok(!JSON.stringify(creds).includes(REAL_LLM_KEY), "the gateway provider's real key never leaves the server");
+  const llm = (headers: Record<string, string>, path = "/gw/smoke_llm/v1/messages") =>
+    fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify({ model: "m", stream: true }) });
+  const streamed = await llm({ "x-api-key": gw.api_key });
+  assert.equal(streamed.status, 200);
+  assert.ok((await streamed.text()).includes('"output_tokens":30'), "SSE streamed through");
+  assert.equal(seen.at(-1)?.auth, REAL_LLM_KEY, "upstream received the real key");
+  assert.equal(seen.at(-1)?.path, "/v1/messages");
+  assert.ok((await llm({ authorization: `Bearer ${gw.api_key}` })).ok, "bearer form accepted");
+  assert.equal((await llm({ "x-api-key": "ogw_forged" })).status, 401);
+  assert.equal((await llm({ "x-api-key": REAL_LLM_KEY })).status, 401, "raw provider keys are not accepted by the gateway");
+  assert.equal((await llm({ "x-api-key": gw.api_key }, "/gw/smoke_vendor/x")).status, 403, "token is scoped to its providers");
+  const orch = await (await worker("/orchestrator/credentials", { orchestrator_id: "smoke-orch" })).json();
+  assert.ok(orch.llm?.api_key.startsWith("ogw_") && orch.llm.base_url.endsWith("/gw/anthropic"), "orchestrator LLM goes through the gateway");
+  assert.equal((await fetch(`${base}/api/admin/keyvault/credentials`)).status, 401);
+  const listed = await (await fetch(`${base}/api/admin/keyvault/credentials`, { headers: { authorization: "Bearer smoke-admin-token" } })).text();
+  assert.ok(listed.includes(stored.hint) && !listed.includes(REAL_LLM_KEY) && !listed.includes(REAL_VENDOR_KEY), "admin API shows hints only");
+  console.log("✓ key vault + gateway: encrypted at rest, scoped tokens, real key injected upstream, streaming, metering");
+
   const outcomes = ["adopted", "competitor", "recommended", "none"] as const;
   for (const [i, job] of jobs.entries()) {
     const events = demoTranscript(job.prompt, outcomes[i]);
@@ -272,6 +325,15 @@ try {
     assert.equal(score.verdict, outcomes[i], `session ${i} scored ${score.verdict}`);
     assert.equal((await worker(`/sessions/${job.session_id}/events`, { events: [{ type: "late" }] })).status, 409, "finished sessions are read-only");
   }
+  assert.equal((await llm({ "x-api-key": gw.api_key })).status, 401, "session token revoked when the session completes");
+  const [metered] = await db.query<{ tokens_in: number; tokens_out: number }>("SELECT tokens_in, tokens_out FROM agent_sessions WHERE id = $1", [jobs[0].session_id]);
+  assert.ok(Number(metered.tokens_in) >= 1000 && Number(metered.tokens_out) >= 200, "session keeps the larger of reported and metered usage");
+  const [gwUse] = await db.query<{ requests: number; input_tokens: number; output_tokens: number }>(
+    "SELECT sum(requests) AS requests, sum(input_tokens) AS input_tokens, sum(output_tokens) AS output_tokens FROM gateway_usage WHERE session_id = $1", [jobs[0].session_id]);
+  assert.equal(Number(gwUse.requests), 2, "two successful upstream calls metered");
+  assert.equal(Number(gwUse.input_tokens), 240);
+  assert.equal(Number(gwUse.output_tokens), 60);
+  upstream.close();
 
   // ---------- fleet check-in over HTTP ----------
   {
@@ -349,6 +411,8 @@ try {
   assert.equal((await ar({ email: `smoke+${stamp}@example.com`, company: "Smoke", product_url: "https://example.com" })).status, 201);
   console.log("✓ landing page and access requests");
 } finally {
+  await db.query("DELETE FROM vault_providers WHERE slug IN ('smoke_llm', 'smoke_vendor')");
+  await db.query("DELETE FROM gateway_tokens WHERE orchestrator_id = 'smoke-orch'");
   await db.query("DELETE FROM access_requests WHERE email = $1", [`smoke+${stamp}@example.com`]);
   await db.query("DELETE FROM organizations WHERE id = ANY($1)", [[a.org.orgId, b.org.orgId]]);
   await A.close();
