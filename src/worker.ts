@@ -1,6 +1,7 @@
 import { getDb } from "./db.js";
 import { normalize, transcripts, type RawEvent, type SessionRef, type StoredEvent } from "./transcripts.js";
 import { scoreTranscript, type Tool } from "./scoring.js";
+import { findAgent } from "./agents.js";
 
 /**
  * The orchestrator's side: agent_sessions rows are the job queue.
@@ -21,6 +22,7 @@ const FINAL = ["completed", "failed", "timeout", "cancelled"];
 
 export interface Job {
   session_id: string; simulation_id: string; org_id: number; product_id: number; model: string; harness: string; attempt: number;
+  agent_id: string | null; agent: { label: string; harness_version?: string; event_format?: string; image?: { docker?: string; boat_snapshot?: string }; requires_env?: string[] } | null;
   prompt: string; repo_url: string | null; language: string | null; max_user_turns: number;
   profile: { slug: string; name: string; summary: string; attributes: Record<string, unknown>; instructions: string } | null;
 }
@@ -33,13 +35,13 @@ export async function claimJobs(workerId: string, opts: { limit?: number; models
   if (opts.models?.length) params.push(opts.models), (filter += ` AND model = ANY($${params.length})`);
   if (opts.harness) params.push(opts.harness), (filter += ` AND harness = $${params.length}`);
   const jobs = await db.transaction(async (tx) => {
-    const rows = await tx.query<Omit<Job, "max_user_turns" | "profile"> & { profile_id: number | null }>(
+    const rows = await tx.query<Omit<Job, "max_user_turns" | "profile" | "agent"> & { profile_id: number | null }>(
       `UPDATE agent_sessions s SET status = 'running', worker_id = $1, started_at = now(), heartbeat_at = now()
          FROM scenarios sc
         WHERE sc.id = s.scenario_id AND s.id IN (
               SELECT id FROM agent_sessions WHERE status = 'queued' ${filter}
                ORDER BY queued_at, id LIMIT $2 FOR UPDATE SKIP LOCKED)
-        RETURNING s.id AS session_id, s.simulation_id, s.org_id, s.product_id, s.model, s.harness, s.attempt, s.profile_id,
+        RETURNING s.id AS session_id, s.simulation_id, s.org_id, s.product_id, s.model, s.harness, s.agent_id, s.attempt, s.profile_id,
                   sc.prompt, sc.repo_url, sc.language`,
       params,
     );
@@ -54,7 +56,9 @@ export async function claimJobs(workerId: string, opts: { limit?: number; models
       : [];
     return rows.map(({ profile_id, ...r }) => {
       const p = profiles.find((x) => x!.id === profile_id);
-      return { ...r, max_user_turns: MAX_USER_TURNS(), profile: p ? { slug: p.slug, name: p.name, summary: p.summary, attributes: p.attributes, instructions: p.instructions } : null };
+      const spec = r.agent_id ? findAgent(r.agent_id) : undefined;
+      const agent = spec ? { label: spec.label, harness_version: spec.harness_version, event_format: spec.event_format, image: spec.image, requires_env: spec.requires_env } : null;
+      return { ...r, agent, max_user_turns: MAX_USER_TURNS(), profile: p ? { slug: p.slug, name: p.name, summary: p.summary, attributes: p.attributes, instructions: p.instructions } : null };
     });
   });
   return jobs;

@@ -14,10 +14,24 @@ import { scoreTranscript } from "../src/scoring.js";
 import { DEMO_PRODUCT, DEMO_SCENARIOS, demoTranscript } from "./demo-data.js";
 
 process.env.OCTILLION_WORKER_TOKEN ??= "smoke-worker-token";
+process.env.OCTILLION_REGISTRY = "scripts/fixtures/registry.json"; // fixed weights, independent of the live registry
 const WORKER_TOKEN = process.env.OCTILLION_WORKER_TOKEN;
 const { createApp } = await import("../src/http.js");
 const db = await getDb();
 console.log(`database: ${db.kind}, transcripts: ${transcripts().kind}`);
+
+// ---------- agent apportionment (no I/O) ----------
+{
+  const { apportion, representativePlan, enabledAgents } = await import("../src/agents.js");
+  assert.deepEqual(apportion([{ weight: 0.5 }, { weight: 0.3 }, { weight: 0.2 }], 7).map((x) => x.count), [4, 2, 1]);
+  const agents = enabledAgents();
+  assert.equal(agents.length, 3, "disabled agents excluded");
+  const plan = representativePlan(20, agents);
+  const counts = Object.fromEntries(agents.map((a) => [a.id, plan.filter((x) => x.id === a.id).length]));
+  assert.deepEqual(counts, { "claude-code/sonnet": 10, "codex/default": 6, "cursor-agent/default": 4 });
+  assert.ok(new Set(plan.slice(0, 5).map((x) => x.id)).size >= 2, "agents interleaved, not bunched");
+  console.log("✓ agent apportionment");
+}
 
 // ---------- scoring unit checks (no I/O) ----------
 {
@@ -79,7 +93,7 @@ try {
   // ---------- tools + UI resource ----------
   const { tools } = await A.listTools();
   console.log("tools:", tools.map((t) => t.name).join(", "));
-  assert.equal(tools.length, 14);
+  assert.equal(tools.length, 15);
   for (const t of tools) assert.equal((t._meta as any)?.ui?.resourceUri, WIDGET_URI, `${t.name} links the UI`);
   const res = await A.readResource({ uri: WIDGET_URI });
   const ui = res.contents[0] as { mimeType: string; text: string };
@@ -119,6 +133,16 @@ try {
   assert.ok(fromLib.scenarios.some((s: any) => s.prompt === libTask.prompt && !s.active), "scenario created from library task");
   await fails(A, "run_simulation", { profiles: ["nobody"] }, /Unknown developer profile/);
 
+  const agentsView = await call(A, "list_agents");
+  assert.equal(agentsView.agents.filter((a: any) => a.enabled).length, 3);
+  await fails(A, "run_simulation", { agents: ["nope/x"] }, /Unknown or disabled agent/);
+  const rep = await call(A, "run_simulation", { samples: 5, name: "representative" });
+  assert.equal(rep.simulation.mode, "representative");
+  assert.equal(rep.totals.sessions, 20, "4 scenarios x 5 samples");
+  assert.deepEqual(Object.fromEntries(rep.by_agent.map((a: any) => [a.agent_id, a.sessions])),
+    { "claude-code/sonnet": 10, "codex/default": 6, "cursor-agent/default": 4 }, "agents sampled by adoption weight");
+  await call(A, "cancel_simulation", { simulation_id: rep.simulation.id });
+
   // ---------- launch ----------
   const sim = await call(A, "run_simulation", { models: ["claude-sonnet-5-5"], repeats: 1, name: "smoke", profiles: ["example-solo-indie"] });
   assert.equal(sim.totals.sessions, 4);
@@ -136,6 +160,7 @@ try {
   assert.equal(jobs.length, 4, "claimed all four sessions");
   assert.ok(jobs.every((j) => j.prompt && !/relayq/i.test(JSON.stringify(j))), "jobs carry the task, not the customer");
   assert.ok(jobs.every((j) => j.profile?.slug === "example-solo-indie" && j.profile.instructions && j.max_user_turns > 0), "jobs carry the developer profile");
+  assert.ok(jobs.every((j) => j.agent_id === "claude-code/sonnet" && j.agent?.image?.boat_snapshot), "jobs carry the worker agent and its image");
   const outcomes = ["adopted", "competitor", "recommended", "none"] as const;
   for (const [i, job] of jobs.entries()) {
     const events = demoTranscript(job.prompt, outcomes[i]);
@@ -165,8 +190,10 @@ try {
   assert.ok(report.share_of_voice.some((v: any) => v.tool === "BullMQ" && v.recommended === 1));
   assert.equal(report.recent_losses.length, 1);
   assert.equal(report.by_profile.length, 1);
+  assert.equal(report.by_agent[0].agent_id, "claude-code/sonnet");
+  assert.equal(report.totals.weighted_hit_rate, 0.5, "only one agent ran, so weighted == its rate");
   assert.equal(report.by_profile[0].avg_user_turns, 1, "simulated developer turns counted");
-  assert.equal((await call(A, "list_simulations")).simulations.length, 1);
+  assert.equal((await call(A, "list_simulations")).simulations.length, 2);
   assert.equal((await call(A, "list_products")).products[0].sessions_30d, 4);
 
   const lost = report.recent_losses[0].id;

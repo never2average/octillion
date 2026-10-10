@@ -14,6 +14,15 @@ tasks across models, stores every raw JSONL transcript in ClickHouse, and scores
 | `competitor` | a configured competitor was recommended or adopted instead |
 | `none` | no tracked product came up (usually: the agent built it itself) |
 
+**Representative by design.** Worker agents come from a versioned registry (`harnesses/registry.json`). Each entry
+pins a harness, a model and a sandbox image, and carries a weight: its share of real-world developer usage, with
+sources. By default a run samples agents in those proportions. The report shows per-agent results and an
+adoption-weighted hit rate.
+
+**Simulated developers.** The orchestrator is built on [Pi](https://pi.dev). When a sub-agent stops to ask
+something, the orchestrator answers in character as a developer profile from the curated vault (role, stack,
+constraints), then resumes it. It stays blind to the customer's product.
+
 Customers use it from **Claude desktop and ChatGPT desktop** through an MCP connector with an interactive dashboard.
 It covers configuring products and scenarios, launching simulations, viewing the visibility report (hit rate with
 Wilson 95% intervals, share of voice, by model, by scenario, trend) and reading the transcript evidence behind each
@@ -24,7 +33,9 @@ flowchart LR
   Host[Claude / ChatGPT desktop] -- MCP + API key --> S[Octillion server]
   S --> PG[(Postgres<br/>orgs, products, scenarios,<br/>simulations, job queue, verdicts)]
   O[Orchestrator workers] -- claim / events / complete --> S
-  O --> SB[boat.dev sandboxes<br/>Claude Code, Codex, ...]
+  O --> SB[boat.dev sandboxes<br/>pinned agent images from harnesses/registry.json]
+  O -. simulated developer replies .-> SB
+  V[(Vault<br/>developer tasks + profiles)] -- vault:sync --> S
   S --> CH[(ClickHouse<br/>raw JSONL events + full-text index)]
   W[Landing page] -- access requests --> S
 ```
@@ -45,6 +56,7 @@ npm run dev            # http://127.0.0.1:3333 (landing page) + /preview/get_vis
 ## Onboarding a customer
 
 ```bash
+npm run vault:sync                      # pull developer profiles + task library (VAULT_URL or VAULT_DIR)
 npm run access:list                     # who asked for access on the landing page
 npm run org:create -- "Acme Inc"        # prints the API key (once) and the connector URL
 ```
@@ -64,7 +76,9 @@ realistic scenarios where a developer would need a job queue, and run a simulati
 | `list_products`, `get_product` | Products, configured context, scenarios with hit rates, warnings (e.g. a prompt that names the product) |
 | `save_product` | Create/update product context: aliases, packages, domains, competitors |
 | `save_scenarios` | Add/edit/retire scenarios (`expectation`: `recommend` or `avoid`) |
-| `run_simulation` | Queue scenarios × models × repeats (default 3) as agent sessions |
+| `run_simulation` | Default: `samples` sessions per scenario (10), agents mixed by adoption weight. Explicit: `agents`/`models` × `repeats`. Optional developer `profiles` |
+| `list_agents` | The worker-agent registry: harness, model, version, adoption weight, sources |
+| `list_developer_profiles`, `browse_task_library` | Curated developer personas and real-world tasks from the vault |
 | `list_simulations`, `get_simulation`, `cancel_simulation` | Progress, scenario × model matrix, sessions |
 | `get_visibility_report` | Hit rate (+95% CI), adoption, losses, share of voice, by model/scenario, daily trend |
 | `get_agent_session`, `get_session_transcript` | Verdict evidence and the raw transcript, paged |
@@ -106,9 +120,13 @@ src/worker.ts        job queue: claim, append, complete + score, stale sweep
 src/scoring.ts       transcript -> verdict, winner, evidence
 src/transcripts.ts   raw JSONL store: ClickHouse (prod) or Postgres (dev); search
 src/auth.ts          orgs, hashed API keys, worker token
+src/agents.ts        worker-agent registry, adoption-weighted sampling
+src/vault.ts         sync developer profiles + task library from the vault
 src/ui/widget.html   the dashboard (single file, no build step)
 public/index.html    landing page
-orchestrator/        reference sandbox worker (boat.dev)
+orchestrator/        Pi-based orchestrator agent + boat.dev worker runtime
+harnesses/           worker-agent registry (versions, images, adoption weights + sources)
+vault/               vault format + example
 scripts/             smoke test, org:create, access:list, demo:seed, db:reset
 ```
 

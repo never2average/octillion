@@ -40,6 +40,7 @@ export function handlersFor(org: Org) {
       q.getTranscript(org, a.session_id, a.offset, a.limit),
     search_transcripts: (a: Parameters<typeof q.searchTranscripts>[1]) => q.searchTranscripts(org, a),
     list_developer_profiles: (a: { query?: string }) => q.listProfiles(a),
+    list_agents: () => Promise.resolve(q.listAgents()),
     browse_task_library: (a: { query?: string; category?: string; language?: string; limit?: number }) => q.browseTaskLibrary(a),
   };
 }
@@ -56,7 +57,7 @@ function summarize(d: Data): string {
         : `${d.org.name} has no products yet. Use save_product to describe one (name, description, aliases, packages, competitors).`;
     case "product": {
       const p = d.product;
-      return `${p.name} [${p.slug}]: ${p.description || "(no description)"} Category: ${p.category || "n/a"}. Aliases: ${p.aliases.join(", ") || "none"}. Packages: ${p.packages.join(", ") || "none"}. Competitors: ${p.competitors.map((c) => c.name).join(", ") || "none"}. ${d.scenarios.length} scenarios (${d.scenarios.filter((s: any) => s.active).length} active)${d.scenarios.length ? `: ${d.scenarios.map((s: any) => `#${s.id} ${s.title} (${s.expectation}, hit ${pct(s.hit_rate)} of ${s.sessions})`).join("; ")}` : ""}. Models available: ${d.models.join(", ")}.${d.warnings.length ? ` Warnings: ${d.warnings.join(" ")}` : ""}`;
+      return `${p.name} [${p.slug}]: ${p.description || "(no description)"} Category: ${p.category || "n/a"}. Aliases: ${p.aliases.join(", ") || "none"}. Packages: ${p.packages.join(", ") || "none"}. Competitors: ${p.competitors.map((c) => c.name).join(", ") || "none"}. ${d.scenarios.length} scenarios (${d.scenarios.filter((s: any) => s.active).length} active)${d.scenarios.length ? `: ${d.scenarios.map((s: any) => `#${s.id} ${s.title} (${s.expectation}, hit ${pct(s.hit_rate)} of ${s.sessions})`).join("; ")}` : ""}. Worker agents: ${d.agents.map((a: any) => `${a.id} (${pct(a.weight)})`).join(", ")}.${d.warnings.length ? ` Warnings: ${d.warnings.join(" ")}` : ""}`;
     }
     case "simulations":
       return d.simulations.length
@@ -64,11 +65,11 @@ function summarize(d: Data): string {
         : "No simulations yet. Launch one with run_simulation.";
     case "simulation": {
       const s = d.simulation;
-      return `Simulation ${s.id} "${s.name}" for ${s.product}: ${s.status}. ${d.totals.sessions} agent sessions (${Object.entries(d.status).map(([k, v]) => `${v} ${k}`).join(", ")}). Hit rate ${pct(d.totals.hit_rate)} over ${d.totals.scored} scored. Verdicts: ${Object.entries(d.verdicts).map(([k, v]) => `${k} ${v}`).join(", ") || "none yet"}. By model: ${d.by_model.map((m: any) => `${m.model} ${pct(m.hit_rate)}`).join(", ")}.`;
+      return `Simulation ${s.id} "${s.name}" for ${s.product}: ${s.status}. ${d.totals.sessions} agent sessions (${Object.entries(d.status).map(([k, v]) => `${v} ${k}`).join(", ")}). Hit rate ${pct(d.totals.hit_rate)} over ${d.totals.scored} scored. Verdicts: ${Object.entries(d.verdicts).map(([k, v]) => `${k} ${v}`).join(", ") || "none yet"}. By agent: ${d.by_agent.map((a: any) => `${a.label} ${pct(a.hit_rate)} (n=${a.scored})`).join(", ")}.`;
     }
     case "report": {
       const t = d.totals;
-      return `${d.product.name}, last ${d.filters.days} days${d.filters.model ? ` (${d.filters.model})` : ""}: ${t.sessions} scored agent sessions. Hit rate ${pct(t.hit_rate)}${t.hit_ci ? ` (95% CI ${pct(t.hit_ci[0])}-${pct(t.hit_ci[1])})` : ""}, adopted ${pct(t.adoption_rate)}, lost to a competitor ${pct(t.competitor_rate)}. Share of voice: ${d.share_of_voice.map((v: any) => `${v.tool} ${pct(v.share)}`).join(", ") || "n/a"}. By model: ${d.by_model.map((m: any) => `${m.model} ${pct(m.hit_rate)}`).join(", ") || "n/a"}. ${d.by_profile.length ? `By developer profile: ${d.by_profile.map((p: any) => `${p.name} ${pct(p.hit_rate)}`).join(", ")}. ` : ""}Weakest scenarios: ${d.by_scenario.slice(0, 3).map((s: any) => `#${s.id} ${s.title} ${pct(s.hit_rate)}${s.usual_winner ? ` (usually ${s.usual_winner})` : ""}`).join("; ") || "n/a"}.`;
+      return `${d.product.name}, last ${d.filters.days} days${d.filters.model ? ` (${d.filters.model})` : ""}: ${t.sessions} scored agent sessions. Hit rate ${pct(t.hit_rate)}${t.weighted_hit_rate != null ? ` (adoption-weighted ${pct(t.weighted_hit_rate)})` : ""}${t.hit_ci ? ` (95% CI ${pct(t.hit_ci[0])}-${pct(t.hit_ci[1])})` : ""}, adopted ${pct(t.adoption_rate)}, lost to a competitor ${pct(t.competitor_rate)}. Share of voice: ${d.share_of_voice.map((v: any) => `${v.tool} ${pct(v.share)}`).join(", ") || "n/a"}. By agent: ${d.by_agent.map((a: any) => `${a.label} ${pct(a.hit_rate)} (n=${a.sessions})`).join(", ") || "n/a"}. ${d.by_profile.length ? `By developer profile: ${d.by_profile.map((p: any) => `${p.name} ${pct(p.hit_rate)}`).join(", ")}. ` : ""}Weakest scenarios: ${d.by_scenario.slice(0, 3).map((s: any) => `#${s.id} ${s.title} ${pct(s.hit_rate)}${s.usual_winner ? ` (usually ${s.usual_winner})` : ""}`).join("; ") || "n/a"}.`;
     }
     case "session": {
       const s = d.session;
@@ -77,6 +78,8 @@ function summarize(d: Data): string {
     }
     case "transcript":
       return `Transcript of ${d.session_id} (${d.model}, "${d.scenario}", verdict ${d.verdict ?? "pending"}): events ${d.total ? d.offset + 1 : 0}-${d.offset + d.events.length} of ${d.total}.`;
+    case "agents":
+      return `Worker agents (registry as of ${d.as_of ?? "n/a"}), weighted by real-world developer adoption: ${d.agents.filter((a) => a.enabled).map((a) => `${a.id} ${pct(a.weight)}`).join(", ")}.${d.agents.some((a) => !a.enabled) ? ` Not runnable yet: ${d.agents.filter((a) => !a.enabled).map((a) => a.label).join(", ")}.` : ""}${d.unrepresented_share != null ? ` Usage share not representable (IDE-only tools): ${pct(d.unrepresented_share)}.` : ""} A default run samples ${d.default_samples} sessions per scenario in these proportions.`;
     case "profiles":
       return d.profiles.length
         ? `${d.profiles.length} developer profiles${d.query ? ` matching "${d.query}"` : ""}: ${d.profiles.map((p: any) => `${p.slug} (${p.name}: ${p.summary})`).join("; ")}. Pass slugs as run_simulation profiles.`
@@ -198,13 +201,15 @@ export function createServer(org: Org): McpServer {
 
   registerAppTool(server, "run_simulation", {
     title: "Run simulation",
-    description: "Launch sandboxed coding sub-agents: every selected scenario x model x repeat becomes one agent session. Runs asynchronously; check progress with get_simulation. Defaults: all active scenarios, all available models, 3 repeats.",
+    description: "Launch sandboxed coding sub-agents on the product's scenarios. Default (representative): `samples` sessions per scenario (default 10), with worker agents (Claude Code, Codex, Cursor, ...) mixed in proportion to real-world developer adoption (see list_agents). Explicit: pass agents and/or models to run exactly those, `repeats` times each. Runs asynchronously; check progress with get_simulation.",
     inputSchema: {
       product,
       scenario_ids: z.array(z.number().int()).optional(),
-      models: z.array(z.string()).optional().describe("Subset of the available models (see get_product)"),
+      agents: z.array(z.string()).optional().describe("Explicit worker agent ids (list_agents), e.g. 'claude-code/sonnet'"),
+      models: z.array(z.string()).optional().describe("Explicit: only agents using these models"),
+      samples: z.number().int().min(1).max(100).optional().describe("Representative mode: sessions per scenario (default 10)"),
       profiles: z.array(z.string()).optional().describe("Developer profile slugs (list_developer_profiles); every scenario runs once per profile. Omit for a generic developer"),
-      repeats: z.number().int().min(1).max(10).optional().describe("Runs per scenario and model (default 3)"),
+      repeats: z.number().int().min(1).max(10).optional().describe("Explicit mode: runs per scenario and agent (default 3)"),
       name: z.string().optional(),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }, _meta: meta,
@@ -283,6 +288,13 @@ export function createServer(org: Org): McpServer {
     inputSchema: { query: z.string().optional().describe("Filter, e.g. 'enterprise' or 'Python'") },
     annotations: read, _meta: meta,
   }, run("list_developer_profiles"));
+
+  registerAppTool(server, "list_agents", {
+    title: "Worker agents",
+    description: "The coding agents Octillion simulates (harness, model, pinned version) and each one's weight: its share of real-world developer usage, with sources. Default simulations sample agents in these proportions.",
+    inputSchema: {},
+    annotations: read, _meta: meta,
+  }, run("list_agents"));
 
   registerAppTool(server, "browse_task_library", {
     title: "Task library",

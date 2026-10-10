@@ -2,6 +2,24 @@ import { getDb, type Queryable } from "./db.js";
 import { randomId, type Org } from "./auth.js";
 import { transcripts, type SearchParams } from "./transcripts.js";
 import type { Tool } from "./scoring.js";
+import { enabledAgents, findAgent, registry, representativePlan, type AgentSpec } from "./agents.js";
+
+const agentLabel = (id: string) => findAgent(id)?.label ?? id;
+
+/** The worker-agent registry as customers see it: who we simulate and how much each counts. */
+export function listAgents() {
+  const r = registry();
+  return {
+    view: "agents" as const,
+    as_of: r.as_of ?? null,
+    unrepresented_share: r.unrepresented_share ?? null,
+    sources: r.sources ?? [],
+    agents: r.agents.map((a) => ({ id: a.id, label: a.label, vendor: a.vendor ?? null, harness: a.harness, model: a.model,
+                                    harness_version: a.harness_version ?? null, weight: a.enabled === false ? 0 : a.weight,
+                                    enabled: a.enabled !== false, notes: a.notes ?? null })),
+    default_samples: config.defaultSamples(),
+  };
+}
 
 /**
  * Everything the MCP tools read or write. Every function takes the calling Org first and every query is
@@ -9,8 +27,9 @@ import type { Tool } from "./scoring.js";
  */
 
 export const config = {
-  models: () => (process.env.OCTILLION_MODELS ?? "claude-sonnet-5-5,claude-opus-5-5").split(",").map((s) => s.trim()).filter(Boolean),
-  harness: () => process.env.OCTILLION_HARNESS ?? "claude-code",
+  models: () => [...new Set(enabledAgents().map((a) => a.model))],
+  agents: () => enabledAgents().map((a) => ({ id: a.id, label: a.label, model: a.model, harness: a.harness, weight: a.weight })),
+  defaultSamples: () => Number(process.env.OCTILLION_DEFAULT_SAMPLES ?? 10),
   maxSessionsPerRun: () => Number(process.env.OCTILLION_MAX_SESSIONS_PER_RUN ?? 100),
 };
 
@@ -139,6 +158,7 @@ export async function getProduct(org: Org, ref?: string) {
     simulations,
     warnings,
     models: config.models(),
+    agents: config.agents(),
   };
 }
 
@@ -191,16 +211,17 @@ export async function saveScenarios(org: Org, productRef: string | undefined, it
 
 // ---------- simulations ----------
 
-export interface RunInput { product?: string; scenario_ids?: number[]; models?: string[]; profiles?: string[]; repeats?: number; name?: string }
+export interface RunInput {
+  product?: string; scenario_ids?: number[]; profiles?: string[]; name?: string;
+  agents?: string[]; models?: string[]; repeats?: number;  // explicit: these agents x repeats on every scenario
+  samples?: number;                                         // representative (default): sessions per scenario, mixed by adoption
+}
 
 export async function runSimulation(org: Org, input: RunInput) {
   const p = await resolveProduct(org, input.product);
   const db = await getDb();
-  const allowed = config.models();
-  const models = input.models?.length ? [...new Set(input.models)] : allowed;
-  const unknown = models.filter((m) => !allowed.includes(m));
-  if (unknown.length) throw new Error(`Unsupported model(s): ${unknown.join(", ")}. Available: ${allowed.join(", ")}`);
-  const repeats = input.repeats ?? 3;
+  const enabled = enabledAgents();
+  if (!enabled.length) throw new Error("No worker agents are enabled in the registry");
 
   const scenarios = await db.query<{ id: number }>(
     input.scenario_ids?.length
@@ -219,22 +240,49 @@ export async function runSimulation(org: Org, input: RunInput) {
     if (missing.length) throw new Error(`Unknown developer profile(s): ${missing.join(", ")}. See list_developer_profiles.`);
   }
   const profileIds: (number | null)[] = profiles.length ? profiles.map((p) => p.id) : [null];
-  const total = scenarios.length * models.length * profileIds.length * repeats;
-  if (total > config.maxSessionsPerRun())
-    throw new Error(`That is ${total} agent sessions (${scenarios.length} scenarios x ${models.length} models x ${profileIds.length} profiles x ${repeats} repeats); the limit per run is ${config.maxSessionsPerRun()}. Use fewer scenarios, models, profiles or repeats.`);
+  const slots = scenarios.flatMap((sc) => profileIds.map((profileId) => ({ scenarioId: sc.id, profileId })));
 
+  // Explicit: chosen agents (by id or by model) x repeats on every slot. Representative: `samples` sessions per slot,
+  // with agents apportioned by real-world adoption over the whole run.
+  const explicit = Boolean(input.agents?.length || input.models?.length);
+  const samples = input.samples ?? config.defaultSamples();
+  const repeats = input.repeats ?? 3;
+  let plan: { scenarioId: number; profileId: number | null; agent: AgentSpec; attempt: number }[];
+  if (explicit) {
+    let chosen = enabled;
+    if (input.agents?.length) {
+      const unknown = input.agents.filter((a) => !enabled.some((e) => e.id === a));
+      if (unknown.length) throw new Error(`Unknown or disabled agent(s): ${unknown.join(", ")}. Available: ${enabled.map((e) => e.id).join(", ")}`);
+      chosen = enabled.filter((e) => input.agents!.includes(e.id));
+    }
+    if (input.models?.length) {
+      const unknown = input.models.filter((m) => !chosen.some((e) => e.model === m));
+      if (unknown.length) throw new Error(`Unsupported model(s): ${unknown.join(", ")}. Available: ${[...new Set(chosen.map((e) => e.model))].join(", ")}`);
+      chosen = chosen.filter((e) => input.models!.includes(e.model));
+    }
+    plan = slots.flatMap((slot) => chosen.flatMap((agent) => Array.from({ length: repeats }, (_, i) => ({ ...slot, agent, attempt: i + 1 }))));
+  } else {
+    const agents = representativePlan(slots.length * samples, enabled);
+    plan = slots.flatMap((slot, si) => Array.from({ length: samples }, (_, i) => ({ ...slot, agent: agents[si * samples + i], attempt: i + 1 })));
+  }
+  if (plan.length > config.maxSessionsPerRun())
+    throw new Error(`That is ${plan.length} agent sessions (${scenarios.length} scenarios x ${profileIds.length} profiles x ${explicit ? "agents x repeats" : `${samples} samples`}); the limit per run is ${config.maxSessionsPerRun()}. Use fewer scenarios, profiles, agents, repeats or samples.`);
+
+  const used = [...new Map(plan.map((x) => [x.agent.id, x.agent])).values()];
   const id = randomId("sim_");
   const name = input.name?.trim() || `${p.name} · ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC`;
   await db.transaction(async (tx) => {
     await tx.query(
-      `INSERT INTO simulations (id, org_id, product_id, name, models, harness, repeats, profile_ids) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [id, org.orgId, p.id, name, models, config.harness(), repeats, profiles.map((x) => x.id)],
+      `INSERT INTO simulations (id, org_id, product_id, name, models, harness, repeats, profile_ids, mode, agent_ids)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [id, org.orgId, p.id, name, [...new Set(used.map((a) => a.model))], [...new Set(used.map((a) => a.harness))].join(", "),
+       explicit ? repeats : samples, profiles.map((x) => x.id), explicit ? "explicit" : "representative", used.map((a) => a.id)],
     );
-    for (const sc of scenarios) for (const model of models) for (const profileId of profileIds) for (let attempt = 1; attempt <= repeats; attempt++)
+    for (const x of plan)
       await tx.query(
-        `INSERT INTO agent_sessions (id, simulation_id, org_id, product_id, scenario_id, model, harness, attempt, profile_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-        [randomId("ses_"), id, org.orgId, p.id, sc.id, model, config.harness(), attempt, profileId],
+        `INSERT INTO agent_sessions (id, simulation_id, org_id, product_id, scenario_id, model, harness, agent_id, attempt, profile_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        [randomId("ses_"), id, org.orgId, p.id, x.scenarioId, x.agent.model, x.agent.harness, x.agent.id, x.attempt, x.profileId],
       );
   });
   return getSimulation(org, id);
@@ -269,7 +317,7 @@ export async function getSimulation(org: Org, simulationId: string) {
   if (!sim) throw new Error(`No simulation ${simulationId}`);
   const sessions = await db.query<any>(
     `SELECT s.id, s.scenario_id, sc.title AS scenario, sc.expectation, s.model, s.attempt, s.status, s.verdict, s.winner,
-            s.started_at, s.ended_at, s.events, s.user_turns, s.cost_usd, s.error_message, dp.name AS profile,
+            s.agent_id, s.started_at, s.ended_at, s.events, s.user_turns, s.cost_usd, s.error_message, dp.name AS profile,
             CASE WHEN s.verdict IS NULL THEN NULL ELSE ${HIT} END AS hit
        FROM agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id LEFT JOIN developer_profiles dp ON dp.id = s.profile_id
       WHERE s.simulation_id = $1 AND s.org_id = $2 ORDER BY sc.id, s.model, s.attempt`,
@@ -291,9 +339,11 @@ export async function getSimulation(org: Org, simulationId: string) {
     statusCounts[s.status] = (statusCounts[s.status] ?? 0) + 1;
     if (s.verdict) verdictCounts[s.verdict] = (verdictCounts[s.verdict] ?? 0) + 1;
   }
+  const agentIds = [...new Set(sessions.map((s) => s.agent_id ?? s.model))]
+    .sort((a, b) => (findAgent(b)?.weight ?? 0) - (findAgent(a)?.weight ?? 0));
   const matrix = [...by((s) => String(s.scenario_id))].map(([scenarioId, xs]) => ({
     scenario_id: Number(scenarioId), scenario: xs[0].scenario, expectation: xs[0].expectation,
-    cells: sim.models.map((model: string) => ({ model, ...summarize(xs.filter((x) => x.model === model)) })),
+    cells: agentIds.map((id) => ({ agent_id: id, label: agentLabel(id), ...summarize(xs.filter((x) => (x.agent_id ?? x.model) === id)) })),
   }));
   return {
     view: "simulation" as const,
@@ -302,6 +352,7 @@ export async function getSimulation(org: Org, simulationId: string) {
     status: statusCounts,
     verdicts: verdictCounts,
     by_model: sim.models.map((model: string) => ({ model, ...summarize(sessions.filter((s) => s.model === model)) })),
+    by_agent: agentIds.map((id) => ({ agent_id: id, label: agentLabel(id), ...summarize(sessions.filter((s) => (s.agent_id ?? s.model) === id)) })),
     by_profile: [...by((s) => s.profile ?? "")].filter(([k]) => k).map(([profile, xs]) => ({ profile, ...summarize(xs) })),
     matrix,
     sessions,
@@ -368,6 +419,20 @@ export async function getReport(org: Org, input: { product?: string; days?: numb
       GROUP BY dp.id ORDER BY dp.name`,
     params,
   );
+  const byAgent = await db.query<any>(
+    `SELECT coalesce(s.agent_id, s.model) AS agent_id, count(*) AS sessions, count(*) FILTER (WHERE ${HIT}) AS hits,
+            count(*) FILTER (WHERE s.verdict = 'competitor') AS competitor
+       FROM ${from} GROUP BY 1`,
+    params,
+  );
+  const agentRows = byAgent.map((a) => {
+    const spec = findAgent(a.agent_id);
+    return { ...a, label: agentLabel(a.agent_id), weight: spec?.enabled === false ? 0 : spec?.weight ?? 0,
+             hit_rate: rate(a.hits, a.sessions), hit_ci: wilson(a.hits, a.sessions) };
+  }).sort((a, b) => b.weight - a.weight);
+  // What a randomly chosen developer's agent would do: per-agent hit rates weighted by real-world adoption.
+  const weightSum = agentRows.reduce((s, a) => s + (a.hit_rate == null ? 0 : a.weight), 0);
+  const weighted = weightSum ? agentRows.reduce((s, a) => s + (a.hit_rate ?? 0) * a.weight, 0) / weightSum : null;
   const byScenario = await db.query<any>(
     `SELECT sc.id, sc.title, sc.expectation, count(*) AS sessions, count(*) FILTER (WHERE ${HIT}) AS hits,
             mode() WITHIN GROUP (ORDER BY s.winner) FILTER (WHERE s.winner IS NOT NULL) AS usual_winner
@@ -393,9 +458,11 @@ export async function getReport(org: Org, input: { product?: string; days?: numb
     product: { id: p.id, slug: p.slug, name: p.name },
     filters: { days, model: input.model ?? null },
     models: config.models(),
-    totals: { ...t, hit_rate: rate(t.hits, n), hit_ci: wilson(t.hits, n), adoption_rate: rate(t.adopted, n), competitor_rate: rate(t.competitor, n) },
+    totals: { ...t, hit_rate: rate(t.hits, n), hit_ci: wilson(t.hits, n), weighted_hit_rate: weighted,
+              adoption_coverage: weightSum, adoption_rate: rate(t.adopted, n), competitor_rate: rate(t.competitor, n) },
     share_of_voice: voice.map((v) => ({ ...v, share: rate(v.recommended, n) })),
     by_model: byModel.map((m) => ({ ...m, hit_rate: rate(m.hits, m.sessions), hit_ci: wilson(m.hits, m.sessions) })),
+    by_agent: agentRows,
     by_profile: byProfile.map((p) => ({ ...p, hit_rate: rate(p.hits, p.sessions), hit_ci: wilson(p.hits, p.sessions) })),
     by_scenario: byScenario.map((s) => ({ ...s, hit_rate: rate(s.hits, s.sessions), hit_ci: wilson(s.hits, s.sessions) })),
     daily: daily.map((d) => ({ day: new Date(d.day).toISOString().slice(0, 10), sessions: Number(d.sessions), hits: Number(d.hits), hit_rate: rate(d.hits, d.sessions) })),
