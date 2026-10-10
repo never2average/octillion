@@ -309,6 +309,11 @@ ALTER TABLE products  ADD COLUMN IF NOT EXISTS features JSONB NOT NULL DEFAULT '
 ALTER TABLE products  ADD COLUMN IF NOT EXISTS research JSONB;            -- sources and notes from the last research
 ALTER TABLE scenarios ADD COLUMN IF NOT EXISTS source    TEXT NOT NULL DEFAULT 'manual';  -- manual | library | generated
 ALTER TABLE scenarios ADD COLUMN IF NOT EXISTS rationale TEXT;            -- why the product fits (or should not)
+-- Starter workspace for scenarios without repo_url (orchestrator/workspaces/<template>); NULL = picked from language/tags/prompt.
+ALTER TABLE scenarios ADD COLUMN IF NOT EXISTS template TEXT;
+-- Why a session ended: done (real workspace changes) | turn_cap (MAX_AGENT_TURNS) | time_cap | agent_gave_up | error.
+ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS completed_reason TEXT
+  CHECK (completed_reason IS NULL OR completed_reason IN ('done', 'turn_cap', 'time_cap', 'agent_gave_up', 'error'));
 -- Personas generated for one product live next to the shared vault profiles, scoped to that org + product.
 ALTER TABLE developer_profiles ADD COLUMN IF NOT EXISTS org_id     INT REFERENCES organizations(id) ON DELETE CASCADE;
 ALTER TABLE developer_profiles ADD COLUMN IF NOT EXISTS product_id INT REFERENCES products(id) ON DELETE CASCADE;

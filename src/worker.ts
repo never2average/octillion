@@ -25,6 +25,8 @@ export interface Job {
   session_id: string; simulation_id: string; org_id: number; product_id: number; model: string; harness: string; attempt: number;
   agent_id: string | null; agent: { label: string; harness_version?: string; event_format?: string; image?: { docker?: string; boat_snapshot?: string }; requires_env?: string[] } | null;
   prompt: string; repo_url: string | null; language: string | null; max_user_turns: number;
+  /** Starter workspace hint + scenario tags/title (the orchestrator picks a template when repo_url is null). */
+  template: string | null; tags: string[]; title: string;
   profile: { slug: string; name: string; summary: string; attributes: Record<string, unknown>; instructions: string } | null;
 }
 
@@ -44,7 +46,7 @@ export async function claimJobs(workerId: string, opts: { limit?: number; models
               SELECT id FROM agent_sessions WHERE status = 'queued' ${filter}
                ORDER BY queued_at, id LIMIT $2 FOR UPDATE SKIP LOCKED)
         RETURNING s.id AS session_id, s.simulation_id, s.org_id, s.product_id, s.model, s.harness, s.agent_id, s.attempt, s.profile_id,
-                  sc.prompt, sc.repo_url, sc.language`,
+                  sc.prompt, sc.repo_url, sc.language, sc.template, sc.tags, sc.title`,
       params,
     );
     if (rows.length)
@@ -94,8 +96,12 @@ export async function heartbeat(sessionId: string) {
   if (!row) throw Object.assign(new Error(`Session ${sessionId} is not running`), { status: 409 });
 }
 
+export const COMPLETED_REASONS = ["done", "turn_cap", "time_cap", "agent_gave_up", "error"] as const;
+
 export interface CompleteInput {
   status?: "completed" | "failed" | "timeout"; error_message?: string; sandbox_id?: string;
+  /** Why the session ended (orchestrator's deterministic done check / caps). */
+  completed_reason?: (typeof COMPLETED_REASONS)[number];
   tokens_in?: number; tokens_out?: number; cost_usd?: number; metadata?: Record<string, unknown>;
 }
 
@@ -116,10 +122,11 @@ export async function completeSession(sessionId: string, input: CompleteInput = 
     await db.query(
       `UPDATE agent_sessions SET status = $2, ended_at = now(), error_message = $3, sandbox_id = coalesce($4, sandbox_id),
               tokens_in = coalesce($5, tokens_in), tokens_out = coalesce($6, tokens_out), cost_usd = coalesce($7, cost_usd),
-              metadata = metadata || $8::jsonb
+              metadata = metadata || $8::jsonb, completed_reason = coalesce($9, completed_reason)
         WHERE id = $1`,
       [sessionId, input.status ?? "completed", input.error_message ?? null, input.sandbox_id ?? null, input.tokens_in ?? null,
-       input.tokens_out ?? null, input.cost_usd ?? null, JSON.stringify(input.metadata ?? {})],
+       input.tokens_out ?? null, input.cost_usd ?? null, JSON.stringify(input.metadata ?? {}),
+       (COMPLETED_REASONS as readonly string[]).includes(input.completed_reason ?? "") ? input.completed_reason : null],
     );
   }
   // The session's gateway token dies with it; tokens the gateway metered are authoritative when larger than

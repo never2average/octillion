@@ -3,8 +3,13 @@
  * (launch, then resumes carrying the simulated developer's replies).
  *
  * This is the deterministic core. The Pi orchestrator (pi-octillion/) drives it through tools; worker.ts drives
- * it with no LLM at all (launch -> wait -> finish). Both share every guarantee here: heartbeats, the
+ * it with no LLM at all (launch -> nudge until done -> finish). Both share every guarantee here: heartbeats, the
  * MAX_SESSION_MINUTES deadline, server-side cancellation, max_user_turns, the git diff event, /complete, cleanup.
+ *
+ * Run until done: a session only ends once the agent has produced something worth scoring (core/progress.ts: a
+ * non-empty workspace diff with code, dependency or config changes), or at MAX_AGENT_TURNS agent turns (summed over
+ * launch + resumes, core/turns.ts), or MAX_SESSION_MINUTES, or after GIVE_UP_RUNS nudged runs without any change.
+ * Why it ended is recorded as completed_reason: done | turn_cap | time_cap | agent_gave_up | error.
  */
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
@@ -16,6 +21,9 @@ import type { Runner, Sandbox, RunExit } from "./runners.js";
 import { EventSink } from "./sink.js";
 import { UsageTracker } from "./usage.js";
 import { api, HttpError, log, withRetry } from "./util.js";
+import { assessDiff, type Progress } from "./progress.js";
+import { newStepCounter } from "./turns.js";
+import { selectTemplate, type TemplateId } from "./workspaces.js";
 
 export interface Profile {
   slug?: string;
@@ -38,6 +46,10 @@ export interface Job {
   prompt: string;
   repo_url: string | null;
   language: string | null;
+  /** Scenario starter-workspace hint (orchestrator/workspaces/<template>), tags and title: template selection. */
+  template?: string | null;
+  tags?: string[] | null;
+  title?: string | null;
   max_user_turns?: number;
   profile?: Profile | null;
 }
@@ -55,10 +67,38 @@ export interface TurnReport {
   files: string[];
   user_turns_used: number;
   user_turns_left: number;
+  /** Agent turns (model responses / steps) used so far across all runs, and left under MAX_AGENT_TURNS. */
+  agent_turns_used: number;
+  agent_turns_left: number;
+  /** Deterministic done check on the workspace diff (null while a run is still going). */
+  workspace: { done: boolean; reason: string; changed_files: string[] } | null;
   /** True when a reply is possible: run ended cleanly, the harness gave a resumable id, turns left, session alive. */
   can_reply: boolean;
-  /** Set when the session can only be finished (timeout, cancelled, shutdown, failure). */
+  /** Not done yet and the agent can be resumed: the developer must reply (finish_session is refused). */
+  must_continue: boolean;
+  /** Set when the session can only be finished (timeout, cancelled, shutdown, failure, caps). */
   stop_reason: string | null;
+}
+
+export type CompletedReason = "done" | "turn_cap" | "time_cap" | "agent_gave_up" | "error";
+
+const NUDGES_AFTER_QUESTION = [
+  "Yes, go ahead and make the change.",
+  "Your call. Please go ahead and implement it.",
+  "Sounds good, do it.",
+];
+const NUDGES = [
+  "Please go ahead and implement it in this project.",
+  "I don't see any changes in the code yet. Please make the actual changes.",
+  "Keep going until it's actually implemented, please.",
+];
+
+/** Deterministic, neutral developer nudge (never names a product): used when no LLM developer is available. */
+export function defaultNudge(r: Pick<TurnReport, "last_assistant_text">, n: number): string {
+  const t = r.last_assistant_text.trim();
+  const asked = /\?\s*$/.test(t) || /\b(should i|shall i|do you want|would you like|want me to|let me know)\b/i.test(t);
+  const list = asked ? NUDGES_AFTER_QUESTION : NUDGES;
+  return list[n % list.length]!;
 }
 
 export type FinishHint = { status?: string; note?: string; orchestrator?: Record<string, unknown> };
@@ -118,12 +158,27 @@ export class WorkerSession {
   private finishing: Promise<{ status: string; skipped: boolean }> | null = null;
   runs = 0;
   userTurns = 0;
+  /** Agent turns used across all runs (core/turns.ts), capped at maxAgentTurns. */
+  agentTurns = 0;
+  readonly maxAgentTurns = CFG.maxAgentTurns;
+  /** Starter workspace seeded into the sandbox (no repo_url), or null. */
+  template: TemplateId | null = null;
+  /** Latest done check of the workspace diff. */
+  progress: Progress | null = null;
+  /** Developer replies sent while the agent was not done yet. */
+  nudges = 0;
+  /** Consecutive resumed runs that changed nothing in the workspace while not done. */
+  noProgressRuns = 0;
+  /** The run was stopped at the agent-turn cap (its non-zero exit is not a failure). */
+  capStopped = false;
+  completedReason: CompletedReason | null = null;
   timedOut = false;
   cancelledByServer = false;
   startError: string | null = null;
 
   private constructor(readonly job: Job, readonly adapter: HarnessAdapter, private runner: Runner) {
     this.maxUserTurns = Math.max(0, Number.isFinite(job.max_user_turns) ? Number(job.max_user_turns) : CFG.defaultMaxUserTurns);
+    this.template = job.repo_url ? null : selectTemplate({ template: job.template, language: job.language, tags: job.tags, title: job.title, prompt: job.prompt });
     this.sink = new EventSink(
       { org_id: job.org_id ?? 0, product_id: job.product_id ?? 0, simulation_id: job.simulation_id, session_id: job.session_id, model: job.model },
       (status) => this.serverRejected(status),
@@ -159,8 +214,8 @@ export class WorkerSession {
       // Credentials first: no point opening a sandbox the broker won't serve.
       s.creds = await sessionCredentials(job.session_id).catch((e) => { throw new Error(`credentials: ${redact(String(e instanceof Error ? e.message : e))}`); });
       harnessCredentials(adapter, s.creds.providers, job.model); // validate the mapping before paying for a sandbox
-      s.sandbox = await runner.open({ adapter, harness: job.harness, jobKey: job.session_id, agentId: job.agent_id ?? undefined, model: job.model, repoUrl: job.repo_url });
-      log(`[${job.session_id}] ${s.handle} started ${adapter.id}/${job.model} in ${s.sandbox.id}${job.repo_url ? ` repo=${job.repo_url}` : ""}`);
+      s.sandbox = await runner.open({ adapter, harness: job.harness, jobKey: job.session_id, agentId: job.agent_id ?? undefined, model: job.model, repoUrl: job.repo_url, template: s.template });
+      log(`[${job.session_id}] ${s.handle} started ${adapter.id}/${job.model} in ${s.sandbox.id}${job.repo_url ? ` repo=${job.repo_url}` : ` template=${s.template}`}`);
       await s.launch(job.prompt, null);
     } catch (e) {
       s.startError = String(e instanceof Error ? e.message : e);
@@ -184,7 +239,8 @@ export class WorkerSession {
   /** Start one harness run. `resumeId` null = first launch. */
   private async launch(input: string, resumeId: string | null): Promise<void> {
     const sb = this.sandbox!;
-    const o = { model: this.job.model, workdir: sb.workdir, maxBudgetUsd: CFG.maxBudgetUsd, bin: this.argvBin() };
+    const turnsLeft = Math.max(1, this.maxAgentTurns - this.agentTurns);
+    const o = { model: this.job.model, workdir: sb.workdir, maxBudgetUsd: CFG.maxBudgetUsd, maxTurns: turnsLeft, bin: this.argvBin() };
     // Session tokens are short-lived: refetch before a run when close to expiry (e.g. a late resume).
     if (!this.creds || sessionCredsExpiring(this.creds)) this.creds = await sessionCredentials(this.job.session_id);
     const hc = harnessCredentials(this.adapter, this.creds.providers, this.job.model);
@@ -192,6 +248,17 @@ export class WorkerSession {
     const argv = withCredentialSetup(base, hc.setup, hc.argv);
     const run = ++this.runs;
     const digest = this.adapter.newDigest();
+    const steps = newStepCounter(this.adapter.id);
+    const countTurns = (n: number) => {
+      if (!n) return;
+      this.agentTurns += n;
+      if (this.agentTurns >= this.maxAgentTurns && !this.capStopped) {
+        this.capStopped = true;
+        log(`[${this.job.session_id}] agent turn cap (${this.maxAgentTurns}) reached; stopping the run`);
+        this.sink.push({ type: "turn_cap", agent_turns: this.agentTurns, max_agent_turns: this.maxAgentTurns });
+        void sb.stopTurn?.();
+      }
+    };
     const turn = await sb.runTurn(argv, input, hc.env);
     let tail = "";
     turn.stderr.on("data", (d: Buffer | string) => { tail = (tail + d.toString()).slice(-8000); });
@@ -205,6 +272,7 @@ export class WorkerSession {
         if (ev && typeof ev === "object" && !Array.isArray(ev)) {
           this.tracker.observe(ev);
           digest.observe(ev);
+          countTurns(steps.observe(ev));
           this.sink.pushLine(t, ev); // verbatim (api mode)
           return;
         }
@@ -216,14 +284,33 @@ export class WorkerSession {
       await Promise.race([linesDone, new Promise((r) => setTimeout(r, 5000))]);
       rl.close();
       if (tail.trim()) { this.stderrTail = tail; this.sink.push({ type: "worker_stderr", run, text: tail.slice(-4000) }); }
+      countTurns(steps.end());
       const d = digest.result();
+      if (d.capped) this.capStopped = true;
       if (d.sessionId) this.resumeId = d.sessionId;
+      await this.checkProgress(run);
       const r = { exit, digest: d };
       this.last = r;
       this.current = null;
       return r;
     })();
   }
+
+  /** Done check after a run: the workspace diff vs the seed / cloned commit (deterministic, no LLM). */
+  private async checkProgress(run: number): Promise<void> {
+    if (!this.sandbox || this.timedOut || this.cancelledByServer) return;
+    const diff = await this.sandbox.diff().catch(() => null);
+    if (diff === null) return;
+    const before = this.progress?.hash ?? null;
+    this.progress = assessDiff(diff);
+    if (run > 1 && !this.progress.done) this.noProgressRuns = this.progress.hash === before ? this.noProgressRuns + 1 : 0;
+    else this.noProgressRuns = 0;
+    log(`[${this.job.session_id}] run ${run}: ${this.agentTurns}/${this.maxAgentTurns} agent turns; ${this.progress.done ? "DONE" : "not done"} (${this.progress.reason})`);
+  }
+
+  get done(): boolean { return !!this.progress?.done; }
+  get gaveUp(): boolean { return !this.done && this.noProgressRuns >= CFG.giveUpRuns; }
+  get turnCapped(): boolean { return this.capStopped || this.agentTurns >= this.maxAgentTurns; }
 
   private stopReason(): string | null {
     if (this.startError) return `start failed: ${this.startError}`;
@@ -238,6 +325,7 @@ export class WorkerSession {
     if (!this.last) return this.startError ? this.startError : "no run";
     const { exit, digest } = this.last;
     if (exit.error) return exit.error;
+    if (this.capStopped) return null; // stopped by us at the agent-turn cap (SIGTERM / error_max_turns)
     if (digest.error) return digest.error;
     if (exit.code !== 0) return `Exit code ${exit.code}${exit.signal ? ` (${exit.signal})` : ""}: ${this.stderrTail.slice(-500)}`;
     return null;
@@ -259,6 +347,11 @@ export class WorkerSession {
     const stop = this.stopReason();
     const left = Math.max(0, this.maxUserTurns - this.userTurns);
     const text = d?.lastText ?? "";
+    const agentLeft = Math.max(0, this.maxAgentTurns - this.agentTurns);
+    // Not done: the developer keeps the agent going (up to the turn cap). Done: optional replies, max_user_turns.
+    const repliesLeft = this.done ? left > 0 : true;
+    const canReply = exited && !failure && !stop && !!this.resumeId && agentLeft > 0 && !this.turnCapped && !this.gaveUp && repliesLeft;
+    const p = exited ? this.progress : null;
     return {
       session: this.handle,
       run: this.runs,
@@ -270,10 +363,27 @@ export class WorkerSession {
       commands: d?.commands.slice(-25) ?? [],
       files: d?.files.slice(-40) ?? [],
       user_turns_used: this.userTurns,
-      user_turns_left: left,
-      can_reply: exited && !failure && !stop && left > 0 && !!this.resumeId,
-      stop_reason: stop ?? (failure ? "harness failed" : left === 0 ? "max_user_turns reached" : !this.resumeId && exited ? "harness gave no resumable session id" : null),
+      user_turns_left: this.done ? left : Math.max(left, 1),
+      agent_turns_used: this.agentTurns,
+      agent_turns_left: agentLeft,
+      workspace: p ? { done: p.done, reason: p.reason, changed_files: p.changed_files.slice(0, 15) } : null,
+      can_reply: canReply,
+      must_continue: canReply && !this.done,
+      stop_reason: stop ?? (failure ? "harness failed"
+        : this.turnCapped ? `agent turn cap reached (${this.maxAgentTurns})`
+        : this.gaveUp ? `no workspace change after ${this.noProgressRuns} nudges`
+        : !this.resumeId && exited ? "harness gave no resumable session id"
+        : this.done && left === 0 ? "max_user_turns reached" : null),
     };
+  }
+
+  /** Why finish_session must not end the session yet (the agent is resumable and not done), or null. */
+  finishRefusal(): string | null {
+    if (this.finished) return null;
+    if (this.current) return "the sub-agent is still running; call wait_for_turn first";
+    const r = this.report(true);
+    if (!r.must_continue) return null;
+    return `not done: ${r.workspace?.reason ?? "no workspace changes"}. The agent stopped before implementing the task; reply as the developer to get it to actually make the change (agent turns left: ${r.agent_turns_left})`;
   }
 
   /** Emit the simulated developer's reply and resume the same harness conversation with it (verbatim, on stdin). */
@@ -285,6 +395,7 @@ export class WorkerSession {
     const r = this.report(true);
     if (!r.can_reply) throw new Error(`cannot reply: ${r.stop_reason ?? "not resumable"}; call finish_session`);
     this.userTurns++;
+    if (!this.done) this.nudges++;
     this.sink.push({ type: "simulated_user", turn: this.userTurns, content: reply });
     await this.launch(reply, this.resumeId);
     return { run: this.runs, user_turns_left: this.maxUserTurns - this.userTurns };
@@ -303,28 +414,32 @@ export class WorkerSession {
       if (sb && !this.timedOut && !this.cancelledByServer) {
         // Codex's stream has no edit contents: one diff event lets the scorer see every change.
         const diff = await sb.diff().catch(() => null);
-        if (diff !== null) this.sink.push({ type: "file_edit", name: "git diff", content: diff });
+        if (diff !== null) { this.sink.push({ type: "file_edit", name: "git diff", content: diff }); this.progress = assessDiff(diff); }
       }
       if (this.hbTimer) clearInterval(this.hbTimer);
       if (this.deadline) clearTimeout(this.deadline);
+
+      let status: "completed" | "failed" | "timeout";
+      let error: string | undefined;
+      let reason: CompletedReason;
+      const failure = this.lastFailed();
+      if (this.timedOut) { status = "timeout"; reason = "time_cap"; error = `Exceeded MAX_SESSION_MINUTES (${CFG.maxSessionMs / 60000})`; }
+      else if (this.startError) { status = "failed"; reason = "error"; error = this.startError; }
+      else if (shuttingDown && failure) { status = "failed"; reason = "error"; error = "Worker shut down"; }
+      else if (failure) { status = "failed"; reason = "error"; error = failure; }
+      else { status = "completed"; reason = this.done ? "done" : this.turnCapped ? "turn_cap" : "agent_gave_up"; }
+      this.completedReason = reason;
+      this.sink.push({ type: "session_end", completed_reason: reason, agent_turns: this.agentTurns, done_reason: this.progress?.reason ?? null });
       this.sink.stop();
       await this.sink.drain();
       await sb?.cleanup().catch(() => {});
       activeSessions.delete(this);
 
-      let status: "completed" | "failed" | "timeout";
-      let error: string | undefined;
-      const failure = this.lastFailed();
-      if (this.timedOut) { status = "timeout"; error = `Exceeded MAX_SESSION_MINUTES (${CFG.maxSessionMs / 60000})`; }
-      else if (this.startError) { status = "failed"; error = this.startError; }
-      else if (shuttingDown && failure) { status = "failed"; error = "Worker shut down"; }
-      else if (failure) { status = "failed"; error = failure; }
-      else status = "completed";
-
       if (this.cancelledByServer) { log(`[${this.job.session_id}] cancelled server-side; skipping /complete`); return { status: "cancelled", skipped: true }; }
       const u = this.tracker.usage();
       await completeJob(this.job.session_id, {
         status,
+        completed_reason: reason,
         error_message: error,
         sandbox_id: sb?.id,
         tokens_in: u.tokens_in,
@@ -336,6 +451,9 @@ export class WorkerSession {
           exit_code: this.last?.exit.code ?? null, exit_signal: this.last?.exit.signal ?? null,
           wall_ms: Date.now() - this.started, attempt: this.job.attempt,
           harness_runs: this.runs, simulated_user_turns: this.userTurns, max_user_turns: this.maxUserTurns,
+          agent_turns: this.agentTurns, max_agent_turns: this.maxAgentTurns, developer_nudges: this.nudges,
+          completed_reason: reason, done_reason: this.progress?.reason ?? null, changed_files: this.progress?.changed_files.length ?? 0,
+          ...(this.template ? { workspace_template: this.template } : {}),
           events: this.sink.count,
           ...(hint.status ? { orchestrator_status: hint.status } : {}),
           ...(hint.note ? { orchestrator_note: hint.note.slice(0, 500) } : {}),
@@ -345,5 +463,18 @@ export class WorkerSession {
       return { status, skipped: false };
     })();
     return this.finishing;
+  }
+}
+
+/**
+ * Deterministic driver: wait for the run; while the agent is resumable and not done, nudge it as the developer
+ * (neutral canned replies, never a product name) and wait again. Stops at done, the turn cap, give-up, a failure or
+ * the deadline. Used without an LLM developer (worker.ts) and as the Pi orchestrator's safety net.
+ */
+export async function driveToDone(s: WorkerSession, nudge: (r: TurnReport, n: number) => string = defaultNudge): Promise<TurnReport> {
+  for (;;) {
+    const r = await s.waitForTurn();
+    if (!r.must_continue || s.finished) return r;
+    await s.replyAsDeveloper(nudge(r, s.nudges));
   }
 }

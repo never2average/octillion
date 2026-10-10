@@ -147,7 +147,7 @@ export async function getProduct(org: Org, ref?: string) {
   const p = await resolveProduct(org, ref);
   const db = await getDb();
   const scenarios = await db.query(
-    `SELECT sc.id, sc.title, sc.prompt, sc.repo_url, sc.language, sc.tags, sc.expectation, sc.active, sc.source, sc.rationale,
+    `SELECT sc.id, sc.title, sc.prompt, sc.repo_url, sc.language, sc.tags, sc.template, sc.expectation, sc.active, sc.source, sc.rationale,
             count(s.id) AS sessions, count(*) FILTER (WHERE ${HIT}) AS hits,
             mode() WITHIN GROUP (ORDER BY s.winner) FILTER (WHERE s.winner IS NOT NULL) AS usual_winner
        FROM scenarios sc
@@ -180,9 +180,23 @@ function namesProduct(prompt: string, p: ProductRow) {
 
 // ---------- scenarios ----------
 
+/** Starter workspaces the orchestrator can seed (orchestrator/workspaces/<template>) for scenarios without repo_url. */
+export const WORKSPACE_TEMPLATES = ["express-ts", "nextjs-ts", "node-ts", "fastapi", "django", "go-http"] as const;
+
+/** Normalize an optional template: "" / "auto" -> null (picked from language/tags/prompt); unknown -> error. */
+export function checkTemplate(t: string | null | undefined): string | null | undefined {
+  if (t === undefined) return undefined;
+  const v = (t ?? "").trim().toLowerCase();
+  if (!v || v === "auto") return null;
+  if (!(WORKSPACE_TEMPLATES as readonly string[]).includes(v)) throw new Error(`Unknown template "${t}"; one of ${WORKSPACE_TEMPLATES.join(", ")} (or omit it)`);
+  return v;
+}
+
 export interface ScenarioInput {
   id?: number; library_task_id?: number; title?: string; prompt?: string; repo_url?: string; language?: string; tags?: string[];
   expectation?: "recommend" | "avoid"; active?: boolean;
+  /** Starter workspace when there is no repo_url; omit to let the orchestrator pick from language/tags/prompt. */
+  template?: string | null;
 }
 
 export async function saveScenarios(org: Org, productRef: string | undefined, items: ScenarioInput[]) {
@@ -190,14 +204,15 @@ export async function saveScenarios(org: Org, productRef: string | undefined, it
   const db = await getDb();
   await db.transaction(async (tx) => {
     for (let s of items) {
+      const template = checkTemplate(s.template);
       if (s.id !== undefined) {
         const [row] = await tx.query(
           `UPDATE scenarios SET title = coalesce($3, title), prompt = coalesce($4, prompt), repo_url = coalesce($5, repo_url),
                   language = coalesce($6, language), tags = coalesce($7, tags), expectation = coalesce($8, expectation),
-                  active = coalesce($9, active), updated_at = now()
+                  active = coalesce($9, active), template = CASE WHEN $10 THEN $11 ELSE template END, updated_at = now()
             WHERE id = $1 AND product_id = $2 RETURNING id`,
           [s.id, p.id, s.title ?? null, s.prompt ?? null, s.repo_url ?? null, s.language ?? null, s.tags ?? null,
-           s.expectation ?? null, s.active ?? null],
+           s.expectation ?? null, s.active ?? null, template !== undefined, template ?? null],
         );
         if (!row) throw new Error(`Scenario ${s.id} does not belong to ${p.name}`);
       } else {
@@ -209,10 +224,10 @@ export async function saveScenarios(org: Org, productRef: string | undefined, it
         }
         if (!s.prompt?.trim()) throw new Error("New scenarios need a prompt (the task given to the agent) or a library_task_id");
         await tx.query(
-          `INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, library_task_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          `INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, library_task_id, template)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
           [p.id, s.title?.trim() || s.prompt.trim().slice(0, 80), s.prompt.trim(), s.repo_url ?? null, s.language ?? null,
-           s.tags ?? [], s.expectation ?? "recommend", s.active ?? true, s.library_task_id ?? null],
+           s.tags ?? [], s.expectation ?? "recommend", s.active ?? true, s.library_task_id ?? null, template ?? null],
         );
       }
     }
@@ -332,6 +347,7 @@ export async function getSimulation(org: Org, simulationId: string) {
   const sessions = await db.query<any>(
     `SELECT s.id, s.scenario_id, sc.title AS scenario, sc.expectation, s.model, s.attempt, s.status, s.verdict, s.winner,
             s.agent_id, s.started_at, s.ended_at, s.events, s.user_turns, s.cost_usd, s.error_message, dp.name AS profile,
+            s.completed_reason, (s.metadata->>'agent_turns')::int AS agent_turns,
             CASE WHEN s.verdict IS NULL THEN NULL ELSE ${HIT} END AS hit
        FROM agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id LEFT JOIN developer_profiles dp ON dp.id = s.profile_id
       WHERE s.simulation_id = $1 AND s.org_id = $2 ORDER BY sc.id, s.model, s.attempt`,
@@ -349,9 +365,11 @@ export async function getSimulation(org: Org, simulationId: string) {
   };
   const statusCounts: Record<string, number> = {};
   const verdictCounts: Record<string, number> = {};
+  const reasonCounts: Record<string, number> = {};
   for (const s of sessions) {
     statusCounts[s.status] = (statusCounts[s.status] ?? 0) + 1;
     if (s.verdict) verdictCounts[s.verdict] = (verdictCounts[s.verdict] ?? 0) + 1;
+    if (s.completed_reason) reasonCounts[s.completed_reason] = (reasonCounts[s.completed_reason] ?? 0) + 1;
   }
   const agentIds = [...new Set(sessions.map((s) => s.agent_id ?? s.model))]
     .sort((a, b) => (findAgent(b)?.weight ?? 0) - (findAgent(a)?.weight ?? 0));
@@ -368,6 +386,7 @@ export async function getSimulation(org: Org, simulationId: string) {
     totals: { ...summarize(sessions), cost_usd: sessions.reduce((a, s) => a + Number(s.cost_usd), 0) },
     status: statusCounts,
     verdicts: verdictCounts,
+    completed_reasons: reasonCounts,
     by_model: sim.models.map((model: string) => ({ model, ...summarize(sessions.filter((s) => s.model === model)) })),
     by_agent: agentIds.map((id) => ({ agent_id: id, label: agentLabel(id), ...summarize(sessions.filter((s) => (s.agent_id ?? s.model) === id)) })),
     by_profile: [...by((s) => s.profile ?? "")].filter(([k]) => k).map(([profile, xs]) => ({ profile, ...summarize(xs) })),
@@ -530,7 +549,8 @@ export async function browseTaskLibrary(input: { query?: string; category?: stri
 export async function getSession(org: Org, sessionId: string) {
   const db = await getDb();
   const [s] = await db.query<any>(
-    `SELECT s.*, sc.title AS scenario, sc.prompt, sc.repo_url, sc.expectation, p.name AS product, p.slug AS product_slug,
+    `SELECT s.*, (s.metadata->>'agent_turns')::int AS agent_turns, s.metadata->>'workspace_template' AS workspace_template,
+            sc.title AS scenario, sc.prompt, sc.repo_url, sc.expectation, p.name AS product, p.slug AS product_slug,
             sim.name AS simulation, dp.name AS profile, dp.slug AS profile_slug, dp.summary AS profile_summary,
             CASE WHEN s.verdict IS NULL THEN NULL ELSE ${HIT} END AS hit
        FROM agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id JOIN products p ON p.id = s.product_id

@@ -93,7 +93,7 @@ export function createOctillionExtension(reg: OctillionRegistry, opts: { allowCl
     pi.registerTool(defineTool({
       name: "wait_for_turn",
       label: "Wait for turn",
-      description: "Wait until the sub-agent's current run ends, then return its last message, the commands it ran, files it touched, exit status, user_turns_left and can_reply.",
+      description: "Wait until the sub-agent's current run ends, then return its last message, the commands it ran, files it touched, exit status, the workspace done check (workspace.done), agent_turns_left, can_reply and must_continue.",
       parameters: Type.Object({ session: Type.String() }),
       executionMode: "sequential",
       async execute(_id, p, signal) {
@@ -110,7 +110,7 @@ export function createOctillionExtension(reg: OctillionRegistry, opts: { allowCl
     pi.registerTool(defineTool({
       name: "reply_as_developer",
       label: "Reply as developer",
-      description: "Send the developer's short in-character reply to the sub-agent and resume its conversation. Only when the last report has can_reply=true and the sub-agent is waiting on the developer.",
+      description: "Send the developer's short in-character reply to the sub-agent and resume its conversation. Only when the last report has can_reply=true: when must_continue=true (not done yet), or when the sub-agent is waiting on the developer.",
       parameters: Type.Object({ session: Type.String(), text: Type.String({ minLength: 1, maxLength: 4000 }) }),
       executionMode: "sequential",
       async execute(_id, p) {
@@ -123,7 +123,7 @@ export function createOctillionExtension(reg: OctillionRegistry, opts: { allowCl
     pi.registerTool(defineTool({
       name: "finish_session",
       label: "Finish session",
-      description: "End the session: collect the diff, report completion and delete the sandbox. Call exactly once per session.",
+      description: "End the session: collect the diff, report completion and delete the sandbox. Refused while the agent is resumable and not done (must_continue=true). Call exactly once per session.",
       parameters: Type.Object({
         session: Type.String(),
         status: Type.Union([Type.Literal("completed"), Type.Literal("failed")]),
@@ -133,8 +133,10 @@ export function createOctillionExtension(reg: OctillionRegistry, opts: { allowCl
       async execute(_id, p) {
         reg.toolCalls++;
         const s = reg.session(p.session);
+        const refusal = s.finishRefusal();
+        if (refusal) throw new Error(`finish_session refused: ${refusal}`);
         const r = await s.finish({ status: p.status, note: p.note, orchestrator: { orchestrator: "pi", orchestrator_tool_calls: reg.toolCalls, ...(reg.metaFn?.() ?? {}) } });
-        return text({ finished: true, status: r.status });
+        return text({ finished: true, status: r.status, completed_reason: s.completedReason });
       },
     }));
   };

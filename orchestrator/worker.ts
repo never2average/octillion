@@ -1,10 +1,10 @@
 /**
  * Octillion deterministic worker (no orchestrator LLM).
  *
- * Claims jobs, runs each harness once in a sandbox (boat.dev by default), streams its JSONL, then finishes:
- * git diff event, /complete, sandbox deleted. No simulated developer: if the sub-agent asks a question the
- * session simply ends there. The Pi orchestrator (pi-octillion/main.ts) adds the simulated-developer loop and
- * falls back to exactly this behaviour when its LLM fails.
+ * Claims jobs, runs the harness in a sandbox (boat.dev by default), streams its JSONL and, while the agent stops
+ * before it is done (core/progress.ts), resumes it with neutral canned developer nudges (core/session.ts
+ * driveToDone) up to MAX_AGENT_TURNS. Then finishes: git diff event, /complete, sandbox deleted. The Pi
+ * orchestrator (pi-octillion/main.ts) adds the in-character simulated developer and falls back to this driver.
  *
  * Run: `npx tsx orchestrator/worker.ts`
  */
@@ -12,19 +12,19 @@ import { getAdapter } from "./harnesses/adapters.js";
 import { CFG } from "./core/config.js";
 import { PodPool, POOL } from "./core/pool.js";
 import { RUNNERS, checkRunner, type Runner } from "./core/runners.js";
-import { activeSessions, adapterFor, claimJobs, markShuttingDown, WorkerSession, type Job } from "./core/session.js";
+import { activeSessions, adapterFor, claimJobs, driveToDone, markShuttingDown, WorkerSession, type Job } from "./core/session.js";
 import { log, sleep } from "./core/util.js";
 import { CREDENTIALS_MODE, orchestratorCredentials, redact } from "./core/credentials.js";
 import { assertOrchestratorHost } from "./core/host-guard.js";
 import { holdBusy, markBusy, startIdleWatcher } from "./core/activity.js";
 import { FLEET, FleetMembership } from "./core/fleet-client.js";
 
-/** Launch -> wait -> finish. Also the fallback path of the Pi orchestrator. */
+/** Launch -> nudge until done (or a cap) -> finish. Also the fallback path of the Pi orchestrator. */
 export async function runDeterministic(job: Job, runner: Runner, orchestrator: Record<string, unknown> = { orchestrator: "none" }): Promise<void> {
   let s: WorkerSession;
   try { s = await WorkerSession.start(job, runner); }
   catch { return; } // already completed as failed (unsupported harness / missing key)
-  await s.waitForTurn();
+  await driveToDone(s).catch((e) => log(`[${job.session_id}] nudge loop stopped:`, String(e)));
   await s.finish({ orchestrator });
 }
 

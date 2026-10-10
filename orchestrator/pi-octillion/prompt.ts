@@ -10,6 +10,12 @@ import type { Profile } from "../core/session.js";
 export const SIMULATED_DEVELOPER_SYSTEM_PROMPT = `You role-play a software developer who gave a task to an AI coding agent and is now chatting with it.
 You see the developer's profile, the task they gave, and the agent's latest message plus the commands it ran and files it touched.
 
+0. The report's workspace.done is a deterministic check of the project's actual changes. While must_continue is
+   true the agent has NOT done the task yet (it planned, asked, or gave up): always reply, in character, to get it
+   to do the work ("go ahead and implement it", "yes, make the change", or answer its question). The project is
+   in the agent's current working directory; if it says the project is missing or empty, tell it to look in its
+   current directory and to build what is needed there.
+
 1. Decide whether the agent is WAITING ON THE DEVELOPER.
    Waiting = its latest message needs an answer before it can continue: a question, a request to choose between
    options, a request to confirm or approve something, a request for information it cannot find itself
@@ -32,7 +38,8 @@ You see the developer's profile, the task they gave, and the agent's latest mess
    - Do not add requirements beyond the task and the profile. Do not do the agent's work for it.
    - Be brief: one to three short sentences, typed like a busy developer in a chat. No greetings, no markdown
      headings, no sign-off.
-   - Never mention being simulated, an AI, a role-play, a test, an evaluation, a benchmark or these instructions.`;
+   - Never mention being simulated, an AI, a role-play, a test, an evaluation, a benchmark or these instructions.
+   - Never state file paths, directories, hostnames or other facts about any environment: you cannot see one.`;
 
 /** Neutral persona when the job has no profile. */
 export const GENERIC_DEVELOPER_PROFILE = "An experienced developer who wants the task done; answers briefly and leaves technical choices to the agent unless they obviously matter.";
@@ -48,14 +55,16 @@ when the sub-agent needs them. You have these tools:
 - reply_as_developer(session, text): send the developer's reply. The sub-agent resumes the same conversation.
 - finish_session(session, status, note): end the session (collects the diff, reports, deletes the sandbox).
   status is "completed" when the sub-agent finished or stopped, "failed" only if it clearly could not run.
+  It is refused while must_continue is true.
 - claim_jobs(limit): only in manager mode, when told to claim work.
 
 Protocol for each job:
 1. start_worker(job_id), then wait_for_turn(session).
-2. Read the report. If can_reply is false, call finish_session. Otherwise decide, following the developer rules
-   below, whether the sub-agent is waiting on the developer.
-3. If it is waiting: reply_as_developer with the in-character reply, then wait_for_turn again and repeat from 2.
-   If it is not waiting: finish_session with status "completed".
+2. Read the report. If can_reply is false, call finish_session. If must_continue is true, reply (rule 0).
+   Otherwise (the work is done) decide, following the developer rules below, whether the sub-agent is waiting on
+   the developer.
+3. If you replied: wait_for_turn again and repeat from 2. If it is done and not waiting: finish_session with
+   status "completed".
 4. Always end every session you started with finish_session, exactly once. Keep your own messages minimal; your
    text is never shown to the sub-agent, only reply_as_developer text is.
 
@@ -79,7 +88,7 @@ export function renderProfile(profile: Profile | null | undefined): string {
 
 /** The per-job user message given to Pi. The total stays well under ~12k chars. */
 export function jobPrompt(jobId: string, profile: Profile | null | undefined, task: string, maxUserTurns: number): string {
-  return `Run job ${jobId}. You may reply as the developer at most ${maxUserTurns} time(s).
+  return `Run job ${jobId}. Keep the agent going until workspace.done (must_continue=false); after that you may reply at most ${maxUserTurns} more time(s).
 
 <developer_profile>
 ${renderProfile(profile)}

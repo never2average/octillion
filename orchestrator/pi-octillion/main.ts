@@ -22,7 +22,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { CFG, ORCH, env } from "../core/config.js";
 import type { Runner } from "../core/runners.js";
-import { isShuttingDown, markShuttingDown, type Job } from "../core/session.js";
+import { driveToDone, isShuttingDown, markShuttingDown, type Job } from "../core/session.js";
 import { log } from "../core/util.js";
 import { claimLoop, runDeterministic } from "../worker.js";
 import { CREDENTIALS_MODE, orchestratorCredentials, redact } from "../core/credentials.js";
@@ -147,8 +147,9 @@ export async function runJobWithPi(job: Job, runner: Runner, brain: Brain): Prom
     log(`[${job.session_id}] Pi never started the worker; running it without the simulated developer`);
     await runDeterministic(job, runner, { ...orchestrator, orchestrator: "fallback" });
   } else if (!s.finished) {
-    if (!piError) log(`[${job.session_id}] Pi left the session open; finishing it`);
-    await s.waitForTurn();
+    if (!piError) log(`[${job.session_id}] Pi left the session open; continuing it deterministically until done`);
+    // Not done yet (Pi stopped early or failed): keep the agent going with neutral nudges up to the turn cap.
+    await driveToDone(s).catch((e) => log(`[${job.session_id}] nudge loop stopped:`, String(e)));
     await s.finish({ orchestrator: { ...orchestrator, orchestrator: "pi+fallback" } });
   }
 }

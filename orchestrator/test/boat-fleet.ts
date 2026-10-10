@@ -76,6 +76,7 @@ interface Sb { id: string; name: string; alive: boolean; files: Map<string, stri
 const sandboxes = new Map<string, Sb>();
 const createTimes: number[] = [];
 let throttled = 0, created = 0;
+const seenIdem = new Set<string>();
 const liveByGroup: Record<string, number> = {}, maxByGroup: Record<string, number> = {};
 const groupOf = (name: string) => (/opus/.test(name) ? "claude-code/opus" : /sonnet/.test(name) ? "claude-code/sonnet" : "?");
 let nextPid = 100;
@@ -99,7 +100,10 @@ const boat = http.createServer((req, res) => {
     if (u === "/me") return json(res, 200, { ok: true, user: { login: "mock" } });
     if (req.method === "POST" && u === "/sandboxes") {
       const now = Date.now();
-      if (createTimes.filter((t) => now - t < 2000).length >= 3) { throttled++; return json(res, 429, { ok: false, code: "rate_limited", message: "slow down" }, { "retry-after": "1" }); }
+      // Rate limit: >= 3 creates in 2s, and (deterministically) the first attempt of the first two creates.
+      const idem = String(req.headers["idempotency-key"] ?? "");
+      const firstTry = idem && !seenIdem.has(idem); if (idem) seenIdem.add(idem);
+      if (createTimes.filter((t) => now - t < 2000).length >= 3 || (firstTry && seenIdem.size <= 2)) { throttled++; return json(res, 429, { ok: false, code: "rate_limited", message: "slow down" }, { "retry-after": "1" }); }
       createTimes.push(now);
       const id = `bx_${randomBytes(4).toString("hex")}`;
       created++;
@@ -140,6 +144,8 @@ const boat = http.createServer((req, res) => {
           const lines = stream([tail[1]!]);
           if (lines.length) frame({ type: "stdout", data: lines.join("\n") + "\n" });
         }
+        // The mock agent "added left-pad": a dependency change, so the done check passes after one run.
+        if (/diff\.sh/.test(cmd)) frame({ type: "stdout", data: 'diff --git a/package.json b/package.json\n--- a/package.json\n+++ b/package.json\n@@ -1 +1 @@\n-{}\n+{"dependencies":{"left-pad":"^1.3.0"}}\n' });
         res.end(JSON.stringify({ type: "exit", exitCode: 0 }) + "\n");
         return;
       }

@@ -360,6 +360,39 @@ Each orchestrator runs up to `POD_CAPACITY` (≤ 20) warm Docker pods. N orchest
   (with `OCTILLION_URL` and the token set) or the standalone plan.
 - **Boat parity (next).** The same semantics on boat would mean N warm VMs per group, forked from per-harness named snapshots (the registry's `image.boat_snapshot`).
 
+## Run until done (starter workspaces, done check, 100-turn cap)
+
+**Why** (live, 2026-10-10, ses_LgbgZJQTay6N): a scenario without `repo_url` ran in an empty `/home/agent/work`.
+- Codex said "The workspace at `/home/agent/work` is empty, so I can't inspect or modify the service yet."
+- Pi answered with a path from its own host ("The project location I have is `/tmp/octillion-pi-…/cwd`").
+- The session ended after 22-41s with an empty diff and verdict `none`.
+
+**Starter workspaces** (`workspaces/<template>/`, `core/workspaces.ts`):
+- The templates are `express-ts`, `nextjs-ts`, `node-ts`, `fastapi`, `django` and `go-http`.
+- Each is a small, neutral project: framework only, no dev-tool SDKs.
+- When a scenario has no `repo_url`, the runner writes the template into the workdir and commits it as "Initial commit". The diff, and so the done check, is taken against that commit.
+- Selection is deterministic, in this order:
+  1. the scenario's `template` (research or `save_scenarios`);
+  2. then `language`;
+  3. then keywords in the tags, title and prompt;
+  4. then `node-ts` as the fallback.
+
+**Done check** (`core/progress.ts`, deterministic; runs after every run):
+- Done = the workspace diff is non-empty and changes code, a dependency manifest or config.
+- Empty, docs-only, tests-only or lockfile-only diffs are not done.
+
+**Loop:**
+- While the agent is resumable and not done, the developer must reply. `wait_for_turn` reports `must_continue`, and `finish_session` is refused.
+- Pi nudges in character. Without Pi, or as its safety net, `driveToDone` sends neutral canned nudges ("Please go ahead and implement it in this project.").
+- Ends:
+  - when done;
+  - at `MAX_AGENT_TURNS` (100), counted in harness terms (`core/turns.ts`), summed across resumes and enforced natively where possible (Claude `--max-turns`), otherwise by SIGTERM to the CLI;
+  - at `MAX_SESSION_MINUTES`;
+  - after `GIVE_UP_RUNS` (3) nudged runs that change nothing.
+- `completed_reason` (done | turn_cap | time_cap | agent_gave_up | error) goes to `/complete`, the `agent_sessions.completed_reason` column, `get_agent_session` and `get_simulation`.
+
+Test: `npx tsx orchestrator/test/run-until-done.ts` (fake Codex CLI on the local runner, mock worker API, 12 checks).
+
 ## Transcript sink (`TRANSCRIPT_SINK`)
 
 | mode | behaviour |
@@ -389,9 +422,10 @@ Heartbeats and `/complete` always go to the API. The server recounts events from
 | `ORCHESTRATOR_MODE` | - | `research`: a research-only worker that never claims coding-agent sessions |
 | `FLEET_MODE` | `server` | `server` or `standalone`. For `RUNNER=boat`, `off` means plain `WORKER_CONCURRENCY` with no per-group caps |
 | `BOAT_STARTS_PER_MINUTE` / `BOAT_STARTS_PER_HOUR` | `10` / `50` | client-side start gate per orchestrator (plan: 12/60/200 per minute/hour/day). 429s back off |
-| launcher tuning | | The launcher forwards only these non-secret knobs from its own env into orchestrator env files: `MAX_SESSION_MINUTES`, `MAX_BUDGET_USD`, `MAX_USER_TURNS`, `ORCHESTRATOR_THINKING`, `BOAT_SANDBOX_SIZE`, `RESEARCH_MAX_COST_USD` |
+| launcher tuning | | The launcher forwards only these non-secret knobs from its own env into orchestrator env files: `MAX_SESSION_MINUTES`, `MAX_BUDGET_USD`, `MAX_USER_TURNS`, `MAX_AGENT_TURNS`, `GIVE_UP_RUNS`, `ORCHESTRATOR_THINKING`, `BOAT_SANDBOX_SIZE`, `RESEARCH_MAX_COST_USD`, `OCTILLION_ORCH_IDLE_MINUTES` (the autoscaler forwards the server's values) |
 | `WORKER_CONCURRENCY` | `2` | parallel sessions for boat, docker and local. For the pool, capacity is the pod count |
 | `MAX_SESSION_MINUTES` (45), `MAX_USER_TURNS` (5) | | hard kill, then `timeout`; default reply cap |
+| `MAX_AGENT_TURNS` (100), `GIVE_UP_RUNS` (3) | | agent-turn cap per session (summed over resumes; Claude gets `--max-turns`); nudged runs without any workspace change before `agent_gave_up` |
 | `WORKER_ID`, `WORKER_MODELS`, `WORKER_HARNESS`, `MAX_BUDGET_USD` | | claim filters; `MAX_BUDGET_USD` applies per Claude run |
 | `POLL_INTERVAL_SECONDS` (5), `FLUSH_INTERVAL_MS` (2000), `HEARTBEAT_SECONDS` (60) | | |
 | `ORCHESTRATOR_ID` | hostname | stable identity for orchestrator credentials, fleet check-in and the pod owner label |

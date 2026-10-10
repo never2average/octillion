@@ -24,6 +24,8 @@ export interface ArgvOptions {
   /** Absolute workdir inside the sandbox (the process cwd is already set to it by the runner). */
   workdir: string;
   maxBudgetUsd?: string;
+  /** Agent turns left in this session (MAX_AGENT_TURNS minus turns used). Passed natively where the CLI has a flag. */
+  maxTurns?: number;
   /** Binary override (local runner only). */
   bin?: string;
 }
@@ -39,6 +41,8 @@ export interface TurnDigest {
   sessionId: string | null;
   /** The harness reported an error in-band (e.g. Claude `result.is_error`, Codex `turn.failed`). */
   error: string | null;
+  /** The run stopped at the harness's own turn limit (e.g. Claude `error_max_turns`); not a failure. */
+  capped?: boolean;
 }
 
 export interface HarnessAdapter {
@@ -91,6 +95,7 @@ const claudeCode: HarnessAdapter = {
     "--model", o.model,
     "--dangerously-skip-permissions",
     ...(o.maxBudgetUsd ? ["--max-budget-usd", o.maxBudgetUsd] : []),
+    ...(o.maxTurns ? ["--max-turns", String(o.maxTurns)] : []),
   ],
   resumeArgv: (o) => [
     o.bin ?? "claude", "-p",
@@ -99,6 +104,7 @@ const claudeCode: HarnessAdapter = {
     "--model", o.model,
     "--dangerously-skip-permissions",
     ...(o.maxBudgetUsd ? ["--max-budget-usd", o.maxBudgetUsd] : []),
+    ...(o.maxTurns ? ["--max-turns", String(o.maxTurns)] : []),
   ],
   newDigest() {
     const d: TurnDigest = { lastText: "", commands: [], files: [], sessionId: null, error: null };
@@ -120,7 +126,8 @@ const claudeCode: HarnessAdapter = {
         }
         if (ev.type === "result") {
           if (typeof ev.result === "string" && ev.result.trim()) resultText = ev.result;
-          if (ev.is_error) d.error = String(ev.result ?? ev.subtype ?? "claude error").slice(0, 1000);
+          if (ev.subtype === "error_max_turns") d.capped = true; // --max-turns reached: the session's turn cap
+          else if (ev.is_error) d.error = String(ev.result ?? ev.subtype ?? "claude error").slice(0, 1000);
         }
       },
       result: () => ({ ...d, lastText: resultText ?? d.lastText }),

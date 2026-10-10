@@ -19,6 +19,7 @@ COPY orchestrator/fleet ./orchestrator/fleet
 COPY orchestrator/harnesses/adapters.ts orchestrator/harnesses/credentials.ts ./orchestrator/harnesses/
 COPY orchestrator/images ./orchestrator/images
 COPY orchestrator/pi-octillion ./orchestrator/pi-octillion
+COPY orchestrator/workspaces ./orchestrator/workspaces
 USER node
 EXPOSE 3333
 HEALTHCHECK --interval=30s --timeout=5s CMD node -e "fetch('http://127.0.0.1:3333/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"

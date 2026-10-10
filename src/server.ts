@@ -68,7 +68,7 @@ function summarize(d: Data): string {
         : "No simulations yet. Launch one with run_simulation.";
     case "simulation": {
       const s = d.simulation;
-      return `Simulation ${s.id} "${s.name}" for ${s.product}: ${s.status}. ${d.totals.sessions} agent sessions (${Object.entries(d.status).map(([k, v]) => `${v} ${k}`).join(", ")}). Hit rate ${pct(d.totals.hit_rate)} over ${d.totals.scored} scored. Verdicts: ${Object.entries(d.verdicts).map(([k, v]) => `${k} ${v}`).join(", ") || "none yet"}. By agent: ${d.by_agent.map((a: any) => `${a.label} ${pct(a.hit_rate)} (n=${a.scored})`).join(", ")}.${d.capacity ? ` Capacity: ${d.capacity.message}` : ""}`;
+      return `Simulation ${s.id} "${s.name}" for ${s.product}: ${s.status}. ${d.totals.sessions} agent sessions (${Object.entries(d.status).map(([k, v]) => `${v} ${k}`).join(", ")}). Hit rate ${pct(d.totals.hit_rate)} over ${d.totals.scored} scored. Verdicts: ${Object.entries(d.verdicts).map(([k, v]) => `${k} ${v}`).join(", ") || "none yet"}.${Object.keys(d.completed_reasons ?? {}).length ? ` Ended: ${Object.entries(d.completed_reasons).map(([k, v]) => `${k} ${v}`).join(", ")}.` : ""} By agent: ${d.by_agent.map((a: any) => `${a.label} ${pct(a.hit_rate)} (n=${a.scored})`).join(", ")}.${d.capacity ? ` Capacity: ${d.capacity.message}` : ""}`;
     }
     case "report": {
       const t = d.totals;
@@ -77,7 +77,7 @@ function summarize(d: Data): string {
     case "session": {
       const s = d.session;
       const ev = (s.mentions ?? []).map((m: any) => `${m.tool}: ${m.level}${m.evidence[0] ? ` (#${m.evidence[0].seq} "${m.evidence[0].snippet}")` : ""}`);
-      return `Session ${s.id}: ${s.model} on "${s.scenario}" (${s.product})${s.profile ? ` as ${s.profile}` : ""}, ${s.status}, ${s.user_turns} questions answered by the simulated developer. Verdict: ${s.verdict ?? "not scored yet"}${s.winner ? `, went with ${s.winner}` : ""}. ${s.events} transcript events.${ev.length ? ` Evidence: ${ev.join("; ")}.` : ""}${s.error_message ? ` Error: ${s.error_message}.` : ""}`;
+      return `Session ${s.id}: ${s.model} on "${s.scenario}" (${s.product})${s.profile ? ` as ${s.profile}` : ""}, ${s.status}${s.completed_reason ? ` (${s.completed_reason}${s.agent_turns != null ? ` after ${s.agent_turns} agent turns` : ""})` : ""}, ${s.user_turns} questions answered by the simulated developer. Verdict: ${s.verdict ?? "not scored yet"}${s.winner ? `, went with ${s.winner}` : ""}. ${s.events} transcript events.${ev.length ? ` Evidence: ${ev.join("; ")}.` : ""}${s.error_message ? ` Error: ${s.error_message}.` : ""}`;
     }
     case "transcript":
       return `Transcript of ${d.session_id} (${d.model}, "${d.scenario}", verdict ${d.verdict ?? "pending"}): events ${d.total ? d.offset + 1 : 0}-${d.offset + d.events.length} of ${d.total}.`;
@@ -310,6 +310,8 @@ export function createServer(org: Org): McpServer {
         prompt: z.string().optional().describe("The task given to the agent"),
         repo_url: z.string().optional().describe("Optional starter git repo cloned into the sandbox"),
         language: z.string().optional(),
+        template: z.enum(["express-ts", "nextjs-ts", "node-ts", "fastapi", "django", "go-http", "auto"]).optional()
+          .describe("Starter project seeded into the sandbox when there is no repo_url. Omit (or 'auto') to pick from language, tags and prompt"),
         tags: z.array(z.string()).optional(),
         expectation: z.enum(["recommend", "avoid"]).optional(),
         active: z.boolean().optional(),

@@ -19,6 +19,7 @@ import { loadRegistry } from "../fleet/plan.js";
 import { randomUUID } from "node:crypto";
 import { PassThrough, type Readable } from "node:stream";
 import type { HarnessAdapter } from "../harnesses/adapters.js";
+import { seedBase, seedScript, type TemplateId } from "./workspaces.js";
 import { BOAT, BOAT_PRICE_PER_HOUR, CFG } from "./config.js";
 import { HttpError, log, sh, shq, sleep, withRetry } from "./util.js";
 import { boatApi, boatCommandRetry, boatCreate, boatExec, boatExecStream, boatSandboxPath, BoatError } from "./boat.js";
@@ -45,6 +46,11 @@ export interface Sandbox {
   runTurn(argv: string[], input: string, env: Record<string, string>): Promise<Turn>;
   /** Unified diff of everything the agent changed (vs the cloned commit, or vs empty). null if unavailable. */
   diff(): Promise<string | null>;
+  /**
+   * Stop the current harness run gracefully (SIGTERM to the CLI), keeping the sandbox and its workspace: used when
+   * the session's agent-turn cap is reached mid-run. Optional; without it the run continues until the deadline.
+   */
+  stopTurn?(): Promise<void>;
   /** Hard-stop (idempotent). */
   kill(): Promise<void>;
   /** Free resources (idempotent). */
@@ -55,6 +61,11 @@ export interface Sandbox {
 export interface OpenSpec {
   adapter: HarnessAdapter;
   repoUrl: string | null;
+  /**
+   * Starter workspace (orchestrator/workspaces/<template>) seeded and committed when there is no repoUrl, so the
+   * agent sees an existing project. The diff is taken against that commit. null/undefined = empty workdir.
+   */
+  template?: TemplateId | null;
   /** Raw job harness id (pool runner picks a pod by it). */
   harness?: string;
   /** Host-side job key (Octillion session id) for pool reservations. Never passed into a sandbox. */
@@ -149,6 +160,10 @@ export const dockerRunner: Runner = {
       const c = await sh("docker", ["exec", name, "git", "clone", "--depth", "1", "-q", spec.repoUrl, AGENT_WORKDIR]);
       if (c.code !== 0) { await rmContainer(); throw new Error(`git clone failed: ${c.out.slice(-500)}`); }
       base = (await sh("docker", ["exec", name, "git", "-C", AGENT_WORKDIR, "rev-parse", "HEAD"])).out.trim();
+    } else if (spec.template) {
+      const c = await sh("docker", ["exec", "-e", `W=${AGENT_WORKDIR}`, name, "bash", "-c", seedScript(spec.template)]);
+      if (c.code !== 0) { await rmContainer(); throw new Error(`workspace seed failed: ${c.out.slice(-500)}`); }
+      base = seedBase(c.out);
     }
     let current: ChildProcess | null = null;
     let killed = false;
@@ -166,6 +181,7 @@ export const dockerRunner: Runner = {
         const r = await sh("docker", ["exec", "-e", `BASE=${base}`, "-e", `WORK=${AGENT_WORKDIR}`, "-e", "SNAP=/tmp/.octi-snap.git", name, "bash", "-c", DIFF_SCRIPT]);
         return r.code === 0 ? capDiff(r.out) : null;
       },
+      async stopTurn() { await sh("docker", ["exec", name, "bash", "-c", "pkill -TERM -u agent || true"]); },
       async kill() {
         if (killed) return;
         killed = true;
@@ -209,6 +225,13 @@ export const localRunner: Runner = {
         throw new Error(`git clone failed: ${r.out.slice(-500)}`);
       }
       base = (await sh("git", ["-C", work, "rev-parse", "HEAD"], { env: baseEnv })).out.trim();
+    } else if (spec.template) {
+      const r = await sh("bash", ["-c", seedScript(spec.template)], { env: { ...baseEnv, W: work } });
+      if (r.code !== 0) {
+        await rm(root, { recursive: true, force: true });
+        throw new Error(`workspace seed failed: ${r.out.slice(-500)}`);
+      }
+      base = seedBase(r.out);
     }
     let current: ChildProcess | null = null;
     const killGroup = () => {
@@ -228,6 +251,7 @@ export const localRunner: Runner = {
         const r = await sh("bash", ["-c", DIFF_SCRIPT], { env: { ...baseEnv, WORK: work, SNAP: join(root, "snap.git"), BASE: base } });
         return r.code === 0 ? capDiff(r.out) : null;
       },
+      async stopTurn() { try { if (current?.pid) process.kill(-current.pid, "SIGTERM"); } catch { /* already gone */ } },
       async kill() { killGroup(); },
       async cleanup() { killGroup(); await rm(root, { recursive: true, force: true }).catch(() => {}); },
       meta: () => ({}),
@@ -255,10 +279,13 @@ function boatRunAs(): string {
   return BOAT.agentUser === "agent" ? "sudo -n -u agent -H" : "";
 }
 
-function boatPrepareScript(bin: string, repoUrl: string | null): string {
+function boatPrepareScript(bin: string, repoUrl: string | null, seed = false): string {
+  // Seed: the template script is read by this (Boat) user's shell and piped to the agent user's bash.
   const clone = repoUrl
     ? `$RUN git clone --depth 1 -q ${shq(repoUrl)} "$W" </dev/null\n$RUN git -C "$W" rev-parse HEAD > "$O/base"`
-    : ":";
+    : seed
+      ? `$RUN env -i HOME="$AH" PATH="$(cat "$O/path")" W="$W" bash -s < "$O/seed.sh" | tail -n 1 > "$O/base"\ntest -s "$O/base"`
+      : ":";
   return `set -euo pipefail
 cd /
 O=${BOAT_DIR}; AH=${AGENT_HOME}; W=${AGENT_WORKDIR}
@@ -413,7 +440,9 @@ export const boatRunner: Runner = {
       }
       const ensure = await boatExec(id, boatEnsureHarnessScript(spec.adapter.id, spec.adapter.bin, pin, !!setup), 600);
       if (ensure.exitCode !== 0) throw new Error(`harness ${spec.adapter.id}${pin ? `@${pin}` : ""} not available: ${(ensure.stderr || ensure.stdout).slice(-800)}`);
-      await put(`${BOAT_DIR}/prepare.sh`, boatPrepareScript(spec.adapter.bin, spec.repoUrl));
+      const seed = !spec.repoUrl && !!spec.template;
+      if (seed) await put(`${BOAT_DIR}/seed.sh`, seedScript(spec.template!));
+      await put(`${BOAT_DIR}/prepare.sh`, boatPrepareScript(spec.adapter.bin, spec.repoUrl, seed));
       await put(`${BOAT_DIR}/diff.sh`, boatDiffScript());
       const prep = await boatExec(id, `bash ${BOAT_DIR}/prepare.sh`, 600);
       if (prep.exitCode !== 0) throw new Error(`sandbox prepare failed (exit ${prep.exitCode}): ${(prep.stderr || prep.stdout).slice(-800)}`);
@@ -519,6 +548,11 @@ export const boatRunner: Runner = {
         }
         return capDiff(d);
       },
+      async stopTurn() {
+        // The harness runs under `timeout -k 30 <limit>`; GNU timeout forwards SIGTERM to the CLI.
+        if (abort.signal.aborted) return;
+        await boatExec(id, "sudo -n pkill -TERM -f '^timeout -k 30 ' || pkill -TERM -f '^timeout -k 30 ' || true", 30).catch(() => {});
+      },
       async kill() {
         await destroy(); // DELETE force-stops the VM; aborting ends any follower
         finishCurrent?.({ code: null, signal: "SIGKILL" });
@@ -527,6 +561,7 @@ export const boatRunner: Runner = {
       meta() {
         const secs = ((destroyedAt ?? Date.now()) - createdAt) / 1000;
         return {
+          ...(spec.template && !spec.repoUrl ? { workspace_template: spec.template } : {}),
           boat_sandbox_id: id,
           boat_sandbox_type: BOAT.size,
           boat_sandbox_seconds: Math.round(secs),

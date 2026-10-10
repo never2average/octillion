@@ -1,6 +1,6 @@
 import { getDb } from "./db.js";
 import { randomId, type Org } from "./auth.js";
-import { config, getProduct, resolveProduct, runSimulation, saveProduct, browseTaskLibrary } from "./queries.js";
+import { WORKSPACE_TEMPLATES, config, getProduct, resolveProduct, runSimulation, saveProduct, browseTaskLibrary } from "./queries.js";
 import type { Tool } from "./scoring.js";
 import { capacityStatus } from "./autoscaler.js";
 
@@ -19,7 +19,9 @@ export interface ResearchResult {
              aliases?: string[]; packages?: string[]; domains?: string[]; competitors?: Tool[] };
   personas: { name: string; summary?: string; attributes?: Record<string, unknown>; instructions?: string }[];
   scenarios: { title?: string; prompt: string; language?: string; tags?: string[]; expectation?: "recommend" | "avoid";
-               rationale?: string; library_task_id?: number; repo_url?: string | null }[];
+               rationale?: string; library_task_id?: number; repo_url?: string | null;
+               /** Optional starter workspace (orchestrator/workspaces/<template>) for scenarios without repo_url. */
+               template?: string | null }[];
   sources?: { url: string; title?: string }[];
 }
 
@@ -117,6 +119,12 @@ export async function researchProgress(id: string, stage: string, note?: string)
   await (await getDb()).query("UPDATE product_research SET stage = $2, note = $3, heartbeat_at = now() WHERE id = $1", [id, String(stage).slice(0, 40), note?.slice(0, 500) ?? null]);
 }
 
+/** Research may suggest a starter workspace; unknown values are dropped (the orchestrator then picks one). */
+function researchTemplate(t: unknown): string | null {
+  const v = typeof t === "string" ? t.trim().toLowerCase() : "";
+  return (WORKSPACE_TEMPLATES as readonly string[]).includes(v) ? v : null;
+}
+
 export function libraryTasks(q: { query?: string; category?: string; language?: string; limit?: number }) {
   return browseTaskLibrary(q).then((r) => ({ tasks: r.tasks, categories: r.categories }));
 }
@@ -157,6 +165,8 @@ export function validateResearch(r: ResearchResult | undefined): string[] {
     const prompt = s?.prompt?.trim() ?? "";
     if (prompt.length < 40 || prompt.length > 2000) issues.push(`scenarios[${i}].prompt must be 40-2000 characters (got ${prompt.length})`);
     if (s?.expectation && !["recommend", "avoid"].includes(s.expectation)) issues.push(`scenarios[${i}].expectation must be recommend or avoid`);
+    if (s?.template && !(WORKSPACE_TEMPLATES as readonly string[]).includes(String(s.template).toLowerCase()))
+      issues.push(`scenarios[${i}].template must be one of ${WORKSPACE_TEMPLATES.join(", ")} (or null)`);
     const leak = named(`${s?.title ?? ""} ${prompt}`, [...productWords, ...competitorWords]);
     if (leak.length) issues.push(`scenarios[${i}] names ${leak.join(", ")}; rephrase it as a neutral task that never names the product or competitors`);
   });
@@ -215,10 +225,11 @@ export async function completeResearch(id: string, body: { status?: string; erro
     for (const s of r.scenarios) {
       const prompt = s.prompt.trim();
       await tx.query(
-        `INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, library_task_id, source, rationale)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $9, $10)`,
+        `INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, library_task_id, source, rationale, template)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $9, $10, $11)`,
         [job.product_id, s.title?.trim() || prompt.slice(0, 80), prompt, s.repo_url ?? null, s.language ?? null, s.tags ?? [],
-         s.expectation ?? "recommend", s.library_task_id ?? null, s.library_task_id ? "library" : "generated", s.rationale ?? null]);
+         s.expectation ?? "recommend", s.library_task_id ?? null, s.library_task_id ? "library" : "generated", s.rationale ?? null,
+         researchTemplate(s.template)]);
     }
     await tx.query(
       "UPDATE product_research SET status = 'completed', stage = 'done', result = $2, finished_at = now(), heartbeat_at = now() WHERE id = $1",

@@ -22,6 +22,10 @@ export const CFG = {
   models: env.WORKER_MODELS ? env.WORKER_MODELS.split(",").map((s) => s.trim()).filter(Boolean) : undefined,
   harness: env.WORKER_HARNESS || undefined,
   defaultMaxUserTurns: num(env.MAX_USER_TURNS, 5),
+  /** Hard cap on agent turns (model responses / steps) per session, summed across launch + resumes. */
+  maxAgentTurns: Math.max(1, num(env.MAX_AGENT_TURNS, 100)),
+  /** Consecutive nudged runs with no workspace change (and not done) before the session ends as agent_gave_up. */
+  giveUpRuns: Math.max(1, num(env.GIVE_UP_RUNS, 3)),
   dockerImage: env.SANDBOX_IMAGE ?? "octillion-sandbox:latest",
   dockerNetwork: env.DOCKER_NETWORK || undefined,
   dockerCpus: env.DOCKER_CPUS ?? "2",

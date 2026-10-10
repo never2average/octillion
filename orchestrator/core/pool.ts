@@ -26,6 +26,7 @@ import { planFleet } from "../fleet/plan.js";
 import { CFG, env, num } from "./config.js";
 import type { Runner, Sandbox, RunExit, Turn } from "./runners.js";
 import { DIFF_SCRIPT, capDiff, AGENT_WORKDIR, AGENT_HOME, imageEnv, dockerExecHarness } from "./runners.js";
+import { seedBase, seedScript } from "./workspaces.js";
 import { api, log, sh } from "./util.js";
 
 export const POOL = {
@@ -255,6 +256,10 @@ export class PodPool {
             const c = await exec([pod.name, "git", "clone", "--depth", "1", "-q", spec.repoUrl, AGENT_WORKDIR]);
             if (c.code !== 0) throw new Error(`git clone failed: ${c.out.slice(-500)}`);
             base = (await exec([pod.name, "git", "-C", AGENT_WORKDIR, "rev-parse", "HEAD"])).out.trim();
+          } else if (spec.template) {
+            const c = await exec(["-e", `W=${AGENT_WORKDIR}`, "-e", `HOME=${AGENT_HOME}`, pod.name, "bash", "-c", seedScript(spec.template)]);
+            if (c.code !== 0) throw new Error(`workspace seed failed: ${c.out.slice(-500)}`);
+            base = seedBase(c.out);
           }
         } catch (e) { await pool.recycle(pod); throw e; }
         let current: ChildProcess | null = null;
@@ -277,6 +282,7 @@ export class PodPool {
             const r = await exec(["-e", `BASE=${base}`, "-e", `WORK=${AGENT_WORKDIR}`, "-e", "SNAP=/tmp/.octi-snap.git", "-e", `HOME=${AGENT_HOME}`, pod.name, "bash", "-c", DIFF_SCRIPT]);
             return r.code === 0 ? capDiff(r.out) : null;
           },
+          async stopTurn() { await sh("docker", ["exec", pod.name, "bash", "-c", "pkill -TERM -u agent || true"]); },
           kill: destroy,
           cleanup: destroy,
           meta: () => ({ pool_agent: pod.agentId, pool_harness: pod.harness, pool_model: pod.model, pool_image: pod.image, pool_orchestrator: pool.orchestratorId }),
