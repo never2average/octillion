@@ -1,7 +1,9 @@
 # Octillion production stack, self-hosted: Postgres + ClickHouse + server + Caddy (TLS).
 #   cd deploy && ./bootstrap.sh            # generates .env with strong secrets (once)
 #   docker compose -f docker-compose.prod.yml --env-file .env up -d --build
-# Only Caddy publishes ports (80/443). Postgres and ClickHouse are reachable inside the compose network only.
+# Only Caddy publishes ports (80/443). Postgres (and the optional local ClickHouse) are reachable inside the
+# compose network only. Transcripts go to ClickHouse Cloud when CLICKHOUSE_URL is set; for a local ClickHouse
+# instead, leave it unset and add --profile local-clickhouse.
 
 name: octillion
 
@@ -48,8 +50,11 @@ services:
     volumes:
       - pg_backups:/backups
 
+  # Local ClickHouse is opt-in (profile local-clickhouse). Production uses ClickHouse Cloud: set CLICKHOUSE_URL,
+  # CLICKHOUSE_USER and CLICKHOUSE_APP_PASSWORD in .env. Without them the server falls back to this container.
   clickhouse:
     image: docker.io/clickhouse/clickhouse-server:25.12
+    profiles: ["local-clickhouse"]
     restart: unless-stopped
     user: "101:101"
     environment:
@@ -74,16 +79,16 @@ services:
     restart: unless-stopped
     depends_on:
       postgres: { condition: service_healthy }
-      clickhouse: { condition: service_healthy }
+      clickhouse: { condition: service_healthy, required: false }
     environment:
       NODE_ENV: production
       HOST: 0.0.0.0
       PORT: 3333
       PUBLIC_URL: ${PUBLIC_URL:?set PUBLIC_URL, e.g. https://octillion.example.com}
       DATABASE_URL: postgres://octillion:${POSTGRES_PASSWORD}@postgres:5432/octillion
-      CLICKHOUSE_URL: http://clickhouse:8123
-      CLICKHOUSE_USER: octillion
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_URL: ${CLICKHOUSE_URL:-http://clickhouse:8123}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-octillion}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_APP_PASSWORD:-${CLICKHOUSE_PASSWORD}}
       CLICKHOUSE_DATABASE: octillion
       OCTILLION_VAULT_KEY: ${OCTILLION_VAULT_KEY:?run bootstrap.sh}
       OCTILLION_ADMIN_TOKEN: ${OCTILLION_ADMIN_TOKEN:?run bootstrap.sh}
