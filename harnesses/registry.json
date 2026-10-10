@@ -300,7 +300,9 @@
       "adapter_evidence": "captured-fixture",
       "enabled": true,
       "notes": "PROXY: most Copilot agent usage is VS Code agent mode / the cloud coding agent, which cannot run headless. The Copilot CLI is GitHub's terminal agent with the same models and is used here as the stand-in for the whole Copilot share. 'auto' is a documented --model value; the CLI's own default model is not documented. Token must belong to an account with a Copilot seat.",
-      "model_mix": "Model mix: not split, no public per-model shares. Claude Sonnet 5.5, GPT-6.1-Sol and Gemini 3.8 Flash are all selectable via --model (verified in the 1.0.95 catalog)."
+      "model_mix": "Model mix: not split, no public per-model shares. Claude Sonnet 5.5, GPT-6.1-Sol and Gemini 3.8 Flash are all selectable via --model (verified in the 1.0.95 catalog).",
+      "paused": true,
+      "paused_reason": "no credentials yet (2026-10-10); runs on Anthropic + OpenAI keys only for now"
     },
     {
       "id": "cursor/auto",
@@ -335,7 +337,9 @@
       "adapter_evidence": "synthesized-fixture",
       "enabled": true,
       "notes": "PROXY: most Cursor usage is the IDE agent; cursor-agent is Cursor's own headless agent and stands in for it. Auto is the IDE default; Auto routes mostly to Composer 2.x (vantage.sh, artificialanalysis.ai), but the routing mix is not public. Version is Cursor's build id; image downloads the pinned tarball from downloads.cursor.com.",
-      "model_mix": "Model mix: not split, no public shares; Auto routes between Composer and frontier models server-side. Model slugs come from Cursor's server (`cursor-agent models` needs auth), so other slugs could not be verified offline."
+      "model_mix": "Model mix: not split, no public shares; Auto routes between Composer and frontier models server-side. Model slugs come from Cursor's server (`cursor-agent models` needs auth), so other slugs could not be verified offline.",
+      "paused": true,
+      "paused_reason": "no credentials yet (2026-10-10); runs on Anthropic + OpenAI keys only for now"
     },
     {
       "id": "opencode/sonnet",
@@ -403,7 +407,9 @@
       "adapter_evidence": "captured-fixture",
       "enabled": true,
       "notes": "PROXY for the Antigravity IDE (JetBrains: 6% work adoption). 'default' = omit --model. API-key auth needs modelProvider \"gemini\" in ~/.gemini/antigravity-cli/settings.json (docs); write it at session setup. Verified headless with no TTY (docker exec -i) against a mock endpoint on 2026-10-10; with no --model it called gemini-3.1-pro-preview.3.3-5524738307653632 with sha512.",
-      "model_mix": "Model mix: not split; no published shares (with no --model, our mock run called gemini-3.1-pro-preview)."
+      "model_mix": "Model mix: not split; no published shares (with no --model, our mock run called gemini-3.1-pro-preview).",
+      "paused": true,
+      "paused_reason": "no credentials yet (2026-10-10); runs on Anthropic + OpenAI keys only for now"
     },
     {
       "id": "gemini-cli/auto",
@@ -436,7 +442,9 @@
       "adapter_evidence": "captured-fixture",
       "enabled": true,
       "notes": "Google is steering users to Antigravity; Gemini CLI npm downloads fell ~40% since April 2026. 'auto' lets the CLI route between Pro/Flash (its default).",
-      "model_mix": "Model mix: not split. Default Auto routes each prompt between Pro and Flash (gemini-3.1-pro-preview and gemini-3.x-flash ids present in 0.63.0); no usage shares published, and Auto already reflects the default mix."
+      "model_mix": "Model mix: not split. Default Auto routes each prompt between Pro and Flash (gemini-3.1-pro-preview and gemini-3.x-flash ids present in 0.63.0); no usage shares published, and Auto already reflects the default mix.",
+      "paused": true,
+      "paused_reason": "no credentials yet (2026-10-10); runs on Anthropic + OpenAI keys only for now"
     },
     {
       "id": "pi/opus",
@@ -568,7 +576,9 @@
       "adapter_evidence": "synthesized-fixture",
       "enabled": true,
       "notes": "Long-tail share (~0.4%, ±100%): no survey coverage, 20k npm downloads/wk. Amp picks the model via its mode (low/medium/high/ultra); 'default' = omit --mode. --stream-json is documented as Claude Code-compatible. Amp does not ask for tool approval. npm name is now @ampcode/cli.",
-      "model_mix": "Model mix: not split. Amp maps modes to models (medium = Claude Opus 5.5, ultra = Claude Fable 5.1) but publishes no mode shares."
+      "model_mix": "Model mix: not split. Amp maps modes to models (medium = Claude Opus 5.5, ultra = Claude Fable 5.1) but publishes no mode shares.",
+      "paused": true,
+      "paused_reason": "no credentials yet (2026-10-10); runs on Anthropic + OpenAI keys only for now"
     },
     {
       "id": "droid/default",
@@ -599,7 +609,9 @@
       "adapter_evidence": "captured-fixture",
       "enabled": true,
       "notes": "Long-tail share (~0.4%, ±100%), mostly enterprise; most installs use the curl script, so npm (11k/wk) undercounts. Default model gpt-6-sol per `droid exec --help` in 0.238.0.",
-      "model_mix": "Model mix: not split. No published shares (Amplifying lists Factory as unmeasured); default gpt-6-sol per --help."
+      "model_mix": "Model mix: not split. No published shares (Amplifying lists Factory as unmeasured); default gpt-6-sol per --help.",
+      "paused": true,
+      "paused_reason": "no credentials yet (2026-10-10); runs on Anthropic + OpenAI keys only for now"
     },
     {
       "id": "qwen-code/default",
@@ -630,7 +642,9 @@
       "adapter_evidence": "captured-fixture",
       "enabled": true,
       "notes": "Gemini CLI fork. Western surveys miss Chinese usage, so this is likely an undercount. Qwen OAuth free tier ended 2026-04-15; use a DashScope key (or OPENAI_API_KEY+OPENAI_BASE_URL+OPENAI_MODEL). Model qwen3-coder-plus via the DashScope OpenAI-compatible endpoint (adapter sets OPENAI_BASE_URL); unverified as the most-used choice.",
-      "model_mix": "Model mix: not split; no published shares."
+      "model_mix": "Model mix: not split; no published shares.",
+      "paused": true,
+      "paused_reason": "no credentials yet (2026-10-10); runs on Anthropic + OpenAI keys only for now"
     },
     {
       "id": "junie",

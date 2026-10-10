@@ -17,7 +17,7 @@ export function listAgents() {
     sources: r.sources ?? [],
     agents: r.agents.map((a) => ({ id: a.id, label: a.label, vendor: a.vendor ?? null, harness: a.harness, model: a.model,
                                     harness_version: a.harness_version ?? null, weight: a.enabled === false ? 0 : a.weight,
-                                    enabled: isRunnable(a), status: isRunnable(a) ? "running" : a.enabled === false ? "not runnable headless" : "adapter pending",
+                                    enabled: isRunnable(a), status: isRunnable(a) ? "running" : a.enabled === false ? "not runnable headless" : a.paused ? `paused${a.paused_reason ? `: ${a.paused_reason}` : ""}` : "adapter pending",
                                     notes: a.notes ?? null })),
     default_samples: config.defaultSamples(),
   };

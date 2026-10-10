@@ -14,6 +14,7 @@ export interface AgentSpec {
   vendor?: string; harness_version?: string; event_format?: string;
   image?: { docker?: string; boat_snapshot?: string }; requires_env?: string[]; notes?: string;
   worker_adapter?: "supported" | "todo" | string;  // whether orchestrator workers can run this harness yet
+  paused?: boolean; paused_reason?: string;          // operator switch: keep the agent defined but don't sample or pod it
 }
 export interface Registry { version: number; as_of?: string; unrepresented_share?: number; sources?: unknown[]; agents: AgentSpec[] }
 
@@ -35,7 +36,7 @@ export function registry(): Registry {
   return reg;
 }
 
-export const isRunnable = (a: AgentSpec) => a.enabled !== false && a.weight > 0 && a.worker_adapter !== "todo";
+export const isRunnable = (a: AgentSpec) => a.enabled !== false && a.weight > 0 && a.worker_adapter !== "todo" && !a.paused;
 
 /** Share of enabled (representable) usage that workers can run today, 0..1. */
 export function runnableCoverage(): number {
