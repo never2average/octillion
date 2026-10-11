@@ -69,7 +69,7 @@ const slugify = (s: string) => s.toLowerCase().normalize("NFKD").replace(/[^a-z0
 export async function resolveProduct(org: Org, ref?: string | number): Promise<ProductRow> {
   const db = await getDb();
   const rows = await db.query<ProductRow>("SELECT * FROM products WHERE org_id = $1 ORDER BY id", [org.orgId]);
-  if (!rows.length) throw new Error("No products configured yet. Create one with save_product first.");
+  if (!rows.length) throw new Error("No products yet. Start with onboard_product: a short description of the product plus its website and docs links (or save_product to enter the details by hand).");
   if (ref === undefined || ref === "") {
     if (rows.length === 1) return rows[0];
     throw new Error(`Several products exist (${rows.map((r) => r.slug).join(", ")}); pass product.`);

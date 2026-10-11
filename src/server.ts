@@ -58,7 +58,7 @@ function summarize(d: Data): string {
     case "products":
       return d.products.length
         ? `${d.org.name} has ${d.products.length} product(s): ${d.products.map((p: any) => `${p.name} [${p.slug}] (${p.scenarios} scenarios, ${p.sessions_30d} scored runs in 30d, hit rate ${pct(p.hit_rate_30d)})`).join("; ")}.`
-        : `${d.org.name} has no products yet. Use save_product to describe one (name, description, aliases, packages, competitors).`;
+        : `${d.org.name} has no products yet. Start with onboard_product: a short description plus the website and docs links, and Octillion researches the rest (or use save_product to enter the details by hand).`;
     case "product": {
       const p = d.product;
       return `${p.name} [${p.slug}]: ${p.description || "(no description)"} Category: ${p.category || "n/a"}. Aliases: ${p.aliases.join(", ") || "none"}. Packages: ${p.packages.join(", ") || "none"}. Competitors: ${p.competitors.map((c) => c.name).join(", ") || "none"}. ${d.scenarios.length} scenarios (${d.scenarios.filter((s: any) => s.active).length} active)${d.scenarios.length ? `: ${d.scenarios.map((s: any) => `#${s.id} ${s.title} (${s.expectation}, hit ${pct(s.hit_rate)} of ${s.sessions})`).join("; ")}` : ""}. Worker agents: ${d.agents.map((a: any) => `${a.id} (${pct(a.weight)})`).join(", ")}.${d.warnings.length ? ` Warnings: ${d.warnings.join(" ")}` : ""}`;

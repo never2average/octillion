@@ -261,7 +261,7 @@ try {
 
   // ---------- configure ----------
   assert.equal((await call(A, "list_products")).products.length, 0);
-  await fails(A, "get_visibility_report", {}, /No products configured/);
+  await fails(A, "get_visibility_report", {}, /No products yet\. Start with onboard_product/);
   const product = await call(A, "save_product", DEMO_PRODUCT);
   assert.equal(product.product.slug, "relayq");
   assert.equal(product.product.competitors.length, 3);
