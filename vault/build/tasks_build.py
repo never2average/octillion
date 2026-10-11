@@ -1,8 +1,9 @@
+import os
 """Stages 2-3: classify WildChat candidates (gpt-6.1-sol, batched), rewrite the keepers blind (gpt-6.1-sol), vendor-check them.
   python tasks_build.py CANDIDATES.jsonl OUT.json [max_rewrites]
 Every LLM reply is cached, so re-running after more candidates arrive only pays for the new ones.
 """
-import glob, os, json, re, sys, collections
+import glob, json, re, sys, collections
 from concurrent.futures import ThreadPoolExecutor
 import pyarrow.parquet as pq
 import llm
@@ -108,9 +109,13 @@ def rewrite(item):
             continue
         if not (60 <= len(r["prompt"]) <= 1200):
             return None
-        return {"id": f"wc-{c['source_id'][:12]}", "title": r["title"], "prompt": r["prompt"], "language": r.get("language"),
+        so = c.get("source") == "pacovaldez/stackoverflow-questions"
+        # WildChat ids keep their historical form (conversation hash prefix); others use the candidate's content hash.
+        tid = f"so-{c['hash'][:12]}" if so else f"wc-{c['source_id'][:12]}"
+        return {"id": tid, "title": r["title"], "prompt": r["prompt"], "language": r.get("language"),
                 "category": r.get("category") or l["category"], "tags": r.get("tags") or [], "template": r["template"],
-                "source": {"dataset": "allenai/WildChat-4.8M", "conversation_hash": c["source_id"], "license": "ODC-BY-1.0",
+                "source": {"dataset": c.get("source", "allenai/WildChat-4.8M"), "source_id": c["source_id"],
+                           "license": c.get("license", "ODC-BY-1.0"),
                            "original_vendors_named": l.get("vendors_named") or [], "rewritten_by": "gpt-6.1-sol"}}
     return None
 

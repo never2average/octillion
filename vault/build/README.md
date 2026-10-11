@@ -8,7 +8,7 @@ python -m venv .venv && .venv/bin/pip install pyarrow pandas huggingface_hub
 export OPENAI_API_KEY=... VAULT_BUILD_WORK=/tmp/vault-work
 export SO_SURVEY_PARQUET=/path/to/survey_2025.parquet   # Stack Overflow Developer Survey 2025, ODbL
 # Tasks: WildChat-4.8M shards (one shard on disk at a time), then classify + blind rewrite + vendor check.
-.venv/bin/python wildchat_extract.py $VAULT_BUILD_WORK/wc 0 70
+.venv/bin/python wildchat_extract.py $VAULT_BUILD_WORK/wc 0 86
 .venv/bin/python tasks_build.py $VAULT_BUILD_WORK/wc/candidates.jsonl ../curated/tasks.json 50
 # Personas: random respondents (professional developers who use AI agents at work), written blind.
 .venv/bin/python so_personas.py ../curated/profiles.json 150
@@ -21,7 +21,23 @@ Rules the build enforces:
   against the survey's own database/platform/AI answer options plus well-known dev-tool vendors; failures are rewritten
   or dropped). Languages and the starter project's framework are allowed.
 - Personal data is dropped at classification and stripped at rewrite.
-- Shards above 69 are skipped on small machines: loading one needs about 4.5 GB of RAM.
 
 Next source: [SALT-NLP/SWE-chat](https://huggingface.co/datasets/SALT-NLP/SWE-chat) (real Claude Code / Codex sessions,
 ODC-BY, gated: accept its terms on Hugging Face with the account whose token this machine uses).
+
+## More sources and round 2
+
+- `so_extract.py`: Stack Overflow questions (`pacovaldez/stackoverflow-questions`, CC BY-SA 4.0) whose title asks how to
+  add a capability (email, payments, feature flags, analytics, jobs, storage, ...). Code blocks and HTML are stripped.
+- `round2.py`: unclassified WildChat candidates in thin categories + a quota-weighted Stack Overflow sample.
+
+## Placing tasks in example repositories
+
+`vault/curated/repos.json` lists 44 permissively licensed apps, pinned to commits, with the capabilities each already has.
+Placement is done by Claude subagents, not a paid API:
+
+1. `prep_place.py` merges task rounds, writes `vendors.json` and splits tasks into per-stack chunks (`place/*.json`).
+2. One subagent per chunk rewrites each task into a fitting repo (same stack, capability not already present, balanced
+   across repos), adds `repo_url` = `<url>#<commit>`, keeps the original as `generic_prompt`, and must pass
+   `check_placed.py <chunk> <output>` (ids unchanged, exact pinned URL, no vendor names, no URLs/emails, length bounds).
+3. `merge_placed.py` re-validates every chunk and writes the final library.

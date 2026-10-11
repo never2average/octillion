@@ -22,3 +22,18 @@ written by the model. Each profile records the survey `ResponseId` it came from.
 survey data and are made available under ODbL 1.0.
 
 Data obtained via the Hugging Face mirror `yeper/stack-overflow-developer-survey` (`survey_2025.parquet`).
+
+## Stack Overflow questions
+
+Some tasks derive from Stack Overflow questions via the Hugging Face dataset `pacovaldez/stackoverflow-questions`.
+Stack Overflow user content is licensed under **CC BY-SA 4.0**; tasks adapted from it (marked `"dataset":
+"pacovaldez/stackoverflow-questions"` in `source`) are shared under the same license, with attribution to the original
+Stack Overflow authors.
+
+## Example repositories (`repos.json`)
+
+44 open-source applications (7-8 per stack: Express/NestJS, Next.js, FastAPI, Django, Go, Node CLIs/bots), each pinned to
+a commit. Tasks placed in a repository carry `repo_url` as `<url>#<commit>`, and the sandbox fetches exactly that commit.
+Every repository is under a permissive license (MIT, Apache-2.0 or BSD-2-Clause, recorded per entry) and is cloned
+unmodified into isolated sandboxes; Octillion does not redistribute their code. `capabilities_present` lists what each
+app already implements, so tasks never ask for something the codebase already does.

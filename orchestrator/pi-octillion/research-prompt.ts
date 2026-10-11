@@ -40,7 +40,9 @@ Procedure:
    they answer a coding agent's questions (brief, what they care about, what they defer to the agent). Personas must
    NOT mention the product, its competitors, their packages or domains. They answer the agent blind.
 4. Problems. First search_library for tasks that fit the product's use case. Prefer fitting library tasks: include
-   them with library_task_id and your rationale. Then create new problems until you are within the scenario limits.
+   them with library_task_id and your rationale, and copy their title and prompt verbatim (many are written for a
+   specific pinned open-source repository, which Octillion attaches automatically). Then create new problems until
+   you are within the scenario limits.
    Each problem must:
    - be written in the voice of a developer asking a coding agent, first person, like a real chat message or ticket;
    - be specific: a concrete stack and versions where natural, an existing-app context (what the app is, what exists

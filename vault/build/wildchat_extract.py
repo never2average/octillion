@@ -44,9 +44,12 @@ out = open(out_path, "a")
 for i in range(start, end):
     name = f"data/train-{i:05d}-of-00086.parquet"
     path = hf_hub_download("allenai/WildChat-4.8M", name, repo_type="dataset", cache_dir=cache)
-    t = pq.read_table(path, columns=["conversation_hash", "language", "conversation", "toxic", "redacted", "timestamp"])
+    pf = pq.ParquetFile(path)
     kept = 0
-    for row in t.to_pylist():
+    # Batches keep memory flat: a whole shard as Python objects needs ~4.5 GB.
+    rows_iter = (row for b in pf.iter_batches(batch_size=2000, columns=["conversation_hash", "language", "conversation", "toxic",
+                                                                         "redacted", "timestamp"]) for row in b.to_pylist())
+    for row in rows_iter:
         if row["language"] != "English" or row["toxic"]:
             continue
         conv = row["conversation"] or []
@@ -70,4 +73,4 @@ for i in range(start, end):
         kept += 1
     out.flush()
     os.remove(os.path.realpath(path))
-    print(f"shard {i}: {t.num_rows} rows -> {kept} candidates (total {len(seen)})", flush=True)
+    print(f"shard {i}: {pf.metadata.num_rows} rows -> {kept} candidates (total {len(seen)})", flush=True)

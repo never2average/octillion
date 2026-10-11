@@ -226,15 +226,18 @@ export async function completeResearch(id: string, body: { status?: string; erro
       const prompt = s.prompt.trim();
       // A library task without an explicit template keeps the starter workspace it was written for.
       let template = researchTemplate(s.template);
-      if (!template && s.library_task_id) {
-        const [t] = await tx.query<{ template: string | null }>(
-          "SELECT attributes->>'template' AS template FROM library_tasks WHERE id = $1", [s.library_task_id]);
-        template = researchTemplate(t?.template);
+      let repoUrl = s.repo_url ?? null;
+      if (s.library_task_id) {
+        // Curated tasks are written for a specific pinned repo (or starter): keep the task and its codebase together.
+        const [t] = await tx.query<{ template: string | null; repo_url: string | null }>(
+          "SELECT attributes->>'template' AS template, repo_url FROM library_tasks WHERE id = $1", [s.library_task_id]);
+        if (!template) template = researchTemplate(t?.template);
+        if (!repoUrl) repoUrl = t?.repo_url ?? null;
       }
       await tx.query(
         `INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, library_task_id, source, rationale, template)
          VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $9, $10, $11)`,
-        [job.product_id, s.title?.trim() || prompt.slice(0, 80), prompt, s.repo_url ?? null, s.language ?? null, s.tags ?? [],
+        [job.product_id, s.title?.trim() || prompt.slice(0, 80), prompt, repoUrl, s.language ?? null, s.tags ?? [],
          s.expectation ?? "recommend", s.library_task_id ?? null, s.library_task_id ? "library" : "generated", s.rationale ?? null,
          template]);
     }

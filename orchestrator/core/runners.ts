@@ -94,6 +94,30 @@ const LOCK_ONLY = LOCKFILES.map((f) => `':(glob)**/${f}'`).join(" ");
  * workdir so the agent never sees a .git it did not create) and BASE (cloned commit, optional).
  * Lockfile changes are listed by name only ("# lockfile changed: ...").
  */
+/**
+ * A repo URL may pin a commit (or tag/branch) after "#": https://github.com/acme/app#3f2c1d0. Pinned repos fetch exactly
+ * that commit, so every run of a scenario sees the identical codebase; unpinned ones clone the default branch.
+ */
+export function parseRepoUrl(raw: string): { url: string; ref: string | null } {
+  const i = raw.lastIndexOf("#");
+  if (i < 0) return { url: raw, ref: null };
+  const ref = raw.slice(i + 1);
+  if (!/^[\w][\w.\/-]{0,199}$/.test(ref)) throw new Error(`Invalid repo ref "${ref}"`);
+  return { url: raw.slice(0, i), ref };
+}
+
+/** Clone URL (at REF when set) into W; prints the checked-out commit last. Inputs come from the environment. */
+export const CLONE_SCRIPT = `set -euo pipefail
+if [ -n "\${REF:-}" ]; then
+  git init -q "$W"
+  git -C "$W" remote add origin "$URL"
+  git -C "$W" fetch -q --depth 1 origin "$REF"
+  git -C "$W" checkout -q FETCH_HEAD
+else
+  git clone --depth 1 -q "$URL" "$W"
+fi
+git -C "$W" rev-parse HEAD`;
+
 export const DIFF_SCRIPT = `cd "$WORK" 2>/dev/null || exit 0
 G="git -c core.quotepath=off -c safe.directory=*"
 if [ -d .git ]; then
@@ -164,9 +188,10 @@ export const dockerRunner: Runner = {
     const rmContainer = () => sh("docker", ["rm", "-f", name]).then(() => {});
     let base = "";
     if (spec.repoUrl) {
-      const c = await sh("docker", ["exec", name, "git", "clone", "--depth", "1", "-q", spec.repoUrl, AGENT_WORKDIR]);
+      const { url, ref } = parseRepoUrl(spec.repoUrl);
+      const c = await sh("docker", ["exec", "-e", `URL=${url}`, "-e", `REF=${ref ?? ""}`, "-e", `W=${AGENT_WORKDIR}`, name, "bash", "-c", CLONE_SCRIPT]);
       if (c.code !== 0) { await rmContainer(); throw new Error(`git clone failed: ${c.out.slice(-500)}`); }
-      base = (await sh("docker", ["exec", name, "git", "-C", AGENT_WORKDIR, "rev-parse", "HEAD"])).out.trim();
+      base = c.out.trim().split("\n").pop() ?? "";
     } else if (spec.template) {
       const c = await sh("docker", ["exec", "-e", `W=${AGENT_WORKDIR}`, name, "bash", "-c", seedScript(spec.template)]);
       if (c.code !== 0) { await rmContainer(); throw new Error(`workspace seed failed: ${c.out.slice(-500)}`); }
@@ -226,12 +251,13 @@ export const localRunner: Runner = {
     };
     let base = "";
     if (spec.repoUrl) {
-      const r = await sh("git", ["clone", "--depth", "1", "-q", spec.repoUrl, work], { env: baseEnv });
+      const { url, ref } = parseRepoUrl(spec.repoUrl);
+      const r = await sh("bash", ["-c", CLONE_SCRIPT], { env: { ...baseEnv, URL: url, REF: ref ?? "", W: work } });
       if (r.code !== 0) {
         await rm(root, { recursive: true, force: true });
         throw new Error(`git clone failed: ${r.out.slice(-500)}`);
       }
-      base = (await sh("git", ["-C", work, "rev-parse", "HEAD"], { env: baseEnv })).out.trim();
+      base = r.out.trim().split("\n").pop() ?? "";
     } else if (spec.template) {
       const r = await sh("bash", ["-c", seedScript(spec.template)], { env: { ...baseEnv, W: work } });
       if (r.code !== 0) {
@@ -288,8 +314,9 @@ function boatRunAs(): string {
 
 function boatPrepareScript(bin: string, repoUrl: string | null, seed = false): string {
   // Seed: the template script is read by this (Boat) user's shell and piped to the agent user's bash.
-  const clone = repoUrl
-    ? `$RUN git clone --depth 1 -q ${shq(repoUrl)} "$W" </dev/null\n$RUN git -C "$W" rev-parse HEAD > "$O/base"`
+  const repo = repoUrl ? parseRepoUrl(repoUrl) : null;
+  const clone = repo
+    ? `$RUN env URL=${shq(repo.url)} REF=${shq(repo.ref ?? "")} W="$W" bash -c ${shq(CLONE_SCRIPT)} </dev/null | tail -n 1 > "$O/base"\ntest -s "$O/base"`
     : seed
       ? `$RUN env -i HOME="$AH" PATH="$(cat "$O/path")" W="$W" bash -s < "$O/seed.sh" | tail -n 1 > "$O/base"\ntest -s "$O/base"`
       : ":";
