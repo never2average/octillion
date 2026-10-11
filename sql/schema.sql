@@ -404,3 +404,18 @@ INSERT INTO model_prices (model, input_per_mtok, cached_input_per_mtok, output_p
   ('@cf/deepseek-ai/deepseek-v4-pro-0813', 1.32, 0.044, 3.96, 'Cloudflare Workers AI pricing, 2026-10-10'),
   ('@cf/openai/gpt-oss-120b',              0.35, 0.35,  0.75, 'Cloudflare Workers AI pricing, 2026-10-10 (no cached rate listed)')
 ON CONFLICT (model) DO NOTHING;
+
+-- Per-organization MCP activity (src/analytics.ts): connector methods and tool calls with outcome and latency.
+-- Tool arguments and results are never stored.
+CREATE TABLE IF NOT EXISTS mcp_events (
+  id      BIGSERIAL PRIMARY KEY,
+  org_id  INT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  method  TEXT NOT NULL,                     -- initialize, tools/list, tools/call, prompts/get, resources/read, ...
+  name    TEXT,                              -- tool or prompt name, or resource URI
+  client  TEXT,                              -- clientInfo on initialize, else the User-Agent
+  ok      BOOLEAN NOT NULL DEFAULT true,
+  error   TEXT,
+  ms      INT
+);
+CREATE INDEX IF NOT EXISTS mcp_events_org_idx ON mcp_events (org_id, at DESC);

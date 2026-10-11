@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createServer, runTool, TOOL_NAMES, WIDGET_HTML, type ToolName } from "./server.js";
+import { connectorEvents, recordMcpEvent } from "./analytics.js";
 import { bearer, isWorkerToken, resolveKey, type Org } from "./auth.js";
 import { getDb } from "./db.js";
 import { parseJsonl, transcripts, type RawEvent } from "./transcripts.js";
@@ -69,6 +70,7 @@ export function createApp() {
   // Keys arrive as `Authorization: Bearer oct_...` or in the connector URL, /mcp/oct_..., for hosts that
   // only take a URL. Stateless: a fresh server per request, bound to the caller's org.
   const mcp = async (req: Request, res: Response, org: Org) => {
+    for (const e of connectorEvents(req.body, req.get("user-agent"))) recordMcpEvent(org.orgId, e);
     const server = createServer(org);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on("close", () => { transport.close(); server.close(); });

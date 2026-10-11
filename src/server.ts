@@ -8,6 +8,7 @@ import { z } from "zod";
 import * as q from "./queries.js";
 import * as research from "./research.js";
 import type { Org } from "./auth.js";
+import { recordMcpEvent } from "./analytics.js";
 
 /** Hosts (ChatGPT in particular) cache the template by URI: bump the version on breaking HTML/JS changes. */
 export const WIDGET_URI = "ui://octillion/dashboard-v2.html";
@@ -155,8 +156,10 @@ export function fitPayload<T extends Record<string, any>>(data: T, budget = STRU
 
 /** Run a handler and shape its output as an MCP tool result (text for the model, structured data for the UI). */
 export async function runTool(org: Org, name: ToolName, args: Record<string, unknown>): Promise<CallToolResult> {
+  const t0 = performance.now();
   try {
     const data = await (handlersFor(org)[name] as (a: unknown) => Promise<Data>)(args ?? {});
+    recordMcpEvent(org.orgId, { method: "tools/call", name, ms: performance.now() - t0 });
     const structured = fitPayload(JSON.parse(JSON.stringify(data))); // Dates -> ISO strings
     const note = structured.truncated
       ? " (Result shortened to fit the host's size limit: page with offset/limit, lower limit, or narrow the filters for the rest.)"
@@ -166,6 +169,7 @@ export async function runTool(org: Org, name: ToolName, args: Record<string, unk
       structuredContent: structured,
     };
   } catch (err) {
+    recordMcpEvent(org.orgId, { method: "tools/call", name, ok: false, error: (err as Error).message, ms: performance.now() - t0 });
     return { isError: true, content: [{ type: "text", text: (err as Error).message }] };
   }
 }
