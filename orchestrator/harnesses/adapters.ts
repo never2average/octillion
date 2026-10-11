@@ -457,10 +457,12 @@ const antigravity: HarnessAdapter = {
 
 // ---------------------------------------------------------------- Pi
 
-/** Pi's Anthropic models default to first-party-only features (per-message effort markers + inline-tools beta, strict
- *  tools) that Vertex behind the gateway rejects; turn them off in pi's models.json (docs: models.md, compat). */
+/** Pi's Anthropic models default to first-party-only features (per-message effort markers, strict tools, and native
+ *  mid-conversation tool changes via the inline-tools beta) that Vertex behind the gateway rejects; turn them off in
+ *  pi's models.json (docs: models.md, compat; the last two flags gate pi-ai's nativeToolChanges). */
 const PI_SETUP = ensureFile(".pi/agent/models.json",
-  '{"providers":{"anthropic":{"compat":{"supportsMidConvoEffort":false,"supportsStrictTools":false}}}}');
+  '{"providers":{"anthropic":{"compat":{"supportsMidConvoEffort":false,"supportsStrictTools":false,' +
+  '"supportsMidConvoSystemMessages":false,"supportsMidConvoToolChanges":false}}}}');
 
 const pi: HarnessAdapter = {
   id: "pi",
