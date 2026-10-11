@@ -75,7 +75,12 @@ export function toVertex(cfg: VertexConfig, path: string, rawBody: Buffer, betaH
   if (!model) throw Object.assign(new Error("model is required"), { status: 400 });
   const vertexModel = cfg.model_map?.[model] ?? model;
   json.anthropic_version = VERSION;
-  const betas = (betaHeader ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  // Vertex lags the first-party API: drop fields it rejects so third-party harnesses still work there.
+  // `thinking.block_binding` (preserved-thinking controls) is not accepted on Vertex; strict tool schemas count as
+  // structured outputs, which an organization policy may disallow for partner models. Tools work without `strict`.
+  if (json.thinking && typeof json.thinking === "object") delete (json.thinking as Record<string, unknown>).block_binding;
+  if (Array.isArray(json.tools)) for (const t of json.tools as Record<string, unknown>[]) if (t && typeof t === "object") delete t.strict;
+  const betas = (betaHeader ?? "").split(",").map((s) => s.trim()).filter((b) => b && !b.startsWith("thinking-binding-controls"));
   if (betas.length) json.anthropic_beta = [...new Set([...(Array.isArray(json.anthropic_beta) ? json.anthropic_beta as string[] : []), ...betas])];
   const loc = `${vertexBase(cfg)}/v1/projects/${encodeURIComponent(cfg.project_id)}/locations/${encodeURIComponent(cfg.region ?? "global")}/publishers/anthropic/models`;
   if (isCount) {
