@@ -20,7 +20,10 @@ const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 const PUBLIC_URL = () => (process.env.PUBLIC_URL ?? `http://127.0.0.1:${process.env.PORT ?? 3333}`).replace(/\/$/, "");
 const LEASE_MINUTES = () => Number(process.env.OCTILLION_LEASE_MINUTES ?? 30);
 const MAX_REQUESTS = () => Number(process.env.OCTILLION_GATEWAY_MAX_REQUESTS ?? 1000);
-const MAX_TOKENS = () => Number(process.env.OCTILLION_GATEWAY_MAX_TOKENS ?? 5_000_000);
+// Per-session budget. Cost is the real limit: token counts include cache reads, so long agent sessions re-read
+// millions of cheap cached tokens. The token cap is a backstop for models without a price.
+const MAX_TOKENS = () => Number(process.env.OCTILLION_GATEWAY_MAX_TOKENS ?? 30_000_000);
+const MAX_COST_USD = () => Number(process.env.OCTILLION_GATEWAY_MAX_COST_USD ?? 10);
 
 /** Requires-env fallback for sessions whose agent is not in the registry. */
 const HARNESS_ENV: Record<string, string[]> = { "claude-code": ["ANTHROPIC_API_KEY"], codex: ["CODEX_API_KEY", "OPENAI_API_KEY"] };
@@ -185,9 +188,9 @@ export async function gatewayHandler(req: Request, res: Response) {
   const p: ProviderRow | null = await getProvider(slug);
   if (!p?.enabled || p.mode !== "gateway" || (!p.upstream_url && p.backend !== "vertex")) return gwError(res, 404, "not_found_error", `No gateway provider ${slug}`);
 
-  const [used] = await db.query<{ requests: number; tokens: number }>(
-    "SELECT coalesce(sum(requests), 0) AS requests, coalesce(sum(input_tokens + output_tokens), 0) AS tokens FROM gateway_usage WHERE token_hash = $1", [hash]);
-  if (Number(used.requests) >= MAX_REQUESTS() || Number(used.tokens) >= MAX_TOKENS())
+  const [used] = await db.query<{ requests: number; tokens: number; cost: number }>(
+    "SELECT coalesce(sum(requests), 0) AS requests, coalesce(sum(input_tokens + output_tokens), 0) AS tokens, coalesce(sum(cost_usd), 0) AS cost FROM gateway_usage WHERE token_hash = $1", [hash]);
+  if (Number(used.requests) >= MAX_REQUESTS() || Number(used.tokens) >= MAX_TOKENS() || Number(used.cost) >= MAX_COST_USD())
     return gwError(res, 429, "octillion_budget_exceeded", "This session's gateway budget is used up");
 
   let cred: { id: number; secret: string };

@@ -57,8 +57,9 @@ The token is valid for 12h; refetch on 401 or near expiry.
 
 ## Gateway limits
 
-- **Per-session caps:** `OCTILLION_GATEWAY_MAX_REQUESTS` (default 1000) and `OCTILLION_GATEWAY_MAX_TOKENS`
-  (default 5M input+output). Over a cap the gateway returns 429 with
+- **Per-session caps:** `OCTILLION_GATEWAY_MAX_COST_USD` (default $10, the main limit),
+  `OCTILLION_GATEWAY_MAX_REQUESTS` (default 1000) and `OCTILLION_GATEWAY_MAX_TOKENS` (default 30M input+output, cache
+  reads included; a backstop for unpriced models). Over a cap the gateway returns 429 with
   `{"error": {"type": "octillion_budget_exceeded"}}`.
 - **Metering:** usage is recorded per session and provider: requests, input/output tokens parsed from JSON or SSE,
   and bytes.
