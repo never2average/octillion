@@ -204,7 +204,7 @@ export async function saveScenarios(org: Org, productRef: string | undefined, it
   const db = await getDb();
   await db.transaction(async (tx) => {
     for (let s of items) {
-      const template = checkTemplate(s.template);
+      let template = checkTemplate(s.template);
       if (s.id !== undefined) {
         const [row] = await tx.query(
           `UPDATE scenarios SET title = coalesce($3, title), prompt = coalesce($4, prompt), repo_url = coalesce($5, repo_url),
@@ -221,6 +221,8 @@ export async function saveScenarios(org: Org, productRef: string | undefined, it
           if (!t) throw new Error(`No library task ${s.library_task_id}; see browse_task_library`);
           s = { ...s, title: s.title ?? t.title, prompt: s.prompt ?? t.prompt, repo_url: s.repo_url ?? t.repo_url ?? undefined,
                 language: s.language ?? t.language ?? undefined, tags: s.tags ?? t.tags };
+          // Curated tasks carry the starter workspace they were written for.
+          if (template == null && (WORKSPACE_TEMPLATES as readonly string[]).includes(t.attributes?.template)) template = t.attributes.template;
         }
         if (!s.prompt?.trim()) throw new Error("New scenarios need a prompt (the task given to the agent) or a library_task_id");
         await tx.query(

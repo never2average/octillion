@@ -224,12 +224,19 @@ export async function completeResearch(id: string, body: { status?: string; erro
     }
     for (const s of r.scenarios) {
       const prompt = s.prompt.trim();
+      // A library task without an explicit template keeps the starter workspace it was written for.
+      let template = researchTemplate(s.template);
+      if (!template && s.library_task_id) {
+        const [t] = await tx.query<{ template: string | null }>(
+          "SELECT attributes->>'template' AS template FROM library_tasks WHERE id = $1", [s.library_task_id]);
+        template = researchTemplate(t?.template);
+      }
       await tx.query(
         `INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, library_task_id, source, rationale, template)
          VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $9, $10, $11)`,
         [job.product_id, s.title?.trim() || prompt.slice(0, 80), prompt, s.repo_url ?? null, s.language ?? null, s.tags ?? [],
          s.expectation ?? "recommend", s.library_task_id ?? null, s.library_task_id ? "library" : "generated", s.rationale ?? null,
-         researchTemplate(s.template)]);
+         template]);
     }
     await tx.query(
       "UPDATE product_research SET status = 'completed', stage = 'done', result = $2, finished_at = now(), heartbeat_at = now() WHERE id = $1",
