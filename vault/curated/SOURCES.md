@@ -42,10 +42,16 @@ original issue (`github.com/<org>/<repo>/issues/<n>`), whose text remains under 
 
 ## Generated tasks
 
-Tasks with `source.dataset` = `generated` (ids `gen-*`) have no upstream text. Claude subagents wrote them from 150
-original product ideas across 15 markets: agent-building and feature-flag tasks (`curate/GEN_BRIEF.md`) and
-Java/Rust/C++ service tasks (`curate/GEN_STACK_BRIEF.md`). They are checked by `check_generated.py` against the same
-blindness rules and are released under the same terms as the rest of this library.
+Tasks with `source.dataset` = `generated` (ids `gen-*`) have no upstream text. Claude subagents wrote them from:
+- 150 original product ideas across 15 markets: agent-building and feature-flag tasks (`curate/GEN_BRIEF.md`) and
+  Java/Rust/C++ service tasks (`curate/GEN_STACK_BRIEF.md`).
+- 460 startup ideas listed on ideabrowser.com (300 buildable products stratified by product type, plus all 160 service
+  ideas reimagined as agent products), `source.pattern` = `ideabrowser` with the idea's link in `source.ideabrowser_url`.
+  Only each idea's title and product type were used as inspiration; no ideabrowser text is reproduced. The number of
+  tasks per idea (0-6) is sized to the product, with a written rationale per idea (`curate/GEN_IDEA_BRIEF.md`,
+  `curate/GEN_SERVICE_ADDENDUM.md`).
+They are checked by `check_generated.py` against the same blindness rules and are released under the same terms as the
+rest of this library.
 
 ## Example repositories (`repos.json`)
 

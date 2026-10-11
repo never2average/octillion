@@ -43,6 +43,17 @@ for ideas in sorted(glob.glob(os.path.join(HERE, "curate/gens/*.json"))):
         skipped.append(os.path.basename(out)); continue
     tasks += json.load(open(out))
 
+# Generated from real ideabrowser ideas (idea mode: 0-6 tasks per idea, sized by the product).
+for ideas in sorted(glob.glob(os.path.join(HERE, "curate/geni/*.json"))):
+    out = ideas.replace("/geni/", "/geni-out/")
+    if not os.path.exists(out):
+        continue
+    r = subprocess.run([sys.executable, os.path.join(HERE, "check_generated.py"), ideas, out], capture_output=True, text=True,
+                       env={**os.environ, "GEN_MODE": "idea"})
+    if r.returncode:
+        skipped.append(os.path.basename(out)); continue
+    tasks += json.load(open(out))
+
 seen_ids, seen_titles, final, dups = set(), set(), [], 0
 for t in tasks:
     k = re.sub(r"\W+", " ", (t.get("generic_title") or t["title"]).lower()).strip()
