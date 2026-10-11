@@ -42,7 +42,11 @@ export const AUTOSCALE = {
   publicUrl: () => (env.PUBLIC_URL ?? "").replace(/\/$/, ""),
 };
 
-export interface Demand { sessions: number; queued_sessions: number; research: number; unclaimable_sessions: number }
+export interface Demand {
+  sessions: number; queued_sessions: number; research: number; unclaimable_sessions: number;
+  /** Claimable sessions queued after `freshSince` (only when computeDemand was given one). */
+  fresh_queued_sessions?: number;
+}
 export interface Row {
   id: number; sandbox_id: string | null; orchestrator_id: string | null; state: "booting" | "running" | "draining" | "deleted";
   created_at: Date; ready_at: Date | null; last_seen: Date | null; error: string | null; from_image: string | null;
@@ -54,17 +58,22 @@ export function desiredOrchestrators(d: Demand, podCapacity: number): number {
   return Math.max(s, d.research > 0 ? 1 : 0);
 }
 
-export async function computeDemand(): Promise<Demand> {
+export async function computeDemand(freshSince?: Date): Promise<Demand> {
   const db = await getDb();
   let agents: string[] = [];
   try { agents = scheduledAgents(await getPopulation()).map((a) => a.id); } catch { /* no population: count everything */ }
-  const [s] = await db.query<{ sessions: number; queued: number; unclaimable: number }>(
-    `SELECT count(*) FILTER (WHERE agent_id IS NULL OR cardinality($1::text[]) = 0 OR agent_id = ANY($1)) AS sessions,
-            count(*) FILTER (WHERE status = 'queued' AND (agent_id IS NULL OR cardinality($1::text[]) = 0 OR agent_id = ANY($1))) AS queued,
-            count(*) FILTER (WHERE NOT (agent_id IS NULL OR cardinality($1::text[]) = 0 OR agent_id = ANY($1))) AS unclaimable
-       FROM agent_sessions WHERE status IN ('queued', 'running')`, [agents]);
+  const claimable = "(agent_id IS NULL OR cardinality($1::text[]) = 0 OR agent_id = ANY($1))";
+  const [s] = await db.query<{ sessions: number; queued: number; unclaimable: number; fresh: number }>(
+    `SELECT count(*) FILTER (WHERE ${claimable}) AS sessions,
+            count(*) FILTER (WHERE status = 'queued' AND ${claimable}) AS queued,
+            count(*) FILTER (WHERE NOT ${claimable}) AS unclaimable,
+            count(*) FILTER (WHERE status = 'queued' AND ${claimable} AND $2::timestamptz IS NOT NULL AND queued_at > $2) AS fresh
+       FROM agent_sessions WHERE status IN ('queued', 'running')`, [agents, freshSince ?? null]);
   const [r] = await db.query<{ n: number }>("SELECT count(*) AS n FROM product_research WHERE status IN ('queued', 'running')");
-  return { sessions: Number(s?.sessions ?? 0), queued_sessions: Number(s?.queued ?? 0), research: Number(r?.n ?? 0), unclaimable_sessions: Number(s?.unclaimable ?? 0) };
+  return {
+    sessions: Number(s?.sessions ?? 0), queued_sessions: Number(s?.queued ?? 0), research: Number(r?.n ?? 0),
+    unclaimable_sessions: Number(s?.unclaimable ?? 0), ...(freshSince ? { fresh_queued_sessions: Number(s?.fresh ?? 0) } : {}),
+  };
 }
 
 export interface TickState {
@@ -131,7 +140,10 @@ export class Autoscaler {
     const db = await getDb();
     try {
       await this.boatKey();
-      const demand = await computeDemand();
+      // Sessions queued in the last FRESH_MS before an idle exit (or after it) were never ignored by a live orchestrator,
+      // so they are new work, not stuck work: they must not wait out the relaunch cooldown below.
+      const FRESH_MS = 2 * 60_000;
+      const demand = await computeDemand(this.lastDrainAt ? new Date(this.lastDrainAt - FRESH_MS) : undefined);
       st.demand = demand;
       const listing = await lib.listSandboxes();
       const byId = new Map(listing.map((s) => [s.id, s]));
@@ -199,8 +211,9 @@ export class Autoscaler {
       const cap = await this.cap(oursActive);
       let desired = Math.min(desiredOrchestrators(demand, AUTOSCALE.podCapacity()), cap);
       // An orchestrator just idled out while sessions are still "queued": they are not claimable by it; don't relaunch
-      // in a loop (each launch is a boat start). Research or new work after the cooldown restarts normally.
-      if (demand.research === 0 && demand.sessions > 0 && active === 0 && now - this.lastDrainAt < AUTOSCALE.idleMinutes() * min) {
+      // in a loop (each launch is a boat start). Research or freshly queued sessions launch right away.
+      if (demand.research === 0 && demand.sessions > 0 && !demand.fresh_queued_sessions && active === 0 &&
+          now - this.lastDrainAt < AUTOSCALE.idleMinutes() * min) {
         st.note = "cooldown: the last orchestrator idled out with these sessions still queued";
         desired = 0;
       }

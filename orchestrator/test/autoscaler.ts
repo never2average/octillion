@@ -135,6 +135,8 @@ try {
   // check-ins, then idle -> drain -> deleted, and no relaunch loop while the remaining queue is not claimable
   for (const r of r2) await fleet.fleetCheckin(r.orchestrator_id, 3);
   await db.query("UPDATE agent_sessions SET status = 'cancelled' WHERE status = 'queued' AND id NOT IN (SELECT id FROM agent_sessions WHERE status = 'queued' LIMIT 1)");
+  // The one left is "stuck": it sat queued for a while next to live orchestrators that never claimed it.
+  await db.query("UPDATE agent_sessions SET queued_at = now() - interval '15 minutes' WHERE status = 'queued'");
   const victim = r2[0];
   await fleet.fleetLeave(victim.orchestrator_id);
   await a1.tick();
@@ -144,6 +146,15 @@ try {
   await fleet.fleetLeave(r2[1].orchestrator_id);
   await a1.tick(); await a1.tick(); await a1.settle();
   check("cooldown: queued-but-unclaimed work does not relaunch in a loop", (await rows()).length === 0 && /cooldown/.test(a1.last?.note ?? ""), a1.last?.note ?? "");
+  // ...but a session queued now (a user clicking Run right after an idle exit) launches at once, not after the cooldown.
+  await queue(1);
+  await a1.tick(); await a1.settle();
+  check("cooldown: freshly queued work launches immediately", (await rows()).length >= 1 && !/cooldown/.test(a1.last?.note ?? ""),
+    `rows ${(await rows()).length}, note ${a1.last?.note ?? "-"}, fresh ${a1.last?.demand?.fresh_queued_sessions}`);
+  for (const r of await rows()) { await fleet.fleetCheckin(r.orchestrator_id, 3).catch(() => {}); }
+  await db.query("UPDATE agent_sessions SET status = 'cancelled' WHERE status IN ('queued', 'running')");
+  for (const r of await rows()) await fleet.fleetLeave(r.orchestrator_id).catch(() => {});
+  await a1.tick();
 
   // stale + stuck booting + orphan
   await db.query("UPDATE agent_sessions SET status = 'cancelled' WHERE status IN ('queued', 'running')");
