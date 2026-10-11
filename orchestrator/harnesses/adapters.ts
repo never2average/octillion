@@ -457,6 +457,11 @@ const antigravity: HarnessAdapter = {
 
 // ---------------------------------------------------------------- Pi
 
+/** Pi's Anthropic models default to first-party-only features (per-message effort markers + inline-tools beta, strict
+ *  tools) that Vertex behind the gateway rejects; turn them off in pi's models.json (docs: models.md, compat). */
+const PI_SETUP = ensureFile(".pi/agent/models.json",
+  '{"providers":{"anthropic":{"compat":{"supportsMidConvoEffort":false,"supportsStrictTools":false}}}}');
+
 const pi: HarnessAdapter = {
   id: "pi",
   supported: true,
@@ -465,8 +470,8 @@ const pi: HarnessAdapter = {
   env: (k) => ({ ...BASE_ENV, ...anthropicEnv(k) }),
   hasKey: (k) => !!envKey(k, "anthropic", "ANTHROPIC_API_KEY"),
   // Piped stdin is the prompt (verified). --model accepts "provider/id".
-  launchArgv: (o) => [o.bin ?? "pi", "-p", "--mode", "json", "--model", o.model],
-  resumeArgv: (o) => [o.bin ?? "pi", "-p", "--mode", "json", "--model", o.model, "--session", o.sessionId],
+  launchArgv: (o) => withSetup([o.bin ?? "pi", "-p", "--mode", "json", "--model", o.model], PI_SETUP),
+  resumeArgv: (o) => withSetup([o.bin ?? "pi", "-p", "--mode", "json", "--model", o.model, "--session", o.sessionId], PI_SETUP),
   newDigest() {
     const d = newDigestState();
     return {
