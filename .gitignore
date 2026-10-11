@@ -4,3 +4,5 @@ dist/
 .env
 .transcripts/
 clickhouse_credentials.txt
+__pycache__/
+*.pyc
