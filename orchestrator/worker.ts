@@ -89,7 +89,7 @@ export async function claimLoop(runJob: (job: Job, runner: Runner) => Promise<vo
     if (fleet) {
       const out: Job[] = [];
       // One claim per agent group: {agent_ids: the group's agents}, limit = that group's free worker-sandbox slots. A slot
-      // agent's group (pi) also claims its model_mix variants; each job carries its own model.
+      // agent's group (pi) also claims its model_variants; each job carries its own model.
       for (const g of fleet.groups()) {
         if (CFG.harness && getAdapterId(g.harness) !== getAdapterId(CFG.harness)) continue;
         if (!runnable(g.harness)) {

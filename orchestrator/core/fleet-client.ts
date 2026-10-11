@@ -11,7 +11,7 @@ import { planFleet } from "../fleet/plan.js";
 import { CFG, env, num } from "./config.js";
 import { api, log } from "./util.js";
 
-/** `agents`: registry agent ids this group claims (itself + a slot agent's model_mix variants; same harness). */
+/** `agents`: registry agent ids this group claims (itself + a slot agent's model_variants; same harness). */
 export interface GroupTarget { agent_id: string; harness: string; model: string; pods: number; agents?: string[] }
 
 export const FLEET = {

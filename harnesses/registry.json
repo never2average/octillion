@@ -3,7 +3,7 @@
   "as_of": "2026-10-10",
   "next_review": "2027-01-10",
   "methodology": "Target quantity: share of developers' agentic-coding usage by harness, Oct 2026. 1) Anchor on JetBrains DevEco 2026 work adoption (largest reweighted professional sample, May-Jul 2026), normalized. 2) Adjust for intensity using SO 2026 (Claude Code 66% vs Copilot 59% of agent users), Pragmatic Engineer 2026, vendor WAU/ARR, and public-GitHub attribution (Amplifying.ai): Claude Code and Codex up, Copilot and Cursor (breadth, lighter agent use) down. 3) Tools absent from surveys (Pi, Amp, droid, Qwen Code, Aider, Augment, Continue, Warp, Trae) share a ~3-5% long tail, ranked by npm/PyPI downloads; these are +/-100%. 4) Midpoints: Claude Code 37 (30-44), Codex 18 (13-24), Copilot 13 (9-18), Cursor 10 (7-14), OpenCode 5 (3-7), Antigravity 3 + Gemini CLI 1.5 (2.5-7 combined), Junie 2.5 (1.5-4), Cline/Roo/Kilo 2 (1-3), Pi 1.5 (0.5-3), Windsurf/Devin 1.5 (0.5-3), Kiro 1 (0.3-2), Jules 0.8 (0.3-1.5), long tail 3.2 (2-5). 5) A harness is runnable if it installs on Linux, runs non-interactively with tool auto-approval and API-key auth, and emits a JSON event stream. Copilot, Cursor, Antigravity, Cline and Kilo are mostly IDE products; their own headless CLIs stand in for them (proxy_represented_share). 6) weight = usage share / sum of runnable shares (rounded to 4 dp, sums to 1). Non-runnable share is unrepresented_share. 7) Within-harness model splits only where data exists (Claude Code Opus/Sonnet from Amplifying.ai commit model mix); elsewhere the harness default.",
-  "model_split_methodology": "A harness is split into one agent per model only when a cited source shows a second model with >=20% of that harness's usage, on a slice representative of the harness's users (not only a gateway's traffic). Split weights sum to the harness's weight; splits share image, requires_env, event_format and worker_adapter. As of 2026-10-10 only Claude Code qualifies. Gateway data (OpenRouter app pages, OpenCode stats) shows other mixes but covers only the usage routed through those gateways. See each agent's model_mix note. In-harness model_mix (2026-10-11): a small harness keeps ONE population slot and each of its sessions is drawn as one of its model variants by share, so splitting it never adds minimum sandboxes. Used for Pi (see pi/opus model_mix_note).",
+  "model_split_methodology": "A harness is split into one agent per model only when a cited source shows a second model with >=20% of that harness's usage, on a slice representative of the harness's users (not only a gateway's traffic). Split weights sum to the harness's weight; splits share image, requires_env, event_format and worker_adapter. As of 2026-10-10 only Claude Code qualifies. Gateway data (OpenRouter app pages, OpenCode stats) shows other mixes but covers only the usage routed through those gateways. See each agent's model_mix note. In-harness model_variants (2026-10-11): a small harness keeps ONE population slot and each of its sessions is drawn as one of its model variants by share, so splitting it never adds minimum sandboxes. Used for Pi (see pi/gpt model_variants_note).",
   "unrepresented_share": 0.084,
   "proxy_represented_share": 0.275,
   "unrepresented_breakdown": {
@@ -456,13 +456,8 @@
       "model": "anthropic/claude-opus-5-5",
       "model_verified": false,
       "harness_version": "1.1.0",
-      "weight": 0.0164,
-      "usage_share": 0.015,
-      "weight_source": [
-        "npm-2026-10",
-        "amplifying-index",
-        "openrouter-apps-2026-10"
-      ],
+      "weight": 0,
+      "weight_source": [],
       "headless": "pi -p --mode json --model <provider/model>  (prompt on stdin)",
       "event_format": "pi-json",
       "image": {
@@ -477,13 +472,8 @@
       "resume": true,
       "adapter_evidence": "captured-fixture",
       "enabled": true,
-      "notes": "No survey coverage; share from npm downloads (0.6M/wk, Amplifying npm demand share 7.9% of CLIs) discounted heavily because CLI-download share overstates terminal-only tools. Package moved to @earendil-works/pi-coding-agent (old @mariozechner name deprecated at 0.73.1). Model choice unverified.",
-      "model_mix": {
-        "pi/gpt": 0.45,
-        "pi/cf-kimi-k2.7-code": 0.5,
-        "pi/opus": 0.05
-      },
-      "model_mix_note": "Pi slot: sessions run as pi/gpt 45%, open model (pi/cf-kimi-k2.7-code) 50%, pi/opus 5% (model_mix). ESTIMATE, no representative survey: Claude subscriptions cannot be used in Pi (API pricing only), while ChatGPT subscriptions can (Pi /login), so subscription users default to GPT; pay-per-token Pi traffic on OpenRouter is ~56% open models (deepseek-v4.1-flash 40.4%, glm-5.3-flash 15.7%) vs claude-opus-5.5 2.7% (openrouter-apps-2026-10). Kimi K2.7 Code on Cloudflare stands in for the open-model share. Revisit when Pi publishes usage data."
+      "notes": "No survey coverage; share from npm downloads (0.6M/wk, Amplifying npm demand share 7.9% of CLIs) discounted heavily because CLI-download share overstates terminal-only tools. Package moved to @earendil-works/pi-coding-agent (old @mariozechner name deprecated at 0.73.1). Model choice unverified. Runs as a model_mix variant of the pi/gpt slot (2.5%).",
+      "model_mix": "Model mix: not split. OpenRouter slice: deepseek-v4.1-flash 40.4%, glm-5.3-flash 15.7%, claude-opus-5.5 2.7%; no second model >=20%, and BYOK Anthropic/OpenAI usage is invisible, so the Opus choice remains an assumption. claude-opus-5-5 verified in `pi --list-models` (1.1.0)."
     },
     {
       "id": "pi/gpt",
@@ -494,8 +484,12 @@
       "model": "openai/gpt-6.1-sol",
       "model_verified": false,
       "harness_version": "1.1.0",
-      "weight": 0,
-      "weight_source": [],
+      "weight": 0.0164,
+      "weight_source": [
+        "npm-2026-10",
+        "amplifying-index",
+        "openrouter-apps-2026-10"
+      ],
       "headless": "pi -p --mode json --model <provider/model>  (prompt on stdin)",
       "event_format": "pi-json",
       "image": {
@@ -511,6 +505,13 @@
       "adapter_evidence": "captured-fixture",
       "enabled": true,
       "notes": "Pi on OpenAI through the Octillion gateway (built-in openai provider, baseUrl override in ~/.pi/agent/models.json).",
+      "usage_share": 0.015,
+      "model_variants": {
+        "pi/gpt": 0.5,
+        "pi/cf-kimi-k2.7-code": 0.475,
+        "pi/opus": 0.025
+      },
+      "model_variants_note": "Pi slot: sessions run as pi/gpt 50%, open model (pi/cf-kimi-k2.7-code) 47.5%, pi/opus 2.5% (model_mix). ESTIMATE, no representative survey. Claude has no subscription connector in Pi (API pricing only), so Opus is capped by its share of pay-per-token Pi traffic: claude-opus-5.5 2.7% on OpenRouter (openrouter-apps-2026-10), lower across all users. ChatGPT subscriptions work in Pi (/login), so subscription users default to GPT; pay-per-token Pi traffic is ~56% open models (deepseek-v4.1-flash 40.4%, glm-5.3-flash 15.7%). Kimi K2.7 Code on Cloudflare stands in for the open-model share. Revisit when Pi publishes usage data.",
       "model_mix": "Model mix: not split. OpenRouter slice: deepseek-v4.1-flash 40.4%, glm-5.3-flash 15.7%, claude-opus-5.5 2.7%; no second model >=20%, and BYOK Anthropic/OpenAI usage is invisible, so the Opus choice remains an assumption. claude-opus-5-5 verified in `pi --list-models` (1.1.0)."
     },
     {

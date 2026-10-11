@@ -1,7 +1,7 @@
 import { getDb } from "./db.js";
 import { apportion, findAgent, scheduledAgents, variantsOf } from "./agents.js";
 
-/** Agent ids a pod group claims: the agent itself plus its model_mix variants. */
+/** Agent ids a pod group claims: the agent itself plus its model_variants. */
 export function claimIds(agentId: string): string[] {
   const spec = findAgent(agentId);
   return [...new Set([agentId, ...(spec ? variantsOf(spec).map((v) => v.id) : [])])];
@@ -126,8 +126,8 @@ export async function fleetStatus(orchestratorId?: string) {
     ...(orchestratorId
       ? {
           orchestrator_id: orchestratorId,
-          // One entry per pod group: claim with `agents` so a Sonnet pod only takes Sonnet sessions. A slot agent with a
-          // model_mix (pi) also takes its variants' sessions (same harness; the model comes from the session).
+          // One entry per pod group: claim with `agents` so a Sonnet pod only takes Sonnet sessions. A slot agent with
+          // model_variants (pi) also takes its variants' sessions (same harness; the model comes from the session).
           assignment: plan.map((s) => ({ agent_id: s.agent_id, harness: s.harness, model: s.model, pods: mine?.get(s.agent_id) ?? 0,
                                          image: s.image ?? null, version: s.version ?? null, agents: claimIds(s.agent_id) }))
             .filter((a) => a.pods > 0),

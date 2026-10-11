@@ -20,7 +20,7 @@ export interface AgentSpec {
    * as one of these registry agents (same harness), drawn by share. Shares sum to 1 and may include this agent itself.
    * Keeps a small harness at its real share instead of one minimum sandbox per model.
    */
-  model_mix?: Record<string, number>;
+  model_variants?: Record<string, number>;
 }
 export interface Registry { version: number; as_of?: string; unrepresented_share?: number; sources?: unknown[]; agents: AgentSpec[] }
 
@@ -97,20 +97,20 @@ export function findAgent(id: string): AgentSpec | undefined {
   return registry().agents.find((a) => a.id === id);
 }
 
-/** The agents a slot agent's sessions may run as: itself, or its model_mix entries (registry agents, same harness). */
+/** The agents a slot agent's sessions may run as: itself, or its model_variants entries (registry agents, same harness). */
 export function variantsOf(slot: AgentSpec): AgentSpec[] {
-  if (!slot.model_mix) return [slot];
-  return Object.keys(slot.model_mix).map((id) => findAgent(id)).filter((a): a is AgentSpec => !!a && a.harness === slot.harness);
+  if (!slot.model_variants) return [slot];
+  return Object.keys(slot.model_variants).map((id) => findAgent(id)).filter((a): a is AgentSpec => !!a && a.harness === slot.harness);
 }
 
-/** Draw the agent one session of `slot` runs as, by model_mix share (`rand` in [0, 1)). */
+/** Draw the agent one session of `slot` runs as, by model_variants share (`rand` in [0, 1)). */
 export function drawVariant(slot: AgentSpec, rand: number = Math.random()): AgentSpec {
   const variants = variantsOf(slot);
   if (variants.length <= 1) return variants[0] ?? slot;
-  const total = variants.reduce((s, v) => s + (slot.model_mix![v.id] ?? 0), 0) || 1;
+  const total = variants.reduce((s, v) => s + (slot.model_variants![v.id] ?? 0), 0) || 1;
   let acc = 0;
   for (const v of variants) {
-    acc += (slot.model_mix![v.id] ?? 0) / total;
+    acc += (slot.model_variants![v.id] ?? 0) / total;
     if (rand < acc) return v;
   }
   return variants[variants.length - 1];

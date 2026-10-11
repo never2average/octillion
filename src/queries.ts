@@ -280,7 +280,7 @@ export async function runSimulation(org: Org, input: RunInput) {
   const repeats = input.repeats ?? 3;
   let plan: { scenarioId: number; profileId: number | null; agent: AgentSpec; attempt: number }[];
   if (explicit) {
-    // A slot agent's model_mix variants (e.g. pi on GPT) are selectable by id too.
+    // A slot agent's model_variants (e.g. pi on GPT) are selectable by id too.
     let chosen = [...new Map(enabled.flatMap((a) => [a, ...variantsOf(a)]).map((a) => [a.id, a])).values()];
     if (input.agents?.length) {
       const unknown = input.agents.filter((a) => !chosen.some((e) => e.id === a));
@@ -294,7 +294,7 @@ export async function runSimulation(org: Org, input: RunInput) {
     }
     plan = slots.flatMap((slot) => chosen.flatMap((agent) => Array.from({ length: repeats }, (_, i) => ({ ...slot, agent, attempt: i + 1 }))));
   } else {
-    // Slot agents with a model_mix (e.g. pi) run each sampled session as one of their models, drawn by share.
+    // Slot agents with model_variants (e.g. pi) run each sampled session as one of their models, drawn by share.
     const agents = representativePlan(slots.length * samples, scheduledAgents(pop)).map((a) => drawVariant(a));
     plan = slots.flatMap((slot, si) => Array.from({ length: samples }, (_, i) => ({ ...slot, agent: agents[si * samples + i], attempt: i + 1 })));
   }
