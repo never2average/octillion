@@ -33,6 +33,18 @@ for t in tasks:
         assert r and t["repo_url"] == f"{r['url']}#{r['commit']}" and r["template"] == t["template"], t["id"]
         assert t["category"] not in r["capabilities_present"], t["id"]
     final.append(t)
+# Balance: at most CAP tasks per (repo, category); the rest fall back to their generic starter version.
+CAP = int(os.environ.get("REPO_CATEGORY_CAP", "25"))
+per, reverted = collections.Counter(), 0
+for t in final:
+    if t.get("repo_url"):
+        k = (t["repo"]["id"], t["category"])
+        per[k] += 1
+        if per[k] > CAP:
+            t["title"], t["prompt"] = t["generic_title"], t["generic_prompt"]
+            t.pop("repo_url", None); t.pop("repo", None)
+            reverted += 1
+print(f"balance: {reverted} placements over {CAP}/repo/category reverted to starters")
 json.dump(final, open(out_tasks, "w"), indent=2, ensure_ascii=False)
 json.dump(list(repos.values()), open(out_repos, "w"), indent=2)
 placed = [t for t in final if t.get("repo_url")]
