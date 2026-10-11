@@ -12,7 +12,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const WORKSPACES_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "workspaces");
-export const TEMPLATES = ["express-ts", "nextjs-ts", "node-ts", "fastapi", "django", "go-http"] as const;
+export const TEMPLATES = ["express-ts", "nextjs-ts", "node-ts", "fastapi", "django", "go-http", "react-native", "flutter"] as const;
 export type TemplateId = (typeof TEMPLATES)[number];
 export const FALLBACK_TEMPLATE: TemplateId = "node-ts";
 
@@ -31,6 +31,9 @@ const FASTAPI = /\bfastapi\b|\bpydantic\b|\buvicorn\b|\bflask\b|\bstarlette\b/;
 const PYTHON = /\bpython\b|\bpip\b|\bpytest\b|\.py\b/;
 const GO = /\bgolang\b|\bgo (service|server|module|api|app|backend|http|code|project)\b|\bnet\/http\b|\bgo\.mod\b/;
 const SERVICE = /\bservice\b|\bapi\b|\bendpoints?\b|\broutes?\b|\bserver\b|\bexpress\b|\bwebhooks?\b|\bmiddleware\b|\bbackend\b|\brest\b|\bhttp\b|\bpost \/|\bget \//;
+const RN = /\breact native\b|\breact-native\b|\bexpo\b/;
+const FLUTTER = /\bflutter\b|\bdart\b|\bpubspec\b/;
+const MOBILE = /\bmobile app\b|\bios\b|\bandroid\b|\bpush notifications? on (the )?(phone|device)\b/;
 const TS_JS = /\btypescript\b|\bjavascript\b|\bnode(\.js|js)?\b|\bnpm\b|\bts\b/;
 
 /** Deterministic template choice for a scenario without a repo. */
@@ -39,6 +42,11 @@ export function selectTemplate(s: TemplateInput): TemplateId {
   if ((TEMPLATES as readonly string[]).includes(explicit)) return explicit as TemplateId;
   const lang = (s.language ?? "").trim().toLowerCase();
   const text = [lang, ...(s.tags ?? []), s.title ?? "", s.prompt ?? ""].join(" \n ").toLowerCase();
+
+  // Mobile first: these keywords are unambiguous, and a mobile task must not land in a web starter.
+  if (lang === "dart" || has(text, FLUTTER)) return "flutter";
+  if (has(text, RN)) return "react-native";
+  if (has(text, MOBILE) && lang !== "python" && lang !== "go") return "react-native";
 
   if (lang === "python" || lang === "py") return has(text, DJANGO) ? "django" : "fastapi";
   if (lang === "go" || lang === "golang") return "go-http";

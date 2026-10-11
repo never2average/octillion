@@ -75,12 +75,12 @@ try {
     const W = mkdtempSync(path.join(tmpdir(), "rud-seed-"));
     const r = spawnSync("bash", ["-c", seedScript(t)], { env: { ...process.env, W, HOME: W }, encoding: "utf8" });
     const files = spawnSync("git", ["-C", W, "ls-files"], { encoding: "utf8" }).stdout.split("\n").filter(Boolean);
-    const manifest = files.find((f) => /^(package\.json|requirements\.txt|go\.mod)$/.test(f));
+    const manifest = files.find((f) => /^(package\.json|requirements\.txt|go\.mod|pubspec\.yaml)$/.test(f));
     if (r.status === 0 && seedBase(r.stdout).length === 40 && manifest && files.some((f) => f === "README.md") && files.length >= 5) seeded.push(t);
   }
   check("every template seeds a committed project (manifest, README, sources)", seeded.length === TEMPLATES.length, seeded.join(","));
   const deps = TEMPLATES.flatMap((t) => { try { return Object.keys({ ...JSON.parse(readFileSync(path.join(HERE, "..", "workspaces", t, "package.json"), "utf8")).dependencies }); } catch { return []; } });
-  check("templates stay neutral (framework deps only)", deps.every((d) => ["express", "next", "react", "react-dom"].includes(d)), deps.join(","));
+  check("templates stay neutral (framework deps only)", deps.every((d) => ["express", "next", "react", "react-dom", "expo", "expo-status-bar", "react-native"].includes(d)), deps.join(","));
 
   // 3. done check
   const diff = (...files: string[]) => files.map((f) => `diff --git a/${f} b/${f}\nnew file mode 100644\n--- /dev/null\n+++ b/${f}\n@@ -0,0 +1 @@\n+x\n`).join("");

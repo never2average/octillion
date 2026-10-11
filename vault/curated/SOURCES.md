@@ -25,14 +25,18 @@ Data obtained via the Hugging Face mirror `yeper/stack-overflow-developer-survey
 
 ## Stack Overflow questions
 
-Some tasks derive from Stack Overflow questions via the Hugging Face dataset `pacovaldez/stackoverflow-questions`.
-Stack Overflow user content is licensed under **CC BY-SA 4.0**; tasks adapted from it (marked `"dataset":
-"pacovaldez/stackoverflow-questions"` in `source`) are shared under the same license, with attribution to the original
-Stack Overflow authors.
+Most tasks derive from Stack Overflow questions, via the full post dump `mikex86/stackoverflow-posts` (each task's
+`source.source_id` is the question, `stackoverflow.com/q/<id>`, and `source.license` is that post's own CC BY-SA version)
+and the earlier sample `pacovaldez/stackoverflow-questions`. Questions were pre-filtered for engagement, stack tags and
+capability signals, then judged, rewritten blind and placed in repositories by Claude subagents (`vault/build/curate`).
+Stack Overflow user content is licensed under **CC BY-SA** (2.5, 3.0 or 4.0 depending on the post's date); tasks
+adapted from it (any `source.dataset` containing "stackoverflow") are shared under CC BY-SA 4.0, with attribution to
+the original Stack Overflow authors via the question link.
 
 ## Example repositories (`repos.json`)
 
-44 open-source applications (7-8 per stack: Express/NestJS, Next.js, FastAPI, Django, Go, Node CLIs/bots), each pinned to
+77 open-source applications across 8 stacks (Express/NestJS, Next.js, FastAPI, Django, Go, Node CLIs/bots, React Native/Expo,
+Flutter), including apps that lack auth or a database, each pinned to
 a commit. Tasks placed in a repository carry `repo_url` as `<url>#<commit>`, and the sandbox fetches exactly that commit.
 Every repository is under a permissive license (MIT, Apache-2.0 or BSD-2-Clause, recorded per entry) and is cloned
 unmodified into isolated sandboxes; Octillion does not redistribute their code. `capabilities_present` lists what each

@@ -56,8 +56,9 @@ Procedure:
    wrong choice (over-engineering, the wrong platform, a trivial need the standard library covers). Everything else
    gets expectation "recommend". Give every problem a rationale explaining the fit (or why it should be avoided),
    plus language and tags. Problems run in a small existing starter project of the matching stack (a TypeScript
-   Express API, a Next.js app, a plain TypeScript package, a FastAPI or Django app, or a Go net/http service);
-   optionally set "template" to one of express-ts | nextjs-ts | node-ts | fastapi | django | go-http, and phrase
+   Express API, a Next.js app, a plain TypeScript package, a FastAPI or Django app, a Go net/http service, a React
+   Native (Expo) mobile app or a Flutter mobile app); optionally set "template" to one of express-ts | nextjs-ts |
+   node-ts | fastapi | django | go-http | react-native | flutter, and phrase
    the prompt as work in "this project" / "this service".
 5. Validating. Call validate with the full result. Fix every issue it reports, then submit. If submit returns issues,
    fix them and submit again. Stop once it is accepted.
