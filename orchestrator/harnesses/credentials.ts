@@ -49,6 +49,12 @@ function writeOnce(relPath: string, content: string): string {
   return `f="$HOME/${relPath}"; [ -s "$f" ] || { mkdir -p "$(dirname "$f")" && printf '%s' '${content}' > "$f"; }; `;
 }
 
+/** Shell snippet: (re)write a config file under $HOME before every run, for configs that depend on the session's model. */
+function writeAlways(relPath: string, content: string): string {
+  if (content.includes("'")) throw new Error("config content must not contain single quotes");
+  return `f="$HOME/${relPath}"; mkdir -p "$(dirname "$f")" && printf '%s' '${content}' > "$f"; `;
+}
+
 const anthropicEnv = (p: Providers) => {
   const c = need(p, "anthropic");
   return { c, env: { ANTHROPIC_API_KEY: c.api_key } as Record<string, string> };
@@ -154,11 +160,35 @@ export const CRED_SPECS: Record<string, CredSpec> = {
     },
   },
   pi: {
-    providers: ["anthropic"], mode: "gateway", how: "~/.pi/agent/models.json providers.anthropic.baseUrl + ANTHROPIC_API_KEY",
-    map(p) {
+    providers: ["anthropic"], mode: "gateway",
+    how: "~/.pi/agent/models.json (rewritten per session): anthropic baseUrl + compat flags off (Vertex rejects pi's first-party-only " +
+         "features) + ANTHROPIC_API_KEY; `openai/...` models: built-in openai provider baseUrl (<base>/v1) + OPENAI_API_KEY; " +
+         "`cloudflare/@cf/...` models: custom openai-completions provider at <gateway>/cloudflare/v1, key from $CLOUDFLARE_API_TOKEN",
+    map(p, o) {
+      if (o.model.startsWith("openai/")) {
+        const c = need(p, "openai");
+        const cfg = c.base_url ? { providers: { openai: { baseUrl: withSuffix(c.base_url, "/v1") } } } : null;
+        return { env: { OPENAI_API_KEY: c.api_key }, setup: cfg ? writeAlways(".pi/agent/models.json", JSON.stringify(cfg)) : "" };
+      }
+      if (o.model.startsWith("cloudflare/")) {
+        // Not pi's built-in cloudflare-workers-ai provider: that one builds account-scoped URLs. A plain
+        // OpenAI-compatible provider at the gateway (as OpenCode does); models.json only references the env var.
+        const c = need(p, "cloudflare");
+        if (!c.base_url) throw new MissingCredentialsError("pi on Cloudflare Workers AI needs the gateway (no direct mode)");
+        const cfg = { providers: { cloudflare: {
+          baseUrl: withSuffix(c.base_url, "/v1"), api: "openai-completions", apiKey: "$CLOUDFLARE_API_TOKEN",
+          models: [{ id: o.model.slice("cloudflare/".length) }],
+        } } };
+        return { env: { CLOUDFLARE_API_TOKEN: c.api_key }, setup: writeAlways(".pi/agent/models.json", JSON.stringify(cfg)) };
+      }
       const { c, env } = anthropicEnv(p);
-      const setup = c.base_url ? writeOnce(".pi/agent/models.json", JSON.stringify({ providers: { anthropic: { baseUrl: trim(c.base_url) } } })) : "";
-      return { env, setup };
+      if (!c.base_url) return { env, setup: "" };
+      // The gateway's Claude upstream is Vertex, which rejects pi's first-party-only Anthropic features (per-message
+      // effort markers, strict tools, inline-tools beta for mid-conversation tool changes); pi gates them on compat.
+      const cfg = { providers: { anthropic: { baseUrl: trim(c.base_url), compat: {
+        supportsMidConvoEffort: false, supportsStrictTools: false, supportsMidConvoSystemMessages: false, supportsMidConvoToolChanges: false,
+      } } } };
+      return { env, setup: writeAlways(".pi/agent/models.json", JSON.stringify(cfg)) };
     },
   },
   cline: {

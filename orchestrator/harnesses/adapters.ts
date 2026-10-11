@@ -457,13 +457,8 @@ const antigravity: HarnessAdapter = {
 
 // ---------------------------------------------------------------- Pi
 
-/** Pi's Anthropic models default to first-party-only features (per-message effort markers, strict tools, and native
- *  mid-conversation tool changes via the inline-tools beta) that Vertex behind the gateway rejects; turn them off in
- *  pi's models.json (docs: models.md, compat; the last two flags gate pi-ai's nativeToolChanges). */
-const PI_SETUP = ensureFile(".pi/agent/models.json",
-  '{"providers":{"anthropic":{"compat":{"supportsMidConvoEffort":false,"supportsStrictTools":false,' +
-  '"supportsMidConvoSystemMessages":false,"supportsMidConvoToolChanges":false}}}}');
-
+// Pi's ~/.pi/agent/models.json (gateway base URLs, Vertex compat flags, Cloudflare provider) is written by its
+// credential mapping (credentials.ts), which knows the session's model.
 const pi: HarnessAdapter = {
   id: "pi",
   supported: true,
@@ -472,8 +467,8 @@ const pi: HarnessAdapter = {
   env: (k) => ({ ...BASE_ENV, ...anthropicEnv(k) }),
   hasKey: (k) => !!envKey(k, "anthropic", "ANTHROPIC_API_KEY"),
   // Piped stdin is the prompt (verified). --model accepts "provider/id".
-  launchArgv: (o) => withSetup([o.bin ?? "pi", "-p", "--mode", "json", "--model", o.model], PI_SETUP),
-  resumeArgv: (o) => withSetup([o.bin ?? "pi", "-p", "--mode", "json", "--model", o.model, "--session", o.sessionId], PI_SETUP),
+  launchArgv: (o) => [o.bin ?? "pi", "-p", "--mode", "json", "--model", o.model],
+  resumeArgv: (o) => [o.bin ?? "pi", "-p", "--mode", "json", "--model", o.model, "--session", o.sessionId],
   newDigest() {
     const d = newDigestState();
     return {

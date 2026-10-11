@@ -481,6 +481,62 @@
       "model_mix": "Model mix: not split. OpenRouter slice: deepseek-v4.1-flash 40.4%, glm-5.3-flash 15.7%, claude-opus-5.5 2.7%; no second model >=20%, and BYOK Anthropic/OpenAI usage is invisible, so the Opus choice remains an assumption. claude-opus-5-5 verified in `pi --list-models` (1.1.0)."
     },
     {
+      "id": "pi/gpt",
+      "harness": "pi",
+      "cli": "pi",
+      "label": "Pi · GPT-6.1-Sol",
+      "vendor": "Earendil (Mario Zechner)",
+      "model": "openai/gpt-6.1-sol",
+      "model_verified": false,
+      "harness_version": "1.1.0",
+      "weight": 0,
+      "weight_source": [],
+      "headless": "pi -p --mode json --model <provider/model>  (prompt on stdin)",
+      "event_format": "pi-json",
+      "image": {
+        "docker": "octillion/agent-pi:1.1.0",
+        "boat_snapshot": "octillion-pi-1-1-0"
+      },
+      "requires_env": [
+        "OPENAI_API_KEY"
+      ],
+      "boat_preinstalled": true,
+      "worker_adapter": "supported",
+      "resume": true,
+      "adapter_evidence": "captured-fixture",
+      "enabled": true,
+      "notes": "Pi on OpenAI through the Octillion gateway (built-in openai provider, baseUrl override in ~/.pi/agent/models.json).",
+      "model_mix": "Model mix: not split. OpenRouter slice: deepseek-v4.1-flash 40.4%, glm-5.3-flash 15.7%, claude-opus-5.5 2.7%; no second model >=20%, and BYOK Anthropic/OpenAI usage is invisible, so the Opus choice remains an assumption. claude-opus-5-5 verified in `pi --list-models` (1.1.0)."
+    },
+    {
+      "id": "pi/cf-kimi-k2.7-code",
+      "harness": "pi",
+      "cli": "pi",
+      "label": "Pi · Kimi K2.7 Code (Cloudflare)",
+      "vendor": "Cloudflare Workers AI (open model)",
+      "model": "cloudflare/@cf/moonshotai/kimi-k2.7-code",
+      "model_verified": false,
+      "harness_version": "1.1.0",
+      "weight": 0,
+      "weight_source": [],
+      "headless": "pi -p --mode json --model <provider/model>  (prompt on stdin)",
+      "event_format": "pi-json",
+      "image": {
+        "docker": "octillion/agent-pi:1.1.0",
+        "boat_snapshot": "octillion-pi-1-1-0"
+      },
+      "requires_env": [
+        "CLOUDFLARE_API_TOKEN"
+      ],
+      "boat_preinstalled": true,
+      "worker_adapter": "supported",
+      "resume": true,
+      "adapter_evidence": "captured-fixture",
+      "enabled": true,
+      "notes": "Pi on an open model via Cloudflare Workers AI through the Octillion gateway (custom openai-completions provider 'cloudflare').",
+      "model_mix": "Model mix: not split. OpenRouter slice: deepseek-v4.1-flash 40.4%, glm-5.3-flash 15.7%, claude-opus-5.5 2.7%; no second model >=20%, and BYOK Anthropic/OpenAI usage is invisible, so the Opus choice remains an assumption. claude-opus-5-5 verified in `pi --list-models` (1.1.0)."
+    },
+    {
       "id": "cline/sonnet",
       "harness": "cline",
       "cli": "cline",
