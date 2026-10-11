@@ -326,13 +326,13 @@ export function createServer(org: Org): McpServer {
 
   registerAppTool(server, "run_simulation", {
     title: "Run simulation",
-    description: "Launch sandboxed coding sub-agents on the product's scenarios. Default (representative): `samples` sessions per scenario (default 10), with worker agents (Claude Code, Codex, Cursor, ...) mixed in proportion to real-world developer adoption (see list_agents). Explicit: pass agents and/or models to run exactly those, `repeats` times each. Runs asynchronously; check progress with get_simulation.",
+    description: `Launch sandboxed coding sub-agents on the product's scenarios. Default (representative): \`samples\` sessions per scenario (default ${q.config.defaultSamples()}), with worker agents (Claude Code, Codex, Cursor, ...) mixed in proportion to real-world developer adoption (see list_agents). Explicit: pass agents and/or models to run exactly those, \`repeats\` times each. At most ${q.config.maxSessionsPerRun()} sessions per run. Runs asynchronously; check progress with get_simulation.`,
     inputSchema: {
       product,
       scenario_ids: z.array(z.number().int()).optional(),
       agents: z.array(z.string()).optional().describe("Explicit worker agent ids (list_agents), e.g. 'claude-code/sonnet'"),
       models: z.array(z.string()).optional().describe("Explicit: only agents using these models"),
-      samples: z.number().int().min(1).max(100).optional().describe("Representative mode: sessions per scenario (default 10)"),
+      samples: z.number().int().min(1).max(100).optional().describe(`Representative mode: sessions per scenario (default ${q.config.defaultSamples()})`),
       population: z.string().optional().describe("Developer population whose coding-agent mix to sample (list_agents); default population if omitted"),
       profiles: z.array(z.string()).optional().describe("Developer profile slugs (list_developer_profiles); every scenario runs once per profile. Omit for a generic developer"),
       repeats: z.number().int().min(1).max(10).optional().describe("Explicit mode: runs per scenario and agent (default 3)"),

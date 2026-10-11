@@ -42,6 +42,8 @@ export const config = {
   agents: async () => scheduledAgents(await getPopulation()).map((a) => ({ id: a.id, label: a.label, model: a.model, harness: a.harness, weight: a.weight })),
   defaultSamples: () => Number(process.env.OCTILLION_DEFAULT_SAMPLES ?? 10),
   maxSessionsPerRun: () => Number(process.env.OCTILLION_MAX_SESSIONS_PER_RUN ?? 100),
+  /** Per-organization model spend per calendar month (UTC); new runs are refused once reached. 0 = no cap. */
+  orgMonthlyBudgetUsd: () => Number(process.env.OCTILLION_ORG_MONTHLY_BUDGET_USD ?? 100),
 };
 
 // A session is a hit when the agent picked the product in a "recommend" scenario, or left it out in an "avoid" one.
@@ -246,9 +248,25 @@ export interface RunInput {
   samples?: number;                                         // representative (default): sessions per scenario, mixed by adoption
 }
 
+/** The organization's metered model spend (gateway cost of its agent sessions) this calendar month, UTC. */
+export async function orgMonthSpendUsd(orgId: number): Promise<number> {
+  const db = await getDb();
+  const [r] = await db.query<{ usd: number }>(
+    `SELECT coalesce(sum(u.cost_usd), 0) AS usd FROM gateway_usage u JOIN agent_sessions s ON s.id = u.session_id
+      WHERE s.org_id = $1 AND s.queued_at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'`, [orgId]);
+  return Number(r?.usd ?? 0);
+}
+
 export async function runSimulation(org: Org, input: RunInput) {
   const p = await resolveProduct(org, input.product);
   const db = await getDb();
+  const budget = config.orgMonthlyBudgetUsd();
+  if (budget > 0) {
+    const spent = await orgMonthSpendUsd(org.orgId);
+    if (spent >= budget)
+      throw new Error(`${org.name ?? "This organization"} has used its $${budget} simulation budget for this month ($${spent.toFixed(2)} spent). ` +
+        "Results so far stay available; reply to your Octillion contact to raise the limit.");
+  }
   const pop = await getPopulation(input.population);
   const enabled = enabledAgents(pop);
   if (!enabled.length) throw new Error(`No coding agents are running in developer population ${pop.slug}`);
