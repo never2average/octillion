@@ -80,6 +80,9 @@ export function toVertex(cfg: VertexConfig, path: string, rawBody: Buffer, betaH
   // structured outputs, which an organization policy may disallow for partner models. Tools work without `strict`.
   if (json.thinking && typeof json.thinking === "object") delete (json.thinking as Record<string, unknown>).block_binding;
   if (Array.isArray(json.tools)) for (const t of json.tools as Record<string, unknown>[]) if (t && typeof t === "object") delete t.strict;
+  // A message is only {role, content}; some harnesses (pi) attach extra keys such as output_config, which Vertex rejects.
+  if (Array.isArray(json.messages))
+    json.messages = (json.messages as Record<string, unknown>[]).map((m) => (m && typeof m === "object" ? { role: m.role, content: m.content } : m));
   const betas = (betaHeader ?? "").split(",").map((s) => s.trim()).filter((b) => b && !b.startsWith("thinking-binding-controls"));
   if (betas.length) json.anthropic_beta = [...new Set([...(Array.isArray(json.anthropic_beta) ? json.anthropic_beta as string[] : []), ...betas])];
   const loc = `${vertexBase(cfg)}/v1/projects/${encodeURIComponent(cfg.project_id)}/locations/${encodeURIComponent(cfg.region ?? "global")}/publishers/anthropic/models`;
