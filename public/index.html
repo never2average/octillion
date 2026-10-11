@@ -3,11 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Octillion — do coding agents recommend your dev tool?</title>
-<meta name="description" content="Octillion runs real coding tasks through AI coding agents across models and tells you whether they adopt, recommend, mention, or skip your developer tool — with full transcript evidence.">
+<title>Octillion — APO: Agentic Preference Optimization for dev tools</title>
+<meta name="description" content="APO (Agentic Preference Optimization) is how dev-tool companies get chosen by AI coding agents. Octillion runs real coding tasks through sandboxed agents, measures whether they adopt, recommend or skip your product, and shows the transcript evidence so you know what to fix.">
 <meta property="og:type" content="website">
-<meta property="og:title" content="Octillion — do coding agents recommend your dev tool?">
-<meta property="og:description" content="Sandboxed coding agents work through real scenarios across models. Octillion scores whether they pick your product or a competitor — and shows you the transcript behind every verdict.">
+<meta property="og:title" content="Octillion — APO: Agentic Preference Optimization">
+<meta property="og:description" content="SEO got you found by people. APO gets you picked by coding agents. Measure how often Claude Code, Codex, Cursor and others choose your dev tool, see why, and prove your fixes worked.">
 <meta name="theme-color" content="#f4f2ec" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0d0e0b" media="(prefers-color-scheme: dark)">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2315140f'/%3E%3Cpath d='M16 6.5 22.7 9.3 25.5 16 22.7 22.7 16 25.5 9.3 22.7 6.5 16 9.3 9.3Z' fill='none' stroke='%23ff5b2e' stroke-width='3' stroke-linejoin='round'/%3E%3Ccircle cx='16' cy='16' r='2.6' fill='%23f4f2ec'/%3E%3C/svg%3E">
@@ -168,6 +168,18 @@ section{padding:88px 0}
 .points h3{font-size:18px;margin-bottom:6px;letter-spacing:-.01em}
 .points p{color:var(--ink-2);font-size:15.5px}
 
+/* APO comparison */
+.apo-cmp{display:grid;gap:14px;margin-bottom:40px}
+@media (min-width:860px){.apo-cmp{grid-template-columns:repeat(3,1fr)}}
+.apo-cmp article{padding:22px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);display:flex;flex-direction:column;gap:12px}
+.apo-cmp article.on{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+.apo-cmp .k{font-family:var(--mono);font-size:12.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3)}
+.apo-cmp .on .k{color:var(--accent)}
+.apo-cmp h3{font-size:21px;letter-spacing:-.015em}
+.apo-cmp dl{margin:0;display:grid;gap:8px}
+.apo-cmp dt{font-family:var(--mono);font-size:11.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-3)}
+.apo-cmp dd{margin:0;color:var(--ink-2);font-size:15px}
+
 /* Steps */
 .steps{list-style:none;margin:0;padding:0;display:grid;gap:16px;counter-reset:s}
 @media (min-width:720px){.steps{grid-template-columns:repeat(2,1fr)}}
@@ -283,7 +295,7 @@ footer a:hover{color:var(--ink)}
     <nav aria-label="Primary">
       <ul>
         <li><a href="#problem">Why now</a></li>
-        <li><a href="#how">How it works</a></li>
+        <li><a href="#how">What is APO</a></li>
         <li><a href="#results">What you get</a></li>
         <li><a href="#mcp">Claude &amp; ChatGPT</a></li>
         <li><a href="#faq">FAQ</a></li>
@@ -299,12 +311,12 @@ footer a:hover{color:var(--ink)}
   <section class="hero" id="top" aria-labelledby="hero-title">
     <div class="wrap">
       <div>
-        <span class="launch"><b>New</b> Launching today — early access open</span>
-        <h1 id="hero-title">Coding agents are picking the stack. Are they <em>picking you?</em></h1>
-        <p class="sub">Octillion runs real coding tasks through sandboxed AI agents across models, then tells you whether they adopted your dev tool, recommended it, barely mentioned it — or reached for a competitor. Every verdict comes with the transcript that proves it.</p>
+        <span class="launch"><b>New</b> Introducing APO · Agentic Preference Optimization</span>
+        <h1 id="hero-title">SEO got you found by people. <em>APO gets you picked by agents.</em></h1>
+        <p class="sub">Coding agents now choose the database, the queue and the auth library. <strong>Agentic Preference Optimization</strong> is the work of making them choose yours. Octillion is the APO platform: it runs real coding tasks through sandboxed agents across models, measures how often they adopt, recommend or skip your dev tool, and shows the transcripts that explain why, so you know what to fix and whether the fix worked.</p>
         <div class="cta-row">
-          <a class="btn btn-primary" href="#access">Request access <span class="arr" aria-hidden="true">→</span></a>
-          <a class="btn btn-ghost" href="#how">How it works</a>
+          <a class="btn btn-primary" href="#access">Get your APO baseline <span class="arr" aria-hidden="true">→</span></a>
+          <a class="btn btn-ghost" href="#how">What is APO?</a>
         </div>
       </div>
 
@@ -314,7 +326,7 @@ footer a:hover{color:var(--ink)}
           <span class="tag">Sample UI · illustrative data</span>
         </div>
         <div class="mock-body">
-          <div class="scn-label">Scenario · product: YourDB</div>
+          <div class="scn-label">APO baseline · product: YourDB</div>
           <div class="scn">“Add persistent storage to this Next.js app”</div>
           <div class="scn-meta">repo: nextjs-starter · 4 models · 12 runs</div>
 
@@ -346,7 +358,7 @@ footer a:hover{color:var(--ink)}
   <section class="band" id="problem" aria-labelledby="problem-title">
     <div class="wrap">
       <div class="sec-head">
-        <span class="eyebrow">The shift</span>
+        <span class="eyebrow">Why APO, why now</span>
         <h2 id="problem-title">Developers stopped picking tools. Their agents do it now.</h2>
         <p>A developer types “add background jobs” into Claude Code, Codex or Cursor and accepts the diff. The agent chose the queue, installed the package and wrote the config. Nobody compared vendors. Nobody read your landing page.</p>
       </div>
@@ -377,30 +389,48 @@ footer a:hover{color:var(--ink)}
   <section id="how" aria-labelledby="how-title">
     <div class="wrap">
       <div class="sec-head">
-        <span class="eyebrow">How it works</span>
-        <h2 id="how-title">Real tasks. Real repos. Real agents. Scored.</h2>
-        <p>Octillion doesn't poll models with survey questions. It hands agents actual work and records what they do.</p>
+        <span class="eyebrow">What is APO</span>
+        <h2 id="how-title">Agentic Preference Optimization, defined.</h2>
+        <p>APO is the practice of measuring and improving how often AI coding agents choose your product while they do real work. It is to coding agents what SEO is to search engines: you can't buy the decision, but you can earn it, and you can't improve what you don't measure.</p>
       </div>
+      <div class="apo-cmp" aria-label="How APO compares with SEO and GEO">
+        <article>
+          <span class="k">SEO</span>
+          <h3>Search engine optimization</h3>
+          <dl><dt>Who decides</dt><dd>A person scanning search results</dd><dt>The win</dt><dd>A click to your site</dd><dt>You measure</dt><dd>Rankings and traffic</dd></dl>
+        </article>
+        <article>
+          <span class="k">GEO</span>
+          <h3>Generative engine optimization</h3>
+          <dl><dt>Who decides</dt><dd>A chatbot answering a question</dd><dt>The win</dt><dd>A mention or citation in the answer</dd><dt>You measure</dt><dd>Mentions in chat replies</dd></dl>
+        </article>
+        <article class="on">
+          <span class="k">APO</span>
+          <h3>Agentic preference optimization</h3>
+          <dl><dt>Who decides</dt><dd>A coding agent in the middle of a task</dd><dt>The win</dt><dd>Your package installed and wired into the code</dd><dt>You measure</dt><dd>Adoption in real agent transcripts</dd></dl>
+        </article>
+      </div>
+      <h3 style="font-size:22px;letter-spacing:-.015em;margin:0 0 18px">The APO loop, run by Octillion</h3>
       <ol class="steps">
         <li>
-          <h3>Configure product context</h3>
-          <p>Your product name, aliases, package names and the competitors you care about — so every install, import and mention is attributed correctly.</p>
+          <h3>Profile your product</h3>
+          <p>Give a one-paragraph pitch, your site and your docs. Octillion researches them and builds the profile: names, real package names, competitors and the developer personas you sell to.</p>
           <div class="snip">name: YourDB · pkgs: yourdb, @yourdb/client · vs: OtherDB</div>
         </li>
         <li>
-          <h3>Define real-world scenarios</h3>
-          <p>The tasks your buyers actually hand to agents, like <code>set up auth for a FastAPI service</code> or <code>add background jobs to this Next.js app</code>.</p>
-          <div class="snip">scenario × repo × prompt variants</div>
+          <h3>Pose blind problems</h3>
+          <p>Realistic tasks your buyers hand to agents, like <code>set up auth for this FastAPI service</code>, that never name you or a competitor. The agent has to arrive at you on its own.</p>
+          <div class="snip">scenario × starter repo × persona</div>
         </li>
         <li>
-          <h3>Agents run them, sandboxed</h3>
-          <p>An orchestrator launches long-running coding sub-agents across multiple models in isolated sandboxes. They explore, install, write code and finish the job. Every raw transcript is kept.</p>
-          <div class="snip">N runs × M models · full transcripts</div>
+          <h3>Run the real agent mix</h3>
+          <p>Claude Code, Codex, Cursor, OpenCode and more work each task in isolated sandboxes, in proportion to how developers actually use them, until the code is really done. A simulated developer answers their questions in persona.</p>
+          <div class="snip">agent mix ∝ developer usage · full transcripts</div>
         </li>
         <li>
-          <h3>Scored, with evidence</h3>
-          <p>Each run gets a verdict: Adopted, Recommended, Mentioned, Competitor or None. Every verdict links to the exact lines in the transcript that justify it.</p>
-          <div class="snip">verdict → transcript line refs</div>
+          <h3>Score, fix, re-run</h3>
+          <p>Every run gets a verdict with transcript evidence. See where you lose and why, improve your docs, examples, SDK or packaging, then re-run the same tasks to prove preference moved.</p>
+          <div class="snip">verdict → evidence → fix → re-measure</div>
         </li>
       </ol>
     </div>
@@ -410,15 +440,15 @@ footer a:hover{color:var(--ink)}
   <section class="band" id="results" aria-labelledby="results-title">
     <div class="wrap">
       <div class="sec-head">
-        <span class="eyebrow">What you get</span>
-        <h2 id="results-title">A measurable answer to “do agents pick us?”</h2>
+        <span class="eyebrow">Your APO scorecard</span>
+        <h2 id="results-title">A measurable answer to “do agents prefer us?”</h2>
         <p>Numbers you can track, broken down the way you'd actually act on them, each one traceable to its source.</p>
       </div>
       <div class="feat">
         <article>
           <svg viewBox="0 0 36 36" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="18" cy="18" r="14"/><path d="M18 4a14 14 0 0 1 13.3 18.3L18 18Z" fill="currentColor" stroke="none"/></svg>
-          <h3>Recommendation rate</h3>
-          <p>The share of runs where an agent adopted or recommended your product, overall and per scenario.</p>
+          <h3>Preference rate</h3>
+          <p>The share of runs where an agent adopted or recommended your product, overall and per scenario. Your headline APO number.</p>
         </article>
         <article>
           <svg viewBox="0 0 36 36" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="4" y="8" width="28" height="5" rx="2.5"/><rect x="4" y="16" width="18" height="5" rx="2.5" fill="currentColor"/><rect x="4" y="24" width="11" height="5" rx="2.5"/></svg>
@@ -432,8 +462,8 @@ footer a:hover{color:var(--ink)}
         </article>
         <article>
           <svg viewBox="0 0 36 36" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 28 12 19l6 5 14-15"/><path d="M24 9h8v8"/></svg>
-          <h3>Trends over time</h3>
-          <p>Re-run scenarios as models ship and as you change docs, SDKs or packaging. See whether the line moves.</p>
+          <h3>Proof your fixes worked</h3>
+          <p>Re-run the same scenarios as new models ship and as you change docs, examples, SDKs or packaging. See whether preference moves, model by model.</p>
         </article>
         <article>
           <svg viewBox="0 0 36 36" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 8h18M6 14h24M6 20h14"/><circle cx="25" cy="25" r="5"/><path d="m29 29 4 4"/></svg>
@@ -461,7 +491,7 @@ footer a:hover{color:var(--ink)}
   <section id="mcp" aria-labelledby="mcp-title">
     <div class="wrap mcp-grid">
       <div>
-        <span class="eyebrow">Works where you already are</span>
+        <span class="eyebrow">APO where you already work</span>
         <h2 id="mcp-title" style="font-size:clamp(30px,4.4vw,46px);margin-top:16px">No new dashboard to learn. Just ask.</h2>
         <p style="color:var(--ink-2);font-size:18px;margin-top:18px">Octillion is an MCP server with an interactive dashboard. Add it as a connector in Claude desktop or ChatGPT desktop, then configure products, launch simulations and dig into results in plain language.</p>
         <ul class="mcp-list">
@@ -496,6 +526,18 @@ footer a:hover{color:var(--ink)}
       </div>
       <div class="faq">
         <details>
+          <summary>What is APO?</summary>
+          <p><strong>Agentic Preference Optimization</strong> is the practice of measuring and improving how often AI coding agents choose your product while they do real work: installing your package, importing your SDK, or recommending you to the developer. Octillion is the platform for it.</p>
+        </details>
+        <details>
+          <summary>How is APO different from SEO or GEO?</summary>
+          <p>SEO optimizes for people reading search results. GEO optimizes for chatbots answering questions. APO optimizes for agents making decisions mid-task, in a real repo with real constraints, where the outcome is code rather than a link or a mention. A brand that chatbots mention can still lose when an agent actually writes the code, so APO measures what agents do, not what they say.</p>
+        </details>
+        <details>
+          <summary>Does Octillion change what the models do?</summary>
+          <p>No. Octillion never pays for placement, injects prompts or touches the models. Agents get blind tasks that don't name you. You improve the things agents actually learn from and act on, such as your docs, quickstarts, examples, SDK ergonomics, package metadata and error messages, and Octillion measures whether those changes moved agent preference.</p>
+        </details>
+        <details>
           <summary>Which models and agents do you test?</summary>
           <p>Octillion runs scenarios across multiple frontier coding models, so you can compare how each one behaves on the same task. The exact model lineup evolves as new models ship; tell us which ones matter to your users and we'll cover them during early access.</p>
         </details>
@@ -528,8 +570,8 @@ footer a:hover{color:var(--ink)}
     <div class="wrap access">
       <div>
         <span class="eyebrow">Early access</span>
-        <h2 id="access-title" style="font-size:clamp(30px,4.4vw,46px);margin-top:16px">Find out what the agents are choosing.</h2>
-        <p style="color:var(--ink-2);font-size:18px;margin-top:18px">We're onboarding developer-tool teams now: databases, auth, queues, hosting, observability and more. Tell us about your product and we'll get back to you to set up your first scenarios.</p>
+        <h2 id="access-title" style="font-size:clamp(30px,4.4vw,46px);margin-top:16px">Start with your APO baseline.</h2>
+        <p style="color:var(--ink-2);font-size:18px;margin-top:18px">We're onboarding developer-tool teams now: databases, auth, queues, hosting, observability and more. Tell us about your product and we'll measure where coding agents prefer you today, where you lose, and why.</p>
         <p class="fine" style="margin-top:20px">We'll only use your details to respond to this request.</p>
       </div>
 
@@ -558,7 +600,7 @@ footer a:hover{color:var(--ink)}
               <textarea id="f-msg" name="message" maxlength="4000" placeholder="Competitors you track, scenarios you care about, models your users run…"></textarea>
             </div>
             <div class="status" id="form-status" role="alert"></div>
-            <button class="btn btn-primary" type="submit" id="f-submit">Request access <span class="arr" aria-hidden="true">→</span></button>
+            <button class="btn btn-primary" type="submit" id="f-submit">Get your APO baseline <span class="arr" aria-hidden="true">→</span></button>
           </div>
         </form>
         <div class="success" id="form-success" role="status" tabindex="-1">
@@ -573,9 +615,9 @@ footer a:hover{color:var(--ink)}
 
 <footer>
   <div class="wrap">
-    <span>© 2026 Octillion</span>
+    <span>© 2026 Octillion · Agentic Preference Optimization</span>
     <nav aria-label="Footer">
-      <a href="#how">How it works</a>
+      <a href="#how">What is APO</a>
       <a href="#faq">FAQ</a>
       <a href="/connect">Connect Claude &amp; ChatGPT</a>
       <a href="#access">Contact us</a>

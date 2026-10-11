@@ -1,11 +1,11 @@
 ---
 name: octillion
-description: Measure and improve whether AI coding agents (Claude Code, Codex, Cursor, OpenCode and others) pick a developer tool. Use when the user asks whether coding agents recommend or adopt their dev tool, wants to onboard a product into Octillion, run agent simulations, read an Octillion visibility report, understand why an agent chose a competitor, or compare how different agents and models treat their product. Requires the Octillion MCP connector.
+description: APO (Agentic Preference Optimization) for developer tools. Measure and improve whether AI coding agents (Claude Code, Codex, Cursor, OpenCode and others) pick a developer tool. Use when the user asks whether coding agents recommend or adopt their dev tool, wants to onboard a product into Octillion, run agent simulations, read an Octillion visibility report, understand why an agent chose a competitor, or compare how different agents and models treat their product. Requires the Octillion MCP connector.
 ---
 
 # Octillion
 
-Octillion runs real, sandboxed coding agents on realistic programming tasks and records whether they **adopt** (install/import), **recommend**, merely **mention**, or skip the user's developer tool in favour of a **competitor**. The agents are blind: tasks never name the product. This skill explains how to drive the Octillion connector and how to read its results honestly.
+Octillion runs real, sandboxed coding agents on realistic programming tasks and records whether they **adopt** (install/import), **recommend**, merely **mention**, or skip the user's developer tool in favour of a **competitor**. This is APO, **Agentic Preference Optimization**: measuring and improving how often coding agents choose a product while they do real work. The agents are blind: tasks never name the product. This skill explains how to drive the Octillion connector and how to read its results honestly.
 
 ## When to use the tools
 

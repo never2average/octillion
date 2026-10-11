@@ -1,6 +1,36 @@
 # Octillion
 
-**Do AI coding agents pick your developer tool?**
+**APO — Agentic Preference Optimization for developer tools.**
+
+SEO got you found by people. APO gets you picked by agents.
+
+## What is APO?
+
+Coding agents (Claude Code, Codex, Cursor, OpenCode, ...) now choose the database, the queue and the auth library
+while they work, and the developer accepts the diff. **Agentic Preference Optimization** is the practice of measuring
+and improving how often those agents choose your product during real work: installing your package, importing your
+SDK, or recommending you to the developer.
+
+| | Who decides | The win | What you measure |
+|---|---|---|---|
+| **SEO** | a person scanning search results | a click to your site | rankings and traffic |
+| **GEO** | a chatbot answering a question | a mention or citation | mentions in chat replies |
+| **APO** | a coding agent in the middle of a task | your package wired into the code | adoption in real agent transcripts |
+
+Octillion is the APO platform. It runs the APO loop:
+
+1. **Profile**: from a pitch, website and docs, build the product profile (real package names, competitors) and
+   target developer personas.
+2. **Pose blind problems**: realistic coding tasks that never name the product or a competitor.
+3. **Run the real agent mix**: sandboxed coding agents in proportion to developer usage work each task until the
+   code is really done, with a simulated developer answering their questions.
+4. **Score, fix, re-run**: every run gets a verdict with transcript evidence; the customer improves docs, examples,
+   SDK or packaging, and re-runs the same tasks to prove preference moved.
+
+Octillion never pays for placement, injects prompts or touches the models. The headline APO number is the
+**preference rate** (reported as the hit rate): the share of runs where an agent adopted or recommended the product.
+
+## How it works
 
 Developer-tool companies configure their product context (names, package names, competitors) and realistic coding
 scenarios. Octillion's orchestrator runs long-lived, sandboxed coding sub-agents (Claude Code, Codex, ...) on those

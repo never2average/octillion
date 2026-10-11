@@ -203,7 +203,7 @@ export function createServer(org: Org): McpServer {
     { name: "octillion", version: "2.0.0" },
     {
       instructions:
-        "Octillion measures whether AI coding agents recommend the user's developer-tool product. Quickest start: onboard_product " +
+        "Octillion is the APO (Agentic Preference Optimization) platform: it measures whether AI coding agents recommend the user's developer-tool product. Quickest start: onboard_product " +
         "with a short description, the website and the docs link; the orchestrator researches the product, builds its profile, " +
         "target developer personas and programming problems, then runs them across coding agents (follow with get_onboarding). " +
         "Manual workflow: save_product " +
