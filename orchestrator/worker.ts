@@ -88,7 +88,8 @@ export async function claimLoop(runJob: (job: Job, runner: Runner) => Promise<vo
   const claim = async (): Promise<Job[]> => {
     if (fleet) {
       const out: Job[] = [];
-      // One claim per agent group: {agent_ids:[id]}, limit = that group's free worker-sandbox slots.
+      // One claim per agent group: {agent_ids: the group's agents}, limit = that group's free worker-sandbox slots. A slot
+      // agent's group (pi) also claims its model_mix variants; each job carries its own model.
       for (const g of fleet.groups()) {
         if (CFG.harness && getAdapterId(g.harness) !== getAdapterId(CFG.harness)) continue;
         if (!runnable(g.harness)) {
@@ -97,7 +98,7 @@ export async function claimLoop(runJob: (job: Job, runner: Runner) => Promise<vo
         }
         const free = fleet.free(g.agent_id);
         if (!free) continue;
-        for (const job of await claimJobs(free, { agentIds: [g.agent_id] })) {
+        for (const job of await claimJobs(free, { agentIds: g.agents?.length ? g.agents : [g.agent_id] })) {
           fleet.acquire(g.agent_id);
           groupOf.set(job.session_id, g.agent_id);
           out.push(job);

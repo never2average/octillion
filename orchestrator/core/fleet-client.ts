@@ -11,7 +11,8 @@ import { planFleet } from "../fleet/plan.js";
 import { CFG, env, num } from "./config.js";
 import { api, log } from "./util.js";
 
-export interface GroupTarget { agent_id: string; harness: string; model: string; pods: number }
+/** `agents`: registry agent ids this group claims (itself + a slot agent's model_mix variants; same harness). */
+export interface GroupTarget { agent_id: string; harness: string; model: string; pods: number; agents?: string[] }
 
 export const FLEET = {
   capacity: Math.max(1, Math.min(20, num(env.POD_CAPACITY ?? env.FLEET_SIZE, 20))),
@@ -44,7 +45,8 @@ export class FleetMembership {
         const r = (await api("/api/worker/fleet", {
           json: { orchestrator_id: this.orchestratorId, capacity: this.capacity, meta: { worker_id: CFG.workerId, runner: "boat", running: Object.fromEntries(this.running) } },
         })) as { assignment?: GroupTarget[]; next_checkin_seconds?: number };
-        this.set((r.assignment ?? []).map((a) => ({ agent_id: a.agent_id, harness: a.harness, model: a.model, pods: a.pods })));
+        this.set((r.assignment ?? []).map((a) => ({ agent_id: a.agent_id, harness: a.harness, model: a.model, pods: a.pods,
+                                                    ...(Array.isArray(a.agents) ? { agents: a.agents } : {}) })));
         next = Math.max(5, Number(r.next_checkin_seconds ?? 30));
       }
     } catch (e) {

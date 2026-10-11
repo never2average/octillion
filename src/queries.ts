@@ -2,7 +2,7 @@ import { getDb, type Queryable } from "./db.js";
 import { randomId, type Org } from "./auth.js";
 import { transcripts, type SearchParams } from "./transcripts.js";
 import type { Tool } from "./scoring.js";
-import { enabledAgents, findAgent, isRunnable, representativePlan, runnableCoverage, sandboxMix, scheduledAgents, type AgentSpec } from "./agents.js";
+import { drawVariant, enabledAgents, findAgent, isRunnable, representativePlan, runnableCoverage, sandboxMix, scheduledAgents, variantsOf, type AgentSpec } from "./agents.js";
 import { getPopulation, listPopulations } from "./populations.js";
 import { capacityStatus } from "./autoscaler.js";
 
@@ -280,11 +280,12 @@ export async function runSimulation(org: Org, input: RunInput) {
   const repeats = input.repeats ?? 3;
   let plan: { scenarioId: number; profileId: number | null; agent: AgentSpec; attempt: number }[];
   if (explicit) {
-    let chosen = enabled;
+    // A slot agent's model_mix variants (e.g. pi on GPT) are selectable by id too.
+    let chosen = [...new Map(enabled.flatMap((a) => [a, ...variantsOf(a)]).map((a) => [a.id, a])).values()];
     if (input.agents?.length) {
-      const unknown = input.agents.filter((a) => !enabled.some((e) => e.id === a));
-      if (unknown.length) throw new Error(`Unknown or disabled agent(s): ${unknown.join(", ")}. Available: ${enabled.map((e) => e.id).join(", ")}`);
-      chosen = enabled.filter((e) => input.agents!.includes(e.id));
+      const unknown = input.agents.filter((a) => !chosen.some((e) => e.id === a));
+      if (unknown.length) throw new Error(`Unknown or disabled agent(s): ${unknown.join(", ")}. Available: ${chosen.map((e) => e.id).join(", ")}`);
+      chosen = chosen.filter((e) => input.agents!.includes(e.id));
     }
     if (input.models?.length) {
       const unknown = input.models.filter((m) => !chosen.some((e) => e.model === m));
@@ -293,7 +294,8 @@ export async function runSimulation(org: Org, input: RunInput) {
     }
     plan = slots.flatMap((slot) => chosen.flatMap((agent) => Array.from({ length: repeats }, (_, i) => ({ ...slot, agent, attempt: i + 1 }))));
   } else {
-    const agents = representativePlan(slots.length * samples, scheduledAgents(pop));
+    // Slot agents with a model_mix (e.g. pi) run each sampled session as one of their models, drawn by share.
+    const agents = representativePlan(slots.length * samples, scheduledAgents(pop)).map((a) => drawVariant(a));
     plan = slots.flatMap((slot, si) => Array.from({ length: samples }, (_, i) => ({ ...slot, agent: agents[si * samples + i], attempt: i + 1 })));
   }
   if (plan.length > config.maxSessionsPerRun())

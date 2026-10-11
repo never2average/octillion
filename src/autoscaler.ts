@@ -2,7 +2,7 @@ import { hostname } from "node:os";
 import { randomBytes } from "node:crypto";
 import { getDb } from "./db.js";
 import { useCredential } from "./keyvault.js";
-import { scheduledAgents } from "./agents.js";
+import { scheduledAgents, variantsOf } from "./agents.js";
 import { getPopulation } from "./populations.js";
 import { BOAT } from "../orchestrator/core/config.js";
 import * as lib from "../orchestrator/deploy/boat-lib.js";
@@ -61,7 +61,8 @@ export function desiredOrchestrators(d: Demand, podCapacity: number): number {
 export async function computeDemand(freshSince?: Date): Promise<Demand> {
   const db = await getDb();
   let agents: string[] = [];
-  try { agents = scheduledAgents(await getPopulation()).map((a) => a.id); } catch { /* no population: count everything */ }
+  try { agents = scheduledAgents(await getPopulation()).flatMap((a) => [a.id, ...variantsOf(a).map((v) => v.id)]); }
+  catch { /* no population: count everything */ }
   const claimable = "(agent_id IS NULL OR cardinality($1::text[]) = 0 OR agent_id = ANY($1))";
   const [s] = await db.query<{ sessions: number; queued: number; unclaimable: number; fresh: number }>(
     `SELECT count(*) FILTER (WHERE ${claimable}) AS sessions,
