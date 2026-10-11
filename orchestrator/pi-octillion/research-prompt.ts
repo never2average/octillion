@@ -57,8 +57,9 @@ Procedure:
    gets expectation "recommend". Give every problem a rationale explaining the fit (or why it should be avoided),
    plus language and tags. Problems run in a small existing starter project of the matching stack (a TypeScript
    Express API, a Next.js app, a plain TypeScript package, a FastAPI or Django app, a Go net/http service, a React
-   Native (Expo) mobile app or a Flutter mobile app); optionally set "template" to one of express-ts | nextjs-ts |
-   node-ts | fastapi | django | go-http | react-native | flutter, and phrase
+   Native (Expo) mobile app, a Flutter mobile app, a Spring Boot (Java) service, a Rust axum service or a C++ CMake
+   project); optionally set "template" to one of express-ts | nextjs-ts | node-ts | fastapi | django | go-http |
+   react-native | flutter | java-spring | rust-axum | cpp-cmake, and phrase
    the prompt as work in "this project" / "this service".
 5. Validating. Call validate with the full result. Fix every issue it reports, then submit. If submit returns issues,
    fix them and submit again. Stop once it is accepted.

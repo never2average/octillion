@@ -181,7 +181,7 @@ function namesProduct(prompt: string, p: ProductRow) {
 // ---------- scenarios ----------
 
 /** Starter workspaces the orchestrator can seed (orchestrator/workspaces/<template>) for scenarios without repo_url. */
-export const WORKSPACE_TEMPLATES = ["express-ts", "nextjs-ts", "node-ts", "fastapi", "django", "go-http", "react-native", "flutter"] as const;
+export const WORKSPACE_TEMPLATES = ["express-ts", "nextjs-ts", "node-ts", "fastapi", "django", "go-http", "react-native", "flutter", "java-spring", "rust-axum", "cpp-cmake"] as const;
 
 /** Normalize an optional template: "" / "auto" -> null (picked from language/tags/prompt); unknown -> error. */
 export function checkTemplate(t: string | null | undefined): string | null | undefined {

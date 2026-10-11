@@ -12,6 +12,7 @@ from huggingface_hub import HfApi, hf_hub_download
 
 out_dir, start, end = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 NEW_ONLY = len(sys.argv) > 4 and sys.argv[4] == "new-only"
+JRC_ONLY = len(sys.argv) > 4 and sys.argv[4] == "jrc-only"
 os.makedirs(out_dir, exist_ok=True)
 REPO = "mikex86/stackoverflow-posts"
 files = sorted(f.path for f in HfApi().list_repo_tree(REPO, repo_type="dataset", recursive=True) if f.path.endswith(".parquet"))
@@ -26,6 +27,31 @@ STACK_TAGS = {
     "flutter": {"flutter", "dart", "flutter-layout", "flutter-dependencies", "flutter-web", "flutter-provider", "flutter-bloc", "riverpod"},
 }
 MOBILE = {"react-native", "flutter"}
+STACK_TAGS.update({
+    "java-spring": {"spring-boot", "spring", "spring-mvc", "spring-security", "spring-data-jpa", "spring-data", "hibernate",
+                    "jpa", "quarkus", "micronaut", "jakarta-ee", "java-ee", "spring-webflux", "spring-cloud", "java"},
+    "rust-axum": {"rust", "rust-tokio", "actix-web", "rust-axum", "axum", "rust-rocket", "rocket", "serde", "rust-diesel",
+                  "diesel", "sqlx", "tokio", "warp", "rust-cargo"},
+    "cpp-cmake": {"c++", "cmake", "qt", "boost", "c++11", "c++14", "c++17", "c++20", "boost-asio", "poco-libraries",
+                  "qt5", "qt6", "boost-beast", "grpc-c++"},
+})
+JRC = {"java-spring", "rust-axum", "cpp-cmake"}
+TITLE_CATS = {k: re.compile(v, re.I) for k, v in {
+    "observability": r"\b(logging|logger|log files?|metrics|tracing|telemetry|monitor(ing)?|crash report)",
+    "database": r"\b(database|sqlite|postgres|mysql|orm|persist(ence)?|store .* data|schema|migrations?)",
+    "auth": r"\b(authenticat|authoriz|login|oauth|jwt|password hash|sessions?)\b",
+    "messaging": r"\b(websockets?|message queue|pub/?sub|push notification|real[- ]time|mqtt|zeromq|grpc streaming)",
+    "background-jobs": r"\b(background (task|job|thread)|scheduler|cron|job queue|task queue|thread pool for jobs)",
+    "caching": r"\b(cach(e|ing)|rate limit)",
+    "search": r"\b(full[- ]text search|search engine|fuzzy search|indexing documents)",
+    "storage": r"\b(file upload|object storage|blob storage|store (files|images))",
+    "payments": r"\b(payment|billing|subscription|checkout)",
+    "email": r"\b(send(ing)? e-?mails?|smtp)\b",
+    "feature-flags": r"\b(feature (flags?|toggles?)|a/b test|gradual rollout|remote config)",
+    "ai": r"\b(llm|language model|embeddings?|inference server|onnx|chatbot)",
+    "agents": r"\b(ai agent|llm agent|tool calling|function calling|rag\b|retrieval[- ]augmented)",
+    "deployment": r"\b(deploy|docker(file)?|container|kubernetes|ci/cd|cross[- ]compil)",
+}.items()}
 CAT_TAGS = {
     "email": {"email", "smtp", "nodemailer", "sendgrid", "mailgun", "amazon-ses", "postmark", "django-email", "html-email", "email-verification", "transactional-email"},
     "payments": {"stripe-payments", "stripe.js", "paypal", "braintree", "payment-gateway", "payment", "subscription", "in-app-purchase", "paddle", "razorpay", "recurring-billing"},
@@ -99,6 +125,8 @@ for i in range(start, min(end, len(files))):
             if BUGGY.search(title):
                 continue
             cats = sorted({TAG2CAT[t] for t in tags if t in TAG2CAT})
+            if JRC_ONLY and not cats:
+                cats = sorted({c for c, rx in TITLE_CATS.items() if rx.search(title)})
             dbms = bool(tags & DBMS_TAGS) and (d["Score"][j] or 0) >= 5 and bool(DBMS_TITLE.search(title))
             agents = "agents" in cats
             if dbms and "database" not in cats:
@@ -109,6 +137,10 @@ for i in range(start, min(end, len(files))):
                 continue
             if NEW_ONLY and not (dbms or agents or MOBILE & set(stacks)):
                 continue
+            if JRC_ONLY:
+                stacks = [s for s in stacks if s in JRC]
+                if not stacks or "android" in tags or any(t.startswith("android") for t in tags):
+                    continue
             text = prose(d["Body"][j])
             if len(text.split()) < 25 or text.count("[code omitted]") > 3:
                 continue

@@ -12,7 +12,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const WORKSPACES_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "workspaces");
-export const TEMPLATES = ["express-ts", "nextjs-ts", "node-ts", "fastapi", "django", "go-http", "react-native", "flutter"] as const;
+export const TEMPLATES = ["express-ts", "nextjs-ts", "node-ts", "fastapi", "django", "go-http", "react-native", "flutter", "java-spring", "rust-axum", "cpp-cmake"] as const;
 export type TemplateId = (typeof TEMPLATES)[number];
 export const FALLBACK_TEMPLATE: TemplateId = "node-ts";
 
@@ -31,6 +31,9 @@ const FASTAPI = /\bfastapi\b|\bpydantic\b|\buvicorn\b|\bflask\b|\bstarlette\b/;
 const PYTHON = /\bpython\b|\bpip\b|\bpytest\b|\.py\b/;
 const GO = /\bgolang\b|\bgo (service|server|module|api|app|backend|http|code|project)\b|\bnet\/http\b|\bgo\.mod\b/;
 const SERVICE = /\bservice\b|\bapi\b|\bendpoints?\b|\broutes?\b|\bserver\b|\bexpress\b|\bwebhooks?\b|\bmiddleware\b|\bbackend\b|\brest\b|\bhttp\b|\bpost \/|\bget \//;
+const JAVA = /\bjava\b|\bspring( boot)?\b|\bkotlin\b|\bmaven\b|\bgradle\b|\bquarkus\b|\bjakarta\b/;
+const RUST = /\brust\b|\bcargo\b|\baxum\b|\bactix\b|\btokio\b|\bcrates?\b/;
+const CPP = /\bc\+\+|\bcpp\b|\bcmake\b|\bqt\b|\bboost\b/;
 const RN = /\breact native\b|\breact-native\b|\bexpo\b/;
 const FLUTTER = /\bflutter\b|\bdart\b|\bpubspec\b/;
 const MOBILE = /\bmobile app\b|\bios\b|\bandroid\b|\bpush notifications? on (the )?(phone|device)\b/;
@@ -43,7 +46,11 @@ export function selectTemplate(s: TemplateInput): TemplateId {
   const lang = (s.language ?? "").trim().toLowerCase();
   const text = [lang, ...(s.tags ?? []), s.title ?? "", s.prompt ?? ""].join(" \n ").toLowerCase();
 
-  // Mobile first: these keywords are unambiguous, and a mobile task must not land in a web starter.
+  // Explicit languages and unambiguous stack keywords first.
+  if (lang === "java" || lang === "kotlin") return "java-spring";
+  if (lang === "rust") return "rust-axum";
+  if (lang === "c++" || lang === "cpp" || lang === "c") return "cpp-cmake";
+  // Mobile next: a mobile task must not land in a web starter.
   if (lang === "dart" || has(text, FLUTTER)) return "flutter";
   if (has(text, RN)) return "react-native";
   if (has(text, MOBILE) && lang !== "python" && lang !== "go") return "react-native";
@@ -55,6 +62,9 @@ export function selectTemplate(s: TemplateInput): TemplateId {
     return has(text, SERVICE) ? "express-ts" : "node-ts";
   }
   // No (or another) language: keywords.
+  if (has(text, RUST)) return "rust-axum";
+  if (has(text, CPP)) return "cpp-cmake";
+  if (has(text, JAVA)) return "java-spring";
   if (has(text, DJANGO)) return "django";
   if (has(text, FASTAPI) || has(text, PYTHON)) return "fastapi";
   if (has(text, GO)) return "go-http";

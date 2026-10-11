@@ -33,11 +33,25 @@ Stack Overflow user content is licensed under **CC BY-SA** (2.5, 3.0 or 4.0 depe
 adapted from it (any `source.dataset` containing "stackoverflow") are shared under CC BY-SA 4.0, with attribution to
 the original Stack Overflow authors via the question link.
 
+## GitHub feature requests (Multi-SWE-bench)
+
+A small number of tasks (`source.dataset` = `ByteDance-Seed/Multi-SWE-bench`, ids `mswe-*`) are adapted from
+feature-request issues in **Multi-SWE-bench** (ByteDance Seed), https://huggingface.co/datasets/ByteDance-Seed/Multi-SWE-bench,
+(Hugging Face license field: "other"). Only the issue's request was used, rewritten blind; `source.source_id` is the
+original issue (`github.com/<org>/<repo>/issues/<n>`), whose text remains under its upstream repository's terms.
+
+## Generated tasks
+
+Tasks with `source.dataset` = `generated` (ids `gen-*`) have no upstream text. Claude subagents wrote them from 150
+original product ideas across 15 markets: agent-building and feature-flag tasks (`curate/GEN_BRIEF.md`) and
+Java/Rust/C++ service tasks (`curate/GEN_STACK_BRIEF.md`). They are checked by `check_generated.py` against the same
+blindness rules and are released under the same terms as the rest of this library.
+
 ## Example repositories (`repos.json`)
 
-77 open-source applications across 8 stacks (Express/NestJS, Next.js, FastAPI, Django, Go, Node CLIs/bots, React Native/Expo,
-Flutter), including apps that lack auth or a database, each pinned to
+108 open-source applications across 11 stacks (Express/NestJS, Next.js, FastAPI, Django, Go, Node CLIs/bots, React Native/Expo,
+Flutter, Spring Boot, Rust/axum, C++/CMake), including apps that lack auth or a database, each pinned to
 a commit. Tasks placed in a repository carry `repo_url` as `<url>#<commit>`, and the sandbox fetches exactly that commit.
-Every repository is under a permissive license (MIT, Apache-2.0 or BSD-2-Clause, recorded per entry) and is cloned
+Every repository is under a permissive license (MIT, Apache-2.0, BSD-2/3-Clause or Unlicense, recorded per entry) and is cloned
 unmodified into isolated sandboxes; Octillion does not redistribute their code. `capabilities_present` lists what each
 app already implements, so tasks never ask for something the codebase already does.

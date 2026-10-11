@@ -2,14 +2,14 @@
 import collections, json, random, re, sys
 T = json.load(open(sys.argv[1]))
 R = {r["id"]: r for r in json.load(open(sys.argv[2]))}
-terms = set(json.load(open(__import__("os").path.join(__import__("os").path.dirname(__file__), "vendors.json")))) - {"Ninja", "all models"}
+terms = set(json.load(open("vendors.json"))) - {"Ninja", "all models"}
 WORDS = {"Make", "Render", "Segment", "Temporal", "Resend", "Neon", "Chroma", "Railway", "Composer", "Cargo", "Passport",
          "Oracle", "Snowflake", "Unleash", "Poetry", "Paddle", "Clerk", "Pip", "Bun", "Pacman", "Lucia", "SES", "Docker"}
 alt = lambda ts: "|".join(sorted((re.escape(t) for t in ts), key=len, reverse=True))
 ci = re.compile(r"(?<![\w.])(" + alt(terms - WORDS) + r")(?![\w])", re.I)
 cs = re.compile(r"(?<![\w.])(" + alt(terms & WORDS) + r")(?![\w])")
 url = re.compile(r"https?://|[\w.+-]+@[\w-]+\.\w+")
-TEMPLATES = {"express-ts", "nextjs-ts", "node-ts", "fastapi", "django", "go-http", "react-native", "flutter"}
+TEMPLATES = {"java-spring", "rust-axum", "cpp-cmake", "express-ts", "nextjs-ts", "node-ts", "fastapi", "django", "go-http", "react-native", "flutter"}
 issues = collections.Counter(); examples = collections.defaultdict(list)
 def flag(kind, t, detail=""):
     issues[kind] += 1

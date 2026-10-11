@@ -4,15 +4,17 @@ Exit 0 only when every task passes.
 """
 import json, os, re, sys, collections
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPOS = os.environ.get("REPOS_JSON", os.path.join(HERE, "..", "curated", "repos.json"))
+REPOS = os.environ.get("REPOS_JSON", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "curated", "repos.json"))
 cands = {json.loads(l)["source_id"]: json.loads(l) for l in open(sys.argv[1])}
 outp = json.load(open(sys.argv[2]))
 repos = {r["id"]: r for r in json.load(open(REPOS))}
 CATS = {"auth", "database", "background-jobs", "caching", "deployment", "observability", "payments", "email", "messaging",
         "search", "ai", "agents", "storage", "feature-flags", "analytics"}
-TEMPLATES = {"express-ts", "nextjs-ts", "node-ts", "fastapi", "django", "go-http", "react-native", "flutter"}
+TEMPLATES = {"express-ts", "nextjs-ts", "node-ts", "fastapi", "django", "go-http", "react-native", "flutter",
+             "java-spring", "rust-axum", "cpp-cmake"}
 LANG = {"express-ts": "TypeScript", "nextjs-ts": "TypeScript", "node-ts": "TypeScript", "fastapi": "Python", "django": "Python",
-        "go-http": "Go", "react-native": "TypeScript", "flutter": "Dart"}
+        "go-http": "Go", "react-native": "TypeScript", "flutter": "Dart", "java-spring": "Java", "rust-axum": "Rust",
+        "cpp-cmake": "C++"}
 terms = set(json.load(open(os.path.join(HERE, "vendors.json")))) - {"Ninja", "all models"}
 WORDS = {"Make", "Render", "Segment", "Temporal", "Resend", "Neon", "Chroma", "Railway", "Composer", "Cargo", "Passport",
          "Oracle", "Snowflake", "Unleash", "Poetry", "Paddle", "Clerk", "Pip", "Bun", "Pacman", "Lucia", "SES", "Docker"}
@@ -33,7 +35,12 @@ for t in outp:
     c = cands.get(src)
     if not c:
         problems.append(f"{tid}: source.source_id must be one of the chunk's candidate source_ids"); continue
-    want_id = ("so-" + src.rsplit("/", 1)[-1]) if src.startswith("stackoverflow.com/") else ("wc-" + src[:12])
+    if src.startswith("stackoverflow.com/"):
+        want_id = "so-" + src.rsplit("/", 1)[-1]
+    elif src.startswith("github.com/"):
+        want_id = "mswe-" + re.sub(r"[^a-z0-9]+", "-", src[len("github.com/"):].lower()).strip("-")[:70]
+    else:
+        want_id = "wc-" + src[:12]
     if tid != want_id:
         problems.append(f"{tid}: id must be {want_id}")
     if t.get("category") not in CATS:

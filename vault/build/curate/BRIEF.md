@@ -24,6 +24,11 @@ description, capabilities_present, license).
 - **Stack "any"**: the question has no framework tag. Pick the template where the task is most natural (usually
   fastapi or express-ts for backends, react-native/flutter for mobile, node-ts for scripts) and write for it.
 
+- **Java / Rust / C++** (stacks java-spring, rust-axum, cpp-cmake): Spring Boot services, Rust (axum) services or CLIs,
+  and C++ (CMake) applications. Capabilities are the same 15 categories (e.g. choosing an HTTP/DB/logging/metrics/
+  queue library or service for a C++ or Rust service is a valid tool choice). Reject language-syntax, compiler, build
+  error and template-metaprogramming questions.
+
 ## For each candidate, decide ACCEPT or REJECT
 Accept only if ALL hold:
 - The developer wants to BUILD or ADD a capability to an application (not debug an error, not a config typo, not a
@@ -52,10 +57,12 @@ Accept only if ALL hold:
   asks for.
 - Avoid starting sentences with words the vendor check treats as brand names ("Make sure" -> "Ensure"; "Render" -> "Display").
 - Fields: `id` = "so-<question id>" for Stack Overflow candidates, "wc-<first 12 characters of source_id>" for WildChat
-  candidates (real user requests to a chatbot; same rules apply); `category` = one of the 15 above (pick the capability the task is really about);
-  `template` = one of express-ts | nextjs-ts | node-ts | fastapi | django | go-http | react-native | flutter
-  (normally the chunk's stack); `language` = TypeScript for express-ts/nextjs-ts/node-ts/react-native, Python for
-  fastapi/django, Go for go-http, Dart for flutter; `tags` = 2-5 generic
+  candidates (real user requests to a chatbot; same rules apply), and for GitHub issue candidates (source_id
+  "github.com/<org>/<repo>/issues/<n>") "mswe-" + that path lowercased with non-alphanumerics as "-" (max 70 chars); `category` = one of the 15 above (pick the capability the task is really about);
+  `template` = one of express-ts | nextjs-ts | node-ts | fastapi | django | go-http | react-native | flutter |
+  java-spring | rust-axum | cpp-cmake (normally the chunk's stack); `language` = TypeScript for
+  express-ts/nextjs-ts/node-ts/react-native, Python for fastapi/django, Go for go-http, Dart for flutter, Java for
+  java-spring, Rust for rust-axum, C++ for cpp-cmake; `tags` = 2-5 generic
   lowercase tags; `source` = {"dataset": <candidate source>, "source_id": <candidate source_id>, "license": <candidate
   license>, "original_vendors_named": [vendors/packages the question named]}.
 

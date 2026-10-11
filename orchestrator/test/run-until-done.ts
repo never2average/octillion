@@ -75,7 +75,7 @@ try {
     const W = mkdtempSync(path.join(tmpdir(), "rud-seed-"));
     const r = spawnSync("bash", ["-c", seedScript(t)], { env: { ...process.env, W, HOME: W }, encoding: "utf8" });
     const files = spawnSync("git", ["-C", W, "ls-files"], { encoding: "utf8" }).stdout.split("\n").filter(Boolean);
-    const manifest = files.find((f) => /^(package\.json|requirements\.txt|go\.mod|pubspec\.yaml)$/.test(f));
+    const manifest = files.find((f) => /^(package\.json|requirements\.txt|go\.mod|pubspec\.yaml|pom\.xml|Cargo\.toml|CMakeLists\.txt)$/.test(f));
     if (r.status === 0 && seedBase(r.stdout).length === 40 && manifest && files.some((f) => f === "README.md") && files.length >= 5) seeded.push(t);
   }
   check("every template seeds a committed project (manifest, README, sources)", seeded.length === TEMPLATES.length, seeded.join(","));

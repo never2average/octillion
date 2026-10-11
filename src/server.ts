@@ -314,7 +314,7 @@ export function createServer(org: Org): McpServer {
         prompt: z.string().optional().describe("The task given to the agent"),
         repo_url: z.string().optional().describe("Optional starter git repo cloned into the sandbox"),
         language: z.string().optional(),
-        template: z.enum(["express-ts", "nextjs-ts", "node-ts", "fastapi", "django", "go-http", "react-native", "flutter", "auto"]).optional()
+        template: z.enum(["express-ts", "nextjs-ts", "node-ts", "fastapi", "django", "go-http", "react-native", "flutter", "java-spring", "rust-axum", "cpp-cmake", "auto"]).optional()
           .describe("Starter project seeded into the sandbox when there is no repo_url. Omit (or 'auto') to pick from language, tags and prompt"),
         tags: z.array(z.string()).optional(),
         expectation: z.enum(["recommend", "avoid"]).optional(),
