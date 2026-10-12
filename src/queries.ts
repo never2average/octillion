@@ -43,7 +43,7 @@ export const config = {
   defaultSamples: () => Number(process.env.OCTILLION_DEFAULT_SAMPLES ?? 10),
   maxSessionsPerRun: () => Number(process.env.OCTILLION_MAX_SESSIONS_PER_RUN ?? 100),
   /** Per-organization model spend per calendar month (UTC); new runs are refused once reached. 0 = no cap. */
-  orgMonthlyBudgetUsd: () => Number(process.env.OCTILLION_ORG_MONTHLY_BUDGET_USD ?? 100),
+  orgMonthlyBudgetUsd: () => Number(process.env.OCTILLION_ORG_MONTHLY_BUDGET_USD ?? 1000),
 };
 
 // A session is a hit when the agent picked the product in a "recommend" scenario, or left it out in an "avoid" one.

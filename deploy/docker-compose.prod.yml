@@ -109,7 +109,7 @@ services:
       # Run sizing and spend guards (beta defaults): sessions per scenario, sessions per run, per-org monthly model spend.
       OCTILLION_DEFAULT_SAMPLES: ${OCTILLION_DEFAULT_SAMPLES:-3}
       OCTILLION_MAX_SESSIONS_PER_RUN: ${OCTILLION_MAX_SESSIONS_PER_RUN:-40}
-      OCTILLION_ORG_MONTHLY_BUDGET_USD: ${OCTILLION_ORG_MONTHLY_BUDGET_USD:-100}
+      OCTILLION_ORG_MONTHLY_BUDGET_USD: ${OCTILLION_ORG_MONTHLY_BUDGET_USD:-1000}
     expose: ["3333"]
 
   caddy:
