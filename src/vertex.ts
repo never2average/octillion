@@ -110,9 +110,12 @@ export function toVertex(cfg: VertexConfig, path: string, rawBody: Buffer, betaH
  */
 export function toVertexGemini(cfg: VertexConfig, path: string, search = ""): { url: string; model: string } {
   if (!cfg.project_id) throw Object.assign(new Error("Vertex backend has no project_id configured"), { status: 503 });
-  const m = /^\/(v1(?:beta|alpha)?)\/(?:models|tunedModels)\/([^/:]+):([A-Za-z]+)$/.exec(path.replace(/\/+$/, ""));
-  if (!m) throw Object.assign(new Error(`${path} is not available on Vertex AI (only /v1beta/models/{model}:{method})`), { status: 404 });
-  const [, version, rawModel, method] = m;
+  // The model and method are read from the end of the path. Normal calls are /v1beta/models/{model}:{method}; Antigravity
+  // CLI's custom models (gemini-api://<base>/models/<id>) arrive as /models/<host>/<path>/v1beta/models/{model}:{method}.
+  const m = /(?:^|\/)models\/([^/:]+):([A-Za-z]+)$/.exec(path.replace(/\/+$/, ""));
+  if (!m) throw Object.assign(new Error(`${path} is not available on Vertex AI (only .../models/{model}:{method})`), { status: 404 });
+  const [, rawModel, method] = m;
+  const version = /^\/v1\//.test(path) ? "v1" : "v1beta";
   const model = cfg.model_map?.[rawModel] ?? rawModel;
   const api = version === "v1" ? "v1" : "v1beta1"; // preview fields (thinking, new tool types) live on v1beta1
   const loc = `${vertexBase(cfg)}/${api}/projects/${encodeURIComponent(cfg.project_id)}/locations/${encodeURIComponent(cfg.region ?? "global")}/publishers/google/models`;
