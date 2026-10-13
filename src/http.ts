@@ -69,7 +69,19 @@ export function createApp() {
   // ---------- MCP (per-organization API key) ----------
   // Keys arrive as `Authorization: Bearer oct_...` or in the connector URL, /mcp/oct_..., for hosts that
   // only take a URL. Stateless: a fresh server per request, bound to the caller's org.
+  // One access-log line per connector request (also the ones analytics never sees: bad keys, GET/DELETE probes,
+  // rejected Accept headers), so "connected but nothing happened" can be diagnosed. The key is never logged.
+  app.use("/mcp", (req, res, next) => {
+    const t0 = Date.now();
+    res.on("finish", () => {
+      const msgs = Array.isArray(req.body) ? req.body : req.body ? [req.body] : [];
+      const rpc = msgs.map((m: any) => (m?.method === "tools/call" ? `tools/call:${m?.params?.name}` : m?.method)).filter(Boolean).join(",");
+      console.error(`mcp ${req.method} ${res.statusCode} org=${res.locals.org ?? "-"} rpc=${rpc || "-"} ${Date.now() - t0}ms ua="${String(req.get("user-agent") ?? "").slice(0, 80)}"`);
+    });
+    next();
+  });
   const mcp = async (req: Request, res: Response, org: Org) => {
+    res.locals.org = org.slug;
     for (const e of connectorEvents(req.body, req.get("user-agent"))) recordMcpEvent(org.orgId, e);
     const server = createServer(org);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
