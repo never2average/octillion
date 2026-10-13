@@ -142,12 +142,19 @@ export const CRED_SPECS: Record<string, CredSpec> = {
     },
   },
   antigravity: {
-    providers: ["google"], mode: "gateway", how: "GOOGLE_GEMINI_BASE_URL + GEMINI_API_KEY (modelProvider gemini, set by the adapter)",
-    map(p) {
+    providers: ["google"], mode: "gateway",
+    how: "GOOGLE_GEMINI_BASE_URL + GEMINI_API_KEY (modelProvider gemini, set by the adapter). `--model` takes agy's display names " +
+         "(\"Gemini 3.1 Pro (High)\"); an API model id (gemini-4-argon) that is not in the CLI's built-in list yet is passed as a " +
+         "custom model URL, gemini-api://<gateway>/v1beta/models/<id>",
+    map(p, o) {
       const c = need(p, "google");
       const env: Record<string, string> = { GEMINI_API_KEY: c.api_key };
-      if (c.base_url) env.GOOGLE_GEMINI_BASE_URL = trim(c.base_url);
-      return { env, setup: "" };
+      if (!c.base_url) return { env, setup: "" };
+      env.GOOGLE_GEMINI_BASE_URL = trim(c.base_url);
+      // agy 1.3.4: "model name does not look like a custom model URL. Expected format: gemini-api://<base_url>/models/<model_name>".
+      const custom = /^gemini-[a-z0-9.-]+$/.test(o.model)
+        ? `gemini-api://${trim(c.base_url).replace(/^https?:\/\//, "")}/v1beta/models/${o.model}` : null;
+      return { env, setup: "", ...(custom ? { argv: (a: string[]) => a.map((x, i) => (a[i - 1] === "--model" ? custom : x)) } : {}) };
     },
   },
   "qwen-code": {
