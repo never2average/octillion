@@ -555,10 +555,25 @@ export const boatRunner: Runner = {
               if (!st?.running) break;
               if (Date.now() - t0 < 5000) await sleep(3000); // don't hot-loop if tail returns early
             }
-            partial = "";
-            await boatExecStream(id, `tail -n +${lines + 1} ${out} 2>/dev/null; true`, 120, onOut, noop, abort.signal);
+            // The run has exited and its output is on disk: a dropped connection here (ECONNRESET mid-stream) must not
+            // fail a finished session. Both reads are idempotent; the drain resumes after the last complete line.
+            const afterExit = async <T>(what: string, fn: () => Promise<T>): Promise<T> => {
+              for (let attempt = 1; ; attempt++) {
+                try { return await fn(); }
+                catch (e) {
+                  if (abort.signal.aborted || attempt >= 6) throw e;
+                  log(`[boat ${id}] ${what} failed (${attempt}), retrying:`, String(e));
+                  await sleep(Math.min(2000 * attempt, 10_000));
+                }
+              }
+            };
+            await afterExit("final output drain", () => {
+              partial = ""; // a torn last line is re-read from its start
+              return boatExecStream(id, `tail -n +${lines + 1} ${out} 2>/dev/null; true`, 120, onOut, noop, abort.signal);
+            });
             if (partial.trim()) { stdout.write(partial + "\n"); partial = ""; }
-            const fin = await boatExec(id, `cat ${BOAT_DIR}/exit-${n} 2>/dev/null; tail -c 8000 ${BOAT_DIR}/err-${n}.log >&2 2>/dev/null; true`, 60);
+            const fin = await afterExit("exit status read", () =>
+              boatExec(id, `cat ${BOAT_DIR}/exit-${n} 2>/dev/null; tail -c 8000 ${BOAT_DIR}/err-${n}.log >&2 2>/dev/null; true`, 60));
             if (fin.stderr) stderr.write(fin.stderr);
             const code = /^\s*(\d+)/.exec(fin.stdout)?.[1];
             finish({ code: code !== undefined ? Number(code) : null, signal: null });

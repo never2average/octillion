@@ -81,6 +81,7 @@ const liveByGroup: Record<string, number> = {}, maxByGroup: Record<string, numbe
 const groupOf = (name: string) => (/opus/.test(name) ? "claude-code/opus" : /sonnet/.test(name) ? "claude-code/sonnet" : "?");
 let nextPid = 100;
 const RUN_MS = 1500;
+let drainFaults = 2, exitFaults = 2; // network drops injected after a run has exited (see the stream / exit handlers)
 
 const stream = (lines: string[]) => [
   JSON.stringify({ type: "system", subtype: "init", session_id: "11111111-2222-3333-4444-555555555555", model: "m" }),
@@ -138,6 +139,9 @@ const boat = http.createServer((req, res) => {
         const frame = (o: object) => res.write(JSON.stringify(o) + "\n");
         frame({ type: "started" });
         const tail = /tail -n \+(\d+)(?: -F --pid=(\d+))? \/tmp\/octi\/out-\d+\.jsonl/.exec(cmd);
+        // Network drop on the final drain (the run has exited, no -F): boat reports the reset as an error frame.
+        if (tail && !tail[2] && drainFaults-- > 0)
+          return void res.end(JSON.stringify({ type: "error", error: "stream_error", message: "ECONNRESET: The socket connection was closed unexpectedly." }) + "\n");
         if (tail) {
           const p = tail[2] ? sb.procs.get(Number(tail[2])) : null;
           if (p) await sleep(Math.max(0, p.end - Date.now()));
@@ -149,6 +153,8 @@ const boat = http.createServer((req, res) => {
         res.end(JSON.stringify({ type: "exit", exitCode: 0 }) + "\n");
         return;
       }
+      // ...and a socket that dies while reading the exit status.
+      if (/cat \/tmp\/octi\/exit-/.test(cmd) && exitFaults-- > 0) return void req.socket.destroy();
       if (/cat \/tmp\/octi\/exit-/.test(cmd)) return json(res, 200, { ok: true, exitCode: 0, stdout: "0\n", stderr: "" });
       return json(res, 200, { ok: true, exitCode: 0, stdout: /cur=/.test(cmd) ? "harness claude-code: preinstalled (2.1.296)" : "", stderr: "" });
     }
@@ -215,6 +221,8 @@ check("claims carry {agent_ids:[group]} with limit <= the group's free slots", c
   claims.filter((c) => c.got).map((c) => `${c.agent_ids?.[0]?.split("/")[1]}:${c.limit}->${c.got}`).join(" "));
 check("one fresh worker sandbox per session, all deleted", created === 8 && [...sandboxes.values()].every((s) => !s.alive), `${created} created, ${[...sandboxes.values()].filter((s) => s.alive).length} alive`);
 check("boat 429s were backed off and retried (no session failed)", throttled > 0 && completed.size === 8, `${throttled} x 429`);
+check("network drops after a run exited (final drain, exit status) are retried, not failed sessions",
+  drainFaults <= 0 && exitFaults <= 0 && completed.size === 8, `drain faults left ${drainFaults}, exit faults left ${exitFaults}, completed ${completed.size}/8`);
 const leaks = [...sandboxes.values()].filter((s) => [...s.files.values(), ...s.cmds].some((x) => x.includes(WORKER_TOKEN) || x.includes(BOAT_KEY)));
 const envFiles = [...sandboxes.values()].flatMap((s) => [...s.files.entries()].filter(([p]) => /\/env-\d+$/.test(p)).map(([, c]) => c));
 const envKeys = [...new Set(envFiles.flatMap((c) => c.split("\n").map((l) => l.split("=")[0]).filter(Boolean)))].sort();
