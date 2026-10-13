@@ -196,7 +196,12 @@ try {
   // ---------- tools + UI resource ----------
   const { tools } = await A.listTools();
   console.log("tools:", tools.map((t) => t.name).join(", "));
-  assert.equal(tools.length, 17);
+  assert.equal(tools.length, 18);
+  assert.equal(tools[0].name, "get_started", "the welcome tool is listed first (the tool list is the first screen in IDE hosts)");
+  const fresh = await call(A, "get_started");
+  assert.equal(fresh.welcome.stage, "onboard");
+  assert.match(fresh.welcome.message, /Welcome to Octillion.*onboard_product.*Onboard my product:/s);
+  assert.equal(fresh.view, "products", "same payload as list_products so the dashboard renders");
   for (const t of tools) assert.equal((t._meta as any)?.ui?.resourceUri, WIDGET_URI, `${t.name} links the UI`);
   const res = await A.readResource({ uri: WIDGET_URI });
   const ui = res.contents[0] as { mimeType: string; text: string };
@@ -272,6 +277,9 @@ try {
   assert.equal(withScenarios.warnings.length, 1, "prompt naming the product is flagged");
   const biased = withScenarios.scenarios.find((s: any) => s.title === "Biased");
   assert.equal((await call(A, "save_scenarios", { scenarios: [{ id: biased.id, active: false }] })).warnings.length, 0);
+  const ready = await call(A, "get_started");
+  assert.equal(ready.welcome.stage, "run", "with tasks and no runs, the next step is to run a simulation");
+  assert.match(ready.welcome.message, /run_simulation.*Run a simulation\./s);
   await call(A, "save_product", { product: "relayq", aliases: ["Relay Queue", "RelayQ Cloud"] });
   await fails(A, "run_simulation", { models: ["gpt-nope"] }, /Unsupported model/);
   process.env.OCTILLION_MAX_SESSIONS_PER_RUN = "5";

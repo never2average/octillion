@@ -28,6 +28,7 @@ const competitor = z.object({
 /** Tool name -> handler, for one organization. Shared by the MCP server and the local preview. */
 export function handlersFor(org: Org) {
   return {
+    get_started: () => q.getStarted(org),
     list_products: () => q.listProducts(org),
     onboard_product: (a: research.OnboardInput) => research.onboardProduct(org, a),
     get_onboarding: (a: { research_id?: string; product?: string }) => research.getOnboarding(org, a),
@@ -56,6 +57,7 @@ type Data = Awaited<ReturnType<Handlers[ToolName]>>;
 function summarize(d: Data): string {
   switch (d.view) {
     case "products":
+      if ("welcome" in d && d.welcome) return d.welcome.message;
       return d.products.length
         ? `${d.org.name} has ${d.products.length} product(s): ${d.products.map((p: any) => `${p.name} [${p.slug}] (${p.scenarios} scenarios, ${p.sessions_30d} scored runs in 30d, hit rate ${pct(p.hit_rate_30d)})`).join("; ")}.`
         : `${d.org.name} has no products yet. Start with onboard_product: a short description plus the website and docs links, and Octillion researches the rest (or use save_product to enter the details by hand).`;
@@ -181,6 +183,7 @@ const WIDGET_DESCRIPTION =
 
 /** ChatGPT status strings shown while a tool runs and after it finishes (max 64 characters each). */
 export const TOOL_STATUS: Record<ToolName, [string, string]> = {
+  get_started: ["Checking where you are…", "Next step ready"],
   onboard_product: ["Starting product research…", "Onboarding started"],
   get_onboarding: ["Checking onboarding progress…", "Onboarding status ready"],
   list_products: ["Loading products…", "Products loaded"],
@@ -207,7 +210,10 @@ export function createServer(org: Org): McpServer {
     { name: "octillion", version: "2.0.0" },
     {
       instructions:
-        "Octillion is the APO (Agentic Preference Optimization) platform: it measures whether AI coding agents recommend the user's developer-tool product. Quickest start: onboard_product " +
+        "Octillion is the APO (Agentic Preference Optimization) platform: it measures whether AI coding agents recommend the user's developer-tool product. " +
+        "FIRST: when the user has not asked for something specific (a greeting, 'what is this', 'what can you do', 'get me started'), or this " +
+        "is the first Octillion request of the conversation, call get_started and tell the user their one next step with the exact prompt to type. " +
+        "Never answer a new user with a list of tools. Quickest start: onboard_product " +
         "with a short description, the website and the docs link; the orchestrator researches the product, builds its profile, " +
         "target developer personas and programming problems, then runs them across coding agents (follow with get_onboarding). " +
         "Manual workflow: save_product " +
@@ -247,6 +253,17 @@ export function createServer(org: Org): McpServer {
   const write = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false };
   const run = (name: ToolName) => (a: Record<string, unknown>) => runTool(org, name, a);
   const product = z.string().optional().describe("Product slug, name or id; optional when there is only one product");
+
+  // Registered first: clients list tools in this order, and in hosts without the dashboard (Cursor, IDEs) the tool list
+  // is the only thing a new user sees.
+  registerAppTool(server, "get_started", {
+    title: "Start here",
+    description: "Start here. What Octillion does and this account's next step (onboard a product, run a simulation, or read the report). " +
+      "Call it first in a new conversation, and whenever the user greets you, asks what Octillion is or can do, asks how to begin, " +
+      "or asks something vague like 'get me started' or 'what now?'. Then tell the user their next step.",
+    inputSchema: {},
+    annotations: read, _meta: meta("get_started"),
+  }, run("get_started"));
 
   registerAppTool(server, "onboard_product", {
     title: "Onboard a product",

@@ -248,6 +248,42 @@ export interface RunInput {
   samples?: number;                                         // representative (default): sessions per scenario, mixed by adoption
 }
 
+/**
+ * The welcome a client gets when the user has not asked for anything specific yet (MCP has no connect-time message a
+ * person sees, so the first tool in the list carries it): what Octillion does and the ONE next step for this
+ * organization's state. Same payload as list_products (so the dashboard renders) plus `welcome`.
+ */
+export async function getStarted(org: Org) {
+  const d = await listProducts(org);
+  const { simulations } = await listSimulations(org);
+  const what = "Octillion runs real AI coding agents on realistic development tasks and reports how often they choose your developer tool over its competitors.";
+  const first = d.products[0] as any;
+  const running = simulations.find((s: any) => s.status === "queued" || s.status === "running") as any;
+  let stage: "onboard" | "onboarding" | "run" | "running" | "report", next: string, say: string;
+  if (!d.products.length) {
+    stage = "onboard";
+    say = "Onboard my product: <name>, <website>, <docs link>. It is a <one-line description>.";
+    next = "No product is set up yet. Ask the user for their product's name, website and docs link, then call onboard_product. Octillion researches the product and its competitors and proposes the coding tasks to test.";
+  } else if (!d.products.some((p: any) => Number(p.scenarios) > 0)) {
+    stage = "onboarding";
+    say = "How is my onboarding going?";
+    next = `${first.name} is set up but has no tasks yet. Call get_onboarding to see whether research is still running; if it finished without tasks, add some with save_scenarios (browse_task_library has curated ones).`;
+  } else if (running) {
+    stage = "running";
+    say = "How is my simulation doing?";
+    next = `Simulation "${running.name}" is ${running.status} (${running.finished}/${running.sessions} sessions done). Call get_simulation for progress; results fill in as sessions finish.`;
+  } else if (!simulations.length) {
+    stage = "run";
+    say = "Run a simulation.";
+    next = `${first.name} has ${first.scenarios} tasks ready and no runs yet. Call run_simulation (${config.defaultSamples()} sessions per task by default); it takes roughly 10 to 30 minutes.`;
+  } else {
+    stage = "report";
+    say = "Show my visibility report.";
+    next = `${d.products.length} product(s) with completed runs. Call get_visibility_report for how often agents chose the product, who won instead and why.`;
+  }
+  return { ...d, welcome: { stage, say, message: `Welcome to Octillion, ${org.name}. ${what} ${next} Tell the user their next step in one or two sentences and offer this prompt to type: "${say}"` } };
+}
+
 /** The organization's metered model spend (gateway cost of its agent sessions) this calendar month, UTC. */
 export async function orgMonthSpendUsd(orgId: number): Promise<number> {
   const db = await getDb();

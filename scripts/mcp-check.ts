@@ -37,7 +37,7 @@ for (const r of resources) {
 
 // Read-only calls. With no product yet, product-scoped tools must fail with a clear, actionable message.
 const calls: [string, Record<string, unknown>][] = [
-  ["list_products", {}], ["list_simulations", {}], ["list_agents", {}], ["list_developer_profiles", {}],
+  ["get_started", {}], ["list_products", {}], ["list_simulations", {}], ["list_agents", {}], ["list_developer_profiles", {}],
   ["browse_task_library", {}], ["get_visibility_report", {}], ["get_product", {}], ["get_onboarding", {}],
   ["search_transcripts", { query: "redis" }],
 ];
