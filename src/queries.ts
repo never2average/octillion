@@ -256,7 +256,7 @@ export interface RunInput {
 export async function getStarted(org: Org) {
   const d = await listProducts(org);
   const { simulations } = await listSimulations(org);
-  const what = "Octillion runs real AI coding agents on realistic development tasks and reports how often they choose your developer tool over its competitors.";
+  const what = "Octillion runs real AI coding agents on realistic development tasks and reports how often they pick your developer tool versus competitors, if they pick one at all.";
   const first = d.products[0] as any;
   const running = simulations.find((s: any) => s.status === "queued" || s.status === "running") as any;
   let stage: "onboard" | "onboarding" | "run" | "running" | "report", next: string, say: string;
