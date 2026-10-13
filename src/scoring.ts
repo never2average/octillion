@@ -6,9 +6,16 @@ import type { RawEvent, StoredEvent } from "./transcripts.js";
  * Only what the agent itself produced counts (assistant text and its tool calls / commands / file edits),
  * never the task prompt or tool output. Per tracked tool (the product and each competitor) we find the
  * strongest signal:
- *   adopted      an agent action installs or imports one of its packages
- *   recommended  assistant text names it in a sentence with a choice cue ("I'll use", "recommend", "go with")
- *   mentioned    it is named anywhere else in agent output
+ *   adopted      the agent built on it: an action installs or imports one of its packages, or code/config it
+ *                wrote calls the tool's API host (https://api.<domain>/..., smtp.<domain>) or sets up its
+ *                credentials or client (RESEND_API_KEY, postmarkServerToken). Agents often call a REST API
+ *                directly "with no extra SDK", so installs alone under-count badly. Reading or searching the
+ *                tool's docs is not adoption.
+ *   recommended  assistant text names it in a clause with a choice cue ("I'll use", "I picked", "default to"),
+ *                and the clause is not hypothetical ("if you want X", "X instead"), negated or a question
+ *   mentioned    it is named anywhere else in agent output. Capitalised names match case-sensitively and a
+ *                plain-word package name only counts in installs and imports, so the verb "resend" is not
+ *                the product Resend.
  * The session verdict is then adopted / recommended for the product, `competitor` when a competitor was
  * recommended or adopted instead (or adopted over a mere recommendation), else mentioned / none.
  */
@@ -108,15 +115,35 @@ const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const token = (s: string) => `(?<![\\w@/.-])${escapeRe(s)}(?![\\w-])`;
 
 const INSTALL = /\b(?:(?:npm|pnpm|yarn|bun)\s+(?:i|install|add)|npx|bunx|pip3?\s+install|uv\s+(?:add|pip\s+install)|poetry\s+add|pipenv\s+install|cargo\s+add|go\s+get|gem\s+install|bundle\s+add|composer\s+require|dotnet\s+add\s+package|brew\s+install)\b[^\n;&|]*/gi;
-const CUE = /\b(recommend\w*|suggest\w*|i'?ll\s+use|i\s+will\s+use|let'?s\s+use|we'?ll\s+use|we\s+will\s+use|go(?:ing)?\s+with|opt(?:ing)?\s+for|choos\w+|chose|pick\w*|prefer\w*|best\s+(?:choice|option|fit)|switch(?:ing)?\s+to|set(?:ting)?\s+up|install\w*|use|using)\b/i;
+const CUE = /\b(recommend\w*|suggest\w*|i'?ll\s+use|i\s+will\s+use|let'?s\s+use|we'?ll\s+use|we\s+will\s+use|go(?:ing)?\s+with|opt(?:ing)?\s+for|choos\w+|chose|pick\w*|prefer\w*|best\s+(?:choice|option|fit)|switch(?:ing)?\s+to|set(?:ting)?\s+up|install\w*|default(?:ing|ed|s)?\s+to|proceed\w*\s+(?:\w+\s+){0,6}with|stick\w*\s+with|add(?:ing|ed)\s+an?\b|integrat\w+|built\s+(?:on|with|against)|wir(?:e|ed|ing)\s+up|use|using)\b/i;
 const NEGATION = /\b(instead\s+of|rather\s+than|avoid\w*|don'?t\s+use|do\s+not\s+use|not\s+recommended|without)\b/i;
+// A clause that only offers the tool as an option, not as the choice made.
+const HYPOTHETICAL = /\b(if\s+you(?:'d|\s+would)?\s+(?:want|prefer|need|rather|like)|you\s+(?:can|could|may|might)\s+(?:also\s+|always\s+|easily\s+)?(?:swap|switch|use|replace|move)|alternativel?y?|such\s+as|for\s+example|e\.g\.|whether\s+to)\b/i;
+// Actions that only read or look things up (docs fetches, searches, file reads, todo lists, sub-agent briefs):
+// naming a tool there, or opening its docs, is not building on it.
+const RESEARCH_ACTION = /^\s*(?:web[_-]?(?:fetch|search)|fetch|search\w*|read\w*|grep|glob|ls|list\w*|view\w*|open\w*|find\w*|todo[_-]?write|todowrite|update[_-]?plan|plan|task|agent|browser\w*|think\w*)\s*$/i;
 
 function matchers(t: Tool) {
   const names = [t.name, ...(t.aliases ?? [])].filter(Boolean);
   const pkgs = (t.packages ?? []).filter(Boolean);
-  const any = [...names, ...pkgs].map(token);
-  for (const d of t.domains ?? []) if (d) any.push(escapeRe(d));
-  const mention = any.length ? new RegExp(any.join("|"), "i") : null;
+  const domains = (t.domains ?? []).filter(Boolean);
+  // "Resend" must not match the verb "resend": a name written with a capital is matched case-sensitively.
+  const nameRes = names.map((n) => new RegExp(token(n), /[A-Z]/.test(n) ? "" : "i"));
+  // A plain-word package ("resend", "postmark") is also an English word or the product name; outside installs and
+  // imports only distinctive package ids ("@sendgrid/mail", "mailgun.js") count as a mention.
+  const distinctive = pkgs.filter((x) => /[^a-z]/i.test(x));
+  const loose = [...distinctive.map(token), ...domains.map(escapeRe)];
+  const looseRe = loose.length ? new RegExp(loose.join("|"), "i") : null;
+  const mention = nameRes.length || looseRe
+    ? (text: string): number => {
+        let best = -1;
+        for (const re of looseRe ? [...nameRes, looseRe] : nameRes) {
+          const i = text.search(re);
+          if (i >= 0 && (best < 0 || i < best)) best = i;
+        }
+        return best;
+      }
+    : null;
   const pkgRe = pkgs.length ? new RegExp(pkgs.map(token).join("|"), "i") : null;
   const imports = pkgs.length
     ? new RegExp(pkgs.map((p) => {
@@ -124,7 +151,19 @@ function matchers(t: Tool) {
         return `(?:from\\s+['"]${e}(?:/[^'"]*)?['"]|require\\(\\s*['"]${e}(?:/[^'"]*)?['"]|import\\s+['"]${e}(?:/[^'"]*)?['"]|^\\s*(?:from|import)\\s+${e}\\b|"${e}"\\s*:\\s*"[~^]?[\\d*])`;
       }).join("|"), "im")
     : null;
-  return { mention, pkgRe, imports };
+  // Built on it without the SDK: the tool's API host in written code...
+  const apiHost = domains.length
+    ? new RegExp(domains.map((d) => /^(?:api|smtp|in|inbound|send|events?|hooks?|webhooks?)[\w-]*\./i.test(d)
+        ? `(?<![\\w.-])${escapeRe(d)}(?![\\w-])`
+        : `(?<![\\w.-])(?:api|smtp|in|inbound|send|events?|hooks?|webhooks?)[\\w-]*\\.${escapeRe(d)}(?![\\w-])`).join("|"), "i")
+    : null;
+  // ...or its credentials / client by name (RESEND_API_KEY, resendApiKey, postmark_server_token, PostmarkClient).
+  // Bare "<name>Token" / "<name>Endpoint" are left out: `resendToken()` is usually the verb.
+  const slugs = [...new Set(names.map((n) => n.toLowerCase().replace(/[^a-z0-9]+/g, "")).filter((x) => x.length >= 3))];
+  const ident = slugs.length
+    ? new RegExp(`(?<![A-Za-z0-9])(?:${slugs.map(escapeRe).join("|")})[_-]?(?:api[_-]?(?:key|url|token|secret|base)|server[_-]?token|access[_-]?token|auth[_-]?token|webhook[_-]?secret|signing[_-]?secret|client|sdk)(?![a-z])`, "i")
+    : null;
+  return { mention, pkgRe, imports, apiHost, ident };
 }
 
 function snippetAround(text: string, idx: number, width = 220) {
@@ -142,19 +181,33 @@ function levelIn(kind: "message" | "action", text: string, m: ReturnType<typeof 
     }
     const imp = m.imports && text.match(m.imports);
     if (imp) return { level: "adopted", index: imp.index ?? 0 };
-    const hit = text.match(m.mention);
-    return hit ? { level: "mentioned", index: hit.index ?? 0 } : null;
+    // Segments start with the tool's name on its own line (see `segments`); a lookup is never an adoption.
+    const research = RESEARCH_ACTION.test(text.slice(0, text.indexOf("\n") < 0 ? text.length : text.indexOf("\n")));
+    if (!research) {
+      const built = (m.apiHost && text.match(m.apiHost)) || (m.ident && text.match(m.ident));
+      if (built) return { level: "adopted", index: built.index ?? 0 };
+    }
+    const at = m.mention(text);
+    return at >= 0 ? { level: "mentioned", index: at } : null;
   }
   let best: { level: Level; index: number } | null = null;
   let offset = 0;
   for (const sentence of text.split(/(?<=[.!?\n])\s+/)) {
-    const hit = sentence.match(m.mention);
-    if (hit) {
-      const before = sentence.slice(0, hit.index);
-      const recommended = CUE.test(sentence) && !NEGATION.test(before);
-      const cand = { level: (recommended ? "recommended" : "mentioned") as Level, index: offset + (hit.index ?? 0) };
-      if (!best || RANK[cand.level] > RANK[best.level]) best = cand;
-      if (best.level === "recommended") break;
+    // The cue has to sit in the same clause as the name: "I picked it as the provider; if you want Postmark or SES
+    // instead, ..." picks nothing in its second clause.
+    let clauseOffset = 0;
+    for (const clause of sentence.split(/(?<=;)|(?<=\s[—–-]\s)|(?=,\s+(?:but|though|although|however)\b)/)) {
+      const at = m.mention(clause);
+      if (at >= 0) {
+        const before = clause.slice(0, at);
+        const after = clause.slice(at, at + 80);
+        const offered = HYPOTHETICAL.test(clause) || /^\S+(?:\s+(?:or|and|,)?\s*\S+){0,4}\s+instead\b(?!\s+of)/i.test(after) || /\?\s*$/.test(clause);
+        const recommended = CUE.test(clause) && !NEGATION.test(before) && !offered;
+        const cand = { level: (recommended ? "recommended" : "mentioned") as Level, index: offset + clauseOffset + at };
+        if (!best || RANK[cand.level] > RANK[best.level]) best = cand;
+        if (best.level === "recommended") return best;
+      }
+      clauseOffset += clause.length;
     }
     offset += sentence.length + 1;
   }
