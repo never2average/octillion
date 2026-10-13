@@ -9,7 +9,7 @@ import { getDb } from "./db.js";
 import { parseJsonl, transcripts, type RawEvent } from "./transcripts.js";
 import { appendEvents, claimJobs, completeSession, heartbeat } from "./worker.js";
 import { fleetCheckin, fleetLeave, fleetStatus } from "./fleet.js";
-import { autoscalerStatus, startAutoscaler } from "./autoscaler.js";
+import { autoscalerStatus, startAutoscaler, stopAutoscaler } from "./autoscaler.js";
 import { brokerOrchestratorCredentials, brokerSessionCredentials, gatewayHandler } from "./gateway.js";
 import * as research from "./research.js";
 import { usageReport } from "./usage.js";
@@ -22,12 +22,16 @@ const HOST = process.env.HOST ?? "127.0.0.1";
 const PUBLIC_URL = (process.env.PUBLIC_URL ?? `http://${HOST}:${PORT}`).replace(/\/$/, "");
 const PUBLIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "public");
 
+/** Set on SIGTERM/SIGINT: the process is finishing in-flight requests and will exit. */
+let draining = false;
+
 export function createApp() {
   const app = express();
   app.set("trust proxy", true);
   app.disable("x-powered-by");
 
   app.get("/healthz", async (_req, res) => {
+    if (draining) return void res.status(503).json({ ok: false, draining: true }); // rolling deploy: stop routing here
     await (await getDb()).query("SELECT 1");
     res.json({ ok: true, transcripts: transcripts().kind });
   });
@@ -267,7 +271,7 @@ export function createApp() {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const db = await getDb();
-  createApp().listen(PORT, HOST, () => {
+  const server = createApp().listen(PORT, HOST, () => {
     console.error(`octillion (${db.kind}, transcripts in ${transcripts().kind}) listening on http://${HOST}:${PORT}`);
     console.error(`  landing page  ${PUBLIC_URL}/`);
     console.error(`  MCP endpoint  ${PUBLIC_URL}/mcp/<api key>   (or /mcp with Authorization: Bearer <api key>)`);
@@ -280,4 +284,20 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
       console.error("  autoscaler    on (orchestrators on demand; OCTILLION_AUTOSCALE=off to disable)");
     } else console.error(`  autoscaler    off (${autoscale ? "needs an https PUBLIC_URL and OCTILLION_WORKER_TOKEN" : "OCTILLION_AUTOSCALE=off"})`);
   });
+  // Graceful drain (deploys, restarts): stop accepting connections, let in-flight requests finish (gateway streams
+  // are sandboxed agents' model calls; cutting them fails the sessions), then exit. A rolling deploy starts the new
+  // replica first, so new requests land there while this one drains (deploy/rolling-deploy.sh).
+  const shutdown = (signal: string) => {
+    if (draining) return;
+    draining = true;
+    const limit = Math.max(0, Number(process.env.OCTILLION_DRAIN_SECONDS ?? 300));
+    console.error(`${signal}: draining, in-flight requests get up to ${limit}s`);
+    void stopAutoscaler();
+    server.close(() => { console.error("drained, exiting"); process.exit(0); });
+    server.closeIdleConnections();
+    setInterval(() => server.closeIdleConnections(), 1000).unref(); // keep-alive sockets as they go idle
+    setTimeout(() => { console.error("drain deadline reached, exiting"); process.exit(0); }, limit * 1000).unref();
+  };
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
 }

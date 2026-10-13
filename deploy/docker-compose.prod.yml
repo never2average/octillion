@@ -76,6 +76,9 @@ services:
   octillion:
     build: { context: .., dockerfile: Dockerfile }
     init: true   # tini as PID 1 forwards SIGTERM to node for a graceful stop
+    # On SIGTERM the server drains: in-flight requests (agents' model streams) get OCTILLION_DRAIN_SECONDS to finish.
+    # Deploy with deploy/rolling-deploy.sh so a new replica is serving before the old one drains.
+    stop_grace_period: 330s
     restart: unless-stopped
     depends_on:
       postgres: { condition: service_healthy }
@@ -110,6 +113,9 @@ services:
       OCTILLION_DEFAULT_SAMPLES: ${OCTILLION_DEFAULT_SAMPLES:-3}
       OCTILLION_MAX_SESSIONS_PER_RUN: ${OCTILLION_MAX_SESSIONS_PER_RUN:-40}
       OCTILLION_ORG_MONTHLY_BUDGET_USD: ${OCTILLION_ORG_MONTHLY_BUDGET_USD:-1000}
+      # Reliability: retries of infrastructure-failed sessions, and how long a stopping server lets requests finish.
+      OCTILLION_SESSION_INFRA_RETRIES: ${OCTILLION_SESSION_INFRA_RETRIES:-1}
+      OCTILLION_DRAIN_SECONDS: ${OCTILLION_DRAIN_SECONDS:-300}
     expose: ["3333"]
 
   caddy:
@@ -118,11 +124,14 @@ services:
     depends_on: [octillion]
     environment:
       DOMAIN: ${DOMAIN:-localhost}
-    command: caddy reverse-proxy --from ${DOMAIN:-localhost} --to octillion:3333
+    # Caddyfile: every replica of `octillion` is an upstream (re-resolved each second), with retries on refused
+    # connections, so a rolling deploy never drops a request.
+    command: caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
     ports:
       - "${HTTP_PORT:-80}:80"
       - "${HTTPS_PORT:-443}:443"
     volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
 
 volumes:

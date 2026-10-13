@@ -107,6 +107,11 @@ export class Autoscaler {
     this.timer.unref();
   }
   stop() { if (this.timer) clearTimeout(this.timer); this.timer = null; }
+  /** Stop ticking and give up the lease, so another replica (a rolling deploy's new one) leads on its next tick. */
+  async release(): Promise<void> {
+    this.stop();
+    await (await getDb()).query("DELETE FROM autoscaler_lease WHERE name = 'autoscaler' AND holder = $1", [this.holder]).catch(() => {});
+  }
   /** Wait for in-flight launches and image builds (tests). */
   async settle() { await Promise.allSettled([...this.inflight.values(), this.imageBuild]); }
 
@@ -287,6 +292,9 @@ export class Autoscaler {
 }
 
 let singleton: Autoscaler | null = null;
+/** Graceful shutdown: stop this process's autoscaler and release its lease. */
+export async function stopAutoscaler(): Promise<void> { await singleton?.release(); }
+
 export function startAutoscaler(): Autoscaler {
   singleton ??= new Autoscaler();
   singleton.start();
