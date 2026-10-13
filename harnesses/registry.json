@@ -381,11 +381,11 @@
       "id": "antigravity/default",
       "harness": "antigravity",
       "cli": "agy",
-      "label": "Antigravity CLI · default",
+      "label": "Antigravity CLI · Gemini 4 Argon",
       "vendor": "Google",
-      "model": "default",
+      "model": "gemini-4-argon",
       "model_verified": false,
-      "harness_version": "1.3.3",
+      "harness_version": "1.3.4",
       "weight": 0.0491,
       "usage_share": 0.045,
       "weight_source": [
@@ -398,8 +398,8 @@
       "headless": "agy --output-format stream-json --dangerously-skip-permissions [--model <model>] -p <prompt>",
       "event_format": "antigravity-stream-json",
       "image": {
-        "docker": "octillion/agent-antigravity:1.3.3",
-        "boat_snapshot": "octillion-antigravity-1-3-3"
+        "docker": "octillion/agent-antigravity:1.3.4",
+        "boat_snapshot": "octillion-antigravity-1-3-4"
       },
       "requires_env": [
         "GEMINI_API_KEY"
@@ -409,7 +409,7 @@
       "resume": true,
       "adapter_evidence": "captured-fixture",
       "enabled": true,
-      "notes": "PROXY for the Antigravity IDE (JetBrains: 6% work adoption). 'default' = omit --model. API-key auth needs modelProvider \"gemini\" in ~/.gemini/antigravity-cli/settings.json (docs); write it at session setup. Verified headless with no TTY (docker exec -i) against a mock endpoint on 2026-10-10; with no --model it called gemini-3.1-pro-preview.3.3-5524738307653632 with sha512. Carries Gemini CLI's share too (0.0164 added 2026-10-13): Google ended consumer Gemini CLI access on 2026-06-18 and moved its users to Antigravity CLI.",
+      "notes": "PROXY for the Antigravity IDE (JetBrains: 6% work adoption). 'default' = omit --model. API-key auth needs modelProvider \"gemini\" in ~/.gemini/antigravity-cli/settings.json (docs); write it at session setup. Verified headless with no TTY (docker exec -i) against a mock endpoint on 2026-10-10; with no --model it called gemini-3.1-pro-preview.3.3-5524738307653632 with sha512. Carries Gemini CLI's share too (0.0164 added 2026-10-13): Google ended consumer Gemini CLI access on 2026-06-18 and moved its users to Antigravity CLI. Since 2026-10-13: CLI 1.3.4, model pinned to gemini-4-argon (Google's Gemini 4 Argon, announced 2026-09-30), served by Vertex through the gateway with the service account (no API key).",
       "model_mix": "Model mix: not split; no published shares (with no --model, our mock run called gemini-3.1-pro-preview).",
       "paused": true,
       "paused_reason": "no credentials yet (2026-10-10); runs on Anthropic + OpenAI keys only for now"

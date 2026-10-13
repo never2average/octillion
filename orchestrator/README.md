@@ -323,7 +323,7 @@ runner injects env only at exec time: docker/pool `docker exec -e NAME … env -
 | pi 1.1.0 | anthropic | gateway | `~/.pi/agent/models.json` `{"providers":{"anthropic":{"baseUrl":"<gw>/anthropic"}}}` + `ANTHROPIC_API_KEY` | ✅ gateway |
 | cline 3.0.70 | anthropic | gateway | The anthropic provider ignores every base URL (`-b` is refused for it; `ANTHROPIC_BASE_URL` and providers.json `baseUrl` are ignored). So: `cline auth -p openai -b <gw>/anthropic/v1` + `-P openai`, which goes to **Anthropic's OpenAI-compatible `/v1/chat/completions`** through the gateway | ✅ gateway (the server gateway must allow that path) |
 | gemini-cli 0.63.0 | google | gateway | `GOOGLE_GEMINI_BASE_URL=<gw>/google` + `GEMINI_API_KEY` (`x-goog-api-key`), plus `~/.gemini/settings.json` `security.auth.selectedType=gemini-api-key` | ✅ gateway |
-| antigravity 1.3.3 | google | gateway | `GOOGLE_GEMINI_BASE_URL` + `GEMINI_API_KEY` (`modelProvider: gemini`, set by the adapter) | ✅ gateway |
+| antigravity 1.3.4 | google | gateway | `GOOGLE_GEMINI_BASE_URL` + `GEMINI_API_KEY` (`modelProvider: gemini`, set by the adapter) | ✅ gateway |
 | qwen-code 0.25.0 | dashscope | gateway | `OPENAI_BASE_URL=<gw>/dashscope/compatible-mode/v1` + `OPENAI_API_KEY` (`--auth-type openai`) | ✅ gateway |
 | copilot 1.0.95 | github_copilot | direct | `COPILOT_GITHUB_TOKEN`. GitHub-hosted models; BYOK `COPILOT_PROVIDER_BASE_URL` would change the product | direct by design |
 | cursor 2026.10.01 | cursor | direct | `CURSOR_API_KEY`. Cursor-hosted backend, no base URL override | direct by design |

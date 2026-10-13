@@ -23,7 +23,7 @@ with `npm install left-pad --no-audit --no-fund`, then answers "Installed left-p
 | qwen-code | captured: `OPENAI_BASE_URL` → mock | 0.25.0 |
 | pi | captured: `~/.pi/agent/models.json` provider → mock | 1.1.0 |
 | droid | captured: `~/.factory/settings.json` customModels → mock | 0.238.0 |
-| antigravity | captured: `modelProvider: gemini` + `GOOGLE_GEMINI_BASE_URL` → mock | 1.3.3 |
+| antigravity | captured: `modelProvider: gemini` + `GOOGLE_GEMINI_BASE_URL` → mock | 1.3.3 (pinned 1.3.4 since 2026-10-13) |
 | cline | captured: `cline auth -p openai -b <mock>` (provider differs from production's `-P anthropic`; the stream format is the same) | 3.0.70 |
 | cursor | **synthesized** from the stream-json emitter in cursor-agent's own JS bundle (field names and order) and Cursor's output-format docs. The backend can't be mocked | 2026.10.01-e373342 |
 | amp | **synthesized** from Amp's streaming-JSON docs (Claude Code-compatible schema). The backend can't be mocked | 0.0.1791619249-g722a12 |
