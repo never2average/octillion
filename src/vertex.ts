@@ -14,7 +14,11 @@ import { createSign } from "node:crypto";
  * service-account JSON key stored as this provider's credential in the key vault.
  */
 
-export interface VertexConfig { project_id?: string; region?: string; model_map?: Record<string, string>; endpoint?: string }
+export interface VertexConfig {
+  project_id?: string; region?: string; model_map?: Record<string, string>; endpoint?: string;
+  /** Use another provider's service-account credential (label "vertex"), e.g. google reusing anthropic's. */
+  credential_provider?: string;
+}
 interface ServiceAccount { client_email: string; private_key: string; token_uri?: string }
 
 const VERSION = "vertex-2023-10-16";
@@ -96,4 +100,21 @@ export function toVertex(cfg: VertexConfig, path: string, rawBody: Buffer, betaH
   }
   delete json.model;
   return { url: `${loc}/${encodeURIComponent(vertexModel)}:${json.stream ? "streamRawPredict" : "rawPredict"}`, body: JSON.stringify(json) };
+}
+
+/**
+ * Gemini on Vertex AI, behind the gateway provider `google`. Harnesses (Antigravity CLI, Gemini CLI) call the Gemini
+ * API shape, `/v1beta/models/{model}:generateContent | :streamGenerateContent | :countTokens`; Vertex serves the same
+ * request and response bodies at `.../publishers/google/models/{model}:{method}`, so only the URL and the auth change
+ * (a Google OAuth token from the service account instead of an API key). The body streams through untouched.
+ */
+export function toVertexGemini(cfg: VertexConfig, path: string, search = ""): { url: string; model: string } {
+  if (!cfg.project_id) throw Object.assign(new Error("Vertex backend has no project_id configured"), { status: 503 });
+  const m = /^\/(v1(?:beta|alpha)?)\/(?:models|tunedModels)\/([^/:]+):([A-Za-z]+)$/.exec(path.replace(/\/+$/, ""));
+  if (!m) throw Object.assign(new Error(`${path} is not available on Vertex AI (only /v1beta/models/{model}:{method})`), { status: 404 });
+  const [, version, rawModel, method] = m;
+  const model = cfg.model_map?.[rawModel] ?? rawModel;
+  const api = version === "v1" ? "v1" : "v1beta1"; // preview fields (thinking, new tool types) live on v1beta1
+  const loc = `${vertexBase(cfg)}/${api}/projects/${encodeURIComponent(cfg.project_id)}/locations/${encodeURIComponent(cfg.region ?? "global")}/publishers/google/models`;
+  return { url: `${loc}/${encodeURIComponent(model)}:${method}${search}`, model };
 }

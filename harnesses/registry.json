@@ -386,12 +386,14 @@
       "model": "default",
       "model_verified": false,
       "harness_version": "1.3.3",
-      "weight": 0.0327,
-      "usage_share": 0.03,
+      "weight": 0.0491,
+      "usage_share": 0.045,
       "weight_source": [
+        "amplifying-index",
         "jb2026",
+        "npm-2026-10",
         "pe2026",
-        "amplifying-index"
+        "so2025"
       ],
       "headless": "agy --output-format stream-json --dangerously-skip-permissions [--model <model>] -p <prompt>",
       "event_format": "antigravity-stream-json",
@@ -407,7 +409,7 @@
       "resume": true,
       "adapter_evidence": "captured-fixture",
       "enabled": true,
-      "notes": "PROXY for the Antigravity IDE (JetBrains: 6% work adoption). 'default' = omit --model. API-key auth needs modelProvider \"gemini\" in ~/.gemini/antigravity-cli/settings.json (docs); write it at session setup. Verified headless with no TTY (docker exec -i) against a mock endpoint on 2026-10-10; with no --model it called gemini-3.1-pro-preview.3.3-5524738307653632 with sha512.",
+      "notes": "PROXY for the Antigravity IDE (JetBrains: 6% work adoption). 'default' = omit --model. API-key auth needs modelProvider \"gemini\" in ~/.gemini/antigravity-cli/settings.json (docs); write it at session setup. Verified headless with no TTY (docker exec -i) against a mock endpoint on 2026-10-10; with no --model it called gemini-3.1-pro-preview.3.3-5524738307653632 with sha512. Carries Gemini CLI's share too (0.0164 added 2026-10-13): Google ended consumer Gemini CLI access on 2026-06-18 and moved its users to Antigravity CLI.",
       "model_mix": "Model mix: not split; no published shares (with no --model, our mock run called gemini-3.1-pro-preview).",
       "paused": true,
       "paused_reason": "no credentials yet (2026-10-10); runs on Anthropic + OpenAI keys only for now"
@@ -421,8 +423,7 @@
       "model": "auto",
       "model_verified": false,
       "harness_version": "0.63.0",
-      "weight": 0.0164,
-      "usage_share": 0.015,
+      "weight": 0,
       "weight_source": [
         "pe2026",
         "so2025",
@@ -441,8 +442,8 @@
       "worker_adapter": "supported",
       "resume": true,
       "adapter_evidence": "captured-fixture",
-      "enabled": true,
-      "notes": "Google is steering users to Antigravity; Gemini CLI npm downloads fell ~40% since April 2026. 'auto' lets the CLI route between Pro/Flash (its default).",
+      "enabled": false,
+      "notes": "Google is steering users to Antigravity; Gemini CLI npm downloads fell ~40% since April 2026. 'auto' lets the CLI route between Pro/Flash (its default). RETIRED 2026-10-13: share folded into antigravity/default (Google's successor CLI).",
       "model_mix": "Model mix: not split. Default Auto routes each prompt between Pro and Flash (gemini-3.1-pro-preview and gemini-3.x-flash ids present in 0.63.0); no usage shares published, and Auto already reflects the default mix.",
       "paused": true,
       "paused_reason": "no credentials yet (2026-10-10); runs on Anthropic + OpenAI keys only for now"

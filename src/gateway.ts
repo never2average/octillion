@@ -4,7 +4,7 @@ import type { Request, Response } from "express";
 import { getDb } from "./db.js";
 import { findAgent } from "./agents.js";
 import { getProvider, providersForEnv, useCredential, VERTEX_LABEL, type ProviderRow } from "./keyvault.js";
-import { toVertex, vertexAccessToken } from "./vertex.js";
+import { toVertex, toVertexGemini, vertexAccessToken } from "./vertex.js";
 import { costOf, recordModelUsage } from "./usage.js";
 
 /**
@@ -198,7 +198,9 @@ export async function gatewayHandler(req: Request, res: Response) {
 
   let cred: { id: number; secret: string };
   // Vertex uses the provider's service-account key (label "vertex"); direct mode never does.
-  try { cred = await useCredential(slug, p.backend === "vertex" ? { label: VERTEX_LABEL } : { excludeLabel: VERTEX_LABEL }); }
+  // A Vertex provider may reuse another provider's service account (backend_config.credential_provider).
+  const credProvider = p.backend === "vertex" ? ((p.backend_config as { credential_provider?: string })?.credential_provider ?? slug) : slug;
+  try { cred = await useCredential(credProvider, p.backend === "vertex" ? { label: VERTEX_LABEL } : { excludeLabel: VERTEX_LABEL }); }
   catch (e) { return gwError(res, 503, "api_error", (e as Error).message); }
 
   // Path after /gw/<provider>, query without our `key` parameter.
@@ -217,9 +219,23 @@ export async function gatewayHandler(req: Request, res: Response) {
   let upstream: string;
   let body: BodyInit | undefined;
   let requestModel = "";                                  // fallback when the response does not name the model
-  const isCountTokens = /\/count_tokens$/.test(rest);       // free endpoint: never billed as usage
+  const isCountTokens = /\/count_tokens$|:countTokens$/.test(rest); // free endpoints: never billed as usage
   const hasBody = !["GET", "HEAD"].includes(req.method);
-  if (p.backend === "vertex") {
+  if (p.backend === "vertex" && slug === "google") {
+    // Gemini on Vertex: same body, different URL and auth; the request streams through.
+    try {
+      const v = toVertexGemini(p.backend_config, rest, url.search);
+      upstream = v.url;
+      requestModel = v.model;
+      headers.delete("x-goog-api-key");
+      headers.delete("x-goog-api-client");
+      headers.set("authorization", `Bearer ${await vertexAccessToken(cred.id, cred.secret)}`);
+      body = hasBody ? (Readable.toWeb(req) as ReadableStream) : undefined;
+    } catch (e) {
+      const err = e as Error & { status?: number };
+      return gwError(res, err.status ?? 502, err.status && err.status < 500 ? "invalid_request_error" : "api_error", err.message);
+    }
+  } else if (p.backend === "vertex") {
     try {
       const chunks: Buffer[] = [];
       let size = 0;
