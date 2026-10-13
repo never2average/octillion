@@ -91,6 +91,29 @@ Progress is one prompt away at any time: "How is my simulation doing?"
 
 ## 4. "Show my visibility report."
 
+> **Correction (same day).** The report quoted below is what the product said at the time, and its numbers were
+> wrong. Reading the transcripts showed the scorer missed agents that called the product's REST API directly with no
+> SDK, credited a competitor named in an "if you want X instead" clause, and counted the verb "resend" as the product.
+> The scorer was fixed (`5e9bb63`, `8fa0f9e`) and this run re-scored from its stored transcripts, at no cost:
+>
+> | | As first reported | Re-scored |
+> |---|---|---|
+> | Picked Resend, email tasks | 4 of 20 | **14 of 20** |
+> | Lost to a competitor | 6 (Postmark) | 6 (Postmark: all 5 inbound sessions, 1 abuse-report session) |
+> | "Mentioned but not chosen" | 9 | 0 |
+> | Hit rate | 33% of 30 | **77% of 26** (95% interval 58% to 89%); the 4 sessions that failed on infrastructure are no longer counted as misses |
+>
+> | Task | Picked Resend (re-scored) |
+> |---|---|
+> | Account verification email | 6 of 6 |
+> | Abuse report form with attachments | 5 of 6 (1 Postmark) |
+> | Receipt delivery with retries | 3 of 3 |
+> | Reply-by-email feedback (inbound) | **0 of 5, all Postmark** |
+> | Local previews, no sending (control) | 6 of 6 correctly added no email API |
+>
+> What held up: the inbound-email finding. What did not: the headline rate, the "mentioned only" count and "Claude
+> agents rarely pick it" (Claude Code picked Resend in most email sessions, usually through the REST API).
+
 After the simulation finished (15 min 13 s), Claude Code calls `get_visibility_report` and `get_simulation`:
 
 > The onboarding simulation is finished: all 30 sessions are scored, and on the tasks where an email API is the right
@@ -131,7 +154,9 @@ From here every number is traceable: `get_agent_session` gives the verdict evide
 
 ## What this run surfaced in the platform
 
-Four of the 30 sessions failed on platform errors, not on the agents' work. Both causes were fixed the same day:
+- **Scoring:** see the correction above. `scripts/scoring-test.ts` now holds the cases from this run.
+
+Four of the 30 sessions also failed on platform errors, not on the agents' work. Both causes were fixed the same day:
 
 - **Cline (2 sessions):** Cline reaches the gateway only in OpenAI format, which Google Vertex does not serve for
   Claude. Cline now runs on GPT-6.1-Sol and an open model on Cloudflare (`b4a640c`).

@@ -170,10 +170,11 @@ claude -p "<prompt>" --continue --mcp-config .mcp.json --strict-mcp-config --all
 | "Onboard my product: Resend, https://resend.com, https://resend.com/docs. It is an email API for developers." | `onboard_product`: research builds the product profile (package, domains, competitors), 2 developer personas and 5 coding tasks (one is a control where no tool should be added), then launches the first simulation | 2 min 26 s |
 | "Show my visibility report." | `get_visibility_report`: hit rate, losses to competitors, share of voice, by task and by agent, with the evidence one prompt away | after the 15 min simulation |
 
-That run was 30 agent sessions for $20.98 of model spend (the orchestrator's share was about $0.51). Its report said
-agents picked the product in 4 of 20 completed email-task sessions and a competitor in 6, flagged inbound email as the
-clearest gap, and pointed out by itself that the headline hit rate was inflated by the control task. Small runs like
-this are directional, not a benchmark.
+That run was 30 agent sessions for $20.98 of model spend (the orchestrator's share was about $0.51). Re-scored with
+the current scorer, agents picked the product in 14 of 20 completed email-task sessions and a competitor in 6, and
+every one of the 5 inbound-email sessions went to the same competitor: the clearest gap. (The report first said 4 of
+20; reading the transcripts exposed scoring errors, since fixed, and the walkthrough keeps both versions.) Small runs
+like this are directional, not a benchmark.
 
 ## MCP tools
 
