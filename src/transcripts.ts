@@ -46,6 +46,8 @@ interface TranscriptStore {
   read(orgId: number, sessionId: string, offset: number, limit: number): Promise<{ total: number; events: StoredEvent[] }>;
   /** Drop a session's events (an infrastructure-failed attempt being retried must not leak into the retry's transcript). */
   remove(orgId: number, sessionId: string): Promise<void>;
+  /** Wake the store in the background (a paused ClickHouse Cloud service takes ~15 s to answer its first query). */
+  warm(): void;
   search(p: SearchParams): Promise<SearchResult>;
 }
 
@@ -164,6 +166,7 @@ function clickhouseStore(cfg: ClickHouseConfig): TranscriptStore {
     return ready;
   };
 
+  let warmedAt = 0;
   return {
     kind: "clickhouse",
     async append(s, events) {
@@ -175,6 +178,11 @@ function clickhouseStore(cfg: ClickHouseConfig): TranscriptStore {
           seq: e.seq, ts: e.ts, type: e.type, text: e.text, raw: JSON.stringify(e.raw),
         })),
       });
+    },
+    warm() {
+      if (Date.now() - warmedAt < 4 * 60_000) return; // at most one wake-up ping every few minutes
+      warmedAt = Date.now();
+      void ensure().then(() => client.ping()).catch(() => { warmedAt = 0; });
     },
     async remove(orgId, sessionId) {
       await ensure();
@@ -263,6 +271,7 @@ const postgresStore: TranscriptStore = {
         [s.id, e.seq, e.ts, e.type, e.text, JSON.stringify(e.raw)],
       );
   },
+  warm() {},
   async remove(orgId, sessionId) {
     const db = await getDb();
     await db.query("DELETE FROM transcript_events WHERE session_id = $1 AND EXISTS (SELECT 1 FROM agent_sessions s WHERE s.id = $1 AND s.org_id = $2)", [sessionId, orgId]);

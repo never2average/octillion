@@ -4,7 +4,7 @@ import { getDb } from "./db.js";
 import { useCredential } from "./keyvault.js";
 import { scheduledAgents, variantsOf } from "./agents.js";
 import { getPopulation } from "./populations.js";
-import { orchestratorBusy, retiringSince, staleOrchestratorIds } from "./fleet.js";
+import { orchestratorBusy, setCurrentCodeHash, staleOrchestratorIds } from "./fleet.js";
 import { BOAT } from "../orchestrator/core/config.js";
 import * as lib from "../orchestrator/deploy/boat-lib.js";
 
@@ -51,6 +51,7 @@ export interface Demand {
 export interface Row {
   id: number; sandbox_id: string | null; orchestrator_id: string | null; state: "booting" | "running" | "draining" | "deleted";
   created_at: Date; ready_at: Date | null; last_seen: Date | null; error: string | null; from_image: string | null;
+  code_hash: string | null; retiring_since: Date | null;
 }
 
 /** Pure: how many orchestrators the demand needs (before caps). */
@@ -157,6 +158,7 @@ export class Autoscaler {
       const rows = await db.query<Row>("SELECT * FROM orchestrator_sandboxes WHERE state <> 'deleted' ORDER BY id");
       const seen = new Map((await db.query<{ id: string; last_seen: Date }>("SELECT id, last_seen FROM orchestrators")).map((o) => [o.id, new Date(o.last_seen)]));
       const now = Date.now(), min = 60_000;
+      setCurrentCodeHash(lib.codeHash(this.opts.root)); // what this autoscaler launches; older code is retired
       const staleIds = await staleOrchestratorIds();
       const reaped: { sandbox_id: string; reason: string }[] = [];
       const reap = async (row: Row, reason: string, deleteIt = true) => {
@@ -198,7 +200,7 @@ export class Autoscaler {
         // Recycle on deploy (src/fleet.ts): once a pre-deploy orchestrator has been handed its empty assignment and
         // has checked in again since, delete it as soon as nothing of its is running. No idle-timeout wait.
         if (row.orchestrator_id && staleIds.has(row.orchestrator_id)) {
-          const told = retiringSince(row.orchestrator_id);
+          const told = row.retiring_since ? new Date(row.retiring_since).getTime() : 0;
           if (told && checkIn && checkIn.getTime() > told && !(await orchestratorBusy(row.orchestrator_id))) {
             await reap(row, "retired: launched before this deploy (old code)");
             continue;
@@ -270,7 +272,7 @@ export class Autoscaler {
   /** Insert the row first (counts toward `active` at once), then create + configure + start in the background. */
   private async launch(image: string | null): Promise<string> {
     const db = await getDb();
-    const [row] = await db.query<{ id: number }>("INSERT INTO orchestrator_sandboxes (state, from_image) VALUES ('booting', $1) RETURNING id", [image]);
+    const [row] = await db.query<{ id: number }>("INSERT INTO orchestrator_sandboxes (state, from_image, code_hash) VALUES ('booting', $1, $2) RETURNING id", [image, lib.codeHash(this.opts.root)]);
     const id = row!.id;
     const workerToken = env.OCTILLION_WORKER_TOKEN ?? "";
     const tuning: Record<string, string> = { OCTILLION_ORCH_IDLE_MINUTES: String(AUTOSCALE.idleMinutes()) };

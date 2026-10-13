@@ -1,5 +1,6 @@
 import { getDb } from "./db.js";
 import { apportion, findAgent, scheduledAgents, variantsOf } from "./agents.js";
+import { codeHash } from "../orchestrator/deploy/boat-lib.js";
 
 /** Agent ids a pod group claims: the agent itself plus its model_variants. */
 export function claimIds(agentId: string): string[] {
@@ -106,23 +107,29 @@ export async function fleetLeave(orchestratorId: string) {
 }
 
 /**
- * Recycle on deploy. An orchestrator gets its code once, when the server launches it, so one launched before this
- * server process started runs the previous deploy's code. Such orchestrators are retired without waiting for their
- * idle timeout: they get an empty assignment (so they claim nothing new, and fresh orchestrators take the pods), and
- * the autoscaler deletes each one as soon as it has checked in again with nothing running.
- * OCTILLION_RECYCLE_ON_DEPLOY=off keeps the old behaviour (they live until idle).
+ * Recycle on deploy. An orchestrator gets its code once, when the server launches it; the launch records that code's
+ * hash (orchestrator_sandboxes.code_hash). One whose hash differs from the code this server ships runs a previous
+ * deploy's code and is retired without waiting for its idle timeout: it gets an empty assignment (so it claims nothing
+ * new, and fresh orchestrators take the pods), and the autoscaler deletes it as soon as it has checked in again with
+ * nothing running. All of it is in the database, so several server replicas agree, and a plain restart (same code)
+ * recycles nothing. OCTILLION_RECYCLE_ON_DEPLOY=off keeps the old behaviour (they live until idle).
  */
 export const SERVER_STARTED_AT = new Date();
-const retiring = new Map<string, number>(); // orchestrator id -> when it was first handed an empty assignment
-export const retiringSince = (orchestratorId: string) => retiring.get(orchestratorId);
+let currentHash: string | undefined;
+/** The hash of the orchestrator code this server launches (the autoscaler sets it; default: the repo's). */
+export const setCurrentCodeHash = (hash: string) => { currentHash = hash; };
+export const currentCodeHash = () => (currentHash ??= codeHash());
 
-/** Autoscaler-launched orchestrators that predate this server process (manually run ones are never retired). */
+/** Autoscaler-launched orchestrators running other code than this server ships (manually run ones are never retired). */
 export async function staleOrchestratorIds(): Promise<Set<string>> {
   if ((process.env.OCTILLION_RECYCLE_ON_DEPLOY ?? "on").toLowerCase() === "off") return new Set();
   const db = await getDb();
+  // Rows from before code_hash existed have none: those are stale when they predate this server process.
   const rows = await db.query<{ orchestrator_id: string }>(
-    "SELECT orchestrator_id FROM orchestrator_sandboxes WHERE state IN ('booting', 'running') AND orchestrator_id IS NOT NULL AND created_at < $1",
-    [SERVER_STARTED_AT]);
+    `SELECT orchestrator_id FROM orchestrator_sandboxes
+      WHERE state IN ('booting', 'running') AND orchestrator_id IS NOT NULL
+        AND ((code_hash IS NOT NULL AND code_hash <> $1) OR (code_hash IS NULL AND created_at < $2))`,
+    [currentCodeHash(), SERVER_STARTED_AT]);
   return new Set(rows.map((r) => r.orchestrator_id));
 }
 
@@ -140,7 +147,8 @@ export async function orchestratorBusy(orchestratorId: string): Promise<boolean>
 export async function fleetStatus(orchestratorId?: string) {
   const db = await getDb();
   const stale = await staleOrchestratorIds();
-  if (orchestratorId && stale.has(orchestratorId) && !retiring.has(orchestratorId)) retiring.set(orchestratorId, Date.now());
+  if (orchestratorId && stale.has(orchestratorId))
+    await db.query("UPDATE orchestrator_sandboxes SET retiring_since = coalesce(retiring_since, now()) WHERE orchestrator_id = $1 AND state IN ('booting', 'running')", [orchestratorId]);
   const live = (await db.query<{ id: string; capacity: number; last_seen: Date }>(
     `SELECT id, capacity, last_seen FROM orchestrators WHERE last_seen > now() - make_interval(secs => $1) ORDER BY id`,
     [STALE_SECONDS()],

@@ -193,6 +193,10 @@ CREATE TABLE IF NOT EXISTS orchestrator_sandboxes (
   timings          JSONB
 );
 CREATE INDEX IF NOT EXISTS orchestrator_sandboxes_live_idx ON orchestrator_sandboxes (state) WHERE state <> 'deleted';
+-- Recycle on deploy (src/fleet.ts): the code an orchestrator was launched with, and when it was first handed an
+-- empty assignment. In the database, not in a server process, so every replica agrees.
+ALTER TABLE orchestrator_sandboxes ADD COLUMN IF NOT EXISTS code_hash TEXT;
+ALTER TABLE orchestrator_sandboxes ADD COLUMN IF NOT EXISTS retiring_since TIMESTAMPTZ;
 
 -- Single-leader lease for the autoscaler across server replicas; `state` holds the leader's last tick for status.
 CREATE TABLE IF NOT EXISTS autoscaler_lease (

@@ -189,6 +189,15 @@ try {
   await a1.tick(); await a1.settle();
   const retired = (a1.last?.reaped ?? []).find((r) => r.sandbox_id === old);
   check("...then retired at once when idle (no 10-minute idle wait)", !sbs.has(old) && /retired/.test(retired?.reason ?? ""), retired?.reason ?? "not reaped");
+  // Same code, older launch (a plain server restart, or another replica launched it): not retired.
+  const same = mk("octi-orch-same1");
+  await db.query("INSERT INTO orchestrator_sandboxes (sandbox_id, orchestrator_id, state, created_at, ready_at, code_hash) VALUES ($1, 'orch-same1', 'running', now() - interval '1 hour', now() - interval '1 hour', $2)", [same, fleet.currentCodeHash()]);
+  await fleet.fleetCheckin("orch-same1", 3, { worker_id: "w-same1", running: {} });
+  await new Promise((r) => setTimeout(r, 20));
+  await fleet.fleetCheckin("orch-same1", 3, { worker_id: "w-same1", running: {} });
+  await a1.tick(); await a1.settle();
+  check("an orchestrator on the current code is kept (restart or other replica), whatever its age",
+    sbs.has(same) && !(await fleet.staleOrchestratorIds()).has("orch-same1"), (a1.last?.reaped ?? []).map((r) => r.reason).join(","));
   for (const r of await rows()) { await fleet.fleetLeave(r.orchestrator_id).catch(() => {}); }
   await a1.tick();
   check("nothing of ours left on boat", ![...sbs.values()].some((s) => s.name.startsWith("octi-orch-")), [...sbs.values()].map((s) => s.name).join(","));

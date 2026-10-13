@@ -86,6 +86,7 @@ export function createApp() {
   });
   const mcp = async (req: Request, res: Response, org: Org) => {
     res.locals.org = org.slug;
+    transcripts().warm(); // a user is here: have transcript search awake by the time they ask for evidence
     for (const e of connectorEvents(req.body, req.get("user-agent"))) recordMcpEvent(org.orgId, e);
     const server = createServer(org);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
