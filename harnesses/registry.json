@@ -3,7 +3,7 @@
   "as_of": "2026-10-10",
   "next_review": "2027-01-10",
   "methodology": "Target quantity: share of developers' agentic-coding usage by harness, Oct 2026. 1) Anchor on JetBrains DevEco 2026 work adoption (largest reweighted professional sample, May-Jul 2026), normalized. 2) Adjust for intensity using SO 2026 (Claude Code 66% vs Copilot 59% of agent users), Pragmatic Engineer 2026, vendor WAU/ARR, and public-GitHub attribution (Amplifying.ai): Claude Code and Codex up, Copilot and Cursor (breadth, lighter agent use) down. 3) Tools absent from surveys (Pi, Amp, droid, Qwen Code, Aider, Augment, Continue, Warp, Trae) share a ~3-5% long tail, ranked by npm/PyPI downloads; these are +/-100%. 4) Midpoints: Claude Code 37 (30-44), Codex 18 (13-24), Copilot 13 (9-18), Cursor 10 (7-14), OpenCode 5 (3-7), Antigravity 3 + Gemini CLI 1.5 (2.5-7 combined), Junie 2.5 (1.5-4), Cline/Roo/Kilo 2 (1-3), Pi 1.5 (0.5-3), Windsurf/Devin 1.5 (0.5-3), Kiro 1 (0.3-2), Jules 0.8 (0.3-1.5), long tail 3.2 (2-5). 5) A harness is runnable if it installs on Linux, runs non-interactively with tool auto-approval and API-key auth, and emits a JSON event stream. Copilot, Cursor, Antigravity, Cline and Kilo are mostly IDE products; their own headless CLIs stand in for them (proxy_represented_share). 6) weight = usage share / sum of runnable shares (rounded to 4 dp, sums to 1). Non-runnable share is unrepresented_share. 7) Within-harness model splits only where data exists (Claude Code Opus/Sonnet from Amplifying.ai commit model mix); elsewhere the harness default.",
-  "model_split_methodology": "A harness is split into one agent per model only when a cited source shows a second model with >=20% of that harness's usage, on a slice representative of the harness's users (not only a gateway's traffic). Split weights sum to the harness's weight; splits share image, requires_env, event_format and worker_adapter. As of 2026-10-10 only Claude Code qualifies. Gateway data (OpenRouter app pages, OpenCode stats) shows other mixes but covers only the usage routed through those gateways. See each agent's model_mix note. In-harness model_variants (2026-10-11): a small harness keeps ONE population slot and each of its sessions is drawn as one of its model variants by share, so splitting it never adds minimum sandboxes. Used for Pi (see pi/gpt model_variants_note).",
+  "model_split_methodology": "A harness is split into one agent per model only when a cited source shows a second model with >=20% of that harness's usage, on a slice representative of the harness's users (not only a gateway's traffic). Split weights sum to the harness's weight; splits share image, requires_env, event_format and worker_adapter. As of 2026-10-10 only Claude Code qualifies. Gateway data (OpenRouter app pages, OpenCode stats) shows other mixes but covers only the usage routed through those gateways. See each agent's model_mix note. In-harness model_variants (2026-10-11): a small harness keeps ONE population slot and each of its sessions is drawn as one of its model variants by share, so splitting it never adds minimum sandboxes. Used for Pi (see pi/gpt model_variants_note). Cline uses model_variants too (2026-10-13; see cline/gpt model_variants_note).",
   "unrepresented_share": 0.084,
   "proxy_represented_share": 0.275,
   "unrepresented_breakdown": {
@@ -551,13 +551,8 @@
       "model": "claude-sonnet-5-5",
       "model_verified": false,
       "harness_version": "3.0.70",
-      "weight": 0.0109,
-      "usage_share": 0.01,
-      "weight_source": [
-        "so2025tech",
-        "npm-2026-10",
-        "openrouter-apps-2026-10"
-      ],
+      "weight": 0,
+      "weight_source": [],
       "headless": "cline --json --auto-approve true -P anthropic -m <model> -k $ANTHROPIC_API_KEY -- <prompt>",
       "event_format": "cline-json",
       "image": {
@@ -572,7 +567,73 @@
       "resume": false,
       "adapter_evidence": "captured-fixture",
       "enabled": true,
-      "notes": "Cline+Roo+Kilo 2.2% of SO2025 IDE respondents; split Cline 1.0 / Roo 0.5 / Kilo 0.5 (judgement, unverified). Cline is mostly a VS Code extension; the CLI is a proxy. Key passed per run with -P anthropic -k (from env). No headless resume (cline --id fails with --json in 3.0.70), so no simulated-developer replies. `-p` means plan mode, not print.",
+      "notes": "Cline+Roo+Kilo 2.2% of SO2025 IDE respondents; split Cline 1.0 / Roo 0.5 / Kilo 0.5 (judgement, unverified). Cline is mostly a VS Code extension; the CLI is a proxy. Key passed per run with -P anthropic -k (from env). No headless resume (cline --id fails with --json in 3.0.70), so no simulated-developer replies. `-p` means plan mode, not print. NOT RUNNABLE through the Vertex-backed gateway: Cline reaches it via /v1/chat/completions, which Vertex does not serve for Claude (every session failed, 2026-10-13). Needs a first-party Anthropic key or a chat-completions translation in the gateway.",
+      "model_mix": "Model mix: not split. OpenRouter slice is led by a stealth model (space-bunny-alpha 43.3%, not a stable target) and muse-spark-1.3 13.3%; no stable second model >=20%; Cline-provider and BYOK usage is invisible."
+    },
+    {
+      "id": "cline/gpt",
+      "harness": "cline",
+      "cli": "cline",
+      "label": "Cline · GPT-6.1-Sol",
+      "vendor": "Cline",
+      "model": "openai/gpt-6.1-sol",
+      "model_verified": false,
+      "harness_version": "3.0.70",
+      "weight": 0.0109,
+      "weight_source": [
+        "so2025tech",
+        "npm-2026-10",
+        "openrouter-apps-2026-10"
+      ],
+      "headless": "cline --json --auto-approve true -P anthropic -m <model> -k $ANTHROPIC_API_KEY -- <prompt>",
+      "event_format": "cline-json",
+      "image": {
+        "docker": "octillion/agent-cline:3.0.70",
+        "boat_snapshot": "octillion-cline-3-0-70"
+      },
+      "requires_env": [
+        "OPENAI_API_KEY"
+      ],
+      "boat_preinstalled": false,
+      "worker_adapter": "supported",
+      "resume": false,
+      "adapter_evidence": "captured-fixture",
+      "enabled": true,
+      "notes": "Cline+Roo+Kilo 2.2% of SO2025 IDE respondents; split Cline 1.0 / Roo 0.5 / Kilo 0.5 (judgement, unverified). Cline is mostly a VS Code extension; the CLI is a proxy. Key passed per run with -P anthropic -k (from env). No headless resume (cline --id fails with --json in 3.0.70), so no simulated-developer replies. `-p` means plan mode, not print. Cline on OpenAI through the Octillion gateway (Cline's OpenAI-compatible provider, native /v1/chat/completions).",
+      "model_mix": "Model mix: not split. OpenRouter slice is led by a stealth model (space-bunny-alpha 43.3%, not a stable target) and muse-spark-1.3 13.3%; no stable second model >=20%; Cline-provider and BYOK usage is invisible.",
+      "usage_share": 0.01,
+      "model_variants": {
+        "cline/gpt": 0.5,
+        "cline/cf-kimi-k2.7-code": 0.5
+      },
+      "model_variants_note": "Cline slot: sessions run as cline/gpt 50%, open model (cline/cf-kimi-k2.7-code) 50%. ESTIMATE, no representative survey, and constrained by what the gateway can run: Claude (a common Cline choice via API keys; no subscription connector) is not reachable for Cline on Vertex, so its share is carried by GPT. OpenRouter's Cline slice is led by open/stealth models (space-bunny-alpha 43.3%, muse-spark-1.3 13.3%; openrouter-apps-2026-10). Revisit once Claude runs for Cline."
+    },
+    {
+      "id": "cline/cf-kimi-k2.7-code",
+      "harness": "cline",
+      "cli": "cline",
+      "label": "Cline · Kimi K2.7 Code (Cloudflare)",
+      "vendor": "Cloudflare Workers AI (open model)",
+      "model": "cloudflare/@cf/moonshotai/kimi-k2.7-code",
+      "model_verified": false,
+      "harness_version": "3.0.70",
+      "weight": 0,
+      "weight_source": [],
+      "headless": "cline --json --auto-approve true -P anthropic -m <model> -k $ANTHROPIC_API_KEY -- <prompt>",
+      "event_format": "cline-json",
+      "image": {
+        "docker": "octillion/agent-cline:3.0.70",
+        "boat_snapshot": "octillion-cline-3-0-70"
+      },
+      "requires_env": [
+        "CLOUDFLARE_API_TOKEN"
+      ],
+      "boat_preinstalled": false,
+      "worker_adapter": "supported",
+      "resume": false,
+      "adapter_evidence": "captured-fixture",
+      "enabled": true,
+      "notes": "Cline on an open model via Cloudflare Workers AI through the Octillion gateway (Cline's OpenAI-compatible provider).",
       "model_mix": "Model mix: not split. OpenRouter slice is led by a stealth model (space-bunny-alpha 43.3%, not a stable target) and muse-spark-1.3 13.3%; no stable second model >=20%; Cline-provider and BYOK usage is invisible."
     },
     {

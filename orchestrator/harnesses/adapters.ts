@@ -504,7 +504,8 @@ const cline: HarnessAdapter = {
   hasKey: (k) => !!envKey(k, "anthropic", "ANTHROPIC_API_KEY"),
   // Prompt must be a positional argument. The key goes in via -k from the env (not argv), with provider anthropic.
   // Note: a one-word prompt is rejected by cline ("Unknown command"); scenario prompts are sentences.
-  launchArgv: (o) => ["bash", "-c", 'exec "$@" -k "$ANTHROPIC_API_KEY" -- "$(cat)"', "octi", o.bin ?? "cline", "--json", "--auto-approve", "true", "-P", "anthropic", "-m", o.model],
+  // CLINE_API_KEY comes from the credential mapping (gateway: Anthropic, OpenAI or Cloudflare token); direct runs use ANTHROPIC_API_KEY.
+  launchArgv: (o) => ["bash", "-c", 'exec "$@" -k "${CLINE_API_KEY:-$ANTHROPIC_API_KEY}" -- "$(cat)"', "octi", o.bin ?? "cline", "--json", "--auto-approve", "true", "-P", "anthropic", "-m", o.model],
   resumeArgv: () => { throw new UnsupportedHarnessError("cline cannot resume a session headlessly"); },
   newDigest() {
     const d = newDigestState();

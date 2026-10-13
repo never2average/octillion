@@ -193,14 +193,25 @@ export const CRED_SPECS: Record<string, CredSpec> = {
   },
   cline: {
     providers: ["anthropic"], mode: "gateway",
-    how: "cline 3.0.70's anthropic provider ignores any base URL (`-b` is refused for it; ANTHROPIC_BASE_URL and a providers.json baseUrl are ignored). Gateway mode uses its OpenAI-compatible provider instead: `cline auth -p openai -b <base>/v1` + `-P openai`, which reaches Anthropic's OpenAI-compatible /v1/chat/completions behind the gateway",
+    how: "cline 3.0.70's anthropic provider ignores any base URL (`-b` is refused for it; ANTHROPIC_BASE_URL and a providers.json baseUrl are ignored), " +
+         "so gateway mode uses its OpenAI-compatible provider: `cline auth -p openai -b <base>/v1` + `-P openai` (key in $CLINE_API_KEY). " +
+         "`openai/<model>` runs on the OpenAI gateway and `cloudflare/@cf/...` on Cloudflare Workers AI, both native /v1/chat/completions. " +
+         "A bare Claude model needs Anthropic's OpenAI-compatible /v1/chat/completions, which the first-party API serves but Vertex does not",
     map(p, o) {
-      const { c, env } = anthropicEnv(p);
+      // Which gateway provider serves this model, and the id Cline's openai provider should send.
+      const [provider, modelId] = o.model.startsWith("openai/") ? ["openai", o.model.slice("openai/".length)]
+        : o.model.startsWith("cloudflare/") ? ["cloudflare", o.model.slice("cloudflare/".length)]
+        : ["anthropic", o.model];
+      const c = need(p, provider);
+      if (provider !== "anthropic" && !c.base_url) throw new MissingCredentialsError(`cline on ${provider} needs the gateway (no direct mode)`);
+      // CLINE_API_KEY is what the adapter passes to -k; ANTHROPIC_API_KEY stays for direct (non-gateway) Anthropic runs.
+      const env: Record<string, string> = provider === "anthropic" ? { ANTHROPIC_API_KEY: c.api_key, CLINE_API_KEY: c.api_key } : { CLINE_API_KEY: c.api_key };
       if (!c.base_url) return { env, setup: "" };
-      if (/['"$`\\]/.test(o.model) || /['"$`\\]/.test(c.base_url)) throw new Error("unsafe model or base URL for cline setup");
-      // The key is referenced from the env ("$ANTHROPIC_API_KEY"), never written into argv by us. </dev/null: stdin is the prompt.
-      const setup = `cline auth -p openai -k "$ANTHROPIC_API_KEY" -b "${withSuffix(c.base_url, "/v1")}" -m "${o.model}" </dev/null >/dev/null 2>&1 || true; `;
-      const argv = (a: string[]) => a.map((x, i) => (x === "anthropic" && a[i - 1] === "-P" ? "openai" : x));
+      if (/['"$`\\]/.test(modelId) || /['"$`\\]/.test(c.base_url)) throw new Error("unsafe model or base URL for cline setup");
+      // The key is referenced from the env ("$CLINE_API_KEY"), never written into argv by us. </dev/null: stdin is the prompt.
+      const setup = `cline auth -p openai -k "$CLINE_API_KEY" -b "${withSuffix(c.base_url, "/v1")}" -m "${modelId}" </dev/null >/dev/null 2>&1 || true; `;
+      // Adapter argv is `-P anthropic -m <registry model>`: switch to the openai provider and the provider-local model id.
+      const argv = (a: string[]) => a.map((x, i) => (x === "anthropic" && a[i - 1] === "-P" ? "openai" : a[i - 1] === "-m" ? modelId : x));
       return { env, setup, argv };
     },
   },
