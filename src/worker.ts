@@ -198,9 +198,14 @@ export async function scoreSession(sessionId: string) {
        FROM agent_sessions s JOIN products p ON p.id = s.product_id WHERE s.id = $1`,
     [sessionId],
   );
+  // Only a session that ran to completion is a result. One that failed or timed out (sandbox, network, provider, a
+  // harness that could not start) says nothing about what the agent would have picked: it gets no verdict, so it is
+  // left out of every hit rate instead of counting as "did not pick the product".
+  if (row.status !== "completed") {
+    await db.query("UPDATE agent_sessions SET verdict = NULL, winner = NULL, mentions = '[]'::jsonb, scored_at = NULL WHERE id = $1 AND verdict IS NOT NULL", [sessionId]);
+    return null;
+  }
   const events = await allEvents(row.org_id, sessionId);
-  // A session that died before producing anything has nothing to judge.
-  if (!events.length && row.status !== "completed") return null;
   const score = scoreTranscript(events, { name: row.name, aliases: row.aliases, packages: row.packages, domains: row.domains }, row.competitors);
   // Recount from the store too, so transcripts an orchestrator wrote straight to ClickHouse are reflected.
   const lastSeq = events.reduce((m, e) => Math.max(m, e.seq), 0);
