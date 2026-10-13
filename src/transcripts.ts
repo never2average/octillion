@@ -44,6 +44,8 @@ interface TranscriptStore {
   kind: "clickhouse" | "postgres";
   append(s: SessionRef, events: StoredEvent[]): Promise<void>;
   read(orgId: number, sessionId: string, offset: number, limit: number): Promise<{ total: number; events: StoredEvent[] }>;
+  /** Drop a session's events (an infrastructure-failed attempt being retried must not leak into the retry's transcript). */
+  remove(orgId: number, sessionId: string): Promise<void>;
   search(p: SearchParams): Promise<SearchResult>;
 }
 
@@ -174,6 +176,14 @@ function clickhouseStore(cfg: ClickHouseConfig): TranscriptStore {
         })),
       });
     },
+    async remove(orgId, sessionId) {
+      await ensure();
+      // Lightweight delete, waited for: the retry's events reuse the same seq numbers.
+      await client.command({
+        query: `DELETE FROM ${TABLE} WHERE org_id = {org:UInt32} AND session_id = {session:String}`,
+        query_params: { org: orgId, session: sessionId }, clickhouse_settings: { lightweight_deletes_sync: "2" },
+      });
+    },
     async read(orgId, sessionId, offset, limit) {
       await ensure();
       const params = { org: orgId, session: sessionId, offset, limit };
@@ -252,6 +262,10 @@ const postgresStore: TranscriptStore = {
          ON CONFLICT (session_id, seq) DO NOTHING`,
         [s.id, e.seq, e.ts, e.type, e.text, JSON.stringify(e.raw)],
       );
+  },
+  async remove(orgId, sessionId) {
+    const db = await getDb();
+    await db.query("DELETE FROM transcript_events WHERE session_id = $1 AND EXISTS (SELECT 1 FROM agent_sessions s WHERE s.id = $1 AND s.org_id = $2)", [sessionId, orgId]);
   },
   async read(orgId, sessionId, offset, limit) {
     const db = await getDb();

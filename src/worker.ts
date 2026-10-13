@@ -124,10 +124,47 @@ async function allEvents(orgId: number, sessionId: string): Promise<StoredEvent[
   }
 }
 
+/**
+ * Infrastructure failures: the sandbox, the network to it, the orchestrator or an overloaded provider, never the
+ * agent's own work. Config and request errors (400s, a harness the gateway cannot serve, a spent budget) are not here:
+ * retrying those only fails again and spends twice.
+ */
+const INFRA_FAILURE = /boat runner:|boat command stream error|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up|socket connection was closed|fetch failed|No heartbeat for \d+ minutes|\b(502|503|504|529)\b|overloaded/i;
+const INFRA_RETRIES = () => Math.max(0, Number(process.env.OCTILLION_SESSION_INFRA_RETRIES ?? 1));
+
+/**
+ * Put an infrastructure-failed session back in the queue (at most INFRA_RETRIES times) instead of failing it: its
+ * transcript is cleared, its gateway token revoked, and the next claim starts it afresh. Returns false when the failure
+ * is not infrastructure, the retries are used up, or the run was cancelled. The spend of the failed attempt stays on
+ * the session (it is real), so one retry bounds the waste at one attempt.
+ */
+async function retryInfraFailure(s: SessionRef, input: CompleteInput): Promise<boolean> {
+  if (input.status !== "failed" && input.status !== "timeout") return false;
+  const msg = input.error_message ?? "";
+  if (!INFRA_FAILURE.test(msg) || /budget is used up/i.test(msg)) return false;
+  const db = await getDb();
+  const [row] = await db.query<{ retries: number; sim: string }>(
+    `SELECT coalesce((a.metadata->>'infra_retries')::int, 0) AS retries, m.status AS sim
+       FROM agent_sessions a JOIN simulations m ON m.id = a.simulation_id WHERE a.id = $1`, [s.id]);
+  if (!row || row.sim === "cancelled" || row.retries >= INFRA_RETRIES()) return false;
+  try { await transcripts().remove(s.org_id, s.id); }
+  catch (err) { console.error(`session ${s.id}: not retried, transcript reset failed: ${(err as Error).message}`); return false; }
+  await revokeSessionTokens(s.id);
+  await db.query(
+    `UPDATE agent_sessions SET status = 'queued', worker_id = NULL, started_at = NULL, heartbeat_at = NULL, ended_at = NULL,
+            sandbox_id = NULL, error_message = NULL, events = 0, user_turns = 0,
+            metadata = metadata || jsonb_build_object('infra_retries', $2::int, 'infra_error', $3::text)
+      WHERE id = $1 AND status = 'running'`,
+    [s.id, row.retries + 1, msg.slice(0, 500)]);
+  console.error(`session ${s.id}: infrastructure failure, requeued (retry ${row.retries + 1}/${INFRA_RETRIES()}): ${msg.slice(0, 160)}`);
+  return true;
+}
+
 /** Finish a session and score it. Re-completing an already finished session just re-scores it. */
 export async function completeSession(sessionId: string, input: CompleteInput = {}) {
   const s = await sessionRef(sessionId);
   const db = await getDb();
+  if (s.status === "running" && (await retryInfraFailure(s, input))) return null;
   if (!FINAL.includes(s.status)) {
     await db.query(
       `UPDATE agent_sessions SET status = $2, ended_at = now(), error_message = $3, sandbox_id = coalesce($4, sandbox_id),

@@ -647,6 +647,26 @@ try {
     .filter((j: any) => ofA.has(j.session_id) || ofB.has(j.session_id));
   assert.equal(fair.filter((j: any) => ofB.has(j.session_id)).length, 2, `the later, smaller org is not starved: claimed ${fair.map((j: any) => (ofB.has(j.session_id) ? "B" : "A")).join("")}`);
   assert.ok(fair.some((j: any) => ofA.has(j.session_id)), "the first org still gets its share");
+
+  // ---------- infrastructure failures are retried once, config errors are not ----------
+  const sessionRow = async (id: string) => (await db.query<any>("SELECT status, events, error_message, metadata FROM agent_sessions WHERE id = $1", [id]))[0];
+  const flaky = fair[0].session_id, broken = fair[1].session_id;
+  await worker(`/sessions/${flaky}/events`, { events: [{ type: "assistant", content: "half-finished work of the failed attempt" }] });
+  await worker(`/sessions/${flaky}/complete`, { status: "failed", error_message: "boat runner: boat command stream error: ECONNRESET: The socket connection was closed unexpectedly." });
+  let row = await sessionRow(flaky);
+  assert.equal(row.status, "queued", "an infrastructure failure puts the session back in the queue");
+  assert.equal(row.metadata.infra_retries, 1);
+  assert.equal(Number(row.events), 0);
+  assert.equal((await (await import("../src/transcripts.js")).transcripts().read(fair[0].org_id, flaky, 0, 10)).total, 0, "the failed attempt's transcript is cleared");
+  const again = (await (await worker("/claim", { worker_id: "smoke-fair", limit: 10, models: ["claude-sonnet-5-5"] })).json()).jobs;
+  assert.ok(again.some((j: any) => j.session_id === flaky), "the retried session is claimable again");
+  await worker(`/sessions/${flaky}/complete`, { status: "failed", error_message: "boat runner: ECONNRESET" });
+  row = await sessionRow(flaky);
+  assert.equal(row.status, "failed", "a second infrastructure failure is final (one retry)");
+  await worker(`/sessions/${broken}/complete`, { status: "failed", error_message: "/v1/chat/completions is not available on Vertex AI (only /v1/messages and /v1/messages/count_tokens)" });
+  assert.equal((await sessionRow(broken)).status, "failed", "a configuration error is not retried");
+  console.log("✓ infrastructure failures are retried once with a clean transcript; config errors fail at once");
+
   await call(A, "cancel_simulation", { simulation_id: runA.simulation.id });
   await call(B, "cancel_simulation", { simulation_id: runB.simulation.id });
   console.log(`✓ claims are shared across organizations (${fair.map((j: any) => (ofB.has(j.session_id) ? "B" : "A")).join("")})`);
