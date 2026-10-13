@@ -208,10 +208,14 @@ export const CRED_SPECS: Record<string, CredSpec> = {
       const env: Record<string, string> = provider === "anthropic" ? { ANTHROPIC_API_KEY: c.api_key, CLINE_API_KEY: c.api_key } : { CLINE_API_KEY: c.api_key };
       if (!c.base_url) return { env, setup: "" };
       if (/['"$`\\]/.test(modelId) || /['"$`\\]/.test(c.base_url)) throw new Error("unsafe model or base URL for cline setup");
+      // OpenAI models use Cline's own OpenAI provider (`openai-native`, which takes a base URL): the generic `openai`
+      // provider sends reasoning_effort with tools on /v1/chat/completions, which OpenAI rejects for gpt-6.1-sol
+      // ("Function tools with reasoning_effort are not supported ... use /v1/responses"; seen live 2026-10-13).
+      const clineProvider = provider === "openai" ? "openai-native" : "openai";
       // The key is referenced from the env ("$CLINE_API_KEY"), never written into argv by us. </dev/null: stdin is the prompt.
-      const setup = `cline auth -p openai -k "$CLINE_API_KEY" -b "${withSuffix(c.base_url, "/v1")}" -m "${modelId}" </dev/null >/dev/null 2>&1 || true; `;
-      // Adapter argv is `-P anthropic -m <registry model>`: switch to the openai provider and the provider-local model id.
-      const argv = (a: string[]) => a.map((x, i) => (x === "anthropic" && a[i - 1] === "-P" ? "openai" : a[i - 1] === "-m" ? modelId : x));
+      const setup = `cline auth -p ${clineProvider} -k "$CLINE_API_KEY" -b "${withSuffix(c.base_url, "/v1")}" -m "${modelId}" </dev/null >/dev/null 2>&1 || true; `;
+      // Adapter argv is `-P anthropic -m <registry model>`: switch to that provider and the provider-local model id.
+      const argv = (a: string[]) => a.map((x, i) => (x === "anthropic" && a[i - 1] === "-P" ? clineProvider : a[i - 1] === "-m" ? modelId : x));
       return { env, setup, argv };
     },
   },
