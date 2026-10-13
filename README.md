@@ -4,6 +4,9 @@
 
 SEO got you found by people. APO gets you picked by agents.
 
+> Continues [SoumilB7/Octillion](https://github.com/SoumilB7/Octillion), where the project started; this repository
+> carries its full history and is where development happens now.
+
 ## What is APO?
 
 Coding agents (Claude Code, Codex, Cursor, OpenCode, ...) now choose the database, the queue and the auth library
