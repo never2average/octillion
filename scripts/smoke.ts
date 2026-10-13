@@ -635,6 +635,22 @@ try {
   assert.equal((await call(B, "search_transcripts", { query: "bullmq" })).results.total, 0, "search is org-scoped");
   console.log("✓ org B sees none of org A's data");
 
+  // ---------- fair share across organizations ----------
+  // A queues a run first, B a smaller one after it. First-come-first-served would hand a 4-pod claim entirely to A.
+  await call(B, "save_product", { name: "FairShare B", description: "A queue for the fairness check.", category: "queues", packages: ["fairshare-b"] });
+  await call(B, "save_scenarios", { scenarios: [{ title: "Fair task", prompt: "Add background job processing with retries to this service and explain the choice of tool." }] });
+  const runA = await call(A, "run_simulation", { product: "relayq", models: ["claude-sonnet-5-5"], repeats: 1, name: "fair-a" });
+  const runB = await call(B, "run_simulation", { models: ["claude-sonnet-5-5"], repeats: 2, name: "fair-b" });
+  const ofA = new Set(runA.sessions.map((s: any) => s.id)), ofB = new Set(runB.sessions.map((s: any) => s.id));
+  assert.ok(ofA.size >= 4 && ofB.size === 2, `fair-share setup: A ${ofA.size}, B ${ofB.size}`);
+  const fair = (await (await worker("/claim", { worker_id: "smoke-fair", limit: 4, models: ["claude-sonnet-5-5"] })).json()).jobs
+    .filter((j: any) => ofA.has(j.session_id) || ofB.has(j.session_id));
+  assert.equal(fair.filter((j: any) => ofB.has(j.session_id)).length, 2, `the later, smaller org is not starved: claimed ${fair.map((j: any) => (ofB.has(j.session_id) ? "B" : "A")).join("")}`);
+  assert.ok(fair.some((j: any) => ofA.has(j.session_id)), "the first org still gets its share");
+  await call(A, "cancel_simulation", { simulation_id: runA.simulation.id });
+  await call(B, "cancel_simulation", { simulation_id: runB.simulation.id });
+  console.log(`✓ claims are shared across organizations (${fair.map((j: any) => (ofB.has(j.session_id) ? "B" : "A")).join("")})`);
+
   // ---------- HTTP: auth, landing page, access requests ----------
   const anon = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
   assert.equal(anon.status, 401);

@@ -43,8 +43,18 @@ export async function claimJobs(workerId: string, opts: { limit?: number; models
       `UPDATE agent_sessions s SET status = 'running', worker_id = $1, started_at = now(), heartbeat_at = now()
          FROM scenarios sc
         WHERE sc.id = s.scenario_id AND s.id IN (
-              SELECT id FROM agent_sessions WHERE status = 'queued' ${filter}
-               ORDER BY queued_at, id LIMIT $2 FOR UPDATE SKIP LOCKED)
+              -- Fair share across organizations, not first-come-first-served: an org's k-th queued session is ranked
+              -- after the sessions it already has running, and the lowest ranks are claimed first. One org's large
+              -- run can no longer hold every pod while another org's sessions wait behind it.
+              SELECT id FROM agent_sessions
+               WHERE status = 'queued' AND id IN (
+                     SELECT id FROM (
+                       SELECT q.id, q.queued_at,
+                              row_number() OVER (PARTITION BY q.org_id ORDER BY q.queued_at, q.id)
+                              + (SELECT count(*) FROM agent_sessions r WHERE r.org_id = q.org_id AND r.status = 'running') AS pos
+                         FROM agent_sessions q WHERE q.status = 'queued' ${filter}) ranked
+                      ORDER BY pos, queued_at, id LIMIT $2)
+                 FOR UPDATE SKIP LOCKED)
         RETURNING s.id AS session_id, s.simulation_id, s.org_id, s.product_id, s.model, s.harness, s.agent_id, s.attempt, s.profile_id,
                   sc.prompt, sc.repo_url, sc.language, sc.template, sc.tags, sc.title`,
       params,
