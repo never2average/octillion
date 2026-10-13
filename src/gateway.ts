@@ -4,7 +4,7 @@ import type { Request, Response } from "express";
 import { getDb } from "./db.js";
 import { findAgent } from "./agents.js";
 import { getProvider, providersForEnv, useCredential, VERTEX_LABEL, type ProviderRow } from "./keyvault.js";
-import { toVertex, toVertexGemini, vertexAccessToken } from "./vertex.js";
+import { adaptGeminiBody, geminiWantsThinkingLevel, toVertex, toVertexGemini, vertexAccessToken } from "./vertex.js";
 import { costOf, recordModelUsage } from "./usage.js";
 
 /**
@@ -230,7 +230,14 @@ export async function gatewayHandler(req: Request, res: Response) {
       headers.delete("x-goog-api-key");
       headers.delete("x-goog-api-client");
       headers.set("authorization", `Bearer ${await vertexAccessToken(cred.id, cred.secret)}`);
-      body = hasBody ? (Readable.toWeb(req) as ReadableStream) : undefined;
+      if (hasBody && geminiWantsThinkingLevel(v.model)) {
+        // This model needs its request adjusted (thinking budget -> level), so the body is read in full first.
+        const chunks: Buffer[] = [];
+        let size = 0;
+        for await (const c of req) { size += (c as Buffer).length; if (size > 30 * 1024 * 1024) throw Object.assign(new Error("Request exceeds Vertex's 30 MB limit"), { status: 413 }); chunks.push(c as Buffer); }
+        body = adaptGeminiBody(v.model, Buffer.concat(chunks)).toString("utf8");
+        headers.delete("content-length");
+      } else body = hasBody ? (Readable.toWeb(req) as ReadableStream) : undefined;
     } catch (e) {
       const err = e as Error & { status?: number };
       return gwError(res, err.status ?? 502, err.status && err.status < 500 ? "invalid_request_error" : "api_error", err.message);

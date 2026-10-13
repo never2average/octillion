@@ -121,3 +121,28 @@ export function toVertexGemini(cfg: VertexConfig, path: string, search = ""): { 
   const loc = `${vertexBase(cfg)}/${api}/projects/${encodeURIComponent(cfg.project_id)}/locations/${encodeURIComponent(cfg.region ?? "global")}/publishers/google/models`;
   return { url: `${loc}/${encodeURIComponent(model)}:${method}${search}`, model };
 }
+
+/**
+ * Gemini 4 (Argon) takes `thinkingConfig.thinkingLevel` (low | medium | high) and rejects `thinkingBudget` outright
+ * ("Thinking budget is not supported for this model. Use thinking level instead"; `minimal` is unsupported too, probed
+ * 2026-10-13). Clients released before it (Antigravity CLI 1.3.4 with a custom model) still send a budget, so the gateway
+ * translates it: dynamic (-1) or large -> high, mid -> medium, small or 0 -> low. Other models and bodies pass untouched.
+ */
+const LEVEL_ONLY_MODEL = /^gemini-(?:[4-9]|\d{2})\b/;
+export const geminiWantsThinkingLevel = (model: string) => LEVEL_ONLY_MODEL.test(model);
+export function adaptGeminiBody(model: string, raw: Buffer): Buffer {
+  if (!geminiWantsThinkingLevel(model)) return raw;
+  let json: any;
+  try { json = JSON.parse(raw.toString("utf8")); } catch { return raw; }
+  const gc = json?.generationConfig ?? json?.generation_config;
+  const tc = gc?.thinkingConfig ?? gc?.thinking_config;
+  if (!tc || typeof tc !== "object") return raw;
+  const budget = tc.thinkingBudget ?? tc.thinking_budget;
+  if (budget === undefined) return raw;
+  const b = Number(budget);
+  if (tc.thinkingLevel === undefined && tc.thinking_level === undefined)
+    tc.thinkingLevel = !Number.isFinite(b) || b < 0 || b > 16384 ? "high" : b > 4096 ? "medium" : "low";
+  delete tc.thinkingBudget;
+  delete tc.thinking_budget;
+  return Buffer.from(JSON.stringify(json));
+}
