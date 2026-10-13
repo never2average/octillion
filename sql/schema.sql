@@ -76,6 +76,10 @@ CREATE TABLE IF NOT EXISTS simulations (
   finished_at  TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS simulations_product_idx ON simulations (product_id, created_at DESC);
+-- Adaptive sampling (src/queries.ts extendAdaptive): the per-task session cap (NULL = fixed-size run) and the last
+-- decision per task ({scenario_id: {attempts, scored, hits, margin, status}}).
+ALTER TABLE simulations ADD COLUMN IF NOT EXISTS max_samples INT;
+ALTER TABLE simulations ADD COLUMN IF NOT EXISTS sampling JSONB;
 
 CREATE TABLE IF NOT EXISTS agent_sessions (
   id              TEXT PRIMARY KEY,           -- ses_<random>

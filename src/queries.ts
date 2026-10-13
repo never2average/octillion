@@ -42,6 +42,14 @@ export const config = {
   agents: async () => scheduledAgents(await getPopulation()).map((a) => ({ id: a.id, label: a.label, model: a.model, harness: a.harness, weight: a.weight })),
   defaultSamples: () => Number(process.env.OCTILLION_DEFAULT_SAMPLES ?? 10),
   maxSessionsPerRun: () => Number(process.env.OCTILLION_MAX_SESSIONS_PER_RUN ?? 100),
+  /**
+   * Adaptive sampling: a task is sampled until its hit rate is known to within +/- samplingMargin (95% interval), or
+   * until maxSamples sessions. Tasks where agents agree settle after a handful; contested ones run to the cap.
+   */
+  maxSamples: () => Math.max(1, Number(process.env.OCTILLION_MAX_SAMPLES ?? 20)),
+  samplingMargin: () => Number(process.env.OCTILLION_SAMPLING_MARGIN ?? 0.2),
+  samplingMin: () => Math.max(1, Number(process.env.OCTILLION_SAMPLING_MIN ?? 6)),
+  samplingBatch: () => Math.max(1, Number(process.env.OCTILLION_SAMPLING_BATCH ?? 4)),
   /** Per-organization model spend per calendar month (UTC); new runs are refused once reached. 0 = no cap. */
   orgMonthlyBudgetUsd: () => Number(process.env.OCTILLION_ORG_MONTHLY_BUDGET_USD ?? 1000),
 };
@@ -246,6 +254,8 @@ export interface RunInput {
   population?: string;                                      // developer population (default: the default one)
   agents?: string[]; models?: string[]; repeats?: number;  // explicit: these agents x repeats on every scenario
   samples?: number;                                         // representative (default): sessions per scenario, mixed by adoption
+  /** Adaptive sampling cap per scenario. Default (no `samples` given): config.maxSamples(). `samples` alone = a fixed-size run. */
+  max_samples?: number;
 }
 
 /**
@@ -332,6 +342,11 @@ export async function runSimulation(org: Org, input: RunInput) {
   const explicit = Boolean(input.agents?.length || input.models?.length);
   const samples = input.samples ?? config.defaultSamples();
   const repeats = input.repeats ?? 3;
+  // Representative runs are adaptive unless the caller fixed the size with `samples` alone: `samples` is then the first
+  // batch per slot and more sessions are added per task until it settles or reaches the cap (extendAdaptive).
+  const maxSamples = explicit ? null
+    : input.max_samples !== undefined ? Math.max(1, Math.trunc(input.max_samples))
+    : input.samples === undefined ? config.maxSamples() : null;
   let plan: { scenarioId: number; profileId: number | null; agent: AgentSpec; attempt: number }[];
   if (explicit) {
     // A slot agent's model_variants (e.g. pi on GPT) are selectable by id too.
@@ -360,10 +375,10 @@ export async function runSimulation(org: Org, input: RunInput) {
   const name = input.name?.trim() || `${p.name} · ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC`;
   await db.transaction(async (tx) => {
     await tx.query(
-      `INSERT INTO simulations (id, org_id, product_id, name, models, harness, repeats, profile_ids, mode, agent_ids, population_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      `INSERT INTO simulations (id, org_id, product_id, name, models, harness, repeats, profile_ids, mode, agent_ids, population_id, max_samples)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
       [id, org.orgId, p.id, name, [...new Set(used.map((a) => a.model))], [...new Set(used.map((a) => a.harness))].join(", "),
-       explicit ? repeats : samples, profiles.map((x) => x.id), explicit ? "explicit" : "representative", used.map((a) => a.id), pop.id],
+       explicit ? repeats : samples, profiles.map((x) => x.id), explicit ? "explicit" : "representative", used.map((a) => a.id), pop.id, maxSamples],
     );
     for (const x of plan)
       await tx.query(
@@ -373,6 +388,71 @@ export async function runSimulation(org: Org, input: RunInput) {
       );
   });
   return getSimulation(org, id);
+}
+
+/**
+ * Adaptive sampling. Called when a simulation's queued and running sessions have all finished: for each task, decide
+ * whether its result is settled, and queue another batch for the ones that are not. A task is settled when its hit rate
+ * is known to within +/- samplingMargin (Wilson 95% interval, at least samplingMin scored sessions), or when it has had
+ * max_samples sessions. Unanimous tasks settle after a handful; split ones run to the cap. Also stops at the per-run
+ * session limit and the organization's monthly budget. Returns the number of sessions queued (0 = the run is done).
+ */
+export async function extendAdaptive(simulationId: string): Promise<number> {
+  const db = await getDb();
+  // Read what needs its own queries before taking the row lock (no nested queries inside the transaction).
+  const [pre] = await db.query<{ org_id: number; mode: string; max_samples: number | null; slug: string | null }>(
+    `SELECT sim.org_id, sim.mode, sim.max_samples, dp.slug FROM simulations sim LEFT JOIN developer_populations dp ON dp.id = sim.population_id
+      WHERE sim.id = $1`, [simulationId]);
+  if (!pre || pre.mode !== "representative" || !pre.max_samples) return 0;
+  const budget = config.orgMonthlyBudgetUsd();
+  const overBudget = budget > 0 && (await orgMonthSpendUsd(pre.org_id)) >= budget;
+  const pop = await getPopulation(pre.slug ?? undefined);
+  return db.transaction(async (tx) => {
+    const [sim] = await tx.query<{ id: string; org_id: number; product_id: number; mode: string; status: string; max_samples: number | null;
+                                   population_id: number | null; profile_ids: number[] | null }>(
+      "SELECT id, org_id, product_id, mode, status, max_samples, population_id, profile_ids FROM simulations WHERE id = $1 FOR UPDATE", [simulationId]);
+    if (!sim || sim.mode !== "representative" || !sim.max_samples || sim.status === "cancelled") return 0;
+    const [open] = await tx.query<{ n: number }>("SELECT count(*) AS n FROM agent_sessions WHERE simulation_id = $1 AND status IN ('queued', 'running')", [simulationId]);
+    if (Number(open.n) > 0) return 0; // a batch is still in flight (or another completion already extended the run)
+    const rows = await tx.query<{ scenario_id: number; attempts: number; n: number; hits: number }>(
+      `SELECT s.scenario_id, count(*) AS attempts, count(*) FILTER (WHERE s.verdict IS NOT NULL) AS n,
+              count(*) FILTER (WHERE s.verdict IS NOT NULL AND ${HIT}) AS hits
+         FROM agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id
+        WHERE s.simulation_id = $1 GROUP BY s.scenario_id ORDER BY s.scenario_id`, [simulationId]);
+    let room = config.maxSessionsPerRun() - rows.reduce((t, r) => t + Number(r.attempts), 0);
+    const decisions: Record<string, unknown> = {};
+    const more: { scenarioId: number; from: number; count: number }[] = [];
+    for (const r of rows) {
+      const attempts = Number(r.attempts), n = Number(r.n), hits = Number(r.hits);
+      const ci = wilson(hits, n);
+      const margin = ci ? (ci[1] - ci[0]) / 2 : 1;
+      const settled = n >= config.samplingMin() && margin <= config.samplingMargin();
+      const want = settled || attempts >= sim.max_samples || overBudget ? 0 : Math.max(0, Math.min(config.samplingBatch(), sim.max_samples - attempts, room));
+      room -= want;
+      decisions[String(r.scenario_id)] = {
+        attempts, scored: n, hits, margin: Math.round(margin * 100) / 100,
+        status: settled ? "settled" : attempts >= sim.max_samples ? "cap reached" : overBudget ? "stopped: monthly budget" : want ? "sampling more" : "stopped: run limit",
+      };
+      if (want) more.push({ scenarioId: Number(r.scenario_id), from: attempts, count: want });
+    }
+    await tx.query("UPDATE simulations SET sampling = $2 WHERE id = $1", [simulationId, JSON.stringify(decisions)]);
+    const total = more.reduce((t, m) => t + m.count, 0);
+    if (!total) return 0;
+    const agents = representativePlan(total, scheduledAgents(pop)).map((a) => drawVariant(a));
+    const profileIds: (number | null)[] = sim.profile_ids?.length ? sim.profile_ids : [null];
+    let k = 0;
+    for (const m of more)
+      for (let i = 0; i < m.count; i++) {
+        const agent = agents[k++];
+        await tx.query(
+          `INSERT INTO agent_sessions (id, simulation_id, org_id, product_id, scenario_id, model, harness, agent_id, attempt, profile_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+          [randomId("ses_"), simulationId, sim.org_id, sim.product_id, m.scenarioId, agent.model, agent.harness, agent.id,
+           m.from + i + 1, profileIds[(m.from + i) % profileIds.length]]);
+      }
+    await tx.query("UPDATE simulations SET status = 'running', finished_at = NULL WHERE id = $1 AND status <> 'cancelled'", [simulationId]);
+    return total;
+  });
 }
 
 export async function listSimulations(org: Org, productRef?: string) {

@@ -71,7 +71,13 @@ function summarize(d: Data): string {
         : "No simulations yet. Launch one with run_simulation.";
     case "simulation": {
       const s = d.simulation;
-      return `Simulation ${s.id} "${s.name}" for ${s.product}: ${s.status}. ${d.totals.sessions} agent sessions (${Object.entries(d.status).map(([k, v]) => `${v} ${k}`).join(", ")}). Hit rate ${pct(d.totals.hit_rate)} over ${d.totals.scored} scored. Verdicts: ${Object.entries(d.verdicts).map(([k, v]) => `${k} ${v}`).join(", ") || "none yet"}.${Object.keys(d.completed_reasons ?? {}).length ? ` Ended: ${Object.entries(d.completed_reasons).map(([k, v]) => `${k} ${v}`).join(", ")}.` : ""} By agent: ${d.by_agent.map((a: any) => `${a.label} ${pct(a.hit_rate)} (n=${a.scored})`).join(", ")}.${d.capacity ? ` Capacity: ${d.capacity.message}` : ""}`;
+      const sampling = Object.values((s.sampling ?? {}) as Record<string, { status: string }>);
+      const count = (st: string) => sampling.filter((x) => x.status === st).length;
+      const adaptive = !s.max_samples ? "" : !sampling.length
+        ? ` Adaptive sampling: up to ${s.max_samples} sessions per scenario, more are added until each result is stable.`
+        : ` Adaptive sampling (up to ${s.max_samples} per scenario): ${count("settled")} scenario(s) settled, ${count("cap reached")} at the cap, ${count("sampling more")} still being sampled${sampling.some((x) => x.status.startsWith("stopped")) ? `, ${sampling.filter((x) => x.status.startsWith("stopped")).length} stopped by a limit` : ""}.`;
+      const base = `Simulation ${s.id} "${s.name}" for ${s.product}: ${s.status}. ${d.totals.sessions} agent sessions (${Object.entries(d.status).map(([k, v]) => `${v} ${k}`).join(", ")}). Hit rate ${pct(d.totals.hit_rate)} over ${d.totals.scored} scored. Verdicts: ${Object.entries(d.verdicts).map(([k, v]) => `${k} ${v}`).join(", ") || "none yet"}.${Object.keys(d.completed_reasons ?? {}).length ? ` Ended: ${Object.entries(d.completed_reasons).map(([k, v]) => `${k} ${v}`).join(", ")}.` : ""} By agent: ${d.by_agent.map((a: any) => `${a.label} ${pct(a.hit_rate)} (n=${a.scored})`).join(", ")}.${d.capacity ? ` Capacity: ${d.capacity.message}` : ""}`;
+      return base + adaptive;
     }
     case "report": {
       const t = d.totals;
@@ -343,13 +349,14 @@ export function createServer(org: Org): McpServer {
 
   registerAppTool(server, "run_simulation", {
     title: "Run simulation",
-    description: `Launch sandboxed coding sub-agents on the product's scenarios. Default (representative): \`samples\` sessions per scenario (default ${q.config.defaultSamples()}), with worker agents (Claude Code, Codex, Cursor, ...) mixed in proportion to real-world developer adoption (see list_agents). Explicit: pass agents and/or models to run exactly those, \`repeats\` times each. At most ${q.config.maxSessionsPerRun()} sessions per run. Runs asynchronously; check progress with get_simulation.`,
+    description: `Launch sandboxed coding sub-agents on the product's scenarios. Default (representative, adaptive): each scenario starts with ${q.config.defaultSamples()} sessions per developer profile and is sampled further until its result is stable (95% interval within +/-${Math.round(q.config.samplingMargin() * 100)} points) or it has had ${q.config.maxSamples()} sessions, so scenarios where agents agree stop early and contested ones get more; pass \`samples\` alone for a fixed-size run. Worker agents (Claude Code, Codex, Cursor, ...) mixed in proportion to real-world developer adoption (see list_agents). Explicit: pass agents and/or models to run exactly those, \`repeats\` times each. At most ${q.config.maxSessionsPerRun()} sessions per run. Runs asynchronously; check progress with get_simulation.`,
     inputSchema: {
       product,
       scenario_ids: z.array(z.number().int()).optional(),
       agents: z.array(z.string()).optional().describe("Explicit worker agent ids (list_agents), e.g. 'claude-code/sonnet'"),
       models: z.array(z.string()).optional().describe("Explicit: only agents using these models"),
-      samples: z.number().int().min(1).max(100).optional().describe(`Representative mode: sessions per scenario (default ${q.config.defaultSamples()})`),
+      samples: z.number().int().min(1).max(100).optional().describe(`Representative mode: first batch of sessions per scenario (default ${q.config.defaultSamples()}). Given alone it makes a fixed-size run with no adaptive sampling`),
+      max_samples: z.number().int().min(1).max(100).optional().describe(`Representative mode: adaptive sampling cap per scenario (default ${q.config.maxSamples()}). Each scenario is sampled until its result is stable or it reaches this many sessions`),
       population: z.string().optional().describe("Developer population whose coding-agent mix to sample (list_agents); default population if omitted"),
       profiles: z.array(z.string()).optional().describe("Developer profile slugs (list_developer_profiles); every scenario runs once per profile. Omit for a generic developer"),
       repeats: z.number().int().min(1).max(10).optional().describe("Explicit mode: runs per scenario and agent (default 3)"),

@@ -184,7 +184,7 @@ this are directional, not a benchmark.
 | `list_products`, `get_product` | Products, configured context, scenarios with hit rates, warnings (e.g. a prompt that names the product) |
 | `save_product` | Create/update product context: aliases, packages, domains, competitors |
 | `save_scenarios` | Add/edit/retire scenarios (`expectation`: `recommend` or `avoid`) |
-| `run_simulation` | Default: `samples` sessions per scenario (`OCTILLION_DEFAULT_SAMPLES`, 3 in production), agents mixed by adoption weight. Explicit: `agents`/`models` × `repeats`. Optional developer `profiles`. Capped per run (`OCTILLION_MAX_SESSIONS_PER_RUN`) and per organization per month (`OCTILLION_ORG_MONTHLY_BUDGET_USD`) |
+| `run_simulation` | Default: adaptive. Each scenario starts with `OCTILLION_DEFAULT_SAMPLES` (3) sessions per developer profile and is sampled further until its hit rate is stable (95% interval within ±20 points) or it has had `max_samples` (`OCTILLION_MAX_SAMPLES`, 20) sessions, so scenarios where agents agree stop early and contested ones get more. `samples` alone gives a fixed-size run. Agents are mixed by adoption weight. Explicit: `agents`/`models` × `repeats`. Optional developer `profiles`. Capped per run (`OCTILLION_MAX_SESSIONS_PER_RUN`) and per organization per month (`OCTILLION_ORG_MONTHLY_BUDGET_USD`) |
 | `list_agents` | A developer population's coding-agent mix (whole sandboxes out of 20), sources, and the available populations |
 | `list_developer_profiles`, `browse_task_library` | Curated developer personas and real-world tasks from the vault |
 | `list_simulations`, `get_simulation`, `cancel_simulation` | Progress, scenario × model matrix, sessions |

@@ -669,6 +669,40 @@ try {
 
   await call(A, "cancel_simulation", { simulation_id: runA.simulation.id });
   await call(B, "cancel_simulation", { simulation_id: runB.simulation.id });
+
+  // ---------- adaptive sampling: agreed tasks stop early, contested ones get more, up to the cap ----------
+  process.env.OCTILLION_SAMPLING_MIN = "2";
+  process.env.OCTILLION_SAMPLING_MARGIN = "0.35";
+  await call(B, "save_scenarios", { scenarios: [{ title: "Contested task", prompt: "Add scheduled background jobs with retries to this API and justify the tool you pick." }] });
+  const ad = await call(B, "run_simulation", { samples: 2, max_samples: 6, name: "adaptive" });
+  assert.equal(ad.totals.sessions, 4, "first batch: 2 tasks x 2 sessions");
+  const { extendAdaptive } = await import("../src/queries.js");
+  const adRows = () => db.query<any>("SELECT s.id, s.status, sc.title FROM agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id WHERE s.simulation_id = $1 ORDER BY s.id", [ad.simulation.id]);
+  let flip = false;
+  const finishBatch = async () => {
+    for (const r of await adRows()) {
+      if (r.status !== "queued") continue;
+      const picked = r.title === "Fair task" ? true : (flip = !flip); // agents agree on one task and split on the other
+      await db.query("UPDATE agent_sessions SET status = 'completed', ended_at = now(), scored_at = now(), verdict = $2 WHERE id = $1", [r.id, picked ? "recommended" : "none"]);
+    }
+  };
+  await finishBatch();
+  assert.equal(await extendAdaptive(ad.simulation.id), 4, "only the contested task gets another batch");
+  const afterFirst = await adRows();
+  assert.ok(afterFirst.filter((r: any) => r.status === "queued").every((r: any) => r.title === "Contested task"), "the agreed task is not sampled again");
+  let [adSim] = await db.query<any>("SELECT status, sampling FROM simulations WHERE id = $1", [ad.simulation.id]);
+  const statuses = Object.values(adSim.sampling as Record<string, any>).map((x) => x.status).sort();
+  assert.deepEqual(statuses, ["sampling more", "settled"]);
+  await finishBatch();
+  assert.equal(await extendAdaptive(ad.simulation.id), 0, "the contested task stops at max_samples");
+  assert.equal((await adRows()).length, 8, "4 first-batch sessions + 4 more for the contested task (cap 6 per task)");
+  [adSim] = await db.query<any>("SELECT sampling FROM simulations WHERE id = $1", [ad.simulation.id]);
+  assert.ok(Object.values(adSim.sampling as Record<string, any>).every((x) => x.status === "settled" || x.status === "cap reached"));
+  const fixed = await call(B, "run_simulation", { samples: 1, name: "fixed" });
+  assert.equal(fixed.simulation.max_samples, null, "`samples` alone is a fixed-size run");
+  await call(B, "cancel_simulation", { simulation_id: fixed.simulation.id });
+  delete process.env.OCTILLION_SAMPLING_MIN; delete process.env.OCTILLION_SAMPLING_MARGIN;
+  console.log(`✓ adaptive sampling: agreed task settled after 2, contested task sampled to the cap (${statuses.join(", ")})`);
   console.log(`✓ claims are shared across organizations (${fair.map((j: any) => (ofB.has(j.session_id) ? "B" : "A")).join("")})`);
 
   // ---------- HTTP: auth, landing page, access requests ----------

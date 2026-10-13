@@ -256,7 +256,9 @@ export async function completeResearch(id: string, body: { status?: string; erro
     if (n * profiles.length > cap) profiles = profiles.slice(0, Math.max(1, Math.floor(cap / n)));
     const samples = job.run.samples ?? Math.max(1, Math.min(config.defaultSamples(), Math.floor(cap / (n * profiles.length))));
     try {
+      // `samples` is the first batch; unless the customer fixed the size, each task then samples adaptively up to the cap.
       const sim = await runSimulation(org, { product: prod.slug, profiles, samples, population: job.run.population ?? undefined,
+                                             ...(job.run.samples == null ? { max_samples: config.maxSamples() } : {}),
                                              name: `Onboarding: ${p.name}` });
       simulation_id = sim.simulation.id;
       await db.query("UPDATE product_research SET simulation_id = $2 WHERE id = $1", [id, simulation_id]);

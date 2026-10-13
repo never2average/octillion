@@ -2,6 +2,7 @@ import { getDb } from "./db.js";
 import { normalize, transcripts, type RawEvent, type SessionRef, type StoredEvent } from "./transcripts.js";
 import { scoreTranscript, type Tool } from "./scoring.js";
 import { findAgent } from "./agents.js";
+import { extendAdaptive } from "./queries.js";
 import { revokeSessionTokens, sessionGatewayUsage } from "./gateway.js";
 
 /**
@@ -213,6 +214,9 @@ export async function scoreSession(sessionId: string) {
 }
 
 async function finishSimulationIfDone(simulationId: string) {
+  // Adaptive runs: when a batch is done, tasks whose result is not settled yet get more sessions; only a run that
+  // queues nothing more is finished.
+  if (await extendAdaptive(simulationId)) return;
   const db = await getDb();
   await db.query(
     `UPDATE simulations SET status = CASE WHEN status = 'cancelled' THEN 'cancelled' ELSE 'completed' END,

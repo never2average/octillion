@@ -138,9 +138,11 @@ services:
       OCTILLION_ORCH_IDLE_MINUTES: ${OCTILLION_ORCH_IDLE_MINUTES:-10}
       OCTILLION_ORCH_SNAPSHOT: ${OCTILLION_ORCH_SNAPSHOT:-off}
       OCTILLION_AUTOSCALE_TICK_SECONDS: ${OCTILLION_AUTOSCALE_TICK_SECONDS:-15}
-      # Run sizing and spend guards (beta defaults): sessions per scenario, sessions per run, per-org monthly model spend.
+      # Run sizing and spend guards. Runs are adaptive: every scenario starts with DEFAULT_SAMPLES sessions per developer
+      # profile and is sampled further until its result is stable or it has had MAX_SAMPLES sessions.
       OCTILLION_DEFAULT_SAMPLES: ${OCTILLION_DEFAULT_SAMPLES:-3}
-      OCTILLION_MAX_SESSIONS_PER_RUN: ${OCTILLION_MAX_SESSIONS_PER_RUN:-40}
+      OCTILLION_MAX_SAMPLES: ${OCTILLION_MAX_SAMPLES:-20}
+      OCTILLION_MAX_SESSIONS_PER_RUN: ${OCTILLION_MAX_SESSIONS_PER_RUN:-120}
       OCTILLION_ORG_MONTHLY_BUDGET_USD: ${OCTILLION_ORG_MONTHLY_BUDGET_USD:-1000}
       # Reliability: retries of infrastructure-failed sessions, and how long a stopping server lets requests finish.
       OCTILLION_SESSION_INFRA_RETRIES: ${OCTILLION_SESSION_INFRA_RETRIES:-1}
