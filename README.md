@@ -95,19 +95,47 @@ npm run org:create -- "Acme Inc"        # prints the API key (once) and the conn
 Give them the connector URL `https://<host>/mcp/<api key>`:
 - **Claude:** Settings → Connectors → *Add custom connector*. On Team/Enterprise plans an owner adds it once for the org.
 - **ChatGPT:** add a custom MCP server and choose no authentication. Business, Enterprise and Edu workspaces need an admin to allow custom MCP.
+- **Claude Code:** `{"mcpServers": {"octillion": {"type": "http", "url": "https://<host>/mcp/<api key>"}}}` in `.mcp.json`.
+- **Cursor and other IDE hosts:** paste the URL into the MCP settings and enable the tools. They show text results, not the dashboard.
 
 Clients that can send headers can use `POST /mcp` with `Authorization: Bearer <api key>` instead.
-Then they just talk to it: *"Add our product Acme Queue (npm @acme/queue, competitors BullMQ and Inngest), write 5
-realistic scenarios where a developer would need a job queue, and run a simulation."*
+Then they just talk to it. The first prompt can be *"Get me started with Octillion"*: the `get_started` tool (listed
+first) answers with the account's one next step. Or go straight to it: *"Onboard my product: Acme Queue,
+https://acme.dev, https://docs.acme.dev. It is a job queue for Node."*
+
+A connected client that never calls a tool shows up in the server log, not in analytics: every `/mcp` request writes
+one line (`mcp POST 200 org=<slug> rpc=tools/call:<tool> <ms> ua="<client>"`, never the key), including bad keys (401).
+
+## Walkthrough: first report in three prompts
+
+Recorded against production with headless Claude Code in an empty workspace, on an example product (Resend, an email
+API). Full transcript and numbers: [docs/walkthrough-claude-code.md](docs/walkthrough-claude-code.md).
+
+```bash
+claude -p "<prompt>" --continue --mcp-config .mcp.json --strict-mcp-config --allowedTools "mcp__octillion"
+```
+
+| Prompt | What happens | Time |
+|---|---|---|
+| "Get me started with Octillion." | `get_started`: a welcome and the next step for this account | 4 s |
+| "Onboard my product: Resend, https://resend.com, https://resend.com/docs. It is an email API for developers." | `onboard_product`: research builds the product profile (package, domains, competitors), 2 developer personas and 5 coding tasks (one is a control where no tool should be added), then launches the first simulation | 2 min 26 s |
+| "Show my visibility report." | `get_visibility_report`: hit rate, losses to competitors, share of voice, by task and by agent, with the evidence one prompt away | after the 15 min simulation |
+
+That run was 30 agent sessions for $20.98 of model spend (the orchestrator's share was about $0.51). Its report said
+agents picked the product in 4 of 20 completed email-task sessions and a competitor in 6, flagged inbound email as the
+clearest gap, and pointed out by itself that the headline hit rate was inflated by the control task. Small runs like
+this are directional, not a benchmark.
 
 ## MCP tools
 
 | Tool | Does |
 |---|---|
+| `get_started` | Listed first. What Octillion does and the account's one next step (onboard, check onboarding, run, check progress, read the report) |
+| `onboard_product`, `get_onboarding` | Research a product from a description, website and docs link: profile, competitors, personas and tasks, then a first simulation; progress and results of that research |
 | `list_products`, `get_product` | Products, configured context, scenarios with hit rates, warnings (e.g. a prompt that names the product) |
 | `save_product` | Create/update product context: aliases, packages, domains, competitors |
 | `save_scenarios` | Add/edit/retire scenarios (`expectation`: `recommend` or `avoid`) |
-| `run_simulation` | Default: `samples` sessions per scenario (10), agents mixed by adoption weight. Explicit: `agents`/`models` × `repeats`. Optional developer `profiles` |
+| `run_simulation` | Default: `samples` sessions per scenario (`OCTILLION_DEFAULT_SAMPLES`, 3 in production), agents mixed by adoption weight. Explicit: `agents`/`models` × `repeats`. Optional developer `profiles`. Capped per run (`OCTILLION_MAX_SESSIONS_PER_RUN`) and per organization per month (`OCTILLION_ORG_MONTHLY_BUDGET_USD`) |
 | `list_agents` | A developer population's coding-agent mix (whole sandboxes out of 20), sources, and the available populations |
 | `list_developer_profiles`, `browse_task_library` | Curated developer personas and real-world tasks from the vault |
 | `list_simulations`, `get_simulation`, `cancel_simulation` | Progress, scenario × model matrix, sessions |
