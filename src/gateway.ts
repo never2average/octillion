@@ -18,7 +18,7 @@ import { costOf, recordModelUsage } from "./usage.js";
 
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 const PUBLIC_URL = () => (process.env.PUBLIC_URL ?? `http://127.0.0.1:${process.env.PORT ?? 3333}`).replace(/\/$/, "");
-const LEASE_MINUTES = () => Number(process.env.OCTILLION_LEASE_MINUTES ?? 30);
+const SESSION_TOKEN_MINUTES = () => Number(process.env.OCTILLION_SESSION_TOKEN_MINUTES ?? 90);
 const MAX_REQUESTS = () => Number(process.env.OCTILLION_GATEWAY_MAX_REQUESTS ?? 1000);
 // Per-session budget. Cost is the real limit: token counts include cache reads, so long agent sessions re-read
 // millions of cheap cached tokens. The token cap is a backstop for models without a price.
@@ -58,7 +58,10 @@ export async function brokerSessionCredentials(sessionId: string) {
   const missing = needs.filter((v) => !providers.some((p) => p.env_vars.includes(v)));
   if (missing.length) throw Object.assign(new Error(`No vault provider supplies ${missing.join(", ")}`), { status: 503 });
 
-  const expiresAt = new Date(Date.now() + LEASE_MINUTES() * 60_000);
+  // Must outlive the longest session (orchestrator MAX_SESSION_MINUTES, 45): a 30-minute token killed slow sessions
+  // mid-run ("Gateway token is invalid, expired or revoked" at 30:00, seen 2026-10-13). The token is revoked when
+  // the session completes, so the lifetime only bounds a session whose completion never arrives.
+  const expiresAt = new Date(Date.now() + SESSION_TOKEN_MINUTES() * 60_000);
   const gatewaySlugs = providers.filter((p) => p.mode === "gateway").map((p) => p.slug);
   const token = gatewaySlugs.length ? await mintToken("session", gatewaySlugs, expiresAt, { sessionId }) : null;
   const out: Record<string, { mode: string; base_url?: string; api_key: string }> = {};
