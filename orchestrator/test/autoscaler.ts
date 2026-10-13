@@ -171,6 +171,26 @@ try {
   check("orphan orchestrator sandbox (no row) deleted", !sbs.has(orphan) && /orphan/.test(reasons[orphan] ?? ""), reasons[orphan] ?? "");
   check("workers of a reaped orchestrator deleted (exact prefix only)", !sbs.has(staleWorker) && sbs.has(otherWorker), reasons[staleWorker] ?? "");
   sbs.delete(otherWorker);
+
+  // recycle on deploy: an orchestrator launched before this server process runs old code. It gets no pods, is not
+  // deleted while a session of its is running, and is retired right after (no idle-timeout wait).
+  const old = mk("octi-orch-old1");
+  await db.query("INSERT INTO orchestrator_sandboxes (sandbox_id, orchestrator_id, state, created_at, ready_at) VALUES ($1, 'orch-old1', 'running', now() - interval '1 hour', now() - interval '1 hour')", [old]);
+  const first = await fleet.fleetCheckin("orch-old1", 3, { worker_id: "w-old1", running: {} }) as any;
+  check("pre-deploy orchestrator is handed an empty assignment", Array.isArray(first.assignment) && first.assignment.length === 0, JSON.stringify(first.assignment));
+  await queue(1);
+  await db.query("UPDATE agent_sessions SET status = 'running', worker_id = 'w-old1' WHERE id = (SELECT id FROM agent_sessions WHERE status = 'queued' LIMIT 1)");
+  await db.query("UPDATE agent_sessions SET status = 'cancelled' WHERE status = 'queued'");
+  await new Promise((r) => setTimeout(r, 20));
+  await fleet.fleetCheckin("orch-old1", 3, { worker_id: "w-old1", running: {} });
+  await a1.tick(); await a1.settle();
+  check("...and is kept while one of its sessions is still running", sbs.has(old), (a1.last?.reaped ?? []).map((r) => r.reason).join(","));
+  await db.query("UPDATE agent_sessions SET status = 'completed' WHERE worker_id = 'w-old1'");
+  await a1.tick(); await a1.settle();
+  const retired = (a1.last?.reaped ?? []).find((r) => r.sandbox_id === old);
+  check("...then retired at once when idle (no 10-minute idle wait)", !sbs.has(old) && /retired/.test(retired?.reason ?? ""), retired?.reason ?? "not reaped");
+  for (const r of await rows()) { await fleet.fleetLeave(r.orchestrator_id).catch(() => {}); }
+  await a1.tick();
   check("nothing of ours left on boat", ![...sbs.values()].some((s) => s.name.startsWith("octi-orch-")), [...sbs.values()].map((s) => s.name).join(","));
   check("knobs reported", AUTOSCALE.podCapacity() === 3 && AUTOSCALE.maxOrchestrators() === 2, "");
 } catch (e) {

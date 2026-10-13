@@ -113,7 +113,7 @@ console.log(`database: ${db.kind}, transcripts: ${transcripts().kind}`);
     antigravity: [wrap(agySetup, "agy", "--output-format", "stream-json", "--dangerously-skip-permissions", "--model", "M", "-p"),
       wrap(agySetup, "agy", "--output-format", "stream-json", "--dangerously-skip-permissions", "--model", "M", "--conversation", "SID", "-p")],
     pi: [["pi", "-p", "--mode", "json", "--model", "M"], ["pi", "-p", "--mode", "json", "--model", "M", "--session", "SID"]],
-    cline: [["bash", "-c", 'exec "$@" -k "$ANTHROPIC_API_KEY" -- "$(cat)"', "octi", "cline", "--json", "--auto-approve", "true", "-P", "anthropic", "-m", "M"], null],
+    cline: [["bash", "-c", 'exec "$@" -k "${CLINE_API_KEY:-$ANTHROPIC_API_KEY}" -- "$(cat)"', "octi", "cline", "--json", "--auto-approve", "true", "-P", "anthropic", "-m", "M"], null],
     amp: [["bash", "-c", `${ampSetup}exec "$@"`, "octi", "amp", "-x", "--stream-json", "--mode", "M"],
       ["bash", "-c", `${ampSetup}exec "$@"`, "octi", "amp", "threads", "continue", "SID", "-x", "--stream-json", "--mode", "M"]],
     droid: [["droid", "exec", "-o", "stream-json", "--skip-permissions-unsafe", "-m", "M"], ["droid", "exec", "-o", "stream-json", "--skip-permissions-unsafe", "-m", "M", "-s", "SID"]],

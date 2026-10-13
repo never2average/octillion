@@ -105,12 +105,46 @@ export async function fleetLeave(orchestratorId: string) {
   await db.query("UPDATE orchestrator_sandboxes SET state = 'draining', last_seen = now() WHERE orchestrator_id = $1 AND state IN ('booting', 'running')", [orchestratorId]);
 }
 
+/**
+ * Recycle on deploy. An orchestrator gets its code once, when the server launches it, so one launched before this
+ * server process started runs the previous deploy's code. Such orchestrators are retired without waiting for their
+ * idle timeout: they get an empty assignment (so they claim nothing new, and fresh orchestrators take the pods), and
+ * the autoscaler deletes each one as soon as it has checked in again with nothing running.
+ * OCTILLION_RECYCLE_ON_DEPLOY=off keeps the old behaviour (they live until idle).
+ */
+export const SERVER_STARTED_AT = new Date();
+const retiring = new Map<string, number>(); // orchestrator id -> when it was first handed an empty assignment
+export const retiringSince = (orchestratorId: string) => retiring.get(orchestratorId);
+
+/** Autoscaler-launched orchestrators that predate this server process (manually run ones are never retired). */
+export async function staleOrchestratorIds(): Promise<Set<string>> {
+  if ((process.env.OCTILLION_RECYCLE_ON_DEPLOY ?? "on").toLowerCase() === "off") return new Set();
+  const db = await getDb();
+  const rows = await db.query<{ orchestrator_id: string }>(
+    "SELECT orchestrator_id FROM orchestrator_sandboxes WHERE state IN ('booting', 'running') AND orchestrator_id IS NOT NULL AND created_at < $1",
+    [SERVER_STARTED_AT]);
+  return new Set(rows.map((r) => r.orchestrator_id));
+}
+
+/** Whether an orchestrator still has agent sessions or product research running (by the worker id it checks in with). */
+export async function orchestratorBusy(orchestratorId: string): Promise<boolean> {
+  const db = await getDb();
+  const [o] = await db.query<{ worker_id: string | null }>("SELECT meta->>'worker_id' AS worker_id FROM orchestrators WHERE id = $1", [orchestratorId]);
+  if (!o?.worker_id) return true; // unknown: never delete on a guess
+  const [n] = await db.query<{ n: number }>(
+    `SELECT (SELECT count(*) FROM agent_sessions WHERE status = 'running' AND worker_id = $1)
+          + (SELECT count(*) FROM product_research WHERE status = 'running' AND worker_id = $1) AS n`, [o.worker_id]);
+  return Number(n?.n ?? 0) > 0;
+}
+
 export async function fleetStatus(orchestratorId?: string) {
   const db = await getDb();
-  const live = await db.query<{ id: string; capacity: number; last_seen: Date }>(
+  const stale = await staleOrchestratorIds();
+  if (orchestratorId && stale.has(orchestratorId) && !retiring.has(orchestratorId)) retiring.set(orchestratorId, Date.now());
+  const live = (await db.query<{ id: string; capacity: number; last_seen: Date }>(
     `SELECT id, capacity, last_seen FROM orchestrators WHERE last_seen > now() - make_interval(secs => $1) ORDER BY id`,
     [STALE_SECONDS()],
-  );
+  )).filter((o) => !stale.has(o.id)); // retiring orchestrators get no pods: their `assignment` below is empty
   const total = live.reduce((s, o) => s + Number(o.capacity), 0);
   const plan = planPods(total, await agentShares());
   const dealt = assign(plan, live.map((o) => ({ id: o.id, capacity: Number(o.capacity) })));

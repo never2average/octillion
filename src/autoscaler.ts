@@ -4,6 +4,7 @@ import { getDb } from "./db.js";
 import { useCredential } from "./keyvault.js";
 import { scheduledAgents, variantsOf } from "./agents.js";
 import { getPopulation } from "./populations.js";
+import { orchestratorBusy, retiringSince, staleOrchestratorIds } from "./fleet.js";
 import { BOAT } from "../orchestrator/core/config.js";
 import * as lib from "../orchestrator/deploy/boat-lib.js";
 
@@ -151,6 +152,7 @@ export class Autoscaler {
       const rows = await db.query<Row>("SELECT * FROM orchestrator_sandboxes WHERE state <> 'deleted' ORDER BY id");
       const seen = new Map((await db.query<{ id: string; last_seen: Date }>("SELECT id, last_seen FROM orchestrators")).map((o) => [o.id, new Date(o.last_seen)]));
       const now = Date.now(), min = 60_000;
+      const staleIds = await staleOrchestratorIds();
       const reaped: { sandbox_id: string; reason: string }[] = [];
       const reap = async (row: Row, reason: string, deleteIt = true) => {
         if (row.sandbox_id && deleteIt) await lib.deleteSandbox(row.sandbox_id).catch((e) => this.log(`delete ${row.sandbox_id}: ${(e as Error).message}`));
@@ -188,6 +190,15 @@ export class Autoscaler {
         // running
         const checkIn = row.orchestrator_id ? seen.get(row.orchestrator_id) : undefined;
         if (checkIn) await db.query("UPDATE orchestrator_sandboxes SET last_seen = $2 WHERE id = $1", [row.id, checkIn]);
+        // Recycle on deploy (src/fleet.ts): once a pre-deploy orchestrator has been handed its empty assignment and
+        // has checked in again since, delete it as soon as nothing of its is running. No idle-timeout wait.
+        if (row.orchestrator_id && staleIds.has(row.orchestrator_id)) {
+          const told = retiringSince(row.orchestrator_id);
+          if (told && checkIn && checkIn.getTime() > told && !(await orchestratorBusy(row.orchestrator_id))) {
+            await reap(row, "retired: launched before this deploy (old code)");
+            continue;
+          }
+        }
         const since = checkIn?.getTime() ?? (row.ready_at ? new Date(row.ready_at).getTime() : new Date(row.created_at).getTime());
         if (now - since > AUTOSCALE.staleMinutes() * min) await reap(row, `stale: no fleet check-in for ${AUTOSCALE.staleMinutes()} min`);
       }
@@ -207,7 +218,9 @@ export class Autoscaler {
       st.reaped = reaped;
 
       // 2. scale up within the caps
-      const active = (await db.query<Row>("SELECT * FROM orchestrator_sandboxes WHERE state IN ('booting', 'running')")).length;
+      // Retiring (pre-deploy) orchestrators claim nothing new, so they do not count as capacity for the demand.
+      const active = (await db.query<Row>("SELECT * FROM orchestrator_sandboxes WHERE state IN ('booting', 'running')"))
+        .filter((r) => !(r.orchestrator_id && staleIds.has(r.orchestrator_id))).length;
       const oursActive = listing.filter((s) => lib.isLive(s) && (s.name?.startsWith(lib.ORCH_PREFIX) || s.name?.startsWith(lib.WORKER_PREFIX))).length;
       const cap = await this.cap(oursActive);
       let desired = Math.min(desiredOrchestrators(demand, AUTOSCALE.podCapacity()), cap);
