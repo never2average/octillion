@@ -53,21 +53,67 @@ adoption-weighted hit rate.
 something, the orchestrator answers in character as a developer profile from the curated vault (role, stack,
 constraints), then resumes it. It stays blind to the customer's product.
 
-Customers use it from **Claude desktop and ChatGPT desktop** through an MCP connector with an interactive dashboard.
+Customers use it from **Claude and ChatGPT** through an MCP connector with an interactive dashboard, and from
+**Claude Code, Cursor** and other MCP clients as text.
 It covers configuring products and scenarios, launching simulations, viewing the visibility report (hit rate with
 Wilson 95% intervals, share of voice, by model, by scenario, trend) and reading the transcript evidence behind each
 verdict.
 
 ```mermaid
 flowchart LR
-  Host[Claude / ChatGPT desktop] -- MCP + API key --> S[Octillion server]
-  S --> PG[(Postgres<br/>orgs, products, scenarios,<br/>simulations, job queue, verdicts)]
-  O[Orchestrator workers] -- claim / events / complete --> S
-  O --> SB[boat.dev sandboxes<br/>pinned agent images from harnesses/registry.json]
-  O -. simulated developer replies .-> SB
-  V[(Vault<br/>developer tasks + profiles)] -- vault:sync --> S
-  S --> CH[(ClickHouse<br/>raw JSONL events + full-text index)]
-  W[Landing page] -- access requests --> S
+  subgraph Clients["Customer's AI client"]
+    C1["Claude / ChatGPT<br/>(inline dashboard)"]
+    C2["Claude Code / Cursor<br/>(text results)"]
+  end
+
+  subgraph VM["Octillion server (one container behind Caddy TLS)"]
+    MCP["MCP endpoint<br/>/mcp/&lt;org key&gt;, 18 tools<br/>+ dashboard widget"]
+    Q["Products, simulations,<br/>reports, scoring"]
+    WAPI["Worker API<br/>claim (fair share per org),<br/>events, complete (infra retry),<br/>fleet check-in, credential broker"]
+    AS["Autoscaler<br/>on-demand orchestrators,<br/>recycle on deploy"]
+    GW["Inference gateway<br/>/gw/&lt;provider&gt;<br/>per-session tokens, metering,<br/>session + org budgets"]
+    KV["Key vault<br/>encrypted provider keys"]
+  end
+
+  subgraph Data["Data"]
+    PG[("Postgres<br/>orgs, products, scenarios,<br/>session queue, verdicts,<br/>agent mix, usage")]
+    CH[("ClickHouse<br/>raw transcripts + search")]
+    BK["pg-backup<br/>nightly dumps"]
+  end
+
+  subgraph Boat["boat.dev sandboxes"]
+    ORCH["Orchestrator (Pi)<br/>researches products,<br/>runs up to 20 sessions,<br/>answers as the developer"]
+    WS["Worker sandbox, one per session<br/>Claude Code, Codex, OpenCode,<br/>Pi, Cline or Kilo<br/>on a starter or a pinned repo"]
+  end
+
+  subgraph LLM["Model providers"]
+    VX["Google Vertex AI<br/>(Claude)"]
+    OA["OpenAI"]
+    CF["Cloudflare Workers AI<br/>(open models)"]
+  end
+
+  VAULT[("Vault<br/>task library, developer<br/>profiles, example repos")]
+  REG["Agent registry<br/>harnesses/registry.json<br/>harness, model, real-world share"]
+  GH["GitHub<br/>pinned open-source repos"]
+
+  C1 & C2 -- "MCP over HTTPS" --> MCP
+  MCP --> Q
+  Q --> PG
+  Q --> CH
+  WAPI --> PG
+  WAPI --> CH
+  PG --> BK
+  AS -- "create / delete" --> ORCH
+  ORCH -- "claim, events, complete" --> WAPI
+  ORCH -- "create, run, tail output" --> WS
+  ORCH -- "its own model calls" --> GW
+  WS -- "agent model calls<br/>(session token)" --> GW
+  GW --> KV
+  GW --> VX & OA & CF
+  WS -- "clone at pinned commit" --> GH
+  VAULT -- "vault:sync" --> PG
+  REG --> Q
+  REG --> AS
 ```
 
 ## Quick start
