@@ -75,6 +75,10 @@ try {
   check("Zed persona: ACP client + adapter installed for Claude Code; native ACP for OpenCode; none for VS Code personas",
     toolsFor("claude-code", zed).map((t) => t.id).join(",") === "cli/jq,acp/client,acp/claude-code" && toolsFor("opencode", zed).map((t) => t.id).join(",") === "cli/jq,acp/client" &&
     !toolsFor("claude-code", { ...zed, editor: "vscode" }).some((t) => t.id.startsWith("acp/")) && (process.env.OCTILLION_ZED_ACP = "on", usesAcp("codex", zed) && !usesAcp("antigravity", zed)), "");
+  // The server image is what the autoscaler uploads to orchestrators: it must contain the client (live smoke 2026-10-14
+  // failed every Zed session with ENOENT when the Dockerfile copied only two files from orchestrator/harnesses).
+  const dockerfile = readFileSync(path.join(here, "..", "..", "Dockerfile"), "utf8");
+  check("server image ships orchestrator/harnesses/acp-client.mjs", /^COPY orchestrator\/harnesses \.\/orchestrator\/harnesses$/m.test(dockerfile) || /acp-client\.mjs/.test(dockerfile), "");
 } catch (e) {
   check("no exception", false, String((e as Error).stack ?? e));
 }

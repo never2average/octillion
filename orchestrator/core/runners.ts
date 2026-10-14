@@ -335,9 +335,13 @@ function boatRunAs(): string {
  */
 async function boatEnvironment(id: string, put: (path: string, content: string) => Promise<unknown>, harness: string, env: SessionEnvironment): Promise<EnvironmentResult> {
   const t0 = Date.now();
-  const tools = toolsFor(harness, env);
+  let tools = toolsFor(harness, env);
+  // Zed over ACP needs the client file; without it the session runs as a CLI rather than failing.
+  if (tools.some((t) => t.id === "acp/client")) {
+    try { await put(`${BOAT_DIR}/acp-client.mjs`, readFileSync(ACP_CLIENT_SRC, "utf8")); }
+    catch (e) { log(`[boat ${id}] ACP client unavailable (${String(e).slice(0, 200)}); running as a CLI`); tools = tools.filter((t) => !t.id.startsWith("acp/")); }
+  }
   await put(`${BOAT_DIR}/env-install.sh`, envInstallScript(tools));
-  if (tools.some((t) => t.id === "acp/client")) await put(`${BOAT_DIR}/acp-client.mjs`, readFileSync(ACP_CLIENT_SRC, "utf8"));
   // One call per tool: boat caps a command at 600s, and a slow install (a JDK) must not take the others with it.
   const inst = { exitCode: 0, stdout: "", stderr: "" };
   for (let i = 0; i < tools.length; i++) {

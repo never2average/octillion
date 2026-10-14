@@ -18,7 +18,8 @@ COPY orchestrator/package.json orchestrator/package-lock.json orchestrator/tscon
 COPY orchestrator/core ./orchestrator/core
 COPY orchestrator/deploy ./orchestrator/deploy
 COPY orchestrator/fleet ./orchestrator/fleet
-COPY orchestrator/harnesses/adapters.ts orchestrator/harnesses/credentials.ts ./orchestrator/harnesses/
+# The whole directory: the worker sandbox also gets files from here (acp-client.mjs for Zed personas).
+COPY orchestrator/harnesses ./orchestrator/harnesses
 COPY orchestrator/images ./orchestrator/images
 COPY orchestrator/pi-octillion ./orchestrator/pi-octillion
 COPY orchestrator/workspaces ./orchestrator/workspaces
