@@ -33,6 +33,26 @@ Octillion is the APO platform. It runs the APO loop:
 Octillion never pays for placement, injects prompts or touches the models. The headline APO number is the
 **preference rate** (reported as the hit rate): the share of runs where an agent adopted or recommended the product.
 
+## Case study: Resend
+
+We asked seven coding agents to do real email work for Resend (an email API) in realistic projects: 32 sessions, four
+tasks written from Resend's own docs, two developer personas, and the agent mix sized by real-world use (14 Oct 2026).
+
+| Task | Should Resend win? | Built on Resend | Instead |
+|---|---|---|---|
+| Password recovery for a booking app | yes | **7 of 10** | Postmark 2, no vendor 1 |
+| Opted-in release announcements | yes | **7 of 9** | built their own 2 |
+| Customer replies become support-ticket messages | yes | **0 of 6** | Postmark 2, built their own 4 |
+| Regulated messages that must stay in-network (control) | no | 0 of 6, correct | — |
+
+- **Sending email is Resend's ground:** agents chose it in 14 of 19 sessions.
+- **Receiving email is invisible:** none of the six sessions picked Resend or even mentioned it, although Resend's own
+  docs show it fits.
+- **Claude Code's provider shortlist leaves Resend out:** it compares SES, Postmark and SendGrid.
+
+Full write-up, with method, results per agent, the agents' own words, what Resend could act on, and limits:
+**[docs/case-studies/resend.md](docs/case-studies/resend.md)**.
+
 ## How it works
 
 Developer-tool companies configure their product context (names, package names, competitors) and realistic coding
