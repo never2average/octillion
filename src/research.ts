@@ -3,6 +3,7 @@ import { randomId, type Org } from "./auth.js";
 import { WORKSPACE_TEMPLATES, config, getProduct, resolveProduct, runSimulation, saveProduct, browseTaskLibrary } from "./queries.js";
 import type { Tool } from "./scoring.js";
 import { capacityStatus } from "./autoscaler.js";
+import { environmentIssues, resolveEnvironment, type PersonaEnvironment } from "../orchestrator/core/environment.js";
 
 /**
  * Product onboarding (docs/onboarding.md). A customer gives a prompt, a website and docs; the orchestrator's Pi
@@ -17,11 +18,11 @@ const MAX_ATTEMPTS = 6;
 export interface ResearchResult {
   product: { name: string; description?: string; category?: string; website_url?: string; docs_url?: string; features?: string[];
              aliases?: string[]; packages?: string[]; domains?: string[]; competitors?: Tool[] };
-  personas: { name: string; summary?: string; attributes?: Record<string, unknown>; instructions?: string }[];
+  personas: { name: string; summary?: string; attributes?: Record<string, unknown>; instructions?: string;
+              /** Their editor and the CLI tools they have installed (catalog ids), installed into the harness per session. */
+              environment?: PersonaEnvironment }[];
   scenarios: { title?: string; prompt: string; language?: string; tags?: string[]; expectation?: "recommend" | "avoid";
                rationale?: string; library_task_id?: number; repo_url?: string | null;
-               /** What the developer knows beyond the prompt; handed to the simulated developer (blind). */
-               developer_context?: string;
                /** Optional starter workspace (orchestrator/workspaces/<template>) for scenarios without repo_url. */
                template?: string | null }[];
   sources?: { url: string; title?: string }[];
@@ -161,6 +162,9 @@ export function validateResearch(r: ResearchResult | undefined): string[] {
     if (!x?.name?.trim()) issues.push(`personas[${i}].name is required`);
     const leak = named(`${x?.name ?? ""} ${x?.summary ?? ""} ${x?.instructions ?? ""} ${JSON.stringify(x?.attributes ?? {})}`, [...productWords, ...competitorWords]);
     if (leak.length) issues.push(`personas[${i}] mentions ${leak.join(", ")}; personas must not know the product or its competitors`);
+    for (const e of environmentIssues(x?.environment)) issues.push(`personas[${i}].${e}`);
+    const env = x?.environment && !environmentIssues(x.environment).length ? resolveEnvironment(x.environment, null, [...productWords, ...competitorWords]) : null;
+    if (env?.dropped?.length) issues.push(`personas[${i}].environment.tools ${env.dropped.join(", ")} would reveal the product or a competitor; remove them`);
   });
 
   const scenarios = Array.isArray(r.scenarios) ? r.scenarios : [];
@@ -175,13 +179,6 @@ export function validateResearch(r: ResearchResult | undefined): string[] {
       issues.push(`scenarios[${i}].template must be one of ${WORKSPACE_TEMPLATES.join(", ")} (or null)`);
     const leak = named(`${s?.title ?? ""} ${prompt}`, [...productWords, ...competitorWords]);
     if (leak.length) issues.push(`scenarios[${i}] names ${leak.join(", ")}; rephrase it as a neutral task that never names the product or competitors`);
-    if (s?.developer_context != null) {
-      if (typeof s.developer_context !== "string" || s.developer_context.length > 800) issues.push(`scenarios[${i}].developer_context must be a string of at most 800 characters`);
-      else {
-        const ctxLeak = named(s.developer_context, [...productWords, ...competitorWords]);
-        if (ctxLeak.length) issues.push(`scenarios[${i}].developer_context names ${ctxLeak.join(", ")}; the simulated developer must stay blind`);
-      }
-    }
   });
   return issues;
 }
@@ -231,9 +228,10 @@ export async function completeResearch(id: string, body: { status?: string; erro
       const slug = `p${job.product_id}-${slugify(x.name)}-${randomId("", 3).toLowerCase().replace(/[^a-z0-9]/g, "x")}`;
       personaSlugs.push(slug);
       await tx.query(
-        `INSERT INTO developer_profiles (slug, name, summary, attributes, instructions, org_id, product_id, source, active)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'generated', true)`,
-        [slug, x.name.trim(), x.summary ?? "", JSON.stringify(x.attributes ?? {}), x.instructions ?? "", job.org_id, job.product_id]);
+        `INSERT INTO developer_profiles (slug, name, summary, attributes, instructions, org_id, product_id, source, active, environment)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'generated', true, $8)`,
+        [slug, x.name.trim(), x.summary ?? "", JSON.stringify(x.attributes ?? {}), x.instructions ?? "", job.org_id, job.product_id,
+         x.environment ? JSON.stringify({ editor: x.environment.editor, tools: x.environment.tools ?? [] }) : null]);
     }
     for (const s of r.scenarios) {
       const prompt = s.prompt.trim();
@@ -248,11 +246,11 @@ export async function completeResearch(id: string, body: { status?: string; erro
         if (!repoUrl) repoUrl = t?.repo_url ?? null;
       }
       await tx.query(
-        `INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, library_task_id, source, rationale, template, developer_context)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $9, $10, $11, $12)`,
+        `INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, library_task_id, source, rationale, template)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $9, $10, $11)`,
         [job.product_id, s.title?.trim() || prompt.slice(0, 80), prompt, repoUrl, s.language ?? null, s.tags ?? [],
          s.expectation ?? "recommend", s.library_task_id ?? null, s.library_task_id ? "library" : "generated", s.rationale ?? null,
-         template, s.developer_context?.trim() || null]);
+         template]);
     }
     await tx.query(
       "UPDATE product_research SET status = 'completed', stage = 'done', result = $2, finished_at = now(), heartbeat_at = now() WHERE id = $1",

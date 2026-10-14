@@ -325,9 +325,12 @@ ALTER TABLE scenarios ADD COLUMN IF NOT EXISTS source    TEXT NOT NULL DEFAULT '
 ALTER TABLE scenarios ADD COLUMN IF NOT EXISTS rationale TEXT;            -- why the product fits (or should not)
 -- Starter workspace for scenarios without repo_url (orchestrator/workspaces/<template>); NULL = picked from language/tags/prompt.
 ALTER TABLE scenarios ADD COLUMN IF NOT EXISTS template TEXT;
--- Research -> experiment hand-off: what the simulated developer knows about this task beyond the prompt (their app,
--- scale, constraints, what done means). Blind like the prompt: it never names the product, competitors or tools.
-ALTER TABLE scenarios ADD COLUMN IF NOT EXISTS developer_context TEXT;
+-- Superseded by developer_profiles.environment (the persona's tools, installed into the harness).
+ALTER TABLE scenarios DROP COLUMN IF EXISTS developer_context;
+-- The persona's developer environment (orchestrator/core/environment.ts): {editor, tools: [catalog ids]}. Each session
+-- installs the editor's language servers for the task's language plus these CLI tools into the worker sandbox and
+-- wires them into the harness. NULL: the default (VS Code + base tools).
+ALTER TABLE developer_profiles ADD COLUMN IF NOT EXISTS environment JSONB;
 -- The onboarding research the run's personas and problems came from (provenance).
 ALTER TABLE simulations ADD COLUMN IF NOT EXISTS research_id TEXT;
 -- Why a session ended: done (real workspace changes) | turn_cap (MAX_AGENT_TURNS) | time_cap | agent_gave_up | error.

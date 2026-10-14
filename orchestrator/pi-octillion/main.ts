@@ -118,7 +118,7 @@ export async function runJobWithPi(job: Job, runner: Runner, brain: Brain): Prom
     // Pi gets the whole session budget plus slack; the session deadline itself is enforced by WorkerSession.
     const budget = setTimeout(() => { piError = "orchestrator exceeded the session budget"; void session.abort(); }, CFG.maxSessionMs + 10 * 60_000);
     try {
-      await session.prompt(jobPrompt(jobId, job.profile, job.prompt, maxTurns, job.context));
+      await session.prompt(jobPrompt(jobId, job.profile, job.prompt, maxTurns));
       const last: any = [...session.messages].reverse().find((m: any) => m.role === "assistant");
       if (last?.stopReason === "error" || last?.stopReason === "aborted") piError ??= `pi: ${last.errorMessage ?? last.stopReason}`;
     } catch (e) {

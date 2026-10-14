@@ -1,6 +1,6 @@
 /**
  * Hermetic test of one orchestrator per job (src/autoscaler.ts per-job mode, src/fleet.ts jobFleetStatus, claim
- * filters, the research -> run developer_context hand-off): real server modules on a temp PGlite + a mock boat API.
+ * filters, per-persona developer environments): real server modules on a temp PGlite + a mock boat API.
  *
  *   npx tsx orchestrator/test/per-job.ts
  */
@@ -164,27 +164,57 @@ try {
   check("claim with simulation_id returns only that run", jobsA.length === 6 && jobsA.every((j) => j.simulation_id === simA) && Number(left.n) === 2,
     `${jobsA.length} claimed, ${left.n} of B still queued`);
 
-  // context hand-off: research's developer_context reaches the job, blind
+  // developer environment: per persona (editor + CLI tools) + the editor's language servers for the task, blind
   await db.query("UPDATE agent_sessions SET status = 'queued', worker_id = NULL WHERE simulation_id = $1", [simA]);
-  const scen = await db.query<any>("SELECT DISTINCT scenario_id FROM agent_sessions WHERE simulation_id = $1 ORDER BY scenario_id", [simA]);
-  await db.query("UPDATE scenarios SET developer_context = 'Small SaaS, 2k users, ships Friday; done = reset email arrives in staging.' WHERE id = $1", [scen[0].scenario_id]);
-  await db.query("UPDATE scenarios SET developer_context = 'We already pay for Postbox, keep it.' WHERE id = $1", [scen[1].scenario_id]);
+  await db.query("UPDATE scenarios SET language = 'TypeScript' WHERE id IN (SELECT scenario_id FROM agent_sessions WHERE simulation_id = $1)", [simA]);
+  await db.query(`UPDATE products SET competitors = competitors || '[{"name": "Stripe Mail"}]'::jsonb WHERE id = $1`, [pid]);
+  const [prof] = await db.query<any>(
+    `INSERT INTO developer_profiles (slug, name, summary, attributes, instructions, org_id, product_id, source, active, environment)
+     VALUES ('pj-zed', 'Zed dev', '', '{}', '', $1, $2, 'generated', true, '{"editor": "zed", "tools": ["cli/psql", "cli/stripe", "cli/gh"]}') RETURNING id`, [O.orgId, pid]);
+  const half = await db.query<any>("SELECT id FROM agent_sessions WHERE simulation_id = $1 ORDER BY id LIMIT 3", [simA]);
+  await db.query("UPDATE agent_sessions SET profile_id = $2 WHERE id = ANY($1)", [half.map((h: any) => h.id), prof.id]);
   const jobs2 = await worker.claimJobs("w-A", { limit: 50, simulation_id: simA });
-  const byScenario = new Map<number, (string | null)[]>();
-  for (const j of jobs2) {
-    const [s] = await db.query<any>("SELECT scenario_id FROM agent_sessions WHERE id = $1", [j.session_id]);
-    byScenario.set(s.scenario_id, [...(byScenario.get(s.scenario_id) ?? []), j.context]);
-  }
-  check("developer_context is handed to the run's jobs", (byScenario.get(scen[0].scenario_id) ?? []).every((c) => /ships Friday/.test(c ?? "")), JSON.stringify([...byScenario]));
-  check("...but dropped at claim if it names a competitor (blindness)", (byScenario.get(scen[1].scenario_id) ?? []).every((c) => c === null), JSON.stringify([...byScenario]));
-  check("...and absent where research gave none", (byScenario.get(scen[2].scenario_id) ?? []).every((c) => c === null), "");
-  const { jobPrompt } = await import("../pi-octillion/prompt.js");
-  const prompt = jobPrompt("j1", null, "Add password reset.", 3, "Small SaaS, ships Friday.");
-  check("Pi's job prompt carries the developer's notes", /<developer_notes_on_this_task>\nSmall SaaS, ships Friday\.\n<\/developer_notes_on_this_task>/.test(prompt) &&
-    !/developer_notes/.test(jobPrompt("j1", null, "Add password reset.", 3, null)), "");
-  const v = research.validateResearch({ product: { name: "Quillmail", packages: ["quillmail"], competitors: [{ name: "Postbox" }, { name: "Mailcrate" }, { name: "Sendfox" }] },
-    personas: [{ name: "Dev" }], scenarios: [1, 2, 3].map((i) => ({ prompt: `Task ${i}: we need password reset emails in this Express service, with templates.`, developer_context: i === 1 ? "Use Quillmail." : "Ships Friday." })) });
-  check("research validation rejects a developer_context that names the product", v.some((x) => /developer_context names Quillmail/.test(x)) && v.length === 1, v.join(" | "));
+  const zed = jobs2.find((j) => half.some((h: any) => h.id === j.session_id))!.environment!;
+  const plain = jobs2.find((j) => !half.some((h: any) => h.id === j.session_id))!.environment!;
+  check("persona environment: Zed's TypeScript server + base CLIs + the persona's tools",
+    zed.editor === "zed" && zed.language === "typescript" && ["lsp/vtsls", "cli/ripgrep", "cli/jq", "cli/psql", "cli/gh"].every((t) => zed.tools.includes(t)), JSON.stringify(zed));
+  check("...a tool naming a competitor is dropped at claim (blindness)", !zed.tools.includes("cli/stripe") && zed.dropped?.includes("cli/stripe") === true, JSON.stringify(zed.dropped));
+  check("no persona environment -> VS Code defaults for the task's language",
+    plain.editor === "vscode" && plain.tools.includes("lsp/typescript-language-server") && !plain.tools.includes("cli/psql"), JSON.stringify(plain));
+  await db.query("UPDATE agent_sessions SET status = 'queued', worker_id = NULL WHERE simulation_id = $1", [simA]);
+  process.env.OCTILLION_DEV_ENV = "off";
+  const jobs3 = await worker.claimJobs("w-A", { limit: 1, simulation_id: simA });
+  delete process.env.OCTILLION_DEV_ENV;
+  check("OCTILLION_DEV_ENV=off -> no environment", jobs3.length === 1 && jobs3[0]!.environment === null, "");
+  const base = { product: { name: "Quillmail", packages: ["quillmail"], competitors: [{ name: "Postbox" }, { name: "Mailcrate" }, { name: "Vercel Mail" }] },
+    scenarios: [1, 2, 3].map((i) => ({ prompt: `Task ${i}: we need password reset emails in this Express service, with templates.` })) };
+  const v1 = research.validateResearch({ ...base, personas: [{ name: "Dev", environment: { editor: "zed", tools: ["cli/psql", "cli/teleporter"] } }] } as any);
+  const v2 = research.validateResearch({ ...base, personas: [{ name: "Dev", environment: { editor: "emacs" as any, tools: ["cli/vercel"] } }] } as any);
+  const v3 = research.validateResearch({ ...base, personas: [{ name: "Dev", environment: { editor: "intellij", tools: ["cli/gh", "cli/uv"] } }] } as any);
+  check("research validation: unknown tools and editors are rejected, competitor tools too, a clean environment passes",
+    v1.some((x) => /unknown environment tools: cli\/teleporter/.test(x)) && v2.some((x) => /editor must be one of/.test(x)) &&
+    v3.length === 0, [v1, v2, v3].map((v) => v.join(" | ")).join(" || "));
+  const v4 = research.validateResearch({ ...base, personas: [{ name: "Dev", environment: { editor: "zed", tools: ["cli/vercel"] } }] } as any);
+  check("research validation: a tool that names a competitor is rejected", v4.some((x) => /cli\/vercel would reveal/.test(x)), v4.join(" | "));
+
+  // worker-sandbox side: what gets installed and how each harness is wired
+  const ei = await import("../core/env-install.js");
+  const tsEnv = { editor: "vscode" as const, language: "typescript" as const, tools: ["lsp/typescript-language-server", "lsp/dart", "cli/jq"] };
+  const cc = ei.harnessWiringScript("claude-code", ei.toolsFor("claude-code", tsEnv));
+  const cx = ei.harnessWiringScript("codex", ei.toolsFor("codex", tsEnv));
+  const oc = ei.harnessWiringScript("opencode", ei.toolsFor("opencode", tsEnv));
+  check("Claude Code: official LSP plugin + local plugin for servers without one; no Serena",
+    /claude plugin install typescript-lsp@claude-plugins-official/.test(cc.script) && /claude plugin install dart-lsp@local-lsp/.test(cc.script) &&
+    !ei.toolsFor("claude-code", tsEnv).some((t) => t.id === "mcp/serena"), cc.summary);
+  check("Codex: Serena over MCP appended to config.toml", ei.toolsFor("codex", tsEnv).some((t) => t.id === "mcp/serena") &&
+    /config\.toml\.mcp" >> "\$HOME\/\.codex\/config\.toml"/.test(cx.script), cx.summary);
+  const ocFile = /printf %s (\S+) \| base64 -d > "\$HOME\/\.config\/opencode\/opencode\.json"/.exec(oc.script);
+  check("OpenCode: lsp entries in the user config", !!ocFile && JSON.parse(Buffer.from(ocFile[1]!, "base64").toString()).lsp["typescript-language-server"].command[0] === "typescript-language-server", oc.summary);
+  const inst = ei.envInstallScript(ei.toolsFor("codex", tsEnv));
+  check("install script: skips tools already present, one subshell per tool", (inst.match(/then r=present/g) ?? []).length === 4 && /ENV mcp\/serena/.test(inst), "");
+  const parsed = ei.parseEnvLines("ENV cli/jq present 0\nENV lsp/dart ok 41\nENV mcp/serena fail 3\nWIRE lsp/dart serena\n");
+  check("install result parsing", parsed.present[0] === "cli/jq" && parsed.installed[0] === "lsp/dart" && parsed.failed[0] === "mcp/serena" && parsed.wired["lsp/dart"] === "serena", JSON.stringify(parsed));
+  check("nothing the agent can see names Octillion", ![cc.script, cx.script, oc.script].some((x) => /octi/i.test(x)), "");
 
   // run over -> job.done -> leave -> reaped; the other run's orchestrator is untouched
   await db.query("UPDATE agent_sessions SET status = 'completed' WHERE simulation_id = $1", [simA]);

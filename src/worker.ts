@@ -2,7 +2,7 @@ import { getDb } from "./db.js";
 import { normalize, transcripts, type RawEvent, type SessionRef, type StoredEvent } from "./transcripts.js";
 import { scoreTranscript, type Tool } from "./scoring.js";
 import { findAgent } from "./agents.js";
-import { named } from "./research.js";
+import { languageOf, resolveEnvironment, type PersonaEnvironment, type SessionEnvironment } from "../orchestrator/core/environment.js";
 import { extendAdaptive } from "./queries.js";
 import { revokeSessionTokens, sessionGatewayUsage } from "./gateway.js";
 
@@ -30,8 +30,11 @@ export interface Job {
   /** Starter workspace hint + scenario tags/title (the orchestrator picks a template when repo_url is null). */
   template: string | null; tags: string[]; title: string;
   profile: { slug: string; name: string; summary: string; attributes: Record<string, unknown>; instructions: string } | null;
-  /** What the developer knows beyond the prompt (onboarding research's developer_context), re-checked blind at claim. */
-  context: string | null;
+  /**
+   * The persona's developer environment for this session: its editor's language servers for the task's language plus
+   * its CLI tools, minus any that would name the product or a competitor. null with OCTILLION_DEV_ENV=off.
+   */
+  environment: SessionEnvironment | null;
 }
 
 /** `simulation_id`: a per-job orchestrator claims only the run it was launched for. */
@@ -45,7 +48,7 @@ export async function claimJobs(workerId: string, opts: { limit?: number; models
   if (opts.agent_ids?.length) params.push(opts.agent_ids), (filter += ` AND agent_id = ANY($${params.length})`);
   if (opts.simulation_id) params.push(opts.simulation_id), (filter += ` AND simulation_id = $${params.length}`);
   const jobs = await db.transaction(async (tx) => {
-    const rows = await tx.query<Omit<Job, "max_user_turns" | "profile" | "agent" | "context"> & { profile_id: number | null; developer_context: string | null }>(
+    const rows = await tx.query<Omit<Job, "max_user_turns" | "profile" | "agent" | "environment"> & { profile_id: number | null }>(
       `UPDATE agent_sessions s SET status = 'running', worker_id = $1, started_at = now(), heartbeat_at = now()
          FROM scenarios sc
         WHERE sc.id = s.scenario_id AND s.id IN (
@@ -62,7 +65,7 @@ export async function claimJobs(workerId: string, opts: { limit?: number; models
                       ORDER BY pos, queued_at, id LIMIT $2)
                  FOR UPDATE SKIP LOCKED)
         RETURNING s.id AS session_id, s.simulation_id, s.org_id, s.product_id, s.model, s.harness, s.agent_id, s.attempt, s.profile_id,
-                  sc.prompt, sc.repo_url, sc.language, sc.template, sc.tags, sc.title, sc.developer_context`,
+                  sc.prompt, sc.repo_url, sc.language, sc.template, sc.tags, sc.title`,
       params,
     );
     if (rows.length)
@@ -70,26 +73,26 @@ export async function claimJobs(workerId: string, opts: { limit?: number; models
         "UPDATE simulations SET status = 'running', started_at = coalesce(started_at, now()) WHERE id = ANY($1) AND status = 'queued'",
         [[...new Set(rows.map((r) => r.simulation_id))]],
       );
-    // Blindness at the hand-off: context written at research time is dropped if it names the product or a competitor
-    // as they are now (the customer may have edited either since).
-    const productIds = [...new Set(rows.filter((r) => r.developer_context).map((r) => r.product_id))];
+    // Blindness at the hand-off: a persona tool that names the product or a competitor as they are now (the customer
+    // may have edited either since research) is dropped for this session.
+    const productIds = [...new Set(rows.map((r) => r.product_id))];
     const products = productIds.length
       ? await tx.query<{ id: number; name: string; aliases: string[]; packages: string[]; domains: string[]; competitors: Tool[] }>(
           "SELECT id, name, aliases, packages, domains, competitors FROM products WHERE id = ANY($1)", [productIds])
       : [];
     const words = new Map(products.map((p) => [p.id, [p.name, ...(p.aliases ?? []), ...(p.packages ?? []), ...(p.domains ?? []),
       ...(p.competitors ?? []).flatMap((c) => [c.name, ...(c.aliases ?? []), ...(c.packages ?? []), ...(c.domains ?? [])])]]));
-    const blindContext = (r: { product_id: number; developer_context: string | null }) =>
-      r.developer_context && !named(r.developer_context, words.get(r.product_id) ?? []).length ? r.developer_context : null;
     const profileIds = [...new Set(rows.map((r) => r.profile_id).filter((x): x is number => x != null))];
     const profiles = profileIds.length
-      ? await tx.query<Job["profile"] & { id: number }>("SELECT id, slug, name, summary, attributes, instructions FROM developer_profiles WHERE id = ANY($1)", [profileIds])
+      ? await tx.query<Job["profile"] & { id: number; environment: PersonaEnvironment | null }>("SELECT id, slug, name, summary, attributes, instructions, environment FROM developer_profiles WHERE id = ANY($1)", [profileIds])
       : [];
-    return rows.map(({ profile_id, developer_context, ...r }) => {
+    const devEnv = (process.env.OCTILLION_DEV_ENV ?? "on").toLowerCase() !== "off";
+    return rows.map(({ profile_id, ...r }) => {
       const p = profiles.find((x) => x!.id === profile_id);
       const spec = r.agent_id ? findAgent(r.agent_id) : undefined;
       const agent = spec ? { label: spec.label, harness_version: spec.harness_version, event_format: spec.event_format, image: spec.image, requires_env: spec.requires_env } : null;
-      return { ...r, agent, context: blindContext({ product_id: r.product_id, developer_context }), max_user_turns: MAX_USER_TURNS(), profile: p ? { slug: p.slug, name: p.name, summary: p.summary, attributes: p.attributes, instructions: p.instructions } : null };
+      const environment = devEnv ? resolveEnvironment(p?.environment ?? null, languageOf(r.language, r.template), words.get(r.product_id) ?? []) : null;
+      return { ...r, agent, environment, max_user_turns: MAX_USER_TURNS(), profile: p ? { slug: p.slug, name: p.name, summary: p.summary, attributes: p.attributes, instructions: p.instructions } : null };
     });
   });
   return jobs;

@@ -24,6 +24,7 @@ import { api, HttpError, log, withRetry } from "./util.js";
 import { assessDiff, type Progress } from "./progress.js";
 import { newStepCounter } from "./turns.js";
 import { selectTemplate, type TemplateId } from "./workspaces.js";
+import type { SessionEnvironment } from "./environment.js";
 
 export interface Profile {
   slug?: string;
@@ -52,8 +53,8 @@ export interface Job {
   title?: string | null;
   max_user_turns?: number;
   profile?: Profile | null;
-  /** What the developer knows beyond the prompt (onboarding research's developer_context; blind, never shown to the agent). */
-  context?: string | null;
+  /** The persona's developer environment for this session (resolved and blindness-filtered by the server at claim). */
+  environment?: SessionEnvironment | null;
 }
 
 /** What the orchestrator sees after a harness run. Contains no Octillion ids. */
@@ -220,7 +221,13 @@ export class WorkerSession {
       // Credentials first: no point opening a sandbox the broker won't serve.
       s.creds = await sessionCredentials(job.session_id).catch((e) => { throw new Error(`credentials: ${redact(String(e instanceof Error ? e.message : e))}`); });
       harnessCredentials(adapter, s.creds.providers, job.model); // validate the mapping before paying for a sandbox
-      s.sandbox = await runner.open({ adapter, harness: job.harness, jobKey: job.session_id, agentId: job.agent_id ?? undefined, model: job.model, repoUrl: job.repo_url, template: s.template });
+      s.sandbox = await runner.open({ adapter, harness: job.harness, jobKey: job.session_id, agentId: job.agent_id ?? undefined, model: job.model, repoUrl: job.repo_url, template: s.template,
+                                       environment: job.environment ?? null });
+      if (s.sandbox.environment) {
+        const e = s.sandbox.environment;
+        s.sink.push({ type: "environment", ...e });
+        log(`[${job.session_id}] environment ${e.editor}/${e.language ?? "-"}: ${e.present.length} present, ${e.installed.length} installed, ${e.failed.length} failed in ${e.seconds}s; ${e.wiring}`);
+      }
       log(`[${job.session_id}] ${s.handle} started ${adapter.id}/${job.model} in ${s.sandbox.id}${job.repo_url ? ` repo=${job.repo_url}` : ` template=${s.template}`}`);
       await s.launch(job.prompt, null);
     } catch (e) {
@@ -452,7 +459,7 @@ export class WorkerSession {
         tokens_out: u.tokens_out,
         cost_usd: u.cost_usd,
         metadata: {
-          ...u.meta, ...(sb?.meta() ?? {}),
+          ...u.meta, ...(sb?.meta() ?? {}), ...(sb?.environment ? { environment: sb.environment } : {}),
           runner: this.runner.name, harness: this.adapter.id, worker_id: CFG.workerId,
           exit_code: this.last?.exit.code ?? null, exit_signal: this.last?.exit.signal ?? null,
           wall_ms: Date.now() - this.started, attempt: this.job.attempt,

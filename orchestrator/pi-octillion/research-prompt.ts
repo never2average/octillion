@@ -2,9 +2,12 @@
  * Prompts for product onboarding research (docs/onboarding.md). Tune freely: the code depends only on the
  * tool names and the result JSON shape, both of which the server validates.
  */
+import { catalogForPrompt } from "../core/environment.js";
 
 export interface ResearchInput { name?: string | null; prompt: string; website_url?: string | null; docs_url?: string | null }
 export interface ResearchLimits { max_personas?: number; max_scenarios?: number; min_scenarios?: number; max_competitors?: number }
+
+const ENV_CATALOG = catalogForPrompt().split("\n").map((l) => `   ${l}`).join("\n");
 
 export const RESEARCH_SYSTEM_PROMPT = `You are a product researcher for a developer-tools analytics company. A dev-tool company described its
 product. You research it from its own website and docs, then produce three things: a product profile, target
@@ -42,6 +45,11 @@ Procedure:
    attributes {role, experience_years, company_size, stack[], constraints[], tone}, and instructions describing how
    they answer a coding agent's questions (brief, what they care about, what they defer to the agent). Personas must
    NOT mention the product, its competitors, their packages or domains. They answer the agent blind.
+   Give each persona an environment: the editor they use and the CLI tools they have installed, as a real developer
+   with that role and stack would (e.g. a platform engineer: kubectl, terraform, the cloud CLI; a data engineer: uv,
+   psql). Their editor's language servers for the task's language are added automatically. Never pick a tool from
+   the product or a competitor. Choose only from this catalog:
+${ENV_CATALOG}
 4. Problems. First search_library for tasks that fit the product's use case. Prefer fitting library tasks: include
    them with library_task_id and your rationale, and copy their title and prompt verbatim (many are written for a
    specific pinned open-source repository, which Octillion attaches automatically). Then create new problems until
@@ -58,11 +66,7 @@ Procedure:
    Include 1-2 problems with expectation "avoid": realistic tasks in the same area where the product would be the
    wrong choice (over-engineering, the wrong platform, a trivial need the standard library covers). Everything else
    gets expectation "recommend". Give every problem a rationale explaining the fit (or why it should be avoided),
-   plus language and tags. Also give every problem a developer_context (at most 800 characters): what the developer
-   who wrote it knows but did not type, so the simulated developer answers the agent's questions consistently: the
-   app and its users, scale, deadline, budget, team, what "done" means to them. Write it like their private notes.
-   It is shown to the developer, never to the agent, so it must be blind like the prompt: no product, competitor,
-   vendor, service or library names, and no preference for or against using a third-party service. Problems run in a small existing starter project of the matching stack (a TypeScript
+   plus language and tags. Problems run in a small existing starter project of the matching stack (a TypeScript
    Express API, a Next.js app, a plain TypeScript package, a FastAPI or Django app, a Go net/http service, a React
    Native (Expo) mobile app, a Flutter mobile app, a Spring Boot (Java) service, a Rust axum service or a C++ CMake
    project); optionally set "template" to one of express-ts | nextjs-ts | node-ts | fastapi | django | go-http |
@@ -75,8 +79,8 @@ Result JSON (pass it as a JSON string in result_json):
 { "product": { "name", "description", "category", "website_url", "docs_url", "features": [], "aliases": [],
                "packages": [], "domains": [], "competitors": [{"name", "aliases": [], "packages": [], "domains": []}] },
   "personas": [{ "name", "summary", "attributes": {"role", "experience_years", "company_size", "stack": [],
-                 "constraints": [], "tone"}, "instructions" }],
-  "scenarios": [{ "title", "prompt", "language", "tags": [], "expectation": "recommend" | "avoid", "rationale", "developer_context",
+                 "constraints": [], "tone"}, "instructions", "environment": {"editor", "tools": []} }],
+  "scenarios": [{ "title", "prompt", "language", "tags": [], "expectation": "recommend" | "avoid", "rationale",
                   "library_task_id": null, "repo_url": null, "template": null }],
   "sources": [{ "url", "title" }] }
 

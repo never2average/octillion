@@ -85,7 +85,8 @@ export const CRED_SPECS: Record<string, CredSpec> = {
       // Built-in openai provider + openai_base_url keeps codex's model catalog (tools, reasoning) and only moves the host.
       const url = withSuffix(c.base_url, "/v1");
       if (/["\\'%]/.test(url)) throw new Error("unsafe openai base URL");
-      return { env, setup: `d="\${CODEX_HOME:-$HOME/.codex}"; mkdir -p "$d"; [ -s "$d/config.toml" ] || printf 'openai_base_url = "%s"\\n' '${url}' > "$d/config.toml"; ` };
+      // Prepended (top-level key) when missing: the developer environment may already have written MCP tables there.
+      return { env, setup: `d="\${CODEX_HOME:-$HOME/.codex}"; mkdir -p "$d"; touch "$d/config.toml"; grep -qs '^openai_base_url' "$d/config.toml" || { printf 'openai_base_url = "%s"\\n' '${url}' | cat - "$d/config.toml" > "$d/config.toml.tmp" && mv "$d/config.toml.tmp" "$d/config.toml"; }; ` };
     },
   },
   copilot: {

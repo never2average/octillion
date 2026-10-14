@@ -20,6 +20,8 @@ import { randomUUID } from "node:crypto";
 import { PassThrough, type Readable } from "node:stream";
 import type { HarnessAdapter } from "../harnesses/adapters.js";
 import { seedBase, seedScript, type TemplateId } from "./workspaces.js";
+import type { SessionEnvironment } from "./environment.js";
+import { envInstallScript, harnessWiringScript, parseEnvLines, toolsFor } from "./env-install.js";
 import { BOAT, BOAT_PRICE_PER_HOUR, CFG } from "./config.js";
 import { HttpError, log, sh, shq, sleep, withRetry } from "./util.js";
 import { boatApi, boatCommandRetry, boatCreate, boatExec, boatExecStream, boatSandboxPath, BoatError } from "./boat.js";
@@ -56,6 +58,14 @@ export interface Sandbox {
   /** Free resources (idempotent). */
   cleanup(): Promise<void>;
   meta(): Record<string, unknown>;
+  /** What the developer environment step did (boat runner); undefined when the session had none. */
+  environment?: EnvironmentResult;
+}
+
+export interface EnvironmentResult {
+  /** present = already on the sandbox (not reinstalled); installed = installed for this session. */
+  editor: string; language: string | null; requested: string[]; present: string[]; installed: string[]; failed: string[]; dropped: string[];
+  wired: Record<string, string>; wiring: string; seconds: number;
 }
 
 export interface OpenSpec {
@@ -73,6 +83,8 @@ export interface OpenSpec {
   /** Registry agent id (pool group) and the job's model; the pool asserts the group's model matches. */
   agentId?: string;
   model?: string;
+  /** The persona's developer environment (CLI tools, language servers), installed and wired before the first run (boat only). */
+  environment?: SessionEnvironment | null;
 }
 
 export interface Runner {
@@ -129,7 +141,7 @@ else
   B=${EMPTY_TREE}
 fi
 $G add -A >/dev/null 2>&1
-$G diff --cached --no-color --no-ext-diff "$B" -- . ${LOCK_EXCLUDE}
+$G diff --cached --no-color --no-ext-diff "$B" -- . ${LOCK_EXCLUDE} ':(exclude,glob)**/.serena/**'
 $G diff --cached --name-only "$B" -- ${LOCK_ONLY} | sed 's/^/# lockfile changed (content omitted): /'`;
 
 export function capDiff(d: string): string {
@@ -312,6 +324,26 @@ function boatRunAs(): string {
   return BOAT.agentUser === "agent" ? "sudo -n -u agent -H" : "";
 }
 
+/**
+ * Developer environment (core/environment.ts): install the persona's CLI tools and language servers system-wide, then
+ * wire them into the harness as the agent user (config under its HOME only). Never fails the session: a tool that does
+ * not install is reported, and the agent runs without it.
+ */
+async function boatEnvironment(id: string, put: (path: string, content: string) => Promise<unknown>, harness: string, env: SessionEnvironment): Promise<EnvironmentResult> {
+  const t0 = Date.now();
+  const tools = toolsFor(harness, env);
+  await put(`${BOAT_DIR}/env-install.sh`, envInstallScript(tools));
+  const inst = await boatExec(id, `bash ${BOAT_DIR}/env-install.sh`, 900).catch((e) => ({ exitCode: -1, stdout: "", stderr: String(e) }));
+  const wiring = harnessWiringScript(harness, tools);
+  await put(`${BOAT_DIR}/env-wire.sh`, wiring.script);
+  const wire = await boatExec(id, `cd / && ${boatRunAs()} env -i HOME=${AGENT_HOME} PATH="$(cat ${BOAT_DIR}/path)" bash ${BOAT_DIR}/env-wire.sh`, 300)
+    .catch((e) => ({ exitCode: -1, stdout: "", stderr: String(e) }));
+  const r = parseEnvLines(`${inst.stdout}\n${wire.stdout}`);
+  if (r.failed.length || inst.exitCode !== 0) log(`[boat ${id}] environment: failed ${r.failed.join(", ") || "-"}: ${(inst.stderr || "").slice(-400)}`);
+  return { editor: env.editor, language: env.language, requested: tools.map((t) => t.id), present: r.present, installed: r.installed, failed: r.failed,
+           dropped: env.dropped ?? [], wired: r.wired, wiring: wiring.summary, seconds: Math.round((Date.now() - t0) / 1000) };
+}
+
 function boatPrepareScript(bin: string, repoUrl: string | null, seed = false): string {
   // Seed: the template script is read by this (Boat) user's shell and piped to the agent user's bash.
   const repo = repoUrl ? parseRepoUrl(repoUrl) : null;
@@ -426,6 +458,7 @@ export const boatRunner: Runner = {
       throw e;
     }
     const id: string = created?.sandbox?.id;
+    let envResult: EnvironmentResult | undefined;
     if (!id) throw new Error(`boat create returned no sandbox id: ${JSON.stringify(created).slice(0, 300)}`);
     // A recognisable name, so `status` / cleanup can attribute worker sandboxes (best effort).
     void boatApi(boatSandboxPath(id), { method: "PATCH", json: { name: workerSandboxName(spec.agentId ?? spec.adapter.id) } }).catch(() => {});
@@ -480,6 +513,7 @@ export const boatRunner: Runner = {
       await put(`${BOAT_DIR}/diff.sh`, boatDiffScript());
       const prep = await boatExec(id, `bash ${BOAT_DIR}/prepare.sh`, 600);
       if (prep.exitCode !== 0) throw new Error(`sandbox prepare failed (exit ${prep.exitCode}): ${(prep.stderr || prep.stdout).slice(-800)}`);
+      if (spec.environment) envResult = await boatEnvironment(id, put, spec.adapter.id, spec.environment);
     } catch (e) {
       await destroy();
       throw e;
@@ -491,6 +525,7 @@ export const boatRunner: Runner = {
     return {
       id: `boat:${id}`,
       workdir: AGENT_WORKDIR,
+      environment: envResult,
       async runTurn(argv, input, env) {
         const n = ++turnNo;
         argv = [...argv];
