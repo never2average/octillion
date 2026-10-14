@@ -567,7 +567,7 @@ try {
     await fails(A, "onboard_product", { prompt: "A durable job queue for Node.js backends." }, /website_url or a docs_url/);
     const started = await call(A, "onboard_product", {
       prompt: "QuickQueue is a hosted job queue for TypeScript backends: retries, cron schedules and a dashboard.",
-      website_url: "https://quickqueue.example.com", docs_url: "https://docs.quickqueue.example.com", samples: 1,
+      website_url: "https://quickqueue.example.com", docs_url: "https://docs.quickqueue.example.com", samples: 1, run: true,
     });
     const rid = started.research.id;
     assert.equal(started.research.status, "queued");
@@ -604,13 +604,16 @@ try {
     bad.product.competitors = bad.product.competitors.slice(0, 2);
     const v = await (await worker(`/research/${rid}/validate`, { result: bad })).json();
     assert.ok(!v.ok && v.issues.some((i: string) => /scenarios\[1\] names QuickQueue/.test(i)) && v.issues.some((i: string) => /personas\[0\] mentions BullMQ/.test(i)) &&
-              v.issues.some((i: string) => /not display names: QuickQueue/.test(i)) && v.issues.some((i: string) => /3-6 competitors/.test(i)), "validation catches leaks, display-name packages and too few competitors");
+              v.issues.some((i: string) => /not display names: QuickQueue/.test(i)) && v.issues.some((i: string) => /3-8 competitors/.test(i)), "validation catches leaks, display-name packages and too few competitors");
     const rejected = await worker(`/research/${rid}/complete`, { status: "completed", result: bad });
     assert.equal(rejected.status, 422);
     assert.ok((await rejected.json()).issues.length >= 2);
     const accepted = await (await worker(`/research/${rid}/complete`, { status: "completed", result: good })).json();
     assert.equal(accepted.status, "completed");
-    assert.ok(accepted.simulation_id, "onboarding auto-launches a run");
+    assert.ok(accepted.simulation_id, "onboarding with run: true chains the run");
+    const plain = await call(A, "onboard_product", { prompt: "QuickQueue Lite is a hosted cron service for TypeScript backends.", website_url: "https://lite.quickqueue.example.com" });
+    const [plainRow] = await db.query<any>("SELECT run FROM product_research WHERE id = $1", [plain.research.id]);
+    assert.equal(plainRow.run, null, "onboarding is research only by default (no run, one sandbox)");
 
     const done = await call(A, "get_onboarding", { research_id: rid });
     assert.equal(done.research.status, "completed");

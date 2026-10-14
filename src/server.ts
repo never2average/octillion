@@ -97,7 +97,7 @@ function summarize(d: Data): string {
       const head = `Onboarding ${r.id} for ${p.name}: ${r.status}${r.stage && r.status === "running" ? ` (${r.stage}${r.note ? `: ${r.note}` : ""})` : ""}${r.error ? `. Error: ${r.error}` : ""}.`;
       if (r.status === "queued" && d.capacity) return `${head} Capacity: ${d.capacity.message} Check again with get_onboarding.`;
       if (r.status !== "completed") return `${head} The orchestrator is researching the website and docs, then writes the product profile, target developer personas and programming problems. Check again with get_onboarding.`;
-      return `${head} Profile: ${p.category || "n/a"}; aliases ${p.aliases.join(", ") || "none"}; packages ${p.packages.join(", ") || "none"}; competitors ${p.competitors.map((c: any) => c.name).join(", ") || "none"}. Personas: ${d.personas.map((x: any) => x.name).join("; ")}. Problems (${d.scenarios.length}): ${d.scenarios.map((s: any) => `#${s.id} ${s.title} [${s.source}${s.expectation === "avoid" ? ", avoid" : ""}]`).join("; ")}.${d.simulation ? ` Simulation ${d.simulation.id}: ${d.simulation.status}, ${d.simulation.finished}/${d.simulation.sessions} sessions done; see get_simulation / get_visibility_report.` : " No run started."}`;
+      return `${head} Profile: ${p.category || "n/a"}; aliases ${p.aliases.join(", ") || "none"}; packages ${p.packages.join(", ") || "none"}; competitors ${p.competitors.map((c: any) => c.name).join(", ") || "none"}. Personas: ${d.personas.map((x: any) => x.name).join("; ")}. Problems (${d.scenarios.length}): ${d.scenarios.map((s: any) => `#${s.id} ${s.title} [${s.source}${s.expectation === "avoid" ? ", avoid" : ""}]`).join("; ")}.${d.simulation ? ` Simulation ${d.simulation.id}: ${d.simulation.status}, ${d.simulation.finished}/${d.simulation.sessions} sessions done; see get_simulation / get_visibility_report.` : r.status === "completed" ? " Research is done and no run has started: review the competitors and problems with the user, then launch it with run_simulation." : ""}`;
     }
     case "profiles":
       return d.profiles.length
@@ -221,7 +221,7 @@ export function createServer(org: Org): McpServer {
         "is the first Octillion request of the conversation, call get_started and tell the user their one next step with the exact prompt to type. " +
         "Never answer a new user with a list of tools. Quickest start: onboard_product " +
         "with a short description, the website and the docs link; the orchestrator researches the product, builds its profile, " +
-        "target developer personas and programming problems, then runs them across coding agents (follow with get_onboarding). " +
+        "target developer personas and programming problems (follow with get_onboarding). " +
         "Manual workflow: save_product " +
         "(product context: names, packages, competitors) -> save_scenarios (realistic coding tasks phrased neutrally, never " +
         "naming the product) -> run_simulation (sandboxed sub-agents work each scenario on each model) -> " +
@@ -273,13 +273,13 @@ export function createServer(org: Org): McpServer {
 
   registerAppTool(server, "onboard_product", {
     title: "Onboard a product",
-    description: "Start here. Describe a developer tool with a short prompt plus its website and docs links. The orchestrator reads them, builds a detailed product profile (package names, domains, competitors), target developer personas and realistic programming problems where the product could be the right answer (found in the curated task library or newly written, never naming the product), then runs them across the coding-agent mix. Takes a few minutes; follow progress with get_onboarding.",
+    description: "Start here. Describe a developer tool with a short prompt plus its website and docs links. The orchestrator reads them, builds a detailed product profile (package names, domains, competitors), target developer personas and realistic programming problems where the product could be the right answer (found in the curated task library or newly written, never naming the product), then stops: research uses a single orchestrator sandbox. Takes a few minutes; follow progress with get_onboarding, review the competitors and problems, then launch the run with run_simulation (or pass run: true to chain it).",
     inputSchema: {
       prompt: z.string().describe("What the product is and who it is for, in a sentence or a paragraph"),
       website_url: z.string().optional().describe("Product website, e.g. https://bullmq.io"),
       docs_url: z.string().optional().describe("Documentation, e.g. https://docs.bullmq.io"),
       name: z.string().optional().describe("Product name (otherwise taken from the website)"),
-      run: z.boolean().optional().describe("Launch the coding-agent run when research finishes (default true)"),
+      run: z.boolean().optional().describe("Also launch the coding-agent run when research finishes (default false: onboarding is research only, run_simulation is the next step)"),
       samples: z.number().int().min(1).max(20).optional().describe("Sessions per problem and persona (default: fitted to the per-run cap)"),
       population: z.string().optional().describe("Developer population whose coding-agent mix to use"),
     },

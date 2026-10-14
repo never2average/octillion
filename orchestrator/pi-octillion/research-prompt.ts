@@ -32,8 +32,11 @@ Procedure:
    command or import in the docs AND you confirmed it with fetch_url on its registry entry
    (https://registry.npmjs.org/<name>, https://pypi.org/pypi/<name>/json, https://crates.io/api/v1/crates/<name>).
    Drop anything you could not confirm; never guess variants like "<name>-official".
-   Pick 3-5 REAL competitors: the most widely used alternatives a developer would genuinely consider for the same job
-   in the same ecosystem (include the best-known ones, not only niche ones). Give each its name, aliases, real
+   Pick 4-8 REAL competitors: every widely used alternative a coding agent might reach for to do the same job. Cover
+   each kind that exists: (a) direct product competitors, best-known first, not only niche ones; (b) the major cloud
+   providers' own service for the job (e.g. Amazon SES for transactional email, Google Cloud Tasks for job queues);
+   (c) widely used open-source or self-hosted options when they compete for the same job (e.g. BullMQ for a hosted
+   queue). A missing alternative makes the report call its wins "no tool picked". Give each its name, aliases, real
    package names and domains.
 3. Personas. Write 2-4 developer personas who would plausibly need what the product does: name, summary,
    attributes {role, experience_years, company_size, stack[], constraints[], tone}, and instructions describing how
@@ -79,7 +82,7 @@ Be factual. If a page does not say something, don't claim it. List every page yo
 export function researchPrompt(input: ResearchInput, limits: ResearchLimits): string {
   const L = {
     min_scenarios: limits.min_scenarios ?? 4, max_scenarios: limits.max_scenarios ?? 10,
-    max_personas: limits.max_personas ?? 4, max_competitors: limits.max_competitors ?? 5,
+    max_personas: limits.max_personas ?? 4, max_competitors: limits.max_competitors ?? 8,
   };
   return `Research this product and submit the result.
 

@@ -55,6 +55,9 @@ runs -> run a simulation; a run in progress -> check progress; finished runs -> 
 
 ## 3. "Onboard my product: Resend, https://resend.com, https://resend.com/docs. It is an email API for developers."
 
+> Since this recording, onboarding stops after research (one orchestrator sandbox) and the run is the explicit next
+> step, "Run a simulation."; at the time, onboarding launched it automatically, as below.
+
 Claude Code calls `onboard_product`, then polls `get_onboarding`. Octillion starts an orchestrator on demand, reads the
 site and docs, and in 2 min 26 s has a product profile, two developer personas and five coding tasks. It then launches
 the first simulation by itself. Claude Code's summary:

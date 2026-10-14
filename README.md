@@ -148,7 +148,7 @@ Give them the connector URL `https://<host>/mcp/<api key>`:
 - **Cursor and other IDE hosts:** paste the URL into the MCP settings and enable the tools. They show text results, not the dashboard.
 
 Clients that can send headers can use `POST /mcp` with `Authorization: Bearer <api key>` instead.
-Then they just talk to it. The first prompt can be *"Get me started with Octillion"*: the `get_started` tool (listed
+The beta guide for testers is [docs/beta-guide.md](docs/beta-guide.md). Then they just talk to it. The first prompt can be *"Get me started with Octillion"*: the `get_started` tool (listed
 first) answers with the account's one next step. Or go straight to it: *"Onboard my product: Acme Queue,
 https://acme.dev, https://docs.acme.dev. It is a job queue for Node."*
 
@@ -167,7 +167,8 @@ claude -p "<prompt>" --continue --mcp-config .mcp.json --strict-mcp-config --all
 | Prompt | What happens | Time |
 |---|---|---|
 | "Get me started with Octillion." | `get_started`: a welcome and the next step for this account | 4 s |
-| "Onboard my product: Resend, https://resend.com, https://resend.com/docs. It is an email API for developers." | `onboard_product`: research builds the product profile (package, domains, competitors), 2 developer personas and 5 coding tasks (one is a control where no tool should be added), then launches the first simulation | 2 min 26 s |
+| "Onboard my product: Resend, https://resend.com, https://resend.com/docs. It is an email API for developers." | `onboard_product`: research builds the product profile (package, domains, competitors), 2 developer personas and 5 coding tasks (one is a control where no tool should be added). One orchestrator sandbox; onboarding now stops here | 2 min 26 s |
+| "Run a simulation." | `run_simulation`: each task in fresh agent sandboxes, sampled until stable (the recorded run was launched by onboarding itself, the behaviour at the time) | 15 min |
 | "Show my visibility report." | `get_visibility_report`: hit rate, losses to competitors, share of voice, by task and by agent, with the evidence one prompt away | after the 15 min simulation |
 
 That run was 30 agent sessions for $20.98 of model spend (the orchestrator's share was about $0.51). Re-scored with

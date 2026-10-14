@@ -10,7 +10,7 @@ import { capacityStatus } from "./autoscaler.js";
  * validates (blindness + counts), applies them and launches a representative run.
  */
 
-export const LIMITS = { max_personas: 4, max_scenarios: 10, min_scenarios: 3, min_competitors: 3, max_competitors: 6 };
+export const LIMITS = { max_personas: 4, max_scenarios: 10, min_scenarios: 3, min_competitors: 3, max_competitors: 8 };
 const STALE_MINUTES = () => Number(process.env.OCTILLION_RESEARCH_STALE_MINUTES ?? 20);
 const MAX_ATTEMPTS = 6;
 
@@ -57,7 +57,9 @@ export async function onboardProduct(org: Org, input: OnboardInput) {
   await db.query(
     `INSERT INTO product_research (id, org_id, product_id, input, run) VALUES ($1, $2, $3, $4, $5)`,
     [id, org.orgId, product.product.id, JSON.stringify({ name: input.name ?? null, prompt, website_url: input.website_url ?? null, docs_url: input.docs_url ?? null }),
-     input.run === false ? null : JSON.stringify({ samples: input.samples ?? null, population: input.population ?? null })],
+     // Research only by default: one orchestrator sandbox, then done. The run (one sandbox per agent session) is the
+     // explicit next step, run_simulation; `run: true` chains it here.
+     input.run === true ? JSON.stringify({ samples: input.samples ?? null, population: input.population ?? null }) : null],
   );
   return getOnboarding(org, { research_id: id });
 }
