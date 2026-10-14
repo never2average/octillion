@@ -52,6 +52,8 @@ export interface Job {
   title?: string | null;
   max_user_turns?: number;
   profile?: Profile | null;
+  /** What the developer knows beyond the prompt (onboarding research's developer_context; blind, never shown to the agent). */
+  context?: string | null;
 }
 
 /** What the orchestrator sees after a harness run. Contains no Octillion ids. */
@@ -133,10 +135,14 @@ export async function completeJob(sessionId: string, body: Record<string, unknow
   }
 }
 
-/** Claim queued jobs. Pool groups claim with `agentIds: [agent_id]` so a group only gets its own agent's sessions. */
+/**
+ * Claim queued jobs. Pool groups claim with `agentIds: [agent_id]` so a group only gets its own agent's sessions. A
+ * per-job orchestrator (ORCHESTRATOR_JOB=sim_...) only ever claims its own simulation's sessions.
+ */
 export async function claimJobs(limit: number, filter: { harness?: string; agentIds?: string[] } = { harness: CFG.harness }): Promise<Job[]> {
   const res = (await api("/api/worker/claim", {
-    json: { worker_id: CFG.workerId, limit: Math.max(1, Math.min(limit, 50)), models: CFG.models, harness: filter.harness, agent_ids: filter.agentIds },
+    json: { worker_id: CFG.workerId, limit: Math.max(1, Math.min(limit, 50)), models: CFG.models, harness: filter.harness, agent_ids: filter.agentIds,
+            simulation_id: CFG.job?.startsWith("sim_") ? CFG.job : undefined },
   })) as { jobs?: Job[] };
   return res?.jobs ?? [];
 }

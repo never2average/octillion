@@ -119,9 +119,9 @@ export function createApp() {
   worker.use(express.text({ type: ["application/x-ndjson", "application/jsonl", "text/plain"], limit: "32mb" }));
 
   worker.post("/claim", async (req, res) => {
-    const { worker_id, limit, models, harness, agent_ids } = req.body ?? {};
+    const { worker_id, limit, models, harness, agent_ids, simulation_id } = req.body ?? {};
     if (typeof worker_id !== "string" || !worker_id) return void res.status(400).json({ error: "worker_id is required" });
-    res.json({ jobs: await claimJobs(worker_id, { limit, models, harness, agent_ids }) });
+    res.json({ jobs: await claimJobs(worker_id, { limit, models, harness, agent_ids, simulation_id: typeof simulation_id === "string" && simulation_id ? simulation_id : undefined }) });
   });
   worker.post("/sessions/:id/events", async (req, res) => {
     const events: RawEvent[] = typeof req.body === "string" ? parseJsonl(req.body) : req.body?.events;
@@ -150,9 +150,9 @@ export function createApp() {
   worker.get("/fleet", async (_req, res) => void res.json(await fleetStatus()));
   // Product onboarding research (docs/onboarding.md).
   worker.post("/research/claim", async (req, res) => {
-    const { worker_id, limit } = req.body ?? {};
+    const { worker_id, limit, research_id } = req.body ?? {};
     if (typeof worker_id !== "string" || !worker_id) return void res.status(400).json({ error: "worker_id is required" });
-    res.json({ jobs: await research.claimResearch(worker_id, limit) });
+    res.json({ jobs: await research.claimResearch(worker_id, limit, typeof research_id === "string" && research_id ? research_id : undefined) });
   });
   worker.post("/research/:id/progress", async (req, res) => {
     await research.researchProgress(String(req.params.id), String(req.body?.stage ?? "working"), req.body?.note);

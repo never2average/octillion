@@ -138,6 +138,11 @@ services:
       OCTILLION_ORCH_IDLE_MINUTES: ${OCTILLION_ORCH_IDLE_MINUTES:-10}
       OCTILLION_ORCH_SNAPSHOT: ${OCTILLION_ORCH_SNAPSHOT:-off}
       OCTILLION_AUTOSCALE_TICK_SECONDS: ${OCTILLION_AUTOSCALE_TICK_SECONDS:-15}
+      # One orchestrator per job (each onboarding research, each simulation), with up to JOB_POD_CAPACITY worker
+      # sandboxes for a simulation. off: the shared fleet above (MAX_ORCHESTRATORS x POD_CAPACITY).
+      OCTILLION_ORCH_PER_JOB: ${OCTILLION_ORCH_PER_JOB:-on}
+      OCTILLION_JOB_POD_CAPACITY: ${OCTILLION_JOB_POD_CAPACITY:-40}
+      OCTILLION_MAX_JOB_ORCHESTRATORS: ${OCTILLION_MAX_JOB_ORCHESTRATORS:-12}
       # Run sizing and spend guards. Runs are adaptive: every scenario starts with DEFAULT_SAMPLES sessions per developer
       # profile and is sampled further until its result is stable or it has had MAX_SAMPLES sessions.
       OCTILLION_DEFAULT_SAMPLES: ${OCTILLION_DEFAULT_SAMPLES:-3}

@@ -15,12 +15,16 @@ import { api, log } from "./util.js";
 export interface GroupTarget { agent_id: string; harness: string; model: string; pods: number; agents?: string[] }
 
 export const FLEET = {
-  capacity: Math.max(1, Math.min(20, num(env.POD_CAPACITY ?? env.FLEET_SIZE, 20))),
+  // Up to 20 on a shared orchestrator; a per-job one (ORCHESTRATOR_JOB) is launched with its run's share, up to 50.
+  capacity: Math.max(1, Math.min(50, num(env.POD_CAPACITY ?? env.FLEET_SIZE, 20))),
   mode: (env.FLEET_MODE === "standalone" ? "standalone" : env.FLEET_MODE === "off" ? "off" : "server") as "server" | "standalone" | "off",
 };
 
 export class FleetMembership {
   targets = new Map<string, GroupTarget>();
+  /** Per-job orchestrator: the server's view of its job; `onJobDone` runs once when the job is over. */
+  job: { id: string; kind: string; status: string | null; done: boolean } | null = null;
+  onJobDone: (() => void) | null = null;
   private running = new Map<string, number>();
   private timer: NodeJS.Timeout | null = null;
   private left = false;
@@ -43,11 +47,21 @@ export class FleetMembership {
         this.set(planFleet(this.capacity).map((g) => ({ agent_id: g.agent_id, harness: g.harness, model: g.model, pods: g.pods })));
       } else {
         const r = (await api("/api/worker/fleet", {
-          json: { orchestrator_id: this.orchestratorId, capacity: this.capacity, meta: { worker_id: CFG.workerId, runner: "boat", running: Object.fromEntries(this.running) } },
-        })) as { assignment?: GroupTarget[]; next_checkin_seconds?: number };
+          json: { orchestrator_id: this.orchestratorId, capacity: this.capacity,
+                  meta: { worker_id: CFG.workerId, runner: "boat", running: Object.fromEntries(this.running), ...(CFG.job ? { job: CFG.job } : {}) } },
+        })) as { assignment?: GroupTarget[]; next_checkin_seconds?: number; job?: FleetMembership["job"] };
         this.set((r.assignment ?? []).map((a) => ({ agent_id: a.agent_id, harness: a.harness, model: a.model, pods: a.pods,
                                                     ...(Array.isArray(a.agents) ? { agents: a.agents } : {}) })));
         next = Math.max(5, Number(r.next_checkin_seconds ?? 30));
+        if (r.job) {
+          this.job = r.job;
+          if (r.job.done && this.onJobDone) {
+            const done = this.onJobDone;
+            this.onJobDone = null;
+            log(`fleet[${this.orchestratorId}] job ${r.job.id} is ${r.job.status ?? "gone"}: leaving`);
+            done();
+          }
+        }
       }
     } catch (e) {
       next = 10;

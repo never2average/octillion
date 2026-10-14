@@ -73,7 +73,7 @@ flowchart LR
     MCP["MCP endpoint<br/>/mcp/&lt;org key&gt;, 18 tools<br/>+ dashboard widget"]
     Q["Products, simulations,<br/>reports, scoring"]
     WAPI["Worker API<br/>claim (fair share per org),<br/>events, complete (infra retry),<br/>fleet check-in, credential broker"]
-    AS["Autoscaler<br/>on-demand orchestrators,<br/>recycle on deploy"]
+    AS["Autoscaler<br/>one orchestrator per job,<br/>recycle on deploy"]
     GW["Inference gateway<br/>/gw/&lt;provider&gt;<br/>per-session tokens, metering,<br/>session + org budgets"]
     KV["Key vault<br/>encrypted provider keys"]
   end
@@ -85,7 +85,7 @@ flowchart LR
   end
 
   subgraph Boat["boat.dev sandboxes"]
-    ORCH["Orchestrator (Pi)<br/>researches products,<br/>runs up to 20 sessions,<br/>answers as the developer"]
+    ORCH["Orchestrator (Pi), one per job<br/>an onboarding research, or<br/>one run's sessions (up to 40),<br/>answers as the developer"]
     WS["Worker sandbox, one per session<br/>Claude Code, Codex, OpenCode,<br/>Pi, Cline or Kilo<br/>on a starter or a pinned repo"]
   end
 

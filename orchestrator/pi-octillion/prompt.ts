@@ -1,8 +1,9 @@
 /**
  * Prompts for the Octillion orchestrator (Pi). Tune these; nothing else in the code depends on their wording.
  *
- * Blindness: the orchestrator is given the developer profile and the task prompt only. It is never told which
- * customer or product the simulation is for, and it must never introduce product/vendor/library names itself.
+ * Blindness: the orchestrator is given the developer profile, the task prompt and the developer's own notes on the task
+ * (research's developer_context, checked blind by the server). It is never told which customer or product the
+ * simulation is for, and it must never introduce product/vendor/library names itself.
  */
 import type { Profile } from "../core/session.js";
 
@@ -26,6 +27,8 @@ You see the developer's profile, the task they gave, and the agent's latest mess
 2. If it is waiting, write the developer's reply.
    - Stay in character. The profile's role, experience, company size, stack, constraints, budget, tone and
      instructions decide what the developer wants. Answer only what was asked.
+   - The developer's notes on the task (when given) are facts they know: their app, users, scale, deadline, what
+     done means. Use them to answer consistently when asked; never volunteer them unprompted.
    - Never introduce a product, vendor, company, service, library, framework, tool or platform name that the
      agent (or the original task) did not already mention. Do not suggest alternatives and do not ask the agent
      to compare vendors.
@@ -87,7 +90,8 @@ export function renderProfile(profile: Profile | null | undefined): string {
 }
 
 /** The per-job user message given to Pi. The total stays well under ~12k chars. */
-export function jobPrompt(jobId: string, profile: Profile | null | undefined, task: string, maxUserTurns: number): string {
+export function jobPrompt(jobId: string, profile: Profile | null | undefined, task: string, maxUserTurns: number, context?: string | null): string {
+  const notes = context?.trim() ? `\n\n<developer_notes_on_this_task>\n${clip(context.trim(), 1000)}\n</developer_notes_on_this_task>` : "";
   return `Run job ${jobId}. Keep the agent going until workspace.done (must_continue=false); after that you may reply at most ${maxUserTurns} more time(s).
 
 <developer_profile>
@@ -96,5 +100,5 @@ ${renderProfile(profile)}
 
 <task_the_developer_gave>
 ${clip(task, 6000)}
-</task_the_developer_gave>`;
+</task_the_developer_gave>${notes}`;
 }

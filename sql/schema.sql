@@ -201,6 +201,10 @@ CREATE INDEX IF NOT EXISTS orchestrator_sandboxes_live_idx ON orchestrator_sandb
 -- empty assignment. In the database, not in a server process, so every replica agrees.
 ALTER TABLE orchestrator_sandboxes ADD COLUMN IF NOT EXISTS code_hash TEXT;
 ALTER TABLE orchestrator_sandboxes ADD COLUMN IF NOT EXISTS retiring_since TIMESTAMPTZ;
+-- One orchestrator per job (src/autoscaler.ts): the simulation (sim_...) or onboarding research (rsh_...) it serves,
+-- and the worker sandboxes reserved for it on the boat plan. NULL job_id: a shared orchestrator (per-job mode off).
+ALTER TABLE orchestrator_sandboxes ADD COLUMN IF NOT EXISTS job_id TEXT;
+ALTER TABLE orchestrator_sandboxes ADD COLUMN IF NOT EXISTS pods INT;
 
 -- Single-leader lease for the autoscaler across server replicas; `state` holds the leader's last tick for status.
 CREATE TABLE IF NOT EXISTS autoscaler_lease (
@@ -321,6 +325,11 @@ ALTER TABLE scenarios ADD COLUMN IF NOT EXISTS source    TEXT NOT NULL DEFAULT '
 ALTER TABLE scenarios ADD COLUMN IF NOT EXISTS rationale TEXT;            -- why the product fits (or should not)
 -- Starter workspace for scenarios without repo_url (orchestrator/workspaces/<template>); NULL = picked from language/tags/prompt.
 ALTER TABLE scenarios ADD COLUMN IF NOT EXISTS template TEXT;
+-- Research -> experiment hand-off: what the simulated developer knows about this task beyond the prompt (their app,
+-- scale, constraints, what done means). Blind like the prompt: it never names the product, competitors or tools.
+ALTER TABLE scenarios ADD COLUMN IF NOT EXISTS developer_context TEXT;
+-- The onboarding research the run's personas and problems came from (provenance).
+ALTER TABLE simulations ADD COLUMN IF NOT EXISTS research_id TEXT;
 -- Why a session ended: done (real workspace changes) | turn_cap (MAX_AGENT_TURNS) | time_cap | agent_gave_up | error.
 ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS completed_reason TEXT
   CHECK (completed_reason IS NULL OR completed_reason IN ('done', 'turn_cap', 'time_cap', 'agent_gave_up', 'error'));

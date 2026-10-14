@@ -20,6 +20,8 @@ export interface ResearchResult {
   personas: { name: string; summary?: string; attributes?: Record<string, unknown>; instructions?: string }[];
   scenarios: { title?: string; prompt: string; language?: string; tags?: string[]; expectation?: "recommend" | "avoid";
                rationale?: string; library_task_id?: number; repo_url?: string | null;
+               /** What the developer knows beyond the prompt; handed to the simulated developer (blind). */
+               developer_context?: string;
                /** Optional starter workspace (orchestrator/workspaces/<template>) for scenarios without repo_url. */
                template?: string | null }[];
   sources?: { url: string; title?: string }[];
@@ -29,7 +31,7 @@ const slugify = (s: string) => s.toLowerCase().normalize("NFKD").replace(/[^a-z0
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const httpUrl = (u: unknown) => typeof u === "string" && /^https?:\/\/[^\s/]+\.[^\s]+/.test(u);
 /** Names (whole word, case-insensitive) of `words` that occur in `text`. */
-function named(text: string, words: string[]) {
+export function named(text: string, words: string[]) {
   return words.filter((w) => w && w.length > 1 && new RegExp(`(?<![\\w-])${escapeRe(w)}(?![\\w-])`, "i").test(text));
 }
 
@@ -95,7 +97,8 @@ export async function getOnboarding(org: Org, input: { research_id?: string; pro
 
 // ---------- orchestrator side ----------
 
-export async function claimResearch(workerId: string, limit = 1) {
+/** `researchId`: a per-job orchestrator claims only the research it was launched for. */
+export async function claimResearch(workerId: string, limit = 1, researchId?: string) {
   const db = await getDb();
   // Stalled jobs (no heartbeat) go back to the queue.
   await db.query(
@@ -103,9 +106,10 @@ export async function claimResearch(workerId: string, limit = 1) {
     [STALE_MINUTES()]);
   const rows = await db.query<{ id: string; input: any }>(
     `UPDATE product_research SET status = 'running', worker_id = $1, started_at = coalesce(started_at, now()), heartbeat_at = now(), stage = 'reading'
-      WHERE id IN (SELECT id FROM product_research WHERE status = 'queued' ORDER BY created_at LIMIT $2 FOR UPDATE SKIP LOCKED)
+      WHERE id IN (SELECT id FROM product_research WHERE status = 'queued' AND ($3::text IS NULL OR id = $3)
+                    ORDER BY created_at LIMIT $2 FOR UPDATE SKIP LOCKED)
       RETURNING id, input`,
-    [workerId, Math.min(Math.max(limit, 1), 5)]);
+    [workerId, Math.min(Math.max(limit, 1), 5), researchId ?? null]);
   return rows.map((r) => ({ research_id: r.id, input: r.input, limits: LIMITS }));
 }
 
@@ -171,6 +175,13 @@ export function validateResearch(r: ResearchResult | undefined): string[] {
       issues.push(`scenarios[${i}].template must be one of ${WORKSPACE_TEMPLATES.join(", ")} (or null)`);
     const leak = named(`${s?.title ?? ""} ${prompt}`, [...productWords, ...competitorWords]);
     if (leak.length) issues.push(`scenarios[${i}] names ${leak.join(", ")}; rephrase it as a neutral task that never names the product or competitors`);
+    if (s?.developer_context != null) {
+      if (typeof s.developer_context !== "string" || s.developer_context.length > 800) issues.push(`scenarios[${i}].developer_context must be a string of at most 800 characters`);
+      else {
+        const ctxLeak = named(s.developer_context, [...productWords, ...competitorWords]);
+        if (ctxLeak.length) issues.push(`scenarios[${i}].developer_context names ${ctxLeak.join(", ")}; the simulated developer must stay blind`);
+      }
+    }
   });
   return issues;
 }
@@ -237,11 +248,11 @@ export async function completeResearch(id: string, body: { status?: string; erro
         if (!repoUrl) repoUrl = t?.repo_url ?? null;
       }
       await tx.query(
-        `INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, library_task_id, source, rationale, template)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $9, $10, $11)`,
+        `INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, library_task_id, source, rationale, template, developer_context)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $9, $10, $11, $12)`,
         [job.product_id, s.title?.trim() || prompt.slice(0, 80), prompt, repoUrl, s.language ?? null, s.tags ?? [],
          s.expectation ?? "recommend", s.library_task_id ?? null, s.library_task_id ? "library" : "generated", s.rationale ?? null,
-         template]);
+         template, s.developer_context?.trim() || null]);
     }
     await tx.query(
       "UPDATE product_research SET status = 'completed', stage = 'done', result = $2, finished_at = now(), heartbeat_at = now() WHERE id = $1",

@@ -13,6 +13,8 @@ export const CFG = {
   workerId: env.WORKER_ID ?? `${hostname()}-${process.pid}`,
   /** Stable orchestrator identity (fleet check-in, orchestrator credentials, pod owner label). */
   orchestratorId: env.ORCHESTRATOR_ID || hostname(),
+  /** Per-job orchestrator (set by the autoscaler): the one simulation (sim_...) or research (rsh_...) it serves. */
+  job: /^(sim|rsh)_[A-Za-z0-9_-]{1,40}$/.test(env.ORCHESTRATOR_JOB ?? "") ? env.ORCHESTRATOR_JOB! : null,
   concurrency: Math.max(1, num(env.WORKER_CONCURRENCY, 2)),
   runner: (env.RUNNER ?? "boat") as RunnerName,
   maxSessionMs: num(env.MAX_SESSION_MINUTES, 45) * 60_000,

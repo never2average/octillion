@@ -22,6 +22,9 @@ import { getPopulation } from "./populations.js";
  */
 
 export const PODS_PER_ORCHESTRATOR = () => Math.max(1, Number(process.env.OCTILLION_PODS_PER_ORCHESTRATOR ?? 20));
+/** Worker sandboxes one per-job orchestrator may run at once (one simulation's sessions). */
+export const JOB_POD_CAPACITY = () => Math.max(1, Math.min(50, Number(process.env.OCTILLION_JOB_POD_CAPACITY ?? 40)));
+export const JOB_ID = /^(sim|rsh)_[A-Za-z0-9_-]{1,40}$/;
 const STALE_SECONDS = () => Number(process.env.OCTILLION_FLEET_STALE_SECONDS ?? 90);
 
 export interface AgentShare { agent_id: string; harness: string; model: string; weight: number; image?: string; version?: string }
@@ -87,16 +90,27 @@ export function assign(plan: { agent_id: string; pods: number }[], orchestrators
   return out;
 }
 
-/** Register / heartbeat an orchestrator and return its share of the global fleet. */
+/** The job a per-job orchestrator serves: its sandbox row (written at launch), else what its check-in says (manual runs). */
+export async function jobOf(orchestratorId: string, meta: Record<string, unknown> = {}): Promise<string | null> {
+  const db = await getDb();
+  const [r] = await db.query<{ job_id: string }>(
+    "SELECT job_id FROM orchestrator_sandboxes WHERE orchestrator_id = $1 AND job_id IS NOT NULL ORDER BY id DESC LIMIT 1", [orchestratorId]);
+  return r?.job_id ?? (typeof meta.job === "string" && JOB_ID.test(meta.job) ? meta.job : null);
+}
+
+/** Register / heartbeat an orchestrator and return its share of the global fleet, or of its job when it has one. */
 export async function fleetCheckin(orchestratorId: string, capacity?: number, meta: Record<string, unknown> = {}) {
-  const cap = Math.min(Math.max(1, Math.trunc(capacity ?? PODS_PER_ORCHESTRATOR())), PODS_PER_ORCHESTRATOR());
+  const job = await jobOf(orchestratorId, meta);
+  const max = job ? JOB_POD_CAPACITY() : PODS_PER_ORCHESTRATOR();
+  const cap = Math.min(Math.max(1, Math.trunc(capacity ?? max)), max);
+  meta = { ...meta, job };
   const db = await getDb();
   await db.query(
     `INSERT INTO orchestrators (id, capacity, meta, registered_at, last_seen) VALUES ($1, $2, $3, now(), now())
      ON CONFLICT (id) DO UPDATE SET capacity = excluded.capacity, meta = excluded.meta, last_seen = now()`,
     [orchestratorId, cap, JSON.stringify(meta)],
   );
-  return fleetStatus(orchestratorId);
+  return job ? jobFleetStatus(orchestratorId, job, cap) : fleetStatus(orchestratorId);
 }
 
 export async function fleetLeave(orchestratorId: string) {
@@ -149,10 +163,10 @@ export async function fleetStatus(orchestratorId?: string) {
   const stale = await staleOrchestratorIds();
   if (orchestratorId && stale.has(orchestratorId))
     await db.query("UPDATE orchestrator_sandboxes SET retiring_since = coalesce(retiring_since, now()) WHERE orchestrator_id = $1 AND state IN ('booting', 'running')", [orchestratorId]);
-  const live = (await db.query<{ id: string; capacity: number; last_seen: Date }>(
-    `SELECT id, capacity, last_seen FROM orchestrators WHERE last_seen > now() - make_interval(secs => $1) ORDER BY id`,
+  const live = (await db.query<{ id: string; capacity: number; last_seen: Date; job: string | null }>(
+    `SELECT id, capacity, last_seen, meta->>'job' AS job FROM orchestrators WHERE last_seen > now() - make_interval(secs => $1) ORDER BY id`,
     [STALE_SECONDS()],
-  )).filter((o) => !stale.has(o.id)); // retiring orchestrators get no pods: their `assignment` below is empty
+  )).filter((o) => !stale.has(o.id) && !o.job); // retiring orchestrators get no pods (empty `assignment`); per-job ones have their own
   const total = live.reduce((s, o) => s + Number(o.capacity), 0);
   const plan = planPods(total, await agentShares());
   const dealt = assign(plan, live.map((o) => ({ id: o.id, capacity: Number(o.capacity) })));
@@ -176,5 +190,77 @@ export async function fleetStatus(orchestratorId?: string) {
           next_checkin_seconds: Math.max(10, Math.floor(STALE_SECONDS() / 3)),
         }
       : { assignments: Object.fromEntries([...dealt].map(([id, m]) => [id, Object.fromEntries(m)])) }),
+  };
+}
+
+/** Whether a job is over: its simulation or research is no longer queued or running (or is gone). */
+export async function jobState(jobId: string): Promise<{ kind: "simulation" | "research"; status: string | null; done: boolean; finished_at: Date | null }> {
+  const db = await getDb();
+  const research = jobId.startsWith("rsh_");
+  const [r] = await db.query<{ status: string; finished_at: Date | null }>(
+    `SELECT status, finished_at FROM ${research ? "product_research" : "simulations"} WHERE id = $1`, [jobId]);
+  return { kind: research ? "research" : "simulation", status: r?.status ?? null, done: !r || !["queued", "running"].includes(r.status),
+           finished_at: r?.finished_at ? new Date(r.finished_at) : null };
+}
+
+/**
+ * Pure: split `capacity` worker sandboxes over groups by their unfinished sessions, never more than a group's demand.
+ * Each group gets one before any gets a second (no agent of the run starves), then the most under-served goes next.
+ */
+export function splitPods(capacity: number, demands: number[]): number[] {
+  const pods = demands.map(() => 0);
+  for (let left = Math.max(0, Math.trunc(capacity)); left > 0; left--) {
+    let best = -1;
+    demands.forEach((d, i) => {
+      if (pods[i]! >= d) return;
+      const r = pods[i]! / d, rb = best < 0 ? Infinity : pods[best]! / demands[best]!;
+      if (r < rb || (r === rb && d > demands[best]!)) best = i;
+    });
+    if (best < 0) break;
+    pods[best]!++;
+  }
+  return pods;
+}
+
+/**
+ * One orchestrator per job. A simulation's orchestrator gets pod groups for that run's unfinished sessions only (per
+ * agent, claimed with simulation_id so nothing of another run or customer reaches it); a research orchestrator gets
+ * none (it runs one onboarding research). `job.done` tells it to leave and exit: the run finished or was cancelled,
+ * or the research completed or failed. A retiring orchestrator (old code) gets nothing, and the autoscaler launches a
+ * fresh one for the job.
+ */
+export async function jobFleetStatus(orchestratorId: string, jobId: string, capacity: number) {
+  const db = await getDb();
+  const stale = await staleOrchestratorIds();
+  if (stale.has(orchestratorId))
+    await db.query("UPDATE orchestrator_sandboxes SET retiring_since = coalesce(retiring_since, now()) WHERE orchestrator_id = $1 AND state IN ('booting', 'running')", [orchestratorId]);
+  const state = await jobState(jobId);
+  type Group = { agent_id: string; harness: string; model: string; image: string | null; version: string | null; agents: string[]; demand: number };
+  const groups = new Map<string, Group>();
+  if (state.kind === "simulation" && !state.done && !stale.has(orchestratorId)) {
+    const counts = await db.query<{ agent_id: string | null; n: number }>(
+      "SELECT agent_id, count(*) AS n FROM agent_sessions WHERE simulation_id = $1 AND status IN ('queued', 'running') GROUP BY agent_id ORDER BY agent_id", [jobId]);
+    const slotOf = new Map<string, AgentShare>();
+    for (const sh of await agentShares()) for (const id of claimIds(sh.agent_id)) if (!slotOf.has(id)) slotOf.set(id, sh);
+    for (const c of counts) {
+      if (!c.agent_id) continue; // sessions without a registry agent are not claimable by agent groups
+      const slot = slotOf.get(c.agent_id);
+      const spec = slot ? undefined : findAgent(c.agent_id);
+      if (!slot && !spec) continue;
+      const id = slot?.agent_id ?? spec!.id;
+      const g = groups.get(id) ?? { agent_id: id, harness: slot?.harness ?? spec!.harness, model: slot?.model ?? spec!.model,
+                                     image: (slot ? slot.image : spec!.image?.docker) ?? null, version: (slot ? slot.version : spec!.harness_version) ?? null,
+                                     agents: slot ? claimIds(id) : [id], demand: 0 };
+      g.demand += Number(c.n);
+      groups.set(id, g);
+    }
+  }
+  const list = [...groups.values()];
+  const pods = splitPods(capacity, list.map((g) => g.demand));
+  return {
+    orchestrator_id: orchestratorId,
+    job: { id: jobId, kind: state.kind, status: state.status, done: state.done },
+    assignment: list.map(({ demand: _d, ...g }, i) => ({ ...g, pods: pods[i]! })).filter((a) => a.pods > 0),
+    next_checkin_seconds: Math.max(10, Math.floor(STALE_SECONDS() / 6)),
   };
 }

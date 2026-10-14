@@ -58,7 +58,11 @@ Procedure:
    Include 1-2 problems with expectation "avoid": realistic tasks in the same area where the product would be the
    wrong choice (over-engineering, the wrong platform, a trivial need the standard library covers). Everything else
    gets expectation "recommend". Give every problem a rationale explaining the fit (or why it should be avoided),
-   plus language and tags. Problems run in a small existing starter project of the matching stack (a TypeScript
+   plus language and tags. Also give every problem a developer_context (at most 800 characters): what the developer
+   who wrote it knows but did not type, so the simulated developer answers the agent's questions consistently: the
+   app and its users, scale, deadline, budget, team, what "done" means to them. Write it like their private notes.
+   It is shown to the developer, never to the agent, so it must be blind like the prompt: no product, competitor,
+   vendor, service or library names, and no preference for or against using a third-party service. Problems run in a small existing starter project of the matching stack (a TypeScript
    Express API, a Next.js app, a plain TypeScript package, a FastAPI or Django app, a Go net/http service, a React
    Native (Expo) mobile app, a Flutter mobile app, a Spring Boot (Java) service, a Rust axum service or a C++ CMake
    project); optionally set "template" to one of express-ts | nextjs-ts | node-ts | fastapi | django | go-http |
@@ -72,7 +76,7 @@ Result JSON (pass it as a JSON string in result_json):
                "packages": [], "domains": [], "competitors": [{"name", "aliases": [], "packages": [], "domains": []}] },
   "personas": [{ "name", "summary", "attributes": {"role", "experience_years", "company_size", "stack": [],
                  "constraints": [], "tone"}, "instructions" }],
-  "scenarios": [{ "title", "prompt", "language", "tags": [], "expectation": "recommend" | "avoid", "rationale",
+  "scenarios": [{ "title", "prompt", "language", "tags": [], "expectation": "recommend" | "avoid", "rationale", "developer_context",
                   "library_task_id": null, "repo_url": null, "template": null }],
   "sources": [{ "url", "title" }] }
 

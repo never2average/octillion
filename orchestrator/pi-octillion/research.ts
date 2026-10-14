@@ -247,7 +247,9 @@ export async function researchLoop(getBrain: () => Promise<BrainLike>): Promise<
     if (running.size >= RESEARCH.concurrency) { await Promise.race(running); continue; }
     let jobs: ResearchJob[] = [];
     try {
-      const r = (await api("/api/worker/research/claim", { json: { worker_id: CFG.workerId, limit: RESEARCH.concurrency - running.size } })) as { jobs?: ResearchJob[] };
+      // A per-job orchestrator (ORCHESTRATOR_JOB=rsh_...) claims only its own research.
+      const r = (await api("/api/worker/research/claim", { json: { worker_id: CFG.workerId, limit: RESEARCH.concurrency - running.size,
+                                                                   research_id: CFG.job?.startsWith("rsh_") ? CFG.job : undefined } })) as { jobs?: ResearchJob[] };
       jobs = r?.jobs ?? [];
     } catch (e) {
       if (e instanceof HttpError && e.status === 404) { if (!missingLogged) log("research: server has no /api/worker/research (older server); polling slowly"); missingLogged = true; await sleep(60_000); continue; }

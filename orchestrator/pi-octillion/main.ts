@@ -28,6 +28,7 @@ import { claimLoop, runDeterministic } from "../worker.js";
 import { CREDENTIALS_MODE, orchestratorCredentials, redact } from "../core/credentials.js";
 import { researchLoop } from "./research.js";
 import { startIdleWatcher } from "../core/activity.js";
+import { FleetMembership } from "../core/fleet-client.js";
 import { assertOrchestratorHost } from "../core/host-guard.js";
 import { createOctillionExtension, OCTILLION_TOOLS, OctillionRegistry } from "./index.js";
 import { jobPrompt, ORCHESTRATOR_SYSTEM_PROMPT } from "./prompt.js";
@@ -117,7 +118,7 @@ export async function runJobWithPi(job: Job, runner: Runner, brain: Brain): Prom
     // Pi gets the whole session budget plus slack; the session deadline itself is enforced by WorkerSession.
     const budget = setTimeout(() => { piError = "orchestrator exceeded the session budget"; void session.abort(); }, CFG.maxSessionMs + 10 * 60_000);
     try {
-      await session.prompt(jobPrompt(jobId, job.profile, job.prompt, maxTurns));
+      await session.prompt(jobPrompt(jobId, job.profile, job.prompt, maxTurns, job.context));
       const last: any = [...session.messages].reverse().find((m: any) => m.role === "assistant");
       if (last?.stopReason === "error" || last?.stopReason === "aborted") piError ??= `pi: ${last.errorMessage ?? last.stopReason}`;
     } catch (e) {
@@ -164,6 +165,27 @@ if (process.argv[1] && /pi-octillion[\\/]main\.(ts|js)$/.test(process.argv[1])) 
       await refreshBrain(brain).catch((e) => log("orchestrator credential refresh failed (using the current token):", redact(String(e))));
       return brain;
     };
+    // Per-job research orchestrator (ORCHESTRATOR_JOB=rsh_...): one onboarding research, then leave and exit. Context
+    // reaches the run's orchestrator only through the server (personas, problems, developer_context), never directly.
+    if (CFG.job?.startsWith("rsh_")) {
+      const fleet = new FleetMembership({ capacity: 1 }); // liveness for the autoscaler and the job's done signal
+      const stop = () => { if (isShuttingDown()) process.exit(1); markShuttingDown(); log(`stopping research orchestrator for ${CFG.job}`); };
+      process.on("SIGINT", stop); process.on("SIGTERM", stop);
+      fleet.onJobDone = stop;
+      await fleet.start();
+      if (fleet.job?.done) stop();
+      log(`research orchestrator bound to ${CFG.job}`);
+      startIdleWatcher();
+      await researchLoop(fresh);
+      await fleet.leave();
+      process.exit(0);
+    }
+    // Per-job run orchestrator (ORCHESTRATOR_JOB=sim_...): that simulation's sessions only, no research.
+    if (CFG.job?.startsWith("sim_")) {
+      startIdleWatcher();
+      await claimLoop(async (job, runner) => runJobWithPi(job, runner, await fresh()), `orchestrator[${CFG.job}]`);
+      process.exit(0);
+    }
     // ORCHESTRATOR_MODE=research: a research-only worker (never claims coding-agent sessions).
     if (env.ORCHESTRATOR_MODE === "research") {
       assertOrchestratorHost(CFG.runner); // research is agent work too: boat orchestrator sandboxes only

@@ -48,7 +48,8 @@ customer ── get_onboarding / get_visibility_report ──▶ results
   "personas": [{ "name": "…", "summary": "…", "attributes": {"role": "…", "experience_years": 5, "company_size": "…",
                  "stack": ["…"], "constraints": ["…"], "tone": "…"}, "instructions": "…" }],
   "scenarios": [{ "title": "…", "prompt": "…", "language": "…", "tags": ["…"], "expectation": "recommend" | "avoid",
-                  "rationale": "why the product fits (or not)", "library_task_id": 12, "repo_url": null }],
+                  "rationale": "why the product fits (or not)", "library_task_id": 12, "repo_url": null,
+                  "developer_context": "what the developer knows but did not type: app, users, scale, deadline, done" }],
   "sources": [{"url": "…", "title": "…"}] }
 ```
 
@@ -60,3 +61,7 @@ customer ── get_onboarding / get_visibility_report ──▶ results
 - **Product fields:** at least one alias, package or domain beyond the name, so detection has something to match;
   competitor names must be distinct from the product.
 - **Personas** must not mention the product or its competitors (they answer the agent blind).
+- **`developer_context`** (optional, at most 800 characters) must not name them either. It is the hand-off from
+  research to the run: each session's job carries it and the run's orchestrator gives it to the simulated developer
+  as their own notes on the task (never to the coding agent). The server checks it again at claim time against the
+  product and competitors as they are then, and drops it if it names one.

@@ -375,8 +375,8 @@ export async function runSimulation(org: Org, input: RunInput) {
   const name = input.name?.trim() || `${p.name} · ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC`;
   await db.transaction(async (tx) => {
     await tx.query(
-      `INSERT INTO simulations (id, org_id, product_id, name, models, harness, repeats, profile_ids, mode, agent_ids, population_id, max_samples)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+      `INSERT INTO simulations (id, org_id, product_id, name, models, harness, repeats, profile_ids, mode, agent_ids, population_id, max_samples, research_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, (SELECT research->>'research_id' FROM products WHERE id = $3))`,
       [id, org.orgId, p.id, name, [...new Set(used.map((a) => a.model))], [...new Set(used.map((a) => a.harness))].join(", "),
        explicit ? repeats : samples, profiles.map((x) => x.id), explicit ? "explicit" : "representative", used.map((a) => a.id), pop.id, maxSamples],
     );

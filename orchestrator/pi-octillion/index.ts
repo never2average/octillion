@@ -66,7 +66,7 @@ export function createOctillionExtension(reg: OctillionRegistry, opts: { allowCl
           const jobs = await claimJobs(p.limit ?? 1);
           return text(jobs.map((j) => {
             const id = reg.addJob(j);
-            return { job_id: id, harness: j.harness, brief: jobPrompt(id, j.profile, j.prompt, j.max_user_turns ?? CFG.defaultMaxUserTurns) };
+            return { job_id: id, harness: j.harness, brief: jobPrompt(id, j.profile, j.prompt, j.max_user_turns ?? CFG.defaultMaxUserTurns, j.context) };
           }));
         },
       }));

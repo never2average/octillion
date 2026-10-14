@@ -57,6 +57,7 @@ export async function claimLoop(runJob: (job: Job, runner: Runner) => Promise<vo
     // RUNNER=boat: the fleet assignment caps concurrent (ephemeral) worker sandboxes per agent group.
     if (r.name === "boat" && FLEET.mode !== "off") { fleet = new FleetMembership(); await fleet.start(); }
   }
+  if (CFG.job) log(`${label} bound to ${CFG.job}: claims only its sessions and exits when it is over`);
   const capacity = pool ? POOL.capacity : fleet ? fleet.capacity : CFG.concurrency;
   log(`${label} ${CFG.workerId} runner=${runner.name}${pool ? ` fleet=${pool.mode} orchestrator_id=${pool.orchestratorId}` : fleet ? ` fleet=${fleet.mode} orchestrator_id=${fleet.orchestratorId}` : ""} capacity=${capacity} url=${CFG.url} max=${CFG.maxSessionMs / 60000}m`);
 
@@ -79,6 +80,11 @@ export async function claimLoop(runJob: (job: Job, runner: Runner) => Promise<vo
   };
   process.on("SIGINT", () => void stop("SIGINT"));
   process.on("SIGTERM", () => void stop("SIGTERM"));
+  // Per-job: the run finished or was cancelled -> same graceful path (nothing of it is still running).
+  if (fleet && CFG.job) {
+    fleet.onJobDone = () => void stop("job over");
+    if (fleet.job?.done) fleet.onJobDone();
+  }
 
   // Only claim harnesses this worker can actually run (adapter; in env mode also the provider keys).
   const runnable = (h: string) => { try { adapterFor({ harness: h }); return true; } catch { return false; } };

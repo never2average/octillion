@@ -76,6 +76,19 @@ It needs only `OCTILLION_URL` (the **public** server URL) and `OCTILLION_WORKER_
 
 In production nobody runs `up`. The server starts orchestrators when there is work and they go away when idle. The launcher shares its code with the autoscaler through `deploy/boat-lib.ts`.
 
+**One orchestrator per job (`OCTILLION_ORCH_PER_JOB=on`, the default).**
+
+- Every onboarding research and every simulation with claimable queued sessions gets its own orchestrator, launched with `ORCHESTRATOR_JOB=<rsh_… | sim_…>` (row: `orchestrator_sandboxes.job_id`, `pods`).
+- A research orchestrator runs that one research (one sandbox, no workers). A run orchestrator runs only that simulation's sessions on up to `OCTILLION_JOB_POD_CAPACITY` (40) worker sandboxes: `min(40, its unfinished sessions, what the boat plan has free)`.
+- Isolation is server-side: claims carry `simulation_id` / `research_id`, and a bound orchestrator's fleet check-in returns pod groups built from its own run's queued and running sessions (per agent, never above demand). Bound orchestrators are left out of the shared fleet plan.
+- Exit: the check-in returns `job.done` once the run completes or is cancelled, or the research completes or fails. The orchestrator then takes the graceful path (leave → `draining` → deleted next tick). Backstop: a bound orchestrator whose job ended over 3 minutes ago and runs nothing is deleted. The idle exit still applies.
+- Launch order: research first (a customer is waiting), then runs, oldest first. Each launch reserves 1 + its pods on the boat plan; a run that does not fit waits for the next tick. At most `OCTILLION_MAX_JOB_ORCHESTRATORS` (12), 2 launches per tick. A run whose orchestrator idled out with sessions still queued is not relaunched for `OCTILLION_ORCH_IDLE_MINUTES` unless new sessions are queued (adaptive batches are).
+- Recycle on deploy works per job: an old-code orchestrator gets no pods, a fresh one is launched for its job, and the old one is deleted once idle.
+- Context between the two kinds goes only through the database, never directly. Research writes the product profile, personas and problems, each problem with a blind `developer_context`, and `simulations.research_id` records which research a run came from. Each claimed session job carries its persona and `context`, and Pi gets the context as the developer's own notes on the task (`<developer_notes_on_this_task>`), never shown to the coding agent. See [docs/onboarding.md](../docs/onboarding.md).
+- Tests: `npx tsx orchestrator/test/per-job.ts` (PGlite + mock boat).
+
+`OCTILLION_ORCH_PER_JOB=off` restores the shared fleet described below.
+
 - **Leader.** One server instance acts at a time, via a lease row in `autoscaler_lease` (renewed every tick, expires after 3 ticks). An advisory lock wouldn't work: session locks are per connection, and xact locks can't span a launch.
 - **Demand, every `OCTILLION_AUTOSCALE_TICK_SECONDS` (15).** Counts queued and running `agent_sessions` (only agents the fleet schedules) plus queued and running `product_research`.
   - With no demand, desired = 0. Otherwise desired = `ceil(sessions / OCTILLION_POD_CAPACITY)`, and at least 1 if there is research.
