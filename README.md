@@ -64,28 +64,28 @@ verdict.
 
 ```mermaid
 flowchart LR
-  subgraph Clients["Customer's AI client"]
+  subgraph Clients["Customer AI clients"]
     C1["Claude / ChatGPT<br/>(inline dashboard)"]
     C2["Claude Code / Cursor<br/>(text results)"]
   end
 
   subgraph VM["Octillion server (one container behind Caddy TLS)"]
-    MCP["MCP endpoint<br/>/mcp/&lt;org key&gt;, 18 tools<br/>+ dashboard widget"]
+    MCP["MCP endpoint<br/>/mcp/ORG_KEY, 18 tools<br/>+ dashboard widget"]
     Q["Products, simulations,<br/>reports, scoring"]
     WAPI["Worker API<br/>claim (fair share per org),<br/>events, complete (infra retry),<br/>fleet check-in, credential broker"]
     AS["Autoscaler<br/>one orchestrator per job,<br/>recycle on deploy"]
-    GW["Inference gateway<br/>/gw/&lt;provider&gt;<br/>per-session tokens, metering,<br/>session + org budgets"]
+    GW["Inference gateway<br/>/gw/PROVIDER<br/>per-session tokens, metering,<br/>session + org budgets"]
     KV["Key vault<br/>encrypted provider keys"]
   end
 
   subgraph Data["Data"]
     PG[("Postgres<br/>orgs, products, scenarios,<br/>session queue, verdicts,<br/>agent mix, usage")]
     CH[("ClickHouse<br/>raw transcripts + search")]
-    BK["pg-backup<br/>nightly dumps"]
+    BK["pg-backup<br/>daily dumps, newest 10<br/>copied to Cloudflare R2"]
   end
 
   subgraph Boat["boat.dev sandboxes"]
-    ORCH["Orchestrator (Pi), one per job<br/>an onboarding research, or<br/>one run's sessions (up to 40),<br/>answers as the developer"]
+    ORCH["Orchestrator (Pi), one per job<br/>an onboarding research, or<br/>the sessions of one run (up to 40),<br/>answers as the developer"]
     WS["Worker sandbox, one per session<br/>Claude Code, Codex, OpenCode,<br/>Pi, Cline or Kilo<br/>on a starter or a pinned repo"]
   end
 
@@ -99,7 +99,8 @@ flowchart LR
   REG["Agent registry<br/>harnesses/registry.json<br/>harness, model, real-world share"]
   GH["GitHub<br/>pinned open-source repos"]
 
-  C1 & C2 -- "MCP over HTTPS" --> MCP
+  C1 -- "MCP over HTTPS" --> MCP
+  C2 -- "MCP over HTTPS" --> MCP
   MCP --> Q
   Q --> PG
   Q --> CH
@@ -112,7 +113,9 @@ flowchart LR
   ORCH -- "its own model calls" --> GW
   WS -- "agent model calls<br/>(session token)" --> GW
   GW --> KV
-  GW --> VX & OA & CF
+  GW --> VX
+  GW --> OA
+  GW --> CF
   WS -- "clone at pinned commit" --> GH
   VAULT -- "vault:sync" --> PG
   REG --> Q
