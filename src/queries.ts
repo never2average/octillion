@@ -2,7 +2,7 @@ import { getDb, type Queryable } from "./db.js";
 import { randomId, type Org } from "./auth.js";
 import { transcripts, type SearchParams } from "./transcripts.js";
 import type { Tool } from "./scoring.js";
-import { drawVariant, enabledAgents, findAgent, isRunnable, representativePlan, runnableCoverage, sandboxMix, scheduledAgents, variantsOf, type AgentSpec } from "./agents.js";
+import { dealToCells, drawVariant, enabledAgents, findAgent, isRunnable, runnableCoverage, sandboxMix, scheduledAgents, variantsOf, type AgentSpec } from "./agents.js";
 import { getPopulation, listPopulations } from "./populations.js";
 import { capacityStatus } from "./autoscaler.js";
 
@@ -364,8 +364,9 @@ export async function runSimulation(org: Org, input: RunInput) {
     plan = slots.flatMap((slot) => chosen.flatMap((agent) => Array.from({ length: repeats }, (_, i) => ({ ...slot, agent, attempt: i + 1 }))));
   } else {
     // Slot agents with model_variants (e.g. pi) run each sampled session as one of their models, drawn by share.
-    const agents = representativePlan(slots.length * samples, scheduledAgents(pop)).map((a) => drawVariant(a));
-    plan = slots.flatMap((slot, si) => Array.from({ length: samples }, (_, i) => ({ ...slot, agent: agents[si * samples + i], attempt: i + 1 })));
+    // Each scenario x profile cell gets a near-proportional share of the weighted mix (agents.ts dealToCells).
+    const cells = dealToCells(slots.map(() => samples), scheduledAgents(pop));
+    plan = slots.flatMap((slot, si) => cells[si]!.map((a, i) => ({ ...slot, agent: drawVariant(a), attempt: i + 1 })));
   }
   if (plan.length > config.maxSessionsPerRun())
     throw new Error(`That is ${plan.length} agent sessions (${scenarios.length} scenarios x ${profileIds.length} profiles x ${explicit ? "agents x repeats" : `${samples} samples`}); the limit per run is ${config.maxSessionsPerRun()}. Use fewer scenarios, profiles, agents, repeats or samples.`);
@@ -438,12 +439,12 @@ export async function extendAdaptive(simulationId: string): Promise<number> {
     await tx.query("UPDATE simulations SET sampling = $2 WHERE id = $1", [simulationId, JSON.stringify(decisions)]);
     const total = more.reduce((t, m) => t + m.count, 0);
     if (!total) return 0;
-    const agents = representativePlan(total, scheduledAgents(pop)).map((a) => drawVariant(a));
+    // Top-ups are dealt the same way: each scenario's batch gets a near-proportional share of the weighted mix.
+    const cells = dealToCells(more.map((m) => m.count), scheduledAgents(pop));
     const profileIds: (number | null)[] = sim.profile_ids?.length ? sim.profile_ids : [null];
-    let k = 0;
-    for (const m of more)
+    for (const [mi, m] of more.entries())
       for (let i = 0; i < m.count; i++) {
-        const agent = agents[k++];
+        const agent = drawVariant(cells[mi]![i]!);
         await tx.query(
           `INSERT INTO agent_sessions (id, simulation_id, org_id, product_id, scenario_id, model, harness, agent_id, attempt, profile_id)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,

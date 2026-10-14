@@ -132,6 +132,34 @@ export function apportion<T extends { weight: number }>(items: T[], n: number): 
 }
 
 /**
+ * Weighted allocation, dealt so every cell gets a near-proportional mix. The run's sessions are apportioned by weight
+ * over the whole run (as representativePlan does), then dealt heaviest agent first: each next session of an agent
+ * goes to the cell holding the fewest of that agent, then the least-filled cell. So Opus and Codex spread evenly
+ * over all cells, and agents with only a slot or two land in different cells instead of piling into one (seen live
+ * 2026-10-14: the strided deal put Cline, Kilo and Pi into the same scenario x persona cell). A cell is one scenario x
+ * profile (first batch) or one scenario's top-up (adaptive); `sizes` are the sessions each cell needs.
+ */
+export function dealToCells(sizes: number[], agents: AgentSpec[]): AgentSpec[][] {
+  const cells: AgentSpec[][] = sizes.map(() => []);
+  const total = sizes.reduce((a, b) => a + b, 0);
+  const queue = apportion(agents, total).filter((r) => r.count > 0)
+    .sort((a, b) => b.item.weight - a.item.weight || a.item.id.localeCompare(b.item.id))
+    .flatMap(({ item, count }) => Array.from({ length: count }, () => item));
+  for (const agent of queue) {
+    let best = -1;
+    for (let c = 0; c < cells.length; c++) {
+      if (cells[c]!.length >= sizes[c]!) continue;
+      if (best < 0) { best = c; continue; }
+      const mine = cells[c]!.filter((a) => a.id === agent.id).length, theirs = cells[best]!.filter((a) => a.id === agent.id).length;
+      const fill = cells[c]!.length / sizes[c]!, bestFill = cells[best]!.length / sizes[best]!;
+      if (mine < theirs || (mine === theirs && fill < bestFill)) best = c;
+    }
+    if (best >= 0) cells[best]!.push(agent);
+  }
+  return cells;
+}
+
+/**
  * Spread a run's agent sessions over its slots (scenario x profile x sample) so every scenario gets a mix close to the
  * overall weights: apportion over the whole run, then deal agents out in a strided order.
  */

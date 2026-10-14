@@ -259,6 +259,24 @@ try {
   check("research validation: skill format and limits", sk.some((x) => /name must be lowercase-hyphenated/.test(x)) && sk.some((x) => /description must be/.test(x)) &&
     sk.some((x) => /body must be 40-/.test(x)) && sk.some((x) => /agent_rules must be text of at most 3000/.test(x)), sk.join(" | "));
 
+
+  // weighted allocation dealt per cell: the live 2026-10-14 case (8 cells x 3, real weights) no longer piles small agents together
+  const { dealToCells, apportion } = await import("../../src/agents.js");
+  const mk = (id: string, weight: number) => ({ id, weight, harness: id.split("/")[0], model: "m", label: id } as any);
+  const mix = [mk("claude-code/opus", .2993), mk("codex/default", .1965), mk("claude-code/sonnet", .1046), mk("opencode/sonnet", .0546),
+               mk("antigravity/default", .0491), mk("pi/gpt", .0164), mk("cline/gpt", .0109), mk("kilo/sonnet", .0054)];
+  const dealt = dealToCells(Array(8).fill(3), mix);
+  const small = new Set(["opencode/sonnet", "antigravity/default", "pi/gpt", "cline/gpt", "kilo/sonnet"]);
+  const totals = new Map<string, number>(); for (const c of dealt) for (const a of c) totals.set(a.id, (totals.get(a.id) ?? 0) + 1);
+  const expected = new Map(apportion(mix, 24).map((r) => [r.item.id, r.count]));
+  check("dealToCells: run totals equal the weighted apportionment (24 sessions)", dealt.every((c) => c.length === 3) && [...expected].every(([id, n]) => (totals.get(id) ?? 0) === n),
+    JSON.stringify([...totals]));
+  check("dealToCells: no cell gets two small-share agents; Opus/Codex spread over cells",
+    dealt.every((c) => c.filter((a) => small.has(a.id)).length <= 1) && dealt.every((c) => c.filter((a) => a.id === "claude-code/opus").length <= 2) &&
+    dealt.filter((c) => c.some((a) => a.id === "codex/default")).length === Math.min(8, expected.get("codex/default")!), JSON.stringify(dealt.map((c) => c.map((a) => a.id.split("/")[0]))));
+  const uneven = dealToCells([4, 4, 2], mix);
+  check("dealToCells: uneven top-up batches are filled exactly", uneven.map((c) => c.length).join(",") === "4,4,2", "");
+
   // purchase decision: the real Resend tasks that produced bad data are rejected; a need-only task passes
   const terms = ["transactional email service", "email API", "email provider"];
   const abuse = "In this pastebin, add an abuse report form ... and send the report to the moderators' inbox through a transactional email service with attachments and the reporter as reply-to.";
