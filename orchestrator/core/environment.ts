@@ -126,7 +126,7 @@ export const ACP_ROUTES: Record<string, { command: string[]; pkg?: string; bin?:
   "claude-code": { command: ["claude-agent-acp"], pkg: "@agentclientprotocol/claude-agent-acp@0.90.0", bin: "claude-agent-acp" },
   codex: { command: ["codex-acp"], pkg: "@agentclientprotocol/codex-acp@2.2.2", bin: "codex-acp", env: { NO_BROWSER: "1", INITIAL_AGENT_MODE: "agent" } },
   opencode: { command: ["opencode", "acp"] },
-  kilo: { command: ["kilo", "acp"] },
+  // kilo acp (7.8.8): the prompt never answered in the live smoke run of 2026-10-14; Kilo runs as a CLI until fixed.
   cline: { command: ["cline", "--acp"] },
   pi: { command: ["pi-acp"], pkg: "pi-acp@0.0.34", bin: "pi-acp" },
 };

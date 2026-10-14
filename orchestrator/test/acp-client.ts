@@ -26,7 +26,7 @@ const logFile = path.join(work, "..", `${path.basename(work)}.log`);
 const client = path.join(here, "..", "harnesses", "acp-client.mjs");
 const agent = path.join(here, "fixtures", "mock-acp-agent.mjs");
 const run = (extra: string[]) => spawnSync("node", [client, "--cwd", work, "--model", "claude-opus-5-5", ...extra, "--", "node", agent],
-  { input: "Add password reset emails to this service.", encoding: "utf8", env: { ...process.env, MOCK_ACP_LOG: logFile }, timeout: 30_000 });
+  { input: "Add password reset emails to this service.", encoding: "utf8", env: { ...process.env, MOCK_ACP_LOG: logFile, CODEX_API_KEY: "test-key" }, timeout: 30_000 });
 
 try {
   const r1 = run([]);
@@ -53,6 +53,9 @@ try {
   const r2 = run(["--load", "sess-1"]);
   const sent2 = readFileSync(logFile, "utf8").trim().split("\n").map((l) => JSON.parse(l));
   check("--load reloads the same session (no new session)", r2.status === 0 && sent2.some((x) => x.k === "loadSession" && x.v.sessionId === "sess-1") && !sent2.some((x) => x.k === "newSession"), r2.stderr.slice(-300));
+  check("history replayed by session/load is not re-emitted (no double-counted evidence)", !/REPLAYED/.test(r2.stdout) && /Done: I used Postmark/.test(r2.stdout), r2.stdout.slice(0, 400));
+  check("API-key auth is used when offered and a key is set; login flows are not", sent.some((x) => x.k === "authenticate" && x.v.methodId === "api-key") &&
+    !sent.some((x) => x.k === "authenticate" && x.v.methodId === "browser-login"), JSON.stringify(sent.filter((x) => x.k === "authenticate")));
 
   // adapter: argv, digest, steps, scoring
   const base = getAdapter("claude-code");
@@ -73,7 +76,7 @@ try {
   check("scoring reads ACP messages and tool calls (picked from the import and the agent's words)", score.verdict === "adopted", JSON.stringify({ v: score.verdict, w: score.winner }));
   const zed = { editor: "zed" as const, language: "typescript" as const, tools: ["cli/jq"] };
   check("Zed persona: ACP client + adapter installed for Claude Code; native ACP for OpenCode; none for VS Code personas",
-    toolsFor("claude-code", zed).map((t) => t.id).join(",") === "cli/jq,acp/client,acp/claude-code" && toolsFor("opencode", zed).map((t) => t.id).join(",") === "cli/jq,acp/client" &&
+    toolsFor("claude-code", zed).map((t) => t.id).join(",") === "cli/jq,acp/client,acp/claude-code" && toolsFor("opencode", zed).map((t) => t.id).join(",") === "cli/jq,acp/client" && !usesAcp("kilo", zed) &&
     !toolsFor("claude-code", { ...zed, editor: "vscode" }).some((t) => t.id.startsWith("acp/")) && (process.env.OCTILLION_ZED_ACP = "on", usesAcp("codex", zed) && !usesAcp("antigravity", zed)), "");
   // The server image is what the autoscaler uploads to orchestrators: it must contain the client (live smoke 2026-10-14
   // failed every Zed session with ENOENT when the Dockerfile copied only two files from orchestrator/harnesses).

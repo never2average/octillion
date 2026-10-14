@@ -10,10 +10,17 @@ const models = { id: "model", name: "Model", category: "model", type: "select", 
   options: [{ value: "default", name: "Default" }, { value: "claude-opus-5-5", name: "Opus 5.5" }] };
 
 new AgentSideConnection((conn) => ({
-  async initialize(p) { record("initialize", p); return { protocolVersion: 1, agentCapabilities: { loadSession: true }, agentInfo: { name: "mock-agent", version: "1.0.0" }, authMethods: [] }; },
-  async authenticate() { return {}; },
+  async initialize(p) { record("initialize", p); return { protocolVersion: 1, agentCapabilities: { loadSession: true }, agentInfo: { name: "mock-agent", version: "1.0.0" },
+    authMethods: [{ id: "browser-login", name: "Log in" }, { id: "api-key", name: "API key" }] }; },
+  async authenticate(p) { record("authenticate", p); return {}; },
   async newSession(p) { record("newSession", p); return { sessionId: "sess-1", configOptions: [models] }; },
-  async loadSession(p) { record("loadSession", p); return { configOptions: [models] }; },
+  async loadSession(p) {
+    record("loadSession", p);
+    // replay, as real agents do
+    await conn.sessionUpdate({ sessionId: p.sessionId, update: { sessionUpdate: "user_message_chunk", content: { type: "text", text: "earlier prompt" } } });
+    await conn.sessionUpdate({ sessionId: p.sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "REPLAYED earlier answer" } } });
+    return { configOptions: [models] };
+  },
   async setSessionConfigOption(p) { record("setConfig", p); return { configOptions: [{ ...models, currentValue: p.value }] }; },
   async cancel() {},
   async prompt(p) {

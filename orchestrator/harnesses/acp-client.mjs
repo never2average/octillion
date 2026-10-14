@@ -41,8 +41,12 @@ const inside = (p) => { const a = isAbsolute(p) ? p : resolve(cwd, p); return a;
 const terminals = new Map();
 let nextTerm = 1;
 
+// session/load replays the conversation as session/update notifications: already in the transcript, so not re-emitted.
+let replaying = false;
+
 const client = {
   async sessionUpdate({ update: u }) {
+    if (replaying) return;
     const k = u?.sessionUpdate;
     if (k === "agent_message_chunk" || k === "agent_thought_chunk") {
       const kind = k === "agent_message_chunk" ? "acp.message" : "acp.thought";
@@ -114,8 +118,18 @@ try {
     clientInfo: { name: "zed", title: "Zed", version: process.env.ZED_VERSION || "1.23.3" },
   });
   const canLoad = !!init.agentCapabilities?.loadSession;
+  // An agent that offers API-key auth (codex-acp) uses the key from the environment once told to: what a Zed user
+  // does by picking "API key" in the agent's login prompt. Login flows (browser, account) are never started.
+  const keyAuth = (init.authMethods ?? []).find((m) => /^api[-_]?key$/i.test(m.id ?? ""));
+  if (keyAuth && (process.env.CODEX_API_KEY || process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY))
+    await conn.authenticate({ methodId: keyAuth.id }).catch((e) => emit({ type: "acp.error", message: `authenticate ${keyAuth.id}: ${e?.message ?? e}` }));
   let res;
-  if (opts.load && canLoad) { res = await conn.loadSession({ sessionId: opts.load, cwd, mcpServers: [] }); sessionId = opts.load; }
+  if (opts.load && canLoad) {
+    replaying = true;
+    try { res = await conn.loadSession({ sessionId: opts.load, cwd, mcpServers: [] }); } finally { replaying = false; }
+    sessionId = opts.load;
+    chunks.kind = null; chunks.text = "";
+  }
   else { res = await conn.newSession({ cwd, mcpServers: [] }); sessionId = res.sessionId; }
   flush();
   // The job's model, through the agent's own model selector (what picking a model in Zed's thread does).

@@ -224,7 +224,8 @@ export const CRED_SPECS: Record<string, CredSpec> = {
       const setup = `cline auth -p ${clineProvider} -k "$CLINE_API_KEY" -b "${withSuffix(c.base_url, "/v1")}" -m "${modelId}" </dev/null >/dev/null 2>&1 || true; `;
       // Adapter argv is `-P anthropic -m <registry model>`: switch to that provider and the provider-local model id.
       const argv = (a: string[]) => a.map((x, i) => (x === "anthropic" && a[i - 1] === "-P" ? clineProvider : a[i - 1] === "-m" ? modelId : x));
-      return { env, setup, argv };
+      // `cline --acp` (Zed personas) takes no -P/-m: without these it falls back to the Cline account provider.
+      return { env: { ...env, CLINE_PROVIDER: clineProvider, CLINE_MODEL: modelId }, setup, argv };
     },
   },
   amp: {
