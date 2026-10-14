@@ -175,6 +175,7 @@ async function retryInfraFailure(s: SessionRef, input: CompleteInput): Promise<b
   await db.query(
     `UPDATE agent_sessions SET status = 'queued', worker_id = NULL, started_at = NULL, heartbeat_at = NULL, ended_at = NULL,
             sandbox_id = NULL, error_message = NULL, events = 0, user_turns = 0,
+            archive_key = NULL, archived_at = NULL, archive_events = NULL, archive_claimed_at = NULL,
             metadata = metadata || jsonb_build_object('infra_retries', $2::int, 'infra_error', $3::text)
       WHERE id = $1 AND status = 'running'`,
     [s.id, row.retries + 1, msg.slice(0, 500)]);

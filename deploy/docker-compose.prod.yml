@@ -133,6 +133,13 @@ services:
       VAULT_TOKEN: ${VAULT_TOKEN:-}
       # On-demand orchestrators (src/autoscaler.ts). OCTILLION_AUTOSCALE=off is the kill switch.
       OCTILLION_AUTOSCALE: ${OCTILLION_AUTOSCALE:-on}
+      # Object storage (src/storage.ts, docs/storage.md): the same R2 bucket as the off-site database backups holds the
+      # trace and research archive (src/archive.ts) and run reports. Unset R2_BUCKET = archive off.
+      R2_BUCKET: ${R2_BUCKET:-}
+      R2_ENDPOINT: ${R2_ENDPOINT:-}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
+      OCTILLION_ARCHIVE: ${OCTILLION_ARCHIVE:-on}
       OCTILLION_MAX_ORCHESTRATORS: ${OCTILLION_MAX_ORCHESTRATORS:-4}
       OCTILLION_POD_CAPACITY: ${OCTILLION_POD_CAPACITY:-20}
       OCTILLION_ORCH_IDLE_MINUTES: ${OCTILLION_ORCH_IDLE_MINUTES:-10}

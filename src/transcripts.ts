@@ -326,10 +326,40 @@ const postgresStore: TranscriptStore = {
 };
 
 let store: TranscriptStore | undefined;
-export function transcripts(): TranscriptStore {
+/** The live store only (ClickHouse, or Postgres without CLICKHOUSE_URL): what archiving and restoring read and write. */
+export function baseTranscripts(): TranscriptStore {
   if (!store) {
     const cfg = chConfig();
     store = cfg ? clickhouseStore(cfg) : postgresStore;
   }
   return store;
+}
+
+let wrapped: TranscriptStore | undefined;
+/**
+ * The transcript store, with read-through to the R2 archive (archive.ts): when the live store has no events for a
+ * session (ClickHouse lapsed and the server moved to Postgres) or cannot be reached, an archived session is read
+ * from R2. Search stays live-store only.
+ */
+export function transcripts(): TranscriptStore {
+  const base = baseTranscripts();
+  wrapped ??= {
+    kind: base.kind,
+    append: (s, events) => base.append(s, events),
+    remove: (orgId, sessionId) => base.remove(orgId, sessionId),
+    warm: () => base.warm(),
+    search: (p) => base.search(p),
+    async read(orgId, sessionId, offset, limit) {
+      const fromArchive = async () => {
+        const { archivedEvents } = await import("./archive.js");
+        const ev = await archivedEvents(orgId, sessionId).catch(() => null);
+        return ev?.length ? { total: ev.length, events: ev.slice(offset, offset + limit) } : null;
+      };
+      let live: { total: number; events: StoredEvent[] };
+      try { live = await base.read(orgId, sessionId, offset, limit); }
+      catch (e) { const a = await fromArchive(); if (a) return a; throw e; }
+      return live.total > 0 ? live : (await fromArchive()) ?? live;
+    },
+  };
+  return wrapped;
 }

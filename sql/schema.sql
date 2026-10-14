@@ -337,6 +337,11 @@ ALTER TABLE scenarios ADD COLUMN IF NOT EXISTS prompt_variants JSONB NOT NULL DE
 -- The purchase decision the task's requirements create (never shown to the agent): {need, options: [{kind, name}],
 -- why_intrinsic, evidence_url}. A task without one measures nothing about tool choice.
 ALTER TABLE scenarios ADD COLUMN IF NOT EXISTS decision JSONB;
+-- Off-machine archive in R2 (src/archive.ts, docs/storage.md): object key once archived; claim time for the sweeper.
+ALTER TABLE agent_sessions   ADD COLUMN IF NOT EXISTS archive_key TEXT;
+ALTER TABLE agent_sessions   ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
+ALTER TABLE agent_sessions   ADD COLUMN IF NOT EXISTS archive_events INT;
+ALTER TABLE agent_sessions   ADD COLUMN IF NOT EXISTS archive_claimed_at TIMESTAMPTZ;
 -- The onboarding research the run's personas and problems came from (provenance).
 ALTER TABLE simulations ADD COLUMN IF NOT EXISTS research_id TEXT;
 -- Why a session ended: done (real workspace changes) | turn_cap (MAX_AGENT_TURNS) | time_cap | agent_gave_up | error.
@@ -445,3 +450,8 @@ CREATE TABLE IF NOT EXISTS mcp_events (
   ms      INT
 );
 CREATE INDEX IF NOT EXISTS mcp_events_org_idx ON mcp_events (org_id, at DESC);
+
+-- R2 archive of onboarding research (src/archive.ts); after product_research exists.
+ALTER TABLE product_research ADD COLUMN IF NOT EXISTS archive_key TEXT;
+ALTER TABLE product_research ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
+ALTER TABLE product_research ADD COLUMN IF NOT EXISTS archive_claimed_at TIMESTAMPTZ;

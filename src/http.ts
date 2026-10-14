@@ -10,6 +10,8 @@ import { parseJsonl, transcripts, type RawEvent } from "./transcripts.js";
 import { appendEvents, claimJobs, completeSession, heartbeat } from "./worker.js";
 import { fleetCheckin, fleetLeave, fleetStatus } from "./fleet.js";
 import { autoscalerStatus, startAutoscaler, stopAutoscaler } from "./autoscaler.js";
+import { startArchiver, stopArchiver } from "./archive.js";
+import { storageEnabled } from "./storage.js";
 import { brokerOrchestratorCredentials, brokerSessionCredentials, gatewayHandler } from "./gateway.js";
 import * as research from "./research.js";
 import { usageReport } from "./usage.js";
@@ -284,6 +286,9 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
       startAutoscaler();
       console.error("  autoscaler    on (orchestrators on demand; OCTILLION_AUTOSCALE=off to disable)");
     } else console.error(`  autoscaler    off (${autoscale ? "needs an https PUBLIC_URL and OCTILLION_WORKER_TOKEN" : "OCTILLION_AUTOSCALE=off"})`);
+    // Off-machine archive of traces and research to R2 (src/archive.ts): backfills, then keeps up every 5 minutes.
+    startArchiver();
+    console.error(`  archive       ${storageEnabled() ? "on (traces + research to R2)" : "off (R2_* not set)"}`);
   });
   // Graceful drain (deploys, restarts): stop accepting connections, let in-flight requests finish (gateway streams
   // are sandboxed agents' model calls; cutting them fails the sessions), then exit. A rolling deploy starts the new
@@ -294,6 +299,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     const limit = Math.max(0, Number(process.env.OCTILLION_DRAIN_SECONDS ?? 300));
     console.error(`${signal}: draining, in-flight requests get up to ${limit}s`);
     void stopAutoscaler();
+    stopArchiver();
     server.close(() => { console.error("drained, exiting"); process.exit(0); });
     server.closeIdleConnections();
     setInterval(() => server.closeIdleConnections(), 1000).unref(); // keep-alive sockets as they go idle
