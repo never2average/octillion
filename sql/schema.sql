@@ -331,6 +331,9 @@ ALTER TABLE scenarios DROP COLUMN IF EXISTS developer_context;
 -- installs the editor's language servers for the task's language plus these CLI tools into the worker sandbox and
 -- wires them into the harness. NULL: the default (VS Code + base tools).
 ALTER TABLE developer_profiles ADD COLUMN IF NOT EXISTS environment JSONB;
+-- The same problem in each persona's own words ({persona slug: prompt}): a junior states the outcome, a senior adds
+-- constraints and acceptance criteria. A session uses its persona's phrasing, else `prompt`.
+ALTER TABLE scenarios ADD COLUMN IF NOT EXISTS prompt_variants JSONB NOT NULL DEFAULT '{}';
 -- The onboarding research the run's personas and problems came from (provenance).
 ALTER TABLE simulations ADD COLUMN IF NOT EXISTS research_id TEXT;
 -- Why a session ended: done (real workspace changes) | turn_cap (MAX_AGENT_TURNS) | time_cap | agent_gave_up | error.

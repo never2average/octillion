@@ -31,7 +31,7 @@ import * as lib from "../orchestrator/deploy/boat-lib.js";
  * sessions on up to OCTILLION_JOB_POD_CAPACITY (40) worker sandboxes, and exits when its check-in says the job is
  * over. Launches fit the boat plan: each reserves 1 + its pods; a job that does not fit waits for the next tick. At
  * most OCTILLION_MAX_JOB_ORCHESTRATORS (12) at once. Context passes between the two kinds only through the database
- * (research writes personas and problems with a blind developer_context; the run's jobs carry them).
+ * (research writes personas with their developer environment and the problems in each persona's words; jobs carry them).
  */
 
 const env = process.env;

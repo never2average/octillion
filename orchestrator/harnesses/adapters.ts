@@ -623,3 +623,45 @@ function registryIds(): string[] {
     return list.map((h) => (typeof h === "string" ? h : h?.harness ?? h?.id)).filter((x): x is string => typeof x === "string").map(normalizeHarnessId);
   } catch { return []; }
 }
+
+// ---------------------------------------------------------------- Agent Client Protocol (Zed personas)
+
+/**
+ * The same harness launched the way Zed launches it: over ACP, with orchestrator/harnesses/acp-client.mjs playing Zed
+ * (core/environment.ts ACP_ROUTES). Credentials and the pinned binary are the base harness's; only the launch and the
+ * event format differ. A follow-up turn reloads the ACP session (session/load).
+ */
+export function acpAdapter(base: HarnessAdapter, route: { command: string[]; env?: Record<string, string> }, clientPath: string): HarnessAdapter {
+  const argv = (o: ArgvOptions, load?: string) =>
+    ["node", clientPath, "--cwd", o.workdir, "--model", o.model, ...(load ? ["--load", load] : []), "--", ...route.command];
+  return {
+    ...base,
+    canResume: true,
+    env: (k) => ({ ...base.env(k), ...(route.env ?? {}) }),
+    launchArgv: (o) => argv(o),
+    resumeArgv: (o) => argv(o, o.sessionId),
+    newDigest: acpDigest,
+  };
+}
+
+function acpDigest(): DigestBuilder {
+  const d: TurnDigest = { lastText: "", commands: [], files: [], sessionId: null, error: null };
+  return {
+    observe(ev) {
+      if (ev.type === "acp.session" || ev.type === "acp.result") d.sessionId = ev.sessionId ?? d.sessionId;
+      if (ev.type === "acp.message" && ev.text) d.lastText = String(ev.text);
+      if (ev.type === "acp.tool_call") {
+        const input = (ev.rawInput ?? {}) as Record<string, unknown>;
+        if (ev.kind === "execute") pushUnique(d.commands, typeof input.command === "string" ? input.command : Array.isArray(input.command) ? input.command.join(" ") : ev.title);
+        if (ev.kind === "edit" || ev.kind === "delete" || ev.kind === "move") {
+          for (const l of (ev.locations ?? []) as { path?: string }[]) pushUnique(d.files, l.path);
+          pushUnique(d.files, (input.file_path ?? input.path ?? input.filePath) as string | undefined);
+        }
+      }
+      if (ev.type === "acp.error") d.error = String(ev.message ?? "acp error");
+      if (ev.type === "acp.result" && (ev.stopReason === "refusal")) d.error = `agent stopped: ${ev.stopReason}`;
+      if (ev.type === "acp.result" && (ev.stopReason === "max_turn_requests" || ev.stopReason === "max_tokens")) d.capped = true;
+    },
+    result: () => d,
+  };
+}

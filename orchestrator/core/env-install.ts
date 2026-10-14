@@ -3,7 +3,7 @@
  * sandbox's sudo user) and the harness wiring (as the agent user, into its HOME only). Names the agent can see are
  * neutral: nothing says Octillion, simulation or test.
  */
-import { SERENA, TOOL, type EnvTool, type SessionEnvironment } from "./environment.js";
+import { acpTools, SERENA, TOOL, usesAcp, type EnvTool, type SessionEnvironment } from "./environment.js";
 
 const b64 = (s: string) => Buffer.from(s, "utf8").toString("base64");
 const shq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
@@ -17,6 +17,7 @@ export function toolsFor(harness: string, env: SessionEnvironment): EnvTool[] {
   const tools = env.tools.map((id) => TOOL.get(id)).filter((t): t is EnvTool => !!t);
   const hasServers = tools.some((t) => t.lsp);
   if (hasServers && !NATIVE_LSP.has(harness) && MCP_CONFIG[harness]) tools.push(SERENA);
+  if (usesAcp(harness, env)) tools.push(...acpTools(harness));
   return tools;
 }
 
@@ -24,8 +25,8 @@ const PRELUDE = String.raw`
 SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo -n"
 export DEBIAN_FRONTEND=noninteractive
 export PATH="/usr/local/bin:$PATH"
-APT_UPDATED=""
-apt_install() { [ -n "$APT_UPDATED" ] || { $SUDO apt-get update -qq >&2; APT_UPDATED=1; }; $SUDO apt-get install -y -qq --no-install-recommends "$@" >&2; }
+# apt-get update once per sandbox (each tool is its own call: boat caps a command at 600s).
+apt_install() { [ -e /tmp/.apt-updated ] || { $SUDO apt-get update -qq >&2 && touch /tmp/.apt-updated; }; $SUDO apt-get install -y -qq --no-install-recommends "$@" >&2; }
 fetch() { curl -fsSL --retry 3 --retry-delay 2 -o "$2" "$1"; }
 ensure_node() {
   if [ -x /usr/local/bin/node ] && [ "$(/usr/local/bin/node -p 'process.versions.node.split(".")[0]')" -ge 22 ]; then return 0; fi
@@ -61,17 +62,21 @@ ensure_dart() {
  * Install script: only the tools this session needs, and only those not already on the sandbox (preinstalled by boat
  * or baked into a worker image): a tool whose binary is on PATH is kept as is. One subshell per tool, so one failure
  * never stops the rest or the session. Prints `ENV <id> present|ok|fail <seconds>` per tool (logs go to stderr).
+ * `bash env-install.sh <n>` runs only tool n (0-based): the runner calls it once per tool, each under boat's 600s cap.
  */
 export function envInstallScript(tools: EnvTool[]): string {
-  const steps = tools.map((t) => `s=$(date +%s)
-if command -v ${shq(t.bin)} >/dev/null 2>&1; then r=present
+  const steps = tools.map((t, i) => `[ -z "\${1:-}" ] || [ "$1" = ${i} ] && {
+s=$(date +%s)
+if ${t.check ?? `command -v ${shq(t.bin)} >/dev/null 2>&1`}; then r=present
 elif ( set -e; ${t.install.split("\n").join("\n  ")}
-     command -v ${shq(t.bin)} >/dev/null || [ -x /usr/local/bin/${t.bin} ] ) >&2; then r=ok; else r=fail; fi
-echo "ENV ${t.id} $r $(( $(date +%s) - s ))"`).join("\n");
+     ${t.check ?? `command -v ${shq(t.bin)} >/dev/null || [ -x /usr/local/bin/${t.bin} ]`} ) >&2; then r=ok; else r=fail; fi
+echo "ENV ${t.id} $r $(( $(date +%s) - s ))"
+}`).join("\n");
   return `#!/usr/bin/env bash
 set -uo pipefail
 ${PRELUDE}
 ${steps}
+exit 0
 `;
 }
 
@@ -79,7 +84,8 @@ ${steps}
 interface HomeFile { path: string; content: string }
 
 function serenaArgs(harness: string): string[] {
-  return ["start-mcp-server", "--context", harness === "codex" ? "codex" : "agent", "--project-from-cwd"];
+  // Serena 2.0 contexts: codex and antigravity have their own; `agent` for other autonomous CLIs.
+  return ["start-mcp-server", "--context", harness === "codex" || harness === "antigravity" ? harness : "agent", "--project-from-cwd"];
 }
 
 /** Claude Code local plugin marketplace for servers without an official plugin. */
@@ -101,9 +107,9 @@ function claudeLocalPlugins(servers: EnvTool[]): HomeFile[] {
  * Wiring script for the agent user (run with HOME = the agent's home, cwd = the workspace's parent). Writes config only
  * under $HOME; for Claude Code it also installs the plugins with the CLI itself.
  */
-export function harnessWiringScript(harness: string, tools: EnvTool[]): { script: string; summary: string } {
+export function harnessWiringScript(harness: string, tools: EnvTool[], env?: SessionEnvironment | null): { script: string; summary: string } {
   const servers = tools.filter((t) => t.lsp);
-  const files: HomeFile[] = [];
+  const files: HomeFile[] = personaFiles(harness, env);
   const cmds: string[] = [];
   let summary = "no language servers";
   const serena = tools.some((t) => t.id === SERENA.id);
@@ -112,19 +118,20 @@ export function harnessWiringScript(harness: string, tools: EnvTool[]): { script
     const official = servers.filter((t) => t.lsp!.claudePlugin);
     const local = servers.filter((t) => !t.lsp!.claudePlugin);
     if (official.length) {
-      cmds.push("claude plugin marketplace add anthropics/claude-plugins-official >&2 || true");
-      for (const t of official) cmds.push(`claude plugin install ${t.lsp!.claudePlugin}@claude-plugins-official >&2 && echo "WIRE ${t.id} plugin" || echo "WIRE ${t.id} fail"`);
+      cmds.push("claude plugin marketplace add anthropics/claude-plugins-official </dev/null >&2 || true");
+      for (const t of official) cmds.push(`claude plugin install ${t.lsp!.claudePlugin}@claude-plugins-official </dev/null >&2 && echo "WIRE ${t.id} plugin" || echo "WIRE ${t.id} fail"`);
     }
     if (local.length) {
       files.push(...claudeLocalPlugins(local));
-      cmds.push(`claude plugin marketplace add "$HOME/.local/share/lsp-plugins" >&2 || true`);
-      for (const t of local) cmds.push(`claude plugin install ${t.id.replace(/^lsp\//, "")}-lsp@local-lsp >&2 && echo "WIRE ${t.id} local-plugin" || echo "WIRE ${t.id} fail"`);
+      cmds.push(`claude plugin marketplace add "$HOME/.local/share/lsp-plugins" </dev/null >&2 || true`);
+      for (const t of local) cmds.push(`claude plugin install ${t.id.replace(/^lsp\//, "")}-lsp@local-lsp </dev/null >&2 && echo "WIRE ${t.id} local-plugin" || echo "WIRE ${t.id} fail"`);
     }
     summary = `Claude Code LSP plugins: ${servers.map((t) => t.lsp!.claudePlugin ?? `${t.id.replace(/^lsp\//, "")}-lsp (local)`).join(", ")}`;
   } else if ((harness === "opencode" || harness === "kilo") && servers.length) {
     const lsp = Object.fromEntries(servers.map((t) => [t.id.replace(/^lsp\//, ""), { command: t.lsp!.command, extensions: Object.keys(t.lsp!.extensions) }]));
     const path = harness === "kilo" ? ".config/kilo/kilo.json" : ".config/opencode/opencode.json";
-    files.push({ path, content: JSON.stringify({ $schema: harness === "kilo" ? "https://kilo.ai/config.json" : "https://opencode.ai/config.json", lsp }, null, 2) });
+    const instructions = harness === "kilo" && env?.agent_rules ? { instructions: ["~/.config/kilo/AGENTS.md"] } : {};
+    files.push({ path, content: JSON.stringify({ $schema: harness === "kilo" ? "https://kilo.ai/config.json" : "https://opencode.ai/config.json", lsp, ...instructions }, null, 2) });
     for (const t of servers) cmds.push(`echo "WIRE ${t.id} config"`);
     summary = `${harness} lsp config: ${Object.keys(lsp).join(", ")}`;
   } else if (serena) {
@@ -139,10 +146,36 @@ export function harnessWiringScript(harness: string, tools: EnvTool[]): { script
     for (const t of servers) cmds.push(`echo "WIRE ${t.id} unsupported"`);
     summary = `${harness}: no LSP or MCP wiring; language servers installed on PATH only`;
   }
+  // Kilo without language servers still needs `instructions` to read the standing rules.
+  if (harness === "kilo" && env?.agent_rules && !files.some((f) => f.path === ".config/kilo/kilo.json"))
+    files.push({ path: ".config/kilo/kilo.json", content: JSON.stringify({ $schema: "https://kilo.ai/config.json", instructions: ["~/.config/kilo/AGENTS.md"] }, null, 2) });
+  if (env?.skills?.length || env?.agent_rules) summary += `; ${env?.skills?.length ?? 0} skill(s)${env?.agent_rules ? " + standing rules" : ""}`;
   const writes = files.map((f) => `mkdir -p "$HOME/${f.path.replace(/\/[^/]+$/, "")}" && printf %s ${b64(f.content)} | base64 -d > "$HOME/${f.path}"`);
   // Codex: the MCP table is appended to config.toml (the credential setup keeps its own top-level keys first).
   if (harness === "codex" && serena) writes.push(`touch "$HOME/.codex/config.toml" && cat "$HOME/.codex/config.toml.mcp" >> "$HOME/.codex/config.toml" && rm -f "$HOME/.codex/config.toml.mcp"`);
   return { script: `set -uo pipefail\n${writes.join("\n")}\n${cmds.join("\n")}\n`, summary };
+}
+
+/**
+ * The persona's skills (SKILL.md, portable frontmatter: name + description) and standing rules, at each harness's
+ * user-level paths (the harnesses' docs, checked 2026-10-14). Kilo takes its rules through `instructions` in kilo.json.
+ */
+const SKILL_DIRS: Record<string, string> = {
+  "claude-code": ".claude/skills", codex: ".agents/skills", opencode: ".config/opencode/skills", kilo: ".kilo/skills",
+  pi: ".pi/agent/skills", cline: ".cline/skills", antigravity: ".gemini/antigravity-cli/skills",
+};
+const RULES_FILES: Record<string, string> = {
+  "claude-code": ".claude/CLAUDE.md", codex: ".codex/AGENTS.md", opencode: ".config/opencode/AGENTS.md", kilo: ".config/kilo/AGENTS.md",
+  pi: ".pi/agent/AGENTS.md", cline: ".cline/rules/developer.md", antigravity: ".gemini/GEMINI.md",
+};
+const yamlStr = (s: string) => JSON.stringify(s.replace(/\s+/g, " ").trim());
+export function personaFiles(harness: string, env?: SessionEnvironment | null): HomeFile[] {
+  const files: HomeFile[] = [];
+  const dir = SKILL_DIRS[harness];
+  for (const s of dir ? env?.skills ?? [] : [])
+    files.push({ path: `${dir}/${s.name}/SKILL.md`, content: `---\nname: ${s.name}\ndescription: ${yamlStr(s.description)}\n---\n\n${s.body.trim()}\n` });
+  if (env?.agent_rules && RULES_FILES[harness]) files.push({ path: RULES_FILES[harness]!, content: `${env.agent_rules.trim()}\n` });
+  return files;
 }
 
 /** Parse `ENV <id> ok|fail <s>` and `WIRE <id> <how>` lines. */

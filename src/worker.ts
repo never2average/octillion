@@ -48,7 +48,7 @@ export async function claimJobs(workerId: string, opts: { limit?: number; models
   if (opts.agent_ids?.length) params.push(opts.agent_ids), (filter += ` AND agent_id = ANY($${params.length})`);
   if (opts.simulation_id) params.push(opts.simulation_id), (filter += ` AND simulation_id = $${params.length}`);
   const jobs = await db.transaction(async (tx) => {
-    const rows = await tx.query<Omit<Job, "max_user_turns" | "profile" | "agent" | "environment"> & { profile_id: number | null }>(
+    const rows = await tx.query<Omit<Job, "max_user_turns" | "profile" | "agent" | "environment"> & { profile_id: number | null; prompt_variants: Record<string, string> | null }>(
       `UPDATE agent_sessions s SET status = 'running', worker_id = $1, started_at = now(), heartbeat_at = now()
          FROM scenarios sc
         WHERE sc.id = s.scenario_id AND s.id IN (
@@ -65,7 +65,7 @@ export async function claimJobs(workerId: string, opts: { limit?: number; models
                       ORDER BY pos, queued_at, id LIMIT $2)
                  FOR UPDATE SKIP LOCKED)
         RETURNING s.id AS session_id, s.simulation_id, s.org_id, s.product_id, s.model, s.harness, s.agent_id, s.attempt, s.profile_id,
-                  sc.prompt, sc.repo_url, sc.language, sc.template, sc.tags, sc.title`,
+                  sc.prompt, sc.prompt_variants, sc.repo_url, sc.language, sc.template, sc.tags, sc.title`,
       params,
     );
     if (rows.length)
@@ -87,12 +87,14 @@ export async function claimJobs(workerId: string, opts: { limit?: number; models
       ? await tx.query<Job["profile"] & { id: number; environment: PersonaEnvironment | null }>("SELECT id, slug, name, summary, attributes, instructions, environment FROM developer_profiles WHERE id = ANY($1)", [profileIds])
       : [];
     const devEnv = (process.env.OCTILLION_DEV_ENV ?? "on").toLowerCase() !== "off";
-    return rows.map(({ profile_id, ...r }) => {
+    return rows.map(({ profile_id, prompt_variants, ...r }) => {
       const p = profiles.find((x) => x!.id === profile_id);
       const spec = r.agent_id ? findAgent(r.agent_id) : undefined;
       const agent = spec ? { label: spec.label, harness_version: spec.harness_version, event_format: spec.event_format, image: spec.image, requires_env: spec.requires_env } : null;
       const environment = devEnv ? resolveEnvironment(p?.environment ?? null, languageOf(r.language, r.template), words.get(r.product_id) ?? []) : null;
-      return { ...r, agent, environment, max_user_turns: MAX_USER_TURNS(), profile: p ? { slug: p.slug, name: p.name, summary: p.summary, attributes: p.attributes, instructions: p.instructions } : null };
+      // The developer phrases the task in their own words when research wrote a version for this persona.
+      const prompt = (p && prompt_variants?.[p.slug]) || r.prompt;
+      return { ...r, prompt, agent, environment, max_user_turns: MAX_USER_TURNS(), profile: p ? { slug: p.slug, name: p.name, summary: p.summary, attributes: p.attributes, instructions: p.instructions } : null };
     });
   });
   return jobs;

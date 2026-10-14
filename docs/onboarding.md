@@ -46,9 +46,11 @@ customer ── get_onboarding / get_visibility_report ──▶ results
                "features": ["…"], "aliases": ["…"], "packages": ["…"], "domains": ["…"],
                "competitors": [{"name": "…", "aliases": [], "packages": [], "domains": []}] },
   "personas": [{ "name": "…", "summary": "…", "attributes": {"role": "…", "experience_years": 5, "company_size": "…",
-                 "stack": ["…"], "constraints": ["…"], "tone": "…"}, "instructions": "…" }],
+                 "stack": ["…"], "constraints": ["…"], "tone": "…"}, "instructions": "…",
+                 "environment": {"editor": "zed", "tools": ["cli/gh", "cli/psql"],
+                                 "skills": [{"name": "testing-conventions", "description": "…", "body": "…"}], "agent_rules": "…"} }],
   "scenarios": [{ "title": "…", "prompt": "…", "language": "…", "tags": ["…"], "expectation": "recommend" | "avoid",
-                  "rationale": "why the product fits (or not)", "library_task_id": 12, "repo_url": null }],
+                  "rationale": "why the product fits (or not)", "variants": {"<persona name>": "…"}, "library_task_id": 12, "repo_url": null }],
   "sources": [{"url": "…", "title": "…"}] }
 ```
 
@@ -60,3 +62,10 @@ customer ── get_onboarding / get_visibility_report ──▶ results
 - **Product fields:** at least one alias, package or domain beyond the name, so detection has something to match;
   competitor names must be distinct from the product.
 - **Personas** must not mention the product or its competitors (they answer the agent blind).
+- **Persona `environment`** `{editor, tools, skills, agent_rules}`: the editor and CLI tools come from the catalog in
+  `orchestrator/core/environment.ts`. Skills (at most 6, `name` lowercase-hyphenated, `body` 40-4000 characters) and
+  `agent_rules` (at most 3000 characters) are the developer's own agent setup, scaled by seniority. None of it may name
+  the product or a competitor. It is installed into the coding agent's harness for every session of that persona
+  (orchestrator/README.md, Developer environments).
+- **Scenario `variants`** `{persona name: prompt}`: the same problem in each persona's words, under the same blindness
+  and length rules as `prompt`. A session uses its persona's version.

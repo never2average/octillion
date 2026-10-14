@@ -35,6 +35,8 @@ export interface EnvTool {
   bin: string;
   /** Bash body (functions from env-install prelude available: SUDO, apt_install, npm_g, fetch, ensure_node). */
   install: string;
+  /** Presence check instead of `command -v bin` (for things that are not a binary on PATH). */
+  check?: string;
   lsp?: LspSpec;
 }
 
@@ -115,6 +117,40 @@ export const ENV_TOOLS: EnvTool[] = [
   npmTool("cli/wrangler", "Wrangler (Cloudflare Workers)", ["Cloudflare", "Wrangler"], "wrangler", "wrangler@4.151.0"),
 ];
 
+/**
+ * Zed: a Zed developer runs the agent from Zed's agent panel over the Agent Client Protocol, not in a terminal. The
+ * worker then launches the harness through ACP (the harness's own ACP mode or its ACP adapter) with a headless client
+ * playing Zed (orchestrator/harnesses/acp-client.mjs). Harnesses without an ACP route run as a CLI.
+ */
+export const ACP_ROUTES: Record<string, { command: string[]; pkg?: string; bin?: string; env?: Record<string, string> }> = {
+  "claude-code": { command: ["claude-agent-acp"], pkg: "@agentclientprotocol/claude-agent-acp@0.90.0", bin: "claude-agent-acp" },
+  codex: { command: ["codex-acp"], pkg: "@agentclientprotocol/codex-acp@2.2.2", bin: "codex-acp", env: { NO_BROWSER: "1", INITIAL_AGENT_MODE: "agent" } },
+  opencode: { command: ["opencode", "acp"] },
+  kilo: { command: ["kilo", "acp"] },
+  cline: { command: ["cline", "--acp"] },
+  pi: { command: ["pi-acp"], pkg: "pi-acp@0.0.34", bin: "pi-acp" },
+};
+export const ACP_CLIENT_DIR = "/usr/local/lib/acp-client";
+export const ACP_CLIENT_PATH = `${ACP_CLIENT_DIR}/acp-client.mjs`;
+
+/** Whether this session runs the harness over ACP (a Zed persona, a harness with a route, OCTILLION_ZED_ACP=on). */
+export function usesAcp(harness: string, env: SessionEnvironment | null | undefined): boolean {
+  // Off until a live run per adapter has confirmed credentials and model selection: OCTILLION_ZED_ACP=on enables it.
+  return env?.editor === "zed" && !!ACP_ROUTES[harness] && (process.env.OCTILLION_ZED_ACP ?? "off").toLowerCase() === "on";
+}
+
+/** The ACP client (uploaded next to the install script as acp-client.mjs) plus the harness's ACP adapter, when it has one. */
+export function acpTools(harness: string): EnvTool[] {
+  const r = ACP_ROUTES[harness];
+  if (!r) return [];
+  const client: EnvTool = { id: "acp/client", kind: "server", label: "ACP client", names: [], bin: "acp-client.mjs",
+    install: `ensure_node\n$SUDO install -D -m 0644 "$ACP_CLIENT_SRC" ${ACP_CLIENT_PATH}\n` +
+             `$SUDO env "PATH=$PATH" npm install --prefix ${ACP_CLIENT_DIR} --no-fund --no-audit --no-save @agentclientprotocol/sdk@1.8.0 >&2\n` +
+             `$SUDO chmod -R a+rX ${ACP_CLIENT_DIR}`,
+    check: `test -r ${ACP_CLIENT_PATH} && test -d ${ACP_CLIENT_DIR}/node_modules/@agentclientprotocol/sdk` };
+  return r.pkg ? [client, { id: `acp/${harness}`, kind: "server", label: `${harness} ACP adapter`, names: [], bin: r.bin!, install: `npm_g ${r.pkg}` }] : [client];
+}
+
 /** Serena: language servers over MCP, for harnesses without native LSP. Infrastructure, not persona-selectable. */
 export const SERENA: EnvTool = { id: "mcp/serena", kind: "server", label: "Serena (LSP over MCP)", names: ["Serena"], bin: "serena",
   install: "ensure_uv\nuv_tool serena-agent==2.0.0" };
@@ -138,15 +174,25 @@ export const EDITORS: Record<EditorId, { label: string; servers: Partial<Record<
   terminal: { label: "Terminal only", servers: {} },
 };
 
-/** Persona environment as stored on developer_profiles.environment. */
-export interface PersonaEnvironment { editor?: EditorId; tools?: string[] }
-/** What a session gets (resolved on the server at claim). */
-export interface SessionEnvironment { editor: EditorId; language: LanguageId | null; tools: string[]; dropped?: string[] }
+/** An Agent Skill (SKILL.md) the developer has built up for their kind of work. */
+export interface Skill { name: string; description: string; body: string }
+/**
+ * Persona environment as stored on developer_profiles.environment: editor, CLI tools, the skills they have written for
+ * their coding agent (more and deeper with seniority) and their standing instructions to it (a global AGENTS.md).
+ */
+export interface PersonaEnvironment { editor?: EditorId; tools?: string[]; skills?: Skill[]; agent_rules?: string }
+/** What a session gets (resolved on the server at claim). `dropped`: tool ids / skill names withheld for blindness. */
+export interface SessionEnvironment {
+  editor: EditorId; language: LanguageId | null; tools: string[]; skills?: Skill[]; agent_rules?: string | null; dropped?: string[];
+}
+
 
 /** Every developer has these. */
 export const BASE_TOOLS = ["cli/ripgrep", "cli/jq"];
 export const DEFAULT_EDITOR: EditorId = "vscode";
 export const MAX_PERSONA_TOOLS = 12;
+export const SKILL_LIMITS = { max_skills: 6, name: 64, description: 1024, body: 4000, agent_rules: 3000 };
+const SKILL_NAME = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 
 const TEMPLATE_LANGUAGE: Record<string, LanguageId> = {
   "express-ts": "typescript", "nextjs-ts": "typescript", "node-ts": "typescript", "react-native": "typescript",
@@ -178,6 +224,21 @@ export function environmentIssues(env: unknown): string[] {
       if (e.tools.length > MAX_PERSONA_TOOLS) issues.push(`at most ${MAX_PERSONA_TOOLS} environment tools`);
     }
   }
+  if (e.skills !== undefined) {
+    if (!Array.isArray(e.skills)) issues.push("environment.skills must be a list of {name, description, body}");
+    else {
+      if (e.skills.length > SKILL_LIMITS.max_skills) issues.push(`at most ${SKILL_LIMITS.max_skills} skills`);
+      const seen = new Set<string>();
+      e.skills.forEach((s, i) => {
+        if (!s || typeof s.name !== "string" || !SKILL_NAME.test(s.name) || s.name.length > SKILL_LIMITS.name) issues.push(`environment.skills[${i}].name must be lowercase-hyphenated, at most ${SKILL_LIMITS.name} characters`);
+        else if (seen.has(s.name)) issues.push(`environment.skills[${i}].name ${s.name} is a duplicate`); else seen.add(s.name);
+        if (typeof s?.description !== "string" || !s.description.trim() || s.description.length > SKILL_LIMITS.description) issues.push(`environment.skills[${i}].description must be 1-${SKILL_LIMITS.description} characters`);
+        if (typeof s?.body !== "string" || s.body.trim().length < 40 || s.body.length > SKILL_LIMITS.body) issues.push(`environment.skills[${i}].body must be 40-${SKILL_LIMITS.body} characters`);
+      });
+    }
+  }
+  if (e.agent_rules !== undefined && (typeof e.agent_rules !== "string" || e.agent_rules.length > SKILL_LIMITS.agent_rules))
+    issues.push(`environment.agent_rules must be text of at most ${SKILL_LIMITS.agent_rules} characters`);
   return issues;
 }
 
@@ -200,7 +261,13 @@ export function resolveEnvironment(persona: PersonaEnvironment | null | undefine
     const clash = blindWords.some((w) => w && (mentions(text, w) || t.names.some((n) => mentions(w, n))));
     (clash ? dropped : tools).push(id);
   }
-  return { editor, language, tools, ...(dropped.length ? { dropped } : {}) };
+  // Skills and standing rules are the developer's own words: one that names the product or a competitor is withheld.
+  const names = (text: string) => blindWords.some((w) => w && mentions(text, w));
+  const skills: Skill[] = [];
+  for (const s of persona?.skills ?? []) (names(`${s.name} ${s.description} ${s.body}`) ? dropped.push(`skill:${s.name}`) : skills.push(s));
+  let agent_rules: string | null = persona?.agent_rules?.trim() || null;
+  if (agent_rules && names(agent_rules)) { dropped.push("agent_rules"); agent_rules = null; }
+  return { editor, language, tools, ...(skills.length ? { skills } : {}), ...(agent_rules ? { agent_rules } : {}), ...(dropped.length ? { dropped } : {}) };
 }
 
 /** Catalog text for the research prompt. */

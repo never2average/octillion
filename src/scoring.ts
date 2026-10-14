@@ -41,6 +41,10 @@ export function segments(raw: RawEvent): { kind: "message" | "action"; text: str
   const msg = raw.message as { role?: string; content?: unknown } | undefined;
   const item = raw.item as { type?: string; text?: string; command?: string; changes?: unknown } | undefined;
 
+  // Agent Client Protocol runs (Zed personas, orchestrator/harnesses/acp-client.mjs): chunks are already joined.
+  if (type === "acp.message") return [{ kind: "message", text: str(raw.text) }];
+  if (type === "acp.tool_call") return [{ kind: "action", text: `${str(raw.title)}\n${str(raw.rawInput)}` }];
+  if (typeof type === "string" && type.startsWith("acp.")) return out;
   // Partial / in-progress events repeat what the final event says; counting them would double up.
   if (type === "stream_event" || type === "item.started" || type === "item.updated") return out;
   if (type === "tool_call" && raw.subtype === "completed") return out; // Cursor repeats the call on completion

@@ -64,8 +64,12 @@ export interface Sandbox {
 
 export interface EnvironmentResult {
   /** present = already on the sandbox (not reinstalled); installed = installed for this session. */
+  /** launch: "acp" = the harness ran over the Agent Client Protocol with a Zed-like client; "cli" = as a CLI. */
+  launch: "acp" | "cli";
   editor: string; language: string | null; requested: string[]; present: string[]; installed: string[]; failed: string[]; dropped: string[];
   wired: Record<string, string>; wiring: string; seconds: number;
+  /** Skill names and whether standing rules were written (contents are in the persona, not repeated here). */
+  skills: string[]; agent_rules: boolean;
 }
 
 export interface OpenSpec {
@@ -333,15 +337,27 @@ async function boatEnvironment(id: string, put: (path: string, content: string) 
   const t0 = Date.now();
   const tools = toolsFor(harness, env);
   await put(`${BOAT_DIR}/env-install.sh`, envInstallScript(tools));
-  const inst = await boatExec(id, `bash ${BOAT_DIR}/env-install.sh`, 900).catch((e) => ({ exitCode: -1, stdout: "", stderr: String(e) }));
-  const wiring = harnessWiringScript(harness, tools);
+  if (tools.some((t) => t.id === "acp/client")) await put(`${BOAT_DIR}/acp-client.mjs`, readFileSync(ACP_CLIENT_SRC, "utf8"));
+  // One call per tool: boat caps a command at 600s, and a slow install (a JDK) must not take the others with it.
+  const inst = { exitCode: 0, stdout: "", stderr: "" };
+  for (let i = 0; i < tools.length; i++) {
+    const r = await boatExec(id, `ACP_CLIENT_SRC=${BOAT_DIR}/acp-client.mjs bash ${BOAT_DIR}/env-install.sh ${i}`, 600)
+      .catch((e) => ({ exitCode: -1, stdout: `ENV ${tools[i]!.id} fail 0\n`, stderr: String(e) }));
+    inst.stdout += r.stdout;
+    if (r.exitCode !== 0) { inst.exitCode = r.exitCode ?? -1; inst.stderr += `${tools[i]!.id}: ${r.stderr.slice(-300)}\n`; }
+  }
+  const wiring = harnessWiringScript(harness, tools, env);
   await put(`${BOAT_DIR}/env-wire.sh`, wiring.script);
-  const wire = await boatExec(id, `cd / && ${boatRunAs()} env -i HOME=${AGENT_HOME} PATH="$(cat ${BOAT_DIR}/path)" bash ${BOAT_DIR}/env-wire.sh`, 300)
+  const wire = await boatExec(id, `cd / && ${boatRunAs()} env -i HOME=${AGENT_HOME} PATH="$(cat ${BOAT_DIR}/path)" bash -s < ${BOAT_DIR}/env-wire.sh`, 300)
     .catch((e) => ({ exitCode: -1, stdout: "", stderr: String(e) }));
   const r = parseEnvLines(`${inst.stdout}\n${wire.stdout}`);
-  if (r.failed.length || inst.exitCode !== 0) log(`[boat ${id}] environment: failed ${r.failed.join(", ") || "-"}: ${(inst.stderr || "").slice(-400)}`);
-  return { editor: env.editor, language: env.language, requested: tools.map((t) => t.id), present: r.present, installed: r.installed, failed: r.failed,
-           dropped: env.dropped ?? [], wired: r.wired, wiring: wiring.summary, seconds: Math.round((Date.now() - t0) / 1000) };
+  if (r.failed.length || inst.exitCode !== 0 || wire.exitCode !== 0)
+    log(`[boat ${id}] environment: failed ${r.failed.join(", ") || "-"}: ${(inst.stderr || "").slice(-400)} ${wire.exitCode !== 0 ? `wiring: ${(wire.stderr || "").slice(-300)}` : ""}`);
+  // ACP only when its pieces are really there (installed now or already present), never on silence.
+  const have = new Set([...r.installed, ...r.present]);
+  const acpOk = tools.filter((t) => t.id.startsWith("acp/")).every((t) => have.has(t.id)) && tools.some((t) => t.id === "acp/client");
+  return { launch: acpOk ? "acp" : "cli", editor: env.editor, language: env.language, requested: tools.map((t) => t.id), present: r.present, installed: r.installed, failed: r.failed,
+           dropped: env.dropped ?? [], skills: (env.skills ?? []).map((s) => s.name), agent_rules: !!env.agent_rules, wired: r.wired, wiring: wiring.summary, seconds: Math.round((Date.now() - t0) / 1000) };
 }
 
 function boatPrepareScript(bin: string, repoUrl: string | null, seed = false): string {
@@ -415,6 +431,7 @@ export function harnessPin(agentId: string | undefined, harness: string): string
 }
 
 const SETUP_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "images", "boat-setup");
+const ACP_CLIENT_SRC = join(dirname(fileURLToPath(import.meta.url)), "..", "harnesses", "acp-client.mjs");
 
 /** orchestrator/images/boat-setup/<harness>.sh + _common.sh, if this harness has one. */
 export function boatSetupScripts(harness: string): { common: string; script: string } | null {

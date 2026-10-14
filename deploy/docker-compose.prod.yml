@@ -143,6 +143,10 @@ services:
       OCTILLION_ORCH_PER_JOB: ${OCTILLION_ORCH_PER_JOB:-on}
       OCTILLION_JOB_POD_CAPACITY: ${OCTILLION_JOB_POD_CAPACITY:-40}
       OCTILLION_MAX_JOB_ORCHESTRATORS: ${OCTILLION_MAX_JOB_ORCHESTRATORS:-12}
+      # Per-persona developer environments (CLI tools, language servers, skills) installed into the harness; Zed
+      # personas over ACP once verified live (orchestrator/README.md, Developer environments).
+      OCTILLION_DEV_ENV: ${OCTILLION_DEV_ENV:-on}
+      OCTILLION_ZED_ACP: ${OCTILLION_ZED_ACP:-off}
       # Run sizing and spend guards. Runs are adaptive: every scenario starts with DEFAULT_SAMPLES sessions per developer
       # profile and is sampled further until its result is stable or it has had MAX_SAMPLES sessions.
       OCTILLION_DEFAULT_SAMPLES: ${OCTILLION_DEFAULT_SAMPLES:-3}

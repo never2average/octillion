@@ -166,7 +166,7 @@ if (process.argv[1] && /pi-octillion[\\/]main\.(ts|js)$/.test(process.argv[1])) 
       return brain;
     };
     // Per-job research orchestrator (ORCHESTRATOR_JOB=rsh_...): one onboarding research, then leave and exit. Context
-    // reaches the run's orchestrator only through the server (personas, problems, developer_context), never directly.
+    // reaches the run's orchestrator only through the server (personas and their environments, problems), never directly.
     if (CFG.job?.startsWith("rsh_")) {
       const fleet = new FleetMembership({ capacity: 1 }); // liveness for the autoscaler and the job's done signal
       const stop = () => { if (isShuttingDown()) process.exit(1); markShuttingDown(); log(`stopping research orchestrator for ${CFG.job}`); };

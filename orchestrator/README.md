@@ -84,10 +84,44 @@ In production nobody runs `up`. The server starts orchestrators when there is wo
 - Exit: the check-in returns `job.done` once the run completes or is cancelled, or the research completes or fails. The orchestrator then takes the graceful path (leave → `draining` → deleted next tick). Backstop: a bound orchestrator whose job ended over 3 minutes ago and runs nothing is deleted. The idle exit still applies.
 - Launch order: research first (a customer is waiting), then runs, oldest first. Each launch reserves 1 + its pods on the boat plan; a run that does not fit waits for the next tick. At most `OCTILLION_MAX_JOB_ORCHESTRATORS` (12), 2 launches per tick. A run whose orchestrator idled out with sessions still queued is not relaunched for `OCTILLION_ORCH_IDLE_MINUTES` unless new sessions are queued (adaptive batches are).
 - Recycle on deploy works per job: an old-code orchestrator gets no pods, a fresh one is launched for its job, and the old one is deleted once idle.
-- Context between the two kinds goes only through the database, never directly. Research writes the product profile, personas and problems, each problem with a blind `developer_context`, and `simulations.research_id` records which research a run came from. Each claimed session job carries its persona and `context`, and Pi gets the context as the developer's own notes on the task (`<developer_notes_on_this_task>`), never shown to the coding agent. See [docs/onboarding.md](../docs/onboarding.md).
+- Context between the two kinds goes only through the database, never directly: research writes the product profile, the personas (each with a developer environment, see below) and the problems, each also phrased in every persona's own words; `simulations.research_id` records which research a run came from.
 - Tests: `npx tsx orchestrator/test/per-job.ts` (PGlite + mock boat).
 
 `OCTILLION_ORCH_PER_JOB=off` restores the shared fleet described below.
+
+### Developer environments (per persona, `core/environment.ts`, `core/env-install.ts`)
+
+What a persona's developer has on their machine goes into the harness, not into a note for the simulated developer.
+No GUI toolchains are installed.
+
+- **Editor profile** (`vscode`, `zed`, `intellij`, `neovim`, `terminal`): picks the language servers that editor uses by default for the task's language. Zed: vtsls, basedpyright + ruff. VS Code, IntelliJ and Neovim: the closest open servers (typescript-language-server, pyright, jdtls, ...). Terminal: none.
+- **CLI tools** from a pinned catalog (ripgrep, jq, gh, psql, uv, kubectl, terraform, cloud CLIs, ...). Every developer gets ripgrep and jq.
+- **Skills and standing rules** the developer wrote for their coding agent, scaled by seniority (juniors 0-1 skills, seniors 3-6, at most 6). Written to each harness's user-level paths:
+  - Claude Code: `~/.claude/skills`, `~/.claude/CLAUDE.md`
+  - Codex: `~/.agents/skills`, `~/.codex/AGENTS.md`
+  - OpenCode: `~/.config/opencode/skills`, its `AGENTS.md`
+  - Kilo: `~/.kilo/skills`, rules via `instructions`
+  - Pi: `~/.pi/agent/skills`, its `AGENTS.md`
+  - Cline: `~/.cline/skills`, `~/.cline/rules`
+  - Antigravity: `~/.gemini/antigravity-cli/skills`, `~/.gemini/GEMINI.md`
+- **The task in the persona's words**: `scenarios.prompt_variants` (by persona slug). Juniors state the outcome; seniors add constraints and acceptance criteria.
+- **Resolution at claim** (`src/worker.ts`): the editor's servers for the task's language, the base CLIs, and the persona's tools, skills and rules.
+  - Anything that names the product or a competitor is withheld and listed in `dropped`.
+  - Without a persona environment: VS Code defaults.
+  - `OCTILLION_DEV_ENV=off` disables environments.
+- **Install** (boat worker sandbox, before the first run): only what the session needs. A tool already on the sandbox is kept (`present`), so nothing is reinstalled. Pinned and system-wide; a tool that fails is reported and the session runs without it.
+- **Wiring:**
+  - Claude Code: official LSP plugins (`claude-plugins-official`), or a local `.lsp.json` plugin.
+  - OpenCode and Kilo: the `lsp` user config.
+  - Codex, Cline, Pi and Antigravity: Serena (LSP over MCP).
+  - Config goes only under the agent's HOME; `.serena/` is excluded from the scored diff.
+- **Zed personas run over ACP**, as Zed's agent panel does (`harnesses/acp-client.mjs`). This is off by default until a live run per adapter confirms credentials and model selection; `OCTILLION_ZED_ACP=on` turns it on (worker side: set it in the orchestrator's tuning). The install, wiring and ACP `initialize` handshake were verified on boat on 2026-10-14 for Claude Code, Codex, OpenCode, Pi and Cline, all with `loadSession: true`.
+  - The client advertises Zed's capabilities and `clientInfo`, sends the prompt as plain text, forwards no MCP servers, and allows permission requests.
+  - It serves `fs/*` and `terminal/*` on the workspace, and reloads the session for developer replies.
+  - Routes: `claude-agent-acp` (runs the pinned `claude`), `codex-acp` (runs the pinned `codex`), `opencode acp`, `kilo acp`, `cline --acp` and `pi-acp`. Antigravity has no route and runs as a CLI.
+  - Events are `acp.*` (whole messages and tool calls), scored like any harness.
+- **Recorded:** an `environment` transcript event and session `metadata.environment` (launch, editor, language, present / installed / failed / dropped, skills, wiring, seconds).
+- **Tests:** `orchestrator/test/per-job.ts` (resolution, blindness, wiring, skills, variants) and `orchestrator/test/acp-client.ts` (the client against a mock ACP agent built with the official SDK).
 
 - **Leader.** One server instance acts at a time, via a lease row in `autoscaler_lease` (renewed every tick, expires after 3 ticks). An advisory lock wouldn't work: session locks are per connection, and xact locks can't span a launch.
 - **Demand, every `OCTILLION_AUTOSCALE_TICK_SECONDS` (15).** Counts queued and running `agent_sessions` (only agents the fleet schedules) plus queued and running `product_research`.

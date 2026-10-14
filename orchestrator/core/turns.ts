@@ -28,6 +28,8 @@ export function newStepCounter(harness: string): StepCounter {
   let sawText = false;
   const add = (n: number) => { total += n; return n; };
   const observe = (ev: Record<string, any>): number => {
+    // ACP runs (a Zed persona): one step per completed tool call or agent message, whatever the harness.
+    if (typeof ev.type === "string" && ev.type.startsWith("acp.")) return ev.type === "acp.tool_call" || ev.type === "acp.message" ? add(1) : 0;
     switch (id) {
       case "claude-code": case "qwen-code": case "amp": {
         if (ev.type !== "assistant") return 0;

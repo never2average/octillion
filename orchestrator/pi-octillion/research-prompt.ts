@@ -50,6 +50,15 @@ Procedure:
    psql). Their editor's language servers for the task's language are added automatically. Never pick a tool from
    the product or a competitor. Choose only from this catalog:
 ${ENV_CATALOG}
+   Also give each persona the skills and standing instructions they have built up for their coding agent:
+   - skills: Agent Skills they wrote for the task types they do (name: lowercase-hyphenated; description: when to use
+     it; body: the procedure, 40-4000 characters). Scale with seniority: juniors 0-1 short ones, mid-level 1-3,
+     seniors 3-6 deeper ones (testing conventions, migration and rollback checklists, error-handling and logging
+     standards, review and commit rules, performance budgets). At most 6.
+   - agent_rules: their global AGENTS.md (at most 3000 characters): coding standards, how to verify work, what to ask
+     before doing. Juniors' are short or empty; seniors' are specific.
+   Both may reflect the persona's stated constraints, but must never name the product, a competitor, a vendor or a
+   service, nor tell the agent to prefer or avoid third-party services in general.
 4. Problems. First search_library for tasks that fit the product's use case. Prefer fitting library tasks: include
    them with library_task_id and your rationale, and copy their title and prompt verbatim (many are written for a
    specific pinned open-source repository, which Octillion attaches automatically). Then create new problems until
@@ -72,6 +81,9 @@ ${ENV_CATALOG}
    project); optionally set "template" to one of express-ts | nextjs-ts | node-ts | fastapi | django | go-http |
    react-native | flutter | java-spring | rust-axum | cpp-cmake, and phrase
    the prompt as work in "this project" / "this service".
+   Then write each problem once per persona, in that persona's own words (variants: {persona name: prompt}): the same
+   task and the same acceptance bar, phrased the way that developer would. Juniors are shorter and state the outcome;
+   seniors name constraints, edge cases and acceptance criteria. Same blindness and length rules as the prompt.
 5. Validating. Call validate with the full result. Fix every issue it reports, then submit. If submit returns issues,
    fix them and submit again. Stop once it is accepted.
 
@@ -79,9 +91,10 @@ Result JSON (pass it as a JSON string in result_json):
 { "product": { "name", "description", "category", "website_url", "docs_url", "features": [], "aliases": [],
                "packages": [], "domains": [], "competitors": [{"name", "aliases": [], "packages": [], "domains": []}] },
   "personas": [{ "name", "summary", "attributes": {"role", "experience_years", "company_size", "stack": [],
-                 "constraints": [], "tone"}, "instructions", "environment": {"editor", "tools": []} }],
+                 "constraints": [], "tone"}, "instructions",
+                 "environment": {"editor", "tools": [], "skills": [{"name", "description", "body"}], "agent_rules"} }],
   "scenarios": [{ "title", "prompt", "language", "tags": [], "expectation": "recommend" | "avoid", "rationale",
-                  "library_task_id": null, "repo_url": null, "template": null }],
+                  "variants": {"<persona name>": "<the prompt in their words>"}, "library_task_id": null, "repo_url": null, "template": null }],
   "sources": [{ "url", "title" }] }
 
 Be factual. If a page does not say something, don't claim it. List every page you used in sources.`;

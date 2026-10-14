@@ -216,6 +216,43 @@ try {
   check("install result parsing", parsed.present[0] === "cli/jq" && parsed.installed[0] === "lsp/dart" && parsed.failed[0] === "mcp/serena" && parsed.wired["lsp/dart"] === "serena", JSON.stringify(parsed));
   check("nothing the agent can see names Octillion", ![cc.script, cx.script, oc.script].some((x) => /octi/i.test(x)), "");
 
+  // skills + standing rules (per persona, seniority-scaled) and the task in the persona's own words
+  const skill = (name: string, body: string) => ({ name, description: `Use when working on ${name.replace(/-/g, " ")}.`, body });
+  const senior = { editor: "vscode", tools: [], agent_rules: "Run the tests before saying done. Ask before adding a dependency.",
+    skills: [skill("testing-conventions", "Write table-driven tests next to the code; cover error paths; run the whole suite before finishing."),
+             skill("email-vendor-notes", "We send through Postbox; reuse its client wrapper in lib/mail for anything transactional.")] };
+  const [sp] = await db.query<any>(
+    `INSERT INTO developer_profiles (slug, name, summary, attributes, instructions, org_id, product_id, source, active, environment)
+     VALUES ('pj-senior', 'Senior dev', '', '{}', '', $1, $2, 'generated', true, $3) RETURNING id`, [O.orgId, pid, JSON.stringify(senior)]);
+  const one = await db.query<any>("SELECT id, scenario_id FROM agent_sessions WHERE simulation_id = $1 ORDER BY id LIMIT 1", [simA]);
+  await db.query("UPDATE agent_sessions SET status = 'queued', worker_id = NULL WHERE simulation_id = $1", [simA]);
+  await db.query("UPDATE agent_sessions SET profile_id = $2 WHERE id = $1", [one[0].id, sp.id]);
+  const seniorPrompt = "Add password reset emails: signed single-use tokens, 30 minute expiry, rate limited per account, with tests for expiry and reuse.";
+  await db.query("UPDATE scenarios SET prompt_variants = $2 WHERE id = $1", [one[0].scenario_id, JSON.stringify({ "pj-senior": seniorPrompt, "someone-else": "nope" })]);
+  const jobs4 = await worker.claimJobs("w-A", { limit: 50, simulation_id: simA });
+  const sj = jobs4.find((j) => j.session_id === one[0].id)!;
+  const otherJob = jobs4.find((j) => j.session_id !== one[0].id && (j as any).profile?.slug !== "pj-senior")!;
+  check("the session gets its persona's phrasing of the task; others keep the base prompt", sj.prompt === seniorPrompt && otherJob.prompt !== seniorPrompt, sj.prompt);
+  check("persona skills + standing rules reach the session; a skill naming a competitor is withheld",
+    sj.environment!.skills?.map((s) => s.name).join(",") === "testing-conventions" && sj.environment!.agent_rules === senior.agent_rules &&
+    sj.environment!.dropped?.includes("skill:email-vendor-notes") === true, JSON.stringify(sj.environment));
+  const files = (h: string) => ei.personaFiles(h, sj.environment);
+  check("skills and rules land at each harness's user-level paths",
+    files("claude-code").map((f) => f.path).join(",") === ".claude/skills/testing-conventions/SKILL.md,.claude/CLAUDE.md" &&
+    files("codex")[0]!.path === ".agents/skills/testing-conventions/SKILL.md" && files("codex")[1]!.path === ".codex/AGENTS.md" &&
+    files("pi")[0]!.path === ".pi/agent/skills/testing-conventions/SKILL.md" && files("cline")[1]!.path === ".cline/rules/developer.md" &&
+    files("opencode")[1]!.path === ".config/opencode/AGENTS.md", files("claude-code").map((f) => f.path).join(","));
+  check("SKILL.md has name + description frontmatter", /^---\nname: testing-conventions\ndescription: "Use when working on testing conventions\."\n---\n\nWrite table-driven/.test(files("claude-code")[0]!.content), files("claude-code")[0]!.content);
+  const kw = ei.harnessWiringScript("kilo", [], sj.environment);
+  const kj = /printf %s (\S+) \| base64 -d > "\$HOME\/\.config\/kilo\/kilo\.json"/.exec(kw.script);
+  check("Kilo reads the rules through `instructions`", !!kj && JSON.parse(Buffer.from(kj[1]!, "base64").toString()).instructions[0] === "~/.config/kilo/AGENTS.md", kw.script.slice(0, 200));
+  const pv = research.validateResearch({ ...base, personas: [{ name: "Dev" }, { name: "Lead" }],
+    scenarios: base.scenarios.map((s, i) => ({ ...s, variants: i === 0 ? { Dev: "Short: add reset emails to this Express service please, thanks a lot.", Ghost: "x".repeat(50) } : i === 1 ? { Lead: "Use Quillmail to send password reset emails from this Express service." } : {} })) } as any);
+  check("research validation: variants must belong to a persona and stay blind", pv.some((x) => /"Ghost", which is not a persona/.test(x)) && pv.some((x) => /variants\["Lead"\] names Quillmail/.test(x)) && pv.length === 2, pv.join(" | "));
+  const sk = research.validateResearch({ ...base, personas: [{ name: "Dev", environment: { skills: [{ name: "Bad Name", description: "", body: "short" }], agent_rules: "x".repeat(4000) } }] } as any);
+  check("research validation: skill format and limits", sk.some((x) => /name must be lowercase-hyphenated/.test(x)) && sk.some((x) => /description must be/.test(x)) &&
+    sk.some((x) => /body must be 40-/.test(x)) && sk.some((x) => /agent_rules must be text of at most 3000/.test(x)), sk.join(" | "));
+
   // run over -> job.done -> leave -> reaped; the other run's orchestrator is untouched
   await db.query("UPDATE agent_sessions SET status = 'completed' WHERE simulation_id = $1", [simA]);
   await db.query("UPDATE simulations SET status = 'completed', finished_at = now() WHERE id = $1", [simA]);

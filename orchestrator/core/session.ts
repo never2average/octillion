@@ -13,7 +13,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
-import { getAdapter, type HarnessAdapter, type TurnDigest } from "../harnesses/adapters.js";
+import { acpAdapter, getAdapter, type HarnessAdapter, type TurnDigest } from "../harnesses/adapters.js";
 import { CFG } from "./config.js";
 import { CREDENTIALS_MODE, redact, sessionCredentials, sessionCredsExpiring, type SessionCreds } from "./credentials.js";
 import { harnessCredentials, withCredentialSetup, providersFromEnv, CRED_SPECS } from "../harnesses/credentials.js";
@@ -24,7 +24,7 @@ import { api, HttpError, log, withRetry } from "./util.js";
 import { assessDiff, type Progress } from "./progress.js";
 import { newStepCounter } from "./turns.js";
 import { selectTemplate, type TemplateId } from "./workspaces.js";
-import type { SessionEnvironment } from "./environment.js";
+import { ACP_CLIENT_PATH, ACP_ROUTES, type SessionEnvironment } from "./environment.js";
 
 export interface Profile {
   slug?: string;
@@ -183,7 +183,10 @@ export class WorkerSession {
   cancelledByServer = false;
   startError: string | null = null;
 
-  private constructor(readonly job: Job, readonly adapter: HarnessAdapter, private runner: Runner) {
+  /** The harness adapter; a Zed persona's session switches to its ACP launch once the ACP client is installed. */
+  adapter: HarnessAdapter;
+  private constructor(readonly job: Job, adapter: HarnessAdapter, private runner: Runner) {
+    this.adapter = adapter;
     this.maxUserTurns = Math.max(0, Number.isFinite(job.max_user_turns) ? Number(job.max_user_turns) : CFG.defaultMaxUserTurns);
     this.template = job.repo_url ? null : selectTemplate({ template: job.template, language: job.language, tags: job.tags, title: job.title, prompt: job.prompt });
     this.sink = new EventSink(
@@ -225,10 +228,12 @@ export class WorkerSession {
                                        environment: job.environment ?? null });
       if (s.sandbox.environment) {
         const e = s.sandbox.environment;
+        // Zed persona: launch over the Agent Client Protocol, as Zed's agent panel does (CLI if the ACP install failed).
+        if (e.launch === "acp" && ACP_ROUTES[adapter.id]) s.adapter = acpAdapter(adapter, ACP_ROUTES[adapter.id]!, ACP_CLIENT_PATH);
         s.sink.push({ type: "environment", ...e });
         log(`[${job.session_id}] environment ${e.editor}/${e.language ?? "-"}: ${e.present.length} present, ${e.installed.length} installed, ${e.failed.length} failed in ${e.seconds}s; ${e.wiring}`);
       }
-      log(`[${job.session_id}] ${s.handle} started ${adapter.id}/${job.model} in ${s.sandbox.id}${job.repo_url ? ` repo=${job.repo_url}` : ` template=${s.template}`}`);
+      log(`[${job.session_id}] ${s.handle} started ${adapter.id}/${job.model}${s.adapter !== adapter ? " over ACP (Zed)" : ""} in ${s.sandbox.id}${job.repo_url ? ` repo=${job.repo_url}` : ` template=${s.template}`}`);
       await s.launch(job.prompt, null);
     } catch (e) {
       s.startError = String(e instanceof Error ? e.message : e);

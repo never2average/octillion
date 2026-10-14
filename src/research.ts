@@ -23,6 +23,8 @@ export interface ResearchResult {
               environment?: PersonaEnvironment }[];
   scenarios: { title?: string; prompt: string; language?: string; tags?: string[]; expectation?: "recommend" | "avoid";
                rationale?: string; library_task_id?: number; repo_url?: string | null;
+               /** The same problem in each persona's words: {persona name: prompt}. */
+               variants?: Record<string, string>;
                /** Optional starter workspace (orchestrator/workspaces/<template>) for scenarios without repo_url. */
                template?: string | null }[];
   sources?: { url: string; title?: string }[];
@@ -179,6 +181,14 @@ export function validateResearch(r: ResearchResult | undefined): string[] {
       issues.push(`scenarios[${i}].template must be one of ${WORKSPACE_TEMPLATES.join(", ")} (or null)`);
     const leak = named(`${s?.title ?? ""} ${prompt}`, [...productWords, ...competitorWords]);
     if (leak.length) issues.push(`scenarios[${i}] names ${leak.join(", ")}; rephrase it as a neutral task that never names the product or competitors`);
+    if (s?.variants != null) {
+      if (typeof s.variants !== "object" || Array.isArray(s.variants)) issues.push(`scenarios[${i}].variants must be {persona name: prompt}`);
+      else for (const [who, text] of Object.entries(s.variants)) {
+        if (!personas.some((x) => x?.name === who)) issues.push(`scenarios[${i}].variants has "${who}", which is not a persona name`);
+        if (typeof text !== "string" || text.trim().length < 40 || text.length > 2000) issues.push(`scenarios[${i}].variants["${who}"] must be 40-2000 characters`);
+        else { const l = named(text, [...productWords, ...competitorWords]); if (l.length) issues.push(`scenarios[${i}].variants["${who}"] names ${l.join(", ")}; keep it neutral`); }
+      }
+    }
   });
   return issues;
 }
@@ -220,6 +230,7 @@ export async function completeResearch(id: string, body: { status?: string; erro
     [job.product_id, JSON.stringify(p.features ?? []), JSON.stringify({ research_id: id, sources: r.sources ?? [], at: new Date().toISOString() })]);
 
   const personaSlugs: string[] = [];
+  const slugOf = new Map<string, string>();
   await db.transaction(async (tx) => {
     // A new research replaces the previous generated personas and problems (kept for history, inactive).
     await tx.query("UPDATE developer_profiles SET active = false WHERE product_id = $1 AND source = 'generated'", [job.product_id]);
@@ -227,11 +238,13 @@ export async function completeResearch(id: string, body: { status?: string; erro
     for (const x of r.personas) {
       const slug = `p${job.product_id}-${slugify(x.name)}-${randomId("", 3).toLowerCase().replace(/[^a-z0-9]/g, "x")}`;
       personaSlugs.push(slug);
+      slugOf.set(x.name, slug);
       await tx.query(
         `INSERT INTO developer_profiles (slug, name, summary, attributes, instructions, org_id, product_id, source, active, environment)
          VALUES ($1, $2, $3, $4, $5, $6, $7, 'generated', true, $8)`,
         [slug, x.name.trim(), x.summary ?? "", JSON.stringify(x.attributes ?? {}), x.instructions ?? "", job.org_id, job.product_id,
-         x.environment ? JSON.stringify({ editor: x.environment.editor, tools: x.environment.tools ?? [] }) : null]);
+         x.environment ? JSON.stringify({ editor: x.environment.editor, tools: x.environment.tools ?? [], skills: x.environment.skills ?? [],
+                                          agent_rules: x.environment.agent_rules ?? null }) : null]);
     }
     for (const s of r.scenarios) {
       const prompt = s.prompt.trim();
@@ -246,11 +259,11 @@ export async function completeResearch(id: string, body: { status?: string; erro
         if (!repoUrl) repoUrl = t?.repo_url ?? null;
       }
       await tx.query(
-        `INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, library_task_id, source, rationale, template)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $9, $10, $11)`,
+        `INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, library_task_id, source, rationale, template, prompt_variants)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $9, $10, $11, $12)`,
         [job.product_id, s.title?.trim() || prompt.slice(0, 80), prompt, repoUrl, s.language ?? null, s.tags ?? [],
          s.expectation ?? "recommend", s.library_task_id ?? null, s.library_task_id ? "library" : "generated", s.rationale ?? null,
-         template]);
+         template, JSON.stringify(Object.fromEntries(Object.entries(s.variants ?? {}).filter(([who]) => slugOf.has(who)).map(([who, t]) => [slugOf.get(who)!, t.trim()])))]);
     }
     await tx.query(
       "UPDATE product_research SET status = 'completed', stage = 'done', result = $2, finished_at = now(), heartbeat_at = now() WHERE id = $1",
