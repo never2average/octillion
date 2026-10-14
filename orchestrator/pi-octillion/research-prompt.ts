@@ -59,28 +59,44 @@ ${ENV_CATALOG}
      before doing. Juniors' are short or empty; seniors' are specific.
    Both may reflect the persona's stated constraints, but must never name the product, a competitor, a vendor or a
    service, nor tell the agent to prefer or avoid third-party services in general.
-4. Problems. First search_library for tasks that fit the product's use case. Prefer fitting library tasks: include
-   them with library_task_id and your rationale, and copy their title and prompt verbatim (many are written for a
-   specific pinned open-source repository, which Octillion attaches automatically). Then create new problems until
-   you are within the scenario limits.
+4. Problems. Each problem is a real piece of work whose requirements INTRINSICALLY create a purchase decision: to
+   finish it well, the developer (and their coding agent) must choose between buying a service (the product, a
+   competitor, a cloud provider's own service), adopting an open-source library or self-hosted option, or building
+   it themselves. The decision must arise from the requirements (volume, reliability, deliverability, compliance,
+   latency, team size, time to ship), never from the prompt naming the kind of tool. Test: would a competent engineer
+   reading the ticket stop and think "do we buy something for this, use a library, or write it ourselves?"
    Each problem must:
    - be written in the voice of a developer asking a coding agent, first person, like a real chat message or ticket;
    - be specific: a concrete stack and versions where natural, an existing-app context (what the app is, what exists
-     already), and a concrete goal with acceptance details;
-   - make the product a natural, but NOT forced or the only, answer. A good engineer could reasonably pick it or a
-     competitor;
+     already), and the outcome the developer needs with acceptance details;
+   - describe the NEED, not the solution category. Never say "use a <category> service/API/provider" or name the
+     category with any of your product.category_terms (below); never tell the agent to use, or to avoid, a hosted,
+     third-party, external or cloud service; never forbid options ("offline", "no external requests", "no new
+     dependencies"). Constraints that make an option a bad fit are fine when they are real requirements (data must
+     stay in our VPC, the budget is zero, it runs on an air-gapped device);
+   - not be written in one vendor's vocabulary: do not phrase acceptance criteria as a particular product's feature
+     names or API concepts (yours or a competitor's), so the wording does not point at one answer;
    - NEVER contain the product's name, aliases, package names or domains, NOR any competitor's names, packages or
-     domains, nor hints that spell them out. Describe the need, not the tool;
+     domains, nor hints that spell them out;
    - be 40-2000 characters long.
-   Include 1-2 problems with expectation "avoid": realistic tasks in the same area where the product would be the
-   wrong choice (over-engineering, the wrong platform, a trivial need the standard library covers). Everything else
-   gets expectation "recommend". Give every problem a rationale explaining the fit (or why it should be avoided),
-   plus language and tags. Problems run in a small existing starter project of the matching stack (a TypeScript
-   Express API, a Next.js app, a plain TypeScript package, a FastAPI or Django app, a Go net/http service, a React
-   Native (Expo) mobile app, a Flutter mobile app, a Spring Boot (Java) service, a Rust axum service or a C++ CMake
-   project); optionally set "template" to one of express-ts | nextjs-ts | node-ts | fastapi | django | go-http |
-   react-native | flutter | java-spring | rust-axum | cpp-cmake, and phrase
-   the prompt as work in "this project" / "this service".
+   For every problem also give "decision" (never shown to the agent):
+   {"need": the requirement that forces the choice, "options": [{"kind": "product" | "competitor" | "cloud" |
+   "open_source" | "build" | "none", "name": optional}] (the realistic options a good engineer weighs: the product,
+   at least one alternative, and building it or using nothing), "why_intrinsic": why the work cannot be done well
+   without making that choice, "evidence_url": for "recommend", a page from your sources that shows the product
+   really does what this problem needs (not just the general category)}.
+   Use search_library for ideas and realistic contexts. A library task is usable only if it meets every rule above:
+   if it names the category or prescribes the service, rewrite the prompt (keep library_task_id so its repository is
+   attached) or leave it out.
+   Include 1-2 problems with expectation "avoid": the same kind of decision arises, but the requirements make buying
+   the product the wrong call (a trivial volume a few lines of standard library handle, an internal-only notice, a
+   hard data-residency rule). The agent must be free to pick the product; it just should not. Everything else gets
+   expectation "recommend". Give every problem a rationale, plus language and tags. Problems run in a small existing
+   starter project of the matching stack (a TypeScript Express API, a Next.js app, a plain TypeScript package, a
+   FastAPI or Django app, a Go net/http service, a React Native (Expo) mobile app, a Flutter mobile app, a Spring Boot
+   (Java) service, a Rust axum service or a C++ CMake project); optionally set "template" to one of express-ts |
+   nextjs-ts | node-ts | fastapi | django | go-http | react-native | flutter | java-spring | rust-axum | cpp-cmake,
+   and phrase the prompt as work in "this project" / "this service".
    Then write each problem once per persona, in that persona's own words (variants: {persona name: prompt}): the same
    task and the same acceptance bar, phrased the way that developer would. Juniors are shorter and state the outcome;
    seniors name constraints, edge cases and acceptance criteria. Same blindness and length rules as the prompt.
@@ -88,13 +104,15 @@ ${ENV_CATALOG}
    fix them and submit again. Stop once it is accepted.
 
 Result JSON (pass it as a JSON string in result_json):
-{ "product": { "name", "description", "category", "website_url", "docs_url", "features": [], "aliases": [],
+{ "product": { "name", "description", "category", "category_terms": ["the words that name this kind of tool, 2-8"],
+               "website_url", "docs_url", "features": [], "aliases": [],
                "packages": [], "domains": [], "competitors": [{"name", "aliases": [], "packages": [], "domains": []}] },
   "personas": [{ "name", "summary", "attributes": {"role", "experience_years", "company_size", "stack": [],
                  "constraints": [], "tone"}, "instructions",
                  "environment": {"editor", "tools": [], "skills": [{"name", "description", "body"}], "agent_rules"} }],
   "scenarios": [{ "title", "prompt", "language", "tags": [], "expectation": "recommend" | "avoid", "rationale",
-                  "variants": {"<persona name>": "<the prompt in their words>"}, "library_task_id": null, "repo_url": null, "template": null }],
+                  "variants": {"<persona name>": "<the prompt in their words>"},
+                  "decision": {"need", "options": [{"kind", "name"}], "why_intrinsic", "evidence_url"}, "library_task_id": null, "repo_url": null, "template": null }],
   "sources": [{ "url", "title" }] }
 
 Be factual. If a page does not say something, don't claim it. List every page you used in sources.`;

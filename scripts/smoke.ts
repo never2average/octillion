@@ -582,8 +582,11 @@ try {
     const lib = await (await fetch(`${base}/api/worker/library/tasks?category=background-jobs`, { headers: { authorization: `Bearer ${WORKER_TOKEN}` } })).json();
     assert.ok(lib.tasks.length >= 1, "orchestrator can search the task library");
 
+    const qDecision = { need: "work must survive restarts and endpoint outages", options: [{ kind: "product" }, { kind: "open_source", name: "BullMQ" }, { kind: "build" }],
+                        why_intrinsic: "Durable retries across deploys need a queue: run one, adopt a library, or build persistence yourself.",
+                        evidence_url: "https://docs.quickqueue.example.com/install" };
     const good = {
-      product: { name: "QuickQueue", description: "Hosted job queue for TypeScript.", category: "Background jobs",
+      product: { name: "QuickQueue", description: "Hosted job queue for TypeScript.", category: "Background jobs", category_terms: ["job queue", "background job service"],
                  aliases: ["Quick Queue"], packages: ["@quickqueue/sdk"], domains: ["quickqueue.example.com"],
                  competitors: [{ name: "BullMQ", packages: ["bullmq"] }, { name: "Inngest", packages: ["inngest"] }, { name: "Trigger.dev", packages: ["@trigger.dev/sdk"] }] },
       personas: [
@@ -591,9 +594,9 @@ try {
         { name: "Enterprise platform engineer", summary: "Compliance-heavy, self-hosting preferred.", attributes: { stack: ["Go"] }, instructions: "Asks about cost." },
       ],
       scenarios: [
-        { title: "Retry webhooks", prompt: "Our Express API sends webhooks inline and loses them when a customer endpoint is down. Make delivery reliable with retries and backoff.", rationale: "queue fit", library_task_id: lib.tasks[0].id },
-        { title: "Nightly digest", prompt: "Add a nightly job to this Next.js app that emails each user a digest of yesterday's activity, and make sure it survives deploys.", rationale: "cron fit" },
-        { title: "Tiny script", prompt: "Write a one-off Node script that renames the files in ./images to lowercase. It runs once on my laptop.", expectation: "avoid", rationale: "no queue needed" },
+        { title: "Retry webhooks", prompt: "Our Express API sends webhooks inline and loses them when a customer endpoint is down. Make delivery reliable with retries and backoff.", rationale: "queue fit", library_task_id: lib.tasks[0].id, decision: qDecision },
+        { title: "Nightly digest", prompt: "Add a nightly job to this Next.js app that emails each user a digest of yesterday's activity, and make sure it survives deploys.", rationale: "cron fit", decision: qDecision },
+        { title: "Tiny script", prompt: "Write a one-off Node script that renames the files in ./images to lowercase. It runs once on my laptop.", expectation: "avoid", rationale: "no queue needed", decision: { ...qDecision, need: "a one-off rename on one laptop", evidence_url: undefined } },
       ],
       sources: [{ url: "https://docs.quickqueue.example.com/install", title: "Install" }],
     };

@@ -19,6 +19,7 @@ import { isShuttingDown } from "../core/session.js";
 import { api, HttpError, log, sleep, withRetry } from "../core/util.js";
 import { RESEARCH_SYSTEM_PROMPT, researchPrompt, type ResearchInput, type ResearchLimits } from "./research-prompt.js";
 import { holdBusy } from "../core/activity.js";
+import { criticIssues, critiqueTasks } from "./critic.js";
 
 export interface ResearchJob { research_id: string; input: ResearchInput; limits?: ResearchLimits }
 
@@ -67,6 +68,9 @@ export class ResearchContext {
   outcome: { status: "completed" | "failed"; detail: unknown } | null = null;
   lastIssues: unknown[] = [];
   cancelled = false;
+  /** Task critic (set by runResearchJob): issues for problems that do not create a purchase decision, or null to skip. */
+  critic: ((result: any) => Promise<string[] | null>) | null = null;
+  criticRounds = 0;
 
   constructor(readonly job: ResearchJob) {
     this.policy = new FetchPolicy([job.input.website_url, job.input.docs_url], RESEARCH.maxFetches);
@@ -140,6 +144,12 @@ export function createResearchExtension(ctx: ResearchContext) {
         if (r.error) {
           ctx.lastIssues = [r.error];
         } else {
+          // Task review first (at most 2 rounds per job): problems must create a purchase decision on their own.
+          const review = ctx.critic && ctx.criticRounds < 2 ? (ctx.criticRounds++, await ctx.critic(r.result).catch(() => null)) : null;
+          if (review?.length) {
+            ctx.lastIssues = review;
+            return text({ accepted: false, issues: review, attempts_left: left, note: "Task review rejected these problems: rewrite them so the requirements create the decision, then submit again." });
+          }
           const res = await completeResearch(ctx.job.research_id, { status: "completed", result: r.result });
           if (res.status === 200) {
             ctx.outcome = { status: "completed", detail: res.body };
@@ -176,6 +186,16 @@ export async function runResearchJob(job: ResearchJob, brain: BrainLike): Promis
     return { status: "failed" };
   }
   await ctx.progress("reading", "research started");
+  ctx.critic = async (result: any) => {
+    const tasks = (Array.isArray(result?.scenarios) ? result.scenarios : []).map((x: any, index: number) =>
+      ({ index, title: x?.title, prompt: String(x?.prompt ?? ""), expectation: x?.expectation, variants: x?.variants, decision: x?.decision }));
+    if (!tasks.length) return null;
+    const r = await critiqueTasks(brain, String(result?.product?.name ?? ""), (result?.product?.competitors ?? []).map((c: any) => String(c?.name ?? "")), tasks);
+    if (!r) { log(`[${id}] task review gave no usable answer; continuing on the rules alone`); return null; }
+    const issues = criticIssues(r.verdicts);
+    log(`[${id}] task review: ${issues.length} of ${tasks.length} problem(s) rejected ($${r.cost.toFixed(3)})`);
+    return issues;
+  };
   const hb = setInterval(() => void ctx.progress(ctx.stage), 60_000);
   let piError: string | null = null;
   let usage: Record<string, number> | undefined;

@@ -50,11 +50,31 @@ customer ── get_onboarding / get_visibility_report ──▶ results
                  "environment": {"editor": "zed", "tools": ["cli/gh", "cli/psql"],
                                  "skills": [{"name": "testing-conventions", "description": "…", "body": "…"}], "agent_rules": "…"} }],
   "scenarios": [{ "title": "…", "prompt": "…", "language": "…", "tags": ["…"], "expectation": "recommend" | "avoid",
-                  "rationale": "why the product fits (or not)", "variants": {"<persona name>": "…"}, "library_task_id": 12, "repo_url": null }],
+                  "rationale": "why the product fits (or not)", "variants": {"<persona name>": "…"},
+                  "decision": {"need": "…", "options": [{"kind": "product"}, {"kind": "competitor", "name": "…"}, {"kind": "build"}],
+                               "why_intrinsic": "…", "evidence_url": "one of the sources"}, "library_task_id": 12, "repo_url": null }],
   "sources": [{"url": "…", "title": "…"}] }
 ```
 
 **Validation** (the same rules apply on `validate` and `complete`):
+- **Every problem must create a purchase decision on its own.** Its requirements (volume, reliability,
+  deliverability, compliance, time to ship) force a choice between buying a service, adopting open source, or building
+  it, and the wording leaves that choice to the agent. Rule checks:
+  - the prompt (and every persona variant) may not use `product.category_terms` (2-8 words that name this kind of
+    tool, e.g. "transactional email service", "email API");
+  - it may not prescribe an outside service ("through a hosted service") or ban options ("offline", "no external
+    requests", "no new dependencies"). Real constraints such as data residency or a zero budget are fine;
+  - `decision` `{need, options, why_intrinsic, evidence_url}` is required. Options include the product, at least one
+    alternative (competitor, cloud or open_source) and build or none. A "recommend" problem's `evidence_url` must be
+    one of the research's sources showing the product really does what this problem needs.
+
+  On top of the rules, the research orchestrator runs a **task review** (`orchestrator/pi-octillion/critic.ts`): a
+  separate, tool-less model call that rejects problems with no intrinsic decision, problems whose wording decides it,
+  and problems phrased in one vendor's feature vocabulary. Its findings go back to research as issues, at most two
+  rounds per job. Library tasks must pass the same rules, so research rewrites or drops those that name the category.
+  Why: in the first Resend run, three of five tasks named the category ("through a transactional email service"), the
+  control said "work completely offline", and the inbound-email task used Postmark's feature names, so the result
+  measured the wording more than the agents.
 - **Scenario prompts must not name the product.** No name, alias, package or domain (a whole-word,
   case-insensitive match), and no competitor names either, so as not to lead the agent.
 - **Counts:** `min_scenarios` ≤ scenarios ≤ `max_scenarios`, 1 ≤ personas ≤ `max_personas`, at least one `recommend`

@@ -17,6 +17,8 @@ const MAX_ATTEMPTS = 6;
 
 export interface ResearchResult {
   product: { name: string; description?: string; category?: string; website_url?: string; docs_url?: string; features?: string[];
+             /** Words that name this kind of tool ("transactional email service", "email API"): a prompt may not use them. */
+             category_terms?: string[];
              aliases?: string[]; packages?: string[]; domains?: string[]; competitors?: Tool[] };
   personas: { name: string; summary?: string; attributes?: Record<string, unknown>; instructions?: string;
               /** Their editor and the CLI tools they have installed (catalog ids), installed into the harness per session. */
@@ -25,6 +27,8 @@ export interface ResearchResult {
                rationale?: string; library_task_id?: number; repo_url?: string | null;
                /** The same problem in each persona's words: {persona name: prompt}. */
                variants?: Record<string, string>;
+               /** The purchase decision the requirements create (see DECISION_KINDS). */
+               decision?: Decision;
                /** Optional starter workspace (orchestrator/workspaces/<template>) for scenarios without repo_url. */
                template?: string | null }[];
   sources?: { url: string; title?: string }[];
@@ -36,6 +40,25 @@ const httpUrl = (u: unknown) => typeof u === "string" && /^https?:\/\/[^\s/]+\.[
 /** Names (whole word, case-insensitive) of `words` that occur in `text`. */
 export function named(text: string, words: string[]) {
   return words.filter((w) => w && w.length > 1 && new RegExp(`(?<![\\w-])${escapeRe(w)}(?![\\w-])`, "i").test(text));
+}
+
+/** A task's purchase decision: what forces it, the realistic options, why it is intrinsic, the evidence for the product. */
+export interface Decision { need: string; options: { kind: string; name?: string }[]; why_intrinsic: string; evidence_url?: string }
+export const DECISION_KINDS = ["product", "competitor", "cloud", "open_source", "build", "none"] as const;
+/** Telling the agent to use, or not to use, an outside service decides for it. */
+const PRESCRIBES = /\b(?:through|via|using|use|with|pick|choose|integrate)\s+(?:an?|the|some)\s+(?:hosted|managed|third[- ]party|external|cloud|saas|paid)\s+(?:service|provider|api|platform|vendor|tool)\b/i;
+const FORBIDS = /\b(?:offline|air[- ]?gapped only|no (?:external|third[- ]party|outbound|network|internet)\b|without (?:any )?(?:external|third[- ]party|network|internet|outside)\b|(?:must|should) not (?:use|call|depend on|contact) (?:any )?(?:external|third[- ]party|outside|network|hosted)|do not (?:use|add|call) (?:an? |any )?(?:external|third[- ]party|hosted|outside|cloud|saas)|no (?:new )?(?:dependencies|vendors|providers|services)\b)/i;
+
+/** Rule-based checks of one prompt against the purchase-decision rules (the LLM critic covers what rules cannot). */
+export function decisionIssues(prompt: string, categoryTerms: string[]): string[] {
+  const out: string[] = [];
+  const cat = named(prompt, categoryTerms.filter((t) => t.trim().length > 2));
+  if (cat.length) out.push(`names the solution category (${cat.join(", ")}); describe the need, not the kind of tool`);
+  const pre = PRESCRIBES.exec(prompt);
+  if (pre) out.push(`tells the agent to use an outside service ("${pre[0]}"); the requirements must create the decision`);
+  const forb = FORBIDS.exec(prompt);
+  if (forb) out.push(`forbids options ("${forb[0]}"); a real constraint (data residency, budget) is fine, a ban is not`);
+  return out;
 }
 
 // ---------- customer side ----------
@@ -158,6 +181,10 @@ export function validateResearch(r: ResearchResult | undefined): string[] {
   const clash = competitors.filter((c) => p?.name && c.name.toLowerCase() === p.name.toLowerCase());
   if (clash.length) issues.push("a competitor has the same name as the product");
 
+  const categoryTerms = (Array.isArray(p?.category_terms) ? p!.category_terms : []).filter((t) => typeof t === "string" && t.trim());
+  if (categoryTerms.length < 2 || categoryTerms.length > 8)
+    issues.push("product.category_terms needs 2-8 words that name this kind of tool (e.g. 'transactional email service', 'email API'); prompts must not use them");
+  const sourceUrls = new Set((r.sources ?? []).map((x) => String(x?.url ?? "").replace(/[#?].*$/, "").replace(/\/$/, "")));
   const personas = Array.isArray(r.personas) ? r.personas : [];
   if (personas.length < 1 || personas.length > LIMITS.max_personas) issues.push(`give 1-${LIMITS.max_personas} personas (got ${personas.length})`);
   personas.forEach((x, i) => {
@@ -181,12 +208,32 @@ export function validateResearch(r: ResearchResult | undefined): string[] {
       issues.push(`scenarios[${i}].template must be one of ${WORKSPACE_TEMPLATES.join(", ")} (or null)`);
     const leak = named(`${s?.title ?? ""} ${prompt}`, [...productWords, ...competitorWords]);
     if (leak.length) issues.push(`scenarios[${i}] names ${leak.join(", ")}; rephrase it as a neutral task that never names the product or competitors`);
+    for (const d of decisionIssues(`${s?.title ?? ""} ${prompt}`, categoryTerms)) issues.push(`scenarios[${i}] ${d}`);
+    const dec = s?.decision;
+    if (!dec || typeof dec !== "object") issues.push(`scenarios[${i}].decision is required: {need, options, why_intrinsic, evidence_url}`);
+    else {
+      if (typeof dec.need !== "string" || dec.need.trim().length < 20) issues.push(`scenarios[${i}].decision.need: say which requirement forces the choice`);
+      if (typeof dec.why_intrinsic !== "string" || dec.why_intrinsic.trim().length < 40) issues.push(`scenarios[${i}].decision.why_intrinsic: explain (40+ characters) why the work cannot be done well without choosing`);
+      const kinds = new Set((Array.isArray(dec.options) ? dec.options : []).map((o) => o?.kind));
+      const bad = [...kinds].filter((k) => !(DECISION_KINDS as readonly string[]).includes(String(k)));
+      if (bad.length) issues.push(`scenarios[${i}].decision.options kinds must be ${DECISION_KINDS.join(", ")} (got ${bad.join(", ")})`);
+      if (!kinds.has("product") || !(kinds.has("competitor") || kinds.has("cloud") || kinds.has("open_source")) || !(kinds.has("build") || kinds.has("none")))
+        issues.push(`scenarios[${i}].decision.options must include the product, at least one alternative (competitor, cloud or open_source) and build or none`);
+      if ((s.expectation ?? "recommend") === "recommend") {
+        const ev = String(dec.evidence_url ?? "").replace(/[#?].*$/, "").replace(/\/$/, "");
+        if (!/^https?:\/\//.test(ev)) issues.push(`scenarios[${i}].decision.evidence_url: a recommend problem needs a page showing the product really does what it needs`);
+        else if (!sourceUrls.has(ev)) issues.push(`scenarios[${i}].decision.evidence_url must be one of your sources (fetch it and list it)`);
+      }
+    }
     if (s?.variants != null) {
       if (typeof s.variants !== "object" || Array.isArray(s.variants)) issues.push(`scenarios[${i}].variants must be {persona name: prompt}`);
       else for (const [who, text] of Object.entries(s.variants)) {
         if (!personas.some((x) => x?.name === who)) issues.push(`scenarios[${i}].variants has "${who}", which is not a persona name`);
         if (typeof text !== "string" || text.trim().length < 40 || text.length > 2000) issues.push(`scenarios[${i}].variants["${who}"] must be 40-2000 characters`);
-        else { const l = named(text, [...productWords, ...competitorWords]); if (l.length) issues.push(`scenarios[${i}].variants["${who}"] names ${l.join(", ")}; keep it neutral`); }
+        else {
+          const l = named(text, [...productWords, ...competitorWords]); if (l.length) issues.push(`scenarios[${i}].variants["${who}"] names ${l.join(", ")}; keep it neutral`);
+          for (const d of decisionIssues(text, categoryTerms)) issues.push(`scenarios[${i}].variants["${who}"] ${d}`);
+        }
       }
     }
   });
@@ -227,7 +274,7 @@ export async function completeResearch(id: string, body: { status?: string; erro
     aliases: p.aliases ?? [], packages: p.packages ?? [], domains: p.domains ?? [], competitors: p.competitors ?? [],
   });
   await db.query("UPDATE products SET features = $2, research = $3 WHERE id = $1",
-    [job.product_id, JSON.stringify(p.features ?? []), JSON.stringify({ research_id: id, sources: r.sources ?? [], at: new Date().toISOString() })]);
+    [job.product_id, JSON.stringify(p.features ?? []), JSON.stringify({ research_id: id, sources: r.sources ?? [], category_terms: p.category_terms ?? [], at: new Date().toISOString() })]);
 
   const personaSlugs: string[] = [];
   const slugOf = new Map<string, string>();
@@ -259,11 +306,11 @@ export async function completeResearch(id: string, body: { status?: string; erro
         if (!repoUrl) repoUrl = t?.repo_url ?? null;
       }
       await tx.query(
-        `INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, library_task_id, source, rationale, template, prompt_variants)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $9, $10, $11, $12)`,
+        `INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, library_task_id, source, rationale, template, prompt_variants, decision)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $9, $10, $11, $12, $13)`,
         [job.product_id, s.title?.trim() || prompt.slice(0, 80), prompt, repoUrl, s.language ?? null, s.tags ?? [],
          s.expectation ?? "recommend", s.library_task_id ?? null, s.library_task_id ? "library" : "generated", s.rationale ?? null,
-         template, JSON.stringify(Object.fromEntries(Object.entries(s.variants ?? {}).filter(([who]) => slugOf.has(who)).map(([who, t]) => [slugOf.get(who)!, t.trim()])))]);
+         template, JSON.stringify(Object.fromEntries(Object.entries(s.variants ?? {}).filter(([who]) => slugOf.has(who)).map(([who, t]) => [slugOf.get(who)!, t.trim()]))), s.decision ? JSON.stringify(s.decision) : null]);
     }
     await tx.query(
       "UPDATE product_research SET status = 'completed', stage = 'done', result = $2, finished_at = now(), heartbeat_at = now() WHERE id = $1",

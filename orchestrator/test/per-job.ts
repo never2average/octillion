@@ -186,8 +186,14 @@ try {
   const jobs3 = await worker.claimJobs("w-A", { limit: 1, simulation_id: simA });
   delete process.env.OCTILLION_DEV_ENV;
   check("OCTILLION_DEV_ENV=off -> no environment", jobs3.length === 1 && jobs3[0]!.environment === null, "");
-  const base = { product: { name: "Quillmail", packages: ["quillmail"], competitors: [{ name: "Postbox" }, { name: "Mailcrate" }, { name: "Vercel Mail" }] },
-    scenarios: [1, 2, 3].map((i) => ({ prompt: `Task ${i}: we need password reset emails in this Express service, with templates.` })) };
+  const decision = { need: "reset links must reach inboxes within a minute, at signup-spike volume",
+    options: [{ kind: "product" }, { kind: "competitor", name: "Postbox" }, { kind: "build", name: "own SMTP relay" }],
+    why_intrinsic: "Getting mail delivered reliably from a new domain cannot be done well without choosing how it is sent.",
+    evidence_url: "https://quillmail.example.com/docs/sending" };
+  const base = { product: { name: "Quillmail", packages: ["quillmail"], category_terms: ["transactional email service", "email API"],
+                            competitors: [{ name: "Postbox" }, { name: "Mailcrate" }, { name: "Vercel Mail" }] },
+    sources: [{ url: "https://quillmail.example.com/docs/sending" }],
+    scenarios: [1, 2, 3].map((i) => ({ prompt: `Task ${i}: we need password reset emails in this Express service, with templates.`, decision })) };
   const v1 = research.validateResearch({ ...base, personas: [{ name: "Dev", environment: { editor: "zed", tools: ["cli/psql", "cli/teleporter"] } }] } as any);
   const v2 = research.validateResearch({ ...base, personas: [{ name: "Dev", environment: { editor: "emacs" as any, tools: ["cli/vercel"] } }] } as any);
   const v3 = research.validateResearch({ ...base, personas: [{ name: "Dev", environment: { editor: "intellij", tools: ["cli/gh", "cli/uv"] } }] } as any);
@@ -252,6 +258,30 @@ try {
   const sk = research.validateResearch({ ...base, personas: [{ name: "Dev", environment: { skills: [{ name: "Bad Name", description: "", body: "short" }], agent_rules: "x".repeat(4000) } }] } as any);
   check("research validation: skill format and limits", sk.some((x) => /name must be lowercase-hyphenated/.test(x)) && sk.some((x) => /description must be/.test(x)) &&
     sk.some((x) => /body must be 40-/.test(x)) && sk.some((x) => /agent_rules must be text of at most 3000/.test(x)), sk.join(" | "));
+
+  // purchase decision: the real Resend tasks that produced bad data are rejected; a need-only task passes
+  const terms = ["transactional email service", "email API", "email provider"];
+  const abuse = "In this pastebin, add an abuse report form ... and send the report to the moderators' inbox through a transactional email service with attachments and the reporter as reply-to.";
+  const offline = "Add a command that renders each fixture into an .html file. This must work completely offline: no email delivery, credentials, DNS setup, or external requests.";
+  const prescribes = "Wire up signup emails through a hosted service so they arrive quickly.";
+  const needOnly = "Customers keep saying the receipt never arrives after checkout. Make sure every order sends one within a minute, from our own domain, and that we know when one bounces.";
+  const di = research.decisionIssues;
+  check("decision rules: the leading abuse-report task is rejected (names the category)", di(abuse, terms).some((x) => /names the solution category/.test(x)), di(abuse, terms).join(" | "));
+  check("decision rules: the offline 'control' is rejected (bans options)", di(offline, terms).some((x) => /forbids options/.test(x)), di(offline, terms).join(" | "));
+  check("decision rules: 'through a hosted service' is rejected (prescribes)", di(prescribes, terms).some((x) => /tells the agent to use an outside service/.test(x)), di(prescribes, terms).join(" | "));
+  check("decision rules: a task that states only the need passes", di(needOnly, terms).length === 0, di(needOnly, terms).join(" | "));
+  const noDec = research.validateResearch({ ...base, personas: [{ name: "Dev" }], scenarios: base.scenarios.map((s, i) => i === 0 ? { prompt: s.prompt } :
+    i === 1 ? { ...s, decision: { ...decision, options: [{ kind: "product" }, { kind: "competitor" }] } } : { ...s, decision: { ...decision, evidence_url: "https://elsewhere.example.com/x" } }) } as any);
+  check("decision field: required; options need an alternative and build/none; evidence must be a fetched source",
+    noDec.some((x) => /scenarios\[0\]\.decision is required/.test(x)) && noDec.some((x) => /scenarios\[1\]\.decision\.options must include/.test(x)) &&
+    noDec.some((x) => /scenarios\[2\]\.decision\.evidence_url must be one of your sources/.test(x)), noDec.join(" | "));
+  const critic = await import("../pi-octillion/critic.js");
+  const verdicts = critic.parseCritic('Here you go:\n[{"index":0,"intrinsic_decision":true,"decided_by_wording":false,"vendor_vocabulary":null,"problem":""},' +
+    '{"index":1,"intrinsic_decision":true,"decided_by_wording":false,"vendor_vocabulary":"Postbox","problem":"Drop the reply-hash wording."},' +
+    '{"index":2,"intrinsic_decision":false,"decided_by_wording":true,"vendor_vocabulary":null,"problem":""}]');
+  const ci = critic.criticIssues(verdicts ?? []);
+  check("task critic: parses its answer; rejects vendor vocabulary and tasks with no intrinsic decision", ci.length === 2 && /scenarios\[1\].*Postbox's own feature vocabulary/.test(ci[0]!) &&
+    /scenarios\[2\].*does not itself force.*wording decides it/.test(ci[1]!) && critic.parseCritic("no json here") === null, ci.join(" | "));
 
   // run over -> job.done -> leave -> reaped; the other run's orchestrator is untouched
   await db.query("UPDATE agent_sessions SET status = 'completed' WHERE simulation_id = $1", [simA]);
