@@ -40,3 +40,5 @@ for c in $old; do
   docker rm "$c" >/dev/null
 done
 echo "deployed: $(dc ps octillion --format '{{.Name}} {{.Status}}')"
+# Disk cleanup policy (old server images, build cache, test leftovers). Never fails the deploy.
+sh "$(dirname "$COMPOSE_FILE")/cleanup.sh" || echo "cleanup failed (deploy is fine)"

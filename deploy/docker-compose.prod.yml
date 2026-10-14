@@ -7,8 +7,16 @@
 
 name: octillion
 
+# Container logs are capped (20 MB x 5 files each) so they cannot fill the disk (deploy/cleanup.sh covers the rest).
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
 services:
   postgres:
+    logging: *logging
     image: docker.io/postgres:17
     restart: unless-stopped
     environment:
@@ -29,6 +37,7 @@ services:
 
   # Nightly logical backups (custom format), 7 days kept. Restore: pg_restore -d octillion <file>.
   pg-backup:
+    logging: *logging
     image: docker.io/postgres:17
     restart: unless-stopped
     depends_on: { postgres: { condition: service_healthy } }
@@ -53,6 +62,7 @@ services:
   # Off-machine copy of those dumps to an S3-compatible bucket (Cloudflare R2), hourly; the newest OFFSITE_KEEP (10) are kept there.
   # Idle unless R2_BUCKET is set. Restore: rclone copy r2:<bucket>/postgres/<file> . && pg_restore -d octillion <file>.
   pg-backup-offsite:
+    logging: *logging
     image: docker.io/rclone/rclone:1
     restart: unless-stopped
     environment:
@@ -85,6 +95,7 @@ services:
   # Local ClickHouse is opt-in (profile local-clickhouse). Production uses ClickHouse Cloud: set CLICKHOUSE_URL,
   # CLICKHOUSE_USER and CLICKHOUSE_APP_PASSWORD in .env. Without them the server falls back to this container.
   clickhouse:
+    logging: *logging
     image: docker.io/clickhouse/clickhouse-server:25.12
     profiles: ["local-clickhouse"]
     restart: unless-stopped
@@ -106,6 +117,7 @@ services:
       retries: 20
 
   octillion:
+    logging: *logging
     build: { context: .., dockerfile: Dockerfile }
     init: true   # tini as PID 1 forwards SIGTERM to node for a graceful stop
     # On SIGTERM the server drains: in-flight requests (agents' model streams) get OCTILLION_DRAIN_SECONDS to finish.
@@ -169,6 +181,7 @@ services:
     expose: ["3333"]
 
   caddy:
+    logging: *logging
     image: docker.io/caddy:2
     restart: unless-stopped
     depends_on: [octillion]

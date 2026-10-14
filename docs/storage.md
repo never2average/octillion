@@ -44,6 +44,26 @@ ClickHouse Cloud is on a trial. When it lapses:
    `npx tsx scripts/restore-transcripts.ts [--org <id>] [--dry-run]`. Sessions the store already has are skipped, so
    it is safe to re-run. The same command fills a new ClickHouse service.
 
+## Host disk
+
+The server shares its machine with other projects. `deploy/cleanup.sh` keeps Octillion's own footprint bounded. It
+runs after every rolling deploy and daily at 04:17 UTC (`/etc/cron.d/octillion-cleanup`, installed by
+`deploy/install-cleanup.sh`, log `/var/log/octillion-cleanup.log`). `--dry-run` shows what it would remove.
+
+- **Old server images:** untagged images of the `octillion` compose project (each deploy leaves one, about 1 GB).
+- **Build cache:** capped at `OCTILLION_BUILD_CACHE_KEEP` (5 GB), oldest first. Docker's cache is shared; it is only
+  cache.
+- **Local agent images** (`octillion/agent-*`, for the local Docker runner): removed when not at the version pinned in
+  `harnesses/registry.json`. Rebuild with `orchestrator/images/build.sh`.
+- **Test leftovers** in `/tmp` older than a day.
+- **Container logs:** capped at 20 MB x 5 files per container (`x-logging` in the compose file). The cap applies when
+  a container is recreated: the server on its next deploy, the database services at the next maintenance restart.
+- **Disk guard:** above 90% the job logs a warning; above 95% it also removes every unused Octillion image.
+
+It never touches volumes, running containers, or other projects' images and files. On 2026-10-14 the disk reached 99%
+(about 30 GB of `/tmp` and 80 sandbox images belong to other projects). Removing local agent images and old build
+cache brought it to 90%.
+
 ## Restoring the database
 
 `rclone copy r2:<bucket>/postgres/<file> . && pg_restore -d octillion <file>` (see the `pg-backup-offsite` service).
