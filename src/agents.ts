@@ -116,6 +116,45 @@ export function drawVariant(slot: AgentSpec, rand: number = Math.random()): Agen
   return variants[variants.length - 1];
 }
 
+/**
+ * Every agent with weight gets at least `floor` slots, the rest go by weight (largest remainder). With 4 problems x 2
+ * personas x 3 samples = 24 and the 2026-10-14 mix (Claude Code on Opus 40.4%, Codex 19.7%, OpenCode 5.5%,
+ * Antigravity 4.9%, Pi 1.6%, Cline 1.1%, Kilo 0.5%) and floor 1: Opus 10, Codex 6, OpenCode 2, Antigravity 2, Pi 2,
+ * Cline 1, Kilo 1. When n cannot cover the floor for every agent, it is plain weighted apportionment.
+ */
+export function apportionWithFloor<T extends { weight: number }>(items: T[], n: number, floor: number): { item: T; count: number }[] {
+  if (floor <= 0 || floor * items.length > n) return apportion(items, n);
+  return apportion(items, n - floor * items.length).map(({ item, count }) => ({ item, count: count + floor }));
+}
+
+/**
+ * Size a run's first batch from its grid: the smallest samples-per-cell s (cell = problem x persona) such that, with
+ * N = problems x personas x s sessions dealt by apportionWithFloor:
+ *   1. every scheduled harness gets at least `floor` sessions (default 1);
+ *   2. every major harness (normalised share >= `majorShare`, default 15%) gets at least one session per problem;
+ *   3. N <= `maxSessions`.
+ * If no s satisfies 1-2 within the cap, the largest s within the cap is used and `met` is false.
+ * Today's mix with 4 problems x 2 personas gives s = 3, N = 24: Opus 10, Codex 6, OpenCode 2, Antigravity 2, Pi 2,
+ * Cline 1, Kilo 1.
+ */
+export function planFirstBatch(problems: number, personas: number, agents: { id: string; weight: number }[],
+  opts: { floor?: number; majorShare?: number; maxSessions?: number; maxSamples?: number } = {}) {
+  const live = agents.filter((a) => a.weight > 0);
+  const floor = opts.floor ?? 1, majorShare = opts.majorShare ?? 0.15, maxSessions = opts.maxSessions ?? 120, maxSamples = opts.maxSamples ?? 20;
+  const total = live.reduce((t, a) => t + a.weight, 0) || 1;
+  const majors = live.filter((a) => a.weight / total >= majorShare);
+  const cells = Math.max(1, problems) * Math.max(1, personas);
+  let pick: { samples: number; sessions: number; counts: Record<string, number>; met: boolean } | null = null;
+  for (let s = 1; s <= maxSamples && cells * s <= maxSessions; s++) {
+    const n = cells * s;
+    const counts = Object.fromEntries(apportionWithFloor(live, n, floor).map(({ item, count }) => [item.id, count]));
+    const met = live.every((a) => counts[a.id]! >= floor) && majors.every((a) => counts[a.id]! >= problems);
+    pick = { samples: s, sessions: n, counts, met };
+    if (met) break;
+  }
+  return { ...(pick ?? { samples: 1, sessions: cells, counts: {}, met: false }), cells, floor, majors: majors.map((a) => a.id) };
+}
+
 /** Largest-remainder apportionment of `n` slots by weight (deterministic; ties go to the larger weight). */
 export function apportion<T extends { weight: number }>(items: T[], n: number): { item: T; count: number }[] {
   const total = items.reduce((s, x) => s + x.weight, 0) || 1;
@@ -139,10 +178,10 @@ export function apportion<T extends { weight: number }>(items: T[], n: number): 
  * 2026-10-14: the strided deal put Cline, Kilo and Pi into the same scenario x persona cell). A cell is one scenario x
  * profile (first batch) or one scenario's top-up (adaptive); `sizes` are the sessions each cell needs.
  */
-export function dealToCells(sizes: number[], agents: AgentSpec[]): AgentSpec[][] {
+export function dealToCells(sizes: number[], agents: AgentSpec[], opts: { floor?: number; groups?: number[] } = {}): AgentSpec[][] {
   const cells: AgentSpec[][] = sizes.map(() => []);
   const total = sizes.reduce((a, b) => a + b, 0);
-  const queue = apportion(agents, total).filter((r) => r.count > 0)
+  const queue = apportionWithFloor(agents.filter((a) => a.weight > 0), total, opts.floor ?? 0).filter((r) => r.count > 0)
     .sort((a, b) => b.item.weight - a.item.weight || a.item.id.localeCompare(b.item.id))
     .flatMap(({ item, count }) => Array.from({ length: count }, () => item));
   for (const agent of queue) {
@@ -151,8 +190,11 @@ export function dealToCells(sizes: number[], agents: AgentSpec[]): AgentSpec[][]
       if (cells[c]!.length >= sizes[c]!) continue;
       if (best < 0) { best = c; continue; }
       const mine = cells[c]!.filter((a) => a.id === agent.id).length, theirs = cells[best]!.filter((a) => a.id === agent.id).length;
+      // Same problem (group) already has this agent: prefer another problem, so a harness covers different problems.
+      const inGroup = (i: number) => opts.groups ? cells.reduce((n, cell, j) => n + (opts.groups![j] === opts.groups![i] ? cell.filter((a) => a.id === agent.id).length : 0), 0) : 0;
+      const g = inGroup(c), gb = inGroup(best);
       const fill = cells[c]!.length / sizes[c]!, bestFill = cells[best]!.length / sizes[best]!;
-      if (mine < theirs || (mine === theirs && fill < bestFill)) best = c;
+      if (mine < theirs || (mine === theirs && (g < gb || (g === gb && fill < bestFill)))) best = c;
     }
     if (best >= 0) cells[best]!.push(agent);
   }

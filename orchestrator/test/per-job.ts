@@ -277,6 +277,28 @@ try {
   const uneven = dealToCells([4, 4, 2], mix);
   check("dealToCells: uneven top-up batches are filled exactly", uneven.map((c) => c.length).join(",") === "4,4,2", "");
 
+
+  // first-batch sizing from the grid (problems x personas): smallest samples that cover every harness and every problem
+  const { planFirstBatch } = await import("../../src/agents.js");
+  const liveMix = [mk("claude-code/opus", .4039), mk("codex/default", .1965), mk("opencode/sonnet", .0546), mk("antigravity/default", .0491),
+                mk("pi/gpt", .0164), mk("cline/gpt", .0109), mk("kilo/sonnet", .0054), mk("claude-code/sonnet", 0)];
+  const { apportionWithFloor } = await import("../../src/agents.js");
+  const apportionWithFloorFor = (items: any[], n: number) => apportionWithFloor(items.filter((x) => x.weight > 0), n, 1).map((r) => [r.item.id, r.count] as const);
+  const plan = planFirstBatch(4, 2, liveMix);
+  check("planFirstBatch: 4 problems x 2 personas -> 3 samples, 24 sessions: Opus 10, Codex 6, OpenCode 2, Antigravity 2, Pi 2, Cline 1, Kilo 1",
+    plan.met && plan.samples === 3 && plan.sessions === 24 && JSON.stringify(plan.counts) ===
+      JSON.stringify({ "claude-code/opus": 10, "codex/default": 6, "opencode/sonnet": 2, "antigravity/default": 2, "pi/gpt": 2, "cline/gpt": 1, "kilo/sonnet": 1 }) &&
+    plan.majors.join(",") === "claude-code/opus,codex/default", JSON.stringify(plan));
+  const two = Object.fromEntries(apportionWithFloorFor(liveMix, 16));
+  check("planFirstBatch: 2 samples (16) is rejected because Codex would get 3 sessions for 4 problems", two["codex/default"] === 3, JSON.stringify(two));
+  const cellsDealt = dealToCells(Array(8).fill(3), liveMix, { floor: 1, groups: [0, 0, 1, 1, 2, 2, 3, 3] });
+  const problemsWith = (id: string) => new Set(cellsDealt.flatMap((c, i) => c.some((a) => a.id === id) ? [Math.floor(i / 2)] : [])).size;
+  check("dealt batch: Codex covers all 4 problems, every harness appears, no Sonnet",
+    problemsWith("codex/default") === 4 && problemsWith("claude-code/opus") === 4 && ["opencode/sonnet", "antigravity/default", "pi/gpt", "cline/gpt", "kilo/sonnet"].every((id) => problemsWith(id) >= 1) &&
+    problemsWith("opencode/sonnet") === 2 && !cellsDealt.flat().some((a) => a.id === "claude-code/sonnet"), JSON.stringify(cellsDealt.map((c) => c.map((a) => a.id.split("/")[0]))));
+  const smallGrid = planFirstBatch(3, 1, liveMix);
+  check("planFirstBatch: other grids get their own minimum (3 problems x 1 persona)", smallGrid.met && smallGrid.counts["codex/default"]! >= 3 && Object.values(smallGrid.counts).every((n) => n >= 1), JSON.stringify(smallGrid));
+
   // purchase decision: the real Resend tasks that produced bad data are rejected; a need-only task passes
   const terms = ["transactional email service", "email API", "email provider"];
   const abuse = "In this pastebin, add an abuse report form ... and send the report to the moderators' inbox through a transactional email service with attachments and the reporter as reply-to.";
