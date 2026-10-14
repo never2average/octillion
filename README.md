@@ -174,9 +174,9 @@ claude -p "<prompt>" --continue --mcp-config .mcp.json --strict-mcp-config --all
 | "Run a simulation." | `run_simulation`: each task in fresh agent sandboxes, sampled until stable (the recorded run was launched by onboarding itself, the behaviour at the time) | 15 min |
 | "Show my visibility report." | `get_visibility_report`: hit rate, losses to competitors, share of voice, by task and by agent, with the evidence one prompt away | after the 15 min simulation |
 
-That recording shows the flow. For results, see the **[Resend case study](docs/case-studies/resend.md)**: eight coding
-agents doing real email work. Agents picked Resend in 8 of 10 password-recovery sessions, but in none of the six
-reply-by-email sessions, where none of them even mentioned it.
+That recording shows the flow. For results, see the **[Resend case study](docs/case-studies/resend.md)**: seven coding
+agents doing real email work. When an app had to send email, agents chose Resend in 14 of 19 sessions. When it had to
+receive email, they never did, and none of the six even mentioned it.
 
 ## MCP tools
 
