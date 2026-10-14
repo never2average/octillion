@@ -40,6 +40,8 @@ function need(p: Providers, id: string): ProviderCred {
   return c;
 }
 const trim = (u: string) => u.replace(/\/+$/, "");
+/** Codex gateway provider id (a copy of the built-in openai provider with WebSockets off; see the codex entry). */
+const CODEX_GW_PROVIDER = "octillion_gateway";
 /** Append `suffix` unless the URL already ends with it. */
 const withSuffix = (u: string, suffix: string) => (trim(u).endsWith(suffix) ? trim(u) : trim(u) + suffix);
 
@@ -77,7 +79,7 @@ export const CRED_SPECS: Record<string, CredSpec> = {
   },
   codex: {
     providers: ["openai"], mode: "gateway",
-    how: "$CODEX_HOME/config.toml `openai_base_url` (<base>/v1) + CODEX_API_KEY. Codex 0.162 IGNORES the OPENAI_BASE_URL env (it called api.openai.com); a custom model_provider loses the built-in model metadata (no tools sent for gpt-6.1-sol)",
+    how: "$CODEX_HOME/config.toml `openai_base_url` (<base>/v1) + an OpenAI-mirroring `model_provider` with supports_websockets = false + CODEX_API_KEY. Codex 0.162 IGNORES the OPENAI_BASE_URL env (it called api.openai.com); the built-in openai provider always tries the Responses WebSocket first",
     map(p) {
       const c = need(p, "openai");
       const env: Record<string, string> = { CODEX_API_KEY: c.api_key };
@@ -85,8 +87,19 @@ export const CRED_SPECS: Record<string, CredSpec> = {
       // Built-in openai provider + openai_base_url keeps codex's model catalog (tools, reasoning) and only moves the host.
       const url = withSuffix(c.base_url, "/v1");
       if (/["\\'%]/.test(url)) throw new Error("unsafe openai base URL");
-      // Prepended (top-level key) when missing: the developer environment may already have written MCP tables there.
-      return { env, setup: `d="\${CODEX_HOME:-$HOME/.codex}"; mkdir -p "$d"; touch "$d/config.toml"; grep -qs '^openai_base_url' "$d/config.toml" || { printf 'openai_base_url = "%s"\\n' '${url}' | cat - "$d/config.toml" > "$d/config.toml.tmp" && mv "$d/config.toml.tmp" "$d/config.toml"; }; ` };
+      // The built-in `openai` provider hard-codes supports_websockets = true and cannot be overridden (reserved id), so
+      // codex first tries wss://<gw>/responses, gets the gateway's 426 and logs an ERROR before falling back to HTTP.
+      // A custom provider that mirrors the built-in one (name "OpenAI" keeps is_openai(); requires_openai_auth keeps the
+      // CODEX_API_KEY auth path) with supports_websockets = false uses plain HTTP from the first request.
+      const lines: [string, string][] = [
+        ["openai_base_url", `openai_base_url = "${url}"`],
+        ["model_provider", `model_provider = "${CODEX_GW_PROVIDER}"`],
+        [`model_providers\\.${CODEX_GW_PROVIDER}`, `model_providers.${CODEX_GW_PROVIDER} = { name = "OpenAI", base_url = "${url}", wire_api = "responses", requires_openai_auth = true, supports_websockets = false, supports_standalone_web_search = true }`],
+      ];
+      // Top-level keys, so each is prepended when missing: the developer environment may already have written MCP tables.
+      const f = `"$d/config.toml"`;
+      const add = ([key, line]: [string, string]) => `grep -qsE '^${key}[[:space:]]*=' ${f} || { printf '%s\\n' '${line}' | cat - ${f} > ${f}.tmp && mv ${f}.tmp ${f}; }; `;
+      return { env, setup: `d="\${CODEX_HOME:-$HOME/.codex}"; mkdir -p "$d"; touch ${f}; ` + lines.reverse().map(add).join("") };
     },
   },
   copilot: {
