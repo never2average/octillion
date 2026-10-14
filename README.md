@@ -174,11 +174,9 @@ claude -p "<prompt>" --continue --mcp-config .mcp.json --strict-mcp-config --all
 | "Run a simulation." | `run_simulation`: each task in fresh agent sandboxes, sampled until stable (the recorded run was launched by onboarding itself, the behaviour at the time) | 15 min |
 | "Show my visibility report." | `get_visibility_report`: hit rate, losses to competitors, share of voice, by task and by agent, with the evidence one prompt away | after the 15 min simulation |
 
-That run was 30 agent sessions for $20.98 of model spend (the orchestrator's share was about $0.51). Re-scored with
-the current scorer, agents picked the product in 14 of 20 completed email-task sessions and a competitor in 6, and
-every one of the 5 inbound-email sessions went to the same competitor: the clearest gap. (The report first said 4 of
-20; reading the transcripts exposed scoring errors, since fixed, and the walkthrough keeps both versions.) Small runs
-like this are directional, not a benchmark.
+That recording shows the flow. For results, see the **[Resend case study](docs/case-studies/resend.md)**: eight coding
+agents doing real email work. Agents picked Resend in 8 of 10 password-recovery sessions, but in none of the six
+reply-by-email sessions, where none of them even mentioned it.
 
 ## MCP tools
 
