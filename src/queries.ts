@@ -560,13 +560,23 @@ export async function cancelSimulation(org: Org, simulationId: string) {
 
 // ---------- visibility report ----------
 
-export async function getReport(org: Org, input: { product?: string; days?: number; model?: string; population?: string }) {
+export async function getReport(org: Org, input: { product?: string; days?: number; model?: string; population?: string; simulation?: string }) {
   const p = await resolveProduct(org, input.product);
   const db = await getDb();
   const days = input.days ?? 30;
   const params: unknown[] = [p.id, days];
-  let filter = "s.product_id = $1 AND s.verdict IS NOT NULL AND s.ended_at > now() - make_interval(days => $2)";
-  if (input.model) params.push(input.model), (filter += ` AND s.model = $${params.length}`);
+  let sim: any = null;
+  let base = "s.product_id = $1 AND s.ended_at > now() - make_interval(days => $2)";
+  if (input.simulation) {
+    [sim] = await db.query<any>(
+      "SELECT id, name, status, sampling, max_samples, created_at, finished_at FROM simulations WHERE id = $1 AND org_id = $2 AND product_id = $3",
+      [input.simulation, org.orgId, p.id]);
+    if (!sim) throw new Error(`No simulation ${input.simulation} for ${p.name}`);
+    // One run, whatever its age. $2 (days) stays referenced so every query keeps the same parameter list.
+    params.push(sim.id), (base = `s.product_id = $1 AND s.simulation_id = $${params.length} AND $2::int > 0`);
+  }
+  if (input.model) params.push(input.model), (base += ` AND s.model = $${params.length}`);
+  const filter = `${base} AND s.verdict IS NOT NULL`;
   const from = `agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id WHERE ${filter}`;
 
   const [t] = await db.query<any>(
@@ -639,21 +649,139 @@ export async function getReport(org: Org, input: { product?: string; days?: numb
     params,
   );
   const n = Number(t.sessions);
+  const rows = await db.query<any>(
+    `SELECT s.id, s.status, s.verdict, s.winner, s.mentions, coalesce(s.agent_id, s.model) AS agent_id, s.cost_usd,
+            sc.id AS scenario_id, sc.expectation, dp.name AS profile
+       FROM agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id LEFT JOIN developer_profiles dp ON dp.id = s.profile_id
+      WHERE ${base} AND s.status NOT IN ('queued', 'running', 'cancelled')`,
+    params,
+  );
+  const prompts = new Map((await db.query<any>("SELECT id, prompt FROM scenarios WHERE product_id = $1", [p.id])).map((r) => [Number(r.id), String(r.prompt ?? "")]));
+  const sections = reportSections(p, rows, byScenario, prompts, sim);
   return {
     view: "report" as const,
     product: { id: p.id, slug: p.slug, name: p.name },
-    filters: { days, model: input.model ?? null },
+    filters: { days, model: input.model ?? null, simulation: sim?.id ?? null },
+    ...sections.report,
     models: await config.models(),
     totals: { ...t, hit_rate: rate(t.hits, n), hit_ci: wilson(t.hits, n), weighted_hit_rate: weighted,
               adoption_coverage: weightSum, adoption_rate: rate(t.adopted, n), competitor_rate: rate(t.competitor, n) },
     share_of_voice: voice.map((v) => ({ ...v, share: rate(v.recommended, n) })),
     by_model: byModel.map((m) => ({ ...m, hit_rate: rate(m.hits, m.sessions), hit_ci: wilson(m.hits, m.sessions) })),
-    by_agent: agentRows,
+    by_agent: agentRows.map((a) => ({ ...a, on_target: sections.onTarget.get(a.agent_id) ?? null })),
     by_profile: byProfile.map((p) => ({ ...p, hit_rate: rate(p.hits, p.sessions), hit_ci: wilson(p.hits, p.sessions) })),
-    by_scenario: byScenario.map((s) => ({ ...s, hit_rate: rate(s.hits, s.sessions), hit_ci: wilson(s.hits, s.sessions) })),
+    by_scenario: byScenario.map((s) => ({ ...s, hit_rate: rate(s.hits, s.sessions), hit_ci: wilson(s.hits, s.sessions), ...sections.tasks.get(Number(s.id)) })),
     daily: daily.map((d) => ({ day: new Date(d.day).toISOString().slice(0, 10), sessions: Number(d.sessions), hits: Number(d.hits), hit_rate: rate(d.hits, d.sessions) })),
     recent_losses: losses,
   };
+}
+
+/** Outcome of one scored session: built on the product, on a competitor, or on no vendor (built it, or left it open). */
+const outcomeOf = (verdict: string) => verdict === "adopted" || verdict === "recommended" ? "product" : verdict === "competitor" ? "competitor" : "no_vendor";
+const tally = (xs: string[]) => [...xs.reduce((m, x) => m.set(x, (m.get(x) ?? 0) + 1), new Map<string, number>())]
+  .map(([tool, sessions]) => ({ tool, sessions })).sort((a, b) => b.sessions - a.sessions || a.tool.localeCompare(b.tool));
+const share = (k: number, n: number) => `${k} of ${n}`;
+
+/**
+ * The sections a written report needs beyond the rates (the shape of docs/case-studies/resend.md): per task, what the
+ * agents built instead and whether they mentioned the product at all; per agent, outcomes on the tasks the product
+ * should win; quotes from the deciding sessions; how the run was set up; headline findings and limits.
+ */
+function reportSections(p: ProductRow, rows: any[], byScenario: any[], prompts: Map<number, string>, sim: any) {
+  const name = p.name;
+  const scored = rows.filter((r) => r.verdict);
+  const mentionsProduct = (r: any) => (r.mentions ?? []).some((m: any) => m.target);
+  const titles = new Map(byScenario.map((s) => [Number(s.id), String(s.title)]));
+
+  const tasks = new Map<number, any>();
+  for (const s of byScenario) {
+    const id = Number(s.id);
+    const xs = scored.filter((r) => Number(r.scenario_id) === id);
+    const out = { product: 0, competitor: 0, no_vendor: 0 };
+    for (const r of xs) out[outcomeOf(r.verdict) as keyof typeof out]++;
+    const misses = xs.filter((r) => outcomeOf(r.verdict) !== "product");
+    tasks.set(id, {
+      outcomes: out,
+      winners: tally(xs.filter((r) => r.verdict === "competitor" && r.winner).map((r) => r.winner)),
+      // Tools the agent named or used in sessions that did not choose the product: its shortlist.
+      alternatives: tally(misses.flatMap((r) => [...new Set((r.mentions ?? []).filter((m: any) => !m.target).map((m: any) => String(m.tool)))] as string[])),
+      product_mentioned: xs.filter(mentionsProduct).length,
+      unscored: rows.filter((r) => !r.verdict && Number(r.scenario_id) === id).length,
+      prompt: (prompts.get(id) ?? "").replace(/\s+/g, " ").slice(0, 280),
+    });
+  }
+
+  const target = scored.filter((r) => r.expectation === "recommend");
+  const onTarget = new Map<string, any>();
+  for (const r of target) {
+    const a = onTarget.get(r.agent_id) ?? { sessions: 0, product: 0, competitor: 0, no_vendor: 0 };
+    a.sessions++; a[outcomeOf(r.verdict)]++;
+    onTarget.set(r.agent_id, a);
+  }
+
+  // Evidence: losses first, then sessions that built without a vendor, then wins; at most 3 per task, 12 in all.
+  const quoteOf = (r: any) => {
+    const ms: any[] = r.mentions ?? [];
+    const pick = ms.find((m) => r.winner && m.tool === r.winner && m.evidence?.length) ?? ms.find((m) => m.target && m.evidence?.length) ?? ms.find((m) => m.evidence?.length);
+    return pick ? { tool: pick.tool, level: pick.level, seq: pick.evidence[0].seq, quote: String(pick.evidence[0].snippet ?? "").replace(/\s+/g, " ").slice(0, 300) } : null;
+  };
+  const rank = (r: any) => r.expectation !== "recommend" ? 3 : r.verdict === "competitor" ? 0 : outcomeOf(r.verdict) === "no_vendor" ? 1 : 2;
+  const perTask = new Map<number, number>();
+  const evidence = [...scored].sort((a, b) => rank(a) - rank(b) || Number(a.scenario_id) - Number(b.scenario_id)).flatMap((r) => {
+    const used = perTask.get(Number(r.scenario_id)) ?? 0;
+    if (rank(r) === 3 || used >= 3) return [];
+    perTask.set(Number(r.scenario_id), used + 1);
+    return [{ session_id: r.id, scenario_id: Number(r.scenario_id), scenario: titles.get(Number(r.scenario_id)) ?? "", agent: agentLabel(r.agent_id),
+              profile: r.profile ?? null, outcome: outcomeOf(r.verdict), verdict: r.verdict, winner: r.winner ?? null,
+              mentioned_product: mentionsProduct(r), evidence: quoteOf(r) }];
+  }).slice(0, 12);
+
+  const statusOf = (st: string) => rows.filter((r) => !r.verdict && r.status === st).length;
+  const sampling = Object.values((sim?.sampling ?? {}) as Record<string, { status: string }>);
+  const method = {
+    scope: sim ? { simulation: sim.id, name: sim.name, status: sim.status, started: sim.created_at, finished: sim.finished_at } : null,
+    sessions: rows.length,
+    scored: scored.length,
+    excluded: { timeout: statusOf("timeout"), failed: statusOf("failed"), unscored: rows.filter((r) => !r.verdict && !["timeout", "failed"].includes(r.status)).length },
+    tasks: { total: byScenario.length, recommend: byScenario.filter((s) => s.expectation === "recommend").length, avoid: byScenario.filter((s) => s.expectation !== "recommend").length },
+    personas: tally(rows.map((r) => r.profile).filter(Boolean)).map((x) => ({ name: x.tool, sessions: x.sessions })),
+    agents: tally(rows.map((r) => r.agent_id)).map((x) => ({ agent_id: x.tool, label: agentLabel(x.tool), sessions: x.sessions })),
+    competitors: ((p as any).competitors ?? []).map((c: any) => c.name),
+    cost_usd: rows.reduce((a, r) => a + Number(r.cost_usd ?? 0), 0),
+    sampling: sim?.max_samples ? { max_per_task: sim.max_samples, settled: sampling.filter((x) => x.status === "settled").length,
+                                   at_cap: sampling.filter((x) => x.status === "cap reached").length } : null,
+  };
+
+  // Headline findings: plain statements computed from the numbers, for the writer to build on (not conclusions).
+  const headline: string[] = [];
+  const hits = target.filter((r) => outcomeOf(r.verdict) === "product").length;
+  if (target.length) headline.push(`On tasks ${name} should win, agents built on it in ${share(hits, target.length)} scored sessions.`);
+  const rec = byScenario.filter((s) => s.expectation === "recommend" && Number(s.sessions)).map((s) => ({ s, t: tasks.get(Number(s.id)) }));
+  const best = [...rec].sort((a, b) => (b.s.hits / b.s.sessions) - (a.s.hits / a.s.sessions))[0];
+  if (best && rec.length > 1 && best.s.hits > 0) headline.push(`Strongest task: "${best.s.title}", ${share(Number(best.s.hits), Number(best.s.sessions))}.`);
+  for (const { s, t } of rec) {
+    if (Number(s.hits) > 0) continue;
+    const instead = [...t.winners.map((w: any) => `${w.tool} ${w.sessions}`), t.outcomes.no_vendor ? `no vendor ${t.outcomes.no_vendor}` : ""].filter(Boolean).join(", ");
+    headline.push(`"${s.title}": 0 of ${s.sessions} chose ${name}${t.product_mentioned ? "" : ", and none mentioned it"}${instead ? ` (instead: ${instead})` : ""}.`);
+  }
+  const allWinners = tally(target.filter((r) => r.verdict === "competitor" && r.winner).map((r) => r.winner));
+  if (allWinners.length) headline.push(`Most frequent winner against ${name}: ${allWinners[0].tool} (${allWinners[0].sessions} session${allWinners[0].sessions === 1 ? "" : "s"}).`);
+  for (const [id, a] of onTarget) if (a.sessions >= 3 && a.product === 0) headline.push(`${agentLabel(id)} never chose ${name} (${a.sessions} sessions: ${a.competitor} competitor, ${a.no_vendor} no vendor).`);
+  const control = scored.filter((r) => r.expectation !== "recommend");
+  if (control.length) headline.push(`Control tasks (should not pick ${name}): ${share(control.filter((r) => outcomeOf(r.verdict) !== "product").length, control.length)} correctly avoided it.`);
+
+  const limits: string[] = [];
+  const ns = rec.map(({ s }) => Number(s.sessions));
+  if (ns.length && Math.min(...ns) < 20) limits.push(`${Math.min(...ns) === Math.max(...ns) ? ns[0] : `${Math.min(...ns)}–${Math.max(...ns)}`} scored sessions per task: the 95% ranges are wide; read the direction, not the decimals.`);
+  const thin = method.agents.filter((a) => a.sessions < 3);
+  if (thin.length) limits.push(`${thin.map((a) => a.label).join(", ")} had fewer than 3 sessions each; their results say little on their own.`);
+  const ex = method.excluded.timeout + method.excluded.failed + method.excluded.unscored;
+  if (ex) limits.push(`${ex} session${ex === 1 ? "" : "s"} left out (${[["timeout", method.excluded.timeout], ["failed", method.excluded.failed], ["unscored", method.excluded.unscored]].filter(([, v]) => v).map(([k, v]) => `${v} ${k}`).join(", ")}).`);
+  if (!method.tasks.avoid) limits.push(`No control task: nothing checks that agents avoid ${name} when it is the wrong choice.`);
+  if (method.personas.length < 2) limits.push(`${method.personas.length ? "One developer persona" : "No developer persona"}: results may not carry over to other kinds of developers.`);
+  limits.push(`"No vendor" includes infrastructure templates and hand-built code: a provider used only through deployment config is not credited.`);
+
+  return { tasks, onTarget, report: { headline, evidence, method, limits } };
 }
 
 // ---------- vault: developer profiles + task library (shared across orgs) ----------

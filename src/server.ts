@@ -39,7 +39,7 @@ export function handlersFor(org: Org) {
     list_simulations: (a: { product?: string }) => q.listSimulations(org, a.product),
     get_simulation: (a: { simulation_id: string }) => q.getSimulation(org, a.simulation_id),
     cancel_simulation: (a: { simulation_id: string }) => q.cancelSimulation(org, a.simulation_id),
-    get_visibility_report: (a: { product?: string; days?: number; model?: string; population?: string }) => q.getReport(org, a),
+    get_visibility_report: (a: { product?: string; days?: number; model?: string; population?: string; simulation?: string }) => q.getReport(org, a),
     get_agent_session: (a: { session_id: string }) => q.getSession(org, a.session_id),
     get_session_transcript: (a: { session_id: string; offset?: number; limit?: number }) =>
       q.getTranscript(org, a.session_id, a.offset, a.limit),
@@ -79,10 +79,8 @@ function summarize(d: Data): string {
       const base = `Simulation ${s.id} "${s.name}" for ${s.product}: ${s.status}. ${d.totals.sessions} agent sessions (${Object.entries(d.status).map(([k, v]) => `${v} ${k}`).join(", ")}). Hit rate ${pct(d.totals.hit_rate)} over ${d.totals.scored} scored. Verdicts: ${Object.entries(d.verdicts).map(([k, v]) => `${k} ${v}`).join(", ") || "none yet"}.${Object.keys(d.completed_reasons ?? {}).length ? ` Ended: ${Object.entries(d.completed_reasons).map(([k, v]) => `${k} ${v}`).join(", ")}.` : ""} By agent: ${d.by_agent.map((a: any) => `${a.label} ${pct(a.hit_rate)} (n=${a.scored})`).join(", ")}.${d.capacity ? ` Capacity: ${d.capacity.message}` : ""}`;
       return base + adaptive;
     }
-    case "report": {
-      const t = d.totals;
-      return `${d.product.name}, last ${d.filters.days} days${d.filters.model ? ` (${d.filters.model})` : ""}: ${t.sessions} scored agent sessions. Hit rate ${pct(t.hit_rate)}${t.weighted_hit_rate != null ? ` (adoption-weighted ${pct(t.weighted_hit_rate)})` : ""}${t.hit_ci ? ` (95% CI ${pct(t.hit_ci[0])}-${pct(t.hit_ci[1])})` : ""}, adopted ${pct(t.adoption_rate)}, lost to a competitor ${pct(t.competitor_rate)}. Share of voice: ${d.share_of_voice.map((v: any) => `${v.tool} ${pct(v.share)}`).join(", ") || "n/a"}. By agent: ${d.by_agent.map((a: any) => `${a.label} ${pct(a.hit_rate)} (n=${a.sessions})`).join(", ") || "n/a"}. ${d.by_profile.length ? `By developer profile: ${d.by_profile.map((p: any) => `${p.name} ${pct(p.hit_rate)}`).join(", ")}. ` : ""}Weakest scenarios: ${d.by_scenario.slice(0, 3).map((s: any) => `#${s.id} ${s.title} ${pct(s.hit_rate)}${s.usual_winner ? ` (usually ${s.usual_winner})` : ""}`).join("; ") || "n/a"}.`;
-    }
+    case "report":
+      return reportMarkdown(d);
     case "session": {
       const s = d.session;
       const ev = (s.mentions ?? []).map((m: any) => `${m.tool}: ${m.level}${m.evidence[0] ? ` (#${m.evidence[0].seq} "${m.evidence[0].snippet}")` : ""}`);
@@ -112,6 +110,50 @@ function summarize(d: Data): string {
       return `${r.total} transcript events match "${d.query}" (${d.filters.mode}).${r.hits.length ? ` Top: ${r.hits.slice(0, 5).map((h) => `${h.session_id}#${h.seq} (${h.type}, ${h.model}): ${h.text.slice(0, 120)}`).join(" | ")}` : ""}`;
     }
   }
+}
+
+/**
+ * The visibility report as a sectioned Markdown document, in the order a written report uses (docs/case-studies/resend.md):
+ * headline findings, results by task, by agent, by persona, share of voice, the agents' own words, method, limits.
+ */
+export function reportMarkdown(d: Extract<Data, { view: "report" }>): string {
+  const t = d.totals, name = d.product.name, m = d.method;
+  const range = (ci: [number, number] | null) => (ci ? `${Math.round(ci[0] * 100)}–${Math.round(ci[1] * 100)}%` : "–");
+  const cell = (s: string) => String(s ?? "").replace(/\|/g, "/");
+  const scope = m.scope ? `run ${m.scope.simulation} "${m.scope.name}" (${m.scope.status})` : `last ${d.filters.days} days`;
+  if (!Number(t.sessions)) return `# ${name}: agent visibility report\n\nNo scored agent sessions (${scope}${d.filters.model ? `, ${d.filters.model}` : ""}). Run a simulation with run_simulation.`;
+  const out: string[] = [`# ${name}: agent visibility report`, `Scope: ${scope}${d.filters.model ? `, model ${d.filters.model}` : ""}. ${t.sessions} scored sessions.`];
+
+  out.push("## Headline", ...d.headline.map((h: string) => `- ${h}`),
+    `- Hit rate ${pct(t.hit_rate)} (95% range ${range(t.hit_ci)})${t.weighted_hit_rate != null ? `, adoption-weighted ${pct(t.weighted_hit_rate)}` : ""}; lost to a competitor ${pct(t.competitor_rate)}.`);
+
+  out.push("## Results by task", `| Task | Should ${cell(name)} win? | Scored | ${cell(name)} | Competitor | No vendor | Mentioned ${cell(name)} | 95% range |`, "|---|---|---|---|---|---|---|---|",
+    ...d.by_scenario.map((s: any) => {
+      const o = s.outcomes ?? { product: s.hits, competitor: 0, no_vendor: 0 };
+      const winners = (s.winners ?? []).map((w: any) => `${w.tool} ${w.sessions}`).join(", ");
+      return `| ${cell(s.title)} | ${s.expectation === "recommend" ? "yes" : "no (control)"} | ${s.sessions} | ${o.product} | ${winners || o.competitor} | ${o.no_vendor} | ${s.product_mentioned ?? "–"} | ${range(s.hit_ci)} |`;
+    }));
+  const shortlists = d.by_scenario.filter((s: any) => s.expectation === "recommend" && s.alternatives?.length);
+  if (shortlists.length) out.push("", "Named instead of " + name + " (sessions that did not choose it):", ...shortlists.map((s: any) => `- ${s.title}: ${s.alternatives.slice(0, 5).map((a: any) => `${a.tool} ${a.sessions}`).join(", ")}`));
+
+  const agents = d.by_agent.filter((a: any) => a.on_target?.sessions);
+  if (agents.length) out.push(`## By agent (tasks ${name} should win)`, `| Agent | Sessions | ${cell(name)} | Competitor | No vendor |`, "|---|---|---|---|---|",
+    ...agents.map((a: any) => `| ${cell(a.label)} | ${a.on_target.sessions} | ${a.on_target.product} | ${a.on_target.competitor} | ${a.on_target.no_vendor} |`));
+  if (d.by_profile.length > 1) out.push("## By developer persona", ...d.by_profile.map((p: any) => `- ${p.name}: ${pct(p.hit_rate)} of ${p.sessions} (95% range ${range(p.hit_ci)}), ${Number(p.avg_user_turns || 0).toFixed(1)} questions answered on average`));
+  if (d.share_of_voice.length) out.push("## Share of voice", "Share of scored sessions where the agent recommended or adopted each tool:",
+    ...d.share_of_voice.slice(0, 8).map((v: any) => `- ${v.tool}${v.target ? " (product)" : ""}: ${pct(v.share)} (recommended ${v.recommended}, adopted ${v.adopted}, mentioned ${v.mentioned})`));
+
+  if (d.evidence.length) out.push("## Evidence: the deciding sessions", "Losses first, then sessions that built without a vendor. Read the transcript around #seq with get_session_transcript.",
+    ...d.evidence.map((e: any) => `- ${e.session_id} · ${e.agent}${e.profile ? ` as ${e.profile}` : ""} · "${e.scenario}" → ${e.outcome === "product" ? name : e.outcome === "competitor" ? e.winner ?? "competitor" : `no vendor${e.mentioned_product ? ` (mentioned ${name})` : ""}`}${e.evidence ? `: "${e.evidence.quote}" (${e.evidence.tool}, ${e.evidence.level}, #${e.evidence.seq})` : ""}`));
+
+  out.push("## How this was run",
+    `- ${m.tasks.total} tasks (${m.tasks.recommend} ${name} should win, ${m.tasks.avoid} control); ${m.sessions} sessions, ${m.scored} scored; agent spend $${Number(m.cost_usd).toFixed(2)}.`,
+    `- Agents: ${m.agents.map((a: any) => `${a.label} ${a.sessions}`).join(", ") || "n/a"}.`,
+    `- Personas: ${m.personas.map((p: any) => `${p.name} ${p.sessions}`).join(", ") || "none"}.`,
+    `- Competitors credited: ${m.competitors.join(", ") || "none configured"}.`,
+    ...(m.sampling ? [`- Adaptive sampling up to ${m.sampling.max_per_task} per task: ${m.sampling.settled} settled, ${m.sampling.at_cap} at the cap.`] : []));
+  out.push("## Limits", ...d.limits.map((l: string) => `- ${l}`));
+  return out.join("\n");
 }
 
 /**
@@ -381,19 +423,20 @@ export function createServer(org: Org): McpServer {
 
   registerAppTool(server, "cancel_simulation", {
     title: "Cancel simulation",
-    description: "Cancel a simulation's queued sessions. Sessions already running finish normally.",
+    description: "Cancel a simulation: queued sessions never start, and running sessions are stopped (their model access is revoked and their sandboxes shut down).",
     inputSchema: { simulation_id: z.string() },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }, _meta: meta("cancel_simulation"),
   }, run("cancel_simulation"));
 
   registerAppTool(server, "get_visibility_report", {
     title: "Visibility report",
-    description: "How often coding agents pick the product: hit rate, adoption rate, losses to competitors, share of voice against each competitor, breakdown by model and by scenario, a daily trend and recent losses with links to the evidence.",
+    description: "A sectioned report on whether coding agents pick the product: headline findings; results by task (built on the product, on which competitor, or on no vendor, and whether the product was even mentioned); results by agent and by developer persona; share of voice; quotes from the deciding sessions; how the run was set up; and limits. Pass simulation to report on one run (as a case study does), or days for a rolling window.",
     inputSchema: {
       product,
       days: z.number().int().min(1).max(365).optional().describe("Look-back window (default 30)"),
       model: z.string().optional().describe("Only this model"),
       population: z.string().optional().describe("Developer population for usage shares and the adoption-weighted rate"),
+      simulation: z.string().optional().describe("Only this simulation (e.g. sim_Ab3...), whatever its age; overrides days"),
     },
     annotations: read, _meta: meta("get_visibility_report"),
   }, run("get_visibility_report"));
@@ -487,14 +530,26 @@ export function registerPrompts(server: McpServer) {
 
   server.registerPrompt("visibility_report", {
     title: "Visibility report",
-    description: "Summarise how often coding agents pick the product, where it loses and what to do next.",
-    argsSchema: { product: productArg, days: z.string().optional().describe("Look-back window in days (default 30)") },
-  }, ({ product, days }) => {
-    const a = { ...(product ? { product } : {}), ...(days && Number(days) > 0 ? { days: Math.round(Number(days)) } : {}) };
+    description: "A full written report on whether coding agents pick the product, why, and what to change: sectioned like a case study, backed by session evidence.",
+    argsSchema: {
+      product: productArg,
+      days: z.string().optional().describe("Look-back window in days (default 30)"),
+      simulation: z.string().optional().describe("Report on this one simulation instead of a time window"),
+    },
+  }, ({ product, days, simulation }) => {
+    const a = { ...(product ? { product } : {}), ...(simulation ? { simulation } : days && Number(days) > 0 ? { days: Math.round(Number(days)) } : {}) };
     return say(
       `Call get_visibility_report with ${JSON.stringify(a)}${product ? "" : " (if it reports several products, call list_products and ask which one)"}.\n` +
-      `Then summarise in at most 8 bullets: hit rate with its 95% CI and sample size, adoption rate, share lost to competitors, the competitor with the most share of voice, the strongest and weakest coding agents, the three weakest scenarios with the tool that usually wins them, and the trend direction.\n` +
-      `Treat samples under 10 sessions as inconclusive. End with 2-3 concrete next steps, e.g. run explain_loss on one of the recent losses (give its session id) or add scenarios where coverage is thin.`,
+      `For the 2-3 most telling sessions in its evidence section (a loss, a session that never mentioned the product, a surprising win), call get_session_transcript around the #seq (offset about 5 before it, limit 30) to find the decisive moment and a short quote.\n` +
+      `Then write the report with these sections, in this order:\n` +
+      `1. Title as a question (e.g. "When coding agents need X, do they choose <product>?") and a 1-2 sentence answer with the key numbers.\n` +
+      `2. How the run was set up: tasks (how many the product should win, control tasks), personas, the agent mix, competitors credited, sessions and how many were left out.\n` +
+      `3. Results by task: a table with sessions, built on the product, which competitor, no vendor, and the 95% range; one line on what each task asked for.\n` +
+      `4. What the agents did, and why: 3-5 numbered findings. Each states a pattern from the numbers and backs it with a quote from a session (with its session id). Separate what the transcripts show from your inference.\n` +
+      `5. By agent: a table over the tasks the product should win; note agents with fewer than 3 sessions say little on their own. Add by persona if there are several.\n` +
+      `6. What the product team could act on: 2-4 concrete changes (docs, examples, package naming, comparison pages), each tied to a finding.\n` +
+      `7. Limits: from the report's limits section, plus anything you noticed reading transcripts.\n` +
+      `Use only numbers from the report; treat tasks with fewer than 10 scored sessions as directional. Write for the product team, in plain words.`,
     );
   });
 

@@ -239,7 +239,7 @@ try {
   const promptArgs = Object.fromEntries(prompts.map((p) => [p.name, (p.arguments ?? []).map((x) => `${x.name}${x.required ? "" : "?"}`)]));
   assert.deepEqual(promptArgs.onboard_product, ["prompt", "website_url", "docs_url"]);
   assert.deepEqual(promptArgs.explain_loss, ["session_id"]);
-  assert.deepEqual(promptArgs.visibility_report, ["product?", "days?"]);
+  assert.deepEqual(promptArgs.visibility_report, ["product?", "days?", "simulation?"]);
   assert.deepEqual(promptArgs.compare_models, ["product?"]);
   assert.deepEqual(promptArgs.weekly_digest, []);
   const onboardPrompt = await A.getPrompt({ name: "onboard_product", arguments: { prompt: "A Redis job queue", website_url: "https://bullmq.io", docs_url: "https://docs.bullmq.io" } });
@@ -543,6 +543,17 @@ try {
   assert.equal(report.by_agent[0].agent_id, "claude-code/sonnet");
   assert.equal(report.totals.weighted_hit_rate, 0.5, "only one agent ran, so weighted == its rate");
   assert.equal(report.by_profile[0].avg_user_turns, 1, "simulated developer turns counted");
+  // Report sections: per-task outcome split, evidence (losses first), method, headline, limits; one-run scope; Markdown text.
+  assert.equal(report.method.scored, 4);
+  assert.ok(report.by_scenario.every((x: any) => x.outcomes && x.outcomes.product + x.outcomes.competitor + x.outcomes.no_vendor === Number(x.sessions)));
+  assert.ok(report.by_scenario.some((x: any) => x.winners?.[0]?.tool === "BullMQ"), "competitor named per task");
+  assert.equal(report.evidence[0].outcome, "competitor");
+  assert.ok(/bullmq/i.test(report.evidence[0].evidence?.quote ?? ""), "loss quoted from the transcript evidence");
+  assert.ok(report.headline.length >= 1 && report.limits.length >= 1);
+  assert.ok(report.by_agent[0].on_target, "per-agent outcomes on tasks the product should win");
+  assert.equal((await call(A, "get_visibility_report", { simulation: sim.simulation.id })).method.scope.simulation, sim.simulation.id);
+  const reportMd = ((await A.callTool({ name: "get_visibility_report", arguments: { days: 7 } })).content as any)[0].text as string;
+  for (const h of ["## Headline", "## Results by task", "## Evidence: the deciding sessions", "## How this was run", "## Limits"]) assert.ok(reportMd.includes(h), `report text has ${h}`);
   assert.equal((await call(A, "list_simulations")).simulations.length, 3);
   assert.equal((await call(A, "list_products")).products[0].sessions_30d, 4);
 
