@@ -115,10 +115,11 @@ No GUI toolchains are installed.
   - OpenCode and Kilo: the `lsp` user config.
   - Codex, Cline, Pi and Antigravity: Serena (LSP over MCP).
   - Config goes only under the agent's HOME; `.serena/` is excluded from the scored diff.
-- **Zed personas run over ACP**, as Zed's agent panel does (`harnesses/acp-client.mjs`). This is off by default until a live run per adapter confirms credentials and model selection; `OCTILLION_ZED_ACP=on` turns it on (worker side: set it in the orchestrator's tuning). The install, wiring and ACP `initialize` handshake were verified on boat on 2026-10-14 for Claude Code, Codex, OpenCode, Pi and Cline, all with `loadSession: true`.
+- **Zed personas run over ACP**, as Zed's agent panel does (`harnesses/acp-client.mjs`). It is enabled in production with `OCTILLION_ZED_ACP=on` (the code default is off). Live smoke runs on 2026-10-14 passed with real models over our gateway for Claude Code, Codex, OpenCode, Pi and Cline, each with a developer reply over `session/load`, for about $0.75 in total. Kilo's `kilo acp` never answered the prompt, so Kilo runs as a CLI.
   - The client advertises Zed's capabilities and `clientInfo`, sends the prompt as plain text, forwards no MCP servers, and allows permission requests.
   - It serves `fs/*` and `terminal/*` on the workspace, and reloads the session for developer replies.
-  - Routes: `claude-agent-acp` (runs the pinned `claude`), `codex-acp` (runs the pinned `codex`), `opencode acp`, `kilo acp`, `cline --acp` and `pi-acp`. Antigravity has no route and runs as a CLI.
+  - Routes: `claude-agent-acp` (runs the pinned `claude`), `codex-acp` (runs the pinned `codex`, authenticated with the `api-key` method), `opencode acp`, `cline --acp` (`CLINE_PROVIDER`/`CLINE_MODEL`) and `pi-acp`. Kilo and Antigravity run as a CLI.
+  - History that `session/load` replays is not re-emitted.
   - Events are `acp.*` (whole messages and tool calls), scored like any harness.
 - **Recorded:** an `environment` transcript event and session `metadata.environment` (launch, editor, language, present / installed / failed / dropped, skills, wiring, seconds).
 - **Tests:** `orchestrator/test/per-job.ts` (resolution, blindness, wiring, skills, variants) and `orchestrator/test/acp-client.ts` (the client against a mock ACP agent built with the official SDK).
