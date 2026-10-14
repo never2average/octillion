@@ -2,7 +2,7 @@ import { getDb, type Queryable } from "./db.js";
 import { randomId, type Org } from "./auth.js";
 import { transcripts, type SearchParams } from "./transcripts.js";
 import type { Tool } from "./scoring.js";
-import { dealToCells, planFirstBatch, drawVariant, enabledAgents, findAgent, isRunnable, runnableCoverage, sandboxMix, scheduledAgents, variantsOf, type AgentSpec } from "./agents.js";
+import { dealToCells, planFirstBatch, schedulingShares, drawVariant, enabledAgents, findAgent, isRunnable, runnableCoverage, sandboxMix, scheduledAgents, variantsOf, type AgentSpec } from "./agents.js";
 import { getPopulation, listPopulations } from "./populations.js";
 import { capacityStatus } from "./autoscaler.js";
 
@@ -343,7 +343,7 @@ export async function runSimulation(org: Org, input: RunInput) {
   // Representative runs size their first batch from the grid (agents.ts planFirstBatch): the smallest samples per
   // problem x persona that give every harness a session and every major harness every problem. `samples` overrides.
   const batchPlan = !explicit && input.samples === undefined
-    ? planFirstBatch(scenarios.length, profileIds.length, scheduledAgents(pop), { maxSessions: config.maxSessionsPerRun() })
+    ? planFirstBatch(scenarios.length, profileIds.length, schedulingShares(pop), { maxSessions: config.maxSessionsPerRun() })
     : null;
   const samples = input.samples ?? batchPlan?.samples ?? config.defaultSamples();
   const repeats = input.repeats ?? 3;
@@ -371,7 +371,7 @@ export async function runSimulation(org: Org, input: RunInput) {
     // Slot agents with model_variants (e.g. pi) run each sampled session as one of their models, drawn by share.
     // Each scenario x profile cell gets a near-proportional share of the weighted mix (agents.ts dealToCells).
     // First batch: every scheduled harness gets at least one session; the rest by weight, spread over problems.
-    const cells = dealToCells(slots.map(() => samples), scheduledAgents(pop), { floor: 1, groups: slots.map((s) => s.scenarioId) });
+    const cells = dealToCells(slots.map(() => samples), schedulingShares(pop), { floor: 1, groups: slots.map((s) => s.scenarioId) });
     plan = slots.flatMap((slot, si) => cells[si]!.map((a, i) => ({ ...slot, agent: drawVariant(a), attempt: i + 1 })));
   }
   if (plan.length > config.maxSessionsPerRun())
@@ -446,7 +446,7 @@ export async function extendAdaptive(simulationId: string): Promise<number> {
     const total = more.reduce((t, m) => t + m.count, 0);
     if (!total) return 0;
     // Top-ups are dealt the same way: each scenario's batch gets a near-proportional share of the weighted mix.
-    const cells = dealToCells(more.map((m) => m.count), scheduledAgents(pop)); // top-ups: by weight only
+    const cells = dealToCells(more.map((m) => m.count), schedulingShares(pop)); // top-ups: by usage share only
     const profileIds: (number | null)[] = sim.profile_ids?.length ? sim.profile_ids : [null];
     for (const [mi, m] of more.entries())
       for (let i = 0; i < m.count; i++) {
@@ -544,14 +544,16 @@ export async function cancelSimulation(org: Org, simulationId: string) {
   const db = await getDb();
   const [sim] = await db.query("SELECT id FROM simulations WHERE id = $1 AND org_id = $2", [simulationId, org.orgId]);
   if (!sim) throw new Error(`No simulation ${simulationId}`);
+  // Running sessions stop too: their gateway tokens are revoked (no more model calls), and their next heartbeat is
+  // refused (409), so the orchestrator kills the sandbox. Before 2026-10-14 only queued sessions were cancelled, and
+  // a run whose sessions had all been claimed kept running and spending.
   await db.transaction(async (tx) => {
-    await tx.query("UPDATE agent_sessions SET status = 'cancelled', ended_at = now() WHERE simulation_id = $1 AND status = 'queued'", [simulationId]);
     await tx.query(
-      `UPDATE simulations SET status = 'cancelled', finished_at = now()
-        WHERE id = $1 AND status IN ('queued', 'running')
-          AND NOT EXISTS (SELECT 1 FROM agent_sessions WHERE simulation_id = $1 AND status = 'running')`,
-      [simulationId],
-    );
+      `UPDATE gateway_tokens SET revoked_at = now()
+        WHERE revoked_at IS NULL AND session_id IN (SELECT id FROM agent_sessions WHERE simulation_id = $1 AND status IN ('queued', 'running'))`,
+      [simulationId]);
+    await tx.query("UPDATE agent_sessions SET status = 'cancelled', ended_at = now() WHERE simulation_id = $1 AND status IN ('queued', 'running')", [simulationId]);
+    await tx.query("UPDATE simulations SET status = 'cancelled', finished_at = now() WHERE id = $1 AND status IN ('queued', 'running')", [simulationId]);
   });
   return getSimulation(org, simulationId);
 }

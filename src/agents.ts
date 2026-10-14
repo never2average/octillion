@@ -93,6 +93,16 @@ export function scheduledAgents(pop: Population): AgentSpec[] {
   return sandboxMix(pop).filter((r) => r.sandboxes > 0).map((r) => ({ ...r.agent, weight: r.sandboxes / pop.sandbox_unit }));
 }
 
+/**
+ * The scheduled agents with their real usage shares as weights, for allocating a run's sessions (planFirstBatch,
+ * dealToCells). scheduledAgents' weights are the pod mix (shares rounded to a sandbox unit with at least one sandbox
+ * each), which already lifts small agents: Kilo's 0.5% becomes 1/20 = 5%. Allocating from those and then applying
+ * the batch floor boosted small agents twice (seen live 2026-10-14: Opus 9 and Codex 5 instead of 10 and 6).
+ */
+export function schedulingShares(pop: Population): AgentSpec[] {
+  return sandboxMix(pop).filter((r) => r.sandboxes > 0).map((r) => r.agent);
+}
+
 export function findAgent(id: string): AgentSpec | undefined {
   return registry().agents.find((a) => a.id === id);
 }

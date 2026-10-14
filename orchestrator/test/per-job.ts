@@ -299,6 +299,35 @@ try {
   const smallGrid = planFirstBatch(3, 1, liveMix);
   check("planFirstBatch: other grids get their own minimum (3 problems x 1 persona)", smallGrid.met && smallGrid.counts["codex/default"]! >= 3 && Object.values(smallGrid.counts).every((n) => n >= 1), JSON.stringify(smallGrid));
 
+
+  // allocation uses real usage shares (not the pod mix, which already lifts small agents) + cancel stops running sessions
+  const pops = await import("../../src/populations.js");
+  const agentsMod = await import("../../src/agents.js");
+  await db.query(`UPDATE developer_population_agents a SET market_share = v.share, paused = false
+                    FROM developer_populations p, (VALUES ('claude-code/opus', 0.4039), ('claude-code/sonnet', 0), ('codex/default', 0.1965),
+                      ('opencode/sonnet', 0.0546), ('antigravity/default', 0.0491), ('pi/gpt', 0.0164), ('cline/gpt', 0.0109), ('kilo/sonnet', 0.0054)) AS v(id, share)
+                   WHERE p.id = a.population_id AND p.is_default AND a.agent_id = v.id`);
+  const livePop = await pops.getPopulation();
+  const shares = agentsMod.schedulingShares(livePop);
+  const prodPlan = agentsMod.planFirstBatch(4, 2, shares);
+  const want = { "claude-code/opus": 10, "codex/default": 6, "opencode/sonnet": 2, "antigravity/default": 2, "pi/gpt": 2, "cline/gpt": 1, "kilo/sonnet": 1 };
+  check("production mix (real shares): 4 x 2 deals Opus 10, Codex 6, OpenCode 2, Antigravity 2, Pi 2, Cline 1, Kilo 1",
+    prodPlan.samples === 3 && Object.entries(want).every(([id, n]) => prodPlan.counts[id] === n), JSON.stringify(prodPlan.counts));
+  const podPlan = agentsMod.planFirstBatch(4, 2, agentsMod.scheduledAgents(livePop));
+  check("the pod-mix weights would have boosted small agents twice (why allocation no longer uses them)",
+    (podPlan.counts["claude-code/opus"] ?? 0) < 10 || (podPlan.counts["kilo/sonnet"] ?? 0) > 1, JSON.stringify(podPlan.counts));
+  const cancelSim = await run(O2, "left-pad", 1, 2);
+  await db.query("UPDATE agent_sessions SET status = 'running', worker_id = 'w-c', started_at = now() WHERE simulation_id = $1", [cancelSim]);
+  await db.query("UPDATE simulations SET status = 'running' WHERE id = $1", [cancelSim]);
+  const cs = await db.query<any>("SELECT id FROM agent_sessions WHERE simulation_id = $1", [cancelSim]);
+  for (const s of cs) await db.query("INSERT INTO gateway_tokens (token_hash, kind, session_id, providers, expires_at) VALUES ($1, 'session', $2, '{openai}', now() + interval '1 hour')", [`h-${s.id}`, s.id]);
+  await q.cancelSimulation(O2, cancelSim);
+  const [after] = await db.query<any>("SELECT status FROM simulations WHERE id = $1", [cancelSim]);
+  const notCancelled = await db.query<any>("SELECT count(*) AS n FROM agent_sessions WHERE simulation_id = $1 AND status <> 'cancelled'", [cancelSim]);
+  const liveTokens = await db.query<any>("SELECT count(*) AS n FROM gateway_tokens WHERE session_id = ANY($1) AND revoked_at IS NULL", [cs.map((s: any) => s.id)]);
+  check("cancel_simulation stops running sessions too: all cancelled, tokens revoked, run cancelled at once",
+    after.status === "cancelled" && Number(notCancelled[0].n) === 0 && Number(liveTokens[0].n) === 0, `${after.status} / ${notCancelled[0].n} / ${liveTokens[0].n}`);
+
   // purchase decision: the real Resend tasks that produced bad data are rejected; a need-only task passes
   const terms = ["transactional email service", "email API", "email provider"];
   const abuse = "In this pastebin, add an abuse report form ... and send the report to the moderators' inbox through a transactional email service with attachments and the reporter as reply-to.";
