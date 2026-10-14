@@ -5,7 +5,7 @@ managed services. There is one prefix per kind of data, and `src/storage.ts` is 
 
 | Prefix | What | Written by | Kept |
 |---|---|---|---|
-| `postgres/` | hourly `pg_dump` of the database | `pg-backup-offsite` service (rclone) | 30 days (`OFFSITE_KEEP_DAYS`) |
+| `postgres/` | daily `pg_dump` of the database, copied hourly | `pg-backup-offsite` service (rclone) | newest 10 (`OFFSITE_KEEP`; the volume keeps `BACKUP_KEEP`, 10) |
 | `transcripts/org-<id>/<yyyy-mm>/<session>.jsonl.gz` | every finished session's full trace | `src/archive.ts` sweeper | indefinitely |
 | `research/org-<id>/<research_id>.json` | every finished onboarding research result (product, personas, problems, sources) | `src/archive.ts` sweeper | indefinitely |
 | `reports/org-<id>/<simulation>/<stamp>.pdf` and `.html` | run reports | reports (planned: `export_report`) | until deleted |
