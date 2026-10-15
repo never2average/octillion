@@ -266,6 +266,7 @@ export async function saveScenarios(org: Org, productRef: string | undefined, it
 export interface RunInput {
   product?: string; scenario_ids?: number[]; profiles?: string[]; name?: string;
   platform?: string;                                        // only active scenarios on this platform (web, mobile, ...)
+  task_set?: string;                                        // only the active tasks of one of the org's private task sets
   population?: string;                                      // developer population (default: the default one)
   agents?: string[]; models?: string[]; repeats?: number;  // explicit: these agents x repeats on every scenario
   samples?: number;                                         // representative (default): sessions per scenario, mixed by adoption
@@ -333,6 +334,15 @@ export async function runSimulation(org: Org, input: RunInput) {
   if (!enabled.length) throw new Error(`No coding agents are running in developer population ${pop.slug}`);
 
   const platform = checkPlatform(input.platform);
+  if (input.task_set) {
+    // Private task set: scoped to this org and product (another org's set name or id resolves to nothing).
+    const ids = (await db.query<{ id: number }>(
+      `SELECT sc.id FROM scenarios sc JOIN org_task_sets ts ON ts.id = sc.task_set_id
+        WHERE ts.org_id = $1 AND ts.product_id = $2 AND (ts.public_id = $3 OR ts.name = $3) AND sc.active ORDER BY sc.id`,
+      [org.orgId, p.id, input.task_set])).map((r) => r.id);
+    if (!ids.length) throw new Error(`No task set ${input.task_set} with active tasks. See list_task_sets.`);
+    input = { ...input, scenario_ids: ids };
+  }
   const scenarios = await db.query<{ id: number }>(
     input.scenario_ids?.length
       ? "SELECT id FROM scenarios WHERE product_id = $1 AND id = ANY($2) ORDER BY id"

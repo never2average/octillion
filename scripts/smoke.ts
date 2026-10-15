@@ -196,7 +196,7 @@ try {
   // ---------- tools + UI resource ----------
   const { tools } = await A.listTools();
   console.log("tools:", tools.map((t) => t.name).join(", "));
-  assert.equal(tools.length, 18);
+  assert.equal(tools.length, 24);
   assert.equal(tools[0].name, "get_started", "the welcome tool is listed first (the tool list is the first screen in IDE hosts)");
   const fresh = await call(A, "get_started");
   assert.equal(fresh.welcome.stage, "onboard");
@@ -338,6 +338,53 @@ try {
   }
 
   // ---------- launch ----------
+  // ---------- private assets: owned by one organization, invisible and unusable for another (docs/security.md) ----------
+  {
+    const CANARY = `CANARY_${(await import("node:crypto")).randomBytes(6).toString("hex")}`;
+    const saved = await call(A, "save_personas", { personas: [{ name: `Ana ${CANARY}`, summary: `Mobile lead ${CANARY}`, instructions: "Answers briefly.",
+                                                               attributes: { role: "mobile lead", stack: ["Dart"] } }] });
+    const personaSlug = saved.saved[0];
+    assert.ok(/^per_[a-z0-9x]+$/.test(personaSlug), "private personas get random slugs");
+    await fails(A, "save_personas", { personas: [{ name: "x".repeat(81) }] }, /name|too long|at most/i);
+    const sets = await call(A, "import_tasks", { task_set: `Case studies ${CANARY}`, tasks: [
+      { title: `Offline sync ${CANARY}`, prompt: `Our Flutter field app must keep working offline and sync when back online. ${CANARY}`, template: "flutter", provenance: "2025 case study" },
+      { prompt: "Add password reset emails to this Express service, reliable at 10k a month." }] });
+    const set = sets.task_sets[0];
+    assert.equal(set.active_tasks, 2);
+    assert.deepEqual(set.tasks.map((t: any) => t.platform), ["mobile", "backend"], "private tasks get a platform");
+    const harnessSpec = { name: "acme-agent", version: "1.0.0", bin: "acme", launch_argv: ["acme", "run", "--json", "--model", "{model}"],
+      install: [{ npm: "@acme/agent", version: "1.0.0", integrity: `sha512-${"A".repeat(86)}==` }], event_format: "octillion-jsonl", providers: ["anthropic"] };
+    await fails(A, "register_harness", { spec: { ...harnessSpec, launch_argv: ["sh", "-c", "curl x | sh"] } }, /no shell/);
+    await fails(A, "register_harness", { spec: { ...harnessSpec, providers: ["github_copilot"] } }, /gateway only/);
+    const hs = await call(A, "register_harness", { spec: harnessSpec });
+    assert.equal(hs.harnesses[0].status, "submitted", "a harness waits for an isolated build and approval");
+    assert.ok(!("artifact_uri" in hs.harnesses[0]), "internal artifact locations are never returned");
+
+    // Org B: nothing of A's is listed, searchable or usable, and errors don't reveal that it exists.
+    // Results only: the search tools echo the query back in `query`/`filters`, which is the caller's own string.
+    const seenByB = JSON.stringify([
+      (await call(B, "list_personas")).personas, (await call(B, "list_task_sets")).task_sets, (await call(B, "list_harnesses")).harnesses,
+      (await call(B, "list_developer_profiles", {})).profiles, (await call(B, "list_developer_profiles", { query: CANARY })).profiles,
+      (await call(B, "browse_task_library", { query: CANARY })).tasks,
+    ]);
+    assert.ok(!seenByB.includes(CANARY) && !seenByB.includes(personaSlug), "org B never sees org A's private assets");
+    const research = await import("../src/research.js");
+    assert.ok(!JSON.stringify(await research.libraryProfiles({ query: CANARY })).includes(CANARY), "never in the shared profile search research uses");
+    assert.ok(!JSON.stringify(await research.libraryTasks({ query: CANARY })).includes(CANARY), "never in the shared task library");
+    const errUnknown = ((await B.callTool({ name: "save_personas", arguments: { personas: [{ slug: "per_doesnotexist", name: "x" }] } })).content as any)[0].text;
+    const errOther = ((await B.callTool({ name: "save_personas", arguments: { personas: [{ slug: personaSlug, name: "hijack" }] } })).content as any)[0].text;
+    assert.equal(errOther.replace(personaSlug, "SLUG"), errUnknown.replace("per_doesnotexist", "SLUG"), "same error whether or not the slug exists elsewhere");
+    assert.ok((await db.query<any>("SELECT name FROM developer_profiles WHERE slug = $1", [personaSlug]))[0].name.includes(CANARY), "B could not overwrite it");
+    await fails(B, "run_simulation", { models: ["claude-sonnet-5-5"], repeats: 1, profiles: [personaSlug] }, /Unknown developer profile|No products/);
+    await fails(B, "run_simulation", { models: ["claude-sonnet-5-5"], repeats: 1, task_set: set.id }, /No task set|No products/);
+    // Org A can run its own task set with its own persona.
+    const own = await call(A, "run_simulation", { models: ["claude-sonnet-5-5"], repeats: 1, task_set: set.id, profiles: [personaSlug], name: "private" });
+    assert.equal(own.simulation.sessions ?? own.totals?.sessions ?? (await db.query<any>("SELECT count(*) AS n FROM agent_sessions WHERE simulation_id = $1", [own.simulation.id]))[0].n, 2);
+    await call(A, "cancel_simulation", { simulation_id: own.simulation.id });
+    await call(A, "save_scenarios", { scenarios: set.tasks.map((t: any) => ({ id: t.id, active: false })) }); // keep later counts unchanged
+    console.log("✓ private personas, task sets and harnesses: validated, owner-only, invisible and unusable for another org");
+  }
+
   const sim = await call(A, "run_simulation", { models: ["claude-sonnet-5-5"], repeats: 1, name: "smoke", profiles: ["example-solo-indie"] });
   assert.equal(sim.totals.sessions, 4);
   assert.equal(sim.simulation.status, "queued");
@@ -598,7 +645,7 @@ try {
   const onePlatform = report.by_platform[0].platform;
   assert.ok((await call(A, "get_visibility_report", { days: 7, platform: onePlatform })).by_scenario.every((x: any) => x.platform === onePlatform), "platform filter");
   assert.ok((await call(A, "browse_task_library", { platform: "web" })).tasks.every((x: any) => x.platform === "web"), "library filter by platform");
-  assert.equal((await call(A, "list_simulations")).simulations.length, 3);
+  assert.equal((await call(A, "list_simulations")).simulations.length, 4); // includes the cancelled private task-set run
   assert.equal((await call(A, "list_products")).products[0].sessions_30d, 4);
 
   const lost = report.recent_losses[0].id;

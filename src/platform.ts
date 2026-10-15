@@ -19,6 +19,7 @@ const DESKTOP = /\b(electron|tauri|desktop app)\b/i;
 const WEB = /\b(next\.?js|react|vue|svelte|angular|frontend|front-end|browser|web app|pwa|single-page)\b/i;
 const CLI = /\b(cli|command-line|command line tool)\b/i;
 const DATA = /\b(notebook|pandas|spark|etl|data pipeline|airflow|dbt)\b/i;
+const BACKEND = /\b(express|fastapi|flask|spring boot|rails|laravel|nestjs|koa|gin|axum|actix|rest api|graphql api|microservice|backend service|api service)\b/i;
 const SERVER_LANGS = /^(python|go|golang|rust|java|ruby|php|c#|elixir|typescript|javascript|kotlin \(server\))$/i;
 
 export function isPlatform(v: unknown): v is Platform {
@@ -35,6 +36,7 @@ export function platformOf(t: { template?: string | null; language?: string | nu
   if (WEB.test(text)) return "web";
   if (CLI.test(text)) return "cli";
   if (DATA.test(text)) return "data";
+  if (BACKEND.test(text)) return "backend";
   if (SERVER_LANGS.test(t.language ?? "")) return "backend";
   return "other";
 }

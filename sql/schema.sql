@@ -472,6 +472,7 @@ CREATE OR REPLACE FUNCTION octillion_platform_of(tpl TEXT, lang TEXT, tags TEXT[
     WHEN concat_ws(' ', array_to_string(tags, ' '), prompt) ~* '\m(next\.?js|react|vue|svelte|angular|frontend|front-end|browser|web app|pwa|single-page)\M' THEN 'web'
     WHEN concat_ws(' ', array_to_string(tags, ' '), prompt) ~* '\m(cli|command-line|command line tool)\M' THEN 'cli'
     WHEN concat_ws(' ', array_to_string(tags, ' '), prompt) ~* '\m(notebook|pandas|spark|etl|data pipeline|airflow|dbt)\M' THEN 'data'
+    WHEN concat_ws(' ', array_to_string(tags, ' '), prompt) ~* '\m(express|fastapi|flask|spring boot|rails|laravel|nestjs|koa|gin|axum|actix|rest api|graphql api|microservice|backend service|api service)\M' THEN 'backend'
     WHEN lang ~* '^(python|go|golang|rust|java|ruby|php|c#|elixir|typescript|javascript)$' THEN 'backend'
     ELSE 'other' END
 $$;
@@ -505,4 +506,37 @@ CREATE TABLE IF NOT EXISTS org_deletions (
   org_id      INT PRIMARY KEY,
   counts      JSONB NOT NULL DEFAULT '{}',
   deleted_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Private customer assets (src/private.ts, docs/security.md phase 1). Owned by one organization; never shared.
+CREATE TABLE IF NOT EXISTS org_task_sets (
+  id          SERIAL PRIMARY KEY,
+  public_id   TEXT UNIQUE NOT NULL,             -- tset_<random>
+  org_id      INT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  product_id  INT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  name        TEXT NOT NULL,
+  description TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (org_id, product_id, name)
+);
+ALTER TABLE scenarios ADD COLUMN IF NOT EXISTS task_set_id INT REFERENCES org_task_sets(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS scenarios_task_set_idx ON scenarios (task_set_id) WHERE task_set_id IS NOT NULL;
+CREATE TABLE IF NOT EXISTS org_harnesses (
+  id              TEXT PRIMARY KEY,             -- oh_<random>
+  org_id          INT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  name            TEXT NOT NULL,
+  version_label   TEXT NOT NULL,
+  spec            JSONB NOT NULL,
+  status          TEXT NOT NULL CHECK (status IN ('submitted', 'building', 'scanning', 'pending_review', 'approved', 'rejected', 'failed', 'revoked')),
+  status_reason   TEXT,
+  providers       TEXT[] NOT NULL DEFAULT '{}',
+  event_format    TEXT NOT NULL,
+  egress_hosts    TEXT[] NOT NULL DEFAULT '{}',
+  artifact_uri    TEXT,                         -- internal only; never returned to customers
+  artifact_digest TEXT,
+  scan_summary    JSONB,
+  approved_at     TIMESTAMPTZ,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (org_id, name, version_label)
 );

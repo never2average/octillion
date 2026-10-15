@@ -476,7 +476,7 @@
   function render(d) {
     tip.style.display = "none";
     product = d.product?.slug ?? d.simulation?.product_slug ?? d.session?.product_slug ?? (typeof d.product === "string" ? d.product : product);
-    const views = { products: viewProducts, product: viewProduct, report: viewReport, simulations: viewSimulations, simulation: viewSimulation, session: viewSession, transcript: viewTranscript, search: viewSearch, profiles: viewProfiles, library: viewLibrary, agents: viewAgents, onboarding: viewOnboarding };
+    const views = { products: viewProducts, product: viewProduct, report: viewReport, simulations: viewSimulations, simulation: viewSimulation, session: viewSession, transcript: viewTranscript, search: viewSearch, profiles: viewProfiles, library: viewLibrary, agents: viewAgents, onboarding: viewOnboarding, personas: viewPersonas, task_sets: viewTaskSets, harnesses: viewHarnesses };
     const fn = views[d.view];
     const note = d.truncated ? `<div class="warn" style="margin-bottom:12px">Result shortened to fit the host's size limit. Page through it or narrow the filters to see the rest.</div>` : "";
     app.innerHTML = nav(d.view) + note + (fn ? fn(d) : `<div class="empty">Unknown view: ${esc(d.view)}</div>`);
@@ -620,6 +620,29 @@
         <div class="card"><h2>Limits</h2><ul class="findings">${d.limits.map((l) => `<li>${esc(l)}</li>`).join("")}</ul></div>
       </div>` : ""}
     </div>`;
+  }
+
+  // ---------- private assets (this organization only) ----------
+  const privateNote = `<p class="muted" style="font-size:12px;margin-top:8px">Private to your organization: no other organization can see, search or use these.</p>`;
+  function viewPersonas({ personas }) {
+    if (!personas.length) return `<div class="card empty">No private personas yet. Ask me to add the developers you target.</div>`;
+    return `<div class="card"><h2>Private personas</h2><div class="table-wrap"><table>
+      <thead><tr><th>Persona</th><th>Summary</th><th>Source</th><th>Slug</th></tr></thead>
+      <tbody>${personas.map((p) => `<tr${p.active ? "" : ' style="opacity:.5"'}><td>${esc(p.name)}</td><td class="muted">${esc(p.summary || "–")}</td><td><span class="badge">${esc(p.source)}</span></td><td class="muted">${esc(p.slug)}</td></tr>`).join("")}</tbody>
+    </table></div>${privateNote}</div>`;
+  }
+  function viewTaskSets({ task_sets }) {
+    if (!task_sets.length) return `<div class="card empty">No private task sets yet. Ask me to import your own tasks.</div>`;
+    return `<div class="stack">${task_sets.map((t) => `<div class="card"><div class="spread"><h2>${esc(t.name)}</h2><span class="muted">${esc(t.product)} · ${num(t.active_tasks)} active</span></div>
+      ${t.description ? `<p class="sub">${esc(t.description)}</p>` : ""}
+      <div class="table-wrap"><table><tbody>${(t.tasks || []).map((x) => `<tr${x.active ? "" : ' style="opacity:.5"'}><td class="muted">${x.id}</td><td>${esc(x.title)}</td><td><span class="badge">${esc(x.platform || "?")}</span></td><td><span class="badge">${esc(x.expectation)}</span></td></tr>`).join("")}</tbody></table></div></div>`).join("")}${privateNote}</div>`;
+  }
+  function viewHarnesses({ harnesses }) {
+    if (!harnesses.length) return `<div class="card empty">No private harnesses yet. Ask me to register your coding agent.</div>`;
+    return `<div class="card"><h2>Private harnesses</h2><div class="table-wrap"><table>
+      <thead><tr><th>Harness</th><th>Version</th><th>Status</th><th>Providers</th></tr></thead>
+      <tbody>${harnesses.map((h) => `<tr><td>${esc(h.name)}</td><td class="muted">${esc(h.version)}</td><td><span class="badge" data-tip="${esc(h.status_reason || "")}">${esc(h.status)}</span></td><td class="muted">${esc((h.providers || []).join(", "))}</td></tr>`).join("")}</tbody>
+    </table></div>${privateNote}</div>`;
   }
 
   // ---------- simulations ----------

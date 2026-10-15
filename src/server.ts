@@ -1,3 +1,4 @@
+import * as priv from "./private.js";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -47,6 +48,12 @@ export function handlersFor(org: Org) {
     list_developer_profiles: (a: { query?: string; product?: string }) => q.listProfiles(org, a),
     list_agents: (a: { population?: string }) => q.listAgents(a),
     browse_task_library: (a: { query?: string; category?: string; language?: string; platform?: string; limit?: number }) => q.browseTaskLibrary(a),
+    save_personas: (a: { personas: priv.PersonaInput[] }) => priv.savePersonas(org, a.personas),
+    list_personas: (_a: Record<string, never>) => priv.listPersonas(org),
+    import_tasks: (a: { product?: string; task_set: string; description?: string; tasks: priv.TaskInput[] }) => priv.importTasks(org, a),
+    list_task_sets: (a: { product?: string }) => priv.listTaskSets(org, a.product),
+    register_harness: (a: { spec: priv.HarnessSpec }) => priv.registerHarness(org, a.spec),
+    list_harnesses: (_a: Record<string, never>) => priv.listHarnesses(org),
   };
 }
 type Handlers = ReturnType<typeof handlersFor>;
@@ -101,6 +108,18 @@ function summarize(d: Data): string {
       return d.profiles.length
         ? `${d.profiles.length} developer profiles${d.query ? ` matching "${d.query}"` : ""}: ${d.profiles.map((p: any) => `${p.slug} (${p.name}: ${p.summary})`).join("; ")}. Pass slugs as run_simulation profiles.`
         : "No developer profiles synced from the vault yet.";
+    case "personas":
+      return d.personas.length
+        ? `${d.personas.length} private persona(s) of this organization: ${d.personas.map((p: any) => `${p.slug} (${p.name}, ${p.source}${p.active ? "" : ", inactive"})`).join("; ")}. Pass slugs as run_simulation profiles. Only this organization can see or use them.`
+        : "No private personas yet. Add your own with save_personas, or pick shared ones with list_developer_profiles.";
+    case "task_sets":
+      return d.task_sets.length
+        ? `${d.task_sets.length} private task set(s): ${d.task_sets.map((t: any) => `${t.name} [${t.id}] for ${t.product}: ${t.active_tasks} active task(s)`).join("; ")}. Run one with run_simulation {task_set}.`
+        : "No private task sets yet. Bring your own with import_tasks.";
+    case "harnesses":
+      return d.harnesses.length
+        ? `${d.harnesses.length} private harness(es): ${d.harnesses.map((h: any) => `${h.name} ${h.version} [${h.id}]: ${h.status}${h.status_reason ? ` (${h.status_reason})` : ""}`).join("; ")}. A harness runs only once it is approved after an isolated build and scan.`
+        : "No private harnesses yet. Submit a declarative spec with register_harness.";
     case "library":
       return d.tasks.length
         ? `${d.tasks.length} library tasks: ${d.tasks.map((t: any) => `#${t.id} ${t.title} [${t.platform ?? "?"}, ${t.category ?? "uncategorized"}${t.language ? `, ${t.language}` : ""}]`).join("; ")}. Categories: ${d.categories.map((c: any) => `${c.category ?? "uncategorized"} (${c.tasks})`).join(", ")}. Platforms: ${(d.platforms ?? []).map((c: any) => `${c.platform ?? "?"} (${c.tasks})`).join(", ")}. Add one to a product with save_scenarios {library_task_id}.`
@@ -257,6 +276,12 @@ export const TOOL_STATUS: Record<ToolName, [string, string]> = {
   list_developer_profiles: ["Loading developer profiles…", "Developer profiles loaded"],
   list_agents: ["Loading agent mix…", "Agent mix loaded"],
   browse_task_library: ["Browsing task library…", "Task library loaded"],
+  save_personas: ["Saving private personas…", "Private personas saved"],
+  list_personas: ["Loading private personas…", "Private personas loaded"],
+  import_tasks: ["Importing private tasks…", "Private tasks imported"],
+  list_task_sets: ["Loading private task sets…", "Private task sets loaded"],
+  register_harness: ["Registering private harness…", "Private harness submitted"],
+  list_harnesses: ["Loading private harnesses…", "Private harnesses loaded"],
 };
 
 export const TOOL_NAMES = Object.keys(handlersFor({ orgId: 0, slug: "", name: "" })) as ToolName[];
@@ -405,6 +430,7 @@ export function createServer(org: Org): McpServer {
       product,
       scenario_ids: z.array(z.number().int()).optional(),
       platform: z.enum(["web", "mobile", "backend", "desktop", "cli", "data", "other"]).optional().describe("Only the product's active scenarios on this platform, e.g. mobile"),
+      task_set: z.string().optional().describe("Only the tasks of one of your private task sets (name or id, see list_task_sets)"),
       agents: z.array(z.string()).optional().describe("Explicit worker agent ids (list_agents), e.g. 'claude-code/sonnet'"),
       models: z.array(z.string()).optional().describe("Explicit: only agents using these models"),
       samples: z.number().int().min(1).max(100).optional().describe(`Representative mode: first batch of sessions per scenario (default ${q.config.defaultSamples()}). Given alone it makes a fixed-size run with no adaptive sampling`),
@@ -500,6 +526,70 @@ export function createServer(org: Org): McpServer {
     inputSchema: { population: z.string().optional().describe("Developer population slug; default population if omitted") },
     annotations: read, _meta: meta("list_agents"),
   }, run("list_agents"));
+
+  // ---------- private assets: owned by this organization only (docs/security.md) ----------
+  const personaSchema = z.object({
+    slug: z.string().optional().describe("Update this persona (from list_personas); omit to add a new one"),
+    name: z.string().max(80), summary: z.string().max(600).optional(),
+    instructions: z.string().max(1500).optional().describe("How this developer answers a coding agent's questions"),
+    attributes: z.record(z.string(), z.unknown()).optional().describe("role, experience_years, company_size, stack[], constraints[], tone"),
+    environment: z.object({ editor: z.string(), tools: z.array(z.string()).optional() }).passthrough().optional()
+      .describe("Editor and CLI tools they have installed (see list_developer_profiles for examples)"),
+    active: z.boolean().optional(),
+  });
+  registerAppTool(server, "save_personas", {
+    title: "Save private personas",
+    description: "Add or update your own developer personas (the developers you target). Private to your organization: no other organization can see, search or use them. Run them with run_simulation {profiles: [slug]}.",
+    inputSchema: { personas: z.array(personaSchema).min(1).max(20) },
+    annotations: write, _meta: meta("save_personas"),
+  }, run("save_personas"));
+  registerAppTool(server, "list_personas", {
+    title: "Private personas",
+    description: "Your organization's own personas: the ones you saved and the ones research picked for your products.",
+    inputSchema: {}, annotations: read, _meta: meta("list_personas"),
+  }, run("list_personas"));
+  registerAppTool(server, "import_tasks", {
+    title: "Import a private task set",
+    description: "Bring your own tasks (for example from past case studies) as a named task set for a product. Private to your organization. Run them with run_simulation {task_set}.",
+    inputSchema: {
+      product, task_set: z.string().max(120).describe("Name of the set, e.g. '2025 case studies'"),
+      description: z.string().max(2000).optional(),
+      tasks: z.array(z.object({
+        title: z.string().max(160).optional(), prompt: z.string().min(20).max(6000).describe("The task as a developer would give it to a coding agent"),
+        language: z.string().optional(), tags: z.array(z.string()).optional(),
+        platform: z.enum(["web", "mobile", "backend", "desktop", "cli", "data", "other"]).optional(),
+        template: z.enum(["express-ts", "nextjs-ts", "node-ts", "fastapi", "django", "go-http", "react-native", "flutter", "java-spring", "rust-axum", "cpp-cmake", "auto"]).optional(),
+        repo_url: z.string().optional(), expectation: z.enum(["recommend", "avoid"]).optional(),
+        provenance: z.string().max(500).optional().describe("Where the task comes from, e.g. the case study"),
+      })).min(1).max(200),
+    },
+    annotations: write, _meta: meta("import_tasks"),
+  }, run("import_tasks"));
+  registerAppTool(server, "list_task_sets", {
+    title: "Private task sets",
+    description: "Your organization's private task sets and their tasks.",
+    inputSchema: { product }, annotations: read, _meta: meta("list_task_sets"),
+  }, run("list_task_sets"));
+  registerAppTool(server, "register_harness", {
+    title: "Register a private harness",
+    description: "Submit your own coding agent as a declarative spec (pinned packages with integrity hashes, the executable and its arguments, the model providers it calls through the Octillion gateway). Private to your organization. It is built and scanned in isolation and runs only once approved; real vendor keys are never given to it.",
+    inputSchema: {
+      spec: z.object({
+        name: z.string(), version: z.string(),
+        install: z.array(z.record(z.string(), z.unknown())).min(1).max(10),
+        allow_install_scripts: z.boolean().optional(), bin: z.string(),
+        launch_argv: z.array(z.string()), resume_argv: z.array(z.string()).optional(),
+        event_format: z.enum(["octillion-jsonl", "claude-stream-json", "codex-json", "acp"]),
+        providers: z.array(z.string()), egress_hosts: z.array(z.string()).optional(),
+      }),
+    },
+    annotations: write, _meta: meta("register_harness"),
+  }, run("register_harness"));
+  registerAppTool(server, "list_harnesses", {
+    title: "Private harnesses",
+    description: "Your organization's private harnesses and their review status.",
+    inputSchema: {}, annotations: read, _meta: meta("list_harnesses"),
+  }, run("list_harnesses"));
 
   registerAppTool(server, "browse_task_library", {
     title: "Task library",
