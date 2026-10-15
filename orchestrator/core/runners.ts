@@ -24,6 +24,7 @@ import type { SessionEnvironment } from "./environment.js";
 import { envInstallScript, harnessWiringScript, parseEnvLines, toolsFor } from "./env-install.js";
 import { BOAT, BOAT_PRICE_PER_HOUR, CFG } from "./config.js";
 import { HttpError, log, sh, shq, sleep, withRetry } from "./util.js";
+import { EGRESS_DIR, proxyEnv, proxySource, probeSource, setupScript as egressSetupScript, type EgressPolicy } from "./egress.js";
 import { boatApi, boatCommandRetry, boatCreate, boatExec, boatExecStream, boatSandboxPath, BoatError } from "./boat.js";
 
 export interface RunExit { code: number | null; signal: string | null; error?: string }
@@ -46,6 +47,8 @@ export interface Sandbox {
    * `env -i`; never written into the image, the container env or argv.
    */
   runTurn(argv: string[], input: string, env: Record<string, string>): Promise<Turn>;
+  /** Network lockdown applied at open (private runs): allowed host count and the probe result. */
+  egress?: { hosts: number; probe: unknown };
   /** Unified diff of everything the agent changed (vs the cloned commit, or vs empty). null if unavailable. */
   diff(): Promise<string | null>;
   /**
@@ -89,6 +92,11 @@ export interface OpenSpec {
   model?: string;
   /** The persona's developer environment (CLI tools, language servers), installed and wired before the first run (boat only). */
   environment?: SessionEnvironment | null;
+  /**
+   * Network lockdown for the agent (core/egress.ts; boat only): after setup, the agent reaches only these hosts through
+   * an in-VM proxy, verified by a probe; the open fails if it cannot be enforced. Set for private runs.
+   */
+  egress?: EgressPolicy | null;
 }
 
 export interface Runner {
@@ -480,6 +488,7 @@ export const boatRunner: Runner = {
     }
     const id: string = created?.sandbox?.id;
     let envResult: EnvironmentResult | undefined;
+    let egressReport: { hosts: number; probe: unknown } | undefined;
     if (!id) throw new Error(`boat create returned no sandbox id: ${JSON.stringify(created).slice(0, 300)}`);
     // A recognisable name, so `status` / cleanup can attribute worker sandboxes (best effort).
     void boatApi(boatSandboxPath(id), { method: "PATCH", json: { name: workerSandboxName(spec.agentId ?? spec.adapter.id) } }).catch(() => {});
@@ -535,6 +544,21 @@ export const boatRunner: Runner = {
       const prep = await boatExec(id, `bash ${BOAT_DIR}/prepare.sh`, 600);
       if (prep.exitCode !== 0) throw new Error(`sandbox prepare failed (exit ${prep.exitCode}): ${(prep.stderr || prep.stdout).slice(-800)}`);
       if (spec.environment) envResult = await boatEnvironment(id, put, spec.adapter.id, spec.environment);
+      // Last step before the agent's first turn: everything that needs the network (harness, repo, tools) is done.
+      if (spec.egress) {
+        if (BOAT.agentUser !== "agent") throw new Error("egress lockdown needs the unprivileged agent user (BOAT_AGENT_USER)");
+        await put(`${BOAT_DIR}/egress-proxy.mjs`, proxySource());
+        await put(`${BOAT_DIR}/egress-allow.json`, JSON.stringify({ hosts: spec.egress.hosts }));
+        await put(`${BOAT_DIR}/egress-probe.mjs`, probeSource(spec.egress.gatewayHost));
+        await put(`${BOAT_DIR}/egress-setup.sh`, egressSetupScript(BOAT_DIR));
+        const lock = await boatExec(id, `bash ${BOAT_DIR}/egress-setup.sh`, 120);
+        if (lock.exitCode !== 0) throw new Error(`egress lockdown failed (exit ${lock.exitCode}): ${(lock.stderr || lock.stdout).slice(-600)}`);
+        const probe = await boatExec(id, `cd / && NODE="$(command -v node)" && ${boatRunAs()} env -i HOME=${AGENT_HOME} PATH="$(cat ${BOAT_DIR}/path)" "$NODE" ${EGRESS_DIR}/probe.mjs`, 120);
+        const last = probe.stdout.trim().split("\n").pop() ?? "";
+        if (probe.exitCode !== 0) throw new Error(`egress probe failed, refusing to run the agent: ${last.slice(0, 800) || probe.stderr.slice(-400)}`);
+        egressReport = { hosts: spec.egress.hosts.length, probe: JSON.parse(last) };
+        log(`[boat ${id}] egress locked down: ${spec.egress.hosts.length} allowed hosts, probe ok`);
+      }
     } catch (e) {
       await destroy();
       throw e;
@@ -547,8 +571,10 @@ export const boatRunner: Runner = {
       id: `boat:${id}`,
       workdir: AGENT_WORKDIR,
       environment: envResult,
+      egress: egressReport,
       async runTurn(argv, input, env) {
         const n = ++turnNo;
+        if (spec.egress) env = { ...env, ...proxyEnv() }; // HTTP clients go through the in-VM proxy
         argv = [...argv];
         argv[0] = argv[0]!.split("/").pop()!; // host bin overrides don't apply in the VM
         await put(`${BOAT_DIR}/env-${n}`, Object.entries(env).map(([k, v]) => `${k}=${shq(v)}`).join("\n") + "\n");

@@ -79,12 +79,12 @@ export async function computeDemand(freshSince?: Date): Promise<Demand> {
   catch { /* no population: count everything */ }
   const claimable = "(agent_id IS NULL OR cardinality($1::text[]) = 0 OR agent_id = ANY($1))";
   const [s] = await db.query<{ sessions: number; queued: number; unclaimable: number; fresh: number }>(
-    `SELECT count(*) FILTER (WHERE ${claimable}) AS sessions,
+    `/* tenant: internal: autoscaler demand counts across all orgs, counts only */ SELECT count(*) FILTER (WHERE ${claimable}) AS sessions,
             count(*) FILTER (WHERE status = 'queued' AND ${claimable}) AS queued,
             count(*) FILTER (WHERE NOT ${claimable}) AS unclaimable,
             count(*) FILTER (WHERE status = 'queued' AND ${claimable} AND $2::timestamptz IS NOT NULL AND queued_at > $2) AS fresh
        FROM agent_sessions WHERE status IN ('queued', 'running')`, [agents, freshSince ?? null]);
-  const [r] = await db.query<{ n: number }>("SELECT count(*) AS n FROM product_research WHERE status IN ('queued', 'running')");
+  const [r] = await db.query<{ n: number }>("/* tenant: internal: autoscaler demand counts across all orgs, counts only */ SELECT count(*) AS n FROM product_research WHERE status IN ('queued', 'running')");
   return {
     sessions: Number(s?.sessions ?? 0), queued_sessions: Number(s?.queued ?? 0), research: Number(r?.n ?? 0),
     unclaimable_sessions: Number(s?.unclaimable ?? 0), ...(freshSince ? { fresh_queued_sessions: Number(s?.fresh ?? 0) } : {}),
@@ -101,11 +101,11 @@ export async function computeJobDemand(): Promise<JobDemand[]> {
   try { agents = scheduledAgents(await getPopulation()).flatMap((a) => [a.id, ...variantsOf(a).map((v) => v.id)]); }
   catch { /* no population: count everything */ }
   const research = await db.query<{ id: string }>(
-    `SELECT id FROM product_research WHERE status = 'queued'
+    `/* tenant: internal: autoscaler job demand across all orgs, ids go to the orchestrator only */ SELECT id FROM product_research WHERE status = 'queued'
         OR (status = 'running' AND heartbeat_at < now() - make_interval(mins => $1)) ORDER BY created_at`,
     [num(env.OCTILLION_RESEARCH_STALE_MINUTES, 20)]);
   const sims = await db.query<{ id: string; sessions: number; queued: number; last_queued: Date | null }>(
-    `SELECT simulation_id AS id, count(*) AS sessions, count(*) FILTER (WHERE status = 'queued') AS queued,
+    `/* tenant: internal: autoscaler job demand across all orgs, ids go to the orchestrator only */ SELECT simulation_id AS id, count(*) AS sessions, count(*) FILTER (WHERE status = 'queued') AS queued,
             max(queued_at) FILTER (WHERE status = 'queued') AS last_queued
        FROM agent_sessions
       WHERE status IN ('queued', 'running') AND (agent_id IS NULL OR cardinality($1::text[]) = 0 OR agent_id = ANY($1))

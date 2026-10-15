@@ -46,7 +46,7 @@ export async function archiveSession(sessionId: string): Promise<{ key: string; 
                 ...events.map((e) => JSON.stringify(e))].join("\n") + "\n";
   await putObject(key, gzipSync(Buffer.from(body, "utf8")), "application/gzip",
                   { session: s.id, org: String(s.org_id), events: String(events.length) });
-  await db.query("UPDATE agent_sessions SET archive_key = $2, archived_at = now(), archive_events = $3 WHERE id = $1", [s.id, key, events.length]);
+  await db.query("/* tenant: internal archive sweep, session id from the claim below */ UPDATE agent_sessions SET archive_key = $2, archived_at = now(), archive_events = $3 WHERE id = $1", [s.id, key, events.length]);
   return { key, events: events.length };
 }
 
@@ -58,7 +58,7 @@ export async function archiveResearch(researchId: string): Promise<string | null
   if (!r || !["completed", "failed"].includes(r.status)) return null;
   const key = keys.research(r.org_id, r.id);
   await putObject(key, JSON.stringify({ ...r, archived_at: new Date().toISOString() }, null, 1), "application/json", { research: r.id, org: String(r.org_id) });
-  await db.query("UPDATE product_research SET archive_key = $2, archived_at = now() WHERE id = $1", [r.id, key]);
+  await db.query("/* tenant: internal archive sweep, research id from the claim below */ UPDATE product_research SET archive_key = $2, archived_at = now() WHERE id = $1", [r.id, key]);
   return key;
 }
 
@@ -67,14 +67,14 @@ export async function archiveSweep(): Promise<{ sessions: number; research: numb
   if (!storageEnabled()) return { sessions: 0, research: 0, failed: 0 };
   const db = await getDb();
   const sessions = await db.query<{ id: string }>(
-    `UPDATE agent_sessions SET archive_claimed_at = now()
+    `/* tenant: internal archive sweep across all orgs (rows keep their org_id) */ UPDATE agent_sessions SET archive_claimed_at = now()
       WHERE id IN (SELECT id FROM agent_sessions
                     WHERE archive_key IS NULL AND status = ANY($2) AND coalesce(ended_at, queued_at) < now() - interval '2 minutes'
                       AND (archive_claimed_at IS NULL OR archive_claimed_at < now() - interval '15 minutes')
                     ORDER BY coalesce(ended_at, queued_at) LIMIT $1 FOR UPDATE SKIP LOCKED)
       RETURNING id`, [BATCH(), FINAL]);
   const research = await db.query<{ id: string }>(
-    `UPDATE product_research SET archive_claimed_at = now()
+    `/* tenant: internal archive sweep across all orgs (rows keep their org_id) */ UPDATE product_research SET archive_claimed_at = now()
       WHERE id IN (SELECT id FROM product_research
                     WHERE archive_key IS NULL AND status IN ('completed', 'failed')
                       AND (archive_claimed_at IS NULL OR archive_claimed_at < now() - interval '15 minutes')

@@ -157,7 +157,7 @@ export async function orchestratorBusy(orchestratorId: string): Promise<boolean>
   const [o] = await db.query<{ worker_id: string | null }>("SELECT meta->>'worker_id' AS worker_id FROM orchestrators WHERE id = $1", [orchestratorId]);
   if (!o?.worker_id) return true; // unknown: never delete on a guess
   const [n] = await db.query<{ n: number }>(
-    `SELECT (SELECT count(*) FROM agent_sessions WHERE status = 'running' AND worker_id = $1)
+    `/* tenant: internal: autoscaler, by the orchestrator's worker id; returns a count only */ SELECT (SELECT count(*) FROM agent_sessions WHERE status = 'running' AND worker_id = $1)
           + (SELECT count(*) FROM product_research WHERE status = 'running' AND worker_id = $1) AS n`, [o.worker_id]);
   return Number(n?.n ?? 0) > 0;
 }
@@ -175,7 +175,7 @@ export async function fleetStatus(orchestratorId?: string) {
   const plan = planPods(total, await agentShares());
   const dealt = assign(plan, live.map((o) => ({ id: o.id, capacity: Number(o.capacity) })));
   const [queue] = await db.query<{ queued: number; running: number }>(
-    "SELECT count(*) FILTER (WHERE status = 'queued') AS queued, count(*) FILTER (WHERE status = 'running') AS running FROM agent_sessions",
+    "/* tenant: worker API: global queue counts for orchestrators, counts only */ SELECT count(*) FILTER (WHERE status = 'queued') AS queued, count(*) FILTER (WHERE status = 'running') AS running FROM agent_sessions",
   );
   const mine = orchestratorId ? dealt.get(orchestratorId) : undefined;
   return {
@@ -243,7 +243,7 @@ export async function jobFleetStatus(orchestratorId: string, jobId: string, capa
   const groups = new Map<string, Group>();
   if (state.kind === "simulation" && !state.done && !stale.has(orchestratorId)) {
     const counts = await db.query<{ agent_id: string | null; n: number }>(
-      "SELECT agent_id, count(*) AS n FROM agent_sessions WHERE simulation_id = $1 AND status IN ('queued', 'running') GROUP BY agent_id ORDER BY agent_id", [jobId]);
+      "/* tenant: simulation is the job token's own job, or fleet token (jobOf in fleetCheckin) */ SELECT agent_id, count(*) AS n FROM agent_sessions WHERE simulation_id = $1 AND status IN ('queued', 'running') GROUP BY agent_id ORDER BY agent_id", [jobId]);
     const slotOf = new Map<string, AgentShare>();
     for (const sh of await agentShares()) for (const id of claimIds(sh.agent_id)) if (!slotOf.has(id)) slotOf.set(id, sh);
     for (const c of counts) {

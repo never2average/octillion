@@ -158,7 +158,7 @@ export async function getProduct(org: Org, ref?: string) {
   const p = await resolveProduct(org, ref);
   const db = await getDb();
   const scenarios = await db.query(
-    `SELECT sc.id, sc.title, sc.prompt, sc.repo_url, sc.language, sc.tags, sc.template, sc.platform, sc.library_task_id, sc.expectation, sc.active, sc.source, sc.rationale,
+    `/* tenant: product from resolveProduct(org) */ SELECT sc.id, sc.title, sc.prompt, sc.repo_url, sc.language, sc.tags, sc.template, sc.platform, sc.library_task_id, sc.expectation, sc.active, sc.source, sc.rationale,
             count(s.id) AS sessions, count(*) FILTER (WHERE ${HIT}) AS hits,
             mode() WITHIN GROUP (ORDER BY s.winner) FILTER (WHERE s.winner IS NOT NULL) AS usual_winner
        FROM scenarios sc
@@ -168,7 +168,7 @@ export async function getProduct(org: Org, ref?: string) {
     [p.id],
   );
   const simulations = await db.query(
-    `SELECT id, name, status, models, repeats, created_at FROM simulations WHERE product_id = $1 ORDER BY created_at DESC LIMIT 5`,
+    `/* tenant: product from resolveProduct(org) */ SELECT id, name, status, models, repeats, created_at FROM simulations WHERE product_id = $1 ORDER BY created_at DESC LIMIT 5`,
     [p.id],
   );
   const warnings = scenarios.filter((sc: any) => sc.active && namesProduct(sc.prompt, p))
@@ -227,7 +227,7 @@ export async function saveScenarios(org: Org, productRef: string | undefined, it
       let template = checkTemplate(s.template);
       if (s.id !== undefined) {
         const [row] = await tx.query(
-          `UPDATE scenarios SET title = coalesce($3, title), prompt = coalesce($4, prompt), repo_url = coalesce($5, repo_url),
+          `/* tenant: product from resolveProduct(org); scenario id must belong to it */ UPDATE scenarios SET title = coalesce($3, title), prompt = coalesce($4, prompt), repo_url = coalesce($5, repo_url),
                   language = coalesce($6, language), tags = coalesce($7, tags), expectation = coalesce($8, expectation),
                   active = coalesce($9, active), template = CASE WHEN $10 THEN $11 ELSE template END,
                   platform = coalesce($12, platform), updated_at = now()
@@ -237,7 +237,7 @@ export async function saveScenarios(org: Org, productRef: string | undefined, it
         );
         if (!row) throw new Error(`Scenario ${s.id} does not belong to ${p.name}`);
         // A new template moves the task to that template's platform unless one was given.
-        if (template && !s.platform) await tx.query("UPDATE scenarios SET platform = $2 WHERE id = $1", [s.id, platformOf({ template })]);
+        if (template && !s.platform) await tx.query("/* tenant: scenario id just verified against product_id from resolveProduct(org) above */ UPDATE scenarios SET platform = $2 WHERE id = $1", [s.id, platformOf({ template })]);
       } else {
         if (s.library_task_id !== undefined) {
           const [t] = await tx.query<any>("SELECT * FROM library_tasks WHERE id = $1 AND active", [s.library_task_id]);
@@ -249,7 +249,7 @@ export async function saveScenarios(org: Org, productRef: string | undefined, it
         }
         if (!s.prompt?.trim()) throw new Error("New scenarios need a prompt (the task given to the agent) or a library_task_id");
         await tx.query(
-          `INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, library_task_id, template, platform)
+          `/* tenant: product from resolveProduct(org) */ INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, library_task_id, template, platform)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
           [p.id, s.title?.trim() || s.prompt.trim().slice(0, 80), s.prompt.trim(), s.repo_url ?? null, s.language ?? null,
            s.tags ?? [], s.expectation ?? "recommend", s.active ?? true, s.library_task_id ?? null, template ?? null,
@@ -345,9 +345,9 @@ export async function runSimulation(org: Org, input: RunInput) {
   }
   const scenarios = await db.query<{ id: number }>(
     input.scenario_ids?.length
-      ? "SELECT id FROM scenarios WHERE product_id = $1 AND id = ANY($2) ORDER BY id"
-      : platform ? "SELECT id FROM scenarios WHERE product_id = $1 AND active AND platform = $2 ORDER BY id"
-      : "SELECT id FROM scenarios WHERE product_id = $1 AND active ORDER BY id",
+      ? "/* tenant: product from resolveProduct(org) */ SELECT id FROM scenarios WHERE product_id = $1 AND id = ANY($2) ORDER BY id"
+      : platform ? "/* tenant: product from resolveProduct(org) */ SELECT id FROM scenarios WHERE product_id = $1 AND active AND platform = $2 ORDER BY id"
+      : "/* tenant: product from resolveProduct(org) */ SELECT id FROM scenarios WHERE product_id = $1 AND active ORDER BY id",
     input.scenario_ids?.length ? [p.id, input.scenario_ids] : platform ? [p.id, platform] : [p.id],
   );
   if (platform && !input.scenario_ids?.length && !scenarios.length) throw new Error(`${p.name} has no active ${platform} scenarios`);
@@ -455,10 +455,10 @@ export async function extendAdaptive(simulationId: string): Promise<number> {
                                    population_id: number | null; profile_ids: number[] | null }>(
       "SELECT id, org_id, product_id, mode, status, max_samples, population_id, profile_ids FROM simulations WHERE id = $1 FOR UPDATE", [simulationId]);
     if (!sim || sim.mode !== "representative" || !sim.max_samples || sim.status === "cancelled") return 0;
-    const [open] = await tx.query<{ n: number }>("SELECT count(*) AS n FROM agent_sessions WHERE simulation_id = $1 AND status IN ('queued', 'running')", [simulationId]);
+    const [open] = await tx.query<{ n: number }>("/* tenant: internal: adaptive sampling of a finished session's simulation */ SELECT count(*) AS n FROM agent_sessions WHERE simulation_id = $1 AND status IN ('queued', 'running')", [simulationId]);
     if (Number(open.n) > 0) return 0; // a batch is still in flight (or another completion already extended the run)
     const rows = await tx.query<{ scenario_id: number; attempts: number; n: number; hits: number }>(
-      `SELECT s.scenario_id, count(*) AS attempts, count(*) FILTER (WHERE s.verdict IS NOT NULL) AS n,
+      `/* tenant: internal: adaptive sampling of a finished session's simulation */ SELECT s.scenario_id, count(*) AS attempts, count(*) FILTER (WHERE s.verdict IS NOT NULL) AS n,
               count(*) FILTER (WHERE s.verdict IS NOT NULL AND ${HIT}) AS hits
          FROM agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id
         WHERE s.simulation_id = $1 GROUP BY s.scenario_id ORDER BY s.scenario_id`, [simulationId]);
@@ -478,7 +478,7 @@ export async function extendAdaptive(simulationId: string): Promise<number> {
       };
       if (want) more.push({ scenarioId: Number(r.scenario_id), from: attempts, count: want });
     }
-    await tx.query("UPDATE simulations SET sampling = $2 WHERE id = $1", [simulationId, JSON.stringify(decisions)]);
+    await tx.query("/* tenant: internal: adaptive sampling of a finished session's simulation */ UPDATE simulations SET sampling = $2 WHERE id = $1", [simulationId, JSON.stringify(decisions)]);
     const total = more.reduce((t, m) => t + m.count, 0);
     if (!total) return 0;
     // Top-ups are dealt the same way: each scenario's batch gets a near-proportional share of the weighted mix.
@@ -493,7 +493,7 @@ export async function extendAdaptive(simulationId: string): Promise<number> {
           [randomId("ses_"), simulationId, sim.org_id, sim.product_id, m.scenarioId, agent.model, agent.harness, agent.id,
            m.from + i + 1, profileIds[(m.from + i) % profileIds.length]]);
       }
-    await tx.query("UPDATE simulations SET status = 'running', finished_at = NULL WHERE id = $1 AND status <> 'cancelled'", [simulationId]);
+    await tx.query("/* tenant: internal: adaptive sampling of a finished session's simulation */ UPDATE simulations SET status = 'running', finished_at = NULL WHERE id = $1 AND status <> 'cancelled'", [simulationId]);
     return total;
   });
 }
@@ -585,11 +585,11 @@ export async function cancelSimulation(org: Org, simulationId: string) {
   // a run whose sessions had all been claimed kept running and spending.
   await db.transaction(async (tx) => {
     await tx.query(
-      `UPDATE gateway_tokens SET revoked_at = now()
+      `/* tenant: simulation checked with org_id = the caller's org above */ UPDATE gateway_tokens SET revoked_at = now()
         WHERE revoked_at IS NULL AND session_id IN (SELECT id FROM agent_sessions WHERE simulation_id = $1 AND status IN ('queued', 'running'))`,
       [simulationId]);
-    await tx.query("UPDATE agent_sessions SET status = 'cancelled', ended_at = now() WHERE simulation_id = $1 AND status IN ('queued', 'running')", [simulationId]);
-    await tx.query("UPDATE simulations SET status = 'cancelled', finished_at = now() WHERE id = $1 AND status IN ('queued', 'running')", [simulationId]);
+    await tx.query("/* tenant: simulation checked with org_id = the caller's org above */ UPDATE agent_sessions SET status = 'cancelled', ended_at = now() WHERE simulation_id = $1 AND status IN ('queued', 'running')", [simulationId]);
+    await tx.query("/* tenant: simulation checked with org_id = the caller's org above */ UPDATE simulations SET status = 'cancelled', finished_at = now() WHERE id = $1 AND status IN ('queued', 'running')", [simulationId]);
   });
   return getSimulation(org, simulationId);
 }
@@ -614,10 +614,10 @@ export async function getReport(org: Org, input: { product?: string; days?: numb
   if (input.model) params.push(input.model), (base += ` AND s.model = $${params.length}`);
   // Never blend harness mixes: a report covers runs on one population (the run's own, the named one, or the default).
   const pop = await getPopulation(sim ? (await db.query<{ slug: string }>(
-    "SELECT dp.slug FROM simulations s JOIN developer_populations dp ON dp.id = s.population_id WHERE s.id = $1", [sim.id]))[0]?.slug ?? input.population : input.population, org.orgId);
+    "/* tenant: simulation checked with org_id and product above */ SELECT dp.slug FROM simulations s JOIN developer_populations dp ON dp.id = s.population_id WHERE s.id = $1", [sim.id]))[0]?.slug ?? input.population : input.population, org.orgId);
   if (!sim) {
     params.push(pop.id);
-    base += ` AND s.simulation_id IN (SELECT id FROM simulations WHERE coalesce(population_id, (SELECT id FROM developer_populations WHERE is_default)) = $${params.length})`;
+    base += ` /* tenant: appended to a filter on s.product_id from resolveProduct(org) */ AND s.simulation_id IN (SELECT id FROM simulations WHERE coalesce(population_id, (SELECT id FROM developer_populations WHERE is_default)) = $${params.length})`;
   }
   const platform = checkPlatform(input.platform);
   if (platform) params.push(platform), (base += ` AND sc.platform = $${params.length}`);
@@ -680,7 +680,7 @@ export async function getReport(org: Org, input: { product?: string; days?: numb
     params,
   );
   const daily = await db.query<any>(
-    `SELECT d::date AS day, count(s.id) AS sessions, count(s.id) FILTER (WHERE ${HIT}) AS hits
+    `/* tenant: product from resolveProduct(org), in the shared filter */ SELECT d::date AS day, count(s.id) AS sessions, count(s.id) FILTER (WHERE ${HIT}) AS hits
        FROM generate_series(current_date - ($2::int - 1), current_date, interval '1 day') d
        LEFT JOIN (agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id)
               ON s.ended_at::date = d::date AND ${filter}
@@ -694,13 +694,13 @@ export async function getReport(org: Org, input: { product?: string; days?: numb
   );
   const n = Number(t.sessions);
   const rows = await db.query<any>(
-    `SELECT s.id, s.status, s.verdict, s.winner, s.mentions, coalesce(s.agent_id, s.model) AS agent_id, s.cost_usd,
+    `/* tenant: product from resolveProduct(org), in the shared base filter */ SELECT s.id, s.status, s.verdict, s.winner, s.mentions, coalesce(s.agent_id, s.model) AS agent_id, s.cost_usd,
             sc.id AS scenario_id, sc.expectation, sc.platform, dp.name AS profile
        FROM agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id LEFT JOIN developer_profiles dp ON dp.id = s.profile_id
       WHERE ${base} AND s.status NOT IN ('queued', 'running', 'cancelled')`,
     params,
   );
-  const prompts = new Map((await db.query<any>("SELECT id, prompt FROM scenarios WHERE product_id = $1", [p.id])).map((r) => [Number(r.id), String(r.prompt ?? "")]));
+  const prompts = new Map((await db.query<any>("/* tenant: product from resolveProduct(org) */ SELECT id, prompt FROM scenarios WHERE product_id = $1", [p.id])).map((r) => [Number(r.id), String(r.prompt ?? "")]));
   const sections = reportSections(p, rows, byScenario, prompts, sim);
   return {
     view: "report" as const,

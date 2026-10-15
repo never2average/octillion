@@ -280,7 +280,7 @@ const postgresStore: TranscriptStore = {
     const db = await getDb();
     for (const e of events)
       await db.query(
-        `INSERT INTO transcript_events (session_id, seq, ts, type, text, raw) VALUES ($1, $2, $3, $4, $5, $6)
+        `/* tenant: session checked against the job token in http.ts (/sessions/:id/events) */ INSERT INTO transcript_events (session_id, seq, ts, type, text, raw) VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (session_id, seq) DO NOTHING`,
         [s.id, e.seq, e.ts, e.type, e.text, JSON.stringify(e.raw)],
       );
@@ -297,9 +297,9 @@ const postgresStore: TranscriptStore = {
   async read(orgId, sessionId, offset, limit) {
     const db = await getDb();
     const owned = "session_id = $1 AND EXISTS (SELECT 1 FROM agent_sessions s WHERE s.id = $1 AND s.org_id = $2)";
-    const [{ total }] = await db.query<{ total: number }>(`SELECT count(*) AS total FROM transcript_events WHERE ${owned}`, [sessionId, orgId]);
+    const [{ total }] = await db.query<{ total: number }>(`/* tenant: org_id check in the owned filter (EXISTS on agent_sessions) */ SELECT count(*) AS total FROM transcript_events WHERE ${owned}`, [sessionId, orgId]);
     const rows = await db.query<{ seq: number; ts: Date; type: string; text: string; raw: RawEvent }>(
-      `SELECT seq, ts, type, text, raw FROM transcript_events WHERE ${owned} ORDER BY seq LIMIT $3 OFFSET $4`,
+      `/* tenant: org_id check in the owned filter (EXISTS on agent_sessions) */ SELECT seq, ts, type, text, raw FROM transcript_events WHERE ${owned} ORDER BY seq LIMIT $3 OFFSET $4`,
       [sessionId, orgId, limit, offset],
     );
     return { total, events: rows.map((r) => ({ ...r, ts: new Date(r.ts).toISOString() })) };

@@ -49,7 +49,7 @@ async function mintToken(kind: "session" | "orchestrator", providers: string[], 
 export async function brokerSessionCredentials(sessionId: string) {
   const db = await getDb();
   const [s] = await db.query<{ status: string; agent_id: string | null; harness: string; task_source: string | null }>(
-    `SELECT s.status, s.agent_id, s.harness, sc.source AS task_source
+    `/* tenant: session checked against the job token in http.ts (/sessions/:id) */ SELECT s.status, s.agent_id, s.harness, sc.source AS task_source
        FROM agent_sessions s LEFT JOIN scenarios sc ON sc.id = s.scenario_id WHERE s.id = $1`, [sessionId]);
   if (!s) throw Object.assign(new Error(`No session ${sessionId}`), { status: 404 });
   if (s.status !== "running") throw Object.assign(new Error(`Session ${sessionId} is ${s.status}, not running`), { status: 409 });
@@ -125,7 +125,7 @@ export async function revokeSessionTokens(sessionId: string) {
 /** Gateway-metered usage for a session (summed over providers). */
 export async function sessionGatewayUsage(sessionId: string) {
   const [u] = await (await getDb()).query<{ requests: number; input_tokens: number; output_tokens: number; cost_usd: number }>(
-    `SELECT coalesce(sum(requests), 0) AS requests, coalesce(sum(input_tokens), 0) AS input_tokens,
+    `/* tenant: session completed via the worker route, checked against the job token in http.ts */ SELECT coalesce(sum(requests), 0) AS requests, coalesce(sum(input_tokens), 0) AS input_tokens,
             coalesce(sum(output_tokens), 0) AS output_tokens, coalesce(sum(cost_usd), 0) AS cost_usd
        FROM gateway_usage WHERE session_id = $1`,
     [sessionId],
@@ -209,7 +209,7 @@ export async function gatewayHandler(req: Request, res: Response) {
   if (!p?.enabled || p.mode !== "gateway" || (!p.upstream_url && p.backend !== "vertex")) return gwError(res, 404, "not_found_error", `No gateway provider ${slug}`);
 
   const [used] = await db.query<{ requests: number; tokens: number; cost: number }>(
-    "SELECT coalesce(sum(requests), 0) AS requests, coalesce(sum(input_tokens + output_tokens), 0) AS tokens, coalesce(sum(cost_usd), 0) AS cost FROM gateway_usage WHERE token_hash = $1", [hash]);
+    "/* tenant: by the gateway token's own hash (budget of that token) */ SELECT coalesce(sum(requests), 0) AS requests, coalesce(sum(input_tokens + output_tokens), 0) AS tokens, coalesce(sum(cost_usd), 0) AS cost FROM gateway_usage WHERE token_hash = $1", [hash]);
   if (Number(used.requests) >= MAX_REQUESTS() || Number(used.tokens) >= MAX_TOKENS() || Number(used.cost) >= MAX_COST_USD())
     return gwError(res, 429, "octillion_budget_exceeded", "This session's gateway budget is used up");
 
@@ -323,7 +323,7 @@ async function record(hash: string, provider: string, t: { kind: string; session
     .catch((e) => console.error("model usage record failed:", (e as Error).message));
   const cost = (await costOf(u.model || "unknown", u).catch(() => null)) ?? 0;
   await (await getDb()).query(
-    `INSERT INTO gateway_usage (token_hash, provider, session_id, orchestrator_id, requests, errors, input_tokens, output_tokens, bytes, cost_usd, last_at)
+    `/* tenant: internal: metering for the gateway token's own session/orchestrator */ INSERT INTO gateway_usage (token_hash, provider, session_id, orchestrator_id, requests, errors, input_tokens, output_tokens, bytes, cost_usd, last_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
      ON CONFLICT (token_hash, provider) DO UPDATE SET requests = gateway_usage.requests + excluded.requests,
        errors = gateway_usage.errors + excluded.errors, input_tokens = gateway_usage.input_tokens + excluded.input_tokens,

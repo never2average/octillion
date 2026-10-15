@@ -157,7 +157,7 @@ export async function onboardProduct(org: Org, input: OnboardInput) {
     ? await saveProduct(org, { product: existing.slug, website_url: input.website_url, docs_url: input.docs_url })
     : await saveProduct(org, { name, description: prompt, website_url: input.website_url, docs_url: input.docs_url });
   const db = await getDb();
-  await db.query("UPDATE products SET prompt = $2 WHERE id = $1", [product.product.id, prompt]);
+  await db.query("/* tenant: product from saveProduct(org) / resolveProduct(org) */ UPDATE products SET prompt = $2 WHERE id = $1", [product.product.id, prompt]);
 
   const id = randomId("rsh_");
   await db.query(
@@ -183,7 +183,7 @@ export async function getOnboarding(org: Org, input: { research_id?: string; pro
     [org.orgId, job.product_id]);
   const [sim] = job.simulation_id
     ? await db.query<any>(
-        `SELECT sim.id, sim.status, count(s.id) AS sessions, count(*) FILTER (WHERE s.status IN ('completed','failed','timeout','cancelled')) AS finished
+        `/* tenant: simulation of a research row already read with org_id = the caller's org */ SELECT sim.id, sim.status, count(s.id) AS sessions, count(*) FILTER (WHERE s.status IN ('completed','failed','timeout','cancelled')) AS finished
            FROM simulations sim LEFT JOIN agent_sessions s ON s.simulation_id = sim.id WHERE sim.id = $1 GROUP BY sim.id`, [job.simulation_id])
     : [];
   return {
@@ -206,10 +206,10 @@ export async function claimResearch(workerId: string, limit = 1, researchId?: st
   const db = await getDb();
   // Stalled jobs (no heartbeat) go back to the queue.
   await db.query(
-    `UPDATE product_research SET status = 'queued', worker_id = NULL WHERE status = 'running' AND heartbeat_at < now() - make_interval(mins => $1)`,
+    `/* tenant: internal: requeue stalled research across all orgs */ UPDATE product_research SET status = 'queued', worker_id = NULL WHERE status = 'running' AND heartbeat_at < now() - make_interval(mins => $1)`,
     [STALE_MINUTES()]);
   const rows = await db.query<{ id: string; input: any }>(
-    `UPDATE product_research SET status = 'running', worker_id = $1, started_at = coalesce(started_at, now()), heartbeat_at = now(), stage = 'reading'
+    `/* tenant: claim: a job token is pinned to its own research in http.ts, fleet claims across orgs */ UPDATE product_research SET status = 'running', worker_id = $1, started_at = coalesce(started_at, now()), heartbeat_at = now(), stage = 'reading'
       WHERE id IN (SELECT id FROM product_research WHERE status = 'queued' AND ($3::text IS NULL OR id = $3)
                     ORDER BY created_at LIMIT $2 FOR UPDATE SKIP LOCKED)
       RETURNING id, input`,
@@ -218,7 +218,7 @@ export async function claimResearch(workerId: string, limit = 1, researchId?: st
 }
 
 async function runningJob(id: string) {
-  const [job] = await (await getDb()).query<any>("SELECT * FROM product_research WHERE id = $1", [id]);
+  const [job] = await (await getDb()).query<any>("/* tenant: research id checked against the job token in http.ts (/research/:id) */ SELECT * FROM product_research WHERE id = $1", [id]);
   if (!job) throw Object.assign(new Error(`No research job ${id}`), { status: 404 });
   if (job.status !== "running") throw Object.assign(new Error(`Research ${id} is ${job.status}, not running`), { status: 409 });
   return job;
@@ -226,7 +226,7 @@ async function runningJob(id: string) {
 
 export async function researchProgress(id: string, stage: string, note?: string) {
   await runningJob(id);
-  await (await getDb()).query("UPDATE product_research SET stage = $2, note = $3, heartbeat_at = now() WHERE id = $1", [id, String(stage).slice(0, 40), note?.slice(0, 500) ?? null]);
+  await (await getDb()).query("/* tenant: research id checked against the job token in http.ts (/research/:id) */ UPDATE product_research SET stage = $2, note = $3, heartbeat_at = now() WHERE id = $1", [id, String(stage).slice(0, 40), note?.slice(0, 500) ?? null]);
 }
 
 /** Research may suggest a starter workspace; unknown values are dropped (the orchestrator then picks one). */
@@ -393,22 +393,22 @@ export async function completeResearch(id: string, body: { status?: string; erro
   const job = await runningJob(id);
   const db = await getDb();
   if (body.status === "failed") {
-    await db.query("UPDATE product_research SET status = 'failed', error = $2, finished_at = now() WHERE id = $1", [id, String(body.error ?? "failed").slice(0, 2000)]);
+    await db.query("/* tenant: research id checked against the job token in http.ts (/research/:id) */ UPDATE product_research SET status = 'failed', error = $2, finished_at = now() WHERE id = $1", [id, String(body.error ?? "failed").slice(0, 2000)]);
     return { status: "failed" };
   }
   const issues = [...validateResearch(body.result), ...(await libraryIssues(body.result)), ...(await profileIssues(body.result))];
   if (issues.length) {
     const [{ attempts }] = await db.query<{ attempts: number }>(
-      "UPDATE product_research SET attempts = attempts + 1, heartbeat_at = now(), stage = 'validating' WHERE id = $1 RETURNING attempts", [id]);
+      "/* tenant: research id checked against the job token in http.ts (/research/:id) */ UPDATE product_research SET attempts = attempts + 1, heartbeat_at = now(), stage = 'validating' WHERE id = $1 RETURNING attempts", [id]);
     if (attempts >= MAX_ATTEMPTS)
-      await db.query("UPDATE product_research SET status = 'failed', error = $2, finished_at = now() WHERE id = $1", [id, `invalid after ${attempts} attempts: ${issues.join("; ")}`]);
+      await db.query("/* tenant: research id checked against the job token in http.ts (/research/:id) */ UPDATE product_research SET status = 'failed', error = $2, finished_at = now() WHERE id = $1", [id, `invalid after ${attempts} attempts: ${issues.join("; ")}`]);
     throw Object.assign(new Error("invalid research result"), { status: 422, issues });
   }
 
   const r = body.result!;
   const [o] = await db.query<{ id: number; slug: string; name: string }>("SELECT id, slug, name FROM organizations WHERE id = $1", [job.org_id]);
   const org: Org = { orgId: o.id, slug: o.slug, name: o.name };
-  const [prod] = await db.query<{ slug: string; competitors: Tool[] | null }>("SELECT slug, competitors FROM products WHERE id = $1", [job.product_id]);
+  const [prod] = await db.query<{ slug: string; competitors: Tool[] | null }>("/* tenant: product of the research job (job checked against the job token in http.ts) */ SELECT slug, competitors FROM products WHERE id = $1", [job.product_id]);
   const p = r.product;
   // The competitor list only grows: research adds what it found; competitors already on the product (added by hand or
   // by an earlier research) stay, so a loss to them is never scored "no vendor".
@@ -420,7 +420,7 @@ export async function completeResearch(id: string, body: { status?: string; erro
     website_url: p.website_url ?? job.input.website_url ?? undefined, docs_url: p.docs_url ?? job.input.docs_url ?? undefined,
     aliases: p.aliases ?? [], packages: p.packages ?? [], domains: p.domains ?? [], competitors,
   });
-  await db.query("UPDATE products SET features = $2, research = $3 WHERE id = $1",
+  await db.query("/* tenant: product of the research job (job checked against the job token in http.ts) */ UPDATE products SET features = $2, research = $3 WHERE id = $1",
     [job.product_id, JSON.stringify(p.features ?? []), JSON.stringify({ research_id: id, sources: r.sources ?? [], category_terms: p.category_terms ?? [], at: new Date().toISOString() })]);
 
   const personaSlugs: string[] = [];
@@ -428,7 +428,7 @@ export async function completeResearch(id: string, body: { status?: string; erro
   await db.transaction(async (tx) => {
     // A new research replaces the previous generated personas and problems (kept for history, inactive).
     await tx.query("UPDATE developer_profiles SET active = false WHERE product_id = $1 AND source IN ('generated', 'picked')", [job.product_id]);
-    await tx.query("UPDATE scenarios SET active = false, updated_at = now() WHERE product_id = $1 AND source IN ('generated', 'library')", [job.product_id]);
+    await tx.query("/* tenant: product of the research job (job checked against the job token in http.ts) */ UPDATE scenarios SET active = false, updated_at = now() WHERE product_id = $1 AND source IN ('generated', 'library')", [job.product_id]);
     for (const x of r.personas) {
       // The persona is a real developer profile from the data: identity, attributes and instructions are copied from it.
       const [d] = await tx.query<any>("SELECT name, summary, attributes, instructions FROM developer_profiles WHERE slug = $1 AND org_id IS NULL", [x.profile_slug]);
@@ -455,7 +455,7 @@ export async function completeResearch(id: string, body: { status?: string; erro
         if (!repoUrl) repoUrl = t?.repo_url ?? null;
       }
       await tx.query(
-        `INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, library_task_id, source, rationale, template, prompt_variants, decision, platform)
+        `/* tenant: product of the research job (job checked against the job token in http.ts) */ INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, library_task_id, source, rationale, template, prompt_variants, decision, platform)
          VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $9, $10, $11, $12, $13, $14)`,
         [job.product_id, s.title?.trim() || prompt.slice(0, 80), prompt, repoUrl, s.language ?? null, s.tags ?? [],
          s.expectation ?? "recommend", s.library_task_id ?? null, s.library_task_id ? "library" : "generated", s.rationale ?? null,
@@ -463,7 +463,7 @@ export async function completeResearch(id: string, body: { status?: string; erro
          isPlatform(s.platform) ? s.platform : platformOf({ template, language: s.language, tags: s.tags, prompt })]);
     }
     await tx.query(
-      "UPDATE product_research SET status = 'completed', stage = 'done', result = $2, finished_at = now(), heartbeat_at = now() WHERE id = $1",
+      "/* tenant: research id checked against the job token in http.ts (/research/:id) */ UPDATE product_research SET status = 'completed', stage = 'done', result = $2, finished_at = now(), heartbeat_at = now() WHERE id = $1",
       [id, JSON.stringify(r)]);
   });
 
@@ -482,10 +482,10 @@ export async function completeResearch(id: string, body: { status?: string; erro
                                              ...(job.run.samples == null ? { max_samples: config.maxSamples() } : {}),
                                              name: `Onboarding: ${p.name}` });
       simulation_id = sim.simulation.id;
-      await db.query("UPDATE product_research SET simulation_id = $2 WHERE id = $1", [id, simulation_id]);
+      await db.query("/* tenant: research id checked against the job token in http.ts (/research/:id) */ UPDATE product_research SET simulation_id = $2 WHERE id = $1", [id, simulation_id]);
     } catch (e) {
       run_error = (e as Error).message;
-      await db.query("UPDATE product_research SET note = $2 WHERE id = $1", [id, `run not started: ${run_error}`.slice(0, 500)]);
+      await db.query("/* tenant: research id checked against the job token in http.ts (/research/:id) */ UPDATE product_research SET note = $2 WHERE id = $1", [id, `run not started: ${run_error}`.slice(0, 500)]);
     }
   }
   return { status: "completed", product: prod.slug, personas: personaSlugs, scenarios: r.scenarios.length, simulation_id, run_error };

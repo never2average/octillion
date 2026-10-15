@@ -259,7 +259,7 @@ export function createApp() {
   });
   admin.get("/gateway/usage", async (_req, res) => {
     const rows = await (await getDb()).query(
-      `SELECT provider, coalesce(session_id, orchestrator_id) AS consumer, requests, errors, input_tokens, output_tokens, bytes, last_at
+      `/* tenant: admin-only (OCTILLION_ADMIN_TOKEN): global gateway usage */ SELECT provider, coalesce(session_id, orchestrator_id) AS consumer, requests, errors, input_tokens, output_tokens, bytes, last_at
          FROM gateway_usage ORDER BY last_at DESC LIMIT 500`);
     res.json({ usage: rows });
   });
