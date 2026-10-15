@@ -194,11 +194,12 @@ udp.bind(Number(process.argv[6] || DPORT), "127.0.0.1");
 
 /** Facts about the lockdown, collected from the VM when its probe fails (the VM is destroyed right after). */
 export function diagnosticsScript(): string {
-  return `echo "--- proxy processes"; pgrep -u octiproxy -a node | head -3 || echo "NONE RUNNING"
-echo "--- listeners"; (sudo -n ss -lntup 2>/dev/null || ss -lntup 2>/dev/null) | grep -E ":(${EGRESS_PROXY_PORT}|${EGRESS_TRANSPARENT_PORT}|${EGRESS_DNS_PORT})\\b" | head -6 || true
+  return `echo "--- proxy processes"; ps -eo user:10,pid,args 2>/dev/null | grep -E "proxy.mjs" | grep -v grep | cut -c1-120 | head -3; echo "(end)"
+echo "--- service"; sudo -n systemctl is-active octi-egress-proxy 2>&1 | head -1; sudo -n journalctl -u octi-egress-proxy -n 6 --no-pager 2>/dev/null | cut -c1-160
+echo "--- listeners"; (sudo -n ss -lntu 2>/dev/null || ss -lntu 2>/dev/null) | head -10
 echo "--- proxy error output"; sudo -n head -c 500 /var/log/octi-egress.err 2>/dev/null | head -8
 echo "--- proxy log (last)"; sudo -n tail -n 12 /var/log/octi-egress.log 2>/dev/null | cut -c1-160
-echo "--- rules"; (sudo -n nft list ruleset 2>/dev/null | grep -E "skuid|redirect|drop" | head -8) || true
+echo "--- rules"; (sudo -n nft list table inet octi_egress 2>&1 | head -14) || true
 (sudo -n iptables -t nat -S OUTPUT 2>/dev/null; sudo -n iptables -S OUTPUT 2>/dev/null) | grep -E "owner|REDIRECT|DROP" | head -8 || true
 echo "--- resolver"; grep -v '^#' /etc/resolv.conf 2>/dev/null | head -3`;
 }
@@ -253,8 +254,14 @@ sudo -n install -m 644 -o root -g root "$O/egress-allow.json" "$D/allow.json"
 sudo -n install -m 644 -o root -g root "$O/egress-probe.mjs" "$D/probe.mjs"
 sudo -n install -m 640 -o octiproxy -g root /dev/null /var/log/octi-egress.log
 sudo -n install -m 640 -o octiproxy -g root /dev/null /var/log/octi-egress.err
-# The redirect must be opened by the proxy user itself (the file is its own), not by this shell.
-sudo -n -u octiproxy sh -c 'exec nohup "$0" "$@" >/dev/null 2>/var/log/octi-egress.err' "$NODE" "$D/proxy.mjs" "$D/allow.json" /var/log/octi-egress.log &
+# The proxy must outlive this command's session (a plain background child is killed when it ends): run it as its own
+# systemd service; where there is no systemd, as a detached session whose stderr is opened by the proxy user itself.
+if command -v systemd-run >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+  sudo -n systemd-run --quiet --unit=octi-egress-proxy --uid=octiproxy --property=Restart=on-failure --property=StandardOutput=null \\
+    --property=StandardError=append:/var/log/octi-egress.err "$NODE" "$D/proxy.mjs" "$D/allow.json" /var/log/octi-egress.log
+else
+  sudo -n -u octiproxy setsid sh -c 'exec nohup "$0" "$@" >/dev/null 2>/var/log/octi-egress.err' "$NODE" "$D/proxy.mjs" "$D/allow.json" /var/log/octi-egress.log </dev/null &
+fi
 up=0; for i in $(seq 1 40); do (exec 3<>/dev/tcp/127.0.0.1/${EGRESS_PROXY_PORT}) 2>/dev/null && { up=1; break; }; sleep 0.25; done
 # All three listeners must be up: the proxy port, the transparent TLS port and the DNS responder.
 if [ "$up" = 1 ]; then

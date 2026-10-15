@@ -25,8 +25,10 @@ check("policy: a non-HTTPS gateway is refused (strict mode is production only)",
 check("policy: a repo given as an IP literal is not allowlisted", !egressPolicy({ gatewayUrls: ["https://gw.x.example"], repoUrl: "https://10.0.0.5/app.git" }).hosts.includes("10.0.0.5"));
 check("proxy env routes HTTP clients through the proxy", proxyEnv().HTTPS_PROXY === `http://127.0.0.1:${EGRESS_PROXY_PORT}` && proxyEnv().NODE_USE_ENV_PROXY === "1");
 const setup = setupScript("/tmp/octi");
+check("setup runs the proxy as its own systemd service, with a detached-session fallback (it must outlive the setup command)",
+  /systemd-run --quiet --unit=octi-egress-proxy --uid=octiproxy/.test(setupScript("/tmp/octi")) && /octiproxy setsid sh -c 'exec nohup/.test(setupScript("/tmp/octi")));
 check("setup shows the proxy's own error when it does not start (file opened by the proxy user, read with sudo)",
-  /sudo -n -u octiproxy sh -c 'exec nohup "\$0" "\$@" >\/dev\/null 2>\/var\/log\/octi-egress\.err'/.test(setupScript("/tmp/octi")) && /egress: proxy did not start: \$\(sudo -n head/.test(setupScript("/tmp/octi")));
+  /-u octiproxy setsid sh -c 'exec nohup "\$0" "\$@" >\/dev\/null 2>\/var\/log\/octi-egress\.err'/.test(setupScript("/tmp/octi")) && /egress: proxy did not start: \$\(sudo -n head/.test(setupScript("/tmp/octi")));
 check("setup fails closed without node, a firewall tool or a running proxy", /exit 20/.test(setup) && /exit 21/.test(setup) && /exit 22/.test(setup) && /meta skuid \$AUID counter drop/.test(setup));
 check("probe expects the gateway reachable (also without proxy settings) and everything else blocked",
   /gateway directly \(transparent/.test(probeSource("gw.x.example")) && /DNS for an unlisted host", false/.test(probeSource("gw.x.example")) &&
