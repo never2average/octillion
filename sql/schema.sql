@@ -479,3 +479,10 @@ UPDATE scenarios SET platform = octillion_platform_of(template, language, tags, 
 UPDATE library_tasks SET platform = octillion_platform_of(attributes->>'template', language, tags, prompt) WHERE platform IS NULL;
 CREATE INDEX IF NOT EXISTS scenarios_product_platform_idx ON scenarios (product_id, platform);
 CREATE INDEX IF NOT EXISTS library_tasks_platform_idx ON library_tasks (platform, category) WHERE active;
+
+-- Tenant safety (docs/security.md): a developer profile is shared (org_id NULL) exactly when it comes from the vault.
+-- A private persona inserted without its org fails instead of silently becoming visible to every organization.
+ALTER TABLE developer_profiles ALTER COLUMN source DROP DEFAULT;
+DO $$ BEGIN
+  ALTER TABLE developer_profiles ADD CONSTRAINT developer_profiles_owner_matches_source CHECK ((org_id IS NULL) = (source = 'vault'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;

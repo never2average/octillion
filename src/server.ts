@@ -222,8 +222,13 @@ export async function runTool(org: Org, name: ToolName, args: Record<string, unk
       structuredContent: structured,
     };
   } catch (err) {
-    recordMcpEvent(org.orgId, { method: "tools/call", name, ok: false, error: (err as Error).message, ms: performance.now() - t0 });
-    return { isError: true, content: [{ type: "text", text: (err as Error).message }] };
+    // Database errors (SQLSTATE codes) can echo other rows' values, e.g. a unique-key clash revealing that another
+    // organization uses a slug; callers get a generic message, never the raw text.
+    const e = err as Error & { code?: unknown };
+    const message = typeof e.code === "string" && /^[0-9A-Z]{5}$/.test(e.code)
+      ? `The request could not be completed (database error ${e.code}). Check the arguments and try again.` : e.message;
+    recordMcpEvent(org.orgId, { method: "tools/call", name, ok: false, error: message, ms: performance.now() - t0 });
+    return { isError: true, content: [{ type: "text", text: message }] };
   }
 }
 

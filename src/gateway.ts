@@ -48,13 +48,21 @@ async function mintToken(kind: "session" | "orchestrator", providers: string[], 
 /** Credentials for one running agent session: gateway providers get a scoped token, direct ones the real key. */
 export async function brokerSessionCredentials(sessionId: string) {
   const db = await getDb();
-  const [s] = await db.query<{ status: string; agent_id: string | null; harness: string }>(
-    "SELECT status, agent_id, harness FROM agent_sessions WHERE id = $1", [sessionId]);
+  const [s] = await db.query<{ status: string; agent_id: string | null; harness: string; task_source: string | null }>(
+    `SELECT s.status, s.agent_id, s.harness, sc.source AS task_source
+       FROM agent_sessions s LEFT JOIN scenarios sc ON sc.id = s.scenario_id WHERE s.id = $1`, [sessionId]);
   if (!s) throw Object.assign(new Error(`No session ${sessionId}`), { status: 404 });
   if (s.status !== "running") throw Object.assign(new Error(`Session ${sessionId} is ${s.status}, not running`), { status: 409 });
 
   const needs = (s.agent_id && findAgent(s.agent_id)?.requires_env) || HARNESS_ENV[s.harness] || [];
-  const providers = await providersForEnv(needs);
+  // Real vendor keys (direct mode) reach a session only when explicitly allowed, never for a task a customer wrote
+  // (its prompt steers an agent that can read its own environment), and never for orchestrator-only keys.
+  const all = await providersForEnv(needs);
+  const providers = all.filter((p) => p.mode === "gateway" || directKeyAllowed(p.slug, s.task_source));
+  const withheld = needs.filter((v) => !providers.some((p) => p.env_vars.includes(v)) && all.some((p) => p.env_vars.includes(v)));
+  if (withheld.length)
+    throw Object.assign(new Error(`Real vendor keys (${withheld.join(", ")}) are not given to this session: direct-mode keys are off ` +
+                                  "(OCTILLION_DIRECT_KEYS) or the task was written by a customer"), { status: 403 });
   const missing = needs.filter((v) => !providers.some((p) => p.env_vars.includes(v)));
   if (missing.length) throw Object.assign(new Error(`No vault provider supplies ${missing.join(", ")}`), { status: 503 });
 
@@ -87,6 +95,15 @@ export const orchestratorBrain = () => ({
 });
 /** Path SDKs expect after the provider's host (OpenAI-style clients append /responses, /chat/completions to .../v1). */
 const SDK_BASE_SUFFIX: Record<string, string> = { openai: "/v1", dashscope: "/compatible-mode/v1" };
+
+/** Direct-mode providers whose key only the orchestrator uses; never brokered to an agent session. */
+export const ORCHESTRATOR_ONLY_PROVIDERS = new Set(["boat"]);
+/** Real vendor keys in agent sessions are off unless OCTILLION_DIRECT_KEYS=allow (see docs/security.md). */
+export const directKeysAllowed = () => process.env.OCTILLION_DIRECT_KEYS === "allow";
+function directKeyAllowed(provider: string, taskSource: string | null): boolean {
+  if (ORCHESTRATOR_ONLY_PROVIDERS.has(provider) || !directKeysAllowed()) return false;
+  return taskSource === "library" || taskSource === "generated"; // curated or research-written, never customer-written
+}
 
 /** The orchestrator's own access: boat.dev key (if in the vault) and gateway access for its LLM. */
 export async function brokerOrchestratorCredentials(orchestratorId: string) {

@@ -68,10 +68,12 @@ export async function syncVault() {
       const s = slug ? slugify(slug) : slugify(String(id ?? name));
       profileSlugs.push(s);
       await tx.query(
-        `INSERT INTO developer_profiles (slug, external_id, name, summary, attributes, instructions, active, synced_at)
-         VALUES ($1, $2, $3, $4, $5, $6, true, now())
+        // Shared rows only: a vault slug that collides with an organization's private persona never overwrites it.
+        `INSERT INTO developer_profiles (slug, external_id, name, summary, attributes, instructions, source, active, synced_at)
+         VALUES ($1, $2, $3, $4, $5, $6, 'vault', true, now())
          ON CONFLICT (slug) DO UPDATE SET external_id = excluded.external_id, name = excluded.name, summary = excluded.summary,
-           attributes = excluded.attributes, instructions = excluded.instructions, active = true, synced_at = now()`,
+           attributes = excluded.attributes, instructions = excluded.instructions, active = true, synced_at = now()
+         WHERE developer_profiles.org_id IS NULL`,
         [s, id == null ? null : String(id), name, summary ?? "", JSON.stringify({ ...rest, ...(attributes ?? {}) }), instructions ?? ""],
       );
     }

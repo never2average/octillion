@@ -377,7 +377,16 @@ try {
                             auth_header: "x-api-key", auth_prefix: "", env_vars: ["SMOKE_LLM_API_KEY"] });
   await kv.upsertProvider({ slug: "smoke_vendor", mode: "direct", env_vars: ["SMOKE_VENDOR_TOKEN"] });
   await kv.setCredential("smoke_llm", REAL_LLM_KEY);
+  // Direct-mode lock: a real vendor key is not even stored unless explicitly allowed ...
+  await assert.rejects(kv.setCredential("smoke_vendor", REAL_VENDOR_KEY), /direct-mode provider/);
+  process.env.OCTILLION_DIRECT_KEYS = "allow";
   await kv.setCredential("smoke_vendor", REAL_VENDOR_KEY);
+  // ... and never reaches a session whose task a customer wrote (this one came from save_scenarios).
+  const lockedOut = await worker(`/sessions/${jobs[0].session_id}/credentials`, {});
+  assert.equal(lockedOut.status, 403, "customer-written task: no real vendor key");
+  assert.ok(!(await lockedOut.text()).includes(REAL_VENDOR_KEY));
+  const [{ scenario_id: lockedScenario }] = await db.query<any>("SELECT scenario_id FROM agent_sessions WHERE id = $1", [jobs[0].session_id]);
+  await db.query("UPDATE scenarios SET source = 'library' WHERE id = $1", [lockedScenario]); // a curated task may get it
   const [stored] = await db.query<{ ciphertext: string; hint: string }>("SELECT ciphertext, hint FROM vault_credentials WHERE provider = 'smoke_llm'");
   assert.ok(!stored.ciphertext.includes("smoke-real") && !Buffer.from(stored.ciphertext, "base64").toString().includes("smoke-real"), "stored encrypted");
 
@@ -387,6 +396,11 @@ try {
   assert.ok(gw.api_key.startsWith("ogw_") && gw.base_url === `${base}/gw/smoke_llm`, "gateway providers get a scoped token + base URL");
   assert.equal(creds.providers.smoke_vendor.api_key, REAL_VENDOR_KEY, "direct providers get the real key for this session");
   assert.equal(creds.env.SMOKE_VENDOR_TOKEN, REAL_VENDOR_KEY);
+  delete process.env.OCTILLION_DIRECT_KEYS;
+  await db.query("UPDATE scenarios SET source = 'manual' WHERE id = $1", [lockedScenario]);
+  // Persona table fails closed: a private persona without its org, or a shared row without the vault source, is refused.
+  await assert.rejects(db.query("INSERT INTO developer_profiles (slug, name, source) VALUES ('leaky', 'Leaky', 'generated')"), /owner_matches_source/);
+  await assert.rejects(db.query("INSERT INTO developer_profiles (slug, name) VALUES ('leaky2', 'Leaky')"));
   assert.ok(!JSON.stringify(creds).includes(REAL_LLM_KEY), "the gateway provider's real key never leaves the server");
   const llm = (headers: Record<string, string>, path = "/gw/smoke_llm/v1/messages") =>
     fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify({ model: "m", stream: true }) });

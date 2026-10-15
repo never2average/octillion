@@ -288,7 +288,7 @@ export async function researchLoop(getBrain: () => Promise<BrainLike>): Promise<
       log("research claim failed:", String(e));
     }
     for (const job of jobs) {
-      log(`[${job.research_id}] research claimed: ${job.input?.website_url ?? ""} ${job.input?.docs_url ?? ""}`);
+      log(`[${job.research_id}] research claimed`); // customer inputs (URLs, prompt) stay out of logs
       const release = holdBusy(); // keeps an on-demand orchestrator from idling out mid-research
       const t: Promise<unknown> = getBrain().then((b) => runResearchJob(job, b))
         .catch((e) => log(`[${job.research_id}] research crashed:`, e))
