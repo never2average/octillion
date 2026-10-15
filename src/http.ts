@@ -227,6 +227,15 @@ export function createApp() {
     return timingSafeEqual(h(t), h(want));
   };
   admin.use((req, res, next) => (adminOk(bearer(req.headers.authorization)) ? next() : void res.status(401).json({ error: "Invalid admin token" })));
+  // Every staff request is logged (who, what, when, outcome); never the body, which can hold secrets.
+  admin.use((req, res, next) => {
+    const actor = String(req.headers["x-octillion-actor"] ?? "admin-token").replace(/[^\w.@ -]/g, "").slice(0, 80) || "admin-token";
+    res.on("finish", () => {
+      void getDb().then((db) => db.query("INSERT INTO admin_access_log (actor, method, path, status, ip) VALUES ($1, $2, $3, $4, $5)",
+        [actor, req.method, req.originalUrl.split("?")[0]!.slice(0, 300), res.statusCode, String(req.ip ?? "").slice(0, 64)])).catch(() => {});
+    });
+    next();
+  });
   admin.use(express.json({ limit: "64kb" }));
   admin.get("/keyvault/providers", async (_req, res) => void res.json({ providers: await kv.listProviders() }));
   admin.put("/keyvault/providers/:slug", async (req, res) => void res.json(await kv.upsertProvider({ ...req.body, slug: String(req.params.slug) })));

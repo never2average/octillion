@@ -488,6 +488,10 @@ try {
   assert.equal((await fetch(`${base}/api/admin/keyvault/credentials`)).status, 401);
   const listed = await (await fetch(`${base}/api/admin/keyvault/credentials`, { headers: { authorization: "Bearer smoke-admin-token" } })).text();
   assert.ok(listed.includes(stored.hint) && !listed.includes(REAL_LLM_KEY) && !listed.includes(REAL_VENDOR_KEY), "admin API shows hints only");
+  await fetch(`${base}/api/admin/keyvault/providers`, { headers: { authorization: "Bearer smoke-admin-token", "x-octillion-actor": "smoke staff" } });
+  await new Promise((r) => setTimeout(r, 200));
+  const [logged] = await db.query<any>("SELECT actor, method, path, status FROM admin_access_log WHERE actor = 'smoke staff' ORDER BY id DESC LIMIT 1");
+  assert.ok(logged && logged.method === "GET" && logged.path === "/api/admin/keyvault/providers" && logged.status === 200, "staff access is logged");
   console.log("✓ key vault + gateway: encrypted at rest, scoped tokens, real key injected upstream, streaming, metering");
 
   const outcomes = ["adopted", "competitor", "recommended", "none"] as const;

@@ -552,3 +552,15 @@ DO $$ BEGIN
   ALTER TABLE developer_populations ADD CONSTRAINT developer_populations_private_not_default CHECK (org_id IS NULL OR NOT is_default);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS developer_populations_org_name ON developer_populations (org_id, name) WHERE org_id IS NOT NULL;
+
+-- Staff access to the admin API (docs/security.md): who, what, when. No request bodies (they can hold secrets).
+CREATE TABLE IF NOT EXISTS admin_access_log (
+  id      BIGSERIAL PRIMARY KEY,
+  at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  actor   TEXT NOT NULL,                        -- x-octillion-actor header (staff name), else 'admin-token'
+  method  TEXT NOT NULL,
+  path    TEXT NOT NULL,
+  status  INT,
+  ip      TEXT
+);
+CREATE INDEX IF NOT EXISTS admin_access_log_at_idx ON admin_access_log (at DESC);

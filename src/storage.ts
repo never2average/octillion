@@ -84,8 +84,8 @@ export async function deleteKeys(list: string[]): Promise<void> {
   }
 }
 
-/** A time-limited download link (default 7 days, the S3 maximum). */
-export async function signedUrl(key: string, seconds = 7 * 24 * 3600, filename?: string): Promise<string> {
+/** A time-limited download link: 1 hour by default (docs/security.md), at most 7 days (the S3 maximum). */
+export async function signedUrl(key: string, seconds = 3600, filename?: string): Promise<string> {
   return getSignedUrl(s3(), new GetObjectCommand({ Bucket: bucket(), Key: key,
     ...(filename ? { ResponseContentDisposition: `attachment; filename="${filename.replace(/["\\]/g, "")}"` } : {}) }),
     { expiresIn: Math.min(Math.max(60, seconds), 7 * 24 * 3600) });
