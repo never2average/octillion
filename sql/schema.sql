@@ -544,3 +544,11 @@ CREATE TABLE IF NOT EXISTS org_harnesses (
 -- A run that uses an organization's private assets (its own personas or tasks; later its harnesses). Its sessions are
 -- claimed only by the per-job orchestrator launched for it (job token), never by a shared orchestrator (fleet token).
 ALTER TABLE simulations ADD COLUMN IF NOT EXISTS private BOOLEAN NOT NULL DEFAULT false;
+
+-- Private harness mixes (docs/security.md, phase 3): a population owned by one organization (its own distribution of
+-- coding agents). Public populations have no owner; an organization's mix is never the default.
+ALTER TABLE developer_populations ADD COLUMN IF NOT EXISTS org_id INT REFERENCES organizations(id) ON DELETE CASCADE;
+DO $$ BEGIN
+  ALTER TABLE developer_populations ADD CONSTRAINT developer_populations_private_not_default CHECK (org_id IS NULL OR NOT is_default);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+CREATE UNIQUE INDEX IF NOT EXISTS developer_populations_org_name ON developer_populations (org_id, name) WHERE org_id IS NOT NULL;

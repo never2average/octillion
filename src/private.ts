@@ -142,6 +142,50 @@ export async function taskSetScenarioIds(org: Org, productId: number, ref: strin
   return rows.map((r) => r.id);
 }
 
+// ---------- harness mixes (private populations) ----------
+
+export async function saveHarnessMix(org: Org, input: { name: string; description?: string; agents: { agent_id: string; share: number }[] }) {
+  const name = cleanText(input.name, 80, "name");
+  if (name.length < 2) throw new Error("name is required");
+  const { registry } = await import("./agents.js");
+  const runnable = new Map(registry().agents.filter((a) => a.enabled !== false).map((a) => [a.id, a]));
+  const seen = new Set<string>();
+  for (const a of input.agents ?? []) {
+    if (!runnable.has(a.agent_id)) throw new Error(`Unknown or unavailable agent ${a.agent_id}; see list_agents`);
+    if (seen.has(a.agent_id)) throw new Error(`${a.agent_id} is listed twice`);
+    if (!(Number(a.share) > 0)) throw new Error(`${a.agent_id}: share must be positive`);
+    seen.add(a.agent_id);
+  }
+  if (!seen.size) throw new Error("A mix needs at least one agent");
+  const total = input.agents.reduce((s, a) => s + Number(a.share), 0);
+  const db = await getDb();
+  await db.transaction(async (tx) => {
+    const [existing] = await tx.query<{ id: number }>("SELECT id FROM developer_populations WHERE org_id = $1 AND name = $2", [org.orgId, name]);
+    const [pop] = existing
+      ? await tx.query<{ id: number }>("UPDATE developer_populations SET description = $2, updated_at = now() WHERE id = $1 RETURNING id",
+          [existing.id, input.description ? cleanText(input.description, 500, "description") : ""])
+      : await tx.query<{ id: number }>(
+          `INSERT INTO developer_populations (slug, name, description, methodology, sandbox_unit, min_one_sandbox, is_default, org_id)
+           VALUES ($1, $2, $3, 'Custom harness mix defined by the organization', 20, true, false, $4) RETURNING id`,
+          [rid("mix"), name, input.description ? cleanText(input.description, 500, "description") : "", org.orgId]);
+    await tx.query("DELETE FROM developer_population_agents WHERE population_id = $1", [pop!.id]);
+    for (const a of input.agents)
+      await tx.query("INSERT INTO developer_population_agents (population_id, agent_id, market_share) VALUES ($1, $2, $3)",
+        [pop!.id, a.agent_id, Number(a.share) / total]);
+  });
+  return listHarnessMixes(org);
+}
+
+export async function listHarnessMixes(org: Org) {
+  const mixes = await (await getDb()).query(
+    `SELECT p.slug, p.name, p.description, p.updated_at,
+            coalesce(jsonb_agg(jsonb_build_object('agent_id', a.agent_id, 'share', a.market_share) ORDER BY a.market_share DESC)
+                     FILTER (WHERE a.agent_id IS NOT NULL), '[]') AS agents
+       FROM developer_populations p LEFT JOIN developer_population_agents a ON a.population_id = p.id
+      WHERE p.org_id = $1 GROUP BY p.id ORDER BY p.name`, [org.orgId]);
+  return { view: "harness_mixes" as const, mixes };
+}
+
 // ---------- harnesses ----------
 
 export const HARNESS_EVENT_FORMATS = ["octillion-jsonl", "claude-stream-json", "codex-json", "acp"] as const;

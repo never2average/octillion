@@ -26,6 +26,11 @@ broad permissions, so they must not reach credentials, other tenants or the scor
 | Organization deletion revokes keys and tokens, stops work, purges ClickHouse transcripts and every R2 org prefix (verified empty), cascades Postgres, leaves a counts-only tombstone | `src/tenancy.ts`, `scripts/delete-org.ts` | 2026-10-15 |
 | Private assets: personas (random `per_` slugs), task sets and harness specs are stored with their org and readable, usable and updatable by that org only; the same error whether or not an id exists elsewhere; never in the shared library or profile search | `src/private.ts`, `src/queries.ts` `runSimulation` | 2026-10-15 |
 | Customer harness specs are declarative only: integrity-pinned packages, argv without a shell, gateway providers only (no real vendor keys) | `src/private.ts` `harnessSpecIssues` | 2026-10-15 |
+| Research fetch never connects to IP-literal URLs (they skip the private-address check), blocks IPv6 forms of private addresses, and onboarding refuses IP, localhost or internal product URLs | `orchestrator/core/safe-fetch.ts`, `src/research.ts` | 2026-10-15 |
+| Event provenance: events are tagged orchestrator or harness; a harness cannot forge the diff, simulated-developer turns or ordering, and the scorer ignores harness-tagged evidence | `orchestrator/core/sink.ts`, `src/transcripts.ts`, `src/scoring.ts`, `src/worker.ts` | 2026-10-15 |
+| Private runs (an org's own tasks or personas) are claimed only by their own per-job orchestrator, never by a shared one | `src/queries.ts`, `src/worker.ts`, `src/http.ts` | 2026-10-15 |
+| The production host guard refuses running the coding agent as boat's sudo-capable user | `orchestrator/core/host-guard.ts` | 2026-10-15 |
+| Private harness mixes are org-owned populations; population lookups for customers see public ones plus their own; reports cover one population and label custom mixes | `src/populations.ts`, `src/private.ts`, `src/queries.ts` | 2026-10-15 |
 
 ## Plan
 
@@ -35,8 +40,8 @@ broad permissions, so they must not reach credentials, other tenants or the scor
 | 0b | Per-job worker tokens: an autoscaled orchestrator's token is bound to one job and organization, enforced on every worker route | done |
 | 0c | Organization deletion purges Postgres, ClickHouse and R2 (`npm run org:delete`) | done |
 | 1 | Private personas (`save_personas`), task sets (`import_tasks`, `run_simulation {task_set}`) and harness specs (`register_harness`), owner-only; per-org encryption of private text still to do | done (encryption: phase 4) |
-| 2 | Private runs only on job-dedicated orchestrators with fresh VMs; default-deny egress; customer harness specs built in isolation, pinned by digest, approved before use | planned |
-| 3 | Private harness mixes (populations): saved per org, labelled in reports, never blended with the default mix | planned |
+| 2 | Done: research fetch hardening, event provenance, private runs only on their own per-job orchestrator, host guard against a sudo-capable agent. Open (need verification on a real boat VM): default-deny egress for agent VMs, an unprivileged orchestrator user, the isolated harness build/scan/sign pipeline and runtime install | in progress |
+| 3 | Private harness mixes (`save_harness_mix`, `run_simulation {population}`): owner-only, reports labelled and never blended with the default mix | done |
 | 4 | Two-org canary isolation test over every tool and route, CI check for org predicates, prompt-injection controls, staff access log | planned |
 
 ### Custom harness mixes

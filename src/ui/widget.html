@@ -476,7 +476,7 @@
   function render(d) {
     tip.style.display = "none";
     product = d.product?.slug ?? d.simulation?.product_slug ?? d.session?.product_slug ?? (typeof d.product === "string" ? d.product : product);
-    const views = { products: viewProducts, product: viewProduct, report: viewReport, simulations: viewSimulations, simulation: viewSimulation, session: viewSession, transcript: viewTranscript, search: viewSearch, profiles: viewProfiles, library: viewLibrary, agents: viewAgents, onboarding: viewOnboarding, personas: viewPersonas, task_sets: viewTaskSets, harnesses: viewHarnesses };
+    const views = { products: viewProducts, product: viewProduct, report: viewReport, simulations: viewSimulations, simulation: viewSimulation, session: viewSession, transcript: viewTranscript, search: viewSearch, profiles: viewProfiles, library: viewLibrary, agents: viewAgents, onboarding: viewOnboarding, personas: viewPersonas, task_sets: viewTaskSets, harnesses: viewHarnesses, harness_mixes: viewMixes };
     const fn = views[d.view];
     const note = d.truncated ? `<div class="warn" style="margin-bottom:12px">Result shortened to fit the host's size limit. Page through it or narrow the filters to see the rest.</div>` : "";
     app.innerHTML = nav(d.view) + note + (fn ? fn(d) : `<div class="empty">Unknown view: ${esc(d.view)}</div>`);
@@ -643,6 +643,13 @@
       <thead><tr><th>Harness</th><th>Version</th><th>Status</th><th>Providers</th></tr></thead>
       <tbody>${harnesses.map((h) => `<tr><td>${esc(h.name)}</td><td class="muted">${esc(h.version)}</td><td><span class="badge" data-tip="${esc(h.status_reason || "")}">${esc(h.status)}</span></td><td class="muted">${esc((h.providers || []).join(", "))}</td></tr>`).join("")}</tbody>
     </table></div>${privateNote}</div>`;
+  }
+
+  function viewMixes({ mixes }) {
+    if (!mixes.length) return `<div class="card empty">No private harness mixes yet. The default is the market-weighted mix.</div>`;
+    return `<div class="stack">${mixes.map((m) => `<div class="card"><div class="spread"><h2>${esc(m.name)}</h2><span class="muted">${esc(m.slug)}</span></div>
+      <div class="hbars">${m.agents.map((a) => `<div class="hit">${esc(a.agent_id)}</div><div class="track"><span class="bar rival" style="width:${(Number(a.share) || 0) * 100}%"></span></div><div class="val">${pct(a.share)}</div>`).join("")}</div></div>`).join("")}
+      <p class="muted" style="font-size:12px">Reports on a custom mix are labelled and never blended with the market-weighted default.</p>${privateNote}</div>`;
   }
 
   // ---------- simulations ----------

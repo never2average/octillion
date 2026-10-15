@@ -10,8 +10,10 @@ import { registry, type Population } from "./agents.js";
 interface PopulationRow {
   id: number; slug: string; name: string; description: string; as_of: string | null; methodology: string; sources: unknown[];
   unrepresented_share: number | null; sandbox_unit: number; min_one_sandbox: boolean; is_default: boolean;
+  /** Owner of a private harness mix; null for public populations. */
+  org_id: number | null;
 }
-const COLS = "id, slug, name, description, as_of::text AS as_of, methodology, sources, unrepresented_share, sandbox_unit, min_one_sandbox, is_default";
+const COLS = "id, slug, name, description, as_of::text AS as_of, methodology, sources, unrepresented_share, sandbox_unit, min_one_sandbox, is_default, org_id";
 
 let seeded: Promise<void> | undefined;
 
@@ -43,9 +45,11 @@ export function ensureDefaultPopulation(): Promise<void> {
   return seeded;
 }
 
-async function row(db: Queryable, slug?: string): Promise<PopulationRow> {
+/** `orgId`: a customer's view: public populations plus that organization's own mixes, never another org's. */
+async function row(db: Queryable, slug?: string, orgId?: number): Promise<PopulationRow> {
+  const scope = orgId === undefined ? "" : ` AND (org_id IS NULL OR org_id = ${Math.trunc(orgId)})`;
   const [p] = await db.query<PopulationRow>(
-    slug ? `SELECT ${COLS} FROM developer_populations WHERE slug = $1` : `SELECT ${COLS} FROM developer_populations WHERE is_default`,
+    slug ? `SELECT ${COLS} FROM developer_populations WHERE slug = $1${scope}` : `SELECT ${COLS} FROM developer_populations WHERE is_default`,
     slug ? [slug] : [],
   );
   if (!p) throw Object.assign(new Error(slug ? `No developer population "${slug}"` : "No default developer population"), { status: 404 });
@@ -53,10 +57,10 @@ async function row(db: Queryable, slug?: string): Promise<PopulationRow> {
 }
 
 /** A population with registry agent specs merged in: weight = its market share, paused = its switch. */
-export async function getPopulation(slug?: string): Promise<Population> {
+export async function getPopulation(slug?: string, orgId?: number): Promise<Population> {
   await ensureDefaultPopulation();
   const db = await getDb();
-  const p = await row(db, slug);
+  const p = await row(db, slug, orgId);
   const mix = await db.query<{ agent_id: string; market_share: number; paused: boolean; paused_reason: string | null; notes: string | null }>(
     "SELECT agent_id, market_share, paused, paused_reason, notes FROM developer_population_agents WHERE population_id = $1", [p.id]);
   const byId = new Map(mix.map((m) => [m.agent_id, m]));
@@ -68,13 +72,15 @@ export async function getPopulation(slug?: string): Promise<Population> {
   return { ...p, unrepresented_share: p.unrepresented_share == null ? null : Number(p.unrepresented_share), agents };
 }
 
-export async function listPopulations() {
+/** All populations (admin), or, with `orgId`, the public ones plus that organization's own mixes. */
+export async function listPopulations(orgId?: number) {
   await ensureDefaultPopulation();
   return (await getDb()).query(
-    `SELECT p.slug, p.name, p.description, p.as_of::text AS as_of, p.sandbox_unit, p.min_one_sandbox, p.is_default,
+    `SELECT p.slug, p.name, p.description, p.as_of::text AS as_of, p.sandbox_unit, p.min_one_sandbox, p.is_default, p.org_id IS NOT NULL AS private,
             count(a.agent_id) FILTER (WHERE a.market_share > 0 AND NOT a.paused) AS running_agents
        FROM developer_populations p LEFT JOIN developer_population_agents a ON a.population_id = p.id
-      GROUP BY p.id ORDER BY p.is_default DESC, p.slug`);
+      ${orgId === undefined ? "" : "WHERE p.org_id IS NULL OR p.org_id = $1"}
+      GROUP BY p.id ORDER BY p.is_default DESC, p.org_id IS NOT NULL, p.slug`, orgId === undefined ? [] : [orgId]);
 }
 
 const knownAgent = (id: string) => {

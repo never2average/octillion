@@ -196,7 +196,7 @@ try {
   // ---------- tools + UI resource ----------
   const { tools } = await A.listTools();
   console.log("tools:", tools.map((t) => t.name).join(", "));
-  assert.equal(tools.length, 24);
+  assert.equal(tools.length, 26);
   assert.equal(tools[0].name, "get_started", "the welcome tool is listed first (the tool list is the first screen in IDE hosts)");
   const fresh = await call(A, "get_started");
   assert.equal(fresh.welcome.stage, "onboard");
@@ -385,6 +385,20 @@ try {
     await call(A, "cancel_simulation", { simulation_id: own.simulation.id });
     await call(A, "save_scenarios", { scenarios: set.tasks.map((t: any) => ({ id: t.id, active: false })) }); // keep later counts unchanged
     console.log("✓ private personas, task sets and harnesses: validated, owner-only, invisible and unusable for another org");
+
+    // Private harness mix: normalised shares, owner-only, labelled and never blended into the default report.
+    const mixes = await call(A, "save_harness_mix", { name: `Enterprise IDE users ${CANARY}`, agents: [{ agent_id: "codex/default", share: 7 }, { agent_id: "claude-code/sonnet", share: 3 }] });
+    const mix = mixes.mixes[0];
+    assert.ok(/^mix_/.test(mix.slug) && Math.abs(mix.agents.reduce((s: number, a: any) => s + Number(a.share), 0) - 1) < 1e-6, "shares normalised to 100%");
+    await fails(A, "save_harness_mix", { name: "bad", agents: [{ agent_id: "ide-only/x", share: 1 }] }, /Unknown or unavailable agent/);
+    assert.ok(!JSON.stringify([(await call(B, "list_harness_mixes")).mixes, (await call(B, "list_agents", {})).populations]).includes(mix.slug), "org B never sees org A's mix");
+    await fails(B, "list_agents", { population: mix.slug }, /No developer population/);
+    const onMix = await call(A, "run_simulation", { models: ["claude-sonnet-5-5"], repeats: 1, population: mix.slug, name: "mix" });
+    assert.equal((await db.query<any>("SELECT dp.org_id FROM simulations s JOIN developer_populations dp ON dp.id = s.population_id WHERE s.id = $1", [onMix.simulation.id]))[0].org_id, a.org.orgId);
+    await call(A, "cancel_simulation", { simulation_id: onMix.simulation.id });
+    const mixReport = ((await A.callTool({ name: "get_visibility_report", arguments: { population: mix.slug } })).content as any)[0].text as string;
+    assert.ok(/custom harness mix/.test(mixReport) || /No scored agent sessions/.test(mixReport), "a custom-mix report is labelled");
+    console.log("✓ private harness mixes: normalised, owner-only, runs record the mix, reports labelled and kept apart");
   }
 
   const sim = await call(A, "run_simulation", { models: ["claude-sonnet-5-5"], repeats: 1, name: "smoke", profiles: ["example-solo-indie"] });
@@ -653,7 +667,7 @@ try {
   const onePlatform = report.by_platform[0].platform;
   assert.ok((await call(A, "get_visibility_report", { days: 7, platform: onePlatform })).by_scenario.every((x: any) => x.platform === onePlatform), "platform filter");
   assert.ok((await call(A, "browse_task_library", { platform: "web" })).tasks.every((x: any) => x.platform === "web"), "library filter by platform");
-  assert.equal((await call(A, "list_simulations")).simulations.length, 4); // includes the cancelled private task-set run
+  assert.equal((await call(A, "list_simulations")).simulations.length, 5); // includes the cancelled private task-set and harness-mix runs
   assert.equal((await call(A, "list_products")).products[0].sessions_30d, 4);
 
   const lost = report.recent_losses[0].id;

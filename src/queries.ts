@@ -10,14 +10,14 @@ import { capacityStatus } from "./autoscaler.js";
 const agentLabel = (id: string) => findAgent(id)?.label ?? id;
 
 /** A developer population's coding-agent mix as customers see it: who we simulate and how much each counts. */
-export async function listAgents(input: { population?: string } = {}) {
-  const pop = await getPopulation(input.population);
+export async function listAgents(org: Org, input: { population?: string } = {}) {
+  const pop = await getPopulation(input.population, org.orgId);
   const unit = pop.sandbox_unit;
   const mix = new Map(sandboxMix(pop).map((r) => [r.agent.id, r])); // whole sandboxes out of the unit
   return {
     view: "agents" as const,
     population: { slug: pop.slug, name: pop.name, description: pop.description, is_default: pop.is_default },
-    populations: await listPopulations(),
+    populations: await listPopulations(org.orgId),
     as_of: pop.as_of,
     unrepresented_share: pop.unrepresented_share,
     runnable_coverage: runnableCoverage(pop),
@@ -329,7 +329,7 @@ export async function runSimulation(org: Org, input: RunInput) {
       throw new Error(`${org.name ?? "This organization"} has used its $${budget} simulation budget for this month ($${spent.toFixed(2)} spent). ` +
         "Results so far stay available; reply to your Octillion contact to raise the limit.");
   }
-  const pop = await getPopulation(input.population);
+  const pop = await getPopulation(input.population, org.orgId);
   const enabled = enabledAgents(pop);
   if (!enabled.length) throw new Error(`No coding agents are running in developer population ${pop.slug}`);
 
@@ -612,6 +612,13 @@ export async function getReport(org: Org, input: { product?: string; days?: numb
     params.push(sim.id), (base = `s.product_id = $1 AND s.simulation_id = $${params.length} AND $2::int > 0`);
   }
   if (input.model) params.push(input.model), (base += ` AND s.model = $${params.length}`);
+  // Never blend harness mixes: a report covers runs on one population (the run's own, the named one, or the default).
+  const pop = await getPopulation(sim ? (await db.query<{ slug: string }>(
+    "SELECT dp.slug FROM simulations s JOIN developer_populations dp ON dp.id = s.population_id WHERE s.id = $1", [sim.id]))[0]?.slug ?? input.population : input.population, org.orgId);
+  if (!sim) {
+    params.push(pop.id);
+    base += ` AND s.simulation_id IN (SELECT id FROM simulations WHERE coalesce(population_id, (SELECT id FROM developer_populations WHERE is_default)) = $${params.length})`;
+  }
   const platform = checkPlatform(input.platform);
   if (platform) params.push(platform), (base += ` AND sc.platform = $${params.length}`);
   const filter = `${base} AND s.verdict IS NOT NULL`;
@@ -656,7 +663,6 @@ export async function getReport(org: Org, input: { product?: string; days?: numb
        FROM ${from} GROUP BY 1`,
     params,
   );
-  const pop = await getPopulation(input.population);
   const running = new Map(scheduledAgents(pop).map((x) => [x.id, x.weight])); // whole-sandbox shares, sum to 1
   const market = new Map(pop.agents.map((x) => [x.id, x.weight]));
   const agentRows = byAgent.map((a) => {
@@ -700,6 +706,7 @@ export async function getReport(org: Org, input: { product?: string; days?: numb
     view: "report" as const,
     product: { id: p.id, slug: p.slug, name: p.name },
     filters: { days, model: input.model ?? null, simulation: sim?.id ?? null, platform: platform ?? null },
+    population: { slug: pop.slug, name: pop.name, is_default: pop.is_default, private: pop.org_id != null },
     ...sections.report,
     models: await config.models(),
     totals: { ...t, hit_rate: rate(t.hits, n), hit_ci: wilson(t.hits, n), weighted_hit_rate: weighted,

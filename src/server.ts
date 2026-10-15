@@ -46,8 +46,10 @@ export function handlersFor(org: Org) {
       q.getTranscript(org, a.session_id, a.offset, a.limit),
     search_transcripts: (a: Parameters<typeof q.searchTranscripts>[1]) => q.searchTranscripts(org, a),
     list_developer_profiles: (a: { query?: string; product?: string }) => q.listProfiles(org, a),
-    list_agents: (a: { population?: string }) => q.listAgents(a),
+    list_agents: (a: { population?: string }) => q.listAgents(org, a),
     browse_task_library: (a: { query?: string; category?: string; language?: string; platform?: string; limit?: number }) => q.browseTaskLibrary(a),
+    save_harness_mix: (a: { name: string; description?: string; agents: { agent_id: string; share: number }[] }) => priv.saveHarnessMix(org, a),
+    list_harness_mixes: (_a: Record<string, never>) => priv.listHarnessMixes(org),
     save_personas: (a: { personas: priv.PersonaInput[] }) => priv.savePersonas(org, a.personas),
     list_personas: (_a: Record<string, never>) => priv.listPersonas(org),
     import_tasks: (a: { product?: string; task_set: string; description?: string; tasks: priv.TaskInput[] }) => priv.importTasks(org, a),
@@ -116,6 +118,10 @@ function summarize(d: Data): string {
       return d.task_sets.length
         ? `${d.task_sets.length} private task set(s): ${d.task_sets.map((t: any) => `${t.name} [${t.id}] for ${t.product}: ${t.active_tasks} active task(s)`).join("; ")}. Run one with run_simulation {task_set}.`
         : "No private task sets yet. Bring your own with import_tasks.";
+    case "harness_mixes":
+      return d.mixes.length
+        ? `${d.mixes.length} private harness mix(es): ${d.mixes.map((m: any) => `${m.name} [${m.slug}]: ${m.agents.map((a: any) => `${a.agent_id} ${Math.round(a.share * 100)}%`).join(", ")}`).join("; ")}. Run one with run_simulation {population: slug}; its reports are labelled and never blended with the default mix.`
+        : "No private harness mixes yet. The default is the market-weighted mix (list_agents); define your own with save_harness_mix.";
     case "harnesses":
       return d.harnesses.length
         ? `${d.harnesses.length} private harness(es): ${d.harnesses.map((h: any) => `${h.name} ${h.version} [${h.id}]: ${h.status}${h.status_reason ? ` (${h.status_reason})` : ""}`).join("; ")}. A harness runs only once it is approved after an isolated build and scan.`
@@ -139,7 +145,8 @@ export function reportMarkdown(d: Extract<Data, { view: "report" }>): string {
   const t = d.totals, name = d.product.name, m = d.method;
   const range = (ci: [number, number] | null) => (ci ? `${Math.round(ci[0] * 100)}–${Math.round(ci[1] * 100)}%` : "–");
   const cell = (s: string) => String(s ?? "").replace(/\|/g, "/");
-  const scope = m.scope ? `run ${m.scope.simulation} "${m.scope.name}" (${m.scope.status})` : `last ${d.filters.days} days`;
+  const scope = (m.scope ? `run ${m.scope.simulation} "${m.scope.name}" (${m.scope.status})` : `last ${d.filters.days} days`) +
+    (d.population && !d.population.is_default ? `, custom harness mix "${d.population.name}" (not the market-weighted default; do not compare it with default-mix figures)` : "");
   if (!Number(t.sessions)) return `# ${name}: agent visibility report\n\nNo scored agent sessions (${scope}${d.filters.model ? `, ${d.filters.model}` : ""}). Run a simulation with run_simulation.`;
   const out: string[] = [`# ${name}: agent visibility report`, `Scope: ${scope}${d.filters.model ? `, model ${d.filters.model}` : ""}${d.filters.platform ? `, ${d.filters.platform} tasks only` : ""}. ${t.sessions} scored sessions.`];
 
@@ -282,6 +289,8 @@ export const TOOL_STATUS: Record<ToolName, [string, string]> = {
   list_task_sets: ["Loading private task sets…", "Private task sets loaded"],
   register_harness: ["Registering private harness…", "Private harness submitted"],
   list_harnesses: ["Loading private harnesses…", "Private harnesses loaded"],
+  save_harness_mix: ["Saving private harness mix…", "Private harness mix saved"],
+  list_harness_mixes: ["Loading private harness mixes…", "Private harness mixes loaded"],
 };
 
 export const TOOL_NAMES = Object.keys(handlersFor({ orgId: 0, slug: "", name: "" })) as ToolName[];
@@ -585,6 +594,21 @@ export function createServer(org: Org): McpServer {
     },
     annotations: write, _meta: meta("register_harness"),
   }, run("register_harness"));
+  registerAppTool(server, "save_harness_mix", {
+    title: "Save a private harness mix",
+    description: "Define your own distribution of coding agents (for example only the agents your users run), from the runnable agents in list_agents. Private to your organization. Run it with run_simulation {population: slug}. Reports on it are labelled and never blended with the market-weighted default, which stays the headline figure.",
+    inputSchema: {
+      name: z.string().min(2).max(80), description: z.string().max(500).optional(),
+      agents: z.array(z.object({ agent_id: z.string(), share: z.number().positive() })).min(1).max(30)
+        .describe("Agents and their relative shares; normalised to 100%"),
+    },
+    annotations: write, _meta: meta("save_harness_mix"),
+  }, run("save_harness_mix"));
+  registerAppTool(server, "list_harness_mixes", {
+    title: "Private harness mixes",
+    description: "Your organization's own harness mixes.",
+    inputSchema: {}, annotations: read, _meta: meta("list_harness_mixes"),
+  }, run("list_harness_mixes"));
   registerAppTool(server, "list_harnesses", {
     title: "Private harnesses",
     description: "Your organization's private harnesses and their review status.",
