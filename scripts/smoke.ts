@@ -877,6 +877,41 @@ try {
   assert.equal((await ar({ email: "nope", company: "x" })).status, 400);
   assert.equal((await ar({ email: `smoke+${stamp}@example.com`, company: "Smoke", product_url: "https://example.com" })).status, 201);
   console.log("✓ landing page and access requests");
+  // ---------- isolation sweep: every MCP tool, as org B, with every identifier of org A ----------
+  {
+    const MARK = `ISOLATION_${(await import("node:crypto")).randomBytes(6).toString("hex")}`;
+    const persona = (await call(A, "save_personas", { personas: [{ name: `Sweep ${MARK}`, summary: MARK }] })).saved[0];
+    const set = (await call(A, "import_tasks", { product: "relayq", task_set: `Sweep ${MARK}`, tasks: [{ prompt: `Sweep task ${MARK}: add retries to the webhook sender in this service.` }] })).task_sets[0];
+    await call(A, "save_scenarios", { product: "relayq", scenarios: set.tasks.map((t: any) => ({ id: t.id, active: false })) });
+    const mixSlug = (await call(A, "save_harness_mix", { name: `Sweep ${MARK}`, agents: [{ agent_id: "codex/default", share: 1 }] })).mixes.find((m: any) => m.name.includes(MARK)).slug;
+    const harness = (await call(A, "list_harnesses")).harnesses[0]?.id;
+    const simsA = (await db.query<any>("SELECT id, status FROM simulations WHERE org_id = $1 ORDER BY created_at", [a.org.orgId]));
+    const sessA = (await db.query<any>("SELECT id FROM agent_sessions WHERE org_id = $1 LIMIT 1", [a.org.orgId]))[0]?.id;
+    const rshA = (await db.query<any>("SELECT id FROM product_research WHERE org_id = $1 LIMIT 1", [a.org.orgId]))[0]?.id;
+    const idsA: string[] = [persona, set.id, mixSlug, harness, sessA, rshA, ...simsA.map((x: any) => x.id)].filter(Boolean);
+    const argSets: Record<string, unknown>[] = [
+      {}, { product: "relayq" }, { simulation_id: simsA[0].id }, { simulation: simsA[0].id }, { session_id: sessA },
+      { research_id: rshA }, { population: mixSlug }, { task_set: set.id }, { query: MARK }, { profiles: [persona] },
+      { personas: [{ slug: persona, name: "x" }] },
+    ];
+    const toolNames = (await B.listTools()).tools.map((t) => t.name);
+    let calls = 0;
+    for (const tool of toolNames) for (const args of argSets) {
+      const r = await B.callTool({ name: tool, arguments: args }).catch((e: Error) => ({ content: [{ type: "text", text: e.message }] }));
+      calls++;
+      // What came back, minus the identifiers B itself passed in (errors may echo the argument).
+      let text = JSON.stringify((r as any).structuredContent ?? null) + JSON.stringify((r as any).content ?? null);
+      const strings = (v: unknown): string[] => typeof v === "string" ? [v] : Array.isArray(v) ? v.flatMap(strings) : v && typeof v === "object" ? Object.values(v).flatMap(strings) : [];
+      for (const v of strings(args)) text = text.split(v).join("");
+      const leaked = [MARK, ...idsA].filter((x) => text.includes(x));
+      assert.deepEqual(leaked, [], `${tool} ${JSON.stringify(args)} returned org A's ${leaked.join(", ")}`);
+    }
+    const after = await db.query<any>("SELECT id, status FROM simulations WHERE org_id = $1 ORDER BY created_at", [a.org.orgId]);
+    assert.deepEqual(after.map((x: any) => x.status), simsA.map((x: any) => x.status), "org B changed nothing of org A's");
+    assert.ok((await db.query<any>("SELECT name FROM developer_profiles WHERE slug = $1", [persona]))[0].name.includes(MARK), "org A's persona untouched");
+    console.log(`✓ isolation sweep: ${toolNames.length} tools x ${argSets.length} argument sets as org B (${calls} calls): nothing of org A's returned or changed`);
+  }
+
   // ---------- organization deletion (docs/security.md, phase 0c) ----------
   {
     const { deleteOrg } = await import("../src/tenancy.js");
