@@ -88,12 +88,12 @@ ${ENV_CATALOG}
    at least one alternative, and building it or using nothing), "why_intrinsic": why the work cannot be done well
    without making that choice, "evidence_url": for "recommend", a page from your sources that shows the product
    really does what this problem needs (not just the general category)}.
-   Library first. Build the problems from the curated library, not from scratch: for each of the product's main
-   platforms and each key feature, call search_library with that platform and a query for the need (and a category
-   or language when it helps), and read the results. Reuse a fitting task by setting its library_task_id (its
-   repository or starter comes with it). A library task is usable only if it meets every rule above: if it names the
-   category or prescribes the service, rewrite the prompt and keep library_task_id. Write a problem from scratch only
-   when no library task fits; then set "library_check" to the searches you ran and why none fit.
+   Library only. Every problem MUST be a task from the curated library, cited by its library_task_id. Never write a
+   problem from scratch: a problem without a valid library_task_id is rejected. For each of the product's main
+   platforms and each key feature, call search_library with that platform and a query for the need (and a category or
+   language when it helps); search again with other words until you find fitting tasks. Use each library task at most
+   once. Keep the library task's prompt; edit it only to meet the rules above (remove a category word, a product or
+   vendor name, or a prescribed service), never to change the work it asks for. Its repository or starter comes with it.
    Spread the problems across product.platforms: every one of the first two platforms gets at least one "recommend"
    problem, and the main platform gets the most (at least a third). Set each problem's "platform" and a template of
    that platform (a mobile problem runs in the react-native or flutter starter, a web one in nextjs-ts).
@@ -121,8 +121,8 @@ Result JSON (pass it as a JSON string in result_json):
                  "environment": {"editor", "tools": [], "skills": [{"name", "description", "body"}], "agent_rules"} }],
   "scenarios": [{ "title", "prompt", "language", "tags": [], "expectation": "recommend" | "avoid", "rationale",
                   "variants": {"<persona name>": "<the prompt in their words>"},
-                  "decision": {"need", "options": [{"kind", "name"}], "why_intrinsic", "evidence_url"}, "library_task_id": null,
-                  "library_check": "only when library_task_id is null", "platform": "web | mobile | ...", "repo_url": null, "template": null }],
+                  "decision": {"need", "options": [{"kind", "name"}], "why_intrinsic", "evidence_url"}, "library_task_id": "REQUIRED: id from search_library",
+                  "platform": "web | mobile | ...", "repo_url": null, "template": null }],
   "sources": [{ "url", "title" }] }
 
 Be factual. If a page does not say something, don't claim it. List every page you used in sources.`;

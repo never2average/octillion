@@ -194,7 +194,7 @@ try {
                             competitors: [{ name: "Postbox" }, { name: "Mailcrate" }, { name: "Vercel Mail" }] },
     sources: [{ url: "https://quillmail.example.com/docs/sending" }],
     scenarios: [1, 2, 3].map((i) => ({ prompt: `Task ${i}: we need password reset emails in this Express service, with templates.`, decision, language: "typescript",
-                                        library_check: "searched 'password reset email' (backend); no task had an Express service" })) };
+                                        library_task_id: 100 + i })) };
   const v1 = research.validateResearch({ ...base, personas: [{ name: "Dev", environment: { editor: "zed", tools: ["cli/psql", "cli/teleporter"] } }] } as any);
   const v2 = research.validateResearch({ ...base, personas: [{ name: "Dev", environment: { editor: "emacs" as any, tools: ["cli/vercel"] } }] } as any);
   const v3 = research.validateResearch({ ...base, personas: [{ name: "Dev", environment: { editor: "intellij", tools: ["cli/gh", "cli/uv"] } }] } as any);
@@ -205,12 +205,13 @@ try {
   check("research validation: a tool that names a competitor is rejected", v4.some((x) => /cli\/vercel would reveal/.test(x)), v4.join(" | "));
   const clean = [{ name: "Dev", environment: { editor: "intellij", tools: ["cli/gh"] } }];
   const v5 = research.validateResearch({ ...base, product: { ...base.product, platforms: ["mobile", "backend"] }, personas: clean } as any);
-  const v6 = research.validateResearch({ ...base, product: { ...base.product, platforms: undefined }, scenarios: base.scenarios.map(({ library_check, ...s }) => s), personas: clean } as any);
+  const v6 = research.validateResearch({ ...base, product: { ...base.product, platforms: undefined }, scenarios: base.scenarios.map(({ library_task_id, ...s }) => s), personas: clean } as any);
+  const v8 = research.validateResearch({ ...base, scenarios: base.scenarios.map((s) => ({ ...s, library_task_id: 101 })), personas: clean } as any);
   const v7 = research.validateResearch({ ...base, product: { ...base.product, platforms: ["mobile", "backend"] }, personas: clean,
     scenarios: [...base.scenarios.slice(0, 1), ...base.scenarios.slice(1).map((s) => ({ ...s, prompt: "Our Flutter app needs password reset emails for its users.", template: "flutter" }))] } as any);
-  check("research validation: problems must cover the product's main platforms, and from-scratch problems must say why no library task fit",
+  check("research validation: problems cover the product's main platforms, every problem is a library task, each used once",
     v5.some((x) => /no "recommend" problem targets mobile/.test(x)) && v6.some((x) => /product\.platforms/.test(x)) &&
-    v6.some((x) => /no library_task_id/.test(x)) && v7.length === 0, [v5, v6, v7].map((v) => v.join(" | ")).join(" || "));
+    v6.some((x) => /no library_task_id/.test(x)) && v8.some((x) => /used once/.test(x)) && v7.length === 0, [v5, v6, v7, v8].map((v) => v.join(" | ")).join(" || "));
   const pl = await import("../../src/platform.js");
   check("platformOf: template, then language, then the prompt",
     pl.platformOf({ template: "flutter" }) === "mobile" && pl.platformOf({ template: "nextjs-ts" }) === "web" &&

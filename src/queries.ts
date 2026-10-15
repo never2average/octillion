@@ -158,7 +158,7 @@ export async function getProduct(org: Org, ref?: string) {
   const p = await resolveProduct(org, ref);
   const db = await getDb();
   const scenarios = await db.query(
-    `SELECT sc.id, sc.title, sc.prompt, sc.repo_url, sc.language, sc.tags, sc.template, sc.platform, sc.expectation, sc.active, sc.source, sc.rationale,
+    `SELECT sc.id, sc.title, sc.prompt, sc.repo_url, sc.language, sc.tags, sc.template, sc.platform, sc.library_task_id, sc.expectation, sc.active, sc.source, sc.rationale,
             count(s.id) AS sessions, count(*) FILTER (WHERE ${HIT}) AS hits,
             mode() WITHIN GROUP (ORDER BY s.winner) FILTER (WHERE s.winner IS NOT NULL) AS usual_winner
        FROM scenarios sc
@@ -650,7 +650,7 @@ export async function getReport(org: Org, input: { product?: string; days?: numb
   const weightSum = agentRows.reduce((s, a) => s + (a.hit_rate == null ? 0 : a.weight), 0);
   const weighted = weightSum ? agentRows.reduce((s, a) => s + (a.hit_rate ?? 0) * a.weight, 0) / weightSum : null;
   const byScenario = await db.query<any>(
-    `SELECT sc.id, sc.title, sc.expectation, sc.platform, count(*) AS sessions, count(*) FILTER (WHERE ${HIT}) AS hits,
+    `SELECT sc.id, sc.title, sc.expectation, sc.platform, sc.library_task_id, sc.source, count(*) AS sessions, count(*) FILTER (WHERE ${HIT}) AS hits,
             mode() WITHIN GROUP (ORDER BY s.winner) FILTER (WHERE s.winner IS NOT NULL) AS usual_winner
        FROM ${from} GROUP BY sc.id ORDER BY count(*) FILTER (WHERE ${HIT})::float / count(*), sc.id`,
     params,

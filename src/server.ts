@@ -63,7 +63,7 @@ function summarize(d: Data): string {
         : `${d.org.name} has no products yet. Start with onboard_product: a short description plus the website and docs links, and Octillion researches the rest (or use save_product to enter the details by hand).`;
     case "product": {
       const p = d.product;
-      return `${p.name} [${p.slug}]: ${p.description || "(no description)"} Category: ${p.category || "n/a"}. Aliases: ${p.aliases.join(", ") || "none"}. Packages: ${p.packages.join(", ") || "none"}. Competitors: ${p.competitors.map((c) => c.name).join(", ") || "none"}. ${d.scenarios.length} scenarios (${d.scenarios.filter((s: any) => s.active).length} active)${d.scenarios.length ? `: ${d.scenarios.map((s: any) => `#${s.id} ${s.title} (${s.platform ?? "?"}, ${s.expectation}, hit ${pct(s.hit_rate)} of ${s.sessions})`).join("; ")}` : ""}. Worker agents: ${d.agents.map((a: any) => `${a.id} (${pct(a.weight)})`).join(", ")}.${d.warnings.length ? ` Warnings: ${d.warnings.join(" ")}` : ""}`;
+      return `${p.name} [${p.slug}]: ${p.description || "(no description)"} Category: ${p.category || "n/a"}. Aliases: ${p.aliases.join(", ") || "none"}. Packages: ${p.packages.join(", ") || "none"}. Competitors: ${p.competitors.map((c) => c.name).join(", ") || "none"}. ${d.scenarios.length} scenarios (${d.scenarios.filter((s: any) => s.active).length} active)${d.scenarios.length ? `: ${d.scenarios.map((s: any) => `#${s.id} ${s.title} (${s.library_task_id ? `library task #${s.library_task_id}` : `not from the library: ${s.source}`}, ${s.platform ?? "?"}, ${s.expectation}, hit ${pct(s.hit_rate)} of ${s.sessions})`).join("; ")}` : ""}. Worker agents: ${d.agents.map((a: any) => `${a.id} (${pct(a.weight)})`).join(", ")}.${d.warnings.length ? ` Warnings: ${d.warnings.join(" ")}` : ""}`;
     }
     case "simulations":
       return d.simulations.length
@@ -130,11 +130,11 @@ export function reportMarkdown(d: Extract<Data, { view: "report" }>): string {
   if (d.by_platform?.length) out.push("## Results by platform", `| Platform | Tasks | Sessions (should win) | ${cell(name)} | Competitor | No vendor | Mentioned ${cell(name)} | 95% range | Control correct |`, "|---|---|---|---|---|---|---|---|---|",
     ...d.by_platform.map((x: any) => `| ${x.platform} | ${x.tasks} | ${x.sessions} | ${x.product} | ${x.competitor} | ${x.no_vendor} | ${x.product_mentioned} | ${range(x.hit_ci)} | ${x.control.sessions ? `${x.control.correct} of ${x.control.sessions}` : "–"} |`));
 
-  out.push("## Results by task", `| Task | Platform | Should ${cell(name)} win? | Scored | ${cell(name)} | Competitor | No vendor | Mentioned ${cell(name)} | 95% range |`, "|---|---|---|---|---|---|---|---|---|",
+  out.push("## Results by task", `| Task | Library task | Platform | Should ${cell(name)} win? | Scored | ${cell(name)} | Competitor | No vendor | Mentioned ${cell(name)} | 95% range |`, "|---|---|---|---|---|---|---|---|---|---|",
     ...d.by_scenario.map((s: any) => {
       const o = s.outcomes ?? { product: s.hits, competitor: 0, no_vendor: 0 };
       const winners = (s.winners ?? []).map((w: any) => `${w.tool} ${w.sessions}`).join(", ");
-      return `| ${cell(s.title)} | ${s.platform ?? "–"} | ${s.expectation === "recommend" ? "yes" : "no (control)"} | ${s.sessions} | ${o.product} | ${winners || o.competitor} | ${o.no_vendor} | ${s.product_mentioned ?? "–"} | ${range(s.hit_ci)} |`;
+      return `| ${cell(s.title)} | ${s.library_task_id ? `#${s.library_task_id}` : `none (${s.source ?? "custom"})`} | ${s.platform ?? "–"} | ${s.expectation === "recommend" ? "yes" : "no (control)"} | ${s.sessions} | ${o.product} | ${winners || o.competitor} | ${o.no_vendor} | ${s.product_mentioned ?? "–"} | ${range(s.hit_ci)} |`;
     }));
   const shortlists = d.by_scenario.filter((s: any) => s.expectation === "recommend" && s.alternatives?.length);
   if (shortlists.length) out.push("", "Named instead of " + name + " (sessions that did not choose it):", ...shortlists.map((s: any) => `- ${s.title}: ${s.alternatives.slice(0, 5).map((a: any) => `${a.tool} ${a.sessions}`).join(", ")}`));

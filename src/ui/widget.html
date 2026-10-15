@@ -594,7 +594,7 @@
         <div class="table-wrap"><table>
         <thead><tr><th>Task</th><th style="width:28%">Outcomes</th><th class="num">Hit rate</th><th>Instead</th><th class="num" data-tip="Sessions that mentioned the product at all">Mentioned</th></tr></thead>
         <tbody>${d.by_scenario.map((s) => { const o = s.outcomes, n = Number(s.sessions) || 1; return `<tr${s.prompt ? ` data-tip="${esc(s.prompt)}"` : ""}>
-          <td>${esc(s.title)}${s.platform ? ` <span class="badge">${esc(s.platform)}</span>` : ""}${s.expectation === "avoid" ? ' <span class="badge">control</span>' : ""}</td>
+          <td>${esc(s.title)} <span class="badge" data-tip="Task library id">${s.library_task_id ? `lib #${esc(s.library_task_id)}` : "not from library"}</span>${s.platform ? ` <span class="badge">${esc(s.platform)}</span>` : ""}${s.expectation === "avoid" ? ' <span class="badge">control</span>' : ""}</td>
           <td>${o ? `<div class="vbar">${[["adopted", o.product, d.product.name], ["competitor", o.competitor, "Competitor"], ["none", o.no_vendor, "No vendor"]].filter(([, v]) => v).map(([k, v, l]) => `<span class="v-${k}" style="width:${(v / n) * 100}%" data-tip="${esc(l)}: ${v} of ${n}"></span>`).join("")}</div>` : ""}</td>
           <td class="num">${num(s.hits)}/${num(s.sessions)} ${ci(s.hit_ci)}</td>
           <td>${esc((s.winners || []).map((w) => `${w.tool} ${w.sessions}`).join(", ") || (s.alternatives || []).slice(0, 3).map((a) => a.tool).join(", ") || s.usual_winner || "–")}</td>

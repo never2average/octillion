@@ -30,8 +30,7 @@ export interface ResearchResult {
                rationale?: string; library_task_id?: number; repo_url?: string | null;
                /** Where the task's code runs; derived from template/language/prompt when omitted. */
                platform?: string;
-               /** For a problem written from scratch (no library_task_id): what was searched and why no library task fit. */
-               library_check?: string;
+
                /** The same problem in each persona's words: {persona name: prompt}. */
                variants?: Record<string, string>;
                /** The purchase decision the requirements create (see DECISION_KINDS). */
@@ -219,12 +218,14 @@ export function validateResearch(r: ResearchResult | undefined): string[] {
   if (platforms.length && isPlatform(platforms[0]) && recommended.length >= 2 &&
       recommended.filter((s) => platformOfScenario(s) === platforms[0]).length * 3 < recommended.length)
     issues.push(`at least a third of the "recommend" problems must target ${platforms[0]}, the product's main platform`);
-  // Library first: a problem written from scratch must say what was searched and why no curated task fit.
+  // Library only: every problem is a curated library task, cited by its id. Never written from scratch.
   scenarios.forEach((s: any, i: number) => {
     if (s?.platform != null && !isPlatform(s.platform)) issues.push(`scenarios[${i}].platform must be one of ${PLATFORMS.join(", ")}`);
-    if (!s?.library_task_id && (typeof s?.library_check !== "string" || s.library_check.trim().length < 30))
-      issues.push(`scenarios[${i}] has no library_task_id: reuse a library task (search_library) or set library_check to the searches you ran and why none fit (30+ characters)`);
+    if (!Number.isInteger(s?.library_task_id) || s.library_task_id <= 0)
+      issues.push(`scenarios[${i}] has no library_task_id: every problem must be a task from the library (search_library); never write one from scratch`);
   });
+  const ids = scenarios.map((s: any) => s?.library_task_id).filter((x: unknown) => Number.isInteger(x));
+  if (new Set(ids).size !== ids.length) issues.push("each library task may be used once; two problems cite the same library_task_id");
   scenarios.forEach((s, i) => {
     const prompt = s?.prompt?.trim() ?? "";
     if (prompt.length < 40 || prompt.length > 2000) issues.push(`scenarios[${i}].prompt must be 40-2000 characters (got ${prompt.length})`);
@@ -265,9 +266,18 @@ export function validateResearch(r: ResearchResult | undefined): string[] {
   return issues;
 }
 
+/** Cited library tasks must exist and be active (validateResearch only checks that each problem cites one). */
+async function libraryIssues(r: ResearchResult | undefined): Promise<string[]> {
+  const ids = (r?.scenarios ?? []).map((s) => s?.library_task_id).filter((x): x is number => Number.isInteger(x));
+  if (!ids.length) return [];
+  const db = await getDb();
+  const found = new Set((await db.query<{ id: number }>("SELECT id FROM library_tasks WHERE active AND id = ANY($1)", [ids])).map((x) => Number(x.id)));
+  return ids.filter((x) => !found.has(x)).map((x) => `library_task_id ${x} is not an active library task; cite an id returned by search_library`);
+}
+
 export async function validateResearchJob(id: string, result: ResearchResult) {
   await runningJob(id);
-  const issues = validateResearch(result);
+  const issues = [...validateResearch(result), ...(await libraryIssues(result))];
   return { ok: issues.length === 0, issues };
 }
 
@@ -279,7 +289,7 @@ export async function completeResearch(id: string, body: { status?: string; erro
     await db.query("UPDATE product_research SET status = 'failed', error = $2, finished_at = now() WHERE id = $1", [id, String(body.error ?? "failed").slice(0, 2000)]);
     return { status: "failed" };
   }
-  const issues = validateResearch(body.result);
+  const issues = [...validateResearch(body.result), ...(await libraryIssues(body.result))];
   if (issues.length) {
     const [{ attempts }] = await db.query<{ attempts: number }>(
       "UPDATE product_research SET attempts = attempts + 1, heartbeat_at = now(), stage = 'validating' WHERE id = $1 RETURNING attempts", [id]);
