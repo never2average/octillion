@@ -267,6 +267,8 @@ try {
   // ---------- configure ----------
   assert.equal((await call(A, "list_products")).products.length, 0);
   await fails(A, "get_visibility_report", {}, /No products yet\. Start with onboard_product/);
+  await fails(A, "onboard_product", { prompt: "A product that is described in enough words here.", website_url: "http://169.254.169.254/latest" }, /public http\(s\) URL/);
+  await fails(A, "onboard_product", { prompt: "A product that is described in enough words here.", website_url: "http://localhost.internal/x" }, /public http\(s\) URL/);
   const product = await call(A, "save_product", DEMO_PRODUCT);
   assert.equal(product.product.slug, "relayq");
   assert.equal(product.product.competitors.length, 3);
@@ -392,6 +394,12 @@ try {
   // ---------- orchestrator worker API ----------
   assert.equal((await worker("/claim", { worker_id: "smoke" }, { token: "wrong" })).status, 401);
   const mine = new Set(sim.sessions.map((s: any) => s.id));
+  // A run on customer-written tasks is private: a shared orchestrator (fleet token) never sees it, its own job token does.
+  assert.equal((await db.query<any>("SELECT private FROM simulations WHERE id = $1", [sim.simulation.id]))[0].private, true, "customer-written tasks make a run private");
+  const viaFleet = (await (await worker("/claim", { worker_id: "smoke-shared", limit: 50, simulation_id: sim.simulation.id })).json()).jobs;
+  assert.ok(!viaFleet.some((j: any) => mine.has(j.session_id)), "the fleet token cannot claim a private run");
+  // From here on the run stands in for one on library tasks, which shared orchestrators may serve.
+  await db.query("UPDATE simulations SET private = false WHERE id = $1", [sim.simulation.id]);
   const jobs: any[] = [];
   for (let i = 0; i < 50 && jobs.length < 4; i++) { // other orgs' queued jobs may exist on a shared DB
     const r = await (await worker("/claim", { worker_id: "smoke", limit: 10, models: ["claude-sonnet-5-5"] })).json();
@@ -769,6 +777,7 @@ try {
   await call(B, "save_scenarios", { scenarios: [{ title: "Fair task", prompt: "Add background job processing with retries to this service and explain the choice of tool." }] });
   const runA = await call(A, "run_simulation", { product: "relayq", models: ["claude-sonnet-5-5"], repeats: 1, name: "fair-a" });
   const runB = await call(B, "run_simulation", { models: ["claude-sonnet-5-5"], repeats: 2, name: "fair-b" });
+  await db.query("UPDATE simulations SET private = false WHERE id IN ($1, $2)", [runA.simulation.id, runB.simulation.id]); // shared-orchestrator fair share
   const ofA = new Set(runA.sessions.map((s: any) => s.id)), ofB = new Set(runB.sessions.map((s: any) => s.id));
   assert.ok(ofA.size >= 4 && ofB.size === 2, `fair-share setup: A ${ofA.size}, B ${ofB.size}`);
   const fair = (await (await worker("/claim", { worker_id: "smoke-fair", limit: 4, models: ["claude-sonnet-5-5"] })).json()).jobs

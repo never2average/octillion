@@ -141,7 +141,7 @@ export function createApp() {
     const job = jobOnly(res);
     if (job && !job.jobId.startsWith("sim_")) return void res.json({ jobs: [] });
     const sim = job ? job.jobId : typeof simulation_id === "string" && simulation_id ? simulation_id : undefined;
-    res.json({ jobs: await claimJobs(worker_id, { limit, models, harness, agent_ids, simulation_id: sim }) });
+    res.json({ jobs: await claimJobs(worker_id, { limit, models, harness, agent_ids, simulation_id: sim, includePrivate: Boolean(job) }) });
   });
   worker.post("/sessions/:id/events", async (req, res) => {
     const events: RawEvent[] = typeof req.body === "string" ? parseJsonl(req.body) : req.body?.events;

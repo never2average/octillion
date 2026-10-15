@@ -38,7 +38,7 @@ export interface Job {
 }
 
 /** `simulation_id`: a per-job orchestrator claims only the run it was launched for. */
-export async function claimJobs(workerId: string, opts: { limit?: number; models?: string[]; harness?: string; agent_ids?: string[]; simulation_id?: string } = {}): Promise<Job[]> {
+export async function claimJobs(workerId: string, opts: { limit?: number; models?: string[]; harness?: string; agent_ids?: string[]; simulation_id?: string; includePrivate?: boolean } = {}): Promise<Job[]> {
   await sweepStale();
   const db = await getDb();
   const params: unknown[] = [workerId, Math.min(Math.max(opts.limit ?? 1, 1), 50)];
@@ -47,6 +47,8 @@ export async function claimJobs(workerId: string, opts: { limit?: number; models
   if (opts.harness) params.push(opts.harness), (filter += ` AND harness = $${params.length}`);
   if (opts.agent_ids?.length) params.push(opts.agent_ids), (filter += ` AND agent_id = ANY($${params.length})`);
   if (opts.simulation_id) params.push(opts.simulation_id), (filter += ` AND simulation_id = $${params.length}`);
+  // Private runs only go to their own per-job orchestrator (job token), never to a shared one (docs/security.md).
+  if (!opts.includePrivate) filter += " AND simulation_id NOT IN (SELECT id FROM simulations WHERE private)";
   const jobs = await db.transaction(async (tx) => {
     const rows = await tx.query<Omit<Job, "max_user_turns" | "profile" | "agent" | "environment"> & { profile_id: number | null; prompt_variants: Record<string, string> | null }>(
       `UPDATE agent_sessions s SET status = 'running', worker_id = $1, started_at = now(), heartbeat_at = now()
@@ -231,7 +233,7 @@ export async function scoreSession(sessionId: string) {
   const score = scoreTranscript(events, { name: row.name, aliases: row.aliases, packages: row.packages, domains: row.domains }, row.competitors);
   // Recount from the store too, so transcripts an orchestrator wrote straight to ClickHouse are reflected.
   const lastSeq = events.reduce((m, e) => Math.max(m, e.seq), 0);
-  const userTurns = events.filter((e) => e.type === SIMULATED_USER).length;
+  const userTurns = events.filter((e) => e.type === SIMULATED_USER && (e.raw as { _src?: unknown })._src !== "harness").length;
   await db.query(
     `UPDATE agent_sessions SET verdict = $2, winner = $3, mentions = $4, scored_at = now(),
             events = greatest(events, $5), user_turns = $6 WHERE id = $1`,

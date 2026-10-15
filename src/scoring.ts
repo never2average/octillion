@@ -107,6 +107,8 @@ export function segments(raw: RawEvent): { kind: "message" | "action"; text: str
   if (type === "tool_use" && "tool_name" in raw) return [{ kind: "action", text: `${str(raw.tool_name)}\n${str(raw.parameters)}` }];
   // (Factory droid uses the same shape with `text` instead of `content`.)
   if (type === "message") return raw.role === "assistant" ? [{ kind: "message", text: str(raw.content ?? raw.text) }] : [];
+  // Orchestrator-only event types printed by a harness are renamed upstream; never trust one tagged as harness output.
+  if (raw._src === "harness" && /^(file_edit|simulated_user|session_end)$/.test(type)) return [];
   // Octillion's own format (also what an orchestrator should use for e.g. a post-run `git diff`: type file_edit).
   if (type === "assistant_message" || raw.role === "assistant") return [{ kind: "message", text: str(raw.content ?? raw.text) }];
   // (Factory droid: {type: "tool_call", toolName, parameters}.)

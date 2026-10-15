@@ -77,7 +77,8 @@ export function normalize(events: RawEvent[], lastSeq: number): StoredEvent[] {
   let next = lastSeq;
   return events.map((raw) => {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Each transcript event must be a JSON object");
-    const seq = Number.isInteger(raw.seq) && Number(raw.seq) > 0 ? Number(raw.seq) : next + 1;
+    // Harness output never chooses its own position in the transcript (docs/security.md, event provenance).
+    const seq = raw._src !== "harness" && Number.isInteger(raw.seq) && Number(raw.seq) > 0 ? Number(raw.seq) : next + 1;
     next = Math.max(next, seq);
     const ts = typeof raw.ts === "string" ? raw.ts : typeof raw.timestamp === "string" ? raw.timestamp : new Date().toISOString();
     const type = typeof raw.type === "string" && raw.type ? raw.type : "event";

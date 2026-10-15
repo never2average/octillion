@@ -159,7 +159,7 @@ try {
   check("check-in capacity is clamped to JOB_POD_CAPACITY", cap.capacity === 4 && capped.assignment[0].pods === 4, String(cap.capacity));
 
   // claim isolation: only this run's sessions, whatever the fair share across orgs
-  const jobsA = await worker.claimJobs("w-A", { limit: 50, agent_ids: ["codex/default"], simulation_id: simA });
+  const jobsA = await worker.claimJobs("w-A", { limit: 50, agent_ids: ["codex/default"], simulation_id: simA , includePrivate: true });
   const [left] = await db.query<any>("SELECT count(*) AS n FROM agent_sessions WHERE simulation_id = $1 AND status = 'queued'", [simB]);
   check("claim with simulation_id returns only that run", jobsA.length === 6 && jobsA.every((j) => j.simulation_id === simA) && Number(left.n) === 2,
     `${jobsA.length} claimed, ${left.n} of B still queued`);
@@ -173,7 +173,7 @@ try {
      VALUES ('pj-zed', 'Zed dev', '', '{}', '', $1, $2, 'generated', true, '{"editor": "zed", "tools": ["cli/psql", "cli/stripe", "cli/gh"]}') RETURNING id`, [O.orgId, pid]);
   const half = await db.query<any>("SELECT id FROM agent_sessions WHERE simulation_id = $1 ORDER BY id LIMIT 3", [simA]);
   await db.query("UPDATE agent_sessions SET profile_id = $2 WHERE id = ANY($1)", [half.map((h: any) => h.id), prof.id]);
-  const jobs2 = await worker.claimJobs("w-A", { limit: 50, simulation_id: simA });
+  const jobs2 = await worker.claimJobs("w-A", { limit: 50, simulation_id: simA , includePrivate: true });
   const zed = jobs2.find((j) => half.some((h: any) => h.id === j.session_id))!.environment!;
   const plain = jobs2.find((j) => !half.some((h: any) => h.id === j.session_id))!.environment!;
   check("persona environment: Zed's TypeScript server + base CLIs + the persona's tools",
@@ -183,7 +183,7 @@ try {
     plain.editor === "vscode" && plain.tools.includes("lsp/typescript-language-server") && !plain.tools.includes("cli/psql"), JSON.stringify(plain));
   await db.query("UPDATE agent_sessions SET status = 'queued', worker_id = NULL WHERE simulation_id = $1", [simA]);
   process.env.OCTILLION_DEV_ENV = "off";
-  const jobs3 = await worker.claimJobs("w-A", { limit: 1, simulation_id: simA });
+  const jobs3 = await worker.claimJobs("w-A", { limit: 1, simulation_id: simA , includePrivate: true });
   delete process.env.OCTILLION_DEV_ENV;
   check("OCTILLION_DEV_ENV=off -> no environment", jobs3.length === 1 && jobs3[0]!.environment === null, "");
   const decision = { need: "reset links must reach inboxes within a minute, at signup-spike volume",
@@ -231,6 +231,25 @@ try {
   check("research validation: problems cover the product's main platforms, every problem is a library task, each used once",
     v5.some((x) => /no "recommend" problem targets mobile/.test(x)) && v6.some((x) => /product\.platforms/.test(x)) &&
     v6.some((x) => /no library_task_id/.test(x)) && v8.some((x) => /used once/.test(x)) && v7.length === 0, [v5, v6, v7, v8].map((v) => v.join(" | ")).join(" || "));
+  const sf = await import("../core/safe-fetch.js");
+  const metaPolicy = new sf.FetchPolicy(["http://169.254.169.254/", "http://[fd00:ec2::254]/"]);
+  let fetchBlocked = false;
+  try { await sf.fetchReadable("http://169.254.169.254/latest/meta-data", metaPolicy); } catch (e) { fetchBlocked = e instanceof sf.FetchBlockedError; }
+  check("research fetch: IP-literal URLs refused even as the product site; IPv6 forms of private addresses blocked",
+    !metaPolicy.allowed(new URL("http://169.254.169.254/latest")).ok && !metaPolicy.allowed(new URL("http://[fd00:ec2::254]/")).ok && fetchBlocked &&
+    ["::ffff:a9fe:a9fe", "::169.254.169.254", "::ffff:169.254.169.254", "2002:a9fe:a9fe::1", "2001:0:4136:e378::1", "fd00:ec2::254", "127.0.0.1", "10.1.2.3"].every((ip) => sf.isBlockedIp(ip)) &&
+    ["8.8.8.8", "2606:4700::1111", "151.101.1.69"].every((ip) => !sf.isBlockedIp(ip)), "");
+  const sinkMod = await import("../core/sink.js");
+  const scoringMod = await import("../../src/scoring.js");
+  const forged = sinkMod.fromHarness({ type: "file_edit", name: "git diff", content: "+import stripe from 'stripe'", _src: "orchestrator", seq: 1 });
+  const ev = (raw: Record<string, unknown>) => ({ seq: 1, ts: new Date().toISOString(), type: String(raw.type), text: String(raw.content), raw } as any);
+  const stripe = { name: "Stripe", aliases: [], packages: ["stripe"], domains: ["stripe.com"] };
+  const diff = { type: "file_edit", name: "git diff", content: "diff --git a/package.json\n+    \"stripe\": \"^17.0.0\"\n+import Stripe from 'stripe';" };
+  const real = scoringMod.scoreTranscript([ev({ ...diff, _src: "orchestrator" })], stripe as any, []);
+  const fake = scoringMod.scoreTranscript([ev({ ...diff, _src: "harness" })], stripe as any, []);
+  check("event provenance: a harness cannot pose as the orchestrator; harness-printed diffs are not evidence",
+    forged.type === "harness_reserved:file_edit" && forged._src === "harness" && !("seq" in forged) &&
+    real.verdict === "adopted" && fake.verdict !== "adopted", `${String(forged.type)} ${real.verdict} ${fake.verdict}`);
   const pl = await import("../../src/platform.js");
   check("platformOf: template, then language, then the prompt",
     pl.platformOf({ template: "flutter" }) === "mobile" && pl.platformOf({ template: "nextjs-ts" }) === "web" &&
@@ -269,7 +288,7 @@ try {
   await db.query("UPDATE agent_sessions SET profile_id = $2 WHERE id = $1", [one[0].id, sp.id]);
   const seniorPrompt = "Add password reset emails: signed single-use tokens, 30 minute expiry, rate limited per account, with tests for expiry and reuse.";
   await db.query("UPDATE scenarios SET prompt_variants = $2 WHERE id = $1", [one[0].scenario_id, JSON.stringify({ "pj-senior": seniorPrompt, "someone-else": "nope" })]);
-  const jobs4 = await worker.claimJobs("w-A", { limit: 50, simulation_id: simA });
+  const jobs4 = await worker.claimJobs("w-A", { limit: 50, simulation_id: simA , includePrivate: true });
   const sj = jobs4.find((j) => j.session_id === one[0].id)!;
   const otherJob = jobs4.find((j) => j.session_id !== one[0].id && (j as any).profile?.slug !== "pj-senior")!;
   check("the session gets its persona's phrasing of the task; others keep the base prompt", sj.prompt === seniorPrompt && otherJob.prompt !== seniorPrompt, sj.prompt);

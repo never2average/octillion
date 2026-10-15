@@ -363,6 +363,14 @@ export async function runSimulation(org: Org, input: RunInput) {
     if (missing.length) throw new Error(`Unknown developer profile(s): ${missing.join(", ")}. See list_developer_profiles.`);
   }
   const profileIds: (number | null)[] = profiles.length ? profiles.map((p) => p.id) : [null];
+  // A run on the org's own tasks or personas is private: only an orchestrator launched for this run may claim it.
+  const [{ n: privateAssets }] = await db.query<{ n: number }>(
+    `SELECT (SELECT count(*) FROM scenarios WHERE id = ANY($1) AND source IN ('custom', 'manual'))
+          + (SELECT count(*) FROM developer_profiles WHERE id = ANY($2) AND org_id IS NOT NULL) AS n`,
+    [scenarios.map((s) => s.id), profiles.map((x) => x.id)]);
+  const isPrivate = Number(privateAssets) > 0;
+  if (isPrivate && (process.env.OCTILLION_ORCH_PER_JOB ?? "on").toLowerCase() === "off")
+    throw new Error("This run uses your private tasks or personas, which run only on an orchestrator dedicated to the run; per-job orchestrators are off on this server");
   const slots = scenarios.flatMap((sc) => profileIds.map((profileId) => ({ scenarioId: sc.id, profileId })));
 
   // Explicit: chosen agents (by id or by model) x repeats on every slot. Representative: `samples` sessions per slot,
@@ -410,10 +418,10 @@ export async function runSimulation(org: Org, input: RunInput) {
   const name = input.name?.trim() || `${p.name} · ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC`;
   await db.transaction(async (tx) => {
     await tx.query(
-      `INSERT INTO simulations (id, org_id, product_id, name, models, harness, repeats, profile_ids, mode, agent_ids, population_id, max_samples, research_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, (SELECT research->>'research_id' FROM products WHERE id = $3))`,
+      `INSERT INTO simulations (id, org_id, product_id, name, models, harness, repeats, profile_ids, mode, agent_ids, population_id, max_samples, research_id, private)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, (SELECT research->>'research_id' FROM products WHERE id = $3), $13)`,
       [id, org.orgId, p.id, name, [...new Set(used.map((a) => a.model))], [...new Set(used.map((a) => a.harness))].join(", "),
-       explicit ? repeats : samples, profiles.map((x) => x.id), explicit ? "explicit" : "representative", used.map((a) => a.id), pop.id, maxSamples],
+       explicit ? repeats : samples, profiles.map((x) => x.id), explicit ? "explicit" : "representative", used.map((a) => a.id), pop.id, maxSamples, isPrivate],
     );
     for (const x of plan)
       await tx.query(

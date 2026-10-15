@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import { getDb } from "./db.js";
 import { randomId, type Org } from "./auth.js";
 import { WORKSPACE_TEMPLATES, config, getProduct, resolveProduct, runSimulation, saveProduct, browseTaskLibrary } from "./queries.js";
@@ -106,7 +107,14 @@ function selectionIssues(kind: "tasks" | "personas", rounds: unknown, finalIds: 
 
 const slugify = (s: string) => s.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const httpUrl = (u: unknown) => typeof u === "string" && /^https?:\/\/[^\s/]+\.[^\s]+/.test(u);
+/** A public http(s) URL with a host name: no IP literals, localhost or internal names (research fetches it). */
+const httpUrl = (u: unknown) => {
+  if (typeof u !== "string" || !/^https?:\/\/[^\s/]+\.[^\s]+/.test(u)) return false;
+  try {
+    const h = new URL(u).hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    return !isIP(h) && !/(^|\.)(localhost|local|internal|localdomain)$/.test(h) && /\.[a-z]{2,}$/.test(h);
+  } catch { return false; }
+};
 /** Names (whole word, case-insensitive) of `words` that occur in `text`. */
 export function named(text: string, words: string[]) {
   return words.filter((w) => w && w.length > 1 && new RegExp(`(?<![\\w-])${escapeRe(w)}(?![\\w-])`, "i").test(text));
@@ -139,7 +147,7 @@ export async function onboardProduct(org: Org, input: OnboardInput) {
   const prompt = input.prompt?.trim() ?? "";
   if (prompt.length < 20) throw new Error("Describe the product in a sentence or two (prompt): what it does and who it is for.");
   for (const k of ["website_url", "docs_url"] as const)
-    if (input[k] !== undefined && !httpUrl(input[k])) throw new Error(`${k} must be an http(s) URL`);
+    if (input[k] !== undefined && !httpUrl(input[k])) throw new Error(`${k} must be a public http(s) URL with a host name (not an IP address)`);
   if (!input.website_url && !input.docs_url) throw new Error("Give at least a website_url or a docs_url so the orchestrator can research the product.");
 
   const host = (u?: string) => (u ? new URL(u).hostname.replace(/^(www|docs)\./, "") : "");

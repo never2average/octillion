@@ -540,3 +540,7 @@ CREATE TABLE IF NOT EXISTS org_harnesses (
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (org_id, name, version_label)
 );
+
+-- A run that uses an organization's private assets (its own personas or tasks; later its harnesses). Its sessions are
+-- claimed only by the per-job orchestrator launched for it (job token), never by a shared orchestrator (fleet token).
+ALTER TABLE simulations ADD COLUMN IF NOT EXISTS private BOOLEAN NOT NULL DEFAULT false;

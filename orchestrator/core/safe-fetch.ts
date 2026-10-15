@@ -38,9 +38,13 @@ export function isBlockedIp(ip: string): boolean {
   }
   if (net.isIPv6(ip)) {
     const x = ip.toLowerCase();
-    const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(x);
+    // IPv4 embedded in IPv6: mapped (::ffff:a.b.c.d or ::ffff:hhhh:hhhh) and compatible (::a.b.c.d) forms.
+    const mapped = /^::(?:ffff:)?(\d+\.\d+\.\d+\.\d+)$/.exec(x);
     if (mapped) return isBlockedIp(mapped[1]!);
-    return x === "::" || x === "::1" || /^f[cd]/.test(x) || /^fe[89ab]/.test(x) || /^ff/.test(x) || x.startsWith("64:ff9b:") || x.startsWith("2001:db8");
+    const hex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(x);
+    if (hex) { const a = parseInt(hex[1]!, 16), b = parseInt(hex[2]!, 16); return isBlockedIp(`${a >> 8}.${a & 255}.${b >> 8}.${b & 255}`); }
+    return x === "::" || x === "::1" || /^f[cd]/.test(x) || /^fe[89ab]/.test(x) || /^ff/.test(x) || x.startsWith("64:ff9b:") || x.startsWith("2001:db8") ||
+      x.startsWith("2002:") /* 6to4 */ || x.startsWith("2001:0:") || x.startsWith("2001::") /* Teredo */;
   }
   return true;
 }
@@ -71,6 +75,9 @@ export class FetchPolicy {
     if (u.protocol !== "https:" && u.protocol !== "http:") return { ok: false, why: `scheme ${u.protocol} not allowed` };
     if (u.username || u.password) return { ok: false, why: "credentials in URL not allowed" };
     const host = u.hostname.toLowerCase();
+    // IP literals skip the socket lookup (where private addresses are refused), so they are never allowed, even when
+    // a customer gave one as the product's website.
+    if (net.isIP(host.replace(/^\[|\]$/g, ""))) return { ok: false, why: "IP address URLs are not allowed; use the host name" };
     if (this.isProductSite(u)) return { ok: true };
     if (REGISTRY_HOSTS.includes(host)) return { ok: true };
     if (GITHUB_HOSTS.includes(host)) {
