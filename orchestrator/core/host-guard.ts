@@ -48,6 +48,8 @@ export function checkHost(runner: string, probe: HostProbe = realProbe): GuardRe
   }
   const problems: string[] = [];
   if (runner !== "boat") problems.push(`RUNNER=${runner} is not allowed in production (only "boat"; pool/docker/local need OCTILLION_DEV_ALLOW_LOCAL=1, tests only)`);
+  // The coding agent runs task text written by customers: never as boat's sudo-capable user (docs/security.md).
+  if (env.BOAT_AGENT_USER === "user") problems.push("BOAT_AGENT_USER=user runs the coding agent with passwordless sudo; not allowed in production (the default agent user has none)");
   if (env.OCTILLION_HOST_ROLE !== HOST_ROLE) problems.push(`OCTILLION_HOST_ROLE is not "${HOST_ROLE}" (set by the launcher's env file)`);
   const markerRaw = probe.read(MARKER_PATH);
   let marker: { role?: string; sandbox_id?: string } | null = null;

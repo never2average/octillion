@@ -49,6 +49,8 @@ check("dev flag bypasses with a loud warning", g3.ok && g3.dev && /HOST GUARD DI
 check("guard accepts a boat orchestrator sandbox (env role + marker + boat indicators)", g4.ok, g4.problems.join());
 check("guard refuses when BOAT_ID does not match the launcher marker", !g5.ok && /does not match/.test(g5.problems.join()), "");
 check("guard refuses a boat VM without the launcher's markers", !g6.ok && /HOST_ROLE|marker/.test(g6.problems.join()), "");
+const g7 = checkHost("boat", probe({ ...boatEnv, BOAT_AGENT_USER: "user" }, boatFiles));
+check("guard refuses running the coding agent as the sudo-capable boat user", !g7.ok && /BOAT_AGENT_USER=user/.test(g7.problems.join()), g7.problems.join());
 const real = spawnSync(TSX, ["orchestrator/worker.ts"], { cwd: ROOT, encoding: "utf8", timeout: 60_000,
   env: { PATH: process.env.PATH, HOME: process.env.HOME, OCTILLION_URL: "http://127.0.0.1:1", OCTILLION_WORKER_TOKEN: "x", RUNNER: "local" } });
 check("the real entry point refuses to start on this machine", real.status !== 0 && /Refusing to start/.test(real.stderr + real.stdout),
