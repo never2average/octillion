@@ -528,6 +528,32 @@ try {
     console.log("✓ Anthropic via Vertex AI: SA JWT -> Google token, rawPredict/streamRawPredict/count-tokens rewrite, betas, metering");
   }
 
+  // ---------- per-job worker tokens (docs/security.md, phase 0b) ----------
+  {
+    const wa = await import("../src/workerauth.js");
+    const sims = (await call(A, "list_simulations")).simulations.map((x: any) => x.id);
+    const pick = async (sim: string) => (await db.query<any>("SELECT id FROM agent_sessions WHERE simulation_id = $1 ORDER BY id LIMIT 1", [sim]))[0];
+    let own = "", other = "";
+    for (const x of sims) for (const y of sims) if (!own && x !== y && (await pick(x)) && (await pick(y))) { own = x; other = y; }
+    assert.ok(own && other, "two simulations with sessions for the token test");
+    const tok = await wa.mintJobWorkerToken(own, null);
+    await db.query("UPDATE agent_sessions SET status = 'queued', worker_id = NULL WHERE simulation_id IN ($1, $2) AND status = 'running'", [own, other]);
+    const claimed = await (await worker("/claim", { worker_id: "w-job", simulation_id: other, limit: 50 }, { token: tok })).json();
+    assert.ok(claimed.jobs.every((j: any) => j.simulation_id === own), "a job token claims only its own simulation, whatever the body says");
+    const otherSess = await pick(other), ownSess = await pick(own);
+    assert.equal((await worker(`/sessions/${otherSess.id}/heartbeat`, {}, { token: tok })).status, 403, "no acting on another job's session");
+    assert.equal((await worker(`/sessions/${otherSess.id}/credentials`, {}, { token: tok })).status, 403, "no credentials for another job's session");
+    assert.notEqual((await worker(`/sessions/${ownSess.id}/heartbeat`, {}, { token: tok })).status, 403, "its own sessions are fine");
+    assert.equal((await fetch(`${base}/api/worker/fleet`, { headers: { authorization: `Bearer ${tok}` } })).status, 403, "no global fleet view");
+    assert.deepEqual((await (await worker("/research/claim", { worker_id: "w-job" }, { token: tok })).json()).jobs, [], "a simulation token claims no research");
+    assert.equal((await worker("/research/rsh_someoneelse/progress", { stage: "reading" }, { token: tok })).status, 403);
+    assert.equal((await worker("/fleet", { orchestrator_id: "orch-not-mine", capacity: 1 }, { token: tok })).status, 403, "cannot speak for another orchestrator");
+    assert.equal((await worker("/claim", { worker_id: "w-job" }, { token: "owk_forged" })).status, 401);
+    await db.query("UPDATE worker_tokens SET revoked_at = now() WHERE job_id = $1", [own]);
+    assert.equal((await worker("/claim", { worker_id: "w-job" }, { token: tok })).status, 401, "revoked tokens stop working");
+    console.log("✓ per-job worker tokens: own job only, no other sessions, research, fleet view or orchestrator; revocable");
+  }
+
   // ---------- fleet check-in over HTTP ----------
   {
     const ids = [`smoke-orch-a-${stamp}`, `smoke-orch-b-${stamp}`];

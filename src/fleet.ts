@@ -90,8 +90,12 @@ export function assign(plan: { agent_id: string; pods: number }[], orchestrators
   return out;
 }
 
-/** The job a per-job orchestrator serves: its sandbox row (written at launch), else what its check-in says (manual runs). */
-export async function jobOf(orchestratorId: string, meta: Record<string, unknown> = {}): Promise<string | null> {
+/**
+ * The job a per-job orchestrator serves: the job its token is bound to, else its sandbox row (written at launch), else
+ * what its check-in says (manual runs with the fleet token only; a job token can never claim another job this way).
+ */
+export async function jobOf(orchestratorId: string, meta: Record<string, unknown> = {}, tokenJob?: string): Promise<string | null> {
+  if (tokenJob) return tokenJob;
   const db = await getDb();
   const [r] = await db.query<{ job_id: string }>(
     "SELECT job_id FROM orchestrator_sandboxes WHERE orchestrator_id = $1 AND job_id IS NOT NULL ORDER BY id DESC LIMIT 1", [orchestratorId]);
@@ -99,8 +103,8 @@ export async function jobOf(orchestratorId: string, meta: Record<string, unknown
 }
 
 /** Register / heartbeat an orchestrator and return its share of the global fleet, or of its job when it has one. */
-export async function fleetCheckin(orchestratorId: string, capacity?: number, meta: Record<string, unknown> = {}) {
-  const job = await jobOf(orchestratorId, meta);
+export async function fleetCheckin(orchestratorId: string, capacity?: number, meta: Record<string, unknown> = {}, tokenJob?: string) {
+  const job = await jobOf(orchestratorId, meta, tokenJob);
   const max = job ? JOB_POD_CAPACITY() : PODS_PER_ORCHESTRATOR();
   const cap = Math.min(Math.max(1, Math.trunc(capacity ?? max)), max);
   meta = { ...meta, job };

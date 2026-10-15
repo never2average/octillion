@@ -1,3 +1,4 @@
+import { canActAsOrchestrator, canActOnSession, resolveWorkerToken, type WorkerAuth } from "./workerauth.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express, { type NextFunction, type Request, type Response } from "express";
@@ -114,16 +115,33 @@ export function createApp() {
   });
   app.all(["/mcp", "/mcp/:key"], methodNotAllowed);
 
-  // ---------- orchestrator worker API (shared OCTILLION_WORKER_TOKEN) ----------
+  // ---------- orchestrator worker API: the fleet token, or a job token bound to one job (src/workerauth.ts) ----------
   const worker = express.Router();
-  worker.use((req, res, next) => (isWorkerToken(bearer(req.headers.authorization)) ? next() : void res.status(401).json({ error: "Invalid worker token" })));
+  worker.use((req, res, next) => {
+    resolveWorkerToken(bearer(req.headers.authorization)).then((auth) => {
+      if (!auth) return void res.status(401).json({ error: "Invalid worker token" });
+      res.locals.worker = auth;
+      next();
+    }, next);
+  });
+  const authOf = (res: express.Response) => res.locals.worker as WorkerAuth;
+  const jobOnly = (res: express.Response) => { const a = authOf(res); return a.kind === "job" ? a : null; };
+  const forbidden = (res: express.Response) => void res.status(403).json({ error: "This worker token is bound to another job" });
+  // Session routes: a job token may act only on its own simulation's sessions.
+  worker.use("/sessions/:id", (req, res, next) => {
+    canActOnSession(authOf(res), String(req.params.id)).then((ok) => (ok ? next() : forbidden(res)), next);
+  });
   worker.use(express.json({ limit: "32mb" }));
   worker.use(express.text({ type: ["application/x-ndjson", "application/jsonl", "text/plain"], limit: "32mb" }));
 
   worker.post("/claim", async (req, res) => {
     const { worker_id, limit, models, harness, agent_ids, simulation_id } = req.body ?? {};
     if (typeof worker_id !== "string" || !worker_id) return void res.status(400).json({ error: "worker_id is required" });
-    res.json({ jobs: await claimJobs(worker_id, { limit, models, harness, agent_ids, simulation_id: typeof simulation_id === "string" && simulation_id ? simulation_id : undefined }) });
+    // A job token claims only its own simulation, whatever the body says; a research job's token claims no sessions.
+    const job = jobOnly(res);
+    if (job && !job.jobId.startsWith("sim_")) return void res.json({ jobs: [] });
+    const sim = job ? job.jobId : typeof simulation_id === "string" && simulation_id ? simulation_id : undefined;
+    res.json({ jobs: await claimJobs(worker_id, { limit, models, harness, agent_ids, simulation_id: sim }) });
   });
   worker.post("/sessions/:id/events", async (req, res) => {
     const events: RawEvent[] = typeof req.body === "string" ? parseJsonl(req.body) : req.body?.events;
@@ -143,18 +161,30 @@ export function createApp() {
   worker.post("/fleet", async (req, res) => {
     const { orchestrator_id, capacity, meta } = req.body ?? {};
     if (typeof orchestrator_id !== "string" || !orchestrator_id) return void res.status(400).json({ error: "orchestrator_id is required" });
-    res.json(await fleetCheckin(orchestrator_id, capacity, meta));
+    if (!(await canActAsOrchestrator(authOf(res), orchestrator_id))) return forbidden(res);
+    const job = jobOnly(res);
+    res.json(await fleetCheckin(orchestrator_id, capacity, meta, job ? job.jobId : undefined));
   });
   worker.delete("/fleet/:id", async (req, res) => {
+    if (!(await canActAsOrchestrator(authOf(res), String(req.params.id)))) return forbidden(res);
     await fleetLeave(String(req.params.id));
     res.status(204).end();
   });
-  worker.get("/fleet", async (_req, res) => void res.json(await fleetStatus()));
+  // The global plan (every orchestrator, every job) is for the fleet only.
+  worker.get("/fleet", async (_req, res) => (jobOnly(res) ? forbidden(res) : void res.json(await fleetStatus())));
   // Product onboarding research (docs/onboarding.md).
   worker.post("/research/claim", async (req, res) => {
     const { worker_id, limit, research_id } = req.body ?? {};
     if (typeof worker_id !== "string" || !worker_id) return void res.status(400).json({ error: "worker_id is required" });
-    res.json({ jobs: await research.claimResearch(worker_id, limit, typeof research_id === "string" && research_id ? research_id : undefined) });
+    const job = jobOnly(res);
+    if (job && !job.jobId.startsWith("rsh_")) return void res.json({ jobs: [] });
+    const rid = job ? job.jobId : typeof research_id === "string" && research_id ? research_id : undefined;
+    res.json({ jobs: await research.claimResearch(worker_id, limit, rid) });
+  });
+  // Research routes: a job token may act only on its own research.
+  worker.use("/research/:id", (req, res, next) => {
+    const job = jobOnly(res);
+    return !job || job.jobId === String(req.params.id) ? next() : forbidden(res);
   });
   worker.post("/research/:id/progress", async (req, res) => {
     await research.researchProgress(String(req.params.id), String(req.body?.stage ?? "working"), req.body?.note);
@@ -182,6 +212,7 @@ export function createApp() {
   worker.post("/orchestrator/credentials", async (req, res) => {
     const id = req.body?.orchestrator_id;
     if (typeof id !== "string" || !id) return void res.status(400).json({ error: "orchestrator_id is required" });
+    if (!(await canActAsOrchestrator(authOf(res), id))) return forbidden(res);
     res.json(await brokerOrchestratorCredentials(id));
   });
   worker.post("/sessions/:id/credentials", async (req, res) => void res.json(await brokerSessionCredentials(String(req.params.id))));

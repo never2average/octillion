@@ -1,3 +1,4 @@
+import { mintJobWorkerToken, revokeSandboxWorkerTokens } from "./workerauth.js";
 import { hostname } from "node:os";
 import { randomBytes } from "node:crypto";
 import { getDb } from "./db.js";
@@ -209,6 +210,7 @@ export class Autoscaler {
       const reap = async (row: Row, reason: string, deleteIt = true) => {
         if (row.sandbox_id && deleteIt) await lib.deleteSandbox(row.sandbox_id).catch((e) => this.log(`delete ${row.sandbox_id}: ${(e as Error).message}`));
         await db.query("UPDATE orchestrator_sandboxes SET state = 'deleted', deleted_at = now(), error = coalesce(error, $2) WHERE id = $1", [row.id, reason]);
+        await revokeSandboxWorkerTokens(row.id);
         if (row.orchestrator_id) {
           await db.query("DELETE FROM orchestrators WHERE id = $1", [row.orchestrator_id]);
           // worker sandboxes a crashed/stale orchestrator could not clean up itself (octi-w-<orch>-<agent>)
@@ -385,7 +387,8 @@ export class Autoscaler {
       "INSERT INTO orchestrator_sandboxes (state, from_image, code_hash, job_id, pods) VALUES ('booting', $1, $2, $3, $4) RETURNING id",
       [image, lib.codeHash(this.opts.root), job?.id ?? null, job ? job.pods : null]);
     const id = row!.id;
-    const workerToken = env.OCTILLION_WORKER_TOKEN ?? "";
+    // A per-job orchestrator gets a token bound to its job, never the fleet token (docs/security.md, phase 0b).
+    const workerToken = job ? await mintJobWorkerToken(job.id, id) : env.OCTILLION_WORKER_TOKEN ?? "";
     const tuning: Record<string, string> = { OCTILLION_ORCH_IDLE_MINUTES: String(AUTOSCALE.idleMinutes()) };
     for (const k of lib.TUNING_VARS) if (env[k]) tuning[k] = env[k]!;
     if (job) tuning.ORCHESTRATOR_JOB = job.id;
@@ -398,6 +401,7 @@ export class Autoscaler {
       this.log(`launched ${r.sandboxId} (${r.orchId}) in ${Math.round((r.timings.started ?? 0) / 1000)}s${r.fromImage ? " from image" : " (code upload + npm ci)"}`);
     }).catch(async (e) => {
       await db.query("UPDATE orchestrator_sandboxes SET state = 'deleted', deleted_at = now(), error = $2 WHERE id = $1", [id, String((e as Error).message).slice(0, 500)]);
+      await revokeSandboxWorkerTokens(id);
       this.log(`launch failed: ${(e as Error).message}`);
     }).finally(() => { this.inflight.delete(id); });
     this.inflight.set(id, p);

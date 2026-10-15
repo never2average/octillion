@@ -486,3 +486,16 @@ ALTER TABLE developer_profiles ALTER COLUMN source DROP DEFAULT;
 DO $$ BEGIN
   ALTER TABLE developer_profiles ADD CONSTRAINT developer_profiles_owner_matches_source CHECK ((org_id IS NULL) = (source = 'vault'));
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- Per-job worker tokens (src/workerauth.ts): an autoscaled per-job orchestrator gets a token bound to its one job and
+-- organization instead of the fleet-wide OCTILLION_WORKER_TOKEN. Hash only; revoked when its sandbox is deleted.
+CREATE TABLE IF NOT EXISTS worker_tokens (
+  token_hash      TEXT PRIMARY KEY,
+  job_id          TEXT NOT NULL,                -- sim_... or rsh_...
+  org_id          INT REFERENCES organizations(id) ON DELETE CASCADE,
+  sandbox_row_id  INT,                          -- orchestrator_sandboxes.id
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at      TIMESTAMPTZ NOT NULL,
+  revoked_at      TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS worker_tokens_sandbox_idx ON worker_tokens (sandbox_row_id) WHERE revoked_at IS NULL;
