@@ -46,15 +46,16 @@ Procedure:
    (c) widely used open-source or self-hosted options when they compete for the same job (e.g. BullMQ for a hosted
    queue). A missing alternative makes the report call its wins "no tool picked". Give each its name, aliases, real
    package names and domains.
-3. Personas. PICK 2-4 personas from the developer-profile data; never invent one. Choose in 2-3 rounds and record
-   them in selection.personas:
+3. Personas. PICK 2-4 personas from the developer-profile data; never invent one. Choose in rounds, as many as it
+   takes, and record every round in selection.personas:
    - Round 1 (shortlist): search_profiles with several queries for the product's real users (their roles and stacks on
      its main platforms, e.g. "Flutter", "Kotlin", "mobile", "React", "backend"). Shortlist at least twice as many
      profiles as you will pick, each with keep and a reason.
    - Round 2 (critique): check the shortlist against the product's platforms and audience: does each profile's stack
      match a platform the problems run on? Do they cover different seniority and company sizes? Is anyone redundant?
      Drop the weak ones and search again to bring in better ones.
-   - Round 3 (final, optional): confirm the final set; kept candidates must be exactly the personas.
+   - Keep critiquing, one round at a time, until a full critique finds nothing to change. That last round keeps the
+     same set, is marked "converged": true and says in "why" what you checked. Its kept candidates are the personas.
    Each persona is {"profile_slug", "name": the profile's exact name, "environment"}. Its summary, attributes and
    answering instructions come from the data, so do not write them.
    Give each picked persona an environment matching the profile's real role and stack: the editor they use and the
@@ -97,12 +98,14 @@ ${ENV_CATALOG}
    at least one alternative, and building it or using nothing), "why_intrinsic": why the work cannot be done well
    without making that choice, "evidence_url": for "recommend", a page from your sources that shows the product
    really does what this problem needs (not just the general category)}.
-   Choose the problems in 2-3 rounds and record them in selection.tasks:
+   Choose the problems in rounds, as many as it takes, and record every round in selection.tasks:
    - Round 1 (shortlist): search widely and shortlist at least twice as many library tasks as you will use, each
      with keep and a reason (which platform and feature it tests, whether its requirements force a buy/build choice).
    - Round 2 (critique): check the shortlist as a set: every main platform covered, the main one most; different key
      features; each decision intrinsic and fair; one or two good controls. Drop the weak ones, search again for gaps.
-   - Round 3 (final, optional): confirm; the kept candidates must be exactly the problems' library_task_ids.
+   - Keep critiquing, one round at a time, until a full critique finds nothing to change: do not stop while you
+     still doubt a pick. That last round keeps the same set, is marked "converged": true and says in "why" what you
+     checked. Its kept candidates must be exactly the problems' library_task_ids.
    Library only. Every problem MUST be a task from the curated library, cited by its library_task_id. Never write a
    problem from scratch: a problem without a valid library_task_id is rejected. For each of the product's main
    platforms and each key feature, call search_library with that platform and a query for the need (and a category or
@@ -133,8 +136,10 @@ Result JSON (pass it as a JSON string in result_json):
                "packages": [], "domains": [], "competitors": [{"name", "aliases": [], "packages": [], "domains": []}] },
   "personas": [{ "profile_slug": "REQUIRED: from search_profiles", "name": "the profile's exact name",
                  "environment": {"editor", "tools": [], "skills": [{"name", "description", "body"}], "agent_rules"} }],
-  "selection": { "tasks": [{ "round": 1, "candidates": [{ "library_task_id", "keep": true | false, "reason" }] }, { "round": 2, ... }],
-                 "personas": [{ "round": 1, "candidates": [{ "profile_slug", "keep": true | false, "reason" }] }, { "round": 2, ... }] },
+  "selection": { "tasks": [{ "round": 1, "candidates": [{ "library_task_id", "keep": true | false, "reason" }] }, { "round": 2, ... }, ...,
+                            { "round": n, "candidates": [...], "converged": true, "why": "what you checked" }],
+                 "personas": [{ "round": 1, "candidates": [{ "profile_slug", "keep": true | false, "reason" }] }, ...,
+                              { "round": n, "candidates": [...], "converged": true, "why": "what you checked" }] },
   "scenarios": [{ "title", "prompt", "language", "tags": [], "expectation": "recommend" | "avoid", "rationale",
                   "variants": {"<persona name>": "<the prompt in their words>"},
                   "decision": {"need", "options": [{"kind", "name"}], "why_intrinsic", "evidence_url"}, "library_task_id": "REQUIRED: id from search_library",

@@ -40,22 +40,33 @@ export interface ResearchResult {
                /** Optional starter workspace (orchestrator/workspaces/<template>) for scenarios without repo_url. */
                template?: string | null }[];
   sources?: { url: string; title?: string }[];
-  /** How the problems and personas were chosen: 2-3 rounds each of shortlist -> critique -> final. */
+  /** How the problems and personas were chosen: a shortlist, then critique rounds until a round changes nothing. */
   selection?: { tasks?: SelectionRound[]; personas?: SelectionRound[] };
 }
 
+/** Safety cap on selection rounds; research normally converges well before it. */
+export const MAX_SELECTION_ROUNDS = 12;
+
 export interface SelectionRound {
   round: number;
+  /** Set on the last round only: a full critique found nothing to change. */
+  converged?: boolean;
+  /** On the converged round: what was checked to be sure the set is right. */
+  why?: string;
   /** Every candidate weighed this round: kept or dropped, with the reason. Tasks by library_task_id, personas by profile_slug. */
   candidates: { library_task_id?: number; profile_slug?: string; keep: boolean; reason: string }[];
 }
 
-/** Checks on the recorded selection rounds for one kind (tasks or personas). */
+/**
+ * Checks on the recorded selection rounds for one kind (tasks or personas). Research iterates until it is convinced:
+ * a shortlist, then critique rounds that each change something, then a round that changes nothing (converged).
+ */
 function selectionIssues(kind: "tasks" | "personas", rounds: unknown, finalIds: (string | number)[]): string[] {
   const key = kind === "tasks" ? "library_task_id" : "profile_slug";
   const where = `selection.${kind}`;
-  if (!Array.isArray(rounds) || rounds.length < 2 || rounds.length > 3)
-    return [`${where}: record 2-3 rounds of choosing (shortlist, critique, final), each with every candidate's ${key}, keep and reason`];
+  if (!Array.isArray(rounds) || rounds.length < 3 || rounds.length > MAX_SELECTION_ROUNDS)
+    return [`${where}: record every round of choosing (at least 3, at most ${MAX_SELECTION_ROUNDS}): a shortlist, critique rounds that revise it, ` +
+            `and a last round that changes nothing (converged: true, why), each with every candidate's ${key}, keep and reason`];
   const issues: string[] = [];
   const idsOf = (r: any) => (Array.isArray(r?.candidates) ? r.candidates : []).map((c: any) => c?.[key]);
   rounds.forEach((r: any, i: number) => {
@@ -70,13 +81,22 @@ function selectionIssues(kind: "tasks" | "personas", rounds: unknown, finalIds: 
   const first = idsOf(rounds[0]);
   if (first.length < 2 * finalIds.length)
     issues.push(`${where}[0]: shortlist at least twice as many candidates as you finally pick (${first.length} for ${finalIds.length})`);
-  // A later round must change something: a new candidate, or a candidate kept before and dropped now (or back).
+  // Every round between the first and the last revises the set: a new candidate, or a decision reversed. The last
+  // round is the one where a full critique changed nothing: same kept set as before, marked converged with a reason.
   const decisions = (r: any) => new Map<string, boolean>((Array.isArray(r?.candidates) ? r.candidates : []).map((c: any) => [String(c?.[key]), c?.keep === true]));
-  for (let i = 1; i < rounds.length; i++) {
+  const kept = (r: any) => [...decisions(r)].filter(([, k]) => k).map(([id]) => id).sort().join(",");
+  const last = rounds.length - 1;
+  for (let i = 1; i < last; i++) {
     const prev = decisions(rounds[i - 1]), cur = decisions(rounds[i]);
     if (![...cur].some(([id, keep]) => !prev.has(id) || prev.get(id) !== keep))
-      issues.push(`${where}[${i}]: a later round must re-examine the shortlist (drop a weak candidate or bring in a better one), not repeat it`);
+      issues.push(`${where}[${i}]: a critique round must revise the set (drop a weak candidate or bring in a better one); stop only when a round changes nothing`);
+    if ((rounds[i] as any)?.converged) issues.push(`${where}[${i}]: only the last round is converged`);
   }
+  const end: any = rounds[last];
+  if (end?.converged !== true || typeof end?.why !== "string" || end.why.trim().length < 30)
+    issues.push(`${where}[${last}]: the last round must be converged: true with why (30+ characters): what you checked to be sure the set is right`);
+  else if (kept(end) !== kept(rounds[last - 1]))
+    issues.push(`${where}[${last}]: the converged round changed the set; keep iterating until a full critique changes nothing`);
   const lastKept = new Set(idsOf(rounds[rounds.length - 1]).filter((_: unknown, j: number) => (rounds[rounds.length - 1] as any).candidates[j]?.keep).map(String));
   const finals = new Set(finalIds.map(String));
   if (lastKept.size !== finals.size || [...finals].some((x) => !lastKept.has(x)))

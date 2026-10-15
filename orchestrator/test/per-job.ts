@@ -197,9 +197,12 @@ try {
                                         library_task_id: 100 + i })),
     selection: {
       tasks: [{ round: 1, candidates: [101, 102, 103, 104, 105, 106].map((id) => ({ library_task_id: id, keep: id <= 103, reason: id <= 103 ? "tests reset email on the main platform" : "weaker fit for the product's main use" })) },
-              { round: 2, candidates: [101, 102, 103, 107].map((id) => ({ library_task_id: id, keep: id <= 103, reason: id <= 103 ? "kept: covers the main platform and feature" : "new search result, but duplicates task 101" })) }],
+              { round: 2, candidates: [101, 102, 103, 107].map((id) => ({ library_task_id: id, keep: id <= 103, reason: id <= 103 ? "kept: covers the main platform and feature" : "new search result, but duplicates task 101" })) },
+              { round: 3, converged: true, why: "rechecked platform coverage, decisions and the control; nothing to change",
+                candidates: [101, 102, 103].map((id) => ({ library_task_id: id, keep: true, reason: "still the best fit for its feature" })) }],
       personas: [{ round: 1, candidates: [{ profile_slug: "so-1", keep: true, reason: "backend developer on the product's stack" }, { profile_slug: "so-2", keep: false, reason: "data scientist; never sends email" }] },
-                 { round: 2, candidates: [{ profile_slug: "so-1", keep: true, reason: "still the best fit after review" }, { profile_slug: "so-3", keep: false, reason: "new candidate, but same role as so-1" }] }],
+                 { round: 2, candidates: [{ profile_slug: "so-1", keep: true, reason: "still the best fit after review" }, { profile_slug: "so-3", keep: false, reason: "new candidate, but same role as so-1" }] },
+                 { round: 3, converged: true, why: "rechecked stack fit and seniority spread; nothing to change", candidates: [{ profile_slug: "so-1", keep: true, reason: "the only backend developer on this stack" }] }],
     } };
   const v1 = research.validateResearch({ ...base, personas: [{ name: "Dev", profile_slug: "so-1", environment: { editor: "zed", tools: ["cli/psql", "cli/teleporter"] } }] } as any);
   const v2 = research.validateResearch({ ...base, personas: [{ name: "Dev", profile_slug: "so-1", environment: { editor: "emacs" as any, tools: ["cli/vercel"] } }] } as any);
@@ -214,11 +217,15 @@ try {
   const v6 = research.validateResearch({ ...base, product: { ...base.product, platforms: undefined }, scenarios: base.scenarios.map(({ library_task_id, ...s }) => s), personas: clean } as any);
   const v8 = research.validateResearch({ ...base, scenarios: base.scenarios.map((s) => ({ ...s, library_task_id: 101 })), personas: clean } as any);
   const v9 = research.validateResearch({ ...base, selection: undefined, personas: [{ name: "Dev", environment: { editor: "intellij", tools: ["cli/gh"] } }] } as any);
-  const v10 = research.validateResearch({ ...base, personas: clean, selection: { ...base.selection, tasks: [base.selection.tasks[0], base.selection.tasks[0]] } } as any);
-  check("research validation: personas are picked from the profile data, and tasks and personas are chosen in 2-3 recorded rounds",
-    v9.some((x) => /profile_slug is required/.test(x)) && v9.some((x) => /selection\.tasks: record 2-3 rounds/.test(x)) &&
-    v9.some((x) => /selection\.personas: record 2-3 rounds/.test(x)) && v10.some((x) => /must re-examine the shortlist/.test(x)),
-    [v9, v10].map((v) => v.join(" | ")).join(" || "));
+  const v10 = research.validateResearch({ ...base, personas: clean, selection: { ...base.selection, tasks: [base.selection.tasks[0], base.selection.tasks[0], base.selection.tasks[2]] } } as any);
+  const v11 = research.validateResearch({ ...base, personas: clean, selection: { ...base.selection, tasks: [...base.selection.tasks.slice(0, 2), { ...base.selection.tasks[2], converged: false }] } } as any);
+  const v12 = research.validateResearch({ ...base, personas: clean, selection: { ...base.selection, tasks: [base.selection.tasks[0], base.selection.tasks[1], base.selection.tasks[1], base.selection.tasks[1], base.selection.tasks[2]] } } as any);
+  check("research validation: personas come from the profile data; selection iterates (each critique round revises) until a converged round",
+    v9.some((x) => /profile_slug is required/.test(x)) && v9.some((x) => /selection\.tasks: record every round/.test(x)) &&
+    v9.some((x) => /selection\.personas: record every round/.test(x)) && v10.some((x) => /critique round must revise/.test(x)) &&
+    v11.some((x) => /must be converged: true/.test(x)) && v12.some((x) => /critique round must revise/.test(x)) &&
+    research.validateResearch({ ...base, personas: clean } as any).length === 0,
+    [v9, v10, v11, v12].map((v) => v.join(" | ")).join(" || "));
   const v7 = research.validateResearch({ ...base, product: { ...base.product, platforms: ["mobile", "backend"] }, personas: clean,
     scenarios: [...base.scenarios.slice(0, 1), ...base.scenarios.slice(1).map((s) => ({ ...s, prompt: "Our Flutter app needs password reset emails for its users.", template: "flutter" }))] } as any);
   check("research validation: problems cover the product's main platforms, every problem is a library task, each used once",

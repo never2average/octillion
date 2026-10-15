@@ -620,9 +620,13 @@ try {
       sources: [{ url: "https://docs.quickqueue.example.com/install", title: "Install" }],
       selection: {
         tasks: [{ round: 1, candidates: [lib.tasks[0].id, ...more.slice(0, 5)].map((id: number, j: number) => ({ library_task_id: id, keep: j < 4, reason: j < 4 ? "a durable-work need on the main platforms" : "weaker: no real buy-or-build decision" })) },
-                { round: 2, candidates: [lib.tasks[0].id, more[0], more[1], more[2]].map((id: number, j: number) => ({ library_task_id: id, keep: j < 3, reason: j < 3 ? "kept after checking platform coverage" : "dropped: same feature as the first task" })) }],
+                { round: 2, candidates: [lib.tasks[0].id, more[0], more[1], more[2]].map((id: number, j: number) => ({ library_task_id: id, keep: j < 3, reason: j < 3 ? "kept after checking platform coverage" : "dropped: same feature as the first task" })) },
+                { round: 3, converged: true, why: "rechecked platforms, decisions and the control task; nothing left to change",
+                  candidates: [lib.tasks[0].id, more[0], more[1]].map((id: number) => ({ library_task_id: id, keep: true, reason: "still the best fit for its feature" })) }],
         personas: [{ round: 1, candidates: ["example-startup-backend", "example-enterprise-platform", "example-solo-indie", "example-agency-frontend"].map((slug, j) => ({ profile_slug: slug, keep: j < 3, reason: j < 3 ? "backend or full-stack role on a matching stack" : "frontend-only work; rarely runs queues" })) },
-                   { round: 2, candidates: ["example-startup-backend", "example-enterprise-platform", "example-solo-indie"].map((slug, j) => ({ profile_slug: slug, keep: j < 2, reason: j < 2 ? "kept: covers startup and enterprise" : "dropped: overlaps the startup engineer" })) }],
+                   { round: 2, candidates: ["example-startup-backend", "example-enterprise-platform", "example-solo-indie"].map((slug, j) => ({ profile_slug: slug, keep: j < 2, reason: j < 2 ? "kept: covers startup and enterprise" : "dropped: overlaps the startup engineer" })) },
+                   { round: 3, converged: true, why: "rechecked stack fit and company-size spread; nothing left to change",
+                     candidates: ["example-startup-backend", "example-enterprise-platform"].map((slug) => ({ profile_slug: slug, keep: true, reason: "still the best fit" })) }],
       },
     };
     const bad = structuredClone(good);
