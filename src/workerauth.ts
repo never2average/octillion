@@ -49,13 +49,13 @@ export async function resolveWorkerToken(token: string | null | undefined): Prom
 
 /** Revoke the tokens of an orchestrator sandbox (it was deleted or reaped). */
 export async function revokeSandboxWorkerTokens(sandboxRowId: number): Promise<void> {
-  await (await getDb()).query("UPDATE worker_tokens SET revoked_at = now() WHERE sandbox_row_id = $1 AND revoked_at IS NULL", [sandboxRowId]);
+  await (await getDb()).query("/* tenant: internal, by the sandbox the token was minted for */ UPDATE worker_tokens SET revoked_at = now() WHERE sandbox_row_id = $1 AND revoked_at IS NULL", [sandboxRowId]);
 }
 
 /** Whether `auth` may act on agent session `sessionId` (a job token: only its own simulation's sessions). */
 export async function canActOnSession(auth: WorkerAuth, sessionId: string): Promise<boolean> {
   if (auth.kind === "fleet") return true;
-  const [s] = await (await getDb()).query<{ simulation_id: string }>("SELECT simulation_id FROM agent_sessions WHERE id = $1", [sessionId]);
+  const [s] = await (await getDb()).query<{ simulation_id: string }>("/* tenant: compared with the job the token is bound to */ SELECT simulation_id FROM agent_sessions WHERE id = $1", [sessionId]);
   return !!s && s.simulation_id === auth.jobId;
 }
 

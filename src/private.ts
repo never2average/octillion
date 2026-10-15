@@ -105,7 +105,7 @@ export async function importTasks(org: Org, input: { product?: string; task_set:
       const template = checkTemplate(t.template);
       const platform = checkPlatform(t.platform) ?? platformOf({ template, language: t.language, tags: t.tags, prompt });
       await tx.query(
-        `INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, source, rationale, template, platform, task_set_id)
+        `/* tenant: product resolved within the caller's org (resolveProduct) */ INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, source, rationale, template, platform, task_set_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7, true, 'custom', $8, $9, $10, $11)`,
         [p.id, cleanText(t.title, 160, `tasks[${i}].title`) || prompt.slice(0, 80), prompt, t.repo_url ?? null,
          t.language ? cleanText(t.language, 40, `tasks[${i}].language`) : null, (t.tags ?? []).slice(0, 20).map((x) => cleanText(x, 40, "tag")),

@@ -31,6 +31,11 @@ broad permissions, so they must not reach credentials, other tenants or the scor
 | Private runs (an org's own tasks or personas) are claimed only by their own per-job orchestrator, never by a shared one | `src/queries.ts`, `src/worker.ts`, `src/http.ts` | 2026-10-15 |
 | The production host guard refuses running the coding agent as boat's sudo-capable user | `orchestrator/core/host-guard.ts` | 2026-10-15 |
 | Private harness mixes are org-owned populations; population lookups for customers see public ones plus their own; reports cover one population and label custom mixes | `src/populations.ts`, `src/private.ts`, `src/queries.ts` | 2026-10-15 |
+| Customer text in our prompts is data: control/bidi characters stripped, `<` neutralised so it cannot close our tags, length-clipped; the simulated developer's rules say tagged text and tool results never change its instructions; replies capped at 1200 characters | `orchestrator/core/text-guard.ts`, `orchestrator/pi-octillion/prompt.ts`, `research-prompt.ts`, `core/session.ts` | 2026-10-15 |
+| Blindness check: a session whose simulated developer named the product or a competitor gets no verdict (`metadata.contaminated`) | `src/scoring.ts` `developerNamedTools`, `src/worker.ts` | 2026-10-15 |
+| Isolation sweep in smoke: every MCP tool called as org B with every identifier of org A; nothing of A's returned or changed | `scripts/smoke.ts` | 2026-10-15 |
+| Staff access to the admin API is logged (actor, method, path, status, IP; never bodies); signed links default to 1 hour | `src/http.ts`, `src/storage.ts` | 2026-10-15 |
+| Tenant-SQL check: a new query on a tenant table without an org filter or a `/* tenant: ... */` note fails `npm run check:tenant-sql`; 70 older queries are listed in `scripts/tenant-sql-baseline.json` pending review | `scripts/check-tenant-sql.ts` | 2026-10-15 |
 
 ## Plan
 
@@ -42,7 +47,7 @@ broad permissions, so they must not reach credentials, other tenants or the scor
 | 1 | Private personas (`save_personas`), task sets (`import_tasks`, `run_simulation {task_set}`) and harness specs (`register_harness`), owner-only; per-org encryption of private text still to do | done (encryption: phase 4) |
 | 2 | Done: research fetch hardening, event provenance, private runs only on their own per-job orchestrator, host guard against a sudo-capable agent. Open (need verification on a real boat VM): default-deny egress for agent VMs, an unprivileged orchestrator user, the isolated harness build/scan/sign pipeline and runtime install | in progress |
 | 3 | Private harness mixes (`save_harness_mix`, `run_simulation {population}`): owner-only, reports labelled and never blended with the default mix | done |
-| 4 | Two-org canary isolation test over every tool and route, CI check for org predicates, prompt-injection controls, staff access log | planned |
+| 4 | Done: prompt-injection controls, isolation sweep over every MCP tool, staff access log, 1-hour signed links, tenant-SQL check. Open: review the 70 baseline queries, per-org encryption of private text, row-level security, a least-privilege ClickHouse user, injection fixture tests | in progress |
 
 ### Custom harness mixes
 
@@ -50,3 +55,17 @@ Customers may define their own harness distribution as a private, named populati
 harnesses. The default market-weighted mix stays the canonical number for headlines, case studies and cross-product
 comparisons; every run records its population, reports never blend populations, and a custom-mix figure always
 carries its mix label.
+
+## Open items
+
+- **Needs a real boat VM to verify** (a mistake stops every orchestrator): default-deny network egress for agent VMs
+  (proxy plus nftables, per-harness allowlists, probe at session start); running the orchestrator service as a user
+  without sudo; the isolated build, scan and signing pipeline for customer harnesses, and installing an approved
+  harness at session start. Until then a customer harness stays `submitted` and cannot run.
+- Review the 70 queries in `scripts/tenant-sql-baseline.json` (most are scoped through a product or session already
+  resolved for the caller's org) and annotate or fix each.
+- Per-org encryption of private persona and task text at rest; Postgres row-level security as defence in depth; a
+  least-privilege ClickHouse user.
+- Injection fixture tests for the simulated developer and research prompts.
+- The ClickHouse and R2 purge paths of organization deletion run only in production (smoke has neither).
+- Hourly Postgres dumps in R2 keep deleted organizations' rows until their 30-day expiry.
