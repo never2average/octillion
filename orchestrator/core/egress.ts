@@ -16,7 +16,7 @@
 export const EGRESS_PROXY_PORT = 3128;
 /** Transparent TLS (SNI) listener and DNS responder the firewall redirects the agent's 443 and 53 to. */
 export const EGRESS_TRANSPARENT_PORT = 3129;
-export const EGRESS_DNS_PORT = 5353;
+export const EGRESS_DNS_PORT = 15353;
 export const EGRESS_DIR = "/opt/octi-egress";
 
 /** Hosts agents need beyond the gateway: package registries (installing packages is part of the measured choice). */
@@ -106,6 +106,8 @@ srv.on("connect", async (req, sock, head) => {
   up.on("error", () => sock.destroy()); sock.on("error", () => up.destroy());
 });
 srv.on("clientError", (e, s) => s.destroy());
+const fatal = (what) => (e) => { log({ fatal: what, error: String(e && e.message || e) }); process.stderr.write("egress proxy: " + what + ": " + String(e && e.message || e) + "\\n"); process.exit(1); };
+srv.on("error", fatal("proxy listener"));
 srv.listen(Number(process.argv[4] || ${EGRESS_PROXY_PORT}), "127.0.0.1");
 const TPORT = ${EGRESS_TRANSPARENT_PORT}, DPORT = ${EGRESS_DNS_PORT};
 
@@ -153,6 +155,7 @@ const tsrv = net.createServer((sock) => {
   };
   sock.on("data", onData); sock.on("error", () => {});
 });
+tsrv.on("error", fatal("transparent TLS listener"));
 tsrv.listen(Number(process.argv[5] || TPORT), "127.0.0.1");
 
 // DNS for the agent (the firewall redirects its port 53 here): allowlisted names get their public IPv4 addresses,
@@ -181,6 +184,7 @@ udp.on("message", async (q, rinfo) => {
   const rr = answers.map((ip) => { const b = Buffer.alloc(16); b.writeUInt16BE(0xc00c, 0); b.writeUInt16BE(1, 2); b.writeUInt16BE(1, 4); b.writeUInt32BE(60, 6); b.writeUInt16BE(4, 10); ip.split(".").forEach((x, i) => (b[12 + i] = Number(x))); return b; });
   udp.send(Buffer.concat([head, question, ...rr]), rinfo.port, rinfo.address);
 });
+udp.on("error", fatal("DNS responder"));
 udp.bind(Number(process.argv[6] || DPORT), "127.0.0.1");
 `;
 }
@@ -234,9 +238,14 @@ sudo -n install -m 644 -o root -g root "$O/egress-proxy.mjs" "$D/proxy.mjs"
 sudo -n install -m 644 -o root -g root "$O/egress-allow.json" "$D/allow.json"
 sudo -n install -m 644 -o root -g root "$O/egress-probe.mjs" "$D/probe.mjs"
 sudo -n install -m 640 -o octiproxy -g root /dev/null /var/log/octi-egress.log
-sudo -n -u octiproxy nohup "$NODE" "$D/proxy.mjs" "$D/allow.json" /var/log/octi-egress.log >/dev/null 2>&1 &
+sudo -n install -m 640 -o octiproxy -g root /dev/null /var/log/octi-egress.err
+sudo -n -u octiproxy nohup "$NODE" "$D/proxy.mjs" "$D/allow.json" /var/log/octi-egress.log >/dev/null 2>/var/log/octi-egress.err &
 up=0; for i in $(seq 1 40); do (exec 3<>/dev/tcp/127.0.0.1/${EGRESS_PROXY_PORT}) 2>/dev/null && { up=1; break; }; sleep 0.25; done
-[ "$up" = 1 ] || { echo "egress: proxy did not start" >&2; exit 22; }
+# All three listeners must be up: the proxy port, the transparent TLS port and the DNS responder.
+if [ "$up" = 1 ]; then
+  up=0; for i in $(seq 1 40); do (exec 3<>/dev/tcp/127.0.0.1/${EGRESS_TRANSPARENT_PORT}) 2>/dev/null && { up=1; break; }; sleep 0.25; done
+fi
+[ "$up" = 1 ] || { echo "egress: proxy did not start: $(head -c 600 /var/log/octi-egress.err 2>/dev/null | tr '\\n' ' ')" >&2; exit 22; }
 AUID="$(id -u agent)"
 if command -v nft >/dev/null 2>&1; then
   sudo -n nft -f - <<EOF

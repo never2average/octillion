@@ -11,7 +11,7 @@ import tls from "node:tls";
 import dgram from "node:dgram";
 import os from "node:os";
 import path from "node:path";
-import { EGRESS_PROXY_PORT, egressPolicy, probeSource, proxyEnv, proxySource, setupScript } from "../core/egress.js";
+import { EGRESS_DNS_PORT, EGRESS_PROXY_PORT, egressPolicy, probeSource, proxyEnv, proxySource, setupScript } from "../core/egress.js";
 
 const results: { name: string; ok: boolean; detail: string }[] = [];
 const check = (name: string, ok: boolean, detail = "") => { results.push({ name, ok, detail }); console.log(`[egress] ${ok ? "PASS" : "FAIL"} ${name}${detail ? ` - ${detail}` : ""}`); };
@@ -25,6 +25,7 @@ check("policy: a non-HTTPS gateway is refused (strict mode is production only)",
 check("policy: a repo given as an IP literal is not allowlisted", !egressPolicy({ gatewayUrls: ["https://gw.x.example"], repoUrl: "https://10.0.0.5/app.git" }).hosts.includes("10.0.0.5"));
 check("proxy env routes HTTP clients through the proxy", proxyEnv().HTTPS_PROXY === `http://127.0.0.1:${EGRESS_PROXY_PORT}` && proxyEnv().NODE_USE_ENV_PROXY === "1");
 const setup = setupScript("/tmp/octi");
+check("setup shows the proxy's own error when it does not start", /octi-egress\.err/.test(setupScript("/tmp/octi")) && /egress: proxy did not start: \$\(head/.test(setupScript("/tmp/octi")));
 check("setup fails closed without node, a firewall tool or a running proxy", /exit 20/.test(setup) && /exit 21/.test(setup) && /exit 22/.test(setup) && /meta skuid \$AUID counter drop/.test(setup));
 check("probe expects the gateway reachable (also without proxy settings) and everything else blocked",
   /gateway directly \(transparent/.test(probeSource("gw.x.example")) && /DNS for an unlisted host", false/.test(probeSource("gw.x.example")) &&
@@ -78,6 +79,21 @@ try {
   check("decisions are logged", /"allow":"registry.npmjs.org"/.test(log) && /"why":"host not allowed"/.test(log), "");
 } finally {
   proc.kill();
+}
+// A port that is already taken (what the old DNS port did on a VM) must fail loudly, not leave a half-started proxy.
+{
+  const taken = net.createServer();
+  await new Promise<void>((r) => taken.listen(0, "127.0.0.1", r));
+  const busy = (taken.address() as net.AddressInfo).port;
+  const out = await new Promise<{ code: number | null; err: string }>((resolve) => {
+    const c = spawn(process.execPath, [path.join(dir, "proxy.mjs"), path.join(dir, "allow.json"), path.join(dir, "log2.jsonl"), String(busy), String(busy + 1000), String(busy + 2000)], { stdio: ["ignore", "ignore", "pipe"] });
+    let err = ""; c.stderr.on("data", (d) => (err += d));
+    const t = setTimeout(() => { c.kill(); resolve({ code: null, err }); }, 8000);
+    c.on("exit", (code) => { clearTimeout(t); resolve({ code, err }); });
+  });
+  taken.close();
+  check("a taken port makes the proxy exit with a clear error (not silently)", out.code === 1 && /egress proxy: proxy listener: /.test(out.err), `${out.code} ${out.err.trim().slice(0, 120)}`);
+  check("the default DNS port is not the mDNS port", EGRESS_DNS_PORT !== 5353, String(EGRESS_DNS_PORT));
 }
 const failed = results.filter((r) => !r.ok);
 console.log(`EGRESS TEST ${failed.length ? "FAIL" : "PASS"} (${results.length - failed.length}/${results.length} assertions)`);
