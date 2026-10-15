@@ -228,8 +228,9 @@ export class WorkerSession {
       s.creds = await sessionCredentials(job.session_id).catch((e) => { throw new Error(`credentials: ${redact(String(e instanceof Error ? e.message : e))}`); });
       harnessCredentials(adapter, s.creds.providers, job.model); // validate the mapping before paying for a sandbox
       // Private runs (customer-written tasks or personas): the agent may only reach the gateway, registries and the
-      // task's git host (core/egress.ts). OCTILLION_EGRESS=all applies it to every run; =off disables it (tests).
-      const lockdown = process.env.OCTILLION_EGRESS === "all" || (job.private && process.env.OCTILLION_EGRESS !== "off");
+      // task's git host (core/egress.ts). Opt-in until the transparent HTTPS path is verified on boat VMs:
+      // OCTILLION_EGRESS=private (private runs) or =all (every run); unset = no lockdown.
+      const lockdown = process.env.OCTILLION_EGRESS === "all" || (job.private && process.env.OCTILLION_EGRESS === "private");
       const egress = lockdown && runner.name === "boat"
         ? egressPolicy({ gatewayUrls: Object.values(s.creds.providers).map((p) => p.base_url).filter((u): u is string => !!u), repoUrl: job.repo_url })
         : null;

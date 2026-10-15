@@ -35,7 +35,10 @@ broad permissions, so they must not reach credentials, other tenants or the scor
 | Blindness check: a session whose simulated developer named the product or a competitor gets no verdict (`metadata.contaminated`) | `src/scoring.ts` `developerNamedTools`, `src/worker.ts` | 2026-10-15 |
 | Isolation sweep in smoke: every MCP tool called as org B with every identifier of org A; nothing of A's returned or changed | `scripts/smoke.ts` | 2026-10-15 |
 | Staff access to the admin API is logged (actor, method, path, status, IP; never bodies); signed links default to 1 hour | `src/http.ts`, `src/storage.ts` | 2026-10-15 |
-| Tenant-SQL check: a new query on a tenant table without an org filter or a `/* tenant: ... */` note fails `npm run check:tenant-sql`; 70 older queries are listed in `scripts/tenant-sql-baseline.json` pending review | `scripts/check-tenant-sql.ts` | 2026-10-15 |
+| Tenant-SQL check: a new query on a tenant table without an org filter or a `/* tenant: ... */` note fails `npm run check:tenant-sql`; all 70 older queries were reviewed and annotated with how they are scoped (none needed a fix; baseline empty) | `scripts/check-tenant-sql.ts` | 2026-10-15 |
+| Private persona and task text is encrypted at rest with a per-organization key, wrapped by the vault master key; deleting the organization deletes its key | `src/orgcrypto.ts` | 2026-10-15 |
+| The orchestrator service on boat VMs runs as the unprivileged `octi` user (no sudo, NoNewPrivileges); verified on a real VM | `orchestrator/deploy/boat-lib.ts` | 2026-10-15 |
+| Network lockdown for agent VMs (proxy, firewall redirect, allowlist, start-up probe; fails closed): built and tested, but **opt-in** (`OCTILLION_EGRESS=private` or `all`) until its transparent HTTPS path is verified on boat VMs | `orchestrator/core/egress.ts`, `orchestrator/core/session.ts` | 2026-10-15 |
 
 ## Plan
 
@@ -44,10 +47,10 @@ broad permissions, so they must not reach credentials, other tenants or the scor
 | 0a | Direct-mode key lock, persona table fails closed, generic DB errors, no customer data in logs | done |
 | 0b | Per-job worker tokens: an autoscaled orchestrator's token is bound to one job and organization, enforced on every worker route | done |
 | 0c | Organization deletion purges Postgres, ClickHouse and R2 (`npm run org:delete`) | done |
-| 1 | Private personas (`save_personas`), task sets (`import_tasks`, `run_simulation {task_set}`) and harness specs (`register_harness`), owner-only; per-org encryption of private text still to do | done (encryption: phase 4) |
-| 2 | Done: research fetch hardening, event provenance, private runs only on their own per-job orchestrator, host guard against a sudo-capable agent. Open (need verification on a real boat VM): default-deny egress for agent VMs, an unprivileged orchestrator user, the isolated harness build/scan/sign pipeline and runtime install | in progress |
+| 1 | Private personas (`save_personas`), task sets (`import_tasks`, `run_simulation {task_set}`) and harness specs (`register_harness`), owner-only, encrypted at rest per org | done |
+| 2 | Done: research fetch hardening, event provenance, private runs only on their own per-job orchestrator, host guard, orchestrator without sudo. Open: the network lockdown is opt-in until its transparent HTTPS path passes on a boat VM; the isolated harness build/scan/sign pipeline and runtime install | in progress |
 | 3 | Private harness mixes (`save_harness_mix`, `run_simulation {population}`): owner-only, reports labelled and never blended with the default mix | done |
-| 4 | Done: prompt-injection controls, isolation sweep over every MCP tool, staff access log, 1-hour signed links, tenant-SQL check. Open: review the 70 baseline queries, per-org encryption of private text, row-level security, a least-privilege ClickHouse user, injection fixture tests | in progress |
+| 4 | Done: prompt-injection controls and tests, isolation sweep over every MCP tool, staff access log, 1-hour signed links, tenant-SQL check with every query reviewed, per-org encryption. Open: row-level security, a least-privilege ClickHouse user | in progress |
 
 ### Custom harness mixes
 
@@ -58,14 +61,12 @@ carries its mix label.
 
 ## Open items
 
-- **Needs a real boat VM to verify** (a mistake stops every orchestrator): default-deny network egress for agent VMs
-  (proxy plus nftables, per-harness allowlists, probe at session start); running the orchestrator service as a user
-  without sudo; the isolated build, scan and signing pipeline for customer harnesses, and installing an approved
-  harness at session start. Until then a customer harness stays `submitted` and cannot run.
-- Review the 70 queries in `scripts/tenant-sql-baseline.json` (most are scoped through a product or session already
-  resolved for the caller's org) and annotate or fix each.
-- Per-org encryption of private persona and task text at rest; Postgres row-level security as defence in depth; a
-  least-privilege ClickHouse user.
-- Injection fixture tests for the simulated developer and research prompts.
+- **Network lockdown is opt-in.** On the last boat VM run the proxy started and stayed up and most probe checks passed,
+  but the transparent HTTPS checks failed, so the lockdown refused the session (fail closed). Diagnostics are in the
+  error message of session `ses_vR4F6OLNopOx` (run `sim_g1UUtQfCxiUn`). Once fixed and verified, set
+  `OCTILLION_EGRESS=private` on the server (it is passed to orchestrators) to turn it on for private runs.
+- The isolated build, scan and signing pipeline for customer harnesses, and installing an approved harness at session
+  start. Until then a customer harness stays `submitted` and cannot run.
+- Postgres row-level security as defence in depth; a least-privilege ClickHouse user.
 - The ClickHouse and R2 purge paths of organization deletion run only in production (smoke has neither).
 - Hourly Postgres dumps in R2 keep deleted organizations' rows until their 30-day expiry.
