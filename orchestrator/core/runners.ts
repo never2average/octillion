@@ -24,7 +24,7 @@ import type { SessionEnvironment } from "./environment.js";
 import { envInstallScript, harnessWiringScript, parseEnvLines, toolsFor } from "./env-install.js";
 import { BOAT, BOAT_PRICE_PER_HOUR, CFG } from "./config.js";
 import { HttpError, log, sh, shq, sleep, withRetry } from "./util.js";
-import { EGRESS_DIR, proxyEnv, proxySource, probeSource, setupScript as egressSetupScript, type EgressPolicy } from "./egress.js";
+import { EGRESS_DIR, proxyEnv, proxySource, probeSource, diagnosticsScript as egressDiagnostics, setupScript as egressSetupScript, type EgressPolicy } from "./egress.js";
 import { boatApi, boatCommandRetry, boatCreate, boatExec, boatExecStream, boatSandboxPath, BoatError } from "./boat.js";
 
 export interface RunExit { code: number | null; signal: string | null; error?: string }
@@ -555,7 +555,13 @@ export const boatRunner: Runner = {
         if (lock.exitCode !== 0) throw new Error(`egress lockdown failed (exit ${lock.exitCode}): ${(lock.stderr || lock.stdout).slice(-600)}`);
         const probe = await boatExec(id, `cd / && NODE="$(command -v node)" && ${boatRunAs()} env -i HOME=${AGENT_HOME} PATH="$(cat ${BOAT_DIR}/path)" "$NODE" ${EGRESS_DIR}/probe.mjs`, 120);
         const last = probe.stdout.trim().split("\n").pop() ?? "";
-        if (probe.exitCode !== 0) throw new Error(`egress probe failed, refusing to run the agent: ${last.slice(0, 800) || probe.stderr.slice(-400)}`);
+        if (probe.exitCode !== 0) {
+          // The VM is destroyed right after this: collect what the proxy and firewall look like first.
+          const diag = await boatExec(id, egressDiagnostics(), 60).then((d) => d.stdout.trim().slice(-1400), () => "(diagnostics unavailable)");
+          let failedChecks = last.slice(0, 300);
+          try { failedChecks = JSON.parse(last).checks.filter((c: { want: boolean; got: boolean }) => c.want !== c.got).map((c: { name: string }) => c.name).join("; "); } catch { /* keep raw */ }
+          throw new Error(`egress probe failed, refusing to run the agent. Unexpected: ${failedChecks || probe.stderr.slice(-300)}\n${diag}`);
+        }
         egressReport = { hosts: spec.egress.hosts.length, probe: JSON.parse(last) };
         log(`[boat ${id}] egress locked down: ${spec.egress.hosts.length} allowed hosts, probe ok`);
       }

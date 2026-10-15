@@ -66,6 +66,9 @@ import http from "node:http"; import net from "node:net"; import dns from "node:
 const allow = JSON.parse(fs.readFileSync(process.argv[2], "utf8")).hosts;
 const logf = process.argv[3];
 const log = (o) => { try { fs.appendFileSync(logf, JSON.stringify({ t: new Date().toISOString(), ...o }) + "\\n"); } catch {} };
+// A bug in one connection must never take the whole proxy (and with it the agent's only way out) down: record it, carry on.
+process.on("uncaughtException", (e) => log({ error: "uncaught", message: String(e && e.stack || e).slice(0, 400) }));
+process.on("unhandledRejection", (e) => log({ error: "unhandled", message: String(e && e.stack || e).slice(0, 400) }));
 function blocked(ip) {
   if (net.isIPv4(ip)) {
     const [a, b] = ip.split(".").map(Number);
@@ -187,6 +190,17 @@ udp.on("message", async (q, rinfo) => {
 udp.on("error", fatal("DNS responder"));
 udp.bind(Number(process.argv[6] || DPORT), "127.0.0.1");
 `;
+}
+
+/** Facts about the lockdown, collected from the VM when its probe fails (the VM is destroyed right after). */
+export function diagnosticsScript(): string {
+  return `echo "--- proxy processes"; pgrep -u octiproxy -a node | head -3 || echo "NONE RUNNING"
+echo "--- listeners"; (sudo -n ss -lntup 2>/dev/null || ss -lntup 2>/dev/null) | grep -E ":(${EGRESS_PROXY_PORT}|${EGRESS_TRANSPARENT_PORT}|${EGRESS_DNS_PORT})\\b" | head -6 || true
+echo "--- proxy error output"; sudo -n head -c 500 /var/log/octi-egress.err 2>/dev/null | head -8
+echo "--- proxy log (last)"; sudo -n tail -n 12 /var/log/octi-egress.log 2>/dev/null | cut -c1-160
+echo "--- rules"; (sudo -n nft list ruleset 2>/dev/null | grep -E "skuid|redirect|drop" | head -8) || true
+(sudo -n iptables -t nat -S OUTPUT 2>/dev/null; sudo -n iptables -S OUTPUT 2>/dev/null) | grep -E "owner|REDIRECT|DROP" | head -8 || true
+echo "--- resolver"; grep -v '^#' /etc/resolv.conf 2>/dev/null | head -3`;
 }
 
 /** Probe program run as the agent after lockdown; prints JSON results and exits 1 on any unexpected outcome. */

@@ -77,7 +77,8 @@ try {
   check("DNS: an allowlisted name resolves", okName.rcode === 0 && okName.answers > 0, JSON.stringify(okName));
   check("DNS: an unlisted name is NXDOMAIN", badName.rcode === 3 && badName.answers === 0, JSON.stringify(badName));
   const log = readFileSync(path.join(dir, "log.jsonl"), "utf8");
-  check("decisions are logged", /"allow":"registry.npmjs.org"/.test(log) && /"why":"host not allowed"/.test(log), "");
+  check("the proxy has not died after serving every kind of request (and has no unexpected errors in its log)", proc.exitCode === null && !/"error":"(uncaught|unhandled)"/.test(readFileSync(path.join(dir, "log.jsonl"), "utf8")), String(proc.exitCode));
+check("decisions are logged", /"allow":"registry.npmjs.org"/.test(log) && /"why":"host not allowed"/.test(log), "");
 } finally {
   proc.kill();
 }
