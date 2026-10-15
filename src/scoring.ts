@@ -220,6 +220,22 @@ function levelIn(kind: "message" | "action", text: string, m: ReturnType<typeof 
   return best;
 }
 
+/**
+ * Blindness check (docs/security.md): the simulated developer must never name the product or a competitor. If its
+ * replies do (for example because a planted persona told it to), the session is contaminated and gets no verdict.
+ * Returns the names it used, or [] when clean. Only orchestrator-written replies count.
+ */
+export function developerNamedTools(events: StoredEvent[], target: Tool, competitors: Tool[]): string[] {
+  const said = events.filter((e) => e.type === "simulated_user" && (e.raw as { _src?: unknown })._src !== "harness")
+    .map((e) => String((e.raw as { content?: unknown }).content ?? e.text)).join("\n");
+  if (!said) return [];
+  const out: string[] = [];
+  for (const t of [target, ...competitors])
+    for (const w of [t.name, ...(t.aliases ?? []), ...(t.packages ?? [])].filter((x) => x && x.length > 2))
+      if (new RegExp(token(w), "i").test(said)) { out.push(t.name); break; }
+  return out;
+}
+
 export function scoreTranscript(events: StoredEvent[], target: Tool, competitors: Tool[]): Score {
   const tools = [{ tool: target, target: true }, ...competitors.map((tool) => ({ tool, target: false }))]
     .map((t) => ({ ...t, m: matchers(t.tool) }));

@@ -493,8 +493,9 @@ try {
   const outcomes = ["adopted", "competitor", "recommended", "none"] as const;
   for (const [i, job] of jobs.entries()) {
     const events = demoTranscript(job.prompt, outcomes[i]);
-    // The orchestrator answers a question as the developer; mentioning a competitor here must not count.
-    events.splice(3, 0, { type: "simulated_user", content: "Keep it cheap. Something like BullMQ is fine if needed, whatever is quickest." });
+    // The orchestrator answers a question as the developer, blind: it never names a tool (a reply that does would
+    // leave the session without a verdict; see developerNamedTools).
+    events.splice(3, 0, { type: "simulated_user", content: "Keep it cheap. Whatever is quickest to set up is fine." });
     const half = Math.ceil(events.length / 2);
     const r1 = await (await worker(`/sessions/${job.session_id}/events`, events.slice(0, half).map((e) => JSON.stringify(e)).join("\n"), { ndjson: true })).json();
     assert.equal(r1.last_seq, half);

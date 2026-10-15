@@ -408,7 +408,8 @@ export class WorkerSession {
   async replyAsDeveloper(text: string): Promise<{ run: number; user_turns_left: number }> {
     const reply = text.trim();
     if (!reply) throw new Error("reply is empty");
-    if (reply.length > 4000) throw new Error("reply too long (max 4000 chars); developers type short chat messages");
+    // Short on purpose: the prompt asks for one to three sentences, and a long reply is room to leak instructions.
+    if (reply.length > 1200) throw new Error("reply too long (max 1200 chars); developers type short chat messages");
     if (this.current) throw new Error("the sub-agent is still running; call wait_for_turn first");
     const r = this.report(true);
     if (!r.can_reply) throw new Error(`cannot reply: ${r.stop_reason ?? "not resumable"}; call finish_session`);

@@ -1,6 +1,6 @@
 import { getDb } from "./db.js";
 import { normalize, transcripts, type RawEvent, type SessionRef, type StoredEvent } from "./transcripts.js";
-import { scoreTranscript, type Tool } from "./scoring.js";
+import { scoreTranscript, developerNamedTools, type Tool } from "./scoring.js";
 import { findAgent } from "./agents.js";
 import { languageOf, resolveEnvironment, type PersonaEnvironment, type SessionEnvironment } from "../orchestrator/core/environment.js";
 import { extendAdaptive } from "./queries.js";
@@ -230,7 +230,17 @@ export async function scoreSession(sessionId: string) {
     return null;
   }
   const events = await allEvents(row.org_id, sessionId);
-  const score = scoreTranscript(events, { name: row.name, aliases: row.aliases, packages: row.packages, domains: row.domains }, row.competitors);
+  const target = { name: row.name, aliases: row.aliases, packages: row.packages, domains: row.domains };
+  const named = developerNamedTools(events, target, row.competitors);
+  if (named.length) {
+    // The simulated developer steered the agent toward a tool: the result is not blind, so it gets no verdict.
+    await db.query(
+      `UPDATE agent_sessions SET verdict = NULL, winner = NULL, mentions = '[]'::jsonb, scored_at = now(),
+              metadata = coalesce(metadata, '{}'::jsonb) || jsonb_build_object('contaminated', 'simulated developer named ' || $2) WHERE id = $1`,
+      [sessionId, named.join(", ")]);
+    return null;
+  }
+  const score = scoreTranscript(events, target, row.competitors);
   // Recount from the store too, so transcripts an orchestrator wrote straight to ClickHouse are reflected.
   const lastSeq = events.reduce((m, e) => Math.max(m, e.seq), 0);
   const userTurns = events.filter((e) => e.type === SIMULATED_USER && (e.raw as { _src?: unknown })._src !== "harness").length;

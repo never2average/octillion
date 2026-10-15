@@ -250,6 +250,12 @@ try {
   check("event provenance: a harness cannot pose as the orchestrator; harness-printed diffs are not evidence",
     forged.type === "harness_reserved:file_edit" && forged._src === "harness" && !("seq" in forged) &&
     real.verdict === "adopted" && fake.verdict !== "adopted", `${String(forged.type)} ${real.verdict} ${fake.verdict}`);
+  const devSaid = (content: string, src = "orchestrator") => [ev({ type: "simulated_user", content, _src: src })];
+  const bull = { name: "BullMQ", aliases: [], packages: ["bullmq"], domains: [] };
+  check("blindness: a simulated-developer reply naming the product or a competitor is caught (orchestrator replies only)",
+    scoringMod.developerNamedTools(devSaid("Something like BullMQ is fine if needed."), stripe as any, [bull as any]).join() === "BullMQ" &&
+    scoringMod.developerNamedTools(devSaid("Keep it cheap, whatever is quickest."), stripe as any, [bull as any]).length === 0 &&
+    scoringMod.developerNamedTools(devSaid("Something like BullMQ is fine.", "harness"), stripe as any, [bull as any]).length === 0, "");
   const pl = await import("../../src/platform.js");
   check("platformOf: template, then language, then the prompt",
     pl.platformOf({ template: "flutter" }) === "mobile" && pl.platformOf({ template: "nextjs-ts" }) === "web" &&
