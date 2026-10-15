@@ -1,6 +1,7 @@
 import { getDb } from "./db.js";
 import { randomId, type Org } from "./auth.js";
 import { WORKSPACE_TEMPLATES, config, getProduct, resolveProduct, runSimulation, saveProduct, browseTaskLibrary } from "./queries.js";
+import { PLATFORMS, isPlatform, platformOf } from "./platform.js";
 import type { Tool } from "./scoring.js";
 import { capacityStatus } from "./autoscaler.js";
 import { environmentIssues, resolveEnvironment, type PersonaEnvironment } from "../orchestrator/core/environment.js";
@@ -19,12 +20,18 @@ export interface ResearchResult {
   product: { name: string; description?: string; category?: string; website_url?: string; docs_url?: string; features?: string[];
              /** Words that name this kind of tool ("transactional email service", "email API"): a prompt may not use them. */
              category_terms?: string[];
+             /** Where the product's users build, most important first (e.g. ["mobile", "web"]); problems are spread across them. */
+             platforms?: string[];
              aliases?: string[]; packages?: string[]; domains?: string[]; competitors?: Tool[] };
   personas: { name: string; summary?: string; attributes?: Record<string, unknown>; instructions?: string;
               /** Their editor and the CLI tools they have installed (catalog ids), installed into the harness per session. */
               environment?: PersonaEnvironment }[];
   scenarios: { title?: string; prompt: string; language?: string; tags?: string[]; expectation?: "recommend" | "avoid";
                rationale?: string; library_task_id?: number; repo_url?: string | null;
+               /** Where the task's code runs; derived from template/language/prompt when omitted. */
+               platform?: string;
+               /** For a problem written from scratch (no library_task_id): what was searched and why no library task fit. */
+               library_check?: string;
                /** The same problem in each persona's words: {persona name: prompt}. */
                variants?: Record<string, string>;
                /** The purchase decision the requirements create (see DECISION_KINDS). */
@@ -157,7 +164,7 @@ function researchTemplate(t: unknown): string | null {
   return (WORKSPACE_TEMPLATES as readonly string[]).includes(v) ? v : null;
 }
 
-export function libraryTasks(q: { query?: string; category?: string; language?: string; limit?: number }) {
+export function libraryTasks(q: { query?: string; category?: string; language?: string; platform?: string; limit?: number }) {
   return browseTaskLibrary(q).then((r) => ({ tasks: r.tasks, categories: r.categories }));
 }
 
@@ -200,6 +207,24 @@ export function validateResearch(r: ResearchResult | undefined): string[] {
   if (scenarios.length < LIMITS.min_scenarios || scenarios.length > LIMITS.max_scenarios)
     issues.push(`give ${LIMITS.min_scenarios}-${LIMITS.max_scenarios} scenarios (got ${scenarios.length})`);
   if (!scenarios.some((s) => (s?.expectation ?? "recommend") === "recommend")) issues.push("at least one scenario must expect a recommendation");
+  // Platforms: problems must cover where the product's users actually build, not only one stack.
+  const platforms: string[] = Array.isArray(p?.platforms) ? p.platforms : [];
+  if (!platforms.length || platforms.some((x) => !isPlatform(x)))
+    issues.push(`product.platforms: list where the product's users build, most important first, from ${PLATFORMS.join(", ")} (e.g. ["mobile", "web"])`);
+  const platformOfScenario = (s: any) => (isPlatform(s?.platform) ? s.platform : platformOf({ template: s?.template, language: s?.language, tags: s?.tags, prompt: s?.prompt }));
+  const recommended = scenarios.filter((s) => (s?.expectation ?? "recommend") === "recommend");
+  for (const pl of platforms.filter(isPlatform).slice(0, 2))
+    if (!recommended.some((s) => platformOfScenario(s) === pl))
+      issues.push(`no "recommend" problem targets ${pl}, one of the product's main platforms; add one (search_library with platform: "${pl}") and set its template`);
+  if (platforms.length && isPlatform(platforms[0]) && recommended.length >= 2 &&
+      recommended.filter((s) => platformOfScenario(s) === platforms[0]).length * 3 < recommended.length)
+    issues.push(`at least a third of the "recommend" problems must target ${platforms[0]}, the product's main platform`);
+  // Library first: a problem written from scratch must say what was searched and why no curated task fit.
+  scenarios.forEach((s: any, i: number) => {
+    if (s?.platform != null && !isPlatform(s.platform)) issues.push(`scenarios[${i}].platform must be one of ${PLATFORMS.join(", ")}`);
+    if (!s?.library_task_id && (typeof s?.library_check !== "string" || s.library_check.trim().length < 30))
+      issues.push(`scenarios[${i}] has no library_task_id: reuse a library task (search_library) or set library_check to the searches you ran and why none fit (30+ characters)`);
+  });
   scenarios.forEach((s, i) => {
     const prompt = s?.prompt?.trim() ?? "";
     if (prompt.length < 40 || prompt.length > 2000) issues.push(`scenarios[${i}].prompt must be 40-2000 characters (got ${prompt.length})`);
@@ -306,11 +331,12 @@ export async function completeResearch(id: string, body: { status?: string; erro
         if (!repoUrl) repoUrl = t?.repo_url ?? null;
       }
       await tx.query(
-        `INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, library_task_id, source, rationale, template, prompt_variants, decision)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $9, $10, $11, $12, $13)`,
+        `INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, library_task_id, source, rationale, template, prompt_variants, decision, platform)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $9, $10, $11, $12, $13, $14)`,
         [job.product_id, s.title?.trim() || prompt.slice(0, 80), prompt, repoUrl, s.language ?? null, s.tags ?? [],
          s.expectation ?? "recommend", s.library_task_id ?? null, s.library_task_id ? "library" : "generated", s.rationale ?? null,
-         template, JSON.stringify(Object.fromEntries(Object.entries(s.variants ?? {}).filter(([who]) => slugOf.has(who)).map(([who, t]) => [slugOf.get(who)!, t.trim()]))), s.decision ? JSON.stringify(s.decision) : null]);
+         template, JSON.stringify(Object.fromEntries(Object.entries(s.variants ?? {}).filter(([who]) => slugOf.has(who)).map(([who, t]) => [slugOf.get(who)!, t.trim()]))), s.decision ? JSON.stringify(s.decision) : null,
+         isPlatform(s.platform) ? s.platform : platformOf({ template, language: s.language, tags: s.tags, prompt })]);
     }
     await tx.query(
       "UPDATE product_research SET status = 'completed', stage = 'done', result = $2, finished_at = now(), heartbeat_at = now() WHERE id = $1",

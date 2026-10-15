@@ -553,7 +553,11 @@ try {
   assert.ok(report.by_agent[0].on_target, "per-agent outcomes on tasks the product should win");
   assert.equal((await call(A, "get_visibility_report", { simulation: sim.simulation.id })).method.scope.simulation, sim.simulation.id);
   const reportMd = ((await A.callTool({ name: "get_visibility_report", arguments: { days: 7 } })).content as any)[0].text as string;
-  for (const h of ["## Headline", "## Results by task", "## Evidence: the deciding sessions", "## How this was run", "## Limits"]) assert.ok(reportMd.includes(h), `report text has ${h}`);
+  for (const h of ["## Headline", "## Results by platform", "## Results by task", "## Evidence: the deciding sessions", "## How this was run", "## Limits"]) assert.ok(reportMd.includes(h), `report text has ${h}`);
+  assert.ok(report.by_platform.length >= 1 && report.by_scenario.every((x: any) => x.platform), "every task has a platform; results split by platform");
+  const onePlatform = report.by_platform[0].platform;
+  assert.ok((await call(A, "get_visibility_report", { days: 7, platform: onePlatform })).by_scenario.every((x: any) => x.platform === onePlatform), "platform filter");
+  assert.ok((await call(A, "browse_task_library", { platform: "web" })).tasks.every((x: any) => x.platform === "web"), "library filter by platform");
   assert.equal((await call(A, "list_simulations")).simulations.length, 3);
   assert.equal((await call(A, "list_products")).products[0].sessions_30d, 4);
 
@@ -597,7 +601,7 @@ try {
                         why_intrinsic: "Durable retries across deploys need a queue: run one, adopt a library, or build persistence yourself.",
                         evidence_url: "https://docs.quickqueue.example.com/install" };
     const good = {
-      product: { name: "QuickQueue", description: "Hosted job queue for TypeScript.", category: "Background jobs", category_terms: ["job queue", "background job service"],
+      product: { name: "QuickQueue", description: "Hosted job queue for TypeScript.", category: "Background jobs", category_terms: ["job queue", "background job service"], platforms: ["backend", "web"],
                  aliases: ["Quick Queue"], packages: ["@quickqueue/sdk"], domains: ["quickqueue.example.com"],
                  competitors: [{ name: "BullMQ", packages: ["bullmq"] }, { name: "Inngest", packages: ["inngest"] }, { name: "Trigger.dev", packages: ["@trigger.dev/sdk"] }] },
       personas: [
@@ -605,9 +609,11 @@ try {
         { name: "Enterprise platform engineer", summary: "Compliance-heavy, self-hosting preferred.", attributes: { stack: ["Go"] }, instructions: "Asks about cost." },
       ],
       scenarios: [
-        { title: "Retry webhooks", prompt: "Our Express API sends webhooks inline and loses them when a customer endpoint is down. Make delivery reliable with retries and backoff.", rationale: "queue fit", library_task_id: lib.tasks[0].id, decision: qDecision },
-        { title: "Nightly digest", prompt: "Add a nightly job to this Next.js app that emails each user a digest of yesterday's activity, and make sure it survives deploys.", rationale: "cron fit", decision: qDecision },
-        { title: "Tiny script", prompt: "Write a one-off Node script that renames the files in ./images to lowercase. It runs once on my laptop.", expectation: "avoid", rationale: "no queue needed", decision: { ...qDecision, need: "a one-off rename on one laptop", evidence_url: undefined } },
+        { title: "Retry webhooks", prompt: "Our Express API sends webhooks inline and loses them when a customer endpoint is down. Make delivery reliable with retries and backoff.", rationale: "queue fit", library_task_id: lib.tasks[0].id, template: "express-ts", decision: qDecision },
+        { title: "Nightly digest", prompt: "Add a nightly job to this Next.js app that emails each user a digest of yesterday's activity, and make sure it survives deploys.", rationale: "cron fit", decision: qDecision,
+          library_check: "searched 'nightly digest' (web) and 'scheduled job' (web); none had a Next.js app" },
+        { title: "Tiny script", prompt: "Write a one-off Node script that renames the files in ./images to lowercase. It runs once on my laptop.", expectation: "avoid", rationale: "no queue needed", decision: { ...qDecision, need: "a one-off rename on one laptop", evidence_url: undefined },
+          library_check: "a control task: the library has no one-off laptop scripts" },
       ],
       sources: [{ url: "https://docs.quickqueue.example.com/install", title: "Install" }],
     };
@@ -636,6 +642,7 @@ try {
     assert.equal(done.personas.length, 2);
     assert.equal(done.scenarios.length, 3);
     assert.deepEqual(done.scenarios.map((x: any) => x.source).sort(), ["generated", "generated", "library"]);
+    assert.equal(done.scenarios.find((x: any) => x.title === "Nightly digest")?.platform, "web", "research problems get a platform");
     assert.ok(done.scenarios.every((x: any) => !/quickqueue/i.test(x.prompt)), "problems never name the product");
     assert.equal(done.simulation.sessions, 6, "3 problems x 2 personas x 1 sample");
     assert.ok((await call(A, "list_developer_profiles", {})).profiles.some((x: any) => x.name === "Startup backend engineer"), "org sees its personas");

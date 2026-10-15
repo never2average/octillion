@@ -455,3 +455,27 @@ CREATE INDEX IF NOT EXISTS mcp_events_org_idx ON mcp_events (org_id, at DESC);
 ALTER TABLE product_research ADD COLUMN IF NOT EXISTS archive_key TEXT;
 ALTER TABLE product_research ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
 ALTER TABLE product_research ADD COLUMN IF NOT EXISTS archive_claimed_at TIMESTAMPTZ;
+
+-- Platform a task targets (src/platform.ts): split results by web / mobile / backend ... Backfilled from the starter
+-- template, else the language, else the tags and prompt; the rules mirror platformOf() in src/platform.ts.
+ALTER TABLE scenarios ADD COLUMN IF NOT EXISTS platform TEXT CHECK (platform IN ('web', 'mobile', 'backend', 'desktop', 'cli', 'data', 'other'));
+ALTER TABLE library_tasks ADD COLUMN IF NOT EXISTS platform TEXT CHECK (platform IN ('web', 'mobile', 'backend', 'desktop', 'cli', 'data', 'other'));
+CREATE OR REPLACE FUNCTION octillion_platform_of(tpl TEXT, lang TEXT, tags TEXT[], prompt TEXT) RETURNS TEXT LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE
+    WHEN tpl IN ('nextjs-ts', 'django') THEN 'web'
+    WHEN tpl IN ('react-native', 'flutter') THEN 'mobile'
+    WHEN tpl IN ('express-ts', 'fastapi', 'go-http', 'java-spring', 'rust-axum', 'node-ts') THEN 'backend'
+    WHEN tpl = 'cpp-cmake' THEN 'other'
+    WHEN lang ~* '^(dart|swift|objective-c|kotlin)$' THEN 'mobile'
+    WHEN concat_ws(' ', array_to_string(tags, ' '), prompt) ~* '\m(flutter|react native|react-native|expo|swiftui|jetpack compose|android app|ios app|mobile app|iphone|app store|play store)\M' THEN 'mobile'
+    WHEN concat_ws(' ', array_to_string(tags, ' '), prompt) ~* '\m(electron|tauri|desktop app)\M' THEN 'desktop'
+    WHEN concat_ws(' ', array_to_string(tags, ' '), prompt) ~* '\m(next\.?js|react|vue|svelte|angular|frontend|front-end|browser|web app|pwa|single-page)\M' THEN 'web'
+    WHEN concat_ws(' ', array_to_string(tags, ' '), prompt) ~* '\m(cli|command-line|command line tool)\M' THEN 'cli'
+    WHEN concat_ws(' ', array_to_string(tags, ' '), prompt) ~* '\m(notebook|pandas|spark|etl|data pipeline|airflow|dbt)\M' THEN 'data'
+    WHEN lang ~* '^(python|go|golang|rust|java|ruby|php|c#|elixir|typescript|javascript)$' THEN 'backend'
+    ELSE 'other' END
+$$;
+UPDATE scenarios SET platform = octillion_platform_of(template, language, tags, prompt) WHERE platform IS NULL;
+UPDATE library_tasks SET platform = octillion_platform_of(attributes->>'template', language, tags, prompt) WHERE platform IS NULL;
+CREATE INDEX IF NOT EXISTS scenarios_product_platform_idx ON scenarios (product_id, platform);
+CREATE INDEX IF NOT EXISTS library_tasks_platform_idx ON library_tasks (platform, category) WHERE active;

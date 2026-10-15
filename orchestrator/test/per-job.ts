@@ -190,10 +190,11 @@ try {
     options: [{ kind: "product" }, { kind: "competitor", name: "Postbox" }, { kind: "build", name: "own SMTP relay" }],
     why_intrinsic: "Getting mail delivered reliably from a new domain cannot be done well without choosing how it is sent.",
     evidence_url: "https://quillmail.example.com/docs/sending" };
-  const base = { product: { name: "Quillmail", packages: ["quillmail"], category_terms: ["transactional email service", "email API"],
+  const base = { product: { name: "Quillmail", packages: ["quillmail"], category_terms: ["transactional email service", "email API"], platforms: ["backend"],
                             competitors: [{ name: "Postbox" }, { name: "Mailcrate" }, { name: "Vercel Mail" }] },
     sources: [{ url: "https://quillmail.example.com/docs/sending" }],
-    scenarios: [1, 2, 3].map((i) => ({ prompt: `Task ${i}: we need password reset emails in this Express service, with templates.`, decision })) };
+    scenarios: [1, 2, 3].map((i) => ({ prompt: `Task ${i}: we need password reset emails in this Express service, with templates.`, decision, language: "typescript",
+                                        library_check: "searched 'password reset email' (backend); no task had an Express service" })) };
   const v1 = research.validateResearch({ ...base, personas: [{ name: "Dev", environment: { editor: "zed", tools: ["cli/psql", "cli/teleporter"] } }] } as any);
   const v2 = research.validateResearch({ ...base, personas: [{ name: "Dev", environment: { editor: "emacs" as any, tools: ["cli/vercel"] } }] } as any);
   const v3 = research.validateResearch({ ...base, personas: [{ name: "Dev", environment: { editor: "intellij", tools: ["cli/gh", "cli/uv"] } }] } as any);
@@ -202,6 +203,19 @@ try {
     v3.length === 0, [v1, v2, v3].map((v) => v.join(" | ")).join(" || "));
   const v4 = research.validateResearch({ ...base, personas: [{ name: "Dev", environment: { editor: "zed", tools: ["cli/vercel"] } }] } as any);
   check("research validation: a tool that names a competitor is rejected", v4.some((x) => /cli\/vercel would reveal/.test(x)), v4.join(" | "));
+  const clean = [{ name: "Dev", environment: { editor: "intellij", tools: ["cli/gh"] } }];
+  const v5 = research.validateResearch({ ...base, product: { ...base.product, platforms: ["mobile", "backend"] }, personas: clean } as any);
+  const v6 = research.validateResearch({ ...base, product: { ...base.product, platforms: undefined }, scenarios: base.scenarios.map(({ library_check, ...s }) => s), personas: clean } as any);
+  const v7 = research.validateResearch({ ...base, product: { ...base.product, platforms: ["mobile", "backend"] }, personas: clean,
+    scenarios: [...base.scenarios.slice(0, 1), ...base.scenarios.slice(1).map((s) => ({ ...s, prompt: "Our Flutter app needs password reset emails for its users.", template: "flutter" }))] } as any);
+  check("research validation: problems must cover the product's main platforms, and from-scratch problems must say why no library task fit",
+    v5.some((x) => /no "recommend" problem targets mobile/.test(x)) && v6.some((x) => /product\.platforms/.test(x)) &&
+    v6.some((x) => /no library_task_id/.test(x)) && v7.length === 0, [v5, v6, v7].map((v) => v.join(" | ")).join(" || "));
+  const pl = await import("../../src/platform.js");
+  check("platformOf: template, then language, then the prompt",
+    pl.platformOf({ template: "flutter" }) === "mobile" && pl.platformOf({ template: "nextjs-ts" }) === "web" &&
+    pl.platformOf({ language: "Dart" }) === "mobile" && pl.platformOf({ prompt: "Our Expo app needs push" }) === "mobile" &&
+    pl.platformOf({ prompt: "this Next.js 15 app", language: "typescript" }) === "web" && pl.platformOf({ language: "go" }) === "backend", "");
 
   // worker-sandbox side: what gets installed and how each harness is wired
   const ei = await import("../core/env-install.js");

@@ -171,7 +171,7 @@ export function createApp() {
   });
   worker.get("/library/tasks", async (req, res) => {
     const q = req.query as Record<string, string | undefined>;
-    res.json(await research.libraryTasks({ query: q.query, category: q.category, language: q.language, limit: q.limit ? Number(q.limit) : undefined }));
+    res.json(await research.libraryTasks({ query: q.query, category: q.category, language: q.language, platform: q.platform, limit: q.limit ? Number(q.limit) : undefined }));
   });
 
   // Credential broker: the orchestrator holds no provider keys; it asks per orchestrator and per session.

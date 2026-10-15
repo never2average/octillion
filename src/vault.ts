@@ -1,3 +1,4 @@
+import { isPlatform, platformOf } from "./platform.js";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { getDb } from "./db.js";
@@ -81,13 +82,16 @@ export async function syncVault() {
       const s = slug ? slugify(slug) : slugify(String(id ?? title ?? prompt.slice(0, 48)));
       taskSlugs.push(s);
       await tx.query(
-        `INSERT INTO library_tasks (slug, external_id, title, prompt, repo_url, language, category, tags, attributes, active, synced_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, true, now())
+        `INSERT INTO library_tasks (slug, external_id, title, prompt, repo_url, language, category, tags, attributes, platform, active, synced_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, now())
          ON CONFLICT (slug) DO UPDATE SET external_id = excluded.external_id, title = excluded.title, prompt = excluded.prompt,
            repo_url = excluded.repo_url, language = excluded.language, category = excluded.category, tags = excluded.tags,
-           attributes = excluded.attributes, active = true, synced_at = now()`,
+           attributes = excluded.attributes, platform = excluded.platform, active = true, synced_at = now()`,
         [s, id == null ? null : String(id), title || prompt.slice(0, 80), prompt, repo_url ?? null, language ?? null,
-         category ?? null, tags ?? [], JSON.stringify({ ...rest, ...(attributes ?? {}) })],
+         category ?? null, tags ?? [], JSON.stringify({ ...rest, ...(attributes ?? {}) }),
+         // A vault task may state its platform; otherwise it is derived like every other task's.
+         isPlatform(t.platform ?? attributes?.platform) ? (t.platform ?? attributes?.platform)
+           : platformOf({ template: (attributes?.template ?? rest.template) as string | undefined, language, tags, prompt })],
       );
     }
     const [{ n: retiredProfiles }] = await tx.query<{ n: number }>(

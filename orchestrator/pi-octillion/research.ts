@@ -101,11 +101,13 @@ export function createResearchExtension(ctx: ResearchContext) {
     }));
     pi.registerTool(defineTool({
       name: "search_library", label: "Search task library",
-      description: "Search the curated library of realistic coding tasks. Returns tasks with ids you can reuse via library_task_id.",
-      parameters: Type.Object({ query: Type.String(), category: Type.Optional(Type.String()), language: Type.Optional(Type.String()), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 25 })) }),
+      description: "Search the curated library of realistic coding tasks (about 7,000, each with a platform: web, mobile, backend, desktop, cli, data, other). Returns tasks with ids you can reuse via library_task_id.",
+      parameters: Type.Object({ query: Type.String(), category: Type.Optional(Type.String()), language: Type.Optional(Type.String()),
+                                platform: Type.Optional(Type.Union(["web", "mobile", "backend", "desktop", "cli", "data", "other"].map((x) => Type.Literal(x)))),
+                                limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 25 })) }),
       executionMode: "sequential",
       async execute(_id, p) {
-        const q = new URLSearchParams({ query: p.query, ...(p.category ? { category: p.category } : {}), ...(p.language ? { language: p.language } : {}), limit: String(p.limit ?? 10) });
+        const q = new URLSearchParams({ query: p.query, ...(p.category ? { category: p.category } : {}), ...(p.language ? { language: p.language } : {}), ...(p.platform ? { platform: String(p.platform) } : {}), limit: String(p.limit ?? 10) });
         return text(await api(`/api/worker/library/tasks?${q}`, { method: "GET" }));
       },
     }));

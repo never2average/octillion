@@ -39,14 +39,14 @@ export function handlersFor(org: Org) {
     list_simulations: (a: { product?: string }) => q.listSimulations(org, a.product),
     get_simulation: (a: { simulation_id: string }) => q.getSimulation(org, a.simulation_id),
     cancel_simulation: (a: { simulation_id: string }) => q.cancelSimulation(org, a.simulation_id),
-    get_visibility_report: (a: { product?: string; days?: number; model?: string; population?: string; simulation?: string }) => q.getReport(org, a),
+    get_visibility_report: (a: { product?: string; days?: number; model?: string; population?: string; simulation?: string; platform?: string }) => q.getReport(org, a),
     get_agent_session: (a: { session_id: string }) => q.getSession(org, a.session_id),
     get_session_transcript: (a: { session_id: string; offset?: number; limit?: number }) =>
       q.getTranscript(org, a.session_id, a.offset, a.limit),
     search_transcripts: (a: Parameters<typeof q.searchTranscripts>[1]) => q.searchTranscripts(org, a),
     list_developer_profiles: (a: { query?: string; product?: string }) => q.listProfiles(org, a),
     list_agents: (a: { population?: string }) => q.listAgents(a),
-    browse_task_library: (a: { query?: string; category?: string; language?: string; limit?: number }) => q.browseTaskLibrary(a),
+    browse_task_library: (a: { query?: string; category?: string; language?: string; platform?: string; limit?: number }) => q.browseTaskLibrary(a),
   };
 }
 type Handlers = ReturnType<typeof handlersFor>;
@@ -63,7 +63,7 @@ function summarize(d: Data): string {
         : `${d.org.name} has no products yet. Start with onboard_product: a short description plus the website and docs links, and Octillion researches the rest (or use save_product to enter the details by hand).`;
     case "product": {
       const p = d.product;
-      return `${p.name} [${p.slug}]: ${p.description || "(no description)"} Category: ${p.category || "n/a"}. Aliases: ${p.aliases.join(", ") || "none"}. Packages: ${p.packages.join(", ") || "none"}. Competitors: ${p.competitors.map((c) => c.name).join(", ") || "none"}. ${d.scenarios.length} scenarios (${d.scenarios.filter((s: any) => s.active).length} active)${d.scenarios.length ? `: ${d.scenarios.map((s: any) => `#${s.id} ${s.title} (${s.expectation}, hit ${pct(s.hit_rate)} of ${s.sessions})`).join("; ")}` : ""}. Worker agents: ${d.agents.map((a: any) => `${a.id} (${pct(a.weight)})`).join(", ")}.${d.warnings.length ? ` Warnings: ${d.warnings.join(" ")}` : ""}`;
+      return `${p.name} [${p.slug}]: ${p.description || "(no description)"} Category: ${p.category || "n/a"}. Aliases: ${p.aliases.join(", ") || "none"}. Packages: ${p.packages.join(", ") || "none"}. Competitors: ${p.competitors.map((c) => c.name).join(", ") || "none"}. ${d.scenarios.length} scenarios (${d.scenarios.filter((s: any) => s.active).length} active)${d.scenarios.length ? `: ${d.scenarios.map((s: any) => `#${s.id} ${s.title} (${s.platform ?? "?"}, ${s.expectation}, hit ${pct(s.hit_rate)} of ${s.sessions})`).join("; ")}` : ""}. Worker agents: ${d.agents.map((a: any) => `${a.id} (${pct(a.weight)})`).join(", ")}.${d.warnings.length ? ` Warnings: ${d.warnings.join(" ")}` : ""}`;
     }
     case "simulations":
       return d.simulations.length
@@ -103,7 +103,7 @@ function summarize(d: Data): string {
         : "No developer profiles synced from the vault yet.";
     case "library":
       return d.tasks.length
-        ? `${d.tasks.length} library tasks: ${d.tasks.map((t: any) => `#${t.id} ${t.title} [${t.category ?? "uncategorized"}${t.language ? `, ${t.language}` : ""}]`).join("; ")}. Categories: ${d.categories.map((c: any) => `${c.category ?? "uncategorized"} (${c.tasks})`).join(", ")}. Add one to a product with save_scenarios {library_task_id}.`
+        ? `${d.tasks.length} library tasks: ${d.tasks.map((t: any) => `#${t.id} ${t.title} [${t.platform ?? "?"}, ${t.category ?? "uncategorized"}${t.language ? `, ${t.language}` : ""}]`).join("; ")}. Categories: ${d.categories.map((c: any) => `${c.category ?? "uncategorized"} (${c.tasks})`).join(", ")}. Platforms: ${(d.platforms ?? []).map((c: any) => `${c.platform ?? "?"} (${c.tasks})`).join(", ")}. Add one to a product with save_scenarios {library_task_id}.`
         : "No matching tasks in the library.";
     case "search": {
       const r = d.results;
@@ -122,16 +122,19 @@ export function reportMarkdown(d: Extract<Data, { view: "report" }>): string {
   const cell = (s: string) => String(s ?? "").replace(/\|/g, "/");
   const scope = m.scope ? `run ${m.scope.simulation} "${m.scope.name}" (${m.scope.status})` : `last ${d.filters.days} days`;
   if (!Number(t.sessions)) return `# ${name}: agent visibility report\n\nNo scored agent sessions (${scope}${d.filters.model ? `, ${d.filters.model}` : ""}). Run a simulation with run_simulation.`;
-  const out: string[] = [`# ${name}: agent visibility report`, `Scope: ${scope}${d.filters.model ? `, model ${d.filters.model}` : ""}. ${t.sessions} scored sessions.`];
+  const out: string[] = [`# ${name}: agent visibility report`, `Scope: ${scope}${d.filters.model ? `, model ${d.filters.model}` : ""}${d.filters.platform ? `, ${d.filters.platform} tasks only` : ""}. ${t.sessions} scored sessions.`];
 
   out.push("## Headline", ...d.headline.map((h: string) => `- ${h}`),
     `- Hit rate ${pct(t.hit_rate)} (95% range ${range(t.hit_ci)})${t.weighted_hit_rate != null ? `, adoption-weighted ${pct(t.weighted_hit_rate)}` : ""}; lost to a competitor ${pct(t.competitor_rate)}.`);
 
-  out.push("## Results by task", `| Task | Should ${cell(name)} win? | Scored | ${cell(name)} | Competitor | No vendor | Mentioned ${cell(name)} | 95% range |`, "|---|---|---|---|---|---|---|---|",
+  if (d.by_platform?.length) out.push("## Results by platform", `| Platform | Tasks | Sessions (should win) | ${cell(name)} | Competitor | No vendor | Mentioned ${cell(name)} | 95% range | Control correct |`, "|---|---|---|---|---|---|---|---|---|",
+    ...d.by_platform.map((x: any) => `| ${x.platform} | ${x.tasks} | ${x.sessions} | ${x.product} | ${x.competitor} | ${x.no_vendor} | ${x.product_mentioned} | ${range(x.hit_ci)} | ${x.control.sessions ? `${x.control.correct} of ${x.control.sessions}` : "–"} |`));
+
+  out.push("## Results by task", `| Task | Platform | Should ${cell(name)} win? | Scored | ${cell(name)} | Competitor | No vendor | Mentioned ${cell(name)} | 95% range |`, "|---|---|---|---|---|---|---|---|---|",
     ...d.by_scenario.map((s: any) => {
       const o = s.outcomes ?? { product: s.hits, competitor: 0, no_vendor: 0 };
       const winners = (s.winners ?? []).map((w: any) => `${w.tool} ${w.sessions}`).join(", ");
-      return `| ${cell(s.title)} | ${s.expectation === "recommend" ? "yes" : "no (control)"} | ${s.sessions} | ${o.product} | ${winners || o.competitor} | ${o.no_vendor} | ${s.product_mentioned ?? "–"} | ${range(s.hit_ci)} |`;
+      return `| ${cell(s.title)} | ${s.platform ?? "–"} | ${s.expectation === "recommend" ? "yes" : "no (control)"} | ${s.sessions} | ${o.product} | ${winners || o.competitor} | ${o.no_vendor} | ${s.product_mentioned ?? "–"} | ${range(s.hit_ci)} |`;
     }));
   const shortlists = d.by_scenario.filter((s: any) => s.expectation === "recommend" && s.alternatives?.length);
   if (shortlists.length) out.push("", "Named instead of " + name + " (sessions that did not choose it):", ...shortlists.map((s: any) => `- ${s.title}: ${s.alternatives.slice(0, 5).map((a: any) => `${a.tool} ${a.sessions}`).join(", ")}`));
@@ -384,6 +387,7 @@ export function createServer(org: Org): McpServer {
         tags: z.array(z.string()).optional(),
         expectation: z.enum(["recommend", "avoid"]).optional(),
         active: z.boolean().optional(),
+        platform: z.enum(["web", "mobile", "backend", "desktop", "cli", "data", "other"]).optional().describe("Where the task's code runs; omit to derive it from the template, language and prompt"),
       })).min(1),
     },
     annotations: write, _meta: meta("save_scenarios"),
@@ -395,6 +399,7 @@ export function createServer(org: Org): McpServer {
     inputSchema: {
       product,
       scenario_ids: z.array(z.number().int()).optional(),
+      platform: z.enum(["web", "mobile", "backend", "desktop", "cli", "data", "other"]).optional().describe("Only the product's active scenarios on this platform, e.g. mobile"),
       agents: z.array(z.string()).optional().describe("Explicit worker agent ids (list_agents), e.g. 'claude-code/sonnet'"),
       models: z.array(z.string()).optional().describe("Explicit: only agents using these models"),
       samples: z.number().int().min(1).max(100).optional().describe(`Representative mode: first batch of sessions per scenario (default ${q.config.defaultSamples()}). Given alone it makes a fixed-size run with no adaptive sampling`),
@@ -430,13 +435,14 @@ export function createServer(org: Org): McpServer {
 
   registerAppTool(server, "get_visibility_report", {
     title: "Visibility report",
-    description: "A sectioned report on whether coding agents pick the product: headline findings; results by task (built on the product, on which competitor, or on no vendor, and whether the product was even mentioned); results by agent and by developer persona; share of voice; quotes from the deciding sessions; how the run was set up; and limits. Pass simulation to report on one run (as a case study does), or days for a rolling window.",
+    description: "A sectioned report on whether coding agents pick the product: headline findings; results by platform (web, mobile, backend, ...) and by task (built on the product, on which competitor, or on no vendor, and whether the product was even mentioned); results by agent and by developer persona; share of voice; quotes from the deciding sessions; how the run was set up; and limits. Pass simulation to report on one run (as a case study does), or days for a rolling window.",
     inputSchema: {
       product,
       days: z.number().int().min(1).max(365).optional().describe("Look-back window (default 30)"),
       model: z.string().optional().describe("Only this model"),
       population: z.string().optional().describe("Developer population for usage shares and the adoption-weighted rate"),
       simulation: z.string().optional().describe("Only this simulation (e.g. sim_Ab3...), whatever its age; overrides days"),
+      platform: z.enum(["web", "mobile", "backend", "desktop", "cli", "data", "other"]).optional().describe("Only tasks on this platform (web, mobile, backend, ...)"),
     },
     annotations: read, _meta: meta("get_visibility_report"),
   }, run("get_visibility_report"));
@@ -497,6 +503,7 @@ export function createServer(org: Org): McpServer {
       query: z.string().optional(),
       category: z.string().optional(),
       language: z.string().optional(),
+      platform: z.enum(["web", "mobile", "backend", "desktop", "cli", "data", "other"]).optional().describe("Only tasks on this platform, e.g. mobile for Flutter / React Native / iOS / Android work"),
       limit: z.number().int().min(1).max(200).optional(),
     },
     annotations: read, _meta: meta("browse_task_library"),

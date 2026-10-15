@@ -517,7 +517,7 @@
       <div class="card"><h2>Scenarios</h2><div class="table-wrap"><table>
         <thead><tr><th>#</th><th>Scenario</th><th>Expect</th><th class="num">Hit rate</th><th>Usually picks</th></tr></thead>
         <tbody>${scenarios.map((s) => `<tr${s.active ? "" : ' style="opacity:.5"'} data-tip="${esc(s.prompt)}">
-          <td class="muted">${s.id}</td><td>${esc(s.title)}${s.active ? "" : ' <span class="badge">retired</span>'}${s.language ? ` <span class="badge">${esc(s.language)}</span>` : ""}</td>
+          <td class="muted">${s.id}</td><td>${esc(s.title)}${s.active ? "" : ' <span class="badge">retired</span>'}${s.platform ? ` <span class="badge">${esc(s.platform)}</span>` : ""}${s.language ? ` <span class="badge">${esc(s.language)}</span>` : ""}</td>
           <td>${s.expectation === "avoid" ? '<span class="badge">avoid</span>' : '<span class="badge">recommend</span>'}</td>
           <td class="num">${pct(s.hit_rate)} <span class="ci">n=${num(s.sessions)}</span></td><td>${esc(s.usual_winner || "–")}</td></tr>`).join("") || `<tr><td colspan="5" class="muted">No scenarios yet</td></tr>`}</tbody>
       </table></div></div>
@@ -558,6 +558,16 @@
       <div class="spread"><div><h1>${esc(d.product.name)}</h1><div class="sub">Do coding agents pick ${esc(d.product.name)}?${d.method?.scope ? ` · run ${esc(d.method.scope.name)}` : ""}</div></div>
         <div class="row">${sel("model", [["", "All models"], ...d.models.map((m) => [m, m])], d.filters.model)}${sel("days", [[7, "7 days"], [30, "30 days"], [90, "90 days"]], d.filters.days)}</div></div>
       ${d.headline?.length ? `<div class="card"><h2>Headline</h2><ul class="findings">${d.headline.map((h) => `<li>${esc(h)}</li>`).join("")}</ul></div>` : ""}
+      ${d.by_platform?.length ? `<div class="card"><h2>By platform</h2><div class="table-wrap"><table>
+        <thead><tr><th>Platform</th><th style="width:30%">Outcomes (should win)</th><th class="num">${esc(d.product.name)}</th><th class="num">Mentioned</th><th class="num">Control</th><th></th></tr></thead>
+        <tbody>${d.by_platform.map((x) => { const n = x.sessions || 1; return `<tr>
+          <td><span class="badge">${esc(x.platform)}</span> <span class="muted">${num(x.tasks)} task${x.tasks === 1 ? "" : "s"}</span></td>
+          <td>${x.sessions ? `<div class="vbar">${[["adopted", x.product], ["competitor", x.competitor], ["none", x.no_vendor]].filter(([, v]) => v).map(([k, v]) => `<span class="v-${k}" style="width:${(v / n) * 100}%"></span>`).join("")}</div>` : '<span class="muted">control only</span>'}</td>
+          <td class="num">${num(x.product)}/${num(x.sessions)} ${ci(x.hit_ci)}</td>
+          <td class="num">${num(x.product_mentioned)}/${num(x.sessions)}</td>
+          <td class="num">${x.control.sessions ? `${num(x.control.correct)}/${num(x.control.sessions)}` : "–"}</td>
+          <td>${d.filters.platform ? "" : go("get_visibility_report", { product: d.product.slug, ...(d.filters.simulation ? { simulation: d.filters.simulation } : { days: d.filters.days }), platform: x.platform }, "Only these →")}</td></tr>`; }).join("")}</tbody>
+      </table></div></div>` : ""}
       <div class="grid">
         ${tile("Hit rate", pct(t.hit_rate), `${ci(t.hit_ci)} 95% CI · n=${num(t.sessions)}`)}
         ${t.weighted_hit_rate != null ? tile("Adoption-weighted", pct(t.weighted_hit_rate), `per-agent rates × developer usage · covers ${pct(t.adoption_coverage)}`) : ""}
@@ -584,7 +594,7 @@
         <div class="table-wrap"><table>
         <thead><tr><th>Task</th><th style="width:28%">Outcomes</th><th class="num">Hit rate</th><th>Instead</th><th class="num" data-tip="Sessions that mentioned the product at all">Mentioned</th></tr></thead>
         <tbody>${d.by_scenario.map((s) => { const o = s.outcomes, n = Number(s.sessions) || 1; return `<tr${s.prompt ? ` data-tip="${esc(s.prompt)}"` : ""}>
-          <td>${esc(s.title)}${s.expectation === "avoid" ? ' <span class="badge">control</span>' : ""}</td>
+          <td>${esc(s.title)}${s.platform ? ` <span class="badge">${esc(s.platform)}</span>` : ""}${s.expectation === "avoid" ? ' <span class="badge">control</span>' : ""}</td>
           <td>${o ? `<div class="vbar">${[["adopted", o.product, d.product.name], ["competitor", o.competitor, "Competitor"], ["none", o.no_vendor, "No vendor"]].filter(([, v]) => v).map(([k, v, l]) => `<span class="v-${k}" style="width:${(v / n) * 100}%" data-tip="${esc(l)}: ${v} of ${n}"></span>`).join("")}</div>` : ""}</td>
           <td class="num">${num(s.hits)}/${num(s.sessions)} ${ci(s.hit_ci)}</td>
           <td>${esc((s.winners || []).map((w) => `${w.tool} ${w.sessions}`).join(", ") || (s.alternatives || []).slice(0, 3).map((a) => a.tool).join(", ") || s.usual_winner || "–")}</td>

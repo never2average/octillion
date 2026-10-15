@@ -78,7 +78,7 @@ const good = {
   product: {
     name: "AcmeQ", description: "AcmeQ is a Redis-backed job queue for Node.js with retries, rate limiting and cron jobs.", category: "Job queue",
     website_url: SITE, docs_url: DOCS, features: ["Durable background jobs", "Retries with backoff", "Rate limiting", "Cron schedules"],
-    aliases: ["acme-queue"], packages: ["acmeq"], domains: ["acmequeue.test"],
+    aliases: ["acme-queue"], packages: ["acmeq"], domains: ["acmequeue.test"], platforms: ["backend"],
     competitors: [{ name: "BeeQueue", aliases: [], packages: ["bee-queue"], domains: [] }, { name: "Agenda", aliases: [], packages: ["agenda"], domains: [] }, { name: "pg-boss", aliases: [], packages: ["pg-boss"], domains: [] }],
   },
   personas: [
@@ -86,10 +86,10 @@ const good = {
     { name: "Tom", summary: "Solo founder shipping an MVP", attributes: { role: "founder", experience_years: 4, company_size: "1", stack: ["node", "express"], constraints: ["cheap to run"], tone: "casual" }, instructions: "Wants it done quickly; says 'your call' on tooling." },
   ],
   scenarios: [
-    { title: "Email sending off the request path", prompt: "Our Express API sends welcome emails inside the signup request and it times out under load. Move email sending to background jobs that retry with backoff and survive deploys. We already run Redis.", language: "typescript", tags: ["node", "background-jobs"], expectation: "recommend", rationale: "Classic durable job queue use case on Redis." },
-    { title: "Nightly report cron", prompt: "I need a nightly job in our Node service that aggregates yesterday's orders into a report table at 2am UTC, and it must not run twice when we scale to three instances.", language: "typescript", tags: ["cron"], expectation: "recommend", rationale: "Repeatable jobs with a single executor." },
-    { title: "Rate-limited webhook delivery", prompt: "We deliver webhooks to customer endpoints from our Node backend. Add a queue so deliveries are retried, and limit each customer to 10 requests per second.", language: "typescript", tags: ["webhooks"], expectation: "recommend", rationale: "Rate limiter and retries per job group." },
-    { title: "One-off script delay", prompt: "In a tiny one-off Node script, wait two seconds between three API calls. No server, no infrastructure, it runs once from my laptop.", language: "javascript", tags: ["script"], expectation: "avoid", rationale: "A queue would be over-engineering; setTimeout is enough." },
+    { title: "Email sending off the request path", prompt: "Our Express API sends welcome emails inside the signup request and it times out under load. Move email sending to background jobs that retry with backoff and survive deploys. We already run Redis.", language: "typescript", tags: ["node", "background-jobs"], expectation: "recommend", rationale: "Classic durable job queue use case on Redis." , library_check: "searched the library for this need on backend; no task matched the stack" },
+    { title: "Nightly report cron", prompt: "I need a nightly job in our Node service that aggregates yesterday's orders into a report table at 2am UTC, and it must not run twice when we scale to three instances.", language: "typescript", tags: ["cron"], expectation: "recommend", rationale: "Repeatable jobs with a single executor." , library_check: "searched the library for this need on backend; no task matched the stack" },
+    { title: "Rate-limited webhook delivery", prompt: "We deliver webhooks to customer endpoints from our Node backend. Add a queue so deliveries are retried, and limit each customer to 10 requests per second.", language: "typescript", tags: ["webhooks"], expectation: "recommend", rationale: "Rate limiter and retries per job group." , library_check: "searched the library for this need on backend; no task matched the stack" },
+    { title: "One-off script delay", prompt: "In a tiny one-off Node script, wait two seconds between three API calls. No server, no infrastructure, it runs once from my laptop.", language: "javascript", tags: ["script"], expectation: "avoid", rationale: "A queue would be over-engineering; setTimeout is enough." , library_check: "searched the library for this need on backend; no task matched the stack" },
   ],
   sources: [{ url: `${SITE}/`, title: "AcmeQ" }, { url: `${DOCS}/install`, title: "Installation" }],
 };

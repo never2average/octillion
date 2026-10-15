@@ -19,7 +19,8 @@ Tools:
   (registry.npmjs.org, pypi.org, crates.io, pkg.go.dev) and the product's GitHub repos (once linked from its site).
   You have about 25 fetches in total, so start with the homepage, docs index, installation/quickstart pages, and
   then the registry entry of the main package.
-- search_library(query, category?, language?): search a curated library of realistic coding tasks.
+- search_library(query, category?, language?, platform?): search the curated library of about 7,000 realistic coding
+  tasks; each has a platform (web, mobile, backend, desktop, cli, data, other).
 - report_progress(stage, note): stages are reading, profiling, personas, problems, validating. Call it as you move on.
 - validate(result_json): dry-run validation. Returns {ok, issues}.
 - submit(result_json): final submission. If it returns issues, fix every one and submit again.
@@ -30,7 +31,9 @@ Procedure:
    domains, the product category and its key features.
 2. Profile. Fill product: name, description (2-4 factual sentences), category, website_url, docs_url, features
    (3-8 short items), aliases (other names developers use, e.g. a CLI name or a domain-style name), packages (every
-   real package name), domains (the product's domains).
+   real package name), domains (the product's domains), and platforms: where the product's users actually build,
+   most important first, from web | mobile | backend | desktop | cli | data | other. Judge it from the docs (which
+   SDKs and quickstarts lead, e.g. iOS/Android/Flutter first means mobile), not from what is easiest to test.
    Packages are install/import identifiers, not display names: list a package only if it appears in an install
    command or import in the docs AND you confirmed it with fetch_url on its registry entry
    (https://registry.npmjs.org/<name>, https://pypi.org/pypi/<name>/json, https://crates.io/api/v1/crates/<name>).
@@ -85,9 +88,15 @@ ${ENV_CATALOG}
    at least one alternative, and building it or using nothing), "why_intrinsic": why the work cannot be done well
    without making that choice, "evidence_url": for "recommend", a page from your sources that shows the product
    really does what this problem needs (not just the general category)}.
-   Use search_library for ideas and realistic contexts. A library task is usable only if it meets every rule above:
-   if it names the category or prescribes the service, rewrite the prompt (keep library_task_id so its repository is
-   attached) or leave it out.
+   Library first. Build the problems from the curated library, not from scratch: for each of the product's main
+   platforms and each key feature, call search_library with that platform and a query for the need (and a category
+   or language when it helps), and read the results. Reuse a fitting task by setting its library_task_id (its
+   repository or starter comes with it). A library task is usable only if it meets every rule above: if it names the
+   category or prescribes the service, rewrite the prompt and keep library_task_id. Write a problem from scratch only
+   when no library task fits; then set "library_check" to the searches you ran and why none fit.
+   Spread the problems across product.platforms: every one of the first two platforms gets at least one "recommend"
+   problem, and the main platform gets the most (at least a third). Set each problem's "platform" and a template of
+   that platform (a mobile problem runs in the react-native or flutter starter, a web one in nextjs-ts).
    Include 1-2 problems with expectation "avoid": the same kind of decision arises, but the requirements make buying
    the product the wrong call (a trivial volume a few lines of standard library handle, an internal-only notice, a
    hard data-residency rule). The agent must be free to pick the product; it just should not. Everything else gets
@@ -105,14 +114,15 @@ ${ENV_CATALOG}
 
 Result JSON (pass it as a JSON string in result_json):
 { "product": { "name", "description", "category", "category_terms": ["the words that name this kind of tool, 2-8"],
-               "website_url", "docs_url", "features": [], "aliases": [],
+               "website_url", "docs_url", "features": [], "aliases": [], "platforms": ["main platform first"],
                "packages": [], "domains": [], "competitors": [{"name", "aliases": [], "packages": [], "domains": []}] },
   "personas": [{ "name", "summary", "attributes": {"role", "experience_years", "company_size", "stack": [],
                  "constraints": [], "tone"}, "instructions",
                  "environment": {"editor", "tools": [], "skills": [{"name", "description", "body"}], "agent_rules"} }],
   "scenarios": [{ "title", "prompt", "language", "tags": [], "expectation": "recommend" | "avoid", "rationale",
                   "variants": {"<persona name>": "<the prompt in their words>"},
-                  "decision": {"need", "options": [{"kind", "name"}], "why_intrinsic", "evidence_url"}, "library_task_id": null, "repo_url": null, "template": null }],
+                  "decision": {"need", "options": [{"kind", "name"}], "why_intrinsic", "evidence_url"}, "library_task_id": null,
+                  "library_check": "only when library_task_id is null", "platform": "web | mobile | ...", "repo_url": null, "template": null }],
   "sources": [{ "url", "title" }] }
 
 Be factual. If a page does not say something, don't claim it. List every page you used in sources.`;
