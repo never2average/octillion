@@ -400,12 +400,17 @@ export async function completeResearch(id: string, body: { status?: string; erro
   const r = body.result!;
   const [o] = await db.query<{ id: number; slug: string; name: string }>("SELECT id, slug, name FROM organizations WHERE id = $1", [job.org_id]);
   const org: Org = { orgId: o.id, slug: o.slug, name: o.name };
-  const [prod] = await db.query<{ slug: string }>("SELECT slug FROM products WHERE id = $1", [job.product_id]);
+  const [prod] = await db.query<{ slug: string; competitors: Tool[] | null }>("SELECT slug, competitors FROM products WHERE id = $1", [job.product_id]);
   const p = r.product;
+  // The competitor list only grows: research adds what it found; competitors already on the product (added by hand or
+  // by an earlier research) stay, so a loss to them is never scored "no vendor".
+  const found = p.competitors ?? [];
+  const known = new Set(found.map((c) => c.name.trim().toLowerCase()));
+  const competitors = [...found, ...(prod.competitors ?? []).filter((c) => !known.has(c.name.trim().toLowerCase()))];
   await saveProduct(org, {
     product: prod.slug, name: p.name, description: p.description, category: p.category,
     website_url: p.website_url ?? job.input.website_url ?? undefined, docs_url: p.docs_url ?? job.input.docs_url ?? undefined,
-    aliases: p.aliases ?? [], packages: p.packages ?? [], domains: p.domains ?? [], competitors: p.competitors ?? [],
+    aliases: p.aliases ?? [], packages: p.packages ?? [], domains: p.domains ?? [], competitors,
   });
   await db.query("UPDATE products SET features = $2, research = $3 WHERE id = $1",
     [job.product_id, JSON.stringify(p.features ?? []), JSON.stringify({ research_id: id, sources: r.sources ?? [], category_terms: p.category_terms ?? [], at: new Date().toISOString() })]);
