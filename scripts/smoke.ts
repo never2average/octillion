@@ -599,7 +599,7 @@ try {
     // Research uses only library tasks: two more distinct ones for the other problems.
     const more = (await (await fetch(`${base}/api/worker/library/tasks?limit=20`, { headers: { authorization: `Bearer ${WORKER_TOKEN}` } })).json())
       .tasks.map((t: any) => t.id).filter((id: number) => id !== lib.tasks[0].id);
-    assert.ok(more.length >= 2, "library has enough tasks for the research fixture");
+    assert.ok(more.length >= 5, "library has enough tasks for a 2x shortlist");
 
     const qDecision = { need: "work must survive restarts and endpoint outages", options: [{ kind: "product" }, { kind: "open_source", name: "BullMQ" }, { kind: "build" }],
                         why_intrinsic: "Durable retries across deploys need a queue: run one, adopt a library, or build persistence yourself.",
@@ -609,8 +609,8 @@ try {
                  aliases: ["Quick Queue"], packages: ["@quickqueue/sdk"], domains: ["quickqueue.example.com"],
                  competitors: [{ name: "BullMQ", packages: ["bullmq"] }, { name: "Inngest", packages: ["inngest"] }, { name: "Trigger.dev", packages: ["@trigger.dev/sdk"] }] },
       personas: [
-        { name: "Startup backend engineer", summary: "Ships fast on Node.js; prefers managed services.", attributes: { stack: ["TypeScript"] }, instructions: "Pragmatic." },
-        { name: "Enterprise platform engineer", summary: "Compliance-heavy, self-hosting preferred.", attributes: { stack: ["Go"] }, instructions: "Asks about cost." },
+        { profile_slug: "example-startup-backend", name: "Seed-stage startup backend engineer (example)" },
+        { profile_slug: "example-enterprise-platform", name: "Enterprise platform engineer (example)" },
       ],
       scenarios: [
         { title: "Retry webhooks", prompt: "Our Express API sends webhooks inline and loses them when a customer endpoint is down. Make delivery reliable with retries and backoff.", rationale: "queue fit", library_task_id: lib.tasks[0].id, template: "express-ts", decision: qDecision },
@@ -618,10 +618,16 @@ try {
         { title: "Tiny script", prompt: "Write a one-off Node script that renames the files in ./images to lowercase. It runs once on my laptop.", expectation: "avoid", rationale: "no queue needed", decision: { ...qDecision, need: "a one-off rename on one laptop", evidence_url: undefined }, library_task_id: more[1] },
       ],
       sources: [{ url: "https://docs.quickqueue.example.com/install", title: "Install" }],
+      selection: {
+        tasks: [{ round: 1, candidates: [lib.tasks[0].id, ...more.slice(0, 5)].map((id: number, j: number) => ({ library_task_id: id, keep: j < 4, reason: j < 4 ? "a durable-work need on the main platforms" : "weaker: no real buy-or-build decision" })) },
+                { round: 2, candidates: [lib.tasks[0].id, more[0], more[1], more[2]].map((id: number, j: number) => ({ library_task_id: id, keep: j < 3, reason: j < 3 ? "kept after checking platform coverage" : "dropped: same feature as the first task" })) }],
+        personas: [{ round: 1, candidates: ["example-startup-backend", "example-enterprise-platform", "example-solo-indie", "example-agency-frontend"].map((slug, j) => ({ profile_slug: slug, keep: j < 3, reason: j < 3 ? "backend or full-stack role on a matching stack" : "frontend-only work; rarely runs queues" })) },
+                   { round: 2, candidates: ["example-startup-backend", "example-enterprise-platform", "example-solo-indie"].map((slug, j) => ({ profile_slug: slug, keep: j < 2, reason: j < 2 ? "kept: covers startup and enterprise" : "dropped: overlaps the startup engineer" })) }],
+      },
     };
     const bad = structuredClone(good);
     bad.scenarios[1].prompt = "Use QuickQueue to add a nightly job to this Next.js app that emails each user a digest of yesterday's activity.";
-    bad.personas[0].summary = "Loves BullMQ and uses it everywhere in production.";
+    (bad.personas[0] as any).summary = "Loves BullMQ and uses it everywhere in production.";
     bad.product.packages = ["@quickqueue/sdk", "QuickQueue"];
     bad.product.competitors = bad.product.competitors.slice(0, 2);
     delete (bad.scenarios[2] as any).library_task_id;
@@ -635,7 +641,7 @@ try {
     assert.equal(rejected.status, 422);
     assert.ok((await rejected.json()).issues.length >= 2);
     const accepted = await (await worker(`/research/${rid}/complete`, { status: "completed", result: good })).json();
-    assert.equal(accepted.status, "completed");
+    assert.equal(accepted.status, "completed", JSON.stringify(accepted).slice(0, 1500));
     assert.ok(accepted.simulation_id, "onboarding with run: true chains the run");
     const plain = await call(A, "onboard_product", { prompt: "QuickQueue Lite is a hosted cron service for TypeScript backends.", website_url: "https://lite.quickqueue.example.com" });
     const [plainRow] = await db.query<any>("SELECT run FROM product_research WHERE id = $1", [plain.research.id]);
@@ -646,13 +652,14 @@ try {
     assert.equal(done.product.name, "QuickQueue");
     assert.deepEqual(done.product.packages, ["@quickqueue/sdk"]);
     assert.equal(done.personas.length, 2);
+    assert.ok(done.personas.every((x: any) => x.attributes?.from_profile && /\(example\)$/.test(x.name)), "personas are copied from the profile data");
     assert.equal(done.scenarios.length, 3);
     assert.ok(done.scenarios.every((x: any) => x.source === "library" && x.library_task_id), "every research problem is a cited library task");
     assert.equal(done.scenarios.find((x: any) => x.title === "Nightly digest")?.platform, "web", "research problems get a platform");
     assert.ok(done.scenarios.every((x: any) => !/quickqueue/i.test(x.prompt)), "problems never name the product");
     assert.equal(done.simulation.sessions, 6, "3 problems x 2 personas x 1 sample");
-    assert.ok((await call(A, "list_developer_profiles", {})).profiles.some((x: any) => x.name === "Startup backend engineer"), "org sees its personas");
-    assert.ok(!(await call(B, "list_developer_profiles", {})).profiles.some((x: any) => x.name === "Startup backend engineer"), "other orgs do not");
+    assert.ok((await call(A, "list_developer_profiles", {})).profiles.some((x: any) => x.attributes?.from_profile === "example-startup-backend" && x.source === "picked"), "org sees its personas");
+    assert.ok(!(await call(B, "list_developer_profiles", {})).profiles.some((x: any) => x.attributes?.from_profile), "other orgs do not");
     await call(A, "cancel_simulation", { simulation_id: accepted.simulation_id });
     console.log("✓ onboarding: research claim, progress, library search, blindness validation, apply, personas scoped, auto-run");
   }

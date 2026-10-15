@@ -194,19 +194,31 @@ try {
                             competitors: [{ name: "Postbox" }, { name: "Mailcrate" }, { name: "Vercel Mail" }] },
     sources: [{ url: "https://quillmail.example.com/docs/sending" }],
     scenarios: [1, 2, 3].map((i) => ({ prompt: `Task ${i}: we need password reset emails in this Express service, with templates.`, decision, language: "typescript",
-                                        library_task_id: 100 + i })) };
-  const v1 = research.validateResearch({ ...base, personas: [{ name: "Dev", environment: { editor: "zed", tools: ["cli/psql", "cli/teleporter"] } }] } as any);
-  const v2 = research.validateResearch({ ...base, personas: [{ name: "Dev", environment: { editor: "emacs" as any, tools: ["cli/vercel"] } }] } as any);
-  const v3 = research.validateResearch({ ...base, personas: [{ name: "Dev", environment: { editor: "intellij", tools: ["cli/gh", "cli/uv"] } }] } as any);
+                                        library_task_id: 100 + i })),
+    selection: {
+      tasks: [{ round: 1, candidates: [101, 102, 103, 104, 105, 106].map((id) => ({ library_task_id: id, keep: id <= 103, reason: id <= 103 ? "tests reset email on the main platform" : "weaker fit for the product's main use" })) },
+              { round: 2, candidates: [101, 102, 103, 107].map((id) => ({ library_task_id: id, keep: id <= 103, reason: id <= 103 ? "kept: covers the main platform and feature" : "new search result, but duplicates task 101" })) }],
+      personas: [{ round: 1, candidates: [{ profile_slug: "so-1", keep: true, reason: "backend developer on the product's stack" }, { profile_slug: "so-2", keep: false, reason: "data scientist; never sends email" }] },
+                 { round: 2, candidates: [{ profile_slug: "so-1", keep: true, reason: "still the best fit after review" }, { profile_slug: "so-3", keep: false, reason: "new candidate, but same role as so-1" }] }],
+    } };
+  const v1 = research.validateResearch({ ...base, personas: [{ name: "Dev", profile_slug: "so-1", environment: { editor: "zed", tools: ["cli/psql", "cli/teleporter"] } }] } as any);
+  const v2 = research.validateResearch({ ...base, personas: [{ name: "Dev", profile_slug: "so-1", environment: { editor: "emacs" as any, tools: ["cli/vercel"] } }] } as any);
+  const v3 = research.validateResearch({ ...base, personas: [{ name: "Dev", profile_slug: "so-1", environment: { editor: "intellij", tools: ["cli/gh", "cli/uv"] } }] } as any);
   check("research validation: unknown tools and editors are rejected, competitor tools too, a clean environment passes",
     v1.some((x) => /unknown environment tools: cli\/teleporter/.test(x)) && v2.some((x) => /editor must be one of/.test(x)) &&
     v3.length === 0, [v1, v2, v3].map((v) => v.join(" | ")).join(" || "));
-  const v4 = research.validateResearch({ ...base, personas: [{ name: "Dev", environment: { editor: "zed", tools: ["cli/vercel"] } }] } as any);
+  const v4 = research.validateResearch({ ...base, personas: [{ name: "Dev", profile_slug: "so-1", environment: { editor: "zed", tools: ["cli/vercel"] } }] } as any);
   check("research validation: a tool that names a competitor is rejected", v4.some((x) => /cli\/vercel would reveal/.test(x)), v4.join(" | "));
-  const clean = [{ name: "Dev", environment: { editor: "intellij", tools: ["cli/gh"] } }];
+  const clean = [{ name: "Dev", profile_slug: "so-1", environment: { editor: "intellij", tools: ["cli/gh"] } }];
   const v5 = research.validateResearch({ ...base, product: { ...base.product, platforms: ["mobile", "backend"] }, personas: clean } as any);
   const v6 = research.validateResearch({ ...base, product: { ...base.product, platforms: undefined }, scenarios: base.scenarios.map(({ library_task_id, ...s }) => s), personas: clean } as any);
   const v8 = research.validateResearch({ ...base, scenarios: base.scenarios.map((s) => ({ ...s, library_task_id: 101 })), personas: clean } as any);
+  const v9 = research.validateResearch({ ...base, selection: undefined, personas: [{ name: "Dev", environment: { editor: "intellij", tools: ["cli/gh"] } }] } as any);
+  const v10 = research.validateResearch({ ...base, personas: clean, selection: { ...base.selection, tasks: [base.selection.tasks[0], base.selection.tasks[0]] } } as any);
+  check("research validation: personas are picked from the profile data, and tasks and personas are chosen in 2-3 recorded rounds",
+    v9.some((x) => /profile_slug is required/.test(x)) && v9.some((x) => /selection\.tasks: record 2-3 rounds/.test(x)) &&
+    v9.some((x) => /selection\.personas: record 2-3 rounds/.test(x)) && v10.some((x) => /must re-examine the shortlist/.test(x)),
+    [v9, v10].map((v) => v.join(" | ")).join(" || "));
   const v7 = research.validateResearch({ ...base, product: { ...base.product, platforms: ["mobile", "backend"] }, personas: clean,
     scenarios: [...base.scenarios.slice(0, 1), ...base.scenarios.slice(1).map((s) => ({ ...s, prompt: "Our Flutter app needs password reset emails for its users.", template: "flutter" }))] } as any);
   check("research validation: problems cover the product's main platforms, every problem is a library task, each used once",
@@ -267,10 +279,10 @@ try {
   const kw = ei.harnessWiringScript("kilo", [], sj.environment);
   const kj = /printf %s (\S+) \| base64 -d > "\$HOME\/\.config\/kilo\/kilo\.json"/.exec(kw.script);
   check("Kilo reads the rules through `instructions`", !!kj && JSON.parse(Buffer.from(kj[1]!, "base64").toString()).instructions[0] === "~/.config/kilo/AGENTS.md", kw.script.slice(0, 200));
-  const pv = research.validateResearch({ ...base, personas: [{ name: "Dev" }, { name: "Lead" }],
+  const pv = research.validateResearch({ ...base, personas: [{ name: "Dev", profile_slug: "so-1" }, { name: "Lead", profile_slug: "so-4" }],
     scenarios: base.scenarios.map((s, i) => ({ ...s, variants: i === 0 ? { Dev: "Short: add reset emails to this Express service please, thanks a lot.", Ghost: "x".repeat(50) } : i === 1 ? { Lead: "Use Quillmail to send password reset emails from this Express service." } : {} })) } as any);
-  check("research validation: variants must belong to a persona and stay blind", pv.some((x) => /"Ghost", which is not a persona/.test(x)) && pv.some((x) => /variants\["Lead"\] names Quillmail/.test(x)) && pv.length === 2, pv.join(" | "));
-  const sk = research.validateResearch({ ...base, personas: [{ name: "Dev", environment: { skills: [{ name: "Bad Name", description: "", body: "short" }], agent_rules: "x".repeat(4000) } }] } as any);
+  check("research validation: variants must belong to a persona and stay blind", pv.some((x) => /"Ghost", which is not a persona/.test(x)) && pv.some((x) => /variants\["Lead"\] names Quillmail/.test(x)) && pv.filter((x) => /variants/.test(x)).length === 2, pv.join(" | "));
+  const sk = research.validateResearch({ ...base, personas: [{ name: "Dev", profile_slug: "so-1", environment: { skills: [{ name: "Bad Name", description: "", body: "short" }], agent_rules: "x".repeat(4000) } }] } as any);
   check("research validation: skill format and limits", sk.some((x) => /name must be lowercase-hyphenated/.test(x)) && sk.some((x) => /description must be/.test(x)) &&
     sk.some((x) => /body must be 40-/.test(x)) && sk.some((x) => /agent_rules must be text of at most 3000/.test(x)), sk.join(" | "));
 

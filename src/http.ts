@@ -169,6 +169,10 @@ export function createApp() {
       throw e;
     }
   });
+  worker.get("/library/profiles", async (req, res) => {
+    const q = req.query as Record<string, string | undefined>;
+    res.json(await research.libraryProfiles({ query: q.query, limit: q.limit ? Number(q.limit) : undefined }));
+  });
   worker.get("/library/tasks", async (req, res) => {
     const q = req.query as Record<string, string | undefined>;
     res.json(await research.libraryTasks({ query: q.query, category: q.category, language: q.language, platform: q.platform, limit: q.limit ? Number(q.limit) : undefined }));

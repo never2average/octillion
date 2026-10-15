@@ -39,7 +39,7 @@ export const RESEARCH = {
   maxCostUsd: num(env.RESEARCH_MAX_COST_USD, 2),
   enabled: env.RESEARCH_DISABLED !== "1",
 };
-export const RESEARCH_TOOLS = ["fetch_url", "search_library", "report_progress", "validate", "submit"] as const;
+export const RESEARCH_TOOLS = ["fetch_url", "search_library", "search_profiles", "report_progress", "validate", "submit"] as const;
 const STAGES = ["reading", "profiling", "personas", "problems", "validating"] as const;
 
 const enc = encodeURIComponent;
@@ -109,6 +109,16 @@ export function createResearchExtension(ctx: ResearchContext) {
       async execute(_id, p) {
         const q = new URLSearchParams({ query: p.query, ...(p.category ? { category: p.category } : {}), ...(p.language ? { language: p.language } : {}), ...(p.platform ? { platform: String(p.platform) } : {}), limit: String(p.limit ?? 10) });
         return text(await api(`/api/worker/library/tasks?${q}`, { method: "GET" }));
+      },
+    }));
+    pi.registerTool(defineTool({
+      name: "search_profiles", label: "Search developer profiles",
+      description: "Search the developer-profile data (real developers from survey responses: role, experience, company size, stack, constraints, how they answer). Personas must be picked from here by profile_slug.",
+      parameters: Type.Object({ query: Type.Optional(Type.String()), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 40 })) }),
+      executionMode: "sequential",
+      async execute(_id, p) {
+        const q = new URLSearchParams({ ...(p.query ? { query: p.query } : {}), limit: String(p.limit ?? 15) });
+        return text(await api(`/api/worker/library/profiles?${q}`, { method: "GET" }));
       },
     }));
     pi.registerTool(defineTool({

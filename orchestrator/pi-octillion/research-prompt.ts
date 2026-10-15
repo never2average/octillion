@@ -21,6 +21,8 @@ Tools:
   then the registry entry of the main package.
 - search_library(query, category?, language?, platform?): search the curated library of about 7,000 realistic coding
   tasks; each has a platform (web, mobile, backend, desktop, cli, data, other).
+- search_profiles(query?, limit?): search the developer-profile data: real developers from survey responses (role,
+  experience, company size, stack, constraints, how they answer). Personas are picked from here.
 - report_progress(stage, note): stages are reading, profiling, personas, problems, validating. Call it as you move on.
 - validate(result_json): dry-run validation. Returns {ok, issues}.
 - submit(result_json): final submission. If it returns issues, fix every one and submit again.
@@ -44,12 +46,19 @@ Procedure:
    (c) widely used open-source or self-hosted options when they compete for the same job (e.g. BullMQ for a hosted
    queue). A missing alternative makes the report call its wins "no tool picked". Give each its name, aliases, real
    package names and domains.
-3. Personas. Write 2-4 developer personas who would plausibly need what the product does: name, summary,
-   attributes {role, experience_years, company_size, stack[], constraints[], tone}, and instructions describing how
-   they answer a coding agent's questions (brief, what they care about, what they defer to the agent). Personas must
-   NOT mention the product, its competitors, their packages or domains. They answer the agent blind.
-   Give each persona an environment: the editor they use and the CLI tools they have installed, as a real developer
-   with that role and stack would (e.g. a platform engineer: kubectl, terraform, the cloud CLI; a data engineer: uv,
+3. Personas. PICK 2-4 personas from the developer-profile data; never invent one. Choose in 2-3 rounds and record
+   them in selection.personas:
+   - Round 1 (shortlist): search_profiles with several queries for the product's real users (their roles and stacks on
+     its main platforms, e.g. "Flutter", "Kotlin", "mobile", "React", "backend"). Shortlist at least twice as many
+     profiles as you will pick, each with keep and a reason.
+   - Round 2 (critique): check the shortlist against the product's platforms and audience: does each profile's stack
+     match a platform the problems run on? Do they cover different seniority and company sizes? Is anyone redundant?
+     Drop the weak ones and search again to bring in better ones.
+   - Round 3 (final, optional): confirm the final set; kept candidates must be exactly the personas.
+   Each persona is {"profile_slug", "name": the profile's exact name, "environment"}. Its summary, attributes and
+   answering instructions come from the data, so do not write them.
+   Give each picked persona an environment matching the profile's real role and stack: the editor they use and the
+   CLI tools they have installed, as a real developer with that role and stack would (e.g. a platform engineer: kubectl, terraform, the cloud CLI; a data engineer: uv,
    psql). Their editor's language servers for the task's language are added automatically. Never pick a tool from
    the product or a competitor. Choose only from this catalog:
 ${ENV_CATALOG}
@@ -88,6 +97,12 @@ ${ENV_CATALOG}
    at least one alternative, and building it or using nothing), "why_intrinsic": why the work cannot be done well
    without making that choice, "evidence_url": for "recommend", a page from your sources that shows the product
    really does what this problem needs (not just the general category)}.
+   Choose the problems in 2-3 rounds and record them in selection.tasks:
+   - Round 1 (shortlist): search widely and shortlist at least twice as many library tasks as you will use, each
+     with keep and a reason (which platform and feature it tests, whether its requirements force a buy/build choice).
+   - Round 2 (critique): check the shortlist as a set: every main platform covered, the main one most; different key
+     features; each decision intrinsic and fair; one or two good controls. Drop the weak ones, search again for gaps.
+   - Round 3 (final, optional): confirm; the kept candidates must be exactly the problems' library_task_ids.
    Library only. Every problem MUST be a task from the curated library, cited by its library_task_id. Never write a
    problem from scratch: a problem without a valid library_task_id is rejected. For each of the product's main
    platforms and each key feature, call search_library with that platform and a query for the need (and a category or
@@ -116,9 +131,10 @@ Result JSON (pass it as a JSON string in result_json):
 { "product": { "name", "description", "category", "category_terms": ["the words that name this kind of tool, 2-8"],
                "website_url", "docs_url", "features": [], "aliases": [], "platforms": ["main platform first"],
                "packages": [], "domains": [], "competitors": [{"name", "aliases": [], "packages": [], "domains": []}] },
-  "personas": [{ "name", "summary", "attributes": {"role", "experience_years", "company_size", "stack": [],
-                 "constraints": [], "tone"}, "instructions",
+  "personas": [{ "profile_slug": "REQUIRED: from search_profiles", "name": "the profile's exact name",
                  "environment": {"editor", "tools": [], "skills": [{"name", "description", "body"}], "agent_rules"} }],
+  "selection": { "tasks": [{ "round": 1, "candidates": [{ "library_task_id", "keep": true | false, "reason" }] }, { "round": 2, ... }],
+                 "personas": [{ "round": 1, "candidates": [{ "profile_slug", "keep": true | false, "reason" }] }, { "round": 2, ... }] },
   "scenarios": [{ "title", "prompt", "language", "tags": [], "expectation": "recommend" | "avoid", "rationale",
                   "variants": {"<persona name>": "<the prompt in their words>"},
                   "decision": {"need", "options": [{"kind", "name"}], "why_intrinsic", "evidence_url"}, "library_task_id": "REQUIRED: id from search_library",

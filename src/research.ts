@@ -23,7 +23,9 @@ export interface ResearchResult {
              /** Where the product's users build, most important first (e.g. ["mobile", "web"]); problems are spread across them. */
              platforms?: string[];
              aliases?: string[]; packages?: string[]; domains?: string[]; competitors?: Tool[] };
-  personas: { name: string; summary?: string; attributes?: Record<string, unknown>; instructions?: string;
+  /** Picked from the shared developer-profile data (search_profiles): the profile's slug; its name, summary,
+   *  attributes and instructions are copied from the data, never written by research. */
+  personas: { profile_slug?: string; name: string; summary?: string; attributes?: Record<string, unknown>; instructions?: string;
               /** Their editor and the CLI tools they have installed (catalog ids), installed into the harness per session. */
               environment?: PersonaEnvironment }[];
   scenarios: { title?: string; prompt: string; language?: string; tags?: string[]; expectation?: "recommend" | "avoid";
@@ -38,6 +40,48 @@ export interface ResearchResult {
                /** Optional starter workspace (orchestrator/workspaces/<template>) for scenarios without repo_url. */
                template?: string | null }[];
   sources?: { url: string; title?: string }[];
+  /** How the problems and personas were chosen: 2-3 rounds each of shortlist -> critique -> final. */
+  selection?: { tasks?: SelectionRound[]; personas?: SelectionRound[] };
+}
+
+export interface SelectionRound {
+  round: number;
+  /** Every candidate weighed this round: kept or dropped, with the reason. Tasks by library_task_id, personas by profile_slug. */
+  candidates: { library_task_id?: number; profile_slug?: string; keep: boolean; reason: string }[];
+}
+
+/** Checks on the recorded selection rounds for one kind (tasks or personas). */
+function selectionIssues(kind: "tasks" | "personas", rounds: unknown, finalIds: (string | number)[]): string[] {
+  const key = kind === "tasks" ? "library_task_id" : "profile_slug";
+  const where = `selection.${kind}`;
+  if (!Array.isArray(rounds) || rounds.length < 2 || rounds.length > 3)
+    return [`${where}: record 2-3 rounds of choosing (shortlist, critique, final), each with every candidate's ${key}, keep and reason`];
+  const issues: string[] = [];
+  const idsOf = (r: any) => (Array.isArray(r?.candidates) ? r.candidates : []).map((c: any) => c?.[key]);
+  rounds.forEach((r: any, i: number) => {
+    const cs = Array.isArray(r?.candidates) ? r.candidates : [];
+    if (!cs.length) issues.push(`${where}[${i}] has no candidates`);
+    cs.forEach((c: any, j: number) => {
+      if (c?.[key] == null) issues.push(`${where}[${i}].candidates[${j}].${key} is required`);
+      if (typeof c?.keep !== "boolean") issues.push(`${where}[${i}].candidates[${j}].keep must be true or false`);
+      if (typeof c?.reason !== "string" || c.reason.trim().length < 15) issues.push(`${where}[${i}].candidates[${j}].reason: say why it is kept or dropped (15+ characters)`);
+    });
+  });
+  const first = idsOf(rounds[0]);
+  if (first.length < 2 * finalIds.length)
+    issues.push(`${where}[0]: shortlist at least twice as many candidates as you finally pick (${first.length} for ${finalIds.length})`);
+  // A later round must change something: a new candidate, or a candidate kept before and dropped now (or back).
+  const decisions = (r: any) => new Map<string, boolean>((Array.isArray(r?.candidates) ? r.candidates : []).map((c: any) => [String(c?.[key]), c?.keep === true]));
+  for (let i = 1; i < rounds.length; i++) {
+    const prev = decisions(rounds[i - 1]), cur = decisions(rounds[i]);
+    if (![...cur].some(([id, keep]) => !prev.has(id) || prev.get(id) !== keep))
+      issues.push(`${where}[${i}]: a later round must re-examine the shortlist (drop a weak candidate or bring in a better one), not repeat it`);
+  }
+  const lastKept = new Set(idsOf(rounds[rounds.length - 1]).filter((_: unknown, j: number) => (rounds[rounds.length - 1] as any).candidates[j]?.keep).map(String));
+  const finals = new Set(finalIds.map(String));
+  if (lastKept.size !== finals.size || [...finals].some((x) => !lastKept.has(x)))
+    issues.push(`${where}: the candidates kept in the last round must be exactly the ${kind === "tasks" ? "problems' library_task_ids" : "personas' profile_slugs"}`);
+  return issues;
 }
 
 const slugify = (s: string) => s.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
@@ -195,6 +239,8 @@ export function validateResearch(r: ResearchResult | undefined): string[] {
   if (personas.length < 1 || personas.length > LIMITS.max_personas) issues.push(`give 1-${LIMITS.max_personas} personas (got ${personas.length})`);
   personas.forEach((x, i) => {
     if (!x?.name?.trim()) issues.push(`personas[${i}].name is required`);
+    if (typeof x?.profile_slug !== "string" || !x.profile_slug.trim())
+      issues.push(`personas[${i}].profile_slug is required: pick every persona from the developer-profile data (search_profiles); never invent one`);
     const leak = named(`${x?.name ?? ""} ${x?.summary ?? ""} ${x?.instructions ?? ""} ${JSON.stringify(x?.attributes ?? {})}`, [...productWords, ...competitorWords]);
     if (leak.length) issues.push(`personas[${i}] mentions ${leak.join(", ")}; personas must not know the product or its competitors`);
     for (const e of environmentIssues(x?.environment)) issues.push(`personas[${i}].${e}`);
@@ -263,6 +309,8 @@ export function validateResearch(r: ResearchResult | undefined): string[] {
       }
     }
   });
+  issues.push(...selectionIssues("tasks", r.selection?.tasks, scenarios.map((s: any) => s?.library_task_id).filter((x: unknown): x is number => Number.isInteger(x))));
+  issues.push(...selectionIssues("personas", r.selection?.personas, personas.map((x: any) => x?.profile_slug).filter(Boolean)));
   return issues;
 }
 
@@ -275,9 +323,40 @@ async function libraryIssues(r: ResearchResult | undefined): Promise<string[]> {
   return ids.filter((x) => !found.has(x)).map((x) => `library_task_id ${x} is not an active library task; cite an id returned by search_library`);
 }
 
+/** Picked personas must be active shared profiles, used once, under the profile's own name. */
+async function profileIssues(r: ResearchResult | undefined): Promise<string[]> {
+  const picks = (r?.personas ?? []).filter((x) => typeof x?.profile_slug === "string");
+  if (!picks.length) return [];
+  const db = await getDb();
+  const rows = await db.query<{ slug: string; name: string }>(
+    "SELECT slug, name FROM developer_profiles WHERE active AND org_id IS NULL AND slug = ANY($1)", [picks.map((x) => x.profile_slug)]);
+  const bySlug = new Map(rows.map((x) => [x.slug, x.name]));
+  const issues: string[] = [];
+  if (new Set(picks.map((x) => x.profile_slug)).size !== picks.length) issues.push("each developer profile may be picked once");
+  for (const x of picks) {
+    const name = bySlug.get(x.profile_slug!);
+    if (!name) issues.push(`profile_slug ${x.profile_slug} is not a developer profile in the data; pick one returned by search_profiles`);
+    else if (name !== x.name) issues.push(`personas: profile ${x.profile_slug} is named "${name}"; use that name (variants are keyed by it)`);
+  }
+  return issues;
+}
+
+/** Shared developer profiles from the data (survey-based), for research to pick personas from. */
+export async function libraryProfiles(q: { query?: string; limit?: number }) {
+  const db = await getDb();
+  const params: unknown[] = [];
+  let where = "active AND org_id IS NULL";
+  if (q.query?.trim()) params.push(`%${q.query.trim()}%`), (where += ` AND (name ILIKE $1 OR summary ILIKE $1 OR attributes::text ILIKE $1)`);
+  const profiles = await db.query(
+    `SELECT slug, name, summary, attributes, left(instructions, 600) AS instructions FROM developer_profiles WHERE ${where}
+      ORDER BY slug LIMIT ${Math.min(Math.max(Math.trunc(q.limit ?? 15), 1), 40)}`, params);
+  const [{ n }] = await db.query<{ n: number }>("SELECT count(*) AS n FROM developer_profiles WHERE active AND org_id IS NULL");
+  return { total: Number(n), profiles };
+}
+
 export async function validateResearchJob(id: string, result: ResearchResult) {
   await runningJob(id);
-  const issues = [...validateResearch(result), ...(await libraryIssues(result))];
+  const issues = [...validateResearch(result), ...(await libraryIssues(result)), ...(await profileIssues(result))];
   return { ok: issues.length === 0, issues };
 }
 
@@ -289,7 +368,7 @@ export async function completeResearch(id: string, body: { status?: string; erro
     await db.query("UPDATE product_research SET status = 'failed', error = $2, finished_at = now() WHERE id = $1", [id, String(body.error ?? "failed").slice(0, 2000)]);
     return { status: "failed" };
   }
-  const issues = [...validateResearch(body.result), ...(await libraryIssues(body.result))];
+  const issues = [...validateResearch(body.result), ...(await libraryIssues(body.result)), ...(await profileIssues(body.result))];
   if (issues.length) {
     const [{ attempts }] = await db.query<{ attempts: number }>(
       "UPDATE product_research SET attempts = attempts + 1, heartbeat_at = now(), stage = 'validating' WHERE id = $1 RETURNING attempts", [id]);
@@ -315,16 +394,18 @@ export async function completeResearch(id: string, body: { status?: string; erro
   const slugOf = new Map<string, string>();
   await db.transaction(async (tx) => {
     // A new research replaces the previous generated personas and problems (kept for history, inactive).
-    await tx.query("UPDATE developer_profiles SET active = false WHERE product_id = $1 AND source = 'generated'", [job.product_id]);
+    await tx.query("UPDATE developer_profiles SET active = false WHERE product_id = $1 AND source IN ('generated', 'picked')", [job.product_id]);
     await tx.query("UPDATE scenarios SET active = false, updated_at = now() WHERE product_id = $1 AND source IN ('generated', 'library')", [job.product_id]);
     for (const x of r.personas) {
-      const slug = `p${job.product_id}-${slugify(x.name)}-${randomId("", 3).toLowerCase().replace(/[^a-z0-9]/g, "x")}`;
+      // The persona is a real developer profile from the data: identity, attributes and instructions are copied from it.
+      const [d] = await tx.query<any>("SELECT name, summary, attributes, instructions FROM developer_profiles WHERE slug = $1 AND org_id IS NULL", [x.profile_slug]);
+      const slug = `p${job.product_id}-${slugify(d.name)}-${randomId("", 3).toLowerCase().replace(/[^a-z0-9]/g, "x")}`;
       personaSlugs.push(slug);
       slugOf.set(x.name, slug);
       await tx.query(
         `INSERT INTO developer_profiles (slug, name, summary, attributes, instructions, org_id, product_id, source, active, environment)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'generated', true, $8)`,
-        [slug, x.name.trim(), x.summary ?? "", JSON.stringify(x.attributes ?? {}), x.instructions ?? "", job.org_id, job.product_id,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'picked', true, $8)`,
+        [slug, d.name, d.summary ?? "", JSON.stringify({ ...(d.attributes ?? {}), from_profile: x.profile_slug }), d.instructions ?? "", job.org_id, job.product_id,
          x.environment ? JSON.stringify({ editor: x.environment.editor, tools: x.environment.tools ?? [], skills: x.environment.skills ?? [],
                                           agent_rules: x.environment.agent_rules ?? null }) : null]);
     }

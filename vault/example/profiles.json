@@ -7,7 +7,11 @@
       "role": "Full-stack developer",
       "experience_years": 3,
       "company_size": "solo",
-      "stack": ["TypeScript", "Next.js", "Vercel"],
+      "stack": [
+        "TypeScript",
+        "Next.js",
+        "Vercel"
+      ],
       "budget": "as close to free as possible",
       "tone": "casual, terse"
     },
@@ -21,8 +25,18 @@
       "role": "Platform engineer",
       "experience_years": 9,
       "company_size": "1000+",
-      "stack": ["Python", "Go", "AWS", "Kubernetes", "Terraform"],
-      "constraints": ["SOC 2", "data must stay in eu-west-1", "SSO required"],
+      "stack": [
+        "Python",
+        "Go",
+        "AWS",
+        "Kubernetes",
+        "Terraform"
+      ],
+      "constraints": [
+        "SOC 2",
+        "data must stay in eu-west-1",
+        "SSO required"
+      ],
       "tone": "precise, asks about operational cost"
     },
     "instructions": "Answer as a careful platform engineer. Mention your constraints when relevant. Ask the agent to justify choices that add a new vendor. Do not suggest specific products yourself."
@@ -35,9 +49,31 @@
       "role": "Backend engineer",
       "experience_years": 5,
       "company_size": "2-50",
-      "stack": ["TypeScript", "Node.js", "Postgres", "Render"],
+      "stack": [
+        "TypeScript",
+        "Node.js",
+        "Postgres",
+        "Render"
+      ],
       "tone": "pragmatic"
     },
     "instructions": "Answer like a pragmatic startup engineer: fine with managed services, wants it done today. If asked to choose, choose what fits the existing stack."
+  },
+  {
+    "id": "example-agency-frontend",
+    "name": "Agency frontend developer (example)",
+    "summary": "Builds client web apps at a 15-person agency; deadlines matter more than elegance.",
+    "attributes": {
+      "role": "Frontend developer",
+      "experience_years": 5,
+      "company_size": "15",
+      "stack": [
+        "TypeScript",
+        "React",
+        "Next.js"
+      ],
+      "tone": "friendly, brief"
+    },
+    "instructions": "Answer briefly. Care about shipping on time and handing over something the client can run. Leave tool choices to the agent unless asked to pick between options it listed."
   }
 ]
