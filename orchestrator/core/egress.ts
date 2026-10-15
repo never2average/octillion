@@ -239,13 +239,14 @@ sudo -n install -m 644 -o root -g root "$O/egress-allow.json" "$D/allow.json"
 sudo -n install -m 644 -o root -g root "$O/egress-probe.mjs" "$D/probe.mjs"
 sudo -n install -m 640 -o octiproxy -g root /dev/null /var/log/octi-egress.log
 sudo -n install -m 640 -o octiproxy -g root /dev/null /var/log/octi-egress.err
-sudo -n -u octiproxy nohup "$NODE" "$D/proxy.mjs" "$D/allow.json" /var/log/octi-egress.log >/dev/null 2>/var/log/octi-egress.err &
+# The redirect must be opened by the proxy user itself (the file is its own), not by this shell.
+sudo -n -u octiproxy sh -c 'exec nohup "$0" "$@" >/dev/null 2>/var/log/octi-egress.err' "$NODE" "$D/proxy.mjs" "$D/allow.json" /var/log/octi-egress.log &
 up=0; for i in $(seq 1 40); do (exec 3<>/dev/tcp/127.0.0.1/${EGRESS_PROXY_PORT}) 2>/dev/null && { up=1; break; }; sleep 0.25; done
 # All three listeners must be up: the proxy port, the transparent TLS port and the DNS responder.
 if [ "$up" = 1 ]; then
   up=0; for i in $(seq 1 40); do (exec 3<>/dev/tcp/127.0.0.1/${EGRESS_TRANSPARENT_PORT}) 2>/dev/null && { up=1; break; }; sleep 0.25; done
 fi
-[ "$up" = 1 ] || { echo "egress: proxy did not start: $(head -c 600 /var/log/octi-egress.err 2>/dev/null | tr '\\n' ' ')" >&2; exit 22; }
+[ "$up" = 1 ] || { echo "egress: proxy did not start: $(sudo -n head -c 600 /var/log/octi-egress.err 2>/dev/null | tr '\\n' ' ')" >&2; exit 22; }
 AUID="$(id -u agent)"
 if command -v nft >/dev/null 2>&1; then
   sudo -n nft -f - <<EOF

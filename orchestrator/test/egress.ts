@@ -25,7 +25,8 @@ check("policy: a non-HTTPS gateway is refused (strict mode is production only)",
 check("policy: a repo given as an IP literal is not allowlisted", !egressPolicy({ gatewayUrls: ["https://gw.x.example"], repoUrl: "https://10.0.0.5/app.git" }).hosts.includes("10.0.0.5"));
 check("proxy env routes HTTP clients through the proxy", proxyEnv().HTTPS_PROXY === `http://127.0.0.1:${EGRESS_PROXY_PORT}` && proxyEnv().NODE_USE_ENV_PROXY === "1");
 const setup = setupScript("/tmp/octi");
-check("setup shows the proxy's own error when it does not start", /octi-egress\.err/.test(setupScript("/tmp/octi")) && /egress: proxy did not start: \$\(head/.test(setupScript("/tmp/octi")));
+check("setup shows the proxy's own error when it does not start (file opened by the proxy user, read with sudo)",
+  /sudo -n -u octiproxy sh -c 'exec nohup "\$0" "\$@" >\/dev\/null 2>\/var\/log\/octi-egress\.err'/.test(setupScript("/tmp/octi")) && /egress: proxy did not start: \$\(sudo -n head/.test(setupScript("/tmp/octi")));
 check("setup fails closed without node, a firewall tool or a running proxy", /exit 20/.test(setup) && /exit 21/.test(setup) && /exit 22/.test(setup) && /meta skuid \$AUID counter drop/.test(setup));
 check("probe expects the gateway reachable (also without proxy settings) and everything else blocked",
   /gateway directly \(transparent/.test(probeSource("gw.x.example")) && /DNS for an unlisted host", false/.test(probeSource("gw.x.example")) &&
@@ -93,7 +94,7 @@ try {
   });
   taken.close();
   check("a taken port makes the proxy exit with a clear error (not silently)", out.code === 1 && /egress proxy: proxy listener: /.test(out.err), `${out.code} ${out.err.trim().slice(0, 120)}`);
-  check("the default DNS port is not the mDNS port", EGRESS_DNS_PORT !== 5353, String(EGRESS_DNS_PORT));
+  check("the default DNS port is not the mDNS port", (EGRESS_DNS_PORT as number) !== 5353, String(EGRESS_DNS_PORT));
 }
 const failed = results.filter((r) => !r.ok);
 console.log(`EGRESS TEST ${failed.length ? "FAIL" : "PASS"} (${results.length - failed.length}/${results.length} assertions)`);
