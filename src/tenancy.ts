@@ -12,6 +12,7 @@
  *
  * Hourly Postgres dumps in R2 (postgres/, 30-day retention) still hold the rows until they expire.
  */
+import { forgetOrgKey } from "./orgcrypto.js";
 import { getDb } from "./db.js";
 import { keys, listKeys, deleteKeys, storageEnabled } from "./storage.js";
 import { baseTranscripts } from "./transcripts.js";
@@ -78,6 +79,7 @@ export async function deleteOrg(orgId: number, opts: { dryRun?: boolean; log?: (
       "INSERT INTO org_deletions (org_id, counts) VALUES ($1, $2) ON CONFLICT (org_id) DO UPDATE SET counts = excluded.counts, deleted_at = now()",
       [orgId, JSON.stringify(counts)]);
   });
+  forgetOrgKey(orgId); // its data key went with the cascade (org_keys): its private text is unreadable
   log(`org ${orgId}: deleted`);
   return out;
 }

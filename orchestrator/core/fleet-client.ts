@@ -7,6 +7,7 @@
  *    unreachable -> keep the last assignment and retry in 10s. SIGTERM -> DELETE /api/worker/fleet/:id.
  *  - standalone: fleet/plan.ts planFleet(capacity).
  */
+import { userInfo } from "node:os";
 import { planFleet } from "../fleet/plan.js";
 import { CFG, env, num } from "./config.js";
 import { api, log } from "./util.js";
@@ -48,7 +49,7 @@ export class FleetMembership {
       } else {
         const r = (await api("/api/worker/fleet", {
           json: { orchestrator_id: this.orchestratorId, capacity: this.capacity,
-                  meta: { worker_id: CFG.workerId, runner: "boat", running: Object.fromEntries(this.running), ...(CFG.job ? { job: CFG.job } : {}) } },
+                  meta: { worker_id: CFG.workerId, runner: "boat", running: Object.fromEntries(this.running), ...(CFG.job ? { job: CFG.job } : {}), user: serviceUser() } },
         })) as { assignment?: GroupTarget[]; next_checkin_seconds?: number; job?: FleetMembership["job"] };
         this.set((r.assignment ?? []).map((a) => ({ agent_id: a.agent_id, harness: a.harness, model: a.model, pods: a.pods,
                                                     ...(Array.isArray(a.agents) ? { agents: a.agents } : {}) })));
@@ -93,4 +94,9 @@ export class FleetMembership {
       await api(`/api/worker/fleet/${encodeURIComponent(this.orchestratorId)}`, { method: "DELETE" })
         .catch((e) => log("fleet leave failed (the server drops us after 90s anyway):", String(e)));
   }
+}
+
+/** The OS user this orchestrator runs as (reported at check-in; production runs as the unprivileged "octi"). */
+function serviceUser(): string {
+  try { return userInfo().username; } catch { return "unknown"; }
 }

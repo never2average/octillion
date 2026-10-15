@@ -14,6 +14,9 @@
  */
 
 export const EGRESS_PROXY_PORT = 3128;
+/** Transparent TLS (SNI) listener and DNS responder the firewall redirects the agent's 443 and 53 to. */
+export const EGRESS_TRANSPARENT_PORT = 3129;
+export const EGRESS_DNS_PORT = 5353;
 export const EGRESS_DIR = "/opt/octi-egress";
 
 /** Hosts agents need beyond the gateway: package registries (installing packages is part of the measured choice). */
@@ -103,13 +106,88 @@ srv.on("connect", async (req, sock, head) => {
   up.on("error", () => sock.destroy()); sock.on("error", () => up.destroy());
 });
 srv.on("clientError", (e, s) => s.destroy());
-srv.listen(${EGRESS_PROXY_PORT}, "127.0.0.1");
+srv.listen(Number(process.argv[4] || ${EGRESS_PROXY_PORT}), "127.0.0.1");
+const TPORT = ${EGRESS_TRANSPARENT_PORT}, DPORT = ${EGRESS_DNS_PORT};
+
+// Transparent mode: the firewall redirects the agent's outbound TCP 443 here, so harnesses that ignore proxy settings
+// still go through the allowlist. The host comes from the TLS ClientHello (SNI); we connect to that host's own public
+// address, so a forged SNI cannot reach anything but an allowlisted host.
+function sniOf(buf) {
+  if (buf.length < 5 || buf[0] !== 0x16) return { need: buf.length < 5 };
+  const recLen = buf.readUInt16BE(3);
+  if (buf.length < 5 + recLen) return { need: true };
+  let p = 5;
+  if (buf[p] !== 0x01) return {};
+  p += 4 + 2 + 32;
+  p += 1 + buf[p];
+  p += 2 + buf.readUInt16BE(p);
+  p += 1 + buf[p];
+  if (p + 2 > buf.length) return {};
+  const end = p + 2 + buf.readUInt16BE(p); p += 2;
+  while (p + 4 <= end && p + 4 <= buf.length) {
+    const type = buf.readUInt16BE(p), len = buf.readUInt16BE(p + 2); p += 4;
+    if (type === 0 && p + 5 <= buf.length) { const n = buf.readUInt16BE(p + 3); return { host: buf.slice(p + 5, p + 5 + n).toString("latin1").toLowerCase() }; }
+    p += len;
+  }
+  return {};
+}
+const tsrv = net.createServer((sock) => {
+  let buf = Buffer.alloc(0); let done = false;
+  const timer = setTimeout(() => { if (!done) { done = true; log({ deny: "transparent", why: "no TLS ClientHello" }); sock.destroy(); } }, 5000);
+  const onData = async (d) => {
+    if (done) return;
+    buf = Buffer.concat([buf, d]);
+    const r = sniOf(buf);
+    if (r.need && buf.length < 16384) return;
+    done = true; clearTimeout(timer); sock.removeListener("data", onData); sock.pause();
+    const host = r.host;
+    const deny = (why) => { log({ deny: host || "transparent", why }); sock.destroy(); };
+    if (!host) return deny("no SNI");
+    if (/^[\\d.]+$/.test(host) || host.includes(":")) return deny("IP literal");
+    if (!listed(host)) return deny("host not allowed");
+    let addrs; try { addrs = await dns.lookup(host, { all: true }); } catch { return deny("dns"); }
+    const good = addrs.filter((a) => !blocked(a.address));
+    if (!good.length) return deny("private or reserved address");
+    const up = net.connect(443, good[0].address, () => { up.write(buf); up.pipe(sock); sock.pipe(up); sock.resume(); log({ allow: host, mode: "transparent" }); });
+    up.on("error", () => sock.destroy()); sock.on("error", () => up.destroy());
+  };
+  sock.on("data", onData); sock.on("error", () => {});
+});
+tsrv.listen(Number(process.argv[5] || TPORT), "127.0.0.1");
+
+// DNS for the agent (the firewall redirects its port 53 here): allowlisted names get their public IPv4 addresses,
+// everything else NXDOMAIN, and nothing is forwarded for unlisted names, so DNS cannot carry data out.
+import dgram from "node:dgram";
+const udp = dgram.createSocket("udp4");
+udp.on("message", async (q, rinfo) => {
+  if (q.length < 17) return;
+  let p = 12; const labels = [];
+  while (p < q.length && q[p] !== 0) { const n = q[p]; labels.push(q.slice(p + 1, p + 1 + n).toString("latin1")); p += 1 + n; }
+  const qEnd = p + 5; if (qEnd > q.length) return;
+  const name = labels.join(".").toLowerCase(), qtype = q.readUInt16BE(p + 1);
+  const head = Buffer.alloc(12); q.copy(head, 0, 0, 2); head.writeUInt16BE(1, 4);
+  const question = q.slice(12, qEnd);
+  let answers = [];
+  let rcode = 3;
+  if (listed(name)) {
+    rcode = 0;
+    if (qtype === 1) {
+      try { answers = (await dns.lookup(name, { all: true, family: 4 })).map((a) => a.address).filter((a) => !blocked(a)); } catch {}
+      if (!answers.length) rcode = 2;
+    }
+  }
+  log(rcode === 0 ? { allow: name, mode: "dns" } : { deny: name, why: "dns not allowed" });
+  head.writeUInt16BE(0x8180 | rcode, 2); head.writeUInt16BE(answers.length, 6);
+  const rr = answers.map((ip) => { const b = Buffer.alloc(16); b.writeUInt16BE(0xc00c, 0); b.writeUInt16BE(1, 2); b.writeUInt16BE(1, 4); b.writeUInt32BE(60, 6); b.writeUInt16BE(4, 10); ip.split(".").forEach((x, i) => (b[12 + i] = Number(x))); return b; });
+  udp.send(Buffer.concat([head, question, ...rr]), rinfo.port, rinfo.address);
+});
+udp.bind(Number(process.argv[6] || DPORT), "127.0.0.1");
 `;
 }
 
 /** Probe program run as the agent after lockdown; prints JSON results and exits 1 on any unexpected outcome. */
 export function probeSource(gatewayHost: string): string {
-  return `import net from "node:net";
+  return `import net from "node:net"; import tls from "node:tls"; import dns from "node:dns/promises";
 const T = 6000;
 const tcp = (host, port) => new Promise((r) => { const s = net.connect({ host, port, timeout: T }); s.on("connect", () => { s.destroy(); r(true); }); s.on("timeout", () => { s.destroy(); r(false); }); s.on("error", () => r(false)); });
 const viaProxy = (target) => new Promise((r) => {
@@ -117,11 +195,21 @@ const viaProxy = (target) => new Promise((r) => {
   let buf = ""; s.setTimeout(T); s.on("data", (d) => { buf += d; if (buf.includes("\\r\\n")) { s.destroy(); r(/^HTTP\\/1\\.1 200/.test(buf)); } });
   s.on("timeout", () => { s.destroy(); r(false); }); s.on("error", () => r(false));
 });
+const tlsOk = (host, servername) => new Promise((r) => {
+  const s = tls.connect({ host, port: 443, servername, timeout: T, rejectUnauthorized: false }, () => { s.destroy(); r(true); });
+  s.on("timeout", () => { s.destroy(); r(false); }); s.on("error", () => r(false)); s.on("close", () => r(false));
+});
+const resolves = (name) => dns.lookup(name).then(() => true, () => false);
 const checks = [
+  ["gateway directly (transparent, as a harness that ignores proxy settings)", true, () => tlsOk(${JSON.stringify(gatewayHost)}, ${JSON.stringify(gatewayHost)})],
+  ["DNS for the gateway", true, () => resolves(${JSON.stringify(gatewayHost)})],
+  ["DNS for an unlisted host", false, () => resolves("example.com")],
+  ["HTTPS to an unlisted host by IP", false, () => tlsOk("93.184.215.14", "example.com")],
+  ["HTTPS by IP with a forged allowlisted name", true, () => tlsOk("93.184.215.14", ${JSON.stringify(gatewayHost)})],
+  ["plain HTTP directly", false, () => tcp("93.184.215.14", 80)],
   ["gateway through the proxy", true, () => viaProxy(${JSON.stringify(gatewayHost)} + ":443")],
   ["unlisted host through the proxy", false, () => viaProxy("example.com:443")],
   ["IP literal through the proxy", false, () => viaProxy("1.1.1.1:443")],
-  ["internet directly", false, () => tcp("93.184.215.14", 443)],
   ["public DNS directly", false, () => tcp("1.1.1.1", 53)],
   ["metadata IP directly", false, () => tcp("169.254.169.254", 80)],
 ];
@@ -153,6 +241,11 @@ AUID="$(id -u agent)"
 if command -v nft >/dev/null 2>&1; then
   sudo -n nft -f - <<EOF
 table inet octi_egress {
+  chain nat_out {
+    type nat hook output priority -100; policy accept;
+    meta skuid $AUID udp dport 53 redirect to :${EGRESS_DNS_PORT}
+    meta skuid $AUID tcp dport 443 redirect to :${EGRESS_TRANSPARENT_PORT}
+  }
   chain out {
     type filter hook output priority 0; policy accept;
     meta skuid $AUID oifname "lo" accept
@@ -161,6 +254,8 @@ table inet octi_egress {
 }
 EOF
 elif command -v iptables >/dev/null 2>&1; then
+  sudo -n iptables -t nat -A OUTPUT -m owner --uid-owner "$AUID" -p udp --dport 53 -j REDIRECT --to-ports ${EGRESS_DNS_PORT}
+  sudo -n iptables -t nat -A OUTPUT -m owner --uid-owner "$AUID" -p tcp --dport 443 -j REDIRECT --to-ports ${EGRESS_TRANSPARENT_PORT}
   sudo -n iptables -A OUTPUT -o lo -m owner --uid-owner "$AUID" -j ACCEPT
   sudo -n iptables -A OUTPUT -m owner --uid-owner "$AUID" -j DROP
   if command -v ip6tables >/dev/null 2>&1; then

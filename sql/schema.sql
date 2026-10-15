@@ -564,3 +564,11 @@ CREATE TABLE IF NOT EXISTS admin_access_log (
   ip      TEXT
 );
 CREATE INDEX IF NOT EXISTS admin_access_log_at_idx ON admin_access_log (at DESC);
+
+-- Per-organization data keys for private text at rest (src/orgcrypto.ts), wrapped by the vault master key.
+-- Deleting the organization deletes its key (crypto-shredding of its private personas and tasks).
+CREATE TABLE IF NOT EXISTS org_keys (
+  org_id      INT PRIMARY KEY REFERENCES organizations(id) ON DELETE CASCADE,
+  wrapped     JSONB NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);

@@ -7,6 +7,8 @@
 import { spawn } from "node:child_process";
 import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import net from "node:net";
+import tls from "node:tls";
+import dgram from "node:dgram";
 import os from "node:os";
 import path from "node:path";
 import { EGRESS_PROXY_PORT, egressPolicy, probeSource, proxyEnv, proxySource, setupScript } from "../core/egress.js";
@@ -24,14 +26,18 @@ check("policy: a repo given as an IP literal is not allowlisted", !egressPolicy(
 check("proxy env routes HTTP clients through the proxy", proxyEnv().HTTPS_PROXY === `http://127.0.0.1:${EGRESS_PROXY_PORT}` && proxyEnv().NODE_USE_ENV_PROXY === "1");
 const setup = setupScript("/tmp/octi");
 check("setup fails closed without node, a firewall tool or a running proxy", /exit 20/.test(setup) && /exit 21/.test(setup) && /exit 22/.test(setup) && /meta skuid \$AUID counter drop/.test(setup));
-check("probe expects the gateway reachable and everything else blocked", /gateway through the proxy", true/.test(probeSource("gw.x.example")) && /metadata IP directly", false/.test(probeSource("gw.x.example")));
+check("probe expects the gateway reachable (also without proxy settings) and everything else blocked",
+  /gateway directly \(transparent/.test(probeSource("gw.x.example")) && /DNS for an unlisted host", false/.test(probeSource("gw.x.example")) &&
+  /metadata IP directly", false/.test(probeSource("gw.x.example")));
+check("setup redirects the agent's HTTPS and DNS to the proxy", /tcp dport 443 redirect/.test(setup) && /udp dport 53 redirect/.test(setup) && /REDIRECT --to-ports/.test(setup));
 
 // Run the generated proxy on a free port (rewritten from 3128) with a small allowlist.
 const dir = mkdtempSync(path.join(os.tmpdir(), "octi-egress-"));
 const port = 31000 + Math.floor(Math.random() * 2000);
-writeFileSync(path.join(dir, "proxy.mjs"), proxySource().replace(`srv.listen(${EGRESS_PROXY_PORT}`, `srv.listen(${port}`));
+writeFileSync(path.join(dir, "proxy.mjs"), proxySource());
+const tport = port + 1, dport = port + 2;
 writeFileSync(path.join(dir, "allow.json"), JSON.stringify({ hosts: ["registry.npmjs.org"] }));
-const proc = spawn(process.execPath, [path.join(dir, "proxy.mjs"), path.join(dir, "allow.json"), path.join(dir, "log.jsonl")], { stdio: "ignore" });
+const proc = spawn(process.execPath, [path.join(dir, "proxy.mjs"), path.join(dir, "allow.json"), path.join(dir, "log.jsonl"), String(port), String(tport), String(dport)], { stdio: "ignore" });
 await new Promise((r) => setTimeout(r, 800));
 const connect = (target: string) => new Promise<string>((resolve) => {
   const s = net.connect(port, "127.0.0.1", () => s.write(`CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\n\r\n`));
@@ -49,6 +55,25 @@ try {
   for (const [target, why] of [["example.com:443", "unlisted host"], ["1.1.1.1:443", "IP literal"], ["registry.npmjs.org:80", "port other than 443"], ["[::1]:443", "IPv6 literal"]])
     check(`refused through the proxy: ${why}`, /^HTTP\/1\.1 403/.test(await connect(target!)), target);
   check("plain HTTP proxying is refused", /^HTTP\/1\.1 403/.test(plain), plain);
+  // Transparent mode: a TLS handshake redirected to the proxy goes through only for an allowlisted SNI.
+  const viaT = (servername: string) => new Promise<boolean>((r) => {
+    const t = tls.connect({ host: "127.0.0.1", port: tport, servername, timeout: 8000 }, () => { t.destroy(); r(true); });
+    t.on("timeout", () => { t.destroy(); r(false); }); t.on("error", () => r(false)); t.on("close", () => r(false));
+  });
+  check("transparent: TLS to an allowlisted host goes through (its real certificate validates)", await viaT("registry.npmjs.org"));
+  check("transparent: TLS to an unlisted host is cut off", !(await viaT("example.com")));
+  // DNS responder: allowlisted names resolve, others are NXDOMAIN and never forwarded.
+  const ask = (name: string) => new Promise<{ rcode: number; answers: number }>((r) => {
+    const q = Buffer.concat([Buffer.from([0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0]),
+      ...name.split(".").map((l) => Buffer.concat([Buffer.from([l.length]), Buffer.from(l)])), Buffer.from([0, 0, 1, 0, 1])]);
+    const u = dgram.createSocket("udp4");
+    const timer = setTimeout(() => { u.close(); r({ rcode: -1, answers: 0 }); }, 5000);
+    u.on("message", (m) => { clearTimeout(timer); u.close(); r({ rcode: m.readUInt16BE(2) & 0xf, answers: m.readUInt16BE(6) }); });
+    u.send(q, dport, "127.0.0.1");
+  });
+  const okName = await ask("registry.npmjs.org"), badName = await ask("example.com");
+  check("DNS: an allowlisted name resolves", okName.rcode === 0 && okName.answers > 0, JSON.stringify(okName));
+  check("DNS: an unlisted name is NXDOMAIN", badName.rcode === 3 && badName.answers === 0, JSON.stringify(badName));
   const log = readFileSync(path.join(dir, "log.jsonl"), "utf8");
   check("decisions are logged", /"allow":"registry.npmjs.org"/.test(log) && /"why":"host not allowed"/.test(log), "");
 } finally {

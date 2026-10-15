@@ -9,6 +9,7 @@
  *  - harnesses: org_harnesses, a declarative spec plus a review status; nothing runs until a harness is approved and
  *    built in isolation (phase 2).
  */
+import { ensureOrgKey, openJson, openRows, seal, sealJson } from "./orgcrypto.js";
 import { randomBytes } from "node:crypto";
 import { getDb } from "./db.js";
 import type { Org } from "./auth.js";
@@ -34,6 +35,7 @@ export interface PersonaInput {
 export async function savePersonas(org: Org, items: PersonaInput[]) {
   if (!Array.isArray(items) || !items.length || items.length > 20) throw new Error("Send 1-20 personas");
   const db = await getDb();
+  await ensureOrgKey(org.orgId); // before the transaction: sealing inside it then needs no query
   const saved: string[] = [];
   await db.transaction(async (tx) => {
     for (const [i, x] of items.entries()) {
@@ -47,12 +49,15 @@ export async function savePersonas(org: Org, items: PersonaInput[]) {
       if (envIssues.length) throw new Error(`personas[${i}].environment: ${envIssues.join("; ")}`);
       const env = x.environment ? JSON.stringify({ editor: x.environment.editor, tools: x.environment.tools ?? [], skills: x.environment.skills ?? [],
                                                     agent_rules: x.environment.agent_rules ?? null }) : null;
+      // Private text at rest is encrypted with the organization's own key (src/orgcrypto.ts).
+      const sSummary = await seal(org.orgId, summary), sInstructions = await seal(org.orgId, instructions);
+      const sAttributes = JSON.stringify(await sealJson(org.orgId, attributes));
       if (x.slug) {
         const [row] = await tx.query<{ slug: string }>(
           `UPDATE developer_profiles SET name = $3, summary = $4, instructions = $5, attributes = $6, environment = coalesce($7, environment),
                   active = coalesce($8, active), synced_at = now()
             WHERE slug = $1 AND org_id = $2 AND source = 'custom' RETURNING slug`,
-          [x.slug, org.orgId, name, summary, instructions, JSON.stringify(attributes), env, x.active ?? null]);
+          [x.slug, org.orgId, name, sSummary, sInstructions, sAttributes, env, x.active ?? null]);
         if (!row) throw new Error(`No persona ${x.slug}. See list_personas.`); // same message whether or not it exists elsewhere
         saved.push(row.slug);
       } else {
@@ -60,7 +65,7 @@ export async function savePersonas(org: Org, items: PersonaInput[]) {
         await tx.query(
           `INSERT INTO developer_profiles (slug, name, summary, instructions, attributes, environment, org_id, source, active)
            VALUES ($1, $2, $3, $4, $5, $6, $7, 'custom', true)`,
-          [slug, name, summary, instructions, JSON.stringify(attributes), env, org.orgId]);
+          [slug, name, sSummary, sInstructions, sAttributes, env, org.orgId]);
         saved.push(slug);
       }
     }
@@ -70,9 +75,11 @@ export async function savePersonas(org: Org, items: PersonaInput[]) {
 
 /** The organization's own personas: brought (custom) and picked or written for it by research. Never another org's. */
 export async function listPersonas(org: Org, highlight: string[] = []) {
-  const personas = await (await getDb()).query(
+  const personas = await (await getDb()).query<any>(
     `SELECT slug, name, summary, attributes, instructions, environment, source, active, product_id
        FROM developer_profiles WHERE org_id = $1 ORDER BY source, name`, [org.orgId]);
+  await openRows(org.orgId, personas, ["summary", "instructions"]);
+  for (const p of personas) p.attributes = await openJson(org.orgId, p.attributes);
   return { view: "personas" as const, personas, saved: highlight };
 }
 
@@ -89,6 +96,7 @@ export async function importTasks(org: Org, input: { product?: string; task_set:
   if (!setName) throw new Error("task_set (a name for this set, e.g. '2025 case studies') is required");
   if (!Array.isArray(input.tasks) || !input.tasks.length || input.tasks.length > 200) throw new Error("Send 1-200 tasks");
   const db = await getDb();
+  await ensureOrgKey(org.orgId); // before the transaction: sealing inside it then needs no query
   let setId = 0;
   await db.transaction(async (tx) => {
     const [set] = await tx.query<{ id: number }>(
@@ -104,12 +112,13 @@ export async function importTasks(org: Org, input: { product?: string; task_set:
         throw new Error(`tasks[${i}].repo_url must be an https URL of a public git host`);
       const template = checkTemplate(t.template);
       const platform = checkPlatform(t.platform) ?? platformOf({ template, language: t.language, tags: t.tags, prompt });
+      const provenance = t.provenance ? cleanText(t.provenance, 500, `tasks[${i}].provenance`) : null;
       await tx.query(
         `/* tenant: product resolved within the caller's org (resolveProduct) */ INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, source, rationale, template, platform, task_set_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7, true, 'custom', $8, $9, $10, $11)`,
-        [p.id, cleanText(t.title, 160, `tasks[${i}].title`) || prompt.slice(0, 80), prompt, t.repo_url ?? null,
+        [p.id, cleanText(t.title, 160, `tasks[${i}].title`) || prompt.slice(0, 80), await seal(org.orgId, prompt), t.repo_url ?? null,
          t.language ? cleanText(t.language, 40, `tasks[${i}].language`) : null, (t.tags ?? []).slice(0, 20).map((x) => cleanText(x, 40, "tag")),
-         t.expectation === "avoid" ? "avoid" : "recommend", t.provenance ? cleanText(t.provenance, 500, `tasks[${i}].provenance`) : null,
+         t.expectation === "avoid" ? "avoid" : "recommend", provenance ? await seal(org.orgId, provenance) : null,
          template ?? null, platform, setId]);
     }
   });

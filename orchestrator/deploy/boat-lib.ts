@@ -26,6 +26,8 @@ export const IMAGE_PREFIX = "octi-orch-img-";
 export const IMAGE_BUILDER_NAME = "octi-img-build";
 export const MAX_TTL_SECONDS = 2_592_000; // 30 days: boat's maximum numeric TTL (docs.boat.dev/long-running-tasks)
 export const HOME = "/home/user/octillion";
+/** Unprivileged system user the orchestrator service runs as (no sudo); created by configure(). */
+export const SERVICE_USER = "octi";
 export const UNIT = "octillion-orchestrator";
 const CHUNK = 3_500_000; // raw bytes per files-API PUT (limit: 5 MiB after base64 decoding)
 
@@ -178,10 +180,12 @@ export async function configure(id: string, orchId: string, ctx: LaunchContext) 
 Description=Octillion orchestrator (${orchId})
 After=network-online.target
 [Service]
-User=user
+User=${SERVICE_USER}
 WorkingDirectory=${HOME}/app
 EnvironmentFile=${HOME}/orchestrator.env
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=HOME=/var/lib/${SERVICE_USER}
+NoNewPrivileges=true
 ExecStart=${HOME}/app/orchestrator/node_modules/.bin/tsx orchestrator/pi-octillion/main.ts
 Restart=on-failure
 RestartSec=10
@@ -196,6 +200,10 @@ WantedBy=multi-user.target
   await put(id, `${HOME}/${UNIT}.service`, unit);
   const r = await run(id, `set -e; cd ${HOME}
 { cat orchestrator.env.new; env | grep -E '^(BOAT_ID|BOX_ID)=' || true; } > orchestrator.env; rm -f orchestrator.env.new; chmod 600 orchestrator.env
+# The service runs as ${SERVICE_USER}: no sudo, no login shell (docs/security.md). It reads the code (made world-readable,
+# the boat user still owns and deploys it) and writes only to its own home and the temp dir; systemd reads the env file.
+id ${SERVICE_USER} >/dev/null 2>&1 || sudo useradd -r -m -d /var/lib/${SERVICE_USER} -s /usr/sbin/nologin ${SERVICE_USER}
+sudo chmod 711 /home/user; sudo chmod 755 ${HOME}; sudo chmod -R a+rX ${HOME}/app
 sudo install -d -m 755 /etc/octillion
 printf '%s' '{"role":"boat-orchestrator","sandbox_id":"${id}","orchestrator_id":"${orchId}"}' | sudo tee /etc/octillion/host-role >/dev/null
 sudo chmod 644 /etc/octillion/host-role

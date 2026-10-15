@@ -187,5 +187,7 @@ export async function rekey() {
     const enc = encrypt(decrypt(r));
     await db.query("UPDATE vault_credentials SET ciphertext = $2, iv = $3, tag = $4, key_id = $5 WHERE id = $1", [r.id, enc.ciphertext, enc.iv, enc.tag, enc.key_id]);
   }
+  // Organizations' data keys (src/orgcrypto.ts) are wrapped by the master key too.
+  await (await import("./orgcrypto.js")).rewrapOrgKeys();
   return rows.length;
 }

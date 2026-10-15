@@ -1,3 +1,4 @@
+import { open as openText, openJson, openRows } from "./orgcrypto.js";
 import { PLATFORMS, isPlatform, platformOf, type Platform } from "./platform.js";
 import { getDb, type Queryable } from "./db.js";
 import { randomId, type Org } from "./auth.js";
@@ -167,6 +168,7 @@ export async function getProduct(org: Org, ref?: string) {
       GROUP BY sc.id ORDER BY sc.active DESC, sc.id`,
     [p.id],
   );
+  await openRows(org.orgId, scenarios as any[], ["prompt", "rationale"]);
   const simulations = await db.query(
     `/* tenant: product from resolveProduct(org) */ SELECT id, name, status, models, repeats, created_at FROM simulations WHERE product_id = $1 ORDER BY created_at DESC LIMIT 5`,
     [p.id],
@@ -700,7 +702,8 @@ export async function getReport(org: Org, input: { product?: string; days?: numb
       WHERE ${base} AND s.status NOT IN ('queued', 'running', 'cancelled')`,
     params,
   );
-  const prompts = new Map((await db.query<any>("/* tenant: product from resolveProduct(org) */ SELECT id, prompt FROM scenarios WHERE product_id = $1", [p.id])).map((r) => [Number(r.id), String(r.prompt ?? "")]));
+  const promptRows = await openRows(org.orgId, await db.query<any>("/* tenant: product from resolveProduct(org) */ SELECT id, prompt FROM scenarios WHERE product_id = $1", [p.id]), ["prompt"]);
+  const prompts = new Map(promptRows.map((r: any) => [Number(r.id), String(r.prompt ?? "")]));
   const sections = reportSections(p, rows, byScenario, prompts, sim);
   return {
     view: "report" as const,
@@ -852,11 +855,14 @@ export async function listProfiles(org: Org, input: { query?: string; product?: 
   let where = "active AND (org_id IS NULL OR org_id = $1)";
   if (q) params.push(`%${q}%`), (where += ` AND (name ILIKE $${params.length} OR summary ILIKE $${params.length} OR attributes::text ILIKE $${params.length})`);
   if (input.product) params.push((await resolveProduct(org, input.product)).id), (where += ` AND product_id = $${params.length}`);
-  const profiles = await db.query(
+  const profiles = await db.query<any>(
     `SELECT id, slug, name, summary, attributes, source, product_id FROM developer_profiles WHERE ${where}
       ORDER BY (org_id IS NULL), name LIMIT 200`,
     params,
   );
+  // The org's own private personas are stored encrypted (src/orgcrypto.ts); shared ones are plain.
+  await openRows(org.orgId, profiles, ["summary"]);
+  for (const p of profiles) p.attributes = await openJson(org.orgId, p.attributes);
   return { view: "profiles" as const, query: q ?? null, profiles };
 }
 
@@ -894,6 +900,8 @@ export async function getSession(org: Org, sessionId: string) {
     [sessionId, org.orgId],
   );
   if (!s) throw new Error(`No agent session ${sessionId}`);
+  s.prompt = await openText(org.orgId, s.prompt);
+  s.profile_summary = await openText(org.orgId, s.profile_summary ?? "");
   return { view: "session" as const, session: s };
 }
 

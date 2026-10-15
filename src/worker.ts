@@ -1,3 +1,4 @@
+import { open as openText, openJson } from "./orgcrypto.js";
 import { getDb } from "./db.js";
 import { normalize, transcripts, type RawEvent, type SessionRef, type StoredEvent } from "./transcripts.js";
 import { scoreTranscript, developerNamedTools, type Tool } from "./scoring.js";
@@ -102,6 +103,16 @@ export async function claimJobs(workerId: string, opts: { limit?: number; models
       return { ...r, prompt, agent, environment, max_user_turns: MAX_USER_TURNS(), profile: p ? { slug: p.slug, name: p.name, summary: p.summary, attributes: p.attributes, instructions: p.instructions } : null };
     });
   });
+  // Private text is stored encrypted with its organization's key (src/orgcrypto.ts). Opened after the claim commits:
+  // key lookups must not run inside the transaction (one connection on PGlite).
+  for (const j of jobs) {
+    j.prompt = await openText(j.org_id, j.prompt);
+    if (j.profile) {
+      j.profile.summary = await openText(j.org_id, j.profile.summary);
+      j.profile.instructions = await openText(j.org_id, j.profile.instructions);
+      j.profile.attributes = await openJson(j.org_id, j.profile.attributes);
+    }
+  }
   return jobs;
 }
 

