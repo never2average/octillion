@@ -806,6 +806,30 @@ try {
   assert.equal((await ar({ email: "nope", company: "x" })).status, 400);
   assert.equal((await ar({ email: `smoke+${stamp}@example.com`, company: "Smoke", product_url: "https://example.com" })).status, 201);
   console.log("✓ landing page and access requests");
+  // ---------- organization deletion (docs/security.md, phase 0c) ----------
+  {
+    const { deleteOrg } = await import("../src/tenancy.js");
+    const orgA = a.org.orgId;
+    const sessionsA = (await db.query<any>("SELECT id FROM agent_sessions WHERE org_id = $1", [orgA])).map((r) => r.id);
+    assert.ok(sessionsA.length > 0, "org A has sessions to delete");
+    const [{ n: eventsBefore }] = await db.query<any>("SELECT count(*) AS n FROM transcript_events WHERE session_id = ANY($1)", [sessionsA]);
+    assert.ok(Number(eventsBefore) > 0, "org A has transcript events to delete");
+    const dry = await deleteOrg(orgA, { dryRun: true });
+    assert.ok(dry.found && dry.counts.sessions === sessionsA.length, "dry run counts without deleting");
+    assert.ok((await db.query("SELECT 1 FROM organizations WHERE id = $1", [orgA])).length === 1, "dry run deletes nothing");
+    await deleteOrg(orgA);
+    const left = async (sql: string, p: unknown[]) => Number((await db.query<any>(sql, p))[0].n);
+    assert.equal(await left("SELECT count(*) AS n FROM organizations WHERE id = $1", [orgA]), 0);
+    assert.equal(await left("SELECT count(*) AS n FROM api_keys WHERE org_id = $1", [orgA]), 0);
+    assert.equal(await left("SELECT count(*) AS n FROM agent_sessions WHERE org_id = $1", [orgA]), 0);
+    assert.equal(await left("SELECT count(*) AS n FROM products WHERE org_id = $1", [orgA]), 0);
+    assert.equal(await left("SELECT count(*) AS n FROM developer_profiles WHERE org_id = $1", [orgA]), 0, "its private personas are gone");
+    assert.equal(await left("SELECT count(*) AS n FROM transcript_events WHERE session_id = ANY($1)", [sessionsA]), 0, "its transcripts are gone");
+    assert.ok(await left("SELECT count(*) AS n FROM org_deletions WHERE org_id = $1", [orgA]) === 1, "tombstone written");
+    assert.ok((await A.callTool({ name: "list_products", arguments: {} }).catch((e) => ({ isError: true, e }))).isError !== false, "its API key no longer works");
+    await deleteOrg(orgA); // idempotent: a second run is a no-op
+    console.log("✓ organization deletion: keys, sessions, products, personas, transcripts gone; dry run, tombstone, idempotent");
+  }
 } finally {
   await db.query("DELETE FROM vault_providers WHERE slug IN ('smoke_llm', 'smoke_vendor')");
   await db.query("DELETE FROM gateway_tokens WHERE orchestrator_id = 'smoke-orch'");

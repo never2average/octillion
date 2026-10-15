@@ -129,6 +129,10 @@ export function parseArchive(gz: Buffer): { header: Record<string, unknown> | nu
 }
 
 const cache = new Map<string, StoredEvent[]>();
+/** Drop an organization's cached archived sessions (organization deletion). */
+export function forgetArchivedOrg(orgId: number): void {
+  for (const k of [...cache.keys()]) if (k.startsWith(`${orgId}:`)) cache.delete(k);
+}
 /** The archived events of a session (org-checked), or null when it has no archive. Small LRU of 20 sessions. */
 export async function archivedEvents(orgId: number, sessionId: string): Promise<StoredEvent[] | null> {
   if (!storageEnabled()) return null;

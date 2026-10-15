@@ -1,4 +1,4 @@
-import { GetObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { DeleteObjectsCommand, GetObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 /**
@@ -74,6 +74,14 @@ export async function listKeys(prefix: string, max = 100_000): Promise<{ key: st
     token = r.IsTruncated ? r.NextContinuationToken : undefined;
   } while (token && out.length < max);
   return out;
+}
+
+/** Delete objects by key, 1000 per request (organization deletion, src/tenancy.ts). */
+export async function deleteKeys(list: string[]): Promise<void> {
+  for (let i = 0; i < list.length; i += 1000) {
+    const r = await s3().send(new DeleteObjectsCommand({ Bucket: bucket(), Delete: { Objects: list.slice(i, i + 1000).map((Key) => ({ Key })), Quiet: true } }));
+    if (r.Errors?.length) throw new Error(`R2 delete failed for ${r.Errors.length} object(s), e.g. ${r.Errors[0]!.Key}: ${r.Errors[0]!.Message}`);
+  }
 }
 
 /** A time-limited download link (default 7 days, the S3 maximum). */

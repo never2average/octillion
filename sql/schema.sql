@@ -499,3 +499,10 @@ CREATE TABLE IF NOT EXISTS worker_tokens (
   revoked_at      TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS worker_tokens_sandbox_idx ON worker_tokens (sandbox_row_id) WHERE revoked_at IS NULL;
+
+-- Deleted organizations (src/tenancy.ts): counts only, no names or content.
+CREATE TABLE IF NOT EXISTS org_deletions (
+  org_id      INT PRIMARY KEY,
+  counts      JSONB NOT NULL DEFAULT '{}',
+  deleted_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);

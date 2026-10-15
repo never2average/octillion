@@ -46,6 +46,8 @@ interface TranscriptStore {
   read(orgId: number, sessionId: string, offset: number, limit: number): Promise<{ total: number; events: StoredEvent[] }>;
   /** Drop a session's events (an infrastructure-failed attempt being retried must not leak into the retry's transcript). */
   remove(orgId: number, sessionId: string): Promise<void>;
+  /** Drop every event of an organization (organization deletion, src/tenancy.ts). */
+  removeOrg(orgId: number): Promise<void>;
   /** Wake the store in the background (a paused ClickHouse Cloud service takes ~15 s to answer its first query). */
   warm(): void;
   search(p: SearchParams): Promise<SearchResult>;
@@ -184,6 +186,17 @@ function clickhouseStore(cfg: ClickHouseConfig): TranscriptStore {
       warmedAt = Date.now();
       void ensure().then(() => client.ping()).catch(() => { warmedAt = 0; });
     },
+    async removeOrg(orgId) {
+      await ensure();
+      await client.command({
+        query: `DELETE FROM ${TABLE} WHERE org_id = {org:UInt32}`,
+        query_params: { org: orgId }, clickhouse_settings: { lightweight_deletes_sync: "2" },
+      });
+      const [{ left }] = await (await client.query({
+        query: `SELECT count() AS left FROM ${TABLE} WHERE org_id = {org:UInt32}`, query_params: { org: orgId }, format: "JSONEachRow",
+      })).json<{ left: string }>();
+      if (Number(left)) throw new Error(`org ${orgId}: ${left} transcript event(s) still in ClickHouse after delete`);
+    },
     async remove(orgId, sessionId) {
       await ensure();
       // Lightweight delete, waited for: the retry's events reuse the same seq numbers.
@@ -272,6 +285,10 @@ const postgresStore: TranscriptStore = {
       );
   },
   warm() {},
+  async removeOrg(orgId) {
+    const db = await getDb();
+    await db.query("DELETE FROM transcript_events WHERE session_id IN (SELECT id FROM agent_sessions WHERE org_id = $1)", [orgId]);
+  },
   async remove(orgId, sessionId) {
     const db = await getDb();
     await db.query("DELETE FROM transcript_events WHERE session_id = $1 AND EXISTS (SELECT 1 FROM agent_sessions s WHERE s.id = $1 AND s.org_id = $2)", [sessionId, orgId]);
@@ -347,6 +364,7 @@ export function transcripts(): TranscriptStore {
     kind: base.kind,
     append: (s, events) => base.append(s, events),
     remove: (orgId, sessionId) => base.remove(orgId, sessionId),
+    removeOrg: (orgId) => base.removeOrg(orgId),
     warm: () => base.warm(),
     search: (p) => base.search(p),
     async read(orgId, sessionId, offset, limit) {
