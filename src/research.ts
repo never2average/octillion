@@ -1,3 +1,4 @@
+import { urlKey, webSearchEnabled } from "./websearch.js";
 import { registryLinks } from "./registry-meta.js";
 import { isIP } from "node:net";
 import { getDb } from "./db.js";
@@ -406,9 +407,31 @@ export async function libraryProfiles(q: { query?: string; limit?: number }) {
   return { total: Number(n), profiles };
 }
 
+/**
+ * Competitors are evidence, not memory: when web search is configured (or the job searched), every competitor cites
+ * an evidence_url that one of this job's searches returned, or a page on the product's own site (e.g. its "vs" page).
+ */
+export async function competitorIssues(job: { sources?: { url: string }[]; input?: any }, r: ResearchResult | undefined): Promise<string[]> {
+  const sources = job.sources ?? [];
+  if (!sources.length && !(await webSearchEnabled())) return [];
+  const seen = new Set(sources.map((s) => urlKey(s.url)));
+  const own = [r?.product?.website_url, r?.product?.docs_url, job.input?.website_url, job.input?.docs_url]
+    .flatMap((u) => { try { return u ? [new URL(u).hostname.toLowerCase().replace(/^www\./, "")] : []; } catch { return []; } });
+  const issues: string[] = [];
+  (r?.product?.competitors ?? []).forEach((c, i) => {
+    const e = c?.evidence_url;
+    if (!e) return void issues.push(`product.competitors[${i}] (${c?.name}) needs evidence_url: a page from web_search, find_similar or package_search showing it competes; drop competitors you cannot find evidence for`);
+    let host = "";
+    try { host = new URL(e).hostname.toLowerCase().replace(/^www\./, ""); } catch { return void issues.push(`product.competitors[${i}].evidence_url is not a URL`); }
+    if (!seen.has(urlKey(e)) && !own.some((h) => host === h || host.endsWith("." + h)))
+      issues.push(`product.competitors[${i}].evidence_url ${e} was not returned by this job's searches; cite a result URL exactly as returned`);
+  });
+  return issues;
+}
+
 export async function validateResearchJob(id: string, result: ResearchResult) {
-  await runningJob(id);
-  const issues = [...validateResearch(result), ...(await libraryIssues(result)), ...(await profileIssues(result))];
+  const job = await runningJob(id);
+  const issues = [...validateResearch(result), ...(await libraryIssues(result)), ...(await profileIssues(result)), ...(await competitorIssues(job, result))];
   return { ok: issues.length === 0, issues };
 }
 
@@ -477,7 +500,7 @@ export async function completeResearch(id: string, body: { status?: string; erro
     await db.query("/* tenant: research id checked against the job token in http.ts (/research/:id) */ UPDATE product_research SET status = 'failed', error = $2, finished_at = now() WHERE id = $1", [id, String(body.error ?? "failed").slice(0, 2000)]);
     return { status: "failed" };
   }
-  const issues = [...validateResearch(body.result), ...(await libraryIssues(body.result)), ...(await profileIssues(body.result))];
+  const issues = [...validateResearch(body.result), ...(await libraryIssues(body.result)), ...(await profileIssues(body.result)), ...(await competitorIssues(job, body.result))];
   if (issues.length) {
     const [{ attempts }] = await db.query<{ attempts: number }>(
       "/* tenant: research id checked against the job token in http.ts (/research/:id) */ UPDATE product_research SET attempts = attempts + 1, heartbeat_at = now(), stage = 'validating' WHERE id = $1 RETURNING attempts", [id]);
@@ -493,7 +516,7 @@ export async function completeResearch(id: string, body: { status?: string; erro
   const p = r.product;
   // The competitor list only grows: research adds what it found; competitors already on the product (added by hand or
   // by an earlier research) stay, so a loss to them is never scored "no vendor".
-  const found = p.competitors ?? [];
+  const found = (p.competitors ?? []).map((c) => ({ ...c, source: "research" as const }));
   const known = new Set(found.map((c) => c.name.trim().toLowerCase()));
   const competitors = [...found, ...(prod.competitors ?? []).filter((c) => !known.has(c.name.trim().toLowerCase()))];
   await saveProduct(org, {

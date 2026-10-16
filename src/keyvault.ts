@@ -118,8 +118,8 @@ export async function setCredential(provider: string, secret: string, opts: { la
   const p = await getProvider(provider);
   if (!p) throw new Error(`Unknown provider ${provider}; add it first (keyvault provider ...)`);
   // A direct-mode key is handed to agent sessions as is; refuse to store one unless that is explicitly allowed.
-  // Orchestrator-only keys (boat) never reach a session, so they are always fine.
-  if (p.mode === "direct" && provider !== "boat" && process.env.OCTILLION_DIRECT_KEYS !== "allow")
+  // Orchestrator-only keys (boat; search providers with no env_vars) never reach a session, so they are always fine.
+  if (p.mode === "direct" && provider !== "boat" && p.env_vars.length && process.env.OCTILLION_DIRECT_KEYS !== "allow")
     throw new Error(`${provider} is a direct-mode provider: its real key would be handed to agent sessions. ` +
                     "Set OCTILLION_DIRECT_KEYS=allow only once those sessions run without customer-written tasks (docs/security.md)");
   const s = secret.trim();

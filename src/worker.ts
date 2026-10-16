@@ -1,7 +1,7 @@
 import { open as openText, openJson } from "./orgcrypto.js";
 import { getDb } from "./db.js";
 import { normalize, transcripts, type RawEvent, type SessionRef, type StoredEvent } from "./transcripts.js";
-import { scoreTranscript, developerNamedTools, type Tool } from "./scoring.js";
+import { scoreTranscript, developerNamedTools, untrackedInstalls, type Tool } from "./scoring.js";
 import { findAgent } from "./agents.js";
 import { languageOf, resolveEnvironment, type PersonaEnvironment, type SessionEnvironment } from "../orchestrator/core/environment.js";
 import { extendAdaptive } from "./queries.js";
@@ -260,8 +260,8 @@ export async function scoreSession(sessionId: string) {
   const userTurns = events.filter((e) => e.type === SIMULATED_USER && (e.raw as { _src?: unknown })._src !== "harness").length;
   await db.query(
     `/* tenant: internal: scoring by session id (from completeSession) */ UPDATE agent_sessions SET verdict = $2, winner = $3, mentions = $4, scored_at = now(),
-            events = greatest(events, $5), user_turns = $6 WHERE id = $1`,
-    [sessionId, score.verdict, score.winner, JSON.stringify(score.mentions), lastSeq, userTurns],
+            events = greatest(events, $5), user_turns = $6, untracked = $7 WHERE id = $1`,
+    [sessionId, score.verdict, score.winner, JSON.stringify(score.mentions), lastSeq, userTurns, JSON.stringify(untrackedInstalls(events, [target, ...row.competitors]))],
   );
   return score;
 }

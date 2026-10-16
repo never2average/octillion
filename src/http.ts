@@ -1,3 +1,4 @@
+import { researchSearch } from "./websearch.js";
 import { canActAsOrchestrator, canActOnSession, resolveWorkerToken, type WorkerAuth } from "./workerauth.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -197,6 +198,14 @@ export function createApp() {
       const err = e as Error & { status?: number; issues?: string[] };
       if (err.status === 422) return void res.status(422).json({ error: err.message, issues: err.issues });
       throw e;
+    }
+  });
+  // Web and package search for research (src/websearch.ts): runs here so the search keys never reach the sandbox.
+  worker.post("/research/:id/search", async (req, res) => {
+    try { res.json(await researchSearch(String(req.params.id), req.body ?? {})); }
+    catch (e) {
+      const err = e as Error & { status?: number };
+      res.status(err.status && err.status >= 400 && err.status < 600 ? err.status : 502).json({ error: err.message });
     }
   });
   worker.get("/library/profiles", async (req, res) => {

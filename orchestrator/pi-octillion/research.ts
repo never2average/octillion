@@ -1,6 +1,6 @@
 /**
  * Research mode (docs/onboarding.md): a dedicated Pi session per research job, on the same broker brain, with
- * research-only tools (fetch_url, search_library, report_progress, validate, submit). No coding-agent tools,
+ * research-only tools (fetch_url, web/package search, search_library, report_progress, validate, submit). No coding-agent tools,
  * no shell, no file access.
  *
  * Deterministic fallback: there is none for the research itself. Without a working LLM the job is completed as
@@ -39,7 +39,7 @@ export const RESEARCH = {
   maxCostUsd: num(env.RESEARCH_MAX_COST_USD, 2),
   enabled: env.RESEARCH_DISABLED !== "1",
 };
-export const RESEARCH_TOOLS = ["fetch_url", "search_library", "search_profiles", "report_progress", "validate", "submit"] as const;
+export const RESEARCH_TOOLS = ["fetch_url", "web_search", "find_similar", "package_search", "search_library", "search_profiles", "report_progress", "validate", "submit"] as const;
 const STAGES = ["reading", "profiling", "personas", "problems", "validating"] as const;
 
 const enc = encodeURIComponent;
@@ -98,6 +98,37 @@ export function createResearchExtension(ctx: ResearchContext) {
         try { return text(await fetchReadable(p.url, ctx.policy)); }
         catch (e) { throw new Error(`fetch_url failed: ${(e as Error).message}`); }
       },
+    }));
+    // Searches run on the server (src/websearch.ts; the keys never reach this sandbox). Result URLs become fetchable
+    // and citable: a competitor's evidence_url must be one of them.
+    const search = async (body: Record<string, unknown>) => {
+      try {
+        const r: any = await api(`/api/worker/research/${enc(ctx.job.research_id)}/search`, { json: body });
+        for (const x of r.results ?? []) for (const u of [x.url, x.homepage, x.repository]) if (typeof u === "string") ctx.policy.allowFound(u);
+        return text(r);
+      } catch (e) { throw new Error(`search failed: ${(e as Error).message}`); }
+    };
+    pi.registerTool(defineTool({
+      name: "web_search", label: "Search the web",
+      description: "Web search (results with URL, title and page text). Use it to find the product's real competitors: \"alternatives to <product>\", \"<product> vs\", \"best <category> for <platform>\". Result pages can then be read with fetch_url and cited as a competitor's evidence_url. About 20 searches per job across web_search, find_similar and package_search.",
+      parameters: Type.Object({ query: Type.String({ minLength: 2, maxLength: 300 }), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 10 })) }),
+      executionMode: "sequential",
+      async execute(_id, p) { return search({ kind: "web", query: p.query, limit: p.limit }); },
+    }));
+    pi.registerTool(defineTool({
+      name: "find_similar", label: "Find similar sites",
+      description: "Sites similar to a URL (pass the product's website): its direct competitors as the web sees them. Results are citable as evidence_url.",
+      parameters: Type.Object({ url: Type.String(), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 10 })) }),
+      executionMode: "sequential",
+      async execute(_id, p) { return search({ kind: "similar", url: p.url, limit: p.limit }); },
+    }));
+    pi.registerTool(defineTool({
+      name: "package_search", label: "Search package registry",
+      description: "Search a package registry for packages that do the same job, with usage numbers (weekly downloads, dependents, stars): finds the open-source competitors and their real package names, and shows which are widely used. ecosystem: npm, pypi, crates, go, maven, nuget, rubygems, packagist.",
+      parameters: Type.Object({ query: Type.String({ minLength: 2, maxLength: 200 }), ecosystem: Type.Union(["npm", "pypi", "crates", "go", "maven", "nuget", "rubygems", "packagist"].map((x) => Type.Literal(x))),
+                                limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })) }),
+      executionMode: "sequential",
+      async execute(_id, p) { return search({ kind: "packages", query: p.query, ecosystem: p.ecosystem, limit: p.limit }); },
     }));
     pi.registerTool(defineTool({
       name: "search_library", label: "Search task library",

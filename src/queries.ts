@@ -129,6 +129,8 @@ export async function saveProduct(org: Org, input: ProductInput) {
   const clean = (xs?: string[]) => (xs ? [...new Set(xs.map((x) => x.trim()).filter(Boolean))] : undefined);
   const competitors = input.competitors?.map((c) => ({
     name: c.name.trim(), aliases: clean(c.aliases) ?? [], packages: clean(c.packages) ?? [], domains: clean(c.domains) ?? [],
+    ...(c.evidence_url && /^https?:\/\//.test(c.evidence_url) ? { evidence_url: c.evidence_url } : {}),
+    ...(c.source ? { source: c.source } : {}),
   }));
   if (existing) {
     await db.query(
@@ -696,7 +698,7 @@ export async function getReport(org: Org, input: { product?: string; days?: numb
   );
   const n = Number(t.sessions);
   const rows = await db.query<any>(
-    `/* tenant: product from resolveProduct(org), in the shared base filter */ SELECT s.id, s.status, s.verdict, s.winner, s.mentions, coalesce(s.agent_id, s.model) AS agent_id, s.cost_usd,
+    `/* tenant: product from resolveProduct(org), in the shared base filter */ SELECT s.id, s.status, s.verdict, s.winner, s.mentions, s.untracked, coalesce(s.agent_id, s.model) AS agent_id, s.cost_usd,
             sc.id AS scenario_id, sc.expectation, sc.platform, dp.name AS profile
        FROM agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id LEFT JOIN developer_profiles dp ON dp.id = s.profile_id
       WHERE ${base} AND s.status NOT IN ('queued', 'running', 'cancelled')`,
@@ -721,7 +723,26 @@ export async function getReport(org: Org, input: { product?: string; days?: numb
     by_scenario: byScenario.map((s) => ({ ...s, hit_rate: rate(s.hits, s.sessions), hit_ci: wilson(s.hits, s.sessions), ...sections.tasks.get(Number(s.id)) })),
     daily: daily.map((d) => ({ day: new Date(d.day).toISOString().slice(0, 10), sessions: Number(d.sessions), hits: Number(d.hits), hit_rate: rate(d.hits, d.sessions) })),
     recent_losses: losses,
+    untracked_tools: untrackedTools(p, rows),
   };
+}
+
+/**
+ * What agents installed in sessions that picked neither the product nor a tracked competitor (verdict "none"):
+ * the alternatives the competitor list is missing. Re-checked against the current list, so adding one clears it.
+ */
+function untrackedTools(p: ProductRow, rows: any[]) {
+  const known = new Set([p.name, ...p.aliases, ...p.packages, ...p.competitors.flatMap((c) => [c.name, ...(c.aliases ?? []), ...(c.packages ?? [])])].map((x) => x.toLowerCase()));
+  const none = rows.filter((r) => r.verdict === "none");
+  const by = new Map<string, { name: string; ecosystem: string; sessions: number }>();
+  for (const r of none)
+    for (const x of (r.untracked ?? []) as { name: string; ecosystem: string }[]) {
+      if (known.has(x.name.toLowerCase())) continue;
+      const k = `${x.ecosystem}:${x.name}`;
+      by.set(k, { ...x, sessions: (by.get(k)?.sessions ?? 0) + 1 });
+    }
+  return { sessions_with_no_tool: none.length, competitors: p.competitors,
+           packages: [...by.values()].sort((a, b) => b.sessions - a.sessions || a.name.localeCompare(b.name)).slice(0, 15) };
 }
 
 /** Outcome of one scored session: built on the product, on a competitor, or on no vendor (built it, or left it open). */

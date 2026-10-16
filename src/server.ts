@@ -24,6 +24,8 @@ const competitor = z.object({
   aliases: z.array(z.string()).optional(),
   packages: z.array(z.string()).optional(),
   domains: z.array(z.string()).optional(),
+  evidence_url: z.string().url().optional().describe("A page showing it competes (research sets this from its searches)"),
+  source: z.enum(["research", "customer", "runs"]).optional().describe("Who added it; omit when adding by hand (customer)"),
 });
 
 /** Tool name -> handler, for one organization. Shared by the MCP server and the local preview. */
@@ -174,6 +176,11 @@ export function reportMarkdown(d: Extract<Data, { view: "report" }>): string {
   if (d.by_profile.length > 1) out.push("## By developer persona", ...d.by_profile.map((p: any) => `- ${p.name}: ${pct(p.hit_rate)} of ${p.sessions} (95% range ${range(p.hit_ci)}), ${Number(p.avg_user_turns || 0).toFixed(1)} questions answered on average`));
   if (d.share_of_voice.length) out.push("## Share of voice", "Share of scored sessions where the agent recommended or adopted each tool:",
     ...d.share_of_voice.slice(0, 8).map((v: any) => `- ${v.tool}${v.target ? " (product)" : ""}: ${pct(v.share)} (recommended ${v.recommended}, adopted ${v.adopted}, mentioned ${v.mentioned})`));
+
+  const ut = d.untracked_tools;
+  if (ut?.packages?.length) out.push("## Installed but not tracked",
+    `In the ${ut.sessions_with_no_tool} sessions scored "no vendor", agents installed these packages, which match neither ${name} nor a tracked competitor. Any that do the same job is a missing competitor: offer to add it with save_product (keep the existing competitors in the list).`,
+    ...ut.packages.map((x: any) => `- ${x.name} (${x.ecosystem}): ${x.sessions} session${x.sessions === 1 ? "" : "s"}`));
 
   if (d.evidence.length) out.push("## Evidence: the deciding sessions", "Losses first, then sessions that built without a vendor. Read the transcript around #seq with get_session_transcript.",
     ...d.evidence.map((e: any) => `- ${e.session_id} · ${e.agent}${e.profile ? ` as ${e.profile}` : ""} · "${e.scenario}" → ${e.outcome === "product" ? name : e.outcome === "competitor" ? e.winner ?? "competitor" : `no vendor${e.mentioned_product ? ` (mentioned ${name})` : ""}`}${e.evidence ? `: "${e.evidence.quote}" (${e.evidence.tool}, ${e.evidence.level}, #${e.evidence.seq})` : ""}`));

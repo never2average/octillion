@@ -572,3 +572,16 @@ CREATE TABLE IF NOT EXISTS org_keys (
   wrapped     JSONB NOT NULL,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Web and package search for onboarding research (src/websearch.ts). Orchestrator-only keys: no env_vars, so they are
+-- never matched to an agent session (gateway/broker look providers up by env_vars) and stay on the server.
+INSERT INTO vault_providers (slug, mode, upstream_url, auth_header, auth_prefix, env_vars) VALUES
+  ('exa',          'direct', 'https://api.exa.ai',      'x-api-key', '', '{}'),
+  ('libraries_io', 'direct', 'https://libraries.io/api', 'api_key',   '', '{}')
+ON CONFLICT (slug) DO NOTHING;
+-- Every result URL a research job's searches returned: a competitor's evidence_url must be one of them.
+ALTER TABLE product_research ADD COLUMN IF NOT EXISTS sources  JSONB NOT NULL DEFAULT '[]';
+ALTER TABLE product_research ADD COLUMN IF NOT EXISTS searches INT NOT NULL DEFAULT 0;
+-- Packages the agent installed that match neither the product nor a tracked competitor ({name, ecosystem}): the
+-- alternatives research missed. The report lists them so the customer can add them as competitors.
+ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS untracked JSONB;

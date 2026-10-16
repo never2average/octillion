@@ -78,6 +78,20 @@ export class FetchPolicy {
     this.siteBases = [...bases];
   }
 
+  /** Hosts a web or package search returned this job (competitors' sites, comparison pages): readable like the product's. */
+  readonly found = new Set<string>();
+
+  /** Allow fetching a search result: its exact host over https (a GitHub result unlocks only that owner). */
+  allowFound(raw: string) {
+    try {
+      const u = new URL(raw);
+      const h = u.hostname.toLowerCase();
+      if (u.protocol !== "https:" || net.isIP(h.replace(/^\[|\]$/g, ""))) return;
+      if (GITHUB_HOSTS.includes(h)) { const owner = u.pathname.split("/").filter(Boolean)[0]; if (owner) this.githubOwners.add(owner.toLowerCase()); }
+      else this.found.add(h);
+    } catch { /* ignore bad URL */ }
+  }
+
   private suffixMatch(host: string, bases: string[]) { return bases.some((b) => host === b || host.endsWith("." + b)); }
 
   /** Product site (website/docs host or a subdomain, or a test-allowed host). */
@@ -92,12 +106,13 @@ export class FetchPolicy {
     if (net.isIP(host.replace(/^\[|\]$/g, ""))) return { ok: false, why: "IP address URLs are not allowed; use the host name" };
     if (this.isProductSite(u)) return { ok: true };
     if (REGISTRY_HOSTS.includes(host)) return { ok: true };
+    if (this.found.has(host) && u.protocol === "https:") return { ok: true };
     if (GITHUB_HOSTS.includes(host)) {
       const owner = u.pathname.split("/").filter(Boolean)[0]?.toLowerCase();
       if (owner && this.githubOwners.has(owner)) return { ok: true };
       return { ok: false, why: `GitHub owner "${owner ?? ""}" is not linked from the product's own pages` };
     }
-    return { ok: false, why: `host ${host} is not the product's website/docs, a package registry, or its GitHub` };
+    return { ok: false, why: `host ${host} is not the product's website/docs, a package registry, its GitHub, or a search result` };
   }
 
   /** Socket lookup: resolve, refuse blocked addresses (unless trusted for tests), connect to the checked address. */

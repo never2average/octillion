@@ -254,6 +254,20 @@ try {
   check("event provenance: a harness cannot pose as the orchestrator; harness-printed diffs are not evidence",
     forged.type === "harness_reserved:file_edit" && forged._src === "harness" && !("seq" in forged) &&
     real.verdict === "adopted" && fake.verdict !== "adopted", `${String(forged.type)} ${real.verdict} ${fake.verdict}`);
+  const installs = scoringMod.untrackedInstalls([
+    ev({ type: "tool_call", name: "Bash", input: { command: "npm install --save bullmq@5 @upstash/qstash zod @types/node typescript && pip install 'celery[redis]>=5' -r requirements.txt" } }),
+    ev({ type: "tool_call", name: "Bash", input: { command: "npx prisma init --datasource-provider sqlite" } }),
+    ev({ type: "assistant_message", content: "You could npm install agenda instead." }),
+    ev({ type: "tool_call", name: "Bash", input: { command: "go get github.com/hibiken/asynq@v0.24.1" }, _src: "harness" }),
+  ], [{ name: "BullMQ", packages: ["bullmq"] } as any]);
+  const found = new sf.FetchPolicy(["https://quickqueue.example.com"]);
+  found.allowFound("https://compare.example.org/alternatives"); found.allowFound("http://insecure.example.org/"); found.allowFound("https://10.0.0.1/");
+  found.allowFound("https://github.com/taskforcesh/bullmq");
+  check("untracked installs: install commands only, versions/extras/flags stripped, tracked/tooling/types and harness output left out; search hosts become fetchable",
+    installs.map((x) => `${x.ecosystem}:${x.name}`).sort().join() === "npm:@upstash/qstash,npm:prisma,npm:zod,pypi:celery" &&
+    found.allowed(new URL("https://compare.example.org/x")).ok && !found.allowed(new URL("http://insecure.example.org/")).ok &&
+    !found.allowed(new URL("https://10.0.0.1/")).ok && found.allowed(new URL("https://github.com/taskforcesh/bullmq")).ok &&
+    !found.allowed(new URL("https://github.com/someone-else/x")).ok, JSON.stringify(installs));
   const devSaid = (content: string, src = "orchestrator") => [ev({ type: "simulated_user", content, _src: src })];
   const bull = { name: "BullMQ", aliases: [], packages: ["bullmq"], domains: [] };
   check("blindness: a simulated-developer reply naming the product or a competitor is caught (orchestrator replies only)",

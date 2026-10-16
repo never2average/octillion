@@ -497,11 +497,22 @@
         </div>`).join("")}</div></div>`;
   }
 
+  // Competitors with where each came from (research cites a page), and a Remove button (save_product with the rest).
+  function competitorsCard(p) {
+    const SRC = { research: "found by research", customer: "added by you", runs: "picked by agents in runs" };
+    const rows = p.competitors.length
+      ? p.competitors.map((c, i) => `<tr><td><strong>${esc(c.name)}</strong><div class="muted" style="font-size:12px">${esc(SRC[c.source] || "added by hand")}</div></td>
+          <td>${/^https?:\/\//.test(c.evidence_url || "") ? `<a href="${esc(c.evidence_url)}" rel="noopener">${esc(new URL(c.evidence_url).hostname.replace(/^www\./, ""))} ↗</a>` : `<span class="muted">–</span>`}</td>
+          <td>${chips(c.packages)}</td><td>${chips(c.domains)}</td>
+          <td>${go("save_product", { product: p.slug, competitors: p.competitors.filter((_, j) => j !== i) }, "Remove")}</td></tr>`).join("")
+      : `<tr><td colspan="5" class="muted">No competitors configured</td></tr>`;
+    return `<div class="card"><h2>Competitors</h2>
+      <p class="sub" style="font-size:13px">Sessions where an agent picks one of these count as a loss to it; anything else counts as "no tool". Missing one? Ask me to add it (e.g. <em>"add competitor X with package x-sdk"</em>).</p>
+      <div class="table-wrap"><table><thead><tr><th>Name</th><th>Evidence</th><th>Packages</th><th>Domains</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+  }
+
   // ---------- product context ----------
   function viewProduct({ product: p, scenarios, simulations, warnings, models }) {
-    const comps = p.competitors.length
-      ? p.competitors.map((c) => `<tr><td>${esc(c.name)}</td><td>${chips(c.aliases)}</td><td>${chips(c.packages)}</td><td>${chips(c.domains)}</td></tr>`).join("")
-      : `<tr><td colspan="4" class="muted">No competitors configured</td></tr>`;
     return `<div class="stack">
       <div class="card stack">
         <div class="spread"><div><h1>${esc(p.name)}</h1><div class="sub">${esc(p.category)}</div></div>
@@ -513,7 +524,7 @@
         </div>
       </div>
       ${warnings.map((w) => `<div class="warn">⚠ ${esc(w)}</div>`).join("")}
-      <div class="card"><h2>Competitors</h2><div class="table-wrap"><table><thead><tr><th>Name</th><th>Aliases</th><th>Packages</th><th>Domains</th></tr></thead><tbody>${comps}</tbody></table></div></div>
+      ${competitorsCard(p)}
       <div class="card"><h2>Scenarios</h2><div class="table-wrap"><table>
         <thead><tr><th>#</th><th>Scenario</th><th>Expect</th><th class="num">Hit rate</th><th>Usually picks</th></tr></thead>
         <tbody>${scenarios.map((s) => `<tr${s.active ? "" : ' style="opacity:.5"'} data-tip="${esc(s.prompt)}">
@@ -602,6 +613,10 @@
       </table></div></div>
       ${d.recent_losses.length ? `<div class="card"><h2>Recent losses</h2><table><tbody>${d.recent_losses.map((l) => `
         <tr class="clickable" data-tool="get_agent_session" data-args="${args({ session_id: l.id })}"><td>${esc(l.scenario)}</td><td class="muted">${esc(l.model)}</td><td>${verdict("competitor")} ${esc(l.winner || "")}</td><td class="muted">${ago(l.ended_at)}</td></tr>`).join("")}</tbody></table></div>` : ""}
+      ${d.untracked_tools?.packages?.length ? `<div class="card"><h2>Installed but not tracked</h2>
+        <p class="sub" style="font-size:13px">In the ${num(d.untracked_tools.sessions_with_no_tool)} sessions scored "no vendor", agents installed these packages, which are neither ${esc(d.product.name)} nor a tracked competitor. If one does the same job, add it so its wins count as losses.</p>
+        <table><tbody>${d.untracked_tools.packages.map((x) => `<tr><td><strong>${esc(x.name)}</strong> <span class="muted">${esc(x.ecosystem)}</span></td><td class="num">${num(x.sessions)} session${x.sessions === 1 ? "" : "s"}</td>
+          <td>${go("save_product", { product: d.product.slug, competitors: [...d.untracked_tools.competitors, { name: x.name, packages: [x.name], source: "runs" }] }, "Add as competitor")}</td></tr>`).join("")}</tbody></table></div>` : ""}
       ${d.evidence?.length ? `<div class="card"><h2>The deciding sessions</h2><div class="stack">${d.evidence.map((e) => `
         <div class="ev evidence clickable" data-tool="get_agent_session" data-args="${args({ session_id: e.session_id })}">
           <div class="spread"><span><b>${esc(e.scenario)}</b> <span class="muted">· ${esc(e.agent)}${e.profile ? ` as ${esc(e.profile)}` : ""}</span></span>
@@ -764,8 +779,8 @@
       ${next ? `<div class="card stack"><div class="spread"><div><h2>Next: run it</h2><p class="sub">${esc(next.message)}</p></div>${go(next.tool, next.args, "▶ Run simulation")}</div></div>` : ""}
       ${drafts?.length ? `<div class="card"><h2>Draft tasks waiting for your approval</h2><p class="sub">The task library had nothing that fits these needs, so research wrote them. They run only once you approve them.</p>${drafts.map((s) => `<div class="ev"><div class="spread"><strong>#${s.id} ${esc(s.title)}</strong><span class="row">${go("review_draft_tasks", { product: p.slug, approve: [s.id] }, "Approve")}${go("review_draft_tasks", { product: p.slug, reject: [s.id] }, "Reject")}</span></div><div class="sub" style="font-size:13px">${esc(s.prompt)}</div></div>`).join("")}</div>` : ""}
       <div class="card stack"><h2>Product profile</h2><p class="sub">${esc(p.description)}</p>
-        <div class="grid-wide"><div><h2>Aliases</h2>${chips(p.aliases)}</div><div><h2>Packages</h2>${chips(p.packages)}</div><div><h2>Domains</h2>${chips(p.domains)}</div></div>
-        <div><h2>Competitors</h2>${chips(p.competitors.map((c) => c.name))}</div></div>
+        <div class="grid-wide"><div><h2>Aliases</h2>${chips(p.aliases)}</div><div><h2>Packages</h2>${chips(p.packages)}</div><div><h2>Domains</h2>${chips(p.domains)}</div></div></div>
+      ${competitorsCard(p)}
       ${warnings.map((w) => `<div class="warn">⚠ ${esc(w)}</div>`).join("")}
       <div class="card"><h2>Target developer personas</h2><div class="grid-wide">${personas.map((x) => `<div><strong>${esc(x.name)}</strong><p class="sub" style="font-size:13px">${esc(x.summary)}</p></div>`).join("")}</div></div>
       <div class="card"><h2>Programming problems</h2>${scenarios.map((s) => `<div class="ev" data-tip="${esc(s.prompt)}">

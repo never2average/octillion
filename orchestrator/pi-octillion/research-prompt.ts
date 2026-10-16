@@ -23,7 +23,10 @@ Tools:
 - fetch_url(url): read a page as text. Only the product's website/docs hosts and subdomains, the package registries
   (registry.npmjs.org, pypi.org, crates.io, pkg.go.dev) and the product's GitHub repos (once linked from its site).
   You have about 25 fetches in total, so start with the homepage, docs index, installation/quickstart pages, and
-  then the registry entry of the main package.
+  then the registry entry of the main package. Pages a search returned can be fetched too.
+- web_search(query), find_similar(url), package_search(query, ecosystem): about 20 searches in total, for finding the
+  product's competitors with evidence (web results, sites like the product's, packages doing the same job with usage
+  numbers). Their result URLs are what a competitor's evidence_url cites.
 - search_library(query, category?, language?, platform?): search the curated library of about 7,000 realistic coding
   tasks; each has a platform (web, mobile, backend, desktop, cli, data, other).
 - search_profiles(query?, limit?): search the developer-profile data: real developers from survey responses (role,
@@ -51,6 +54,12 @@ Procedure:
    (c) widely used open-source or self-hosted options when they compete for the same job (e.g. BullMQ for a hosted
    queue). A missing alternative makes the report call its wins "no tool picked". Give each its name, aliases, real
    package names and domains.
+   Find competitors with evidence, not memory: find_similar on the product's website; web_search for "alternatives to
+   <product>", "<product> vs" and "best <category> for <main platform>"; package_search in the product's ecosystems
+   for the job it does (usage numbers show which are widely used; take package names from there). Every competitor
+   cites evidence_url: a result URL exactly as a search returned it (a comparison or alternatives page, or the
+   competitor's own page for the same job). Drop any you cannot find evidence for. If search is not configured,
+   say so in notes and use the product's docs and registry pages.
 3. Personas. PICK 2-4 personas from the developer-profile data; never invent one. Choose in rounds, as many as it
    takes, and record every round in selection.personas:
    - Round 1 (shortlist): search_profiles with several queries for the product's real users (their roles and stacks on
@@ -141,7 +150,7 @@ ${ENV_CATALOG}
 Result JSON (pass it as a JSON string in result_json):
 { "product": { "name", "description", "category", "category_terms": ["the words that name this kind of tool, 2-8"],
                "website_url", "docs_url", "features": [], "aliases": [], "platforms": ["main platform first"],
-               "packages": [], "domains": [], "competitors": [{"name", "aliases": [], "packages": [], "domains": []}] },
+               "packages": [], "domains": [], "competitors": [{"name", "aliases": [], "packages": [], "domains": [], "evidence_url"}] },
   "personas": [{ "profile_slug": "REQUIRED: from search_profiles", "name": "the profile's exact name",
                  "environment": {"editor", "tools": [], "skills": [{"name", "description", "body"}], "agent_rules"} }],
   "selection": { "tasks": [{ "round": 1, "candidates": [{ "library_task_id", "keep": true | false, "reason" }] }, { "round": 2, ... }, ...,
