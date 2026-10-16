@@ -12,6 +12,11 @@ export SO_SURVEY_PARQUET=/path/to/survey_2025.parquet   # Stack Overflow Develop
 .venv/bin/python tasks_build.py $VAULT_BUILD_WORK/wc/candidates.jsonl ../curated/tasks.json 50
 # Personas: random respondents (professional developers who use AI agents at work), written blind.
 .venv/bin/python so_personas.py ../curated/profiles.json 150
+# Researcher personas: academic researchers, data scientists and applied scientists who use AI agents at work (many
+# write code for their research rather than as developers). Sampled here; the drafts are written from the brief in
+# FACTS.json, then merge checks them against their respondents and adds them to the profiles.
+.venv/bin/python so_researchers.py sample 40 $VAULT_BUILD_WORK/researcher-facts.json
+.venv/bin/python so_researchers.py merge $VAULT_BUILD_WORK/researcher-facts.json DRAFTS.json ../curated/profiles.json
 ```
 
 Then load into Postgres: `VAULT_DIR=vault/curated npm run vault:sync`.
