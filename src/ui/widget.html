@@ -749,17 +749,20 @@
   }
 
   // ---------- onboarding ----------
-  function viewOnboarding({ research: r, product: p, personas, scenarios, simulation: sim, warnings }) {
+  function viewOnboarding({ research: r, product: p, personas, scenarios, simulation: sim, warnings, failure, next_step: next, drafts }) {
     const stages = ["reading", "profiling", "personas", "problems", "validating", "done"];
     const at = r.status === "completed" ? stages.length - 1 : Math.max(0, stages.indexOf(r.stage || "reading"));
     const steps = stages.map((s, i) => `<span class="badge" style="${i <= at ? "background:var(--accent);color:var(--surface)" : ""}">${i < at || r.status === "completed" ? "✓ " : ""}${esc(s)}</span>`).join("");
     if (r.status !== "completed")
       return `<div class="stack"><div class="spread"><div><h1>Onboarding ${esc(p.name)}</h1><div class="sub">${esc(r.input.website_url || "")} ${esc(r.input.docs_url || "")}</div></div>${statusPill(r.status === "failed" ? "failed" : r.status === "queued" ? "queued" : "running")}</div>
         <div class="card stack"><div class="chips">${steps}</div><p class="sub">${esc(r.note || "The orchestrator reads the website and docs, then writes the product profile, target developer personas and programming problems.")}</p>
-        ${r.error ? `<div class="err-box">${esc(r.error)}</div>` : ""}${go("get_onboarding", { research_id: r.id }, "↻ Refresh")}</div></div>`;
+        ${failure ? `<div class="warn"><strong>${esc(failure.summary)}</strong><ol style="margin:6px 0 0 18px">${failure.next.map((x) => `<li>${esc(x)}</li>`).join("")}</ol></div>` : ""}
+        ${r.status === "failed" ? "" : go("get_onboarding", { research_id: r.id }, "↻ Refresh")}</div></div>`;
     return `<div class="stack">
       <div class="spread"><div><h1>${esc(p.name)}</h1><div class="sub">${esc(p.category)}</div></div>
         <div class="row">${sim ? go("get_simulation", { simulation_id: sim.id }, `Run: ${sim.finished}/${sim.sessions} →`) : ""}${go("get_visibility_report", { product: p.slug }, "Report →")}</div></div>
+      ${next ? `<div class="card stack"><div class="spread"><div><h2>Next: run it</h2><p class="sub">${esc(next.message)}</p></div>${go(next.tool, next.args, "▶ Run simulation")}</div></div>` : ""}
+      ${drafts?.length ? `<div class="card"><h2>Draft tasks waiting for your approval</h2><p class="sub">The task library had nothing that fits these needs, so research wrote them. They run only once you approve them.</p>${drafts.map((s) => `<div class="ev"><div class="spread"><strong>#${s.id} ${esc(s.title)}</strong><span class="row">${go("review_draft_tasks", { product: p.slug, approve: [s.id] }, "Approve")}${go("review_draft_tasks", { product: p.slug, reject: [s.id] }, "Reject")}</span></div><div class="sub" style="font-size:13px">${esc(s.prompt)}</div></div>`).join("")}</div>` : ""}
       <div class="card stack"><h2>Product profile</h2><p class="sub">${esc(p.description)}</p>
         <div class="grid-wide"><div><h2>Aliases</h2>${chips(p.aliases)}</div><div><h2>Packages</h2>${chips(p.packages)}</div><div><h2>Domains</h2>${chips(p.domains)}</div></div>
         <div><h2>Competitors</h2>${chips(p.competitors.map((c) => c.name))}</div></div>

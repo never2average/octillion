@@ -57,8 +57,20 @@ export class FetchPolicy {
   private testDns = new Map(envList(process.env.RESEARCH_TEST_DNS).map((kv) => kv.split("=") as [string, string]));
   fetches = 0;
 
-  constructor(urls: (string | null | undefined)[], readonly maxFetches = 25) {
+  /**
+   * `related`: the product's own links found in its registry metadata (docs site, homepage, source). Their hosts are
+   * allowed like the website; a GitHub link unlocks only that owner's repositories, never all of GitHub.
+   */
+  constructor(urls: (string | null | undefined)[], readonly maxFetches = 25, related: string[] = []) {
     const bases = new Set<string>();
+    for (const r of related) {
+      try {
+        const u = new URL(r);
+        const h = u.hostname.toLowerCase().replace(/^www\./, "");
+        if (GITHUB_HOSTS.includes(h)) { const owner = u.pathname.split("/").filter(Boolean)[0]; if (owner) this.githubOwners.add(owner.toLowerCase()); }
+        else if (u.protocol === "https:") bases.add(h);
+      } catch { /* ignore bad URL */ }
+    }
     for (const u of urls) {
       if (!u) continue;
       try { bases.add(new URL(u).hostname.toLowerCase().replace(/^www\./, "")); } catch { /* ignore bad URL */ }

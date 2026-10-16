@@ -50,6 +50,7 @@ export function handlersFor(org: Org) {
     browse_task_library: (a: { query?: string; category?: string; language?: string; platform?: string; limit?: number }) => q.browseTaskLibrary(a),
     save_harness_mix: (a: { name: string; description?: string; agents: { agent_id: string; share: number }[] }) => priv.saveHarnessMix(org, a),
     list_harness_mixes: (_a: Record<string, never>) => priv.listHarnessMixes(org),
+    review_draft_tasks: (a: { product?: string; approve?: number[]; reject?: number[] }) => research.reviewDraftTasks(org, a),
     save_personas: (a: { personas: priv.PersonaInput[] }) => priv.savePersonas(org, a.personas),
     list_personas: (_a: Record<string, never>) => priv.listPersonas(org),
     import_tasks: (a: { product?: string; task_set: string; description?: string; tasks: priv.TaskInput[] }) => priv.importTasks(org, a),
@@ -101,10 +102,12 @@ function summarize(d: Data): string {
       return `Developer population "${d.population.name}" [${d.population.slug}]${d.populations.length > 1 ? ` (others: ${d.populations.filter((p: any) => p.slug !== d.population.slug).map((p: any) => p.slug).join(", ")})` : ""}. Coding agents (as of ${d.as_of ?? "n/a"}), weighted by real-world developer adoption, rounded to whole sandboxes out of ${d.sandbox_unit}: ${d.agents.filter((a) => a.enabled).map((a) => `${a.id} ${a.sandboxes}/${d.sandbox_unit} (${pct(a.weight)})`).join(", ")}.${d.agents.some((a) => !a.enabled) ? ` Not runnable yet: ${d.agents.filter((a) => !a.enabled).map((a) => a.label).join(", ")}.` : ""}${d.unrepresented_share != null ? ` Usage share not representable (IDE-only tools): ${pct(d.unrepresented_share)}.` : ""} A default run samples ${d.default_samples} sessions per scenario in these proportions. Runnable agents cover ${pct(d.runnable_coverage)} of representable usage${d.agents.some((a) => a.status === "adapter pending") ? `; adapters pending for ${d.agents.filter((a) => a.status === "adapter pending").map((a) => a.label).join(", ")}` : ""}.`;
     case "onboarding": {
       const r = d.research, p = d.product;
-      const head = `Onboarding ${r.id} for ${p.name}: ${r.status}${r.stage && r.status === "running" ? ` (${r.stage}${r.note ? `: ${r.note}` : ""})` : ""}${r.error ? `. Error: ${r.error}` : ""}.`;
+      const head = `Onboarding ${r.id} for ${p.name}: ${r.status}${r.stage && r.status === "running" ? ` (${r.stage}${r.note ? `: ${r.note}` : ""})` : ""}.`;
+      if (r.status === "failed" && d.failure)
+        return `${head} ${d.failure.summary} What to do next: ${d.failure.next.map((x: string, i: number) => `(${i + 1}) ${x}`).join(" ")} Tell the user plainly; do not show internal error text.`;
       if (r.status === "queued" && d.capacity) return `${head} Capacity: ${d.capacity.message} Check again with get_onboarding.`;
       if (r.status !== "completed") return `${head} The orchestrator is researching the website and docs, then writes the product profile, target developer personas and programming problems. Check again with get_onboarding.`;
-      return `${head} Profile: ${p.category || "n/a"}; aliases ${p.aliases.join(", ") || "none"}; packages ${p.packages.join(", ") || "none"}; competitors ${p.competitors.map((c: any) => c.name).join(", ") || "none"}. Personas: ${d.personas.map((x: any) => x.name).join("; ")}. Problems (${d.scenarios.length}): ${d.scenarios.map((s: any) => `#${s.id} ${s.title} [${s.source}${s.expectation === "avoid" ? ", avoid" : ""}]`).join("; ")}.${d.simulation ? ` Simulation ${d.simulation.id}: ${d.simulation.status}, ${d.simulation.finished}/${d.simulation.sessions} sessions done; see get_simulation / get_visibility_report.` : r.status === "completed" ? " Research is done and no run has started: review the competitors and problems with the user, then launch it with run_simulation." : ""}`;
+      return `${head} Profile: ${p.category || "n/a"}; aliases ${p.aliases.join(", ") || "none"}; packages ${p.packages.join(", ") || "none"}; competitors ${p.competitors.map((c: any) => c.name).join(", ") || "none"}. Personas: ${d.personas.map((x: any) => x.name).join("; ")}. Problems (${d.scenarios.length}): ${d.scenarios.map((s: any) => `#${s.id} ${s.title} [${s.source}${s.expectation === "avoid" ? ", avoid" : ""}]`).join("; ")}.${d.drafts?.length ? ` Draft tasks waiting for the user's approval (research wrote them because the library had nothing fitting; they run only once approved with review_draft_tasks): ${d.drafts.map((s: any) => `#${s.id} ${s.title}`).join("; ")}.` : ""}${d.simulation ? ` Simulation ${d.simulation.id}: ${d.simulation.status}, ${d.simulation.finished}/${d.simulation.sessions} sessions done; see get_simulation / get_visibility_report.` : d.next_step ? ` Next step, offer it to the user now: ${d.next_step.message} If they agree, call ${d.next_step.tool} ${JSON.stringify(d.next_step.args)}.` : r.status === "completed" && d.drafts?.length ? " No task is active yet: ask the user to review the draft tasks (review_draft_tasks), then run_simulation." : ""}`;
     }
     case "profiles":
       return d.profiles.length
@@ -290,6 +293,7 @@ export const TOOL_STATUS: Record<ToolName, [string, string]> = {
   register_harness: ["Registering private harness…", "Private harness submitted"],
   list_harnesses: ["Loading private harnesses…", "Private harnesses loaded"],
   save_harness_mix: ["Saving private harness mix…", "Private harness mix saved"],
+  review_draft_tasks: ["Saving draft task review…", "Draft tasks reviewed"],
   list_harness_mixes: ["Loading private harness mixes…", "Private harness mixes loaded"],
 };
 
@@ -594,6 +598,16 @@ export function createServer(org: Org): McpServer {
     },
     annotations: write, _meta: meta("register_harness"),
   }, run("register_harness"));
+  registerAppTool(server, "review_draft_tasks", {
+    title: "Review draft tasks",
+    description: "Approve or reject the draft tasks onboarding research proposed for needs Octillion's task library does not cover (listed by get_onboarding). Only approved drafts run.",
+    inputSchema: {
+      product,
+      approve: z.array(z.number().int()).optional().describe("Draft task ids to approve (they become active tasks)"),
+      reject: z.array(z.number().int()).optional().describe("Draft task ids to reject"),
+    },
+    annotations: write, _meta: meta("review_draft_tasks"),
+  }, run("review_draft_tasks"));
   registerAppTool(server, "save_harness_mix", {
     title: "Save a private harness mix",
     description: "Define your own distribution of coding agents (for example only the agents your users run), from the runnable agents in list_agents. Private to your organization. Run it with run_simulation {population: slug}. Reports on it are labelled and never blended with the market-weighted default, which stays the headline figure.",

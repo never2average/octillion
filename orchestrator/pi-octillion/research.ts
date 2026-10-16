@@ -73,7 +73,7 @@ export class ResearchContext {
   criticRounds = 0;
 
   constructor(readonly job: ResearchJob) {
-    this.policy = new FetchPolicy([job.input.website_url, job.input.docs_url], RESEARCH.maxFetches);
+    this.policy = new FetchPolicy([job.input.website_url, job.input.docs_url], RESEARCH.maxFetches, job.input.related_urls ?? []);
   }
 
   async progress(stage: string, note?: string) {

@@ -1,3 +1,4 @@
+import { registryLinks } from "./registry-meta.js";
 import { isIP } from "node:net";
 import { getDb } from "./db.js";
 import { randomId, type Org } from "./auth.js";
@@ -34,6 +35,10 @@ export interface ResearchResult {
                /** Where the task's code runs; derived from template/language/prompt when omitted. */
                platform?: string;
 
+               /** A problem written for a need the library does not cover: saved inactive until the customer approves it. */
+               draft?: boolean;
+               /** For a draft: the library searches that were run and why no task fit. */
+               library_check?: string;
                /** The same problem in each persona's words: {persona name: prompt}. */
                variants?: Record<string, string>;
                /** The purchase decision the requirements create (see DECISION_KINDS). */
@@ -149,6 +154,8 @@ export async function onboardProduct(org: Org, input: OnboardInput) {
   for (const k of ["website_url", "docs_url"] as const)
     if (input[k] !== undefined && !httpUrl(input[k])) throw new Error(`${k} must be a public http(s) URL with a host name (not an IP address)`);
   if (!input.website_url && !input.docs_url) throw new Error("Give at least a website_url or a docs_url so the orchestrator can research the product.");
+  // A registry page (PyPI, npm, crates.io) rarely holds the docs: add the package's own links from its metadata.
+  const relatedUrls = await registryLinks([input.website_url, input.docs_url]);
 
   const host = (u?: string) => (u ? new URL(u).hostname.replace(/^(www|docs)\./, "") : "");
   const name = input.name?.trim() || host(input.website_url) || host(input.docs_url);
@@ -162,7 +169,8 @@ export async function onboardProduct(org: Org, input: OnboardInput) {
   const id = randomId("rsh_");
   await db.query(
     `INSERT INTO product_research (id, org_id, product_id, input, run) VALUES ($1, $2, $3, $4, $5)`,
-    [id, org.orgId, product.product.id, JSON.stringify({ name: input.name ?? null, prompt, website_url: input.website_url ?? null, docs_url: input.docs_url ?? null }),
+    [id, org.orgId, product.product.id, JSON.stringify({ name: input.name ?? null, prompt, website_url: input.website_url ?? null, docs_url: input.docs_url ?? null,
+                                                          related_urls: relatedUrls }),
      // Research only by default: one orchestrator sandbox, then done. The run (one sandbox per agent session) is the
      // explicit next step, run_simulation; `run: true` chains it here.
      input.run === true ? JSON.stringify({ samples: input.samples ?? null, population: input.population ?? null }) : null],
@@ -186,14 +194,21 @@ export async function getOnboarding(org: Org, input: { research_id?: string; pro
         `/* tenant: simulation of a research row already read with org_id = the caller's org */ SELECT sim.id, sim.status, count(s.id) AS sessions, count(*) FILTER (WHERE s.status IN ('completed','failed','timeout','cancelled')) AS finished
            FROM simulations sim LEFT JOIN agent_sessions s ON s.simulation_id = sim.id WHERE sim.id = $1 GROUP BY sim.id`, [job.simulation_id])
     : [];
+  const drafts = product.scenarios.filter((s: any) => s.source === "draft" && !s.active);
+  const active = product.scenarios.filter((s: any) => s.active);
   return {
     view: "onboarding" as const,
     capacity: job.status === "queued" ? await capacityStatus() : null, // "starting orchestrator…" while waiting
-    research: { id: job.id, status: job.status, stage: job.stage, note: job.note, error: job.error, input: job.input,
+    // The raw validator output stays internal; customers get what went wrong and what to do, in plain words.
+    research: { id: job.id, status: job.status, stage: job.stage, note: job.note, input: job.input,
                 created_at: job.created_at, finished_at: job.finished_at, sources: job.result?.sources ?? [] },
+    failure: job.status === "failed" ? onboardingFailure(job, product.product.slug) : null,
+    next_step: job.status === "completed" && !sim && active.length
+      ? await firstRunOffer(product.product.slug, active.length, personas.map((x: any) => x.slug)) : null,
+    drafts,
     product: product.product,
     personas,
-    scenarios: product.scenarios.filter((s: any) => s.active),
+    scenarios: active,
     simulation: sim ?? null,
     warnings: product.warnings,
   };
@@ -292,12 +307,19 @@ export function validateResearch(r: ResearchResult | undefined): string[] {
   if (platforms.length && isPlatform(platforms[0]) && recommended.length >= 2 &&
       recommended.filter((s) => platformOfScenario(s) === platforms[0]).length * 3 < recommended.length)
     issues.push(`at least a third of the "recommend" problems must target ${platforms[0]}, the product's main platform`);
-  // Library only: every problem is a curated library task, cited by its id. Never written from scratch.
+  // Library first: every problem is a curated library task, cited by its id, or (only for a need the library does not
+  // cover) a draft the customer must approve before it runs, saying what was searched and why nothing fit.
   scenarios.forEach((s: any, i: number) => {
     if (s?.platform != null && !isPlatform(s.platform)) issues.push(`scenarios[${i}].platform must be one of ${PLATFORMS.join(", ")}`);
-    if (!Number.isInteger(s?.library_task_id) || s.library_task_id <= 0)
-      issues.push(`scenarios[${i}] has no library_task_id: every problem must be a task from the library (search_library); never write one from scratch`);
+    if (s?.draft === true) {
+      if (s.library_task_id != null) issues.push(`scenarios[${i}] is a draft: drafts have no library_task_id`);
+      if (typeof s.library_check !== "string" || s.library_check.trim().length < 30)
+        issues.push(`scenarios[${i}] is a draft: set library_check to the library searches you ran and why no task fit (30+ characters)`);
+    } else if (!Number.isInteger(s?.library_task_id) || s.library_task_id <= 0)
+      issues.push(`scenarios[${i}] has no library_task_id: use a library task (search_library), or, only if none fits this need, propose it as a draft (draft: true, library_check)`);
   });
+  if (scenarios.length && scenarios.every((s: any) => s?.draft === true) && !(Array.isArray(r.selection?.tasks) && r.selection!.tasks!.length))
+    issues.push("selection.tasks: record the library rounds you ran before falling back to drafts");
   const ids = scenarios.map((s: any) => s?.library_task_id).filter((x: unknown) => Number.isInteger(x));
   if (new Set(ids).size !== ids.length) issues.push("each library task may be used once; two problems cite the same library_task_id");
   scenarios.forEach((s, i) => {
@@ -337,7 +359,9 @@ export function validateResearch(r: ResearchResult | undefined): string[] {
       }
     }
   });
-  issues.push(...selectionIssues("tasks", r.selection?.tasks, scenarios.map((s: any) => s?.library_task_id).filter((x: unknown): x is number => Number.isInteger(x))));
+  // Selection rounds cover the library tasks; when every problem is a draft, the rounds record the searches instead.
+  const libraryIds = scenarios.map((s: any) => s?.library_task_id).filter((x: unknown): x is number => Number.isInteger(x));
+  if (libraryIds.length) issues.push(...selectionIssues("tasks", r.selection?.tasks, libraryIds));
   issues.push(...selectionIssues("personas", r.selection?.personas, personas.map((x: any) => x?.profile_slug).filter(Boolean)));
   return issues;
 }
@@ -388,6 +412,63 @@ export async function validateResearchJob(id: string, result: ResearchResult) {
   return { ok: issues.length === 0, issues };
 }
 
+/** Why onboarding failed, in plain words, and what the customer can do next (never the raw validator output). */
+export function onboardingFailure(job: { note?: string | null; error?: string | null; input?: any }, product: string) {
+  const text = `${job.note ?? ""} ${job.error ?? ""}`;
+  const reasons: string[] = [], next: string[] = [];
+  if (/blocked by fetch policy|could not read|not readable|fetch_url failed|documentation hosts/i.test(text)) {
+    reasons.push("Research could not read the product's documentation from the links given.");
+    next.push("Onboard again with docs_url set to the documentation site itself (for example its Read the Docs or docs page).");
+  }
+  if (/no (interatomic|matching|fitting|relevant)? ?.*tasks|library searches found no|scenarios \(got 0\)|give \d+-\d+ scenarios/i.test(text)) {
+    reasons.push("Octillion's task library has no tasks that fit this product yet.");
+    next.push(`Bring your own tasks with import_tasks {product: "${product}"} (for example from your docs' tutorials or support questions), then run_simulation {task_set}.`);
+    next.push("Or onboard again: research can now propose draft tasks for gaps in the library, which you approve with review_draft_tasks before they run.");
+  }
+  if (/competitors \(got 0\)/i.test(text) && !reasons.length) reasons.push("Research could not identify the product's alternatives.");
+  if (/LLM unavailable|provider|rate limit|timed out|stale/i.test(text)) {
+    reasons.push("The research service was interrupted.");
+    next.push("Try onboarding again in a few minutes.");
+  }
+  const explanation = (job.note ?? "").replace(/\s+/g, " ").trim();
+  if (!reasons.length) reasons.push(explanation ? `Research did not finish: ${explanation.slice(0, 300)}` : "Research did not finish.");
+  if (!next.length) next.push("Try onboarding again, or set up the product by hand with save_product and save_scenarios.");
+  return { summary: reasons.join(" "), research_note: explanation || null, next };
+}
+
+/** The first run, offered concretely: the exact call, how many sessions, roughly what it costs. */
+export async function firstRunOffer(product: string, tasks: number, profiles: string[]) {
+  const db = await getDb();
+  const [{ avg }] = await db.query<{ avg: number | null }>(
+    "/* tenant: aggregate average across all completed sessions, no rows of any org returned */ SELECT avg(cost_usd)::float AS avg FROM agent_sessions WHERE status = 'completed' AND ended_at > now() - interval '30 days' AND cost_usd > 0");
+  const perSession = Number(avg) > 0 ? Number(avg) : 1.5;
+  const slots = tasks * Math.max(1, profiles.length);
+  const first = Math.min(slots * config.defaultSamples(), config.maxSessionsPerRun());
+  const most = Math.min(slots * config.maxSamples(), config.maxSessionsPerRun());
+  const usd = (n: number) => Math.max(1, Math.round(n));
+  return {
+    tool: "run_simulation", args: { product, ...(profiles.length ? { profiles } : {}) },
+    sessions_first_batch: first, sessions_at_most: most,
+    cost_estimate_usd: [usd(first * perSession), usd(most * perSession)] as [number, number],
+    message: `Run it now: about ${first} agent sessions to start (up to ${most} as results settle), roughly $${usd(first * perSession)}-${usd(most * perSession)}.`,
+  };
+}
+
+/** Approve or reject the draft tasks research proposed for gaps in the library (only approved drafts ever run). */
+export async function reviewDraftTasks(org: Org, input: { product?: string; approve?: number[]; reject?: number[] }) {
+  const p = await resolveProduct(org, input.product);
+  const db = await getDb();
+  const ids = [...(input.approve ?? []), ...(input.reject ?? [])];
+  if (!ids.length) throw new Error("Pass approve and/or reject: draft task ids from get_onboarding");
+  const found = (await db.query<{ id: number }>(
+    "/* tenant: product from resolveProduct(org) */ SELECT id FROM scenarios WHERE product_id = $1 AND id = ANY($2) AND source = 'draft'", [p.id, ids])).map((r) => Number(r.id));
+  const missing = ids.filter((x) => !found.includes(x));
+  if (missing.length) throw new Error(`Not draft tasks of ${p.name}: ${missing.join(", ")}. See get_onboarding.`);
+  if (input.approve?.length) await db.query("/* tenant: product from resolveProduct(org) */ UPDATE scenarios SET active = true, updated_at = now() WHERE product_id = $1 AND id = ANY($2) AND source = 'draft'", [p.id, input.approve]);
+  if (input.reject?.length) await db.query("/* tenant: product from resolveProduct(org) */ UPDATE scenarios SET source = 'draft_rejected', active = false, updated_at = now() WHERE product_id = $1 AND id = ANY($2) AND source = 'draft'", [p.id, input.reject]);
+  return getOnboarding(org, { product: p.slug });
+}
+
 /** Apply a completed research result (or record a failure). Returns 422-style issues when invalid. */
 export async function completeResearch(id: string, body: { status?: string; error?: string; result?: ResearchResult }) {
   const job = await runningJob(id);
@@ -428,7 +509,7 @@ export async function completeResearch(id: string, body: { status?: string; erro
   await db.transaction(async (tx) => {
     // A new research replaces the previous generated personas and problems (kept for history, inactive).
     await tx.query("UPDATE developer_profiles SET active = false WHERE product_id = $1 AND source IN ('generated', 'picked')", [job.product_id]);
-    await tx.query("/* tenant: product of the research job (job checked against the job token in http.ts) */ UPDATE scenarios SET active = false, updated_at = now() WHERE product_id = $1 AND source IN ('generated', 'library')", [job.product_id]);
+    await tx.query("/* tenant: product of the research job (job checked against the job token in http.ts) */ UPDATE scenarios SET active = false, updated_at = now() WHERE product_id = $1 AND source IN ('generated', 'library', 'draft')", [job.product_id]);
     for (const x of r.personas) {
       // The persona is a real developer profile from the data: identity, attributes and instructions are copied from it.
       const [d] = await tx.query<any>("SELECT name, summary, attributes, instructions FROM developer_profiles WHERE slug = $1 AND org_id IS NULL", [x.profile_slug]);
@@ -456,11 +537,12 @@ export async function completeResearch(id: string, body: { status?: string; erro
       }
       await tx.query(
         `/* tenant: product of the research job (job checked against the job token in http.ts) */ INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, library_task_id, source, rationale, template, prompt_variants, decision, platform)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $9, $10, $11, $12, $13, $14)`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $15, $8, $9, $10, $11, $12, $13, $14)`,
         [job.product_id, s.title?.trim() || prompt.slice(0, 80), prompt, repoUrl, s.language ?? null, s.tags ?? [],
-         s.expectation ?? "recommend", s.library_task_id ?? null, s.library_task_id ? "library" : "generated", s.rationale ?? null,
+         s.expectation ?? "recommend", s.library_task_id ?? null, s.draft ? "draft" : s.library_task_id ? "library" : "generated",
+         s.draft ? `Draft: ${s.library_check ?? ""}${s.rationale ? ` ${s.rationale}` : ""}` : s.rationale ?? null,
          template, JSON.stringify(Object.fromEntries(Object.entries(s.variants ?? {}).filter(([who]) => slugOf.has(who)).map(([who, t]) => [slugOf.get(who)!, t.trim()]))), s.decision ? JSON.stringify(s.decision) : null,
-         isPlatform(s.platform) ? s.platform : platformOf({ template, language: s.language, tags: s.tags, prompt })]);
+         isPlatform(s.platform) ? s.platform : platformOf({ template, language: s.language, tags: s.tags, prompt }), !s.draft]);
     }
     await tx.query(
       "/* tenant: research id checked against the job token in http.ts (/research/:id) */ UPDATE product_research SET status = 'completed', stage = 'done', result = $2, finished_at = now(), heartbeat_at = now() WHERE id = $1",

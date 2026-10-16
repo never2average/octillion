@@ -232,6 +232,10 @@ try {
     v5.some((x) => /no "recommend" problem targets mobile/.test(x)) && v6.some((x) => /product\.platforms/.test(x)) &&
     v6.some((x) => /no library_task_id/.test(x)) && v8.some((x) => /used once/.test(x)) && v7.length === 0, [v5, v6, v7, v8].map((v) => v.join(" | ")).join(" || "));
   const sf = await import("../core/safe-fetch.js");
+  const pkgPolicy = new sf.FetchPolicy(["https://pypi.org/project/mace-torch/"], 25, ["https://github.com/ACEsuit/mace", "https://mace-docs.readthedocs.io/"]);
+  check("research fetch: the package's own registry links are readable; a GitHub link unlocks only that owner",
+    pkgPolicy.allowed(new URL("https://mace-docs.readthedocs.io/en/latest/")).ok && pkgPolicy.allowed(new URL("https://github.com/ACEsuit/mace/blob/main/README.md")).ok &&
+    !pkgPolicy.allowed(new URL("https://github.com/someone-else/repo")).ok && !pkgPolicy.allowed(new URL("https://example.com/")).ok, "");
   const metaPolicy = new sf.FetchPolicy(["http://169.254.169.254/", "http://[fd00:ec2::254]/"]);
   let fetchBlocked = false;
   try { await sf.fetchReadable("http://169.254.169.254/latest/meta-data", metaPolicy); } catch (e) { fetchBlocked = e instanceof sf.FetchBlockedError; }
@@ -256,6 +260,14 @@ try {
     scoringMod.developerNamedTools(devSaid("Something like BullMQ is fine if needed."), stripe as any, [bull as any]).join() === "BullMQ" &&
     scoringMod.developerNamedTools(devSaid("Keep it cheap, whatever is quickest."), stripe as any, [bull as any]).length === 0 &&
     scoringMod.developerNamedTools(devSaid("Something like BullMQ is fine.", "harness"), stripe as any, [bull as any]).length === 0, "");
+  const asDrafts = base.scenarios.map(({ library_task_id, ...s }) => ({ ...s, draft: true, library_check: "searched 'reset email' and 'transactional email' on backend; no library task fits" }));
+  const vD = research.validateResearch({ ...base, personas: clean, scenarios: asDrafts } as any);
+  const vD2 = research.validateResearch({ ...base, personas: clean, scenarios: asDrafts.map(({ library_check, ...s }) => s) } as any);
+  const fail = research.onboardingFailure({ note: "Extensive library searches found no molecular simulation tasks; documentation hosts are blocked by fetch policy.", error: '{"error":"invalid research result","issues":["give 3-10 scenarios (got 0)"]}' }, "mace");
+  check("drafts: a gap the library does not cover may be a draft with its library check; a draft without one is refused; failures read plainly",
+    vD.length === 0 && vD2.some((x) => /is a draft: set library_check/.test(x)) &&
+    /could not read the product's documentation/.test(fail.summary) && /no tasks that fit/.test(fail.summary) && !/invalid research result/.test(JSON.stringify(fail)),
+    [vD, vD2].map((v) => v.join(" | ")).join(" || "));
   const pl = await import("../../src/platform.js");
   check("platformOf: template, then language, then the prompt",
     pl.platformOf({ template: "flutter" }) === "mobile" && pl.platformOf({ template: "nextjs-ts" }) === "web" &&

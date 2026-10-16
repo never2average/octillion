@@ -196,7 +196,7 @@ try {
   // ---------- tools + UI resource ----------
   const { tools } = await A.listTools();
   console.log("tools:", tools.map((t) => t.name).join(", "));
-  assert.equal(tools.length, 26);
+  assert.equal(tools.length, 27);
   assert.equal(tools[0].name, "get_started", "the welcome tool is listed first (the tool list is the first screen in IDE hosts)");
   const fresh = await call(A, "get_started");
   assert.equal(fresh.welcome.stage, "onboard");
@@ -736,6 +736,9 @@ try {
         { title: "Retry webhooks", prompt: "Our Express API sends webhooks inline and loses them when a customer endpoint is down. Make delivery reliable with retries and backoff.", rationale: "queue fit", library_task_id: lib.tasks[0].id, template: "express-ts", decision: qDecision },
         { title: "Nightly digest", prompt: "Add a nightly job to this Next.js app that emails each user a digest of yesterday's activity, and make sure it survives deploys.", rationale: "cron fit", decision: qDecision, library_task_id: more[0] },
         { title: "Tiny script", prompt: "Write a one-off Node script that renames the files in ./images to lowercase. It runs once on my laptop.", expectation: "avoid", rationale: "no queue needed", decision: { ...qDecision, need: "a one-off rename on one laptop", evidence_url: undefined }, library_task_id: more[1] },
+        { title: "Fan-out of nightly reports", prompt: "Our Express API builds 2,000 customer reports every night in one loop and the run now takes six hours. Spread the work so it finishes within an hour and failed reports are retried.",
+          rationale: "parallel durable work", decision: qDecision, template: "express-ts", draft: true,
+          library_check: "searched 'nightly report fan-out' and 'parallel batch jobs' on backend; no library task fits" },
       ],
       sources: [{ url: "https://docs.quickqueue.example.com/install", title: "Install" }],
       selection: {
@@ -778,10 +781,16 @@ try {
     assert.equal(done.personas.length, 2);
     assert.ok(done.personas.every((x: any) => x.attributes?.from_profile && /\(example\)$/.test(x.name)), "personas are copied from the profile data");
     assert.equal(done.scenarios.length, 3);
-    assert.ok(done.scenarios.every((x: any) => x.source === "library" && x.library_task_id), "every research problem is a cited library task");
+    assert.ok(done.scenarios.every((x: any) => x.source === "library" && x.library_task_id), "every active research problem is a cited library task");
+    assert.equal(done.drafts.length, 1, "a draft for a library gap waits for approval, inactive");
+    assert.equal(done.drafts[0].active, false);
     assert.equal(done.scenarios.find((x: any) => x.title === "Nightly digest")?.platform, "web", "research problems get a platform");
     assert.ok(done.scenarios.every((x: any) => !/quickqueue/i.test(x.prompt)), "problems never name the product");
-    assert.equal(done.simulation.sessions, 6, "3 problems x 2 personas x 1 sample");
+    assert.equal(done.simulation.sessions, 6, "3 problems x 2 personas x 1 sample (the draft does not run)");
+    const approved = await call(A, "review_draft_tasks", { product: done.product.slug, approve: [done.drafts[0].id] });
+    assert.ok(approved.scenarios.some((x: any) => x.id === done.drafts[0].id) && !approved.drafts.length, "an approved draft becomes an active task");
+    await fails(A, "review_draft_tasks", { product: done.product.slug, reject: [done.scenarios[0].id] }, /Not draft tasks/);
+    await fails(B, "review_draft_tasks", { approve: [done.drafts[0].id] }, /Not draft tasks|No products/);
     assert.ok((await call(A, "list_developer_profiles", {})).profiles.some((x: any) => x.attributes?.from_profile === "example-startup-backend" && x.source === "picked"), "org sees its personas");
     assert.ok(!(await call(B, "list_developer_profiles", {})).profiles.some((x: any) => x.attributes?.from_profile), "other orgs do not");
     await call(A, "cancel_simulation", { simulation_id: accepted.simulation_id });
