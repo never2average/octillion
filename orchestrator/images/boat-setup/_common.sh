@@ -73,11 +73,14 @@ linux_arch() {
 # verify <harness> <bin> <version>: run `<bin> --version` the way the worker will (as an unprivileged user, env -i,
 # minimal PATH), check the pinned version, and record a manifest at /etc/octillion/harnesses/<harness>.json.
 verify() {
-  local harness="$1" bin="$2" ver="$3" out path
+  local harness="$1" bin="$2" ver="$3" out all path
   path="$(PATH=/usr/local/bin:/usr/bin:/bin command -v "$bin")" || die "$bin not on /usr/local/bin:/usr/bin:/bin"
-  out="$($SUDO -u nobody env -i HOME=/tmp PATH=/usr/local/bin:/usr/bin:/bin "$bin" --version 2>&1 | head -n 1)" \
-    || die "$bin --version failed as nobody: $out"
-  case "$out" in *"$ver"*) ;; *) die "$bin reports '$out', expected $ver (another $bin earlier on PATH?)";; esac
+  # Some CLIs print a warning before the version (codex: "WARNING: ... could not create PATH aliases" with HOME=/tmp),
+  # so the version is looked for in every line, and the line that has it is recorded.
+  all="$($SUDO -u nobody env -i HOME=/tmp PATH=/usr/local/bin:/usr/bin:/bin "$bin" --version 2>&1)" \
+    || die "$bin --version failed as nobody: $(printf %s "$all" | head -n 3)"
+  out="$(printf '%s\n' "$all" | grep -F -m 1 -- "$ver")" \
+    || die "$bin reports '$(printf '%s\n' "$all" | grep -v -i '^warning' | head -n 1)', expected $ver (another $bin earlier on PATH?)"
   $SUDO mkdir -p /etc/octillion/harnesses
   printf '{"harness":"%s","bin":"%s","path":"%s","version":"%s","reported":"%s","installed_at":"%s"}\n' \
     "$harness" "$bin" "$path" "$ver" "${out//\"/\'}" "$(date -u +%FT%TZ)" | $SUDO tee "/etc/octillion/harnesses/$harness.json" >/dev/null
