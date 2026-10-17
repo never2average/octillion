@@ -11,7 +11,6 @@ import { Area, AreaChart, Bar, BarChart, CartesianGrid, XAxis, YAxis } from 'rec
 import PageContainer from '@/components/layout/page-container';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { ButtonGroup } from '@/components/ui/button-group';
 import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent, type ChartConfig } from '@/components/ui/chart';
 import { Checkbox } from '@/components/ui/checkbox';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
@@ -324,11 +323,13 @@ function useExport(view: 'analytics' | 'health', a: Analytics | undefined, base:
 function ExportButton({ view, a, x }: { view: 'analytics' | 'health'; a: Analytics | undefined; x: ReturnType<typeof useExport> }) {
   const open = (url: string) => window.open(url, '_blank', 'noopener,noreferrer');
   return (
-    <ButtonGroup>
-      <Button variant='outline' disabled={!a || x.busy} onClick={x.every}>{x.busy ? <Icons.spinner className='animate-spin' /> : <Icons.download />} Export CSV</Button>
-      <DropdownMenu>
-        <DropdownMenuTrigger render={<Button size='icon' variant='outline' aria-label='More export options' disabled={!a} />}><Icons.chevronDown /></DropdownMenuTrigger>
+    <DropdownMenu>
+        <DropdownMenuTrigger render={<Button size='icon' variant='ghost' aria-label='Export' title='Export' disabled={!a} />}>
+          {x.busy ? <Icons.spinner className='animate-spin' /> : <Icons.download />}
+        </DropdownMenuTrigger>
         <DropdownMenuContent align='end' className='w-60'>
+          <DropdownMenuItem disabled={x.busy} onClick={x.every}><Icons.download /> Everything (CSV)</DropdownMenuItem>
+          <DropdownMenuSeparator />
           {SECTIONS[view].map(([id, label]) => <DropdownMenuItem key={id} disabled={x.busy} onClick={() => x.one(id)}><Icons.download /> {label}</DropdownMenuItem>)}
           <DropdownMenuSeparator />
           <DropdownMenuItem disabled={x.busy} onClick={x.json}><Icons.code /> Whole report (JSON)</DropdownMenuItem>
@@ -337,7 +338,6 @@ function ExportButton({ view, a, x }: { view: 'analytics' | 'health'; a: Analyti
           {a?.links.new_relic && <DropdownMenuItem onClick={() => open(a.links.new_relic!)}><Icons.externalLink /> Open New Relic</DropdownMenuItem>}
         </DropdownMenuContent>
       </DropdownMenu>
-    </ButtonGroup>
   );
 }
 

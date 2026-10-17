@@ -197,7 +197,12 @@ export function RecordView<T>({
       <DropdownMenuItem onClick={() => exportRows(rows, '-all')}><Icons.download /> Export all ({rows.length} rows)</DropdownMenuItem>
     </>)}
   </>) : null;
-  const primaryNode = menuItems ? (
+  const primaryNode = menuItems && !primary ? (
+    <DropdownMenu>
+      <DropdownMenuTrigger render={<Button size='icon' variant='ghost' aria-label='Export' title='Export' />}><Icons.download /></DropdownMenuTrigger>
+      <DropdownMenuContent align='end' className='w-56'>{menuItems}</DropdownMenuContent>
+    </DropdownMenu>
+  ) : menuItems ? (
     <ButtonGroup>
       {primary || (exportName && <Button variant='outline' onClick={() => exportRows(data.ordered)}><Icons.download /> Export CSV</Button>)}
       <DropdownMenu>
