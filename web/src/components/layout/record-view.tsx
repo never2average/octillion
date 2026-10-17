@@ -281,7 +281,7 @@ export function RecordView<T>({
                   {visible.map((c) => {
                     const d = sortDir(c.key);
                     return (
-                      <TableHead key={c.key} className={c.className} aria-sort={d === 'asc' ? 'ascending' : d === 'desc' ? 'descending' : undefined}>
+                      <TableHead key={c.key} className={cn('px-3', c.className)} aria-sort={d === 'asc' ? 'ascending' : d === 'desc' ? 'descending' : undefined}>
                         {typed(c) ? (
                           <button type='button' onClick={() => cycle(c.key)} className='hover:text-foreground inline-flex items-center gap-1 leading-none'>
                             {c.label}{d === 'asc' ? <IconArrowUp className='size-3' /> : d === 'desc' ? <IconArrowDown className='size-3' /> : null}
@@ -331,7 +331,7 @@ export function RecordView<T>({
                               <Checkbox aria-label='Select row' checked={sel.has(k)} onCheckedChange={(on) => toggle([k], !!on)} />
                             </TableCell>
                           )}
-                          {visible.map((c) => <TableCell key={c.key} className={cn('py-3 whitespace-normal', c.className)}>{c.render(r)}</TableCell>)}
+                          {visible.map((c) => <TableCell key={c.key} className={cn('px-3 py-3.5 whitespace-normal', c.className)}>{c.render(r)}</TableCell>)}
                           {actions && <TableCell className='w-10 py-1.5 text-center' onClick={(e) => e.stopPropagation()}><ActionsMenu items={actions(r)} /></TableCell>}
                         </TableRow>
                       )}

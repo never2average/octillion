@@ -127,20 +127,20 @@ export function AdminRequests() {
     { key: 'email', label: 'Email', type: 'text', className: 'w-56', value: (q) => q.email, render: (q) => muted(q.email) },
     { key: 'domain', label: 'Domain', type: 'text', hidden: true, value: (q) => domainOf(q.email), render: (q) => muted(domainOf(q.email) || '—') },
     { key: 'work', label: 'Work email', type: 'boolean', hidden: true, value: isWork, render: (q) => muted(isWork(q) ? 'Yes' : 'No') },
-    { key: 'product', label: 'Product', type: 'text', className: 'w-44', value: link, render: (q) => muted(host(q) ?? '—') },
-    { key: 'message', label: 'Message', type: 'text', peek: false, value: (q) => q.message, render: (q) => (q.message ? <span className='block max-w-md truncate text-sm leading-none'>{q.message}</span> : muted('—')) },
+    { key: 'product', label: 'Product', hidden: true, type: 'text', className: 'w-44', value: link, render: (q) => muted(host(q) ?? '—') },
+    { key: 'message', label: 'Message', hidden: true, type: 'text', peek: false, value: (q) => q.message, render: (q) => (q.message ? <span className='block max-w-md truncate text-sm leading-none'>{q.message}</span> : muted('—')) },
     { key: 'account', label: 'Account', type: 'text', hidden: true, value: (q) => q.org_name, render: (q) => muted(q.org_name ?? '—') },
     { key: 'match', label: 'Matches account', type: 'text', hidden: true, value: (q) => matches.get(q.id), render: (q) => muted(matches.get(q.id) ?? '—') },
     { key: 'created_at', label: 'Requested', type: 'date', className: 'w-28', keep: true, value: (q) => q.created_at, render: (q) => <When d={q.created_at} className='text-muted-foreground text-xs leading-none' /> },
     { key: 'decided_at', label: 'Decided', type: 'date', className: 'w-28', hidden: true, value: (q) => q.decided_at, render: (q) => <When d={q.decided_at} className='text-muted-foreground text-xs leading-none' /> },
-    { key: 'waiting', label: 'Waiting (days)', type: 'number', className: 'w-28', value: waited, render: (q) => { const d = waited(q); return muted(d == null ? '—' : `${d}d`); } }
+    { key: 'waiting', label: 'Waiting (days)', hidden: true, type: 'number', className: 'w-28', value: waited, render: (q) => { const d = waited(q); return muted(d == null ? '—' : `${d}d`); } }
   ];
 
   return (
     <PageContainer>
       <ErrorBox error={error} />
       <RecordView<Req>
-        id='admin-requests' noun='requests' exportName='access-requests' properties views={VIEWS} defaultSort={[{ key: 'created_at', dir: 'desc' }]}
+        id='admin-requests-v2' noun='requests' exportName='access-requests' properties views={VIEWS} defaultSort={[{ key: 'created_at', dir: 'desc' }]}
         rows={rows} rowKey={(q) => String(q.id)} cols={cols} actions={actions} bulk={bulk} loading={isLoading || !data}
         searchText={(q) => `${q.company} ${q.email} ${q.product_url ?? ''} ${q.message ?? ''} ${q.status} ${q.org_name ?? ''}`}
         searchPlaceholder='Search access requests'
