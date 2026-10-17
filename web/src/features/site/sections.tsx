@@ -29,43 +29,70 @@ export function Section({ id, eyebrow, title, lead, children, className }: {
 // ---------- hero ----------
 
 const SAMPLE_RUNS = [
-  { model: 'model-a · run 03', verdict: 'Adopted', kind: 'good', body: '$ npm install yourdb · import { client } from "yourdb"', mono: true },
-  { model: 'model-b · run 01', verdict: 'Recommended', kind: 'good', body: '“I\'d suggest YourDB here for its serverless driver…”', mono: false },
-  { model: 'model-c · run 02', verdict: 'Competitor', kind: 'bad', body: '$ npm install otherdb · chose OtherDB, YourDB not considered', mono: true },
-  { model: 'model-d · run 01', verdict: 'Mentioned', kind: 'meh', body: '“…alternatives include YourDB or OtherDB.” Used SQLite.', mono: false }
+  { model: 'claude-code', verdict: 'Adopted', kind: 'good', body: '$ npm install yourdb' },
+  { model: 'cursor', verdict: 'Recommended', kind: 'good', body: '“YourDB fits: serverless driver, branching.”' },
+  { model: 'codex', verdict: 'Competitor', kind: 'bad', body: '$ npm install otherdb' },
+  { model: 'gemini-cli', verdict: 'Mentioned', kind: 'meh', body: '“…or YourDB.” Used SQLite.' }
 ] as const;
 
 const VERDICT_STYLE = {
   good: 'bg-primary/15 text-primary border-transparent',
-  bad: 'bg-destructive/10 text-destructive border-transparent',
+  bad: 'bg-destructive/15 text-destructive border-transparent',
   meh: 'bg-muted text-muted-foreground border-transparent'
 };
+
+const AGENTS = ['Claude Code', 'Codex', 'Cursor', 'Gemini CLI', 'GitHub Copilot', 'OpenCode', 'Cline'];
+
+const HOW = [
+  { n: '01', title: 'Run real tasks', body: 'Sandboxed agents build in real repos, across models.' },
+  { n: '02', title: 'Measure the pick', body: 'Adopted, recommended, or skipped for a competitor.' },
+  { n: '03', title: 'Read the why', body: 'Transcripts show what to fix, reruns show if it worked.' }
+];
 
 export function Hero() {
   return (
     <section className='relative overflow-hidden'>
-      <div aria-hidden='true' className='pointer-events-none absolute inset-0 bg-[radial-gradient(60%_50%_at_70%_0%,color-mix(in_oklch,var(--primary)_14%,transparent),transparent)]' />
-      <div className='relative mx-auto grid max-w-6xl gap-12 px-4 py-16 sm:px-6 sm:py-24 lg:grid-cols-[1.05fr_1fr] lg:items-center'>
-        <div>
-          <Badge variant='outline' className='gap-1.5 rounded-full px-3 py-1'>
-            <span className='bg-primary text-primary-foreground rounded-full px-1.5 text-[10px] font-semibold uppercase'>New</span>
-            Introducing APO · Agentic Preference Optimization
-          </Badge>
-          <h1 className='mt-6 text-4xl font-semibold tracking-tight text-balance sm:text-5xl lg:text-6xl'>
-            SEO got you found by people. <span className='text-primary'>APO gets you picked by agents.</span>
-          </h1>
-          <p className='text-muted-foreground mt-6 text-lg text-pretty'>
-            Coding agents now choose the database, the queue and the auth library. Agentic Preference Optimization is the work of
-            making them choose yours. Octillion is the APO platform: it runs real coding tasks through sandboxed agents across
-            models, measures how often they adopt, recommend or skip your dev tool, and shows the transcripts that explain why, so
-            you know what to fix and whether the fix worked.
-          </p>
-          <div className='mt-8 flex flex-wrap gap-3'>
-            <Link href='/#access' className={buttonVariants({ size: 'lg' })}>Get your APO baseline <IconArrowRight /></Link>
-            <Link href='/#apo' className={buttonVariants({ size: 'lg', variant: 'outline' })}>What is APO?</Link>
+      <div aria-hidden='true' className='pointer-events-none absolute inset-0 [mask-image:radial-gradient(70%_60%_at_50%_0%,black,transparent)] bg-[linear-gradient(to_right,var(--border)_1px,transparent_1px),linear-gradient(to_bottom,var(--border)_1px,transparent_1px)] bg-[size:56px_56px] opacity-60' />
+      <div aria-hidden='true' className='pointer-events-none absolute -top-40 left-1/2 h-[520px] w-[900px] max-w-full -translate-x-1/2 rounded-full bg-[radial-gradient(closest-side,color-mix(in_oklch,var(--primary)_22%,transparent),transparent)] blur-2xl' />
+
+      <div className='relative mx-auto max-w-6xl px-4 pt-16 pb-14 sm:px-6 sm:pt-24 sm:pb-20'>
+        <div className='grid gap-12 lg:grid-cols-[1.1fr_1fr] lg:items-center'>
+          <div className='min-w-0'>
+            <Link href='/#apo' className='border-primary/30 bg-primary/10 text-primary hover:bg-primary/15 inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium transition-colors'>
+              <IconSparkles className='size-3.5' /> Introducing APO · Agentic Preference Optimization <IconArrowRight className='size-3.5' />
+            </Link>
+            <h1 className='mt-6 text-4xl font-semibold tracking-tight text-balance sm:text-5xl lg:text-[3.6rem] lg:leading-[1.05]'>
+              SEO got you found by people.
+              <span className='text-primary block'>APO gets you picked by agents.</span>
+            </h1>
+            <p className='text-muted-foreground mt-6 max-w-xl text-lg text-pretty'>
+              Coding agents now choose the database, the queue and the auth library. Octillion measures how often they choose yours,
+              shows the transcripts that explain why, and tells you whether your fix worked.
+            </p>
+            <div className='mt-8 flex flex-wrap gap-3'>
+              <Link href='/#access' className={buttonVariants({ size: 'lg' })}>Get your APO baseline <IconArrowRight /></Link>
+              <Link href='/connect' className={buttonVariants({ size: 'lg', variant: 'outline' })}><IconTerminal2 /> Connect in Claude or ChatGPT</Link>
+            </div>
           </div>
+          <SampleCard />
         </div>
-        <SampleCard />
+
+        <div className='mt-16'>
+          <p className='text-muted-foreground text-xs font-medium tracking-wider uppercase'>Measures the agents your users already run</p>
+          <ul className='mt-4 flex flex-wrap gap-x-8 gap-y-3'>
+            {AGENTS.map((a) => <li key={a} className='text-foreground/70 font-mono text-sm'>{a}</li>)}
+          </ul>
+        </div>
+
+        <ol className='mt-12 grid gap-px overflow-hidden rounded-xl border bg-border sm:grid-cols-3'>
+          {HOW.map((s) => (
+            <li key={s.n} className='bg-background p-5'>
+              <span className='text-primary font-mono text-xs'>{s.n}</span>
+              <p className='mt-2 font-medium'>{s.title}</p>
+              <p className='text-muted-foreground mt-1 text-sm'>{s.body}</p>
+            </li>
+          ))}
+        </ol>
       </div>
     </section>
   );
@@ -73,35 +100,35 @@ export function Hero() {
 
 function SampleCard() {
   return (
-    <Card className='shadow-lg'>
-      <CardHeader className='gap-1'>
-        <div className='flex items-center justify-between gap-2'>
-          <p className='text-muted-foreground text-xs font-medium tracking-wide uppercase'>APO baseline · product: YourDB</p>
-          <Badge variant='secondary' className='shrink-0'>Sample UI · illustrative data</Badge>
+    <figure className='bg-card min-w-0 overflow-hidden rounded-xl border shadow-2xl shadow-black/40'>
+      <div className='flex items-center gap-1.5 border-b px-4 py-3'>
+        <span className='size-2.5 rounded-full bg-white/15' /><span className='size-2.5 rounded-full bg-white/15' /><span className='size-2.5 rounded-full bg-white/15' />
+        <span className='text-muted-foreground ml-3 truncate font-mono text-xs'>octillion · APO baseline · YourDB</span>
+      </div>
+      <div className='space-y-5 p-5'>
+        <div>
+          <p className='text-muted-foreground font-mono text-xs'>task</p>
+          <p className='mt-1 font-medium'>“Add persistent storage to this Next.js app”</p>
         </div>
-        <CardTitle className='text-base'>“Add persistent storage to this Next.js app”</CardTitle>
-        <p className='text-muted-foreground font-mono text-xs'>repo: nextjs-starter · 4 models · 12 runs</p>
-      </CardHeader>
-      <CardContent className='space-y-4'>
-        <div className='flex items-end gap-3'>
-          <span className='text-primary text-5xl font-semibold tabular-nums'>7/12</span>
-          <span className='text-muted-foreground pb-1.5 text-sm'>runs adopted or recommended YourDB <span className='text-xs'>(example numbers)</span></span>
+        <div>
+          <div className='flex items-baseline gap-3'>
+            <span className='text-primary text-5xl font-semibold tabular-nums'>58%</span>
+            <span className='text-muted-foreground text-sm'>of 12 runs picked YourDB</span>
+          </div>
+          <div className='bg-muted mt-3 h-1.5 overflow-hidden rounded-full'><div className='bg-primary h-full w-[58%] rounded-full' /></div>
         </div>
-        <div className='bg-muted h-2 overflow-hidden rounded-full'><div className='bg-primary h-full w-[58%] rounded-full' /></div>
         <ul className='divide-y rounded-lg border'>
           {SAMPLE_RUNS.map((r) => (
-            <li key={r.model} className='flex flex-col gap-1 p-3 sm:flex-row sm:items-start sm:gap-3'>
-              <div className='flex shrink-0 items-center gap-2 sm:w-44'>
-                <span className='text-muted-foreground font-mono text-xs'>{r.model}</span>
-              </div>
-              <Badge className={cn('w-fit shrink-0', VERDICT_STYLE[r.kind])}>{r.verdict}</Badge>
-              <span className={cn('min-w-0 text-sm break-words', r.mono && 'font-mono text-xs')}>{r.body}</span>
+            <li key={r.model} className='grid grid-cols-[6.5rem_auto_1fr] items-center gap-3 px-3 py-2.5 max-sm:grid-cols-[auto_1fr]'>
+              <span className='text-muted-foreground truncate font-mono text-xs max-sm:col-span-2'>{r.model}</span>
+              <Badge className={cn('w-fit', VERDICT_STYLE[r.kind])}>{r.verdict}</Badge>
+              <span className='min-w-0 truncate font-mono text-xs'>{r.body}</span>
             </li>
           ))}
         </ul>
-        <p className='text-muted-foreground text-xs'>Illustrative mock. Product, competitor, models and numbers are placeholders.</p>
-      </CardContent>
-    </Card>
+      </div>
+      <figcaption className='text-muted-foreground border-t px-5 py-3 text-xs'>Illustrative sample. Product, competitor and numbers are placeholders.</figcaption>
+    </figure>
   );
 }
 

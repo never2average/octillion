@@ -10,10 +10,8 @@ import NextTopLoader from 'nextjs-toploader';
 import { NuqsAdapter } from 'nuqs/adapters/next/app';
 import '../styles/globals.css';
 
-const META_THEME_COLORS = {
-  light: '#fcfcfc',
-  dark: '#121212'
-};
+// One look everywhere: Supabase dark. No light mode, no toggle.
+const THEME_COLOR = '#171717';
 
 // Absolute URLs for icons and the share image (Vercel sets the production host; NEXT_PUBLIC_APP_URL overrides it).
 const host = process.env.NEXT_PUBLIC_APP_URL ?? (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : 'http://localhost:3400');
@@ -27,7 +25,8 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: META_THEME_COLORS.light
+  themeColor: THEME_COLOR,
+  colorScheme: 'dark'
 };
 
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
@@ -37,21 +36,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   const themeToApply = isValidTheme ? activeThemeValue! : DEFAULT_THEME;
 
   return (
-    <html lang='en' suppressHydrationWarning data-theme={themeToApply}>
-      <head>
-        <script
-          dangerouslySetInnerHTML={{
-            __html: `
-              try {
-                // Set meta theme color
-                if (localStorage.theme === 'dark' || ((!('theme' in localStorage) || localStorage.theme === 'system') && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
-                  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', '${META_THEME_COLORS.dark}')
-                }
-              } catch (_) {}
-            `
-          }}
-        />
-      </head>
+    <html lang='en' suppressHydrationWarning data-theme={themeToApply} className='dark' style={{ colorScheme: 'dark' }}>
       <body
         className={cn(
           'bg-background overflow-x-hidden overscroll-none font-sans antialiased',
@@ -62,10 +47,10 @@ export default async function RootLayout({ children }: { children: React.ReactNo
         <NuqsAdapter>
           <ThemeProvider
             attribute='class'
-            defaultTheme='system'
-            enableSystem
+            defaultTheme='dark'
+            forcedTheme='dark'
+            enableSystem={false}
             disableTransitionOnChange
-            enableColorScheme
           >
             <Providers activeThemeValue={themeToApply}>
               <Toaster />
