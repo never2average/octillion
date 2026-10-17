@@ -15,11 +15,11 @@ import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartToo
 import { Checkbox } from '@/components/ui/checkbox';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
+import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { DateRangePicker, last30, rangeQuery, type DateRange } from '@/components/layout/date-range-picker';
 import { PagedTable, TablePager, type Paged } from '@/components/layout/table-pager';
 import { StatStrip } from '@/components/layout/section';
@@ -42,7 +42,8 @@ interface Analytics {
     active_accounts: number; active_people: number; calls: number; error_pct: number; p50_ms: number | null; p95_ms: number | null; new_accounts: number;
     change: { active_accounts: number | null; active_people: number | null; calls: number | null };
   };
-  daily: { day: string; accounts: number; people: number; calls: number; errors: number }[];
+  daily: { day: string; accounts: number; people: number; calls: number; errors: number; p95_ms?: number | null }[];
+  new_daily?: { day: string; n: number }[];
   tools: { name: string; accounts: number; people: number; calls: number; error_pct: number; p50_ms: number | null; p95_ms: number | null }[];
   clients: { client: string; accounts: number; people: number; connections: number }[];
   accounts: { slug: string; name: string; products: string | null; calls: number; prev_calls: number; errors: number; people: number; last_seen: string | null; trend: number | null; at_risk: boolean }[];
@@ -62,13 +63,15 @@ const callsConfig = { calls: { label: 'Tool calls', color: 'var(--chart-1)' }, e
 const activeConfig = { accounts: { label: 'Accounts', color: 'var(--chart-2)' }, people: { label: 'People', color: 'var(--chart-4)' } } satisfies ChartConfig;
 
 /** Every day of the period, zero-filled, oldest first. */
-function fillDays(rows: Analytics['daily'], days: number, from?: string) {
-  const by = new Map(rows.map((r) => [r.day, r]));
+function fillDays(rows: Analytics['daily'], days: number, from?: string, created: Analytics['new_daily'] = []) {
+  const by = new Map(rows.map((r) => [r.day, r])), born = new Map(created.map((r) => [r.day, r.n]));
   const start = from ? Date.parse(`${from}T00:00:00Z`) : Date.now() - (days - 1) * 86_400_000;
   return Array.from({ length: days }, (_, i) => {
     const day = new Date(start + i * 86_400_000).toISOString().slice(0, 10);
     const r = by.get(day);
-    return { day, calls: Number(r?.calls ?? 0), errors: Number(r?.errors ?? 0), accounts: Number(r?.accounts ?? 0), people: Number(r?.people ?? 0) };
+    const calls = Number(r?.calls ?? 0), errors = Number(r?.errors ?? 0);
+    return { day, calls, errors, accounts: Number(r?.accounts ?? 0), people: Number(r?.people ?? 0),
+      error_pct: calls ? (errors / calls) * 100 : 0, p95: Number(r?.p95_ms ?? 0), created: Number(born.get(day) ?? 0) };
   });
 }
 const shortDay = (d: string) => new Date(`${d}T00:00:00Z`).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
@@ -387,16 +390,16 @@ function Report({ view }: { view: 'analytics' | 'health' }) {
 }
 
 function AnalyticsBody({ a, match }: { a: Analytics; match: (r: object) => boolean }) {
-  const series = useMemo(() => fillDays(a.daily, a.days, a.range?.from), [a]);
+  const series = useMemo(() => fillDays(a.daily, a.days, a.range?.from, a.new_daily), [a]);
   const tools = a.tools.filter(match), accounts = a.accounts.filter(match);
   const maxClient = Math.max(...a.clients.map((c) => c.accounts), 1);
   return (
     <div className='flex max-w-6xl flex-col gap-10 pb-4'>
       <StatStrip items={[
-        { label: 'Active accounts', value: num(a.totals.active_accounts), hint: <><Trend pct={a.totals.change.active_accounts} /> vs previous {a.days} days</> },
-        { label: 'Active people', value: num(a.totals.active_people), hint: <><Trend pct={a.totals.change.active_people} /> vs previous {a.days} days</> },
-        { label: 'Tool calls', value: num(a.totals.calls), hint: <><Trend pct={a.totals.change.calls} /> vs previous {a.days} days</> },
-        { label: 'New accounts', value: num(a.totals.new_accounts), hint: `in the last ${a.days} days` }
+        { label: 'Active accounts', value: num(a.totals.active_accounts), hint: <><Trend pct={a.totals.change.active_accounts} /> vs previous {a.days} days</>, spark: series.map((d) => d.accounts) },
+        { label: 'Active people', value: num(a.totals.active_people), hint: <><Trend pct={a.totals.change.active_people} /> vs previous {a.days} days</>, spark: series.map((d) => d.people) },
+        { label: 'Tool calls', value: num(a.totals.calls), hint: <><Trend pct={a.totals.change.calls} /> vs previous {a.days} days</>, spark: series.map((d) => d.calls) },
+        { label: 'New accounts', value: num(a.totals.new_accounts), hint: `in the last ${a.days} days`, spark: series.map((d) => d.created) }
       ]} />
 
       <div className='grid gap-8 lg:grid-cols-2 lg:gap-12'>
@@ -567,6 +570,7 @@ function HealthBody({ a, base, match }: { a: Analytics; base: string; match: (r:
   const rows = (fresh?.rows ?? []).filter(match);
   const total = fresh?.total ?? 0;
   const pager: Paged<ErrorRow> = { rows, page, pages: Math.max(1, Math.ceil(total / size)), size, total, setPage, setSize };
+  const series = useMemo(() => fillDays(a.daily, a.days, a.range?.from), [a]);
   const counts: Record<ErrorKind, number> = { tool: a.errors_total, session: a.ops.sessions_failed ?? 0, onboarding: a.ops.onboardings_failed ?? 0 };
   const cols = [{ label: 'When', render: (r: ErrorRow) => <When d={r.at} /> }, { label: 'Account', render: (r: ErrorRow) => <span className='leading-none'>{r.account}</span> },
     ...ERROR_TABLE[kind], { label: 'Error', render: (r: ErrorRow) => <span className='line-clamp-2 text-sm whitespace-normal' title={String(r.error ?? '')}>{r.error ?? '—'}</span>, className: 'min-w-64' }];
@@ -574,8 +578,8 @@ function HealthBody({ a, base, match }: { a: Analytics; base: string; match: (r:
     <div className='flex h-full min-h-[32rem] flex-col gap-6'>
       <div className='flex shrink-0 flex-col gap-4'>
         <StatStrip items={[
-          { label: 'Tool error rate', value: `${a.totals.error_pct}%`, hint: `p50 ${ms(a.totals.p50_ms)}` },
-          { label: 'Tool latency, p95', value: ms(a.totals.p95_ms) },
+          { label: 'Tool error rate', value: `${a.totals.error_pct}%`, hint: `p50 ${ms(a.totals.p50_ms)}`, spark: series.map((d) => d.error_pct) },
+          { label: 'Tool latency, p95', value: ms(a.totals.p95_ms), spark: series.map((d) => d.p95) },
           { label: 'Simulations completed', value: `${num(a.ops.sims_completed)} / ${num(a.ops.sims)}`, hint: `${num(a.ops.sims_open)} open now` },
           { label: 'Agent sessions failed', value: pct(a.ops.sessions_failed, a.ops.sessions), hint: `${num(a.ops.sessions_failed)} of ${num(a.ops.sessions)}` }
         ]} />
@@ -588,15 +592,9 @@ function HealthBody({ a, base, match }: { a: Analytics; base: string; match: (r:
       </div>
       <div className='flex min-h-0 flex-1 flex-col gap-2'>
         <div className='flex shrink-0 items-center gap-2'>
-          <Tabs value={kind} onValueChange={(v) => setKind(v as ErrorKind)}>
-            <TabsList>
-              {KINDS.map((k) => (
-                <TabsTrigger key={k.id} value={k.id} className='gap-1.5 px-2.5 leading-none'>
-                  {k.label}<span className='text-muted-foreground text-xs tabular-nums'>{num(counts[k.id])}</span>
-                </TabsTrigger>
-              ))}
-            </TabsList>
-          </Tabs>
+          <NativeSelect size='sm' aria-label='Errors from' value={kind} onChange={(e) => setKind(e.target.value as ErrorKind)}>
+            {KINDS.map((k) => <NativeSelectOption key={k.id} value={k.id}>{k.label} errors · {num(counts[k.id])}</NativeSelectOption>)}
+          </NativeSelect>
           {isFetching && <Icons.spinner className='text-muted-foreground size-4 animate-spin' />}
         </div>
         <ErrorBox error={error} />

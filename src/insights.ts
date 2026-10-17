@@ -161,7 +161,7 @@ export async function platformAnalytics(q: AnalyticsQuery) {
   const calls = "method = 'tools/call'";
   const person = "coalesce(user_id, 'org:' || org_id)";
 
-  const [totals, prev, daily, tools, clients, accounts, retention, ops, errors, newAccounts, errorsTotal] = await Promise.all([
+  const [totals, prev, daily, tools, clients, accounts, retention, ops, errors, newAccounts, errorsTotal, newDaily] = await Promise.all([
     db.query<Record<string, number>>(
       `SELECT count(DISTINCT org_id) FILTER (WHERE ${calls}) AS active_accounts, count(DISTINCT ${person}) FILTER (WHERE ${calls}) AS active_people,
               count(*) FILTER (WHERE ${calls}) AS calls, count(*) FILTER (WHERE ${calls} AND NOT ok) AS errors,
@@ -174,7 +174,7 @@ export async function platformAnalytics(q: AnalyticsQuery) {
          FROM mcp_events WHERE ${inP("at")}${EV()}`),
     db.query(
       `SELECT to_char(date_trunc('day', at), 'YYYY-MM-DD') AS day, count(DISTINCT org_id) AS accounts, count(DISTINCT ${person}) AS people,
-              count(*) AS calls, count(*) FILTER (WHERE NOT ok) AS errors
+              count(*) AS calls, count(*) FILTER (WHERE NOT ok) AS errors, round(percentile_cont(0.95) WITHIN GROUP (ORDER BY ms)) AS p95_ms
          FROM mcp_events WHERE ${calls} AND ${inW("at")}${EV()} GROUP BY 1 ORDER BY 1`),
     db.query(
       `SELECT name, count(DISTINCT org_id) AS accounts, count(DISTINCT ${person}) AS people, count(*) AS calls,
@@ -219,6 +219,8 @@ export async function platformAnalytics(q: AnalyticsQuery) {
          FROM mcp_events e JOIN organizations o ON o.id = e.org_id WHERE NOT e.ok AND ${inW("e.at")}${EV("e.")} ORDER BY e.at DESC LIMIT 15`),
     db.query<{ n: number }>(`SELECT count(*) AS n FROM organizations WHERE ${inW("created_at")}${O ? ` AND id = ANY(${O})` : ""}`),
     db.query<{ n: number }>(`SELECT count(*) AS n FROM mcp_events WHERE NOT ok AND ${inW("at")}${EV()}`),
+    // accounts created per day, for the New accounts sparkline
+    db.query<{ day: string; n: number }>(`SELECT to_char(date_trunc('day', created_at), 'YYYY-MM-DD') AS day, count(*) AS n FROM organizations WHERE ${inW("created_at")}${O ? ` AND id = ANY(${O})` : ""} GROUP BY 1 ORDER BY 1`),
   ]);
 
   const t = totals[0] ?? {}, p = prev[0] ?? {};
@@ -240,7 +242,7 @@ export async function platformAnalytics(q: AnalyticsQuery) {
       new_accounts: Number(newAccounts[0]?.n ?? 0),
       change: { active_accounts: change(t.active_accounts, p.active_accounts), active_people: change(t.active_people, p.active_people), calls: change(t.calls, p.calls) },
     },
-    daily, tools, clients,
+    daily, new_daily: newDaily.map((r) => ({ day: r.day, n: Number(r.n) })), tools, clients,
     accounts: accounts.map(({ total: _t, ...a }: any) => ({ ...a, calls: Number(a.calls), prev_calls: Number(a.prev_calls),
       trend: change(a.calls, a.prev_calls), at_risk: Number(a.prev_calls) >= 5 && Number(a.calls) <= Number(a.prev_calls) / 2 })),
     retention: [...cohorts.values()].map((c) => ({ ...c, weeks: Array.from({ length: 8 }, (_, i) => c.weeks[i] ?? null) })),

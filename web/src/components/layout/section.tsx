@@ -26,7 +26,7 @@ export function Section({ title, description, action, children, className }: {
 
 /** A row of headline numbers divided by hairlines (wraps on small screens): replaces grids of stat cards. */
 export function StatStrip({ items, className }: {
-  items: { label: ReactNode; value: ReactNode; hint?: ReactNode; href?: string }[]; className?: string;
+  items: { label: ReactNode; value: ReactNode; hint?: ReactNode; href?: string; spark?: number[] }[]; className?: string;
 }) {
   return (
     <dl className={cn('grid grid-cols-2 border-y sm:flex sm:divide-x', className)}>
@@ -34,7 +34,10 @@ export function StatStrip({ items, className }: {
         const body = (
           <>
             <dt className='text-muted-foreground text-xs font-medium'>{it.label}</dt>
-            <dd className='mt-1 text-2xl font-semibold tabular-nums tracking-tight'>{it.value}</dd>
+            <dd className='mt-1 flex items-end justify-between gap-3'>
+              <span className='text-2xl font-semibold tabular-nums tracking-tight'>{it.value}</span>
+              {it.spark && it.spark.length > 1 && <Sparkline values={it.spark} />}
+            </dd>
             {it.hint && <dd className='text-muted-foreground mt-0.5 text-xs'>{it.hint}</dd>}
           </>
         );
@@ -45,6 +48,19 @@ export function StatStrip({ items, className }: {
         );
       })}
     </dl>
+  );
+}
+
+/** A tiny trend line for a stat: the range's daily values, scaled to their own max. */
+function Sparkline({ values }: { values: number[] }) {
+  const w = 96, h = 28, max = Math.max(...values, 0), step = w / (values.length - 1);
+  const pts = values.map((v, i) => [i * step, max ? h - 2 - (v / max) * (h - 4) : h - 2] as const);
+  const line = pts.map(([x, y], i) => `${i ? 'L' : 'M'}${x.toFixed(1)},${y.toFixed(1)}`).join('');
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} width={w} height={h} className='text-primary mb-1 shrink-0 overflow-visible' aria-hidden>
+      <path d={`${line}L${w},${h}L0,${h}Z`} fill='currentColor' opacity={0.12} />
+      <path d={line} fill='none' stroke='currentColor' strokeWidth={1.5} strokeLinejoin='round' strokeLinecap='round' />
+    </svg>
   );
 }
 
