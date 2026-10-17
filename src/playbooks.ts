@@ -57,6 +57,10 @@ export const PLAYBOOKS: Playbook[] = [
     who: "DevRel and docs owners after the first report.",
     example: { title: "Resend inbound email", result: "0 of 6 sessions picked Resend to receive email although its docs show it can; agents shortlisted Postmark, SES and SendGrid. The fix to test: an inbound quickstart and the words agents search for." },
     stages: [
+      { id: "recall", title: "Check what the team already tried", tools: ["search_memory"],
+        why: "Someone may have fixed this before, or decided not to; start from what the team remembers.",
+        prompt: "What do we remember about {product} losing to {competitor}?",
+        expect: "Past fixes, decisions and notes about it, newest first (or nothing yet)." },
       { id: "weakest", title: "Find your weakest task", tools: ["get_visibility_report"],
         why: "Start where agents should pick you and don't.",
         prompt: "Which of my tasks has the lowest hit rate where agents should pick {product}?",
@@ -93,6 +97,10 @@ export const PLAYBOOKS: Playbook[] = [
     who: "Product marketing and founders.",
     example: { title: "Resend vs Postmark", result: "Postmark took 2 of the 10 password-recovery sessions and both receiving-email wins; Claude Code's provider shortlist named SES, Postmark and SendGrid but not Resend." },
     stages: [
+      { id: "recall", title: "Recall what you know about them", tools: ["search_memory"],
+        why: "The team's past decisions about this competitor frame what to look for.",
+        prompt: "What have we decided or learned about {competitor}?",
+        expect: "Facts, decisions and preferences saved about them, newest first." },
       { id: "competitors", title: "Make sure the competitor is tracked", tools: ["get_product", "save_product"],
         why: "Octillion only credits competitors it knows by name, package and domain.",
         prompt: "Make sure {competitor} is a competitor of {product}, with its npm/PyPI packages and domains.",
