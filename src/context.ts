@@ -43,6 +43,14 @@ export async function getPerson(orgId: number, userId: string): Promise<PersonCo
   return r ?? { title: null, focus_product: null, interests: null, answer_style: null, notes: null, updated_at: null };
 }
 
+/** Several people's context at once, keyed by user id (people with none get the empty context). */
+export async function getPeople(orgId: number, userIds: string[]): Promise<Record<string, PersonContext>> {
+  const rows = userIds.length ? await (await getDb()).query<PersonContext & { user_id: string }>(
+    "SELECT user_id, title, focus_product, interests, answer_style, notes, updated_at FROM user_context WHERE org_id = $1 AND user_id = ANY($2)", [orgId, userIds]) : [];
+  const empty: PersonContext = { title: null, focus_product: null, interests: null, answer_style: null, notes: null, updated_at: null };
+  return Object.fromEntries(userIds.map((id) => { const r = rows.find((x) => x.user_id === id); if (!r) return [id, empty]; const { user_id: _, ...c } = r; return [id, c]; }));
+}
+
 export async function savePerson(orgId: number, userId: string, b: Record<string, unknown>) {
   const style = text(b.answer_style, 20);
   if (style && !(ANSWER_STYLES as readonly string[]).includes(style)) throw new ContextError(`answer_style must be one of ${ANSWER_STYLES.join(", ")}`);

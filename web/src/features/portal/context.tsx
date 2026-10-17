@@ -1,6 +1,6 @@
 'use client';
-// /app Context: the company's context (admins), the person's own, and product profiles with their coding tasks
-// (admins). Company and personal context reach the AI client on every connection; the side card shows what is sent.
+// /app Context: the company's context (admins), each user's context (admins edit anyone's, members their own), and
+// product profiles with their coding tasks (admins). Company and personal context reach the AI client on every connection; the side card shows what is sent.
 import { useCallback, useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import PageContainer from '@/components/layout/page-container';
@@ -38,27 +38,27 @@ function FormCard({ onSubmit, children }: { onSubmit: (e: React.FormEvent) => vo
 
 const csv = (xs?: string[] | null) => (xs ?? []).join(', ');
 const parseCsv = (v: string) => v.split(',').map((x) => x.trim()).filter(Boolean);
-type Tab = 'company' | 'me' | 'products';
+interface UserRow { user_id: string; email: string | null; name: string | null; role: 'admin' | 'member'; active: boolean; me: boolean; context: Person }
 
-export type ContextSection = 'company' | 'me' | 'products';
+export type ContextSection = 'company' | 'users' | 'products';
 const CONTEXT_TABS = [
   { href: '/app/context/company', label: 'Company', icon: Icons.building },
-  { href: '/app/context/you', label: 'You', icon: Icons.user },
+  { href: '/app/context/users', label: 'Users', icon: Icons.teams },
   { href: '/app/context/products', label: 'Products', icon: Icons.product }
 ];
 
-/** Context: three pages (company, you, products) under one header with route tabs. */
+/** Context: three pages (company, users, products) under one header with route tabs. */
 export function ContextPage({ section }: { section: ContextSection }) {
   const { data: d, error, reload } = useOrgLoad(() => appApi<Ctx>('GET', '/context'));
-  const shown: ContextSection = section === 'me' && d && !d.person ? 'company' : section;
+  const shown: ContextSection = section === 'users' && d && !d.person ? 'company' : section;
   return (
-    <PageContainer pageTitle='Context' pageDescription='What Octillion and your AI client should know about your company, about you, and about each product.'>
-      <PageTabs items={d && !d.person ? CONTEXT_TABS.filter((t) => t.label !== 'You') : CONTEXT_TABS} />
+    <PageContainer pageTitle='Context' pageDescription='What Octillion and your AI client should know about your company, its users, and each product.'>
+      <PageTabs items={d && !d.person ? CONTEXT_TABS.filter((t) => t.label !== 'Users') : CONTEXT_TABS} />
       {error ? <ErrorState error={error} /> : !d ? <LoadingCards count={2} /> : (
         <div className='flex max-w-6xl flex-col gap-6'>
           <div className='grid gap-x-12 gap-y-8 lg:grid-cols-5'>
             <div className='lg:col-span-3'>
-              {shown === 'company' ? <CompanyForm key='c' d={d} onSaved={reload} /> : shown === 'me' ? <PersonForm key='m' d={d} onSaved={reload} /> : <Products key='p' d={d} onSaved={reload} />}
+              {shown === 'company' ? <CompanyForm key='c' d={d} onSaved={reload} /> : shown === 'users' ? <UsersSection key='u' d={d} onSaved={reload} /> : <Products key='p' d={d} onSaved={reload} />}
             </div>
             <Card className='h-fit lg:col-span-2'>
               <CardHeader>
@@ -112,36 +112,66 @@ function CompanyForm({ d, onSaved }: { d: Ctx; onSaved: () => void }) {
   );
 }
 
-function PersonForm({ d, onSaved }: { d: Ctx; onSaved: () => void }) {
-  const p = d.person!;
+/** Users: pick a person (admins see everyone, members only themselves) and edit what the AI client knows about them. */
+function UsersSection({ d, onSaved }: { d: Ctx; onSaved: () => void }) {
+  const [rows, setRows] = useState<UserRow[] | null>(null);
+  const [pick, setPick] = useState('');
+  const load = useCallback(() => appApi<{ users: UserRow[] }>('GET', '/context/users').then((r) => {
+    setRows(r.users);
+    setPick((cur) => cur || r.users.find((u) => u.me)?.user_id || r.users[0]?.user_id || '');
+  }).catch(fail), []);
+  useEffect(() => { load(); }, [load]);
+  if (!rows) return <LoadingCards count={1} />;
+  const user = rows.find((u) => u.user_id === pick);
+  const label = (u: UserRow) => `${u.name || u.email || 'Unnamed user'}${u.me ? ' (you)' : ''}${u.active ? '' : ' · suspended'}`;
+  return (
+    <div className='flex flex-col gap-6'>
+      {rows.length > 1 && (
+        <FormRow label='User' htmlFor='uPick'>
+          <NativeSelect id='uPick' value={pick} onChange={(e) => setPick(e.target.value)}>
+            {rows.map((u) => <NativeSelectOption key={u.user_id} value={u.user_id}>{label(u)}</NativeSelectOption>)}
+          </NativeSelect>
+        </FormRow>
+      )}
+      {user && <PersonForm key={user.user_id} d={d} user={user} onSaved={() => { load(); onSaved(); }} />}
+    </div>
+  );
+}
+
+function PersonForm({ d, user, onSaved }: { d: Ctx; user: UserRow; onSaved: () => void }) {
+  const p = user.context;
   const [f, setF] = useState({ title: p.title ?? '', focus_product: p.focus_product ?? '', interests: p.interests ?? '', answer_style: p.answer_style ?? '', notes: p.notes ?? '' });
   const [busy, setBusy] = useState(false);
   const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => setF({ ...f, [k]: e.target.value });
+  const who = user.me ? 'you' : (user.name || user.email || 'this user');
   const save = (e: React.FormEvent) => {
     e.preventDefault(); setBusy(true);
-    appApi('PUT', '/context/me', { ...f, focus_product: f.focus_product || null, answer_style: f.answer_style || null })
-      .then(() => { toast.success('Your context saved'); onSaved(); }).catch(fail).finally(() => setBusy(false));
+    appApi('PUT', `/context/users/${encodeURIComponent(user.user_id)}`, { ...f, focus_product: f.focus_product || null, answer_style: f.answer_style || null })
+      .then(() => { toast.success(user.me ? 'Your context saved' : `Context saved for ${who}`); onSaved(); }).catch(fail).finally(() => setBusy(false));
   };
   return (
     <FormCard onSubmit={save}>
       <CardHeader>
-        <CardTitle>You</CardTitle>
-        <CardDescription>Only you see and change this. Your AI client uses it to tailor answers to you.</CardDescription>
+        <CardTitle>{user.me ? 'You' : who}</CardTitle>
+        <CardDescription>
+          {user.me ? 'Your AI client uses this to tailor answers to you.' : `Their AI client uses this to tailor answers to ${who}.`}
+          {d.can_manage ? ' Account admins can see and change every user’s context.' : ' Only you and your account admins see this.'}
+        </CardDescription>
       </CardHeader>
       <CardContent className='grid gap-4'>
         <div className='grid gap-4 sm:grid-cols-2'>
-          <FormRow label='Your role' htmlFor='mTitle'><Input id='mTitle' maxLength={120} value={f.title} onChange={set('title')} placeholder='e.g. Head of DevRel' /></FormRow>
-          <FormRow label='Product you work on most' htmlFor='mFocus'>
+          <FormRow label='Role' htmlFor='mTitle'><Input id='mTitle' maxLength={120} value={f.title} onChange={set('title')} placeholder='e.g. Head of DevRel' /></FormRow>
+          <FormRow label='Product they work on most' htmlFor='mFocus'>
             <NativeSelect id='mFocus' value={f.focus_product} onChange={set('focus_product')}>
               <NativeSelectOption value=''>None</NativeSelectOption>
               {d.products.map((x) => <NativeSelectOption key={x.slug} value={x.slug}>{x.name}</NativeSelectOption>)}
             </NativeSelect>
           </FormRow>
         </div>
-        <FormRow label='What you care about' htmlFor='mInterests'>
+        <FormRow label='What they care about' htmlFor='mInterests'>
           <Textarea id='mInterests' rows={2} maxLength={1000} value={f.interests} onChange={set('interests')} placeholder='e.g. whether Claude Code picks us for queue work, and why we lose to BullMQ' />
         </FormRow>
-        <FormRow label='How you like answers' htmlFor='mStyle'>
+        <FormRow label='How they like answers' htmlFor='mStyle'>
           <NativeSelect id='mStyle' value={f.answer_style} onChange={set('answer_style')}>
             <NativeSelectOption value=''>No preference</NativeSelectOption>
             <NativeSelectOption value='brief'>Brief</NativeSelectOption>
@@ -151,7 +181,7 @@ function PersonForm({ d, onSaved }: { d: Ctx; onSaved: () => void }) {
         </FormRow>
         <FormRow label='Notes' htmlFor='mNotes'><Textarea id='mNotes' rows={2} maxLength={1000} value={f.notes} onChange={set('notes')} /></FormRow>
       </CardContent>
-      <CardFooter><Button type='submit' disabled={busy}>Save my context</Button></CardFooter>
+      <CardFooter><Button type='submit' disabled={busy}>{user.me ? 'Save my context' : 'Save context'}</Button></CardFooter>
     </FormCard>
   );
 }

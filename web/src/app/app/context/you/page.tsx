@@ -1,7 +1,6 @@
-import { ContextPage } from '@/features/portal/context';
+import { redirect } from 'next/navigation';
 
-export const metadata = { title: 'Your context' };
-
+// "You" became the Users tab.
 export default function Page() {
-  return <ContextPage section='me' />;
+  redirect('/app/context/users');
 }

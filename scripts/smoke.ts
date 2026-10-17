@@ -1034,6 +1034,16 @@ try {
       assert.equal((await appCall(devC, "PUT", "/context/me", { answer_style: "loud" })).status, 400);
       assert.equal((await appCall(devC, "PUT", "/context/me", { focus_product: "no-such-product" })).status, 404);
       assert.equal((await json(appCall(devC, "PUT", "/context/me", { title: "Head of DevRel", focus_product: slugP, answer_style: "executive", interests: "why we lose to BullMQ" }))).title, "Head of DevRel");
+      // Users tab: members see only themselves; admins see and edit everyone's.
+      const devUsers = await json(appCall(devC, "GET", "/context/users"));
+      assert.deepEqual(devUsers.users.map((u: any) => u.user_id), [acc2.user.id], "members see only their own context");
+      assert.equal(devUsers.users[0].me, true);
+      assert.equal(devUsers.users[0].context.title, "Head of DevRel");
+      assert.equal((await appCall(devC, "PUT", `/context/users/${accepted.user.id}`, { title: "x" })).status, 403, "members cannot edit someone else's");
+      const ownerUsers = await json(appCall(ownerC, "GET", "/context/users"));
+      assert.ok(ownerUsers.users.some((u: any) => u.user_id === acc2.user.id && u.context.answer_style === "executive"), "admins see everyone's");
+      assert.equal((await appCall(ownerC, "PUT", "/context/users/user_not_here", { title: "x" })).status, 404, "only members of the account");
+      assert.equal((await json(appCall(ownerC, "PUT", `/context/users/${acc2.user.id}`, { title: "Head of DevRel", focus_product: slugP, answer_style: "executive", interests: "why we lose to BullMQ", notes: "set by an admin" }))).notes, "set by an admin");
       const instructionsFor = async (t: string) => {
         const c = new Client({ name: "smoke-context", version: "1.0.0" });
         await c.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${t}` } } }));

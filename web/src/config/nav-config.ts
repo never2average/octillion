@@ -42,9 +42,11 @@ export const portalNav: NavGroup[] = [
     items: [{ title: 'Usage', url: '/app/usage', icon: 'chartLine', shortcut: ['g', 'u'], items: [] }]
   },
   {
-    label: 'Configuration',
+    label: 'Context',
     items: [
-      { title: 'Context', url: '/app/context', icon: 'book', shortcut: ['g', 'c'], items: [] }
+      { title: 'Company', url: '/app/context/company', icon: 'building', shortcut: ['g', 'c'], items: [] },
+      { title: 'Users', url: '/app/context/users', icon: 'teams', items: [] },
+      { title: 'Products', url: '/app/context/products', icon: 'product', shortcut: ['g', 'p'], items: [] }
     ]
   },
   {

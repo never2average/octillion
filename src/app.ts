@@ -277,6 +277,24 @@ export function appRouter() {
   api.put("/context/me", async (req, res) => {
     res.json(await context.savePerson(S(res).org, S(res).user!, req.body ?? {}));
   });
+  // Users: admins see and edit everyone's context; members only their own.
+  api.get("/context/users", async (_req, res) => {
+    const s = S(res);
+    const t = await admin.team(s.slug);
+    const members = t.members.filter((m) => s.role === "admin" || m.user_id === s.user)
+      .map((m) => ({ user_id: m.user_id, email: m.email, name: m.name, role: m.role, active: m.status === "active" }));
+    if (s.user && !members.some((m) => m.user_id === s.user)) members.unshift({ user_id: s.user, email: null, name: null, role: s.role === "admin" ? "admin" : "member", active: true });
+    const ctx = await context.getPeople(s.org, members.map((m) => m.user_id));
+    res.json({ users: members.map((m) => ({ ...m, me: m.user_id === s.user, context: ctx[m.user_id] })), can_manage: s.role === "admin" });
+  });
+  api.put("/context/users/:userId", async (req, res) => {
+    const s = S(res), id = String(req.params.userId);
+    if (id !== s.user) {
+      adminOnly(res);
+      if (!(await admin.team(s.slug)).members.some((m) => m.user_id === id)) throw new AppError("Not a member of this account", 404);
+    }
+    res.json(await context.savePerson(s.org, id, req.body ?? {}));
+  });
   api.get("/context/products/:slug", async (req, res) => void res.json(await q(getProduct(await orgOf(res), String(req.params.slug)))));
   api.post("/context/products", async (req, res) => {
     adminOnly(res);
