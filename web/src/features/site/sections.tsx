@@ -119,11 +119,6 @@ function DecisionGraph() {
           );
         })}
       </svg>
-      <figcaption className='mt-4 flex items-center gap-4'>
-        <span className='text-primary text-4xl font-semibold tabular-nums'>58%</span>
-        <div className='bg-muted h-1.5 flex-1 overflow-hidden rounded-full'><div className='bg-primary h-full w-[58%] rounded-full' /></div>
-        <span className='text-muted-foreground text-xs'>picked Postgres · sample</span>
-      </figcaption>
     </figure>
   );
 }
