@@ -732,56 +732,455 @@ try {
   assert.equal((await ar({ email: `smoke+${stamp}@example.com`, company: "Smoke", product_url: "https://example.com" })).status, 201);
   console.log("✓ landing page and access requests");
 
-  // ---------- onboarding admin console ----------
+  // ---------- onboarding admin console: legacy keys (no Clerk) ----------
   const adm = (method: string, path: string, body?: unknown) => fetch(`${base}/api/admin/onboarding${path}`, {
     method, headers: { authorization: `Bearer ${process.env.OCTILLION_ADMIN_TOKEN}`, "x-admin-actor": "smoke", "content-type": "application/json" },
     body: body ? JSON.stringify(body) : undefined });
+  const json = async (r: Response | Promise<Response>) => { const x = await r; const j = await x.json(); assert.ok(x.ok, `${x.status} ${JSON.stringify(j)}`); return j; };
+  const post = (key: string) => fetch(`${base}/mcp/${key}`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+  const orgRow = async (slug: string) => (await json(adm("GET", "/orgs"))).orgs.find((o: any) => o.slug === slug);
+  const settle = () => new Promise((r) => setTimeout(r, 200)); // connector events are recorded fire-and-forget
   assert.equal((await fetch(`${base}/api/admin/onboarding/overview`)).status, 401, "admin API needs the admin token");
-  const pending = (await (await adm("GET", "/requests?status=pending")).json()).requests;
-  const request = pending.find((q: any) => q.email === `smoke+${stamp}@example.com`);
+  const request = (await json(adm("GET", "/requests?status=pending"))).requests.find((q: any) => q.email === `smoke+${stamp}@example.com`);
   assert.ok(request, "new access request is pending");
-  const approved = await adm("POST", `/requests/${request.id}/approve`, { name: `Smoke Admin ${stamp}`, slug: `smoke-admin-${stamp}` });
-  assert.equal(approved.status, 201);
-  const ap = await approved.json();
-  assert.match(ap.key, /^oct_/);
-  assert.ok(ap.connector_url.endsWith(`/mcp/${ap.key}`), "connector URL carries the key")
-  assert.ok(ap.email.body.includes(ap.connector_url) && ap.email.to === request.email, "invite carries the link and the requester");
+  const ap = await json(adm("POST", `/requests/${request.id}/approve`, { name: `Smoke Admin ${stamp}`, slug: `smoke-admin-${stamp}` }));
+  assert.match(ap.key, /^oct_/, "without Clerk, approval issues a legacy key");
+  assert.ok(ap.secret && ap.connector_url.endsWith(`/mcp/${ap.key}`) && ap.email.body.includes(ap.connector_url) && ap.email.to === request.email);
   assert.equal((await adm("POST", `/requests/${request.id}/approve`, {})).status, 409, "no double approval");
   assert.equal((await adm("POST", "/requests/abc/approve", {})).status, 400, "bad id is a 400");
   const slugA = ap.org.slug;
-  const stageOf = async () => (await (await adm("GET", "/orgs")).json()).orgs.find((o: any) => o.slug === slugA);
-  assert.equal((await stageOf()).stage, "created");
-  assert.equal((await stageOf()).contact_email, request.email);
-  await adm("POST", `/orgs/${slugA}/invited`, {});
-  assert.equal((await stageOf()).stage, "invited");
+  assert.equal((await orgRow(slugA)).stage, "created");
   const viaKey = new Client({ name: "smoke-onboarded", version: "1.0.0" });
   await viaKey.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp/${ap.key}`)));
   await viaKey.callTool({ name: "list_products", arguments: {} });
   await viaKey.close();
-  await new Promise((r) => setTimeout(r, 200)); // event recording is fire-and-forget
-  assert.equal((await stageOf()).stage, "first_call", "funnel follows real connector use");
-  const second = await (await adm("POST", `/orgs/${slugA}/keys`, { label: "teammate@example.com" })).json();
-  assert.equal(second.email.to, "teammate@example.com", "a second user's invite goes to them");
-  const detail = await (await adm("GET", `/orgs/${slugA}`)).json();
+  await settle();
+  assert.equal((await orgRow(slugA)).stage, "first_call", "funnel follows real connector use");
+  const second = await json(adm("POST", `/orgs/${slugA}/invitations`, { email: "teammate@example.com" }));
+  assert.ok(second.key && second.email.to === "teammate@example.com", "without Clerk, inviting someone is a key labelled with their email");
+  const detail = await json(adm("GET", `/orgs/${slugA}`));
   assert.equal(detail.keys.length, 2);
   assert.ok(!JSON.stringify(detail).includes(ap.key), "detail never returns a full key");
   const k1 = detail.keys.find((k: any) => k.label === request.email);
-  const rotated = await (await adm("POST", `/orgs/${slugA}/keys/${k1.id}/rotate`)).json();
-  const post = (key: string) => fetch(`${base}/mcp/${key}`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+  const rotated = await json(adm("POST", `/orgs/${slugA}/keys/${k1.id}/rotate`));
   assert.equal((await post(ap.key)).status, 401, "rotated key stops working");
   assert.notEqual((await post(rotated.key)).status, 401, "its replacement works");
   const k2 = detail.keys.find((k: any) => k.label === "teammate@example.com");
   assert.equal((await adm("POST", `/orgs/${slugA}/keys/${k2.id}/revoke`)).status, 204);
   assert.equal((await post(second.key)).status, 401, "revoked key stops working");
-  assert.equal((await adm("PATCH", `/orgs/${slugA}`, { contact_email: "not-an-email" })).status, 400);
-  const auditRows = (await (await adm("GET", "/audit")).json()).audit.filter((a: any) => a.org_slug === slugA);
-  for (const a of ["request.approve", "org.invited", "key.create", "key.rotate", "key.revoke"])
-    assert.ok(auditRows.some((r: any) => r.action === a && r.actor === "smoke"), `audit has ${a}`);
-  assert.ok(![ap.key, second.key, rotated.key].some((k) => JSON.stringify(auditRows).includes(k)), "audit never holds a key");
-  const ov = await (await adm("GET", "/overview")).json();
-  assert.ok(ov.funnel[0].reached >= 1 && ov.funnel.length === 7);
-  await db.query("DELETE FROM organizations WHERE slug = $1", [slugA]);
-  console.log("✓ onboarding console: approve, invite, funnel from real use, per-user keys, rotate, revoke, audit");
+  assert.equal((await adm("POST", `/orgs/${slugA}/invitations`, { email: "nope" })).status, 400);
+  assert.equal((await adm("POST", `/orgs/${slugA}/billing/portal`)).status, 503, "billing says it is off, not a 500");
+  const ov = await json(adm("GET", "/overview"));
+  assert.ok(ov.funnel.length === 8 && !ov.integrations.clerk && !ov.integrations.stripe);
+  console.log("✓ onboarding console (legacy keys): approve, funnel from real use, per-person keys, rotate, revoke");
+
+  // The customer API needs Clerk: without it, it says so instead of half-working.
+  const appCall = (session: string, method: string, path: string, body?: unknown, headers: Record<string, string> = {}) => fetch(`${base}/api/app${path}`, {
+    method, headers: { ...(session ? { authorization: `Bearer ${session}` } : {}), "content-type": "application/json", ...headers }, body: body ? JSON.stringify(body) : undefined });
+  assert.equal((await appCall("", "GET", "/me")).status, 503, "no Clerk: the portal API is off");
+  if ((await import("node:fs")).existsSync("web/out/app/index.html")) assert.equal((await fetch(`${base}/app/`)).status, 200, "the portal page itself is public (after npm run web:build)");
+  for (const gone of ["/app/login-key", "/admin/login"]) assert.equal((await fetch(`${base}${gone}`, { method: "POST" })).status, 404, `${gone} is gone: Clerk signs people in`);
+
+  // ---------- onboarding console with Clerk (people, sign-in) and Stripe (billing), against the mock ----------
+  const { startMockProviders } = await import("../src/mock-providers.js");
+  const mock = await startMockProviders();
+  const { pem } = await (await fetch(`${mock.url}/_mock/public-key`)).json();
+  const providerEnv = { CLERK_SECRET_KEY: "sk_test_mock", CLERK_API_URL: mock.url, CLERK_FRONTEND_API_URL: mock.url, CLERK_JWT_KEY: pem,
+                        STRIPE_SECRET_KEY: "sk_test_mock", STRIPE_API_URL: mock.url, STRIPE_SPEND_METER: "octillion_model_spend" };
+  Object.assign(process.env, providerEnv);
+  const { mcpAudience } = await import("../src/clerk.js");
+  const mockPost = async (path: string, body: unknown = {}) => (await fetch(`${mock.url}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })).json();
+  /** A Clerk session token (what the UI sends): v2 claims with the active organization, unless told otherwise. */
+  const clerkSession = async (userId: string, orgId?: string | null, role = "member", extra: Record<string, unknown> = {}) =>
+    (await mockPost("/_mock/session", { user_id: userId, org_id: orgId ?? undefined, org_role: role, ...extra })).token as string;
+  /** A Clerk OAuth access token for an MCP client (opaque by default; jwt: true for a JWT). */
+  const token = async (claims: { user_id: string; jwt?: boolean; revoked?: boolean; expired?: boolean; [k: string]: unknown }) =>
+    (await mockPost("/_mock/oauth", claims)).access_token as string;
+  try {
+    const anonW = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    assert.equal(anonW.status, 401);
+    const prm = /resource_metadata="([^"]+)"/.exec(anonW.headers.get("www-authenticate") ?? "")?.[1];
+    assert.ok(prm, "401 points MCP clients at the protected-resource metadata");
+    assert.equal(anonW.headers.get("access-control-expose-headers"), "WWW-Authenticate", "browser MCP clients can read it");
+    const metaRes = await fetch(prm!.replace(/^https?:\/\/[^/]+/, base));
+    assert.equal(metaRes.headers.get("access-control-allow-origin"), "*", "discovery is CORS-open");
+    const meta = await metaRes.json();
+    assert.deepEqual(meta.authorization_servers, [mock.url], "Clerk is the authorization server");
+    assert.equal(meta.resource, mcpAudience());
+    assert.equal((await (await fetch(`${base}/.well-known/oauth-authorization-server`)).json()).issuer, mock.url, "AS metadata proxied from Clerk");
+
+    const reqW = await ar({ email: `owner+${stamp}@acme-smoke.dev`, company: `Acme Smoke ${stamp}`, product_url: "https://acme-smoke.dev" });
+    assert.equal(reqW.status, 201);
+    const qW = (await json(adm("GET", "/requests?status=pending"))).requests.find((q: any) => q.email === `owner+${stamp}@acme-smoke.dev`);
+    const apW = await json(adm("POST", `/requests/${qW.id}/approve`, {}));
+    assert.equal(apW.key, null, "with Clerk, no secret is handed out");
+    assert.equal(apW.invitation.state, "pending", "Clerk sends the invitation");
+    assert.equal(apW.invitation.role, "admin", "the requester is invited as the account's admin");
+    assert.ok(!apW.secret && apW.connector_url === `${ap.connector_url.split("/mcp/")[0]}/mcp`);
+    const slugW = apW.org.slug;
+    const [rowW] = await db.query<{ id: number; clerk_org_id: string; stripe_customer_id: string }>("SELECT id, clerk_org_id, stripe_customer_id FROM organizations WHERE slug = $1", [slugW]);
+    const corg = mock.state.orgs.get(rowW.clerk_org_id);
+    assert.ok(corg, "the Clerk organization exists");
+    assert.equal(corg.public_metadata.octillion_slug, slugW, "joined by public_metadata.octillion_slug");
+    assert.equal(corg.public_metadata.stripe_customer_id, rowW.stripe_customer_id, "Stripe customer recorded on the Clerk org");
+    assert.equal(mock.state.invitations.get(apW.invitation.id).role, "org:admin");
+    assert.equal(await db.query("SELECT 1 FROM api_keys WHERE org_id = $1", [rowW.id]).then((r) => r.length), 0, "no API key minted");
+    assert.equal((await orgRow(slugW)).stage, "invited");
+
+    // The invitee accepts, signs in through the client's OAuth flow and calls a tool with the access token.
+    const accepted = await mockPost(`/_mock/invitations/${apW.invitation.id}/accept`);
+    assert.equal((await orgRow(slugW)).stage, "joined");
+    const callWith = async (t: string) => {
+      const c = new Client({ name: "smoke-oauth", version: "1.0.0" });
+      await c.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${t}` } } }));
+      const r = await c.callTool({ name: "get_started", arguments: {} });
+      await c.close();
+      return r;
+    };
+    assert.ok(!(await callWith(await token({ user_id: accepted.user.id }))).isError, "an opaque Clerk OAuth token (oat_) works");
+    assert.ok(!(await callWith(await token({ user_id: accepted.user.id, jwt: true }))).isError, "a JWT Clerk OAuth token (at+jwt) works");
+    const bad = (t: string) => fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${t}` }, body: "{}" }).then((r) => r.status);
+    assert.equal(await bad(await token({ user_id: accepted.user.id, revoked: true })), 401, "revoked token rejected");
+    assert.equal(await bad(await token({ user_id: accepted.user.id, jwt: true, expired: true })), 401, "expired token rejected");
+    assert.equal(await bad(await clerkSession(accepted.user.id, rowW.clerk_org_id, "admin")), 401, "a session token is not an OAuth token");
+    const loner = await mockPost("/_mock/clerk/users", { email: `loner+${stamp}@nowhere.dev` });
+    assert.equal(await bad(await token({ user_id: loner.id })), 401, "a user with no membership gets nothing");
+    await settle();
+    assert.equal((await orgRow(slugW)).stage, "first_call");
+
+    // A second person from the same company; suspending them ends their access, not their colleague's.
+    const invA = await json(adm("POST", `/orgs/${slugW}/invitations`, { email: `lead+${stamp}@acme-smoke.dev`, role: "admin" }));
+    assert.equal(mock.state.invitations.get(invA.invitation.id).role, "org:admin", "the chosen role reaches Clerk");
+    const inv2 = await json(adm("POST", `/orgs/${slugW}/invitations`, { email: `dev+${stamp}@acme-smoke.dev` }));
+    const again = await json(adm("POST", `/orgs/${slugW}/invitations`, { email: `dev+${stamp}@acme-smoke.dev` }));
+    assert.equal(mock.state.invitations.get(inv2.invitation.id).status, "revoked", "inviting again replaces the pending invitation (as Clerk does)");
+    assert.equal((await adm("POST", `/orgs/${slugW}/invitations/${inv2.invitation.id}/revoke`)).status, 409, "a replaced invitation cannot be revoked");
+    const re = await json(adm("POST", `/orgs/${slugW}/invitations/${again.invitation.id}/resend`));
+    assert.notEqual(re.invitation.id, again.invitation.id, "resend = a fresh invitation");
+    assert.equal(mock.state.invitations.get(again.invitation.id).status, "revoked");
+    const taken = await adm("POST", "/orgs", { name: `Clash ${stamp}`, slug: slugW });
+    assert.equal(taken.status, 409, "a taken slug is refused before reaching Clerk");
+    assert.equal((await adm("POST", `/orgs/${slugW}/invitations/${invA.invitation.id}/revoke`)).status, 204);
+    const acc2 = await mockPost(`/_mock/invitations/${re.invitation.id}/accept`, { first_name: "Dana" });
+    const dW = await json(adm("GET", `/orgs/${slugW}`));
+    assert.equal(dW.members.length, 2);
+    assert.ok(dW.members.some((m: any) => m.email === `owner+${stamp}@acme-smoke.dev` && m.role === "admin"), "members carry their email and role");
+    assert.ok(dW.members.every((m: any) => m.id.startsWith("user_")), "members are keyed by Clerk user id");
+    assert.ok(dW.clerk_dashboard && !("workos_error" in dW));
+    assert.equal((await adm("POST", `/orgs/${slugW}/members/${acc2.user.id}/deactivate`)).status, 204);
+    assert.equal(mock.state.memberships.get(`${rowW.clerk_org_id}:${acc2.user.id}`).public_metadata.suspended, true, "suspension is membership metadata");
+    assert.equal(await bad(await token({ user_id: acc2.user.id })), 401, "a suspended member has no account on /mcp");
+    assert.equal((await adm("POST", `/orgs/${slugW}/members/${acc2.user.id}/reactivate`)).status, 204);
+    assert.equal((await adm("POST", `/orgs/${slugW}/members/${acc2.user.id}/role`, { role: "admin" })).status, 204);
+    assert.equal(mock.state.memberships.get(`${rowW.clerk_org_id}:${acc2.user.id}`).role, "org:admin", "role changes reach Clerk");
+    assert.equal((await adm("POST", `/orgs/${slugW}/members/${acc2.user.id}/role`, { role: "member" })).status, 204);
+    assert.equal((await adm("POST", `/orgs/${slugW}/members/${acc2.user.id}/role`, { role: "owner" })).status, 400);
+
+    // The customer portal with Clerk sessions: the owner (admin) and the second person (member).
+    const ownerC = await clerkSession(accepted.user.id, rowW.clerk_org_id, "admin");
+    const meO = await json(appCall(ownerC, "GET", "/me"));
+    assert.equal(meO.role, "admin", "the requester administers the account");
+    assert.equal(meO.org_role, "org:admin");
+    assert.equal(meO.via, "clerk");
+    assert.equal(meO.account.clerk_org_id, rowW.clerk_org_id);
+    assert.equal(meO.organizations.length, 1);
+    assert.equal((await json(appCall("", "GET", "/me", undefined, { cookie: `__session=${ownerC}` }))).account.slug, slugW, "the __session cookie works");
+    assert.equal((await json(appCall("", "GET", "/me", undefined, { cookie: `__session_Ab12=${ownerC}` }))).account.slug, slugW, "so does a suffixed one");
+    assert.equal((await json(appCall(await clerkSession(accepted.user.id, rowW.clerk_org_id, "org:admin", { v1: true }), "GET", "/me"))).role, "admin", "v1 org claims work");
+    assert.equal((await json(appCall(await clerkSession(accepted.user.id, null), "GET", "/me"))).account.slug, slugW, "no active organization: their oldest membership");
+    const tampered = ownerC.slice(0, -4) + (ownerC.endsWith("AAAA") ? "BBBB" : "AAAA");
+    const s401 = await appCall(tampered, "GET", "/me");
+    assert.equal(s401.status, 401, "a tampered session is rejected");
+    assert.equal((await s401.json()).sign_in_url, "/sign-in");
+    assert.equal((await appCall(await clerkSession(accepted.user.id, rowW.clerk_org_id, "admin", { expired: true }), "GET", "/me")).status, 401, "an expired session is rejected");
+    assert.equal((await appCall(await token({ user_id: accepted.user.id, jwt: true }), "GET", "/me")).status, 401, "an OAuth token is not a portal session");
+    process.env.CLERK_AUTHORIZED_PARTIES = "https://app.octillion.test";
+    assert.equal((await appCall(await clerkSession(accepted.user.id, rowW.clerk_org_id, "admin", { azp: "https://evil.test" }), "GET", "/me")).status, 401, "a session minted for another origin (azp) is rejected");
+    assert.equal((await appCall(await clerkSession(accepted.user.id, rowW.clerk_org_id, "admin", { azp: "https://app.octillion.test" }), "GET", "/me")).status, 200);
+    delete process.env.CLERK_AUTHORIZED_PARTIES;
+    const lonerS = await appCall(await clerkSession(loner.id), "GET", "/me");
+    assert.equal(lonerS.status, 403);
+    assert.equal((await lonerS.json()).code, "no_account", "signed in but in no account: 403, not a sign-in loop");
+    const setupO = await json(appCall(ownerC, "GET", "/setup"));
+    assert.equal(setupO.steps.find((x: any) => x.id === "first_call").done, true, "OAuth tool calls are recorded per person");
+    assert.equal(setupO.connect.secret, false);
+    const devC = await clerkSession(acc2.user.id, rowW.clerk_org_id, "admin"); // the claim says admin; Clerk's membership (member) wins
+    assert.equal((await json(appCall(devC, "GET", "/me"))).role, "member", "the role comes from Clerk, not the token's claim");
+    const setupD = await json(appCall(devC, "GET", "/setup"));
+    assert.equal(setupD.steps.find((x: any) => x.id === "connected").done, false, "a person who never connected is not marked connected");
+    const { since } = await json(appCall(devC, "POST", "/setup/test"));
+    assert.equal((await json(appCall(devC, "GET", `/setup?since=${encodeURIComponent(since)}`))).live, null);
+    await callWith(await token({ user_id: acc2.user.id }));
+    await settle();
+    assert.ok((await json(appCall(devC, "GET", `/setup?since=${encodeURIComponent(since)}`))).live, "live test sees the new connection");
+    assert.equal((await appCall(devC, "POST", "/team/invitations", { email: "x@acme-smoke.dev" })).status, 403, "members cannot invite");
+    assert.equal((await appCall(devC, "POST", "/billing/portal")).status, 403, "members cannot open billing");
+    const teamO = await json(appCall(ownerC, "GET", "/team"));
+    assert.equal(teamO.members.length, 2);
+    const meMember = teamO.members.find((m: any) => m.email === `owner+${stamp}@acme-smoke.dev`);
+    assert.equal((await appCall(ownerC, "POST", `/team/members/${meMember.id}/deactivate`)).status, 400, "cannot remove yourself");
+    assert.equal((await appCall(ownerC, "POST", `/team/members/${meMember.id}/role`, { role: "member" })).status, 400, "cannot demote yourself");
+    assert.equal((await appCall(ownerC, "POST", "/team/invitations", { email: `third+${stamp}@acme-smoke.dev`, role: "member" })).status, 201, "admins invite from /app");
+    const usageO = await json(appCall(ownerC, "GET", "/usage"));
+    assert.ok(usageO.people.some((p: any) => p.email === `dev+${stamp}@acme-smoke.dev`), "usage per person, by email");
+    assert.equal((await appCall(ownerC, "POST", `/team/members/${acc2.user.id}/deactivate`)).status, 204);
+    const gone = await appCall(devC, "GET", "/me");
+    assert.equal(gone.status, 403, "a suspended member loses the page");
+    assert.equal((await gone.json()).code, "suspended");
+    assert.equal((await appCall(ownerC, "POST", `/team/members/${acc2.user.id}/reactivate`)).status, 204);
+    console.log("✓ customer portal with Clerk sessions: bearer or __session cookie, v1/v2 claims, azp, fallback org, roles from Clerk, setup, team, suspension");
+
+    // ---------- platform admins: Clerk session + allowlist (address, domain, verified email) or public_metadata ----------
+    {
+      process.env.OCTILLION_PLATFORM_ADMINS = `boss@octillion.test,*@staff.octillion.test,old@octillion.test:scrypt:x:y`;
+      const user = (email: string, extra: Record<string, unknown> = {}) => mockPost("/_mock/clerk/users", { email, ...extra });
+      const asAdmin = (sess: string, method: string, path: string, opts: { cookie?: boolean; csrf?: boolean; body?: unknown } = {}) =>
+        fetch(`${base}/api/admin/onboarding${path}`, { method, headers: { "content-type": "application/json",
+          ...(opts.cookie ? { cookie: `__session=${sess}` } : { authorization: `Bearer ${sess}` }), ...(opts.csrf ? { "x-octillion-admin": "1" } : {}) },
+          body: opts.body ? JSON.stringify(opts.body) : undefined });
+      const boss = await clerkSession((await user("Boss@octillion.test")).id);
+      assert.equal((await asAdmin(boss, "GET", "/overview")).status, 200, "a listed address (any case) opens the admin API");
+      const sessInfo = await (await fetch(`${base}/admin/session`, { headers: { authorization: `Bearer ${boss}` } })).json();
+      assert.ok(sessInfo.signed_in && sessInfo.is_platform_admin && sessInfo.email === "boss@octillion.test");
+      assert.deepEqual(await (await fetch(`${base}/admin/session`)).json(), { signed_in: false, email: null, is_platform_admin: false, clerk: true });
+      assert.equal((await asAdmin(await clerkSession((await user(`any+${stamp}@staff.octillion.test`)).id), "GET", "/overview")).status, 200, "a domain entry admits the domain");
+      assert.equal((await asAdmin(await clerkSession((await user(`old@octillion.test`)).id), "GET", "/overview")).status, 200, "old password entries still name their admin");
+      const unverified = await clerkSession((await user(`fake+${stamp}@staff.octillion.test`, { verified: false })).id);
+      assert.equal((await asAdmin(unverified, "GET", "/overview")).status, 403, "an unverified address is not enough");
+      assert.equal((await asAdmin(await clerkSession((await user(`meta+${stamp}@elsewhere.test`, { platform_admin: true })).id), "GET", "/overview")).status, 200, "public_metadata.platform_admin works");
+      const stranger = await asAdmin(await clerkSession(loner.id), "GET", "/overview");
+      assert.equal(stranger.status, 403, "everyone else is turned away");
+      assert.equal((await asAdmin(boss, "POST", `/orgs/${slugA}/keys`, { cookie: true, body: { label: "csrf" } })).status, 403, "cookie writes need the X-Octillion-Admin header");
+      assert.equal((await asAdmin(boss, "POST", `/orgs/${slugA}/keys`, { cookie: true, csrf: true, body: { label: "by-session" } })).status, 201);
+      assert.equal((await asAdmin(boss, "POST", `/orgs/${slugA}/keys`, { body: { label: "by-bearer" } })).status, 201, "bearer writes need no header");
+      assert.equal((await asAdmin(await token({ user_id: accepted.user.id, jwt: true }), "GET", "/overview")).status, 401, "an OAuth token is not an admin session");
+      process.env.OCTILLION_PLATFORM_ADMINS = "*@staff.octillion.test";
+      assert.equal((await asAdmin(boss, "GET", "/overview")).status, 403, "removing an admin from the env ends their access");
+      delete process.env.OCTILLION_PLATFORM_ADMINS;
+      console.log("✓ platform admins: Clerk session + allowlist (address, domain, verified email) or public_metadata, CSRF header on cookie writes");
+    }
+
+    // ---------- usage limits: budget split, teams, rollout, throughput (set by account admins on /app) ----------
+    {
+      const { saveProduct, saveScenarios } = await import("../src/queries.js");
+      const orgW = { orgId: rowW.id, slug: slugW, name: `Acme Smoke ${stamp}` };
+      await saveProduct(orgW, { ...DEMO_PRODUCT });
+      await saveScenarios(orgW, undefined, DEMO_SCENARIOS);
+      const run = async (t: string, args: Record<string, unknown>) => {
+        const c = new Client({ name: "smoke-limits", version: "1.0.0" });
+        await c.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${t}` } } }));
+        const r = await c.callTool({ name: "run_simulation", arguments: args });
+        await c.close();
+        return { error: r.isError ? (r.content as any[])[0].text as string : null, id: (r.structuredContent as any)?.simulation?.id as string | undefined };
+      };
+      const ownerT = await token({ user_id: accepted.user.id }), devT = await token({ user_id: acc2.user.id });
+      const lim0 = await json(appCall(ownerC, "GET", "/limits"));
+      assert.equal(lim0.policy.mode, "pool");
+      assert.equal(lim0.members.length, 2);
+      assert.ok(lim0.members.every((m: any) => m.allowance_usd === null && m.can_run), "pool: no personal caps");
+      assert.equal((await appCall(devC, "PUT", "/limits/policy", { mode: "even" })).status, 403, "members cannot change limits");
+      const devView = await json(appCall(devC, "GET", "/limits"));
+      assert.ok(!devView.can_manage && devView.members.length === 1 && devView.members[0].user_id === acc2.user.id, "members see only themselves");
+      // Even split: (budget - reserve) / people, plus adjustments.
+      const budget = lim0.budget_usd;
+      assert.equal((await appCall(ownerC, "PUT", "/limits/policy", { mode: "even", reserve_usd: 100 })).status, 204);
+      assert.equal((await appCall(ownerC, "PUT", `/limits/members/${acc2.user.id}`, { adjust_usd: -50 })).status, 204);
+      let lim = await json(appCall(ownerC, "GET", "/limits"));
+      const share = (budget - 100) / 2;
+      assert.equal(lim.members.find((m: any) => m.user_id === accepted.user.id).allowance_usd, share);
+      assert.equal(lim.members.find((m: any) => m.user_id === acc2.user.id).allowance_usd, share - 50, "minus the adjustment");
+      // A team with a budget: its people share it; everyone else shares the rest.
+      const devrel = await json(appCall(ownerC, "POST", "/limits/teams", { name: "DevRel", budget_usd: 200 }));
+      assert.equal((await appCall(ownerC, "POST", "/limits/teams", { name: "DevRel" })).status, 409, "team names are unique");
+      await appCall(ownerC, "PUT", `/limits/members/${acc2.user.id}`, { team_id: devrel.id });
+      lim = await json(appCall(ownerC, "GET", "/limits"));
+      assert.equal(lim.members.find((m: any) => m.user_id === acc2.user.id).allowance_usd, 150, "team budget / team size, minus 50");
+      assert.equal(lim.members.find((m: any) => m.user_id === accepted.user.id).allowance_usd, budget - 100 - 200, "the rest after reserve and team budgets");
+      assert.equal((await appCall(ownerC, "PUT", "/limits/members/user_nobody", { cap_usd: 5 })).status, 404, "only members of the account");
+      // Rollout: turn running off for one person.
+      await appCall(ownerC, "PUT", `/limits/members/${acc2.user.id}`, { can_run: false });
+      assert.match((await run(devT, { samples: 1 })).error ?? "", /not switched on for you/, "rollout blocks launching");
+      // Throughput: sessions per launch, and runs at once.
+      await appCall(ownerC, "PUT", "/limits/policy", { max_sessions_per_run: 1 });
+      assert.match((await run(ownerT, { samples: 1 })).error ?? "", /limit per run is 1 \(set by your account admin\)/);
+      await appCall(ownerC, "PUT", "/limits/policy", { max_sessions_per_run: null, max_concurrent_runs: 1 });
+      const first = await run(ownerT, { samples: 1, name: "limits-1" });
+      assert.ok(first.id && !first.error, `a run within limits starts (${first.error})`);
+      assert.equal((await db.query<{ created_by: string }>("SELECT created_by FROM simulations WHERE id = $1", [first.id]))[0].created_by, accepted.user.id, "runs record who launched them");
+      assert.match((await run(ownerT, { samples: 1 })).error ?? "", /already have 1 simulation running/, "runs at once");
+      await db.query("UPDATE simulations SET status = 'cancelled' WHERE id = $1", [first.id]);
+      await db.query("UPDATE agent_sessions SET status = 'cancelled' WHERE simulation_id = $1", [first.id]);
+      // Custom caps: a person at their cap cannot launch.
+      await appCall(ownerC, "PUT", "/limits/policy", { mode: "custom", max_concurrent_runs: null });
+      await appCall(ownerC, "PUT", `/limits/members/${accepted.user.id}`, { cap_usd: 0 });
+      assert.match((await run(ownerT, { samples: 1 })).error ?? "", /used your \$0\.00 model allowance/);
+      lim = await json(appCall(ownerC, "GET", "/limits"));
+      assert.equal(lim.members.find((m: any) => m.user_id === accepted.user.id).allowance_usd, 0);
+      await appCall(ownerC, "PUT", "/limits/policy", { mode: "pool" });
+      await appCall(ownerC, "PUT", `/limits/members/${acc2.user.id}`, { can_run: true, team_id: null });
+      console.log("✓ usage limits: even split with reserve and adjustments, team budgets, rollout, sessions per launch, runs at once, custom caps");
+    }
+
+    // ---------- context: company (admins), person (self), product (admins); reaches the AI client and research ----------
+    {
+      assert.equal((await appCall(devC, "PUT", "/context/company", { about: "x" })).status, 403, "members cannot change company context");
+      const co = await json(appCall(ownerC, "PUT", "/context/company", { about: "Acme builds a job queue for Node teams.", audience: "Backend engineers at SaaS startups",
+        competitors: "BullMQ, Inngest, , BullMQ", terms: "AQ = Acme Queue", notes_for_ai: "Prefer TypeScript examples." }));
+      assert.deepEqual(co.competitors, ["BullMQ", "Inngest"], "competitors: trimmed, blanks and duplicates dropped");
+      const ctxDev = await json(appCall(devC, "GET", "/context"));
+      assert.equal(ctxDev.company.about, "Acme builds a job queue for Node teams.", "everyone sees the company context");
+      assert.equal(ctxDev.can_manage, false);
+      const slugP = ctxDev.products[0].slug;
+      assert.equal((await appCall(devC, "PUT", "/context/me", { answer_style: "loud" })).status, 400);
+      assert.equal((await appCall(devC, "PUT", "/context/me", { focus_product: "no-such-product" })).status, 404);
+      assert.equal((await json(appCall(devC, "PUT", "/context/me", { title: "Head of DevRel", focus_product: slugP, answer_style: "executive", interests: "why we lose to BullMQ" }))).title, "Head of DevRel");
+      const instructionsFor = async (t: string) => {
+        const c = new Client({ name: "smoke-context", version: "1.0.0" });
+        await c.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${t}` } } }));
+        const i = c.getInstructions() ?? ""; await c.close(); return i;
+      };
+      const devI = await instructionsFor(await token({ user_id: acc2.user.id }));
+      assert.match(devI, /Acme builds a job queue/, "company context reaches the AI client");
+      assert.match(devI, /role: Head of DevRel; focus product: /, "so does the person's own");
+      assert.match(devI, /Write for an executive/);
+      const ownerI = await instructionsFor(await token({ user_id: accepted.user.id }));
+      assert.ok(ownerI.includes("Acme builds") && !ownerI.includes("Head of DevRel"), "personal context stays personal");
+      // Product context, edited on the page.
+      assert.equal((await appCall(devC, "PUT", `/context/products/${slugP}`, { packages: ["x"] })).status, 403);
+      assert.equal((await appCall(ownerC, "PUT", "/context/products/no-such-product", { name: "Ghost" })).status, 404, "no product created by accident");
+      const pr = await json(appCall(ownerC, "PUT", `/context/products/${slugP}`, { packages: ["acme-queue", "@acme/queue"], competitors: [{ name: "BullMQ", packages: ["bullmq"], domains: ["bullmq.io"], aliases: [] }] }));
+      assert.deepEqual(pr.product.packages, ["acme-queue", "@acme/queue"]);
+      const scn = pr.scenarios.find((x: any) => x.active);
+      assert.equal((await appCall(ownerC, "PUT", `/context/products/${slugP}/scenarios/${scn.id}`, { active: false })).status, 204);
+      assert.equal((await json(appCall(ownerC, "GET", `/context/products/${slugP}`))).scenarios.find((x: any) => x.id === scn.id).active, false, "tasks can be retired from the page");
+      await appCall(ownerC, "PUT", `/context/products/${slugP}/scenarios/${scn.id}`, { active: true });
+      assert.equal((await appCall(ownerC, "POST", "/context/products", { name: "Acme Cron", website_url: "https://acme.dev/cron" })).status, 201, "admins add products");
+      // Research starts from the company's context.
+      const { onboardProduct } = await import("../src/research.js");
+      const job = await onboardProduct({ orgId: rowW.id, slug: slugW, name: "Acme" }, { prompt: "Acme Workflows: durable workflows for Node services.", website_url: "https://acme.dev/workflows" } as any);
+      const [inp] = await db.query<{ input: any }>("SELECT input FROM product_research WHERE id = $1", [(job as any).research.id]);
+      assert.match(inp.input.prompt, /Company context from the account:[\s\S]*BullMQ, Inngest/, "research gets the company's competitors");
+      console.log("✓ context: company (admins), person (self), product editing, in the AI client's instructions and in research");
+    }
+
+    // ---------- platform analytics and health (/admin Analytics) ----------
+    {
+      assert.equal((await fetch(`${base}/api/admin/onboarding/analytics`)).status, 401);
+      const an = await json(adm("GET", "/analytics?days=30"));
+      assert.equal(an.days, 30);
+      assert.ok(an.totals.active_accounts >= 2 && an.totals.calls > 0 && an.totals.p95_ms != null, "totals across accounts");
+      assert.ok(an.tools.some((t: any) => t.name === "list_products" && t.accounts >= 2), "tool adoption counts accounts");
+      assert.ok(an.daily.length >= 1 && an.retention.length >= 1 && an.retention[0].weeks.length === 8 && an.retention[0].weeks[0] === 100, "retention: week 0 is everyone");
+      assert.ok(an.accounts.some((a: any) => a.slug === slugW), "per-account activity");
+      assert.ok(typeof an.ops.sessions === "number" && typeof an.ops.gateway_requests === "number");
+      assert.equal((await json(adm("GET", "/analytics?days=999"))).days, 90, "period capped at 90 days");
+      console.log("✓ platform analytics: totals, daily, tool adoption, clients, retention cohorts, accounts at risk, ops health");
+    }
+
+    // ---------- journeys: PostHog Workflows webhook -> in-chat and /app tips ----------
+    process.env.OCTILLION_JOURNEY_SECRET = "smoke-journey-secret";
+    const hook = (body: unknown, auth?: string, path = "") => fetch(`${base}/api/journeys/nudges${path}`, {
+      method: "POST", headers: { "content-type": "application/json", ...(auth ? { authorization: auth } : {}) }, body: JSON.stringify(body) });
+    const step = { distinct_id: accepted.user.id, journey: "first-report", step: "onboard", message: "Start by onboarding your product.", prompt: "Onboard my product: X" };
+    assert.equal((await hook(step)).status, 401, "the webhook needs the secret");
+    assert.equal((await hook(step, "Bearer wrong")).status, 401);
+    assert.equal((await hook(step, "Bearer smoke-journey-secret")).status, 201, "bearer secret");
+    assert.equal((await hook({ ...step, step: "via-path" }, undefined, "/smoke-journey-secret")).status, 201, "secret in the path");
+    assert.equal((await hook({ distinct_id: "user_unknown", message: "x" }, "Bearer smoke-journey-secret")).status, 404, "unknown person");
+    assert.equal((await hook({ distinct_id: `org:${slugW}`, message: "" }, "Bearer smoke-journey-secret")).status, 400, "message required");
+    await db.query("DELETE FROM nudges WHERE step = 'via-path'");
+    const ownerTok = await token({ user_id: accepted.user.id });
+    const callTool = async (t: string, tool: string) => {
+      const c = new Client({ name: "smoke-journey", version: "1.0.0" });
+      await c.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${t}` } } }));
+      const r = await c.callTool({ name: tool, arguments: {} });
+      await c.close();
+      return { text: (r.content as any[])[0].text as string, nudge: (r.structuredContent as any)?.nudge };
+    };
+    await db.query("DELETE FROM nudge_prefs WHERE org_id = $1", [rowW.id]);
+    const first = await callTool(ownerTok, "list_products");
+    assert.match(first.text, /Octillion tip for the user .*Start by onboarding your product\./s, "the tip rides on the next tool result");
+    assert.equal(first.nudge?.prompt, "Onboard my product: X");
+    assert.ok(!(await callTool(ownerTok, "list_products")).text.includes("Octillion tip"), "at most one tip per interval");
+    assert.ok((await callTool(ownerTok, "get_started")).text.includes("Start by onboarding"), "get_started always shows the waiting tip");
+    const devTok = await token({ user_id: acc2.user.id });
+    await db.query("DELETE FROM nudge_prefs WHERE org_id = $1", [rowW.id]);
+    assert.ok(!(await callTool(devTok, "list_products")).text.includes("Octillion tip"), "a person-level tip is not shown to colleagues");
+    await json(adm("POST", "/journeys/nudges", { org_slug: slugW, journey: "manual", step: "hello", message: "New: transcript search." }));
+    assert.ok((await callTool(devTok, "list_products")).text.includes("New: transcript search."), "account-wide tips reach everyone");
+    const tipsO = await json(appCall(ownerC, "GET", "/nudges"));
+    assert.ok(tipsO.nudges.length >= 2 && tipsO.muted === false);
+    const onboardTip = tipsO.nudges.find((n: any) => n.step === "onboard");
+    assert.equal((await appCall(ownerC, "POST", `/nudges/${onboardTip.id}/dismiss`)).status, 204);
+    assert.ok(!(await json(appCall(ownerC, "GET", "/nudges"))).nudges.some((n: any) => n.step === "onboard"), "dismissed tips go away");
+    assert.equal((await appCall(devC, "POST", `/nudges/${onboardTip.id}/dismiss`)).status, 404, "nobody dismisses someone else's tip");
+    await appCall(ownerC, "POST", "/nudges/mute", { muted: true });
+    assert.ok(!(await callTool(ownerTok, "get_started")).text.includes("Octillion tip"), "muted: no tips in chat, even in get_started");
+    const jv = await json(adm("GET", "/journeys"));
+    assert.ok(jv.recent.some((r: any) => r.email === `owner+${stamp}@acme-smoke.dev`), "recent tips name the person by email");
+    assert.ok(jv.configured && jv.recipes.length >= 5 && jv.steps.some((x: any) => x.journey === "first-report" && Number(x.shown) >= 1));
+    assert.ok(jv.recipes.every((r: any) => r.steps.every((x: any) => JSON.parse(x.body).distinct_id === "{event.distinct_id}")), "recipe bodies are valid JSON");
+    delete process.env.OCTILLION_JOURNEY_SECRET;
+    console.log("✓ journeys: webhook auth, in-chat tips (one a day, per person or account), get_started, /app dismiss and mute, admin stats");
+
+    // Billing: plans come from Stripe; the plan's budget caps simulations; portal and checkout are Stripe-hosted.
+    assert.deepEqual(dW.plans.map((p: any) => p.lookup_key), ["octillion_starter", "octillion_growth"], "only octillion_ prices are plans");
+    assert.match((await json(adm("POST", `/orgs/${slugW}/billing/checkout`, { price_id: "price_mock_starter" }))).url, /\/checkout\//);
+    assert.equal((await adm("POST", `/orgs/${slugW}/billing/checkout`, { price_id: "price_unrelated" })).status, 400);
+    assert.match((await json(adm("POST", `/orgs/${slugW}/billing/portal`))).url, /\/billing\//);
+    const { orgBudget, invalidateSubscriptions } = await import("../src/billing.js");
+    assert.equal((await orgBudget(rowW.id)).budget, Number(process.env.OCTILLION_ORG_MONTHLY_BUDGET_USD ?? 1000), "no plan yet: the default budget");
+    await fetch(`${mock.url}/_mock/subscriptions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ customer: rowW.stripe_customer_id, price: "price_mock_starter" }) });
+    invalidateSubscriptions();
+    assert.equal((await orgBudget(rowW.id)).budget, 300, "the Starter plan's monthly_budget_usd");
+    const billO = await json(appCall(ownerC, "GET", "/billing"));
+    assert.equal(billO.subscription.plan, "Starter");
+    assert.equal(billO.budget_usd, 300);
+    assert.match((await json(appCall(ownerC, "POST", "/billing/portal"))).url, /\/billing\//, "admins reach the Stripe portal");
+    const sW = await orgRow(slugW);
+    assert.equal(sW.subscription.status, "active");
+    assert.equal(sW.subscription.plan, "Starter");
+    process.env.OCTILLION_REQUIRE_SUBSCRIPTION = "1";
+    await assert.rejects(orgBudget(a.org.orgId), /no active Octillion plan/, "OCTILLION_REQUIRE_SUBSCRIPTION refuses orgs without a plan");
+    delete process.env.OCTILLION_REQUIRE_SUBSCRIPTION;
+
+    // Usage metering: a finished session's cost goes to the Stripe meter once.
+    const { reportSessionSpend } = await import("../src/billing.js");
+    const [sess] = await db.query<{ id: string }>("SELECT id FROM agent_sessions WHERE org_id = $1 LIMIT 1", [a.org.orgId]);
+    await db.query("UPDATE organizations SET stripe_customer_id = $2 WHERE id = $1", [a.org.orgId, `cus_smoke_${stamp}`]);
+    await db.query("UPDATE agent_sessions SET cost_usd = 1.234 WHERE id = $1", [sess.id]);
+    reportSessionSpend(sess.id); reportSessionSpend(sess.id);
+    await settle();
+    const metered = mock.state.meterEvents.filter((e: any) => e.identifier === sess.id);
+    assert.equal(metered.length, 1, "deduplicated by session id");
+    assert.equal(metered[0].payload.value, "123");
+    assert.equal(metered[0].payload.stripe_customer_id, `cus_smoke_${stamp}`);
+
+    // An organization created straight in the Clerk dashboard gets its Octillion row on first use.
+    const clerkApi = (path: string, body: unknown) => fetch(`${mock.url}/v1${path}`, { method: "POST", headers: { authorization: "Bearer sk_test_mock", "content-type": "application/json" }, body: JSON.stringify(body) }).then((r) => r.json());
+    const direct = await clerkApi("/organizations", { name: `Dashboard Made ${stamp}` });
+    const dashUser = await mockPost("/_mock/clerk/users", { email: `x+${stamp}@dash.dev` });
+    await mockPost("/_mock/clerk/memberships", { org_id: direct.id, user_id: dashUser.id, role: "org:admin" });
+    assert.ok(!(await callWith(await token({ user_id: dashUser.id }))).isError);
+    const [rowD] = await db.query<{ slug: string }>("SELECT slug FROM organizations WHERE clerk_org_id = $1", [direct.id]);
+    assert.ok(rowD, "linked on first use");
+    assert.equal(mock.state.orgs.get(direct.id).public_metadata.octillion_slug, rowD.slug, "and the slug is written back to Clerk");
+    assert.equal((await json(appCall(await clerkSession(dashUser.id, direct.id, "admin"), "GET", "/me"))).account.slug, rowD.slug, "the portal finds it too");
+
+    // A legacy account gets a Clerk organization on demand; its keys keep working.
+    const linked = await json(adm("POST", `/orgs/${slugA}/clerk`));
+    assert.match(linked.clerk_org_id, /^org_/);
+    assert.equal(mock.state.orgs.get(linked.clerk_org_id).public_metadata.octillion_slug, slugA);
+    assert.notEqual((await post(rotated.key)).status, 401);
+    const ovW = await json(adm("GET", "/overview"));
+    assert.ok(ovW.integrations.clerk && ovW.integrations.oauth_on_mcp && ovW.integrations.stripe && ovW.paying >= 1);
+    await db.query("DELETE FROM organizations WHERE slug = ANY($1)", [[slugA, slugW, rowD.slug]]);
+    await db.query("DELETE FROM access_requests WHERE id = $1", [qW.id]);
+    console.log("✓ onboarding console with Clerk + Stripe: invitations, roles, suspension, OAuth on /mcp, plans, budget, metering, dashboard-made orgs");
+  } finally {
+    for (const k of Object.keys(providerEnv)) delete process.env[k];
+    await mock.close();
+  }
 } finally {
   await db.query("DELETE FROM vault_providers WHERE slug IN ('smoke_llm', 'smoke_vendor')");
   await db.query("DELETE FROM gateway_tokens WHERE orchestrator_id = 'smoke-orch'");

@@ -1,10 +1,18 @@
 import path from "node:path";
+import { contextForAI } from "./context.js";
+import { platformAnalytics } from "./insights.js";
+import * as journeys from "./journeys.js";
+import * as telemetry from "./telemetry.js";
+import { appRouter } from "./app.js";
+import { adminActor, adminAuthRouter, requirePlatformAdmin } from "./admin-auth.js";
 import { fileURLToPath } from "node:url";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createServer, runTool, TOOL_NAMES, WIDGET_HTML, type ToolName } from "./server.js";
 import { connectorEvents, recordMcpEvent } from "./analytics.js";
-import { bearer, isWorkerToken, resolveKey, type Org } from "./auth.js";
+import { bearer, isWorkerToken, resolveKey, resolveUserToken, type Org } from "./auth.js";
+import { clerkEnabled, ClerkError, frontendApi, mcpAudience } from "./clerk.js";
+import { StripeError } from "./billing.js";
 import { getDb } from "./db.js";
 import { parseJsonl, transcripts, type RawEvent } from "./transcripts.js";
 import { appendEvents, claimJobs, completeSession, heartbeat } from "./worker.js";
@@ -18,12 +26,13 @@ import { usageReport } from "./usage.js";
 import * as kv from "./keyvault.js";
 import * as populations from "./populations.js";
 import * as onboarding from "./admin.js";
-import { createHash, timingSafeEqual } from "node:crypto";
 
 const PORT = Number(process.env.PORT ?? 3333);
 const HOST = process.env.HOST ?? "127.0.0.1";
 const PUBLIC_URL = (process.env.PUBLIC_URL ?? `http://${HOST}:${PORT}`).replace(/\/$/, "");
 const PUBLIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "public");
+/** The admin panel (/admin) and customer portal (/app): the Next.js app in web/, built to static files (npm run web:build). */
+const WEB_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "web", "out");
 
 /** Set on SIGTERM/SIGINT: the process is finishing in-flight requests and will exit. */
 let draining = false;
@@ -44,6 +53,10 @@ export function createApp() {
   app.use("/gw/:provider", (req, res, next) => void gatewayHandler(req, res).catch(next));
 
   // ---------- landing page + access requests ----------
+  app.use(express.static(WEB_DIR, {
+    extensions: ["html"], maxAge: "5m",
+    setHeaders: (res, file) => { if (file.includes(`${path.sep}_next${path.sep}static${path.sep}`)) res.setHeader("Cache-Control", "public, max-age=31536000, immutable"); },
+  }));
   app.use(express.static(PUBLIC_DIR, { extensions: ["html"], maxAge: "5m" }));
 
   const recent = new Map<string, number[]>();
@@ -63,6 +76,7 @@ export function createApp() {
       "INSERT INTO access_requests (email, company, product_url, message) VALUES ($1, $2, $3, $4)",
       [email, company, productUrl || null, message || null],
     );
+    telemetry.capture({ distinctId: email.toLowerCase() }, "access_requested", { has_product_url: Boolean(productUrl), has_message: Boolean(message) });
     const hook = process.env.ACCESS_REQUEST_WEBHOOK_URL; // e.g. a Slack incoming webhook
     if (hook)
       fetch(hook, {
@@ -73,13 +87,73 @@ export function createApp() {
     res.status(201).json({ ok: true });
   });
 
-  // ---------- MCP (per-organization API key) ----------
+  // ---------- fake Clerk + Stripe for previews and API tests (src/mock-providers.ts), state in Postgres ----------
+  // Only with OCTILLION_MOCK_PROVIDERS=1; point CLERK_API_URL, CLERK_FRONTEND_API_URL and STRIPE_API_URL at PUBLIC_URL/mock.
+  if (process.env.OCTILLION_MOCK_PROVIDERS === "1") {
+    let mock: Promise<express.Express> | null = null;
+    const persistence = {
+      async load() {
+        const db = await getDb();
+        await db.exec("CREATE TABLE IF NOT EXISTS mock_provider_state (id INT PRIMARY KEY, state TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now())");
+        return (await db.query<{ state: string }>("SELECT state FROM mock_provider_state WHERE id = 1"))[0]?.state ?? null;
+      },
+      async save(state: string) {
+        await (await getDb()).query(
+          "INSERT INTO mock_provider_state (id, state) VALUES (1, $1) ON CONFLICT (id) DO UPDATE SET state = $1, updated_at = now()", [state]);
+      },
+    };
+    app.use("/mock", (req, res, next) => {
+      mock ??= import("./mock-providers.js").then(async (m) => (await m.createMockApp(() => `${PUBLIC_URL}/mock`, persistence)).app);
+      mock.then((a) => a(req, res, next), next);
+    });
+    console.error("  MOCK PROVIDERS at /mock: fake Clerk Backend API and Stripe (previews only)");
+  }
+
+  // ---------- customer page: sign-in, setup check, usage, team, billing (src/app.ts, web/app/app) ----------
+  app.use(appRouter());
+
+  // ---------- journey webhook: PostHog Workflows queues in-chat nudges (src/journeys.ts) ----------
+  // The secret goes in an Authorization header, or in the path for webhook steps that cannot set headers.
+  const nudgeHook = async (req: Request, res: Response, secret: string | null) => {
+    if (!journeys.journeySecretOk(secret)) return void res.status(401).json({ error: "Invalid journey secret" });
+    try { res.status(201).json(await journeys.receiveNudge(req.body ?? {})); }
+    catch (e) { const err = e as journeys.JourneyError; if (!(err instanceof journeys.JourneyError)) throw e; res.status(err.status).json({ error: err.message }); }
+  };
+  app.post("/api/journeys/nudges", express.json({ limit: "32kb" }), (req, res) => nudgeHook(req, res, bearer(req.headers.authorization)));
+  app.post("/api/journeys/nudges/:secret", express.json({ limit: "32kb" }), (req, res) => nudgeHook(req, res, String(req.params.secret)));
+
+  // ---------- OAuth discovery (Clerk is the authorization server; src/clerk.ts) ----------
+  // MCP clients (Claude, ChatGPT, Claude Code, Cursor) find Clerk from the 401 below, register (CIMD or DCR) and sign
+  // the user in. Public and CORS-open, as browser-based MCP clients read them too.
+  const oauthServer = () => (clerkEnabled() ? frontendApi() : null);
+  const openCors = (req: Request, res: Response, next: NextFunction) => {
+    res.set({ "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, OPTIONS", "Access-Control-Allow-Headers": "*" });
+    if (req.method === "OPTIONS") return void res.status(204).end();
+    next();
+  };
+  app.use("/.well-known", openCors);
+  const resourceMetadata = (_req: Request, res: Response) => {
+    const as = oauthServer();
+    if (!as) return void res.status(404).json({ error: "OAuth is not configured" });
+    res.json({ resource: mcpAudience(), authorization_servers: [as], bearer_methods_supported: ["header"], scopes_supported: ["profile", "email"], resource_name: "Octillion" });
+  };
+  app.get(["/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp"], resourceMetadata);
+  // For clients that only look for authorization-server metadata on the resource's own origin (older MCP spec).
+  app.get("/.well-known/oauth-authorization-server", async (_req, res) => {
+    const as = oauthServer();
+    if (!as) return void res.status(404).json({ error: "OAuth is not configured" });
+    const r = await fetch(`${as}/.well-known/oauth-authorization-server`, { signal: AbortSignal.timeout(10_000) });
+    res.status(r.status).type("application/json").send(await r.text());
+  });
+
+  // ---------- MCP (Clerk OAuth sign-in, or a per-organization API key) ----------
   // Keys arrive as `Authorization: Bearer oct_...` or in the connector URL, /mcp/oct_..., for hosts that
   // only take a URL. Stateless: a fresh server per request, bound to the caller's org.
   // One access-log line per connector request (also the ones analytics never sees: bad keys, GET/DELETE probes,
   // rejected Accept headers), so "connected but nothing happened" can be diagnosed. The key is never logged.
   app.use("/mcp", (req, res, next) => {
     const t0 = Date.now();
+    res.set("Access-Control-Expose-Headers", "WWW-Authenticate"); // browser MCP clients read the 401's resource metadata
     res.on("finish", () => {
       const msgs = Array.isArray(req.body) ? req.body : req.body ? [req.body] : [];
       const rpc = msgs.map((m: any) => (m?.method === "tools/call" ? `tools/call:${m?.params?.name}` : m?.method)).filter(Boolean).join(",");
@@ -90,23 +164,26 @@ export function createApp() {
   const mcp = async (req: Request, res: Response, org: Org) => {
     res.locals.org = org.slug;
     transcripts().warm(); // a user is here: have transcript search awake by the time they ask for evidence
-    for (const e of connectorEvents(req.body, req.get("user-agent"))) recordMcpEvent(org.orgId, e);
-    const server = createServer(org);
+    for (const e of connectorEvents(req.body, req.get("user-agent"))) recordMcpEvent(org, e);
+    const server = createServer(org, await contextForAI(org).catch(() => ""));
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on("close", () => { transport.close(); server.close(); });
     await server.connect(transport);
     await transport.handleRequest(req, res, req.body);
   };
   const unauthorized = (res: Response) =>
-    res.status(401).set("WWW-Authenticate", 'Bearer realm="octillion"').json({
+    res.status(401).set("WWW-Authenticate", oauthServer()
+      ? `Bearer error="unauthorized", error_description="Sign in to Octillion", resource_metadata="${PUBLIC_URL}/.well-known/oauth-protected-resource"`
+      : 'Bearer realm="octillion"').json({
       jsonrpc: "2.0", id: null,
-      error: { code: -32001, message: `Missing or invalid Octillion API key. Request access at ${PUBLIC_URL}` },
+      error: { code: -32001, message: `Sign in to Octillion (or send a valid API key). Request access at ${PUBLIC_URL}` },
     });
   const methodNotAllowed = (_req: Request, res: Response) =>
     void res.status(405).json({ jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed" }, id: null });
 
   app.post("/mcp", express.json({ limit: "4mb" }), async (req, res) => {
-    const org = await resolveKey(bearer(req.headers.authorization));
+    const token = bearer(req.headers.authorization);
+    const org = token?.startsWith("oct_") ? await resolveKey(token) : token ? await resolveUserToken(token) : null;
     org ? await mcp(req, res, org) : unauthorized(res);
   });
   app.post("/mcp/:key", express.json({ limit: "4mb" }), async (req, res) => {
@@ -184,15 +261,10 @@ export function createApp() {
   worker.post("/sessions/:id/credentials", async (req, res) => void res.json(await brokerSessionCredentials(String(req.params.id))));
   app.use("/api/worker", worker);
 
-  // ---------- key vault admin API (OCTILLION_ADMIN_TOKEN) ----------
+  // ---------- platform admin API: /admin console, key vault, populations (src/admin-auth.ts) ----------
+  app.use(adminAuthRouter());
   const admin = express.Router();
-  const adminOk = (t: string | null) => {
-    const want = process.env.OCTILLION_ADMIN_TOKEN;
-    if (!want || !t) return false;
-    const h = (x: string) => createHash("sha256").update(x).digest();
-    return timingSafeEqual(h(t), h(want));
-  };
-  admin.use((req, res, next) => (adminOk(bearer(req.headers.authorization)) ? next() : void res.status(401).json({ error: "Invalid admin token" })));
+  admin.use(requirePlatformAdmin);
   admin.use(express.json({ limit: "64kb" }));
   admin.get("/keyvault/providers", async (_req, res) => void res.json({ providers: await kv.listProviders() }));
   admin.put("/keyvault/providers/:slug", async (req, res) => void res.json(await kv.upsertProvider({ ...req.body, slug: String(req.params.slug) })));
@@ -238,34 +310,45 @@ export function createApp() {
   });
   admin.post("/populations/:slug/default", async (req, res) => void res.json(await populations.setDefaultPopulation(String(req.params.slug))));
   admin.get("/autoscaler", async (_req, res) => void res.json(await autoscalerStatus()));
-  // Onboarding console (public/admin.html, src/admin.ts): requests, organizations, keys, funnel, audit.
-  // X-Admin-Actor names the person for the audit log; the token is shared, so it is a label, not an identity.
-  const actor = (req: Request) => String(req.get("x-admin-actor") ?? "admin").trim() || "admin";
+  // Onboarding console (web/app/admin, src/admin.ts): requests, accounts, people (Clerk), billing (Stripe), legacy keys.
+  // X-Admin-Actor names the person in the log lines; the token is shared, so it is a label, not an identity.
   const ob = express.Router();
   ob.use((_req, res, next) => { res.set("Cache-Control", "no-store"); next(); }); // responses can carry a new key
+  const slug = (req: Request) => String(req.params.slug);
+  const done = (res: Response, _?: unknown) => void res.status(204).end();
   ob.get("/overview", async (_req, res) => void res.json(await onboarding.overview()));
   ob.get("/requests", async (req, res) => void res.json({ requests: await onboarding.listRequests(req.query.status ? String(req.query.status) : undefined) }));
-  ob.post("/requests/:id/approve", async (req, res) => void res.status(201).json(await onboarding.approveRequest(actor(req), Number(req.params.id), req.body ?? {})));
-  ob.post("/requests/:id/decline", async (req, res) => {
-    await onboarding.declineRequest(actor(req), Number(req.params.id), req.body?.note);
-    res.status(204).end();
+  ob.post("/requests/:id/approve", async (req, res) => void res.status(201).json(await onboarding.approveRequest(adminActor(req, res), Number(req.params.id), req.body ?? {})));
+  ob.post("/requests/:id/decline", async (req, res) => done(res, await onboarding.declineRequest(adminActor(req, res), Number(req.params.id))));
+  ob.post("/requests/:id/reopen", async (req, res) => done(res, await onboarding.reopenRequest(adminActor(req, res), Number(req.params.id))));
+  ob.get("/orgs", async (_req, res) => void res.json(await onboarding.listOrgs()));
+  ob.post("/orgs", async (req, res) => void res.status(201).json(await onboarding.createAccount(adminActor(req, res), req.body ?? {})));
+  ob.get("/orgs/:slug", async (req, res) => void res.json(await onboarding.orgDetail(slug(req))));
+  ob.patch("/orgs/:slug", async (req, res) => void res.json(await onboarding.renameOrg(adminActor(req, res), slug(req), req.body?.name)));
+  ob.post("/orgs/:slug/invitations", async (req, res) => void res.status(201).json(await onboarding.invite(adminActor(req, res), slug(req), req.body?.email, req.body?.role)));
+  ob.post("/orgs/:slug/invitations/:id/resend", async (req, res) => void res.status(201).json(await onboarding.resendInvitation(adminActor(req, res), slug(req), String(req.params.id))));
+  ob.post("/orgs/:slug/invitations/:id/revoke", async (req, res) => done(res, await onboarding.revokeInvitation(adminActor(req, res), slug(req), String(req.params.id))));
+  ob.post("/orgs/:slug/members/:id/deactivate", async (req, res) => done(res, await onboarding.setMemberActive(adminActor(req, res), slug(req), String(req.params.id), false)));
+  ob.post("/orgs/:slug/members/:id/reactivate", async (req, res) => done(res, await onboarding.setMemberActive(adminActor(req, res), slug(req), String(req.params.id), true)));
+  ob.post("/orgs/:slug/members/:id/role", async (req, res) => done(res, await onboarding.setMemberRole(adminActor(req, res), slug(req), String(req.params.id), req.body?.role)));
+  ob.post("/orgs/:slug/clerk", async (req, res) => void res.json(await onboarding.linkClerk(adminActor(req, res), slug(req))));
+  ob.post("/orgs/:slug/billing/customer", async (req, res) => void res.json({ customer: await onboarding.ensureCustomer(adminActor(req, res), slug(req)) }));
+  ob.post("/orgs/:slug/billing/checkout", async (req, res) => void res.json(await onboarding.checkoutLink(adminActor(req, res), slug(req), req.body?.price_id)));
+  ob.post("/orgs/:slug/billing/portal", async (req, res) => void res.json(await onboarding.portalLink(adminActor(req, res), slug(req))));
+  ob.post("/orgs/:slug/keys", async (req, res) => void res.status(201).json(await onboarding.issueKey(adminActor(req, res), slug(req), req.body?.label)));
+  ob.post("/orgs/:slug/keys/:id/revoke", async (req, res) => done(res, await onboarding.revokeKey(adminActor(req, res), slug(req), Number(req.params.id))));
+  ob.post("/orgs/:slug/keys/:id/rotate", async (req, res) => void res.status(201).json(await onboarding.rotateKey(adminActor(req, res), slug(req), Number(req.params.id))));
+  // Platform analytics and health across every account (src/insights.ts).
+  ob.get("/analytics", async (req, res) => void res.json(await platformAnalytics(req.query.days)));
+  // Journeys: what PostHog Workflows queued for the in-chat channel, and nudges sent by hand.
+  ob.get("/journeys", async (_req, res) => void res.json(await journeys.adminView()));
+  ob.post("/journeys/nudges", async (req, res) => void res.status(201).json(await journeys.sendFromAdmin(adminActor(req, res), req.body ?? {})));
+  ob.delete("/journeys/nudges/:id", async (req, res) => { await journeys.adminDelete(adminActor(req, res), Number(req.params.id)); res.status(204).end(); });
+  // Clerk / Stripe failures are the admin's to see (a bad key, a rate limit), not a generic 500.
+  ob.use((err: Error & { status?: number }, _req: Request, res: Response, next: NextFunction) => {
+    if (!(err instanceof onboarding.AdminError || err instanceof journeys.JourneyError || err instanceof ClerkError || err instanceof StripeError)) return next(err);
+    res.status(err.status ?? 400).json({ error: err.message });
   });
-  ob.post("/requests/:id/reopen", async (req, res) => {
-    await onboarding.reopenRequest(actor(req), Number(req.params.id));
-    res.status(204).end();
-  });
-  ob.get("/orgs", async (_req, res) => void res.json({ stages: onboarding.STAGES, orgs: await onboarding.listOrgs() }));
-  ob.post("/orgs", async (req, res) => void res.status(201).json(await onboarding.createOrgManually(actor(req), req.body ?? {})));
-  ob.get("/orgs/:slug", async (req, res) => void res.json(await onboarding.orgDetail(String(req.params.slug))));
-  ob.patch("/orgs/:slug", async (req, res) => void res.json(await onboarding.updateOrg(actor(req), String(req.params.slug), req.body ?? {})));
-  ob.post("/orgs/:slug/invited", async (req, res) => void res.json(await onboarding.markInvited(actor(req), String(req.params.slug), req.body?.invited !== false)));
-  ob.post("/orgs/:slug/keys", async (req, res) => void res.status(201).json(await onboarding.issueKey(actor(req), String(req.params.slug), req.body?.label)));
-  ob.post("/orgs/:slug/keys/:id/revoke", async (req, res) => {
-    await onboarding.revokeKey(actor(req), String(req.params.slug), Number(req.params.id));
-    res.status(204).end();
-  });
-  ob.post("/orgs/:slug/keys/:id/rotate", async (req, res) => void res.status(201).json(await onboarding.rotateKey(actor(req), String(req.params.slug), Number(req.params.id))));
-  ob.get("/audit", async (req, res) => void res.json({ audit: await onboarding.auditLog(req.query.limit ? Number(req.query.limit) : undefined) }));
   admin.use("/onboarding", ob);
   app.use("/api/admin", admin);
 
@@ -330,6 +413,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     console.error(`${signal}: draining, in-flight requests get up to ${limit}s`);
     void stopAutoscaler();
     stopArchiver();
+    void telemetry.flush();
     server.close(() => { console.error("drained, exiting"); process.exit(0); });
     server.closeIdleConnections();
     setInterval(() => server.closeIdleConnections(), 1000).unref(); // keep-alive sockets as they go idle

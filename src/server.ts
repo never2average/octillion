@@ -1,4 +1,6 @@
 import { readFileSync } from "node:fs";
+import { chatLine, nudgeForChat } from "./journeys.js";
+import { span } from "./telemetry.js";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -163,21 +165,31 @@ export function fitPayload<T extends Record<string, any>>(data: T, budget = STRU
 }
 
 /** Run a handler and shape its output as an MCP tool result (text for the model, structured data for the UI). */
-export async function runTool(org: Org, name: ToolName, args: Record<string, unknown>): Promise<CallToolResult> {
+export function runTool(org: Org, name: ToolName, args: Record<string, unknown>): Promise<CallToolResult> {
+  return span(`mcp.tool ${name}`, { "octillion.org": org.slug, "mcp.tool.name": name, "octillion.auth": org.userId ? "clerk" : "api_key" }, async (s) => {
+    const r = await runToolInner(org, name, args);
+    if (r.isError) s.setAttribute("mcp.tool.error", true);
+    return r;
+  });
+}
+
+async function runToolInner(org: Org, name: ToolName, args: Record<string, unknown>): Promise<CallToolResult> {
   const t0 = performance.now();
   try {
     const data = await (handlersFor(org)[name] as (a: unknown) => Promise<Data>)(args ?? {});
-    recordMcpEvent(org.orgId, { method: "tools/call", name, ms: performance.now() - t0 });
+    recordMcpEvent(org, { method: "tools/call", name, ms: performance.now() - t0 });
     const structured = fitPayload(JSON.parse(JSON.stringify(data))); // Dates -> ISO strings
     const note = structured.truncated
       ? " (Result shortened to fit the host's size limit: page with offset/limit, lower limit, or narrow the filters for the rest.)"
       : "";
+    // A journey step waiting for this person (src/journeys.ts): at most one a day; get_started always shows it.
+    const nudge = await nudgeForChat(org, { force: name === "get_started" }).catch((e) => { console.error("nudge:", (e as Error).message); return null; });
     return {
-      content: [{ type: "text", text: `${summarize(structured as Data)}${note}\n\n${JSON.stringify(structured)}` }],
-      structuredContent: structured,
+      content: [{ type: "text", text: `${summarize(structured as Data)}${note}\n\n${JSON.stringify(structured)}${nudge ? chatLine(nudge) : ""}` }],
+      structuredContent: nudge ? { ...structured, nudge: { message: nudge.message, prompt: nudge.prompt } } : structured,
     };
   } catch (err) {
-    recordMcpEvent(org.orgId, { method: "tools/call", name, ok: false, error: (err as Error).message, ms: performance.now() - t0 });
+    recordMcpEvent(org, { method: "tools/call", name, ok: false, error: (err as Error).message, ms: performance.now() - t0 });
     return { isError: true, content: [{ type: "text", text: (err as Error).message }] };
   }
 }
@@ -211,7 +223,8 @@ export const TOOL_STATUS: Record<ToolName, [string, string]> = {
 
 export const TOOL_NAMES = Object.keys(handlersFor({ orgId: 0, slug: "", name: "" })) as ToolName[];
 
-export function createServer(org: Org): McpServer {
+/** `context`: the account's and the person's context (src/context.ts), appended to the instructions. */
+export function createServer(org: Org, context = ""): McpServer {
   const server = new McpServer(
     { name: "octillion", version: "2.0.0" },
     {
@@ -227,7 +240,7 @@ export function createServer(org: Org): McpServer {
         "naming the product) -> run_simulation (sandboxed sub-agents work each scenario on each model) -> " +
         "get_visibility_report / get_simulation for results -> get_agent_session and get_session_transcript for evidence. " +
         "browse_task_library offers curated real-world tasks to turn into scenarios; list_developer_profiles lists the developer " +
-        "personas the orchestrator role-plays when a sub-agent asks questions (pass them to run_simulation as profiles).",
+        "personas the orchestrator role-plays when a sub-agent asks questions (pass them to run_simulation as profiles)." + context,
     },
   );
 

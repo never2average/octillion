@@ -1,4 +1,6 @@
 import { getDb } from "./db.js";
+import { orgEvent } from "./telemetry.js";
+import { reportSessionSpend } from "./billing.js";
 import { normalize, transcripts, type RawEvent, type SessionRef, type StoredEvent } from "./transcripts.js";
 import { scoreTranscript, type Tool } from "./scoring.js";
 import { findAgent } from "./agents.js";
@@ -209,6 +211,7 @@ export async function completeSession(sessionId: string, input: CompleteInput = 
               cost_usd = greatest(cost_usd, $4) WHERE id = $1`,
       [sessionId, metered.input_tokens, metered.output_tokens, metered.cost_usd]);
   const score = await scoreSession(sessionId);
+  if (!FINAL.includes(s.status)) reportSessionSpend(sessionId); // usage-based billing; once per session (Stripe dedupes by id too)
   await finishSimulationIfDone(s.simulation_id);
   return score;
 }
@@ -245,12 +248,14 @@ async function finishSimulationIfDone(simulationId: string) {
   // queues nothing more is finished.
   if (await extendAdaptive(simulationId)) return;
   const db = await getDb();
-  await db.query(
+  const [done] = await db.query<{ org_id: number; status: string; first: boolean }>(
     `UPDATE simulations SET status = CASE WHEN status = 'cancelled' THEN 'cancelled' ELSE 'completed' END,
             finished_at = coalesce(finished_at, now())
-      WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM agent_sessions WHERE simulation_id = $1 AND status IN ('queued', 'running'))`,
+      WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM agent_sessions WHERE simulation_id = $1 AND status IN ('queued', 'running'))
+      RETURNING org_id, status, finished_at > now() - interval '2 seconds' AS first`,
     [simulationId],
   );
+  if (done?.first) void orgEvent(done.org_id, done.status === "cancelled" ? "simulation_cancelled" : "simulation_completed", { simulation_id: simulationId });
 }
 
 /** Time out sessions whose worker went quiet for longer than the lease. */

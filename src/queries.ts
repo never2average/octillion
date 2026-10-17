@@ -1,4 +1,6 @@
 import { getDb, type Queryable } from "./db.js";
+import { orgBudget } from "./billing.js";
+import { checkRun, launcherOverLimit } from "./limits.js";
 import { randomId, type Org } from "./auth.js";
 import { transcripts, type SearchParams } from "./transcripts.js";
 import type { Tool } from "./scoring.js";
@@ -50,7 +52,7 @@ export const config = {
   samplingMargin: () => Number(process.env.OCTILLION_SAMPLING_MARGIN ?? 0.2),
   samplingMin: () => Math.max(1, Number(process.env.OCTILLION_SAMPLING_MIN ?? 6)),
   samplingBatch: () => Math.max(1, Number(process.env.OCTILLION_SAMPLING_BATCH ?? 4)),
-  /** Per-organization model spend per calendar month (UTC); new runs are refused once reached. 0 = no cap. */
+  /** Default per-organization model spend per calendar month (UTC), for orgs without a Stripe plan that sets one (src/billing.ts). 0 = no cap. */
   orgMonthlyBudgetUsd: () => Number(process.env.OCTILLION_ORG_MONTHLY_BUDGET_USD ?? 1000),
 };
 
@@ -306,13 +308,16 @@ export async function orgMonthSpendUsd(orgId: number): Promise<number> {
 export async function runSimulation(org: Org, input: RunInput) {
   const p = await resolveProduct(org, input.product);
   const db = await getDb();
-  const budget = config.orgMonthlyBudgetUsd();
+  const { budget } = await orgBudget(org.orgId); // the Stripe plan's cap, else the default; may refuse without a plan
   if (budget > 0) {
     const spent = await orgMonthSpendUsd(org.orgId);
     if (spent >= budget)
       throw new Error(`${org.name ?? "This organization"} has used its $${budget} simulation budget for this month ($${spent.toFixed(2)} spent). ` +
         "Results so far stay available; reply to your Octillion contact to raise the limit.");
   }
+  // The account's own limits for this person (src/limits.ts): rollout, allowance, team budget, concurrency, run size.
+  const personal = await checkRun(org);
+  const maxSessions = Math.min(config.maxSessionsPerRun(), personal.maxSessions ?? Infinity);
   const pop = await getPopulation(input.population);
   const enabled = enabledAgents(pop);
   if (!enabled.length) throw new Error(`No coding agents are running in developer population ${pop.slug}`);
@@ -343,7 +348,7 @@ export async function runSimulation(org: Org, input: RunInput) {
   // Representative runs size their first batch from the grid (agents.ts planFirstBatch): the smallest samples per
   // problem x persona that give every harness a session and every major harness every problem. `samples` overrides.
   const batchPlan = !explicit && input.samples === undefined
-    ? planFirstBatch(scenarios.length, profileIds.length, schedulingShares(pop), { maxSessions: config.maxSessionsPerRun() })
+    ? planFirstBatch(scenarios.length, profileIds.length, schedulingShares(pop), { maxSessions })
     : null;
   const samples = input.samples ?? batchPlan?.samples ?? config.defaultSamples();
   const repeats = input.repeats ?? 3;
@@ -374,18 +379,18 @@ export async function runSimulation(org: Org, input: RunInput) {
     const cells = dealToCells(slots.map(() => samples), schedulingShares(pop), { floor: 1, groups: slots.map((s) => s.scenarioId) });
     plan = slots.flatMap((slot, si) => cells[si]!.map((a, i) => ({ ...slot, agent: drawVariant(a), attempt: i + 1 })));
   }
-  if (plan.length > config.maxSessionsPerRun())
-    throw new Error(`That is ${plan.length} agent sessions (${scenarios.length} scenarios x ${profileIds.length} profiles x ${explicit ? "agents x repeats" : `${samples} samples`}); the limit per run is ${config.maxSessionsPerRun()}. Use fewer scenarios, profiles, agents, repeats or samples.`);
+  if (plan.length > maxSessions)
+    throw new Error(`That is ${plan.length} agent sessions (${scenarios.length} scenarios x ${profileIds.length} profiles x ${explicit ? "agents x repeats" : `${samples} samples`}); the limit per run is ${maxSessions}${maxSessions < config.maxSessionsPerRun() ? " (set by your account admin)" : ""}. Use fewer scenarios, profiles, agents, repeats or samples.`);
 
   const used = [...new Map(plan.map((x) => [x.agent.id, x.agent])).values()];
   const id = randomId("sim_");
   const name = input.name?.trim() || `${p.name} · ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC`;
   await db.transaction(async (tx) => {
     await tx.query(
-      `INSERT INTO simulations (id, org_id, product_id, name, models, harness, repeats, profile_ids, mode, agent_ids, population_id, max_samples, research_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, (SELECT research->>'research_id' FROM products WHERE id = $3))`,
+      `INSERT INTO simulations (id, org_id, product_id, name, models, harness, repeats, profile_ids, mode, agent_ids, population_id, max_samples, research_id, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, (SELECT research->>'research_id' FROM products WHERE id = $3), $13)`,
       [id, org.orgId, p.id, name, [...new Set(used.map((a) => a.model))], [...new Set(used.map((a) => a.harness))].join(", "),
-       explicit ? repeats : samples, profiles.map((x) => x.id), explicit ? "explicit" : "representative", used.map((a) => a.id), pop.id, maxSamples],
+       explicit ? repeats : samples, profiles.map((x) => x.id), explicit ? "explicit" : "representative", used.map((a) => a.id), pop.id, maxSamples, org.userId ?? null],
     );
     for (const x of plan)
       await tx.query(
@@ -407,12 +412,14 @@ export async function runSimulation(org: Org, input: RunInput) {
 export async function extendAdaptive(simulationId: string): Promise<number> {
   const db = await getDb();
   // Read what needs its own queries before taking the row lock (no nested queries inside the transaction).
-  const [pre] = await db.query<{ org_id: number; mode: string; max_samples: number | null; slug: string | null }>(
-    `SELECT sim.org_id, sim.mode, sim.max_samples, dp.slug FROM simulations sim LEFT JOIN developer_populations dp ON dp.id = sim.population_id
+  const [pre] = await db.query<{ org_id: number; mode: string; max_samples: number | null; slug: string | null; created_by: string | null; org_slug: string }>(
+    `SELECT sim.org_id, sim.mode, sim.max_samples, dp.slug, sim.created_by, o.slug AS org_slug
+       FROM simulations sim JOIN organizations o ON o.id = sim.org_id LEFT JOIN developer_populations dp ON dp.id = sim.population_id
       WHERE sim.id = $1`, [simulationId]);
   if (!pre || pre.mode !== "representative" || !pre.max_samples) return 0;
-  const budget = config.orgMonthlyBudgetUsd();
-  const overBudget = budget > 0 && (await orgMonthSpendUsd(pre.org_id)) >= budget;
+  const budget = await orgBudget(pre.org_id).then((b) => b.budget, () => 0); // no plan any more: let the run finish
+  // The account's budget, or the launcher's own allowance or team budget (src/limits.ts), stops sampling early.
+  const overBudget = (budget > 0 && (await orgMonthSpendUsd(pre.org_id)) >= budget) || (await launcherOverLimit(pre.org_id, pre.org_slug, pre.created_by));
   const pop = await getPopulation(pre.slug ?? undefined);
   return db.transaction(async (tx) => {
     const [sim] = await tx.query<{ id: string; org_id: number; product_id: number; mode: string; status: string; max_samples: number | null;

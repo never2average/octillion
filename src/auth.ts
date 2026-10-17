@@ -1,11 +1,14 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { getDb } from "./db.js";
+import { clerkEnabled, isSuspended, memberships, onMembershipChange, organizations, verifyOAuthToken } from "./clerk.js";
 
 /** The tenant a request acts for. Every query in queries.ts is scoped by orgId. */
 export interface Org {
   orgId: number;
   slug: string;
   name: string;
+  /** The Clerk user, when the request came with a Clerk token (absent for legacy API keys). */
+  userId?: string;
 }
 
 const KEY_PREFIX = "oct_";
@@ -66,4 +69,52 @@ export function isWorkerToken(token: string | undefined | null): boolean {
 export function bearer(header: string | undefined): string | null {
   const m = header?.match(/^Bearer\s+(\S+)$/i);
   return m ? m[1] : null;
+}
+
+// ---------- Clerk users on /mcp (OAuth) ----------
+
+const tokenOrgs = new Map<string, { org: Org; at: number }>();
+onMembershipChange((userId) => tokenOrgs.delete(userId)); // a suspended person is cut off at once, not after the cache
+
+/**
+ * Resolve a Clerk OAuth access token to the organization the user acts for: their oldest Clerk membership that is not
+ * suspended. A Clerk organization created in the Clerk dashboard gets its Octillion row on first use.
+ */
+export async function resolveUserToken(token: string): Promise<Org | null> {
+  const claims = await verifyOAuthToken(token);
+  if (!claims) return null;
+  const hit = tokenOrgs.get(claims.userId);
+  if (hit && Date.now() - hit.at < 60_000) return hit.org;
+  const ms = (await memberships.forUser(claims.userId)).filter((m) => !isSuspended(m) && m.organization)
+    .sort((a, b) => a.created_at - b.created_at);
+  if (!ms.length) return null;
+  const found = await orgForClerk(ms[0].organization!.id);
+  const org = found ? { ...found, userId: claims.userId } : null;
+  if (org) tokenOrgs.set(claims.userId, { org, at: Date.now() });
+  return org;
+}
+
+/** The Octillion organization joined to a Clerk organization, created (and linked by slug metadata) on first sight. */
+export async function orgForClerk(clerkOrgId: string): Promise<Org | null> {
+  const db = await getDb();
+  const find = async () => (await db.query<{ id: number; slug: string; name: string }>(
+    "SELECT id, slug, name FROM organizations WHERE clerk_org_id = $1", [clerkOrgId]))[0];
+  let row = await find();
+  if (!row) {
+    if (!clerkEnabled()) return null;
+    const c = await organizations.get(clerkOrgId);
+    const known = typeof c.public_metadata?.octillion_slug === "string" ? c.public_metadata.octillion_slug : null;
+    const bySlug = known
+      ? (await db.query<{ id: number }>("SELECT id FROM organizations WHERE slug = $1 AND clerk_org_id IS NULL", [known]))[0]
+      : undefined;
+    if (bySlug) await db.query("UPDATE organizations SET clerk_org_id = $2 WHERE id = $1", [bySlug.id, clerkOrgId]);
+    else {
+      let slug = slugify(c.name);
+      if ((await db.query("SELECT 1 FROM organizations WHERE slug = $1", [slug])).length) slug = `${slug.slice(0, 40)}-${randomBytes(3).toString("hex")}`;
+      await db.query("INSERT INTO organizations (slug, name, clerk_org_id) VALUES ($1, $2, $3) ON CONFLICT (clerk_org_id) DO NOTHING", [slug, c.name, clerkOrgId]);
+      await organizations.setMetadata(clerkOrgId, { octillion_slug: slug }).catch((err) => console.error("clerk metadata:", (err as Error).message));
+    }
+    row = await find();
+  }
+  return row ? { orgId: row.id, slug: row.slug, name: row.name } : null;
 }

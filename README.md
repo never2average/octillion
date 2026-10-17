@@ -158,6 +158,30 @@ npm run dev            # http://127.0.0.1:3333 (landing page) + /preview/get_vis
 
 ## Onboarding a customer
 
+People live in **Clerk**, billing in **Stripe**, product analytics in **PostHog** and ops observability in
+**New Relic** (OpenTelemetry). Octillion keeps only the links to them. Setup and the funnel are in
+**[docs/accounts.md](docs/accounts.md)**.
+
+- **`/admin`** (`OCTILLION_ADMIN_TOKEN`) is the onboarding console. It handles access requests (approve creates the
+  Clerk organization, Stripe customer and invitation), the funnel from invite to first report, who is stuck and why,
+  members (roles, suspension) and invitations, plans and checkout/portal links, and legacy keys.
+- **`/app`** is the customer page, behind Clerk sign-in (the account is the session's active Clerk organization). It has a setup checklist with a live connection test,
+  per-client guides, "use it fully" prompts for the parts of the workflow they have not tried, team usage, team
+  management for account admins, and billing.
+- **Journeys** are built in PostHog Workflows; Octillion delivers their tips inside Claude/ChatGPT (after the next tool
+  call, at most one a day) and on `/app` ([docs/journeys.md](docs/journeys.md)).
+- **Account admins on `/app`** split the plan's budget across teams and people (even split with adjustments, or custom
+  caps), choose who may launch simulations and cap throughput (Limits), and keep company, personal and product
+  context that reaches the AI client (Context).
+- `/admin` and `/app` are a Next.js app in `web/`. Sign-in everywhere is Clerk (passwords, Google, Microsoft, GitHub,
+  enterprise SSO, whatever the Clerk instance enables).
+- `/admin` is for platform admins: Clerk users whose verified email matches `OCTILLION_PLATFORM_ADMINS` (addresses or
+  `*@domain`), or with `public_metadata.platform_admin` set in Clerk.
+- With Clerk on, the connector URL is just `https://<host>/mcp`: Claude, ChatGPT, Claude Code and Cursor sign the
+  person in over OAuth, with Clerk as the authorization server.
+
+Without Clerk (or for beta accounts), per-org API keys still work:
+
 ```bash
 npm run vault:sync                      # pull developer profiles + task library (VAULT_URL or VAULT_DIR)
 npm run access:list                     # who asked for access on the landing page
@@ -287,7 +311,19 @@ and applied on boot.
 ## Layout
 
 ```
-src/http.ts          landing page, access requests, /mcp (API key), /api/worker, dev preview
+src/http.ts          landing page, access requests, /mcp (Clerk OAuth or API key), /api/worker, /api/admin, dev preview
+src/admin.ts         onboarding console: requests, accounts, funnel, people (Clerk), billing (Stripe), legacy keys
+src/app.ts           customer page API (Clerk sessions): setup check, usage, team, limits, context, billing, tips
+src/limits.ts        per-account usage limits: budget split, teams, rollout, throughput; enforced at launch
+src/context.ts       company, personal and product context for the AI client and research
+src/insights.ts      platform analytics and health for /admin (replicated from the event log)
+src/journeys.ts      journey tips: PostHog Workflows webhook, in-chat and /app delivery, recipes
+src/admin-auth.ts    platform-admin guard for /api/admin (Clerk session + allowlist, or the admin token)
+src/session.ts       reads the Clerk session from a request (Bearer or __session cookie)
+src/clerk.ts         Clerk Backend API client, session and OAuth token verification, platform-admin check
+src/billing.ts       Stripe REST client: plans, subscriptions, checkout, portal, budgets, spend meter
+src/telemetry.ts     PostHog events (grouped by organization) + OpenTelemetry span helper
+src/otel.ts          OpenTelemetry bootstrap (OTLP to New Relic), loaded with --import
 src/server.ts        MCP tools + dashboard resource; model-readable summaries
 src/queries.ts       org-scoped reads/writes: products, scenarios, simulations, report
 src/worker.ts        job queue: claim, append, complete + score, stale sweep
@@ -298,16 +334,18 @@ src/agents.ts        worker-agent registry, adoption-weighted sampling
 src/vault.ts         sync developer profiles + task library from the vault
 src/ui/widget.html   the dashboard (single file, no build step)
 public/index.html    landing page
+web/                 admin panel (/admin) and customer portal (/app): Next.js, built to static files the server serves
 orchestrator/        Pi-based orchestrator agent + boat.dev worker runtime
 harnesses/           worker-agent registry (versions, images, adoption weights + sources)
 vault/               vault format + example
-scripts/             smoke test, org:create, access:list, demo:seed, db:reset
+scripts/             smoke test, org:create, access:list, demo:seed, admin:demo, mock:providers, db:reset
 ```
 
 ## Known gaps
 
-- **Auth is an API key per org, sent in the URL path or as a bearer header.** Next step: OAuth (e.g. WorkOS AuthKit
-  with DCR/CIMD), which both Claude and ChatGPT support natively, with per-user identity.
+- **Two ways in.** Clerk OAuth with per-user identity (docs/accounts.md), and the older per-org API keys in
+  the URL path or a bearer header, kept for beta accounts and header-only clients.
 - **Scoring is deterministic** (names, packages, install commands, imports). An LLM judge and a "built it
   themselves" bucket are next. Partial-word and negation handling is heuristic.
-- **No billing, quotas or scheduled re-runs yet.** Spend is capped by `OCTILLION_MAX_SESSIONS_PER_RUN` per launch.
+- **Billing is Stripe, scheduled re-runs are not built yet.** A plan's `monthly_budget_usd` caps model spend per month
+  (docs/accounts.md); `OCTILLION_MAX_SESSIONS_PER_RUN` caps each launch. The orchestrators are not traced yet.

@@ -1,4 +1,6 @@
 import { getDb } from "./db.js";
+import { companyHintForResearch } from "./context.js";
+import { capture, orgEvent } from "./telemetry.js";
 import { randomId, type Org } from "./auth.js";
 import { WORKSPACE_TEMPLATES, config, getProduct, resolveProduct, runSimulation, saveProduct, browseTaskLibrary } from "./queries.js";
 import type { Tool } from "./scoring.js";
@@ -84,7 +86,9 @@ export async function onboardProduct(org: Org, input: OnboardInput) {
   const id = randomId("rsh_");
   await db.query(
     `INSERT INTO product_research (id, org_id, product_id, input, run) VALUES ($1, $2, $3, $4, $5)`,
-    [id, org.orgId, product.product.id, JSON.stringify({ name: input.name ?? null, prompt, website_url: input.website_url ?? null, docs_url: input.docs_url ?? null }),
+    // The company's own context (src/context.ts) rides along with the prompt, so research starts from what they know.
+    [id, org.orgId, product.product.id, JSON.stringify({ name: input.name ?? null, prompt: prompt + (await companyHintForResearch(org.orgId).catch(() => "")),
+                                                         website_url: input.website_url ?? null, docs_url: input.docs_url ?? null }),
      // Research only by default: one orchestrator sandbox, then done. The run (one sandbox per agent session) is the
      // explicit next step, run_simulation; `run: true` chains it here.
      input.run === true ? JSON.stringify({ samples: input.samples ?? null, population: input.population ?? null }) : null],
@@ -252,14 +256,17 @@ export async function completeResearch(id: string, body: { status?: string; erro
   const db = await getDb();
   if (body.status === "failed") {
     await db.query("UPDATE product_research SET status = 'failed', error = $2, finished_at = now() WHERE id = $1", [id, String(body.error ?? "failed").slice(0, 2000)]);
+    void orgEvent(job.org_id, "onboarding_failed", { research_id: id, reason: "worker" });
     return { status: "failed" };
   }
   const issues = validateResearch(body.result);
   if (issues.length) {
     const [{ attempts }] = await db.query<{ attempts: number }>(
       "UPDATE product_research SET attempts = attempts + 1, heartbeat_at = now(), stage = 'validating' WHERE id = $1 RETURNING attempts", [id]);
-    if (attempts >= MAX_ATTEMPTS)
+    if (attempts >= MAX_ATTEMPTS) {
       await db.query("UPDATE product_research SET status = 'failed', error = $2, finished_at = now() WHERE id = $1", [id, `invalid after ${attempts} attempts: ${issues.join("; ")}`]);
+      void orgEvent(job.org_id, "onboarding_failed", { research_id: id, reason: "validation", attempts });
+    }
     throw Object.assign(new Error("invalid research result"), { status: 422, issues });
   }
 
@@ -338,5 +345,7 @@ export async function completeResearch(id: string, body: { status?: string; erro
       await db.query("UPDATE product_research SET note = $2 WHERE id = $1", [id, `run not started: ${run_error}`.slice(0, 500)]);
     }
   }
+  capture({ distinctId: `org:${org.slug}`, orgSlug: org.slug }, "onboarding_completed",
+    { research_id: id, personas: personaSlugs.length, scenarios: r.scenarios.length, competitors: (p.competitors ?? []).length, auto_run: Boolean(simulation_id) });
   return { status: "completed", product: prod.slug, personas: personaSlugs, scenarios: r.scenarios.length, simulation_id, run_error };
 }

@@ -456,21 +456,103 @@ ALTER TABLE product_research ADD COLUMN IF NOT EXISTS archive_key TEXT;
 ALTER TABLE product_research ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
 ALTER TABLE product_research ADD COLUMN IF NOT EXISTS archive_claimed_at TIMESTAMPTZ;
 
--- Onboarding admin console (/admin, src/admin.ts): access-request triage, contacts, invites and an audit trail.
+-- Onboarding (src/admin.ts, /admin). People live in WorkOS and money in Stripe; these are only the joins to them,
+-- plus the triage state of a landing-page request.
+ALTER TABLE organizations ADD COLUMN IF NOT EXISTS workos_org_id TEXT UNIQUE;       -- WorkOS organization (users, invites, SSO)
+ALTER TABLE organizations ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT UNIQUE;  -- Stripe customer (plan, invoices); also on the WorkOS org
 ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending'
   CHECK (status IN ('pending', 'approved', 'declined'));
 ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS org_id INT REFERENCES organizations(id) ON DELETE SET NULL;
 ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS decided_at TIMESTAMPTZ;
-ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS admin_note TEXT;
-ALTER TABLE organizations ADD COLUMN IF NOT EXISTS contact_email TEXT;
-ALTER TABLE organizations ADD COLUMN IF NOT EXISTS notes TEXT;
-ALTER TABLE organizations ADD COLUMN IF NOT EXISTS invited_at TIMESTAMPTZ;  -- the admin sent the connector link
-CREATE TABLE IF NOT EXISTS admin_audit (
-  id      BIGSERIAL PRIMARY KEY,
-  at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-  actor   TEXT NOT NULL,                      -- the name the admin signed in with (the token itself is shared)
-  action  TEXT NOT NULL,                      -- request.approve, key.revoke, org.update, ...
-  org_id  INT REFERENCES organizations(id) ON DELETE SET NULL,
-  detail  JSONB NOT NULL DEFAULT '{}'         -- never a key: only its prefix
+ALTER TABLE mcp_events ADD COLUMN IF NOT EXISTS user_id TEXT;           -- the WorkOS user when signed in (null for API keys)
+CREATE INDEX IF NOT EXISTS mcp_events_user_idx ON mcp_events (org_id, user_id, at DESC);
+
+-- Journey nudges (src/journeys.ts): a delivery queue for PostHog Workflows' in-chat channel. Journeys themselves live in
+-- PostHog. One row per account (user_id '') or person and journey step; a step that fires again replaces its row.
+CREATE TABLE IF NOT EXISTS nudges (
+  id             BIGSERIAL PRIMARY KEY,
+  org_id         INT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  user_id        TEXT NOT NULL DEFAULT '',     -- WorkOS user, or '' for everyone in the account
+  journey        TEXT NOT NULL,
+  step           TEXT NOT NULL,
+  message        TEXT NOT NULL,
+  prompt         TEXT,                         -- what to type to try it
+  link           TEXT,
+  source         TEXT NOT NULL DEFAULT 'posthog' CHECK (source IN ('posthog', 'admin')),
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at     TIMESTAMPTZ NOT NULL,
+  shown_count    INT NOT NULL DEFAULT 0,
+  first_shown_at TIMESTAMPTZ,
+  last_shown_at  TIMESTAMPTZ,
+  dismissed_at   TIMESTAMPTZ,
+  UNIQUE (org_id, user_id, journey, step)
 );
-CREATE INDEX IF NOT EXISTS admin_audit_at_idx ON admin_audit (at DESC);
+CREATE INDEX IF NOT EXISTS nudges_active_idx ON nudges (org_id, user_id, created_at DESC) WHERE dismissed_at IS NULL;
+CREATE TABLE IF NOT EXISTS nudge_prefs (
+  org_id         INT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  user_id        TEXT NOT NULL DEFAULT '',
+  muted          BOOLEAN NOT NULL DEFAULT false,  -- the person turned tips off on /app
+  last_shown_at  TIMESTAMPTZ,                     -- for the one-a-day limit in chat
+  PRIMARY KEY (org_id, user_id)
+);
+
+-- Usage limits inside an account (src/limits.ts): how its admins split the plan's budget, who may run simulations,
+-- and how much each person may run at once. Set on /app Limits; the budget itself comes from the Stripe plan.
+ALTER TABLE simulations ADD COLUMN IF NOT EXISTS created_by TEXT;   -- the WorkOS user who launched it (null: connector key)
+CREATE INDEX IF NOT EXISTS simulations_created_by_idx ON simulations (org_id, created_by);
+CREATE TABLE IF NOT EXISTS usage_policies (
+  org_id                INT PRIMARY KEY REFERENCES organizations(id) ON DELETE CASCADE,
+  mode                  TEXT NOT NULL DEFAULT 'pool' CHECK (mode IN ('pool', 'even', 'custom')),
+  reserve_usd           NUMERIC NOT NULL DEFAULT 0,     -- kept out of an even split, as a shared buffer
+  default_cap_usd       NUMERIC,                         -- custom mode: for people without their own cap
+  new_members_can_run   BOOLEAN NOT NULL DEFAULT true,   -- rollout: may people launch simulations unless set per person
+  max_concurrent_runs   INT,                             -- per person, unless set per team or person
+  max_sessions_per_run  INT,                             -- per launch, under the server's own limit
+  updated_at            TIMESTAMPTZ,
+  updated_by            TEXT
+);
+CREATE TABLE IF NOT EXISTS usage_teams (
+  id                    SERIAL PRIMARY KEY,
+  org_id                INT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  name                  TEXT NOT NULL,
+  budget_usd            NUMERIC,                         -- the team's monthly share; a hard cap on its combined spend
+  max_concurrent_runs   INT,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (org_id, name)
+);
+CREATE TABLE IF NOT EXISTS usage_members (
+  org_id                INT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  user_id               TEXT NOT NULL,                   -- WorkOS user
+  team_id               INT REFERENCES usage_teams(id) ON DELETE SET NULL,
+  cap_usd               NUMERIC,                         -- custom mode: this person's monthly cap
+  adjust_usd            NUMERIC NOT NULL DEFAULT 0,      -- even mode: plus or minus the even share
+  can_run               BOOLEAN,                         -- null: the account's default
+  max_concurrent_runs   INT,
+  PRIMARY KEY (org_id, user_id)
+);
+
+-- Context for the AI client (src/context.ts, /app Context): the company's, set by its admins, and each person's own.
+CREATE TABLE IF NOT EXISTS account_context (
+  org_id        INT PRIMARY KEY REFERENCES organizations(id) ON DELETE CASCADE,
+  about         TEXT,                          -- what the company does
+  audience      TEXT,                          -- the developers it builds for
+  competitors   JSONB NOT NULL DEFAULT '[]',   -- names to always track
+  terms         TEXT,                          -- internal product names and jargon
+  notes_for_ai  TEXT,
+  updated_at    TIMESTAMPTZ,
+  updated_by    TEXT
+);
+CREATE TABLE IF NOT EXISTS user_context (
+  org_id        INT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  user_id       TEXT NOT NULL,                 -- WorkOS user
+  title         TEXT,
+  focus_product TEXT,                          -- product slug used when they do not name one
+  interests     TEXT,
+  answer_style  TEXT,                          -- brief | detailed | executive
+  notes         TEXT,
+  updated_at    TIMESTAMPTZ,
+  PRIMARY KEY (org_id, user_id)
+);
+
+-- Clerk replaced WorkOS for people (src/clerk.ts): the join to a Clerk organization. workos_org_id is no longer used.
+ALTER TABLE organizations ADD COLUMN IF NOT EXISTS clerk_org_id TEXT UNIQUE;

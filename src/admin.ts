@@ -1,55 +1,94 @@
 /**
  * Onboarding admin console (/admin): the work between "someone asked for access" and "they read their first report".
- * Triage access requests, create organizations and per-user API keys, hand out the connector link with per-client
- * setup, see where each account is in the funnel and who is stuck, and rotate or revoke keys. Every change is
- * written to admin_audit. Keys are returned once, at creation, and never stored or logged (only their prefix).
+ * Octillion is not the system of record for any of it:
+ *  - people (organizations, users, memberships, roles, invitations) live in Clerk (src/clerk.ts); Clerk sends the
+ *    invite email and handles sign-in (passwords, Google, Microsoft, GitHub, enterprise SSO);
+ *  - money (plans, subscriptions, invoices, cards) lives in Stripe (src/billing.ts); customers self-serve in Stripe;
+ *  - Postgres keeps the joins (clerk_org_id, stripe_customer_id), a landing-page request's triage state, and the
+ *    product usage Octillion already records (connector events, products, onboarding, simulations).
+ * This module reads all three and puts the funnel in one place. Admin actions are logged to stderr; Clerk and Stripe
+ * keep their own event history for what changes there.
+ *
+ * Without CLERK_SECRET_KEY the console falls back to per-org API keys (src/auth.ts) and hands out secret connector URLs.
+ * Legacy keys keep working either way, for existing beta users and clients that can only send a header.
  */
 import { createApiKey, createOrg, slugify } from "./auth.js";
+import { capture } from "./telemetry.js";
+import * as billing from "./billing.js";
 import { getDb } from "./db.js";
-import { config } from "./queries.js";
+import * as clerk from "./clerk.js";
 
 export class AdminError extends Error {
   constructor(message: string, public status = 400) { super(message); }
 }
 
 const publicUrl = () => (process.env.PUBLIC_URL ?? `http://127.0.0.1:${process.env.PORT ?? 3333}`).replace(/\/$/, "");
-
-async function audit(actor: string, action: string, orgId: number | null, detail: Record<string, unknown> = {}) {
-  await (await getDb()).query("INSERT INTO admin_audit (actor, action, org_id, detail) VALUES ($1, $2, $3, $4)",
-    [actor.slice(0, 80) || "admin", action, orgId, JSON.stringify(detail)]);
+/** One stderr line per admin change, and the same as a PostHog event (without emails) for the onboarding funnel. */
+function log(actor: string, action: string, slug: string | null, detail: Record<string, unknown> = {}) {
+  console.error(`admin ${actor} ${action}${slug ? ` org=${slug}` : ""} ${JSON.stringify(detail)}`);
+  const { email: _email, ...safe } = detail;
+  capture({ distinctId: `admin:${actor}`, orgSlug: slug }, `admin_${action.replace(/\./g, "_")}`, safe);
 }
 
-// ---------- onboarding funnel ----------
+export function integrations() {
+  const key = process.env.STRIPE_SECRET_KEY ?? "";
+  return {
+    clerk: clerk.clerkEnabled(), clerk_frontend_api: clerk.frontendApi(), oauth_on_mcp: Boolean(clerk.clerkEnabled() && clerk.frontendApi()),
+    stripe: billing.stripeEnabled(), stripe_test_mode: /^(sk|rk)_test_/.test(key), spend_meter: process.env.STRIPE_SPEND_METER || null,
+    require_subscription: process.env.OCTILLION_REQUIRE_SUBSCRIPTION === "1",
+    default_budget_usd: Number(process.env.OCTILLION_ORG_MONTHLY_BUDGET_USD ?? 1000),
+  };
+}
 
-/** In order. An org's stage is the furthest step it has reached; `next` is what it has to do after that. */
-export const STAGES = [
-  { id: "created", label: "Key issued", next: "Send the invite with the connector link" },
-  { id: "invited", label: "Invited", next: "Add the connector in Claude, ChatGPT or an IDE" },
-  { id: "connected", label: "Connected", next: "Ask: \"Get me started with Octillion\"" },
-  { id: "first_call", label: "First tool call", next: "Onboard a product (name, website, docs)" },
-  { id: "onboarded", label: "Product onboarded", next: "Run a simulation" },
-  { id: "simulated", label: "Simulation run", next: "Open the visibility report" },
-  { id: "reported", label: "Report read", next: "Act on the report and re-run" },
-] as const;
-export type StageId = (typeof STAGES)[number]["id"];
+// ---------- connecting ----------
+
+/** How a person connects: the plain /mcp URL with Clerk sign-in, or (legacy) a secret URL carrying their key. */
+export function connectInfo(key?: string) {
+  const base = publicUrl();
+  const url = key ? `${base}/mcp/${key}` : `${base}/mcp`;
+  const signIn = key ? "" : " Sign in with the email the invitation went to when the client asks.";
+  const clients = [
+    { client: "Claude (web or desktop)", steps: `Settings → Connectors → Add custom connector, paste the URL.${signIn} On Team/Enterprise an owner adds it under Organization settings → Connectors.` },
+    { client: "ChatGPT", steps: `Add a custom MCP server (developer mode), paste the URL and choose ${key ? "No authentication" : "OAuth"}.${signIn}` },
+    { client: "Claude Code", steps: `Add to .mcp.json${key ? "" : ", then run /mcp and choose Authenticate"}:`, snippet: JSON.stringify({ mcpServers: { octillion: { type: "http", url } } }, null, 2) },
+    { client: "Cursor and other IDEs", steps: `Paste the URL into the MCP settings and switch the Octillion tools on.${signIn}` },
+  ];
+  if (key) clients.push({ client: "Header-capable clients", steps: `POST ${base}/mcp with the header:`, snippet: `Authorization: Bearer ${key}` });
+  const subject = "Your Octillion access";
+  const body = `Hi,
+
+You now have access to Octillion. ${key ? "Your personal connector link is:" : "Add this connector URL to your AI client:"}
+
+${url}
+${key ? "\nIt is your login: anyone with it can use your account, so keep it private.\n" : "\nIt has no secret in it: you sign in with your work email (accept the invitation email first).\n"}
+Connect it:
+${clients.filter((c) => c.client !== "Header-capable clients").map((c) => `- ${c.client}: ${c.steps}${c.snippet ? ` ${c.snippet.replace(/\s+/g, " ")}` : ""}`).join("\n")}
+
+Then type: "Get me started with Octillion." The beta guide: ${base}/connect
+
+Reply to this email with anything that gets in your way.`;
+  return { connector_url: url, secret: Boolean(key), clients, email: { subject, body } };
+}
+
+// ---------- local facts ----------
 
 interface OrgFacts {
-  id: number; slug: string; name: string; contact_email: string | null; notes: string | null;
-  created_at: Date; invited_at: Date | null; active_keys: number; revoked_keys: number; key_last_used: Date | null;
-  first_seen: Date | null; last_seen: Date | null; first_call_at: Date | null; onboarded_at: Date | null;
-  onboarding_running: number; onboarding_failed: number; first_sim_at: Date | null; sims_running: number;
-  first_report_at: Date | null; calls_7d: number; errors_7d: number; month_spend_usd: number; requests: number;
+  id: number; slug: string; name: string; created_at: Date; clerk_org_id: string | null; stripe_customer_id: string | null;
+  active_keys: number; key_last_used: Date | null; first_seen: Date | null; last_seen: Date | null; first_call_at: Date | null;
+  onboarded_at: Date | null; onboarding_running: number; onboarding_failed: number; first_sim_at: Date | null; sims_running: number;
+  first_report_at: Date | null; calls_7d: number; errors_7d: number; month_spend_usd: number;
 }
-
 const ORG_FACTS = `
-  SELECT o.id, o.slug, o.name, o.contact_email, o.notes, o.created_at, o.invited_at,
+  SELECT o.id, o.slug, o.name, o.created_at, o.clerk_org_id, o.stripe_customer_id,
     (SELECT count(*) FROM api_keys k WHERE k.org_id = o.id AND k.revoked_at IS NULL) AS active_keys,
-    (SELECT count(*) FROM api_keys k WHERE k.org_id = o.id AND k.revoked_at IS NOT NULL) AS revoked_keys,
     (SELECT max(k.last_used_at) FROM api_keys k WHERE k.org_id = o.id) AS key_last_used,
     (SELECT min(e.at) FROM mcp_events e WHERE e.org_id = o.id) AS first_seen,
     (SELECT max(e.at) FROM mcp_events e WHERE e.org_id = o.id) AS last_seen,
     (SELECT min(e.at) FROM mcp_events e WHERE e.org_id = o.id AND e.method = 'tools/call' AND e.ok) AS first_call_at,
-    (SELECT min(r.finished_at) FROM product_research r WHERE r.org_id = o.id AND r.status = 'completed') AS onboarded_at,
+    -- Onboarded: research completed, or a product saved by hand (save_product) without research.
+    least((SELECT min(r.finished_at) FROM product_research r WHERE r.org_id = o.id AND r.status = 'completed'),
+          (SELECT min(p.created_at) FROM products p WHERE p.org_id = o.id
+            AND NOT EXISTS (SELECT 1 FROM product_research r WHERE r.product_id = p.id))) AS onboarded_at,
     (SELECT count(*) FROM product_research r WHERE r.org_id = o.id AND r.status IN ('queued', 'running')) AS onboarding_running,
     (SELECT count(*) FROM product_research r WHERE r.org_id = o.id AND r.status = 'failed') AS onboarding_failed,
     (SELECT min(s.created_at) FROM simulations s WHERE s.org_id = o.id) AS first_sim_at,
@@ -58,91 +97,169 @@ const ORG_FACTS = `
     (SELECT count(*) FROM mcp_events e WHERE e.org_id = o.id AND e.method = 'tools/call' AND e.at > now() - interval '7 days') AS calls_7d,
     (SELECT count(*) FROM mcp_events e WHERE e.org_id = o.id AND NOT e.ok AND e.at > now() - interval '7 days') AS errors_7d,
     (SELECT coalesce(sum(u.cost_usd), 0) FROM gateway_usage u JOIN agent_sessions a ON a.id = u.session_id
-      WHERE a.org_id = o.id AND a.queued_at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') AS month_spend_usd,
-    (SELECT count(*) FROM access_requests q WHERE q.org_id = o.id) AS requests
+      WHERE a.org_id = o.id AND a.queued_at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') AS month_spend_usd
   FROM organizations o`;
 
-const DAY = 86_400_000;
-const ago = (d: Date | null) => (d ? (Date.now() - new Date(d).getTime()) / DAY : null);
+// ---------- people, from Clerk ----------
 
-function stageOf(f: OrgFacts): StageId {
-  if (f.first_report_at) return "reported";
-  if (f.first_sim_at) return "simulated";
-  if (f.onboarded_at) return "onboarded";
-  if (f.first_call_at) return "first_call";
-  if (f.first_seen) return "connected";
-  if (f.invited_at) return "invited";
-  return "created";
+/** A member, keyed by Clerk user id (Clerk's membership endpoints are). Suspended = public_metadata.suspended. */
+export interface Member { id: string; user_id: string; status: "active" | "inactive"; role: "admin" | "member"; created_at: string | null; email: string | null; name: string | null }
+export interface Invite { id: string; email: string; state: clerk.ClerkInvitation["status"]; role: "admin" | "member"; created_at: string | null; expires_at: string | null }
+interface People { members: Member[]; invitations: Invite[]; error?: string }
+
+const toMember = (m: clerk.ClerkMembership): Member => ({
+  id: m.public_user_data?.user_id ?? m.id, user_id: m.public_user_data?.user_id ?? "", status: clerk.isSuspended(m) ? "inactive" : "active",
+  role: clerk.roleOf(m.role), created_at: clerk.iso(m.created_at), email: m.public_user_data?.identifier?.toLowerCase() ?? null,
+  name: clerk.displayName(m.public_user_data ?? {}),
+});
+const toInvite = (x: clerk.ClerkInvitation): Invite => ({
+  id: x.id, email: x.email_address.toLowerCase(), state: x.status, role: clerk.roleOf(x.role), created_at: clerk.iso(x.created_at), expires_at: clerk.iso(x.expires_at),
+});
+
+const peopleCache = new Map<string, { at: number; people: People }>();
+async function peopleOf(clerkOrgId: string | null, fresh = false): Promise<People | null> {
+  if (!clerkOrgId || !clerk.clerkEnabled()) return null;
+  const hit = peopleCache.get(clerkOrgId);
+  if (!fresh && hit && Date.now() - hit.at < 60_000) return hit.people;
+  let people: People;
+  try {
+    const [members, invitations] = await Promise.all([clerk.memberships.list(clerkOrgId), clerk.invitations.list(clerkOrgId)]);
+    people = { members: members.map(toMember), invitations: invitations.map(toInvite) };
+  } catch (err) {
+    return { members: [], invitations: [], error: (err as Error).message }; // show the account anyway; do not cache a failure
+  }
+  peopleCache.set(clerkOrgId, { at: Date.now(), people });
+  return people;
+}
+const forget = (clerkOrgId: string | null) => { if (clerkOrgId) peopleCache.delete(clerkOrgId); };
+
+async function subscriptions(): Promise<{ map: Map<string, billing.SubscriptionSummary>; error?: string }> {
+  if (!billing.stripeEnabled()) return { map: new Map() };
+  try { return { map: await billing.subscriptionsByCustomer() }; }
+  catch (err) { return { map: new Map(), error: (err as Error).message }; }
 }
 
-/** Why an account needs a person to look at it, most urgent first. Empty when it is moving on its own. */
-function attentionOf(f: OrgFacts, stage: StageId, budget: number): string[] {
-  const out: string[] = [];
-  if (Number(f.active_keys) === 0) out.push("No active API key: the account cannot connect");
-  if (Number(f.onboarding_failed) && !f.onboarded_at) out.push("Product onboarding failed");
-  if (Number(f.errors_7d) >= 3) out.push(`${f.errors_7d} tool errors in the last 7 days`);
-  if (budget > 0 && Number(f.month_spend_usd) >= budget * 0.8)
-    out.push(`At ${Math.round((Number(f.month_spend_usd) / budget) * 100)}% of the monthly model budget`);
-  const since = (d: Date | null) => Math.floor(ago(d) ?? 0);
-  if (stage === "created" && since(f.created_at) >= 1) out.push(`Key issued ${since(f.created_at)}d ago, invite not marked as sent`);
-  if (stage === "invited" && since(f.invited_at) >= 2) out.push(`Invited ${since(f.invited_at)}d ago, never connected`);
-  if (stage === "connected" && since(f.first_seen) >= 1) out.push("Connected but never called a tool (tools may be switched off in the client)");
-  if (stage === "first_call" && !Number(f.onboarding_running) && since(f.first_call_at) >= 2) out.push("Using tools but has not onboarded a product");
-  if (stage === "onboarded" && since(f.onboarded_at) >= 2) out.push("Product onboarded, no simulation yet");
-  if (stage === "simulated" && !Number(f.sims_running) && since(f.first_sim_at) >= 2) out.push("Simulation ran, report never opened");
+/** Run fn over items, at most n at a time (Clerk rate limits; dozens of orgs, not thousands). */
+async function pool<T, R>(items: T[], n: number, fn: (x: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let i = 0;
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => { while (i < items.length) { const j = i++; out[j] = await fn(items[j]); } }));
   return out;
 }
 
-function shapeOrg(f: OrgFacts, budget: number) {
-  const stage = stageOf(f);
-  const i = STAGES.findIndex((s) => s.id === stage);
+// ---------- the funnel ----------
+
+/** In order. An org's stage is the furthest step it has reached; `next` is what has to happen after that. */
+export const STAGES = [
+  { id: "created", label: "Account created", next: "Invite the first person" },
+  { id: "invited", label: "Invited", next: "Accept the invitation email" },
+  { id: "joined", label: "Joined", next: "Add the connector in Claude, ChatGPT or an IDE and sign in" },
+  { id: "connected", label: "Connected", next: "Ask: \"Get me started with Octillion\"" },
+  { id: "first_call", label: "First tool call", next: "Onboard a product (name, website, docs)" },
+  { id: "onboarded", label: "Product onboarded", next: "Run a simulation" },
+  { id: "simulated", label: "Simulation run", next: "Open the visibility report" },
+  { id: "reported", label: "Report read", next: "Act on the report and re-run" },
+] as const;
+export type StageId = (typeof STAGES)[number]["id"];
+
+const DAY = 86_400_000;
+const daysSince = (d: Date | string | null) => (d ? Math.floor((Date.now() - new Date(d).getTime()) / DAY) : 0);
+const minDate = (xs: (string | null | undefined)[]) => xs.filter(Boolean).sort()[0] ?? null;
+
+function shapeOrg(f: OrgFacts, people: People | null, sub: billing.SubscriptionSummary | null, defaultBudget: number) {
+  const members = people?.members ?? [];
+  const invites = people?.invitations ?? [];
+  const reached: Record<StageId, Date | string | null> = {
+    created: f.created_at,
+    invited: minDate(invites.map((i) => i.created_at)),
+    joined: minDate(members.map((m) => m.created_at)),
+    connected: f.first_seen, first_call: f.first_call_at, onboarded: f.onboarded_at, simulated: f.first_sim_at, reported: f.first_report_at,
+  };
+  let i = STAGES.length - 1;
+  while (i > 0 && !reached[STAGES[i].id]) i--;
+  const stage = STAGES[i];
+  const activeMembers = members.filter((m) => m.status === "active").length;
+  const pendingInvites = invites.filter((x) => x.state === "pending");
+  const live = sub && ["active", "trialing"].includes(sub.status);
+  const budget = live && sub!.monthly_budget_usd != null ? sub!.monthly_budget_usd : defaultBudget;
+
+  const attention: string[] = [];
+  if (people?.error) attention.push(`Clerk: ${people.error}`);
+  if (!activeMembers && !pendingInvites.length && !Number(f.active_keys)) attention.push("Nobody can get in: no active member, pending invitation or API key");
+  const expired = invites.filter((x) => x.state === "expired" && !members.some((m) => (m.email ?? "") === x.email));
+  if (expired.length) attention.push(`Invitation expired for ${expired.map((x) => x.email).join(", ")}: resend it`);
+  if (Number(f.onboarding_failed) && !f.onboarded_at) attention.push("Product onboarding failed");
+  if (Number(f.errors_7d) >= 3) attention.push(`${f.errors_7d} tool errors in the last 7 days`);
+  if (sub && ["past_due", "unpaid", "incomplete"].includes(sub.status)) attention.push(`Stripe subscription is ${sub.status.replace("_", " ")}`);
+  if (sub?.cancel_at_period_end) attention.push(`Subscription cancels on ${sub.renews_at?.slice(0, 10)}`);
+  if (budget > 0 && Number(f.month_spend_usd) >= budget * 0.8) attention.push(`At ${Math.round((Number(f.month_spend_usd) / budget) * 100)}% of the monthly model budget`);
+  const since = (d: Date | string | null) => daysSince(d);
+  switch (stage.id) {
+    case "created": if (f.clerk_org_id && since(f.created_at) >= 1) attention.push(`Created ${since(f.created_at)}d ago, nobody invited`); break;
+    case "invited": if (pendingInvites.length && since(reached.invited) >= 2) attention.push(`Invited ${since(reached.invited)}d ago, invitation not accepted`); break;
+    case "joined": if (since(reached.joined) >= 1) attention.push(`Joined ${since(reached.joined)}d ago, never connected a client`); break;
+    case "connected": if (since(f.first_seen) >= 1) attention.push("Connected but never called a tool (tools may be switched off in the client)"); break;
+    case "first_call": if (!Number(f.onboarding_running) && since(f.first_call_at) >= 2) attention.push("Using tools but has not onboarded a product"); break;
+    case "onboarded": if (since(f.onboarded_at) >= 2) attention.push("Product onboarded, no simulation yet"); break;
+    case "simulated": if (!Number(f.sims_running) && since(f.first_sim_at) >= 2) attention.push("Simulation ran, report never opened"); break;
+  }
   return {
-    id: f.id, slug: f.slug, name: f.name, contact_email: f.contact_email, notes: f.notes, created_at: f.created_at,
-    invited_at: f.invited_at, stage, stage_index: i, stage_label: STAGES[i].label, next_step: STAGES[i].next,
-    reached: { created: f.created_at, invited: f.invited_at, connected: f.first_seen, first_call: f.first_call_at,
-               onboarded: f.onboarded_at, simulated: f.first_sim_at, reported: f.first_report_at },
-    active_keys: Number(f.active_keys), revoked_keys: Number(f.revoked_keys), key_last_used: f.key_last_used,
-    last_seen: f.last_seen, calls_7d: Number(f.calls_7d), errors_7d: Number(f.errors_7d),
-    onboarding_running: Number(f.onboarding_running), sims_running: Number(f.sims_running),
-    month_spend_usd: Number(f.month_spend_usd), budget_usd: budget, attention: attentionOf(f, stage, budget),
+    id: f.id, slug: f.slug, name: f.name, created_at: f.created_at, clerk_org_id: f.clerk_org_id, stripe_customer_id: f.stripe_customer_id,
+    stage: stage.id, stage_index: i, stage_label: stage.label, next_step: stage.next, reached,
+    members: activeMembers, pending_invites: pendingInvites.length, contact: members[0]?.email ?? invites[0]?.email ?? null,
+    active_keys: Number(f.active_keys), key_last_used: f.key_last_used, last_seen: f.last_seen,
+    calls_7d: Number(f.calls_7d), errors_7d: Number(f.errors_7d), onboarding_running: Number(f.onboarding_running), sims_running: Number(f.sims_running),
+    subscription: sub, month_spend_usd: Number(f.month_spend_usd), budget_usd: budget, attention,
   };
 }
 export type AdminOrg = ReturnType<typeof shapeOrg>;
 
-export async function listOrgs(): Promise<AdminOrg[]> {
-  const rows = await (await getDb()).query<OrgFacts>(`${ORG_FACTS} ORDER BY o.created_at DESC`);
-  const budget = config.orgMonthlyBudgetUsd();
-  return rows.map((r) => shapeOrg(r, budget));
+async function shapeAll(rows: OrgFacts[], fresh = false) {
+  const subs = await subscriptions();
+  const defaultBudget = integrations().default_budget_usd;
+  const people = await pool(rows, 5, (r) => peopleOf(r.clerk_org_id, fresh));
+  return { orgs: rows.map((r, i) => shapeOrg(r, people[i], r.stripe_customer_id ? subs.map.get(r.stripe_customer_id) ?? null : null, defaultBudget)), stripe_error: subs.error };
 }
 
-async function orgBySlug(slug: string) {
+export async function listOrgs(fresh = true) {
+  const rows = await (await getDb()).query<OrgFacts>(`${ORG_FACTS} ORDER BY o.created_at DESC`);
+  return { stages: STAGES, ...(await shapeAll(rows, fresh)) };
+}
+
+async function factsBySlug(slug: string) {
   const [f] = await (await getDb()).query<OrgFacts>(`${ORG_FACTS} WHERE o.slug = $1`, [slug]);
   if (!f) throw new AdminError(`No organization ${slug}`, 404);
-  return shapeOrg(f, config.orgMonthlyBudgetUsd());
+  return f;
+}
+async function orgBySlug(slug: string, fresh = false) {
+  return (await shapeAll([await factsBySlug(slug)], fresh)).orgs[0];
 }
 
 export async function overview() {
   const db = await getDb();
-  const orgs = await listOrgs();
+  const { orgs, stripe_error } = await listOrgs();
   const [req] = await db.query<{ pending: number; approved: number; declined: number; oldest_pending: Date | null }>(
     `SELECT count(*) FILTER (WHERE status = 'pending') AS pending, count(*) FILTER (WHERE status = 'approved') AS approved,
             count(*) FILTER (WHERE status = 'declined') AS declined, min(created_at) FILTER (WHERE status = 'pending') AS oldest_pending
        FROM access_requests`);
+  const subs = orgs.map((o) => o.subscription).filter(Boolean) as billing.SubscriptionSummary[];
   return {
-    public_url: publicUrl(),
+    public_url: publicUrl(), integrations: integrations(), stripe_error,
     requests: { pending: Number(req.pending), approved: Number(req.approved), declined: Number(req.declined), oldest_pending: req.oldest_pending },
-    // Funnel: how many accounts reached each step (cumulative), so drop-off between steps is visible.
+    // Cumulative: how many accounts reached each step, so the drop-off between steps is visible.
     funnel: STAGES.map((s, i) => ({ id: s.id, label: s.label, reached: orgs.filter((o) => o.stage_index >= i).length })),
     attention: orgs.filter((o) => o.attention.length).map((o) => ({ slug: o.slug, name: o.name, stage_label: o.stage_label, attention: o.attention })),
     active_7d: orgs.filter((o) => o.calls_7d > 0).length,
+    paying: subs.filter((s) => s.status === "active").length, trialing: subs.filter((s) => s.status === "trialing").length,
     orgs: orgs.length,
   };
 }
 
 export async function orgDetail(slug: string) {
-  const org = await orgBySlug(slug);
+  const org = await orgBySlug(slug, true);
   const db = await getDb();
-  const [keys, tools, clients, errors, recent, products, research, sims, requests, log] = await Promise.all([
+  const people = await peopleOf(org.clerk_org_id);
+  const [keys, tools, clients, errors, products, research, sims, requests, invoices] = await Promise.all([
     db.query(`SELECT id, label, key_prefix, created_at, last_used_at, revoked_at FROM api_keys WHERE org_id = $1
                ORDER BY revoked_at IS NOT NULL, created_at DESC`, [org.id]),
     db.query(`SELECT name, count(*) AS calls, count(*) FILTER (WHERE NOT ok) AS errors, round(avg(ms)) AS avg_ms, max(at) AS last
@@ -150,7 +267,6 @@ export async function orgDetail(slug: string) {
     db.query(`SELECT client, count(*) AS n, max(at) AS last FROM mcp_events WHERE org_id = $1 AND client IS NOT NULL
                GROUP BY client ORDER BY max(at) DESC LIMIT 8`, [org.id]),
     db.query(`SELECT at, method, name, error FROM mcp_events WHERE org_id = $1 AND NOT ok ORDER BY at DESC LIMIT 10`, [org.id]),
-    db.query(`SELECT at, method, name, client, ok, ms FROM mcp_events WHERE org_id = $1 ORDER BY at DESC LIMIT 25`, [org.id]),
     db.query(`SELECT slug, name, website_url, created_at FROM products WHERE org_id = $1 ORDER BY created_at`, [org.id]),
     db.query(`SELECT r.id, p.name AS product, r.status, r.stage, r.error, r.created_at, r.finished_at
                 FROM product_research r JOIN products p ON p.id = r.product_id WHERE r.org_id = $1 ORDER BY r.created_at DESC LIMIT 10`, [org.id]),
@@ -159,9 +275,21 @@ export async function orgDetail(slug: string) {
                      (SELECT count(*) FROM agent_sessions a WHERE a.simulation_id = s.id AND a.status = 'completed') AS completed
                 FROM simulations s WHERE s.org_id = $1 ORDER BY s.created_at DESC LIMIT 10`, [org.id]),
     db.query(`SELECT id, email, company, created_at, status FROM access_requests WHERE org_id = $1 ORDER BY created_at`, [org.id]),
-    db.query(`SELECT at, actor, action, detail FROM admin_audit WHERE org_id = $1 ORDER BY at DESC LIMIT 30`, [org.id]),
+    org.stripe_customer_id && billing.stripeEnabled() ? billing.recentInvoices(org.stripe_customer_id).catch(() => []) : Promise.resolve([]),
   ]);
-  return { org, keys, tools, clients, errors, recent, products, research, simulations: sims, requests, audit: log };
+  const testMode = integrations().stripe_test_mode;
+  return {
+    org, integrations: integrations(), connect: connectInfo(),
+    members: people?.members ?? [],
+    invitations: people?.invitations ?? [],
+    clerk_error: people?.error ?? null,
+    // Enterprise SSO (SAML/OIDC) is set up per organization in the Clerk dashboard; there is no hosted admin portal link.
+    clerk_dashboard: org.clerk_org_id ? "https://dashboard.clerk.com/" : null,
+    plans: billing.stripeEnabled() ? await billing.listPlans().catch(() => []) : [],
+    invoices,
+    stripe_dashboard: org.stripe_customer_id ? `https://dashboard.stripe.com/${testMode ? "test/" : ""}customers/${org.stripe_customer_id}` : null,
+    keys, tools, clients, errors, products, research, simulations: sims, requests,
+  };
 }
 
 // ---------- access requests ----------
@@ -169,8 +297,7 @@ export async function orgDetail(slug: string) {
 export async function listRequests(status?: string) {
   if (status && !["pending", "approved", "declined"].includes(status)) throw new AdminError("status must be pending, approved or declined");
   return (await getDb()).query(
-    `SELECT q.id, q.email, q.company, q.product_url, q.message, q.created_at, q.status, q.decided_at, q.admin_note,
-            o.slug AS org_slug, o.name AS org_name
+    `SELECT q.id, q.email, q.company, q.product_url, q.message, q.created_at, q.status, q.decided_at, o.slug AS org_slug, o.name AS org_name
        FROM access_requests q LEFT JOIN organizations o ON o.id = q.org_id
       WHERE $1::text IS NULL OR q.status = $1
       ORDER BY q.status = 'pending' DESC, q.created_at DESC LIMIT 500`, [status ?? null]);
@@ -180,180 +307,257 @@ const intId = (v: number) => {
   if (!Number.isSafeInteger(v) || v <= 0) throw new AdminError("Invalid id");
   return v;
 };
-
 async function requestById(id: number) {
   intId(id);
-  const [r] = await (await getDb()).query<{ id: number; email: string; company: string; product_url: string | null; status: string }>(
-    "SELECT id, email, company, product_url, status FROM access_requests WHERE id = $1", [id]);
+  const [r] = await (await getDb()).query<{ id: number; email: string; company: string; status: string }>(
+    "SELECT id, email, company, status FROM access_requests WHERE id = $1", [id]);
   if (!r) throw new AdminError(`No access request ${id}`, 404);
   return r;
 }
-
 const cleanEmail = (v: unknown) => {
-  if (v == null || v === "") return null;
-  const s = String(v).trim().slice(0, 200);
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s)) throw new AdminError("contact_email is not a valid email");
+  const s = String(v ?? "").trim().slice(0, 200);
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s)) throw new AdminError("Enter a valid email");
   return s;
 };
 
-/** A ready-to-send invite: the connector URL, per-client setup, and a message to paste into an email. */
-export function invite(org: { name: string }, key: string, email?: string | null) {
-  const base = publicUrl();
-  const url = `${base}/mcp/${key}`;
-  const clients = [
-    { client: "Claude (web or desktop)", steps: "Settings → Connectors → Add custom connector, paste the link. On Team/Enterprise an owner adds it under Organization settings → Connectors." },
-    { client: "ChatGPT", steps: "Add a custom MCP server (developer mode), paste the link, choose No authentication. Business/Enterprise/Edu admins may need to allow custom MCP." },
-    { client: "Claude Code", steps: "Add to .mcp.json:", snippet: JSON.stringify({ mcpServers: { octillion: { type: "http", url } } }, null, 2) },
-    { client: "Cursor and other IDEs", steps: "Paste the link into the MCP settings and switch the Octillion tools on." },
-    { client: "Header-capable clients", steps: `POST ${base}/mcp with the header:`, snippet: `Authorization: Bearer ${key}` },
-  ];
-  const subject = `Your Octillion access`;
-  const body = `Hi${email ? "" : " there"},
-
-${org.name} now has access to Octillion. Your personal connector link is:
-
-${url}
-
-It is your login: anyone with it can use your account, so keep it private.
-
-Connect it:
-- Claude: Settings → Connectors → Add custom connector, paste the link.
-- ChatGPT: add a custom MCP server with the link and choose No authentication.
-- Claude Code: {"mcpServers": {"octillion": {"type": "http", "url": "${url}"}}} in .mcp.json
-- Cursor and other IDEs: paste the link into the MCP settings and switch the Octillion tools on.
-
-Then type: "Get me started with Octillion." The beta guide: ${base}/connect
-
-Reply to this email with anything that gets in your way.`;
-  return { connector_url: url, clients, email: { to: email ?? null, subject, body,
-    mailto: email ? `mailto:${encodeURIComponent(email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}` : null } };
+/**
+ * A new account: the Clerk organization (public_metadata.octillion_slug), the Octillion row joined to it, and a Stripe
+ * customer set on both. Without Clerk, a local organization with a legacy API key.
+ */
+async function newAccount(actor: string, nameIn: string, slugIn: string | undefined, email: string | null) {
+  const name = nameIn.trim().slice(0, 200);
+  if (!name) throw new AdminError("name is required");
+  const slug = slugify(slugIn || name);
+  const db = await getDb();
+  if ((await db.query("SELECT 1 FROM organizations WHERE slug = $1", [slug])).length)
+    throw new AdminError(`The slug ${slug} is taken: pick another, or add this person to that account`, 409);
+  let key: string | undefined, clerkOrgId: string | null = null;
+  if (clerk.clerkEnabled()) {
+    clerkOrgId = (await clerk.organizations.create(name, slug, { octillion_slug: slug })).id;
+    await db.query("INSERT INTO organizations (slug, name, clerk_org_id) VALUES ($1, $2, $3)", [slug, name, clerkOrgId]);
+  } else {
+    key = (await createOrg(name, slug)).key;
+    if (email) await db.query("UPDATE api_keys SET label = $2 WHERE org_id = (SELECT id FROM organizations WHERE slug = $1)", [slug, email]);
+  }
+  if (billing.stripeEnabled()) await ensureCustomer(actor, slug, email).catch((err) => console.error(`stripe customer for ${slug}:`, (err as Error).message));
+  log(actor, "org.create", slug, { clerk: Boolean(clerkOrgId) });
+  return { slug, name, key };
 }
 
-const prefixOf = (key: string) => key.slice(0, 10);
+/** Invite a person: a Clerk invitation (Clerk emails it), or without Clerk a legacy key labelled with their email. */
+async function invitePerson(actor: string, slug: string, email: string, role?: "admin" | "member") {
+  const f = await factsBySlug(slug);
+  if (clerk.clerkEnabled()) {
+    const clerkOrgId = f.clerk_org_id ?? (await linkClerk(actor, slug)).clerk_org_id!;
+    const inv = toInvite(await clerk.invitations.send(clerkOrgId, email, role ?? "member"));
+    forget(clerkOrgId);
+    log(actor, "invite.send", slug, { email, invitation: inv.id });
+    return { invitation: { id: inv.id, email: inv.email, state: inv.state, role: inv.role, expires_at: inv.expires_at }, key: undefined as string | undefined };
+  }
+  const key = await createApiKey(f.id, email);
+  log(actor, "key.create", slug, { label: email, key_prefix: key.slice(0, 10) });
+  return { invitation: null, key };
+}
 
-/**
- * Approve a request: a new organization (name and slug default to the company), or, with `org_slug`, another
- * user of an existing one, who gets their own key labelled with their email so it can be revoked on its own.
- */
-export async function approveRequest(actor: string, id: number, opts: { name?: string; slug?: string; org_slug?: string; note?: string } = {}) {
+const result = async (slug: string, email: string | null, extra: { key?: string; invitation?: unknown; created?: boolean }) => {
+  const o = await factsBySlug(slug);
+  const c = connectInfo(extra.key);
+  return { org: { slug: o.slug, name: o.name }, created: extra.created ?? false, invitation: extra.invitation ?? null, key: extra.key ?? null,
+           ...c, email: { ...c.email, to: email, mailto: email ? `mailto:${encodeURIComponent(email)}?subject=${encodeURIComponent(c.email.subject)}&body=${encodeURIComponent(c.email.body)}` : null } };
+};
+
+/** Approve a request: a new account (name and slug default to the company), or, with `org_slug`, another person in one. */
+export async function approveRequest(actor: string, id: number, opts: { name?: string; slug?: string; org_slug?: string } = {}) {
   const r = await requestById(id);
   if (r.status === "approved") throw new AdminError("This request is already approved", 409);
-  const db = await getDb();
-  let org: { id: number; slug: string; name: string }, key: string, created = false;
-  if (opts.org_slug) {
-    const [o] = await db.query<{ id: number; slug: string; name: string }>("SELECT id, slug, name FROM organizations WHERE slug = $1", [opts.org_slug]);
-    if (!o) throw new AdminError(`No organization ${opts.org_slug}`, 404);
-    org = o;
-    key = await createApiKey(o.id, r.email);
-  } else {
-    const name = (opts.name ?? r.company).trim().slice(0, 200);
-    if (!name) throw new AdminError("name is required");
-    const slug = slugify(opts.slug || name);
-    if ((await db.query("SELECT 1 FROM organizations WHERE slug = $1", [slug])).length)
-      throw new AdminError(`The slug ${slug} is taken: pick another, or add this person to that organization`, 409);
-    const made = await createOrg(name, slug);
-    org = { id: made.org.orgId, slug: made.org.slug, name: made.org.name };
-    key = made.key;
-    created = true;
-    await db.query("UPDATE organizations SET contact_email = $2 WHERE id = $1", [org.id, r.email]);
-    await db.query("UPDATE api_keys SET label = $2 WHERE org_id = $1", [org.id, r.email]);
+  let slug: string, created = false, key: string | undefined, invitation: unknown = null;
+  if (opts.org_slug) slug = (await factsBySlug(opts.org_slug)).slug;
+  else {
+    const made = await newAccount(actor, opts.name ?? r.company, opts.slug, r.email);
+    slug = made.slug; key = made.key; created = true;
   }
-  await db.query("UPDATE access_requests SET status = 'approved', org_id = $2, decided_at = now(), admin_note = coalesce($3, admin_note) WHERE id = $1",
-    [id, org.id, opts.note ?? null]);
-  await audit(actor, "request.approve", org.id, { request_id: id, email: r.email, new_org: created, key_prefix: prefixOf(key) });
-  return { org: { slug: org.slug, name: org.name }, created, key, ...invite(org, key, r.email) };
+  // Whoever asked for a new account administers it (invites colleagues, manages billing in /app).
+  if (!key) ({ key, invitation } = await invitePerson(actor, slug, r.email, created ? "admin" : undefined));
+  await (await getDb()).query("UPDATE access_requests SET status = 'approved', org_id = (SELECT id FROM organizations WHERE slug = $2), decided_at = now() WHERE id = $1", [id, slug]);
+  log(actor, "request.approve", slug, { request_id: id, email: r.email, new_org: created });
+  return result(slug, r.email, { key, invitation, created });
 }
 
-export async function declineRequest(actor: string, id: number, note?: string) {
+export async function declineRequest(actor: string, id: number) {
   const r = await requestById(id);
-  if (r.status === "approved") throw new AdminError("Approved requests cannot be declined: revoke the key instead", 409);
-  await (await getDb()).query("UPDATE access_requests SET status = 'declined', decided_at = now(), admin_note = $2 WHERE id = $1", [id, note ?? null]);
-  await audit(actor, "request.decline", null, { request_id: id, email: r.email, note: note ?? null });
+  if (r.status === "approved") throw new AdminError("Approved requests cannot be declined: remove the person from the account instead", 409);
+  await (await getDb()).query("UPDATE access_requests SET status = 'declined', decided_at = now() WHERE id = $1", [id]);
+  log(actor, "request.decline", null, { request_id: id, email: r.email });
 }
 
 export async function reopenRequest(actor: string, id: number) {
   const r = await requestById(id);
   if (r.status !== "declined") throw new AdminError("Only declined requests can be reopened", 409);
   await (await getDb()).query("UPDATE access_requests SET status = 'pending', decided_at = NULL WHERE id = $1", [id]);
-  await audit(actor, "request.reopen", null, { request_id: id, email: r.email });
+  log(actor, "request.reopen", null, { request_id: id, email: r.email });
 }
 
-// ---------- organizations and keys ----------
+// ---------- accounts and people ----------
 
-export async function createOrgManually(actor: string, input: { name?: string; slug?: string; contact_email?: string; notes?: string }) {
-  const name = String(input.name ?? "").trim().slice(0, 200);
-  if (!name) throw new AdminError("name is required");
-  const email = cleanEmail(input.contact_email);
-  const slug = slugify(input.slug || name);
-  const db = await getDb();
-  if ((await db.query("SELECT 1 FROM organizations WHERE slug = $1", [slug])).length) throw new AdminError(`The slug ${slug} is taken`, 409);
-  const { org, key } = await createOrg(name, slug);
-  await db.query("UPDATE organizations SET contact_email = $2, notes = $3 WHERE id = $1", [org.orgId, email, input.notes?.slice(0, 4000) || null]);
-  if (email) await db.query("UPDATE api_keys SET label = $2 WHERE org_id = $1", [org.orgId, email]);
-  await audit(actor, "org.create", org.orgId, { key_prefix: prefixOf(key) });
-  return { org: { slug: org.slug, name: org.name }, created: true, key, ...invite(org, key, email) };
+export async function createAccount(actor: string, input: { name?: string; slug?: string; email?: string }) {
+  const email = input.email ? cleanEmail(input.email) : null;
+  const made = await newAccount(actor, String(input.name ?? ""), input.slug, email);
+  let key = made.key, invitation: unknown = null;
+  if (email && !key) ({ key, invitation } = await invitePerson(actor, made.slug, email, "admin"));
+  return result(made.slug, email, { key, invitation, created: true });
 }
 
-export async function updateOrg(actor: string, slug: string, input: { name?: string; contact_email?: string | null; notes?: string | null }) {
-  const org = await orgBySlug(slug);
-  const sets: string[] = [], vals: unknown[] = [org.id];
-  const set = (col: string, v: unknown) => { vals.push(v); sets.push(`${col} = $${vals.length}`); };
-  if (input.name !== undefined) {
-    const n = String(input.name).trim().slice(0, 200);
-    if (!n) throw new AdminError("name cannot be empty");
-    set("name", n);
-  }
-  if (input.contact_email !== undefined) set("contact_email", cleanEmail(input.contact_email));
-  if (input.notes !== undefined) set("notes", input.notes ? String(input.notes).slice(0, 4000) : null);
-  if (!sets.length) throw new AdminError("Nothing to update");
-  await (await getDb()).query(`UPDATE organizations SET ${sets.join(", ")} WHERE id = $1`, vals);
-  await audit(actor, "org.update", org.id, { fields: Object.keys(input) });
+export async function invite(actor: string, slug: string, emailIn: unknown, role?: unknown) {
+  const email = cleanEmail(emailIn);
+  if (role !== undefined && role !== "admin" && role !== "member") throw new AdminError("role must be admin or member");
+  const { key, invitation } = await invitePerson(actor, slug, email, role as "admin" | "member" | undefined);
+  return result(slug, email, { key, invitation });
+}
+
+/** Resend = revoke the old invitation (if still pending) and send a fresh one, which restarts its 7-day clock. */
+export async function resendInvitation(actor: string, slug: string, invitationId: string) {
+  const f = await factsBySlug(slug);
+  const inv = (await peopleOf(f.clerk_org_id, true))?.invitations.find((x) => x.id === invitationId);
+  if (!inv) throw new AdminError("No such invitation in this account", 404);
+  if (inv.state === "accepted") throw new AdminError("Already accepted", 409);
+  if (inv.state === "pending") await clerk.invitations.revoke(f.clerk_org_id!, inv.id);
+  return invite(actor, slug, inv.email, inv.role);
+}
+
+export async function revokeInvitation(actor: string, slug: string, invitationId: string) {
+  const f = await factsBySlug(slug);
+  const inv = (await peopleOf(f.clerk_org_id, true))?.invitations.find((x) => x.id === invitationId);
+  if (!inv) throw new AdminError("No such invitation in this account", 404);
+  if (inv.state !== "pending") throw new AdminError(`The invitation is ${inv.state}`, 409);
+  await clerk.invitations.revoke(f.clerk_org_id!, inv.id);
+  forget(f.clerk_org_id);
+  log(actor, "invite.revoke", slug, { email: inv.email });
+}
+
+/**
+ * Suspend a person's access (or restore it). Clerk memberships have no deactivated state: suspension is the
+ * membership's public_metadata.suspended, enforced by Octillion on /mcp and /api/app within a minute (caches).
+ * `memberId` is the Clerk user id.
+ */
+export async function setMemberActive(actor: string, slug: string, memberId: string, active: boolean) {
+  const f = await factsBySlug(slug);
+  const m = (await peopleOf(f.clerk_org_id, true))?.members.find((x) => x.id === memberId);
+  if (!m) throw new AdminError("No such member in this account", 404);
+  await clerk.memberships.setSuspended(f.clerk_org_id!, m.user_id, !active);
+  forget(f.clerk_org_id);
+  log(actor, active ? "member.reactivate" : "member.deactivate", slug, { user: m.user_id, email: m.email });
+}
+
+/** Change a member's role in the Clerk organization (admin or member). */
+export async function setMemberRole(actor: string, slug: string, memberId: string, roleIn: unknown) {
+  if (roleIn !== "admin" && roleIn !== "member") throw new AdminError("role must be admin or member");
+  const f = await factsBySlug(slug);
+  const m = (await peopleOf(f.clerk_org_id, true))?.members.find((x) => x.id === memberId);
+  if (!m) throw new AdminError("No such member in this account", 404);
+  await clerk.memberships.setRole(f.clerk_org_id!, m.user_id, roleIn);
+  forget(f.clerk_org_id);
+  log(actor, "member.role", slug, { user: m.user_id, role: roleIn });
+}
+
+/** Give a legacy account (API keys only) a Clerk organization so people can be invited and sign in. */
+export async function linkClerk(actor: string, slug: string) {
+  const f = await factsBySlug(slug);
+  if (f.clerk_org_id) return { clerk_org_id: f.clerk_org_id };
+  if (!clerk.clerkEnabled()) throw new AdminError("Clerk is not configured (CLERK_SECRET_KEY)", 503);
+  const c = await clerk.organizations.create(f.name, f.slug, { octillion_slug: f.slug, ...(f.stripe_customer_id ? { stripe_customer_id: f.stripe_customer_id } : {}) });
+  await (await getDb()).query("UPDATE organizations SET clerk_org_id = $2 WHERE id = $1", [f.id, c.id]);
+  log(actor, "org.link_clerk", slug, { clerk_org_id: c.id });
+  return { clerk_org_id: c.id };
+}
+
+export async function renameOrg(actor: string, slug: string, nameIn: unknown) {
+  const f = await factsBySlug(slug);
+  const name = String(nameIn ?? "").trim().slice(0, 200);
+  if (!name) throw new AdminError("name cannot be empty");
+  await (await getDb()).query("UPDATE organizations SET name = $2 WHERE id = $1", [f.id, name]);
+  if (f.clerk_org_id) await clerk.organizations.rename(f.clerk_org_id, name);
+  log(actor, "org.rename", slug, { name });
   return orgBySlug(slug);
 }
 
-export async function markInvited(actor: string, slug: string, invited = true) {
-  const org = await orgBySlug(slug);
-  await (await getDb()).query("UPDATE organizations SET invited_at = CASE WHEN $2 THEN now() ELSE NULL END WHERE id = $1", [org.id, invited]);
-  await audit(actor, invited ? "org.invited" : "org.invite_cleared", org.id);
-  return orgBySlug(slug);
+// ---------- billing, in Stripe ----------
+
+/** The Stripe customer for an account, created on first need and recorded on the Clerk organization too. */
+export async function ensureCustomer(actor: string, slug: string, email?: string | null) {
+  const f = await factsBySlug(slug);
+  if (f.stripe_customer_id) return f.stripe_customer_id;
+  if (!billing.stripeEnabled()) throw new AdminError("Stripe is not configured (STRIPE_SECRET_KEY)", 503);
+  const c = await billing.createCustomer({ name: f.name, email, slug: f.slug, clerkOrgId: f.clerk_org_id });
+  await (await getDb()).query("UPDATE organizations SET stripe_customer_id = $2 WHERE id = $1", [f.id, c.id]);
+  if (f.clerk_org_id) await clerk.organizations.setMetadata(f.clerk_org_id, { stripe_customer_id: c.id }).catch((err) => console.error("clerk stripe link:", (err as Error).message));
+  log(actor, "billing.customer", slug, { customer: c.id });
+  return c.id;
 }
+
+/** A Stripe Checkout link for a plan, to send to the account's billing contact. */
+export async function checkoutLink(actor: string, slug: string, priceId: unknown, returnUrl = `${publicUrl()}/connect`) {
+  const plans = await billing.listPlans();
+  const plan = plans.find((p) => p.price_id === priceId);
+  if (!plan) throw new AdminError("Unknown plan: use a price whose lookup_key starts with octillion_");
+  const customer = await ensureCustomer(actor, slug);
+  billing.invalidateSubscriptions();
+  log(actor, "billing.checkout_link", slug, { price: plan.price_id });
+  return { url: await billing.checkoutUrl(customer, plan.price_id, returnUrl) };
+}
+
+/** A Stripe customer-portal link: plan changes, card, invoices, cancellation. */
+export async function portalLink(actor: string, slug: string, returnUrl = `${publicUrl()}/connect`) {
+  const customer = await ensureCustomer(actor, slug);
+  billing.invalidateSubscriptions();
+  log(actor, "billing.portal_link", slug);
+  return { url: await billing.portalUrl(customer, returnUrl) };
+}
+
+// ---------- legacy API keys (beta links, header-only clients) ----------
 
 export async function issueKey(actor: string, slug: string, label?: string) {
-  const org = await orgBySlug(slug);
-  const l = String(label ?? "").trim().slice(0, 200) || org.contact_email || "extra";
-  const key = await createApiKey(org.id, l);
-  await audit(actor, "key.create", org.id, { label: l, key_prefix: prefixOf(key) });
-  return { org: { slug: org.slug, name: org.name }, created: false, key, ...invite(org, key, l.includes("@") ? l : org.contact_email) };
+  const f = await factsBySlug(slug);
+  const l = String(label ?? "").trim().slice(0, 200) || "extra";
+  const key = await createApiKey(f.id, l);
+  log(actor, "key.create", slug, { label: l, key_prefix: key.slice(0, 10) });
+  return result(slug, l.includes("@") ? l : null, { key });
 }
 
 async function keyOf(slug: string, keyId: number) {
   intId(keyId);
-  const org = await orgBySlug(slug);
+  const f = await factsBySlug(slug);
   const [k] = await (await getDb()).query<{ id: number; label: string; key_prefix: string; revoked_at: Date | null }>(
-    "SELECT id, label, key_prefix, revoked_at FROM api_keys WHERE id = $1 AND org_id = $2", [keyId, org.id]);
+    "SELECT id, label, key_prefix, revoked_at FROM api_keys WHERE id = $1 AND org_id = $2", [keyId, f.id]);
   if (!k) throw new AdminError(`No key ${keyId} in ${slug}`, 404);
-  return { org, k };
+  return { f, k };
 }
 
 export async function revokeKey(actor: string, slug: string, keyId: number) {
-  const { org, k } = await keyOf(slug, keyId);
+  const { k } = await keyOf(slug, keyId);
   if (k.revoked_at) throw new AdminError("This key is already revoked", 409);
   await (await getDb()).query("UPDATE api_keys SET revoked_at = now() WHERE id = $1", [k.id]);
-  await audit(actor, "key.revoke", org.id, { label: k.label, key_prefix: k.key_prefix });
+  log(actor, "key.revoke", slug, { label: k.label, key_prefix: k.key_prefix });
 }
 
-/** Revoke a key and issue its replacement under the same label (a leaked link, a person leaving and rejoining). */
+/** Revoke a key and issue its replacement under the same label (a leaked link). */
 export async function rotateKey(actor: string, slug: string, keyId: number) {
-  const { org, k } = await keyOf(slug, keyId);
-  const db = await getDb();
-  if (!k.revoked_at) await db.query("UPDATE api_keys SET revoked_at = now() WHERE id = $1", [k.id]);
-  const key = await createApiKey(org.id, k.label);
-  await audit(actor, "key.rotate", org.id, { label: k.label, old_prefix: k.key_prefix, key_prefix: prefixOf(key) });
-  return { org: { slug: org.slug, name: org.name }, created: false, key, ...invite(org, key, k.label.includes("@") ? k.label : org.contact_email) };
+  const { f, k } = await keyOf(slug, keyId);
+  if (!k.revoked_at) await (await getDb()).query("UPDATE api_keys SET revoked_at = now() WHERE id = $1", [k.id]);
+  const key = await createApiKey(f.id, k.label);
+  log(actor, "key.rotate", slug, { label: k.label, old_prefix: k.key_prefix, key_prefix: key.slice(0, 10) });
+  return result(slug, k.label.includes("@") ? k.label : null, { key });
 }
 
-export async function auditLog(limit = 200) {
-  return (await getDb()).query(
-    `SELECT a.at, a.actor, a.action, a.detail, o.slug AS org_slug, o.name AS org_name
-       FROM admin_audit a LEFT JOIN organizations o ON o.id = a.org_id ORDER BY a.at DESC LIMIT $1`, [Math.min(1000, Math.max(1, limit))]);
+// ---------- for the customer page (src/app.ts) ----------
+
+/** An account's people from Clerk (cached for a minute unless `fresh`), shaped for display. */
+export async function team(slug: string, fresh = false) {
+  const f = await factsBySlug(slug);
+  const people = await peopleOf(f.clerk_org_id, fresh);
+  return {
+    clerk: Boolean(f.clerk_org_id && clerk.clerkEnabled()), error: people?.error ?? null,
+    members: people?.members ?? [],
+    invitations: (people?.invitations ?? []).filter((x) => x.state === "pending" || x.state === "expired"),
+  };
 }
+export { factsBySlug as accountFacts, STAGES as ACCOUNT_STAGES };

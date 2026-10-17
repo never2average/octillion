@@ -16,6 +16,8 @@ export interface Db extends Queryable {
   /** Run fn inside BEGIN/COMMIT; rolls back if it throws. */
   transaction<T>(fn: (tx: Queryable) => Promise<T>): Promise<T>;
   close(): Promise<void>;
+  /** Apply schema SQL with no other process doing the same at once (concurrent ALTERs deadlock). */
+  migrate(sql: string): Promise<void>;
   kind: "postgres" | "pglite";
 }
 
@@ -52,6 +54,25 @@ async function createDb(): Promise<Db> {
         }
       },
       close: () => pool.end(),
+      // Replicas starting together (rolling deploys, serverless cold starts) would run the same ALTERs at once and
+      // deadlock: they take turns on a transaction-level advisory lock. Transaction-level, not session-level, so it is
+      // released at COMMIT even behind a transaction-pooling proxy (PgBouncer, Neon's pooler), where a session lock
+      // can be taken on one server connection and "released" on another. The schema is idempotent and has no
+      // statements that cannot run in a transaction; the second replica's pass is a no-op.
+      async migrate(sql) {
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+          await client.query("SELECT pg_advisory_xact_lock(7270010)");
+          await client.query(sql);
+          await client.query("COMMIT");
+        } catch (err) {
+          await client.query("ROLLBACK").catch(() => {});
+          throw err;
+        } finally {
+          client.release();
+        }
+      },
     };
   }
 
@@ -71,6 +92,7 @@ async function createDb(): Promise<Db> {
     transaction: (fn) =>
       lite.transaction((tx) => fn({ query: async (sql, params) => (await tx.query(sql, params)).rows as never[] })),
     close: () => lite.close(),
+    migrate: (sql) => lite.exec(sql).then(() => undefined), // one process per PGlite directory
   };
 }
 
@@ -78,11 +100,19 @@ let dbPromise: Promise<Db> | undefined;
 
 /** Shared connection. Applies the (idempotent) schema on first use. */
 export function getDb(): Promise<Db> {
-  dbPromise ??= (async () => {
+  if (dbPromise) return dbPromise;
+  dbPromise = (async () => {
     const db = await createDb();
-    await db.exec(await readFile(path.join(SQL_DIR, "schema.sql"), "utf8"));
+    try {
+      await db.migrate(await readFile(path.join(SQL_DIR, "schema.sql"), "utf8"));
+    } catch (err) {
+      await db.close().catch(() => {});
+      throw err;
+    }
     return db;
   })();
+  // A failed start (the database restarting, a network blip) must not stick: the next caller tries again.
+  dbPromise.catch(() => { dbPromise = undefined; });
   return dbPromise;
 }
 
