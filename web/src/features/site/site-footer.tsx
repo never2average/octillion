@@ -12,7 +12,7 @@ export function SiteFooter() {
         <nav aria-label='Footer' className='flex flex-wrap gap-x-5 gap-y-2 sm:ml-auto'>
           <Link href='/#apo' className='hover:text-foreground'>What is APO</Link>
           <Link href='/#faq' className='hover:text-foreground'>FAQ</Link>
-          <Link href='/#access' className='hover:text-foreground'>Contact us</Link>
+          <Link href='/early-access' className='hover:text-foreground'>Early access</Link>
         </nav>
       </div>
     </footer>

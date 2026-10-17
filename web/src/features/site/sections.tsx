@@ -5,6 +5,7 @@ import {
 import { buttonVariants } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { AccountButton } from './account-cta';
+import { AgentLogo } from './agent-logos';
 
 /** Section wrapper: anchor target, eyebrow, title and an optional one-line lead. */
 export function Section({ id, eyebrow, title, lead, children, className }: {
@@ -29,7 +30,7 @@ const FLOW = 'stroke-primary [stroke-dasharray:4_12] motion-safe:animate-[apo-da
 
 // ---------- hero ----------
 
-const AGENTS = ['Claude Code', 'Codex', 'Cursor', 'Gemini CLI', 'GitHub Copilot', 'OpenCode', 'Cline'];
+const AGENTS = [['claude-code', 'Claude Code'], ['codex', 'Codex'], ['cursor', 'Cursor'], ['gemini-cli', 'Gemini CLI'], ['copilot', 'GitHub Copilot'], ['opencode', 'OpenCode'], ['cline', 'Cline']] as const;
 
 export function Hero() {
   return (
@@ -43,21 +44,20 @@ export function Hero() {
             <Link href='/#apo' className='border-primary/30 bg-primary/10 text-primary hover:bg-primary/15 inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium transition-colors'>
               <IconSparkles className='size-3.5' /> Agentic Preference Optimization <IconArrowRight className='size-3.5' />
             </Link>
-            <h1 className='mt-6 text-4xl font-semibold tracking-tight text-balance sm:text-5xl lg:text-[3.5rem] lg:leading-[1.05]'>
-              SEO got you found by people.
-              <span className='text-primary block'>APO gets you picked by agents.</span>
+            <h1 className='mt-6 text-3xl font-semibold tracking-tight text-balance sm:text-4xl lg:text-[2.75rem] lg:leading-[1.1]'>
+              Get picked by <span className='text-primary'>coding agents.</span>
             </h1>
-            <p className='text-muted-foreground mt-5 max-w-md text-lg text-pretty'>See how often coding agents choose your dev tool, and why.</p>
+            <p className='text-muted-foreground mt-4 max-w-md text-base text-pretty sm:text-lg'>Octillion measures how often AI coding agents choose your dev tool, and shows why.</p>
             <div className='mt-8 flex flex-wrap gap-3'>
               <AccountButton size='lg' />
-              <Link href='/#access' className={buttonVariants({ size: 'lg', variant: 'outline' })}>Request access</Link>
+              <Link href='/early-access' className={buttonVariants({ size: 'lg', variant: 'outline' })}>Early access</Link>
             </div>
           </div>
           <DecisionGraph />
         </div>
 
         <ul aria-label='Agents measured' className='text-foreground/60 mt-16 flex flex-wrap gap-x-8 gap-y-3 font-mono text-sm'>
-          {AGENTS.map((a) => <li key={a}>{a}</li>)}
+          {AGENTS.map(([id, name]) => <li key={id} className='flex items-center gap-2'><AgentLogo id={id} size={18} aria-hidden='true' />{name}</li>)}
         </ul>
       </div>
     </section>
@@ -65,9 +65,9 @@ export function Hero() {
 }
 
 const PICKS = [
-  { agent: 'claude-code', pick: '✓ yourdb', tone: 'good' },
-  { agent: 'cursor', pick: '✓ yourdb', tone: 'good' },
-  { agent: 'codex', pick: '✗ otherdb', tone: 'bad' },
+  { agent: 'claude-code', pick: '✓ postgres', tone: 'good' },
+  { agent: 'cursor', pick: '✓ postgres', tone: 'good' },
+  { agent: 'codex', pick: '✗ mongodb', tone: 'bad' },
   { agent: 'gemini-cli', pick: '– sqlite', tone: 'meh' }
 ] as const;
 
@@ -82,7 +82,7 @@ function DecisionGraph() {
   const ys = [50, 150, 250, 350];
   return (
     <figure className='min-w-0'>
-      <svg viewBox='0 0 560 400' className='h-auto w-full' role='img' aria-label='One prompt sent to four coding agents: two install YourDB, one installs a competitor, one uses SQLite.'>
+      <svg viewBox='0 0 560 400' className='h-auto w-full' role='img' aria-label='One prompt sent to four coding agents: two pick Postgres, one picks MongoDB, one uses SQLite.'>
         <rect x='1' y='174' width='170' height='52' rx='10' className='fill-card stroke-border' />
         <text x='18' y='206' className='fill-foreground font-mono text-[15px]'>&gt; add a database</text>
         {ys.map((y, i) => {
@@ -92,10 +92,11 @@ function DecisionGraph() {
             <g key={p.agent}>
               <path d={curve} fill='none' className='stroke-border' strokeWidth='1.5' />
               <path d={curve} fill='none' className={FLOW} strokeWidth='1.5' />
-              <rect x='236' y={y - 20} width='132' height='40' rx='8' className='fill-card stroke-border' />
-              <text x='252' y={y + 5} className='fill-muted-foreground font-mono text-[14px]'>{p.agent}</text>
-              <path d={`M368 ${y} L418 ${y}`} className='stroke-border' strokeWidth='1.5' />
-              <path d={`M368 ${y} L418 ${y}`} className={FLOW} strokeWidth='1.5' />
+              <rect x='236' y={y - 20} width='140' height='40' rx='8' className='fill-card stroke-border' />
+              <AgentLogo id={p.agent} x='248' y={y - 9} size={18} className='text-foreground' aria-hidden='true' />
+              <text x='274' y={y + 5} className='fill-muted-foreground font-mono text-[14px]'>{p.agent}</text>
+              <path d={`M376 ${y} L418 ${y}`} className='stroke-border' strokeWidth='1.5' />
+              <path d={`M376 ${y} L418 ${y}`} className={FLOW} strokeWidth='1.5' />
               <rect x='418' y={y - 20} width='140' height='40' rx='20' className={TONE[p.tone].box} />
               <text x='488' y={y + 5} textAnchor='middle' className={cn('font-mono text-[14px] font-medium', TONE[p.tone].text)}>{p.pick}</text>
             </g>
@@ -105,7 +106,7 @@ function DecisionGraph() {
       <figcaption className='mt-4 flex items-center gap-4'>
         <span className='text-primary text-4xl font-semibold tabular-nums'>58%</span>
         <div className='bg-muted h-1.5 flex-1 overflow-hidden rounded-full'><div className='bg-primary h-full w-[58%] rounded-full' /></div>
-        <span className='text-muted-foreground text-xs'>picked YourDB · sample</span>
+        <span className='text-muted-foreground text-xs'>picked Postgres · sample</span>
       </figcaption>
     </figure>
   );
@@ -115,8 +116,8 @@ function DecisionGraph() {
 
 const SESSION = [
   ['prompt', '> add background jobs to this app'],
-  ['agent', 'agent ▸ I\'ll use SomeQueue.'],
-  ['cmd', 'agent ▸ $ npm install somequeue'],
+  ['agent', 'agent ▸ I\'ll use BullMQ with Redis.'],
+  ['cmd', 'agent ▸ $ npm install bullmq ioredis'],
   ['ok', 'agent ▸ ✓ done. 3 files changed.'],
   ['comment', '# was your product considered?']
 ] as const;
@@ -234,8 +235,8 @@ export function Scorecard() {
           <figcaption className='text-muted-foreground font-mono text-xs uppercase'>By agent</figcaption>
           <ul className='mt-5 space-y-3'>
             {BY_AGENT.map(([n, v]) => (
-              <li key={n} className='grid grid-cols-[6rem_1fr_2.5rem] items-center gap-3 text-xs'>
-                <span className='text-muted-foreground font-mono'>{n}</span>
+              <li key={n} className='grid grid-cols-[7rem_1fr_2.5rem] items-center gap-3 text-xs'>
+                <span className='text-muted-foreground flex items-center gap-1.5 font-mono'><AgentLogo id={n} size={13} aria-hidden='true' />{n}</span>
                 <span className='bg-muted h-2 rounded-full'><span className='bg-primary block h-full rounded-full' style={{ width: `${v}%` }} /></span>
                 <span className='text-right tabular-nums'>{v}%</span>
               </li>
@@ -252,9 +253,9 @@ export function Scorecard() {
               <circle cx='60' cy='60' r='48' fill='none' strokeWidth='14' pathLength={100} strokeDasharray='30 100' strokeDashoffset={-58} className='stroke-destructive/70' />
             </svg>
             <ul className='space-y-2 text-xs'>
-              <li className='flex items-center gap-2'><span className='bg-primary size-2 rounded-full' />You <b className='ml-auto pl-3 tabular-nums'>58%</b></li>
-              <li className='flex items-center gap-2'><span className='bg-destructive/70 size-2 rounded-full' />OtherDB <b className='ml-auto pl-3 tabular-nums'>30%</b></li>
-              <li className='flex items-center gap-2'><span className='bg-muted size-2 rounded-full' />Neither <b className='ml-auto pl-3 tabular-nums'>12%</b></li>
+              <li className='flex items-center gap-2'><span className='bg-primary size-2 rounded-full' />Postgres <b className='ml-auto pl-3 tabular-nums'>58%</b></li>
+              <li className='flex items-center gap-2'><span className='bg-destructive/70 size-2 rounded-full' />MongoDB <b className='ml-auto pl-3 tabular-nums'>30%</b></li>
+              <li className='flex items-center gap-2'><span className='bg-muted size-2 rounded-full' />SQLite <b className='ml-auto pl-3 tabular-nums'>12%</b></li>
             </ul>
           </div>
         </figure>
@@ -284,7 +285,7 @@ export function WhereYouWork() {
   return (
     <Section id='claude' eyebrow='Claude & ChatGPT' title='Just ask.' lead='Octillion is an MCP server. Run it from the chat you already use.'>
       <div className='mx-auto max-w-2xl space-y-4'>
-        <div className='bg-muted ml-auto w-fit max-w-[85%] rounded-2xl rounded-br-sm px-4 py-2.5 text-sm'>Where does Codex pick OtherDB over us?</div>
+        <div className='bg-muted ml-auto w-fit max-w-[85%] rounded-2xl rounded-br-sm px-4 py-2.5 text-sm'>Where does Codex pick MongoDB over Postgres?</div>
         <div className='text-muted-foreground flex w-fit items-center gap-2 rounded-full border px-3 py-1.5 font-mono text-xs'>
           <IconBolt className='text-primary size-3.5' /> octillion · get_share_of_voice
         </div>

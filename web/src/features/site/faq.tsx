@@ -6,7 +6,7 @@ const FAQ = [
   ['How is it different from SEO or GEO?', 'SEO is for people reading search results, GEO for chatbots answering questions. APO is for agents writing code, where the outcome is an install, not a link.'],
   ['Do the agents know about my product?', 'No. They get blind, realistic tasks in real repos. Your product is used only to score the transcript afterwards.'],
   ['Does Octillion change the models?', 'No. No paid placement, no prompt injection. You improve docs, examples and SDKs; Octillion measures whether preference moved.'],
-  ['How much does it cost?', 'We’re in early access. Pricing depends on scenarios, models and runs. Request access and talk to us.']
+  ['How much does it cost?', 'We’re in early access. Pricing depends on scenarios, models and runs. Request early access and talk to us.']
 ];
 
 export function Faq() {
