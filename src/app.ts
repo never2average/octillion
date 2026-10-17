@@ -103,6 +103,64 @@ async function setup(s: Session, since?: string) {
   };
 }
 
+/** Readable step titles for the journey recipes (src/journeys.ts RECIPES). */
+const STEP_TITLES: Record<string, string> = {
+  "connect/guide": "Connect your AI client",
+  "first-report/onboard": "Onboard your product", "first-report/run": "Run a simulation", "first-report/report": "Read the visibility report",
+  "evidence/why": "Check the evidence behind a result",
+  "rerun/rerun": "Re-run after changing docs or SDK",
+  "team/invite": "Invite a colleague",
+  "win-back/nudge": "Run a fresh simulation",
+};
+
+/** What each journey gets you, in the customer's words (the recipes' `goal` is written for whoever builds the workflow). */
+const JOURNEY_GOALS: Record<string, string> = {
+  connect: "Octillion working in your AI client on day one",
+  "first-report": "Your first visibility report within a week",
+  evidence: "Understand why agents picked a competitor",
+  rerun: "Prove a docs or SDK change moved agents' choices",
+  team: "Get the people who own docs and DevRel on board",
+  "win-back": "Check you are still being picked as models change",
+};
+
+/**
+ * The journeys a person can follow on Setup: "Get set up" (the checklist) and the recommended journeys, each step
+ * marked done from what the person and their account actually did. The same recipes drive PostHog Workflows'
+ * nudges; here they are a guide the person can open any time.
+ */
+async function journeyGuide(s: Session) {
+  const db = await getDb();
+  const who = s.user ? "user_id = $2" : "user_id IS NULL";
+  const args = s.user ? [s.org, s.user] : [s.org];
+  const [me] = await db.query<{ connected: Date | null }>(`SELECT min(at) FILTER (WHERE method = 'initialize') AS connected FROM mcp_events WHERE org_id = $1 AND ${who}`, args);
+  const tools = new Map((await db.query<{ name: string; first: Date; last: Date }>(
+    `SELECT name, min(at) AS first, max(at) AS last FROM mcp_events WHERE org_id = $1 AND method = 'tools/call' AND ok GROUP BY name`, [s.org])).map((r) => [r.name, r]));
+  const [sims] = await db.query<{ n: number; last: Date | null }>("SELECT count(*) AS n, max(created_at) AS last FROM simulations WHERE org_id = $1", [s.org]);
+  const [recent] = await db.query<{ last: Date | null }>("SELECT max(at) AS last FROM mcp_events WHERE org_id = $1 AND method = 'tools/call'", [s.org]);
+  const f = await admin.accountFacts(s.slug);
+  const t = await admin.team(s.slug).catch(() => null);
+  const firstOf = (...names: string[]) => names.map((n) => tools.get(n)?.first).filter(Boolean).sort()[0] ?? null;
+  const reran = f.first_report_at && sims.last && new Date(sims.last) > new Date(f.first_report_at) ? sims.last : null;
+  const active14 = recent.last && Date.now() - new Date(recent.last).getTime() < 14 * 86_400_000 ? recent.last : null;
+  const doneAt: Record<string, Date | string | null> = {
+    "connect/guide": me.connected,
+    "first-report/onboard": f.onboarded_at, "first-report/run": f.first_sim_at, "first-report/report": f.first_report_at,
+    "evidence/why": firstOf("get_agent_session", "get_session_transcript", "search_transcripts"),
+    "rerun/rerun": reran,
+    "team/invite": (t && (t.members.length > 1 || t.invitations.length > 0)) ? (t.invitations[0]?.created_at ?? t.members[1]?.created_at ?? null) : null,
+    "win-back/nudge": active14,
+  };
+  return journeys.RECIPES.map((r) => {
+    const steps = r.steps.map((x) => {
+      const key = `${r.id}/${x.step}`;
+      const at = doneAt[key] ?? null;
+      return { id: x.step, title: STEP_TITLES[key] ?? x.step, message: x.message, prompt: "prompt" in x ? x.prompt : null,
+               link: "link" in x ? x.link : null, done: Boolean(at), at };
+    });
+    return { id: r.id, name: r.name, goal: JOURNEY_GOALS[r.id] ?? r.goal, steps, done: steps.filter((x) => x.done).length, total: steps.length };
+  });
+}
+
 async function usage(s: Session, daysIn: unknown) {
   const days = Math.min(90, Math.max(1, Number(daysIn) || 30));
   const db = await getDb();
@@ -189,6 +247,7 @@ export function appRouter() {
     capture({ distinctId: S(res).user ?? `org:${S(res).slug}`, orgSlug: S(res).slug }, "app_connection_test_started");
     res.json({ since: new Date().toISOString() });
   });
+  api.get("/journeys", async (_req, res) => void res.json({ journeys: await journeyGuide(S(res)) }));
   api.get("/usage", async (req, res) => void res.json(await usage(S(res), req.query.days)));
   api.get("/team", async (_req, res) => void res.json({ ...(await admin.team(S(res).slug, true)), me: S(res).user, can_manage: S(res).role === "admin" }));
   api.post("/team/invitations", async (req, res) => {

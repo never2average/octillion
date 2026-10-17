@@ -1061,6 +1061,13 @@ try {
       const [inp] = await db.query<{ input: any }>("SELECT input FROM product_research WHERE id = $1", [(job as any).research.id]);
       assert.match(inp.input.prompt, /Company context from the account:[\s\S]*BullMQ, Inngest/, "research gets the company's competitors");
       console.log("✓ context: company (admins), person (self), product editing, in the AI client's instructions and in research");
+      // Journeys as a guide on Setup: every recipe, with each step marked from what actually happened.
+      const jg = (await json(appCall(ownerC, "GET", "/journeys"))).journeys;
+      assert.deepEqual(jg.map((j: any) => j.id), ["connect", "first-report", "evidence", "rerun", "team", "win-back"]);
+      assert.equal(jg.find((j: any) => j.id === "connect").steps[0].done, true, "the owner connected earlier in this test");
+      assert.equal(jg.find((j: any) => j.id === "team").steps[0].done, true, "the account has a second member");
+      assert.ok(jg.every((j: any) => j.total === j.steps.length && j.steps.every((x: any) => x.title && x.message)));
+      console.log("✓ journey guide: recipes with per-step progress for /app Setup");
     }
 
     // ---------- platform analytics and health (/admin Analytics) ----------
