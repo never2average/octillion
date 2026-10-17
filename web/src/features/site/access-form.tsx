@@ -2,7 +2,6 @@
 import { useState } from 'react';
 import { IconArrowRight, IconCircleCheck } from '@tabler/icons-react';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
@@ -58,13 +57,11 @@ export function AccessForm() {
 
   if (status === 'done') {
     return (
-      <Card>
-        <CardContent className='flex flex-col items-center gap-3 py-10 text-center' role='status' tabIndex={-1}>
+      <div className='flex flex-col items-start gap-3 py-6' role='status' tabIndex={-1}>
           <IconCircleCheck className='text-primary size-10' />
           <h3 className='text-lg font-semibold'>Thanks — we&apos;ll be in touch shortly</h3>
           <p className='text-muted-foreground'>Your request is in. Expect a reply from the Octillion team soon.</p>
-        </CardContent>
-      </Card>
+      </div>
     );
   }
 
@@ -77,8 +74,6 @@ export function AccessForm() {
   );
 
   return (
-    <Card>
-      <CardContent>
         <form onSubmit={submit} noValidate className='space-y-2'>
           <div className='grid gap-x-4 sm:grid-cols-2'>
             {field('email', 'Work email', { type: 'email', autoComplete: 'email', placeholder: 'you@company.com', maxLength: 254, required: true })}
@@ -87,7 +82,7 @@ export function AccessForm() {
           {field('product_url', 'Product URL (optional)', { type: 'url', inputMode: 'url', autoComplete: 'url', placeholder: 'https://yourproduct.dev', maxLength: 500 })}
           <div className='space-y-1.5'>
             <Label htmlFor='f-message'>What do you want to learn? (optional)</Label>
-            <Textarea id='f-message' name='message' rows={4} maxLength={4000} value={v.message} onChange={set('message')}
+            <Textarea id='f-message' name='message' rows={3} maxLength={4000} value={v.message} onChange={set('message')}
               placeholder='Competitors you track, scenarios you care about, models your users run…' />
           </div>
           {error && <p className='text-destructive text-sm' role='alert'>{error}</p>}
@@ -98,7 +93,5 @@ export function AccessForm() {
             <p className='text-muted-foreground text-xs'>We&apos;ll only use your details to respond to this request.</p>
           </div>
         </form>
-      </CardContent>
-    </Card>
   );
 }

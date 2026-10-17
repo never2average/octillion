@@ -10,11 +10,10 @@ export default function LandingPage() {
       <WhatIsApo />
       <Scorecard />
       <WhereYouWork />
-      <Section id='faq' eyebrow='FAQ' title='Questions, answered.'>
+      <Section id='faq' eyebrow='FAQ' title='Questions.'>
         <div className='max-w-3xl'><Faq /></div>
       </Section>
-      <Section id='access' eyebrow='Early access' title='Start with your APO baseline.'
-        lead='We’re onboarding developer-tool teams now: databases, auth, queues, hosting, observability and more. Tell us about your product and we’ll measure where coding agents prefer you today, where you lose, and why.'>
+      <Section id='access' eyebrow='Early access' title='Get your APO baseline.' lead='Tell us your product. We’ll show where agents pick you, and where they don’t.'>
         <div className='max-w-2xl'><AccessForm /></div>
       </Section>
     </>

@@ -1,53 +1,35 @@
 import Link from 'next/link';
 import {
-  IconArrowRight, IconBolt, IconChartBar, IconChartPie, IconEye, IconFileSearch, IconGitCompare, IconMessages,
-  IconRefresh, IconSparkles, IconTerminal2, IconUsers
+  IconArrowRight, IconBolt, IconCode, IconEyeOff, IconGitCompare, IconMessageChatbot, IconSearch, IconSparkles, IconTerminal2
 } from '@tabler/icons-react';
-import { Badge } from '@/components/ui/badge';
 import { buttonVariants } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
+import { AccountButton } from './account-cta';
 
-/** Section wrapper: anchor target, eyebrow, title and lead. */
+/** Section wrapper: anchor target, eyebrow, title and an optional one-line lead. */
 export function Section({ id, eyebrow, title, lead, children, className }: {
   id?: string; eyebrow?: string; title: React.ReactNode; lead?: React.ReactNode; children?: React.ReactNode; className?: string;
 }) {
   return (
     <section id={id} className={cn('scroll-mt-20 border-t py-16 sm:py-24', className)}>
       <div className='mx-auto max-w-6xl px-4 sm:px-6'>
-        <div className='max-w-3xl'>
-          {eyebrow && <p className='text-primary text-sm font-semibold tracking-wide uppercase'>{eyebrow}</p>}
+        <div className='max-w-2xl'>
+          {eyebrow && <p className='text-primary font-mono text-xs tracking-wider uppercase'>{eyebrow}</p>}
           <h2 className='mt-2 text-3xl font-semibold tracking-tight text-balance sm:text-4xl'>{title}</h2>
-          {lead && <p className='text-muted-foreground mt-4 text-lg text-pretty'>{lead}</p>}
+          {lead && <p className='text-muted-foreground mt-3 text-lg text-pretty'>{lead}</p>}
         </div>
-        {children && <div className='mt-10 sm:mt-12'>{children}</div>}
+        {children && <div className='mt-10 sm:mt-14'>{children}</div>}
       </div>
     </section>
   );
 }
 
+/** Thin animated dashes along a path: shows direction of flow (still when reduced motion is on). */
+const FLOW = 'stroke-primary [stroke-dasharray:4_12] motion-safe:animate-[apo-dash_1.4s_linear_infinite]';
+
 // ---------- hero ----------
 
-const SAMPLE_RUNS = [
-  { model: 'claude-code', verdict: 'Adopted', kind: 'good', body: '$ npm install yourdb' },
-  { model: 'cursor', verdict: 'Recommended', kind: 'good', body: '“YourDB fits: serverless driver, branching.”' },
-  { model: 'codex', verdict: 'Competitor', kind: 'bad', body: '$ npm install otherdb' },
-  { model: 'gemini-cli', verdict: 'Mentioned', kind: 'meh', body: '“…or YourDB.” Used SQLite.' }
-] as const;
-
-const VERDICT_STYLE = {
-  good: 'bg-primary/15 text-primary border-transparent',
-  bad: 'bg-destructive/15 text-destructive border-transparent',
-  meh: 'bg-muted text-muted-foreground border-transparent'
-};
-
 const AGENTS = ['Claude Code', 'Codex', 'Cursor', 'Gemini CLI', 'GitHub Copilot', 'OpenCode', 'Cline'];
-
-const HOW = [
-  { n: '01', title: 'Run real tasks', body: 'Sandboxed agents build in real repos, across models.' },
-  { n: '02', title: 'Measure the pick', body: 'Adopted, recommended, or skipped for a competitor.' },
-  { n: '03', title: 'Read the why', body: 'Transcripts show what to fix, reruns show if it worked.' }
-];
 
 export function Hero() {
   return (
@@ -56,78 +38,75 @@ export function Hero() {
       <div aria-hidden='true' className='pointer-events-none absolute -top-40 left-1/2 h-[520px] w-[900px] max-w-full -translate-x-1/2 rounded-full bg-[radial-gradient(closest-side,color-mix(in_oklch,var(--primary)_22%,transparent),transparent)] blur-2xl' />
 
       <div className='relative mx-auto max-w-6xl px-4 pt-16 pb-14 sm:px-6 sm:pt-24 sm:pb-20'>
-        <div className='grid gap-12 lg:grid-cols-[1.1fr_1fr] lg:items-center'>
+        <div className='grid gap-12 lg:grid-cols-[1fr_1.1fr] lg:items-center'>
           <div className='min-w-0'>
             <Link href='/#apo' className='border-primary/30 bg-primary/10 text-primary hover:bg-primary/15 inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium transition-colors'>
-              <IconSparkles className='size-3.5' /> Introducing APO · Agentic Preference Optimization <IconArrowRight className='size-3.5' />
+              <IconSparkles className='size-3.5' /> Agentic Preference Optimization <IconArrowRight className='size-3.5' />
             </Link>
-            <h1 className='mt-6 text-4xl font-semibold tracking-tight text-balance sm:text-5xl lg:text-[3.6rem] lg:leading-[1.05]'>
+            <h1 className='mt-6 text-4xl font-semibold tracking-tight text-balance sm:text-5xl lg:text-[3.5rem] lg:leading-[1.05]'>
               SEO got you found by people.
               <span className='text-primary block'>APO gets you picked by agents.</span>
             </h1>
-            <p className='text-muted-foreground mt-6 max-w-xl text-lg text-pretty'>
-              Coding agents now choose the database, the queue and the auth library. Octillion measures how often they choose yours,
-              shows the transcripts that explain why, and tells you whether your fix worked.
-            </p>
+            <p className='text-muted-foreground mt-5 max-w-md text-lg text-pretty'>See how often coding agents choose your dev tool, and why.</p>
             <div className='mt-8 flex flex-wrap gap-3'>
-              <Link href='/#access' className={buttonVariants({ size: 'lg' })}>Get your APO baseline <IconArrowRight /></Link>
-              <Link href='/#apo' className={buttonVariants({ size: 'lg', variant: 'outline' })}>What is APO?</Link>
+              <AccountButton size='lg' />
+              <Link href='/#access' className={buttonVariants({ size: 'lg', variant: 'outline' })}>Request access</Link>
             </div>
           </div>
-          <SampleCard />
+          <DecisionGraph />
         </div>
 
-        <div className='mt-16'>
-          <p className='text-muted-foreground text-xs font-medium tracking-wider uppercase'>Measures the agents your users already run</p>
-          <ul className='mt-4 flex flex-wrap gap-x-8 gap-y-3'>
-            {AGENTS.map((a) => <li key={a} className='text-foreground/70 font-mono text-sm'>{a}</li>)}
-          </ul>
-        </div>
-
-        <ol className='mt-12 grid gap-px overflow-hidden rounded-xl border bg-border sm:grid-cols-3'>
-          {HOW.map((s) => (
-            <li key={s.n} className='bg-background p-5'>
-              <span className='text-primary font-mono text-xs'>{s.n}</span>
-              <p className='mt-2 font-medium'>{s.title}</p>
-              <p className='text-muted-foreground mt-1 text-sm'>{s.body}</p>
-            </li>
-          ))}
-        </ol>
+        <ul aria-label='Agents measured' className='text-foreground/60 mt-16 flex flex-wrap gap-x-8 gap-y-3 font-mono text-sm'>
+          {AGENTS.map((a) => <li key={a}>{a}</li>)}
+        </ul>
       </div>
     </section>
   );
 }
 
-function SampleCard() {
+const PICKS = [
+  { agent: 'claude-code', pick: '✓ yourdb', tone: 'good' },
+  { agent: 'cursor', pick: '✓ yourdb', tone: 'good' },
+  { agent: 'codex', pick: '✗ otherdb', tone: 'bad' },
+  { agent: 'gemini-cli', pick: '– sqlite', tone: 'meh' }
+] as const;
+
+const TONE = {
+  good: { box: 'fill-primary/15 stroke-primary/50', text: 'fill-primary' },
+  bad: { box: 'fill-destructive/15 stroke-destructive/50', text: 'fill-destructive' },
+  meh: { box: 'fill-muted stroke-border', text: 'fill-muted-foreground' }
+};
+
+/** One prompt, four agents, four different picks: the APO problem in a picture. */
+function DecisionGraph() {
+  const ys = [50, 150, 250, 350];
   return (
-    <figure className='bg-card min-w-0 overflow-hidden rounded-xl border shadow-2xl shadow-black/40'>
-      <div className='flex items-center gap-1.5 border-b px-4 py-3'>
-        <span className='size-2.5 rounded-full bg-white/15' /><span className='size-2.5 rounded-full bg-white/15' /><span className='size-2.5 rounded-full bg-white/15' />
-        <span className='text-muted-foreground ml-3 truncate font-mono text-xs'>octillion · APO baseline · YourDB</span>
-      </div>
-      <div className='space-y-5 p-5'>
-        <div>
-          <p className='text-muted-foreground font-mono text-xs'>task</p>
-          <p className='mt-1 font-medium'>“Add persistent storage to this Next.js app”</p>
-        </div>
-        <div>
-          <div className='flex items-baseline gap-3'>
-            <span className='text-primary text-5xl font-semibold tabular-nums'>58%</span>
-            <span className='text-muted-foreground text-sm'>of 12 runs picked YourDB</span>
-          </div>
-          <div className='bg-muted mt-3 h-1.5 overflow-hidden rounded-full'><div className='bg-primary h-full w-[58%] rounded-full' /></div>
-        </div>
-        <ul className='divide-y rounded-lg border'>
-          {SAMPLE_RUNS.map((r) => (
-            <li key={r.model} className='grid grid-cols-[6.5rem_auto_1fr] items-center gap-3 px-3 py-2.5 max-sm:grid-cols-[auto_1fr]'>
-              <span className='text-muted-foreground truncate font-mono text-xs max-sm:col-span-2'>{r.model}</span>
-              <Badge className={cn('w-fit', VERDICT_STYLE[r.kind])}>{r.verdict}</Badge>
-              <span className='min-w-0 truncate font-mono text-xs'>{r.body}</span>
-            </li>
-          ))}
-        </ul>
-      </div>
-      <figcaption className='text-muted-foreground border-t px-5 py-3 text-xs'>Illustrative sample. Product, competitor and numbers are placeholders.</figcaption>
+    <figure className='min-w-0'>
+      <svg viewBox='0 0 560 400' className='h-auto w-full' role='img' aria-label='One prompt sent to four coding agents: two install YourDB, one installs a competitor, one uses SQLite.'>
+        <rect x='1' y='174' width='170' height='52' rx='10' className='fill-card stroke-border' />
+        <text x='18' y='206' className='fill-foreground font-mono text-[15px]'>&gt; add a database</text>
+        {ys.map((y, i) => {
+          const p = PICKS[i];
+          const curve = `M171 200 C205 200 205 ${y} 236 ${y}`;
+          return (
+            <g key={p.agent}>
+              <path d={curve} fill='none' className='stroke-border' strokeWidth='1.5' />
+              <path d={curve} fill='none' className={FLOW} strokeWidth='1.5' />
+              <rect x='236' y={y - 20} width='132' height='40' rx='8' className='fill-card stroke-border' />
+              <text x='252' y={y + 5} className='fill-muted-foreground font-mono text-[14px]'>{p.agent}</text>
+              <path d={`M368 ${y} L418 ${y}`} className='stroke-border' strokeWidth='1.5' />
+              <path d={`M368 ${y} L418 ${y}`} className={FLOW} strokeWidth='1.5' />
+              <rect x='418' y={y - 20} width='140' height='40' rx='20' className={TONE[p.tone].box} />
+              <text x='488' y={y + 5} textAnchor='middle' className={cn('font-mono text-[14px] font-medium', TONE[p.tone].text)}>{p.pick}</text>
+            </g>
+          );
+        })}
+      </svg>
+      <figcaption className='mt-4 flex items-center gap-4'>
+        <span className='text-primary text-4xl font-semibold tabular-nums'>58%</span>
+        <div className='bg-muted h-1.5 flex-1 overflow-hidden rounded-full'><div className='bg-primary h-full w-[58%] rounded-full' /></div>
+        <span className='text-muted-foreground text-xs'>picked YourDB · sample</span>
+      </figcaption>
     </figure>
   );
 }
@@ -135,49 +114,42 @@ function SampleCard() {
 // ---------- why now ----------
 
 const SESSION = [
-  ['comment', '# developer, 11:42pm'],
   ['prompt', '> add background jobs to this app'],
-  ['agent', 'agent ▸ reading package.json, src/…'],
-  ['agent', 'agent ▸ I\'ll use SomeQueue — it fits this stack.'],
+  ['agent', 'agent ▸ I\'ll use SomeQueue.'],
   ['cmd', 'agent ▸ $ npm install somequeue'],
-  ['agent', 'agent ▸ created src/jobs/worker.ts'],
   ['ok', 'agent ▸ ✓ done. 3 files changed.'],
-  ['comment', '# was your product considered?'],
-  ['comment', '# you\'ll never see this session.']
+  ['comment', '# was your product considered?']
 ] as const;
 
 const REASONS = [
-  { icon: IconEye, title: 'The decision is invisible', body: 'It happens inside a private session on someone else\'s laptop. No click, no referrer, no signup funnel to measure.' },
-  { icon: IconGitCompare, title: 'Every model decides differently', body: 'Each model, version and harness has its own defaults. What one agent installs, another never mentions.' },
-  { icon: IconMessages, title: 'Asking a chatbot isn\'t the same', body: '“What\'s the best queue?” in a chat window tells you little about what an agent does mid-task in a real repo with real constraints. You need to watch the work.' }
+  { icon: IconEyeOff, title: 'Invisible', body: 'No click, no referrer.' },
+  { icon: IconGitCompare, title: 'Per model', body: 'Each agent picks differently.' },
+  { icon: IconCode, title: 'Mid-task', body: 'Decided in code, not chat.' }
 ];
 
 export function WhyNow() {
   return (
-    <Section id='why' eyebrow='Why APO, why now' title='Developers stopped picking tools. Their agents do it now.'
-      lead='A developer types “add background jobs” into Claude Code, Codex or Cursor and accepts the diff. The agent chose the queue, installed the package and wrote the config. Nobody compared vendors. Nobody read your landing page.'>
-      <div className='grid gap-6 lg:grid-cols-[1.1fr_1fr] lg:items-start'>
-        <div className='overflow-hidden rounded-xl border bg-zinc-950 text-zinc-100 shadow-lg'>
-          <div className='flex items-center gap-1.5 border-b border-white/10 px-4 py-3'>
-            <span className='size-2.5 rounded-full bg-white/20' /><span className='size-2.5 rounded-full bg-white/20' /><span className='size-2.5 rounded-full bg-white/20' />
-            <IconTerminal2 className='ml-2 size-4 text-white/50' />
+    <Section id='why' eyebrow='Why now' title='Agents pick the stack now.' lead='Developers accept the diff. Nobody reads your landing page.'>
+      <div className='grid gap-10 lg:grid-cols-[1.2fr_1fr] lg:items-center'>
+        <div className='overflow-hidden rounded-xl border bg-black/40'>
+          <div className='flex items-center gap-1.5 border-b px-4 py-3'>
+            <span className='size-2.5 rounded-full bg-white/15' /><span className='size-2.5 rounded-full bg-white/15' /><span className='size-2.5 rounded-full bg-white/15' />
+            <IconTerminal2 className='text-muted-foreground ml-2 size-4' />
           </div>
-          <pre className='overflow-x-auto p-4 font-mono text-[13px] leading-6 whitespace-pre-wrap'>
+          <pre className='overflow-x-auto p-5 font-mono text-[13px] leading-7 whitespace-pre-wrap'>
             {SESSION.map(([k, line], i) => (
-              <div key={i} className={cn(k === 'comment' && 'text-white/45', k === 'prompt' && 'text-white', k === 'cmd' && 'text-amber-300', k === 'ok' && 'text-emerald-400', k === 'agent' && 'text-white/80')}>{line}</div>
+              <div key={i} className={cn(k === 'comment' && 'text-primary mt-2', k === 'prompt' && 'text-foreground', k === 'cmd' && 'text-amber-300', k === 'ok' && 'text-foreground/80', k === 'agent' && 'text-foreground/70')}>{line}</div>
             ))}
           </pre>
         </div>
-        <div className='grid gap-4'>
+        <ul className='grid gap-8 sm:grid-cols-3 lg:grid-cols-1'>
           {REASONS.map((r) => (
-            <Card key={r.title} size='sm'>
-              <CardContent className='flex gap-4'>
-                <div className='bg-primary/10 text-primary flex size-10 shrink-0 items-center justify-center rounded-lg'><r.icon className='size-5' /></div>
-                <div><h3 className='font-semibold'>{r.title}</h3><p className='text-muted-foreground mt-1 text-sm'>{r.body}</p></div>
-              </CardContent>
-            </Card>
+            <li key={r.title} className='flex items-center gap-4'>
+              <r.icon className='text-primary size-8 shrink-0' stroke={1.5} />
+              <div><p className='text-lg font-semibold'>{r.title}</p><p className='text-muted-foreground text-sm'>{r.body}</p></div>
+            </li>
           ))}
-        </div>
+        </ul>
       </div>
     </Section>
   );
@@ -185,103 +157,122 @@ export function WhyNow() {
 
 // ---------- what is APO ----------
 
-const COMPARE = [
-  { short: 'SEO', long: 'Search engine optimization', who: 'A person scanning search results', win: 'A click to your site', measure: 'Rankings and traffic' },
-  { short: 'GEO', long: 'Generative engine optimization', who: 'A chatbot answering a question', win: 'A mention or citation in the answer', measure: 'Mentions in chat replies' },
-  { short: 'APO', long: 'Agentic preference optimization', who: 'A coding agent in the middle of a task', win: 'Your package installed and wired into the code', measure: 'Adoption in real agent transcripts', highlight: true }
-];
-
-const LOOP = [
-  { title: 'Profile your product', body: 'Give a one-paragraph pitch, your site and your docs. Octillion researches them and builds the profile: names, real package names, competitors and the developer personas you sell to.', tag: 'name: YourDB · pkgs: yourdb, @yourdb/client · vs: OtherDB' },
-  { title: 'Pose blind problems', body: 'Realistic tasks your buyers hand to agents, like “set up auth for this FastAPI service”, that never name you or a competitor. The agent has to arrive at you on its own.', tag: 'scenario × starter repo × persona' },
-  { title: 'Run the real agent mix', body: 'Claude Code, Codex, Cursor, OpenCode and more work each task in isolated sandboxes, in proportion to how developers actually use them, until the code is really done. A simulated developer answers their questions in persona.', tag: 'agent mix ∝ developer usage · full transcripts' },
-  { title: 'Score, fix, re-run', body: 'Every run gets a verdict with transcript evidence. See where you lose and why, improve your docs, examples, SDK or packaging, then re-run the same tasks to prove preference moved.', tag: 'verdict → evidence → fix → re-measure' }
+const ERAS = [
+  { icon: IconSearch, short: 'SEO', who: 'People', win: 'a click' },
+  { icon: IconMessageChatbot, short: 'GEO', who: 'Chatbots', win: 'a mention' },
+  { icon: IconTerminal2, short: 'APO', who: 'Coding agents', win: 'an install', current: true }
 ];
 
 export function WhatIsApo() {
   return (
-    <Section id='apo' eyebrow='What is APO' title='Agentic Preference Optimization, defined.'
-      lead='APO is the practice of measuring and improving how often AI coding agents choose your product while they do real work. It is to coding agents what SEO is to search engines: you can’t buy the decision, but you can earn it, and you can’t improve what you don’t measure.'>
-      <div className='grid gap-4 md:grid-cols-3'>
-        {COMPARE.map((c) => (
-          <Card key={c.short} className={cn(c.highlight && 'ring-primary ring-2')}>
-            <CardHeader>
-              <div className='flex items-center gap-2'>
-                <span className={cn('text-2xl font-semibold', c.highlight && 'text-primary')}>{c.short}</span>
-                {c.highlight && <Badge>Octillion</Badge>}
+    <Section id='apo' eyebrow='What is APO' title='Earn the agent’s pick, and prove it.'>
+      <div className='grid gap-14 lg:grid-cols-2 lg:items-center'>
+        <ol className='flex flex-col gap-2'>
+          {ERAS.map((e, i) => (
+            <li key={e.short}>
+              <div className={cn('flex items-center gap-5 rounded-xl px-4 py-4', e.current && 'bg-primary/10')}>
+                <span className={cn('flex size-12 shrink-0 items-center justify-center rounded-full border', e.current ? 'border-primary text-primary' : 'text-muted-foreground')}>
+                  <e.icon className='size-6' stroke={1.5} />
+                </span>
+                <span className={cn('w-16 font-mono text-2xl font-semibold', e.current && 'text-primary')}>{e.short}</span>
+                <span className='text-muted-foreground min-w-0 text-sm'>{e.who} <IconArrowRight className='inline size-3.5' /> <span className='text-foreground'>{e.win}</span></span>
               </div>
-              <p className='text-muted-foreground text-sm'>{c.long}</p>
-            </CardHeader>
-            <CardContent>
-              <dl className='grid gap-3 text-sm'>
-                <div><dt className='text-muted-foreground text-xs font-medium uppercase'>Who decides</dt><dd className='mt-0.5'>{c.who}</dd></div>
-                <div><dt className='text-muted-foreground text-xs font-medium uppercase'>The win</dt><dd className='mt-0.5'>{c.win}</dd></div>
-                <div><dt className='text-muted-foreground text-xs font-medium uppercase'>You measure</dt><dd className='mt-0.5'>{c.measure}</dd></div>
-              </dl>
-            </CardContent>
-          </Card>
-        ))}
+              {i < ERAS.length - 1 && <div aria-hidden='true' className='bg-border ml-10 h-4 w-px' />}
+            </li>
+          ))}
+        </ol>
+        <ApoLoop />
       </div>
-      <h3 className='mt-16 text-xl font-semibold'>The APO loop, run by Octillion</h3>
-      <ol className='mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4'>
-        {LOOP.map((s, i) => (
-          <li key={s.title}>
-            <Card className='h-full'>
-              <CardContent className='flex h-full flex-col gap-3'>
-                <span className='bg-primary text-primary-foreground flex size-8 items-center justify-center rounded-full text-sm font-semibold'>{i + 1}</span>
-                <h4 className='font-semibold'>{s.title}</h4>
-                <p className='text-muted-foreground flex-1 text-sm'>{s.body}</p>
-                <code className='bg-muted text-muted-foreground rounded-md px-2 py-1.5 font-mono text-[11px] break-words'>{s.tag}</code>
-              </CardContent>
-            </Card>
-          </li>
-        ))}
-      </ol>
     </Section>
+  );
+}
+
+const LOOP = [
+  { x: 200, y: 60, label: 'Profile product' },
+  { x: 340, y: 200, label: 'Blind tasks' },
+  { x: 200, y: 340, label: 'Agents run' },
+  { x: 60, y: 200, label: 'Score & fix' }
+];
+
+function ApoLoop() {
+  return (
+    <svg viewBox='-20 0 440 400' className='mx-auto h-auto w-full max-w-md' role='img' aria-label='The APO loop: profile your product, pose blind tasks, agents run them, score and fix, repeat.'>
+      <circle cx='200' cy='200' r='140' fill='none' className='stroke-border' strokeWidth='1.5' />
+      <circle cx='200' cy='200' r='140' fill='none' className={FLOW} strokeWidth='2' />
+      <text x='200' y='204' textAnchor='middle' className='fill-primary font-mono text-[34px] font-semibold'>APO</text>
+      <text x='200' y='230' textAnchor='middle' className='fill-muted-foreground font-mono text-[13px]'>repeat every release</text>
+      {LOOP.map((s, i) => (
+        <g key={s.label}>
+          <rect x={s.x - 70} y={s.y - 22} width='140' height='44' rx='22' className='fill-background stroke-primary/60' />
+          <text x={s.x - 52} y={s.y + 5} className='fill-primary font-mono text-[13px]'>{`0${i + 1}`}</text>
+          <text x={s.x - 28} y={s.y + 5} className='fill-foreground text-[14px]'>{s.label}</text>
+        </g>
+      ))}
+    </svg>
   );
 }
 
 // ---------- scorecard ----------
 
-const FEATURES = [
-  { icon: IconChartBar, title: 'Preference rate', body: 'The share of runs where an agent adopted or recommended your product, overall and per scenario. Your headline APO number.' },
-  { icon: IconChartPie, title: 'Share of voice vs competitors', body: 'How often agents choose you versus each named competitor, and where you lose head-to-head.' },
-  { icon: IconUsers, title: 'By model and by scenario', body: 'Find the model that never picks you, or the use case where you\'re invisible, and know exactly where to focus.' },
-  { icon: IconRefresh, title: 'Proof your fixes worked', body: 'Re-run the same scenarios as new models ship and as you change docs, examples, SDKs or packaging. See whether preference moves, model by model.' },
-  { icon: IconFileSearch, title: 'Full, searchable transcripts', body: 'Every run\'s raw transcript: the reasoning, the commands, the files. Search across all of them for any package or phrase.' },
-  { icon: IconBolt, title: 'Verdict evidence', body: 'No black-box scores. Each verdict points to the install command, import or sentence that earned it, so you can check it yourself.' }
-];
+const BY_AGENT = [['claude-code', 75], ['cursor', 62], ['copilot', 55], ['gemini-cli', 40], ['codex', 25]] as const;
+const TREND = [22, 25, 24, 27, 26, 41, 46, 48];
 
 const VERDICTS = [
-  { name: 'Adopted', body: 'Installed, imported or configured your product in the code.', cls: VERDICT_STYLE.good },
-  { name: 'Recommended', body: 'Explicitly advised using your product, without wiring it in.', cls: VERDICT_STYLE.good },
-  { name: 'Mentioned', body: 'Named you in passing, as one option among others.', cls: VERDICT_STYLE.meh },
-  { name: 'Competitor', body: 'Picked a competitor you configured instead.', cls: VERDICT_STYLE.bad },
-  { name: 'None', body: 'You never came up. Built it another way.', cls: 'bg-secondary text-secondary-foreground border-transparent' }
+  { name: 'Adopted', cls: 'bg-primary/15 text-primary' },
+  { name: 'Recommended', cls: 'bg-primary/15 text-primary' },
+  { name: 'Mentioned', cls: 'bg-muted text-muted-foreground' },
+  { name: 'Competitor', cls: 'bg-destructive/15 text-destructive' },
+  { name: 'None', cls: 'bg-secondary text-secondary-foreground' }
 ];
 
 export function Scorecard() {
+  const pts = TREND.map((v, i) => `${10 + i * 40},${110 - v * 1.8}`).join(' ');
   return (
-    <Section id='features' eyebrow='Your APO scorecard' title='A measurable answer to “do agents prefer us?”'
-      lead='Numbers you can track, broken down the way you’d actually act on them, each one traceable to its source.'>
-      <div className='grid gap-4 sm:grid-cols-2 lg:grid-cols-3'>
-        {FEATURES.map((f) => (
-          <Card key={f.title}>
-            <CardContent className='space-y-3'>
-              <div className='bg-primary/10 text-primary flex size-10 items-center justify-center rounded-lg'><f.icon className='size-5' /></div>
-              <h3 className='font-semibold'>{f.title}</h3>
-              <p className='text-muted-foreground text-sm'>{f.body}</p>
-            </CardContent>
-          </Card>
-        ))}
-      </div>
-      <div className='mt-8 grid gap-3 sm:grid-cols-2 lg:grid-cols-5'>
-        {VERDICTS.map((v) => (
-          <div key={v.name} className='rounded-lg border p-4'>
-            <Badge className={v.cls}>{v.name}</Badge>
-            <p className='text-muted-foreground mt-2 text-sm'>{v.body}</p>
+    <Section id='features' eyebrow='Scorecard' title='A number you can move.'>
+      <div className='grid gap-x-10 gap-y-12 md:grid-cols-3'>
+        <figure className='border-t pt-5'>
+          <figcaption className='text-muted-foreground font-mono text-xs uppercase'>By agent</figcaption>
+          <ul className='mt-5 space-y-3'>
+            {BY_AGENT.map(([n, v]) => (
+              <li key={n} className='grid grid-cols-[6rem_1fr_2.5rem] items-center gap-3 text-xs'>
+                <span className='text-muted-foreground font-mono'>{n}</span>
+                <span className='bg-muted h-2 rounded-full'><span className='bg-primary block h-full rounded-full' style={{ width: `${v}%` }} /></span>
+                <span className='text-right tabular-nums'>{v}%</span>
+              </li>
+            ))}
+          </ul>
+        </figure>
+
+        <figure className='border-t pt-5'>
+          <figcaption className='text-muted-foreground font-mono text-xs uppercase'>Share of voice</figcaption>
+          <div className='mt-4 flex items-center gap-6'>
+            <svg viewBox='0 0 120 120' className='size-32 shrink-0 -rotate-90' aria-hidden='true'>
+              <circle cx='60' cy='60' r='48' fill='none' strokeWidth='14' className='stroke-muted' />
+              <circle cx='60' cy='60' r='48' fill='none' strokeWidth='14' pathLength={100} strokeDasharray='58 100' className='stroke-primary' />
+              <circle cx='60' cy='60' r='48' fill='none' strokeWidth='14' pathLength={100} strokeDasharray='30 100' strokeDashoffset={-58} className='stroke-destructive/70' />
+            </svg>
+            <ul className='space-y-2 text-xs'>
+              <li className='flex items-center gap-2'><span className='bg-primary size-2 rounded-full' />You <b className='ml-auto pl-3 tabular-nums'>58%</b></li>
+              <li className='flex items-center gap-2'><span className='bg-destructive/70 size-2 rounded-full' />OtherDB <b className='ml-auto pl-3 tabular-nums'>30%</b></li>
+              <li className='flex items-center gap-2'><span className='bg-muted size-2 rounded-full' />Neither <b className='ml-auto pl-3 tabular-nums'>12%</b></li>
+            </ul>
           </div>
-        ))}
+        </figure>
+
+        <figure className='border-t pt-5'>
+          <figcaption className='text-muted-foreground flex font-mono text-xs uppercase'>After your fix <span className='text-primary ml-auto'>+22 pts</span></figcaption>
+          <svg viewBox='0 0 300 120' className='mt-4 h-auto w-full' aria-hidden='true'>
+            <line x1='190' y1='0' x2='190' y2='118' className='stroke-border' strokeDasharray='3 4' />
+            <text x='196' y='12' className='fill-muted-foreground font-mono text-[10px]'>docs fix</text>
+            <polyline points={pts} fill='none' className='stroke-primary' strokeWidth='2.5' strokeLinejoin='round' strokeLinecap='round' />
+            <circle cx={10 + 7 * 40} cy={110 - 48 * 1.8} r='4' className='fill-primary' />
+          </svg>
+        </figure>
+      </div>
+
+      <div className='mt-12 flex flex-wrap items-center gap-2'>
+        {VERDICTS.map((v) => <span key={v.name} className={cn('rounded-full px-3 py-1 text-xs font-medium', v.cls)}>{v.name}</span>)}
+        <span className='text-muted-foreground ml-1 text-xs'>Every verdict links to its transcript. Sample data.</span>
       </div>
     </Section>
   );
@@ -291,54 +282,24 @@ export function Scorecard() {
 
 export function WhereYouWork() {
   return (
-    <Section id='claude' eyebrow='APO where you already work' title='No new dashboard to learn. Just ask.'
-      lead='Octillion is an MCP server with an interactive dashboard. Add it as a connector in Claude desktop or ChatGPT desktop, then configure products, launch simulations and dig into results in plain language.'>
-      <div className='grid gap-8 lg:grid-cols-[1fr_1.15fr] lg:items-start'>
-        <ul className='space-y-4'>
-          {[
-            ['Configure by talking.', '“Add OtherDB and FastDB as competitors.”'],
-            ['Launch from chat.', '“Run the queue-setup scenarios on every model tonight.”'],
-            ['Explore interactively.', 'Charts, breakdowns and transcripts render right in the conversation.']
-          ].map(([t, b]) => (
-            <li key={t} className='flex gap-3'>
-              <IconSparkles className='text-primary mt-0.5 size-5 shrink-0' />
-              <p><span className='font-semibold'>{t}</span> <span className='text-muted-foreground'>{b}</span></p>
-            </li>
-          ))}
-          <li className='pt-2'><Link href='/app' className={buttonVariants({ variant: 'outline' })}>Set it up in your account <IconArrowRight /></Link></li>
-        </ul>
-        <ChatMock />
-      </div>
-    </Section>
-  );
-}
-
-function ChatMock() {
-  return (
-    <Card className='shadow-lg'>
-      <CardContent className='space-y-4'>
-        <div className='bg-muted ml-auto w-fit max-w-[85%] rounded-2xl rounded-br-sm px-4 py-2.5 text-sm'>How often does model-b pick us over OtherQueue for queue setup?</div>
-        <div className='flex items-center gap-2 rounded-lg border px-3 py-2 font-mono text-xs'>
-          <IconBolt className='text-primary size-4 shrink-0' />
-          <span className='font-semibold'>Octillion</span>
-          <span className='text-muted-foreground truncate'>get_share_of_voice · scenario: queue-setup · model: model-b</span>
+    <Section id='claude' eyebrow='Claude & ChatGPT' title='Just ask.' lead='Octillion is an MCP server. Run it from the chat you already use.'>
+      <div className='mx-auto max-w-2xl space-y-4'>
+        <div className='bg-muted ml-auto w-fit max-w-[85%] rounded-2xl rounded-br-sm px-4 py-2.5 text-sm'>Where does Codex pick OtherDB over us?</div>
+        <div className='text-muted-foreground flex w-fit items-center gap-2 rounded-full border px-3 py-1.5 font-mono text-xs'>
+          <IconBolt className='text-primary size-3.5' /> octillion · get_share_of_voice
         </div>
-        <p className='text-sm'>
-          Across the last batch of queue-setup runs on model-b, YourQueue was adopted or recommended more often than OtherQueue, but
-          lost on the Python worker scenario. Want the transcripts where it chose OtherQueue?
-        </p>
-        <div className='space-y-2 rounded-lg border p-3'>
-          {[['YourQueue', 'w-[64%]', 'bg-primary'], ['OtherQueue', 'w-[36%]', 'bg-muted-foreground/40']].map(([n, w, c]) => (
-            <div key={n} className='grid grid-cols-[90px_1fr] items-center gap-3 text-xs'>
+        <div className='space-y-2.5 border-l-2 border-primary/40 pl-4'>
+          {[['Python worker', 22], ['Next.js app', 64], ['Edge function', 71]].map(([n, v]) => (
+            <div key={n} className='grid grid-cols-[7rem_1fr_2.5rem] items-center gap-3 text-xs'>
               <span className='text-muted-foreground'>{n}</span>
-              <div className='bg-muted h-2.5 rounded-full'><div className={cn('h-full rounded-full', w, c)} /></div>
+              <span className='bg-muted h-2 rounded-full'><span className={cn('block h-full rounded-full', Number(v) < 40 ? 'bg-destructive/70' : 'bg-primary')} style={{ width: `${v}%` }} /></span>
+              <span className='text-right tabular-nums'>{v}%</span>
             </div>
           ))}
-          <p className='text-muted-foreground text-[11px]'>sample</p>
         </div>
-        <div className='bg-muted ml-auto w-fit rounded-2xl rounded-br-sm px-4 py-2.5 text-sm'>Yes, show me the evidence.</div>
-        <p className='text-muted-foreground text-center text-xs'>Illustrative conversation · placeholder names and values</p>
-      </CardContent>
-    </Card>
+        <div className='bg-muted ml-auto w-fit rounded-2xl rounded-br-sm px-4 py-2.5 text-sm'>Show me the Python transcripts.</div>
+        <p className='text-muted-foreground pt-2 text-center text-xs'>Illustrative · sample values</p>
+      </div>
+    </Section>
   );
 }

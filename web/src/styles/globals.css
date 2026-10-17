@@ -645,3 +645,8 @@ main .grid > *,
 main .flex-col > * {
   min-width: 0;
 }
+
+/* Landing-page diagrams: dashes travelling along a path. */
+@keyframes apo-dash {
+  to { stroke-dashoffset: -32; }
+}
