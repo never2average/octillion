@@ -56,12 +56,12 @@ export function AdminAccounts() {
   );
   const sel = (vs: string[]) => vs.map((v) => ({ value: v }));
   const cols: RecordCol<Org>[] = [
-    { key: 'name', label: 'Account', name: 'Account', type: 'text', title: true, keep: true, peek: false, value: (o) => o.name, render: (o) => (
+    { key: 'name', label: 'Account', name: 'Account', className: 'min-w-64', type: 'text', title: true, keep: true, peek: false, value: (o) => o.name, render: (o) => (
       <span className='leading-none font-medium'>{o.name}</span>
     ) },
     { key: 'slug', label: 'Slug', type: 'text', hidden: true, value: (o) => o.slug, render: (o) => <code className='text-xs'>{o.slug}</code> },
     { key: 'contact', label: 'Contact', hidden: true, type: 'text', value: (o) => o.contact, render: (o) => o.contact ?? dash },
-    { key: 'stage', label: 'Stage', type: 'select', keep: true, value: (o) => o.stage, options: (data?.stages ?? []).map((s) => ({ value: s.id, label: s.label })),
+    { key: 'stage', label: 'Stage', className: 'w-60', type: 'select', keep: true, value: (o) => o.stage, options: (data?.stages ?? []).map((s) => ({ value: s.id, label: s.label })),
       render: (o) => <span className='whitespace-nowrap'><StageDots index={o.stage_index} total={n} />{o.stage_label}</span> },
     { key: 'next_step', label: 'Next step', type: 'text', hidden: true, value: (o) => o.next_step, render: (o) => o.next_step },
     { key: 'attention', label: 'Attention', type: 'number', keep: true, value: (o) => o.attention.length, render: (o) => o.attention.length ? (
@@ -81,7 +81,7 @@ export function AdminAccounts() {
     { key: 'renews', label: 'Renews', type: 'date', hidden: true, value: (o) => o.subscription?.renews_at ?? o.subscription?.trial_end ?? null,
       render: (o) => { const d = o.subscription?.renews_at ?? o.subscription?.trial_end; return d ? <When d={d} /> : dash; } },
     { key: 'last_seen', label: 'Last seen', type: 'date', value: (o) => o.last_seen, render: (o) => (o.last_seen ? <When d={o.last_seen} /> : dash) },
-    { key: 'calls_7d', label: 'Calls 7d', type: 'number', value: (o) => o.calls_7d, render: (o) => (
+    { key: 'calls_7d', label: 'Calls 7d', hidden: true, type: 'number', value: (o) => o.calls_7d, render: (o) => (
       <span className='inline-flex items-center gap-1.5 tabular-nums'>{o.calls_7d}{o.errors_7d > 0 && <StatusBadge tone='bad'>{o.errors_7d} err</StatusBadge>}</span>
     ) },
     { key: 'errors_7d', label: 'Errors 7d', type: 'number', hidden: true, value: (o) => o.errors_7d, render: (o) => num(o.errors_7d) },
