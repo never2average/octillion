@@ -455,3 +455,22 @@ CREATE INDEX IF NOT EXISTS mcp_events_org_idx ON mcp_events (org_id, at DESC);
 ALTER TABLE product_research ADD COLUMN IF NOT EXISTS archive_key TEXT;
 ALTER TABLE product_research ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
 ALTER TABLE product_research ADD COLUMN IF NOT EXISTS archive_claimed_at TIMESTAMPTZ;
+
+-- Onboarding admin console (/admin, src/admin.ts): access-request triage, contacts, invites and an audit trail.
+ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending'
+  CHECK (status IN ('pending', 'approved', 'declined'));
+ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS org_id INT REFERENCES organizations(id) ON DELETE SET NULL;
+ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS decided_at TIMESTAMPTZ;
+ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS admin_note TEXT;
+ALTER TABLE organizations ADD COLUMN IF NOT EXISTS contact_email TEXT;
+ALTER TABLE organizations ADD COLUMN IF NOT EXISTS notes TEXT;
+ALTER TABLE organizations ADD COLUMN IF NOT EXISTS invited_at TIMESTAMPTZ;  -- the admin sent the connector link
+CREATE TABLE IF NOT EXISTS admin_audit (
+  id      BIGSERIAL PRIMARY KEY,
+  at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  actor   TEXT NOT NULL,                      -- the name the admin signed in with (the token itself is shared)
+  action  TEXT NOT NULL,                      -- request.approve, key.revoke, org.update, ...
+  org_id  INT REFERENCES organizations(id) ON DELETE SET NULL,
+  detail  JSONB NOT NULL DEFAULT '{}'         -- never a key: only its prefix
+);
+CREATE INDEX IF NOT EXISTS admin_audit_at_idx ON admin_audit (at DESC);

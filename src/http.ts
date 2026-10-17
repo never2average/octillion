@@ -17,6 +17,7 @@ import * as research from "./research.js";
 import { usageReport } from "./usage.js";
 import * as kv from "./keyvault.js";
 import * as populations from "./populations.js";
+import * as onboarding from "./admin.js";
 import { createHash, timingSafeEqual } from "node:crypto";
 
 const PORT = Number(process.env.PORT ?? 3333);
@@ -237,6 +238,35 @@ export function createApp() {
   });
   admin.post("/populations/:slug/default", async (req, res) => void res.json(await populations.setDefaultPopulation(String(req.params.slug))));
   admin.get("/autoscaler", async (_req, res) => void res.json(await autoscalerStatus()));
+  // Onboarding console (public/admin.html, src/admin.ts): requests, organizations, keys, funnel, audit.
+  // X-Admin-Actor names the person for the audit log; the token is shared, so it is a label, not an identity.
+  const actor = (req: Request) => String(req.get("x-admin-actor") ?? "admin").trim() || "admin";
+  const ob = express.Router();
+  ob.use((_req, res, next) => { res.set("Cache-Control", "no-store"); next(); }); // responses can carry a new key
+  ob.get("/overview", async (_req, res) => void res.json(await onboarding.overview()));
+  ob.get("/requests", async (req, res) => void res.json({ requests: await onboarding.listRequests(req.query.status ? String(req.query.status) : undefined) }));
+  ob.post("/requests/:id/approve", async (req, res) => void res.status(201).json(await onboarding.approveRequest(actor(req), Number(req.params.id), req.body ?? {})));
+  ob.post("/requests/:id/decline", async (req, res) => {
+    await onboarding.declineRequest(actor(req), Number(req.params.id), req.body?.note);
+    res.status(204).end();
+  });
+  ob.post("/requests/:id/reopen", async (req, res) => {
+    await onboarding.reopenRequest(actor(req), Number(req.params.id));
+    res.status(204).end();
+  });
+  ob.get("/orgs", async (_req, res) => void res.json({ stages: onboarding.STAGES, orgs: await onboarding.listOrgs() }));
+  ob.post("/orgs", async (req, res) => void res.status(201).json(await onboarding.createOrgManually(actor(req), req.body ?? {})));
+  ob.get("/orgs/:slug", async (req, res) => void res.json(await onboarding.orgDetail(String(req.params.slug))));
+  ob.patch("/orgs/:slug", async (req, res) => void res.json(await onboarding.updateOrg(actor(req), String(req.params.slug), req.body ?? {})));
+  ob.post("/orgs/:slug/invited", async (req, res) => void res.json(await onboarding.markInvited(actor(req), String(req.params.slug), req.body?.invited !== false)));
+  ob.post("/orgs/:slug/keys", async (req, res) => void res.status(201).json(await onboarding.issueKey(actor(req), String(req.params.slug), req.body?.label)));
+  ob.post("/orgs/:slug/keys/:id/revoke", async (req, res) => {
+    await onboarding.revokeKey(actor(req), String(req.params.slug), Number(req.params.id));
+    res.status(204).end();
+  });
+  ob.post("/orgs/:slug/keys/:id/rotate", async (req, res) => void res.status(201).json(await onboarding.rotateKey(actor(req), String(req.params.slug), Number(req.params.id))));
+  ob.get("/audit", async (req, res) => void res.json({ audit: await onboarding.auditLog(req.query.limit ? Number(req.query.limit) : undefined) }));
+  admin.use("/onboarding", ob);
   app.use("/api/admin", admin);
 
   // ---------- local preview of the widget (development only) ----------

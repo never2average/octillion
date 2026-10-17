@@ -11,6 +11,7 @@
     "org:create": "tsx --env-file-if-exists=.env scripts/create-org.ts",
     "access:list": "tsx --env-file-if-exists=.env scripts/access-requests.ts",
     "demo:seed": "tsx --env-file-if-exists=.env scripts/seed-demo.ts",
+    "admin:demo": "tsx --env-file-if-exists=.env scripts/seed-onboarding-demo.ts",
     "smoke": "tsx --env-file-if-exists=.env scripts/smoke.ts",
     "typecheck": "tsc --noEmit && tsc --noEmit -p orchestrator",
     "vault:sync": "tsx --env-file-if-exists=.env scripts/vault-sync.ts",

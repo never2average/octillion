@@ -731,6 +731,57 @@ try {
   assert.equal((await ar({ email: "nope", company: "x" })).status, 400);
   assert.equal((await ar({ email: `smoke+${stamp}@example.com`, company: "Smoke", product_url: "https://example.com" })).status, 201);
   console.log("✓ landing page and access requests");
+
+  // ---------- onboarding admin console ----------
+  const adm = (method: string, path: string, body?: unknown) => fetch(`${base}/api/admin/onboarding${path}`, {
+    method, headers: { authorization: `Bearer ${process.env.OCTILLION_ADMIN_TOKEN}`, "x-admin-actor": "smoke", "content-type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined });
+  assert.equal((await fetch(`${base}/api/admin/onboarding/overview`)).status, 401, "admin API needs the admin token");
+  const pending = (await (await adm("GET", "/requests?status=pending")).json()).requests;
+  const request = pending.find((q: any) => q.email === `smoke+${stamp}@example.com`);
+  assert.ok(request, "new access request is pending");
+  const approved = await adm("POST", `/requests/${request.id}/approve`, { name: `Smoke Admin ${stamp}`, slug: `smoke-admin-${stamp}` });
+  assert.equal(approved.status, 201);
+  const ap = await approved.json();
+  assert.match(ap.key, /^oct_/);
+  assert.ok(ap.connector_url.endsWith(`/mcp/${ap.key}`), "connector URL carries the key")
+  assert.ok(ap.email.body.includes(ap.connector_url) && ap.email.to === request.email, "invite carries the link and the requester");
+  assert.equal((await adm("POST", `/requests/${request.id}/approve`, {})).status, 409, "no double approval");
+  assert.equal((await adm("POST", "/requests/abc/approve", {})).status, 400, "bad id is a 400");
+  const slugA = ap.org.slug;
+  const stageOf = async () => (await (await adm("GET", "/orgs")).json()).orgs.find((o: any) => o.slug === slugA);
+  assert.equal((await stageOf()).stage, "created");
+  assert.equal((await stageOf()).contact_email, request.email);
+  await adm("POST", `/orgs/${slugA}/invited`, {});
+  assert.equal((await stageOf()).stage, "invited");
+  const viaKey = new Client({ name: "smoke-onboarded", version: "1.0.0" });
+  await viaKey.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp/${ap.key}`)));
+  await viaKey.callTool({ name: "list_products", arguments: {} });
+  await viaKey.close();
+  await new Promise((r) => setTimeout(r, 200)); // event recording is fire-and-forget
+  assert.equal((await stageOf()).stage, "first_call", "funnel follows real connector use");
+  const second = await (await adm("POST", `/orgs/${slugA}/keys`, { label: "teammate@example.com" })).json();
+  assert.equal(second.email.to, "teammate@example.com", "a second user's invite goes to them");
+  const detail = await (await adm("GET", `/orgs/${slugA}`)).json();
+  assert.equal(detail.keys.length, 2);
+  assert.ok(!JSON.stringify(detail).includes(ap.key), "detail never returns a full key");
+  const k1 = detail.keys.find((k: any) => k.label === request.email);
+  const rotated = await (await adm("POST", `/orgs/${slugA}/keys/${k1.id}/rotate`)).json();
+  const post = (key: string) => fetch(`${base}/mcp/${key}`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+  assert.equal((await post(ap.key)).status, 401, "rotated key stops working");
+  assert.notEqual((await post(rotated.key)).status, 401, "its replacement works");
+  const k2 = detail.keys.find((k: any) => k.label === "teammate@example.com");
+  assert.equal((await adm("POST", `/orgs/${slugA}/keys/${k2.id}/revoke`)).status, 204);
+  assert.equal((await post(second.key)).status, 401, "revoked key stops working");
+  assert.equal((await adm("PATCH", `/orgs/${slugA}`, { contact_email: "not-an-email" })).status, 400);
+  const auditRows = (await (await adm("GET", "/audit")).json()).audit.filter((a: any) => a.org_slug === slugA);
+  for (const a of ["request.approve", "org.invited", "key.create", "key.rotate", "key.revoke"])
+    assert.ok(auditRows.some((r: any) => r.action === a && r.actor === "smoke"), `audit has ${a}`);
+  assert.ok(![ap.key, second.key, rotated.key].some((k) => JSON.stringify(auditRows).includes(k)), "audit never holds a key");
+  const ov = await (await adm("GET", "/overview")).json();
+  assert.ok(ov.funnel[0].reached >= 1 && ov.funnel.length === 7);
+  await db.query("DELETE FROM organizations WHERE slug = $1", [slugA]);
+  console.log("✓ onboarding console: approve, invite, funnel from real use, per-user keys, rotate, revoke, audit");
 } finally {
   await db.query("DELETE FROM vault_providers WHERE slug IN ('smoke_llm', 'smoke_vendor')");
   await db.query("DELETE FROM gateway_tokens WHERE orchestrator_id = 'smoke-orch'");

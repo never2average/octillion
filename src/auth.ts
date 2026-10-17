@@ -12,7 +12,7 @@ const KEY_PREFIX = "oct_";
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 export const randomId = (prefix: string, bytes = 9) => `${prefix}${randomBytes(bytes).toString("base64url")}`;
 
-const slugify = (s: string) =>
+export const slugify = (s: string) =>
   s.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48) || "org";
 
 /** Create an organization and its first API key. The key is returned once and only its hash is stored. */
