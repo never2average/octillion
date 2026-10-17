@@ -734,3 +734,9 @@ ALTER TABLE product_research ADD COLUMN IF NOT EXISTS searches INT NOT NULL DEFA
 -- Packages the agent installed that match neither the product nor a tracked competitor ({name, ecosystem}): the
 -- alternatives research missed. The report lists them so the customer can add them as competitors.
 ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS untracked JSONB;
+
+-- Built-in journeys already seeded (src/playbooks.ts ensureSeeded): each is added once, so one an admin deleted stays gone.
+CREATE TABLE IF NOT EXISTS journey_seed (
+  id         TEXT PRIMARY KEY,
+  seeded_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);

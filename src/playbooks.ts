@@ -81,6 +81,10 @@ export const PLAYBOOKS: Playbook[] = [
         why: "Proof the change moved agents' choices, task by task and agent by agent.",
         prompt: "Compare the hit rate on that task before and after my change.",
         expect: "The daily trend and both runs' results with their ranges; overlapping ranges mean run more sessions." },
+      { id: "remember", title: "Remember the fix", tools: ["save_to_memory"],
+        why: "So the next person (and every AI client on the team) knows what changed on this task and why, without re-reading transcripts.",
+        prompt: "Remember for {product}: we fixed the loss to {competitor} on that task by <what you changed>; the hit rate moved from <before> to <after>.",
+        expect: "The decision saved to the product's memory; it shows under Context and in every new chat." },
     ],
   },
   {
@@ -167,6 +171,26 @@ export const PLAYBOOKS: Playbook[] = [
         expect: "The trend line and per-agent change since the last run." },
     ],
   },
+  {
+    id: "team-memory", name: "Build your team's memory", time: "ten minutes, then as you go",
+    outcome: "Your AI client remembers the company's facts, decisions and preferences, so nobody explains them twice.",
+    who: "Anyone on the team; most useful for whoever owns positioning or DevRel.",
+    example: { title: "Resend positioning", result: "\"We don't compete with SES on price; lead with deliverability\" saved once; every later report and draft on the team led with deliverability." },
+    stages: [
+      { id: "save", title: "Save a decision", tools: ["save_to_memory"],
+        why: "Lasting context (competitors you ignore, the angle you lead with, internal names) belongs in memory, not in every prompt.",
+        prompt: "Remember: we lead with <your angle> against {competitor}, and never compete on price.",
+        expect: "The item saved to the company's memory; your team sees it under Context." },
+      { id: "recall", title: "Find it again", tools: ["search_memory"],
+        why: "Memory is only useful if it comes back when someone asks.",
+        prompt: "What have we decided about {competitor}?",
+        expect: "The decisions and facts saved about it, newest first." },
+      { id: "use", title: "See it used in a new chat", tools: [], manual: true,
+        why: "Your AI client reads the newest memory as background at the start of every conversation.",
+        prompt: "(In a new chat) Draft the opening of a comparison page for {product} vs {competitor}.",
+        expect: "Mark this done when the draft follows what you saved without being told." },
+    ],
+  },
 ];
 
 // ---------- templates in the database (managed on /admin) ----------
@@ -185,16 +209,37 @@ const toPlaybook = (r: Row): Playbook & { promoted: boolean; position: number; u
 
 let seeded = false;
 /** The built-in pipelines become the first templates, once (an admin may delete or rewrite them afterwards). */
+/** The built-ins that existed before the seed ledger: a database seeded then has them (or deleted them on purpose). */
+const FIRST_BUILT_INS = ["baseline", "fix-loss", "head-to-head", "agent-audit", "new-capability", "release-watch"];
+
+/**
+ * Built-in journeys, through a ledger (journey_seed): each is added once, so one an admin deleted stays deleted; one
+ * still untouched (updated_by 'built-in') follows the code when its stages change; one an admin edited is left alone.
+ */
+/** For the smoke test: seed again on the next read, as a fresh server would. */
+export const __resetSeed = () => { seeded = false; };
+
 async function ensureSeeded() {
   if (seeded) return;
   const db = await getDb();
-  const [{ n }] = await db.query<{ n: number }>("SELECT count(*) AS n FROM journey_templates");
+  const [{ n }] = await db.query<{ n: number }>("SELECT count(*) AS n FROM journey_seed");
   if (!Number(n)) {
-    for (const [i, p] of PLAYBOOKS.entries())
-      await db.query(
-        `INSERT INTO journey_templates (id, name, outcome, who, time, example_title, example_result, stages, promoted, position, updated_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, $9, 'built-in') ON CONFLICT (id) DO NOTHING`,
-        [p.id, p.name, p.outcome, p.who, p.time, p.example.title, p.example.result, JSON.stringify(p.stages), i]);
+    const [{ t }] = await db.query<{ t: number }>("SELECT count(*) AS t FROM journey_templates");
+    if (Number(t)) for (const id of FIRST_BUILT_INS) await db.query("INSERT INTO journey_seed (id) VALUES ($1) ON CONFLICT DO NOTHING", [id]);
+  }
+  const done = new Set((await db.query<{ id: string }>("SELECT id FROM journey_seed")).map((r) => r.id));
+  for (const p of PLAYBOOKS) {
+    if (done.has(p.id)) {
+      await db.query("UPDATE journey_templates SET stages = $2, updated_at = now() WHERE id = $1 AND updated_by = 'built-in' AND org_id IS NULL AND stages::text <> $2::jsonb::text",
+        [p.id, JSON.stringify(p.stages)]);
+      continue;
+    }
+    const [{ next }] = await db.query<{ next: number }>("SELECT coalesce(max(position), -1) + 1 AS next FROM journey_templates WHERE org_id IS NULL");
+    await db.query(
+      `INSERT INTO journey_templates (id, name, outcome, who, time, example_title, example_result, stages, promoted, position, updated_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, $9, 'built-in') ON CONFLICT (id) DO NOTHING`,
+      [p.id, p.name, p.outcome, p.who, p.time, p.example.title, p.example.result, JSON.stringify(p.stages), Number(next)]);
+    await db.query("INSERT INTO journey_seed (id) VALUES ($1) ON CONFLICT DO NOTHING", [p.id]);
   }
   seeded = true;
 }

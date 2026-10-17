@@ -48,6 +48,8 @@ export const TOOL_GROUPS = [
     prompt: "Why did agents pick <competitor> on <task>? Show me the transcript." },
   { id: "tune", label: "See who is tested", tools: ["list_agents", "list_developer_profiles", "browse_task_library"],
     prompt: "Which coding agents and developer personas do you test with?" },
+  { id: "memory", label: "Build team memory", tools: ["save_to_memory", "search_memory"],
+    prompt: "Remember: we lead with <your angle> against <competitor>." },
 ] as const;
 
 /** Plain-language fixes for errors people hit, matched on the tool's error text. */

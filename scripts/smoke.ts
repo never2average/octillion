@@ -1343,7 +1343,24 @@ try {
       console.log("✓ context: company (admins), person (self), product editing, in the AI client's instructions and in research");
       // Journeys on Setup: use-case pipelines, prompts filled in with the account's product, stages done in order.
       const jg = (await json(appCall(ownerC, "GET", "/journeys"))).journeys;
-      assert.deepEqual(jg.map((j: any) => j.id), ["baseline", "fix-loss", "head-to-head", "agent-audit", "new-capability", "release-watch"]);
+      assert.deepEqual(jg.map((j: any) => j.id), ["baseline", "fix-loss", "head-to-head", "agent-audit", "new-capability", "release-watch", "team-memory"]);
+      // Memory in journeys: its own journey, and the losing-task pipeline ends by remembering the fix.
+      const memJ = jg.find((j: any) => j.id === "team-memory");
+      assert.deepEqual(memJ.stages.map((x: any) => x.tools), [["save_to_memory"], ["search_memory"], []]);
+      assert.equal(jg.find((j: any) => j.id === "fix-loss").stages.at(-1).tools[0], "save_to_memory");
+      // The seed ledger: a deleted built-in stays deleted; an untouched one follows the code; an edited one is left alone.
+      {
+        const { listTemplates } = await import("../src/playbooks.js");
+        await db.query("DELETE FROM journey_templates WHERE id = 'team-memory'");
+        await db.query("UPDATE journey_templates SET stages = '[]'::jsonb WHERE id = 'fix-loss'");
+        const pb = await import("../src/playbooks.js");
+        (pb as any).__resetSeed?.();
+        const again = await listTemplates();
+        assert.ok(!again.some((t) => t.id === "team-memory"), "a deleted built-in is not re-added");
+        assert.ok(again.find((t) => t.id === "fix-loss")!.stages.length > 0, "an untouched built-in gets its stages back");
+        await db.query(`INSERT INTO journey_templates (id, name, outcome, stages, promoted, position, updated_by) SELECT 'team-memory', $1, $2, $3, true, 99, 'built-in'`,
+          [memJ.name, memJ.outcome, JSON.stringify(memJ.stages.map(({ done, at, ...st }: any) => st))]);
+      }
       const base0 = jg.find((j: any) => j.id === "baseline");
       assert.ok(base0.stages.every((x: any) => x.prompt && x.expect && x.tools), "every stage has a prompt, tools and what you'll see");
       assert.ok(!JSON.stringify(jg).includes("{product}"), "prompts are filled in");
@@ -1362,7 +1379,7 @@ try {
       console.log("✓ journeys as use-case pipelines; connection catalog for every client, ordered by usage share");
       // Admins manage the journeys; the portal shows the promoted ones in order.
       const pb = await json(adm("GET", "/playbooks"));
-      assert.equal(pb.playbooks.length, 6, "built-in templates seeded once");
+      assert.equal(pb.playbooks.length, 7, "built-in templates seeded once");
       assert.ok(pb.tools.includes("run_simulation") && pb.playbooks.every((p: any) => p.adoption), "tool list and adoption for the editor");
       const custom = { name: "Docs launch check", outcome: "See whether agents find the new docs", who: "Docs team", time: "an hour",
         example: { title: "Example", result: "Agents found the new quickstart." },
