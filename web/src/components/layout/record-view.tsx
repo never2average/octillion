@@ -17,7 +17,6 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { Input } from '@/components/ui/input';
 import { Separator } from '@/components/ui/separator';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Icons } from '@/components/icons';
 import { downloadCsv, today, type CsvValue } from '@/lib/csv';
 import { cn } from '@/lib/utils';
@@ -85,7 +84,6 @@ export function RecordView<T>({
   const ns = (s: string) => (id ? `rv:${id}:${s}` : null);
   const [q, setQ] = useState('');
   const [open, setOpen] = useState<string | null>(null);
-  const [viewId, setViewId] = useStored<string>(ns('view'), views?.[0]?.id ?? '');
   const [sortMap, setSortMap] = useStored<Record<string, SortRule[]>>(ns('sort'), {});
   const [groupMap, setGroupMap] = useStored<Record<string, string | null>>(ns('group'), {});
   const [hiddenStored, setHidden] = useStored<string[] | null>(ns('cols'), null);
@@ -94,7 +92,8 @@ export function RecordView<T>({
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [sel, setSel] = useState<Set<string>>(() => new Set());
 
-  const view = views?.find((v) => v.id === viewId) ?? views?.[0];
+  // No view tabs: every table shows its first (whole) view; search and filters do the narrowing.
+  const view = views?.[0];
   const vid = view?.id ?? '_';
   const presetSort = view?.sort ?? defaultSort ?? [];
   const sorts = isObj(sortMap) ? sortMap : {}, groups = isObj(groupMap) ? groupMap : {};
@@ -127,7 +126,6 @@ export function RecordView<T>({
     return { base: base.length, ordered: gs ? gs.flatMap((g) => g.rows) : sorted, items };
   }, [rows, view, q, searchText, cols, rules, sort, groupCol, collapsed]);
   const page = usePaged(data.items, initialSize);
-  const counts = useMemo(() => views?.map((v) => (v.match ? rows.filter(v.match).length : rows.length)), [views, rows]);
 
   // Selection survives paging; keys that drop out of the filtered set are pruned.
   const live = useMemo(() => new Set(data.ordered.map(rowKey)), [data.ordered, rowKey]);
@@ -138,7 +136,6 @@ export function RecordView<T>({
   const allOnPage = pageKeys.length > 0 && pageKeys.every((k) => sel.has(k)), someOnPage = pageKeys.some((k) => sel.has(k));
   const toggle = (keys: string[], on: boolean) => setSel((s) => { const n = new Set(s); keys.forEach((k) => (on ? n.add(k) : n.delete(k))); return n; });
 
-  const pickView = (v: string) => { setViewId(v); clearSel(); setEditing(null); };
   const current = open ? rows.find((r) => rowKey(r) === open) : undefined;
   const close = () => setOpen(null);
 
@@ -182,8 +179,8 @@ export function RecordView<T>({
   // Simple pages (no id, views or typed columns) keep today's toolbar exactly.
   const database = !!id || !!views || anyTyped || cols.some((c) => c.hidden || c.title);
   const searching = !!q.trim() || rules.some(ruleActive);
-  const narrowed = searching || (!!views && vid !== views[0].id);
-  const clearAll = () => { setQ(''); setRuleMap({}); if (views) pickView(views[0].id); };
+  const narrowed = searching;
+  const clearAll = () => { setQ(''); setRuleMap({}); };
 
   // CSV: every shown column; value() when given, else render() when it is plain text, else the column is skipped.
   const exportRows = (list: readonly T[], suffix = '') => {
@@ -225,21 +222,6 @@ export function RecordView<T>({
   return (
     // Fills the page below the header (header 3.5–4rem plus the page's padding): the table frame never scrolls or shrinks.
     <div className='flex h-[calc(100svh-5.5rem)] min-h-[24rem] min-w-0 flex-col gap-3'>
-      {views && (
-        <div className='flex h-8 shrink-0 items-center gap-2 overflow-x-auto'>
-          <Tabs value={vid} onValueChange={(v) => pickView(String(v))}>
-            <TabsList variant='line'>
-              {views.map((v, i) => (
-                <TabsTrigger key={v.id} value={v.id} className='flex-none gap-1.5 px-2 leading-none'>
-                  {v.label}{v.count !== false && <span className='text-muted-foreground text-xs tabular-nums'>{counts?.[i]}</span>}
-                </TabsTrigger>
-              ))}
-            </TabsList>
-          </Tabs>
-          {dirty && <Button variant='ghost' size='xs' className='text-muted-foreground shrink-0' onClick={reset}>Reset</Button>}
-        </div>
-      )}
-
       <div className='flex flex-wrap items-center gap-2'>
         <div className='relative min-w-48 flex-1'>
           <Icons.search className='text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2' />
@@ -265,7 +247,7 @@ export function RecordView<T>({
       ) : rules.length > 0 && (
         <div className='flex min-h-8 shrink-0 items-center gap-2'>
           <FilterChips cols={cols} rows={rows} rules={rules} setRules={setRules} editing={editing} setEditing={setEditing} />
-          {!views && <Button variant='ghost' size='xs' className='text-muted-foreground ml-auto' onClick={reset}>Reset</Button>}
+          {(!views || dirty) && <Button variant='ghost' size='xs' className='text-muted-foreground ml-auto' onClick={reset}>Reset</Button>}
         </div>
       )}
 
