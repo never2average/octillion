@@ -71,7 +71,7 @@ export const MEMORY_KINDS = ["fact", "decision", "preference", "note"] as const;
 export type MemoryScope = (typeof MEMORY_SCOPES)[number];
 export interface Memory { id: number; scope: MemoryScope; subject: string; kind: string; body: string; created_by: string | null; created_at: Date }
 
-export async function listMemories(orgId: number, scope: MemoryScope, subject: string, limit = 200): Promise<Memory[]> {
+export async function listMemories(orgId: number, scope: MemoryScope, subject: string, limit = 5000): Promise<Memory[]> {
   return (await getDb()).query<Memory>(
     "SELECT id::int AS id, scope, subject, kind, body, created_by, created_at FROM context_memories WHERE org_id = $1 AND scope = $2 AND subject = $3 ORDER BY created_at DESC, id DESC LIMIT $4",
     [orgId, scope, subject, limit]);
@@ -90,6 +90,22 @@ export async function addMemory(orgId: number, actor: string | null, b: Record<s
     `INSERT INTO context_memories (org_id, scope, subject, kind, body, created_by) VALUES ($1, $2, $3, $4, $5, $6)
      RETURNING id::int AS id, scope, subject, kind, body, created_by, created_at`, [orgId, scope, scope === "company" ? "" : subject, kind, body, actor]);
   return m;
+}
+
+/** Bulk add (import): each item is { kind?, body }; an unknown kind becomes a note, empty bodies are skipped. */
+export async function importMemories(orgId: number, actor: string | null, scope: MemoryScope, subject: string, items: unknown): Promise<{ imported: number; skipped: number }> {
+  if (!Array.isArray(items)) throw new ContextError("items must be a list of { kind, body }");
+  if (items.length > 1000) throw new ContextError("Import at most 1,000 items at a time");
+  let imported = 0, skipped = 0;
+  for (const raw of items) {
+    const it = (raw ?? {}) as Record<string, unknown>;
+    const body = text(it.body ?? it.memory, 1000);
+    if (!body) { skipped++; continue; }
+    const kind = (MEMORY_KINDS as readonly string[]).includes(String(it.kind ?? "").toLowerCase()) ? String(it.kind).toLowerCase() : "note";
+    await addMemory(orgId, actor, { scope, kind, body }, subject);
+    imported++;
+  }
+  return { imported, skipped };
 }
 
 export async function getMemory(orgId: number, id: number): Promise<Memory | null> {

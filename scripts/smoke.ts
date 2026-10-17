@@ -1072,6 +1072,17 @@ try {
       assert.match(devI, /Company memory:[\s\S]*fact: Acme Queue 3 ships exactly-once[\s\S]*decision: We stopped competing/, "company memory reaches the AI client");
       assert.match(devI, /asked you to remember:[\s\S]*preference: Lead with the Python numbers/);
       assert.match(devI, /Memory about [\s\S]*Docs moved to \/v3/, "so does their focus product's");
+      // Import (export is a client-side CSV of the same list): kinds normalised, blanks skipped, scoped like a save.
+      const imp = await json(appCall(devC, "POST", "/context/memories/import", { scope: "product", subject: slugP,
+        items: [{ kind: "Decision", body: "Imported: v4 drops Node 18." }, { kind: "weird", memory: "Imported: changelog is weekly." }, { body: "  " }] }));
+      assert.deepEqual(imp, { imported: 2, skipped: 1 });
+      const prodMem = await json(appCall(devC, "GET", `/context/memories?scope=product&subject=${slugP}`));
+      assert.deepEqual(prodMem.memories.slice(0, 2).map((m: any) => m.kind).sort(), ["decision", "note"]);
+      assert.equal((await appCall(devC, "POST", "/context/memories/import", { scope: "user", subject: accepted.user.id, items: [{ body: "x" }] })).status, 403);
+      assert.equal((await appCall(devC, "POST", "/context/memories/import", { scope: "company", items: "nope" })).status, 400);
+      const bulk = Array.from({ length: 300 }, (_, i) => ({ kind: "fact", body: `Bulk import item ${i}: ${"x".repeat(80)}` }));
+      assert.equal(JSON.stringify(bulk).length > 16_000, true);
+      assert.deepEqual(await json(appCall(ownerC, "POST", "/context/memories/import", { scope: "product", subject: slugP, items: bulk })), { imported: 300, skipped: 0 }, "a big import is not held to the 16kb body limit");
       // The same memory from the AI client: save_to_memory and search_memory over MCP, as the signed-in person.
       const devMcp = new Client({ name: "smoke-memory", version: "1.0.0" });
       await devMcp.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${await token({ user_id: acc2.user.id })}` } } }));

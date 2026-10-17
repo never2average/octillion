@@ -1,4 +1,5 @@
 import {
+  IconDownload,
   IconShieldLock,
   IconAdjustmentsHorizontal,
   IconAlertCircle,
@@ -185,6 +186,7 @@ export const Icons = {
   add: IconPlus,
   edit: IconEdit,
   upload: IconUpload,
+  download: IconDownload,
   share: IconShare,
   login: IconLogin,
   logout: IconLogout,

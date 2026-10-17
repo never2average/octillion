@@ -164,7 +164,9 @@ export function appRouter() {
 
   // The API behind the portal pages. Sign-in and sign-out happen in the UI, with Clerk.
   const api = express.Router();
-  api.use(express.json({ limit: "16kb" }));
+  // Small bodies everywhere except a memory import (up to 1,000 items), which parses its own up to 2 MB.
+  const small = express.json({ limit: "16kb" });
+  api.use((req, res, next) => (req.path === "/context/memories/import" ? next() : small(req, res, next)));
   api.use((_req, res, next) => { res.set("Cache-Control", "no-store"); next(); });
   api.use(async (req, res, next) => {
     if (!clerk.clerkEnabled()) return void res.status(503).json({ error: "Sign-in is not configured (CLERK_SECRET_KEY)" });
@@ -303,6 +305,11 @@ export function appRouter() {
   api.post("/context/memories", async (req, res) => {
     const scope = String(req.body?.scope ?? "");
     res.status(201).json(await context.addMemory(S(res).org, actor(res), req.body ?? {}, await memorySubject(res, scope, req.body?.subject)));
+  });
+  api.post("/context/memories/import", express.json({ limit: "2mb" }), async (req, res) => {
+    const scope = String(req.body?.scope ?? "") as context.MemoryScope;
+    if (!context.MEMORY_SCOPES.includes(scope)) throw new AppError("scope must be company, user or product");
+    res.json(await context.importMemories(S(res).org, actor(res), scope, await memorySubject(res, scope, req.body?.subject), req.body?.items));
   });
   api.put("/context/memories/:id", async (req, res) => {
     const m = await context.getMemory(S(res).org, Number(req.params.id));

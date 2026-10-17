@@ -1,6 +1,6 @@
 'use client';
-// Institutional memory on /app/context: the pieces the context table uses. A Gmail-style floating button and a compose
-// window docked bottom-right (minimise, close) where memory items are saved and changed.
+// Institutional memory on /app/context: the pieces the context table uses: item kinds and a Gmail-style
+// compose window docked bottom-right (minimise, close) where memory items are saved and changed.
 import { useEffect, useState } from 'react';
 import { Icons } from '@/components/icons';
 import { cn } from '@/lib/utils';
@@ -21,16 +21,6 @@ export const TYPE_STYLE: Record<string, string> = {
   preference: 'bg-sky-500/15 text-sky-400',
   note: 'bg-muted text-muted-foreground'
 };
-
-/** The floating "Remember" button, bottom-right. */
-export function RememberFab({ onClick }: { onClick: () => void }) {
-  return (
-    <button type='button' onClick={onClick}
-      className='bg-primary text-primary-foreground fixed right-6 bottom-6 z-40 flex items-center gap-2 rounded-2xl px-5 py-4 text-sm font-semibold shadow-xl shadow-black/40 transition-transform hover:scale-[1.03] focus-visible:ring-4 focus-visible:ring-primary/30 focus-visible:outline-none'>
-      <Icons.edit className='size-5' /> Remember
-    </button>
-  );
-}
 
 /** A compose window docked bottom-right, Gmail-style: title bar that minimises, close, and the form inside. */
 export function Dock({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {

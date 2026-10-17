@@ -1,7 +1,7 @@
 'use client';
 // /app Context: the account's institutional memory, one page each for the company, a user and a product. Each page
-// does three things: show the memory list, save to it (the floating Remember button and its docked editor), and
-// search it. The AI client reads and writes the same memory (save_to_memory, search_memory; src/context.ts).
+// shows the memory list, saves to it (Add memory and its docked editor), searches it, and exports or imports it as
+// CSV or JSON. The AI client reads and writes the same memory (save_to_memory, search_memory; src/context.ts).
 import { TablePager, usePaged } from '@/components/layout/table-pager';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
@@ -15,7 +15,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Icons } from '@/components/icons';
 import { appApi } from '@/lib/api-client';
 import { cn } from '@/lib/utils';
-import { Dock, KINDS, RememberFab, TYPE_STYLE, type Kind, type MemoryItem, type MemoryScope } from './memory';
+import { Dock, KINDS, TYPE_STYLE, type Kind, type MemoryItem, type MemoryScope } from './memory';
 import { ErrorState, LoadingCards, When, fail, useOrgLoad } from './shared';
 
 interface Ctx { person: unknown | null; products: { slug: string; name: string }[] }
@@ -77,6 +77,15 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
 
   const page = usePaged(shown);
   const noSubject = section !== 'company' && !subject;
+  const file = useRef<HTMLInputElement>(null);
+  const importFile = async (f: File) => {
+    let rows: { kind?: string; body?: string }[];
+    try { rows = parseMemoryFile(f.name, await f.text()); } catch (e) { fail(e); return; }
+    if (!rows.length) { toast.error('No memories found in that file'); return; }
+    appApi<{ imported: number; skipped: number }>('POST', '/context/memories/import', { scope, subject, items: rows })
+      .then((r) => { toast.success(`Imported ${r.imported} memor${r.imported === 1 ? 'y' : 'ies'}${r.skipped ? `, skipped ${r.skipped} empty` : ''}`); load(); })
+      .catch(fail);
+  };
   return (
     <div className='flex min-w-0 flex-col gap-3 pb-24'>
       <div className='flex flex-wrap items-center gap-2'>
@@ -94,6 +103,14 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
           <Icons.search className='text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2' />
           <Input type='search' value={q} onChange={(e) => setQ(e.target.value)} placeholder={`Search ${label ? `${label === 'You' ? 'your' : `${label}'s`} ` : ''}memory`} aria-label='Search memory' className='h-9 pl-8' />
         </div>
+        {!noSubject && <>
+          <Button onClick={() => setEditing({})}><Icons.add /> Add memory</Button>
+          <div className='ml-auto flex gap-1'>
+            <Button variant='ghost' size='sm' disabled={!items?.length} onClick={() => items && exportCsv(items, label)}><Icons.download /> Export</Button>
+            <Button variant='ghost' size='sm' onClick={() => file.current?.click()}><Icons.upload /> Import</Button>
+            <input ref={file} type='file' accept='.csv,.json,text/csv,application/json' className='hidden' onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) void importFile(f); }} />
+          </div>
+        </>}
       </div>
 
       {noSubject ? (
@@ -113,7 +130,7 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
             <TableBody>
               {shown.length === 0 && (
                 <TableRow><TableCell colSpan={5} className='text-muted-foreground py-12 text-center'>
-                  {q ? 'No memory matches.' : 'Nothing remembered yet. Press Remember to save the first item.'}
+                  {q ? 'No memory matches.' : 'Nothing remembered yet. Add the first memory, or import a CSV or JSON file.'}
                 </TableCell></TableRow>
               )}
               {page.rows.map((m) => (
@@ -138,10 +155,59 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
         </div>
       )}
 
-      {!noSubject && !editing && <RememberFab onClick={() => setEditing({})} />}
       {editing && <MemoryEditor key={editing.item?.id ?? 'new'} item={editing.item} label={label} onClose={() => setEditing(null)} onSave={save} />}
     </div>
   );
+}
+
+// ---------- export / import ----------
+
+const csvCell = (v: string) => (/[",\n\r]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
+
+/** Download the list as CSV: kind, memory, added_by, added_at (the same columns import reads back). */
+function exportCsv(items: MemoryItem[], label: string) {
+  const lines = [['kind', 'memory', 'added_by', 'added_at'].join(','),
+    ...items.map((m) => [m.kind, m.body, m.created_by ?? '', new Date(m.created_at).toISOString()].map(csvCell).join(','))];
+  const blob = new Blob([`${lines.join('\r\n')}\r\n`], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `octillion-memory-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'export'}-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+/** RFC 4180-ish CSV: quoted fields, doubled quotes, newlines inside quotes. */
+function parseCsv(text: string): string[][] {
+  const rows: string[][] = []; let row: string[] = [], cell = '', quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quoted) {
+      if (ch === '"' && text[i + 1] === '"') { cell += '"'; i++; } else if (ch === '"') quoted = false; else cell += ch;
+    } else if (ch === '"') quoted = true;
+    else if (ch === ',') { row.push(cell); cell = ''; }
+    else if (ch === '\n' || ch === '\r') { if (ch === '\r' && text[i + 1] === '\n') i++; row.push(cell); rows.push(row); row = []; cell = ''; }
+    else cell += ch;
+  }
+  if (cell || row.length) { row.push(cell); rows.push(row); }
+  return rows.filter((r) => r.some((c) => c.trim()));
+}
+
+/** A memory file: our CSV export (or any CSV with a memory/body column), or JSON: a list of { kind, body } or strings. */
+function parseMemoryFile(name: string, text: string): { kind?: string; body?: string }[] {
+  const t = text.replace(/^\uFEFF/, '').trim();
+  if (name.toLowerCase().endsWith('.json') || t.startsWith('[') || t.startsWith('{')) {
+    const data = JSON.parse(t);
+    const list = Array.isArray(data) ? data : Array.isArray(data?.memories) ? data.memories : null;
+    if (!list) throw new Error('JSON must be a list of memories, e.g. [{ "kind": "fact", "body": "…" }]');
+    return list.map((x: unknown) => (typeof x === 'string' ? { body: x } : { kind: (x as any)?.kind, body: (x as any)?.body ?? (x as any)?.memory }));
+  }
+  const [head, ...rest] = parseCsv(t);
+  if (!head) return [];
+  const cols = head.map((h) => h.trim().toLowerCase());
+  const bodyAt = cols.findIndex((c) => c === 'memory' || c === 'body' || c === 'text');
+  const kindAt = cols.indexOf('kind');
+  if (bodyAt < 0) return [head, ...rest].map((r) => ({ body: r[0] })); // no header: one memory per line
+  return rest.map((r) => ({ kind: kindAt >= 0 ? r[kindAt] : undefined, body: r[bodyAt] }));
 }
 
 /** Save a new memory item or change one, in the docked window. */
