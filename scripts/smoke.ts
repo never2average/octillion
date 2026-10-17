@@ -1182,6 +1182,16 @@ try {
       assert.equal((await adm("DELETE", "/playbooks/docs-launch-check")).status, 204);
       await adm("POST", "/playbooks/release-watch/promote", { promoted: true });
       console.log("✓ journeys managed on /admin: create, validate tools, promote/hide, order, edit, delete");
+      // An account's own use cases (Add use case on /app/adoption): only that account sees them; not on /admin.
+      assert.equal((await appCall(devC, "POST", "/journeys", { outcome: "x", stages: [{ prompt: "y" }] })).status, 400, "a use case needs a name");
+      const uc = await json(appCall(devC, "POST", "/journeys", { name: "Pricing page check", outcome: "Know if agents read our pricing page",
+        stages: [{ title: "Read the report", prompt: "Show my visibility report.", tools: ["get_visibility_report"] }, { prompt: "Update the pricing page" }] }));
+      const mine = (await json(appCall(ownerC, "GET", "/journeys"))).journeys.find((j: any) => j.id === uc.id);
+      assert.ok(mine && mine.own && mine.stages.length === 2 && mine.stages[1].manual && mine.stages[1].title === "Update the pricing page");
+      assert.ok(!(await json(adm("GET", "/playbooks"))).playbooks.some((p: any) => p.id === uc.id), "account use cases stay off the global list");
+      assert.equal((await appCall(ownerC, "DELETE", "/journeys/release-watch")).status, 404, "global templates are not deletable from /app");
+      assert.equal((await appCall(ownerC, "DELETE", `/journeys/${uc.id}`)).status, 204, "an account admin removes it");
+      assert.ok(!(await portalIds()).includes(uc.id));
       // Journey analytics: progress recorded per account, a funnel on /admin, and journey_* events to PostHog once each.
       {
         const http = await import("node:http");

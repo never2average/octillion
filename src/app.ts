@@ -16,7 +16,9 @@ import { getDb } from "./db.js";
 import { getProduct, listProducts, orgMonthSpendUsd, saveProduct, saveScenarios } from "./queries.js";
 import * as context from "./context.js";
 import { getPopulation } from "./populations.js";
+import * as playbooks from "./playbooks.js";
 import { markStage, playbooksFor, PlaybookError, syncProgress } from "./playbooks.js";
+import { TOOL_NAMES } from "./server.js";
 import { capture, identifyPerson } from "./telemetry.js";
 import * as journeys from "./journeys.js";
 import * as limits from "./limits.js";
@@ -256,6 +258,16 @@ export function appRouter() {
   api.get("/journeys", async (_req, res) => {
     await syncProgress({ orgId: S(res).org, slug: S(res).slug }, S(res).user ?? undefined).catch((e) => console.error("journey sync:", e.message));
     res.json({ journeys: await playbooksFor(S(res).org) });
+  });
+  // The account's own use cases (Add use case on /app/adoption): anyone adds; whoever added it or an admin removes.
+  api.post("/journeys", async (req, res) => {
+    const id = await playbooks.createUseCase({ orgId: S(res).org, slug: S(res).slug }, actor(res), req.body ?? {}, TOOL_NAMES);
+    capture({ distinctId: S(res).user ?? `org:${S(res).slug}`, orgSlug: S(res).slug }, "use_case_added", { journey: id });
+    res.status(201).json({ id });
+  });
+  api.delete("/journeys/:id", async (req, res) => {
+    await playbooks.deleteUseCase(S(res).org, String(req.params.id), actor(res), S(res).role === "admin");
+    res.status(204).end();
   });
   api.post("/journeys/:id/view", async (req, res) => {
     capture({ distinctId: S(res).user ?? `org:${S(res).slug}`, orgSlug: S(res).slug }, "journey_viewed", { journey: String(req.params.id) });

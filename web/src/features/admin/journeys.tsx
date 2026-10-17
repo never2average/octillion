@@ -2,7 +2,6 @@
 // Journeys live in PostHog Workflows; Octillion delivers their in-chat and /app tips. Status, recipes, delivery, manual tips.
 import { useEffect, useRef, useState } from 'react';
 import PageContainer from '@/components/layout/page-container';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { CustomerJourneys } from './playbooks';
 import { Button } from '@/components/ui/button';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
@@ -34,14 +33,16 @@ interface JourneyView {
 /** Journeys: the customer journeys shown on /app (written and promoted here), and PostHog nudges. */
 export function AdminJourneys() {
   const [tab, setTab] = useState<'customer' | 'nudges'>('customer');
+  // Which list: the customer journeys (the table) or PostHog nudges; the switch sits in the table's toolbar.
+  const switcher = (
+    <NativeSelect value={tab} onChange={(e) => setTab(e.target.value as 'customer' | 'nudges')} aria-label='View' className='w-48'>
+      <NativeSelectOption value='customer'>Customer journeys</NativeSelectOption>
+      <NativeSelectOption value='nudges'>Nudges (PostHog)</NativeSelectOption>
+    </NativeSelect>
+  );
   return (
-    <PageContainer pageTitle='Journeys'
-      pageDescription='Customer journeys are the use-case pipelines customers follow on /app Setup. Nudges are PostHog Workflows steps that Octillion delivers in chat and on /app.'>
-      <Tabs value={tab} onValueChange={(v) => setTab(v as 'customer' | 'nudges')} className='max-w-6xl'>
-        <TabsList><TabsTrigger value='customer'>Customer journeys</TabsTrigger><TabsTrigger value='nudges'>Nudges (PostHog)</TabsTrigger></TabsList>
-        <TabsContent value='customer' className='pt-4'><CustomerJourneys /></TabsContent>
-        <TabsContent value='nudges' className='pt-4'><NudgesPanel /></TabsContent>
-      </Tabs>
+    <PageContainer>
+      {tab === 'customer' ? <CustomerJourneys switcher={switcher} /> : <div className='flex max-w-6xl flex-col gap-4'>{switcher}<NudgesPanel /></div>}
     </PageContainer>
   );
 }

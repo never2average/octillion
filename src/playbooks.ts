@@ -176,11 +176,11 @@ export class PlaybookError extends Error {
 }
 
 interface Row { id: string; name: string; outcome: string; who: string; time: string; example_title: string; example_result: string;
-  stages: Stage[]; promoted: boolean; position: number; updated_at: Date; updated_by: string | null }
+  stages: Stage[]; promoted: boolean; position: number; updated_at: Date; updated_by: string | null; org_id: number | null }
 
-const toPlaybook = (r: Row): Playbook & { promoted: boolean; position: number; updated_at: Date; updated_by: string | null } => ({
+const toPlaybook = (r: Row): Playbook & { promoted: boolean; position: number; updated_at: Date; updated_by: string | null; own: boolean } => ({
   id: r.id, name: r.name, outcome: r.outcome, who: r.who, time: r.time, example: { title: r.example_title, result: r.example_result },
-  stages: r.stages, promoted: r.promoted, position: r.position, updated_at: r.updated_at, updated_by: r.updated_by,
+  stages: r.stages, promoted: r.promoted, position: r.position, updated_at: r.updated_at, updated_by: r.updated_by, own: r.org_id != null,
 });
 
 let seeded = false;
@@ -199,11 +199,42 @@ async function ensureSeeded() {
   seeded = true;
 }
 
-export async function listTemplates(opts: { promotedOnly?: boolean } = {}) {
+/** Global templates (promoted only, if asked), plus with `orgId` that account's own use cases. */
+export async function listTemplates(opts: { promotedOnly?: boolean; orgId?: number } = {}) {
   await ensureSeeded();
+  const global = `org_id IS NULL${opts.promotedOnly ? " AND promoted" : ""}`;
   const rows = await (await getDb()).query<Row>(
-    `SELECT * FROM journey_templates ${opts.promotedOnly ? "WHERE promoted" : ""} ORDER BY position, name`);
+    `SELECT * FROM journey_templates WHERE (${global})${opts.orgId != null ? " OR org_id = $1" : ""} ORDER BY org_id NULLS FIRST, position, name`,
+    opts.orgId != null ? [opts.orgId] : []);
   return rows.map(toPlaybook);
+}
+
+/**
+ * An account's own use case (Add use case on /app/adoption): a name, the outcome and its steps, each a prompt to type,
+ * optionally tied to the Octillion tools that complete it (a step without tools is marked done by hand).
+ */
+export async function createUseCase(org: { orgId: number; slug: string }, actor: string, b: Record<string, any>, toolNames: readonly string[]) {
+  const stages = (Array.isArray(b.stages) ? b.stages : []).filter((st: any) => String(st?.title ?? "").trim() || String(st?.prompt ?? "").trim())
+    .map((st: any) => ({ ...st, title: String(st.title ?? "").trim() || String(st.prompt ?? "").trim().slice(0, 80), expect: String(st.expect ?? "").trim() || "Your AI client walks you through it." }));
+  const t = cleanTemplate({ ...b, stages }, toolNames);
+  const db = await getDb();
+  const base = `${org.slug}-${slug(t.name)}`.slice(0, 60);
+  let id = base;
+  for (let i = 2; (await db.query("SELECT 1 FROM journey_templates WHERE id = $1", [id])).length; i++) id = `${base}-${i}`;
+  await db.query(
+    `INSERT INTO journey_templates (id, name, outcome, who, time, example_title, example_result, stages, promoted, position, updated_by, org_id)
+     VALUES ($1, $2, $3, '', '', '', '', $4, false, 0, $5, $6)`, [id, t.name, t.outcome, JSON.stringify(t.stages), actor, org.orgId]);
+  return id;
+}
+
+/** Remove an account's own use case: whoever added it, or an account admin. Global templates are managed on /admin. */
+export async function deleteUseCase(orgId: number, id: string, actor: string, isAdmin: boolean) {
+  const db = await getDb();
+  const [r] = await db.query<{ updated_by: string | null }>("SELECT updated_by FROM journey_templates WHERE id = $1 AND org_id = $2", [id, orgId]);
+  if (!r) throw new PlaybookError("No such use case on this account", 404);
+  if (!isAdmin && r.updated_by !== actor) throw new PlaybookError("Only whoever added it, or an account admin, can remove it", 403);
+  await db.query("DELETE FROM journey_progress WHERE org_id = $1 AND journey_id = $2", [orgId, id]);
+  await db.query("DELETE FROM journey_templates WHERE id = $1 AND org_id = $2", [id, orgId]);
 }
 
 const slug = (v: unknown) => String(v ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48);
@@ -289,7 +320,7 @@ export async function deleteTemplate(id: string) {
  */
 export async function syncProgress(org: { orgId: number; slug: string }, distinctId?: string) {
   const db = await getDb();
-  const templates = await listTemplates({ promotedOnly: true });
+  const templates = await listTemplates({ promotedOnly: true, orgId: org.orgId });
   const progress = await progressFor(org.orgId, templates);
   const have = new Set((await db.query<{ journey_id: string; stage_id: string }>(
     "SELECT journey_id, stage_id FROM journey_progress WHERE org_id = $1", [org.orgId])).map((r) => `${r.journey_id}/${r.stage_id}`));
@@ -324,7 +355,7 @@ export function scheduleSync(org: { orgId: number; slug: string }, distinctId?: 
 
 /** A person marks a stage with no tool (e.g. "ship the fix") done, or undoes it. */
 export async function markStage(org: { orgId: number; slug: string }, userId: string | null, journeyId: string, stageId: string, done: boolean) {
-  const t = (await listTemplates()).find((x) => x.id === journeyId);
+  const t = (await listTemplates({ orgId: org.orgId })).find((x) => x.id === journeyId);
   const st = t?.stages.find((x) => x.id === stageId);
   if (!t || !st) throw new PlaybookError("No such journey stage", 404);
   if (!st.manual) throw new PlaybookError("This stage is marked done by your AI client's tool calls, not by hand");
@@ -375,7 +406,7 @@ export async function templatesWithAdoption() {
 
 /** Every promoted journey with its stages marked from this account's tool calls, prompts filled in with its product. */
 export async function playbooksFor(orgId: number) {
-  return progressFor(orgId, await listTemplates({ promotedOnly: true }));
+  return progressFor(orgId, await listTemplates({ promotedOnly: true, orgId }));
 }
 
 async function progressFor(orgId: number, templates: Playbook[]) {
@@ -398,7 +429,9 @@ async function progressFor(orgId: number, templates: Playbook[]) {
       if (at) since = Math.max(since, new Date(at).getTime());
       return { ...st, prompt: fill(st.prompt), why: fill(st.why), expect: fill(st.expect), done: Boolean(at), at };
     });
+    const own = Boolean((p as { own?: boolean }).own); // the account's own use case, not a global template
     return { id: p.id, name: p.name, outcome: p.outcome, who: p.who, time: p.time, example: { ...p.example }, stages,
-             done: stages.filter((x) => x.done).length, total: stages.length, manualCount: stages.filter((x) => x.manual).length };
+             done: stages.filter((x) => x.done).length, total: stages.length, manualCount: stages.filter((x) => x.manual).length,
+             own, added_by: own ? ((p as { updated_by?: string | null }).updated_by ?? null) : null };
   });
 }

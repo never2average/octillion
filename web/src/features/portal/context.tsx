@@ -2,7 +2,6 @@
 // /app Context: the account's institutional memory, one page each for the company, a user and a product. Each page
 // shows the memory list, saves to it (Add memory and its docked editor), searches it, and exports or imports it as
 // CSV or JSON. The AI client reads and writes the same memory (save_to_memory, search_memory; src/context.ts).
-import { TablePager, usePaged } from '@/components/layout/table-pager';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import PageContainer from '@/components/layout/page-container';
@@ -11,12 +10,12 @@ import { ButtonGroup } from '@/components/ui/button-group';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Textarea } from '@/components/ui/textarea';
 import { Icons } from '@/components/icons';
 import { appApi } from '@/lib/api-client';
 import { cn } from '@/lib/utils';
 import { Dock, KINDS, TYPE_STYLE, type Kind, type MemoryItem, type MemoryScope } from './memory';
+import { Field, RecordView, type RecordCol } from '@/components/layout/record-view';
 import { ErrorState, LoadingCards, When, fail, useOrgLoad } from './shared';
 
 interface Ctx { person: unknown | null; products: { slug: string; name: string }[] }
@@ -41,7 +40,6 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
   // Users: one person at a time. Products: every product's memory in one table (no onboarded product needed).
   const [subject, setSubject] = useState<string>('');
   const [items, setItems] = useState<MemoryItem[] | null>(null);
-  const [q, setQ] = useState('');
   const [editing, setEditing] = useState<{ item?: MemoryItem } | null>(null);
 
   useEffect(() => {
@@ -62,10 +60,6 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
   const label = section === 'company' ? 'Company' : section === 'users' ? (user ? (user.me ? 'You' : user.name || user.email || 'this user') : '') : 'Products';
   // Product names to suggest: onboarded products, then names already used in memory.
   const productNames = useMemo(() => [...new Set([...d.products.map((p) => p.name), ...(items ?? []).map((m) => m.subject_name ?? '').filter(Boolean)])], [d.products, items]);
-  const shown = useMemo(() => {
-    const words = q.trim().toLowerCase().split(/\s+/).filter(Boolean);
-    return (items ?? []).filter((m) => words.every((w) => `${m.kind} ${m.body} ${m.created_by ?? ''} ${m.subject_name ?? ''}`.toLowerCase().includes(w)));
-  }, [items, q]);
 
   const save = (item: MemoryItem | undefined, kind: Kind, body: string, product?: string) =>
     (item ? appApi('PUT', `/context/memories/${item.id}`, { kind, body }) : appApi('POST', '/context/memories', { scope, subject: section === 'products' ? product : subject, kind, body }))
@@ -73,7 +67,6 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
       .catch((e) => { fail(e); return false; });
   const remove = (m: MemoryItem) => appApi('DELETE', `/context/memories/${m.id}`).then(() => { toast.success('Removed from memory'); load(); }).catch(fail);
 
-  const page = usePaged(shown);
   const noSubject = section === 'users' && !subject;
   const file = useRef<HTMLInputElement>(null);
   const importFile = async (f: File) => {
@@ -84,81 +77,64 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
       .then((r) => { toast.success(`Imported ${r.imported} memor${r.imported === 1 ? 'y' : 'ies'}${r.skipped ? `, skipped ${r.skipped} ${section === 'products' ? 'empty or without a product' : 'empty'}` : ''}`); load(); })
       .catch(fail);
   };
+  const cols: RecordCol<MemoryItem>[] = [
+    { key: 'kind', label: 'Type', className: 'w-28', keep: true, render: (m) => <span className={cn('rounded-full px-2 py-0.5 text-[11px] font-medium', TYPE_STYLE[m.kind] ?? TYPE_STYLE.note)}>{m.kind}</span> },
+    ...(section === 'products' ? [{ key: 'product', label: 'Product', className: 'w-44', keep: true, render: (m: MemoryItem) => <span className='text-sm font-medium'>{m.subject_name}</span> }] : []),
+    { key: 'body', label: 'Memory', keep: true, render: (m) => <p className='line-clamp-3 text-sm whitespace-pre-wrap'>{m.body}</p> },
+    { key: 'by', label: 'Added by', className: 'hidden w-48 md:table-cell', render: (m) => <span className='text-muted-foreground text-xs'>{m.created_by ?? '—'}</span> },
+    { key: 'at', label: 'Added', className: 'hidden w-32 sm:table-cell', render: (m) => <span className='text-muted-foreground text-xs'><When d={m.created_at} /></span> }
+  ];
+  const picker = section === 'users' && users && users.length > 1 && (
+    <NativeSelect aria-label='User' value={subject} onChange={(e) => setSubject(e.target.value)} className='w-56'>
+      {users.map((u) => <NativeSelectOption key={u.user_id} value={u.user_id}>{`${u.name || u.email || 'Unnamed user'}${u.me ? ' (you)' : ''}${u.active ? '' : ' · suspended'}`}</NativeSelectOption>)}
+    </NativeSelect>
+  );
+  const primary = !noSubject && (<>
+    <ButtonGroup>
+      <Button onClick={() => setEditing({})}><Icons.add /> Add memory</Button>
+      <DropdownMenu>
+        <DropdownMenuTrigger render={<Button size='icon' aria-label='More memory actions' className='border-primary-foreground/20 border-l' />}>
+          <Icons.chevronDown />
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align='end' className='w-44'>
+          <DropdownMenuItem onClick={() => file.current?.click()}><Icons.upload /> Import CSV or JSON</DropdownMenuItem>
+          <DropdownMenuItem disabled={!items?.length} onClick={() => items && exportCsv(items, label, section === 'products')}><Icons.download /> Export CSV</DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </ButtonGroup>
+    <input ref={file} type='file' accept='.csv,.json,text/csv,application/json' className='hidden' onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) void importFile(f); }} />
+  </>);
   return (
-    <div className='flex min-w-0 flex-col gap-3 pb-24'>
-      <div className='flex flex-wrap items-center gap-2'>
-        {section === 'users' && users && users.length > 1 && (
-          <NativeSelect aria-label='User' value={subject} onChange={(e) => setSubject(e.target.value)} className='w-56'>
-            {users.map((u) => <NativeSelectOption key={u.user_id} value={u.user_id}>{`${u.name || u.email || 'Unnamed user'}${u.me ? ' (you)' : ''}${u.active ? '' : ' · suspended'}`}</NativeSelectOption>)}
-          </NativeSelect>
+    <>
+      <RecordView<MemoryItem>
+        key={subject}
+        rows={items ?? []} rowKey={(m) => String(m.id)} cols={cols} loading={items === null && !noSubject} noun='memories'
+        searchText={(m) => `${m.kind} ${m.body} ${m.created_by ?? ''} ${m.subject_name ?? ''}`}
+        searchPlaceholder={`Search ${label ? `${label === 'You' ? 'your' : `${label}'s`} ` : ''}memory`}
+        filters={picker || undefined}
+        primary={primary || undefined}
+        empty={noSubject ? 'Nobody to show.' : 'Nothing remembered yet. Add the first memory, or import a CSV or JSON file.'}
+        detailTitle={(m) => `${m.kind[0].toUpperCase()}${m.kind.slice(1)}${m.subject_name && section === 'products' ? ` · ${m.subject_name}` : ''}`}
+        detail={(m, close) => (
+          <div className='flex flex-col gap-5'>
+            <p className='text-base whitespace-pre-wrap'>{m.body}</p>
+            <dl>
+              <Field label='Type'><span className={cn('rounded-full px-2 py-0.5 text-[11px] font-medium', TYPE_STYLE[m.kind] ?? TYPE_STYLE.note)}>{m.kind}</span></Field>
+              {section === 'products' && <Field label='Product'>{m.subject_name}</Field>}
+              <Field label='Added by'>{m.created_by ?? '—'}</Field>
+              <Field label='Added'><When d={m.created_at} /></Field>
+            </dl>
+            {m.can_delete && (
+              <div className='flex gap-2 border-t pt-4'>
+                <Button onClick={() => setEditing({ item: m })}><Icons.edit /> Edit</Button>
+                <Button variant='ghost' className='text-destructive' onClick={() => { close(); void remove(m); }}><Icons.trash /> Remove</Button>
+              </div>
+            )}
+          </div>
         )}
-        <div className='relative min-w-48 flex-1'>
-          <Icons.search className='text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2' />
-          <Input type='search' value={q} onChange={(e) => setQ(e.target.value)} placeholder={`Search ${label ? `${label === 'You' ? 'your' : `${label}'s`} ` : ''}memory`} aria-label='Search memory' className='h-9 pl-8' />
-        </div>
-        {!noSubject && <>
-          <ButtonGroup>
-            <Button onClick={() => setEditing({})}><Icons.add /> Add memory</Button>
-            <DropdownMenu>
-              <DropdownMenuTrigger render={<Button size='icon' aria-label='More memory actions' className='border-primary-foreground/20 border-l' />}>
-                <Icons.chevronDown />
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align='end' className='w-44'>
-                <DropdownMenuItem onClick={() => file.current?.click()}><Icons.upload /> Import CSV or JSON</DropdownMenuItem>
-                <DropdownMenuItem disabled={!items?.length} onClick={() => items && exportCsv(items, label, section === 'products')}><Icons.download /> Export CSV</DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </ButtonGroup>
-          <input ref={file} type='file' accept='.csv,.json,text/csv,application/json' className='hidden' onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) void importFile(f); }} />
-        </>}
-      </div>
-
-      {noSubject ? (
-        <p className='text-muted-foreground border-y py-10 text-center text-sm'>Nobody to show.</p>
-      ) : items === null ? <LoadingCards count={1} /> : (
-        <div className='overflow-x-auto border-y'>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className='w-28'>Type</TableHead>
-                {section === 'products' && <TableHead className='w-44'>Product</TableHead>}
-                <TableHead>Memory</TableHead>
-                <TableHead className='hidden w-48 md:table-cell'>Added by</TableHead>
-                <TableHead className='hidden w-32 sm:table-cell'>Added</TableHead>
-                <TableHead className='w-20'><span className='sr-only'>Actions</span></TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {shown.length === 0 && (
-                <TableRow><TableCell colSpan={section === 'products' ? 6 : 5} className='text-muted-foreground py-12 text-center'>
-                  {q ? 'No memory matches.' : 'Nothing remembered yet. Add the first memory, or import a CSV or JSON file.'}
-                </TableCell></TableRow>
-              )}
-              {page.rows.map((m) => (
-                <TableRow key={m.id} className={cn('group align-top', m.can_delete && 'cursor-pointer')} onClick={m.can_delete ? () => setEditing({ item: m }) : undefined}>
-                  <TableCell className='py-3'><span className={cn('rounded-full px-2 py-0.5 text-[11px] font-medium', TYPE_STYLE[m.kind] ?? TYPE_STYLE.note)}>{m.kind}</span></TableCell>
-                  {section === 'products' && <TableCell className='py-3 text-sm font-medium whitespace-normal'>{m.subject_name}</TableCell>}
-                  <TableCell className='py-3 whitespace-normal'><p className='text-sm whitespace-pre-wrap'>{m.body}</p></TableCell>
-                  <TableCell className='text-muted-foreground hidden py-3 text-xs md:table-cell'>{m.created_by ?? '—'}</TableCell>
-                  <TableCell className='text-muted-foreground hidden py-3 text-xs sm:table-cell'><When d={m.created_at} /></TableCell>
-                  <TableCell className='py-2 text-right' onClick={(e) => e.stopPropagation()}>
-                    {m.can_delete && (
-                      <div className='flex justify-end gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100'>
-                        <Button variant='ghost' size='icon' className='size-7' aria-label='Edit' onClick={() => setEditing({ item: m })}><Icons.edit className='size-4' /></Button>
-                        <Button variant='ghost' size='icon' className='size-7' aria-label='Remove from memory' onClick={() => remove(m)}><Icons.trash className='size-4' /></Button>
-                      </div>
-                    )}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-          <TablePager p={page} noun='memories' className='border-t px-2' />
-        </div>
-      )}
-
+      />
       {editing && <MemoryEditor key={editing.item?.id ?? 'new'} item={editing.item} label={label} products={section === 'products' ? productNames : undefined} onClose={() => setEditing(null)} onSave={save} />}
-    </div>
+    </>
   );
 }
 

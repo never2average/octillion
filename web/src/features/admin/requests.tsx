@@ -12,7 +12,8 @@ import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Icons } from '@/components/icons';
 import { accountHref, post, useAdmin, useAdminAction, type InviteResult, type OrgList } from './lib';
 import { useResult } from './result-dialog';
-import { ConfirmButton, ErrorBox, LoadingCards, StatusBadge, When } from './ui';
+import { Field, RecordView, type RecordCol } from '@/components/layout/record-view';
+import { ConfirmButton, ErrorBox, StatusBadge, When } from './ui';
 
 interface Req {
   id: number;
@@ -35,78 +36,59 @@ export function AdminRequests() {
   const decline = useAdminAction((q: Req) => post(`/requests/${q.id}/decline`), { success: 'Declined' });
   const reopen = useAdminAction((q: Req) => post(`/requests/${q.id}/reopen`), { success: 'Back in pending' });
 
+  const link = (q: Req) => (q.product_url ? (/^https?:\/\//.test(q.product_url) ? q.product_url : `https://${q.product_url}`) : null);
+  const tone = (q: Req) => (q.status === 'pending' ? 'info' : q.status === 'approved' ? 'ok' : 'neutral') as 'info' | 'ok' | 'neutral';
+  const actions = (q: Req) => (
+    <div className='flex flex-wrap gap-2'>
+      {q.status === 'pending' && (<>
+        <Button size='sm' onClick={() => setApproving(q)}><Icons.check className='size-3.5' /> Approve</Button>
+        <ConfirmButton label='Decline' title={`Decline ${q.company}?`} description='Nothing is sent to them. You can reopen the request later.' confirmLabel='Decline' onConfirm={() => decline.mutate(q)} />
+      </>)}
+      {q.status === 'declined' && <Button variant='outline' size='sm' disabled={reopen.isPending} onClick={() => reopen.mutate(q)}>Reopen</Button>}
+      {q.status === 'approved' && q.org_slug && <Link className={buttonVariants({ variant: 'outline', size: 'sm' })} href={accountHref(q.org_slug)}>Open {q.org_name}</Link>}
+    </div>
+  );
+  const cols: RecordCol<Req>[] = [
+    { key: 'company', label: 'Company', keep: true, render: (q) => <div className='space-y-1'><p className='font-semibold'>{q.company}</p><StatusBadge tone={tone(q)}>{q.status}</StatusBadge></div> },
+    { key: 'contact', label: 'Contact', render: (q) => <span className='text-muted-foreground text-sm'>{q.email}</span> },
+    { key: 'message', label: 'Message', render: (q) => q.message ? <p className='line-clamp-2 text-sm'>{q.message}</p> : <span className='text-muted-foreground'>—</span> },
+    { key: 'at', label: 'Requested', className: 'w-28', keep: true, render: (q) => <When d={q.created_at} className='text-muted-foreground text-xs' /> }
+  ];
+
   return (
-    <PageContainer
-      pageTitle='Access requests'
-      pageDescription='Sign-ups from the landing page. Approving creates the account (or adds the person to one) and invites them.'
-    >
-      <Tabs value={status} onValueChange={(v) => setStatus(v as Status)} className='mb-4'>
-        <TabsList>
-          <TabsTrigger value='pending'>Pending</TabsTrigger>
-          <TabsTrigger value='approved'>Approved</TabsTrigger>
-          <TabsTrigger value='declined'>Declined</TabsTrigger>
-          <TabsTrigger value='all'>All</TabsTrigger>
-        </TabsList>
-      </Tabs>
+    <PageContainer>
       <ErrorBox error={error} />
-      {isLoading || !data ? (
-        <LoadingCards count={3} />
-      ) : data.requests.length ? (
-        <ul className='max-w-4xl divide-y border-y'>
-          {data.requests.map((q) => {
-            const url = q.product_url ? (/^https?:\/\//.test(q.product_url) ? q.product_url : `https://${q.product_url}`) : null;
-            return (
-              <li key={q.id} className='grid gap-2 py-4'>
-                  <div className='flex flex-wrap items-center gap-2'>
-                    <span className='font-semibold'>{q.company}</span>
-                    <StatusBadge tone={q.status === 'pending' ? 'info' : q.status === 'approved' ? 'ok' : 'neutral'}>{q.status}</StatusBadge>
-                    <When d={q.created_at} className='text-muted-foreground ml-auto text-xs' />
-                  </div>
-                  <div className='text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1 text-sm'>
-                    <a className='hover:text-foreground underline-offset-4 hover:underline' href={`mailto:${q.email}`}>
-                      {q.email}
-                    </a>
-                    {url && (
-                      <a className='hover:text-foreground inline-flex items-center gap-1 underline-offset-4 hover:underline' href={url} target='_blank' rel='noopener noreferrer'>
-                        {q.product_url}
-                        <Icons.externalLink className='size-3' />
-                      </a>
-                    )}
-                  </div>
-                  {q.message && <p className='text-sm whitespace-pre-wrap'>{q.message}</p>}
-                  <div className='flex flex-wrap gap-2 pt-1'>
-                    {q.status === 'pending' && (
-                      <>
-                        <Button size='sm' onClick={() => setApproving(q)}>
-                          <Icons.check className='size-3.5' /> Approve
-                        </Button>
-                        <ConfirmButton
-                          label='Decline'
-                          title={`Decline ${q.company}?`}
-                          description='Nothing is sent to them. You can reopen the request later.'
-                          confirmLabel='Decline'
-                          onConfirm={() => decline.mutate(q)}
-                        />
-                      </>
-                    )}
-                    {q.status === 'declined' && (
-                      <Button variant='outline' size='sm' disabled={reopen.isPending} onClick={() => reopen.mutate(q)}>
-                        Reopen
-                      </Button>
-                    )}
-                    {q.status === 'approved' && q.org_slug && (
-                      <Link className={buttonVariants({ variant: 'outline', size: 'sm' })} href={accountHref(q.org_slug)}>
-                        Open {q.org_name}
-                      </Link>
-                    )}
-                  </div>
-              </li>
-            );
-          })}
-        </ul>
-      ) : (
-        <p className='text-muted-foreground border-y py-12 text-center text-sm'>No {status === 'all' ? '' : status} requests.</p>
-      )}
+      <RecordView<Req>
+        rows={data?.requests ?? []} rowKey={(q) => String(q.id)} cols={cols} loading={isLoading || !data} noun='requests'
+        searchText={(q) => `${q.company} ${q.email} ${q.product_url ?? ''} ${q.message ?? ''} ${q.status}`}
+        searchPlaceholder='Search access requests'
+        filters={
+          <NativeSelect value={status} onChange={(e) => setStatus(e.target.value as Status)} aria-label='Status' className='w-36'>
+            <NativeSelectOption value='pending'>Pending</NativeSelectOption>
+            <NativeSelectOption value='approved'>Approved</NativeSelectOption>
+            <NativeSelectOption value='declined'>Declined</NativeSelectOption>
+            <NativeSelectOption value='all'>All</NativeSelectOption>
+          </NativeSelect>
+        }
+        empty={`No ${status === 'all' ? '' : `${status} `}requests.`}
+        detailTitle={(q) => q.company}
+        detail={(q) => {
+          const url = link(q);
+          return (
+            <div className='flex flex-col gap-5'>
+              <dl>
+                <Field label='Status'><StatusBadge tone={tone(q)}>{q.status}</StatusBadge></Field>
+                <Field label='Email'><a className='text-primary underline-offset-4 hover:underline' href={`mailto:${q.email}`}>{q.email}</a></Field>
+                <Field label='Product'>{url ? <a className='inline-flex items-center gap-1 underline-offset-4 hover:underline' href={url} target='_blank' rel='noopener noreferrer'>{q.product_url}<Icons.externalLink className='size-3' /></a> : '—'}</Field>
+                <Field label='Requested'><When d={q.created_at} /></Field>
+                {q.org_name && <Field label='Account'>{q.org_name}</Field>}
+                <Field label='Message'>{q.message ? <p className='whitespace-pre-wrap'>{q.message}</p> : '—'}</Field>
+              </dl>
+              {actions(q)}
+            </div>
+          );
+        }}
+      />
       {approving && (
         <ApproveDialog
           req={approving}

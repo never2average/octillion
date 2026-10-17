@@ -600,3 +600,7 @@ CREATE TABLE IF NOT EXISTS context_memories (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS context_memories_scope ON context_memories (org_id, scope, subject, created_at DESC);
+
+-- Use cases an account adds for itself on /app/adoption (src/playbooks.ts): journey templates owned by one account.
+-- NULL: a global template managed on /admin.
+ALTER TABLE journey_templates ADD COLUMN IF NOT EXISTS org_id INT REFERENCES organizations(id) ON DELETE CASCADE;
