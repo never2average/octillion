@@ -339,11 +339,10 @@ export function ViewMenu<T>({ cols, sort, setSort, group, setGroup, hidden, setH
   const sortable = cols.filter(typed), groupBy = cols.filter((c) => c.type === 'select' && c.value);
   const first = sort[0], cur = groupBy.find((c) => c.key === group);
   const nHidden = hidden.filter((k) => cols.some((c) => c.key === k && !c.title)).length;
-  const changed = !!cur || nHidden > 0;
   const label = 'text-muted-foreground text-xs font-medium leading-none';
   return (
     <Popover>
-      <PopoverTrigger render={<Button variant='ghost' size='icon' aria-label='View options' title='Sort, group and columns' className={cn(changed && 'text-primary')} />}>
+      <PopoverTrigger render={<Button variant='ghost' size='icon' aria-label='View options' title='Sort, group and columns' />}>
         <IconAdjustmentsHorizontal />
       </PopoverTrigger>
       <PopoverContent align='end' className='flex w-72 flex-col gap-4'>
