@@ -1,3 +1,4 @@
+import * as priv from "./private.js";
 import { readFileSync } from "node:fs";
 import { chatLine, nudgeForChat } from "./journeys.js";
 import { span } from "./telemetry.js";
@@ -26,6 +27,8 @@ const competitor = z.object({
   aliases: z.array(z.string()).optional(),
   packages: z.array(z.string()).optional(),
   domains: z.array(z.string()).optional(),
+  evidence_url: z.string().url().optional().describe("A page showing it competes (research sets this from its searches)"),
+  source: z.enum(["research", "customer", "runs"]).optional().describe("Who added it; omit when adding by hand (customer)"),
 });
 
 /** Tool name -> handler, for one organization. Shared by the MCP server and the local preview. */
@@ -42,14 +45,23 @@ export function handlersFor(org: Org) {
     list_simulations: (a: { product?: string }) => q.listSimulations(org, a.product),
     get_simulation: (a: { simulation_id: string }) => q.getSimulation(org, a.simulation_id),
     cancel_simulation: (a: { simulation_id: string }) => q.cancelSimulation(org, a.simulation_id),
-    get_visibility_report: (a: { product?: string; days?: number; model?: string; population?: string }) => q.getReport(org, a),
+    get_visibility_report: (a: { product?: string; days?: number; model?: string; population?: string; simulation?: string; platform?: string }) => q.getReport(org, a),
     get_agent_session: (a: { session_id: string }) => q.getSession(org, a.session_id),
     get_session_transcript: (a: { session_id: string; offset?: number; limit?: number }) =>
       q.getTranscript(org, a.session_id, a.offset, a.limit),
     search_transcripts: (a: Parameters<typeof q.searchTranscripts>[1]) => q.searchTranscripts(org, a),
     list_developer_profiles: (a: { query?: string; product?: string }) => q.listProfiles(org, a),
-    list_agents: (a: { population?: string }) => q.listAgents(a),
-    browse_task_library: (a: { query?: string; category?: string; language?: string; limit?: number }) => q.browseTaskLibrary(a),
+    list_agents: (a: { population?: string }) => q.listAgents(org, a),
+    browse_task_library: (a: { query?: string; category?: string; language?: string; platform?: string; limit?: number }) => q.browseTaskLibrary(a),
+    save_harness_mix: (a: { name: string; description?: string; agents: { agent_id: string; share: number }[] }) => priv.saveHarnessMix(org, a),
+    list_harness_mixes: (_a: Record<string, never>) => priv.listHarnessMixes(org),
+    review_draft_tasks: (a: { product?: string; approve?: number[]; reject?: number[] }) => research.reviewDraftTasks(org, a),
+    save_personas: (a: { personas: priv.PersonaInput[] }) => priv.savePersonas(org, a.personas),
+    list_personas: (_a: Record<string, never>) => priv.listPersonas(org),
+    import_tasks: (a: { product?: string; task_set: string; description?: string; tasks: priv.TaskInput[] }) => priv.importTasks(org, a),
+    list_task_sets: (a: { product?: string }) => priv.listTaskSets(org, a.product),
+    register_harness: (a: { spec: priv.HarnessSpec }) => priv.registerHarness(org, a.spec),
+    list_harnesses: (_a: Record<string, never>) => priv.listHarnesses(org),
     save_to_memory: (a: { body: string; kind?: string; scope?: memory.ToolScope; product?: string }) => memory.saveMemoryFromAI(org, a),
     search_memory: (a: { query?: string; scope?: memory.ToolScope | "all"; product?: string; limit?: number }) => memory.searchMemory(org, a),
   };
@@ -68,7 +80,7 @@ function summarize(d: Data): string {
         : `${d.org.name} has no products yet. Start with onboard_product: a short description plus the website and docs links, and Octillion researches the rest (or use save_product to enter the details by hand).`;
     case "product": {
       const p = d.product;
-      return `${p.name} [${p.slug}]: ${p.description || "(no description)"} Category: ${p.category || "n/a"}. Aliases: ${p.aliases.join(", ") || "none"}. Packages: ${p.packages.join(", ") || "none"}. Competitors: ${p.competitors.map((c) => c.name).join(", ") || "none"}. ${d.scenarios.length} scenarios (${d.scenarios.filter((s: any) => s.active).length} active)${d.scenarios.length ? `: ${d.scenarios.map((s: any) => `#${s.id} ${s.title} (${s.expectation}, hit ${pct(s.hit_rate)} of ${s.sessions})`).join("; ")}` : ""}. Worker agents: ${d.agents.map((a: any) => `${a.id} (${pct(a.weight)})`).join(", ")}.${d.warnings.length ? ` Warnings: ${d.warnings.join(" ")}` : ""}`;
+      return `${p.name} [${p.slug}]: ${p.description || "(no description)"} Category: ${p.category || "n/a"}. Aliases: ${p.aliases.join(", ") || "none"}. Packages: ${p.packages.join(", ") || "none"}. Competitors: ${p.competitors.map((c) => c.name).join(", ") || "none"}. ${d.scenarios.length} scenarios (${d.scenarios.filter((s: any) => s.active).length} active)${d.scenarios.length ? `: ${d.scenarios.map((s: any) => `#${s.id} ${s.title} (${s.library_task_id ? `library task #${s.library_task_id}` : `not from the library: ${s.source}`}, ${s.platform ?? "?"}, ${s.expectation}, hit ${pct(s.hit_rate)} of ${s.sessions})`).join("; ")}` : ""}. Worker agents: ${d.agents.map((a: any) => `${a.id} (${pct(a.weight)})`).join(", ")}.${d.warnings.length ? ` Warnings: ${d.warnings.join(" ")}` : ""}`;
     }
     case "simulations":
       return d.simulations.length
@@ -84,10 +96,8 @@ function summarize(d: Data): string {
       const base = `Simulation ${s.id} "${s.name}" for ${s.product}: ${s.status}. ${d.totals.sessions} agent sessions (${Object.entries(d.status).map(([k, v]) => `${v} ${k}`).join(", ")}). Hit rate ${pct(d.totals.hit_rate)} over ${d.totals.scored} scored. Verdicts: ${Object.entries(d.verdicts).map(([k, v]) => `${k} ${v}`).join(", ") || "none yet"}.${Object.keys(d.completed_reasons ?? {}).length ? ` Ended: ${Object.entries(d.completed_reasons).map(([k, v]) => `${k} ${v}`).join(", ")}.` : ""} By agent: ${d.by_agent.map((a: any) => `${a.label} ${pct(a.hit_rate)} (n=${a.scored})`).join(", ")}.${d.capacity ? ` Capacity: ${d.capacity.message}` : ""}`;
       return base + adaptive;
     }
-    case "report": {
-      const t = d.totals;
-      return `${d.product.name}, last ${d.filters.days} days${d.filters.model ? ` (${d.filters.model})` : ""}: ${t.sessions} scored agent sessions. Hit rate ${pct(t.hit_rate)}${t.weighted_hit_rate != null ? ` (adoption-weighted ${pct(t.weighted_hit_rate)})` : ""}${t.hit_ci ? ` (95% CI ${pct(t.hit_ci[0])}-${pct(t.hit_ci[1])})` : ""}, adopted ${pct(t.adoption_rate)}, lost to a competitor ${pct(t.competitor_rate)}. Share of voice: ${d.share_of_voice.map((v: any) => `${v.tool} ${pct(v.share)}`).join(", ") || "n/a"}. By agent: ${d.by_agent.map((a: any) => `${a.label} ${pct(a.hit_rate)} (n=${a.sessions})`).join(", ") || "n/a"}. ${d.by_profile.length ? `By developer profile: ${d.by_profile.map((p: any) => `${p.name} ${pct(p.hit_rate)}`).join(", ")}. ` : ""}Weakest scenarios: ${d.by_scenario.slice(0, 3).map((s: any) => `#${s.id} ${s.title} ${pct(s.hit_rate)}${s.usual_winner ? ` (usually ${s.usual_winner})` : ""}`).join("; ") || "n/a"}.`;
-    }
+    case "report":
+      return reportMarkdown(d);
     case "session": {
       const s = d.session;
       const ev = (s.mentions ?? []).map((m: any) => `${m.tool}: ${m.level}${m.evidence[0] ? ` (#${m.evidence[0].seq} "${m.evidence[0].snippet}")` : ""}`);
@@ -99,18 +109,36 @@ function summarize(d: Data): string {
       return `Developer population "${d.population.name}" [${d.population.slug}]${d.populations.length > 1 ? ` (others: ${d.populations.filter((p: any) => p.slug !== d.population.slug).map((p: any) => p.slug).join(", ")})` : ""}. Coding agents (as of ${d.as_of ?? "n/a"}), weighted by real-world developer adoption, rounded to whole sandboxes out of ${d.sandbox_unit}: ${d.agents.filter((a) => a.enabled).map((a) => `${a.id} ${a.sandboxes}/${d.sandbox_unit} (${pct(a.weight)})`).join(", ")}.${d.agents.some((a) => !a.enabled) ? ` Not runnable yet: ${d.agents.filter((a) => !a.enabled).map((a) => a.label).join(", ")}.` : ""}${d.unrepresented_share != null ? ` Usage share not representable (IDE-only tools): ${pct(d.unrepresented_share)}.` : ""} A default run samples ${d.default_samples} sessions per scenario in these proportions. Runnable agents cover ${pct(d.runnable_coverage)} of representable usage${d.agents.some((a) => a.status === "adapter pending") ? `; adapters pending for ${d.agents.filter((a) => a.status === "adapter pending").map((a) => a.label).join(", ")}` : ""}.`;
     case "onboarding": {
       const r = d.research, p = d.product;
-      const head = `Onboarding ${r.id} for ${p.name}: ${r.status}${r.stage && r.status === "running" ? ` (${r.stage}${r.note ? `: ${r.note}` : ""})` : ""}${r.error ? `. Error: ${r.error}` : ""}.`;
+      const head = `Onboarding ${r.id} for ${p.name}: ${r.status}${r.stage && r.status === "running" ? ` (${r.stage}${r.note ? `: ${r.note}` : ""})` : ""}.`;
+      if (r.status === "failed" && d.failure)
+        return `${head} ${d.failure.summary} What to do next: ${d.failure.next.map((x: string, i: number) => `(${i + 1}) ${x}`).join(" ")} Tell the user plainly; do not show internal error text.`;
       if (r.status === "queued" && d.capacity) return `${head} Capacity: ${d.capacity.message} Check again with get_onboarding.`;
       if (r.status !== "completed") return `${head} The orchestrator is researching the website and docs, then writes the product profile, target developer personas and programming problems. Check again with get_onboarding.`;
-      return `${head} Profile: ${p.category || "n/a"}; aliases ${p.aliases.join(", ") || "none"}; packages ${p.packages.join(", ") || "none"}; competitors ${p.competitors.map((c: any) => c.name).join(", ") || "none"}. Personas: ${d.personas.map((x: any) => x.name).join("; ")}. Problems (${d.scenarios.length}): ${d.scenarios.map((s: any) => `#${s.id} ${s.title} [${s.source}${s.expectation === "avoid" ? ", avoid" : ""}]`).join("; ")}.${d.simulation ? ` Simulation ${d.simulation.id}: ${d.simulation.status}, ${d.simulation.finished}/${d.simulation.sessions} sessions done; see get_simulation / get_visibility_report.` : r.status === "completed" ? " Research is done and no run has started: review the competitors and problems with the user, then launch it with run_simulation." : ""}`;
+      return `${head} Profile: ${p.category || "n/a"}; aliases ${p.aliases.join(", ") || "none"}; packages ${p.packages.join(", ") || "none"}; competitors ${p.competitors.map((c: any) => c.name).join(", ") || "none"}. Personas: ${d.personas.map((x: any) => x.name).join("; ")}. Problems (${d.scenarios.length}): ${d.scenarios.map((s: any) => `#${s.id} ${s.title} [${s.source}${s.expectation === "avoid" ? ", avoid" : ""}]`).join("; ")}.${d.drafts?.length ? ` Draft tasks waiting for the user's approval (research wrote them because the library had nothing fitting; they run only once approved with review_draft_tasks): ${d.drafts.map((s: any) => `#${s.id} ${s.title}`).join("; ")}.` : ""}${d.simulation ? ` Simulation ${d.simulation.id}: ${d.simulation.status}, ${d.simulation.finished}/${d.simulation.sessions} sessions done; see get_simulation / get_visibility_report.` : d.next_step ? ` Next step, offer it to the user now: ${d.next_step.message} If they agree, call ${d.next_step.tool} ${JSON.stringify(d.next_step.args)}.` : r.status === "completed" && d.drafts?.length ? " No task is active yet: ask the user to review the draft tasks (review_draft_tasks), then run_simulation." : ""}`;
     }
     case "profiles":
       return d.profiles.length
         ? `${d.profiles.length} developer profiles${d.query ? ` matching "${d.query}"` : ""}: ${d.profiles.map((p: any) => `${p.slug} (${p.name}: ${p.summary})`).join("; ")}. Pass slugs as run_simulation profiles.`
         : "No developer profiles synced from the vault yet.";
+    case "personas":
+      return d.personas.length
+        ? `${d.personas.length} private persona(s) of this organization: ${d.personas.map((p: any) => `${p.slug} (${p.name}, ${p.source}${p.active ? "" : ", inactive"})`).join("; ")}. Pass slugs as run_simulation profiles. Only this organization can see or use them.`
+        : "No private personas yet. Add your own with save_personas, or pick shared ones with list_developer_profiles.";
+    case "task_sets":
+      return d.task_sets.length
+        ? `${d.task_sets.length} private task set(s): ${d.task_sets.map((t: any) => `${t.name} [${t.id}] for ${t.product}: ${t.active_tasks} active task(s)`).join("; ")}. Run one with run_simulation {task_set}.`
+        : "No private task sets yet. Bring your own with import_tasks.";
+    case "harness_mixes":
+      return d.mixes.length
+        ? `${d.mixes.length} private harness mix(es): ${d.mixes.map((m: any) => `${m.name} [${m.slug}]: ${m.agents.map((a: any) => `${a.agent_id} ${Math.round(a.share * 100)}%`).join(", ")}`).join("; ")}. Run one with run_simulation {population: slug}; its reports are labelled and never blended with the default mix.`
+        : "No private harness mixes yet. The default is the market-weighted mix (list_agents); define your own with save_harness_mix.";
+    case "harnesses":
+      return d.harnesses.length
+        ? `${d.harnesses.length} private harness(es): ${d.harnesses.map((h: any) => `${h.name} ${h.version} [${h.id}]: ${h.status}${h.status_reason ? ` (${h.status_reason})` : ""}`).join("; ")}. A harness runs only once it is approved after an isolated build and scan.`
+        : "No private harnesses yet. Submit a declarative spec with register_harness.";
     case "library":
       return d.tasks.length
-        ? `${d.tasks.length} library tasks: ${d.tasks.map((t: any) => `#${t.id} ${t.title} [${t.category ?? "uncategorized"}${t.language ? `, ${t.language}` : ""}]`).join("; ")}. Categories: ${d.categories.map((c: any) => `${c.category ?? "uncategorized"} (${c.tasks})`).join(", ")}. Add one to a product with save_scenarios {library_task_id}.`
+        ? `${d.tasks.length} library tasks: ${d.tasks.map((t: any) => `#${t.id} ${t.title} [${t.platform ?? "?"}, ${t.category ?? "uncategorized"}${t.language ? `, ${t.language}` : ""}]`).join("; ")}. Categories: ${d.categories.map((c: any) => `${c.category ?? "uncategorized"} (${c.tasks})`).join(", ")}. Platforms: ${(d.platforms ?? []).map((c: any) => `${c.platform ?? "?"} (${c.tasks})`).join(", ")}. Add one to a product with save_scenarios {library_task_id}.`
         : "No matching tasks in the library.";
     case "memory": {
       const line = (m: any) => `#${m.id} [${m.scope === "product" ? m.subject_name : m.scope === "user" ? "you" : "company"}, ${m.kind}] ${m.body}`;
@@ -125,6 +153,59 @@ function summarize(d: Data): string {
       return `${r.total} transcript events match "${d.query}" (${d.filters.mode}).${r.hits.length ? ` Top: ${r.hits.slice(0, 5).map((h) => `${h.session_id}#${h.seq} (${h.type}, ${h.model}): ${h.text.slice(0, 120)}`).join(" | ")}` : ""}`;
     }
   }
+}
+
+/**
+ * The visibility report as a sectioned Markdown document, in the order a written report uses (docs/case-studies/resend.md):
+ * headline findings, results by task, by agent, by persona, share of voice, the agents' own words, method, limits.
+ */
+export function reportMarkdown(d: Extract<Data, { view: "report" }>): string {
+  const t = d.totals, name = d.product.name, m = d.method;
+  const range = (ci: [number, number] | null) => (ci ? `${Math.round(ci[0] * 100)}–${Math.round(ci[1] * 100)}%` : "–");
+  const cell = (s: string) => String(s ?? "").replace(/\|/g, "/");
+  const scope = (m.scope ? `run ${m.scope.simulation} "${m.scope.name}" (${m.scope.status})` : `last ${d.filters.days} days`) +
+    (d.population && !d.population.is_default ? `, custom harness mix "${d.population.name}" (not the market-weighted default; do not compare it with default-mix figures)` : "");
+  if (!Number(t.sessions)) return `# ${name}: agent visibility report\n\nNo scored agent sessions (${scope}${d.filters.model ? `, ${d.filters.model}` : ""}). Run a simulation with run_simulation.`;
+  const out: string[] = [`# ${name}: agent visibility report`, `Scope: ${scope}${d.filters.model ? `, model ${d.filters.model}` : ""}${d.filters.platform ? `, ${d.filters.platform} tasks only` : ""}. ${t.sessions} scored sessions.`];
+
+  out.push("## Headline", ...d.headline.map((h: string) => `- ${h}`),
+    `- Hit rate ${pct(t.hit_rate)} (95% range ${range(t.hit_ci)})${t.weighted_hit_rate != null ? `, adoption-weighted ${pct(t.weighted_hit_rate)}` : ""}; lost to a competitor ${pct(t.competitor_rate)}.`);
+
+  if (d.by_platform?.length) out.push("## Results by platform", `| Platform | Tasks | Sessions (should win) | ${cell(name)} | Competitor | No vendor | Mentioned ${cell(name)} | 95% range | Control correct |`, "|---|---|---|---|---|---|---|---|---|",
+    ...d.by_platform.map((x: any) => `| ${x.platform} | ${x.tasks} | ${x.sessions} | ${x.product} | ${x.competitor} | ${x.no_vendor} | ${x.product_mentioned} | ${range(x.hit_ci)} | ${x.control.sessions ? `${x.control.correct} of ${x.control.sessions}` : "–"} |`));
+
+  out.push("## Results by task", `| Task | Library task | Platform | Should ${cell(name)} win? | Scored | ${cell(name)} | Competitor | No vendor | Mentioned ${cell(name)} | 95% range |`, "|---|---|---|---|---|---|---|---|---|---|",
+    ...d.by_scenario.map((s: any) => {
+      const o = s.outcomes ?? { product: s.hits, competitor: 0, no_vendor: 0 };
+      const winners = (s.winners ?? []).map((w: any) => `${w.tool} ${w.sessions}`).join(", ");
+      return `| ${cell(s.title)} | ${s.library_task_id ? `#${s.library_task_id}` : `none (${s.source ?? "custom"})`} | ${s.platform ?? "–"} | ${s.expectation === "recommend" ? "yes" : "no (control)"} | ${s.sessions} | ${o.product} | ${winners || o.competitor} | ${o.no_vendor} | ${s.product_mentioned ?? "–"} | ${range(s.hit_ci)} |`;
+    }));
+  const shortlists = d.by_scenario.filter((s: any) => s.expectation === "recommend" && s.alternatives?.length);
+  if (shortlists.length) out.push("", "Named instead of " + name + " (sessions that did not choose it):", ...shortlists.map((s: any) => `- ${s.title}: ${s.alternatives.slice(0, 5).map((a: any) => `${a.tool} ${a.sessions}`).join(", ")}`));
+
+  const agents = d.by_agent.filter((a: any) => a.on_target?.sessions);
+  if (agents.length) out.push(`## By agent (tasks ${name} should win)`, `| Agent | Sessions | ${cell(name)} | Competitor | No vendor |`, "|---|---|---|---|---|",
+    ...agents.map((a: any) => `| ${cell(a.label)} | ${a.on_target.sessions} | ${a.on_target.product} | ${a.on_target.competitor} | ${a.on_target.no_vendor} |`));
+  if (d.by_profile.length > 1) out.push("## By developer persona", ...d.by_profile.map((p: any) => `- ${p.name}: ${pct(p.hit_rate)} of ${p.sessions} (95% range ${range(p.hit_ci)}), ${Number(p.avg_user_turns || 0).toFixed(1)} questions answered on average`));
+  if (d.share_of_voice.length) out.push("## Share of voice", "Share of scored sessions where the agent recommended or adopted each tool:",
+    ...d.share_of_voice.slice(0, 8).map((v: any) => `- ${v.tool}${v.target ? " (product)" : ""}: ${pct(v.share)} (recommended ${v.recommended}, adopted ${v.adopted}, mentioned ${v.mentioned})`));
+
+  const ut = d.untracked_tools;
+  if (ut?.packages?.length) out.push("## Installed but not tracked",
+    `In the ${ut.sessions_with_no_tool} sessions scored "no vendor", agents installed these packages, which match neither ${name} nor a tracked competitor. Any that do the same job is a missing competitor: offer to add it with save_product (keep the existing competitors in the list).`,
+    ...ut.packages.map((x: any) => `- ${x.name} (${x.ecosystem}): ${x.sessions} session${x.sessions === 1 ? "" : "s"}`));
+
+  if (d.evidence.length) out.push("## Evidence: the deciding sessions", "Losses first, then sessions that built without a vendor. Read the transcript around #seq with get_session_transcript.",
+    ...d.evidence.map((e: any) => `- ${e.session_id} · ${e.agent}${e.profile ? ` as ${e.profile}` : ""} · "${e.scenario}" → ${e.outcome === "product" ? name : e.outcome === "competitor" ? e.winner ?? "competitor" : `no vendor${e.mentioned_product ? ` (mentioned ${name})` : ""}`}${e.evidence ? `: "${e.evidence.quote}" (${e.evidence.tool}, ${e.evidence.level}, #${e.evidence.seq})` : ""}`));
+
+  out.push("## How this was run",
+    `- ${m.tasks.total} tasks (${m.tasks.recommend} ${name} should win, ${m.tasks.avoid} control); ${m.sessions} sessions, ${m.scored} scored; agent spend $${Number(m.cost_usd).toFixed(2)}.`,
+    `- Agents: ${m.agents.map((a: any) => `${a.label} ${a.sessions}`).join(", ") || "n/a"}.`,
+    `- Personas: ${m.personas.map((p: any) => `${p.name} ${p.sessions}`).join(", ") || "none"}.`,
+    `- Competitors credited: ${m.competitors.join(", ") || "none configured"}.`,
+    ...(m.sampling ? [`- Adaptive sampling up to ${m.sampling.max_per_task} per task: ${m.sampling.settled} settled, ${m.sampling.at_cap} at the cap.`] : []));
+  out.push("## Limits", ...d.limits.map((l: string) => `- ${l}`));
+  return out.join("\n");
 }
 
 /**
@@ -200,8 +281,13 @@ async function runToolInner(org: Org, name: ToolName, args: Record<string, unkno
       structuredContent: nudge ? { ...structured, nudge: { message: nudge.message, prompt: nudge.prompt } } : structured,
     };
   } catch (err) {
-    recordMcpEvent(org, { method: "tools/call", name, ok: false, error: (err as Error).message, ms: performance.now() - t0 });
-    return { isError: true, content: [{ type: "text", text: (err as Error).message }] };
+    // Database errors (SQLSTATE codes) can echo other rows' values, e.g. a unique-key clash revealing that another
+    // organization uses a slug; callers get a generic message, never the raw text.
+    const e = err as Error & { code?: unknown };
+    const message = typeof e.code === "string" && /^[0-9A-Z]{5}$/.test(e.code)
+      ? `The request could not be completed (database error ${e.code}). Check the arguments and try again.` : e.message;
+    recordMcpEvent(org, { method: "tools/call", name, ok: false, error: message, ms: performance.now() - t0 });
+    return { isError: true, content: [{ type: "text", text: message }] };
   }
 }
 
@@ -230,6 +316,15 @@ export const TOOL_STATUS: Record<ToolName, [string, string]> = {
   list_developer_profiles: ["Loading developer profiles…", "Developer profiles loaded"],
   list_agents: ["Loading agent mix…", "Agent mix loaded"],
   browse_task_library: ["Browsing task library…", "Task library loaded"],
+  save_personas: ["Saving private personas…", "Private personas saved"],
+  list_personas: ["Loading private personas…", "Private personas loaded"],
+  import_tasks: ["Importing private tasks…", "Private tasks imported"],
+  list_task_sets: ["Loading private task sets…", "Private task sets loaded"],
+  register_harness: ["Registering private harness…", "Private harness submitted"],
+  list_harnesses: ["Loading private harnesses…", "Private harnesses loaded"],
+  save_harness_mix: ["Saving private harness mix…", "Private harness mix saved"],
+  review_draft_tasks: ["Saving draft task review…", "Draft tasks reviewed"],
+  list_harness_mixes: ["Loading private harness mixes…", "Private harness mixes loaded"],
   save_to_memory: ["Saving to memory…", "Saved to memory"],
   search_memory: ["Searching memory…", "Memory searched"],
 };
@@ -370,6 +465,7 @@ export function createServer(org: Org, context = ""): McpServer {
         tags: z.array(z.string()).optional(),
         expectation: z.enum(["recommend", "avoid"]).optional(),
         active: z.boolean().optional(),
+        platform: z.enum(["web", "mobile", "backend", "desktop", "cli", "data", "other"]).optional().describe("Where the task's code runs; omit to derive it from the template, language and prompt"),
       })).min(1),
     },
     annotations: write, _meta: meta("save_scenarios"),
@@ -381,6 +477,8 @@ export function createServer(org: Org, context = ""): McpServer {
     inputSchema: {
       product,
       scenario_ids: z.array(z.number().int()).optional(),
+      platform: z.enum(["web", "mobile", "backend", "desktop", "cli", "data", "other"]).optional().describe("Only the product's active scenarios on this platform, e.g. mobile"),
+      task_set: z.string().optional().describe("Only the tasks of one of your private task sets (name or id, see list_task_sets)"),
       agents: z.array(z.string()).optional().describe("Explicit worker agent ids (list_agents), e.g. 'claude-code/sonnet'"),
       models: z.array(z.string()).optional().describe("Explicit: only agents using these models"),
       samples: z.number().int().min(1).max(100).optional().describe(`Representative mode: first batch of sessions per scenario (default ${q.config.defaultSamples()}). Given alone it makes a fixed-size run with no adaptive sampling`),
@@ -409,19 +507,21 @@ export function createServer(org: Org, context = ""): McpServer {
 
   registerAppTool(server, "cancel_simulation", {
     title: "Cancel simulation",
-    description: "Cancel a simulation's queued sessions. Sessions already running finish normally.",
+    description: "Cancel a simulation: queued sessions never start, and running sessions are stopped (their model access is revoked and their sandboxes shut down).",
     inputSchema: { simulation_id: z.string() },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }, _meta: meta("cancel_simulation"),
   }, run("cancel_simulation"));
 
   registerAppTool(server, "get_visibility_report", {
     title: "Visibility report",
-    description: "How often coding agents pick the product: hit rate, adoption rate, losses to competitors, share of voice against each competitor, breakdown by model and by scenario, a daily trend and recent losses with links to the evidence.",
+    description: "A sectioned report on whether coding agents pick the product: headline findings; results by platform (web, mobile, backend, ...) and by task (built on the product, on which competitor, or on no vendor, and whether the product was even mentioned); results by agent and by developer persona; share of voice; quotes from the deciding sessions; how the run was set up; and limits. Pass simulation to report on one run (as a case study does), or days for a rolling window.",
     inputSchema: {
       product,
       days: z.number().int().min(1).max(365).optional().describe("Look-back window (default 30)"),
       model: z.string().optional().describe("Only this model"),
       population: z.string().optional().describe("Developer population for usage shares and the adoption-weighted rate"),
+      simulation: z.string().optional().describe("Only this simulation (e.g. sim_Ab3...), whatever its age; overrides days"),
+      platform: z.enum(["web", "mobile", "backend", "desktop", "cli", "data", "other"]).optional().describe("Only tasks on this platform (web, mobile, backend, ...)"),
     },
     annotations: read, _meta: meta("get_visibility_report"),
   }, run("get_visibility_report"));
@@ -475,6 +575,95 @@ export function createServer(org: Org, context = ""): McpServer {
     annotations: read, _meta: meta("list_agents"),
   }, run("list_agents"));
 
+  // ---------- private assets: owned by this organization only (docs/security.md) ----------
+  const personaSchema = z.object({
+    slug: z.string().optional().describe("Update this persona (from list_personas); omit to add a new one"),
+    name: z.string().max(80), summary: z.string().max(600).optional(),
+    instructions: z.string().max(1500).optional().describe("How this developer answers a coding agent's questions"),
+    attributes: z.record(z.string(), z.unknown()).optional().describe("role, experience_years, company_size, stack[], constraints[], tone"),
+    environment: z.object({ editor: z.string(), tools: z.array(z.string()).optional() }).passthrough().optional()
+      .describe("Editor and CLI tools they have installed (see list_developer_profiles for examples)"),
+    active: z.boolean().optional(),
+  });
+  registerAppTool(server, "save_personas", {
+    title: "Save private personas",
+    description: "Add or update your own developer personas (the developers you target). Private to your organization: no other organization can see, search or use them. Run them with run_simulation {profiles: [slug]}.",
+    inputSchema: { personas: z.array(personaSchema).min(1).max(20) },
+    annotations: write, _meta: meta("save_personas"),
+  }, run("save_personas"));
+  registerAppTool(server, "list_personas", {
+    title: "Private personas",
+    description: "Your organization's own personas: the ones you saved and the ones research picked for your products.",
+    inputSchema: {}, annotations: read, _meta: meta("list_personas"),
+  }, run("list_personas"));
+  registerAppTool(server, "import_tasks", {
+    title: "Import a private task set",
+    description: "Bring your own tasks (for example from past case studies) as a named task set for a product. Private to your organization. Run them with run_simulation {task_set}.",
+    inputSchema: {
+      product, task_set: z.string().max(120).describe("Name of the set, e.g. '2025 case studies'"),
+      description: z.string().max(2000).optional(),
+      tasks: z.array(z.object({
+        title: z.string().max(160).optional(), prompt: z.string().min(20).max(6000).describe("The task as a developer would give it to a coding agent"),
+        language: z.string().optional(), tags: z.array(z.string()).optional(),
+        platform: z.enum(["web", "mobile", "backend", "desktop", "cli", "data", "other"]).optional(),
+        template: z.enum(["express-ts", "nextjs-ts", "node-ts", "fastapi", "django", "go-http", "react-native", "flutter", "java-spring", "rust-axum", "cpp-cmake", "auto"]).optional(),
+        repo_url: z.string().optional(), expectation: z.enum(["recommend", "avoid"]).optional(),
+        provenance: z.string().max(500).optional().describe("Where the task comes from, e.g. the case study"),
+      })).min(1).max(200),
+    },
+    annotations: write, _meta: meta("import_tasks"),
+  }, run("import_tasks"));
+  registerAppTool(server, "list_task_sets", {
+    title: "Private task sets",
+    description: "Your organization's private task sets and their tasks.",
+    inputSchema: { product }, annotations: read, _meta: meta("list_task_sets"),
+  }, run("list_task_sets"));
+  registerAppTool(server, "register_harness", {
+    title: "Register a private harness",
+    description: "Submit your own coding agent as a declarative spec (pinned packages with integrity hashes, the executable and its arguments, the model providers it calls through the Octillion gateway). Private to your organization. It is built and scanned in isolation and runs only once approved; real vendor keys are never given to it.",
+    inputSchema: {
+      spec: z.object({
+        name: z.string(), version: z.string(),
+        install: z.array(z.record(z.string(), z.unknown())).min(1).max(10),
+        allow_install_scripts: z.boolean().optional(), bin: z.string(),
+        launch_argv: z.array(z.string()), resume_argv: z.array(z.string()).optional(),
+        event_format: z.enum(["octillion-jsonl", "claude-stream-json", "codex-json", "acp"]),
+        providers: z.array(z.string()), egress_hosts: z.array(z.string()).optional(),
+      }),
+    },
+    annotations: write, _meta: meta("register_harness"),
+  }, run("register_harness"));
+  registerAppTool(server, "review_draft_tasks", {
+    title: "Review draft tasks",
+    description: "Approve or reject the draft tasks onboarding research proposed for needs Octillion's task library does not cover (listed by get_onboarding). Only approved drafts run.",
+    inputSchema: {
+      product,
+      approve: z.array(z.number().int()).optional().describe("Draft task ids to approve (they become active tasks)"),
+      reject: z.array(z.number().int()).optional().describe("Draft task ids to reject"),
+    },
+    annotations: write, _meta: meta("review_draft_tasks"),
+  }, run("review_draft_tasks"));
+  registerAppTool(server, "save_harness_mix", {
+    title: "Save a private harness mix",
+    description: "Define your own distribution of coding agents (for example only the agents your users run), from the runnable agents in list_agents. Private to your organization. Run it with run_simulation {population: slug}. Reports on it are labelled and never blended with the market-weighted default, which stays the headline figure.",
+    inputSchema: {
+      name: z.string().min(2).max(80), description: z.string().max(500).optional(),
+      agents: z.array(z.object({ agent_id: z.string(), share: z.number().positive() })).min(1).max(30)
+        .describe("Agents and their relative shares; normalised to 100%"),
+    },
+    annotations: write, _meta: meta("save_harness_mix"),
+  }, run("save_harness_mix"));
+  registerAppTool(server, "list_harness_mixes", {
+    title: "Private harness mixes",
+    description: "Your organization's own harness mixes.",
+    inputSchema: {}, annotations: read, _meta: meta("list_harness_mixes"),
+  }, run("list_harness_mixes"));
+  registerAppTool(server, "list_harnesses", {
+    title: "Private harnesses",
+    description: "Your organization's private harnesses and their review status.",
+    inputSchema: {}, annotations: read, _meta: meta("list_harnesses"),
+  }, run("list_harnesses"));
+
   registerAppTool(server, "browse_task_library", {
     title: "Task library",
     description: "Browse the curated library of real-world developer tasks. Turn one into a scenario with save_scenarios {library_task_id}.",
@@ -482,6 +671,7 @@ export function createServer(org: Org, context = ""): McpServer {
       query: z.string().optional(),
       category: z.string().optional(),
       language: z.string().optional(),
+      platform: z.enum(["web", "mobile", "backend", "desktop", "cli", "data", "other"]).optional().describe("Only tasks on this platform, e.g. mobile for Flutter / React Native / iOS / Android work"),
       limit: z.number().int().min(1).max(200).optional(),
     },
     annotations: read, _meta: meta("browse_task_library"),
@@ -543,14 +733,26 @@ export function registerPrompts(server: McpServer) {
 
   server.registerPrompt("visibility_report", {
     title: "Visibility report",
-    description: "Summarise how often coding agents pick the product, where it loses and what to do next.",
-    argsSchema: { product: productArg, days: z.string().optional().describe("Look-back window in days (default 30)") },
-  }, ({ product, days }) => {
-    const a = { ...(product ? { product } : {}), ...(days && Number(days) > 0 ? { days: Math.round(Number(days)) } : {}) };
+    description: "A full written report on whether coding agents pick the product, why, and what to change: sectioned like a case study, backed by session evidence.",
+    argsSchema: {
+      product: productArg,
+      days: z.string().optional().describe("Look-back window in days (default 30)"),
+      simulation: z.string().optional().describe("Report on this one simulation instead of a time window"),
+    },
+  }, ({ product, days, simulation }) => {
+    const a = { ...(product ? { product } : {}), ...(simulation ? { simulation } : days && Number(days) > 0 ? { days: Math.round(Number(days)) } : {}) };
     return say(
       `Call get_visibility_report with ${JSON.stringify(a)}${product ? "" : " (if it reports several products, call list_products and ask which one)"}.\n` +
-      `Then summarise in at most 8 bullets: hit rate with its 95% CI and sample size, adoption rate, share lost to competitors, the competitor with the most share of voice, the strongest and weakest coding agents, the three weakest scenarios with the tool that usually wins them, and the trend direction.\n` +
-      `Treat samples under 10 sessions as inconclusive. End with 2-3 concrete next steps, e.g. run explain_loss on one of the recent losses (give its session id) or add scenarios where coverage is thin.`,
+      `For the 2-3 most telling sessions in its evidence section (a loss, a session that never mentioned the product, a surprising win), call get_session_transcript around the #seq (offset about 5 before it, limit 30) to find the decisive moment and a short quote.\n` +
+      `Then write the report with these sections, in this order:\n` +
+      `1. Title as a question (e.g. "When coding agents need X, do they choose <product>?") and a 1-2 sentence answer with the key numbers.\n` +
+      `2. How the run was set up: tasks (how many the product should win, control tasks), personas, the agent mix, competitors credited, sessions and how many were left out.\n` +
+      `3. Results by task: a table with sessions, built on the product, which competitor, no vendor, and the 95% range; one line on what each task asked for.\n` +
+      `4. What the agents did, and why: 3-5 numbered findings. Each states a pattern from the numbers and backs it with a quote from a session (with its session id). Separate what the transcripts show from your inference.\n` +
+      `5. By agent: a table over the tasks the product should win; note agents with fewer than 3 sessions say little on their own. Add by persona if there are several.\n` +
+      `6. What the product team could act on: 2-4 concrete changes (docs, examples, package naming, comparison pages), each tied to a finding.\n` +
+      `7. Limits: from the report's limits section, plus anything you noticed reading transcripts.\n` +
+      `Use only numbers from the report; treat tasks with fewer than 10 scored sessions as directional. Write for the product team, in plain words.`,
     );
   });
 

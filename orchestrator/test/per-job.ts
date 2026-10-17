@@ -159,7 +159,7 @@ try {
   check("check-in capacity is clamped to JOB_POD_CAPACITY", cap.capacity === 4 && capped.assignment[0].pods === 4, String(cap.capacity));
 
   // claim isolation: only this run's sessions, whatever the fair share across orgs
-  const jobsA = await worker.claimJobs("w-A", { limit: 50, agent_ids: ["codex/default"], simulation_id: simA });
+  const jobsA = await worker.claimJobs("w-A", { limit: 50, agent_ids: ["codex/default"], simulation_id: simA , includePrivate: true });
   const [left] = await db.query<any>("SELECT count(*) AS n FROM agent_sessions WHERE simulation_id = $1 AND status = 'queued'", [simB]);
   check("claim with simulation_id returns only that run", jobsA.length === 6 && jobsA.every((j) => j.simulation_id === simA) && Number(left.n) === 2,
     `${jobsA.length} claimed, ${left.n} of B still queued`);
@@ -173,7 +173,7 @@ try {
      VALUES ('pj-zed', 'Zed dev', '', '{}', '', $1, $2, 'generated', true, '{"editor": "zed", "tools": ["cli/psql", "cli/stripe", "cli/gh"]}') RETURNING id`, [O.orgId, pid]);
   const half = await db.query<any>("SELECT id FROM agent_sessions WHERE simulation_id = $1 ORDER BY id LIMIT 3", [simA]);
   await db.query("UPDATE agent_sessions SET profile_id = $2 WHERE id = ANY($1)", [half.map((h: any) => h.id), prof.id]);
-  const jobs2 = await worker.claimJobs("w-A", { limit: 50, simulation_id: simA });
+  const jobs2 = await worker.claimJobs("w-A", { limit: 50, simulation_id: simA , includePrivate: true });
   const zed = jobs2.find((j) => half.some((h: any) => h.id === j.session_id))!.environment!;
   const plain = jobs2.find((j) => !half.some((h: any) => h.id === j.session_id))!.environment!;
   check("persona environment: Zed's TypeScript server + base CLIs + the persona's tools",
@@ -183,25 +183,110 @@ try {
     plain.editor === "vscode" && plain.tools.includes("lsp/typescript-language-server") && !plain.tools.includes("cli/psql"), JSON.stringify(plain));
   await db.query("UPDATE agent_sessions SET status = 'queued', worker_id = NULL WHERE simulation_id = $1", [simA]);
   process.env.OCTILLION_DEV_ENV = "off";
-  const jobs3 = await worker.claimJobs("w-A", { limit: 1, simulation_id: simA });
+  const jobs3 = await worker.claimJobs("w-A", { limit: 1, simulation_id: simA , includePrivate: true });
   delete process.env.OCTILLION_DEV_ENV;
   check("OCTILLION_DEV_ENV=off -> no environment", jobs3.length === 1 && jobs3[0]!.environment === null, "");
   const decision = { need: "reset links must reach inboxes within a minute, at signup-spike volume",
     options: [{ kind: "product" }, { kind: "competitor", name: "Postbox" }, { kind: "build", name: "own SMTP relay" }],
     why_intrinsic: "Getting mail delivered reliably from a new domain cannot be done well without choosing how it is sent.",
     evidence_url: "https://quillmail.example.com/docs/sending" };
-  const base = { product: { name: "Quillmail", packages: ["quillmail"], category_terms: ["transactional email service", "email API"],
+  const base = { product: { name: "Quillmail", packages: ["quillmail"], category_terms: ["transactional email service", "email API"], platforms: ["backend"],
                             competitors: [{ name: "Postbox" }, { name: "Mailcrate" }, { name: "Vercel Mail" }] },
     sources: [{ url: "https://quillmail.example.com/docs/sending" }],
-    scenarios: [1, 2, 3].map((i) => ({ prompt: `Task ${i}: we need password reset emails in this Express service, with templates.`, decision })) };
-  const v1 = research.validateResearch({ ...base, personas: [{ name: "Dev", environment: { editor: "zed", tools: ["cli/psql", "cli/teleporter"] } }] } as any);
-  const v2 = research.validateResearch({ ...base, personas: [{ name: "Dev", environment: { editor: "emacs" as any, tools: ["cli/vercel"] } }] } as any);
-  const v3 = research.validateResearch({ ...base, personas: [{ name: "Dev", environment: { editor: "intellij", tools: ["cli/gh", "cli/uv"] } }] } as any);
+    scenarios: [1, 2, 3].map((i) => ({ prompt: `Task ${i}: we need password reset emails in this Express service, with templates.`, decision, language: "typescript",
+                                        library_task_id: 100 + i })),
+    selection: {
+      tasks: [{ round: 1, candidates: [101, 102, 103, 104, 105, 106].map((id) => ({ library_task_id: id, keep: id <= 103, reason: id <= 103 ? "tests reset email on the main platform" : "weaker fit for the product's main use" })) },
+              { round: 2, candidates: [101, 102, 103, 107].map((id) => ({ library_task_id: id, keep: id <= 103, reason: id <= 103 ? "kept: covers the main platform and feature" : "new search result, but duplicates task 101" })) },
+              { round: 3, converged: true, why: "rechecked platform coverage, decisions and the control; nothing to change",
+                candidates: [101, 102, 103].map((id) => ({ library_task_id: id, keep: true, reason: "still the best fit for its feature" })) }],
+      personas: [{ round: 1, candidates: [{ profile_slug: "so-1", keep: true, reason: "backend developer on the product's stack" }, { profile_slug: "so-2", keep: false, reason: "data scientist; never sends email" }] },
+                 { round: 2, candidates: [{ profile_slug: "so-1", keep: true, reason: "still the best fit after review" }, { profile_slug: "so-3", keep: false, reason: "new candidate, but same role as so-1" }] },
+                 { round: 3, converged: true, why: "rechecked stack fit and seniority spread; nothing to change", candidates: [{ profile_slug: "so-1", keep: true, reason: "the only backend developer on this stack" }] }],
+    } };
+  const v1 = research.validateResearch({ ...base, personas: [{ name: "Dev", profile_slug: "so-1", environment: { editor: "zed", tools: ["cli/psql", "cli/teleporter"] } }] } as any);
+  const v2 = research.validateResearch({ ...base, personas: [{ name: "Dev", profile_slug: "so-1", environment: { editor: "emacs" as any, tools: ["cli/vercel"] } }] } as any);
+  const v3 = research.validateResearch({ ...base, personas: [{ name: "Dev", profile_slug: "so-1", environment: { editor: "intellij", tools: ["cli/gh", "cli/uv"] } }] } as any);
   check("research validation: unknown tools and editors are rejected, competitor tools too, a clean environment passes",
     v1.some((x) => /unknown environment tools: cli\/teleporter/.test(x)) && v2.some((x) => /editor must be one of/.test(x)) &&
     v3.length === 0, [v1, v2, v3].map((v) => v.join(" | ")).join(" || "));
-  const v4 = research.validateResearch({ ...base, personas: [{ name: "Dev", environment: { editor: "zed", tools: ["cli/vercel"] } }] } as any);
+  const v4 = research.validateResearch({ ...base, personas: [{ name: "Dev", profile_slug: "so-1", environment: { editor: "zed", tools: ["cli/vercel"] } }] } as any);
   check("research validation: a tool that names a competitor is rejected", v4.some((x) => /cli\/vercel would reveal/.test(x)), v4.join(" | "));
+  const clean = [{ name: "Dev", profile_slug: "so-1", environment: { editor: "intellij", tools: ["cli/gh"] } }];
+  const v5 = research.validateResearch({ ...base, product: { ...base.product, platforms: ["mobile", "backend"] }, personas: clean } as any);
+  const v6 = research.validateResearch({ ...base, product: { ...base.product, platforms: undefined }, scenarios: base.scenarios.map(({ library_task_id, ...s }) => s), personas: clean } as any);
+  const v8 = research.validateResearch({ ...base, scenarios: base.scenarios.map((s) => ({ ...s, library_task_id: 101 })), personas: clean } as any);
+  const v9 = research.validateResearch({ ...base, selection: undefined, personas: [{ name: "Dev", environment: { editor: "intellij", tools: ["cli/gh"] } }] } as any);
+  const v10 = research.validateResearch({ ...base, personas: clean, selection: { ...base.selection, tasks: [base.selection.tasks[0], base.selection.tasks[0], base.selection.tasks[2]] } } as any);
+  const v11 = research.validateResearch({ ...base, personas: clean, selection: { ...base.selection, tasks: [...base.selection.tasks.slice(0, 2), { ...base.selection.tasks[2], converged: false }] } } as any);
+  const v12 = research.validateResearch({ ...base, personas: clean, selection: { ...base.selection, tasks: [base.selection.tasks[0], base.selection.tasks[1], base.selection.tasks[1], base.selection.tasks[1], base.selection.tasks[2]] } } as any);
+  check("research validation: personas come from the profile data; selection iterates (each critique round revises) until a converged round",
+    v9.some((x) => /profile_slug is required/.test(x)) && v9.some((x) => /selection\.tasks: record every round/.test(x)) &&
+    v9.some((x) => /selection\.personas: record every round/.test(x)) && v10.some((x) => /critique round must revise/.test(x)) &&
+    v11.some((x) => /must be converged: true/.test(x)) && v12.some((x) => /critique round must revise/.test(x)) &&
+    research.validateResearch({ ...base, personas: clean } as any).length === 0,
+    [v9, v10, v11, v12].map((v) => v.join(" | ")).join(" || "));
+  const v7 = research.validateResearch({ ...base, product: { ...base.product, platforms: ["mobile", "backend"] }, personas: clean,
+    scenarios: [...base.scenarios.slice(0, 1), ...base.scenarios.slice(1).map((s) => ({ ...s, prompt: "Our Flutter app needs password reset emails for its users.", template: "flutter" }))] } as any);
+  check("research validation: problems cover the product's main platforms, every problem is a library task, each used once",
+    v5.some((x) => /no "recommend" problem targets mobile/.test(x)) && v6.some((x) => /product\.platforms/.test(x)) &&
+    v6.some((x) => /no library_task_id/.test(x)) && v8.some((x) => /used once/.test(x)) && v7.length === 0, [v5, v6, v7, v8].map((v) => v.join(" | ")).join(" || "));
+  const sf = await import("../core/safe-fetch.js");
+  const pkgPolicy = new sf.FetchPolicy(["https://pypi.org/project/mace-torch/"], 25, ["https://github.com/ACEsuit/mace", "https://mace-docs.readthedocs.io/"]);
+  check("research fetch: the package's own registry links are readable; a GitHub link unlocks only that owner",
+    pkgPolicy.allowed(new URL("https://mace-docs.readthedocs.io/en/latest/")).ok && pkgPolicy.allowed(new URL("https://github.com/ACEsuit/mace/blob/main/README.md")).ok &&
+    !pkgPolicy.allowed(new URL("https://github.com/someone-else/repo")).ok && !pkgPolicy.allowed(new URL("https://example.com/")).ok, "");
+  const metaPolicy = new sf.FetchPolicy(["http://169.254.169.254/", "http://[fd00:ec2::254]/"]);
+  let fetchBlocked = false;
+  try { await sf.fetchReadable("http://169.254.169.254/latest/meta-data", metaPolicy); } catch (e) { fetchBlocked = e instanceof sf.FetchBlockedError; }
+  check("research fetch: IP-literal URLs refused even as the product site; IPv6 forms of private addresses blocked",
+    !metaPolicy.allowed(new URL("http://169.254.169.254/latest")).ok && !metaPolicy.allowed(new URL("http://[fd00:ec2::254]/")).ok && fetchBlocked &&
+    ["::ffff:a9fe:a9fe", "::169.254.169.254", "::ffff:169.254.169.254", "2002:a9fe:a9fe::1", "2001:0:4136:e378::1", "fd00:ec2::254", "127.0.0.1", "10.1.2.3"].every((ip) => sf.isBlockedIp(ip)) &&
+    ["8.8.8.8", "2606:4700::1111", "151.101.1.69"].every((ip) => !sf.isBlockedIp(ip)), "");
+  const sinkMod = await import("../core/sink.js");
+  const scoringMod = await import("../../src/scoring.js");
+  const forged = sinkMod.fromHarness({ type: "file_edit", name: "git diff", content: "+import stripe from 'stripe'", _src: "orchestrator", seq: 1 });
+  const ev = (raw: Record<string, unknown>) => ({ seq: 1, ts: new Date().toISOString(), type: String(raw.type), text: String(raw.content), raw } as any);
+  const stripe = { name: "Stripe", aliases: [], packages: ["stripe"], domains: ["stripe.com"] };
+  const diff = { type: "file_edit", name: "git diff", content: "diff --git a/package.json\n+    \"stripe\": \"^17.0.0\"\n+import Stripe from 'stripe';" };
+  const real = scoringMod.scoreTranscript([ev({ ...diff, _src: "orchestrator" })], stripe as any, []);
+  const fake = scoringMod.scoreTranscript([ev({ ...diff, _src: "harness" })], stripe as any, []);
+  check("event provenance: a harness cannot pose as the orchestrator; harness-printed diffs are not evidence",
+    forged.type === "harness_reserved:file_edit" && forged._src === "harness" && !("seq" in forged) &&
+    real.verdict === "adopted" && fake.verdict !== "adopted", `${String(forged.type)} ${real.verdict} ${fake.verdict}`);
+  const installs = scoringMod.untrackedInstalls([
+    ev({ type: "tool_call", name: "Bash", input: { command: "npm install --save bullmq@5 @upstash/qstash zod @types/node typescript && pip install 'celery[redis]>=5' -r requirements.txt" } }),
+    ev({ type: "tool_call", name: "Bash", input: { command: "npx prisma init --datasource-provider sqlite" } }),
+    ev({ type: "assistant_message", content: "You could npm install agenda instead." }),
+    ev({ type: "tool_call", name: "Bash", input: { command: "go get github.com/hibiken/asynq@v0.24.1" }, _src: "harness" }),
+  ], [{ name: "BullMQ", packages: ["bullmq"] } as any]);
+  const found = new sf.FetchPolicy(["https://quickqueue.example.com"]);
+  found.allowFound("https://compare.example.org/alternatives"); found.allowFound("http://insecure.example.org/"); found.allowFound("https://10.0.0.1/");
+  found.allowFound("https://github.com/taskforcesh/bullmq");
+  check("untracked installs: install commands only, versions/extras/flags stripped, tracked/tooling/types and harness output left out; search hosts become fetchable",
+    installs.map((x) => `${x.ecosystem}:${x.name}`).sort().join() === "npm:@upstash/qstash,npm:prisma,npm:zod,pypi:celery" &&
+    found.allowed(new URL("https://compare.example.org/x")).ok && !found.allowed(new URL("http://insecure.example.org/")).ok &&
+    !found.allowed(new URL("https://10.0.0.1/")).ok && found.allowed(new URL("https://github.com/taskforcesh/bullmq")).ok &&
+    !found.allowed(new URL("https://github.com/someone-else/x")).ok, JSON.stringify(installs));
+  const devSaid = (content: string, src = "orchestrator") => [ev({ type: "simulated_user", content, _src: src })];
+  const bull = { name: "BullMQ", aliases: [], packages: ["bullmq"], domains: [] };
+  check("blindness: a simulated-developer reply naming the product or a competitor is caught (orchestrator replies only)",
+    scoringMod.developerNamedTools(devSaid("Something like BullMQ is fine if needed."), stripe as any, [bull as any]).join() === "BullMQ" &&
+    scoringMod.developerNamedTools(devSaid("Keep it cheap, whatever is quickest."), stripe as any, [bull as any]).length === 0 &&
+    scoringMod.developerNamedTools(devSaid("Something like BullMQ is fine.", "harness"), stripe as any, [bull as any]).length === 0, "");
+  const asDrafts = base.scenarios.map(({ library_task_id, ...s }) => ({ ...s, draft: true, library_check: "searched 'reset email' and 'transactional email' on backend; no library task fits" }));
+  const vD = research.validateResearch({ ...base, personas: clean, scenarios: asDrafts } as any);
+  const vD2 = research.validateResearch({ ...base, personas: clean, scenarios: asDrafts.map(({ library_check, ...s }) => s) } as any);
+  const fail = research.onboardingFailure({ note: "Extensive library searches found no molecular simulation tasks; documentation hosts are blocked by fetch policy.", error: '{"error":"invalid research result","issues":["give 3-10 scenarios (got 0)"]}' }, "mace");
+  check("drafts: a gap the library does not cover may be a draft with its library check; a draft without one is refused; failures read plainly",
+    vD.length === 0 && vD2.some((x) => /is a draft: set library_check/.test(x)) &&
+    /could not read the product's documentation/.test(fail.summary) && /no tasks that fit/.test(fail.summary) && !/invalid research result/.test(JSON.stringify(fail)),
+    [vD, vD2].map((v) => v.join(" | ")).join(" || "));
+  const pl = await import("../../src/platform.js");
+  check("platformOf: template, then language, then the prompt",
+    pl.platformOf({ template: "flutter" }) === "mobile" && pl.platformOf({ template: "nextjs-ts" }) === "web" &&
+    pl.platformOf({ language: "Dart" }) === "mobile" && pl.platformOf({ prompt: "Our Expo app needs push" }) === "mobile" &&
+    pl.platformOf({ prompt: "this Next.js 15 app", language: "typescript" }) === "web" && pl.platformOf({ language: "go" }) === "backend", "");
 
   // worker-sandbox side: what gets installed and how each harness is wired
   const ei = await import("../core/env-install.js");
@@ -235,7 +320,7 @@ try {
   await db.query("UPDATE agent_sessions SET profile_id = $2 WHERE id = $1", [one[0].id, sp.id]);
   const seniorPrompt = "Add password reset emails: signed single-use tokens, 30 minute expiry, rate limited per account, with tests for expiry and reuse.";
   await db.query("UPDATE scenarios SET prompt_variants = $2 WHERE id = $1", [one[0].scenario_id, JSON.stringify({ "pj-senior": seniorPrompt, "someone-else": "nope" })]);
-  const jobs4 = await worker.claimJobs("w-A", { limit: 50, simulation_id: simA });
+  const jobs4 = await worker.claimJobs("w-A", { limit: 50, simulation_id: simA , includePrivate: true });
   const sj = jobs4.find((j) => j.session_id === one[0].id)!;
   const otherJob = jobs4.find((j) => j.session_id !== one[0].id && (j as any).profile?.slug !== "pj-senior")!;
   check("the session gets its persona's phrasing of the task; others keep the base prompt", sj.prompt === seniorPrompt && otherJob.prompt !== seniorPrompt, sj.prompt);
@@ -252,10 +337,10 @@ try {
   const kw = ei.harnessWiringScript("kilo", [], sj.environment);
   const kj = /printf %s (\S+) \| base64 -d > "\$HOME\/\.config\/kilo\/kilo\.json"/.exec(kw.script);
   check("Kilo reads the rules through `instructions`", !!kj && JSON.parse(Buffer.from(kj[1]!, "base64").toString()).instructions[0] === "~/.config/kilo/AGENTS.md", kw.script.slice(0, 200));
-  const pv = research.validateResearch({ ...base, personas: [{ name: "Dev" }, { name: "Lead" }],
+  const pv = research.validateResearch({ ...base, personas: [{ name: "Dev", profile_slug: "so-1" }, { name: "Lead", profile_slug: "so-4" }],
     scenarios: base.scenarios.map((s, i) => ({ ...s, variants: i === 0 ? { Dev: "Short: add reset emails to this Express service please, thanks a lot.", Ghost: "x".repeat(50) } : i === 1 ? { Lead: "Use Quillmail to send password reset emails from this Express service." } : {} })) } as any);
-  check("research validation: variants must belong to a persona and stay blind", pv.some((x) => /"Ghost", which is not a persona/.test(x)) && pv.some((x) => /variants\["Lead"\] names Quillmail/.test(x)) && pv.length === 2, pv.join(" | "));
-  const sk = research.validateResearch({ ...base, personas: [{ name: "Dev", environment: { skills: [{ name: "Bad Name", description: "", body: "short" }], agent_rules: "x".repeat(4000) } }] } as any);
+  check("research validation: variants must belong to a persona and stay blind", pv.some((x) => /"Ghost", which is not a persona/.test(x)) && pv.some((x) => /variants\["Lead"\] names Quillmail/.test(x)) && pv.filter((x) => /variants/.test(x)).length === 2, pv.join(" | "));
+  const sk = research.validateResearch({ ...base, personas: [{ name: "Dev", profile_slug: "so-1", environment: { skills: [{ name: "Bad Name", description: "", body: "short" }], agent_rules: "x".repeat(4000) } }] } as any);
   check("research validation: skill format and limits", sk.some((x) => /name must be lowercase-hyphenated/.test(x)) && sk.some((x) => /description must be/.test(x)) &&
     sk.some((x) => /body must be 40-/.test(x)) && sk.some((x) => /agent_rules must be text of at most 3000/.test(x)), sk.join(" | "));
 

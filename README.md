@@ -53,6 +53,20 @@ tasks written from Resend's own docs, two developer personas, and the agent mix 
 Full write-up, with method, results per agent, the agents' own words, what Resend could act on, and limits:
 **[docs/case-studies/resend.md](docs/case-studies/resend.md)**.
 
+## Case study: Firebase
+
+Seven coding agents did real app work for Firebase: 40 sessions on five tasks from the curated library (four mobile,
+one web), with two developers picked from Stack Overflow survey data (15 Oct 2026).
+
+- **No session built on Firebase:** 0 adoptions in 30 sessions on tasks it should win; 4 recommended it as a later
+  option, all on one mobile task.
+- **Supabase is the default hosted backend:** it won 8 sessions, including 5 of 7 on syncing data to a new phone.
+- **Setup is the stated reason on mobile:** "Firebase would need `google-services.json` and Gradle changes, and you
+  haven't set up credentials."
+
+Full write-up, with library task ids, results by platform and agent, quotes, and limits:
+**[docs/case-studies/firebase.md](docs/case-studies/firebase.md)**.
+
 ## How it works
 
 Developer-tool companies configure their product context (names, package names, competitors) and realistic coding

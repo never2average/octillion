@@ -1,8 +1,9 @@
+import { open as openText, openJson } from "./orgcrypto.js";
 import { getDb } from "./db.js";
 import { orgEvent } from "./telemetry.js";
 import { reportSessionSpend } from "./billing.js";
 import { normalize, transcripts, type RawEvent, type SessionRef, type StoredEvent } from "./transcripts.js";
-import { scoreTranscript, type Tool } from "./scoring.js";
+import { scoreTranscript, developerNamedTools, untrackedInstalls, type Tool } from "./scoring.js";
 import { findAgent } from "./agents.js";
 import { languageOf, resolveEnvironment, type PersonaEnvironment, type SessionEnvironment } from "../orchestrator/core/environment.js";
 import { extendAdaptive } from "./queries.js";
@@ -31,6 +32,8 @@ export interface Job {
   prompt: string; repo_url: string | null; language: string | null; max_user_turns: number;
   /** Starter workspace hint + scenario tags/title (the orchestrator picks a template when repo_url is null). */
   template: string | null; tags: string[]; title: string;
+  /** A private run (the org's own tasks or personas): the orchestrator locks down the agent's network (core/egress.ts). */
+  private: boolean;
   profile: { slug: string; name: string; summary: string; attributes: Record<string, unknown>; instructions: string } | null;
   /**
    * The persona's developer environment for this session: its editor's language servers for the task's language plus
@@ -40,7 +43,7 @@ export interface Job {
 }
 
 /** `simulation_id`: a per-job orchestrator claims only the run it was launched for. */
-export async function claimJobs(workerId: string, opts: { limit?: number; models?: string[]; harness?: string; agent_ids?: string[]; simulation_id?: string } = {}): Promise<Job[]> {
+export async function claimJobs(workerId: string, opts: { limit?: number; models?: string[]; harness?: string; agent_ids?: string[]; simulation_id?: string; includePrivate?: boolean } = {}): Promise<Job[]> {
   await sweepStale();
   const db = await getDb();
   const params: unknown[] = [workerId, Math.min(Math.max(opts.limit ?? 1, 1), 50)];
@@ -49,6 +52,8 @@ export async function claimJobs(workerId: string, opts: { limit?: number; models
   if (opts.harness) params.push(opts.harness), (filter += ` AND harness = $${params.length}`);
   if (opts.agent_ids?.length) params.push(opts.agent_ids), (filter += ` AND agent_id = ANY($${params.length})`);
   if (opts.simulation_id) params.push(opts.simulation_id), (filter += ` AND simulation_id = $${params.length}`);
+  // Private runs only go to their own per-job orchestrator (job token), never to a shared one (docs/security.md).
+  if (!opts.includePrivate) filter += " /* tenant: claim filter; a job token's claim is pinned to its own simulation in http.ts, the fleet token claims across orgs */ AND simulation_id NOT IN (SELECT id FROM simulations WHERE private)";
   const jobs = await db.transaction(async (tx) => {
     const rows = await tx.query<Omit<Job, "max_user_turns" | "profile" | "agent" | "environment"> & { profile_id: number | null; prompt_variants: Record<string, string> | null }>(
       `UPDATE agent_sessions s SET status = 'running', worker_id = $1, started_at = now(), heartbeat_at = now()
@@ -67,12 +72,13 @@ export async function claimJobs(workerId: string, opts: { limit?: number; models
                       ORDER BY pos, queued_at, id LIMIT $2)
                  FOR UPDATE SKIP LOCKED)
         RETURNING s.id AS session_id, s.simulation_id, s.org_id, s.product_id, s.model, s.harness, s.agent_id, s.attempt, s.profile_id,
-                  sc.prompt, sc.prompt_variants, sc.repo_url, sc.language, sc.template, sc.tags, sc.title`,
+                  sc.prompt, sc.prompt_variants, sc.repo_url, sc.language, sc.template, sc.tags, sc.title,
+                  coalesce((SELECT private FROM simulations WHERE id = s.simulation_id), false) AS private`,
       params,
     );
     if (rows.length)
       await tx.query(
-        "UPDATE simulations SET status = 'running', started_at = coalesce(started_at, now()) WHERE id = ANY($1) AND status = 'queued'",
+        "/* tenant: internal: simulations of the sessions this claim just took */ UPDATE simulations SET status = 'running', started_at = coalesce(started_at, now()) WHERE id = ANY($1) AND status = 'queued'",
         [[...new Set(rows.map((r) => r.simulation_id))]],
       );
     // Blindness at the hand-off: a persona tool that names the product or a competitor as they are now (the customer
@@ -80,7 +86,7 @@ export async function claimJobs(workerId: string, opts: { limit?: number; models
     const productIds = [...new Set(rows.map((r) => r.product_id))];
     const products = productIds.length
       ? await tx.query<{ id: number; name: string; aliases: string[]; packages: string[]; domains: string[]; competitors: Tool[] }>(
-          "SELECT id, name, aliases, packages, domains, competitors FROM products WHERE id = ANY($1)", [productIds])
+          "/* tenant: internal: products of the sessions this claim just took */ SELECT id, name, aliases, packages, domains, competitors FROM products WHERE id = ANY($1)", [productIds])
       : [];
     const words = new Map(products.map((p) => [p.id, [p.name, ...(p.aliases ?? []), ...(p.packages ?? []), ...(p.domains ?? []),
       ...(p.competitors ?? []).flatMap((c) => [c.name, ...(c.aliases ?? []), ...(c.packages ?? []), ...(c.domains ?? [])])]]));
@@ -99,6 +105,16 @@ export async function claimJobs(workerId: string, opts: { limit?: number; models
       return { ...r, prompt, agent, environment, max_user_turns: MAX_USER_TURNS(), profile: p ? { slug: p.slug, name: p.name, summary: p.summary, attributes: p.attributes, instructions: p.instructions } : null };
     });
   });
+  // Private text is stored encrypted with its organization's key (src/orgcrypto.ts). Opened after the claim commits:
+  // key lookups must not run inside the transaction (one connection on PGlite).
+  for (const j of jobs) {
+    j.prompt = await openText(j.org_id, j.prompt);
+    if (j.profile) {
+      j.profile.summary = await openText(j.org_id, j.profile.summary);
+      j.profile.instructions = await openText(j.org_id, j.profile.instructions);
+      j.profile.attributes = await openJson(j.org_id, j.profile.attributes);
+    }
+  }
   return jobs;
 }
 
@@ -120,13 +136,13 @@ export async function appendEvents(sessionId: string, raw: RawEvent[]) {
   await transcripts().append(s, events);
   const lastSeq = Math.max(s.events, ...events.map((e) => e.seq));
   const db = await getDb();
-  await db.query("UPDATE agent_sessions SET events = greatest(events, $2), heartbeat_at = now() WHERE id = $1", [sessionId, lastSeq]);
+  await db.query("/* tenant: session checked against the job token in http.ts (/sessions/:id) */ UPDATE agent_sessions SET events = greatest(events, $2), heartbeat_at = now() WHERE id = $1", [sessionId, lastSeq]);
   return { appended: events.length, last_seq: lastSeq };
 }
 
 export async function heartbeat(sessionId: string) {
   const db = await getDb();
-  const [row] = await db.query("UPDATE agent_sessions SET heartbeat_at = now() WHERE id = $1 AND status = 'running' RETURNING id", [sessionId]);
+  const [row] = await db.query("/* tenant: session checked against the job token in http.ts (/sessions/:id) */ UPDATE agent_sessions SET heartbeat_at = now() WHERE id = $1 AND status = 'running' RETURNING id", [sessionId]);
   if (!row) throw Object.assign(new Error(`Session ${sessionId} is not running`), { status: 409 });
 }
 
@@ -168,14 +184,14 @@ async function retryInfraFailure(s: SessionRef, input: CompleteInput): Promise<b
   if (!INFRA_FAILURE.test(msg) || /budget is used up/i.test(msg)) return false;
   const db = await getDb();
   const [row] = await db.query<{ retries: number; sim: string }>(
-    `SELECT coalesce((a.metadata->>'infra_retries')::int, 0) AS retries, m.status AS sim
+    `/* tenant: session checked against the job token in http.ts, or internal stale sweep */ SELECT coalesce((a.metadata->>'infra_retries')::int, 0) AS retries, m.status AS sim
        FROM agent_sessions a JOIN simulations m ON m.id = a.simulation_id WHERE a.id = $1`, [s.id]);
   if (!row || row.sim === "cancelled" || row.retries >= INFRA_RETRIES()) return false;
   try { await transcripts().remove(s.org_id, s.id); }
   catch (err) { console.error(`session ${s.id}: not retried, transcript reset failed: ${(err as Error).message}`); return false; }
   await revokeSessionTokens(s.id);
   await db.query(
-    `UPDATE agent_sessions SET status = 'queued', worker_id = NULL, started_at = NULL, heartbeat_at = NULL, ended_at = NULL,
+    `/* tenant: session checked against the job token in http.ts, or internal stale sweep */ UPDATE agent_sessions SET status = 'queued', worker_id = NULL, started_at = NULL, heartbeat_at = NULL, ended_at = NULL,
             sandbox_id = NULL, error_message = NULL, events = 0, user_turns = 0,
             archive_key = NULL, archived_at = NULL, archive_events = NULL, archive_claimed_at = NULL,
             metadata = metadata || jsonb_build_object('infra_retries', $2::int, 'infra_error', $3::text)
@@ -192,7 +208,7 @@ export async function completeSession(sessionId: string, input: CompleteInput = 
   if (s.status === "running" && (await retryInfraFailure(s, input))) return null;
   if (!FINAL.includes(s.status)) {
     await db.query(
-      `UPDATE agent_sessions SET status = $2, ended_at = now(), error_message = $3, sandbox_id = coalesce($4, sandbox_id),
+      `/* tenant: session checked against the job token in http.ts, or internal stale sweep */ UPDATE agent_sessions SET status = $2, ended_at = now(), error_message = $3, sandbox_id = coalesce($4, sandbox_id),
               tokens_in = coalesce($5, tokens_in), tokens_out = coalesce($6, tokens_out), cost_usd = coalesce($7, cost_usd),
               metadata = metadata || $8::jsonb, completed_reason = coalesce($9, completed_reason)
         WHERE id = $1`,
@@ -207,7 +223,7 @@ export async function completeSession(sessionId: string, input: CompleteInput = 
   const metered = await sessionGatewayUsage(sessionId);
   if (metered.requests)
     await db.query(
-      `UPDATE agent_sessions SET tokens_in = greatest(tokens_in, $2), tokens_out = greatest(tokens_out, $3),
+      `/* tenant: session checked against the job token in http.ts, or internal stale sweep */ UPDATE agent_sessions SET tokens_in = greatest(tokens_in, $2), tokens_out = greatest(tokens_out, $3),
               cost_usd = greatest(cost_usd, $4) WHERE id = $1`,
       [sessionId, metered.input_tokens, metered.output_tokens, metered.cost_usd]);
   const score = await scoreSession(sessionId);
@@ -227,18 +243,28 @@ export async function scoreSession(sessionId: string) {
   // harness that could not start) says nothing about what the agent would have picked: it gets no verdict, so it is
   // left out of every hit rate instead of counting as "did not pick the product".
   if (row.status !== "completed") {
-    await db.query("UPDATE agent_sessions SET verdict = NULL, winner = NULL, mentions = '[]'::jsonb, scored_at = NULL WHERE id = $1 AND verdict IS NOT NULL", [sessionId]);
+    await db.query("/* tenant: internal: scoring by session id (from completeSession) */ UPDATE agent_sessions SET verdict = NULL, winner = NULL, mentions = '[]'::jsonb, scored_at = NULL WHERE id = $1 AND verdict IS NOT NULL", [sessionId]);
     return null;
   }
   const events = await allEvents(row.org_id, sessionId);
-  const score = scoreTranscript(events, { name: row.name, aliases: row.aliases, packages: row.packages, domains: row.domains }, row.competitors);
+  const target = { name: row.name, aliases: row.aliases, packages: row.packages, domains: row.domains };
+  const named = developerNamedTools(events, target, row.competitors);
+  if (named.length) {
+    // The simulated developer steered the agent toward a tool: the result is not blind, so it gets no verdict.
+    await db.query(
+      `/* tenant: internal: scoring by session id (from completeSession) */ UPDATE agent_sessions SET verdict = NULL, winner = NULL, mentions = '[]'::jsonb, scored_at = now(),
+              metadata = coalesce(metadata, '{}'::jsonb) || jsonb_build_object('contaminated', 'simulated developer named ' || $2) WHERE id = $1`,
+      [sessionId, named.join(", ")]);
+    return null;
+  }
+  const score = scoreTranscript(events, target, row.competitors);
   // Recount from the store too, so transcripts an orchestrator wrote straight to ClickHouse are reflected.
   const lastSeq = events.reduce((m, e) => Math.max(m, e.seq), 0);
-  const userTurns = events.filter((e) => e.type === SIMULATED_USER).length;
+  const userTurns = events.filter((e) => e.type === SIMULATED_USER && (e.raw as { _src?: unknown })._src !== "harness").length;
   await db.query(
-    `UPDATE agent_sessions SET verdict = $2, winner = $3, mentions = $4, scored_at = now(),
-            events = greatest(events, $5), user_turns = $6 WHERE id = $1`,
-    [sessionId, score.verdict, score.winner, JSON.stringify(score.mentions), lastSeq, userTurns],
+    `/* tenant: internal: scoring by session id (from completeSession) */ UPDATE agent_sessions SET verdict = $2, winner = $3, mentions = $4, scored_at = now(),
+            events = greatest(events, $5), user_turns = $6, untracked = $7 WHERE id = $1`,
+    [sessionId, score.verdict, score.winner, JSON.stringify(score.mentions), lastSeq, userTurns, JSON.stringify(untrackedInstalls(events, [target, ...row.competitors]))],
   );
   return score;
 }
@@ -249,7 +275,7 @@ async function finishSimulationIfDone(simulationId: string) {
   if (await extendAdaptive(simulationId)) return;
   const db = await getDb();
   const [done] = await db.query<{ org_id: number; status: string; first: boolean }>(
-    `UPDATE simulations SET status = CASE WHEN status = 'cancelled' THEN 'cancelled' ELSE 'completed' END,
+    `/* tenant: internal: the finished session's own simulation */ UPDATE simulations SET status = CASE WHEN status = 'cancelled' THEN 'cancelled' ELSE 'completed' END,
             finished_at = coalesce(finished_at, now())
       WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM agent_sessions WHERE simulation_id = $1 AND status IN ('queued', 'running'))
       RETURNING org_id, status, finished_at > now() - interval '2 seconds' AS first`,
@@ -262,7 +288,7 @@ async function finishSimulationIfDone(simulationId: string) {
 export async function sweepStale() {
   const db = await getDb();
   const stale = await db.query<{ id: string }>(
-    `SELECT id FROM agent_sessions WHERE status = 'running' AND heartbeat_at < now() - make_interval(mins => $1)`,
+    `/* tenant: internal: stale-lease sweep across all orgs */ SELECT id FROM agent_sessions WHERE status = 'running' AND heartbeat_at < now() - make_interval(mins => $1)`,
     [LEASE_MINUTES()],
   );
   for (const { id } of stale)

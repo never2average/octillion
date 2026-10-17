@@ -11,6 +11,7 @@
  * launch + resumes, core/turns.ts), or MAX_SESSION_MINUTES, or after GIVE_UP_RUNS nudged runs without any change.
  * Why it ended is recorded as completed_reason: done | turn_cap | time_cap | agent_gave_up | error.
  */
+import { egressPolicy } from "./egress.js";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import { acpAdapter, getAdapter, type HarnessAdapter, type TurnDigest } from "../harnesses/adapters.js";
@@ -55,6 +56,8 @@ export interface Job {
   profile?: Profile | null;
   /** The persona's developer environment for this session (resolved and blindness-filtered by the server at claim). */
   environment?: SessionEnvironment | null;
+  /** A private run: the agent's network is locked down to the gateway, registries and the task's git host. */
+  private?: boolean;
 }
 
 /** What the orchestrator sees after a harness run. Contains no Octillion ids. */
@@ -224,8 +227,18 @@ export class WorkerSession {
       // Credentials first: no point opening a sandbox the broker won't serve.
       s.creds = await sessionCredentials(job.session_id).catch((e) => { throw new Error(`credentials: ${redact(String(e instanceof Error ? e.message : e))}`); });
       harnessCredentials(adapter, s.creds.providers, job.model); // validate the mapping before paying for a sandbox
+      // Private runs (customer-written tasks or personas): the agent may only reach the gateway, registries and the
+      // task's git host (core/egress.ts). Opt-in until the transparent HTTPS path is verified on boat VMs:
+      // OCTILLION_EGRESS=private (private runs) or =all (every run); unset = no lockdown.
+      const lockdown = process.env.OCTILLION_EGRESS === "all" || (job.private && process.env.OCTILLION_EGRESS === "private");
+      const egress = lockdown && runner.name === "boat"
+        ? egressPolicy({ gatewayUrls: Object.values(s.creds.providers).map((p) => p.base_url).filter((u): u is string => !!u), repoUrl: job.repo_url })
+        : null;
+      if (lockdown && runner.name !== "boat" && process.env.OCTILLION_DEV_ALLOW_LOCAL !== "1")
+        throw new Error(`private runs need the boat runner for network lockdown (RUNNER=${runner.name})`);
       s.sandbox = await runner.open({ adapter, harness: job.harness, jobKey: job.session_id, agentId: job.agent_id ?? undefined, model: job.model, repoUrl: job.repo_url, template: s.template,
-                                       environment: job.environment ?? null });
+                                       environment: job.environment ?? null, egress });
+      if (s.sandbox.egress) s.sink.push({ type: "environment", egress: s.sandbox.egress });
       if (s.sandbox.environment) {
         const e = s.sandbox.environment;
         // Zed persona: launch over the Agent Client Protocol, as Zed's agent panel does (CLI if the ACP install failed).
@@ -408,7 +421,8 @@ export class WorkerSession {
   async replyAsDeveloper(text: string): Promise<{ run: number; user_turns_left: number }> {
     const reply = text.trim();
     if (!reply) throw new Error("reply is empty");
-    if (reply.length > 4000) throw new Error("reply too long (max 4000 chars); developers type short chat messages");
+    // Short on purpose: the prompt asks for one to three sentences, and a long reply is room to leak instructions.
+    if (reply.length > 1200) throw new Error("reply too long (max 1200 chars); developers type short chat messages");
     if (this.current) throw new Error("the sub-agent is still running; call wait_for_turn first");
     const r = this.report(true);
     if (!r.can_reply) throw new Error(`cannot reply: ${r.stop_reason ?? "not resumable"}; call finish_session`);

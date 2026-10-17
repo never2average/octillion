@@ -18,7 +18,7 @@ A dev-tool company describes its product in three things: a **prompt** (what it 
 
 ```
 customer (Claude/ChatGPT) ── onboard_product{prompt, website_url, docs_url} ──▶ server: product + research job
-orchestrator ── claim research ─▶ Pi research session ─ fetch_url / search_library / validate ─▶ submit
+orchestrator ── claim research ─▶ Pi research session ─ fetch_url / web_search / find_similar / package_search / search_library / validate ─▶ submit
 server ── apply: product profile, personas, scenarios ──▶ run_simulation (coding agents × personas × samples)
 customer ── get_onboarding / get_visibility_report ──▶ results
 ```
@@ -44,7 +44,7 @@ customer ── get_onboarding / get_visibility_report ──▶ results
 ```json
 { "product": { "name": "…", "description": "…", "category": "…", "website_url": "…", "docs_url": "…",
                "features": ["…"], "aliases": ["…"], "packages": ["…"], "domains": ["…"],
-               "competitors": [{"name": "…", "aliases": [], "packages": [], "domains": []}] },
+               "competitors": [{"name": "…", "aliases": [], "packages": [], "domains": [], "evidence_url": "…"}] },
   "personas": [{ "name": "…", "summary": "…", "attributes": {"role": "…", "experience_years": 5, "company_size": "…",
                  "stack": ["…"], "constraints": ["…"], "tone": "…"}, "instructions": "…",
                  "environment": {"editor": "zed", "tools": ["cli/gh", "cli/psql"],
@@ -81,6 +81,17 @@ customer ── get_onboarding / get_visibility_report ──▶ results
   scenario, and prompts of 40–2000 characters.
 - **Product fields:** at least one alias, package or domain beyond the name, so detection has something to match;
   competitor names must be distinct from the product.
+- **Competitors come from evidence, not memory** (`src/websearch.ts`). Research has `web_search` and `find_similar`
+  (Exa: "alternatives to X", sites like the product's) and `package_search` (npm and crates.io free; PyPI, Go, Maven
+  and others via libraries.io), with usage numbers. Searches run on the server, capped per job
+  (`RESEARCH_MAX_SEARCHES`, default 20); the keys never reach the research sandbox. Every result URL is recorded on the
+  job (`product_research.sources`) and becomes fetchable; when search is configured, each competitor's `evidence_url`
+  must be one of those URLs or a page on the product's own site. Keys: `npm run keyvault -- set exa` and
+  `npm run keyvault -- set libraries_io` (orchestrator-only providers), or `EXA_API_KEY` / `LIBRARIES_IO_API_KEY` locally.
+- **Runs check the list too.** Scoring records the packages each agent installed that match neither the product nor a
+  tracked competitor (`agent_sessions.untracked`); the report lists those from "no vendor" sessions under "Installed
+  but not tracked", with an "Add as competitor" button. The dashboard shows each competitor's evidence and who added
+  it (research, the customer, or runs), with a Remove button.
 - **Personas** must not mention the product or its competitors (they answer the agent blind).
 - **Persona `environment`** `{editor, tools, skills, agent_rules}`: the editor and CLI tools come from the catalog in
   `orchestrator/core/environment.ts`. Skills (at most 6, `name` lowercase-hyphenated, `body` 40-4000 characters) and

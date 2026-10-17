@@ -117,6 +117,11 @@ export async function providersForEnv(envVars: string[]): Promise<ProviderRow[]>
 export async function setCredential(provider: string, secret: string, opts: { label?: string; priority?: number } = {}) {
   const p = await getProvider(provider);
   if (!p) throw new Error(`Unknown provider ${provider}; add it first (keyvault provider ...)`);
+  // A direct-mode key is handed to agent sessions as is; refuse to store one unless that is explicitly allowed.
+  // Orchestrator-only keys (boat; search providers with no env_vars) never reach a session, so they are always fine.
+  if (p.mode === "direct" && provider !== "boat" && p.env_vars.length && process.env.OCTILLION_DIRECT_KEYS !== "allow")
+    throw new Error(`${provider} is a direct-mode provider: its real key would be handed to agent sessions. ` +
+                    "Set OCTILLION_DIRECT_KEYS=allow only once those sessions run without customer-written tasks (docs/security.md)");
   const s = secret.trim();
   if (s.length < 8) throw new Error("That does not look like a credential");
   const enc = encrypt(s);
@@ -182,5 +187,7 @@ export async function rekey() {
     const enc = encrypt(decrypt(r));
     await db.query("UPDATE vault_credentials SET ciphertext = $2, iv = $3, tag = $4, key_id = $5 WHERE id = $1", [r.id, enc.ciphertext, enc.iv, enc.tag, enc.key_id]);
   }
+  // Organizations' data keys (src/orgcrypto.ts) are wrapped by the master key too.
+  await (await import("./orgcrypto.js")).rewrapOrgKeys();
   return rows.length;
 }

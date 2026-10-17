@@ -40,6 +40,8 @@ cursor|CURSOR_API_KEY|Cursor CLI (paused)
 amp|AMP_API_KEY|Amp (paused)
 factory|FACTORY_API_KEY|Droid (paused)
 dashscope|DASHSCOPE_API_KEY|Qwen Code (paused)
+exa|EXA_API_KEY|web search for onboarding research (competitors with evidence; server only)
+libraries_io|LIBRARIES_IO_API_KEY|PyPI/Go/Maven package search for research (optional; server only)
 "
 
 vault() { docker compose -p "$PROJECT" exec -T octillion node --import tsx scripts/keyvault.ts "$@"; }

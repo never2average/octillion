@@ -46,6 +46,8 @@ interface TranscriptStore {
   read(orgId: number, sessionId: string, offset: number, limit: number): Promise<{ total: number; events: StoredEvent[] }>;
   /** Drop a session's events (an infrastructure-failed attempt being retried must not leak into the retry's transcript). */
   remove(orgId: number, sessionId: string): Promise<void>;
+  /** Drop every event of an organization (organization deletion, src/tenancy.ts). */
+  removeOrg(orgId: number): Promise<void>;
   /** Wake the store in the background (a paused ClickHouse Cloud service takes ~15 s to answer its first query). */
   warm(): void;
   search(p: SearchParams): Promise<SearchResult>;
@@ -75,7 +77,8 @@ export function normalize(events: RawEvent[], lastSeq: number): StoredEvent[] {
   let next = lastSeq;
   return events.map((raw) => {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Each transcript event must be a JSON object");
-    const seq = Number.isInteger(raw.seq) && Number(raw.seq) > 0 ? Number(raw.seq) : next + 1;
+    // Harness output never chooses its own position in the transcript (docs/security.md, event provenance).
+    const seq = raw._src !== "harness" && Number.isInteger(raw.seq) && Number(raw.seq) > 0 ? Number(raw.seq) : next + 1;
     next = Math.max(next, seq);
     const ts = typeof raw.ts === "string" ? raw.ts : typeof raw.timestamp === "string" ? raw.timestamp : new Date().toISOString();
     const type = typeof raw.type === "string" && raw.type ? raw.type : "event";
@@ -184,6 +187,17 @@ function clickhouseStore(cfg: ClickHouseConfig): TranscriptStore {
       warmedAt = Date.now();
       void ensure().then(() => client.ping()).catch(() => { warmedAt = 0; });
     },
+    async removeOrg(orgId) {
+      await ensure();
+      await client.command({
+        query: `DELETE FROM ${TABLE} WHERE org_id = {org:UInt32}`,
+        query_params: { org: orgId }, clickhouse_settings: { lightweight_deletes_sync: "2" },
+      });
+      const [{ left }] = await (await client.query({
+        query: `SELECT count() AS left FROM ${TABLE} WHERE org_id = {org:UInt32}`, query_params: { org: orgId }, format: "JSONEachRow",
+      })).json<{ left: string }>();
+      if (Number(left)) throw new Error(`org ${orgId}: ${left} transcript event(s) still in ClickHouse after delete`);
+    },
     async remove(orgId, sessionId) {
       await ensure();
       // Lightweight delete, waited for: the retry's events reuse the same seq numbers.
@@ -266,12 +280,16 @@ const postgresStore: TranscriptStore = {
     const db = await getDb();
     for (const e of events)
       await db.query(
-        `INSERT INTO transcript_events (session_id, seq, ts, type, text, raw) VALUES ($1, $2, $3, $4, $5, $6)
+        `/* tenant: session checked against the job token in http.ts (/sessions/:id/events) */ INSERT INTO transcript_events (session_id, seq, ts, type, text, raw) VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (session_id, seq) DO NOTHING`,
         [s.id, e.seq, e.ts, e.type, e.text, JSON.stringify(e.raw)],
       );
   },
   warm() {},
+  async removeOrg(orgId) {
+    const db = await getDb();
+    await db.query("DELETE FROM transcript_events WHERE session_id IN (SELECT id FROM agent_sessions WHERE org_id = $1)", [orgId]);
+  },
   async remove(orgId, sessionId) {
     const db = await getDb();
     await db.query("DELETE FROM transcript_events WHERE session_id = $1 AND EXISTS (SELECT 1 FROM agent_sessions s WHERE s.id = $1 AND s.org_id = $2)", [sessionId, orgId]);
@@ -279,9 +297,9 @@ const postgresStore: TranscriptStore = {
   async read(orgId, sessionId, offset, limit) {
     const db = await getDb();
     const owned = "session_id = $1 AND EXISTS (SELECT 1 FROM agent_sessions s WHERE s.id = $1 AND s.org_id = $2)";
-    const [{ total }] = await db.query<{ total: number }>(`SELECT count(*) AS total FROM transcript_events WHERE ${owned}`, [sessionId, orgId]);
+    const [{ total }] = await db.query<{ total: number }>(`/* tenant: org_id check in the owned filter (EXISTS on agent_sessions) */ SELECT count(*) AS total FROM transcript_events WHERE ${owned}`, [sessionId, orgId]);
     const rows = await db.query<{ seq: number; ts: Date; type: string; text: string; raw: RawEvent }>(
-      `SELECT seq, ts, type, text, raw FROM transcript_events WHERE ${owned} ORDER BY seq LIMIT $3 OFFSET $4`,
+      `/* tenant: org_id check in the owned filter (EXISTS on agent_sessions) */ SELECT seq, ts, type, text, raw FROM transcript_events WHERE ${owned} ORDER BY seq LIMIT $3 OFFSET $4`,
       [sessionId, orgId, limit, offset],
     );
     return { total, events: rows.map((r) => ({ ...r, ts: new Date(r.ts).toISOString() })) };
@@ -347,6 +365,7 @@ export function transcripts(): TranscriptStore {
     kind: base.kind,
     append: (s, events) => base.append(s, events),
     remove: (orgId, sessionId) => base.remove(orgId, sessionId),
+    removeOrg: (orgId) => base.removeOrg(orgId),
     warm: () => base.warm(),
     search: (p) => base.search(p),
     async read(orgId, sessionId, offset, limit) {

@@ -604,3 +604,133 @@ CREATE INDEX IF NOT EXISTS context_memories_scope ON context_memories (org_id, s
 -- Use cases an account adds for itself on /app/adoption (src/playbooks.ts): journey templates owned by one account.
 -- NULL: a global template managed on /admin.
 ALTER TABLE journey_templates ADD COLUMN IF NOT EXISTS org_id INT REFERENCES organizations(id) ON DELETE CASCADE;
+
+-- Platform a task targets (src/platform.ts): split results by web / mobile / backend ... Backfilled from the starter
+-- template, else the language, else the tags and prompt; the rules mirror platformOf() in src/platform.ts.
+ALTER TABLE scenarios ADD COLUMN IF NOT EXISTS platform TEXT CHECK (platform IN ('web', 'mobile', 'backend', 'desktop', 'cli', 'data', 'other'));
+ALTER TABLE library_tasks ADD COLUMN IF NOT EXISTS platform TEXT CHECK (platform IN ('web', 'mobile', 'backend', 'desktop', 'cli', 'data', 'other'));
+CREATE OR REPLACE FUNCTION octillion_platform_of(tpl TEXT, lang TEXT, tags TEXT[], prompt TEXT) RETURNS TEXT LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE
+    WHEN tpl IN ('nextjs-ts', 'django') THEN 'web'
+    WHEN tpl IN ('react-native', 'flutter') THEN 'mobile'
+    WHEN tpl IN ('express-ts', 'fastapi', 'go-http', 'java-spring', 'rust-axum', 'node-ts') THEN 'backend'
+    WHEN tpl = 'cpp-cmake' THEN 'other'
+    WHEN lang ~* '^(dart|swift|objective-c|kotlin)$' THEN 'mobile'
+    WHEN concat_ws(' ', array_to_string(tags, ' '), prompt) ~* '\m(flutter|react native|react-native|expo|swiftui|jetpack compose|android app|ios app|mobile app|iphone|app store|play store)\M' THEN 'mobile'
+    WHEN concat_ws(' ', array_to_string(tags, ' '), prompt) ~* '\m(electron|tauri|desktop app)\M' THEN 'desktop'
+    WHEN concat_ws(' ', array_to_string(tags, ' '), prompt) ~* '\m(next\.?js|react|vue|svelte|angular|frontend|front-end|browser|web app|pwa|single-page)\M' THEN 'web'
+    WHEN concat_ws(' ', array_to_string(tags, ' '), prompt) ~* '\m(cli|command-line|command line tool)\M' THEN 'cli'
+    WHEN concat_ws(' ', array_to_string(tags, ' '), prompt) ~* '\m(notebook|pandas|spark|etl|data pipeline|airflow|dbt)\M' THEN 'data'
+    WHEN concat_ws(' ', array_to_string(tags, ' '), prompt) ~* '\m(express|fastapi|flask|spring boot|rails|laravel|nestjs|koa|gin|axum|actix|rest api|graphql api|microservice|backend service|api service)\M' THEN 'backend'
+    WHEN lang ~* '^(python|go|golang|rust|java|ruby|php|c#|elixir|typescript|javascript)$' THEN 'backend'
+    ELSE 'other' END
+$$;
+UPDATE scenarios SET platform = octillion_platform_of(template, language, tags, prompt) WHERE platform IS NULL;
+UPDATE library_tasks SET platform = octillion_platform_of(attributes->>'template', language, tags, prompt) WHERE platform IS NULL;
+CREATE INDEX IF NOT EXISTS scenarios_product_platform_idx ON scenarios (product_id, platform);
+CREATE INDEX IF NOT EXISTS library_tasks_platform_idx ON library_tasks (platform, category) WHERE active;
+
+-- Tenant safety (docs/security.md): a developer profile is shared (org_id NULL) exactly when it comes from the vault.
+-- A private persona inserted without its org fails instead of silently becoming visible to every organization.
+ALTER TABLE developer_profiles ALTER COLUMN source DROP DEFAULT;
+DO $$ BEGIN
+  ALTER TABLE developer_profiles ADD CONSTRAINT developer_profiles_owner_matches_source CHECK ((org_id IS NULL) = (source = 'vault'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- Per-job worker tokens (src/workerauth.ts): an autoscaled per-job orchestrator gets a token bound to its one job and
+-- organization instead of the fleet-wide OCTILLION_WORKER_TOKEN. Hash only; revoked when its sandbox is deleted.
+CREATE TABLE IF NOT EXISTS worker_tokens (
+  token_hash      TEXT PRIMARY KEY,
+  job_id          TEXT NOT NULL,                -- sim_... or rsh_...
+  org_id          INT REFERENCES organizations(id) ON DELETE CASCADE,
+  sandbox_row_id  INT,                          -- orchestrator_sandboxes.id
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at      TIMESTAMPTZ NOT NULL,
+  revoked_at      TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS worker_tokens_sandbox_idx ON worker_tokens (sandbox_row_id) WHERE revoked_at IS NULL;
+
+-- Deleted organizations (src/tenancy.ts): counts only, no names or content.
+CREATE TABLE IF NOT EXISTS org_deletions (
+  org_id      INT PRIMARY KEY,
+  counts      JSONB NOT NULL DEFAULT '{}',
+  deleted_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Private customer assets (src/private.ts, docs/security.md phase 1). Owned by one organization; never shared.
+CREATE TABLE IF NOT EXISTS org_task_sets (
+  id          SERIAL PRIMARY KEY,
+  public_id   TEXT UNIQUE NOT NULL,             -- tset_<random>
+  org_id      INT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  product_id  INT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  name        TEXT NOT NULL,
+  description TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (org_id, product_id, name)
+);
+ALTER TABLE scenarios ADD COLUMN IF NOT EXISTS task_set_id INT REFERENCES org_task_sets(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS scenarios_task_set_idx ON scenarios (task_set_id) WHERE task_set_id IS NOT NULL;
+CREATE TABLE IF NOT EXISTS org_harnesses (
+  id              TEXT PRIMARY KEY,             -- oh_<random>
+  org_id          INT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  name            TEXT NOT NULL,
+  version_label   TEXT NOT NULL,
+  spec            JSONB NOT NULL,
+  status          TEXT NOT NULL CHECK (status IN ('submitted', 'building', 'scanning', 'pending_review', 'approved', 'rejected', 'failed', 'revoked')),
+  status_reason   TEXT,
+  providers       TEXT[] NOT NULL DEFAULT '{}',
+  event_format    TEXT NOT NULL,
+  egress_hosts    TEXT[] NOT NULL DEFAULT '{}',
+  artifact_uri    TEXT,                         -- internal only; never returned to customers
+  artifact_digest TEXT,
+  scan_summary    JSONB,
+  approved_at     TIMESTAMPTZ,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (org_id, name, version_label)
+);
+
+-- A run that uses an organization's private assets (its own personas or tasks; later its harnesses). Its sessions are
+-- claimed only by the per-job orchestrator launched for it (job token), never by a shared orchestrator (fleet token).
+ALTER TABLE simulations ADD COLUMN IF NOT EXISTS private BOOLEAN NOT NULL DEFAULT false;
+
+-- Private harness mixes (docs/security.md, phase 3): a population owned by one organization (its own distribution of
+-- coding agents). Public populations have no owner; an organization's mix is never the default.
+ALTER TABLE developer_populations ADD COLUMN IF NOT EXISTS org_id INT REFERENCES organizations(id) ON DELETE CASCADE;
+DO $$ BEGIN
+  ALTER TABLE developer_populations ADD CONSTRAINT developer_populations_private_not_default CHECK (org_id IS NULL OR NOT is_default);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+CREATE UNIQUE INDEX IF NOT EXISTS developer_populations_org_name ON developer_populations (org_id, name) WHERE org_id IS NOT NULL;
+
+-- Staff access to the admin API (docs/security.md): who, what, when. No request bodies (they can hold secrets).
+CREATE TABLE IF NOT EXISTS admin_access_log (
+  id      BIGSERIAL PRIMARY KEY,
+  at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  actor   TEXT NOT NULL,                        -- x-octillion-actor header (staff name), else 'admin-token'
+  method  TEXT NOT NULL,
+  path    TEXT NOT NULL,
+  status  INT,
+  ip      TEXT
+);
+CREATE INDEX IF NOT EXISTS admin_access_log_at_idx ON admin_access_log (at DESC);
+
+-- Per-organization data keys for private text at rest (src/orgcrypto.ts), wrapped by the vault master key.
+-- Deleting the organization deletes its key (crypto-shredding of its private personas and tasks).
+CREATE TABLE IF NOT EXISTS org_keys (
+  org_id      INT PRIMARY KEY REFERENCES organizations(id) ON DELETE CASCADE,
+  wrapped     JSONB NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Web and package search for onboarding research (src/websearch.ts). Orchestrator-only keys: no env_vars, so they are
+-- never matched to an agent session (gateway/broker look providers up by env_vars) and stay on the server.
+INSERT INTO vault_providers (slug, mode, upstream_url, auth_header, auth_prefix, env_vars) VALUES
+  ('exa',          'direct', 'https://api.exa.ai',      'x-api-key', '', '{}'),
+  ('libraries_io', 'direct', 'https://libraries.io/api', 'api_key',   '', '{}')
+ON CONFLICT (slug) DO NOTHING;
+-- Every result URL a research job's searches returned: a competitor's evidence_url must be one of them.
+ALTER TABLE product_research ADD COLUMN IF NOT EXISTS sources  JSONB NOT NULL DEFAULT '[]';
+ALTER TABLE product_research ADD COLUMN IF NOT EXISTS searches INT NOT NULL DEFAULT 0;
+-- Packages the agent installed that match neither the product nor a tracked competitor ({name, ecosystem}): the
+-- alternatives research missed. The report lists them so the customer can add them as competitors.
+ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS untracked JSONB;

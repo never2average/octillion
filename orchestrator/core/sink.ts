@@ -50,6 +50,20 @@ async function chRequest(query: string, body: string | undefined, params: Record
   return text;
 }
 
+/**
+ * Event provenance (docs/security.md): every event says who wrote it. `_src: "orchestrator"` for the orchestrator's own
+ * events (the post-run diff, the simulated developer's replies, session end), `_src: "harness"` for lines the coding
+ * agent's harness printed. A harness cannot pose as the orchestrator: its `_src` and `seq` are overwritten, and the
+ * orchestrator's event types are renamed `harness_reserved:<type>` when a harness prints them, so the scorer and the
+ * turn count never take forged evidence.
+ */
+export const ORCHESTRATOR_EVENT_TYPES = new Set(["file_edit", "simulated_user", "session_end", "environment", "turn_cap", "raw_stdout", "worker_stderr", "egress"]);
+export function fromHarness(obj: Record<string, unknown>): Record<string, unknown> {
+  const { _src, seq, ...rest } = obj;
+  const type = typeof rest.type === "string" && ORCHESTRATOR_EVENT_TYPES.has(rest.type) ? `harness_reserved:${rest.type}` : rest.type;
+  return { ...rest, ...(type !== undefined ? { type } : {}), _src: "harness" };
+}
+
 export class EventSink {
   private seq = 0;
   private apiBuf: string[] = [];
@@ -80,18 +94,20 @@ export class EventSink {
   start() { this.timer ??= setInterval(() => void this.flush(), CFG.flushMs); }
   stop() { if (this.timer) clearInterval(this.timer); this.timer = null; }
 
-  /** A harness JSONL line (already parsed into `obj`). Sent verbatim in api mode. */
-  pushLine(line: string, obj: Record<string, unknown>) {
+  /** A harness JSONL line (already parsed into `obj`): tagged as harness output (see fromHarness). */
+  pushLine(_line: string, obj: Record<string, unknown>) {
     this.count++;
-    if (!this.toCh) { this.apiBuf.push(line); return; }
-    this.normalized(obj);
+    const tagged = fromHarness(obj);
+    if (!this.toCh) { this.apiBuf.push(JSON.stringify(tagged)); return; }
+    this.normalized(tagged);
   }
 
-  /** A synthetic event (simulated_user, file_edit, raw_stdout, worker_stderr...). */
+  /** A synthetic event (simulated_user, file_edit, raw_stdout, worker_stderr...), written by the orchestrator. */
   push(obj: Record<string, unknown>) {
     this.count++;
-    if (!this.toCh) { this.apiBuf.push(JSON.stringify(obj)); return; }
-    this.normalized(obj);
+    const tagged = { ...obj, _src: "orchestrator" };
+    if (!this.toCh) { this.apiBuf.push(JSON.stringify(tagged)); return; }
+    this.normalized(tagged);
   }
 
   private normalized(obj: Record<string, unknown>) {

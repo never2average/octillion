@@ -53,7 +53,7 @@ export async function resolveKey(key: string | undefined | null): Promise<Org | 
   );
   if (!row) return null;
   // Best effort; never block the request on it.
-  db.query("UPDATE api_keys SET last_used_at = now() WHERE id = $1", [row.id]).catch(() => {});
+  db.query("/* tenant: the key row just resolved by its hash */ UPDATE api_keys SET last_used_at = now() WHERE id = $1", [row.id]).catch(() => {});
   return { orgId: row.org_id, slug: row.slug, name: row.name };
 }
 

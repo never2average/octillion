@@ -24,7 +24,11 @@ export type Level = "mentioned" | "recommended" | "adopted";
 export type Verdict = "adopted" | "recommended" | "mentioned" | "competitor" | "none";
 const RANK: Record<Level, number> = { mentioned: 1, recommended: 2, adopted: 3 };
 
-export interface Tool { name: string; aliases?: string[]; packages?: string[]; domains?: string[] }
+export interface Tool {
+  name: string; aliases?: string[]; packages?: string[]; domains?: string[];
+  /** Competitors only: the page that shows it competes (a search result from research), and who added it. */
+  evidence_url?: string; source?: "research" | "customer" | "runs";
+}
 export interface Evidence { seq: number; kind: "message" | "action"; level: Level; snippet: string }
 export interface Mention { tool: string; target: boolean; level: Level; first_seq: number; evidence: Evidence[] }
 export interface Score { verdict: Verdict; winner: string | null; mentions: Mention[] }
@@ -107,6 +111,8 @@ export function segments(raw: RawEvent): { kind: "message" | "action"; text: str
   if (type === "tool_use" && "tool_name" in raw) return [{ kind: "action", text: `${str(raw.tool_name)}\n${str(raw.parameters)}` }];
   // (Factory droid uses the same shape with `text` instead of `content`.)
   if (type === "message") return raw.role === "assistant" ? [{ kind: "message", text: str(raw.content ?? raw.text) }] : [];
+  // Orchestrator-only event types printed by a harness are renamed upstream; never trust one tagged as harness output.
+  if (raw._src === "harness" && /^(file_edit|simulated_user|session_end)$/.test(type)) return [];
   // Octillion's own format (also what an orchestrator should use for e.g. a post-run `git diff`: type file_edit).
   if (type === "assistant_message" || raw.role === "assistant") return [{ kind: "message", text: str(raw.content ?? raw.text) }];
   // (Factory droid: {type: "tool_call", toolName, parameters}.)
@@ -216,6 +222,67 @@ function levelIn(kind: "message" | "action", text: string, m: ReturnType<typeof 
     offset += sentence.length + 1;
   }
   return best;
+}
+
+const MANAGER: [RegExp, string][] = [
+  [/^(?:npm|pnpm|yarn|bun)\s+(?:i|install|add)\b|^npx\b|^bunx\b/i, "npm"],
+  [/^(?:pip3?\s+install|uv\s+(?:add|pip\s+install)|poetry\s+add|pipenv\s+install)\b/i, "pypi"],
+  [/^cargo\s+add\b/i, "crates"], [/^go\s+get\b/i, "go"], [/^(?:gem\s+install|bundle\s+add)\b/i, "rubygems"],
+  [/^composer\s+require\b/i, "packagist"], [/^dotnet\s+add\s+package\b/i, "nuget"], [/^brew\s+install\b/i, "brew"],
+];
+// Build and test tooling every project installs: never a choice between vendors.
+const TOOLING = new Set(["typescript", "ts-node", "tsx", "nodemon", "eslint", "prettier", "jest", "vitest", "mocha", "chai", "supertest",
+  "pytest", "black", "ruff", "mypy", "flake8", "isort", "pip", "setuptools", "wheel", "uv", "dotenv", "python-dotenv", "concurrently", "rimraf"]);
+
+/**
+ * Packages the agent installed that are neither the product nor a tracked competitor: the alternatives research
+ * missed. A session whose verdict is "none" usually still picked something; this is what it was. Only install
+ * commands in agent actions count (not prose, not lookups); versions, extras and flags are stripped, and type stubs
+ * and common build/test tooling are left out.
+ */
+export function untrackedInstalls(events: StoredEvent[], tracked: Tool[]): { name: string; ecosystem: string }[] {
+  const known = new Set(tracked.flatMap((t) => [...(t.packages ?? []), t.name, ...(t.aliases ?? [])]).map((x) => x.toLowerCase()));
+  const out = new Map<string, { name: string; ecosystem: string }>();
+  for (const e of events) {
+    if ((e.raw as { _src?: unknown })._src === "harness" || e.type === "simulated_user") continue;
+    for (const seg of segments(e.raw)) {
+      if (seg.kind !== "action") continue;
+      for (const m of seg.text.replace(/\\n|\\t/g, "\n").matchAll(INSTALL)) {
+        const cmd = m[0].replace(/["'`},\]\\]+$/g, "").trim();
+        const mgr = MANAGER.find(([re]) => re.test(cmd));
+        if (!mgr) continue;
+        const words = cmd.replace(mgr[0], "").trim().split(/\s+/).filter(Boolean);
+        const npx = /^(?:npx|bunx)\b/i.test(cmd);
+        for (let i = 0; i < words.length; i++) {
+          let w = words[i]!.replace(/^["'`]+|["'`,]+$/g, "");
+          if (/^-/.test(w)) { if (/^(?:-r|--requirement|-e|--editable|-c|--constraint|--index-url|-i|--extra-index-url|-p|--package)$/.test(w)) i++; continue; }
+          if (!w || /^[.~/]|:\/\/|^\$|\.(?:txt|toml|cfg|json|lock)$/i.test(w)) { if (npx) break; continue; }
+          w = mgr[1] === "npm" ? w.replace(/(?!^)@[^/]*$/, "") : mgr[1] === "go" ? w.replace(/@.*$/, "") : w.replace(/\[.*\]|[=<>~!]=?.*$/g, "");
+          const name = w.toLowerCase();
+          if (name && !/^@types\//.test(name) && !TOOLING.has(name) && !known.has(name) && /^[@a-z0-9][\w./@-]*$/i.test(name))
+            out.set(`${mgr[1]}:${name}`, { name, ecosystem: mgr[1] });
+          if (npx) break;   // npx runs one CLI; the rest are its arguments
+        }
+      }
+    }
+  }
+  return [...out.values()];
+}
+
+/**
+ * Blindness check (docs/security.md): the simulated developer must never name the product or a competitor. If its
+ * replies do (for example because a planted persona told it to), the session is contaminated and gets no verdict.
+ * Returns the names it used, or [] when clean. Only orchestrator-written replies count.
+ */
+export function developerNamedTools(events: StoredEvent[], target: Tool, competitors: Tool[]): string[] {
+  const said = events.filter((e) => e.type === "simulated_user" && (e.raw as { _src?: unknown })._src !== "harness")
+    .map((e) => String((e.raw as { content?: unknown }).content ?? e.text)).join("\n");
+  if (!said) return [];
+  const out: string[] = [];
+  for (const t of [target, ...competitors])
+    for (const w of [t.name, ...(t.aliases ?? []), ...(t.packages ?? [])].filter((x) => x && x.length > 2))
+      if (new RegExp(token(w), "i").test(said)) { out.push(t.name); break; }
+  return out;
 }
 
 export function scoreTranscript(events: StoredEvent[], target: Tool, competitors: Tool[]): Score {

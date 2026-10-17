@@ -92,6 +92,8 @@ const O = org;
 await q.saveProduct(O, { name: "left-pad", packages: ["left-pad"] });
 const queue = async (n: number) => {
   await q.saveScenarios(O, "left-pad", Array.from({ length: n }, (_, i) => ({ title: `t${i}-${Math.random()}`, prompt: `Task number ${i}: add zero padding to the invoice numbers in this small Node project.` })));
+  // Shared-pool mode serves only non-private runs: these tasks stand in for library tasks (customer-written ones are private).
+  await db.query("UPDATE scenarios SET source = 'library' WHERE product_id = (SELECT id FROM products WHERE slug = 'left-pad' AND org_id = $1)", [O.orgId]);
   return q.runSimulation(O, { product: "left-pad", agents: ["codex/default"], repeats: 1 });
 };
 const rows = async () => db.query<any>("SELECT * FROM orchestrator_sandboxes WHERE state <> 'deleted' ORDER BY id");

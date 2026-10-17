@@ -171,6 +171,7 @@
   .prompt { white-space: pre-wrap; background: var(--surface-2); border-radius: 6px; padding: 10px 12px; font-size: 13px; }
   .ev.evidence { box-shadow: inset 3px 0 0 var(--s4); padding-left: 10px; }
   .warn { border-left: 3px solid var(--warning); background: var(--surface-2); padding: 8px 12px; border-radius: 4px; font-size: 13px; }
+  .findings { margin: 0; padding-left: 18px; display: grid; gap: 6px; font-size: 14px; }
   .brand { font-weight: 700; letter-spacing: -0.02em; margin-right: 6px; align-self: center; }
 </style>
 </head>
@@ -476,7 +477,7 @@
   function render(d) {
     tip.style.display = "none";
     product = d.product?.slug ?? d.simulation?.product_slug ?? d.session?.product_slug ?? (typeof d.product === "string" ? d.product : product);
-    const views = { products: viewProducts, product: viewProduct, report: viewReport, simulations: viewSimulations, simulation: viewSimulation, session: viewSession, transcript: viewTranscript, search: viewSearch, memory: viewMemory, profiles: viewProfiles, library: viewLibrary, agents: viewAgents, onboarding: viewOnboarding };
+    const views = { products: viewProducts, product: viewProduct, report: viewReport, simulations: viewSimulations, simulation: viewSimulation, session: viewSession, transcript: viewTranscript, search: viewSearch, memory: viewMemory, profiles: viewProfiles, library: viewLibrary, agents: viewAgents, onboarding: viewOnboarding, personas: viewPersonas, task_sets: viewTaskSets, harnesses: viewHarnesses, harness_mixes: viewMixes };
     const fn = views[d.view];
     const note = d.truncated ? `<div class="warn" style="margin-bottom:12px">Result shortened to fit the host's size limit. Page through it or narrow the filters to see the rest.</div>` : "";
     app.innerHTML = nav(d.view) + note + (fn ? fn(d) : `<div class="empty">Unknown view: ${esc(d.view)}</div>`);
@@ -497,11 +498,22 @@
         </div>`).join("")}</div></div>`;
   }
 
+  // Competitors with where each came from (research cites a page), and a Remove button (save_product with the rest).
+  function competitorsCard(p) {
+    const SRC = { research: "found by research", customer: "added by you", runs: "picked by agents in runs" };
+    const rows = p.competitors.length
+      ? p.competitors.map((c, i) => `<tr><td><strong>${esc(c.name)}</strong><div class="muted" style="font-size:12px">${esc(SRC[c.source] || "added by hand")}</div></td>
+          <td>${/^https?:\/\//.test(c.evidence_url || "") ? `<a href="${esc(c.evidence_url)}" rel="noopener">${esc(new URL(c.evidence_url).hostname.replace(/^www\./, ""))} ↗</a>` : `<span class="muted">–</span>`}</td>
+          <td>${chips(c.packages)}</td><td>${chips(c.domains)}</td>
+          <td>${go("save_product", { product: p.slug, competitors: p.competitors.filter((_, j) => j !== i) }, "Remove")}</td></tr>`).join("")
+      : `<tr><td colspan="5" class="muted">No competitors configured</td></tr>`;
+    return `<div class="card"><h2>Competitors</h2>
+      <p class="sub" style="font-size:13px">Sessions where an agent picks one of these count as a loss to it; anything else counts as "no tool". Missing one? Ask me to add it (e.g. <em>"add competitor X with package x-sdk"</em>).</p>
+      <div class="table-wrap"><table><thead><tr><th>Name</th><th>Evidence</th><th>Packages</th><th>Domains</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+  }
+
   // ---------- product context ----------
   function viewProduct({ product: p, scenarios, simulations, warnings, models }) {
-    const comps = p.competitors.length
-      ? p.competitors.map((c) => `<tr><td>${esc(c.name)}</td><td>${chips(c.aliases)}</td><td>${chips(c.packages)}</td><td>${chips(c.domains)}</td></tr>`).join("")
-      : `<tr><td colspan="4" class="muted">No competitors configured</td></tr>`;
     return `<div class="stack">
       <div class="card stack">
         <div class="spread"><div><h1>${esc(p.name)}</h1><div class="sub">${esc(p.category)}</div></div>
@@ -513,11 +525,11 @@
         </div>
       </div>
       ${warnings.map((w) => `<div class="warn">⚠ ${esc(w)}</div>`).join("")}
-      <div class="card"><h2>Competitors</h2><div class="table-wrap"><table><thead><tr><th>Name</th><th>Aliases</th><th>Packages</th><th>Domains</th></tr></thead><tbody>${comps}</tbody></table></div></div>
+      ${competitorsCard(p)}
       <div class="card"><h2>Scenarios</h2><div class="table-wrap"><table>
         <thead><tr><th>#</th><th>Scenario</th><th>Expect</th><th class="num">Hit rate</th><th>Usually picks</th></tr></thead>
         <tbody>${scenarios.map((s) => `<tr${s.active ? "" : ' style="opacity:.5"'} data-tip="${esc(s.prompt)}">
-          <td class="muted">${s.id}</td><td>${esc(s.title)}${s.active ? "" : ' <span class="badge">retired</span>'}${s.language ? ` <span class="badge">${esc(s.language)}</span>` : ""}</td>
+          <td class="muted">${s.id}</td><td>${esc(s.title)}${s.active ? "" : ' <span class="badge">retired</span>'}${s.platform ? ` <span class="badge">${esc(s.platform)}</span>` : ""}${s.language ? ` <span class="badge">${esc(s.language)}</span>` : ""}</td>
           <td>${s.expectation === "avoid" ? '<span class="badge">avoid</span>' : '<span class="badge">recommend</span>'}</td>
           <td class="num">${pct(s.hit_rate)} <span class="ci">n=${num(s.sessions)}</span></td><td>${esc(s.usual_winner || "–")}</td></tr>`).join("") || `<tr><td colspan="5" class="muted">No scenarios yet</td></tr>`}</tbody>
       </table></div></div>
@@ -555,8 +567,19 @@
     if (!Number(t.sessions))
       return `<div class="stack"><h1>${esc(d.product.name)}</h1><div class="card empty">No scored agent sessions in the last ${d.filters.days} days.<br>Run a simulation to see how coding agents treat ${esc(d.product.name)}.</div></div>`;
     return `<div class="stack">
-      <div class="spread"><div><h1>${esc(d.product.name)}</h1><div class="sub">Do coding agents pick ${esc(d.product.name)}?</div></div>
+      <div class="spread"><div><h1>${esc(d.product.name)}</h1><div class="sub">Do coding agents pick ${esc(d.product.name)}?${d.method?.scope ? ` · run ${esc(d.method.scope.name)}` : ""}</div></div>
         <div class="row">${sel("model", [["", "All models"], ...d.models.map((m) => [m, m])], d.filters.model)}${sel("days", [[7, "7 days"], [30, "30 days"], [90, "90 days"]], d.filters.days)}</div></div>
+      ${d.headline?.length ? `<div class="card"><h2>Headline</h2><ul class="findings">${d.headline.map((h) => `<li>${esc(h)}</li>`).join("")}</ul></div>` : ""}
+      ${d.by_platform?.length ? `<div class="card"><h2>By platform</h2><div class="table-wrap"><table>
+        <thead><tr><th>Platform</th><th style="width:30%">Outcomes (should win)</th><th class="num">${esc(d.product.name)}</th><th class="num">Mentioned</th><th class="num">Control</th><th></th></tr></thead>
+        <tbody>${d.by_platform.map((x) => { const n = x.sessions || 1; return `<tr>
+          <td><span class="badge">${esc(x.platform)}</span> <span class="muted">${num(x.tasks)} task${x.tasks === 1 ? "" : "s"}</span></td>
+          <td>${x.sessions ? `<div class="vbar">${[["adopted", x.product], ["competitor", x.competitor], ["none", x.no_vendor]].filter(([, v]) => v).map(([k, v]) => `<span class="v-${k}" style="width:${(v / n) * 100}%"></span>`).join("")}</div>` : '<span class="muted">control only</span>'}</td>
+          <td class="num">${num(x.product)}/${num(x.sessions)} ${ci(x.hit_ci)}</td>
+          <td class="num">${num(x.product_mentioned)}/${num(x.sessions)}</td>
+          <td class="num">${x.control.sessions ? `${num(x.control.correct)}/${num(x.control.sessions)}` : "–"}</td>
+          <td>${d.filters.platform ? "" : go("get_visibility_report", { product: d.product.slug, ...(d.filters.simulation ? { simulation: d.filters.simulation } : { days: d.filters.days }), platform: x.platform }, "Only these →")}</td></tr>`; }).join("")}</tbody>
+      </table></div></div>` : ""}
       <div class="grid">
         ${tile("Hit rate", pct(t.hit_rate), `${ci(t.hit_ci)} 95% CI · n=${num(t.sessions)}`)}
         ${t.weighted_hit_rate != null ? tile("Adoption-weighted", pct(t.weighted_hit_rate), `per-agent rates × developer usage · covers ${pct(t.adoption_coverage)}`) : ""}
@@ -571,20 +594,78 @@
           <div class="track"><span class="bar ${v.target ? "target" : "rival"}" style="width:${((Number(v.share) || 0) / max) * 100}%" data-tip="${esc(v.tool)}: recommended or adopted in ${v.recommended} sessions, mentioned in ${v.mentioned}"></span></div>
           <div class="val">${pct(v.share)}</div>`).join("") || '<span class="muted">No tools detected</span>'}</div>
           <p class="muted" style="font-size:12px;margin-top:8px">Share of sessions where the agent recommended or adopted each tool.</p></div>
-        <div class="card"><h2>By coding agent</h2><table><thead><tr><th>Agent</th><th class="num">Usage</th><th class="num">Hit rate</th><th class="num">Lost</th></tr></thead><tbody>${d.by_agent.map((a) => `
-          <tr><td>${esc(a.label)}</td><td class="num muted">${a.weight ? pct(a.weight) : "–"}</td><td class="num">${pct(a.hit_rate)} ${ci(a.hit_ci)}</td><td class="num">${num(a.competitor)}/${num(a.sessions)}</td></tr>`).join("")}</tbody></table>
+        <div class="card"><h2>By coding agent</h2><table><thead><tr><th>Agent</th><th class="num">Usage</th><th class="num">Hit rate</th><th class="num" data-tip="On tasks the product should win: built on it / on a competitor / no vendor">Product · rival · none</th></tr></thead><tbody>${d.by_agent.map((a) => `
+          <tr><td>${esc(a.label)}</td><td class="num muted">${a.weight ? pct(a.weight) : "–"}</td><td class="num">${pct(a.hit_rate)} ${ci(a.hit_ci)}</td><td class="num">${a.on_target ? `${num(a.on_target.product)} · ${num(a.on_target.competitor)} · ${num(a.on_target.no_vendor)}` : `${num(a.competitor)} lost`}</td></tr>`).join("")}</tbody></table>
           <p class="muted" style="font-size:12px;margin-top:8px">${go("list_agents", {}, "Usage = share of real-world developer adoption")}</p></div>
       </div>
       ${d.by_profile.length ? `<div class="card"><h2>By developer profile</h2><table><thead><tr><th>Profile</th><th class="num">Hit rate</th><th class="num">n</th><th class="num">Questions answered</th></tr></thead><tbody>${d.by_profile.map((p) => `
         <tr><td>${esc(p.name)}</td><td class="num">${pct(p.hit_rate)} ${ci(p.hit_ci)}</td><td class="num">${num(p.sessions)}</td><td class="num">${Number(p.avg_user_turns || 0).toFixed(1)} avg</td></tr>`).join("")}</tbody></table></div>` : ""}
       <div class="card"><h2>Daily hit rate</h2>${trendChart(d.daily)}</div>
-      <div class="card"><h2>By scenario (weakest first)</h2><div class="table-wrap"><table>
-        <thead><tr><th>Scenario</th><th class="num">Hit rate</th><th class="num">n</th><th>Usually picks</th></tr></thead>
-        <tbody>${d.by_scenario.map((s) => `<tr><td>${esc(s.title)}${s.expectation === "avoid" ? ' <span class="badge">avoid</span>' : ""}</td><td class="num">${pct(s.hit_rate)} ${ci(s.hit_ci)}</td><td class="num">${num(s.sessions)}</td><td>${esc(s.usual_winner || "–")}</td></tr>`).join("")}</tbody>
+      <div class="card"><h2>Results by task (weakest first)</h2>
+        <div class="legend" style="margin-bottom:8px"><span><i class="v-adopted"></i>Built on ${esc(d.product.name)}</span><span><i class="v-competitor"></i>Competitor</span><span><i class="v-none"></i>No vendor</span></div>
+        <div class="table-wrap"><table>
+        <thead><tr><th>Task</th><th style="width:28%">Outcomes</th><th class="num">Hit rate</th><th>Instead</th><th class="num" data-tip="Sessions that mentioned the product at all">Mentioned</th></tr></thead>
+        <tbody>${d.by_scenario.map((s) => { const o = s.outcomes, n = Number(s.sessions) || 1; return `<tr${s.prompt ? ` data-tip="${esc(s.prompt)}"` : ""}>
+          <td>${esc(s.title)} <span class="badge" data-tip="Task library id">${s.library_task_id ? `lib #${esc(s.library_task_id)}` : "not from library"}</span>${s.platform ? ` <span class="badge">${esc(s.platform)}</span>` : ""}${s.expectation === "avoid" ? ' <span class="badge">control</span>' : ""}</td>
+          <td>${o ? `<div class="vbar">${[["adopted", o.product, d.product.name], ["competitor", o.competitor, "Competitor"], ["none", o.no_vendor, "No vendor"]].filter(([, v]) => v).map(([k, v, l]) => `<span class="v-${k}" style="width:${(v / n) * 100}%" data-tip="${esc(l)}: ${v} of ${n}"></span>`).join("")}</div>` : ""}</td>
+          <td class="num">${num(s.hits)}/${num(s.sessions)} ${ci(s.hit_ci)}</td>
+          <td>${esc((s.winners || []).map((w) => `${w.tool} ${w.sessions}`).join(", ") || (s.alternatives || []).slice(0, 3).map((a) => a.tool).join(", ") || s.usual_winner || "–")}</td>
+          <td class="num">${s.product_mentioned != null ? `${num(s.product_mentioned)}/${num(s.sessions)}` : "–"}</td></tr>`; }).join("")}</tbody>
       </table></div></div>
       ${d.recent_losses.length ? `<div class="card"><h2>Recent losses</h2><table><tbody>${d.recent_losses.map((l) => `
         <tr class="clickable" data-tool="get_agent_session" data-args="${args({ session_id: l.id })}"><td>${esc(l.scenario)}</td><td class="muted">${esc(l.model)}</td><td>${verdict("competitor")} ${esc(l.winner || "")}</td><td class="muted">${ago(l.ended_at)}</td></tr>`).join("")}</tbody></table></div>` : ""}
+      ${d.untracked_tools?.packages?.length ? `<div class="card"><h2>Installed but not tracked</h2>
+        <p class="sub" style="font-size:13px">In the ${num(d.untracked_tools.sessions_with_no_tool)} sessions scored "no vendor", agents installed these packages, which are neither ${esc(d.product.name)} nor a tracked competitor. If one does the same job, add it so its wins count as losses.</p>
+        <table><tbody>${d.untracked_tools.packages.map((x) => `<tr><td><strong>${esc(x.name)}</strong> <span class="muted">${esc(x.ecosystem)}</span></td><td class="num">${num(x.sessions)} session${x.sessions === 1 ? "" : "s"}</td>
+          <td>${go("save_product", { product: d.product.slug, competitors: [...d.untracked_tools.competitors, { name: x.name, packages: [x.name], source: "runs" }] }, "Add as competitor")}</td></tr>`).join("")}</tbody></table></div>` : ""}
+      ${d.evidence?.length ? `<div class="card"><h2>The deciding sessions</h2><div class="stack">${d.evidence.map((e) => `
+        <div class="ev evidence clickable" data-tool="get_agent_session" data-args="${args({ session_id: e.session_id })}">
+          <div class="spread"><span><b>${esc(e.scenario)}</b> <span class="muted">· ${esc(e.agent)}${e.profile ? ` as ${esc(e.profile)}` : ""}</span></span>
+            <span>${e.outcome === "competitor" ? verdict("competitor") + " " + esc(e.winner || "") : e.outcome === "product" ? verdict(e.verdict) : `<span class="badge">no vendor${e.mentioned_product ? ", mentioned" : ""}</span>`}</span></div>
+          ${e.evidence ? `<div class="muted" style="font-size:13px;margin-top:4px">“${esc(e.evidence.quote)}” <span class="ci">${esc(e.evidence.tool)} · #${e.evidence.seq}</span></div>` : ""}
+        </div>`).join("")}</div></div>` : ""}
+      ${d.method ? `<div class="grid-wide">
+        <div class="card"><h2>How this was run</h2><ul class="findings">
+          <li>${num(d.method.tasks.total)} tasks: ${num(d.method.tasks.recommend)} the product should win, ${num(d.method.tasks.avoid)} control</li>
+          <li>${num(d.method.sessions)} sessions, ${num(d.method.scored)} scored · ${usd(d.method.cost_usd)}</li>
+          <li>Agents: ${esc(d.method.agents.map((a) => `${a.label} ${a.sessions}`).join(", ") || "–")}</li>
+          <li>Personas: ${esc(d.method.personas.map((x) => `${x.name} ${x.sessions}`).join(", ") || "–")}</li>
+          <li>Competitors: ${esc(d.method.competitors.join(", ") || "–")}</li>
+          ${d.method.sampling ? `<li>Adaptive sampling up to ${num(d.method.sampling.max_per_task)} per task: ${num(d.method.sampling.settled)} settled, ${num(d.method.sampling.at_cap)} at the cap</li>` : ""}
+        </ul></div>
+        <div class="card"><h2>Limits</h2><ul class="findings">${d.limits.map((l) => `<li>${esc(l)}</li>`).join("")}</ul></div>
+      </div>` : ""}
     </div>`;
+  }
+
+  // ---------- private assets (this organization only) ----------
+  const privateNote = `<p class="muted" style="font-size:12px;margin-top:8px">Private to your organization: no other organization can see, search or use these.</p>`;
+  function viewPersonas({ personas }) {
+    if (!personas.length) return `<div class="card empty">No private personas yet. Ask me to add the developers you target.</div>`;
+    return `<div class="card"><h2>Private personas</h2><div class="table-wrap"><table>
+      <thead><tr><th>Persona</th><th>Summary</th><th>Source</th><th>Slug</th></tr></thead>
+      <tbody>${personas.map((p) => `<tr${p.active ? "" : ' style="opacity:.5"'}><td>${esc(p.name)}</td><td class="muted">${esc(p.summary || "–")}</td><td><span class="badge">${esc(p.source)}</span></td><td class="muted">${esc(p.slug)}</td></tr>`).join("")}</tbody>
+    </table></div>${privateNote}</div>`;
+  }
+  function viewTaskSets({ task_sets }) {
+    if (!task_sets.length) return `<div class="card empty">No private task sets yet. Ask me to import your own tasks.</div>`;
+    return `<div class="stack">${task_sets.map((t) => `<div class="card"><div class="spread"><h2>${esc(t.name)}</h2><span class="muted">${esc(t.product)} · ${num(t.active_tasks)} active</span></div>
+      ${t.description ? `<p class="sub">${esc(t.description)}</p>` : ""}
+      <div class="table-wrap"><table><tbody>${(t.tasks || []).map((x) => `<tr${x.active ? "" : ' style="opacity:.5"'}><td class="muted">${x.id}</td><td>${esc(x.title)}</td><td><span class="badge">${esc(x.platform || "?")}</span></td><td><span class="badge">${esc(x.expectation)}</span></td></tr>`).join("")}</tbody></table></div></div>`).join("")}${privateNote}</div>`;
+  }
+  function viewHarnesses({ harnesses }) {
+    if (!harnesses.length) return `<div class="card empty">No private harnesses yet. Ask me to register your coding agent.</div>`;
+    return `<div class="card"><h2>Private harnesses</h2><div class="table-wrap"><table>
+      <thead><tr><th>Harness</th><th>Version</th><th>Status</th><th>Providers</th></tr></thead>
+      <tbody>${harnesses.map((h) => `<tr><td>${esc(h.name)}</td><td class="muted">${esc(h.version)}</td><td><span class="badge" data-tip="${esc(h.status_reason || "")}">${esc(h.status)}</span></td><td class="muted">${esc((h.providers || []).join(", "))}</td></tr>`).join("")}</tbody>
+    </table></div>${privateNote}</div>`;
+  }
+
+  function viewMixes({ mixes }) {
+    if (!mixes.length) return `<div class="card empty">No private harness mixes yet. The default is the market-weighted mix.</div>`;
+    return `<div class="stack">${mixes.map((m) => `<div class="card"><div class="spread"><h2>${esc(m.name)}</h2><span class="muted">${esc(m.slug)}</span></div>
+      <div class="hbars">${m.agents.map((a) => `<div class="hit">${esc(a.agent_id)}</div><div class="track"><span class="bar rival" style="width:${(Number(a.share) || 0) * 100}%"></span></div><div class="val">${pct(a.share)}</div>`).join("")}</div></div>`).join("")}
+      <p class="muted" style="font-size:12px">Reports on a custom mix are labelled and never blended with the market-weighted default.</p>${privateNote}</div>`;
   }
 
   // ---------- simulations ----------
@@ -684,20 +765,23 @@
   }
 
   // ---------- onboarding ----------
-  function viewOnboarding({ research: r, product: p, personas, scenarios, simulation: sim, warnings }) {
+  function viewOnboarding({ research: r, product: p, personas, scenarios, simulation: sim, warnings, failure, next_step: next, drafts }) {
     const stages = ["reading", "profiling", "personas", "problems", "validating", "done"];
     const at = r.status === "completed" ? stages.length - 1 : Math.max(0, stages.indexOf(r.stage || "reading"));
     const steps = stages.map((s, i) => `<span class="badge" style="${i <= at ? "background:var(--accent);color:var(--surface)" : ""}">${i < at || r.status === "completed" ? "✓ " : ""}${esc(s)}</span>`).join("");
     if (r.status !== "completed")
       return `<div class="stack"><div class="spread"><div><h1>Onboarding ${esc(p.name)}</h1><div class="sub">${esc(r.input.website_url || "")} ${esc(r.input.docs_url || "")}</div></div>${statusPill(r.status === "failed" ? "failed" : r.status === "queued" ? "queued" : "running")}</div>
         <div class="card stack"><div class="chips">${steps}</div><p class="sub">${esc(r.note || "The orchestrator reads the website and docs, then writes the product profile, target developer personas and programming problems.")}</p>
-        ${r.error ? `<div class="err-box">${esc(r.error)}</div>` : ""}${go("get_onboarding", { research_id: r.id }, "↻ Refresh")}</div></div>`;
+        ${failure ? `<div class="warn"><strong>${esc(failure.summary)}</strong><ol style="margin:6px 0 0 18px">${failure.next.map((x) => `<li>${esc(x)}</li>`).join("")}</ol></div>` : ""}
+        ${r.status === "failed" ? "" : go("get_onboarding", { research_id: r.id }, "↻ Refresh")}</div></div>`;
     return `<div class="stack">
       <div class="spread"><div><h1>${esc(p.name)}</h1><div class="sub">${esc(p.category)}</div></div>
         <div class="row">${sim ? go("get_simulation", { simulation_id: sim.id }, `Run: ${sim.finished}/${sim.sessions} →`) : ""}${go("get_visibility_report", { product: p.slug }, "Report →")}</div></div>
+      ${next ? `<div class="card stack"><div class="spread"><div><h2>Next: run it</h2><p class="sub">${esc(next.message)}</p></div>${go(next.tool, next.args, "▶ Run simulation")}</div></div>` : ""}
+      ${drafts?.length ? `<div class="card"><h2>Draft tasks waiting for your approval</h2><p class="sub">The task library had nothing that fits these needs, so research wrote them. They run only once you approve them.</p>${drafts.map((s) => `<div class="ev"><div class="spread"><strong>#${s.id} ${esc(s.title)}</strong><span class="row">${go("review_draft_tasks", { product: p.slug, approve: [s.id] }, "Approve")}${go("review_draft_tasks", { product: p.slug, reject: [s.id] }, "Reject")}</span></div><div class="sub" style="font-size:13px">${esc(s.prompt)}</div></div>`).join("")}</div>` : ""}
       <div class="card stack"><h2>Product profile</h2><p class="sub">${esc(p.description)}</p>
-        <div class="grid-wide"><div><h2>Aliases</h2>${chips(p.aliases)}</div><div><h2>Packages</h2>${chips(p.packages)}</div><div><h2>Domains</h2>${chips(p.domains)}</div></div>
-        <div><h2>Competitors</h2>${chips(p.competitors.map((c) => c.name))}</div></div>
+        <div class="grid-wide"><div><h2>Aliases</h2>${chips(p.aliases)}</div><div><h2>Packages</h2>${chips(p.packages)}</div><div><h2>Domains</h2>${chips(p.domains)}</div></div></div>
+      ${competitorsCard(p)}
       ${warnings.map((w) => `<div class="warn">⚠ ${esc(w)}</div>`).join("")}
       <div class="card"><h2>Target developer personas</h2><div class="grid-wide">${personas.map((x) => `<div><strong>${esc(x.name)}</strong><p class="sub" style="font-size:13px">${esc(x.summary)}</p></div>`).join("")}</div></div>
       <div class="card"><h2>Programming problems</h2>${scenarios.map((s) => `<div class="ev" data-tip="${esc(s.prompt)}">

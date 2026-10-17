@@ -51,6 +51,8 @@ export const isRunnable = (a: AgentSpec) => a.enabled !== false && a.weight > 0 
 export interface Population {
   id: number; slug: string; name: string; description: string; as_of: string | null; methodology: string;
   sources: unknown[]; unrepresented_share: number | null; sandbox_unit: number; min_one_sandbox: boolean; is_default: boolean;
+  /** Owner of a private harness mix; null or absent for public populations. */
+  org_id?: number | null;
   agents: AgentSpec[];
 }
 

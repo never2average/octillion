@@ -1,3 +1,4 @@
+import { mintJobWorkerToken, revokeSandboxWorkerTokens } from "./workerauth.js";
 import { hostname } from "node:os";
 import { randomBytes } from "node:crypto";
 import { getDb } from "./db.js";
@@ -78,12 +79,12 @@ export async function computeDemand(freshSince?: Date): Promise<Demand> {
   catch { /* no population: count everything */ }
   const claimable = "(agent_id IS NULL OR cardinality($1::text[]) = 0 OR agent_id = ANY($1))";
   const [s] = await db.query<{ sessions: number; queued: number; unclaimable: number; fresh: number }>(
-    `SELECT count(*) FILTER (WHERE ${claimable}) AS sessions,
+    `/* tenant: internal: autoscaler demand counts across all orgs, counts only */ SELECT count(*) FILTER (WHERE ${claimable}) AS sessions,
             count(*) FILTER (WHERE status = 'queued' AND ${claimable}) AS queued,
             count(*) FILTER (WHERE NOT ${claimable}) AS unclaimable,
             count(*) FILTER (WHERE status = 'queued' AND ${claimable} AND $2::timestamptz IS NOT NULL AND queued_at > $2) AS fresh
        FROM agent_sessions WHERE status IN ('queued', 'running')`, [agents, freshSince ?? null]);
-  const [r] = await db.query<{ n: number }>("SELECT count(*) AS n FROM product_research WHERE status IN ('queued', 'running')");
+  const [r] = await db.query<{ n: number }>("/* tenant: internal: autoscaler demand counts across all orgs, counts only */ SELECT count(*) AS n FROM product_research WHERE status IN ('queued', 'running')");
   return {
     sessions: Number(s?.sessions ?? 0), queued_sessions: Number(s?.queued ?? 0), research: Number(r?.n ?? 0),
     unclaimable_sessions: Number(s?.unclaimable ?? 0), ...(freshSince ? { fresh_queued_sessions: Number(s?.fresh ?? 0) } : {}),
@@ -100,11 +101,11 @@ export async function computeJobDemand(): Promise<JobDemand[]> {
   try { agents = scheduledAgents(await getPopulation()).flatMap((a) => [a.id, ...variantsOf(a).map((v) => v.id)]); }
   catch { /* no population: count everything */ }
   const research = await db.query<{ id: string }>(
-    `SELECT id FROM product_research WHERE status = 'queued'
+    `/* tenant: internal: autoscaler job demand across all orgs, ids go to the orchestrator only */ SELECT id FROM product_research WHERE status = 'queued'
         OR (status = 'running' AND heartbeat_at < now() - make_interval(mins => $1)) ORDER BY created_at`,
     [num(env.OCTILLION_RESEARCH_STALE_MINUTES, 20)]);
   const sims = await db.query<{ id: string; sessions: number; queued: number; last_queued: Date | null }>(
-    `SELECT simulation_id AS id, count(*) AS sessions, count(*) FILTER (WHERE status = 'queued') AS queued,
+    `/* tenant: internal: autoscaler job demand across all orgs, ids go to the orchestrator only */ SELECT simulation_id AS id, count(*) AS sessions, count(*) FILTER (WHERE status = 'queued') AS queued,
             max(queued_at) FILTER (WHERE status = 'queued') AS last_queued
        FROM agent_sessions
       WHERE status IN ('queued', 'running') AND (agent_id IS NULL OR cardinality($1::text[]) = 0 OR agent_id = ANY($1))
@@ -209,6 +210,7 @@ export class Autoscaler {
       const reap = async (row: Row, reason: string, deleteIt = true) => {
         if (row.sandbox_id && deleteIt) await lib.deleteSandbox(row.sandbox_id).catch((e) => this.log(`delete ${row.sandbox_id}: ${(e as Error).message}`));
         await db.query("UPDATE orchestrator_sandboxes SET state = 'deleted', deleted_at = now(), error = coalesce(error, $2) WHERE id = $1", [row.id, reason]);
+        await revokeSandboxWorkerTokens(row.id);
         if (row.orchestrator_id) {
           await db.query("DELETE FROM orchestrators WHERE id = $1", [row.orchestrator_id]);
           // worker sandboxes a crashed/stale orchestrator could not clean up itself (octi-w-<orch>-<agent>)
@@ -385,7 +387,8 @@ export class Autoscaler {
       "INSERT INTO orchestrator_sandboxes (state, from_image, code_hash, job_id, pods) VALUES ('booting', $1, $2, $3, $4) RETURNING id",
       [image, lib.codeHash(this.opts.root), job?.id ?? null, job ? job.pods : null]);
     const id = row!.id;
-    const workerToken = env.OCTILLION_WORKER_TOKEN ?? "";
+    // A per-job orchestrator gets a token bound to its job, never the fleet token (docs/security.md, phase 0b).
+    const workerToken = job ? await mintJobWorkerToken(job.id, id) : env.OCTILLION_WORKER_TOKEN ?? "";
     const tuning: Record<string, string> = { OCTILLION_ORCH_IDLE_MINUTES: String(AUTOSCALE.idleMinutes()) };
     for (const k of lib.TUNING_VARS) if (env[k]) tuning[k] = env[k]!;
     if (job) tuning.ORCHESTRATOR_JOB = job.id;
@@ -398,6 +401,7 @@ export class Autoscaler {
       this.log(`launched ${r.sandboxId} (${r.orchId}) in ${Math.round((r.timings.started ?? 0) / 1000)}s${r.fromImage ? " from image" : " (code upload + npm ci)"}`);
     }).catch(async (e) => {
       await db.query("UPDATE orchestrator_sandboxes SET state = 'deleted', deleted_at = now(), error = $2 WHERE id = $1", [id, String((e as Error).message).slice(0, 500)]);
+      await revokeSandboxWorkerTokens(id);
       this.log(`launch failed: ${(e as Error).message}`);
     }).finally(() => { this.inflight.delete(id); });
     this.inflight.set(id, p);

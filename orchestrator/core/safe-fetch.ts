@@ -38,9 +38,13 @@ export function isBlockedIp(ip: string): boolean {
   }
   if (net.isIPv6(ip)) {
     const x = ip.toLowerCase();
-    const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(x);
+    // IPv4 embedded in IPv6: mapped (::ffff:a.b.c.d or ::ffff:hhhh:hhhh) and compatible (::a.b.c.d) forms.
+    const mapped = /^::(?:ffff:)?(\d+\.\d+\.\d+\.\d+)$/.exec(x);
     if (mapped) return isBlockedIp(mapped[1]!);
-    return x === "::" || x === "::1" || /^f[cd]/.test(x) || /^fe[89ab]/.test(x) || /^ff/.test(x) || x.startsWith("64:ff9b:") || x.startsWith("2001:db8");
+    const hex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(x);
+    if (hex) { const a = parseInt(hex[1]!, 16), b = parseInt(hex[2]!, 16); return isBlockedIp(`${a >> 8}.${a & 255}.${b >> 8}.${b & 255}`); }
+    return x === "::" || x === "::1" || /^f[cd]/.test(x) || /^fe[89ab]/.test(x) || /^ff/.test(x) || x.startsWith("64:ff9b:") || x.startsWith("2001:db8") ||
+      x.startsWith("2002:") /* 6to4 */ || x.startsWith("2001:0:") || x.startsWith("2001::") /* Teredo */;
   }
   return true;
 }
@@ -53,13 +57,39 @@ export class FetchPolicy {
   private testDns = new Map(envList(process.env.RESEARCH_TEST_DNS).map((kv) => kv.split("=") as [string, string]));
   fetches = 0;
 
-  constructor(urls: (string | null | undefined)[], readonly maxFetches = 25) {
+  /**
+   * `related`: the product's own links found in its registry metadata (docs site, homepage, source). Their hosts are
+   * allowed like the website; a GitHub link unlocks only that owner's repositories, never all of GitHub.
+   */
+  constructor(urls: (string | null | undefined)[], readonly maxFetches = 25, related: string[] = []) {
     const bases = new Set<string>();
+    for (const r of related) {
+      try {
+        const u = new URL(r);
+        const h = u.hostname.toLowerCase().replace(/^www\./, "");
+        if (GITHUB_HOSTS.includes(h)) { const owner = u.pathname.split("/").filter(Boolean)[0]; if (owner) this.githubOwners.add(owner.toLowerCase()); }
+        else if (u.protocol === "https:") bases.add(h);
+      } catch { /* ignore bad URL */ }
+    }
     for (const u of urls) {
       if (!u) continue;
       try { bases.add(new URL(u).hostname.toLowerCase().replace(/^www\./, "")); } catch { /* ignore bad URL */ }
     }
     this.siteBases = [...bases];
+  }
+
+  /** Hosts a web or package search returned this job (competitors' sites, comparison pages): readable like the product's. */
+  readonly found = new Set<string>();
+
+  /** Allow fetching a search result: its exact host over https (a GitHub result unlocks only that owner). */
+  allowFound(raw: string) {
+    try {
+      const u = new URL(raw);
+      const h = u.hostname.toLowerCase();
+      if (u.protocol !== "https:" || net.isIP(h.replace(/^\[|\]$/g, ""))) return;
+      if (GITHUB_HOSTS.includes(h)) { const owner = u.pathname.split("/").filter(Boolean)[0]; if (owner) this.githubOwners.add(owner.toLowerCase()); }
+      else this.found.add(h);
+    } catch { /* ignore bad URL */ }
   }
 
   private suffixMatch(host: string, bases: string[]) { return bases.some((b) => host === b || host.endsWith("." + b)); }
@@ -71,14 +101,18 @@ export class FetchPolicy {
     if (u.protocol !== "https:" && u.protocol !== "http:") return { ok: false, why: `scheme ${u.protocol} not allowed` };
     if (u.username || u.password) return { ok: false, why: "credentials in URL not allowed" };
     const host = u.hostname.toLowerCase();
+    // IP literals skip the socket lookup (where private addresses are refused), so they are never allowed, even when
+    // a customer gave one as the product's website.
+    if (net.isIP(host.replace(/^\[|\]$/g, ""))) return { ok: false, why: "IP address URLs are not allowed; use the host name" };
     if (this.isProductSite(u)) return { ok: true };
     if (REGISTRY_HOSTS.includes(host)) return { ok: true };
+    if (this.found.has(host) && u.protocol === "https:") return { ok: true };
     if (GITHUB_HOSTS.includes(host)) {
       const owner = u.pathname.split("/").filter(Boolean)[0]?.toLowerCase();
       if (owner && this.githubOwners.has(owner)) return { ok: true };
       return { ok: false, why: `GitHub owner "${owner ?? ""}" is not linked from the product's own pages` };
     }
-    return { ok: false, why: `host ${host} is not the product's website/docs, a package registry, or its GitHub` };
+    return { ok: false, why: `host ${host} is not the product's website/docs, a package registry, its GitHub, or a search result` };
   }
 
   /** Socket lookup: resolve, refuse blocked addresses (unless trusted for tests), connect to the checked address. */

@@ -48,13 +48,21 @@ async function mintToken(kind: "session" | "orchestrator", providers: string[], 
 /** Credentials for one running agent session: gateway providers get a scoped token, direct ones the real key. */
 export async function brokerSessionCredentials(sessionId: string) {
   const db = await getDb();
-  const [s] = await db.query<{ status: string; agent_id: string | null; harness: string }>(
-    "SELECT status, agent_id, harness FROM agent_sessions WHERE id = $1", [sessionId]);
+  const [s] = await db.query<{ status: string; agent_id: string | null; harness: string; task_source: string | null }>(
+    `/* tenant: session checked against the job token in http.ts (/sessions/:id) */ SELECT s.status, s.agent_id, s.harness, sc.source AS task_source
+       FROM agent_sessions s LEFT JOIN scenarios sc ON sc.id = s.scenario_id WHERE s.id = $1`, [sessionId]);
   if (!s) throw Object.assign(new Error(`No session ${sessionId}`), { status: 404 });
   if (s.status !== "running") throw Object.assign(new Error(`Session ${sessionId} is ${s.status}, not running`), { status: 409 });
 
   const needs = (s.agent_id && findAgent(s.agent_id)?.requires_env) || HARNESS_ENV[s.harness] || [];
-  const providers = await providersForEnv(needs);
+  // Real vendor keys (direct mode) reach a session only when explicitly allowed, never for a task a customer wrote
+  // (its prompt steers an agent that can read its own environment), and never for orchestrator-only keys.
+  const all = await providersForEnv(needs);
+  const providers = all.filter((p) => p.mode === "gateway" || directKeyAllowed(p.slug, s.task_source));
+  const withheld = needs.filter((v) => !providers.some((p) => p.env_vars.includes(v)) && all.some((p) => p.env_vars.includes(v)));
+  if (withheld.length)
+    throw Object.assign(new Error(`Real vendor keys (${withheld.join(", ")}) are not given to this session: direct-mode keys are off ` +
+                                  "(OCTILLION_DIRECT_KEYS) or the task was written by a customer"), { status: 403 });
   const missing = needs.filter((v) => !providers.some((p) => p.env_vars.includes(v)));
   if (missing.length) throw Object.assign(new Error(`No vault provider supplies ${missing.join(", ")}`), { status: 503 });
 
@@ -88,6 +96,15 @@ export const orchestratorBrain = () => ({
 /** Path SDKs expect after the provider's host (OpenAI-style clients append /responses, /chat/completions to .../v1). */
 const SDK_BASE_SUFFIX: Record<string, string> = { openai: "/v1", dashscope: "/compatible-mode/v1" };
 
+/** Direct-mode providers whose key only the orchestrator uses; never brokered to an agent session. */
+export const ORCHESTRATOR_ONLY_PROVIDERS = new Set(["boat"]);
+/** Real vendor keys in agent sessions are off unless OCTILLION_DIRECT_KEYS=allow (see docs/security.md). */
+export const directKeysAllowed = () => process.env.OCTILLION_DIRECT_KEYS === "allow";
+function directKeyAllowed(provider: string, taskSource: string | null): boolean {
+  if (ORCHESTRATOR_ONLY_PROVIDERS.has(provider) || !directKeysAllowed()) return false;
+  return taskSource === "library" || taskSource === "generated"; // curated or research-written, never customer-written
+}
+
 /** The orchestrator's own access: boat.dev key (if in the vault) and gateway access for its LLM. */
 export async function brokerOrchestratorCredentials(orchestratorId: string) {
   const { provider: llmProvider, model: llmModel } = orchestratorBrain();
@@ -108,7 +125,7 @@ export async function revokeSessionTokens(sessionId: string) {
 /** Gateway-metered usage for a session (summed over providers). */
 export async function sessionGatewayUsage(sessionId: string) {
   const [u] = await (await getDb()).query<{ requests: number; input_tokens: number; output_tokens: number; cost_usd: number }>(
-    `SELECT coalesce(sum(requests), 0) AS requests, coalesce(sum(input_tokens), 0) AS input_tokens,
+    `/* tenant: session completed via the worker route, checked against the job token in http.ts */ SELECT coalesce(sum(requests), 0) AS requests, coalesce(sum(input_tokens), 0) AS input_tokens,
             coalesce(sum(output_tokens), 0) AS output_tokens, coalesce(sum(cost_usd), 0) AS cost_usd
        FROM gateway_usage WHERE session_id = $1`,
     [sessionId],
@@ -192,7 +209,7 @@ export async function gatewayHandler(req: Request, res: Response) {
   if (!p?.enabled || p.mode !== "gateway" || (!p.upstream_url && p.backend !== "vertex")) return gwError(res, 404, "not_found_error", `No gateway provider ${slug}`);
 
   const [used] = await db.query<{ requests: number; tokens: number; cost: number }>(
-    "SELECT coalesce(sum(requests), 0) AS requests, coalesce(sum(input_tokens + output_tokens), 0) AS tokens, coalesce(sum(cost_usd), 0) AS cost FROM gateway_usage WHERE token_hash = $1", [hash]);
+    "/* tenant: by the gateway token's own hash (budget of that token) */ SELECT coalesce(sum(requests), 0) AS requests, coalesce(sum(input_tokens + output_tokens), 0) AS tokens, coalesce(sum(cost_usd), 0) AS cost FROM gateway_usage WHERE token_hash = $1", [hash]);
   if (Number(used.requests) >= MAX_REQUESTS() || Number(used.tokens) >= MAX_TOKENS() || Number(used.cost) >= MAX_COST_USD())
     return gwError(res, 429, "octillion_budget_exceeded", "This session's gateway budget is used up");
 
@@ -306,7 +323,7 @@ async function record(hash: string, provider: string, t: { kind: string; session
     .catch((e) => console.error("model usage record failed:", (e as Error).message));
   const cost = (await costOf(u.model || "unknown", u).catch(() => null)) ?? 0;
   await (await getDb()).query(
-    `INSERT INTO gateway_usage (token_hash, provider, session_id, orchestrator_id, requests, errors, input_tokens, output_tokens, bytes, cost_usd, last_at)
+    `/* tenant: internal: metering for the gateway token's own session/orchestrator */ INSERT INTO gateway_usage (token_hash, provider, session_id, orchestrator_id, requests, errors, input_tokens, output_tokens, bytes, cost_usd, last_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
      ON CONFLICT (token_hash, provider) DO UPDATE SET requests = gateway_usage.requests + excluded.requests,
        errors = gateway_usage.errors + excluded.errors, input_tokens = gateway_usage.input_tokens + excluded.input_tokens,

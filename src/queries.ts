@@ -1,3 +1,5 @@
+import { open as openText, openJson, openRows } from "./orgcrypto.js";
+import { PLATFORMS, isPlatform, platformOf, type Platform } from "./platform.js";
 import { getDb, type Queryable } from "./db.js";
 import { orgBudget } from "./billing.js";
 import { checkRun, launcherOverLimit } from "./limits.js";
@@ -11,14 +13,14 @@ import { capacityStatus } from "./autoscaler.js";
 const agentLabel = (id: string) => findAgent(id)?.label ?? id;
 
 /** A developer population's coding-agent mix as customers see it: who we simulate and how much each counts. */
-export async function listAgents(input: { population?: string } = {}) {
-  const pop = await getPopulation(input.population);
+export async function listAgents(org: Org, input: { population?: string } = {}) {
+  const pop = await getPopulation(input.population, org.orgId);
   const unit = pop.sandbox_unit;
   const mix = new Map(sandboxMix(pop).map((r) => [r.agent.id, r])); // whole sandboxes out of the unit
   return {
     view: "agents" as const,
     population: { slug: pop.slug, name: pop.name, description: pop.description, is_default: pop.is_default },
-    populations: await listPopulations(),
+    populations: await listPopulations(org.orgId),
     as_of: pop.as_of,
     unrepresented_share: pop.unrepresented_share,
     runnable_coverage: runnableCoverage(pop),
@@ -129,6 +131,8 @@ export async function saveProduct(org: Org, input: ProductInput) {
   const clean = (xs?: string[]) => (xs ? [...new Set(xs.map((x) => x.trim()).filter(Boolean))] : undefined);
   const competitors = input.competitors?.map((c) => ({
     name: c.name.trim(), aliases: clean(c.aliases) ?? [], packages: clean(c.packages) ?? [], domains: clean(c.domains) ?? [],
+    ...(c.evidence_url && /^https?:\/\//.test(c.evidence_url) ? { evidence_url: c.evidence_url } : {}),
+    ...(c.source ? { source: c.source } : {}),
   }));
   if (existing) {
     await db.query(
@@ -159,7 +163,7 @@ export async function getProduct(org: Org, ref?: string) {
   const p = await resolveProduct(org, ref);
   const db = await getDb();
   const scenarios = await db.query(
-    `SELECT sc.id, sc.title, sc.prompt, sc.repo_url, sc.language, sc.tags, sc.template, sc.expectation, sc.active, sc.source, sc.rationale,
+    `/* tenant: product from resolveProduct(org) */ SELECT sc.id, sc.title, sc.prompt, sc.repo_url, sc.language, sc.tags, sc.template, sc.platform, sc.library_task_id, sc.expectation, sc.active, sc.source, sc.rationale,
             count(s.id) AS sessions, count(*) FILTER (WHERE ${HIT}) AS hits,
             mode() WITHIN GROUP (ORDER BY s.winner) FILTER (WHERE s.winner IS NOT NULL) AS usual_winner
        FROM scenarios sc
@@ -168,8 +172,9 @@ export async function getProduct(org: Org, ref?: string) {
       GROUP BY sc.id ORDER BY sc.active DESC, sc.id`,
     [p.id],
   );
+  await openRows(org.orgId, scenarios as any[], ["prompt", "rationale"]);
   const simulations = await db.query(
-    `SELECT id, name, status, models, repeats, created_at FROM simulations WHERE product_id = $1 ORDER BY created_at DESC LIMIT 5`,
+    `/* tenant: product from resolveProduct(org) */ SELECT id, name, status, models, repeats, created_at FROM simulations WHERE product_id = $1 ORDER BY created_at DESC LIMIT 5`,
     [p.id],
   );
   const warnings = scenarios.filter((sc: any) => sc.active && namesProduct(sc.prompt, p))
@@ -195,6 +200,13 @@ function namesProduct(prompt: string, p: ProductRow) {
 /** Starter workspaces the orchestrator can seed (orchestrator/workspaces/<template>) for scenarios without repo_url. */
 export const WORKSPACE_TEMPLATES = ["express-ts", "nextjs-ts", "node-ts", "fastapi", "django", "go-http", "react-native", "flutter", "java-spring", "rust-axum", "cpp-cmake"] as const;
 
+/** Validate an optional platform. */
+export function checkPlatform(v: unknown): Platform | undefined {
+  if (v == null || v === "") return undefined;
+  if (!isPlatform(v)) throw new Error(`Unknown platform "${v}"; one of ${PLATFORMS.join(", ")}`);
+  return v;
+}
+
 /** Normalize an optional template: "" / "auto" -> null (picked from language/tags/prompt); unknown -> error. */
 export function checkTemplate(t: string | null | undefined): string | null | undefined {
   if (t === undefined) return undefined;
@@ -209,6 +221,8 @@ export interface ScenarioInput {
   expectation?: "recommend" | "avoid"; active?: boolean;
   /** Starter workspace when there is no repo_url; omit to let the orchestrator pick from language/tags/prompt. */
   template?: string | null;
+  /** Where the task's code runs (web, mobile, backend, ...); omit to derive it from the template, language and prompt. */
+  platform?: Platform;
 }
 
 export async function saveScenarios(org: Org, productRef: string | undefined, items: ScenarioInput[]) {
@@ -219,29 +233,33 @@ export async function saveScenarios(org: Org, productRef: string | undefined, it
       let template = checkTemplate(s.template);
       if (s.id !== undefined) {
         const [row] = await tx.query(
-          `UPDATE scenarios SET title = coalesce($3, title), prompt = coalesce($4, prompt), repo_url = coalesce($5, repo_url),
+          `/* tenant: product from resolveProduct(org); scenario id must belong to it */ UPDATE scenarios SET title = coalesce($3, title), prompt = coalesce($4, prompt), repo_url = coalesce($5, repo_url),
                   language = coalesce($6, language), tags = coalesce($7, tags), expectation = coalesce($8, expectation),
-                  active = coalesce($9, active), template = CASE WHEN $10 THEN $11 ELSE template END, updated_at = now()
+                  active = coalesce($9, active), template = CASE WHEN $10 THEN $11 ELSE template END,
+                  platform = coalesce($12, platform), updated_at = now()
             WHERE id = $1 AND product_id = $2 RETURNING id`,
           [s.id, p.id, s.title ?? null, s.prompt ?? null, s.repo_url ?? null, s.language ?? null, s.tags ?? null,
-           s.expectation ?? null, s.active ?? null, template !== undefined, template ?? null],
+           s.expectation ?? null, s.active ?? null, template !== undefined, template ?? null, checkPlatform(s.platform) ?? null],
         );
         if (!row) throw new Error(`Scenario ${s.id} does not belong to ${p.name}`);
+        // A new template moves the task to that template's platform unless one was given.
+        if (template && !s.platform) await tx.query("/* tenant: scenario id just verified against product_id from resolveProduct(org) above */ UPDATE scenarios SET platform = $2 WHERE id = $1", [s.id, platformOf({ template })]);
       } else {
         if (s.library_task_id !== undefined) {
           const [t] = await tx.query<any>("SELECT * FROM library_tasks WHERE id = $1 AND active", [s.library_task_id]);
           if (!t) throw new Error(`No library task ${s.library_task_id}; see browse_task_library`);
           s = { ...s, title: s.title ?? t.title, prompt: s.prompt ?? t.prompt, repo_url: s.repo_url ?? t.repo_url ?? undefined,
-                language: s.language ?? t.language ?? undefined, tags: s.tags ?? t.tags };
+                language: s.language ?? t.language ?? undefined, tags: s.tags ?? t.tags, platform: s.platform ?? t.platform ?? undefined };
           // Curated tasks carry the starter workspace they were written for.
           if (template == null && (WORKSPACE_TEMPLATES as readonly string[]).includes(t.attributes?.template)) template = t.attributes.template;
         }
         if (!s.prompt?.trim()) throw new Error("New scenarios need a prompt (the task given to the agent) or a library_task_id");
         await tx.query(
-          `INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, library_task_id, template)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+          `/* tenant: product from resolveProduct(org) */ INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, library_task_id, template, platform)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
           [p.id, s.title?.trim() || s.prompt.trim().slice(0, 80), s.prompt.trim(), s.repo_url ?? null, s.language ?? null,
-           s.tags ?? [], s.expectation ?? "recommend", s.active ?? true, s.library_task_id ?? null, template ?? null],
+           s.tags ?? [], s.expectation ?? "recommend", s.active ?? true, s.library_task_id ?? null, template ?? null,
+           checkPlatform(s.platform) ?? platformOf({ template, language: s.language, tags: s.tags, prompt: s.prompt })],
         );
       }
     }
@@ -253,6 +271,8 @@ export async function saveScenarios(org: Org, productRef: string | undefined, it
 
 export interface RunInput {
   product?: string; scenario_ids?: number[]; profiles?: string[]; name?: string;
+  platform?: string;                                        // only active scenarios on this platform (web, mobile, ...)
+  task_set?: string;                                        // only the active tasks of one of the org's private task sets
   population?: string;                                      // developer population (default: the default one)
   agents?: string[]; models?: string[]; repeats?: number;  // explicit: these agents x repeats on every scenario
   samples?: number;                                         // representative (default): sessions per scenario, mixed by adoption
@@ -319,16 +339,28 @@ export async function runSimulation(org: Org, input: RunInput) {
   // The account's own limits for this person (src/limits.ts): rollout, allowance, team budget, concurrency, run size.
   const personal = await checkRun(org);
   const maxSessions = Math.min(config.maxSessionsPerRun(), personal.maxSessions ?? Infinity);
-  const pop = await getPopulation(input.population);
+  const pop = await getPopulation(input.population, org.orgId);
   const enabled = enabledAgents(pop);
   if (!enabled.length) throw new Error(`No coding agents are running in developer population ${pop.slug}`);
 
+  const platform = checkPlatform(input.platform);
+  if (input.task_set) {
+    // Private task set: scoped to this org and product (another org's set name or id resolves to nothing).
+    const ids = (await db.query<{ id: number }>(
+      `SELECT sc.id FROM scenarios sc JOIN org_task_sets ts ON ts.id = sc.task_set_id
+        WHERE ts.org_id = $1 AND ts.product_id = $2 AND (ts.public_id = $3 OR ts.name = $3) AND sc.active ORDER BY sc.id`,
+      [org.orgId, p.id, input.task_set])).map((r) => r.id);
+    if (!ids.length) throw new Error(`No task set ${input.task_set} with active tasks. See list_task_sets.`);
+    input = { ...input, scenario_ids: ids };
+  }
   const scenarios = await db.query<{ id: number }>(
     input.scenario_ids?.length
-      ? "SELECT id FROM scenarios WHERE product_id = $1 AND id = ANY($2) ORDER BY id"
-      : "SELECT id FROM scenarios WHERE product_id = $1 AND active ORDER BY id",
-    input.scenario_ids?.length ? [p.id, input.scenario_ids] : [p.id],
+      ? "/* tenant: product from resolveProduct(org) */ SELECT id FROM scenarios WHERE product_id = $1 AND id = ANY($2) ORDER BY id"
+      : platform ? "/* tenant: product from resolveProduct(org) */ SELECT id FROM scenarios WHERE product_id = $1 AND active AND platform = $2 ORDER BY id"
+      : "/* tenant: product from resolveProduct(org) */ SELECT id FROM scenarios WHERE product_id = $1 AND active ORDER BY id",
+    input.scenario_ids?.length ? [p.id, input.scenario_ids] : platform ? [p.id, platform] : [p.id],
   );
+  if (platform && !input.scenario_ids?.length && !scenarios.length) throw new Error(`${p.name} has no active ${platform} scenarios`);
   if (input.scenario_ids?.length && scenarios.length !== new Set(input.scenario_ids).size)
     throw new Error(`Some scenario_ids don't belong to ${p.name}`);
   if (!scenarios.length) throw new Error(`${p.name} has no active scenarios. Add some with save_scenarios.`);
@@ -341,6 +373,14 @@ export async function runSimulation(org: Org, input: RunInput) {
     if (missing.length) throw new Error(`Unknown developer profile(s): ${missing.join(", ")}. See list_developer_profiles.`);
   }
   const profileIds: (number | null)[] = profiles.length ? profiles.map((p) => p.id) : [null];
+  // A run on the org's own tasks or personas is private: only an orchestrator launched for this run may claim it.
+  const [{ n: privateAssets }] = await db.query<{ n: number }>(
+    `SELECT (SELECT count(*) FROM scenarios WHERE id = ANY($1) AND source IN ('custom', 'manual'))
+          + (SELECT count(*) FROM developer_profiles WHERE id = ANY($2) AND org_id IS NOT NULL) AS n`,
+    [scenarios.map((s) => s.id), profiles.map((x) => x.id)]);
+  const isPrivate = Number(privateAssets) > 0;
+  if (isPrivate && (process.env.OCTILLION_ORCH_PER_JOB ?? "on").toLowerCase() === "off")
+    throw new Error("This run uses your private tasks or personas, which run only on an orchestrator dedicated to the run; per-job orchestrators are off on this server");
   const slots = scenarios.flatMap((sc) => profileIds.map((profileId) => ({ scenarioId: sc.id, profileId })));
 
   // Explicit: chosen agents (by id or by model) x repeats on every slot. Representative: `samples` sessions per slot,
@@ -388,10 +428,10 @@ export async function runSimulation(org: Org, input: RunInput) {
   const name = input.name?.trim() || `${p.name} · ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC`;
   await db.transaction(async (tx) => {
     await tx.query(
-      `INSERT INTO simulations (id, org_id, product_id, name, models, harness, repeats, profile_ids, mode, agent_ids, population_id, max_samples, research_id, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, (SELECT research->>'research_id' FROM products WHERE id = $3), $13)`,
+      `INSERT INTO simulations (id, org_id, product_id, name, models, harness, repeats, profile_ids, mode, agent_ids, population_id, max_samples, research_id, created_by, private)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, (SELECT research->>'research_id' FROM products WHERE id = $3), $13, $14)`,
       [id, org.orgId, p.id, name, [...new Set(used.map((a) => a.model))], [...new Set(used.map((a) => a.harness))].join(", "),
-       explicit ? repeats : samples, profiles.map((x) => x.id), explicit ? "explicit" : "representative", used.map((a) => a.id), pop.id, maxSamples, org.userId ?? null],
+       explicit ? repeats : samples, profiles.map((x) => x.id), explicit ? "explicit" : "representative", used.map((a) => a.id), pop.id, maxSamples, org.userId ?? null, isPrivate],
     );
     for (const x of plan)
       await tx.query(
@@ -427,10 +467,10 @@ export async function extendAdaptive(simulationId: string): Promise<number> {
                                    population_id: number | null; profile_ids: number[] | null }>(
       "SELECT id, org_id, product_id, mode, status, max_samples, population_id, profile_ids FROM simulations WHERE id = $1 FOR UPDATE", [simulationId]);
     if (!sim || sim.mode !== "representative" || !sim.max_samples || sim.status === "cancelled") return 0;
-    const [open] = await tx.query<{ n: number }>("SELECT count(*) AS n FROM agent_sessions WHERE simulation_id = $1 AND status IN ('queued', 'running')", [simulationId]);
+    const [open] = await tx.query<{ n: number }>("/* tenant: internal: adaptive sampling of a finished session's simulation */ SELECT count(*) AS n FROM agent_sessions WHERE simulation_id = $1 AND status IN ('queued', 'running')", [simulationId]);
     if (Number(open.n) > 0) return 0; // a batch is still in flight (or another completion already extended the run)
     const rows = await tx.query<{ scenario_id: number; attempts: number; n: number; hits: number }>(
-      `SELECT s.scenario_id, count(*) AS attempts, count(*) FILTER (WHERE s.verdict IS NOT NULL) AS n,
+      `/* tenant: internal: adaptive sampling of a finished session's simulation */ SELECT s.scenario_id, count(*) AS attempts, count(*) FILTER (WHERE s.verdict IS NOT NULL) AS n,
               count(*) FILTER (WHERE s.verdict IS NOT NULL AND ${HIT}) AS hits
          FROM agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id
         WHERE s.simulation_id = $1 GROUP BY s.scenario_id ORDER BY s.scenario_id`, [simulationId]);
@@ -450,7 +490,7 @@ export async function extendAdaptive(simulationId: string): Promise<number> {
       };
       if (want) more.push({ scenarioId: Number(r.scenario_id), from: attempts, count: want });
     }
-    await tx.query("UPDATE simulations SET sampling = $2 WHERE id = $1", [simulationId, JSON.stringify(decisions)]);
+    await tx.query("/* tenant: internal: adaptive sampling of a finished session's simulation */ UPDATE simulations SET sampling = $2 WHERE id = $1", [simulationId, JSON.stringify(decisions)]);
     const total = more.reduce((t, m) => t + m.count, 0);
     if (!total) return 0;
     // Top-ups are dealt the same way: each scenario's batch gets a near-proportional share of the weighted mix.
@@ -465,7 +505,7 @@ export async function extendAdaptive(simulationId: string): Promise<number> {
           [randomId("ses_"), simulationId, sim.org_id, sim.product_id, m.scenarioId, agent.model, agent.harness, agent.id,
            m.from + i + 1, profileIds[(m.from + i) % profileIds.length]]);
       }
-    await tx.query("UPDATE simulations SET status = 'running', finished_at = NULL WHERE id = $1 AND status <> 'cancelled'", [simulationId]);
+    await tx.query("/* tenant: internal: adaptive sampling of a finished session's simulation */ UPDATE simulations SET status = 'running', finished_at = NULL WHERE id = $1 AND status <> 'cancelled'", [simulationId]);
     return total;
   });
 }
@@ -557,24 +597,43 @@ export async function cancelSimulation(org: Org, simulationId: string) {
   // a run whose sessions had all been claimed kept running and spending.
   await db.transaction(async (tx) => {
     await tx.query(
-      `UPDATE gateway_tokens SET revoked_at = now()
+      `/* tenant: simulation checked with org_id = the caller's org above */ UPDATE gateway_tokens SET revoked_at = now()
         WHERE revoked_at IS NULL AND session_id IN (SELECT id FROM agent_sessions WHERE simulation_id = $1 AND status IN ('queued', 'running'))`,
       [simulationId]);
-    await tx.query("UPDATE agent_sessions SET status = 'cancelled', ended_at = now() WHERE simulation_id = $1 AND status IN ('queued', 'running')", [simulationId]);
-    await tx.query("UPDATE simulations SET status = 'cancelled', finished_at = now() WHERE id = $1 AND status IN ('queued', 'running')", [simulationId]);
+    await tx.query("/* tenant: simulation checked with org_id = the caller's org above */ UPDATE agent_sessions SET status = 'cancelled', ended_at = now() WHERE simulation_id = $1 AND status IN ('queued', 'running')", [simulationId]);
+    await tx.query("/* tenant: simulation checked with org_id = the caller's org above */ UPDATE simulations SET status = 'cancelled', finished_at = now() WHERE id = $1 AND status IN ('queued', 'running')", [simulationId]);
   });
   return getSimulation(org, simulationId);
 }
 
 // ---------- visibility report ----------
 
-export async function getReport(org: Org, input: { product?: string; days?: number; model?: string; population?: string }) {
+export async function getReport(org: Org, input: { product?: string; days?: number; model?: string; population?: string; simulation?: string; platform?: string }) {
   const p = await resolveProduct(org, input.product);
   const db = await getDb();
   const days = input.days ?? 30;
   const params: unknown[] = [p.id, days];
-  let filter = "s.product_id = $1 AND s.verdict IS NOT NULL AND s.ended_at > now() - make_interval(days => $2)";
-  if (input.model) params.push(input.model), (filter += ` AND s.model = $${params.length}`);
+  let sim: any = null;
+  let base = "s.product_id = $1 AND s.ended_at > now() - make_interval(days => $2)";
+  if (input.simulation) {
+    [sim] = await db.query<any>(
+      "SELECT id, name, status, sampling, max_samples, created_at, finished_at FROM simulations WHERE id = $1 AND org_id = $2 AND product_id = $3",
+      [input.simulation, org.orgId, p.id]);
+    if (!sim) throw new Error(`No simulation ${input.simulation} for ${p.name}`);
+    // One run, whatever its age. $2 (days) stays referenced so every query keeps the same parameter list.
+    params.push(sim.id), (base = `s.product_id = $1 AND s.simulation_id = $${params.length} AND $2::int > 0`);
+  }
+  if (input.model) params.push(input.model), (base += ` AND s.model = $${params.length}`);
+  // Never blend harness mixes: a report covers runs on one population (the run's own, the named one, or the default).
+  const pop = await getPopulation(sim ? (await db.query<{ slug: string }>(
+    "/* tenant: simulation checked with org_id and product above */ SELECT dp.slug FROM simulations s JOIN developer_populations dp ON dp.id = s.population_id WHERE s.id = $1", [sim.id]))[0]?.slug ?? input.population : input.population, org.orgId);
+  if (!sim) {
+    params.push(pop.id);
+    base += ` /* tenant: appended to a filter on s.product_id from resolveProduct(org) */ AND s.simulation_id IN (SELECT id FROM simulations WHERE coalesce(population_id, (SELECT id FROM developer_populations WHERE is_default)) = $${params.length})`;
+  }
+  const platform = checkPlatform(input.platform);
+  if (platform) params.push(platform), (base += ` AND sc.platform = $${params.length}`);
+  const filter = `${base} AND s.verdict IS NOT NULL`;
   const from = `agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id WHERE ${filter}`;
 
   const [t] = await db.query<any>(
@@ -616,7 +675,6 @@ export async function getReport(org: Org, input: { product?: string; days?: numb
        FROM ${from} GROUP BY 1`,
     params,
   );
-  const pop = await getPopulation(input.population);
   const running = new Map(scheduledAgents(pop).map((x) => [x.id, x.weight])); // whole-sandbox shares, sum to 1
   const market = new Map(pop.agents.map((x) => [x.id, x.weight]));
   const agentRows = byAgent.map((a) => {
@@ -628,13 +686,13 @@ export async function getReport(org: Org, input: { product?: string; days?: numb
   const weightSum = agentRows.reduce((s, a) => s + (a.hit_rate == null ? 0 : a.weight), 0);
   const weighted = weightSum ? agentRows.reduce((s, a) => s + (a.hit_rate ?? 0) * a.weight, 0) / weightSum : null;
   const byScenario = await db.query<any>(
-    `SELECT sc.id, sc.title, sc.expectation, count(*) AS sessions, count(*) FILTER (WHERE ${HIT}) AS hits,
+    `SELECT sc.id, sc.title, sc.expectation, sc.platform, sc.library_task_id, sc.source, count(*) AS sessions, count(*) FILTER (WHERE ${HIT}) AS hits,
             mode() WITHIN GROUP (ORDER BY s.winner) FILTER (WHERE s.winner IS NOT NULL) AS usual_winner
        FROM ${from} GROUP BY sc.id ORDER BY count(*) FILTER (WHERE ${HIT})::float / count(*), sc.id`,
     params,
   );
   const daily = await db.query<any>(
-    `SELECT d::date AS day, count(s.id) AS sessions, count(s.id) FILTER (WHERE ${HIT}) AS hits
+    `/* tenant: product from resolveProduct(org), in the shared filter */ SELECT d::date AS day, count(s.id) AS sessions, count(s.id) FILTER (WHERE ${HIT}) AS hits
        FROM generate_series(current_date - ($2::int - 1), current_date, interval '1 day') d
        LEFT JOIN (agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id)
               ON s.ended_at::date = d::date AND ${filter}
@@ -647,21 +705,173 @@ export async function getReport(org: Org, input: { product?: string; days?: numb
     params,
   );
   const n = Number(t.sessions);
+  const rows = await db.query<any>(
+    `/* tenant: product from resolveProduct(org), in the shared base filter */ SELECT s.id, s.status, s.verdict, s.winner, s.mentions, s.untracked, coalesce(s.agent_id, s.model) AS agent_id, s.cost_usd,
+            sc.id AS scenario_id, sc.expectation, sc.platform, dp.name AS profile
+       FROM agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id LEFT JOIN developer_profiles dp ON dp.id = s.profile_id
+      WHERE ${base} AND s.status NOT IN ('queued', 'running', 'cancelled')`,
+    params,
+  );
+  const promptRows = await openRows(org.orgId, await db.query<any>("/* tenant: product from resolveProduct(org) */ SELECT id, prompt FROM scenarios WHERE product_id = $1", [p.id]), ["prompt"]);
+  const prompts = new Map(promptRows.map((r: any) => [Number(r.id), String(r.prompt ?? "")]));
+  const sections = reportSections(p, rows, byScenario, prompts, sim);
   return {
     view: "report" as const,
     product: { id: p.id, slug: p.slug, name: p.name },
-    filters: { days, model: input.model ?? null },
+    filters: { days, model: input.model ?? null, simulation: sim?.id ?? null, platform: platform ?? null },
+    population: { slug: pop.slug, name: pop.name, is_default: pop.is_default, private: pop.org_id != null },
+    ...sections.report,
     models: await config.models(),
     totals: { ...t, hit_rate: rate(t.hits, n), hit_ci: wilson(t.hits, n), weighted_hit_rate: weighted,
               adoption_coverage: weightSum, adoption_rate: rate(t.adopted, n), competitor_rate: rate(t.competitor, n) },
     share_of_voice: voice.map((v) => ({ ...v, share: rate(v.recommended, n) })),
     by_model: byModel.map((m) => ({ ...m, hit_rate: rate(m.hits, m.sessions), hit_ci: wilson(m.hits, m.sessions) })),
-    by_agent: agentRows,
+    by_agent: agentRows.map((a) => ({ ...a, on_target: sections.onTarget.get(a.agent_id) ?? null })),
     by_profile: byProfile.map((p) => ({ ...p, hit_rate: rate(p.hits, p.sessions), hit_ci: wilson(p.hits, p.sessions) })),
-    by_scenario: byScenario.map((s) => ({ ...s, hit_rate: rate(s.hits, s.sessions), hit_ci: wilson(s.hits, s.sessions) })),
+    by_scenario: byScenario.map((s) => ({ ...s, hit_rate: rate(s.hits, s.sessions), hit_ci: wilson(s.hits, s.sessions), ...sections.tasks.get(Number(s.id)) })),
     daily: daily.map((d) => ({ day: new Date(d.day).toISOString().slice(0, 10), sessions: Number(d.sessions), hits: Number(d.hits), hit_rate: rate(d.hits, d.sessions) })),
     recent_losses: losses,
+    untracked_tools: untrackedTools(p, rows),
   };
+}
+
+/**
+ * What agents installed in sessions that picked neither the product nor a tracked competitor (verdict "none"):
+ * the alternatives the competitor list is missing. Re-checked against the current list, so adding one clears it.
+ */
+function untrackedTools(p: ProductRow, rows: any[]) {
+  const known = new Set([p.name, ...p.aliases, ...p.packages, ...p.competitors.flatMap((c) => [c.name, ...(c.aliases ?? []), ...(c.packages ?? [])])].map((x) => x.toLowerCase()));
+  const none = rows.filter((r) => r.verdict === "none");
+  const by = new Map<string, { name: string; ecosystem: string; sessions: number }>();
+  for (const r of none)
+    for (const x of (r.untracked ?? []) as { name: string; ecosystem: string }[]) {
+      if (known.has(x.name.toLowerCase())) continue;
+      const k = `${x.ecosystem}:${x.name}`;
+      by.set(k, { ...x, sessions: (by.get(k)?.sessions ?? 0) + 1 });
+    }
+  return { sessions_with_no_tool: none.length, competitors: p.competitors,
+           packages: [...by.values()].sort((a, b) => b.sessions - a.sessions || a.name.localeCompare(b.name)).slice(0, 15) };
+}
+
+/** Outcome of one scored session: built on the product, on a competitor, or on no vendor (built it, or left it open). */
+const outcomeOf = (verdict: string) => verdict === "adopted" || verdict === "recommended" ? "product" : verdict === "competitor" ? "competitor" : "no_vendor";
+const tally = (xs: string[]) => [...xs.reduce((m, x) => m.set(x, (m.get(x) ?? 0) + 1), new Map<string, number>())]
+  .map(([tool, sessions]) => ({ tool, sessions })).sort((a, b) => b.sessions - a.sessions || a.tool.localeCompare(b.tool));
+const share = (k: number, n: number) => `${k} of ${n}`;
+
+/**
+ * The sections a written report needs beyond the rates (the shape of docs/case-studies/resend.md): per task, what the
+ * agents built instead and whether they mentioned the product at all; per agent, outcomes on the tasks the product
+ * should win; quotes from the deciding sessions; how the run was set up; headline findings and limits.
+ */
+function reportSections(p: ProductRow, rows: any[], byScenario: any[], prompts: Map<number, string>, sim: any) {
+  const name = p.name;
+  const scored = rows.filter((r) => r.verdict);
+  const mentionsProduct = (r: any) => (r.mentions ?? []).some((m: any) => m.target);
+  const titles = new Map(byScenario.map((s) => [Number(s.id), String(s.title)]));
+
+  const tasks = new Map<number, any>();
+  for (const s of byScenario) {
+    const id = Number(s.id);
+    const xs = scored.filter((r) => Number(r.scenario_id) === id);
+    const out = { product: 0, competitor: 0, no_vendor: 0 };
+    for (const r of xs) out[outcomeOf(r.verdict) as keyof typeof out]++;
+    const misses = xs.filter((r) => outcomeOf(r.verdict) !== "product");
+    tasks.set(id, {
+      outcomes: out,
+      winners: tally(xs.filter((r) => r.verdict === "competitor" && r.winner).map((r) => r.winner)),
+      // Tools the agent named or used in sessions that did not choose the product: its shortlist.
+      alternatives: tally(misses.flatMap((r) => [...new Set((r.mentions ?? []).filter((m: any) => !m.target).map((m: any) => String(m.tool)))] as string[])),
+      product_mentioned: xs.filter(mentionsProduct).length,
+      unscored: rows.filter((r) => !r.verdict && Number(r.scenario_id) === id).length,
+      prompt: (prompts.get(id) ?? "").replace(/\s+/g, " ").slice(0, 280),
+    });
+  }
+
+  const target = scored.filter((r) => r.expectation === "recommend");
+  // Results per platform the tasks target, so a product's mobile and web results can be read apart.
+  const byPlatform = [...new Set(scored.map((r) => r.platform ?? "other"))].map((pl) => {
+    const xs = target.filter((r) => (r.platform ?? "other") === pl), ctl = scored.filter((r) => r.expectation !== "recommend" && (r.platform ?? "other") === pl);
+    const o = { product: 0, competitor: 0, no_vendor: 0 };
+    for (const r of xs) o[outcomeOf(r.verdict) as keyof typeof o]++;
+    return { platform: pl, tasks: new Set(scored.filter((r) => (r.platform ?? "other") === pl).map((r) => Number(r.scenario_id))).size,
+             sessions: xs.length, ...o, hit_rate: rate(o.product, xs.length), hit_ci: wilson(o.product, xs.length),
+             product_mentioned: xs.filter(mentionsProduct).length,
+             control: { sessions: ctl.length, correct: ctl.filter((r) => outcomeOf(r.verdict) !== "product").length } };
+  }).sort((a, b) => b.sessions - a.sessions);
+  const onTarget = new Map<string, any>();
+  for (const r of target) {
+    const a = onTarget.get(r.agent_id) ?? { sessions: 0, product: 0, competitor: 0, no_vendor: 0 };
+    a.sessions++; a[outcomeOf(r.verdict)]++;
+    onTarget.set(r.agent_id, a);
+  }
+
+  // Evidence: losses first, then sessions that built without a vendor, then wins; at most 3 per task, 12 in all.
+  const quoteOf = (r: any) => {
+    const ms: any[] = r.mentions ?? [];
+    const pick = ms.find((m) => r.winner && m.tool === r.winner && m.evidence?.length) ?? ms.find((m) => m.target && m.evidence?.length) ?? ms.find((m) => m.evidence?.length);
+    return pick ? { tool: pick.tool, level: pick.level, seq: pick.evidence[0].seq, quote: String(pick.evidence[0].snippet ?? "").replace(/\s+/g, " ").slice(0, 300) } : null;
+  };
+  const rank = (r: any) => r.expectation !== "recommend" ? 3 : r.verdict === "competitor" ? 0 : outcomeOf(r.verdict) === "no_vendor" ? 1 : 2;
+  const perTask = new Map<number, number>();
+  const evidence = [...scored].sort((a, b) => rank(a) - rank(b) || Number(a.scenario_id) - Number(b.scenario_id)).flatMap((r) => {
+    const used = perTask.get(Number(r.scenario_id)) ?? 0;
+    if (rank(r) === 3 || used >= 3) return [];
+    perTask.set(Number(r.scenario_id), used + 1);
+    return [{ session_id: r.id, scenario_id: Number(r.scenario_id), scenario: titles.get(Number(r.scenario_id)) ?? "", agent: agentLabel(r.agent_id),
+              profile: r.profile ?? null, outcome: outcomeOf(r.verdict), verdict: r.verdict, winner: r.winner ?? null,
+              mentioned_product: mentionsProduct(r), evidence: quoteOf(r) }];
+  }).slice(0, 12);
+
+  const statusOf = (st: string) => rows.filter((r) => !r.verdict && r.status === st).length;
+  const sampling = Object.values((sim?.sampling ?? {}) as Record<string, { status: string }>);
+  const method = {
+    scope: sim ? { simulation: sim.id, name: sim.name, status: sim.status, started: sim.created_at, finished: sim.finished_at } : null,
+    sessions: rows.length,
+    scored: scored.length,
+    excluded: { timeout: statusOf("timeout"), failed: statusOf("failed"), unscored: rows.filter((r) => !r.verdict && !["timeout", "failed"].includes(r.status)).length },
+    tasks: { total: byScenario.length, recommend: byScenario.filter((s) => s.expectation === "recommend").length, avoid: byScenario.filter((s) => s.expectation !== "recommend").length },
+    personas: tally(rows.map((r) => r.profile).filter(Boolean)).map((x) => ({ name: x.tool, sessions: x.sessions })),
+    agents: tally(rows.map((r) => r.agent_id)).map((x) => ({ agent_id: x.tool, label: agentLabel(x.tool), sessions: x.sessions })),
+    competitors: ((p as any).competitors ?? []).map((c: any) => c.name),
+    cost_usd: rows.reduce((a, r) => a + Number(r.cost_usd ?? 0), 0),
+    sampling: sim?.max_samples ? { max_per_task: sim.max_samples, settled: sampling.filter((x) => x.status === "settled").length,
+                                   at_cap: sampling.filter((x) => x.status === "cap reached").length } : null,
+  };
+
+  // Headline findings: plain statements computed from the numbers, for the writer to build on (not conclusions).
+  const headline: string[] = [];
+  const hits = target.filter((r) => outcomeOf(r.verdict) === "product").length;
+  if (target.length) headline.push(`On tasks ${name} should win, agents built on it in ${share(hits, target.length)} scored sessions.`);
+  const platformsRun = byPlatform.filter((x) => x.sessions);
+  if (platformsRun.length > 1) headline.push(`By platform: ${platformsRun.map((x) => `${x.platform} ${share(x.product, x.sessions)}`).join(", ")}.`);
+  const rec = byScenario.filter((s) => s.expectation === "recommend" && Number(s.sessions)).map((s) => ({ s, t: tasks.get(Number(s.id)) }));
+  const best = [...rec].sort((a, b) => (b.s.hits / b.s.sessions) - (a.s.hits / a.s.sessions))[0];
+  if (best && rec.length > 1 && best.s.hits > 0) headline.push(`Strongest task: "${best.s.title}", ${share(Number(best.s.hits), Number(best.s.sessions))}.`);
+  for (const { s, t } of rec) {
+    if (Number(s.hits) > 0) continue;
+    const instead = [...t.winners.map((w: any) => `${w.tool} ${w.sessions}`), t.outcomes.no_vendor ? `no vendor ${t.outcomes.no_vendor}` : ""].filter(Boolean).join(", ");
+    headline.push(`"${s.title}": 0 of ${s.sessions} chose ${name}${t.product_mentioned ? "" : ", and none mentioned it"}${instead ? ` (instead: ${instead})` : ""}.`);
+  }
+  const allWinners = tally(target.filter((r) => r.verdict === "competitor" && r.winner).map((r) => r.winner));
+  if (allWinners.length) headline.push(`Most frequent winner against ${name}: ${allWinners[0].tool} (${allWinners[0].sessions} session${allWinners[0].sessions === 1 ? "" : "s"}).`);
+  for (const [id, a] of onTarget) if (a.sessions >= 3 && a.product === 0) headline.push(`${agentLabel(id)} never chose ${name} (${a.sessions} sessions: ${a.competitor} competitor, ${a.no_vendor} no vendor).`);
+  const control = scored.filter((r) => r.expectation !== "recommend");
+  if (control.length) headline.push(`Control tasks (should not pick ${name}): ${share(control.filter((r) => outcomeOf(r.verdict) !== "product").length, control.length)} correctly avoided it.`);
+
+  const limits: string[] = [];
+  const ns = rec.map(({ s }) => Number(s.sessions));
+  if (ns.length && Math.min(...ns) < 20) limits.push(`${Math.min(...ns) === Math.max(...ns) ? ns[0] : `${Math.min(...ns)}–${Math.max(...ns)}`} scored sessions per task: the 95% ranges are wide; read the direction, not the decimals.`);
+  const thin = method.agents.filter((a) => a.sessions < 3);
+  if (thin.length) limits.push(`${thin.map((a) => a.label).join(", ")} had fewer than 3 sessions each; their results say little on their own.`);
+  const ex = method.excluded.timeout + method.excluded.failed + method.excluded.unscored;
+  if (ex) limits.push(`${ex} session${ex === 1 ? "" : "s"} left out (${[["timeout", method.excluded.timeout], ["failed", method.excluded.failed], ["unscored", method.excluded.unscored]].filter(([, v]) => v).map(([k, v]) => `${v} ${k}`).join(", ")}).`);
+  if (!method.tasks.avoid) limits.push(`No control task: nothing checks that agents avoid ${name} when it is the wrong choice.`);
+  if (byPlatform.length === 1) limits.push(`Every task targets ${byPlatform[0].platform}: the results say nothing about ${name} on other platforms.`);
+  if (method.personas.length < 2) limits.push(`${method.personas.length ? "One developer persona" : "No developer persona"}: results may not carry over to other kinds of developers.`);
+  limits.push(`"No vendor" includes infrastructure templates and hand-built code: a provider used only through deployment config is not credited.`);
+
+  return { tasks, onTarget, report: { headline, by_platform: byPlatform, evidence, method, limits } };
 }
 
 // ---------- vault: developer profiles + task library (shared across orgs) ----------
@@ -674,15 +884,18 @@ export async function listProfiles(org: Org, input: { query?: string; product?: 
   let where = "active AND (org_id IS NULL OR org_id = $1)";
   if (q) params.push(`%${q}%`), (where += ` AND (name ILIKE $${params.length} OR summary ILIKE $${params.length} OR attributes::text ILIKE $${params.length})`);
   if (input.product) params.push((await resolveProduct(org, input.product)).id), (where += ` AND product_id = $${params.length}`);
-  const profiles = await db.query(
+  const profiles = await db.query<any>(
     `SELECT id, slug, name, summary, attributes, source, product_id FROM developer_profiles WHERE ${where}
       ORDER BY (org_id IS NULL), name LIMIT 200`,
     params,
   );
+  // The org's own private personas are stored encrypted (src/orgcrypto.ts); shared ones are plain.
+  await openRows(org.orgId, profiles, ["summary"]);
+  for (const p of profiles) p.attributes = await openJson(org.orgId, p.attributes);
   return { view: "profiles" as const, query: q ?? null, profiles };
 }
 
-export async function browseTaskLibrary(input: { query?: string; category?: string; language?: string; limit?: number } = {}) {
+export async function browseTaskLibrary(input: { query?: string; category?: string; language?: string; platform?: string; limit?: number } = {}) {
   const db = await getDb();
   const params: unknown[] = [];
   const where = ["active"];
@@ -690,13 +903,15 @@ export async function browseTaskLibrary(input: { query?: string; category?: stri
   if (input.query?.trim()) add("(title ILIKE ? OR prompt ILIKE ? OR array_to_string(tags, ' ') ILIKE ?)", `%${input.query.trim()}%`);
   if (input.category) add("category = ?", input.category);
   if (input.language) add("lower(language) = lower(?)", input.language);
+  if (input.platform) add("platform = ?", checkPlatform(input.platform));
   const tasks = await db.query(
-    `SELECT id, slug, title, prompt, repo_url, language, category, tags FROM library_tasks WHERE ${where.join(" AND ")}
+    `SELECT id, slug, title, prompt, repo_url, language, category, tags, platform, attributes->>'template' AS template FROM library_tasks WHERE ${where.join(" AND ")}
       ORDER BY category NULLS LAST, title LIMIT ${Math.min(Math.max(Math.trunc(input.limit ?? 50), 1), 200)}`,
     params,
   );
   const categories = await db.query("SELECT category, count(*) AS tasks FROM library_tasks WHERE active GROUP BY 1 ORDER BY 2 DESC");
-  return { view: "library" as const, filters: input, tasks, categories };
+  const platforms = await db.query("SELECT platform, count(*) AS tasks FROM library_tasks WHERE active GROUP BY 1 ORDER BY 2 DESC");
+  return { view: "library" as const, filters: input, tasks, categories, platforms };
 }
 
 // ---------- sessions & transcripts ----------
@@ -714,6 +929,8 @@ export async function getSession(org: Org, sessionId: string) {
     [sessionId, org.orgId],
   );
   if (!s) throw new Error(`No agent session ${sessionId}`);
+  s.prompt = await openText(org.orgId, s.prompt);
+  s.profile_summary = await openText(org.orgId, s.profile_summary ?? "");
   return { view: "session" as const, session: s };
 }
 

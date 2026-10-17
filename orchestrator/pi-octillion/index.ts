@@ -111,7 +111,7 @@ export function createOctillionExtension(reg: OctillionRegistry, opts: { allowCl
       name: "reply_as_developer",
       label: "Reply as developer",
       description: "Send the developer's short in-character reply to the sub-agent and resume its conversation. Only when the last report has can_reply=true: when must_continue=true (not done yet), or when the sub-agent is waiting on the developer.",
-      parameters: Type.Object({ session: Type.String(), text: Type.String({ minLength: 1, maxLength: 4000 }) }),
+      parameters: Type.Object({ session: Type.String(), text: Type.String({ minLength: 1, maxLength: 1200 }) }),
       executionMode: "sequential",
       async execute(_id, p) {
         reg.toolCalls++;

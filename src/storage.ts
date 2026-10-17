@@ -1,4 +1,4 @@
-import { GetObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { DeleteObjectsCommand, GetObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 /**
@@ -76,8 +76,16 @@ export async function listKeys(prefix: string, max = 100_000): Promise<{ key: st
   return out;
 }
 
-/** A time-limited download link (default 7 days, the S3 maximum). */
-export async function signedUrl(key: string, seconds = 7 * 24 * 3600, filename?: string): Promise<string> {
+/** Delete objects by key, 1000 per request (organization deletion, src/tenancy.ts). */
+export async function deleteKeys(list: string[]): Promise<void> {
+  for (let i = 0; i < list.length; i += 1000) {
+    const r = await s3().send(new DeleteObjectsCommand({ Bucket: bucket(), Delete: { Objects: list.slice(i, i + 1000).map((Key) => ({ Key })), Quiet: true } }));
+    if (r.Errors?.length) throw new Error(`R2 delete failed for ${r.Errors.length} object(s), e.g. ${r.Errors[0]!.Key}: ${r.Errors[0]!.Message}`);
+  }
+}
+
+/** A time-limited download link: 1 hour by default (docs/security.md), at most 7 days (the S3 maximum). */
+export async function signedUrl(key: string, seconds = 3600, filename?: string): Promise<string> {
   return getSignedUrl(s3(), new GetObjectCommand({ Bucket: bucket(), Key: key,
     ...(filename ? { ResponseContentDisposition: `attachment; filename="${filename.replace(/["\\]/g, "")}"` } : {}) }),
     { expiresIn: Math.min(Math.max(60, seconds), 7 * 24 * 3600) });
