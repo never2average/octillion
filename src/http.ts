@@ -1,6 +1,6 @@
 import path from "node:path";
 import { contextForAI } from "./context.js";
-import { platformAnalytics } from "./insights.js";
+import { platformAnalytics, platformErrors } from "./insights.js";
 import * as journeys from "./journeys.js";
 import * as playbooks from "./playbooks.js";
 import * as telemetry from "./telemetry.js";
@@ -341,6 +341,8 @@ export function createApp() {
   ob.post("/orgs/:slug/keys/:id/rotate", async (req, res) => void res.status(201).json(await onboarding.rotateKey(adminActor(req, res), slug(req), Number(req.params.id))));
   // Platform analytics and health across every account (src/insights.ts).
   ob.get("/analytics", async (req, res) => void res.json(await platformAnalytics(req.query)));
+  // Every failure in the period, paged: ?kind=tool|session|onboarding&offset&limit, plus the /analytics filters.
+  ob.get("/analytics/errors", async (req, res) => void res.json(await platformErrors(req.query)));
   // Customer journeys (src/playbooks.ts): the use-case pipelines on /app Setup. Admins write them, promote the ones
   // customers see, and order them; adoption = accounts that started / finished each.
   ob.get("/playbooks", async (_req, res) => void res.json({ playbooks: await playbooks.templatesWithAdoption(), tools: TOOL_NAMES }));

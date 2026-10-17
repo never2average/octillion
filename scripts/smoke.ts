@@ -1238,6 +1238,34 @@ try {
       const ranged = await json(adm("GET", "/analytics?from=2026-01-01&to=2026-01-07"));
       assert.deepEqual(ranged.range, { from: "2026-01-01", to: "2026-01-07", days: 7 }, "a date range, both days included");
       assert.equal((await json(adm("GET", "/analytics?from=2026-02-10&to=2026-02-01"))).days, 30, "a backwards range falls back to the default");
+      // Filters narrow every section; facets stay whole; the errors endpoint pages each kind.
+      // People: the picker lists who was active; filtering on them narrows calls to theirs; an unknown id empties it.
+      const people = an.facets.users as { id: string; account: string }[];
+      assert.ok(Array.isArray(people), "the user picker gets its list");
+      if (people.length) {
+        const one = await json(adm("GET", `/analytics?days=30&user=${encodeURIComponent(people[0].id)}`));
+        assert.ok(one.totals.calls <= an.totals.calls && one.totals.active_people <= 1, "one person's calls only");
+        assert.deepEqual(one.filters.user, [people[0].id]);
+      }
+      const nobody = await json(adm("GET", "/analytics?days=30&user=user_nobody"));
+      assert.equal(nobody.totals.calls, 0, "an unknown user matches nothing");
+      assert.equal(nobody.ops.sims, 0, "and launched no simulations");
+      const none = await json(adm("GET", "/analytics?tool=__none__"));
+      assert.equal(none.totals.calls, 0, "a tool filter applies to totals");
+      assert.ok(Array.isArray(none.facets.tools) && none.facets.tools.includes("list_products"), "facets ignore the filters");
+      assert.deepEqual(none.filters.tool, ["__none__"], "filters are echoed back");
+      const one = await json(adm("GET", "/analytics?limit=1"));
+      assert.ok(one.accounts.length <= 1 && one.accounts_total >= one.accounts.length && typeof one.errors_total === "number", "accounts limit and totals");
+      const scoped = await json(adm("GET", `/analytics?account=${slugW}&tool=list_products`));
+      assert.ok(scoped.accounts.every((a: any) => a.slug === slugW) && scoped.tools.every((t: any) => t.name === "list_products"), "account and tool filters");
+      assert.equal((await json(adm("GET", "/analytics?account=o'brien,x"))).totals.calls, 0, "quoted values are literals");
+      const errs = await json(adm("GET", "/analytics/errors?kind=tool&limit=5"));
+      assert.ok(Array.isArray(errs.rows) && errs.rows.length <= 5 && typeof errs.total === "number" && errs.kind === "tool");
+      for (const kind of ["session", "onboarding"]) assert.equal((await adm("GET", `/analytics/errors?kind=${kind}`)).status, 200, `errors kind=${kind}`);
+      const every = "product=Neon,x&client=claude-ai&plan=none&sub_status=none,active&stage=created,first_call&errors=1&at_risk=1";
+      const all = await json(adm("GET", `/analytics?${every}`));
+      assert.ok(all.filters.errors === true && all.filters.stage.length === 2 && all.facets.stages.length === 8, "every filter at once");
+      for (const kind of ["tool", "session", "onboarding"]) await json(adm("GET", `/analytics/errors?${every}&kind=${kind}&offset=5`));
       const usageR = await json(appCall(ownerC, "GET", "/usage?from=2026-01-01&to=2026-01-31"));
       assert.equal(usageR.days, 31); assert.equal(usageR.range.to, "2026-01-31");
       console.log("✓ platform analytics: totals, daily, tool adoption, clients, retention cohorts, accounts at risk, ops health");

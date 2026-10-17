@@ -12,17 +12,20 @@ import { Icons } from '@/components/icons';
 import { adminApi } from '@/lib/api-client';
 import { post, useAdminAction } from './lib';
 
-interface Stage { id?: string; title: string; why: string; prompt: string; tools: string[]; expect: string; manual?: boolean }
+export interface Stage { id?: string; title: string; why: string; prompt: string; tools: string[]; expect: string; manual?: boolean }
 export interface Playbook {
   id: string; name: string; outcome: string; who: string; time: string; example: { title: string; result: string };
-  stages: Stage[]; promoted: boolean; position: number; updated_at: string; updated_by: string | null;
+  stages: Stage[]; promoted: boolean; updated_at: string; updated_by: string | null;
   adoption?: { started: number; completed: number; median_hours_to_complete: number | null; dropoff: { id: string; title: string; lost: number } | null;
     last_activity: string | null; funnel: { id: string; title: string; reached: number }[] };
   accounts_active?: number;
 }
-export type Draft = Omit<Playbook, 'promoted' | 'position' | 'updated_at' | 'updated_by' | 'adoption' | 'accounts_active'> & { isNew: boolean };
+export type Draft = Omit<Playbook, 'promoted' | 'updated_at' | 'updated_by' | 'adoption' | 'accounts_active'> & { isNew: boolean };
 
 const emptyStage = (): Stage => ({ title: '', why: '', prompt: '', tools: [], expect: '' });
+// Journeys are not ordered, so the draft carries only what the editor writes (no ordering, no adoption).
+export const toDraft = (p: Playbook): Draft => ({ id: p.id, name: p.name, outcome: p.outcome, who: p.who, time: p.time, example: { ...p.example },
+  stages: p.stages.map((s) => ({ ...s, tools: [...s.tools] })), isNew: false });
 export const blank = (): Draft => ({ id: '', name: '', outcome: '', who: '', time: '', example: { title: '', result: '' }, stages: [emptyStage()], isNew: true });
 
 /** Journey-level usage: started and finished accounts, time to finish, where accounts stop, and the stage funnel. */

@@ -1,111 +1,128 @@
 'use client';
-// Every account, where it is in onboarding, its people and plan, and whether it is being used.
-import { useRouter } from 'next/navigation';
-import { useMemo, useState } from 'react';
+// Every account as a database: views for the questions asked most (who needs attention, who is paying, who went quiet),
+// typed columns to filter, sort, group and export, and the account itself in the side peek (account-peek.tsx).
+import { useState } from 'react';
+import { toast } from 'sonner';
 import PageContainer from '@/components/layout/page-container';
 import { Button } from '@/components/ui/button';
-import { Checkbox } from '@/components/ui/checkbox';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Icons } from '@/components/icons';
 import { usd } from '@/lib/octillion-format';
-import { post, useAdmin, useAdminAction, type InviteResult, type OrgList, type OrgRow } from './lib';
+import { post, useAdmin, useAdminAction, type InviteResult } from './lib';
 import { useResult } from './result-dialog';
-import { Field, RecordView, type RecordCol } from '@/components/layout/record-view';
-import { ErrorBox, Notice, StageDots, StatusBadge, SubBadge, When } from './ui';
+import { RecordView, type RecordCol, type RecordViewDef } from '@/components/layout/record-view';
+import { AccountPeek, AccountPeekActions, accountActions, useAccountActions, type Org } from './account-peek';
+import { copyText, StageDots, StatusBadge, SubBadge, When } from './ui';
 
-type Sort = 'created' | 'seen' | 'calls' | 'stage' | 'attention';
+interface Orgs { orgs: Org[]; stages: { id: string; label: string; next: string }[]; stripe_error?: string }
+
+const DAY = 86_400_000;
+const billingTrouble = (o: Org) => ['past_due', 'unpaid', 'incomplete'].includes(o.subscription?.status ?? '') || !!o.subscription?.cancel_at_period_end;
+const dormant = (o: Org) => !o.last_seen || Date.now() - new Date(o.last_seen).getTime() > 14 * DAY;
+const budgetPct = (o: Org) => (o.budget_usd ? Math.round((o.month_spend_usd / o.budget_usd) * 100) : null);
+const dash = <span className='text-muted-foreground'>—</span>;
+const num = (n: number | null) => (n ? <span className='tabular-nums'>{n}</span> : dash);
+
+const VIEWS: RecordViewDef<Org>[] = [
+  { id: 'all', label: 'All', group: 'stage' },
+  { id: 'attention', label: 'Needs attention', match: (o) => o.attention.length > 0 },
+  { id: 'onboarding', label: 'Onboarding', match: (o) => o.stage_index < 6, group: 'stage' },
+  { id: 'active', label: 'Active 7d', match: (o) => o.calls_7d > 0 },
+  { id: 'paying', label: 'Paying', match: (o) => o.subscription?.status === 'active' },
+  { id: 'trialing', label: 'Trialing', match: (o) => o.subscription?.status === 'trialing' },
+  { id: 'billing', label: 'Billing issues', match: billingTrouble },
+  { id: 'dormant', label: 'Dormant 14d', match: dormant }
+];
+
+/** Contact emails, one per account that has one. */
+const contacts = (list: Org[]) => [...new Set(list.map((o) => o.contact).filter(Boolean))].join(', ');
 
 export function AdminAccounts() {
-  const router = useRouter();
-  const { data, error, isLoading } = useAdmin<OrgList>('/orgs');
+  const { data, error, isLoading } = useAdmin<Orgs>('/orgs');
   const { data: ov } = useAdmin<{ integrations: { clerk?: boolean } }>('/overview');
-  const [stage, setStage] = useState('');
-  const [att, setAtt] = useState(false);
-  const [sort, setSort] = useState<Sort>('created');
   const [creating, setCreating] = useState(false);
   const result = useResult();
-
-  // Filters and sort apply before search (search is the table's own).
-  const rows = useMemo(() => {
-    const list = (data?.orgs ?? []).filter((o) => (!stage || o.stage === stage) && (!att || o.attention.length));
-    const by: Record<Sort, (a: OrgRow, b: OrgRow) => number> = {
-      created: () => 0, // the API's order: newest first
-      seen: (a, b) => new Date(b.last_seen ?? 0).getTime() - new Date(a.last_seen ?? 0).getTime(),
-      calls: (a, b) => b.calls_7d - a.calls_7d,
-      stage: (a, b) => b.stage_index - a.stage_index,
-      attention: (a, b) => b.attention.length - a.attention.length
-    };
-    return [...list].sort(by[sort]);
-  }, [data, stage, att, sort]);
+  const ctl = useAccountActions(result.show, Boolean(ov?.integrations.clerk));
+  const orgs = data?.orgs ?? [];
   const n = data?.stages.length || 8;
-  const members = (o: OrgRow) => o.clerk_org_id ? (
-    <span className='inline-flex flex-wrap items-center gap-1.5'>{o.members}{o.pending_invites > 0 && <StatusBadge tone='info'>+{o.pending_invites} invited</StatusBadge>}</span>
+
+  const members = (o: Org) => o.clerk_org_id ? (
+    <span className='inline-flex flex-wrap items-center gap-1.5 tabular-nums'>{o.members}{o.pending_invites > 0 && <StatusBadge tone='info'>+{o.pending_invites} invited</StatusBadge>}</span>
   ) : (
     <span className='inline-flex items-center gap-1.5'><span className='text-muted-foreground'>keys: {o.active_keys}</span>{!o.active_keys && <StatusBadge tone='bad'>none</StatusBadge>}</span>
   );
-  const spend = (o: OrgRow) => <span className='tabular-nums'>{usd(o.month_spend_usd)}{o.budget_usd ? <span className='text-muted-foreground'> / {usd(o.budget_usd)}</span> : null}</span>;
-  const cols: RecordCol<OrgRow>[] = [
-    { key: 'account', label: 'Account', keep: true, render: (o) => (<>
-      <div className='font-medium'>{o.name}</div>
-      <div className='text-muted-foreground text-xs'>{o.slug}{o.contact ? ` · ${o.contact}` : ''}</div>
-    </>) },
-    { key: 'stage', label: 'Stage', keep: true, render: (o) => <div className='whitespace-nowrap'><StageDots index={o.stage_index} total={n} />{o.stage_label}</div> },
-    { key: 'members', label: 'Members', render: members },
-    { key: 'plan', label: 'Plan', render: (o) => <SubBadge sub={o.subscription} /> },
-    { key: 'seen', label: 'Last seen', render: (o) => <When d={o.last_seen} /> },
-    { key: 'calls', label: 'Calls 7d', render: (o) => <span className='inline-flex items-center gap-1.5 tabular-nums'>{o.calls_7d}{o.errors_7d > 0 && <StatusBadge tone='bad'>{o.errors_7d} err</StatusBadge>}</span> },
-    { key: 'spend', label: 'Spend (month)', render: spend },
-    { key: 'att', label: '', keep: true, render: (o) => o.attention.length ? <StatusBadge tone='warn' title={o.attention.join('\n')}>{o.attention.length} to check</StatusBadge> : null }
+  const sel = (vs: string[]) => vs.map((v) => ({ value: v }));
+  const cols: RecordCol<Org>[] = [
+    { key: 'name', label: 'Account', name: 'Account', type: 'text', title: true, keep: true, peek: false, value: (o) => o.name, render: (o) => (
+      <span className='grid gap-1 leading-none'><span className='font-medium'>{o.name}</span><span className='text-muted-foreground text-xs'>{o.slug}</span></span>
+    ) },
+    { key: 'slug', label: 'Slug', type: 'text', hidden: true, value: (o) => o.slug, render: (o) => <code className='text-xs'>{o.slug}</code> },
+    { key: 'contact', label: 'Contact', type: 'text', value: (o) => o.contact, render: (o) => o.contact ?? dash },
+    { key: 'stage', label: 'Stage', type: 'select', keep: true, value: (o) => o.stage, options: (data?.stages ?? []).map((s) => ({ value: s.id, label: s.label })),
+      render: (o) => <span className='whitespace-nowrap'><StageDots index={o.stage_index} total={n} />{o.stage_label}</span> },
+    { key: 'next_step', label: 'Next step', type: 'text', hidden: true, value: (o) => o.next_step, render: (o) => o.next_step },
+    { key: 'attention', label: 'Attention', type: 'number', keep: true, value: (o) => o.attention.length, render: (o) => o.attention.length ? (
+      <Tooltip>
+        <TooltipTrigger render={<span className='inline-flex' />}><StatusBadge tone='warn'>{o.attention.length} to check</StatusBadge></TooltipTrigger>
+        <TooltipContent className='block max-w-sm whitespace-pre-line'>{o.attention.join('\n')}</TooltipContent>
+      </Tooltip>
+    ) : dash },
+    { key: 'members', label: 'Members', type: 'number', value: (o) => o.members, render: members },
+    { key: 'pending_invites', label: 'Pending invites', type: 'number', hidden: true, value: (o) => o.pending_invites, render: (o) => num(o.pending_invites) },
+    { key: 'auth', label: 'Sign-in', type: 'select', hidden: true, options: [{ value: 'clerk', label: 'Clerk' }, { value: 'keys', label: 'Keys' }],
+      value: (o) => (o.clerk_org_id ? 'clerk' : 'keys'), render: (o) => (o.clerk_org_id ? 'Clerk' : 'Keys') },
+    { key: 'active_keys', label: 'Active keys', type: 'number', hidden: true, value: (o) => o.active_keys, render: (o) => num(o.active_keys) },
+    { key: 'plan', label: 'Plan', type: 'select', value: (o) => o.subscription?.plan ?? 'none', render: (o) => o.subscription?.plan ?? dash },
+    { key: 'billing', label: 'Billing', type: 'select', options: sel(['active', 'trialing', 'past_due', 'unpaid', 'incomplete', 'canceled', 'none']),
+      value: (o) => o.subscription?.status ?? 'none', render: (o) => <SubBadge sub={o.subscription} /> },
+    { key: 'renews', label: 'Renews', type: 'date', hidden: true, value: (o) => o.subscription?.renews_at ?? o.subscription?.trial_end ?? null,
+      render: (o) => { const d = o.subscription?.renews_at ?? o.subscription?.trial_end; return d ? <When d={d} /> : dash; } },
+    { key: 'last_seen', label: 'Last seen', type: 'date', value: (o) => o.last_seen, render: (o) => (o.last_seen ? <When d={o.last_seen} /> : dash) },
+    { key: 'calls_7d', label: 'Calls 7d', type: 'number', value: (o) => o.calls_7d, render: (o) => (
+      <span className='inline-flex items-center gap-1.5 tabular-nums'>{o.calls_7d}{o.errors_7d > 0 && <StatusBadge tone='bad'>{o.errors_7d} err</StatusBadge>}</span>
+    ) },
+    { key: 'errors_7d', label: 'Errors 7d', type: 'number', hidden: true, value: (o) => o.errors_7d, render: (o) => num(o.errors_7d) },
+    { key: 'spend', label: 'Spend (month)', type: 'number', value: (o) => o.month_spend_usd, render: (o) => (
+      <span className='tabular-nums'>{usd(o.month_spend_usd)}{o.budget_usd ? <span className='text-muted-foreground'> / {usd(o.budget_usd)}</span> : null}</span>
+    ) },
+    { key: 'budget_pct', label: 'Budget used %', type: 'number', hidden: true, value: budgetPct, render: (o) => { const p = budgetPct(o); return p == null ? dash : <span className='tabular-nums'>{p}%</span>; } },
+    { key: 'running', label: 'Running', name: 'Running (onboarding + simulations)', type: 'number', hidden: true, value: (o) => o.onboarding_running + o.sims_running, render: (o) => num(o.onboarding_running + o.sims_running) },
+    { key: 'created_at', label: 'Created', type: 'date', hidden: true, value: (o) => o.created_at, render: (o) => <When d={o.created_at} /> },
+    { key: 'stripe', label: 'Stripe', name: 'Stripe customer', type: 'boolean', hidden: true, value: (o) => !!o.stripe_customer_id, render: (o) => (o.stripe_customer_id ? 'Yes' : 'No') }
   ];
+
+  // RecordView owns the selected tab; it saves it under rv:admin-accounts:view, so read it there at click time.
+  const tabRows = () => {
+    let id = VIEWS[0].id;
+    try { const v = JSON.parse(localStorage.getItem('rv:admin-accounts:view') ?? 'null'); if (typeof v === 'string') id = v; } catch { /* first view */ }
+    const v = VIEWS.find((x) => x.id === id) ?? VIEWS[0];
+    return v.match ? orgs.filter(v.match) : orgs;
+  };
+  const copyContacts = (list: Org[]) => { const t = contacts(list); if (t) copyText(t, 'Contact emails copied'); else toast.info('No contact emails here'); };
 
   return (
     <PageContainer>
-      <ErrorBox error={error} />
-      {data?.stripe_error && <div className='mb-4'><Notice>Stripe: {data.stripe_error}</Notice></div>}
-      <RecordView<OrgRow>
-        rows={rows} rowKey={(o) => o.slug} cols={cols} loading={isLoading || !data} noun='accounts'
-        searchText={(o) => `${o.name} ${o.slug} ${o.contact ?? ''} ${o.stage_label}`}
-        searchPlaceholder='Search accounts by name, slug or email'
-        filters={<>
-          <NativeSelect value={stage} onChange={(e) => setStage(e.target.value)} aria-label='Stage' className='w-40'>
-            <NativeSelectOption value=''>All stages</NativeSelectOption>
-            {(data?.stages ?? []).map((s) => <NativeSelectOption key={s.id} value={s.id}>{s.label}</NativeSelectOption>)}
-          </NativeSelect>
-          <NativeSelect value={sort} onChange={(e) => setSort(e.target.value as Sort)} aria-label='Sort' className='w-40'>
-            <NativeSelectOption value='created'>Newest first</NativeSelectOption>
-            <NativeSelectOption value='seen'>Last seen</NativeSelectOption>
-            <NativeSelectOption value='calls'>Most calls (7d)</NativeSelectOption>
-            <NativeSelectOption value='stage'>Furthest stage</NativeSelectOption>
-            <NativeSelectOption value='attention'>Most to check</NativeSelectOption>
-          </NativeSelect>
-          <label className='flex items-center gap-2 text-sm whitespace-nowrap'><Checkbox checked={att} onCheckedChange={(v) => setAtt(Boolean(v))} /> Needs attention</label>
-        </>}
+      <RecordView<Org>
+        id='admin-accounts' noun='accounts' exportName='accounts' groupable properties
+        rows={orgs} rowKey={(o) => o.slug} cols={cols} views={VIEWS} loading={isLoading}
+        defaultSort={[{ key: 'last_seen', dir: 'desc' }]}
+        searchText={(o) => `${o.name} ${o.slug} ${o.contact ?? ''} ${o.stage_label} ${o.subscription?.plan ?? ''}`}
+        searchPlaceholder='Search accounts by name, slug, email or plan'
+        filters={error ? <StatusBadge tone='bad' title={error.message}>Load failed</StatusBadge>
+          : data?.stripe_error ? <StatusBadge tone='warn' title={data.stripe_error}>Stripe error</StatusBadge> : undefined}
         primary={<Button onClick={() => setCreating(true)}><Icons.add className='size-4' /> New account</Button>}
-        empty='No accounts match.'
-        detailTitle={(o) => o.name}
-        detail={(o) => (
-          <div className='flex flex-col gap-5'>
-            <dl>
-              <Field label='Slug'><code className='text-xs'>{o.slug}</code></Field>
-              <Field label='Contact'>{o.contact ?? '—'}</Field>
-              <Field label='Stage'><div><StageDots index={o.stage_index} total={n} />{o.stage_label}</div><p className='text-muted-foreground mt-1 text-xs'>Next: {o.next_step}</p></Field>
-              <Field label='Members'>{members(o)}</Field>
-              <Field label='Plan'><SubBadge sub={o.subscription} /></Field>
-              <Field label='Last seen'><When d={o.last_seen} /></Field>
-              <Field label='Calls (7 days)'>{o.calls_7d}{o.errors_7d > 0 && <span className='text-destructive'> · {o.errors_7d} errors</span>}</Field>
-              <Field label='Spend this month'>{spend(o)}</Field>
-            </dl>
-            {o.attention.length > 0 && (
-              <div className='space-y-2'>
-                <p className='text-sm font-medium'>Needs attention</p>
-                <ul className='list-disc space-y-1 pl-5 text-sm text-amber-400'>{o.attention.map((a) => <li key={a}>{a}</li>)}</ul>
-              </div>
-            )}
-          </div>
-        )}
+        primaryMenu={[{ label: 'Copy contact emails (current view)', icon: <Icons.teams />, onSelect: () => copyContacts(tabRows()) }]}
+        bulk={(list) => [
+          { label: 'Copy contact emails', icon: <Icons.teams />, onSelect: () => copyContacts(list) },
+          { label: `Send a tip to ${list.length}`, icon: <Icons.chat />, onSelect: () => ctl.open('tip', ...list) }
+        ]}
+        actions={(o) => accountActions(o, ctl)}
+        empty='No accounts yet. Approve an access request or create one.'
+        detailActions={(o) => <AccountPeekActions org={o} ctl={ctl} />}
+        detail={(o, close) => <AccountPeek org={o} close={close} ctl={ctl} />}
       />
       {creating && (
         <NewAccount
@@ -117,6 +134,7 @@ export function AdminAccounts() {
           }}
         />
       )}
+      {ctl.dialogs}
       {result.dialog}
     </PageContainer>
   );

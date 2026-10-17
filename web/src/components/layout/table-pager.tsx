@@ -21,12 +21,15 @@ export function usePaged<T>(items: readonly T[], initialSize = 25): Paged<T> {
   return { rows, page: at, pages, size, total, setPage, setSize };
 }
 
-/** "21–40 of 137 · Rows [25] · ‹ 2 / 7 ›"; an empty table still shows its footer ("0 items"). */
-export function TablePager<T>({ p, noun = 'items', className }: { p: Paged<T>; noun?: string; className?: string }) {
-  const from = (p.page - 1) * p.size + 1, to = Math.min(p.total, p.page * p.size);
+/** "21–40 of 137 · Rows [25] · ‹ 2 / 7 ›"; an empty table still shows its footer ("0 items"). With `of` (the unfiltered count)
+ * a filtered table reads "12 of 340 requests"; `count` overrides the row count shown (grouped tables page their headers too). */
+export function TablePager<T>({ p, noun = 'items', className, of, count }: { p: Paged<T>; noun?: string; className?: string; of?: number; count?: number }) {
+  const from = (p.page - 1) * p.size + 1, to = Math.min(p.total, p.page * p.size), n = count ?? p.total;
   return (
     <div className={cn('text-muted-foreground flex flex-wrap items-center gap-x-4 gap-y-2 py-2 text-xs', className)}>
-      <span className='tabular-nums'>{p.total <= p.size ? `${p.total} ${noun}` : `${from}–${to} of ${p.total} ${noun}`}</span>
+      <span className='tabular-nums'>
+        {p.total <= p.size ? `${n}${of !== undefined && of !== n ? ` of ${of}` : ''} ${noun}` : `${from}–${to} of ${n} ${noun}${of !== undefined && of !== n ? ` (${of} in all)` : ''}`}
+      </span>
       <label className='ml-auto flex items-center gap-2'>
         Rows
         <NativeSelect size='sm' aria-label='Rows per page' value={String(p.size)} onChange={(e) => p.setSize(Number(e.target.value))} className='w-[4.5rem]'>
