@@ -11,6 +11,7 @@ import * as q from "./queries.js";
 import * as research from "./research.js";
 import type { Org } from "./auth.js";
 import { recordMcpEvent } from "./analytics.js";
+import * as memory from "./context.js";
 
 /** Hosts (ChatGPT in particular) cache the template by URI: bump the version on breaking HTML/JS changes. */
 export const WIDGET_URI = "ui://octillion/dashboard-v2.html";
@@ -49,6 +50,8 @@ export function handlersFor(org: Org) {
     list_developer_profiles: (a: { query?: string; product?: string }) => q.listProfiles(org, a),
     list_agents: (a: { population?: string }) => q.listAgents(a),
     browse_task_library: (a: { query?: string; category?: string; language?: string; limit?: number }) => q.browseTaskLibrary(a),
+    save_to_memory: (a: { body: string; kind?: string; scope?: memory.ToolScope; product?: string }) => memory.saveMemoryFromAI(org, a),
+    search_memory: (a: { query?: string; scope?: memory.ToolScope | "all"; product?: string; limit?: number }) => memory.searchMemory(org, a),
   };
 }
 type Handlers = ReturnType<typeof handlersFor>;
@@ -109,6 +112,14 @@ function summarize(d: Data): string {
       return d.tasks.length
         ? `${d.tasks.length} library tasks: ${d.tasks.map((t: any) => `#${t.id} ${t.title} [${t.category ?? "uncategorized"}${t.language ? `, ${t.language}` : ""}]`).join("; ")}. Categories: ${d.categories.map((c: any) => `${c.category ?? "uncategorized"} (${c.tasks})`).join(", ")}. Add one to a product with save_scenarios {library_task_id}.`
         : "No matching tasks in the library.";
+    case "memory": {
+      const line = (m: any) => `#${m.id} [${m.scope === "product" ? m.subject_name : m.scope === "user" ? "you" : "company"}, ${m.kind}] ${m.body}`;
+      const whose = d.saved?.scope === "user" ? "your" : d.saved?.scope === "company" ? "the company's" : `${d.saved?.subject_name}'s`;
+      if (d.action === "saved") return `Saved to ${whose} memory: ${line(d.saved)}${/[.!?]$/.test(d.saved!.body) ? "" : "."} The team sees it on the Octillion account page under Context, and it is part of the background you get at the start of every conversation.`;
+      return d.items.length
+        ? `${d.items.length} memory item(s)${d.query ? ` matching "${d.query}"` : ""}, newest first: ${d.items.map(line).join(" | ")}`
+        : `Nothing in memory${d.query ? ` matches "${d.query}"` : " yet"}. Save what the team should not have to repeat with save_to_memory.`;
+    }
     case "search": {
       const r = d.results;
       return `${r.total} transcript events match "${d.query}" (${d.filters.mode}).${r.hits.length ? ` Top: ${r.hits.slice(0, 5).map((h) => `${h.session_id}#${h.seq} (${h.type}, ${h.model}): ${h.text.slice(0, 120)}`).join(" | ")}` : ""}`;
@@ -219,6 +230,8 @@ export const TOOL_STATUS: Record<ToolName, [string, string]> = {
   list_developer_profiles: ["Loading developer profiles…", "Developer profiles loaded"],
   list_agents: ["Loading agent mix…", "Agent mix loaded"],
   browse_task_library: ["Browsing task library…", "Task library loaded"],
+  save_to_memory: ["Saving to memory…", "Saved to memory"],
+  search_memory: ["Searching memory…", "Memory searched"],
 };
 
 export const TOOL_NAMES = Object.keys(handlersFor({ orgId: 0, slug: "", name: "" })) as ToolName[];
@@ -240,7 +253,9 @@ export function createServer(org: Org, context = ""): McpServer {
         "naming the product) -> run_simulation (sandboxed sub-agents work each scenario on each model) -> " +
         "get_visibility_report / get_simulation for results -> get_agent_session and get_session_transcript for evidence. " +
         "browse_task_library offers curated real-world tasks to turn into scenarios; list_developer_profiles lists the developer " +
-        "personas the orchestrator role-plays when a sub-agent asks questions (pass them to run_simulation as profiles)." + context,
+        "personas the orchestrator role-plays when a sub-agent asks questions (pass them to run_simulation as profiles). " +
+        "Memory: when the user states a lasting fact, decision or preference about their company, product or themselves (or says 'remember'), " +
+        "save it with save_to_memory; before answering questions about past decisions or how the team works, check search_memory." + context,
     },
   );
 
@@ -471,6 +486,34 @@ export function createServer(org: Org, context = ""): McpServer {
     },
     annotations: read, _meta: meta("browse_task_library"),
   }, run("browse_task_library"));
+
+  const scope = z.enum(["company", "me", "product"]);
+  registerAppTool(server, "save_to_memory", {
+    title: "Save to memory",
+    description: "Save one lasting item to the account's institutional memory: a fact, decision, preference or note about the company, " +
+      "the signed-in person ('me') or a product. Use it when the user states something the team should not have to repeat, or says 'remember'. " +
+      "Keep each item to one self-contained sentence or two. The team sees and edits memory on the Octillion account page (Context).",
+    inputSchema: {
+      body: z.string().min(1).max(1000).describe("What to remember, self-contained, e.g. 'We stopped competing on price with Postmark.'"),
+      kind: z.enum(["fact", "decision", "preference", "note"]).optional().describe("Default note"),
+      scope: scope.optional().describe("company (default), me (only this person) or product"),
+      product,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }, _meta: meta("save_to_memory"),
+  }, run("save_to_memory"));
+
+  registerAppTool(server, "search_memory", {
+    title: "Search memory",
+    description: "Search the account's institutional memory: the company's items, this person's own and product items, newest first. " +
+      "Every word of the query must appear; leave it empty to list the latest.",
+    inputSchema: {
+      query: z.string().optional().describe("e.g. 'pricing' or a competitor's name"),
+      scope: z.enum(["all", "company", "me", "product"]).optional().describe("Default all"),
+      product,
+      limit: z.number().int().min(1).max(100).optional().describe("Max items (default 25)"),
+    },
+    annotations: read, _meta: meta("search_memory"),
+  }, run("search_memory"));
 
   registerPrompts(server);
   return server;

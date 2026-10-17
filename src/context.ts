@@ -159,3 +159,65 @@ export async function companyHintForResearch(orgId: number): Promise<string> {
     c.competitors.length ? `Competitors the company tracks (include the ones that fit this product): ${c.competitors.join(", ")}` : null].filter(Boolean);
   return parts.length ? `\n\nCompany context from the account:\n${parts.join("\n")}` : "";
 }
+
+// ---------- memory from the AI client (MCP tools save_to_memory and search_memory) ----------
+
+/** "me" in the tools is the signed-in person; the table stores it as the user scope. */
+export type ToolScope = "company" | "me" | "product";
+interface MemoryHit { id: number; scope: MemoryScope; subject: string; subject_name: string; kind: string; body: string; created_by: string | null; created_at: Date }
+export interface MemoryView { view: "memory"; action: "saved" | "search"; query: string; scope: string; saved: MemoryHit | null; items: MemoryHit[] }
+
+/** A product by slug, name or id; else the person's focus product; else the only one. */
+async function productFor(org: Org, product?: string): Promise<{ slug: string; name: string }> {
+  const db = await getDb();
+  const all = await db.query<{ id: number; slug: string; name: string }>("SELECT id, slug, name FROM products WHERE org_id = $1 ORDER BY name", [org.orgId]);
+  if (product) {
+    const p = product.trim().toLowerCase();
+    const hit = all.find((x) => x.slug === p || x.name.toLowerCase() === p || String(x.id) === p);
+    if (!hit) throw new ContextError(`No product "${product}". Products: ${all.map((x) => x.slug).join(", ") || "none yet"}.`, 404);
+    return hit;
+  }
+  if (org.userId) {
+    const focus = (await getPerson(org.orgId, org.userId)).focus_product;
+    const hit = focus && all.find((x) => x.slug === focus);
+    if (hit) return hit;
+  }
+  if (all.length === 1) return all[0];
+  throw new ContextError(all.length ? `Say which product: ${all.map((x) => x.slug).join(", ")}.` : "No products yet: onboard one first.");
+}
+
+const aiActor = (org: Org) => `ai:${org.userId ?? "api-key"}`;
+
+export async function saveMemoryFromAI(org: Org, a: { body: string; kind?: string; scope?: ToolScope; product?: string }): Promise<MemoryView> {
+  const scope = a.scope ?? (a.product ? "product" : "company");
+  let subject = "", name = "Company";
+  if (scope === "me") {
+    if (!org.userId) throw new ContextError("Personal memory needs a signed-in person; this connection uses an API key. Save it to the company instead.");
+    subject = org.userId; name = "You";
+  } else if (scope === "product") ({ slug: subject, name } = await productFor(org, a.product));
+  const m = await addMemory(org.orgId, aiActor(org), { scope: scope === "me" ? "user" : scope, kind: a.kind ?? "note", body: a.body }, subject);
+  return { view: "memory", action: "saved", query: "", scope, saved: { ...m, subject_name: name }, items: [] };
+}
+
+export async function searchMemory(org: Org, a: { query?: string; scope?: ToolScope | "all"; product?: string; limit?: number }): Promise<MemoryView> {
+  const db = await getDb();
+  const scope = a.scope ?? "all";
+  const limit = Math.min(100, Math.max(1, Math.round(a.limit ?? 25)));
+  const where = ["m.org_id = $1"], args: unknown[] = [org.orgId];
+  const add = (v: unknown) => { args.push(v); return `$${args.length}`; };
+  // Whose memory: the company's, this person's own (never anyone else's), and product memory.
+  const mine = org.userId ? `(m.scope = 'user' AND m.subject = ${add(org.userId)})` : "FALSE";
+  if (scope === "company") where.push("m.scope = 'company'");
+  else if (scope === "me") where.push(mine);
+  else if (scope === "product") {
+    where.push("m.scope = 'product'");
+    if (a.product) where.push(`m.subject = ${add((await productFor(org, a.product)).slug)}`);
+  } else where.push(`(m.scope IN ('company', 'product') OR ${mine})`);
+  for (const w of String(a.query ?? "").trim().split(/\s+/).filter(Boolean).slice(0, 8)) where.push(`m.body ILIKE ${add(`%${w.replace(/[%_\\]/g, "\\$&")}%`)}`);
+  const items = await db.query<MemoryHit>(
+    `SELECT m.id::int AS id, m.scope, m.subject, COALESCE(p.name, CASE m.scope WHEN 'company' THEN 'Company' ELSE 'You' END) AS subject_name,
+            m.kind, m.body, m.created_by, m.created_at
+       FROM context_memories m LEFT JOIN products p ON m.scope = 'product' AND p.org_id = m.org_id AND p.slug = m.subject
+      WHERE ${where.join(" AND ")} ORDER BY m.created_at DESC, m.id DESC LIMIT ${add(limit)}`, args);
+  return { view: "memory", action: "search", query: String(a.query ?? ""), scope, saved: null, items };
+}

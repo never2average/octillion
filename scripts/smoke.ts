@@ -196,7 +196,7 @@ try {
   // ---------- tools + UI resource ----------
   const { tools } = await A.listTools();
   console.log("tools:", tools.map((t) => t.name).join(", "));
-  assert.equal(tools.length, 18);
+  assert.equal(tools.length, 20);
   assert.equal(tools[0].name, "get_started", "the welcome tool is listed first (the tool list is the first screen in IDE hosts)");
   const fresh = await call(A, "get_started");
   assert.equal(fresh.welcome.stage, "onboard");
@@ -1072,6 +1072,33 @@ try {
       assert.match(devI, /Company memory:[\s\S]*fact: Acme Queue 3 ships exactly-once[\s\S]*decision: We stopped competing/, "company memory reaches the AI client");
       assert.match(devI, /asked you to remember:[\s\S]*preference: Lead with the Python numbers/);
       assert.match(devI, /Memory about [\s\S]*Docs moved to \/v3/, "so does their focus product's");
+      // The same memory from the AI client: save_to_memory and search_memory over MCP, as the signed-in person.
+      const devMcp = new Client({ name: "smoke-memory", version: "1.0.0" });
+      await devMcp.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${await token({ user_id: acc2.user.id })}` } } }));
+      const sv = await call(devMcp, "save_to_memory", { body: "Launch week for Acme Queue 4 is November 3.", kind: "decision" });
+      assert.equal(sv.view, "memory"); assert.equal(sv.saved.scope, "company");
+      const mineSaved = await call(devMcp, "save_to_memory", { body: "Prefers charts over tables.", kind: "preference", scope: "me" });
+      assert.equal(mineSaved.saved.subject_name, "You");
+      const prodSaved = await call(devMcp, "save_to_memory", { body: "Retry semantics changed in v3.", scope: "product" });
+      assert.equal(prodSaved.saved.subject, slugP, "product defaults to the person's focus product");
+      await fails(devMcp, "save_to_memory", { body: "x", scope: "product", product: "no-such-product" }, /No product/);
+      let found = await call(devMcp, "search_memory", { query: "launch november" });
+      assert.deepEqual(found.items.map((m: any) => m.id), [sv.saved.id], "every word must match");
+      found = await call(devMcp, "search_memory", { scope: "me" });
+      assert.deepEqual(found.items.map((m: any) => m.body), ["Prefers charts over tables.", "Lead with the Python numbers."]);
+      const ownerFound = await (async () => {
+        const c = new Client({ name: "smoke-memory-owner", version: "1.0.0" });
+        await c.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${await token({ user_id: accepted.user.id })}` } } }));
+        const r = await call(c, "search_memory", {}); await c.close(); return r;
+      })();
+      assert.ok(!ownerFound.items.some((m: any) => m.scope === "user"), "someone else's personal memory never shows in search");
+      assert.ok(ownerFound.items.some((m: any) => m.id === sv.saved.id), "company memory does");
+      await fails(A, "save_to_memory", { body: "x", scope: "me" }, /needs a signed-in person/);
+      const viaPortal = await json(appCall(devC, "GET", "/context/memories?scope=company"));
+      const aiItem = viaPortal.memories.find((m: any) => m.id === sv.saved.id);
+      assert.equal(aiItem.created_by, "AI client"); assert.equal(aiItem.can_delete, true, "the person whose AI saved it can remove it");
+      assert.equal((await appCall(devC, "DELETE", `/context/memories/${sv.saved.id}`)).status, 204);
+      await devMcp.close();
       assert.equal((await appCall(ownerC, "DELETE", `/context/memories/${cm.id}`)).status, 204, "admins delete any item");
       mem = await json(appCall(devC, "GET", "/context/memories?scope=company"));
       assert.deepEqual(mem.memories.map((m: any) => m.id), [om.id]);

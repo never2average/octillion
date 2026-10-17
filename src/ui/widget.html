@@ -433,12 +433,12 @@
     if (back && history.length > 1) { history.pop(); render(history[history.length - 1]); }
   });
   app.addEventListener("submit", (e) => {
-    const form = e.target.closest("form[data-search]");
+    const form = e.target.closest("form[data-search], form[data-memory-search]");
     if (!form) return;
     e.preventDefault();
     const params = {};
     for (const [k, v] of new FormData(form).entries()) if (v !== "") params[k] = v;
-    callTool("search_transcripts", params);
+    callTool(form.hasAttribute("data-memory-search") ? "search_memory" : "search_transcripts", params);
   });
   app.addEventListener("change", (e) => {
     const f = e.target.closest("[data-filter]");
@@ -456,6 +456,7 @@
       ...(product ? [["product", "Context", "get_product", p], ["report", "Report", "get_visibility_report", p]] : []),
       ["simulations", "Simulations", "list_simulations", p],
       ["library", "Library", "browse_task_library", {}],
+      ["memory", "Memory", "search_memory", {}],
     ];
     const group = { simulation: "simulations", session: "simulations", transcript: "simulations", profiles: "library", agents: "library" }[view] || view;
     return `<nav class="nav">
@@ -475,7 +476,7 @@
   function render(d) {
     tip.style.display = "none";
     product = d.product?.slug ?? d.simulation?.product_slug ?? d.session?.product_slug ?? (typeof d.product === "string" ? d.product : product);
-    const views = { products: viewProducts, product: viewProduct, report: viewReport, simulations: viewSimulations, simulation: viewSimulation, session: viewSession, transcript: viewTranscript, search: viewSearch, profiles: viewProfiles, library: viewLibrary, agents: viewAgents, onboarding: viewOnboarding };
+    const views = { products: viewProducts, product: viewProduct, report: viewReport, simulations: viewSimulations, simulation: viewSimulation, session: viewSession, transcript: viewTranscript, search: viewSearch, memory: viewMemory, profiles: viewProfiles, library: viewLibrary, agents: viewAgents, onboarding: viewOnboarding };
     const fn = views[d.view];
     const note = d.truncated ? `<div class="warn" style="margin-bottom:12px">Result shortened to fit the host's size limit. Page through it or narrow the filters to see the rest.</div>` : "";
     app.innerHTML = nav(d.view) + note + (fn ? fn(d) : `<div class="empty">Unknown view: ${esc(d.view)}</div>`);
@@ -760,6 +761,22 @@
           <div class="ev-meta"><span class="ev-type">${esc(h.type)}</span><span class="muted">${esc(h.model)} · #${h.seq}</span><span class="muted">${ago(h.ts)}</span></div>
           <div class="ev-body" style="word-break:break-word">${highlight(snippet(h.text, d.query), d.query)}</div></div>`).join("") || '<div class="empty">No transcript events match</div>'}</div>
     </div>`;
+  }
+
+  // ---------- memory ----------
+  function viewMemory(d) {
+    const who = (m) => m.scope === "product" ? m.subject_name : m.scope === "user" ? "You" : "Company";
+    const row = (m) => `<div class="ev"><div class="ev-meta"><span class="ev-type">${esc(m.kind)}</span><span class="muted">${esc(who(m))} · #${m.id}</span><span class="muted">${ago(m.created_at)}</span></div>
+      <div class="ev-body" style="word-break:break-word">${d.query ? highlight(m.body, d.query) : esc(m.body)}</div></div>`;
+    const form = `<form data-memory-search class="row card">
+      <input type="search" name="query" value="${esc(d.query)}" placeholder="Search your team's memory" style="flex:1;min-width:180px">
+      <select name="scope">${["all", "company", "me", "product"].map((x) => `<option${x === d.scope ? " selected" : ""}>${x}</option>`).join("")}</select>
+      <button class="btn" type="submit">Search</button></form>`;
+    if (d.action === "saved") return `<div class="stack">
+      <div class="card stack"><h2 style="margin:0">Saved to memory</h2>${row(d.saved)}<p class="muted" style="font-size:12px;margin:0">Your team sees and edits it on the Octillion account page under Context.</p></div>${form}</div>`;
+    return `<div class="stack">${form}
+      <div class="card"><h2 style="margin:0 0 8px">${num(d.items.length)} item${d.items.length === 1 ? "" : "s"}${d.query ? ` matching “${esc(d.query)}”` : ""}</h2>
+        ${d.items.map(row).join("") || '<div class="empty">Nothing in memory yet. Ask me to remember something.</div>'}</div></div>`;
   }
 
   // ---------- boot ----------

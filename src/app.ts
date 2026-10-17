@@ -295,7 +295,10 @@ export function appRouter() {
     if (!context.MEMORY_SCOPES.includes(scope)) throw new AppError("scope must be company, user or product");
     const me = actor(res), admin_ = S(res).role === "admin";
     const memories = await context.listMemories(S(res).org, scope, await memorySubject(res, scope, req.query.subject));
-    res.json({ memories: memories.map((m) => ({ ...m, created_by: m.created_by?.replace(/^customer:/, "") ?? null, can_delete: admin_ || m.created_by === me })), kinds: context.MEMORY_KINDS });
+    // Items saved from chat (save_to_memory) are by "ai:<user id>": shown as the AI client, editable by that person.
+    const mineAi = `ai:${S(res).user ?? ""}`;
+    res.json({ memories: memories.map((m) => ({ ...m, created_by: m.created_by?.startsWith("ai:") ? "AI client" : m.created_by?.replace(/^customer:/, "") ?? null,
+      can_delete: admin_ || m.created_by === me || (!!S(res).user && m.created_by === mineAi) })), kinds: context.MEMORY_KINDS });
   });
   api.post("/context/memories", async (req, res) => {
     const scope = String(req.body?.scope ?? "");
@@ -304,13 +307,13 @@ export function appRouter() {
   api.put("/context/memories/:id", async (req, res) => {
     const m = await context.getMemory(S(res).org, Number(req.params.id));
     if (!m) throw new AppError("Not found", 404);
-    if (m.created_by !== actor(res)) adminOnly(res);
+    if (m.created_by !== actor(res) && !(S(res).user && m.created_by === `ai:${S(res).user}`)) adminOnly(res);
     res.json(await context.updateMemory(S(res).org, m.id, req.body ?? {}));
   });
   api.delete("/context/memories/:id", async (req, res) => {
     const m = await context.getMemory(S(res).org, Number(req.params.id));
     if (!m) throw new AppError("Not found", 404);
-    if (m.created_by !== actor(res)) adminOnly(res);
+    if (m.created_by !== actor(res) && !(S(res).user && m.created_by === `ai:${S(res).user}`)) adminOnly(res);
     await context.deleteMemory(S(res).org, m.id);
     res.status(204).end();
   });
