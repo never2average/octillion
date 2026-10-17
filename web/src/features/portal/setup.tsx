@@ -49,24 +49,35 @@ export function SetupPage() {
       pageDescription={!s ? 'Connect your AI client and learn the workflow.' : next ? `Next: ${next.label.replace(' (team)', '')}.` : 'You are set up. Pick a journey to keep going.'}
     >
       {error ? <ErrorState error={error} /> : !s ? <LoadingCards count={4} /> : (
-        <div className='grid max-w-6xl gap-x-12 gap-y-8 lg:grid-cols-5'>
-          <div className='order-2 flex flex-col gap-8 lg:order-1 lg:col-span-3'>
+        <div className='grid max-w-6xl gap-x-10 gap-y-6 lg:grid-cols-5 lg:items-start'>
+          <div className='order-2 flex min-w-0 flex-col gap-8 lg:order-1 lg:col-span-3'>
             {selected === 'setup' || !journey ? (<>
               <Timeline s={s} next={next} />
               {s.errors.length > 0 && <Problems errors={s.errors} />}
             </>) : <JourneyView key={journey.id} j={journey} onChanged={reloadJourneys} />}
+            <TipsSection />
           </div>
-          <div className='order-1 flex flex-col gap-8 lg:order-2 lg:col-span-2'>
+          {/* Two floating panels, pinned while the main column scrolls: the connection string and the journey picker. */}
+          <div className='order-1 flex min-w-0 flex-col gap-4 lg:sticky lg:top-[4.5rem] lg:order-2 lg:col-span-2 lg:max-h-[calc(100svh-5.5rem)]'>
             <ConnectionBox s={s} onConnected={reload} />
             <JourneyPicker setup={{ done: s.done, total: s.total }} journeys={jr?.journeys ?? []} selected={journey ? selected : 'setup'} onSelect={(id) => {
               void setSelected(id === 'setup' ? null : id);
               if (id !== 'setup') void appApi('POST', `/journeys/${encodeURIComponent(id)}/view`).catch(() => {});
             }} />
-            <TipsSection />
           </div>
         </div>
       )}
     </PageContainer>
+  );
+}
+
+/** A floating panel for the pinned right column. */
+function FloatPanel({ title, description, className, children }: { title: string; description?: React.ReactNode; className?: string; children: React.ReactNode }) {
+  return (
+    <section className={cn('bg-card flex min-w-0 flex-col gap-3 rounded-xl border p-4 shadow-xl shadow-black/30', className)}>
+      <div><h2 className='text-sm font-semibold tracking-tight'>{title}</h2>{description && <p className='text-muted-foreground text-xs'>{description}</p>}</div>
+      {children}
+    </section>
   );
 }
 
@@ -106,9 +117,9 @@ function ConnectionBox({ s, onConnected }: { s: Setup; onConnected: () => void }
   };
   const groups: [Client['group'], string][] = [['chat', 'Chat apps'], ['agent', 'Coding agents · by share of developers'], ['editor', 'Editors']];
   return (
-    <Section title='Connection string'
+    <FloatPanel title='Connection string' className='lg:max-h-[58%] lg:shrink-0 lg:overflow-y-auto'
       description={s.connect.secret ? 'This link contains your key: keep it private.' : 'One URL for every client. No secret in it: your client asks you to sign in.'}>
-      <div className='bg-muted/50 space-y-4 rounded-lg border p-3'>
+      <div className='space-y-4'>
         <div className='flex gap-2'>
           <Input readOnly value={s.connect.connector_url} className='bg-background font-mono text-xs' aria-label='Connection string' onFocus={(e) => e.currentTarget.select()} />
           <CopyButton text={s.connect.connector_url} />
@@ -140,7 +151,7 @@ function ConnectionBox({ s, onConnected }: { s: Setup; onConnected: () => void }
           </Alert>
         )}
       </div>
-    </Section>
+    </FloatPanel>
   );
 }
 
@@ -177,17 +188,30 @@ function CodeLine({ text, label }: { text: string; label: string }) {
 }
 
 /** Pick what the main column shows: getting set up, or one of the journeys, each with its progress. */
+/** Journeys beyond this many get a search box. */
+const SEARCH_FROM = 6;
+
 function JourneyPicker({ setup, journeys, selected, onSelect }: { setup: { done: number; total: number }; journeys: Journey[]; selected: string; onSelect: (id: string) => void }) {
+  const [q, setQ] = useState('');
   const items = [{ id: 'setup', name: 'Get set up', goal: 'Connect your client and try the workflow once', done: setup.done, total: setup.total },
     ...journeys.map((j) => ({ id: j.id, name: j.name, goal: j.outcome, done: j.done, total: j.total }))];
+  const needle = q.trim().toLowerCase();
+  const shown = needle ? items.filter((j) => `${j.name} ${j.goal}`.toLowerCase().includes(needle)) : items;
   return (
-    <Section title='Journeys' description='Real use cases as step-by-step pipelines. Pick one to replicate it.'>
-      <div role='radiogroup' aria-label='Journey' className='flex flex-col gap-1'>
-        {items.map((j) => {
+    <FloatPanel title='Journeys' description='Real use cases as step-by-step pipelines. Pick one to replicate it.' className='lg:min-h-0 lg:flex-1'>
+      {items.length > SEARCH_FROM && (
+        <div className='relative'>
+          <Icons.search className='text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2' />
+          <Input type='search' value={q} onChange={(e) => setQ(e.target.value)} placeholder={`Search ${items.length} journeys`} aria-label='Search journeys' className='h-8 pl-8 text-sm' />
+        </div>
+      )}
+      <div role='radiogroup' aria-label='Journey' className='-mx-1 flex min-h-0 flex-col gap-1 overflow-y-auto px-1'>
+        {shown.length === 0 && <p className='text-muted-foreground px-2 py-3 text-sm'>No journey matches “{q}”.</p>}
+        {shown.map((j) => {
           const on = j.id === selected, complete = j.total > 0 && j.done >= j.total;
           return (
             <button key={j.id} type='button' role='radio' aria-checked={on} onClick={() => onSelect(j.id)}
-              className={cn('flex items-center gap-3 rounded-lg border px-3 py-2.5 text-left transition-colors',
+              className={cn('flex shrink-0 items-center gap-3 rounded-lg border px-3 py-2.5 text-left transition-colors',
                 on ? 'border-primary bg-primary/5' : 'hover:bg-muted/60 border-transparent')}>
               <span className={cn('flex size-5 shrink-0 items-center justify-center rounded-full border-2', complete ? 'border-primary bg-primary text-primary-foreground' : on ? 'border-primary' : 'border-muted-foreground/40')}>
                 {complete && <Icons.check className='size-3' />}
@@ -201,7 +225,7 @@ function JourneyPicker({ setup, journeys, selected, onSelect }: { setup: { done:
           );
         })}
       </div>
-    </Section>
+    </FloatPanel>
   );
 }
 
