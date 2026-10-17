@@ -1,5 +1,5 @@
 'use client';
-// Customer journeys: the use-case pipelines customers follow on /app Setup. The editor and journey stats used by the
+// Customer journeys: the use-case pipelines customers follow on /app Setup. The editor used by the
 // Journeys table (journeys.tsx); write journeys there and promote the ones customers see. Progress on /app comes from real tool calls (src/playbooks.ts).
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
@@ -27,39 +27,6 @@ const emptyStage = (): Stage => ({ title: '', why: '', prompt: '', tools: [], ex
 export const toDraft = (p: Playbook): Draft => ({ id: p.id, name: p.name, outcome: p.outcome, who: p.who, time: p.time, example: { ...p.example },
   stages: p.stages.map((s) => ({ ...s, tools: [...s.tools] })), isNew: false });
 export const blank = (): Draft => ({ id: '', name: '', outcome: '', who: '', time: '', example: { title: '', result: '' }, stages: [emptyStage()], isNew: true });
-
-/** Journey-level usage: started and finished accounts, time to finish, where accounts stop, and the stage funnel. */
-export function JourneyStats({ p }: { p: Playbook }) {
-  const a = p.adoption!;
-  const [open, setOpen] = useState(true);
-  const active = Math.max(1, p.accounts_active ?? 0);
-  const hrs = a.median_hours_to_complete;
-  const time = hrs == null ? '—' : hrs < 1 ? `${Math.round(hrs * 60)} min` : hrs < 48 ? `${Math.round(hrs)} h` : `${Math.round(hrs / 24)} d`;
-  const top = Math.max(1, ...a.funnel.map((f) => f.reached));
-  return (
-    <div className='mt-2'>
-      <dl className='text-muted-foreground flex flex-wrap gap-x-5 gap-y-1 text-xs'>
-        <div><dt className='inline'>Started </dt><dd className='text-foreground inline font-medium tabular-nums'>{a.started}</dd><span> of {p.accounts_active ?? 0} active accounts ({Math.round((a.started / active) * 100)}%)</span></div>
-        <div><dt className='inline'>Finished </dt><dd className='text-foreground inline font-medium tabular-nums'>{a.completed}</dd>{a.started > 0 && <span> ({Math.round((a.completed / a.started) * 100)}% of starters)</span>}</div>
-        <div><dt className='inline'>Median time to finish </dt><dd className='text-foreground inline font-medium'>{time}</dd></div>
-        {a.dropoff && <div><dt className='inline'>Most stop at </dt><dd className='text-foreground inline font-medium'>{a.dropoff.title}</dd><span> (−{a.dropoff.lost})</span></div>}
-        <button type='button' className='text-primary hover:underline' onClick={() => setOpen(!open)}>{open ? 'Hide funnel' : 'Stage funnel'}</button>
-      </dl>
-      {open && (
-        <ol className='mt-3 flex max-w-xl flex-col gap-1.5'>
-          {a.funnel.map((f, i) => (
-            <li key={f.id} className='grid grid-cols-[1.5rem_minmax(0,10rem)_1fr_2rem] items-center gap-2 text-xs'>
-              <span className='text-muted-foreground tabular-nums'>{i + 1}</span>
-              <span className='truncate' title={f.title}>{f.title}</span>
-              <span className='bg-muted h-2 overflow-hidden rounded-full'><span className='bg-primary block h-full' style={{ width: `${(f.reached / top) * 100}%` }} /></span>
-              <span className='text-right tabular-nums'>{f.reached}</span>
-            </li>
-          ))}
-        </ol>
-      )}
-    </div>
-  );
-}
 
 export function Editor({ draft: initial, tools, onClose }: { draft: Draft; tools: string[]; onClose: () => void }) {
   const [d, setD] = useState<Draft>(initial);

@@ -1,6 +1,7 @@
 'use client';
-// One account in the accounts page's side peek: what account-detail.tsx showed, without leaving the list. Its actions
-// (the row ⋯ menu and the peek header) share one controller, so every dialog and result is rendered once by the page.
+// One account in the accounts page's side peek: its problems with a fix, a short summary and four tabs, without leaving
+// the list. Its actions (the row ⋯ menu and the peek header) share one controller, so every dialog and result is
+// rendered once by the page.
 import { useEffect, useState, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
@@ -9,7 +10,6 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -21,7 +21,7 @@ import { money, usd } from '@/lib/octillion-format';
 import { cn } from '@/lib/utils';
 import { Dock } from '@/features/portal/memory';
 import { post, STAGE_LABELS, useAdmin, type InviteResult, type OrgRow } from './lib';
-import { copyText, ErrorBox, Mono, Notice, StatusBadge, SubBadge, When, type Tone } from './ui';
+import { copyText, ErrorBox, Mono, When, type Tone } from './ui';
 
 /** A row of GET /orgs: lib.ts's OrgRow plus the fields shapeOrg (src/admin.ts) also returns. */
 export type Org = OrgRow & {
@@ -52,7 +52,12 @@ export interface OrgDetail {
 }
 
 export const orgPath = (slug: string) => `/orgs/${encodeURIComponent(slug)}`;
-const day = (d: unknown) => (d ? String(d).slice(0, 10) : '—');
+/** Whole dollars with separators; cents only under $10, and only when there are some ($4, $4.20, $1,234). */
+export const dollars = (n: number | null | undefined) => {
+  const v = Number(n || 0);
+  const cents = Math.abs(v) < 9.995 && Math.round(v * 100) % 100 !== 0 ? 2 : 0;
+  return v.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: cents, maximumFractionDigits: cents });
+};
 const dash = <span className='text-muted-foreground'>—</span>;
 
 type Kind = 'invite' | 'rename' | 'checkout' | 'key' | 'tip';
@@ -84,37 +89,53 @@ export function useAccountActions(show: (r: InviteResult, title: string) => void
   };
 }
 
-/** The row ⋯ menu (and the peek's): pass `d` when the detail is at hand, else whatever is cached is used. */
-export function accountActions(o: Org, ctl: AccountCtl, d: OrgDetail | undefined = ctl.cached(o)): RowAction[] {
+/** Each account action as a plain function: the ⋯ menus and the peek's problem fixes share them. */
+function actionsOf(o: Org, ctl: AccountCtl) {
   const p = orgPath(o.slug);
   const fromDetail = (f: (d: OrgDetail) => void) => () => void ctl.detailOf(o).then(f, (e: Error) => toast.error(e.message));
-  const ext = (url: string) => () => window.open(url, '_blank', 'noopener');
-  const items: RowAction[] = [
-    { label: 'Invite person…', icon: <Icons.send />, onSelect: () => ctl.open('invite', o) },
-    { label: 'Rename…', icon: <Icons.edit />, onSelect: () => ctl.open('rename', o) },
-    { label: 'Copy connector URL', icon: <Icons.plug />, onSelect: fromDetail((x) => copyText(x.connect.connector_url, 'Connector URL copied')) },
-    { label: 'Copy welcome email', icon: <Icons.post />, onSelect: fromDetail((x) => copyText(`Subject: ${x.connect.email.subject}\n\n${x.connect.email.body}`, 'Welcome email copied')) },
-    { label: 'Billing portal link', icon: <Icons.billing />, onSelect: () => void ctl.run(() => post<{ url: string }>(`${p}/billing/portal`)).then((r) => r && copyText(r.url, 'Billing portal link copied')) },
-    { label: 'Checkout link…', icon: <Icons.creditCard />, onSelect: () => ctl.open('checkout', o) },
-    { label: 'Issue key…', icon: <Icons.lock />, onSelect: () => ctl.open('key', o) },
-    ...(!o.clerk_org_id && ctl.clerkOn ? [{ label: 'Link to Clerk', icon: <Icons.shield />, onSelect: () => void ctl.run(() => post(`${p}/clerk`), 'Moved to Clerk: invite people by email now') }] : []),
-    { label: 'Send a tip…', icon: <Icons.chat />, onSelect: () => ctl.open('tip', o) }
-  ];
-  const links: RowAction[] = [
-    ...(d?.clerk_dashboard ? [{ label: 'Clerk dashboard', icon: <Icons.externalLink />, onSelect: ext(d.clerk_dashboard) }] : []),
-    ...(d?.stripe_dashboard ? [{ label: 'Stripe dashboard', icon: <Icons.externalLink />, onSelect: ext(d.stripe_dashboard) }] : [])
-  ];
-  if (links.length) links[0].separator = true;
-  return [...items, ...links];
+  return {
+    invite: () => ctl.open('invite', o),
+    key: () => ctl.open('key', o),
+    tip: () => ctl.open('tip', o),
+    linkClerk: () => void ctl.run(() => post(`${p}/clerk`), 'Moved to Clerk: invite people by email now'),
+    welcome: fromDetail((x) => copyText(`Subject: ${x.connect.email.subject}\n\n${x.connect.email.body}`, 'Welcome email copied')),
+    connector: fromDetail((x) => copyText(x.connect.connector_url, 'Connector URL copied')),
+    portal: () => void ctl.run(() => post<{ url: string }>(`${p}/billing/portal`)).then((r) => r && copyText(r.url, 'Billing portal link copied'))
+  };
 }
 
-/** The peek header: Invite, then the ⋯ menu with the dashboards once the detail has loaded. */
+/** The row ⋯ menu (and the peek's), in groups: people, share, billing, account, dashboards. Pass `d` when the detail
+ *  is at hand, else whatever is cached is used. */
+export function accountActions(o: Org, ctl: AccountCtl, d: OrgDetail | undefined = ctl.cached(o)): RowAction[] {
+  const x = actionsOf(o, ctl);
+  const ext = (url: string) => () => window.open(url, '_blank', 'noopener');
+  const issue: RowAction = { label: 'Issue key…', icon: <Icons.lock />, onSelect: x.key };
+  const people: RowAction[] = o.clerk_org_id
+    ? [{ label: 'Invite person…', icon: <Icons.send />, onSelect: x.invite }, issue]
+    : [issue, ...(ctl.clerkOn ? [{ label: 'Link to Clerk', icon: <Icons.shield />, onSelect: x.linkClerk }] : [])];
+  const groups: RowAction[][] = [
+    [...people, { label: 'Send a tip…', icon: <Icons.chat />, onSelect: x.tip }],
+    [
+      { label: 'Copy connector URL', icon: <Icons.plug />, onSelect: x.connector },
+      { label: 'Copy welcome email', icon: <Icons.post />, onSelect: x.welcome }
+    ],
+    [
+      { label: 'Copy billing portal link', icon: <Icons.billing />, onSelect: x.portal },
+      { label: 'Copy checkout link…', icon: <Icons.creditCard />, onSelect: () => ctl.open('checkout', o) }
+    ],
+    [{ label: 'Rename…', icon: <Icons.edit />, onSelect: () => ctl.open('rename', o) }],
+    [
+      ...(d?.clerk_dashboard ? [{ label: 'Clerk dashboard', icon: <Icons.externalLink />, onSelect: ext(d.clerk_dashboard) }] : []),
+      ...(d?.stripe_dashboard ? [{ label: 'Stripe dashboard', icon: <Icons.externalLink />, onSelect: ext(d.stripe_dashboard) }] : [])
+    ]
+  ];
+  return groups.filter((g) => g.length).flatMap((g) => g.map((a, i) => (i ? a : { ...a, separator: true })));
+}
+
+/** The peek header: just the ⋯ menu, with the dashboards once the detail has loaded. */
 export function AccountPeekActions({ org, ctl }: { org: Org; ctl: AccountCtl }) {
   const { data: d } = useAdmin<OrgDetail>(orgPath(org.slug));
-  return (<>
-    <Button size='sm' onClick={() => ctl.open('invite', org)}><Icons.send /> Invite</Button>
-    <ActionsMenu items={accountActions(org, ctl, d)} />
-  </>);
+  return <ActionsMenu items={accountActions(org, ctl, d)} />;
 }
 
 // ---------- dialogs ----------
@@ -249,41 +270,94 @@ function useConfirm() {
   };
 }
 
-/** A small flat table that keeps its header and an empty row; the ⋯ column appears when `actions` is given. */
-function Sub<T>({ cols, rows, empty, actions, title }: { cols: [string, (r: T) => ReactNode][]; rows: T[]; empty: string; actions?: (r: T) => RowAction[]; title?: string }) {
+/** Flat list: muted header, no borders between columns; one muted line, or nothing, when empty. */
+function List<T>({ title, rows, cols, empty, actions, hideEmpty, rowClassName }: {
+  title: string; rows: T[]; cols: [string, (r: T) => ReactNode, string?][]; empty?: string; actions?: (r: T) => RowAction[]; hideEmpty?: boolean; rowClassName?: (r: T) => string | undefined;
+}) {
+  if (!rows.length && hideEmpty) return null;
   return (
     <div className='grid gap-2'>
-      {title && <p className='text-sm leading-none font-medium'>{title}</p>}
-      <div className='overflow-x-auto border-y'>
-        <Table>
-          <TableHeader><TableRow>{cols.map(([l]) => <TableHead key={l}>{l}</TableHead>)}{actions && <TableHead className='w-10'><span className='sr-only'>Actions</span></TableHead>}</TableRow></TableHeader>
-          <TableBody>
-            {rows.length ? rows.map((r, i) => (
-              <TableRow key={i}>
-                {cols.map(([l, f]) => <TableCell key={l} className='leading-none'>{f(r)}</TableCell>)}
-                {actions && <TableCell className='w-10 py-1 text-center'><ActionsMenu items={actions(r)} /></TableCell>}
+      <p className='text-sm leading-none font-medium'>{title}{rows.length > 1 && <span className='text-muted-foreground ml-1.5 font-normal'>{rows.length}</span>}</p>
+      {!rows.length ? <p className='text-muted-foreground text-sm leading-none'>{empty}</p> : (
+        <div className='overflow-x-auto'>
+          <Table>
+            <TableHeader>
+              <TableRow className='hover:bg-transparent'>
+                {cols.map(([l, , c], i) => <TableHead key={i} className={cn('text-muted-foreground h-8 border-r-0 px-3 text-xs font-normal first:pl-0 last:pr-0', c)}>{l}</TableHead>)}
+                {actions && <TableHead className='h-8 w-8 border-r-0 pr-0'><span className='sr-only'>Actions</span></TableHead>}
               </TableRow>
-            )) : (
-              <TableRow><TableCell colSpan={cols.length + (actions ? 1 : 0)} className='text-muted-foreground py-6 text-center'>{empty}</TableCell></TableRow>
-            )}
-          </TableBody>
-        </Table>
-      </div>
+            </TableHeader>
+            <TableBody>
+              {rows.map((r, i) => (
+                <TableRow key={i} className={rowClassName?.(r)}>
+                  {cols.map(([, f, c], j) => <TableCell key={j} className={cn('border-r-0 px-3 py-2.5 text-sm leading-none first:pl-0 last:pr-0', c)}>{f(r)}</TableCell>)}
+                  {actions && <TableCell className='w-8 border-r-0 py-1 pr-0 text-right'><ActionsMenu items={actions(r)} /></TableCell>}
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
     </div>
   );
 }
 
-const inviteTone = (s: string): Tone => (s === 'accepted' ? 'ok' : s === 'pending' ? 'info' : s === 'expired' ? 'warn' : 'neutral');
+// Status is a plain word: colour only for warn and bad.
+const toneText: Record<Tone, string> = { ok: 'text-muted-foreground', neutral: 'text-muted-foreground', warn: 'text-amber-700 dark:text-amber-400', bad: 'text-destructive', info: '' };
+const word = (tone: Tone, s: ReactNode) => <span className={toneText[tone]}>{s}</span>;
 const runTone = (s: string): Tone => (s === 'completed' ? 'ok' : s === 'failed' ? 'bad' : s === 'cancelled' ? 'neutral' : 'info');
+const count = (n: number | null | undefined) => (n == null ? dash : Number(n) ? <span className='tabular-nums'>{n}</span> : <span className='text-muted-foreground tabular-nums'>0</span>);
+const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`;
+const host = (u: string) => { try { return new URL(u).host; } catch { return u.replace(/^https?:\/\//, ''); } };
+const amber = 'text-amber-700 dark:text-amber-400';
+/** Plain text that copies itself on click or Enter. */
+const CopyText = ({ value, ok }: { value: string; ok: string }) => (
+  <button type='button' title='Copy' aria-label={`Copy ${value}`} onClick={() => copyText(value, ok)} className='cursor-pointer text-left leading-none hover:underline focus-visible:underline focus-visible:outline-none'>{value}</button>
+);
 
-/** The body under the peek's property list: attention, the onboarding timeline, then the detail in tabs (fetched lazily). */
-export function AccountPeek({ org, ctl }: { org: Org; close?: () => void; ctl: AccountCtl }) {
+/** The one-click fix for an attention message (src/admin.ts shapeOrg), or null when there is none. */
+function fixFor(a: string, o: Org, d: OrgDetail | undefined, ctl: AccountCtl, view: (tab: string) => void): { label: string; onSelect: () => void } | null {
+  const x = actionsOf(o, ctl);
+  if (a.startsWith('Nobody can get in')) {
+    if (ctl.clerkOn && !o.clerk_org_id) return { label: 'Link to Clerk', onSelect: x.linkClerk };
+    return o.clerk_org_id ? { label: 'Invite…', onSelect: x.invite } : { label: 'Issue key…', onSelect: x.key };
+  }
+  if (a.startsWith('Created ') && a.includes('nobody invited')) return { label: 'Invite…', onSelect: x.invite };
+  if (a.startsWith('Invitation expired for ')) {
+    // The message lists the emails exactly ("Invitation expired for a@x, b@x: resend it"); members are already left out.
+    const emails = new Set(a.slice('Invitation expired for '.length).replace(/: resend it$/, '').split(', '));
+    const joined = new Set(d?.members.map((m) => m.email ?? ''));
+    const expired = d?.invitations.filter((i) => i.state === 'expired' && emails.has(i.email) && !joined.has(i.email)) ?? [];
+    if (!expired.length) return null;
+    const p = orgPath(o.slug);
+    return { label: 'Resend', onSelect: () => void ctl.run(() => Promise.all(expired.map((i) => post(`${p}/invitations/${encodeURIComponent(i.id)}/resend`))), 'Invitation resent') };
+  }
+  if ((a.startsWith('Joined ') && a.includes('never connected')) || a.startsWith('Connected but never called')) return { label: 'Copy welcome email', onSelect: x.welcome };
+  if (['Using tools but has not onboarded', 'Product onboarded, no simulation', 'Simulation ran, report never opened'].some((m) => a.startsWith(m))) return { label: 'Send a tip…', onSelect: x.tip };
+  if (a.startsWith('Stripe subscription is') || a.startsWith('Subscription cancels')) return { label: 'Copy portal link', onSelect: x.portal };
+  if (a.startsWith('Product onboarding failed') || a.includes('tool errors')) return { label: 'View', onSelect: () => view('usage') };
+  return null;
+}
+
+/** Plan and where the subscription stands; "active" goes without saying. `stripeOn` is unknown until the detail loads. */
+function planLine(s: Org['subscription'], stripeOn: boolean | undefined): ReactNode {
+  if (stripeOn === undefined && !s) return dash;
+  if (stripeOn === false) return <span className='text-muted-foreground'>Stripe off</span>;
+  if (!s) return <span className='text-muted-foreground'>No subscription</span>;
+  const state = s.cancel_at_period_end ? <span className={amber}>cancels <When d={s.renews_at} /></span>
+    : s.status === 'trialing' ? <>trial ends <When d={s.trial_end} /></>
+    : s.status === 'active' ? (s.renews_at ? <>renews <When d={s.renews_at} /></> : null)
+    : <span className={['past_due', 'unpaid', 'incomplete'].includes(s.status) ? 'text-destructive' : undefined}>{s.status.replace(/_/g, ' ')}</span>;
+  return <>{s.plan ?? 'No plan'}{state && <><span className='text-muted-foreground'> · </span>{state}</>}</>;
+}
+
+/** Problems with their fix, a five-line summary, then People / Usage / Billing / Onboarding (fetched lazily). */
+export function AccountPeek({ org, ctl }: { org: Org; ctl: AccountCtl }) {
   const path = orgPath(org.slug);
   const { data: d, error } = useAdmin<OrgDetail>(path);
   const confirm = useConfirm();
   const [tab, setTab] = useState('people');
   useEffect(() => setTab('people'), [org.slug]);
-  const stages = Object.keys(org.reached ?? STAGE_LABELS);
 
   const member = (m: OrgDetail['members'][number]): RowAction[] => {
     const who = m.email || m.user_id;
@@ -309,157 +383,162 @@ export function AccountPeek({ org, ctl }: { org: Org; close?: () => void; ctl: A
   ];
 
   const s = org.subscription;
-  const showKeys = !d || !org.clerk_org_id || d.keys.length > 0;
+  const stripeOn = d ? !!d.integrations.stripe : undefined;
+  const access = org.clerk_org_id
+    ? ['Clerk', org.members > 0 && plural(org.members, 'member'), org.pending_invites > 0 && `${org.pending_invites} invited`, org.active_keys > 0 && plural(org.active_keys, 'key')]
+    : ['Key links', org.active_keys > 0 && plural(org.active_keys, 'key')];
+  const running = org.onboarding_running + org.sims_running;
+  const over = org.budget_usd > 0 && org.month_spend_usd >= org.budget_usd * 0.8;
+  const stages = Object.keys(org.reached ?? STAGE_LABELS);
+  const keys = d ? [...d.keys].sort((a, b) => Number(!!a.revoked_at) - Number(!!b.revoked_at)) : [];
+  const req = d?.requests[0];
   return (
     <div className='flex flex-col gap-6'>
       {org.attention.length > 0 && (
-        <div className='grid gap-2'>
-          <p className='text-sm leading-none font-medium'>Needs attention</p>
-          <ul className='grid list-disc gap-1.5 pl-5 text-sm leading-none text-amber-400'>{org.attention.map((a) => <li key={a}>{a}</li>)}</ul>
+        <div>
+          {org.attention.map((a) => {
+            const fix = fixFor(a, org, d, ctl, setTab);
+            return (
+              <div key={a} className='flex items-center gap-3 border-b py-3 text-sm leading-none last:border-b-0'>
+                <Icons.warning className='size-3.5 shrink-0 text-amber-700 dark:text-amber-400' />
+                <span className='min-w-0 flex-1 truncate text-amber-700 dark:text-amber-400' title={a}>{a}</span>
+                {fix && <Button variant='ghost' size='xs' className='text-muted-foreground hover:text-foreground -my-1.5' onClick={fix.onSelect}>{fix.label}</Button>}
+              </div>
+            );
+          })}
         </div>
       )}
 
-      <div className='grid gap-2'>
-        <p className='text-sm leading-none font-medium'>Onboarding</p>
-        <ol className='grid gap-x-4 sm:grid-cols-2'>
-          {stages.map((k) => {
-            const at = org.reached?.[k];
-            return (
-              <li key={k} className={cn('flex items-center gap-2 border-b py-2 text-sm leading-none', !at && 'text-muted-foreground')}>
-                {at ? <Icons.circleCheck className='text-primary size-3.5 shrink-0' /> : <Icons.circle className='size-3.5 shrink-0 opacity-40' />}
-                <span className='flex-1 truncate'>{STAGE_LABELS[k] ?? k}</span>
-                <span className='text-muted-foreground text-xs'>{at ? <When d={at} /> : 'not yet'}</span>
-              </li>
-            );
-          })}
-        </ol>
-      </div>
+      <dl>
+        <Field label='Stage'>
+          <span className='block truncate' title={`${org.stage_label} · next: ${org.next_step}`}>{org.stage_label}<span className='text-muted-foreground'> · next: {org.next_step}</span></span>
+        </Field>
+        <Field label='Access'>
+          {org.members || org.pending_invites || org.active_keys ? access.filter(Boolean).join(' · ') : <span className='text-muted-foreground'>No one yet</span>}
+        </Field>
+        <Field label='Usage'>
+          {org.last_seen ? (<>
+            Last seen <When d={org.last_seen} /> · <span className='tabular-nums'>{org.calls_7d}</span> calls 7d
+            {org.errors_7d > 0 && <> · <span className='text-destructive tabular-nums'>{org.errors_7d} errors</span></>}
+            {running > 0 && <> · {running} running</>}
+          </>) : <span className='text-muted-foreground'>Never connected</span>}
+        </Field>
+        <Field label='Plan'>{planLine(s, stripeOn)}</Field>
+        <Field label='Spend'>
+          <span className={cn('tabular-nums', over && amber)}>{dollars(org.month_spend_usd)} of {org.budget_usd ? dollars(org.budget_usd) : 'no cap'} this month</span>
+        </Field>
+        {org.contact && (
+          <Field label='Contact'>
+            <CopyText value={org.contact} ok='Email copied' />
+          </Field>
+        )}
+      </dl>
 
       <ErrorBox error={error} />
-      {!d ? (
+      {!d ? (!error &&
         <div className='grid gap-3'><Skeleton className='h-8' /><Skeleton className='h-40' /></div>
       ) : (
         <Tabs value={tab} onValueChange={(v) => setTab(String(v))}>
-          <div className='overflow-x-auto'>
-            <TabsList variant='line'>
-              <TabsTrigger value='people'>People</TabsTrigger>
-              <TabsTrigger value='billing'>Billing</TabsTrigger>
-              <TabsTrigger value='activity'>Activity</TabsTrigger>
-              <TabsTrigger value='products'>Products & runs</TabsTrigger>
-              {showKeys && <TabsTrigger value='keys'>Keys</TabsTrigger>}
-              <TabsTrigger value='requests'>Requests</TabsTrigger>
-            </TabsList>
-          </div>
+          <TabsList variant='line' className='gap-4 p-0'>
+            <TabsTrigger value='people' className='flex-none px-0'>People</TabsTrigger>
+            <TabsTrigger value='usage' className='flex-none px-0'>Usage</TabsTrigger>
+            <TabsTrigger value='billing' className='flex-none px-0'>Billing</TabsTrigger>
+            <TabsTrigger value='onboarding' className='flex-none px-0'>Onboarding</TabsTrigger>
+          </TabsList>
 
-          <TabsContent value='people' className='mt-4 grid gap-6'>
-            {d.clerk_error && <Notice>Clerk: {d.clerk_error}</Notice>}
-            {!org.clerk_org_id ? (
-              <p className='text-muted-foreground text-sm'>
-                {d.integrations.clerk
-                  ? 'This account predates Clerk: people connect with key links. Use Link to Clerk in the ⋯ menu to invite people by email.'
-                  : 'Clerk is off (CLERK_SECRET_KEY). People connect with the legacy key links.'}
-              </p>
-            ) : (<>
-              <Sub title='Members' rows={d.members} empty='Nobody has joined yet.' actions={member} cols={[
-                ['Person', (m) => <span className='grid gap-1'><span className='font-medium'>{m.email || m.user_id}</span>{m.name && <span className='text-muted-foreground text-xs'>{m.name}</span>}</span>],
+          <TabsContent value='people' className='mt-5 grid gap-6'>
+            {org.clerk_org_id && (<>
+              <List title='Members' rows={d.members} empty='Nobody has joined yet.' actions={member} cols={[
+                ['Person', (m) => <>{m.email || m.user_id}{m.name && <span className='text-muted-foreground ml-2'>{m.name}</span>}</>],
                 ['Role', (m) => m.role || 'member'],
-                ['Status', (m) => <StatusBadge tone={m.status === 'active' ? 'ok' : m.status === 'inactive' ? 'bad' : 'info'}>{m.status === 'inactive' ? 'suspended' : m.status}</StatusBadge>],
+                ['Status', (m) => (m.status === 'inactive' ? word('bad', 'suspended') : word(m.status === 'active' || m.status === 'pending' ? 'ok' : 'info', m.status))],
                 ['Joined', (m) => <When d={m.created_at} />]
               ]} />
-              <Sub title='Invitations' rows={d.invitations} empty='No invitations.' actions={invitation} cols={[
+              <List title='Invitations' rows={d.invitations} hideEmpty actions={invitation} cols={[
                 ['Email', (x) => x.email],
                 ['Role', (x) => x.role || 'member'],
-                ['State', (x) => <StatusBadge tone={inviteTone(x.state)}>{x.state}</StatusBadge>],
+                ['State', (x) => word(x.state === 'expired' ? 'warn' : x.state === 'pending' ? 'ok' : 'info', x.state)],
                 ['Expires', (x) => (x.state === 'pending' && x.expires_at ? <When d={x.expires_at} /> : dash)]
               ]} />
             </>)}
-          </TabsContent>
-
-          <TabsContent value='billing' className='mt-4 grid gap-6'>
-            {!d.integrations.stripe ? (
-              <p className='text-muted-foreground text-sm'>Stripe is off (STRIPE_SECRET_KEY). The account gets the default budget of {usd(org.budget_usd)} a month.</p>
-            ) : (<>
-              <dl>
-                <Field label='Subscription'><SubBadge sub={s} /></Field>
-                <Field label='Plan'>{s?.plan ?? dash}</Field>
-                <Field label={s?.cancel_at_period_end ? 'Cancels' : 'Renews'}>{s?.renews_at ? day(s.renews_at) : dash}</Field>
-                <Field label='Trial ends'>{s?.trial_end ? day(s.trial_end) : dash}</Field>
-                <Field label='Model spend'>{usd(org.month_spend_usd)} of {org.budget_usd ? usd(org.budget_usd) : 'no cap'} this month</Field>
-                <Field label='Stripe customer'>{org.stripe_customer_id ? <Mono>{org.stripe_customer_id}</Mono> : dash}</Field>
-              </dl>
-              <Sub title='Invoices' rows={d.invoices} empty='No invoices yet.' cols={[
-                ['Invoice', (x) => x.number || x.id],
-                ['Status', (x) => <StatusBadge tone={x.status === 'paid' ? 'ok' : x.status === 'open' ? 'warn' : 'neutral'}>{x.status}</StatusBadge>],
-                ['Total', (x) => money(x.total, x.currency)],
-                ['Date', (x) => day(typeof x.created === 'number' ? new Date(x.created * 1000).toISOString() : x.created)],
-                ['', (x) => x.url ? <a href={x.url} target='_blank' rel='noopener noreferrer' aria-label='Open invoice' className='text-muted-foreground hover:text-foreground'><Icons.externalLink className='size-3.5' /></a> : null]
+            {(!org.clerk_org_id || d.keys.length > 0) && (
+              <List title='Keys' rows={keys} empty='No keys.' actions={key} rowClassName={(k) => (k.revoked_at ? 'text-muted-foreground' : undefined)} cols={[
+                ['Label', (k) => k.label],
+                ['Key', (k) => <span className='tabular-nums'>{k.key_prefix}…</span>],
+                ['Last used', (k) => (k.revoked_at ? <>revoked <When d={k.revoked_at} /></> : <When d={k.last_used_at} />)],
+                ['Created', (k) => <When d={k.created_at} />]
               ]} />
-            </>)}
+            )}
           </TabsContent>
 
-          <TabsContent value='activity' className='mt-4 grid gap-6'>
-            <Sub title='Tools' rows={d.tools} empty='No tool calls yet.' cols={[
-              ['Tool', (t) => <Mono>{t.name}</Mono>],
-              ['Calls', (t) => <span className='tabular-nums'>{t.calls}</span>],
-              ['Errors', (t) => (Number(t.errors) ? <StatusBadge tone='bad'>{t.errors}</StatusBadge> : '0')],
-              ['Avg', (t) => (t.avg_ms != null ? `${t.avg_ms} ms` : dash)],
+          <TabsContent value='usage' className='mt-5 grid gap-6'>
+            <List title='Tools' rows={d.tools} empty='No tool calls yet.' cols={[
+              ['Tool', (t) => t.name],
+              ['Calls', (t) => count(t.calls), 'text-right tabular-nums'],
+              ['Errors', (t) => (Number(t.errors) ? <span className='text-destructive'>{t.errors}</span> : count(0)), 'text-right tabular-nums'],
+              ['Avg', (t) => (t.avg_ms != null ? `${t.avg_ms} ms` : dash), 'text-right tabular-nums'],
               ['Last', (t) => <When d={t.last} />]
             ]} />
-            <Sub title='Clients' rows={d.clients} empty='No clients yet.' cols={[
+            <List title='Recent errors' rows={d.errors} hideEmpty cols={[
+              ['When', (e) => <When d={e.at} />],
+              ['Call', (e) => e.name || e.method],
+              ['Error', (e) => e.error, 'whitespace-normal leading-snug']
+            ]} />
+            <List title='Clients' rows={d.clients} hideEmpty cols={[
               ['Client', (c) => c.client],
-              ['Calls', (c) => <span className='tabular-nums'>{c.n}</span>],
+              ['Calls', (c) => count(c.n), 'text-right tabular-nums'],
               ['Last', (c) => <When d={c.last} />]
             ]} />
-            <Sub title='Recent errors' rows={d.errors} empty='No errors.' cols={[
-              ['When', (e) => <When d={e.at} />],
-              ['Call', (e) => <Mono>{e.name || e.method}</Mono>],
-              ['Error', (e) => <span className='text-sm whitespace-normal'>{e.error}</span>]
-            ]} />
-          </TabsContent>
-
-          <TabsContent value='products' className='mt-4 grid gap-6'>
-            <Sub title='Products' rows={d.products} empty='No product yet.' cols={[
+            <List title='Products' rows={d.products} empty='No product yet.' cols={[
               ['Product', (x) => x.name],
-              ['Website', (x) => x.website_url ? <a href={x.website_url} target='_blank' rel='noopener noreferrer' className='text-muted-foreground hover:text-foreground'>{x.website_url.replace(/^https?:\/\//, '')}</a> : dash],
+              ['Website', (x) => (x.website_url ? <a href={x.website_url} target='_blank' rel='noopener noreferrer' className='text-muted-foreground hover:text-foreground'>{host(x.website_url)}</a> : dash)],
               ['Added', (x) => <When d={x.created_at} />]
             ]} />
-            <Sub title='Onboarding research' rows={d.research} empty='No onboarding research.' cols={[
+            <List title='Onboarding research' rows={d.research} hideEmpty cols={[
               ['Product', (r) => r.product],
-              ['Status', (r) => <span className='inline-flex items-center gap-1.5'><StatusBadge tone={runTone(r.status)}>{r.status}</StatusBadge>{r.stage && r.status === 'running' && <span className='text-muted-foreground text-xs'>{r.stage}</span>}</span>],
+              ['Status', (r) => <>{word(runTone(r.status), r.status)}{r.stage && r.status === 'running' && <span className='text-muted-foreground ml-1.5'>{r.stage}</span>}</>],
               ['Started', (r) => <When d={r.created_at} />],
-              ['Detail', (r) => <span className='text-sm whitespace-normal'>{r.error || ''}</span>]
+              ...(d.research.some((r) => r.error) ? [['Detail', (r: OrgDetail['research'][number]) => (r.error ? <span className='text-destructive'>{r.error}</span> : null), 'whitespace-normal leading-snug'] as [string, (r: OrgDetail['research'][number]) => ReactNode, string]] : [])
             ]} />
-            <Sub title='Simulations' rows={d.simulations} empty='No simulations yet.' cols={[
+            <List title='Simulations' rows={d.simulations} empty='No simulations yet.' cols={[
               ['Simulation', (x) => x.name],
-              ['Status', (x) => <StatusBadge tone={runTone(x.status)}>{x.status}</StatusBadge>],
-              ['Sessions', (x) => <span className='tabular-nums'>{x.completed} / {x.sessions}</span>],
+              ['Status', (x) => word(runTone(x.status), x.status)],
+              ['Sessions', (x) => `${x.completed} / ${x.sessions}`, 'text-right tabular-nums'],
               ['Started', (x) => <When d={x.created_at} />]
             ]} />
           </TabsContent>
 
-          {showKeys && (
-            <TabsContent value='keys' className='mt-4 grid gap-2'>
-              <p className='text-muted-foreground text-xs leading-none'>Secret connector links from before Clerk sign-in, and for clients that can only send a header. Issue one from the ⋯ menu.</p>
-              <Sub rows={d.keys} empty='No keys.' actions={key} cols={[
-                ['Label', (k) => k.label],
-                ['Key', (k) => <Mono>{k.key_prefix}…</Mono>],
-                ['Created', (k) => <When d={k.created_at} />],
-                ['Last used', (k) => (k.last_used_at ? <When d={k.last_used_at} /> : dash)],
-                ['Revoked', (k) => (k.revoked_at ? <When d={k.revoked_at} /> : dash)]
+          <TabsContent value='billing' className='mt-5 grid gap-6'>
+            {!d.integrations.stripe ? (
+              <p className='text-muted-foreground text-sm leading-none'>Stripe is off · default budget {dollars(org.budget_usd)}/month</p>
+            ) : (<>
+              <List title='Invoices' rows={d.invoices} empty='No invoices yet.' cols={[
+                ['Invoice', (x) => x.number || x.id],
+                ['Status', (x) => word(x.status === 'paid' ? 'ok' : x.status === 'open' ? 'warn' : x.status === 'uncollectible' ? 'bad' : 'neutral', x.status)],
+                ['Total', (x) => money(x.total, x.currency), 'text-right tabular-nums'],
+                ['Date', (x) => <When d={typeof x.created === 'number' ? new Date(x.created * 1000) : x.created} />],
+                ['', (x) => (x.url ? <a href={x.url} target='_blank' rel='noopener noreferrer' aria-label='Open invoice' className='text-muted-foreground hover:text-foreground'><Icons.externalLink className='size-3.5' /></a> : null), 'w-8 text-right']
               ]} />
-            </TabsContent>
-          )}
+              {org.stripe_customer_id && (
+                <p className='text-muted-foreground text-xs leading-none'>
+                  Customer <CopyText value={org.stripe_customer_id} ok='Customer id copied' />
+                </p>
+              )}
+            </>)}
+          </TabsContent>
 
-          <TabsContent value='requests' className='mt-4'>
-            <Sub rows={d.requests} empty='No access requests.' cols={[
-              ['Email', (r) => r.email],
-              ['Company', (r) => r.company],
-              ['Status', (r) => r.status],
-              ['Requested', (r) => day(r.created_at)]
-            ]} />
+          <TabsContent value='onboarding' className='mt-5 grid gap-6'>
+            <dl>
+              {stages.filter((k) => org.reached?.[k]).map((k) => <Field key={k} label={STAGE_LABELS[k] ?? k}><When d={org.reached[k]} /></Field>)}
+              {org.stage !== 'reported' && <Field label='Next'><span className='text-muted-foreground'>{org.next_step}</span></Field>}
+            </dl>
           </TabsContent>
         </Tabs>
       )}
+
+      <p className='text-muted-foreground text-xs leading-none'>
+        {org.slug} · created <When d={org.created_at} />{req && <> · requested <When d={req.created_at} /> by {req.email}</>}
+      </p>
       {confirm.dialog}
     </div>
   );

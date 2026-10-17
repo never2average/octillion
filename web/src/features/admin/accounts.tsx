@@ -10,11 +10,10 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Icons } from '@/components/icons';
-import { usd } from '@/lib/octillion-format';
 import { post, useAdmin, useAdminAction, type InviteResult } from './lib';
 import { useResult } from './result-dialog';
 import { RecordView, type RecordCol, type RecordViewDef } from '@/components/layout/record-view';
-import { AccountPeek, AccountPeekActions, accountActions, useAccountActions, type Org } from './account-peek';
+import { AccountPeek, AccountPeekActions, accountActions, dollars, useAccountActions, type Org } from './account-peek';
 import { copyText, StageDots, StatusBadge, SubBadge, When } from './ui';
 
 interface Orgs { orgs: Org[]; stages: { id: string; label: string; next: string }[]; stripe_error?: string }
@@ -24,7 +23,7 @@ const billingTrouble = (o: Org) => ['past_due', 'unpaid', 'incomplete'].includes
 const dormant = (o: Org) => !o.last_seen || Date.now() - new Date(o.last_seen).getTime() > 14 * DAY;
 const budgetPct = (o: Org) => (o.budget_usd ? Math.round((o.month_spend_usd / o.budget_usd) * 100) : null);
 const dash = <span className='text-muted-foreground'>—</span>;
-const num = (n: number | null) => (n ? <span className='tabular-nums'>{n}</span> : dash);
+const num = (n: number | null | undefined) => (n == null ? dash : n ? <span className='tabular-nums'>{n}</span> : <span className='text-muted-foreground tabular-nums'>0</span>);
 
 const VIEWS: RecordViewDef<Org>[] = [
   { id: 'all', label: 'All', group: 'stage' },
@@ -52,17 +51,17 @@ export function AdminAccounts() {
   const members = (o: Org) => o.clerk_org_id ? (
     <span className='inline-flex flex-wrap items-center gap-1.5 tabular-nums'>{o.members}{o.pending_invites > 0 && <StatusBadge tone='info'>+{o.pending_invites} invited</StatusBadge>}</span>
   ) : (
-    <span className='inline-flex items-center gap-1.5'><span className='text-muted-foreground'>keys: {o.active_keys}</span>{!o.active_keys && <StatusBadge tone='bad'>none</StatusBadge>}</span>
+    <span className='text-muted-foreground tabular-nums'>{o.active_keys} keys</span>
   );
   const sel = (vs: string[]) => vs.map((v) => ({ value: v }));
   const cols: RecordCol<Org>[] = [
-    { key: 'name', label: 'Account', name: 'Account', className: 'min-w-64', type: 'text', title: true, keep: true, peek: false, value: (o) => o.name, render: (o) => (
+    { key: 'name', label: 'Account', name: 'Account', className: 'min-w-64', type: 'text', title: true, keep: true, value: (o) => o.name, render: (o) => (
       <span className='leading-none font-medium'>{o.name}</span>
     ) },
     { key: 'slug', label: 'Slug', type: 'text', hidden: true, value: (o) => o.slug, render: (o) => <code className='text-xs'>{o.slug}</code> },
     { key: 'contact', label: 'Contact', hidden: true, type: 'text', value: (o) => o.contact, render: (o) => o.contact ?? dash },
-    { key: 'stage', label: 'Stage', className: 'w-60', type: 'select', keep: true, value: (o) => o.stage, options: (data?.stages ?? []).map((s) => ({ value: s.id, label: s.label })),
-      render: (o) => <span className='whitespace-nowrap'><StageDots index={o.stage_index} total={n} />{o.stage_label}</span> },
+    { key: 'stage', label: 'Stage', className: 'w-48', type: 'select', keep: true, value: (o) => o.stage, options: (data?.stages ?? []).map((s) => ({ value: s.id, label: s.label })),
+      render: (o) => <span className='whitespace-nowrap'><span className='hidden 2xl:inline'><StageDots index={o.stage_index} total={n} /></span>{o.stage_label}</span> },
     { key: 'next_step', label: 'Next step', type: 'text', hidden: true, value: (o) => o.next_step, render: (o) => o.next_step },
     { key: 'attention', label: 'Attention', type: 'number', keep: true, value: (o) => o.attention.length, render: (o) => o.attention.length ? (
       <Tooltip>
@@ -86,10 +85,10 @@ export function AdminAccounts() {
     ) },
     { key: 'errors_7d', label: 'Errors 7d', type: 'number', hidden: true, value: (o) => o.errors_7d, render: (o) => num(o.errors_7d) },
     { key: 'spend', label: 'Spend (month)', hidden: true, type: 'number', value: (o) => o.month_spend_usd, render: (o) => (
-      <span className='tabular-nums'>{usd(o.month_spend_usd)}{o.budget_usd ? <span className='text-muted-foreground'> / {usd(o.budget_usd)}</span> : null}</span>
+      <span className='tabular-nums'>{dollars(o.month_spend_usd)}{o.budget_usd ? <span className='text-muted-foreground'> / {dollars(o.budget_usd)}</span> : null}</span>
     ) },
     { key: 'budget_pct', label: 'Budget used %', type: 'number', hidden: true, value: budgetPct, render: (o) => { const p = budgetPct(o); return p == null ? dash : <span className='tabular-nums'>{p}%</span>; } },
-    { key: 'running', label: 'Running', name: 'Running (onboarding + simulations)', type: 'number', hidden: true, value: (o) => o.onboarding_running + o.sims_running, render: (o) => num(o.onboarding_running + o.sims_running) },
+    { key: 'running', label: 'Running', type: 'number', hidden: true, value: (o) => o.onboarding_running + o.sims_running, render: (o) => num(o.onboarding_running + o.sims_running) },
     { key: 'created_at', label: 'Created', type: 'date', hidden: true, value: (o) => o.created_at, render: (o) => <When d={o.created_at} /> },
     { key: 'stripe', label: 'Stripe', name: 'Stripe customer', type: 'boolean', hidden: true, value: (o) => !!o.stripe_customer_id, render: (o) => (o.stripe_customer_id ? 'Yes' : 'No') }
   ];
@@ -106,7 +105,7 @@ export function AdminAccounts() {
   return (
     <PageContainer>
       <RecordView<Org>
-        id='admin-accounts-v2' noun='accounts' exportName='accounts' groupable properties
+        id='admin-accounts-v2' noun='accounts' exportName='accounts' groupable
         rows={orgs} rowKey={(o) => o.slug} cols={cols} views={VIEWS} loading={isLoading}
         defaultSort={[{ key: 'last_seen', dir: 'desc' }]}
         searchText={(o) => `${o.name} ${o.slug} ${o.contact ?? ''} ${o.stage_label} ${o.subscription?.plan ?? ''}`}
@@ -122,7 +121,7 @@ export function AdminAccounts() {
         actions={(o) => accountActions(o, ctl)}
         empty='No accounts yet. Approve an access request or create one.'
         detailActions={(o) => <AccountPeekActions org={o} ctl={ctl} />}
-        detail={(o, close) => <AccountPeek org={o} close={close} ctl={ctl} />}
+        detail={(o) => <AccountPeek org={o} ctl={ctl} />}
       />
       {creating && (
         <NewAccount
