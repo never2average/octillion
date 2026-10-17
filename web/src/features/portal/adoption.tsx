@@ -56,23 +56,23 @@ export function AdoptionPage() {
   // team-wide), you for clients (the list is yours).
   const userOf = (r: Row) => r.type === 'use case' ? (r.who?.label ?? 'Not started') : r.type === 'workflow' ? 'Team' : 'You';
   const cols: RecordCol<Row>[] = [
-    { key: 'item', label: 'Use case', keep: true, render: (r) => (<>
+    { key: 'item', label: 'Use case', className: 'min-w-72', keep: true, render: (r) => (<>
       <p className='text-sm leading-none font-medium'>{r.name}</p>
       <p className='text-muted-foreground mt-1.5 line-clamp-1 text-xs leading-none'>{r.detail}</p>
     </>) },
-    { key: 'user', label: 'User', className: 'w-48', keep: true, render: (r) => <span className={cn('block max-w-48 truncate text-sm', r.type === 'use case' && r.who ? '' : 'text-muted-foreground')}>{userOf(r)}</span> },
-    { key: 'usage', label: 'Usage', className: 'w-52', render: (r) => (
+    { key: 'user', label: 'User', className: 'w-40', keep: true, render: (r) => <span className={cn('block max-w-40 truncate text-sm', r.type === 'use case' && r.who ? '' : 'text-muted-foreground')}>{userOf(r)}</span> },
+    { key: 'usage', label: 'Usage', className: 'w-44', render: (r) => (
       <div className='space-y-1.5'>
         <Progress done={r.done} total={r.total} check={r.type === 'client'} />
         {r.type === 'use case' && r.who && <p className='text-muted-foreground text-xs leading-none'>{r.who.calls} call{r.who.calls === 1 ? '' : 's'}{r.who.finished ? ' · outcome reached' : ''}</p>}
       </div>
     ) },
-    { key: 'issues', label: 'Issues', className: 'w-60', render: (r) => r.type !== 'use case' || !r.who ? <span className='text-muted-foreground'>—</span>
-      : r.who.errors ? <span className='text-destructive block max-w-60 truncate text-xs leading-none' title={r.who.last_error ?? undefined}>{r.who.errors} failed · {r.who.last_error ?? 'tool error'}</span>
+    { key: 'issues', label: 'Issues', className: 'w-52', render: (r) => r.type !== 'use case' || !r.who ? <span className='text-muted-foreground'>—</span>
+      : r.who.errors ? <span className='text-destructive block max-w-52 truncate text-xs leading-none' title={r.who.last_error ?? undefined}>{r.who.errors} failed · {r.who.last_error ?? 'tool error'}</span>
       : r.who.finished ? <span className='text-primary text-xs leading-none'>None · done</span>
-      : <span className='text-muted-foreground block max-w-60 truncate text-xs leading-none'>Next: {r.who.stuck}</span> },
-    { key: 'help', label: 'Help', className: 'w-56', render: (r) => <HelpCell r={r} /> },
-    { key: 'last', label: 'Last', className: 'hidden w-28 sm:table-cell', render: (r) => <span className='text-muted-foreground text-xs'>{r.type === 'client' ? <When d={r.at} /> : r.type === 'use case' && r.who?.at ? <When d={r.who.at} /> : '—'}</span> }
+      : <span className='text-muted-foreground block max-w-52 truncate text-xs leading-none'>Next: {r.who.stuck}</span> },
+    { key: 'help', label: 'Help', className: 'w-44', render: (r) => <HelpCell r={r} /> },
+    { key: 'last', label: 'Last', className: 'hidden w-24 sm:table-cell', render: (r) => <span className='text-muted-foreground text-xs'>{r.type === 'client' ? <When d={r.at} /> : r.type === 'use case' && r.who?.at ? <When d={r.who.at} /> : '—'}</span> }
   ];
   if (error) return <PageContainer><ErrorState error={error} /></PageContainer>;
   return (
@@ -109,7 +109,7 @@ function askLink(r: Row) {
 function HelpCell({ r }: { r: Row }) {
   if (r.type !== 'use case') return <span className='text-muted-foreground'>—</span>;
   const uc = r.uc, link = askLink(r);
-  if (link) return <a href={link} onClick={(e) => e.stopPropagation()} className='text-primary block max-w-56 truncate text-xs leading-none hover:underline'>Ask {uc!.helper_label}{uc!.people.find((p) => p.user_id === uc!.helper)?.finished ? ' (finished it)' : ' (furthest along)'}</a>;
+  if (link) return <a href={link} onClick={(e) => e.stopPropagation()} className='text-primary block max-w-44 truncate text-xs leading-none hover:underline'>Ask {uc!.helper_label}{uc!.people.find((p) => p.user_id === uc!.helper)?.finished ? ' (finished it)' : ' (furthest along)'}</a>;
   if (r.who?.finished) {
     const waiting = (uc?.people ?? []).filter((p) => !p.finished).length;
     return <span className='text-muted-foreground text-xs leading-none'>{waiting ? `Can help ${waiting} teammate${waiting === 1 ? '' : 's'}` : 'Finished'}</span>;
