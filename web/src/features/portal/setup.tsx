@@ -119,7 +119,8 @@ function ConnectionBox({ s, onConnected }: { s: Setup; onConnected: () => void }
       <div className='space-y-2.5'>
         <div className='relative'>
           <Input readOnly value={s.connect.connector_url} className='bg-background pr-10 font-mono text-xs' aria-label='Connection string' onFocus={(e) => e.currentTarget.select()} />
-          <Button type='button' variant='ghost' size='icon-sm' className='absolute top-1/2 right-1 -translate-y-1/2' aria-label='Copy connection string' title='Copy' onClick={() => copy(s.connect.connector_url)}>
+          <Button type='button' variant='ghost' size='icon-sm' className='absolute top-1/2 right-1 -translate-y-1/2' aria-label={`Copy the URL and how to add it in ${c?.client ?? 'your client'}`}
+            title={`Copy the URL and how to add it in ${c?.client ?? 'your client'}`} onClick={() => copy(c ? setupText(s.connect.connector_url, c) : s.connect.connector_url)}>
             <Icons.page className='size-4' />
           </Button>
         </div>
@@ -161,6 +162,19 @@ function ConnectionBox({ s, onConnected }: { s: Setup; onConnected: () => void }
       </div>
     </FloatPanel>
   );
+}
+
+/** Everything to paste into a message or a terminal: the URL plus the selected client's way in. */
+function setupText(url: string, c: Client) {
+  return [
+    `Octillion MCP server: ${url}`,
+    '',
+    `Add it to ${c.client}:`,
+    c.steps,
+    c.install_url && `One-click install: ${c.install_url}`,
+    c.command && `Command:\n${c.command}`,
+    c.snippet && `${c.file ? `${c.command || c.install_url ? 'Or add to' : 'In'} ${c.file}` : 'Config'}:\n${c.snippet}`
+  ].filter((x): x is string => typeof x === 'string').join('\n');
 }
 
 /** The selected client's way in: one-click install, a command, a config snippet, or steps in its settings. */
