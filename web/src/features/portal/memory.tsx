@@ -1,6 +1,6 @@
 'use client';
 // Institutional memory on /app/context: the pieces the context table uses. A Gmail-style floating button and a compose
-// window docked bottom-right (minimise, close) that edits a core field or adds and changes memory items.
+// window docked bottom-right (minimise, close) where memory items are saved and changed.
 import { useEffect, useState } from 'react';
 import { Icons } from '@/components/icons';
 import { cn } from '@/lib/utils';
@@ -16,12 +16,10 @@ export const KINDS: { id: Kind; label: string; hint: string }[] = [
   { id: 'note', label: 'Note', hint: 'Anything the team should not have to explain twice.' }
 ];
 export const TYPE_STYLE: Record<string, string> = {
-  core: 'bg-secondary text-secondary-foreground',
   fact: 'bg-primary/15 text-primary',
   decision: 'bg-amber-500/15 text-amber-400',
   preference: 'bg-sky-500/15 text-sky-400',
-  note: 'bg-muted text-muted-foreground',
-  task: 'bg-violet-500/15 text-violet-300'
+  note: 'bg-muted text-muted-foreground'
 };
 
 /** The floating "Remember" button, bottom-right. */
