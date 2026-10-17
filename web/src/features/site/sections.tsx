@@ -30,13 +30,22 @@ const FLOW = 'stroke-primary [stroke-dasharray:4_12] motion-safe:animate-[apo-da
 
 // ---------- hero ----------
 
-const AGENTS = [['claude-code', 'Claude Code'], ['codex', 'Codex'], ['cursor', 'Cursor'], ['gemini-cli', 'Gemini CLI'], ['copilot', 'GitHub Copilot'], ['opencode', 'OpenCode'], ['cline', 'Cline']] as const;
+/** The grid and green glow behind the top of a public page. */
+export function HeroBackdrop() {
+  return (
+    <>
+      <div aria-hidden='true' className='pointer-events-none absolute inset-0 [mask-image:radial-gradient(70%_60%_at_50%_0%,black,transparent)] bg-[linear-gradient(to_right,var(--border)_1px,transparent_1px),linear-gradient(to_bottom,var(--border)_1px,transparent_1px)] bg-[size:56px_56px] opacity-60' />
+      <div aria-hidden='true' className='pointer-events-none absolute -top-40 left-1/2 h-[520px] w-[900px] max-w-full -translate-x-1/2 rounded-full bg-[radial-gradient(closest-side,color-mix(in_oklch,var(--primary)_22%,transparent),transparent)] blur-2xl' />
+    </>
+  );
+}
+
+export const AGENTS = [['claude-code', 'Claude Code'], ['codex', 'Codex'], ['cursor', 'Cursor'], ['gemini-cli', 'Gemini CLI'], ['copilot', 'GitHub Copilot'], ['opencode', 'OpenCode'], ['cline', 'Cline']] as const;
 
 export function Hero() {
   return (
     <section className='relative overflow-hidden'>
-      <div aria-hidden='true' className='pointer-events-none absolute inset-0 [mask-image:radial-gradient(70%_60%_at_50%_0%,black,transparent)] bg-[linear-gradient(to_right,var(--border)_1px,transparent_1px),linear-gradient(to_bottom,var(--border)_1px,transparent_1px)] bg-[size:56px_56px] opacity-60' />
-      <div aria-hidden='true' className='pointer-events-none absolute -top-40 left-1/2 h-[520px] w-[900px] max-w-full -translate-x-1/2 rounded-full bg-[radial-gradient(closest-side,color-mix(in_oklch,var(--primary)_22%,transparent),transparent)] blur-2xl' />
+      <HeroBackdrop />
 
       <div className='relative mx-auto max-w-6xl px-4 pt-16 pb-14 sm:px-6 sm:pt-24 sm:pb-20'>
         <div className='grid gap-12 lg:grid-cols-[1fr_1.1fr] lg:items-center'>
@@ -56,11 +65,18 @@ export function Hero() {
           <DecisionGraph />
         </div>
 
-        <ul aria-label='Agents measured' className='text-foreground/60 mt-16 flex flex-wrap gap-x-8 gap-y-3 font-mono text-sm'>
-          {AGENTS.map(([id, name]) => <li key={id} className='flex items-center gap-2'><AgentLogo id={id} size={18} aria-hidden='true' />{name}</li>)}
-        </ul>
+        <AgentStrip className='mt-16' />
       </div>
     </section>
+  );
+}
+
+/** The coding agents Octillion measures, as a row of logos. */
+export function AgentStrip({ className }: { className?: string }) {
+  return (
+    <ul aria-label='Agents measured' className={cn('text-foreground/60 flex flex-wrap gap-x-8 gap-y-3 font-mono text-sm', className)}>
+      {AGENTS.map(([id, name]) => <li key={id} className='flex items-center gap-2'><AgentLogo id={id} size={18} aria-hidden='true' />{name}</li>)}
+    </ul>
   );
 }
 
