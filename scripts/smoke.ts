@@ -1283,6 +1283,15 @@ try {
     const billO = await json(appCall(ownerC, "GET", "/billing"));
     assert.equal(billO.subscription.plan, "Starter");
     assert.equal(billO.budget_usd, 300);
+    // Usage-based billing on the page: month to date, projection, metered vs in flight, daily, by agent and person.
+    const useO = await json(appCall(ownerC, "GET", "/billing/usage"));
+    assert.equal(useO.budget_usd, 300);
+    assert.ok(useO.period.days >= 28 && useO.period.elapsed_days > 0 && useO.period.elapsed_days <= useO.period.days);
+    assert.ok(Math.abs(useO.spent_usd - useO.daily.reduce((a: number, d: any) => a + d.usd, 0)) < 1e-6, "daily adds up to the month");
+    assert.ok(useO.projected_usd >= useO.spent_usd && useO.metered_usd >= 0 && useO.in_flight_usd >= 0);
+    assert.ok(Array.isArray(useO.by_agent) && Array.isArray(useO.by_person));
+    const useM = await json(appCall(devC, "GET", "/billing/usage"));
+    assert.ok(useM.by_person.every((p: any) => p.label === "You"), "members see only their own spend line");
     assert.match((await json(appCall(ownerC, "POST", "/billing/portal"))).url, /\/billing\//, "admins reach the Stripe portal");
     const sW = await orgRow(slugW);
     assert.equal(sW.subscription.status, "active");

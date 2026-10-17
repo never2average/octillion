@@ -113,7 +113,7 @@ export async function checkRun(org: Org): Promise<{ maxSessions: number | null }
   if (!org.userId) return { maxSessions: null };
   const o = await overview(org);
   const me = o.members.find((m) => m.user_id === org.userId);
-  const where = "Your account admin can change this under Billing → Limits on the Octillion account page (/app/billing/limits).";
+  const where = "Your account admin can change this under Limits on the Octillion account's Billing page (/app/billing).";
   if (!me) return { maxSessions: o.policy.max_sessions_per_run };
   if (!me.can_run) throw new LimitError(`Running simulations is not switched on for you in ${org.name}. Reports and transcripts stay available. ${where}`, 403);
   if (me.allowance_usd != null && me.spent >= me.allowance_usd)

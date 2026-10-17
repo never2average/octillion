@@ -1,7 +1,6 @@
-import { LimitsPage } from '@/features/portal/limits';
+import { redirect } from 'next/navigation';
 
-export const metadata = { title: 'Limits' };
-
+// Limits are part of the Billing page now.
 export default function Page() {
-  return <LimitsPage />;
+  redirect('/app/billing#limits');
 }

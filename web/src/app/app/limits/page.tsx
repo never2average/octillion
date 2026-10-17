@@ -1,6 +1,6 @@
 import { redirect } from 'next/navigation';
 
-// Limits moved under Billing.
+// Limits are part of the Billing page.
 export default function Page() {
-  redirect('/app/billing/limits');
+  redirect('/app/billing#limits');
 }

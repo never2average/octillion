@@ -157,6 +157,51 @@ async function billingView(s: Session) {
   };
 }
 
+/**
+ * Usage-based billing for this month (UTC): live model spend (gateway, includes running sessions), what has been
+ * metered to Stripe (finished sessions; src/billing.ts reportSessionSpend), daily spend, a straight-line projection,
+ * and who and which agents spent it.
+ */
+async function billingUsage(s: Session) {
+  const db = await getDb();
+  const month = "date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'";
+  const daily = await db.query<{ day: string; usd: number; sessions: number }>(
+    `SELECT to_char(date_trunc('day', s.queued_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS day, coalesce(sum(u.cost_usd), 0)::float AS usd, count(DISTINCT s.id)::int AS sessions
+       FROM agent_sessions s LEFT JOIN gateway_usage u ON u.session_id = s.id
+      WHERE s.org_id = $1 AND s.queued_at >= ${month} GROUP BY 1 ORDER BY 1`, [s.org]);
+  const [m] = await db.query<{ metered: number; finished: number; running: number }>(
+    `SELECT coalesce(sum(cost_usd) FILTER (WHERE status IN ('completed', 'failed', 'timeout', 'cancelled')), 0)::float AS metered,
+            count(*) FILTER (WHERE status IN ('completed', 'failed', 'timeout', 'cancelled'))::int AS finished,
+            count(*) FILTER (WHERE status IN ('queued', 'running'))::int AS running
+       FROM agent_sessions WHERE org_id = $1 AND queued_at >= ${month}`, [s.org]);
+  const byAgent = await db.query<{ agent: string; usd: number; sessions: number }>(
+    `SELECT coalesce(s.agent_id, s.harness || '/' || s.model) AS agent, coalesce(sum(u.cost_usd), 0)::float AS usd, count(DISTINCT s.id)::int AS sessions
+       FROM agent_sessions s LEFT JOIN gateway_usage u ON u.session_id = s.id
+      WHERE s.org_id = $1 AND s.queued_at >= ${month} GROUP BY 1 ORDER BY 2 DESC LIMIT 8`, [s.org]);
+  const byPerson = await db.query<{ user_id: string | null; usd: number; runs: number }>(
+    `SELECT r.created_by AS user_id, coalesce(sum(u.cost_usd), 0)::float AS usd, count(DISTINCT r.id)::int AS runs
+       FROM simulations r JOIN agent_sessions s ON s.simulation_id = r.id LEFT JOIN gateway_usage u ON u.session_id = s.id
+      WHERE r.org_id = $1 AND s.queued_at >= ${month} GROUP BY 1 ORDER BY 2 DESC LIMIT 8`, [s.org]);
+  const people = s.role === "admin" ? (await admin.team(s.slug)).members : [];
+  const now = new Date(), start = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1), end = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1);
+  const spent = daily.reduce((a, d) => a + Number(d.usd), 0);
+  const elapsed = Math.max(1 / 24, (now.getTime() - start) / 86_400_000), days = (end - start) / 86_400_000;
+  const { budget } = await orgBudget(s.org).catch(() => ({ budget: 0 }));
+  return {
+    period: { start: new Date(start).toISOString(), end: new Date(end).toISOString(), days, elapsed_days: elapsed },
+    spent_usd: spent, budget_usd: budget, projected_usd: (spent / elapsed) * days,
+    metered_usd: Number(m?.metered ?? 0), in_flight_usd: Math.max(0, spent - Number(m?.metered ?? 0)),
+    sessions: { finished: m?.finished ?? 0, running: m?.running ?? 0 },
+    meter: { enabled: Boolean(process.env.STRIPE_SPEND_METER && billing.stripeEnabled()), event: process.env.STRIPE_SPEND_METER ?? null },
+    daily, by_agent: byAgent,
+    // Members see only their own line; admins see everyone, by email.
+    by_person: byPerson.filter((p) => s.role === "admin" || p.user_id === s.user).map((p) => {
+      const who = people.find((x) => x.user_id === p.user_id);
+      return { ...p, label: p.user_id == null ? "Connector key" : p.user_id === s.user ? "You" : who?.email ?? who?.name ?? "Former member" };
+    }),
+  };
+}
+
 // ---------- routes ----------
 
 export function appRouter() {
@@ -367,6 +412,7 @@ export function appRouter() {
   api.post("/nudges/:id/dismiss", async (req, res) => { await journeys.dismiss(S(res).org, S(res).slug, S(res).user, Number(req.params.id)); res.status(204).end(); });
   api.post("/nudges/mute", async (req, res) => { await journeys.setMuted(S(res).org, S(res).slug, S(res).user, req.body?.muted !== false); res.status(204).end(); });
   api.get("/billing", async (_req, res) => void res.json({ ...(await billingView(S(res))), can_manage: S(res).role === "admin" }));
+  api.get("/billing/usage", async (_req, res) => void res.json(await billingUsage(S(res))));
   api.post("/billing/portal", async (_req, res) => { adminOnly(res); res.json(await admin.portalLink(actor(res), S(res).slug, `${publicUrl()}/app#billing`)); });
   api.post("/billing/checkout", async (req, res) => { adminOnly(res); res.json(await admin.checkoutLink(actor(res), S(res).slug, req.body?.price_id, `${publicUrl()}/app#billing`)); });
   api.use((err: Error & { status?: number }, _req: Request, res: Response, next: NextFunction) => {

@@ -1,12 +1,9 @@
 'use client';
-// /app Limits: account admins split the plan's monthly model budget across teams and people (shared pool, even split
+// Billing → limits: account admins split the plan's monthly model budget across teams and people (shared pool, even split
 // with adjustments, or custom caps), choose who may launch simulations, and cap throughput. Everyone sees their allowance.
 import { PagedTable } from '@/components/layout/table-pager';
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
-import PageContainer from '@/components/layout/page-container';
-import { PageTabs } from '@/components/layout/page-tabs';
-import { BILLING_TABS } from './billing';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -40,21 +37,19 @@ const HELP: Record<Mode, string> = {
 const orNull = (v: string) => (v.trim() === '' ? null : Number(v));
 const str = (v: number | null | undefined) => (v == null ? '' : String(v));
 
-export function LimitsPage() {
+/** Limits, as a part of the Billing page: your allowance, and for admins the split across teams and people. */
+export function LimitsSection() {
   const { data: d, error, reload } = useOrgLoad(() => appApi<Limits>('GET', '/limits'));
   const synced = d ? (d.clerk ?? d.workos ?? true) : true;
   const mine = d?.members.find((m) => m.user_id === d.me);
+  if (error) return <ErrorState error={error} />;
+  if (!d) return <LoadingCards count={2} />;
   return (
-    <PageContainer pageTitle='Billing' pageDescription="Split the plan's monthly model budget across teams and people, choose who can launch simulations, and cap how much each person runs at once.">
-      <PageTabs items={BILLING_TABS} />
-      {error ? <ErrorState error={error} /> : !d ? <LoadingCards count={4} /> : (
-        <div className='flex max-w-6xl flex-col gap-8'>
-          {!synced && <Alert><Icons.info /><AlertDescription>Per-person limits need this account&apos;s team to be set up. Until then everyone shares the account budget.</AlertDescription></Alert>}
-          {mine && <MyAllowance d={d} me={mine} />}
-          {d.can_manage && synced && <AdminLimits d={d} reload={reload} />}
-        </div>
-      )}
-    </PageContainer>
+    <div id='limits' className='flex scroll-mt-20 flex-col gap-8'>
+      {!synced && <Alert><Icons.info /><AlertDescription>Per-person limits need this account&apos;s team to be set up. Until then everyone shares the account budget.</AlertDescription></Alert>}
+      {mine && <MyAllowance d={d} me={mine} />}
+      {d.can_manage && synced && <AdminLimits d={d} reload={reload} />}
+    </div>
   );
 }
 
