@@ -101,7 +101,6 @@ export interface Col<T> {
 /** A simple table on the page; scrolls sideways on small screens. */
 export function DataList<T>({ cols, rows, empty, onRow, minWidth = 640, noun }: { cols: Col<T>[]; rows: T[] | undefined; empty: ReactNode; onRow?: (r: T) => void; minWidth?: number; noun?: string }) {
   const p = usePaged(rows ?? []);
-  if (!rows?.length) return <p className='text-muted-foreground py-6 text-center text-sm'>{empty}</p>;
   return (
     <div>
     <div className='overflow-x-auto'>
@@ -116,6 +115,9 @@ export function DataList<T>({ cols, rows, empty, onRow, minWidth = 640, noun }: 
           </TableRow>
         </TableHeader>
         <TableBody>
+          {!rows?.length && (
+            <TableRow><TableCell colSpan={cols.length} className='text-muted-foreground py-10 text-center whitespace-normal'>{empty}</TableCell></TableRow>
+          )}
           {p.rows.map((r, i) => (
             <TableRow
               key={i}

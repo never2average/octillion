@@ -300,8 +300,9 @@ export async function getStarted(org: Org) {
 export async function orgMonthSpendUsd(orgId: number): Promise<number> {
   const db = await getDb();
   const [r] = await db.query<{ usd: number }>(
-    `SELECT coalesce(sum(u.cost_usd), 0) AS usd FROM gateway_usage u JOIN agent_sessions s ON s.id = u.session_id
-      WHERE s.org_id = $1 AND s.queued_at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'`, [orgId]);
+    // Per session: its recorded cost, or the gateway's live total while it runs (whichever is larger); same as Billing shows.
+    `SELECT coalesce(sum(GREATEST(s.cost_usd, coalesce((SELECT sum(g.cost_usd) FROM gateway_usage g WHERE g.session_id = s.id), 0))), 0) AS usd
+       FROM agent_sessions s WHERE s.org_id = $1 AND s.queued_at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'`, [orgId]);
   return Number(r?.usd ?? 0);
 }
 

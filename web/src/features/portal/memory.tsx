@@ -7,7 +7,7 @@ import { cn } from '@/lib/utils';
 
 export type MemoryScope = 'company' | 'user' | 'product';
 export type Kind = 'fact' | 'decision' | 'preference' | 'note';
-export interface MemoryItem { id: number; kind: Kind; body: string; created_by: string | null; created_at: string; can_delete: boolean }
+export interface MemoryItem { id: number; kind: Kind; body: string; created_by: string | null; created_at: string; can_delete: boolean; subject?: string; subject_name?: string }
 
 export const KINDS: { id: Kind; label: string; hint: string }[] = [
   { id: 'fact', label: 'Fact', hint: 'e.g. Our Python SDK is in beta; the Node SDK is GA.' },

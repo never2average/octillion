@@ -102,9 +102,9 @@ export function UsagePage() {
 
           <div className='grid gap-8 lg:grid-cols-2'>
             <Section title='People' description='Who is using Octillion and from which clients.'>
-              {u.people.length ? (
+              <>
                 <div className='overflow-x-auto'>
-                  <PagedTable items={u.people} noun='people'>{(rows) => (
+                  <PagedTable items={u.people} empty='Nobody has connected yet.' noun='people'>{(rows) => (
                   <Table>
                     <TableHeader><TableRow><TableHead>Person</TableHead><TableHead className='text-right'>Calls</TableHead><TableHead>Last active</TableHead><TableHead>Clients</TableHead></TableRow></TableHeader>
                     <TableBody>
@@ -120,12 +120,12 @@ export function UsagePage() {
                   </Table>
                   )}</PagedTable>
                 </div>
-              ) : <NoData text='Nobody has connected yet.' />}
+</>
             </Section>
             <Section title='Tools' description='Which parts of Octillion your team uses.'>
-              {u.tools.length ? (
+              <>
                 <div className='overflow-x-auto'>
-                  <PagedTable items={u.tools} noun='tools'>{(rows) => (
+                  <PagedTable items={u.tools} empty='No tool calls yet.' noun='tools'>{(rows) => (
                   <Table>
                     <TableHeader><TableRow><TableHead>Tool</TableHead><TableHead className='text-right'>Calls</TableHead><TableHead className='text-right'>Errors</TableHead><TableHead className='text-right'>Avg</TableHead></TableRow></TableHeader>
                     <TableBody>
@@ -141,7 +141,7 @@ export function UsagePage() {
                   </Table>
                   )}</PagedTable>
                 </div>
-              ) : <NoData text='No tool calls yet.' />}
+</>
             </Section>
           </div>
         </div>

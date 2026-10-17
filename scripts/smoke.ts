@@ -1058,7 +1058,11 @@ try {
       assert.equal((await appCall(devC, "POST", "/context/memories", { scope: "user", subject: accepted.user.id, body: "x" })).status, 403, "not someone else's personal memory");
       await json(appCall(devC, "POST", "/context/memories", { scope: "user", kind: "preference", body: "Lead with the Python numbers." }));
       assert.equal((await json(appCall(ownerC, "GET", `/context/memories?scope=user&subject=${acc2.user.id}`))).memories.length, 1, "admins see anyone's");
-      assert.equal((await appCall(devC, "POST", "/context/memories", { scope: "product", subject: "no-such-product", body: "x" })).status, 404);
+      // Product memory needs no onboarded product: an unknown name is kept as written; a known name maps to its slug.
+      assert.equal((await json(appCall(devC, "POST", "/context/memories", { scope: "product", subject: "Acme Edge (not onboarded)", body: "Pre-launch: edge runtime support." }))).subject, "Acme Edge (not onboarded)");
+      assert.equal((await appCall(devC, "POST", "/context/memories", { scope: "product", subject: "  ", body: "x" })).status, 400, "but it needs a name");
+      const allProd = await json(appCall(devC, "GET", "/context/memories?scope=product"));
+      assert.ok(allProd.memories.some((m: any) => m.subject_name === "Acme Edge (not onboarded)"), "no subject lists every product's memory, with names");
       await json(appCall(devC, "POST", "/context/memories", { scope: "product", subject: slugP, kind: "fact", body: "Docs moved to /v3 in October." }));
       const instructionsFor = async (t: string) => {
         const c = new Client({ name: "smoke-context", version: "1.0.0" });
@@ -1092,7 +1096,7 @@ try {
       assert.equal(mineSaved.saved.subject_name, "You");
       const prodSaved = await call(devMcp, "save_to_memory", { body: "Retry semantics changed in v3.", scope: "product" });
       assert.equal(prodSaved.saved.subject, slugP, "product defaults to the person's focus product");
-      await fails(devMcp, "save_to_memory", { body: "x", scope: "product", product: "no-such-product" }, /No product/);
+      assert.equal((await call(devMcp, "save_to_memory", { body: "Beta waitlist opens in Q1.", scope: "product", product: "Acme Edge (not onboarded)" })).saved.subject_name, "Acme Edge (not onboarded)", "from chat too, without onboarding");
       let found = await call(devMcp, "search_memory", { query: "launch november" });
       assert.deepEqual(found.items.map((m: any) => m.id), [sv.saved.id], "every word must match");
       found = await call(devMcp, "search_memory", { scope: "me" });

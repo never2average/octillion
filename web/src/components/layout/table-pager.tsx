@@ -21,9 +21,8 @@ export function usePaged<T>(items: readonly T[], initialSize = 25): Paged<T> {
   return { rows, page: at, pages, size, total, setPage, setSize };
 }
 
-/** "21–40 of 137 · Rows [25] · ‹ 2 / 7 ›". Hidden when there is nothing to show. */
+/** "21–40 of 137 · Rows [25] · ‹ 2 / 7 ›"; an empty table still shows its footer ("0 items"). */
 export function TablePager<T>({ p, noun = 'items', className }: { p: Paged<T>; noun?: string; className?: string }) {
-  if (!p.total) return null;
   const from = (p.page - 1) * p.size + 1, to = Math.min(p.total, p.page * p.size);
   return (
     <div className={cn('text-muted-foreground flex flex-wrap items-center gap-x-4 gap-y-2 py-2 text-xs', className)}>
@@ -44,7 +43,14 @@ export function TablePager<T>({ p, noun = 'items', className }: { p: Paged<T>; n
 }
 
 /** Page any table in place: `children` renders the current page's rows; the pager follows the table. */
-export function PagedTable<T>({ items, noun, initialSize, children }: { items: readonly T[]; noun?: string; initialSize?: number; children: (rows: T[]) => React.ReactNode }) {
+export function PagedTable<T>({ items, noun, initialSize, empty, children }: {
+  items: readonly T[]; noun?: string; initialSize?: number; empty?: React.ReactNode; children: (rows: T[]) => React.ReactNode;
+}) {
   const p = usePaged(items, initialSize);
-  return <>{children(p.rows)}<TablePager p={p} noun={noun} /></>;
+  return (<>
+    {children(p.rows)}
+    {/* an empty table keeps its outline: the header above, this row, and the footer */}
+    {!items.length && <div className='text-muted-foreground border-b py-10 text-center text-sm'>{empty ?? `No ${noun ?? 'items'} yet.`}</div>}
+    <TablePager p={p} noun={noun} />
+  </>);
 }

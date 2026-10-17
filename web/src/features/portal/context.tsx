@@ -38,7 +38,8 @@ export function ContextPage({ section }: { section: ContextSection }) {
 function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
   const scope: MemoryScope = section === 'company' ? 'company' : section === 'users' ? 'user' : 'product';
   const [users, setUsers] = useState<UserRow[] | null>(null);
-  const [subject, setSubject] = useState<string>(section === 'products' ? d.products[0]?.slug ?? '' : '');
+  // Users: one person at a time. Products: every product's memory in one table (no onboarded product needed).
+  const [subject, setSubject] = useState<string>('');
   const [items, setItems] = useState<MemoryItem[] | null>(null);
   const [q, setQ] = useState('');
   const [editing, setEditing] = useState<{ item?: MemoryItem } | null>(null);
@@ -52,33 +53,35 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
   }, [section]);
 
   const load = useCallback(() => {
-    if (section !== 'company' && !subject) { setItems([]); return; }
+    if (section === 'users' && !subject) { setItems([]); return; }
     appApi<{ memories: MemoryItem[] }>('GET', `/context/memories?scope=${scope}&subject=${encodeURIComponent(subject)}`).then((r) => setItems(r.memories)).catch(fail);
   }, [section, scope, subject]);
   useEffect(() => { setItems(null); load(); }, [load]);
 
   const user = users?.find((u) => u.user_id === subject);
-  const label = section === 'company' ? 'Company' : section === 'users' ? (user ? (user.me ? 'You' : user.name || user.email || 'this user') : '') : (d.products.find((p) => p.slug === subject)?.name ?? '');
+  const label = section === 'company' ? 'Company' : section === 'users' ? (user ? (user.me ? 'You' : user.name || user.email || 'this user') : '') : 'Products';
+  // Product names to suggest: onboarded products, then names already used in memory.
+  const productNames = useMemo(() => [...new Set([...d.products.map((p) => p.name), ...(items ?? []).map((m) => m.subject_name ?? '').filter(Boolean)])], [d.products, items]);
   const shown = useMemo(() => {
     const words = q.trim().toLowerCase().split(/\s+/).filter(Boolean);
-    return (items ?? []).filter((m) => words.every((w) => `${m.kind} ${m.body} ${m.created_by ?? ''}`.toLowerCase().includes(w)));
+    return (items ?? []).filter((m) => words.every((w) => `${m.kind} ${m.body} ${m.created_by ?? ''} ${m.subject_name ?? ''}`.toLowerCase().includes(w)));
   }, [items, q]);
 
-  const save = (item: MemoryItem | undefined, kind: Kind, body: string) =>
-    (item ? appApi('PUT', `/context/memories/${item.id}`, { kind, body }) : appApi('POST', '/context/memories', { scope, subject, kind, body }))
-      .then(() => { toast.success(item ? 'Memory updated' : `Saved to ${label === 'You' ? 'your' : `${label}'s`} memory`); load(); return true; })
+  const save = (item: MemoryItem | undefined, kind: Kind, body: string, product?: string) =>
+    (item ? appApi('PUT', `/context/memories/${item.id}`, { kind, body }) : appApi('POST', '/context/memories', { scope, subject: section === 'products' ? product : subject, kind, body }))
+      .then(() => { toast.success(item ? 'Memory updated' : `Saved to ${section === 'products' ? `${product}'s` : label === 'You' ? 'your' : `${label}'s`} memory`); load(); return true; })
       .catch((e) => { fail(e); return false; });
   const remove = (m: MemoryItem) => appApi('DELETE', `/context/memories/${m.id}`).then(() => { toast.success('Removed from memory'); load(); }).catch(fail);
 
   const page = usePaged(shown);
-  const noSubject = section !== 'company' && !subject;
+  const noSubject = section === 'users' && !subject;
   const file = useRef<HTMLInputElement>(null);
   const importFile = async (f: File) => {
-    let rows: { kind?: string; body?: string }[];
+    let rows: { kind?: string; body?: string; product?: string }[];
     try { rows = parseMemoryFile(f.name, await f.text()); } catch (e) { fail(e); return; }
     if (!rows.length) { toast.error('No memories found in that file'); return; }
     appApi<{ imported: number; skipped: number }>('POST', '/context/memories/import', { scope, subject, items: rows })
-      .then((r) => { toast.success(`Imported ${r.imported} memor${r.imported === 1 ? 'y' : 'ies'}${r.skipped ? `, skipped ${r.skipped} empty` : ''}`); load(); })
+      .then((r) => { toast.success(`Imported ${r.imported} memor${r.imported === 1 ? 'y' : 'ies'}${r.skipped ? `, skipped ${r.skipped} ${section === 'products' ? 'empty or without a product' : 'empty'}` : ''}`); load(); })
       .catch(fail);
   };
   return (
@@ -87,11 +90,6 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
         {section === 'users' && users && users.length > 1 && (
           <NativeSelect aria-label='User' value={subject} onChange={(e) => setSubject(e.target.value)} className='w-56'>
             {users.map((u) => <NativeSelectOption key={u.user_id} value={u.user_id}>{`${u.name || u.email || 'Unnamed user'}${u.me ? ' (you)' : ''}${u.active ? '' : ' · suspended'}`}</NativeSelectOption>)}
-          </NativeSelect>
-        )}
-        {section === 'products' && d.products.length > 1 && (
-          <NativeSelect aria-label='Product' value={subject} onChange={(e) => setSubject(e.target.value)} className='w-56'>
-            {d.products.map((p) => <NativeSelectOption key={p.slug} value={p.slug}>{p.name}</NativeSelectOption>)}
           </NativeSelect>
         )}
         <div className='relative min-w-48 flex-1'>
@@ -107,7 +105,7 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
               </DropdownMenuTrigger>
               <DropdownMenuContent align='end' className='w-44'>
                 <DropdownMenuItem onClick={() => file.current?.click()}><Icons.upload /> Import CSV or JSON</DropdownMenuItem>
-                <DropdownMenuItem disabled={!items?.length} onClick={() => items && exportCsv(items, label)}><Icons.download /> Export CSV</DropdownMenuItem>
+                <DropdownMenuItem disabled={!items?.length} onClick={() => items && exportCsv(items, label, section === 'products')}><Icons.download /> Export CSV</DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
           </ButtonGroup>
@@ -116,13 +114,14 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
       </div>
 
       {noSubject ? (
-        <p className='text-muted-foreground border-y py-10 text-center text-sm'>{section === 'products' ? 'No products yet. Onboard one from your AI client.' : 'Nobody to show.'}</p>
+        <p className='text-muted-foreground border-y py-10 text-center text-sm'>Nobody to show.</p>
       ) : items === null ? <LoadingCards count={1} /> : (
         <div className='overflow-x-auto border-y'>
           <Table>
             <TableHeader>
               <TableRow>
                 <TableHead className='w-28'>Type</TableHead>
+                {section === 'products' && <TableHead className='w-44'>Product</TableHead>}
                 <TableHead>Memory</TableHead>
                 <TableHead className='hidden w-48 md:table-cell'>Added by</TableHead>
                 <TableHead className='hidden w-32 sm:table-cell'>Added</TableHead>
@@ -131,13 +130,14 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
             </TableHeader>
             <TableBody>
               {shown.length === 0 && (
-                <TableRow><TableCell colSpan={5} className='text-muted-foreground py-12 text-center'>
+                <TableRow><TableCell colSpan={section === 'products' ? 6 : 5} className='text-muted-foreground py-12 text-center'>
                   {q ? 'No memory matches.' : 'Nothing remembered yet. Add the first memory, or import a CSV or JSON file.'}
                 </TableCell></TableRow>
               )}
               {page.rows.map((m) => (
                 <TableRow key={m.id} className={cn('group align-top', m.can_delete && 'cursor-pointer')} onClick={m.can_delete ? () => setEditing({ item: m }) : undefined}>
                   <TableCell className='py-3'><span className={cn('rounded-full px-2 py-0.5 text-[11px] font-medium', TYPE_STYLE[m.kind] ?? TYPE_STYLE.note)}>{m.kind}</span></TableCell>
+                  {section === 'products' && <TableCell className='py-3 text-sm font-medium whitespace-normal'>{m.subject_name}</TableCell>}
                   <TableCell className='py-3 whitespace-normal'><p className='text-sm whitespace-pre-wrap'>{m.body}</p></TableCell>
                   <TableCell className='text-muted-foreground hidden py-3 text-xs md:table-cell'>{m.created_by ?? '—'}</TableCell>
                   <TableCell className='text-muted-foreground hidden py-3 text-xs sm:table-cell'><When d={m.created_at} /></TableCell>
@@ -157,7 +157,7 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
         </div>
       )}
 
-      {editing && <MemoryEditor key={editing.item?.id ?? 'new'} item={editing.item} label={label} onClose={() => setEditing(null)} onSave={save} />}
+      {editing && <MemoryEditor key={editing.item?.id ?? 'new'} item={editing.item} label={label} products={section === 'products' ? productNames : undefined} onClose={() => setEditing(null)} onSave={save} />}
     </div>
   );
 }
@@ -166,10 +166,10 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
 
 const csvCell = (v: string) => (/[",\n\r]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
 
-/** Download the list as CSV: kind, memory, added_by, added_at (the same columns import reads back). */
-function exportCsv(items: MemoryItem[], label: string) {
-  const lines = [['kind', 'memory', 'added_by', 'added_at'].join(','),
-    ...items.map((m) => [m.kind, m.body, m.created_by ?? '', new Date(m.created_at).toISOString()].map(csvCell).join(','))];
+/** Download the list as CSV: (product,) kind, memory, added_by, added_at (the same columns import reads back). */
+function exportCsv(items: MemoryItem[], label: string, withProduct = false) {
+  const lines = [[...(withProduct ? ['product'] : []), 'kind', 'memory', 'added_by', 'added_at'].join(','),
+    ...items.map((m) => [...(withProduct ? [m.subject_name ?? m.subject ?? ''] : []), m.kind, m.body, m.created_by ?? '', new Date(m.created_at).toISOString()].map(csvCell).join(','))];
   const blob = new Blob([`${lines.join('\r\n')}\r\n`], { type: 'text/csv;charset=utf-8' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -195,38 +195,46 @@ function parseCsv(text: string): string[][] {
 }
 
 /** A memory file: our CSV export (or any CSV with a memory/body column), or JSON: a list of { kind, body } or strings. */
-function parseMemoryFile(name: string, text: string): { kind?: string; body?: string }[] {
+function parseMemoryFile(name: string, text: string): { kind?: string; body?: string; product?: string }[] {
   const t = text.replace(/^\uFEFF/, '').trim();
   if (name.toLowerCase().endsWith('.json') || t.startsWith('[') || t.startsWith('{')) {
     const data = JSON.parse(t);
     const list = Array.isArray(data) ? data : Array.isArray(data?.memories) ? data.memories : null;
     if (!list) throw new Error('JSON must be a list of memories, e.g. [{ "kind": "fact", "body": "…" }]');
-    return list.map((x: unknown) => (typeof x === 'string' ? { body: x } : { kind: (x as any)?.kind, body: (x as any)?.body ?? (x as any)?.memory }));
+    return list.map((x: unknown) => (typeof x === 'string' ? { body: x } : { kind: (x as any)?.kind, body: (x as any)?.body ?? (x as any)?.memory, product: (x as any)?.product }));
   }
   const [head, ...rest] = parseCsv(t);
   if (!head) return [];
   const cols = head.map((h) => h.trim().toLowerCase());
   const bodyAt = cols.findIndex((c) => c === 'memory' || c === 'body' || c === 'text');
-  const kindAt = cols.indexOf('kind');
+  const kindAt = cols.indexOf('kind'), productAt = cols.indexOf('product');
   if (bodyAt < 0) return [head, ...rest].map((r) => ({ body: r[0] })); // no header: one memory per line
-  return rest.map((r) => ({ kind: kindAt >= 0 ? r[kindAt] : undefined, body: r[bodyAt] }));
+  return rest.map((r) => ({ kind: kindAt >= 0 ? r[kindAt] : undefined, body: r[bodyAt], product: productAt >= 0 ? r[productAt] : undefined }));
 }
 
 /** Save a new memory item or change one, in the docked window. */
-function MemoryEditor({ item, label, onClose, onSave }: { item?: MemoryItem; label: string; onClose: () => void; onSave: (item: MemoryItem | undefined, kind: Kind, body: string) => Promise<boolean> }) {
+function MemoryEditor({ item, label, products, onClose, onSave }: {
+  item?: MemoryItem; label: string; products?: string[]; onClose: () => void; onSave: (item: MemoryItem | undefined, kind: Kind, body: string, product?: string) => Promise<boolean>;
+}) {
   const [kind, setKind] = useState<Kind>(item?.kind ?? 'fact');
+  const [product, setProduct] = useState(item?.subject_name ?? '');
+  const needsProduct = Boolean(products) && !item;
   const [body, setBody] = useState(item?.body ?? '');
   const [busy, setBusy] = useState(false);
   const area = useRef<HTMLTextAreaElement>(null);
   useEffect(() => { area.current?.focus(); }, []);
   const save = (again: boolean) => {
-    if (!body.trim()) return;
+    if (!body.trim() || (needsProduct && !product.trim())) return;
     setBusy(true);
-    void onSave(item, kind, body.trim()).then((ok) => { setBusy(false); if (!ok) return; if (again && !item) { setBody(''); area.current?.focus(); } else onClose(); });
+    void onSave(item, kind, body.trim(), product.trim()).then((ok) => { setBusy(false); if (!ok) return; if (again && !item) { setBody(''); area.current?.focus(); } else onClose(); });
   };
   return (
-    <Dock title={`${item ? 'Edit memory' : 'New memory'} · ${label}`} onClose={onClose}>
+    <Dock title={`${item ? 'Edit memory' : 'New memory'} · ${products ? (item?.subject_name ?? 'Product') : label}`} onClose={onClose}>
       <form onSubmit={(e) => { e.preventDefault(); save(false); }} className='flex flex-col gap-3 p-4'>
+        {needsProduct && (<>
+          <Input list='memory-products' value={product} onChange={(e) => setProduct(e.target.value)} placeholder='Product name (onboarded or not)' aria-label='Product' maxLength={120} />
+          <datalist id='memory-products'>{products!.map((n) => <option key={n} value={n} />)}</datalist>
+        </>)}
         <div role='radiogroup' aria-label='Kind' className='flex flex-wrap gap-1.5'>
           {KINDS.map((k) => (
             <button key={k.id} type='button' role='radio' aria-checked={kind === k.id} onClick={() => setKind(k.id)}
@@ -239,8 +247,8 @@ function MemoryEditor({ item, label, onClose, onSave }: { item?: MemoryItem; lab
           aria-label='What to remember' className='resize-none border-0 bg-transparent px-0 shadow-none focus-visible:ring-0'
           onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); save(false); } }} />
         <div className='flex items-center gap-2 border-t pt-3'>
-          <Button type='submit' disabled={busy || !body.trim()}>{item ? 'Save' : 'Save to memory'}</Button>
-          {!item && <Button type='button' variant='ghost' disabled={busy || !body.trim()} onClick={() => save(true)}>Save & add another</Button>}
+          <Button type='submit' disabled={busy || !body.trim() || (needsProduct && !product.trim())}>{item ? 'Save' : 'Save to memory'}</Button>
+          {!item && <Button type='button' variant='ghost' disabled={busy || !body.trim() || (needsProduct && !product.trim())} onClick={() => save(true)}>Save & add another</Button>}
           <span className='text-muted-foreground ml-auto text-xs tabular-nums'>{body.length}/1000</span>
         </div>
       </form>

@@ -1,96 +1,90 @@
 'use client';
-// /app Adoption: how much of Octillion the account actually uses. Setup, the parts of the workflow your team has
-// tried (from real tool calls), journey progress and the AI clients that connect. Same data as Setup & training.
+// /app Adoption: how much of Octillion the account uses, as one searchable, paged table like the memory pages: the
+// parts of the workflow your team has tried (from real tool calls), journey progress, and the AI clients you connected.
+import { useMemo, useState } from 'react';
 import Link from 'next/link';
 import PageContainer from '@/components/layout/page-container';
-import { Section, StatStrip } from '@/components/layout/section';
-import { Badge } from '@/components/ui/badge';
+import { TablePager, usePaged } from '@/components/layout/table-pager';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Icons } from '@/components/icons';
 import { appApi } from '@/lib/api-client';
 import { cn } from '@/lib/utils';
-import { CopyButton, ErrorState, LoadingCards, When, useOrgLoad } from './shared';
+import { ErrorState, LoadingCards, When, copy, useOrgLoad } from './shared';
 
 interface Setup {
-  done: number; total: number; clients: { client: string; last: string }[]; calls: number;
+  clients: { client: string; last: string }[];
   groups: { id: string; label: string; prompt: string; used: number; total: number }[];
 }
 interface Journey { id: string; name: string; outcome: string; done: number; total: number }
+interface Row { key: string; type: 'workflow' | 'journey' | 'client'; name: string; detail: string; done: number; total: number; at?: string; prompt?: string; href?: string }
 
-const Bar = ({ value, total, tone = 'primary' }: { value: number; total: number; tone?: 'primary' | 'muted' }) => (
-  <div className='bg-muted h-1.5 w-full overflow-hidden rounded-full'>
-    <div className={cn('h-full rounded-full', tone === 'primary' ? 'bg-primary' : 'bg-muted-foreground/40')} style={{ width: `${Math.round((value / Math.max(1, total)) * 100)}%` }} />
-  </div>
-);
+const TYPE_STYLE = { workflow: 'bg-primary/15 text-primary', journey: 'bg-sky-500/15 text-sky-400', client: 'bg-muted text-muted-foreground' };
 
 export function AdoptionPage() {
   const { data: s, error } = useOrgLoad(() => appApi<Setup>('GET', '/setup'));
   const { data: jr } = useOrgLoad(() => appApi<{ journeys: Journey[] }>('GET', '/journeys'));
-  const journeys = jr?.journeys ?? [];
-  const used = s?.groups.filter((g) => g.used).length ?? 0;
+  const [q, setQ] = useState('');
+  const rows = useMemo<Row[]>(() => !s ? [] : [
+    ...s.groups.map((g) => ({ key: `w-${g.id}`, type: 'workflow' as const, name: g.label, detail: g.used ? `${g.used} of ${g.total} tools used` : g.prompt, done: g.used, total: g.total, prompt: g.used ? undefined : g.prompt })),
+    ...(jr?.journeys ?? []).map((j) => ({ key: `j-${j.id}`, type: 'journey' as const, name: j.name, detail: j.outcome, done: j.done, total: j.total, href: `/app?journey=${encodeURIComponent(j.id)}` })),
+    ...s.clients.map((c) => ({ key: `c-${c.client}`, type: 'client' as const, name: c.client, detail: 'Connected', done: 1, total: 1, at: c.last }))
+  ], [s, jr]);
+  const shown = useMemo(() => {
+    const words = q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    return rows.filter((r) => words.every((w) => `${r.type} ${r.name} ${r.detail}`.toLowerCase().includes(w)));
+  }, [rows, q]);
+  const page = usePaged(shown);
   return (
-    <PageContainer pageTitle='Adoption' pageDescription='How much of Octillion your team uses, from real tool calls: the workflow, the journeys and the AI clients that connect.'>
-      {error ? <ErrorState error={error} /> : !s ? <LoadingCards count={3} /> : (
-        <div className='flex max-w-6xl flex-col gap-10'>
-          <StatStrip items={[
-            { label: 'Setup', value: `${s.done}/${s.total}`, hint: 'steps done', href: '/app' },
-            { label: 'Workflow', value: `${used}/${s.groups.length}`, hint: 'parts in use' },
-            { label: 'Journeys', value: `${journeys.filter((j) => j.done === j.total && j.total > 0).length}/${journeys.length}`, hint: `${journeys.filter((j) => j.done > 0).length} started` },
-            { label: 'Your tool calls', value: s.calls.toLocaleString(), hint: `${s.clients.length} client${s.clients.length === 1 ? '' : 's'} you connected` }
-          ]} />
-
-          <div className='grid gap-x-12 gap-y-10 lg:grid-cols-2'>
-            <Section title='Workflow' description={`Your team has used ${used} of ${s.groups.length} parts of the workflow. Try the prompt in your AI client to start one.`}>
-              <ul className='divide-y border-y'>
-                {s.groups.map((g) => (
-                  <li key={g.id} className='space-y-2 py-3'>
-                    <div className='flex items-center justify-between gap-2 text-sm'>
-                      <span className='font-medium'>{g.label}</span>
-                      {g.used > 0 ? <Badge variant='secondary'><Icons.check className='size-3' /> {g.used}/{g.total} tools</Badge> : <Badge variant='outline'>not yet</Badge>}
-                    </div>
-                    <Bar value={g.used} total={g.total} tone={g.used ? 'primary' : 'muted'} />
-                    {!g.used && (
-                      <div className='flex items-center gap-2'>
-                        <code className='bg-muted flex-1 truncate rounded px-2 py-1 text-xs' title={g.prompt}>{g.prompt}</code>
-                        <CopyButton text={g.prompt} />
-                      </div>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            </Section>
-
-            <div className='flex flex-col gap-10'>
-              <Section title='Journeys' description='Step-by-step use cases. A stage counts as done when its tools run, so progress follows real work.'>
-                {!journeys.length ? <p className='text-muted-foreground text-sm'>No journeys yet.</p> : (
-                  <ul className='divide-y border-y'>
-                    {journeys.map((j) => (
-                      <li key={j.id}>
-                        <Link href={`/app?journey=${encodeURIComponent(j.id)}`} className='hover:bg-muted/40 -mx-2 block space-y-2 rounded-md px-2 py-3'>
-                          <div className='flex items-center justify-between gap-2 text-sm'>
-                            <span className='min-w-0 truncate font-medium'>{j.name}</span>
-                            <span className='text-muted-foreground shrink-0 tabular-nums'>{j.done}/{j.total}</span>
-                          </div>
-                          <Bar value={j.done} total={j.total} tone={j.done ? 'primary' : 'muted'} />
-                        </Link>
-                      </li>
-                    ))}
-                  </ul>
+    <PageContainer>
+      {error ? <ErrorState error={error} /> : !s ? <LoadingCards count={2} /> : (
+        <div className='flex min-w-0 flex-col gap-3'>
+          <div className='relative'>
+            <Icons.search className='text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2' />
+            <Input type='search' value={q} onChange={(e) => setQ(e.target.value)} placeholder='Search adoption: workflow, journeys, clients' aria-label='Search adoption' className='h-9 pl-8' />
+          </div>
+          <div className='overflow-x-auto border-y'>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className='w-28'>Type</TableHead>
+                  <TableHead>Item</TableHead>
+                  <TableHead className='w-56'>Progress</TableHead>
+                  <TableHead className='hidden w-32 sm:table-cell'>Last</TableHead>
+                  <TableHead className='w-24'><span className='sr-only'>Actions</span></TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {shown.length === 0 && (
+                  <TableRow><TableCell colSpan={5} className='text-muted-foreground py-12 text-center'>{q ? 'Nothing matches.' : 'Nothing to show yet.'}</TableCell></TableRow>
                 )}
-              </Section>
-
-              <Section title='Your AI clients' description='The clients you have connected to Octillion, most recent first.'>
-                {!s.clients.length ? <p className='text-muted-foreground text-sm'>None yet. Connect one from <Link className='text-primary underline-offset-4 hover:underline' href='/app'>Setup & training</Link>.</p> : (
-                  <ul className='divide-y border-y'>
-                    {s.clients.map((c) => (
-                      <li key={c.client} className='flex items-center justify-between gap-2 py-3 text-sm'>
-                        <span className='font-medium'>{c.client}</span>
-                        <span className='text-muted-foreground text-xs'><When d={c.last} /></span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </Section>
-            </div>
+                {page.rows.map((r) => {
+                  const pct = Math.round((r.done / Math.max(1, r.total)) * 100);
+                  return (
+                    <TableRow key={r.key} className='align-top'>
+                      <TableCell className='py-3'><span className={cn('rounded-full px-2 py-0.5 text-[11px] font-medium', TYPE_STYLE[r.type])}>{r.type}</span></TableCell>
+                      <TableCell className='py-3 whitespace-normal'>
+                        <p className='text-sm font-medium'>{r.name}</p>
+                        <p className={cn('text-muted-foreground mt-0.5 line-clamp-2 text-xs', r.prompt && 'font-mono')}>{r.detail}</p>
+                      </TableCell>
+                      <TableCell className='py-3'>
+                        <div className='flex items-center gap-2'>
+                          <div className='bg-muted h-1.5 flex-1 overflow-hidden rounded-full'><div className={cn('h-full rounded-full', r.done ? 'bg-primary' : 'bg-muted')} style={{ width: `${pct}%` }} /></div>
+                          <span className='text-muted-foreground w-10 text-right text-xs tabular-nums'>{r.type === 'client' ? '✓' : `${r.done}/${r.total}`}</span>
+                        </div>
+                      </TableCell>
+                      <TableCell className='text-muted-foreground hidden py-3 text-xs sm:table-cell'>{r.at ? <When d={r.at} /> : '—'}</TableCell>
+                      <TableCell className='py-2 text-right'>
+                        {r.prompt && <Button variant='ghost' size='sm' onClick={() => copy(r.prompt!)}><Icons.page /> Prompt</Button>}
+                        {r.href && <Button variant='ghost' size='sm' render={<Link href={r.href} />}>Open</Button>}
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+            <TablePager p={page} className='border-t px-2' />
           </div>
         </div>
       )}

@@ -165,23 +165,23 @@ async function billingView(s: Session) {
 async function billingUsage(s: Session) {
   const db = await getDb();
   const month = "date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'";
+  // A session's cost: what it recorded when it finished, or the gateway's live total while it runs (whichever is larger).
+  const sc = `sc AS (SELECT s.*, GREATEST(s.cost_usd, coalesce((SELECT sum(g.cost_usd) FROM gateway_usage g WHERE g.session_id = s.id), 0))::float AS usd
+                FROM agent_sessions s WHERE s.org_id = $1 AND s.queued_at >= ${month})`;
   const daily = await db.query<{ day: string; usd: number; sessions: number }>(
-    `SELECT to_char(date_trunc('day', s.queued_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS day, coalesce(sum(u.cost_usd), 0)::float AS usd, count(DISTINCT s.id)::int AS sessions
-       FROM agent_sessions s LEFT JOIN gateway_usage u ON u.session_id = s.id
-      WHERE s.org_id = $1 AND s.queued_at >= ${month} GROUP BY 1 ORDER BY 1`, [s.org]);
+    `WITH ${sc} SELECT to_char(date_trunc('day', queued_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS day, sum(usd)::float AS usd, count(*)::int AS sessions
+       FROM sc GROUP BY 1 ORDER BY 1`, [s.org]);
   const [m] = await db.query<{ metered: number; finished: number; running: number }>(
     `SELECT coalesce(sum(cost_usd) FILTER (WHERE status IN ('completed', 'failed', 'timeout', 'cancelled')), 0)::float AS metered,
             count(*) FILTER (WHERE status IN ('completed', 'failed', 'timeout', 'cancelled'))::int AS finished,
             count(*) FILTER (WHERE status IN ('queued', 'running'))::int AS running
        FROM agent_sessions WHERE org_id = $1 AND queued_at >= ${month}`, [s.org]);
   const byAgent = await db.query<{ agent: string; usd: number; sessions: number }>(
-    `SELECT coalesce(s.agent_id, s.harness || '/' || s.model) AS agent, coalesce(sum(u.cost_usd), 0)::float AS usd, count(DISTINCT s.id)::int AS sessions
-       FROM agent_sessions s LEFT JOIN gateway_usage u ON u.session_id = s.id
-      WHERE s.org_id = $1 AND s.queued_at >= ${month} GROUP BY 1 ORDER BY 2 DESC LIMIT 8`, [s.org]);
+    `WITH ${sc} SELECT coalesce(agent_id, harness || '/' || model) AS agent, sum(usd)::float AS usd, count(*)::int AS sessions
+       FROM sc GROUP BY 1 ORDER BY 2 DESC LIMIT 8`, [s.org]);
   const byPerson = await db.query<{ user_id: string | null; usd: number; runs: number }>(
-    `SELECT r.created_by AS user_id, coalesce(sum(u.cost_usd), 0)::float AS usd, count(DISTINCT r.id)::int AS runs
-       FROM simulations r JOIN agent_sessions s ON s.simulation_id = r.id LEFT JOIN gateway_usage u ON u.session_id = s.id
-      WHERE r.org_id = $1 AND s.queued_at >= ${month} GROUP BY 1 ORDER BY 2 DESC LIMIT 8`, [s.org]);
+    `WITH ${sc} SELECT r.created_by AS user_id, sum(sc.usd)::float AS usd, count(DISTINCT r.id)::int AS runs
+       FROM sc JOIN simulations r ON r.id = sc.simulation_id GROUP BY 1 ORDER BY 2 DESC LIMIT 8`, [s.org]);
   const people = s.role === "admin" ? (await admin.team(s.slug)).members : [];
   const now = new Date(), start = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1), end = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1);
   const spent = daily.reduce((a, d) => a + Number(d.usd), 0);
@@ -341,7 +341,7 @@ export function appRouter() {
     const scope = String(req.query.scope ?? "") as context.MemoryScope;
     if (!context.MEMORY_SCOPES.includes(scope)) throw new AppError("scope must be company, user or product");
     const me = actor(res), admin_ = S(res).role === "admin";
-    const memories = await context.listMemories(S(res).org, scope, await memorySubject(res, scope, req.query.subject));
+    const memories = await context.listMemories(S(res).org, scope, scope === "product" && !req.query.subject ? "" : await memorySubject(res, scope, req.query.subject));
     // Items saved from chat (save_to_memory) are by "ai:<user id>": shown as the AI client, editable by that person.
     const mineAi = `ai:${S(res).user ?? ""}`;
     res.json({ memories: memories.map((m) => ({ ...m, created_by: m.created_by?.startsWith("ai:") ? "AI client" : m.created_by?.replace(/^customer:/, "") ?? null,

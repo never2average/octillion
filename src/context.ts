@@ -71,10 +71,26 @@ export const MEMORY_KINDS = ["fact", "decision", "preference", "note"] as const;
 export type MemoryScope = (typeof MEMORY_SCOPES)[number];
 export interface Memory { id: number; scope: MemoryScope; subject: string; kind: string; body: string; created_by: string | null; created_at: Date }
 
-export async function listMemories(orgId: number, scope: MemoryScope, subject: string, limit = 5000): Promise<Memory[]> {
-  return (await getDb()).query<Memory>(
-    "SELECT id::int AS id, scope, subject, kind, body, created_by, created_at FROM context_memories WHERE org_id = $1 AND scope = $2 AND subject = $3 ORDER BY created_at DESC, id DESC LIMIT $4",
-    [orgId, scope, subject, limit]);
+/** One subject's memory; for products, an empty subject lists every product's (each item carries its product name). */
+export async function listMemories(orgId: number, scope: MemoryScope, subject: string, limit = 5000): Promise<(Memory & { subject_name: string })[]> {
+  const all = scope === "product" && !subject;
+  return (await getDb()).query<Memory & { subject_name: string }>(
+    `SELECT m.id::int AS id, m.scope, m.subject, m.kind, m.body, m.created_by, m.created_at, coalesce(p.name, m.subject) AS subject_name
+       FROM context_memories m LEFT JOIN products p ON m.scope = 'product' AND p.org_id = m.org_id AND p.slug = m.subject
+      WHERE m.org_id = $1 AND m.scope = $2 ${all ? "" : "AND m.subject = $3"} ORDER BY m.created_at DESC, m.id DESC LIMIT ${all ? "$3" : "$4"}`,
+    all ? [orgId, scope, limit] : [orgId, scope, subject, limit]);
+}
+
+/**
+ * Product memory needs no onboarded product: an onboarded product (by slug or name) is stored by its slug, any other
+ * name as written, so memory can start before onboarding and joins up when the product is onboarded under that name.
+ */
+export async function productSubject(orgId: number, name: unknown): Promise<string> {
+  const n = String(name ?? "").trim().slice(0, 120);
+  if (!n) throw new ContextError("Name the product this memory is about");
+  const [p] = await (await getDb()).query<{ slug: string }>(
+    "SELECT slug FROM products WHERE org_id = $1 AND (slug = $2 OR lower(name) = lower($2)) LIMIT 1", [orgId, n]);
+  return p?.slug ?? n;
 }
 
 export async function addMemory(orgId: number, actor: string | null, b: Record<string, unknown>, subject: string): Promise<Memory> {
@@ -84,8 +100,7 @@ export async function addMemory(orgId: number, actor: string | null, b: Record<s
   if (!(MEMORY_KINDS as readonly string[]).includes(kind)) throw new ContextError(`kind must be one of ${MEMORY_KINDS.join(", ")}`);
   const body = text(b.body, 1000);
   if (!body) throw new ContextError("Write something to remember");
-  if (scope === "product" && !(await (await getDb()).query("SELECT 1 FROM products WHERE org_id = $1 AND slug = $2", [orgId, subject])).length)
-    throw new ContextError("Unknown product", 404);
+  if (scope === "product") subject = await productSubject(orgId, subject);
   const [m] = await (await getDb()).query<Memory>(
     `INSERT INTO context_memories (org_id, scope, subject, kind, body, created_by) VALUES ($1, $2, $3, $4, $5, $6)
      RETURNING id::int AS id, scope, subject, kind, body, created_by, created_at`, [orgId, scope, scope === "company" ? "" : subject, kind, body, actor]);
@@ -102,7 +117,9 @@ export async function importMemories(orgId: number, actor: string | null, scope:
     const body = text(it.body ?? it.memory, 1000);
     if (!body) { skipped++; continue; }
     const kind = (MEMORY_KINDS as readonly string[]).includes(String(it.kind ?? "").toLowerCase()) ? String(it.kind).toLowerCase() : "note";
-    await addMemory(orgId, actor, { scope, kind, body }, subject);
+    const about = scope === "product" ? String(it.product ?? "").trim() || subject : subject;
+    if (scope === "product" && !about) { skipped++; continue; }
+    await addMemory(orgId, actor, { scope, kind, body }, about);
     imported++;
   }
   return { imported, skipped };
@@ -190,8 +207,8 @@ async function productFor(org: Org, product?: string): Promise<{ slug: string; n
   if (product) {
     const p = product.trim().toLowerCase();
     const hit = all.find((x) => x.slug === p || x.name.toLowerCase() === p || String(x.id) === p);
-    if (!hit) throw new ContextError(`No product "${product}". Products: ${all.map((x) => x.slug).join(", ") || "none yet"}.`, 404);
-    return hit;
+    // Not onboarded (yet): memory is kept under the name as given.
+    return hit ?? { slug: product.trim().slice(0, 120), name: product.trim().slice(0, 120) };
   }
   if (org.userId) {
     const focus = (await getPerson(org.orgId, org.userId)).focus_product;
@@ -199,7 +216,7 @@ async function productFor(org: Org, product?: string): Promise<{ slug: string; n
     if (hit) return hit;
   }
   if (all.length === 1) return all[0];
-  throw new ContextError(all.length ? `Say which product: ${all.map((x) => x.slug).join(", ")}.` : "No products yet: onboard one first.");
+  throw new ContextError(all.length ? `Say which product: ${all.map((x) => x.slug).join(", ")} (or any other product name).` : "Say which product this is about (any name; it does not have to be onboarded).");
 }
 
 const aiActor = (org: Org) => `ai:${org.userId ?? "api-key"}`;

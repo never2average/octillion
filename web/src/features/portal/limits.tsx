@@ -160,8 +160,8 @@ function Teams({ d, reload }: { d: Limits; reload: () => void }) {
   return (
     <Section title='Teams' description={"A team's budget is split among its members (in Split evenly) and caps the team's combined spend in every mode."}>
       <div className='overflow-x-auto'>
-        {d.teams.length ? (
-          <PagedTable items={d.teams} noun='teams'>{(rows) => (
+        <>
+          <PagedTable items={d.teams} empty='No teams. Everyone shares the account budget.' noun='teams'>{(rows) => (
           <Table>
             <TableHeader><TableRow><TableHead>Team</TableHead><TableHead>Budget</TableHead><TableHead>Spent</TableHead><TableHead>People</TableHead><TableHead>Runs at once</TableHead><TableHead /></TableRow></TableHeader>
             <TableBody>
@@ -183,7 +183,7 @@ function Teams({ d, reload }: { d: Limits; reload: () => void }) {
             </TableBody>
           </Table>
           )}</PagedTable>
-        ) : <p className='text-muted-foreground text-sm'>No teams. Everyone shares the account budget.</p>}
+</>
       </div>
       <form onSubmit={create} className='grid w-full gap-2 sm:grid-cols-[2fr_1fr_1fr_auto]'>
           <Input placeholder='Team name' required value={add.name} onChange={(e) => setAdd({ ...add, name: e.target.value })} aria-label='Team name' />
@@ -232,8 +232,8 @@ function People({ d, reload }: { d: Limits; reload: () => void }) {
   return (
     <Section title='People' description='Changes save as you make them.'>
       <div className='overflow-x-auto'>
-        {d.members.length ? (
-          <PagedTable items={d.members} noun='people'>{(rows) => (
+        <>
+          <PagedTable items={d.members} empty='No active members.' noun='people'>{(rows) => (
           <Table className='min-w-[820px]'>
             <TableHeader>
               <TableRow>
@@ -272,7 +272,7 @@ function People({ d, reload }: { d: Limits; reload: () => void }) {
             </TableBody>
           </Table>
           )}</PagedTable>
-        ) : <p className='text-muted-foreground text-sm'>No active members.</p>}
+</>
       </div>
     </Section>
   );
