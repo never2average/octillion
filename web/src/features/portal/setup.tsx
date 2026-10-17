@@ -113,7 +113,7 @@ function ConnectionBox({ s, onConnected }: { s: Setup; onConnected: () => void }
       }, 3000);
     }).catch(fail);
   };
-  const groups: [Client['group'], string][] = [['chat', 'Chat apps'], ['agent', 'Coding agents · by share of developers'], ['editor', 'Editors']];
+  const groups: [Client['group'], string][] = [['chat', 'Chat apps'], ['agent', 'Coding agents'], ['editor', 'Editors']];
   return (
     <FloatPanel title='Connection string' description={s.connect.secret ? 'Contains your key: keep it private.' : undefined}>
       <div className='space-y-2.5'>
@@ -129,7 +129,7 @@ function ConnectionBox({ s, onConnected }: { s: Setup; onConnected: () => void }
             {groups.map(([g, label]) => (
               <NativeSelectOptGroup key={g} label={label}>
                 {clients.filter((x) => x.group === g).map((x) => (
-                  <NativeSelectOption key={x.id} value={x.id}>{x.client}{x.share != null && x.share > 0 ? ` · ${x.share}%` : ''}</NativeSelectOption>
+                  <NativeSelectOption key={x.id} value={x.id}>{x.client}</NativeSelectOption>
                 ))}
               </NativeSelectOptGroup>
             ))}
