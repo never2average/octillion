@@ -1,6 +1,8 @@
 User-agent: *
+Allow: /
+Allow: /connect
+Disallow: /admin
+Disallow: /app
 Disallow: /auth
-Disallow: /dashboard
-Disallow: /sign-in
-Disallow: /sign-up
-Disallow: /v1/
+Disallow: /api
+Disallow: /mcp

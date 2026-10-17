@@ -1,7 +1,7 @@
-import { ContextPage } from '@/features/portal/context';
+import { redirect } from 'next/navigation';
 
-export const metadata = { title: 'Context' };
-
-export default function Page() {
-  return <ContextPage />;
+// Context is three pages now; the old ?tab= links land on the matching one.
+export default async function Page({ searchParams }: { searchParams: Promise<{ tab?: string }> }) {
+  const tab = (await searchParams).tab;
+  redirect(tab === 'me' ? '/app/context/you' : tab === 'products' ? '/app/context/products' : '/app/context/company');
 }

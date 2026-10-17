@@ -10,7 +10,7 @@
  * (shipping a docs change) are marked by the person.
  */
 import { getDb } from "./db.js";
-import { capture } from "./telemetry.js";
+import { capture, keepAlive } from "./telemetry.js";
 
 export interface Stage {
   id: string; title: string; why: string; prompt: string; tools: string[]; expect: string; manual?: boolean;
@@ -314,6 +314,7 @@ export async function syncProgress(org: { orgId: number; slug: string }, distinc
 const pending = new Map<number, ReturnType<typeof setTimeout>>();
 /** After a tool call: sync this account's journey progress a few seconds later (calls in a burst sync once). */
 export function scheduleSync(org: { orgId: number; slug: string }, distinctId?: string) {
+  if (process.env.VERCEL) { keepAlive(syncProgress(org, distinctId).catch((e) => console.error("journey sync:", (e as Error).message))); return; }
   if (pending.has(org.orgId)) return;
   pending.set(org.orgId, setTimeout(() => {
     pending.delete(org.orgId);

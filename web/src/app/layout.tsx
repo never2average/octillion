@@ -11,11 +11,16 @@ import { NuqsAdapter } from 'nuqs/adapters/next/app';
 import '../styles/globals.css';
 
 const META_THEME_COLORS = {
-  light: '#ffffff',
-  dark: '#09090b'
+  light: '#fcfcfc',
+  dark: '#121212'
 };
 
+// Absolute URLs for icons and the share image (Vercel sets the production host; NEXT_PUBLIC_APP_URL overrides it).
+const host = process.env.NEXT_PUBLIC_APP_URL ?? (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : 'http://localhost:3400');
+
 export const metadata: Metadata = {
+  metadataBase: new URL(host),
+  applicationName: 'Octillion',
   title: { default: 'Octillion', template: '%s | Octillion' },
   description: 'Octillion: measure and improve how often AI coding agents pick your developer tool.',
   robots: { index: false, follow: false }

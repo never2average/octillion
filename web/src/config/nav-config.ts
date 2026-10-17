@@ -44,8 +44,7 @@ export const portalNav: NavGroup[] = [
   {
     label: 'Configuration',
     items: [
-      { title: 'Context', url: '/app/context', icon: 'book', shortcut: ['g', 'c'], items: [] },
-      { title: 'Limits', url: '/app/limits', icon: 'gauge', shortcut: ['g', 'l'], items: [] }
+      { title: 'Context', url: '/app/context', icon: 'book', shortcut: ['g', 'c'], items: [] }
     ]
   },
   {

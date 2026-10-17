@@ -11,7 +11,7 @@ type BreadcrumbItem = {
 // Readable names for path segments; anything else is capitalised.
 const TITLES: Record<string, string> = {
   admin: 'Admin', app: 'Account', requests: 'Access requests', accounts: 'Accounts', journeys: 'Journeys',
-  analytics: 'Analytics & health', usage: 'Usage', context: 'Context', limits: 'Limits', team: 'Team', billing: 'Billing', profile: 'Profile'
+  analytics: 'Analytics & health', usage: 'Usage', context: 'Context', limits: 'Limits', team: 'Team', billing: 'Billing', profile: 'Profile', company: 'Company', you: 'You', products: 'Products'
 };
 const routeMapping: Record<string, BreadcrumbItem[]> = {};
 

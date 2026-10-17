@@ -34,6 +34,7 @@ import * as React from 'react';
 import { Icons } from '../icons';
 import { OrgSwitcher } from '../org-switcher';
 import { useNav } from './nav-context';
+import { OctillionMark } from '@/features/site/logo';
 
 export default function AppSidebar() {
   const pathname = usePathname();
@@ -59,9 +60,7 @@ export default function AppSidebar() {
           <SidebarMenu>
             <SidebarMenuItem>
               <SidebarMenuButton size='lg' render={<Link href='/admin' aria-label='Octillion Admin' />}>
-                <div className='bg-primary text-primary-foreground flex aspect-square size-8 items-center justify-center rounded-lg'>
-                  <Icons.logo className='size-4' />
-                </div>
+                <OctillionMark className='size-8 shrink-0' />
                 <div className='grid flex-1 text-left text-sm leading-tight'>
                   <span className='truncate font-semibold'>Octillion</span>
                   <span className='text-muted-foreground truncate text-xs'>Platform admin</span>

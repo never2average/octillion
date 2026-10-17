@@ -20,6 +20,9 @@ import { ExpressInstrumentation } from "@opentelemetry/instrumentation-express";
 import { PgInstrumentation } from "@opentelemetry/instrumentation-pg";
 import { UndiciInstrumentation } from "@opentelemetry/instrumentation-undici";
 
+/** Export pending spans and metrics now (serverless: before the function is frozen). A no-op when OTel is off. */
+export let otelFlush: () => Promise<void> = async () => {};
+
 if (process.env.OTEL_EXPORTER_OTLP_ENDPOINT && process.env.OTEL_SDK_DISABLED !== "true") {
   // Keys travel in the connector URL path (/mcp/oct_...) and the gateway carries session tokens: never record those paths.
   const redact = (path: string) => path.replace(/\/mcp\/oct_[^/?]+/, "/mcp/:key").replace(/\/api\/journeys\/nudges\/[^/?]+/, "/api/journeys/nudges/:secret").replace(/\?.*$/, "");
@@ -47,6 +50,12 @@ if (process.env.OTEL_EXPORTER_OTLP_ENDPOINT && process.env.OTEL_SDK_DISABLED !==
     ],
   });
   sdk.start();
+  otelFlush = async () => {
+    const { trace, metrics } = await import("@opentelemetry/api");
+    const tp = trace.getTracerProvider() as { forceFlush?: () => Promise<void> };
+    const mp = metrics.getMeterProvider() as { forceFlush?: () => Promise<void> };
+    await Promise.all([tp.forceFlush?.(), mp.forceFlush?.()]);
+  };
   const stop = () => void sdk.shutdown().catch(() => {});
   process.once("SIGTERM", stop);
   process.once("beforeExit", stop);

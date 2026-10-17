@@ -2,6 +2,12 @@
 // /app Billing: the plan (from Stripe), this month's model spend against its cap, and Stripe-hosted checkout and portal.
 import { useState } from 'react';
 import PageContainer from '@/components/layout/page-container';
+import { PageTabs } from '@/components/layout/page-tabs';
+
+export const BILLING_TABS = [
+  { href: '/app/billing', label: 'Plan & payment', icon: Icons.creditCard },
+  { href: '/app/billing/limits', label: 'Limits', icon: Icons.gauge }
+];
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -30,6 +36,7 @@ export function BillingPage() {
   const live = s && ['active', 'trialing', 'past_due'].includes(s.status);
   return (
     <PageContainer pageTitle='Billing' pageDescription="Your plan, this month's model spend, invoices and payment details.">
+      <PageTabs items={BILLING_TABS} />
       {error ? <ErrorState error={error} /> : !b ? <LoadingCards count={2} /> : (
         <div className='flex max-w-6xl flex-col gap-8'>
           <StatStrip items={[

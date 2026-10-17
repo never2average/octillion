@@ -28,8 +28,16 @@ export function capture(actor: Actor, event: string, properties: Record<string, 
     event, distinct_id: actor.distinctId, timestamp: new Date().toISOString(),
     properties: { ...properties, ...(actor.orgSlug ? { $groups: { organization: actor.orgSlug } } : {}), $lib: "octillion-server" },
   });
+  // Serverless (Vercel): the function can be frozen as soon as the response is sent, so send now and keep it alive.
+  if (process.env.VERCEL) { keepAlive(flush()); return; }
   if (queue.length >= 100) void flush();
   else if (!timer) timer = setTimeout(() => void flush(), 5000).unref();
+}
+
+/** On Vercel, keep the function running until `p` settles (waitUntil); elsewhere a no-op. */
+export function keepAlive(p: Promise<unknown>): void {
+  if (!process.env.VERCEL) return;
+  void import("@vercel/functions").then((m) => m.waitUntil(p.catch(() => {}))).catch(() => {});
 }
 
 /** An account-level event when only the org id is at hand (workers, research): looks up the slug. Best effort. */

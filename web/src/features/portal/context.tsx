@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Switch } from '@/components/ui/switch';
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { PageTabs } from '@/components/layout/page-tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { Icons } from '@/components/icons';
 import { appApi } from '@/lib/api-client';
@@ -40,26 +40,22 @@ const csv = (xs?: string[] | null) => (xs ?? []).join(', ');
 const parseCsv = (v: string) => v.split(',').map((x) => x.trim()).filter(Boolean);
 type Tab = 'company' | 'me' | 'products';
 
-export function ContextPage() {
+export type ContextSection = 'company' | 'me' | 'products';
+const CONTEXT_TABS = [
+  { href: '/app/context/company', label: 'Company', icon: Icons.building },
+  { href: '/app/context/you', label: 'You', icon: Icons.user },
+  { href: '/app/context/products', label: 'Products', icon: Icons.product }
+];
+
+/** Context: three pages (company, you, products) under one header with route tabs. */
+export function ContextPage({ section }: { section: ContextSection }) {
   const { data: d, error, reload } = useOrgLoad(() => appApi<Ctx>('GET', '/context'));
-  const [tab, setTabState] = useState<Tab>('company');
-  useEffect(() => {
-    const t = new URLSearchParams(window.location.search).get('tab');
-    if (t === 'company' || t === 'me' || t === 'products') setTabState(t);
-  }, []);
-  const setTab = (t: Tab) => { setTabState(t); history.replaceState(null, '', `?tab=${t}`); };
-  const shown: Tab = tab === 'me' && d && !d.person ? 'company' : tab;
+  const shown: ContextSection = section === 'me' && d && !d.person ? 'company' : section;
   return (
     <PageContainer pageTitle='Context' pageDescription='What Octillion and your AI client should know about your company, about you, and about each product.'>
+      <PageTabs items={d && !d.person ? CONTEXT_TABS.filter((t) => t.label !== 'You') : CONTEXT_TABS} />
       {error ? <ErrorState error={error} /> : !d ? <LoadingCards count={2} /> : (
         <div className='flex max-w-6xl flex-col gap-6'>
-          <Tabs value={shown} onValueChange={(v) => setTab(v as Tab)}>
-            <TabsList>
-              <TabsTrigger value='company'><Icons.building /> Company</TabsTrigger>
-              {d.person && <TabsTrigger value='me'><Icons.user /> You</TabsTrigger>}
-              <TabsTrigger value='products'><Icons.product /> Products</TabsTrigger>
-            </TabsList>
-          </Tabs>
           <div className='grid gap-x-12 gap-y-8 lg:grid-cols-5'>
             <div className='lg:col-span-3'>
               {shown === 'company' ? <CompanyForm key='c' d={d} onSaved={reload} /> : shown === 'me' ? <PersonForm key='m' d={d} onSaved={reload} /> : <Products key='p' d={d} onSaved={reload} />}

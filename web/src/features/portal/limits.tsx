@@ -4,6 +4,8 @@
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import PageContainer from '@/components/layout/page-container';
+import { PageTabs } from '@/components/layout/page-tabs';
+import { BILLING_TABS } from './billing';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -42,7 +44,8 @@ export function LimitsPage() {
   const synced = d ? (d.clerk ?? d.workos ?? true) : true;
   const mine = d?.members.find((m) => m.user_id === d.me);
   return (
-    <PageContainer pageTitle='Limits' pageDescription="Split the plan's monthly model budget across teams and people, choose who can launch simulations, and cap how much each person runs at once.">
+    <PageContainer pageTitle='Billing' pageDescription="Split the plan's monthly model budget across teams and people, choose who can launch simulations, and cap how much each person runs at once.">
+      <PageTabs items={BILLING_TABS} />
       {error ? <ErrorState error={error} /> : !d ? <LoadingCards count={4} /> : (
         <div className='flex max-w-6xl flex-col gap-8'>
           {!synced && <Alert><Icons.info /><AlertDescription>Per-person limits need this account&apos;s team to be set up. Until then everyone shares the account budget.</AlertDescription></Alert>}
