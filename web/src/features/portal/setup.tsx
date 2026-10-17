@@ -116,9 +116,11 @@ function ConnectionBox({ s, onConnected }: { s: Setup; onConnected: () => void }
   return (
     <FloatPanel title='Connection string' description={s.connect.secret ? 'Contains your key: keep it private.' : undefined}>
       <div className='space-y-2.5'>
-        <div className='flex gap-2'>
-          <Input readOnly value={s.connect.connector_url} className='bg-background font-mono text-xs' aria-label='Connection string' onFocus={(e) => e.currentTarget.select()} />
-          <CopyButton text={s.connect.connector_url} />
+        <div className='relative'>
+          <Input readOnly value={s.connect.connector_url} className='bg-background pr-10 font-mono text-xs' aria-label='Connection string' onFocus={(e) => e.currentTarget.select()} />
+          <Button type='button' variant='ghost' size='icon-sm' className='absolute top-1/2 right-1 -translate-y-1/2' aria-label='Copy connection string' title='Copy' onClick={() => copy(s.connect.connector_url)}>
+            <Icons.page className='size-4' />
+          </Button>
         </div>
         <div className='flex gap-2'>
           <NativeSelect id='client-pick' aria-label='Your AI client' value={c?.id} onChange={(e) => choose(e.target.value)} className='bg-background min-w-0 flex-1'>
