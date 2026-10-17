@@ -124,7 +124,8 @@ type Option = { value: string; label: string };
 function facetOptions(f: Facets | undefined): Record<ListKey, Option[]> {
   const plain = (xs: string[] | undefined) => (xs ?? []).map((x) => ({ value: x, label: x }));
   return {
-    user: (f?.users ?? []).map((u) => ({ value: u.id, label: `${u.email ?? u.name ?? u.id} · ${u.account}` })),
+    // people Clerk no longer knows (removed, or seeded demo activity) show as unknown with the end of their id
+    user: (f?.users ?? []).map((u) => ({ value: u.id, label: `${u.email ?? u.name ?? `Unknown user …${u.id.slice(-6)}`} · ${u.account}` })),
     account: (f?.accounts ?? []).map((a) => ({ value: a.slug, label: a.name })), product: plain(f?.products), tool: plain(f?.tools), client: plain(f?.clients),
     plan: plain(f?.plans), sub_status: (f?.sub_statuses ?? []).map((x) => ({ value: x, label: x.replace('_', ' ') })), stage: (f?.stages ?? []).map((s) => ({ value: s.id, label: s.label }))
   };
