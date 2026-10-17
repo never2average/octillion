@@ -25,7 +25,6 @@ type Row =
   | { key: string; type: 'use case'; name: string; detail: string; done: number; total: number; j: Journey }
   | { key: string; type: 'client'; name: string; detail: string; done: number; total: number; at: string };
 
-const TYPE_STYLE: Record<Row['type'], string> = { workflow: 'bg-primary/15 text-primary', 'use case': 'bg-sky-500/15 text-sky-400', client: 'bg-muted text-muted-foreground' };
 
 export function AdoptionPage() {
   const { data: s, error } = useOrgLoad(() => appApi<Setup>('GET', '/setup'));
@@ -41,12 +40,15 @@ export function AdoptionPage() {
     ...s.groups.map((g) => ({ key: `w-${g.id}`, type: 'workflow' as const, name: g.label, detail: g.used ? `${g.used} of ${g.total} tools used` : 'Not tried yet', done: g.used, total: g.total, g })),
     ...s.clients.map((c) => ({ key: `c-${c.client}`, type: 'client' as const, name: c.client, detail: 'Connected', done: 1, total: 1, at: c.last }))
   ];
+  // Who a row belongs to: whoever added an account's own use case, Octillion for the built-ins, the team for workflow
+  // parts (counted team-wide), you for clients (the list is yours).
+  const userOf = (r: Row) => r.type === 'use case' ? (r.j.own ? (r.j.added_by?.replace(/^customer:/, '') ?? 'Your team') : 'Octillion') : r.type === 'workflow' ? 'Team' : 'You';
   const cols: RecordCol<Row>[] = [
-    { key: 'type', label: 'Type', className: 'w-28', keep: true, render: (r) => <span className={cn('rounded-full px-2 py-0.5 text-[11px] font-medium whitespace-nowrap', TYPE_STYLE[r.type])}>{r.type}</span> },
-    { key: 'item', label: 'Item', keep: true, render: (r) => (<>
-      <p className='text-sm font-medium'>{r.name}{r.type === 'use case' && r.j.own && <span className='text-muted-foreground font-normal'> · yours</span>}</p>
-      <p className='text-muted-foreground mt-0.5 line-clamp-2 text-xs'>{r.detail}</p>
+    { key: 'item', label: 'Use case', keep: true, render: (r) => (<>
+      <p className='text-sm leading-none font-medium'>{r.name}</p>
+      <p className='text-muted-foreground mt-1.5 line-clamp-1 text-xs leading-none'>{r.detail}</p>
     </>) },
+    { key: 'user', label: 'User', className: 'w-56', keep: true, render: (r) => <span className={cn('block max-w-56 truncate text-sm', userOf(r) === 'Octillion' || userOf(r) === 'Team' ? 'text-muted-foreground' : '')}>{userOf(r)}</span> },
     { key: 'progress', label: 'Progress', className: 'w-56', render: (r) => <Progress done={r.done} total={r.total} check={r.type === 'client'} /> },
     { key: 'last', label: 'Last', className: 'hidden w-32 sm:table-cell', render: (r) => <span className='text-muted-foreground text-xs'>{r.type === 'client' ? <When d={r.at} /> : r.type === 'use case' ? lastDone(r.j) : '—'}</span> }
   ];
@@ -55,7 +57,7 @@ export function AdoptionPage() {
     <PageContainer>
       <RecordView<Row>
         rows={rows} rowKey={(r) => r.key} cols={cols} loading={!s} noun='items'
-        searchText={(r) => `${r.type} ${r.name} ${r.detail}`}
+        searchText={(r) => `${r.type} ${r.name} ${r.detail} ${userOf(r)}`}
         searchPlaceholder='Search adoption: use cases, workflow, clients'
         primary={<Button onClick={() => setAdding(true)}><Icons.add /> Add use case</Button>}
         empty='Nothing to show yet.'
