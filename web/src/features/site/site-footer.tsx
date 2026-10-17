@@ -12,7 +12,6 @@ export function SiteFooter() {
         <nav aria-label='Footer' className='flex flex-wrap gap-x-5 gap-y-2 sm:ml-auto'>
           <Link href='/#apo' className='hover:text-foreground'>What is APO</Link>
           <Link href='/#faq' className='hover:text-foreground'>FAQ</Link>
-          <Link href='/connect' className='hover:text-foreground'>Connect Claude &amp; ChatGPT</Link>
           <Link href='/#access' className='hover:text-foreground'>Contact us</Link>
         </nav>
       </div>

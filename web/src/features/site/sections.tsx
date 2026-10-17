@@ -71,7 +71,7 @@ export function Hero() {
             </p>
             <div className='mt-8 flex flex-wrap gap-3'>
               <Link href='/#access' className={buttonVariants({ size: 'lg' })}>Get your APO baseline <IconArrowRight /></Link>
-              <Link href='/connect' className={buttonVariants({ size: 'lg', variant: 'outline' })}><IconTerminal2 /> Connect in Claude or ChatGPT</Link>
+              <Link href='/#apo' className={buttonVariants({ size: 'lg', variant: 'outline' })}>What is APO?</Link>
             </div>
           </div>
           <SampleCard />
@@ -305,7 +305,7 @@ export function WhereYouWork() {
               <p><span className='font-semibold'>{t}</span> <span className='text-muted-foreground'>{b}</span></p>
             </li>
           ))}
-          <li className='pt-2'><Link href='/connect' className={buttonVariants({ variant: 'outline' })}>Connect Claude &amp; ChatGPT <IconArrowRight /></Link></li>
+          <li className='pt-2'><Link href='/app' className={buttonVariants({ variant: 'outline' })}>Set it up in your account <IconArrowRight /></Link></li>
         </ul>
         <ChatMock />
       </div>

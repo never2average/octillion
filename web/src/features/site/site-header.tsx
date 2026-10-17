@@ -27,7 +27,6 @@ export function SiteHeader() {
           ))}
         </nav>
         <div className='ml-auto flex items-center gap-2'>
-          <Link href='/connect' className={cn(buttonVariants({ variant: 'ghost' }), 'hidden sm:inline-flex')}>Connect</Link>
           <Link href={account.href} className={cn(buttonVariants({ variant: 'ghost' }), 'hidden sm:inline-flex')}>{account.label}</Link>
           <Link href='/#access' className={buttonVariants()}>Request access</Link>
           <Sheet open={open} onOpenChange={setOpen}>
@@ -39,7 +38,7 @@ export function SiteHeader() {
                 <SheetTitle>Octillion</SheetTitle>
               </SheetHeader>
               <nav aria-label='Menu' className='flex flex-col gap-1 px-4 pb-6'>
-                {[...SECTIONS, { href: '/connect', label: 'Connect' }, account].map((s) => (
+                {[...SECTIONS, account].map((s) => (
                   <Link key={s.href} href={s.href} onClick={() => setOpen(false)} className='hover:bg-muted rounded-md px-3 py-2 text-sm'>
                     {s.label}
                   </Link>

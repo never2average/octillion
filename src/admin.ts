@@ -60,7 +60,7 @@ Connect it:
 ${clients.filter((c) => ["claude", "chatgpt", "claude-code", "cursor", "codex"].includes(c.id)).map((c) => `- ${c.client}: ${c.command ? `${c.steps} ${c.command}` : c.steps}`).join("\n")}
 Every other client (Copilot, OpenCode, Gemini CLI, VS Code, Windsurf and more) is listed at ${base}/app
 
-Then type: "Get me started with Octillion." The beta guide: ${base}/connect
+Then type: "Get me started with Octillion."
 
 Reply to this email with anything that gets in your way.`;
   return { connector_url: url, secret: Boolean(key), clients, email: { subject, body } };
@@ -491,7 +491,7 @@ export async function ensureCustomer(actor: string, slug: string, email?: string
 }
 
 /** A Stripe Checkout link for a plan, to send to the account's billing contact. */
-export async function checkoutLink(actor: string, slug: string, priceId: unknown, returnUrl = `${publicUrl()}/connect`) {
+export async function checkoutLink(actor: string, slug: string, priceId: unknown, returnUrl = `${publicUrl()}/app/billing`) {
   const plans = await billing.listPlans();
   const plan = plans.find((p) => p.price_id === priceId);
   if (!plan) throw new AdminError("Unknown plan: use a price whose lookup_key starts with octillion_");
@@ -502,7 +502,7 @@ export async function checkoutLink(actor: string, slug: string, priceId: unknown
 }
 
 /** A Stripe customer-portal link: plan changes, card, invoices, cancellation. */
-export async function portalLink(actor: string, slug: string, returnUrl = `${publicUrl()}/connect`) {
+export async function portalLink(actor: string, slug: string, returnUrl = `${publicUrl()}/app/billing`) {
   const customer = await ensureCustomer(actor, slug);
   billing.invalidateSubscriptions();
   log(actor, "billing.portal_link", slug);

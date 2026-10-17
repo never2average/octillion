@@ -12,6 +12,10 @@ const config: NextConfig = {
   output: process.env.BUILD_STANDALONE === 'true' ? 'standalone' : undefined,
   images: { remotePatterns: [{ protocol: 'https', hostname: 'img.clerk.com' }] },
   compiler: { removeConsole: process.env.NODE_ENV === 'production' ? { exclude: ['error'] } : false },
+  // /connect was a public setup guide; the connection box now lives on the setup page.
+  async redirects() {
+    return [{ source: '/connect', destination: '/app', permanent: true }];
+  },
   async rewrites() {
     return { beforeFiles: [], afterFiles: [], fallback: [{ source: '/:path*', destination: `${API}/:path*` }] };
   }
