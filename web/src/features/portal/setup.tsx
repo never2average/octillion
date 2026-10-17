@@ -147,7 +147,7 @@ function ConnectionBox({ s, onConnected }: { s: Setup; onConnected: () => void }
                 <DialogTitle>Add Octillion to {c.client}</DialogTitle>
                 <DialogDescription>Then press Test to check it reaches us.</DialogDescription>
               </DialogHeader>
-              <ClientSteps c={c} />
+              <div className='min-w-0'><ClientSteps c={c} /></div>
             </DialogContent>
           </Dialog>
         )}
@@ -189,7 +189,7 @@ function ClientSteps({ c }: { c: Client }) {
 function CodeLine({ text, label }: { text: string; label: string }) {
   return (
     <div className='flex items-center gap-2'>
-      <code className='bg-background min-w-0 flex-1 overflow-x-auto rounded-md border px-2.5 py-2 font-mono text-xs whitespace-nowrap' aria-label={label}>{text}</code>
+      <code className='bg-background min-w-0 flex-1 overflow-x-auto rounded-md border px-2.5 py-2 font-mono text-xs break-all whitespace-pre-wrap' aria-label={label}>{text}</code>
       <CopyButton text={text} />
     </div>
   );
