@@ -64,7 +64,7 @@ export default function AppSidebar() {
             <SidebarMenuItem>
               <SidebarMenuButton size='lg' render={<Link href='/admin' aria-label='Octillion Admin' />}>
                 <OctillionMark className='size-8 shrink-0' />
-                <div className='grid flex-1 text-left text-sm leading-tight'>
+                <div className='grid flex-1 text-left text-sm leading-tight group-data-[collapsible=icon]:hidden'>
                   <span className='truncate font-semibold'>Octillion</span>
                   <span className='text-muted-foreground truncate text-xs'>Platform admin</span>
                 </div>
@@ -77,7 +77,7 @@ export default function AppSidebar() {
       </SidebarHeader>
       <SidebarContent className='overflow-x-hidden'>
         {filteredGroups.map((group) => (
-          <SidebarGroup key={group.label || 'ungrouped'} className='py-0'>
+          <SidebarGroup key={group.label || 'ungrouped'} className='py-0 group-data-[collapsible=icon]:py-1.5'>
             {group.label && <SidebarGroupLabel>{group.label}</SidebarGroupLabel>}
             <SidebarMenu>
               {group.items.map((item) => {

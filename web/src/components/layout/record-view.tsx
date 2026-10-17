@@ -173,7 +173,10 @@ export function RecordView<T>({
   }, [hasCurrent]);
 
   const shownCols = cols.filter((c) => !hidden.includes(c.key));
-  const visible = current && detail ? shownCols.filter((c) => c.keep) : shownCols;
+  // Beside an open record the table is a narrow list: the title and one more column, truncated rather than clipped.
+  const narrow = Boolean(current && detail);
+  const titled = shownCols.filter((c) => c.title), kept = shownCols.filter((c) => c.keep && !c.title);
+  const visible = narrow ? (titled.length ? [...titled, ...kept.slice(0, 1)] : kept.slice(0, 2)) : shownCols;
   const span = visible.length + (actions ? 1 : 0) + (bulk ? 1 : 0);
   const anyTyped = cols.some(typed);
   // Simple pages (no id, views or typed columns) keep today's toolbar exactly.
@@ -269,7 +272,7 @@ export function RecordView<T>({
       <div className='flex min-h-0 flex-1 gap-4'>
         <div className={cn('flex min-h-0 min-w-0 flex-col border-y', current ? 'hidden lg:flex lg:w-[40%] lg:shrink-0' : 'w-full')}>
           <div className='min-h-0 flex-1 overflow-auto'>
-            <Table>
+            <Table className={cn(narrow && 'table-fixed')}>
               <TableHeader className='bg-background sticky top-0 z-10 shadow-[0_1px_0_var(--border)]'>
                 <TableRow>
                   {bulk && (
@@ -331,7 +334,7 @@ export function RecordView<T>({
                               <Checkbox aria-label='Select row' checked={sel.has(k)} onCheckedChange={(on) => toggle([k], !!on)} />
                             </TableCell>
                           )}
-                          {visible.map((c) => <TableCell key={c.key} className={cn('px-3 py-3.5 whitespace-normal', c.className)}>{c.render(r)}</TableCell>)}
+                          {visible.map((c) => <TableCell key={c.key} className={cn('px-3 py-3.5', narrow ? 'overflow-hidden text-ellipsis whitespace-nowrap [&>*]:truncate' : 'whitespace-normal', c.className)}>{c.render(r)}</TableCell>)}
                           {actions && <TableCell className='w-10 py-1.5 text-center' onClick={(e) => e.stopPropagation()}><ActionsMenu items={actions(r)} /></TableCell>}
                         </TableRow>
                       )}

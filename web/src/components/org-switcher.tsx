@@ -71,7 +71,7 @@ export function OrgSwitcher() {
             <div
               className={`grid flex-1 text-left text-sm leading-tight transition-all duration-200 ease-in-out ${
                 state === 'collapsed'
-                  ? 'invisible max-w-0 overflow-hidden opacity-0'
+                  ? 'hidden'
                   : 'visible max-w-full opacity-100'
               }`}
             >
@@ -100,7 +100,7 @@ export function OrgSwitcher() {
             <div
               className={`grid flex-1 text-left text-sm leading-tight transition-all duration-200 ease-in-out ${
                 state === 'collapsed'
-                  ? 'invisible max-w-0 overflow-hidden opacity-0'
+                  ? 'hidden'
                   : 'visible max-w-full opacity-100'
               }`}
             >
@@ -110,7 +110,7 @@ export function OrgSwitcher() {
             <Icons.chevronsUpDown
               className={`ml-auto transition-all duration-200 ease-in-out ${
                 state === 'collapsed'
-                  ? 'invisible max-w-0 opacity-0'
+                  ? 'hidden'
                   : 'visible max-w-full opacity-100'
               }`}
             />
@@ -155,7 +155,7 @@ export function OrgSwitcher() {
             <div
               className={`grid flex-1 text-left text-sm leading-tight transition-all duration-200 ease-in-out ${
                 state === 'collapsed'
-                  ? 'invisible max-w-0 overflow-hidden opacity-0'
+                  ? 'hidden'
                   : 'visible max-w-full opacity-100'
               }`}
             >
@@ -168,7 +168,7 @@ export function OrgSwitcher() {
             <Icons.chevronsUpDown
               className={`ml-auto transition-all duration-200 ease-in-out ${
                 state === 'collapsed'
-                  ? 'invisible max-w-0 opacity-0'
+                  ? 'hidden'
                   : 'visible max-w-full opacity-100'
               }`}
             />
