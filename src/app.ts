@@ -124,31 +124,52 @@ async function setup(s: Session, since?: string) {
   };
 }
 
-async function usage(s: Session, q: { from?: unknown; to?: unknown; days?: unknown }) {
+/**
+ * /app Usage for a period, optionally for some people only (?user=id,id): their own tool calls, the runs they launched
+ * and those runs' model spend. Without a filter it is the whole team. `people` lists who can be picked: everyone on the
+ * team plus anyone who used Octillion in the period.
+ */
+async function usage(s: Session, q: { from?: unknown; to?: unknown; days?: unknown; user?: unknown }) {
   const range = reportRange(q), days = range.days;
+  const users = [...new Set(String(q.user ?? "").split(",").map((x) => x.trim()).filter(Boolean))].slice(0, 200);
   const db = await getDb();
-  const [daily, tools, people, runs] = await Promise.all([
+  const ev = users.length ? " AND user_id = ANY($4)" : "";
+  const sim = users.length ? " AND created_by = ANY($4)" : "";
+  const p = users.length ? [s.org, range.start, range.end, users] : [s.org, range.start, range.end];
+  const month = "date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'";
+  const [daily, tools, people, runs, spentBy] = await Promise.all([
     db.query<{ day: string; calls: number; errors: number }>(
       `SELECT to_char(date_trunc('day', at), 'YYYY-MM-DD') AS day, count(*) AS calls, count(*) FILTER (WHERE NOT ok) AS errors
-         FROM mcp_events WHERE org_id = $1 AND method = 'tools/call' AND at >= $2 AND at < $3 GROUP BY 1 ORDER BY 1`, [s.org, range.start, range.end]),
+         FROM mcp_events WHERE org_id = $1 AND method = 'tools/call' AND at >= $2 AND at < $3${ev} GROUP BY 1 ORDER BY 1`, p),
     db.query<{ name: string; calls: number; errors: number; avg_ms: number }>(
       `SELECT name, count(*) AS calls, count(*) FILTER (WHERE NOT ok) AS errors, round(avg(ms)) AS avg_ms
-         FROM mcp_events WHERE org_id = $1 AND method = 'tools/call' AND at >= $2 AND at < $3 GROUP BY name ORDER BY count(*) DESC`, [s.org, range.start, range.end]),
-    db.query<{ user_id: string | null; calls: number; last: Date; clients: string[] }>(
-      `SELECT user_id, count(*) FILTER (WHERE method = 'tools/call') AS calls, max(at) AS last, array_remove(array_agg(DISTINCT client), NULL) AS clients
-         FROM mcp_events WHERE org_id = $1 AND at >= $2 AND at < $3 GROUP BY user_id ORDER BY max(at) DESC`, [s.org, range.start, range.end]),
+         FROM mcp_events WHERE org_id = $1 AND method = 'tools/call' AND at >= $2 AND at < $3${ev} GROUP BY name ORDER BY count(*) DESC`, p),
+    db.query<{ user_id: string; calls: number }>(
+      `SELECT user_id, count(*) FILTER (WHERE method = 'tools/call') AS calls
+         FROM mcp_events WHERE org_id = $1 AND at >= $2 AND at < $3 AND user_id IS NOT NULL GROUP BY user_id`, [s.org, range.start, range.end]),
     db.query<{ simulations: number; sessions: number; completed: number }>(
-      `SELECT (SELECT count(*) FROM simulations WHERE org_id = $1 AND created_at >= $2 AND created_at < $3) AS simulations,
+      `SELECT (SELECT count(*) FROM simulations WHERE org_id = $1 AND created_at >= $2 AND created_at < $3${sim}) AS simulations,
               count(*) AS sessions, count(*) FILTER (WHERE status = 'completed') AS completed
-         FROM agent_sessions WHERE org_id = $1 AND queued_at >= $2 AND queued_at < $3`, [s.org, range.start, range.end]),
+         FROM agent_sessions WHERE org_id = $1 AND queued_at >= $2 AND queued_at < $3
+          ${users.length ? "AND simulation_id IN (SELECT id FROM simulations WHERE org_id = $1 AND created_by = ANY($4))" : ""}`, p),
+    // This month's spend on the selected people's runs (session cost, or the gateway's live total while it runs).
+    users.length ? db.query<{ usd: number }>(
+      `SELECT coalesce(sum(GREATEST(s.cost_usd, coalesce((SELECT sum(g.cost_usd) FROM gateway_usage g WHERE g.session_id = s.id), 0))), 0)::float AS usd
+         FROM agent_sessions s JOIN simulations r ON r.id = s.simulation_id
+        WHERE s.org_id = $1 AND r.created_by = ANY($2) AND s.queued_at >= ${month}`, [s.org, users]) : Promise.resolve(null),
   ]);
   const t = await admin.team(s.slug);
-  const emailOf = new Map(t.members.map((m) => [m.user_id, m.email]));
+  const callsOf = new Map(people.map((x) => [x.user_id, Number(x.calls)]));
+  const known = new Set(t.members.map((m) => m.user_id));
   const [{ budget }, spent] = await Promise.all([orgBudget(s.org).catch(() => ({ budget: 0 })), orgMonthSpendUsd(s.org)]);
   return {
-    days, range: { from: range.from, to: range.to }, daily, tools, runs: runs[0],
-    people: people.map((p) => ({ user_id: p.user_id, email: p.user_id ? emailOf.get(p.user_id) ?? "Former member" : "Connector key", calls: Number(p.calls), last: p.last, clients: p.clients })),
-    spend: { month_usd: spent, budget_usd: budget },
+    days, range: { from: range.from, to: range.to }, daily, tools, runs: runs[0], filters: { user: users },
+    people: [
+      ...t.members.map((m) => ({ user_id: m.user_id, email: m.email ?? m.name ?? "Unnamed member", me: m.user_id === s.user, calls: callsOf.get(m.user_id) ?? 0 })),
+      ...people.filter((x) => !known.has(x.user_id)).map((x) => ({ user_id: x.user_id, email: "Former member", me: false, calls: Number(x.calls) })),
+    ],
+    active_people: users.length ? users.filter((u) => callsOf.get(u)).length : people.filter((x) => Number(x.calls)).length,
+    spend: { month_usd: spentBy ? Number(spentBy[0]?.usd ?? 0) : spent, budget_usd: budget, filtered: Boolean(spentBy) },
   };
 }
 

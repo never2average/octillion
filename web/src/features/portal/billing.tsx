@@ -1,5 +1,5 @@
 'use client';
-// /app Billing, one page: this month's usage-based spend (live meter, daily spend, projection, what is metered to
+// /app Billing, one page: the team, this month's usage-based spend (live meter, daily spend, projection, what is metered to
 // Stripe, by person and by agent), the plan with Stripe-hosted checkout and portal, and the limits that split the budget.
 import { useState } from 'react';
 import PageContainer from '@/components/layout/page-container';
@@ -12,6 +12,7 @@ import { appApi } from '@/lib/api-client';
 import { money, usd } from '@/lib/octillion-format';
 import { cn } from '@/lib/utils';
 import { LimitsSection } from './limits';
+import { TeamSection } from './team';
 import { ErrorState, LoadingCards, fail, useOrgLoad } from './shared';
 
 interface Sub { status: string; plan: string | null; renews_at: string | null; cancel_at_period_end: boolean; trial_end: string | null }
@@ -45,6 +46,10 @@ export function BillingPage() {
           )}
           <Rule />
           <PlanSection b={b} />
+          <Rule />
+          <Section title='Team' description='Who can use Octillion in your account. People sign in with Google, Microsoft, GitHub or email.'>
+            <TeamSection />
+          </Section>
           <Rule />
           <Section title='Limits' description="Split the monthly cap across teams and people, choose who can launch simulations, and cap how much runs at once.">
             <LimitsSection />

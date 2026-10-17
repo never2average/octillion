@@ -1,7 +1,8 @@
 'use client';
-// /app Usage: the whole team's activity across every AI client, and model spend against the plan.
+// /app Usage: the team's activity across every AI client, and model spend against the plan, for everyone or for the
+// people picked in the People filter (server-side, so a per-person view can later pin it to the signed-in user).
 import { PagedTable } from '@/components/layout/table-pager';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Area, AreaChart, Bar, BarChart, CartesianGrid, XAxis, YAxis } from 'recharts';
 import PageContainer from '@/components/layout/page-container';
 import { Badge } from '@/components/ui/badge';
@@ -12,21 +13,31 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { appApi } from '@/lib/api-client';
 import { num, usd } from '@/lib/octillion-format';
 import { DateRangePicker, last30, rangeQuery, type DateRange } from '@/components/layout/date-range-picker';
-import { ErrorState, LoadingCards, SpendMeter, When, useOrgLoad } from './shared';
+import { MultiSelectFilter, type FilterOption } from '@/components/layout/multi-select-filter';
+import { Icons } from '@/components/icons';
+import { ErrorState, LoadingCards, SpendMeter, useOrgLoad } from './shared';
 
 interface Usage {
   days: number; range?: { from: string; to: string }; daily: { day: string; calls: number; errors: number }[];
   tools: { name: string; calls: number; errors: number; avg_ms: number | null }[];
   runs: { simulations: number; sessions: number; completed: number };
-  people: { user_id: string | null; email: string; calls: number; last: string; clients: string[] | null }[];
-  spend: { month_usd: number; budget_usd: number };
+  people: { user_id: string; email: string; me: boolean; calls: number }[];
+  active_people: number;
+  spend: { month_usd: number; budget_usd: number; filtered?: boolean };
 }
 
 const callsConfig = { calls: { label: 'Tool calls', color: 'var(--chart-1)' }, errors: { label: 'Errors', color: 'var(--destructive)' } } satisfies ChartConfig;
 
 export function UsagePage() {
   const [range, setRange] = useState<DateRange>(last30);
-  const { data: u, error } = useOrgLoad(() => appApi<Usage>('GET', `/usage?${rangeQuery(range)}`), [range.from, range.to]);
+  const [users, setUsers] = useState<string[]>([]);
+  const userQ = users.length ? `&user=${encodeURIComponent(users.join(','))}` : '';
+  const { data: u, error } = useOrgLoad(() => appApi<Usage>('GET', `/usage?${rangeQuery(range)}${userQ}`), [range.from, range.to, userQ]);
+  // keep the people list from the last load, so the picker does not empty while a new selection loads
+  const [peopleOpts, setPeopleOpts] = useState<FilterOption[]>([]);
+  useEffect(() => {
+    if (u?.people) setPeopleOpts(u.people.map((p) => ({ value: p.user_id, label: p.me ? `${p.email} (you)` : p.email, hint: p.calls ? `${num(p.calls)} calls` : undefined })));
+  }, [u?.people]);
   const days = u?.days ?? 30;
   // Every day of the period, zero-filled, so the charts have a continuous axis.
   const series = useMemo(() => {
@@ -43,9 +54,12 @@ export function UsagePage() {
   return (
     <PageContainer
       pageTitle='Usage'
-      pageDescription='Your whole team, across every AI client.'
+      pageDescription={users.length ? `${users.length === 1 ? 'One person' : `${users.length} people`} on your team, across every AI client.` : 'Your whole team, across every AI client.'}
       pageHeaderAction={
-        <DateRangePicker value={range} onChange={setRange} />
+        <div className='flex flex-wrap items-center gap-2'>
+          <MultiSelectFilter noun='people' icon={<Icons.teams />} options={peopleOpts} value={users} onChange={setUsers} />
+          <DateRangePicker value={range} onChange={setRange} />
+        </div>
       }
     >
       {error ? <ErrorState error={error} /> : !u ? <LoadingCards count={4} /> : (
@@ -53,16 +67,16 @@ export function UsagePage() {
           <div className='flex flex-col gap-3'>
             <StatStrip items={[
               { label: 'Tool calls', value: num(calls), hint: errs ? `${num(errs)} errors` : 'no errors' },
-              { label: 'Active people', value: u.people.filter((p) => p.calls).length },
+              { label: 'Active people', value: u.active_people },
               { label: 'Simulations', value: num(u.runs.simulations) },
               { label: 'Agent sessions done', value: `${num(u.runs.completed)} / ${num(u.runs.sessions)}` },
-              { label: 'Model spend this month', value: usd(u.spend.month_usd), hint: Number(u.spend.budget_usd) ? `of ${usd(u.spend.budget_usd)}` : 'no monthly cap' }
+              { label: u.spend.filtered ? 'Their model spend this month' : 'Model spend this month', value: usd(u.spend.month_usd), hint: u.spend.filtered ? 'runs they launched' : Number(u.spend.budget_usd) ? `of ${usd(u.spend.budget_usd)}` : 'no monthly cap' }
             ]} />
-            {Number(u.spend.budget_usd) > 0 && <SpendMeter spent={Number(u.spend.month_usd)} budget={Number(u.spend.budget_usd)} className='max-w-md' />}
+            {!u.spend.filtered && Number(u.spend.budget_usd) > 0 && <SpendMeter spent={Number(u.spend.month_usd)} budget={Number(u.spend.budget_usd)} className='max-w-md' />}
           </div>
 
-          <div className='grid gap-8 lg:grid-cols-3'>
-            <Section title='Tool calls per day' description={`Every Octillion tool call from your team, last ${days} days.`} className='lg:col-span-2'>
+          <div className='flex flex-col gap-10'>
+            <Section title='Tool calls per day' description={`Every Octillion tool call${users.length ? ' from the people picked' : ' from your team'}, ${days} days.`}>
               {calls ? (
                 <ChartContainer config={callsConfig} className='aspect-auto h-[240px] w-full'>
                   <AreaChart data={series} margin={{ left: 0, right: 8 }}>
@@ -98,29 +112,8 @@ export function UsagePage() {
 
           <Rule />
 
-          <div className='grid gap-8 lg:grid-cols-2'>
-            <Section title='People' description='Who is using Octillion and from which clients.'>
-              <>
-                <div className='overflow-x-auto'>
-                  <PagedTable items={u.people} empty='Nobody has connected yet.' noun='people'>{(rows) => (
-                  <Table>
-                    <TableHeader><TableRow><TableHead>Person</TableHead><TableHead className='text-right'>Calls</TableHead><TableHead>Last active</TableHead><TableHead>Clients</TableHead></TableRow></TableHeader>
-                    <TableBody>
-                      {rows.map((p, i) => (
-                        <TableRow key={p.user_id ?? i}>
-                          <TableCell className='font-medium'>{p.email}</TableCell>
-                          <TableCell className='text-right tabular-nums'>{num(p.calls)}</TableCell>
-                          <TableCell><When d={p.last} /></TableCell>
-                          <TableCell className='text-muted-foreground'>{(p.clients ?? []).map((c) => c.split(' ')[0]).join(', ')}</TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                  )}</PagedTable>
-                </div>
-</>
-            </Section>
-            <Section title='Tools' description='Which parts of Octillion your team uses.'>
+          <div className='flex flex-col gap-10'>
+            <Section title='Tools' description={users.length ? 'Which parts of Octillion the people picked use.' : 'Which parts of Octillion your team uses.'}>
               <>
                 <div className='overflow-x-auto'>
                   <PagedTable items={u.tools} empty='No tool calls yet.' noun='tools'>{(rows) => (

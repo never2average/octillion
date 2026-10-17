@@ -1129,6 +1129,14 @@ try {
     assert.equal((await appCall(ownerC, "POST", "/team/invitations", { email: `third+${stamp}@acme-smoke.dev`, role: "member" })).status, 201, "admins invite from /app");
     const usageO = await json(appCall(ownerC, "GET", "/usage"));
     assert.ok(usageO.people.some((p: any) => p.email === `dev+${stamp}@acme-smoke.dev`), "usage per person, by email");
+    // The people filter: everyone on the team is offered; picking someone narrows calls, tools, runs and spend to them.
+    const devP = usageO.people.find((p: any) => p.email === `dev+${stamp}@acme-smoke.dev`);
+    const usageD = await json(appCall(ownerC, "GET", `/usage?user=${encodeURIComponent(devP.user_id)}`));
+    assert.deepEqual(usageD.filters.user, [devP.user_id]);
+    assert.ok(usageD.daily.reduce((n: number, d: any) => n + Number(d.calls), 0) <= usageO.daily.reduce((n: number, d: any) => n + Number(d.calls), 0));
+    assert.equal(usageD.spend.filtered, true, "spend is for the selected people");
+    const usageN = await json(appCall(ownerC, "GET", "/usage?user=user_nobody"));
+    assert.equal(usageN.daily.length + usageN.tools.length + Number(usageN.runs.simulations) + usageN.active_people, 0, "an unknown person has no usage");
     assert.equal((await appCall(ownerC, "POST", `/team/members/${acc2.user.id}/deactivate`)).status, 204);
     const gone = await appCall(devC, "GET", "/me");
     assert.equal(gone.status, 403, "a suspended member loses the page");

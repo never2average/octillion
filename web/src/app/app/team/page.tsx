@@ -1,7 +1,6 @@
-import { TeamPage } from '@/features/portal/team';
+import { redirect } from 'next/navigation';
 
-export const metadata = { title: 'Team' };
-
+// The team is part of the Billing page.
 export default function Page() {
-  return <TeamPage />;
+  redirect('/app/billing#team');
 }

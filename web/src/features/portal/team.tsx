@@ -1,10 +1,9 @@
 'use client';
-// /app Team: one flat page. People live in Clerk (the API server talks to it); account admins invite colleagues, set
+// Billing → Team: one flat section of the Billing page. People live in Clerk (the API server talks to it); account admins invite colleagues, set
 // roles, and suspend or restore a person's Octillion access (their AI client and this portal) without removing them.
 import { PagedTable } from '@/components/layout/table-pager';
 import { useState } from 'react';
 import { toast } from 'sonner';
-import PageContainer from '@/components/layout/page-container';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -36,7 +35,8 @@ function Section({ title, description, action, children }: { title: string; desc
   );
 }
 
-export function TeamPage() {
+/** The team, as a part of the Billing page: invite, members, pending invitations. */
+export function TeamSection() {
   const { data: t, error, reload } = useOrgLoad(() => appApi<Team>('GET', '/team'));
   const [email, setEmail] = useState(''), [role, setRole] = useState('member'), [sending, setSending] = useState(false);
   const [confirm, setConfirm] = useState<Member | null>(null);
@@ -55,9 +55,9 @@ export function TeamPage() {
       .finally(() => setConfirm(null));
 
   return (
-    <PageContainer pageTitle='Team' pageDescription='Who can use Octillion in your account. People sign in with Google, Microsoft, GitHub or email.'>
+    <div id='team' className='scroll-mt-20'>
       {error ? <ErrorState error={error} /> : !t ? <LoadingCards count={2} /> : (
-        <div className='flex max-w-5xl flex-col gap-8'>
+        <div className='flex flex-col gap-8'>
           {t.error && <Alert variant='destructive'><AlertDescription>{t.error}</AlertDescription></Alert>}
 
           {t.can_manage && (
@@ -164,6 +164,6 @@ export function TeamPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </PageContainer>
+    </div>
   );
 }
