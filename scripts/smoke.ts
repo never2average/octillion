@@ -1044,6 +1044,20 @@ try {
       assert.ok(ownerUsers.users.some((u: any) => u.user_id === acc2.user.id && u.context.answer_style === "executive"), "admins see everyone's");
       assert.equal((await appCall(ownerC, "PUT", "/context/users/user_not_here", { title: "x" })).status, 404, "only members of the account");
       assert.equal((await json(appCall(ownerC, "PUT", `/context/users/${acc2.user.id}`, { title: "Head of DevRel", focus_product: slugP, answer_style: "executive", interests: "why we lose to BullMQ", notes: "set by an admin" }))).notes, "set by an admin");
+      // Memory: anyone adds company/product memory and their own; only admins reach someone else's; delete own or as admin.
+      assert.equal((await appCall(devC, "POST", "/context/memories", { scope: "company", kind: "loud", body: "x" })).status, 400);
+      assert.equal((await appCall(devC, "POST", "/context/memories", { scope: "company", body: "  " })).status, 400);
+      const cm = await json(appCall(devC, "POST", "/context/memories", { scope: "company", kind: "decision", body: "We stopped competing on price with BullMQ." }));
+      const om = await json(appCall(ownerC, "POST", "/context/memories", { scope: "company", kind: "fact", body: "Acme Queue 3 ships exactly-once delivery." }));
+      let mem = await json(appCall(devC, "GET", "/context/memories?scope=company"));
+      assert.deepEqual(mem.memories.map((m: any) => m.id), [om.id, cm.id], "newest first");
+      assert.equal(mem.memories.find((m: any) => m.id === om.id).can_delete, false, "members cannot delete someone else's item");
+      assert.equal((await appCall(devC, "DELETE", `/context/memories/${om.id}`)).status, 403);
+      assert.equal((await appCall(devC, "POST", "/context/memories", { scope: "user", subject: accepted.user.id, body: "x" })).status, 403, "not someone else's personal memory");
+      await json(appCall(devC, "POST", "/context/memories", { scope: "user", kind: "preference", body: "Lead with the Python numbers." }));
+      assert.equal((await json(appCall(ownerC, "GET", `/context/memories?scope=user&subject=${acc2.user.id}`))).memories.length, 1, "admins see anyone's");
+      assert.equal((await appCall(devC, "POST", "/context/memories", { scope: "product", subject: "no-such-product", body: "x" })).status, 404);
+      await json(appCall(devC, "POST", "/context/memories", { scope: "product", subject: slugP, kind: "fact", body: "Docs moved to /v3 in October." }));
       const instructionsFor = async (t: string) => {
         const c = new Client({ name: "smoke-context", version: "1.0.0" });
         await c.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${t}` } } }));
@@ -1053,6 +1067,12 @@ try {
       assert.match(devI, /Acme builds a job queue/, "company context reaches the AI client");
       assert.match(devI, /role: Head of DevRel; focus product: /, "so does the person's own");
       assert.match(devI, /Write for an executive/);
+      assert.match(devI, /Company memory:[\s\S]*fact: Acme Queue 3 ships exactly-once[\s\S]*decision: We stopped competing/, "company memory reaches the AI client");
+      assert.match(devI, /asked you to remember:[\s\S]*preference: Lead with the Python numbers/);
+      assert.match(devI, /Memory about [\s\S]*Docs moved to \/v3/, "so does their focus product's");
+      assert.equal((await appCall(ownerC, "DELETE", `/context/memories/${cm.id}`)).status, 204, "admins delete any item");
+      mem = await json(appCall(devC, "GET", "/context/memories?scope=company"));
+      assert.deepEqual(mem.memories.map((m: any) => m.id), [om.id]);
       const ownerI = await instructionsFor(await token({ user_id: accepted.user.id }));
       assert.ok(ownerI.includes("Acme builds") && !ownerI.includes("Head of DevRel"), "personal context stays personal");
       // Product context, edited on the page.

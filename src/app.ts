@@ -277,6 +277,37 @@ export function appRouter() {
   api.put("/context/me", async (req, res) => {
     res.json(await context.savePerson(S(res).org, S(res).user!, req.body ?? {}));
   });
+  // Memory: anyone on the account adds company and product memory and their own; admins add to anyone's and delete
+  // any item, everyone else deletes what they added.
+  const memorySubject = async (res: Response, scope: string, subject: unknown) => {
+    const s = S(res);
+    if (scope !== "user") return String(subject ?? "");
+    const id = String(subject || s.user || "");
+    if (!id) throw new AppError("Sign in as a person to keep personal memory");
+    if (id !== s.user) {
+      adminOnly(res);
+      if (!(await admin.team(s.slug)).members.some((m) => m.user_id === id)) throw new AppError("Not a member of this account", 404);
+    }
+    return id;
+  };
+  api.get("/context/memories", async (req, res) => {
+    const scope = String(req.query.scope ?? "") as context.MemoryScope;
+    if (!context.MEMORY_SCOPES.includes(scope)) throw new AppError("scope must be company, user or product");
+    const me = actor(res), admin_ = S(res).role === "admin";
+    const memories = await context.listMemories(S(res).org, scope, await memorySubject(res, scope, req.query.subject));
+    res.json({ memories: memories.map((m) => ({ ...m, created_by: m.created_by?.replace(/^customer:/, "") ?? null, can_delete: admin_ || m.created_by === me })), kinds: context.MEMORY_KINDS });
+  });
+  api.post("/context/memories", async (req, res) => {
+    const scope = String(req.body?.scope ?? "");
+    res.status(201).json(await context.addMemory(S(res).org, actor(res), req.body ?? {}, await memorySubject(res, scope, req.body?.subject)));
+  });
+  api.delete("/context/memories/:id", async (req, res) => {
+    const m = await context.getMemory(S(res).org, Number(req.params.id));
+    if (!m) throw new AppError("Not found", 404);
+    if (m.created_by !== actor(res)) adminOnly(res);
+    await context.deleteMemory(S(res).org, m.id);
+    res.status(204).end();
+  });
   // Users: admins see and edit everyone's context; members only their own.
   api.get("/context/users", async (_req, res) => {
     const s = S(res);

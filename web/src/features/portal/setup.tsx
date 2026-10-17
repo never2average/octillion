@@ -58,7 +58,7 @@ export function SetupPage() {
             <TipsSection />
           </div>
           {/* Two floating panels, pinned while the main column scrolls: the connection string and the journey picker. */}
-          <div className='order-1 flex min-w-0 flex-col gap-4 lg:sticky lg:top-[4.5rem] lg:order-2 lg:col-span-2 lg:max-h-[calc(100svh-5.5rem)]'>
+          <div className='order-1 flex min-w-0 flex-col gap-4 lg:sticky lg:top-[4.5rem] lg:order-2 lg:col-span-2'>
             <ConnectionBox s={s} onConnected={reload} />
             <JourneyPicker setup={{ done: s.done, total: s.total }} journeys={jr?.journeys ?? []} selected={journey ? selected : 'setup'} onSelect={(id) => {
               void setSelected(id === 'setup' ? null : id);
@@ -117,7 +117,7 @@ function ConnectionBox({ s, onConnected }: { s: Setup; onConnected: () => void }
   };
   const groups: [Client['group'], string][] = [['chat', 'Chat apps'], ['agent', 'Coding agents · by share of developers'], ['editor', 'Editors']];
   return (
-    <FloatPanel title='Connection string' className='lg:max-h-[58%] lg:shrink-0 lg:overflow-y-auto'
+    <FloatPanel title='Connection string'
       description={s.connect.secret ? 'This link contains your key: keep it private.' : 'One URL for every client. No secret in it: your client asks you to sign in.'}>
       <div className='space-y-4'>
         <div className='flex gap-2'>
@@ -196,35 +196,45 @@ function JourneyPicker({ setup, journeys, selected, onSelect }: { setup: { done:
   const items = [{ id: 'setup', name: 'Get set up', goal: 'Connect your client and try the workflow once', done: setup.done, total: setup.total },
     ...journeys.map((j) => ({ id: j.id, name: j.name, goal: j.outcome, done: j.done, total: j.total }))];
   const needle = q.trim().toLowerCase();
-  const shown = needle ? items.filter((j) => `${j.name} ${j.goal}`.toLowerCase().includes(needle)) : items;
+  const [all, setAll] = useState(false);
+  const matches = needle ? items.filter((j) => `${j.name} ${j.goal}`.toLowerCase().includes(needle)) : items;
+  // Fit the pinned column: past SEARCH_FROM, show the first few (and the selected one) until searched or expanded.
+  const shown = needle || all || matches.length <= SEARCH_FROM ? matches
+    : [...matches.slice(0, SEARCH_FROM - 1), ...matches.slice(SEARCH_FROM - 1).filter((j) => j.id === selected)];
   return (
-    <FloatPanel title='Journeys' description='Real use cases as step-by-step pipelines. Pick one to replicate it.' className='lg:min-h-0 lg:flex-1'>
+    <FloatPanel title='Journeys' description='Real use cases as step-by-step pipelines. Pick one to replicate it.' >
       {items.length > SEARCH_FROM && (
         <div className='relative'>
           <Icons.search className='text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2' />
           <Input type='search' value={q} onChange={(e) => setQ(e.target.value)} placeholder={`Search ${items.length} journeys`} aria-label='Search journeys' className='h-8 pl-8 text-sm' />
         </div>
       )}
-      <div role='radiogroup' aria-label='Journey' className='-mx-1 flex min-h-0 flex-col gap-1 overflow-y-auto px-1'>
+      <div role='radiogroup' aria-label='Journey' className='flex flex-col gap-0.5'>
         {shown.length === 0 && <p className='text-muted-foreground px-2 py-3 text-sm'>No journey matches “{q}”.</p>}
         {shown.map((j) => {
           const on = j.id === selected, complete = j.total > 0 && j.done >= j.total;
           return (
             <button key={j.id} type='button' role='radio' aria-checked={on} onClick={() => onSelect(j.id)}
-              className={cn('flex shrink-0 items-center gap-3 rounded-lg border px-3 py-2.5 text-left transition-colors',
+              title={j.goal}
+              className={cn('flex items-center gap-3 rounded-lg border px-3 py-2 text-left transition-colors',
                 on ? 'border-primary bg-primary/5' : 'hover:bg-muted/60 border-transparent')}>
-              <span className={cn('flex size-5 shrink-0 items-center justify-center rounded-full border-2', complete ? 'border-primary bg-primary text-primary-foreground' : on ? 'border-primary' : 'border-muted-foreground/40')}>
+              <span className={cn('flex size-4 shrink-0 items-center justify-center rounded-full border-2', complete ? 'border-primary bg-primary text-primary-foreground' : on ? 'border-primary' : 'border-muted-foreground/40')}>
                 {complete && <Icons.check className='size-3' />}
               </span>
-              <span className='min-w-0 flex-1'>
-                <span className='block text-sm font-medium'>{j.name}</span>
-                <span className='text-muted-foreground block truncate text-xs'>{j.goal}</span>
-              </span>
+              <span className='min-w-0 flex-1 truncate text-sm font-medium'>{j.name}</span>
               <span className='text-muted-foreground shrink-0 text-xs tabular-nums'>{j.done}/{j.total}</span>
             </button>
           );
         })}
       </div>
+      {!needle && matches.length > shown.length && (
+        <button type='button' onClick={() => setAll(true)} className='text-primary self-start px-3 text-xs font-medium hover:underline'>
+          Show all {matches.length} journeys
+        </button>
+      )}
+      {!needle && all && matches.length > SEARCH_FROM && (
+        <button type='button' onClick={() => setAll(false)} className='text-muted-foreground self-start px-3 text-xs hover:underline'>Show fewer</button>
+      )}
     </FloatPanel>
   );
 }

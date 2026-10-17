@@ -13,6 +13,7 @@ import { PageTabs } from '@/components/layout/page-tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { Icons } from '@/components/icons';
 import { appApi } from '@/lib/api-client';
+import { Memory } from './memory';
 import { ErrorState, FormRow, LoadingCards, fail, useOrgLoad } from './shared';
 
 interface Company { about: string | null; audience: string | null; competitors: string[]; terms: string | null; notes_for_ai: string | null; updated_at: string | null; updated_by: string | null }
@@ -58,7 +59,7 @@ export function ContextPage({ section }: { section: ContextSection }) {
         <div className='flex max-w-6xl flex-col gap-6'>
           <div className='grid gap-x-12 gap-y-8 lg:grid-cols-5'>
             <div className='lg:col-span-3'>
-              {shown === 'company' ? <CompanyForm key='c' d={d} onSaved={reload} /> : shown === 'users' ? <UsersSection key='u' d={d} onSaved={reload} /> : <Products key='p' d={d} onSaved={reload} />}
+              {shown === 'company' ? <div className='flex flex-col gap-10'><CompanyForm key='c' d={d} onSaved={reload} /><Memory scope='company' label='Company' onChange={reload} /></div> : shown === 'users' ? <UsersSection key='u' d={d} onSaved={reload} /> : <Products key='p' d={d} onSaved={reload} />}
             </div>
             <Card className='h-fit lg:col-span-2'>
               <CardHeader>
@@ -125,7 +126,7 @@ function UsersSection({ d, onSaved }: { d: Ctx; onSaved: () => void }) {
   const user = rows.find((u) => u.user_id === pick);
   const label = (u: UserRow) => `${u.name || u.email || 'Unnamed user'}${u.me ? ' (you)' : ''}${u.active ? '' : ' · suspended'}`;
   return (
-    <div className='flex flex-col gap-6'>
+    <div className='flex flex-col gap-10'>
       {rows.length > 1 && (
         <FormRow label='User' htmlFor='uPick'>
           <NativeSelect id='uPick' value={pick} onChange={(e) => setPick(e.target.value)}>
@@ -134,6 +135,7 @@ function UsersSection({ d, onSaved }: { d: Ctx; onSaved: () => void }) {
         </FormRow>
       )}
       {user && <PersonForm key={user.user_id} d={d} user={user} onSaved={() => { load(); onSaved(); }} />}
+      {user && <Memory key={`m-${user.user_id}`} scope='user' subject={user.user_id} label={user.me ? 'You' : (user.name || user.email || 'this user')} onChange={onSaved} />}
     </div>
   );
 }
@@ -262,6 +264,7 @@ function Products({ d, onSaved }: { d: Ctx; onSaved: () => void }) {
         </CardContent>
         {!ro && slug && <CardFooter><Button type='submit' disabled={busy}>{isNew ? 'Create product' : 'Save product'}</Button></CardFooter>}
       </FormCard>
+      {!isNew && slug && <Memory key={`m-${slug}`} scope='product' subject={slug} label={d.products.find((x) => x.slug === slug)?.name ?? slug} onChange={onSaved} />}
       {!isNew && slug && (
         <Card>
           <CardHeader>

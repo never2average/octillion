@@ -586,3 +586,17 @@ CREATE TABLE IF NOT EXISTS journey_progress (
   user_id     TEXT,                              -- who marked it, for manual stages
   PRIMARY KEY (org_id, journey_id, stage_id)
 );
+
+-- Institutional memory (src/context.ts): short items people add on /app/context beside the core fields. Scope is the
+-- company, one user (subject = Clerk user id) or one product (subject = product slug). Fed to the AI client as background.
+CREATE TABLE IF NOT EXISTS context_memories (
+  id          BIGSERIAL PRIMARY KEY,
+  org_id      INT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  scope       TEXT NOT NULL CHECK (scope IN ('company', 'user', 'product')),
+  subject     TEXT NOT NULL DEFAULT '',
+  kind        TEXT NOT NULL DEFAULT 'note' CHECK (kind IN ('fact', 'decision', 'preference', 'note')),
+  body        TEXT NOT NULL,
+  created_by  TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS context_memories_scope ON context_memories (org_id, scope, subject, created_at DESC);
