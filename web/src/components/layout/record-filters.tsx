@@ -2,7 +2,7 @@
 // The Notion-style database controls for RecordView: the column / rule types, the pure filter, sort and group helpers,
 // and the toolbar menus (filter chips, sort, properties, group). RecordView re-exports the types; pages import from there.
 import type { ReactNode } from 'react';
-import { IconArrowsSort, IconColumns3, IconFilter, IconLayoutRows } from '@tabler/icons-react';
+import { IconAdjustmentsHorizontal, IconArrowsSort, IconColumns3, IconFilter, IconLayoutRows } from '@tabler/icons-react';
 import { DateRangePicker, last30, rangeLabel, type DateRange } from '@/components/layout/date-range-picker';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -327,5 +327,72 @@ export function GroupMenu<T>({ cols, group, setGroup }: { cols: RecordCol<T>[]; 
         {can.map((c) => <DropdownMenuCheckboxItem key={c.key} checked={cur?.key === c.key} onCheckedChange={() => setGroup(c.key)}>{colName(c)}</DropdownMenuCheckboxItem>)}
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+/** Sort, group and columns in one popover, so the toolbar is just search, Filter, this and the primary action. */
+export function ViewMenu<T>({ cols, sort, setSort, group, setGroup, hidden, setHidden, groupable, properties }: {
+  cols: RecordCol<T>[]; sort: SortRule[]; setSort: (s: SortRule[]) => void;
+  group: string | null; setGroup: (g: string | null) => void; hidden: string[]; setHidden: (h: string[]) => void;
+  groupable?: boolean; properties?: boolean;
+}) {
+  const sortable = cols.filter(typed), groupBy = cols.filter((c) => c.type === 'select' && c.value);
+  const first = sort[0], cur = groupBy.find((c) => c.key === group);
+  const nHidden = hidden.filter((k) => cols.some((c) => c.key === k && !c.title)).length;
+  const changed = !!cur || nHidden > 0;
+  const label = 'text-muted-foreground text-xs font-medium leading-none';
+  return (
+    <Popover>
+      <PopoverTrigger render={<Button variant='ghost' size='icon' aria-label='View options' title='Sort, group and columns' className={cn(changed && 'text-primary')} />}>
+        <IconAdjustmentsHorizontal />
+      </PopoverTrigger>
+      <PopoverContent align='end' className='flex w-72 flex-col gap-4'>
+        {sortable.length > 0 && (
+          <div className='flex flex-col gap-2'>
+            <span className={label}>Sort by</span>
+            <div className='flex items-center gap-2'>
+              <NativeSelect size='sm' aria-label='Sort by' value={first?.key ?? ''} className='flex-1'
+                onChange={(e) => setSort(e.target.value ? [{ key: e.target.value, dir: first?.dir ?? 'asc' }] : [])}>
+                <NativeSelectOption value=''>Default order</NativeSelectOption>
+                {sortable.map((c) => <NativeSelectOption key={c.key} value={c.key}>{colName(c)}</NativeSelectOption>)}
+              </NativeSelect>
+              <NativeSelect size='sm' aria-label='Direction' value={first?.dir ?? 'asc'} disabled={!first}
+                onChange={(e) => first && setSort([{ ...first, dir: e.target.value as SortRule['dir'] }, ...sort.slice(1)])}>
+                <NativeSelectOption value='asc'>Ascending</NativeSelectOption>
+                <NativeSelectOption value='desc'>Descending</NativeSelectOption>
+              </NativeSelect>
+            </div>
+          </div>
+        )}
+        {groupable && groupBy.length > 0 && (
+          <div className='flex flex-col gap-2'>
+            <span className={label}>Group by</span>
+            <NativeSelect size='sm' aria-label='Group by' value={cur?.key ?? ''} onChange={(e) => setGroup(e.target.value || null)}>
+              <NativeSelectOption value=''>No grouping</NativeSelectOption>
+              {groupBy.map((c) => <NativeSelectOption key={c.key} value={c.key}>{colName(c)}</NativeSelectOption>)}
+            </NativeSelect>
+          </div>
+        )}
+        {properties && (
+          <div className='flex flex-col gap-2'>
+            <div className='flex items-center justify-between'>
+              <span className={label}>Columns</span>
+              {nHidden > 0 && <button type='button' className='text-primary text-xs leading-none hover:underline' onClick={() => setHidden([])}>Show all</button>}
+            </div>
+            <ul className='flex max-h-56 flex-col gap-0.5 overflow-y-auto'>
+              {cols.map((c) => (
+                <li key={c.key}>
+                  <label className={cn('hover:bg-muted flex items-center gap-2 rounded px-1.5 py-1.5 text-sm leading-none', c.title ? 'opacity-60' : 'cursor-pointer')}>
+                    <Checkbox disabled={c.title} checked={c.title || !hidden.includes(c.key)}
+                      onCheckedChange={(on) => setHidden(on ? hidden.filter((k) => k !== c.key) : [...hidden, c.key])} />
+                    <span className='truncate'>{colName(c)}</span>
+                  </label>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </PopoverContent>
+    </Popover>
   );
 }

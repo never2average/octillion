@@ -6,7 +6,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { IconArrowDown, IconArrowUp } from '@tabler/icons-react';
 import {
-  applyFilters, colName, FilterButton, FilterChips, GroupMenu, groupRows, PropertiesMenu, ruleActive, SortMenu, sortRows, typed,
+  applyFilters, colName, FilterButton, FilterChips, groupRows, ruleActive, sortRows, ViewMenu, typed,
   type FilterRule, type Group, type RecordCol, type RowAction, type SortRule
 } from '@/components/layout/record-filters';
 import { TablePager, usePaged } from '@/components/layout/table-pager';
@@ -229,9 +229,10 @@ export function RecordView<T>({
         </div>
         {filters}
         {anyTyped && <FilterButton cols={cols} count={rules.filter(ruleActive).length} onAdd={addRule} />}
-        {anyTyped && <SortMenu cols={cols} sort={sort} setSort={setSort} />}
-        {database && cols.length > 3 && <PropertiesMenu cols={cols} hidden={hidden} setHidden={setHidden} />}
-        {groupable && <GroupMenu cols={cols} group={groupCol?.key ?? null} setGroup={setGroup} />}
+        {(anyTyped || groupable || (database && cols.length > 3)) && (
+          <ViewMenu cols={cols} sort={sort} setSort={setSort} group={groupCol?.key ?? null} setGroup={setGroup}
+            hidden={hidden} setHidden={setHidden} groupable={groupable} properties={database && cols.length > 3} />
+        )}
         {primaryNode}
       </div>
 
