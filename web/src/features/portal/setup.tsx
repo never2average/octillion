@@ -8,6 +8,7 @@ import { toast } from 'sonner';
 import PageContainer from '@/components/layout/page-container';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Section } from '@/components/layout/section';
 import { Input } from '@/components/ui/input';
@@ -137,12 +138,18 @@ function ConnectionBox({ s, onConnected }: { s: Setup; onConnected: () => void }
           </Button>
         </div>
         {c && (
-          <details className='group text-sm'>
-            <summary className='text-muted-foreground hover:text-foreground flex cursor-pointer list-none items-center gap-1 text-xs font-medium'>
-              <Icons.chevronRight className='size-3.5 transition-transform group-open:rotate-90' /> How to add it in {c.client}
-            </summary>
-            <div className='pt-2'><ClientSteps c={c} /></div>
-          </details>
+          <Dialog>
+            <DialogTrigger render={<button type='button' className='text-muted-foreground hover:text-foreground flex items-center gap-1 text-xs font-medium' />}>
+              <Icons.help className='size-3.5' /> How to add it in {c.client}
+            </DialogTrigger>
+            <DialogContent className='sm:max-w-lg'>
+              <DialogHeader>
+                <DialogTitle>Add Octillion to {c.client}</DialogTitle>
+                <DialogDescription>Then press Test to check it reaches us.</DialogDescription>
+              </DialogHeader>
+              <ClientSteps c={c} />
+            </DialogContent>
+          </Dialog>
         )}
         {live && (
           <Alert variant={live.kind === 'bad' ? 'destructive' : 'default'} role='status' aria-live='polite'
