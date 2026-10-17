@@ -253,7 +253,7 @@ const ERROR_COLS: Record<ErrorKind, string[]> = {
   session: ['at', 'account', 'slug', 'product', 'simulation_id', 'model', 'harness', 'status', 'error', 'cost_usd'],
   onboarding: ['at', 'account', 'slug', 'product', 'stage', 'error']
 };
-const KINDS: { id: ErrorKind; label: string }[] = [{ id: 'tool', label: 'Tool calls' }, { id: 'session', label: 'Agent sessions' }, { id: 'onboarding', label: 'Onboarding' }];
+const KINDS: { id: ErrorKind; label: string }[] = [{ id: 'tool', label: 'Tool call errors' }, { id: 'session', label: 'Failed agent sessions' }, { id: 'onboarding', label: 'Failed onboardings' }];
 const SECTIONS = {
   analytics: [['summary', 'Summary'], ['daily', 'Daily'], ['tools', 'Tool adoption'], ['clients', 'Clients'], ['accounts', 'Accounts'], ['retention', 'Retention']],
   health: [['health-summary', 'Summary'], ['errors-tool', 'Tool call errors (all)'], ['errors-session', 'Agent session failures (all)'], ['errors-onboarding', 'Onboarding failures (all)']]
@@ -593,7 +593,7 @@ function HealthBody({ a, base, match }: { a: Analytics; base: string; match: (r:
       <div className='flex min-h-0 flex-1 flex-col gap-2'>
         <div className='flex shrink-0 items-center gap-2'>
           <NativeSelect size='sm' aria-label='Errors from' value={kind} onChange={(e) => setKind(e.target.value as ErrorKind)}>
-            {KINDS.map((k) => <NativeSelectOption key={k.id} value={k.id}>{k.label} errors · {num(counts[k.id])}</NativeSelectOption>)}
+            {KINDS.map((k) => <NativeSelectOption key={k.id} value={k.id}>{k.label} · {num(counts[k.id])}</NativeSelectOption>)}
           </NativeSelect>
           {isFetching && <Icons.spinner className='text-muted-foreground size-4 animate-spin' />}
         </div>
