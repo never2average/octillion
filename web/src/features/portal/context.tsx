@@ -2,6 +2,7 @@
 // /app Context: the account's institutional memory, one page each for the company, a user and a product. Each page
 // does three things: show the memory list, save to it (the floating Remember button and its docked editor), and
 // search it. The AI client reads and writes the same memory (save_to_memory, search_memory; src/context.ts).
+import { TablePager, usePaged } from '@/components/layout/table-pager';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import PageContainer from '@/components/layout/page-container';
@@ -74,6 +75,7 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
       .catch((e) => { fail(e); return false; });
   const remove = (m: MemoryItem) => appApi('DELETE', `/context/memories/${m.id}`).then(() => { toast.success('Removed from memory'); load(); }).catch(fail);
 
+  const page = usePaged(shown);
   const noSubject = section !== 'company' && !subject;
   return (
     <div className='flex min-w-0 flex-col gap-3 pb-24'>
@@ -114,7 +116,7 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
                   {q ? 'No memory matches.' : 'Nothing remembered yet. Press Remember to save the first item.'}
                 </TableCell></TableRow>
               )}
-              {shown.map((m) => (
+              {page.rows.map((m) => (
                 <TableRow key={m.id} className={cn('group align-top', m.can_delete && 'cursor-pointer')} onClick={m.can_delete ? () => setEditing({ item: m }) : undefined}>
                   <TableCell className='py-3'><span className={cn('rounded-full px-2 py-0.5 text-[11px] font-medium', TYPE_STYLE[m.kind] ?? TYPE_STYLE.note)}>{m.kind}</span></TableCell>
                   <TableCell className='py-3 whitespace-normal'><p className='text-sm whitespace-pre-wrap'>{m.body}</p></TableCell>
@@ -132,6 +134,7 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
               ))}
             </TableBody>
           </Table>
+          <TablePager p={page} noun='memories' className='border-t px-2' />
         </div>
       )}
 

@@ -1,5 +1,6 @@
 'use client';
 // /app Usage: the whole team's activity across every AI client, and model spend against the plan.
+import { PagedTable } from '@/components/layout/table-pager';
 import { useMemo, useState } from 'react';
 import { Area, AreaChart, Bar, BarChart, CartesianGrid, XAxis, YAxis } from 'recharts';
 import PageContainer from '@/components/layout/page-container';
@@ -103,10 +104,11 @@ export function UsagePage() {
             <Section title='People' description='Who is using Octillion and from which clients.'>
               {u.people.length ? (
                 <div className='overflow-x-auto'>
+                  <PagedTable items={u.people} noun='people'>{(rows) => (
                   <Table>
                     <TableHeader><TableRow><TableHead>Person</TableHead><TableHead className='text-right'>Calls</TableHead><TableHead>Last active</TableHead><TableHead>Clients</TableHead></TableRow></TableHeader>
                     <TableBody>
-                      {u.people.map((p, i) => (
+                      {rows.map((p, i) => (
                         <TableRow key={p.user_id ?? i}>
                           <TableCell className='font-medium'>{p.email}</TableCell>
                           <TableCell className='text-right tabular-nums'>{num(p.calls)}</TableCell>
@@ -116,16 +118,18 @@ export function UsagePage() {
                       ))}
                     </TableBody>
                   </Table>
+                  )}</PagedTable>
                 </div>
               ) : <NoData text='Nobody has connected yet.' />}
             </Section>
             <Section title='Tools' description='Which parts of Octillion your team uses.'>
               {u.tools.length ? (
                 <div className='overflow-x-auto'>
+                  <PagedTable items={u.tools} noun='tools'>{(rows) => (
                   <Table>
                     <TableHeader><TableRow><TableHead>Tool</TableHead><TableHead className='text-right'>Calls</TableHead><TableHead className='text-right'>Errors</TableHead><TableHead className='text-right'>Avg</TableHead></TableRow></TableHeader>
                     <TableBody>
-                      {u.tools.map((t) => (
+                      {rows.map((t) => (
                         <TableRow key={t.name}>
                           <TableCell className='font-mono text-xs'>{t.name}</TableCell>
                           <TableCell className='text-right tabular-nums'>{num(t.calls)}</TableCell>
@@ -135,6 +139,7 @@ export function UsagePage() {
                       ))}
                     </TableBody>
                   </Table>
+                  )}</PagedTable>
                 </div>
               ) : <NoData text='No tool calls yet.' />}
             </Section>

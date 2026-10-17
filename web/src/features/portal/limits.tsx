@@ -1,6 +1,7 @@
 'use client';
 // /app Limits: account admins split the plan's monthly model budget across teams and people (shared pool, even split
 // with adjustments, or custom caps), choose who may launch simulations, and cap throughput. Everyone sees their allowance.
+import { PagedTable } from '@/components/layout/table-pager';
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import PageContainer from '@/components/layout/page-container';
@@ -165,10 +166,11 @@ function Teams({ d, reload }: { d: Limits; reload: () => void }) {
     <Section title='Teams' description={"A team's budget is split among its members (in Split evenly) and caps the team's combined spend in every mode."}>
       <div className='overflow-x-auto'>
         {d.teams.length ? (
+          <PagedTable items={d.teams} noun='teams'>{(rows) => (
           <Table>
             <TableHeader><TableRow><TableHead>Team</TableHead><TableHead>Budget</TableHead><TableHead>Spent</TableHead><TableHead>People</TableHead><TableHead>Runs at once</TableHead><TableHead /></TableRow></TableHeader>
             <TableBody>
-              {d.teams.map((t) => (
+              {rows.map((t) => (
                 <TableRow key={t.id}>
                   <TableCell className='font-medium'>{t.name}</TableCell>
                   <TableCell>{t.budget_usd == null ? <span className='text-muted-foreground'>no cap</span> : usd(t.budget_usd)}</TableCell>
@@ -185,6 +187,7 @@ function Teams({ d, reload }: { d: Limits; reload: () => void }) {
               ))}
             </TableBody>
           </Table>
+          )}</PagedTable>
         ) : <p className='text-muted-foreground text-sm'>No teams. Everyone shares the account budget.</p>}
       </div>
       <form onSubmit={create} className='grid w-full gap-2 sm:grid-cols-[2fr_1fr_1fr_auto]'>
@@ -235,6 +238,7 @@ function People({ d, reload }: { d: Limits; reload: () => void }) {
     <Section title='People' description='Changes save as you make them.'>
       <div className='overflow-x-auto'>
         {d.members.length ? (
+          <PagedTable items={d.members} noun='people'>{(rows) => (
           <Table className='min-w-[820px]'>
             <TableHeader>
               <TableRow>
@@ -244,7 +248,7 @@ function People({ d, reload }: { d: Limits; reload: () => void }) {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {d.members.map((m) => (
+              {rows.map((m) => (
                 <TableRow key={m.user_id}>
                   <TableCell>
                     <div className='flex items-center gap-2 font-medium'>{m.name || m.email}{m.role === 'admin' && <Badge variant='outline'>admin</Badge>}</div>
@@ -272,6 +276,7 @@ function People({ d, reload }: { d: Limits; reload: () => void }) {
               ))}
             </TableBody>
           </Table>
+          )}</PagedTable>
         ) : <p className='text-muted-foreground text-sm'>No active members.</p>}
       </div>
     </Section>

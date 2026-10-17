@@ -1,5 +1,6 @@
 'use client';
 // Small presentational pieces shared by the admin pages, on top of the template's shadcn components.
+import { TablePager, usePaged } from '@/components/layout/table-pager';
 import { useState, type ReactNode } from 'react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
@@ -98,9 +99,11 @@ export interface Col<T> {
 }
 
 /** A simple table on the page; scrolls sideways on small screens. */
-export function DataList<T>({ cols, rows, empty, onRow, minWidth = 640 }: { cols: Col<T>[]; rows: T[] | undefined; empty: ReactNode; onRow?: (r: T) => void; minWidth?: number }) {
+export function DataList<T>({ cols, rows, empty, onRow, minWidth = 640, noun }: { cols: Col<T>[]; rows: T[] | undefined; empty: ReactNode; onRow?: (r: T) => void; minWidth?: number; noun?: string }) {
+  const p = usePaged(rows ?? []);
   if (!rows?.length) return <p className='text-muted-foreground py-6 text-center text-sm'>{empty}</p>;
   return (
+    <div>
     <div className='overflow-x-auto'>
       <Table style={{ minWidth }}>
         <TableHeader>
@@ -113,7 +116,7 @@ export function DataList<T>({ cols, rows, empty, onRow, minWidth = 640 }: { cols
           </TableRow>
         </TableHeader>
         <TableBody>
-          {rows.map((r, i) => (
+          {p.rows.map((r, i) => (
             <TableRow
               key={i}
               className={onRow ? 'cursor-pointer' : undefined}
@@ -130,6 +133,8 @@ export function DataList<T>({ cols, rows, empty, onRow, minWidth = 640 }: { cols
           ))}
         </TableBody>
       </Table>
+    </div>
+    <TablePager p={p} noun={noun} />
     </div>
   );
 }

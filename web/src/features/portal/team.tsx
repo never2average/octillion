@@ -1,6 +1,7 @@
 'use client';
 // /app Team: one flat page. People live in Clerk (the API server talks to it); account admins invite colleagues, set
 // roles, and suspend or restore a person's Octillion access (their AI client and this portal) without removing them.
+import { PagedTable } from '@/components/layout/table-pager';
 import { useState } from 'react';
 import { toast } from 'sonner';
 import PageContainer from '@/components/layout/page-container';
@@ -79,12 +80,13 @@ export function TeamPage() {
             ? 'Suspending someone cuts off their AI client and portal access within a minute; they stay in the account and can be restored.'
             : 'Ask an account admin to change roles or access.'}>
             <div className='overflow-x-auto'>
+              <PagedTable items={t.members} noun='members'>{(rows) => (
               <Table>
                 <TableHeader>
                   <TableRow><TableHead>Person</TableHead><TableHead>Role</TableHead><TableHead>Access</TableHead><TableHead>Joined</TableHead><TableHead className='text-right' /></TableRow>
                 </TableHeader>
                 <TableBody>
-                  {t.members.map((m) => {
+                  {rows.map((m) => {
                     const self = m.user_id === t.me, active = m.status === 'active';
                     return (
                       <TableRow key={m.id}>
@@ -113,6 +115,7 @@ export function TeamPage() {
                   })}
                 </TableBody>
               </Table>
+              )}</PagedTable>
             </div>
           </Section>
 
@@ -120,10 +123,11 @@ export function TeamPage() {
             <Separator />
             <Section title='Pending invitations'>
               <div className='overflow-x-auto'>
+                <PagedTable items={t.invitations} noun='invitations'>{(rows) => (
                 <Table>
                   <TableHeader><TableRow><TableHead>Email</TableHead><TableHead>Role</TableHead><TableHead>Status</TableHead><TableHead>Sent</TableHead><TableHead className='text-right' /></TableRow></TableHeader>
                   <TableBody>
-                    {t.invitations.map((x) => (
+                    {rows.map((x) => (
                       <TableRow key={x.id}>
                         <TableCell className='font-medium'>{x.email}</TableCell>
                         <TableCell><Badge variant='outline'>{x.role === 'admin' ? 'Admin' : 'Member'}</Badge></TableCell>
@@ -141,6 +145,7 @@ export function TeamPage() {
                     ))}
                   </TableBody>
                 </Table>
+                )}</PagedTable>
               </div>
             </Section>
           </>)}
