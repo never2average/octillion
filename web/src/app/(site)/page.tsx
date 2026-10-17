@@ -9,7 +9,8 @@ export default function LandingPage() {
       <WhatIsApo />
       <Scorecard />
       <WhereYouWork />
-      <Section id='faq' eyebrow='FAQ' title='Questions.'>
+      <Section id='faq' eyebrow='FAQ' title='Questions.'
+        lead='Straight answers on how Octillion measures agent preference, what it does and doesn’t touch, which agents it covers, and how your team gets started during early access.'>
         <div className='max-w-3xl'><Faq /></div>
       </Section>
     </>

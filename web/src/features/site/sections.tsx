@@ -141,7 +141,8 @@ const REASONS = [
 
 export function WhyNow() {
   return (
-    <Section id='why' eyebrow='Why now' title='Agents pick the stack now.' lead='Developers accept the diff. Nobody reads your landing page.'>
+    <Section id='why' eyebrow='Why now' title='Agents pick the stack now.'
+      lead='Developers type a task into Claude Code, Codex or Cursor and accept the diff. The agent picks the database, queue or auth library, and nobody reads your landing page.'>
       <div className='grid gap-10 lg:grid-cols-[1.2fr_1fr] lg:items-center'>
         <div className='overflow-hidden rounded-xl border bg-black/40'>
           <div className='flex items-center gap-1.5 border-b px-4 py-3'>
@@ -177,7 +178,8 @@ const ERAS = [
 
 export function WhatIsApo() {
   return (
-    <Section id='apo' eyebrow='What is APO' title='Earn the agent’s pick, and prove it.'>
+    <Section id='apo' eyebrow='What is APO' title='Earn the agent’s pick, and prove it.'
+      lead='Agentic Preference Optimization measures and improves how often coding agents choose your product in the middle of real work. Like SEO, you can’t buy the pick, but you can earn it.'>
       <div className='grid gap-14 lg:grid-cols-2 lg:items-center'>
         <ol className='flex flex-col gap-2'>
           {ERAS.map((e, i) => (
@@ -240,7 +242,8 @@ const VERDICTS = [
 export function Scorecard() {
   const pts = TREND.map((v, i) => `${10 + i * 40},${110 - v * 1.8}`).join(' ');
   return (
-    <Section id='features' eyebrow='Scorecard' title='A number you can move.'>
+    <Section id='features' eyebrow='Scorecard' title='A number you can move.'
+      lead='See your pick rate by agent, task and competitor, with every verdict linked to the transcript behind it. Re-run the same tasks after each docs or SDK change to prove it moved.'>
       <div className='grid gap-x-10 gap-y-12 md:grid-cols-3'>
         <figure className='border-t pt-5'>
           <figcaption className='text-muted-foreground font-mono text-xs uppercase'>By agent</figcaption>
@@ -294,7 +297,8 @@ export function Scorecard() {
 
 export function WhereYouWork() {
   return (
-    <Section id='claude' eyebrow='Claude & ChatGPT' title='Just ask.' lead='Octillion is an MCP server. Run it from the chat you already use.'>
+    <Section id='claude' eyebrow='Claude & ChatGPT' title='Just ask.'
+      lead='Octillion is an MCP server, so you can set up products, launch simulations and explore results in plain language from Claude or ChatGPT, with charts rendered right in the chat.'>
       <div className='mx-auto max-w-2xl space-y-4'>
         <div className='bg-muted ml-auto w-fit max-w-[85%] rounded-2xl rounded-br-sm px-4 py-2.5 text-sm'>Where does Codex pick MongoDB over Postgres?</div>
         <div className='text-muted-foreground flex w-fit items-center gap-2 rounded-full border px-3 py-1.5 font-mono text-xs'>

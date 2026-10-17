@@ -15,6 +15,10 @@ export default function Providers({
     <>
       <ActiveThemeProvider initialTheme={activeThemeValue}>
         <ClerkProvider
+          localization={{
+            signIn: { start: { title: 'Sign in to Octillion', subtitle: 'Welcome back' } },
+            signUp: { start: { title: 'Create your Octillion account', subtitle: 'Measure how coding agents pick your product' } }
+          }}
           appearance={{
             variables: {
               colorPrimary: 'var(--primary)',
