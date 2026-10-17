@@ -30,6 +30,9 @@ export function recordMcpEvent(org: Org, e: McpEvent): void {
        e.error?.slice(0, 500) ?? null, e.ms == null ? null : Math.round(e.ms), org.userId ?? null],
     ))
     .catch((err) => console.error("mcp event record failed:", (err as Error).message));
+  // A successful tool call may complete a stage of a customer journey (src/playbooks.ts): sync shortly after.
+  if (e.method === "tools/call" && e.ok !== false)
+    void import("./playbooks.js").then((m) => m.scheduleSync({ orgId: org.orgId, slug: org.slug }, org.userId)).catch(() => {});
   const event = e.method === "tools/call" ? "tool_called" : PRODUCT_EVENTS[e.method];
   if (!event) return;
   const actor = { distinctId: org.userId ?? `org:${org.slug}`, orgSlug: org.slug };

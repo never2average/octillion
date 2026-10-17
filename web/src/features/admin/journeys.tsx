@@ -2,6 +2,8 @@
 // Journeys live in PostHog Workflows; Octillion delivers their in-chat and /app tips. Status, recipes, delivery, manual tips.
 import { useEffect, useRef, useState } from 'react';
 import PageContainer from '@/components/layout/page-container';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { CustomerJourneys } from './playbooks';
 import { Button } from '@/components/ui/button';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Input } from '@/components/ui/input';
@@ -29,7 +31,22 @@ interface JourneyView {
   recipes: Recipe[];
 }
 
+/** Journeys: the customer journeys shown on /app (written and promoted here), and PostHog nudges. */
 export function AdminJourneys() {
+  const [tab, setTab] = useState<'customer' | 'nudges'>('customer');
+  return (
+    <PageContainer pageTitle='Journeys'
+      pageDescription='Customer journeys are the use-case pipelines customers follow on /app Setup. Nudges are PostHog Workflows steps that Octillion delivers in chat and on /app.'>
+      <Tabs value={tab} onValueChange={(v) => setTab(v as 'customer' | 'nudges')} className='max-w-6xl'>
+        <TabsList><TabsTrigger value='customer'>Customer journeys</TabsTrigger><TabsTrigger value='nudges'>Nudges (PostHog)</TabsTrigger></TabsList>
+        <TabsContent value='customer' className='pt-4'><CustomerJourneys /></TabsContent>
+        <TabsContent value='nudges' className='pt-4'><NudgesPanel /></TabsContent>
+      </Tabs>
+    </PageContainer>
+  );
+}
+
+function NudgesPanel() {
   const { data: j, error, isLoading } = useAdmin<JourneyView>('/journeys');
   const { data: orgs } = useAdmin<{ orgs: { slug: string; name: string }[] }>('/orgs');
   const [org, setOrg] = useState('');
@@ -59,10 +76,7 @@ export function AdminJourneys() {
   };
 
   return (
-    <PageContainer
-      pageTitle='Journeys'
-      pageDescription='Built in PostHog Workflows (triggers, waits, branches, email, Slack). Octillion delivers the in-chat and /app steps: a tip after the next tool call (at most one a day), in get_started, and on /app.'
-    >
+    <>
       <ErrorBox error={error} />
       {isLoading || !j ? (
         <div className='grid gap-4 lg:grid-cols-2'>
@@ -274,6 +288,6 @@ export function AdminJourneys() {
           </Section>
         </div>
       )}
-    </PageContainer>
+    </>
   );
 }

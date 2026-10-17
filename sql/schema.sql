@@ -556,3 +556,33 @@ CREATE TABLE IF NOT EXISTS user_context (
 
 -- Clerk replaced WorkOS for people (src/clerk.ts): the join to a Clerk organization. workos_org_id is no longer used.
 ALTER TABLE organizations ADD COLUMN IF NOT EXISTS clerk_org_id TEXT UNIQUE;
+
+-- Customer journeys (src/playbooks.ts): use-case pipelines shown on /app Setup, managed by platform admins on /admin.
+-- Seeded once with the built-in pipelines; `promoted` ones appear in the portal, in `position` order.
+CREATE TABLE IF NOT EXISTS journey_templates (
+  id              TEXT PRIMARY KEY,               -- slug
+  name            TEXT NOT NULL,
+  outcome         TEXT NOT NULL,
+  who             TEXT NOT NULL DEFAULT '',
+  time            TEXT NOT NULL DEFAULT '',
+  example_title   TEXT NOT NULL DEFAULT '',
+  example_result  TEXT NOT NULL DEFAULT '',
+  stages          JSONB NOT NULL,                 -- [{id, title, why, prompt, tools[], expect, manual?}]
+  promoted        BOOLEAN NOT NULL DEFAULT false,
+  position        INT NOT NULL DEFAULT 0,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_by      TEXT
+);
+
+-- Journey progress per account (src/playbooks.ts): when each stage of a customer journey was first done, by a tool
+-- call or marked by hand. Drives the per-journey funnel on /admin and the journey_* PostHog events (sent once).
+CREATE TABLE IF NOT EXISTS journey_progress (
+  org_id      INT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  journey_id  TEXT NOT NULL,
+  stage_id    TEXT NOT NULL,
+  done_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  source      TEXT NOT NULL CHECK (source IN ('tool', 'manual')),
+  user_id     TEXT,                              -- who marked it, for manual stages
+  PRIMARY KEY (org_id, journey_id, stage_id)
+);

@@ -1,7 +1,7 @@
 'use client';
 // /app Setup & training. Right column: the connection string (with a live connection test), a journey selector and
 // tips. Main column: the selected journey. "Get set up" is the setup checklist with the client guides, "use it fully"
-// and recent problems; the other journeys (src/journeys.ts RECIPES) show their steps, marked from what really happened.
+// and recent problems; the other journeys (managed on /admin, src/playbooks.ts) show their stages, marked from real tool calls.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useQueryState } from 'nuqs';
 import { toast } from 'sonner';
@@ -11,8 +11,8 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Section } from '@/components/layout/section';
 import { Input } from '@/components/ui/input';
+import { NativeSelect, NativeSelectOptGroup, NativeSelectOption } from '@/components/ui/native-select';
 import { Switch } from '@/components/ui/switch';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Icons } from '@/components/icons';
 import { appApi } from '@/lib/api-client';
 import { cn } from '@/lib/utils';
@@ -23,16 +23,23 @@ interface Setup {
   steps: Step[]; done: number; total: number; clients: { client: string; last: string }[]; calls: number;
   groups: { id: string; label: string; prompt: string; used: number; total: number }[];
   errors: { at: string; name: string | null; error: string | null; hint: string | null }[];
-  connect: { connector_url: string; secret: boolean; clients: { client: string; steps: string; snippet?: string }[] };
+  connect: { connector_url: string; secret: boolean; clients: Client[] };
   live: { at: string; client: string | null } | null;
 }
-interface JourneyStep { id: string; title: string; message: string; prompt: string | null; link: string | null; done: boolean; at: string | null }
-interface Journey { id: string; name: string; goal: string; steps: JourneyStep[]; done: number; total: number }
+interface Client {
+  id: string; client: string; group: 'chat' | 'agent' | 'editor'; method: 'ui' | 'cli' | 'config' | 'link'; steps: string;
+  command?: string; snippet?: string; file?: string; install_url?: string; verified: boolean; share: number | null;
+}
+interface Stage { id: string; title: string; why: string; prompt: string; tools: string[]; expect: string; manual?: boolean; done: boolean; at: string | null }
+interface Journey {
+  id: string; name: string; outcome: string; who: string; time: string; example: { title: string; result: string };
+  stages: Stage[]; done: number; total: number;
+}
 interface Tips { muted: boolean; nudges: { id: number; message: string; prompt: string | null; link: string | null }[] }
 
 export function SetupPage() {
   const { data: s, error, reload } = useOrgLoad(() => appApi<Setup>('GET', '/setup'));
-  const { data: jr } = useOrgLoad(() => appApi<{ journeys: Journey[] }>('GET', '/journeys'));
+  const { data: jr, reload: reloadJourneys } = useOrgLoad(() => appApi<{ journeys: Journey[] }>('GET', '/journeys'));
   const [selected, setSelected] = useQueryState('journey', { defaultValue: 'setup' });
   const next = s?.steps.find((x) => !x.done && !x.optional);
   const journey = jr?.journeys.find((x) => x.id === selected) ?? null;
@@ -46,14 +53,16 @@ export function SetupPage() {
           <div className='order-2 flex flex-col gap-8 lg:order-1 lg:col-span-3'>
             {selected === 'setup' || !journey ? (<>
               <Checklist s={s} next={next} />
-              <ClientGuide s={s} />
               {s.errors.length > 0 && <Problems errors={s.errors} />}
               <UseItFully groups={s.groups} />
-            </>) : <JourneyView j={journey} />}
+            </>) : <JourneyView key={journey.id} j={journey} onChanged={reloadJourneys} />}
           </div>
           <div className='order-1 flex flex-col gap-8 lg:order-2 lg:col-span-2'>
             <ConnectionBox s={s} onConnected={reload} />
-            <JourneyPicker setup={{ done: s.done, total: s.total }} journeys={jr?.journeys ?? []} selected={journey ? selected : 'setup'} onSelect={(id) => void setSelected(id === 'setup' ? null : id)} />
+            <JourneyPicker setup={{ done: s.done, total: s.total }} journeys={jr?.journeys ?? []} selected={journey ? selected : 'setup'} onSelect={(id) => {
+              void setSelected(id === 'setup' ? null : id);
+              if (id !== 'setup') void appApi('POST', `/journeys/${encodeURIComponent(id)}/view`).catch(() => {});
+            }} />
             <TipsSection />
           </div>
         </div>
@@ -66,6 +75,15 @@ export function SetupPage() {
 function ConnectionBox({ s, onConnected }: { s: Setup; onConnected: () => void }) {
   const [live, setLive] = useState<{ kind: 'wait' | 'ok' | 'bad'; text: string } | null>(null);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const clients = s.connect.clients;
+  // The client to show: the last one picked here, else one this person already connected from, else Claude.
+  const [pick, setPick] = useState<string>(() => {
+    try { const saved = localStorage.getItem('oct_client'); if (saved && clients.some((c) => c.id === saved)) return saved; } catch { /* private mode */ }
+    const seen = s.clients.map((x) => x.client.toLowerCase());
+    return clients.find((c) => seen.some((x) => x.includes(c.id.replace('-cli', '')) || x.includes(c.client.toLowerCase().split(' ')[0])))?.id ?? clients[0]?.id ?? 'claude';
+  });
+  const choose = (id: string) => { setPick(id); try { localStorage.setItem('oct_client', id); } catch { /* private mode */ } };
+  const c = clients.find((x) => x.id === pick) ?? clients[0];
   useEffect(() => () => { if (timer.current) clearInterval(timer.current); }, []);
   // Live connection test: watch for this person's next connector request for up to three minutes.
   const test = () => {
@@ -87,15 +105,29 @@ function ConnectionBox({ s, onConnected }: { s: Setup; onConnected: () => void }
       }, 3000);
     }).catch(fail);
   };
+  const groups: [Client['group'], string][] = [['chat', 'Chat apps'], ['agent', 'Coding agents · by share of developers'], ['editor', 'Editors']];
   return (
     <Section title='Connection string'
-      description={s.connect.secret ? 'This link contains your key: keep it private.' : 'Add it to your AI client as a custom connector. No secret in it: the client asks you to sign in.'}>
-      <div className='bg-muted/50 space-y-3 rounded-lg border p-3'>
+      description={s.connect.secret ? 'This link contains your key: keep it private.' : 'One URL for every client. No secret in it: your client asks you to sign in.'}>
+      <div className='bg-muted/50 space-y-4 rounded-lg border p-3'>
         <div className='flex gap-2'>
           <Input readOnly value={s.connect.connector_url} className='bg-background font-mono text-xs' aria-label='Connection string' onFocus={(e) => e.currentTarget.select()} />
           <CopyButton text={s.connect.connector_url} />
         </div>
-        <div className='flex flex-wrap items-center gap-3'>
+        <div className='space-y-1.5'>
+          <label htmlFor='client-pick' className='text-muted-foreground text-xs font-medium'>Your AI client</label>
+          <NativeSelect id='client-pick' value={c?.id} onChange={(e) => choose(e.target.value)} className='bg-background w-full'>
+            {groups.map(([g, label]) => (
+              <NativeSelectOptGroup key={g} label={label}>
+                {clients.filter((x) => x.group === g).map((x) => (
+                  <NativeSelectOption key={x.id} value={x.id}>{x.client}{x.share != null && x.share > 0 ? ` · ${x.share}%` : ''}</NativeSelectOption>
+                ))}
+              </NativeSelectOptGroup>
+            ))}
+          </NativeSelect>
+        </div>
+        {c && <ClientSteps c={c} />}
+        <div className='flex flex-wrap items-center gap-3 border-t pt-3'>
           <Button size='sm' variant='outline' onClick={test} disabled={live?.kind === 'wait'}>
             {live?.kind === 'wait' ? <Icons.spinner className='animate-spin' /> : <Icons.plug />} Test my connection
           </Button>
@@ -113,11 +145,44 @@ function ConnectionBox({ s, onConnected }: { s: Setup; onConnected: () => void }
   );
 }
 
+/** The selected client's way in: one-click install, a command, a config snippet, or steps in its settings. */
+function ClientSteps({ c }: { c: Client }) {
+  return (
+    <div className='space-y-2 text-sm'>
+      <p>{c.steps}</p>
+      {c.install_url && (
+        <Button size='sm' render={<a href={c.install_url} />}><Icons.add /> Add to {c.client}</Button>
+      )}
+      {c.command && <CodeLine text={c.command} label='Command' />}
+      {c.snippet && (
+        <div className='space-y-1'>
+          {c.file && <div className='text-muted-foreground text-xs'>{c.command || c.install_url ? 'Or add to ' : 'In '}<code className='font-mono'>{c.file}</code></div>}
+          <div className='relative'>
+            <pre className='bg-background overflow-x-auto rounded-md border p-2.5 pr-10 font-mono text-xs whitespace-pre-wrap break-all'>{c.snippet}</pre>
+            <Button variant='ghost' size='icon-sm' className='absolute top-1 right-1' onClick={() => copy(c.snippet!)} aria-label='Copy snippet'><Icons.page /></Button>
+          </div>
+        </div>
+      )}
+      {!c.verified && <p className='text-muted-foreground text-xs'>Based on {c.client}&apos;s documented MCP settings; if your version differs, use its “add MCP server” option with the URL above.</p>}
+    </div>
+  );
+}
+
+function CodeLine({ text, label }: { text: string; label: string }) {
+  return (
+    <div className='flex items-center gap-2'>
+      <code className='bg-background min-w-0 flex-1 overflow-x-auto rounded-md border px-2.5 py-2 font-mono text-xs whitespace-nowrap' aria-label={label}>{text}</code>
+      <CopyButton text={text} />
+    </div>
+  );
+}
+
 /** Pick what the main column shows: getting set up, or one of the journeys, each with its progress. */
 function JourneyPicker({ setup, journeys, selected, onSelect }: { setup: { done: number; total: number }; journeys: Journey[]; selected: string; onSelect: (id: string) => void }) {
-  const items = [{ id: 'setup', name: 'Get set up', goal: 'Connect your client and run the workflow once', done: setup.done, total: setup.total }, ...journeys];
+  const items = [{ id: 'setup', name: 'Get set up', goal: 'Connect your client and try the workflow once', done: setup.done, total: setup.total },
+    ...journeys.map((j) => ({ id: j.id, name: j.name, goal: j.outcome, done: j.done, total: j.total }))];
   return (
-    <Section title='Journeys' description='Guided paths through Octillion. Pick one to see its steps.'>
+    <Section title='Journeys' description='Real use cases as step-by-step pipelines. Pick one to replicate it.'>
       <div role='radiogroup' aria-label='Journey' className='flex flex-col gap-1'>
         {items.map((j) => {
           const on = j.id === selected, complete = j.total > 0 && j.done >= j.total;
@@ -141,42 +206,55 @@ function JourneyPicker({ setup, journeys, selected, onSelect }: { setup: { done:
   );
 }
 
-/** A journey's steps in the main column: what to do, the prompt to type, and whether it already happened. */
-function JourneyView({ j }: { j: Journey }) {
-  const next = j.steps.find((x) => !x.done);
-  const pct = j.total ? Math.round((j.done / j.total) * 100) : 0;
+/** A use case as a pipeline: what it gets you, a worked example, and each stage's prompt, tool and expected result. */
+function JourneyView({ j, onChanged }: { j: Journey; onChanged: () => void }) {
+  const [busy, setBusy] = useState<string | null>(null);
+  // Stages with no tool are marked by hand, for the whole account (and counted in journey analytics).
+  const toggle = (id: string, done: boolean) => {
+    setBusy(id);
+    appApi('POST', `/journeys/${encodeURIComponent(j.id)}/stages/${encodeURIComponent(id)}`, { done })
+      .then(() => onChanged()).catch(fail).finally(() => setBusy(null));
+  };
+  const isDone = (x: Stage) => x.done;
+  const done = j.stages.filter(isDone).length;
+  const current = j.stages.find((x) => !isDone(x));
+  const pct = j.total ? Math.round((done / j.total) * 100) : 0;
   return (
-    <Section title={j.name} description={`Goal: ${j.goal}`} action={<Badge variant={pct === 100 ? 'default' : 'secondary'}>{j.done} of {j.total} done</Badge>}>
+    <Section title={j.name} description={j.outcome} action={<Badge variant={pct === 100 ? 'default' : 'secondary'}>{done} of {j.total} stages</Badge>}>
+      <div className='text-muted-foreground flex flex-wrap gap-x-4 gap-y-1 text-xs'><span>For: {j.who}</span><span>Takes: {j.time}</span></div>
       <div className='bg-muted h-1.5 overflow-hidden rounded-full'><div className='bg-primary h-full transition-all' style={{ width: `${pct}%` }} /></div>
+      <div className='border-primary/40 bg-primary/5 rounded-r-md border-l-2 px-3 py-2 text-sm'>
+        <div className='text-xs font-medium'>Worked example · {j.example.title}</div>
+        <p className='text-muted-foreground mt-0.5'>{j.example.result}</p>
+      </div>
       <ol className='divide-y'>
-        {j.steps.map((x, i) => {
-          const current = next?.id === x.id;
+        {j.stages.map((x, i) => {
+          const ok = isDone(x), now = current?.id === x.id;
           return (
             <li key={x.id} className='flex gap-3 py-4'>
               <span className={cn('mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full border-2 text-xs font-semibold',
-                x.done ? 'border-primary bg-primary text-primary-foreground' : current ? 'border-primary text-primary' : 'border-muted-foreground/30 text-muted-foreground')}>
-                {x.done ? <Icons.check className='size-3.5' /> : i + 1}
+                ok ? 'border-primary bg-primary text-primary-foreground' : now ? 'border-primary text-primary' : 'border-muted-foreground/30 text-muted-foreground')}>
+                {ok ? <Icons.check className='size-3.5' /> : i + 1}
               </span>
               <div className='min-w-0 flex-1 space-y-2'>
                 <div className='flex flex-wrap items-center gap-2'>
                   <span className='font-medium'>{x.title}</span>
-                  {current && <Badge variant='secondary'>next</Badge>}
+                  {now && <Badge variant='secondary'>next</Badge>}
+                  {x.tools.map((t) => <code key={t} className='text-muted-foreground bg-muted rounded px-1.5 py-0.5 font-mono text-[11px]'>{t}</code>)}
                   {x.done && x.at && <span className='text-muted-foreground text-xs'>done <When d={x.at} /></span>}
                 </div>
-                <p className={cn('text-sm', x.done ? 'text-muted-foreground' : '')}>{x.message}</p>
-                {!x.done && x.prompt && (
-                  <div className='flex items-center gap-2'>
-                    <code className='bg-muted min-w-0 flex-1 truncate rounded-md px-2 py-1.5 font-mono text-xs' title={x.prompt}>{x.prompt}</code>
-                    <CopyButton text={x.prompt} />
-                  </div>
-                )}
-                {!x.done && x.link && <Button size='sm' variant='outline' render={<a href={x.link} />}>Open</Button>}
+                <p className='text-muted-foreground text-sm'>{x.why}</p>
+                {!ok && (x.manual
+                  ? <div className='flex flex-wrap items-center gap-2'><span className='text-sm'>{x.prompt}</span><Button size='sm' variant='outline' disabled={busy === x.id} onClick={() => toggle(x.id, true)}>Mark done</Button></div>
+                  : <CodeLine text={x.prompt} label='Prompt' />)}
+                {x.manual && ok && <Button size='sm' variant='ghost' className='text-muted-foreground' disabled={busy === x.id} onClick={() => toggle(x.id, false)}>Undo</Button>}
+                <p className='text-xs'><span className='font-medium'>You’ll see:</span> <span className='text-muted-foreground'>{x.expect}</span></p>
               </div>
             </li>
           );
         })}
       </ol>
-      {j.done >= j.total && <p className='text-muted-foreground text-sm'>Journey complete. Pick another journey to keep going.</p>}
+      {done >= j.total && <p className='text-muted-foreground text-sm'>Pipeline complete. Run it again after your next change, or pick another journey.</p>}
     </Section>
   );
 }
@@ -210,30 +288,6 @@ function Checklist({ s, next }: { s: Setup; next: Step | undefined }) {
           })}
         </ol>
       </div>
-    </Section>
-  );
-}
-
-/** How to add the connection string in each client (the string itself and the test live in the right column). */
-function ClientGuide({ s }: { s: Setup }) {
-  return (
-    <Section title='Connect your AI client' description='Add the connection string from the right in your client, then sign in when it asks.'>
-      <Tabs defaultValue='0'>
-        <div className='overflow-x-auto'>
-          <TabsList>{s.connect.clients.map((c, i) => <TabsTrigger key={c.client} value={String(i)}>{c.client}</TabsTrigger>)}</TabsList>
-        </div>
-        {s.connect.clients.map((c, i) => (
-          <TabsContent key={c.client} value={String(i)} className='space-y-2 pt-2 text-sm'>
-            <p>{c.steps}</p>
-            {c.snippet && (
-              <div className='relative'>
-                <pre className='bg-muted overflow-x-auto rounded-lg p-3 font-mono text-xs whitespace-pre-wrap break-all'>{c.snippet}</pre>
-                <Button variant='ghost' size='icon-sm' className='absolute top-1.5 right-1.5' onClick={() => copy(c.snippet!)} aria-label='Copy snippet'><Icons.page /></Button>
-              </div>
-            )}
-          </TabsContent>
-        ))}
-      </Tabs>
     </Section>
   );
 }

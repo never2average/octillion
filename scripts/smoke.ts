@@ -1061,13 +1061,83 @@ try {
       const [inp] = await db.query<{ input: any }>("SELECT input FROM product_research WHERE id = $1", [(job as any).research.id]);
       assert.match(inp.input.prompt, /Company context from the account:[\s\S]*BullMQ, Inngest/, "research gets the company's competitors");
       console.log("✓ context: company (admins), person (self), product editing, in the AI client's instructions and in research");
-      // Journeys as a guide on Setup: every recipe, with each step marked from what actually happened.
+      // Journeys on Setup: use-case pipelines, prompts filled in with the account's product, stages done in order.
       const jg = (await json(appCall(ownerC, "GET", "/journeys"))).journeys;
-      assert.deepEqual(jg.map((j: any) => j.id), ["connect", "first-report", "evidence", "rerun", "team", "win-back"]);
-      assert.equal(jg.find((j: any) => j.id === "connect").steps[0].done, true, "the owner connected earlier in this test");
-      assert.equal(jg.find((j: any) => j.id === "team").steps[0].done, true, "the account has a second member");
-      assert.ok(jg.every((j: any) => j.total === j.steps.length && j.steps.every((x: any) => x.title && x.message)));
-      console.log("✓ journey guide: recipes with per-step progress for /app Setup");
+      assert.deepEqual(jg.map((j: any) => j.id), ["baseline", "fix-loss", "head-to-head", "agent-audit", "new-capability", "release-watch"]);
+      const base0 = jg.find((j: any) => j.id === "baseline");
+      assert.ok(base0.stages.every((x: any) => x.prompt && x.expect && x.tools), "every stage has a prompt, tools and what you'll see");
+      assert.ok(!JSON.stringify(jg).includes("{product}"), "prompts are filled in");
+      assert.equal(base0.stages.find((x: any) => x.id === "onboard").done, false, "nothing onboarded through the connector yet");
+      const audit = jg.find((j: any) => j.id === "agent-audit");
+      assert.ok(audit.stages[0].done === false || audit.stages[0].at, "stage progress comes from real tool calls");
+      // Connection catalog: every client, coding agents ordered by usage share.
+      const setupC = (await json(appCall(ownerC, "GET", "/setup"))).connect;
+      const ids = setupC.clients.map((c: any) => c.id);
+      for (const id of ["claude", "chatgpt", "claude-code", "codex", "cursor", "copilot", "gemini-cli", "vscode"]) assert.ok(ids.includes(id), `catalog has ${id}`);
+      const cursor = setupC.clients.find((c: any) => c.id === "cursor");
+      assert.match(cursor.install_url, /^cursor:\/\/anysphere\.cursor-deeplink\/mcp\/install\?name=octillion&config=/);
+      assert.match(setupC.clients.find((c: any) => c.id === "claude-code").command, /^claude mcp add --transport http octillion https?:\/\//);
+      const agents = setupC.clients.filter((c: any) => c.group === "agent" && c.share != null);
+      assert.ok(agents.every((c: any, i: number) => i === 0 || agents[i - 1].share >= c.share), "agents ordered by usage share");
+      console.log("✓ journeys as use-case pipelines; connection catalog for every client, ordered by usage share");
+      // Admins manage the journeys; the portal shows the promoted ones in order.
+      const pb = await json(adm("GET", "/playbooks"));
+      assert.equal(pb.playbooks.length, 6, "built-in templates seeded once");
+      assert.ok(pb.tools.includes("run_simulation") && pb.playbooks.every((p: any) => p.adoption), "tool list and adoption for the editor");
+      const custom = { name: "Docs launch check", outcome: "See whether agents find the new docs", who: "Docs team", time: "an hour",
+        example: { title: "Example", result: "Agents found the new quickstart." },
+        stages: [{ title: "Run it", prompt: "Run a simulation for {product}.", tools: ["run_simulation"], expect: "A run starts." },
+                 { title: "Publish the docs", prompt: "Publish the quickstart.", tools: [], expect: "Mark it done." }] };
+      assert.equal((await adm("POST", "/playbooks", { ...custom, stages: [{ ...custom.stages[0], tools: ["rm_rf"] }] })).status, 400, "unknown tools are refused");
+      const created = await json(adm("POST", "/playbooks", custom));
+      assert.equal(created.id, "docs-launch-check");
+      assert.equal((await adm("POST", "/playbooks", custom)).status, 409);
+      const portalIds = async () => (await json(appCall(ownerC, "GET", "/journeys"))).journeys.map((j: any) => j.id);
+      assert.ok(!(await portalIds()).includes("docs-launch-check"), "new journeys are not promoted until an admin says so");
+      assert.equal((await adm("POST", "/playbooks/docs-launch-check/promote", { promoted: true })).status, 204);
+      await adm("POST", "/playbooks/release-watch/promote", { promoted: false });
+      let ids2 = await portalIds();
+      assert.ok(ids2.includes("docs-launch-check") && !ids2.includes("release-watch"), "promote and hide");
+      await adm("POST", "/playbooks/reorder", { ids: ["docs-launch-check", ...ids2.filter((x: string) => x !== "docs-launch-check")] });
+      assert.equal((await portalIds())[0], "docs-launch-check", "order follows the admin's");
+      const shown = (await json(appCall(ownerC, "GET", "/journeys"))).journeys[0];
+      assert.equal(shown.stages[1].manual, true, "a stage without tools is marked by the person");
+      assert.ok(!shown.stages[0].prompt.includes("{product}"), "prompts filled in for the account");
+      await adm("PUT", "/playbooks/docs-launch-check", { ...custom, name: "Docs launch" });
+      assert.equal((await json(adm("GET", "/playbooks"))).playbooks.find((p: any) => p.id === "docs-launch-check").name, "Docs launch");
+      assert.equal((await adm("DELETE", "/playbooks/docs-launch-check")).status, 204);
+      await adm("POST", "/playbooks/release-watch/promote", { promoted: true });
+      console.log("✓ journeys managed on /admin: create, validate tools, promote/hide, order, edit, delete");
+      // Journey analytics: progress recorded per account, a funnel on /admin, and journey_* events to PostHog once each.
+      {
+        const http = await import("node:http");
+        const got: any[] = [];
+        const ph = http.createServer((req, res) => { let b = ""; req.on("data", (c) => (b += c)); req.on("end", () => { try { got.push(...JSON.parse(b).batch); } catch { /* ignore */ } res.end("{}"); }); });
+        await new Promise<void>((r) => ph.listen(0, "127.0.0.1", () => r()));
+        process.env.POSTHOG_API_KEY = "phc_smoke"; process.env.POSTHOG_HOST = `http://127.0.0.1:${(ph.address() as AddressInfo).port}`;
+        const { flush } = await import("../src/telemetry.js");
+        await db.query("DELETE FROM journey_progress WHERE org_id = $1", [rowW.id]);
+        const j1 = (await json(appCall(ownerC, "GET", "/journeys"))).journeys;
+        const rows = await db.query<{ journey_id: string; stage_id: string; source: string }>("SELECT journey_id, stage_id, source FROM journey_progress WHERE org_id = $1", [rowW.id]);
+        assert.ok(rows.length > 0 && rows.every((r) => r.source === "tool"), "tool-done stages recorded on load");
+        assert.equal((await appCall(ownerC, "POST", "/journeys/fix-loss/stages/weakest", { done: true })).status, 400, "tool stages can't be marked by hand");
+        assert.equal((await appCall(ownerC, "POST", "/journeys/fix-loss/stages/ship", { done: true })).status, 204);
+        assert.equal((await json(appCall(ownerC, "GET", "/journeys"))).journeys.find((j: any) => j.id === "fix-loss").stages.find((x: any) => x.id === "ship").done, true, "manual marks are shared by the account");
+        await appCall(ownerC, "POST", "/journeys/baseline/view");
+        await json(appCall(ownerC, "GET", "/journeys")); // a second load sends nothing new
+        await flush();
+        const names = got.map((e) => e.event);
+        assert.ok(names.includes("journey_started") && names.includes("journey_stage_completed") && names.includes("journey_viewed"), `journey events sent (${[...new Set(names)].join(", ")})`);
+        const stageEvents = got.filter((e) => e.event === "journey_stage_completed");
+        assert.equal(new Set(stageEvents.map((e) => `${e.properties.journey}/${e.properties.stage}`)).size, stageEvents.length, "each stage completion sent once");
+        assert.ok(stageEvents.every((e) => e.properties.$groups?.organization === slugW), "grouped by account");
+        const an = (await json(adm("GET", "/playbooks"))).playbooks;
+        const fx = an.find((p: any) => p.id === "fix-loss");
+        assert.ok(fx.adoption.started >= 1 && fx.adoption.funnel.length === fx.stages.length && fx.adoption.funnel.find((f: any) => f.id === "ship").reached === 1, "per-stage funnel on /admin");
+        await appCall(ownerC, "POST", "/journeys/fix-loss/stages/ship", { done: false });
+        delete process.env.POSTHOG_API_KEY; delete process.env.POSTHOG_HOST; ph.close();
+        console.log("✓ journey analytics: progress per account, manual stages, funnel on /admin, journey_* events once each");
+      }
     }
 
     // ---------- platform analytics and health (/admin Analytics) ----------

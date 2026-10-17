@@ -15,6 +15,7 @@
 import { createApiKey, createOrg, slugify } from "./auth.js";
 import { capture } from "./telemetry.js";
 import * as billing from "./billing.js";
+import { clientCatalog } from "./connect-catalog.js";
 import { getDb } from "./db.js";
 import * as clerk from "./clerk.js";
 
@@ -46,14 +47,8 @@ export function integrations() {
 export function connectInfo(key?: string) {
   const base = publicUrl();
   const url = key ? `${base}/mcp/${key}` : `${base}/mcp`;
-  const signIn = key ? "" : " Sign in with the email the invitation went to when the client asks.";
-  const clients = [
-    { client: "Claude (web or desktop)", steps: `Settings → Connectors → Add custom connector, paste the URL.${signIn} On Team/Enterprise an owner adds it under Organization settings → Connectors.` },
-    { client: "ChatGPT", steps: `Add a custom MCP server (developer mode), paste the URL and choose ${key ? "No authentication" : "OAuth"}.${signIn}` },
-    { client: "Claude Code", steps: `Add to .mcp.json${key ? "" : ", then run /mcp and choose Authenticate"}:`, snippet: JSON.stringify({ mcpServers: { octillion: { type: "http", url } } }, null, 2) },
-    { client: "Cursor and other IDEs", steps: `Paste the URL into the MCP settings and switch the Octillion tools on.${signIn}` },
-  ];
-  if (key) clients.push({ client: "Header-capable clients", steps: `POST ${base}/mcp with the header:`, snippet: `Authorization: Bearer ${key}` });
+  // Every client Octillion supports, with its exact way in (src/connect-catalog.ts).
+  const clients = clientCatalog(url, key);
   const subject = "Your Octillion access";
   const body = `Hi,
 
@@ -62,7 +57,8 @@ You now have access to Octillion. ${key ? "Your personal connector link is:" : "
 ${url}
 ${key ? "\nIt is your login: anyone with it can use your account, so keep it private.\n" : "\nIt has no secret in it: you sign in with your work email (accept the invitation email first).\n"}
 Connect it:
-${clients.filter((c) => c.client !== "Header-capable clients").map((c) => `- ${c.client}: ${c.steps}${c.snippet ? ` ${c.snippet.replace(/\s+/g, " ")}` : ""}`).join("\n")}
+${clients.filter((c) => ["claude", "chatgpt", "claude-code", "cursor", "codex"].includes(c.id)).map((c) => `- ${c.client}: ${c.command ? `${c.steps} ${c.command}` : c.steps}`).join("\n")}
+Every other client (Copilot, OpenCode, Gemini CLI, VS Code, Windsurf and more) is listed at ${base}/app
 
 Then type: "Get me started with Octillion." The beta guide: ${base}/connect
 

@@ -2,6 +2,7 @@ import path from "node:path";
 import { contextForAI } from "./context.js";
 import { platformAnalytics } from "./insights.js";
 import * as journeys from "./journeys.js";
+import * as playbooks from "./playbooks.js";
 import * as telemetry from "./telemetry.js";
 import { appRouter } from "./app.js";
 import { adminActor, adminAuthRouter, requirePlatformAdmin } from "./admin-auth.js";
@@ -340,13 +341,21 @@ export function createApp() {
   ob.post("/orgs/:slug/keys/:id/rotate", async (req, res) => void res.status(201).json(await onboarding.rotateKey(adminActor(req, res), slug(req), Number(req.params.id))));
   // Platform analytics and health across every account (src/insights.ts).
   ob.get("/analytics", async (req, res) => void res.json(await platformAnalytics(req.query.days)));
+  // Customer journeys (src/playbooks.ts): the use-case pipelines on /app Setup. Admins write them, promote the ones
+  // customers see, and order them; adoption = accounts that started / finished each.
+  ob.get("/playbooks", async (_req, res) => void res.json({ playbooks: await playbooks.templatesWithAdoption(), tools: TOOL_NAMES }));
+  ob.post("/playbooks", async (req, res) => void res.status(201).json({ id: await playbooks.createTemplate(adminActor(req, res), req.body ?? {}, TOOL_NAMES) }));
+  ob.put("/playbooks/:id", async (req, res) => { await playbooks.updateTemplate(adminActor(req, res), String(req.params.id), req.body ?? {}, TOOL_NAMES); res.status(204).end(); });
+  ob.post("/playbooks/:id/promote", async (req, res) => { await playbooks.setPromoted(adminActor(req, res), String(req.params.id), req.body?.promoted !== false); res.status(204).end(); });
+  ob.post("/playbooks/reorder", async (req, res) => { await playbooks.reorder(adminActor(req, res), req.body?.ids); res.status(204).end(); });
+  ob.delete("/playbooks/:id", async (req, res) => { await playbooks.deleteTemplate(String(req.params.id)); res.status(204).end(); });
   // Journeys: what PostHog Workflows queued for the in-chat channel, and nudges sent by hand.
   ob.get("/journeys", async (_req, res) => void res.json(await journeys.adminView()));
   ob.post("/journeys/nudges", async (req, res) => void res.status(201).json(await journeys.sendFromAdmin(adminActor(req, res), req.body ?? {})));
   ob.delete("/journeys/nudges/:id", async (req, res) => { await journeys.adminDelete(adminActor(req, res), Number(req.params.id)); res.status(204).end(); });
   // Clerk / Stripe failures are the admin's to see (a bad key, a rate limit), not a generic 500.
   ob.use((err: Error & { status?: number }, _req: Request, res: Response, next: NextFunction) => {
-    if (!(err instanceof onboarding.AdminError || err instanceof journeys.JourneyError || err instanceof ClerkError || err instanceof StripeError)) return next(err);
+    if (!(err instanceof onboarding.AdminError || err instanceof journeys.JourneyError || err instanceof playbooks.PlaybookError || err instanceof ClerkError || err instanceof StripeError)) return next(err);
     res.status(err.status ?? 400).json({ error: err.message });
   });
   admin.use("/onboarding", ob);

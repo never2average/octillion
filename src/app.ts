@@ -15,6 +15,8 @@ import * as billing from "./billing.js";
 import { getDb } from "./db.js";
 import { getProduct, listProducts, orgMonthSpendUsd, saveProduct, saveScenarios } from "./queries.js";
 import * as context from "./context.js";
+import { getPopulation } from "./populations.js";
+import { markStage, playbooksFor, PlaybookError, syncProgress } from "./playbooks.js";
 import { capture, identifyPerson } from "./telemetry.js";
 import * as journeys from "./journeys.js";
 import * as limits from "./limits.js";
@@ -53,6 +55,20 @@ const HINTS: [RegExp, string][] = [
   [/research failed|403|fetch/i, "Octillion could not read your website or docs. Check that they are public, or paste a short description instead."],
 ];
 
+/**
+ * Each coding agent's share of real-world developer usage (the default developer population, the same mix the agent
+ * selector and simulations use), so the connection picker lists agents in the order people actually use them.
+ */
+async function withUsageShares(c: ReturnType<typeof admin.connectInfo>) {
+  const pop = await getPopulation().catch(() => null);
+  const share = new Map<string, number>();
+  for (const a of pop?.agents ?? []) share.set(a.harness, (share.get(a.harness) ?? 0) + Number(a.weight || 0));
+  const clients = c.clients.map((x) => ({ ...x, share: share.has(x.id) ? Math.round((share.get(x.id) ?? 0) * 1000) / 10 : null }));
+  const rank = { chat: 0, agent: 1, editor: 2 } as const;
+  clients.sort((a, b) => rank[a.group] - rank[b.group] || (b.share ?? -1) - (a.share ?? -1));
+  return { ...c, clients };
+}
+
 async function setup(s: Session, since?: string) {
   const db = await getDb();
   // Per person (the Clerk user); per account for a session without a user.
@@ -76,7 +92,7 @@ async function setup(s: Session, since?: string) {
   const steps = [
     { id: "joined", label: "Join your team's account", done: true, at: null, help: "Done: you are signed in." },
     { id: "connected", label: "Add the Octillion connector to your AI client", done: Boolean(m.connected), at: m.connected,
-      help: "Follow the guide for your client below, then press Test my connection." },
+      help: "Pick your client under Connection string, follow its step, then press Test my connection." },
     { id: "tools", label: "Switch the Octillion tools on", done: Boolean(m.tools_listed), at: m.tools_listed,
       help: "Your client has not loaded the tools yet. In Cursor, switch the Octillion server on in the MCP settings; elsewhere, start a new chat." },
     { id: "dashboard", label: "See results as an interactive dashboard", done: Boolean(m.dashboard), at: m.dashboard, optional: true,
@@ -99,66 +115,8 @@ async function setup(s: Session, since?: string) {
     clients, calls: Number(m.calls), groups, coverage: groups.filter((g) => g.used > 0).length / groups.length,
     next: groups.find((g) => g.used === 0) ?? null,
     errors: errors.map((e) => ({ ...e, hint: HINTS.find(([re]) => re.test(e.error ?? ""))?.[1] ?? null })),
-    connect: admin.connectInfo(), live,
+    connect: await withUsageShares(admin.connectInfo()), live,
   };
-}
-
-/** Readable step titles for the journey recipes (src/journeys.ts RECIPES). */
-const STEP_TITLES: Record<string, string> = {
-  "connect/guide": "Connect your AI client",
-  "first-report/onboard": "Onboard your product", "first-report/run": "Run a simulation", "first-report/report": "Read the visibility report",
-  "evidence/why": "Check the evidence behind a result",
-  "rerun/rerun": "Re-run after changing docs or SDK",
-  "team/invite": "Invite a colleague",
-  "win-back/nudge": "Run a fresh simulation",
-};
-
-/** What each journey gets you, in the customer's words (the recipes' `goal` is written for whoever builds the workflow). */
-const JOURNEY_GOALS: Record<string, string> = {
-  connect: "Octillion working in your AI client on day one",
-  "first-report": "Your first visibility report within a week",
-  evidence: "Understand why agents picked a competitor",
-  rerun: "Prove a docs or SDK change moved agents' choices",
-  team: "Get the people who own docs and DevRel on board",
-  "win-back": "Check you are still being picked as models change",
-};
-
-/**
- * The journeys a person can follow on Setup: "Get set up" (the checklist) and the recommended journeys, each step
- * marked done from what the person and their account actually did. The same recipes drive PostHog Workflows'
- * nudges; here they are a guide the person can open any time.
- */
-async function journeyGuide(s: Session) {
-  const db = await getDb();
-  const who = s.user ? "user_id = $2" : "user_id IS NULL";
-  const args = s.user ? [s.org, s.user] : [s.org];
-  const [me] = await db.query<{ connected: Date | null }>(`SELECT min(at) FILTER (WHERE method = 'initialize') AS connected FROM mcp_events WHERE org_id = $1 AND ${who}`, args);
-  const tools = new Map((await db.query<{ name: string; first: Date; last: Date }>(
-    `SELECT name, min(at) AS first, max(at) AS last FROM mcp_events WHERE org_id = $1 AND method = 'tools/call' AND ok GROUP BY name`, [s.org])).map((r) => [r.name, r]));
-  const [sims] = await db.query<{ n: number; last: Date | null }>("SELECT count(*) AS n, max(created_at) AS last FROM simulations WHERE org_id = $1", [s.org]);
-  const [recent] = await db.query<{ last: Date | null }>("SELECT max(at) AS last FROM mcp_events WHERE org_id = $1 AND method = 'tools/call'", [s.org]);
-  const f = await admin.accountFacts(s.slug);
-  const t = await admin.team(s.slug).catch(() => null);
-  const firstOf = (...names: string[]) => names.map((n) => tools.get(n)?.first).filter(Boolean).sort()[0] ?? null;
-  const reran = f.first_report_at && sims.last && new Date(sims.last) > new Date(f.first_report_at) ? sims.last : null;
-  const active14 = recent.last && Date.now() - new Date(recent.last).getTime() < 14 * 86_400_000 ? recent.last : null;
-  const doneAt: Record<string, Date | string | null> = {
-    "connect/guide": me.connected,
-    "first-report/onboard": f.onboarded_at, "first-report/run": f.first_sim_at, "first-report/report": f.first_report_at,
-    "evidence/why": firstOf("get_agent_session", "get_session_transcript", "search_transcripts"),
-    "rerun/rerun": reran,
-    "team/invite": (t && (t.members.length > 1 || t.invitations.length > 0)) ? (t.invitations[0]?.created_at ?? t.members[1]?.created_at ?? null) : null,
-    "win-back/nudge": active14,
-  };
-  return journeys.RECIPES.map((r) => {
-    const steps = r.steps.map((x) => {
-      const key = `${r.id}/${x.step}`;
-      const at = doneAt[key] ?? null;
-      return { id: x.step, title: STEP_TITLES[key] ?? x.step, message: x.message, prompt: "prompt" in x ? x.prompt : null,
-               link: "link" in x ? x.link : null, done: Boolean(at), at };
-    });
-    return { id: r.id, name: r.name, goal: JOURNEY_GOALS[r.id] ?? r.goal, steps, done: steps.filter((x) => x.done).length, total: steps.length };
-  });
 }
 
 async function usage(s: Session, daysIn: unknown) {
@@ -247,7 +205,20 @@ export function appRouter() {
     capture({ distinctId: S(res).user ?? `org:${S(res).slug}`, orgSlug: S(res).slug }, "app_connection_test_started");
     res.json({ since: new Date().toISOString() });
   });
-  api.get("/journeys", async (_req, res) => void res.json({ journeys: await journeyGuide(S(res)) }));
+  // Journeys on Setup: use-case pipelines with real progress (src/playbooks.ts).
+  api.get("/journeys", async (_req, res) => {
+    await syncProgress({ orgId: S(res).org, slug: S(res).slug }, S(res).user ?? undefined).catch((e) => console.error("journey sync:", e.message));
+    res.json({ journeys: await playbooksFor(S(res).org) });
+  });
+  api.post("/journeys/:id/view", async (req, res) => {
+    capture({ distinctId: S(res).user ?? `org:${S(res).slug}`, orgSlug: S(res).slug }, "journey_viewed", { journey: String(req.params.id) });
+    res.status(204).end();
+  });
+  // Stages with no tool (shipping a docs change) are marked by the person; recorded for everyone in the account.
+  api.post("/journeys/:id/stages/:stage", async (req, res) => {
+    await markStage({ orgId: S(res).org, slug: S(res).slug }, S(res).user, String(req.params.id), String(req.params.stage), req.body?.done !== false);
+    res.status(204).end();
+  });
   api.get("/usage", async (req, res) => void res.json(await usage(S(res), req.query.days)));
   api.get("/team", async (_req, res) => void res.json({ ...(await admin.team(S(res).slug, true)), me: S(res).user, can_manage: S(res).role === "admin" }));
   api.post("/team/invitations", async (req, res) => {
@@ -334,7 +305,7 @@ export function appRouter() {
   api.post("/billing/portal", async (_req, res) => { adminOnly(res); res.json(await admin.portalLink(actor(res), S(res).slug, `${publicUrl()}/app#billing`)); });
   api.post("/billing/checkout", async (req, res) => { adminOnly(res); res.json(await admin.checkoutLink(actor(res), S(res).slug, req.body?.price_id, `${publicUrl()}/app#billing`)); });
   api.use((err: Error & { status?: number }, _req: Request, res: Response, next: NextFunction) => {
-    if (!(err instanceof AppError || err instanceof context.ContextError || err instanceof limits.LimitError || err instanceof journeys.JourneyError || err instanceof admin.AdminError || err instanceof clerk.ClerkError || err instanceof billing.StripeError)) return next(err);
+    if (!(err instanceof AppError || err instanceof PlaybookError || err instanceof context.ContextError || err instanceof limits.LimitError || err instanceof journeys.JourneyError || err instanceof admin.AdminError || err instanceof clerk.ClerkError || err instanceof billing.StripeError)) return next(err);
     res.status(err.status ?? 400).json({ error: err.message });
   });
   r.use("/api/app", api);
