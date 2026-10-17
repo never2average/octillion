@@ -6,8 +6,9 @@ import { TablePager, usePaged } from '@/components/layout/table-pager';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import PageContainer from '@/components/layout/page-container';
-import { PageTabs } from '@/components/layout/page-tabs';
 import { Button } from '@/components/ui/button';
+import { ButtonGroup } from '@/components/ui/button-group';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -22,19 +23,13 @@ interface Ctx { person: unknown | null; products: { slug: string; name: string }
 interface UserRow { user_id: string; email: string | null; name: string | null; active: boolean; me: boolean }
 
 export type ContextSection = 'company' | 'users' | 'products';
-const CONTEXT_TABS = [
-  { href: '/app/context/company', label: 'Company', icon: Icons.building },
-  { href: '/app/context/users', label: 'Users', icon: Icons.teams },
-  { href: '/app/context/products', label: 'Products', icon: Icons.product }
-];
 
-/** Context: three pages (company, users, products) under one header with route tabs; each is one memory table. */
+/** Context: three pages (company, users, products), reached from the sidebar; each is one memory table and its toolbar. */
 export function ContextPage({ section }: { section: ContextSection }) {
   const { data: d, error } = useOrgLoad(() => appApi<Ctx>('GET', '/context'));
   const shown: ContextSection = section === 'users' && d && !d.person ? 'company' : section;
   return (
-    <PageContainer pageTitle='Context' pageDescription='Your institutional memory: what Octillion and your AI client know about your company, its users and each product.'>
-      <PageTabs items={d && !d.person ? CONTEXT_TABS.filter((t) => t.label !== 'Users') : CONTEXT_TABS} />
+    <PageContainer>
       {error ? <ErrorState error={error} /> : !d ? <LoadingCards count={2} /> : <MemoryTable key={shown} d={d} section={shown} />}
     </PageContainer>
   );
@@ -99,17 +94,24 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
             {d.products.map((p) => <NativeSelectOption key={p.slug} value={p.slug}>{p.name}</NativeSelectOption>)}
           </NativeSelect>
         )}
-        <div className='relative min-w-48 flex-1 sm:max-w-sm'>
+        <div className='relative min-w-48 flex-1'>
           <Icons.search className='text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2' />
           <Input type='search' value={q} onChange={(e) => setQ(e.target.value)} placeholder={`Search ${label ? `${label === 'You' ? 'your' : `${label}'s`} ` : ''}memory`} aria-label='Search memory' className='h-9 pl-8' />
         </div>
         {!noSubject && <>
-          <Button onClick={() => setEditing({})}><Icons.add /> Add memory</Button>
-          <div className='ml-auto flex gap-1'>
-            <Button variant='ghost' size='sm' disabled={!items?.length} onClick={() => items && exportCsv(items, label)}><Icons.download /> Export</Button>
-            <Button variant='ghost' size='sm' onClick={() => file.current?.click()}><Icons.upload /> Import</Button>
-            <input ref={file} type='file' accept='.csv,.json,text/csv,application/json' className='hidden' onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) void importFile(f); }} />
-          </div>
+          <ButtonGroup>
+            <Button onClick={() => setEditing({})}><Icons.add /> Add memory</Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger render={<Button size='icon' aria-label='More memory actions' className='border-primary-foreground/20 border-l' />}>
+                <Icons.chevronDown />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align='end' className='w-44'>
+                <DropdownMenuItem onClick={() => file.current?.click()}><Icons.upload /> Import CSV or JSON</DropdownMenuItem>
+                <DropdownMenuItem disabled={!items?.length} onClick={() => items && exportCsv(items, label)}><Icons.download /> Export CSV</DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </ButtonGroup>
+          <input ref={file} type='file' accept='.csv,.json,text/csv,application/json' className='hidden' onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) void importFile(f); }} />
         </>}
       </div>
 
