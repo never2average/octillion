@@ -39,7 +39,10 @@ export const portalNav: NavGroup[] = [
   },
   {
     label: 'Insights',
-    items: [{ title: 'Usage', url: '/app/usage', icon: 'chartLine', shortcut: ['g', 'u'], items: [] }]
+    items: [
+      { title: 'Usage', url: '/app/usage', icon: 'chartLine', shortcut: ['g', 'u'], items: [] },
+      { title: 'Adoption', url: '/app/adoption', icon: 'route', shortcut: ['g', 'a'], items: [] }
+    ]
   },
   {
     label: 'Context',
@@ -50,11 +53,11 @@ export const portalNav: NavGroup[] = [
     ]
   },
   {
-    label: 'People',
-    items: [{ title: 'Team', url: '/app/team', icon: 'teams', shortcut: ['g', 't'], items: [] }]
-  },
-  {
-    label: 'Account',
-    items: [{ title: 'Billing', url: '/app/billing', icon: 'billing', shortcut: ['g', 'b'], items: [] }]
+    label: 'Operational',
+    items: [
+      { title: 'Team', url: '/app/team', icon: 'teams', shortcut: ['g', 't'], items: [] },
+      { title: 'Billing', url: '/app/billing', icon: 'billing', shortcut: ['g', 'b'], items: [] },
+      { title: 'Profile', url: '/app/profile', icon: 'account', items: [] }
+    ]
   }
 ];

@@ -1,7 +1,7 @@
 'use client';
 // /app Setup & training. Right column: the connection string (with a live connection test), a journey selector and
-// tips. Main column: the selected journey. "Get set up" is the setup checklist with the client guides, "use it fully"
-// and recent problems; the other journeys (managed on /admin, src/playbooks.ts) show their stages, marked from real tool calls.
+// tips. Main column: the selected journey. "Get set up" is the setup timeline and recent problems (workflow coverage
+// lives on /app/adoption); the other journeys (managed on /admin, src/playbooks.ts) show their stages, marked from real tool calls.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useQueryState } from 'nuqs';
 import { toast } from 'sonner';
@@ -52,9 +52,8 @@ export function SetupPage() {
         <div className='grid max-w-6xl gap-x-12 gap-y-8 lg:grid-cols-5'>
           <div className='order-2 flex flex-col gap-8 lg:order-1 lg:col-span-3'>
             {selected === 'setup' || !journey ? (<>
-              <Checklist s={s} next={next} />
+              <Timeline s={s} next={next} />
               {s.errors.length > 0 && <Problems errors={s.errors} />}
-              <UseItFully groups={s.groups} />
             </>) : <JourneyView key={journey.id} j={journey} onChanged={reloadJourneys} />}
           </div>
           <div className='order-1 flex flex-col gap-8 lg:order-2 lg:col-span-2'>
@@ -259,35 +258,43 @@ function JourneyView({ j, onChanged }: { j: Journey; onChanged: () => void }) {
   );
 }
 
-function Checklist({ s, next }: { s: Setup; next: Step | undefined }) {
+/** Setup as a vertical timeline: every step explained, what is done (and when), what is next, what is optional. */
+function Timeline({ s, next }: { s: Setup; next: Step | undefined }) {
   const pct = Math.round((s.done / Math.max(1, s.total)) * 100);
   return (
-    <Section title='Checklist' description={`${s.done} of ${s.total} steps done`} action={<Badge variant={pct === 100 ? 'default' : 'secondary'}>{pct}%</Badge>}>
-      <div className='space-y-4'>
-        <div className='bg-muted h-2 overflow-hidden rounded-full'><div className='bg-primary h-full rounded-full transition-all' style={{ width: `${pct}%` }} /></div>
-        <ol className='divide-y'>
-          {s.steps.map((x) => {
-            const cur = next?.id === x.id;
-            return (
-              <li key={x.id} className='flex items-start gap-3 py-3 first:pt-0 last:pb-0'>
-                <span className={cn('mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full border-2',
-                  x.done ? 'border-primary bg-primary text-primary-foreground' : cur ? 'border-primary' : 'border-muted-foreground/30')}>
-                  {x.done && <Icons.check className='size-3' />}
-                </span>
-                <div className='min-w-0 flex-1'>
-                  <div className='flex flex-wrap items-center gap-2'>
-                    <span className={cn('font-medium', x.done && 'text-muted-foreground')}>{x.label}</span>
-                    {x.optional && <Badge variant='outline'>optional</Badge>}
-                    {cur && <Badge>next</Badge>}
-                  </div>
-                  {!x.done && (cur || x.optional) && <p className='text-muted-foreground mt-1 text-sm'>{x.help}</p>}
+    <Section title='Get set up' description={`${s.done} of ${s.total} steps done. Steps marked team are done once by anyone on your account.`}
+      action={<Badge variant={pct === 100 ? 'default' : 'secondary'}>{pct}%</Badge>}>
+      <div className='bg-muted h-1.5 overflow-hidden rounded-full'><div className='bg-primary h-full rounded-full transition-all' style={{ width: `${pct}%` }} /></div>
+      <ol className='mt-3'>
+        {s.steps.map((x, i) => {
+          const cur = next?.id === x.id;
+          const last = i === s.steps.length - 1;
+          return (
+            <li key={x.id} className='relative flex gap-4 pb-7 last:pb-0'>
+              {!last && <span aria-hidden='true' className={cn('absolute top-8 bottom-0 left-[15px] w-px', x.done ? 'bg-primary/60' : 'bg-border')} />}
+              <span className={cn('relative z-10 flex size-8 shrink-0 items-center justify-center rounded-full border-2 text-xs font-semibold tabular-nums',
+                x.done ? 'border-primary bg-primary text-primary-foreground' : cur ? 'border-primary text-primary bg-background ring-primary/20 ring-4' : 'border-border text-muted-foreground bg-background')}>
+                {x.done ? <Icons.check className='size-4' /> : i + 1}
+              </span>
+              <div className={cn('min-w-0 flex-1 pt-1', cur && 'bg-primary/5 -mt-1 rounded-lg px-4 py-3')}>
+                <div className='flex flex-wrap items-center gap-2'>
+                  <span className={cn('font-medium', x.done && 'text-muted-foreground')}>{x.label.replace(' (team)', '')}</span>
+                  {x.label.includes('(team)') && <Badge variant='outline'>team</Badge>}
+                  {x.optional && <Badge variant='outline'>optional</Badge>}
+                  {cur && <Badge>up next</Badge>}
                 </div>
-                {x.done && x.at && <span className='text-muted-foreground shrink-0 text-xs'><When d={x.at} /></span>}
-              </li>
-            );
-          })}
-        </ol>
-      </div>
+                <p className={cn('mt-1 text-sm', x.done ? 'text-muted-foreground/70' : 'text-muted-foreground')}>{x.help}</p>
+                <p className='text-muted-foreground mt-1.5 text-xs'>
+                  {x.done ? <>Done{x.at && <> · <When d={x.at} /></>}</> : cur ? 'Waiting for this step' : x.optional ? 'Whenever you like' : 'Not started'}
+                </p>
+              </div>
+            </li>
+          );
+        })}
+      </ol>
+      <p className='text-muted-foreground border-t pt-3 text-sm'>
+        How much of the workflow your team uses is on <a href='/app/adoption' className='text-primary underline-offset-4 hover:underline'>Adoption</a>.
+      </p>
     </Section>
   );
 }
@@ -323,30 +330,6 @@ function TipsSection() {
             </div>
           </div>
         )) : <p className='text-muted-foreground text-sm'>No tips right now.</p>}
-      </div>
-    </Section>
-  );
-}
-
-function UseItFully({ groups }: { groups: Setup['groups'] }) {
-  const used = groups.filter((g) => g.used).length;
-  return (
-    <Section title='Use it fully' description={`Your team has used ${used} of ${groups.length} parts of the workflow.`}>
-      <div className='divide-y border-y'>
-        {groups.map((g) => (
-          <div key={g.id} className='space-y-2 py-3'>
-            <div className='flex items-center justify-between gap-2'>
-              <span className='text-sm font-medium'>{g.label}</span>
-              {g.used > 0 ? <Badge variant='secondary'><Icons.check className='size-3' /> in use</Badge> : <Badge variant='outline'>not yet</Badge>}
-            </div>
-            {!g.used && (
-              <div className='flex items-center gap-2'>
-                <code className='bg-muted flex-1 truncate rounded px-2 py-1 text-xs' title={g.prompt}>{g.prompt}</code>
-                <CopyButton text={g.prompt} />
-              </div>
-            )}
-          </div>
-        ))}
       </div>
     </Section>
   );

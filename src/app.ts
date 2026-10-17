@@ -90,17 +90,17 @@ async function setup(s: Session, since?: string) {
   const facts = await admin.accountFacts(s.slug);
   const textOnly = clients.length > 0 && clients.every((c) => !/claude-ai|claude\.ai|openai|chatgpt/i.test(c.client));
   const steps = [
-    { id: "joined", label: "Join your team's account", done: true, at: null, help: "Done: you are signed in." },
+    { id: "joined", label: "Join your team's account", done: true, at: null, help: "You accepted the invitation and signed in, so your usage, limits and context belong to your team's account." },
     { id: "connected", label: "Add the Octillion connector to your AI client", done: Boolean(m.connected), at: m.connected,
-      help: "Pick your client under Connection string, follow its step, then press Test my connection." },
+      help: "Octillion runs inside the AI client you already use. Pick your client under Connection string, follow its one step, then press Test my connection to prove it reaches us." },
     { id: "tools", label: "Switch the Octillion tools on", done: Boolean(m.tools_listed), at: m.tools_listed,
-      help: "Your client has not loaded the tools yet. In Cursor, switch the Octillion server on in the MCP settings; elsewhere, start a new chat." },
+      help: "Your client has to load Octillion's tools before it can use them. In Cursor, switch the Octillion server on in its MCP settings; in other clients, start a new chat." },
     { id: "dashboard", label: "See results as an interactive dashboard", done: Boolean(m.dashboard), at: m.dashboard, optional: true,
-      help: textOnly ? "Your client shows text results. The dashboard appears in Claude and ChatGPT." : "Ask anything in Claude or ChatGPT; the dashboard renders under the answer." },
-    { id: "first_call", label: "Ask Octillion something", done: Boolean(m.first_call), at: m.first_call, help: "Type: \"Get me started with Octillion.\"" },
-    { id: "onboarded", label: "Onboard your product (team)", done: Boolean(facts.onboarded_at), at: facts.onboarded_at, help: TOOL_GROUPS[1].prompt },
-    { id: "simulated", label: "Run a simulation (team)", done: Boolean(facts.first_sim_at), at: facts.first_sim_at, help: "Type: \"Run a simulation.\" It takes 20 to 60 minutes." },
-    { id: "reported", label: "Read the visibility report (team)", done: Boolean(facts.first_report_at), at: facts.first_report_at, help: "Type: \"Show my visibility report.\"" },
+      help: textOnly ? "Your client shows results as text. In Claude or ChatGPT, the same answers render as an interactive dashboard with charts and transcripts." : "Ask anything in Claude or ChatGPT and an interactive dashboard, with charts and transcripts, renders under the answer." },
+    { id: "first_call", label: "Ask Octillion something", done: Boolean(m.first_call), at: m.first_call, help: "Your first question checks everything works end to end and gives you a guided tour. Type: \"Get me started with Octillion.\"" },
+    { id: "onboarded", label: "Onboard your product (team)", done: Boolean(facts.onboarded_at), at: facts.onboarded_at, help: `Octillion researches your product, its packages and competitors, and drafts realistic coding tasks to test. Type: "${TOOL_GROUPS[1].prompt.replace(/^Type:\s*/, "").replace(/^"|"$/g, "")}"` },
+    { id: "simulated", label: "Run a simulation (team)", done: Boolean(facts.first_sim_at), at: facts.first_sim_at, help: "Coding agents work your tasks in sandboxes and Octillion records which tools they pick. Type: \"Run a simulation.\" It takes 20 to 60 minutes." },
+    { id: "reported", label: "Read the visibility report (team)", done: Boolean(facts.first_report_at), at: facts.first_report_at, help: "The report shows how often agents pick you, where you lose and the transcript evidence for why. Type: \"Show my visibility report.\"" },
   ];
   const groups = TOOL_GROUPS.map((g) => ({ id: g.id, label: g.label, prompt: g.prompt, used: g.tools.filter((t) => used.has(t)).length, total: g.tools.length }));
   let live = null;

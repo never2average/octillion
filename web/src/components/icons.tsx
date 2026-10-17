@@ -1,4 +1,5 @@
 import {
+  IconShieldLock,
   IconAdjustmentsHorizontal,
   IconAlertCircle,
   IconAlertTriangle,
@@ -187,6 +188,7 @@ export const Icons = {
   share: IconShare,
   login: IconLogin,
   logout: IconLogout,
+  shield: IconShieldLock,
   gripVertical: IconGripVertical,
 
   // Shapes / Indicators

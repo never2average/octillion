@@ -1,15 +1,6 @@
 'use client';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuGroup,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger
-} from '@/components/ui/dropdown-menu';
-import {
   Sidebar,
   SidebarContent,
   SidebarFooter,
@@ -26,24 +17,36 @@ import {
 } from '@/components/ui/sidebar';
 import { UserAvatarProfile } from '@/components/user-avatar-profile';
 import { useMediaQuery } from '@/hooks/use-media-query';
-import { useClerk, useOrganization, useUser } from '@clerk/nextjs';
+import { useClerk, useUser } from '@clerk/nextjs';
 import { useFilteredNavGroups } from '@/hooks/use-nav';
 import Link from 'next/link';
-import { usePathname, useRouter } from 'next/navigation';
+import { usePathname } from 'next/navigation';
 import * as React from 'react';
 import { Icons } from '../icons';
 import { OrgSwitcher } from '../org-switcher';
 import { useNav } from './nav-context';
 import { OctillionMark } from '@/features/site/logo';
 
+/** Platform admins (Octillion staff) get a switch between the customer portal and /admin; nobody else sees it. */
+function usePlatformAdmin(area: string) {
+  const [is, setIs] = React.useState(area === 'admin');
+  React.useEffect(() => {
+    if (area === 'admin') return;
+    let live = true;
+    fetch('/admin/session', { headers: { accept: 'application/json' } })
+      .then((r) => (r.ok ? r.json() : null)).then((b) => { if (live) setIs(Boolean(b?.is_platform_admin)); }).catch(() => {});
+    return () => { live = false; };
+  }, [area]);
+  return is;
+}
+
 export default function AppSidebar() {
   const pathname = usePathname();
   const { isOpen } = useMediaQuery();
   const { user } = useUser();
-  const { organization } = useOrganization();
   const { signOut } = useClerk();
-  const router = useRouter();
   const { area, groups } = useNav();
+  const canSwitch = usePlatformAdmin(area);
   const filteredGroups = useFilteredNavGroups(groups);
   const base = area === 'admin' ? '/admin' : '/app';
   // A module is active on its own page and its sub-pages; the area's home only on itself.
@@ -136,63 +139,33 @@ export default function AppSidebar() {
           </SidebarGroup>
         ))}
       </SidebarContent>
-      <SidebarFooter>
+      <SidebarFooter className='gap-2'>
         <SidebarMenu>
-          <SidebarMenuItem>
-            <DropdownMenu>
-              <DropdownMenuTrigger
-                render={
-                  <SidebarMenuButton
-                    size='lg'
-                    className='data-popup-open:bg-sidebar-accent data-popup-open:text-sidebar-accent-foreground'
-                  />
-                }
+          {canSwitch && (
+            <SidebarMenuItem>
+              <SidebarMenuButton
+                tooltip={area === 'admin' ? 'Customer portal' : 'Platform admin'}
+                render={<Link href={area === 'admin' ? '/app' : '/admin'} />}
+                className='border-primary/40 bg-primary/10 text-primary hover:bg-primary/20 hover:text-primary rounded-full border shadow-sm'
               >
-                {user && <UserAvatarProfile className='h-8 w-8 rounded-lg' showInfo user={user} />}
-                <Icons.chevronsDown className='ml-auto size-4' />
-              </DropdownMenuTrigger>
-              <DropdownMenuContent
-                className='w-(--anchor-width) min-w-56 rounded-lg'
-                side='bottom'
-                align='end'
-                sideOffset={4}
-              >
-                <DropdownMenuGroup>
-                  <DropdownMenuLabel className='p-0 font-normal'>
-                    <div className='px-1 py-1.5'>
-                      {user && (
-                        <UserAvatarProfile className='h-8 w-8 rounded-lg' showInfo user={user} />
-                      )}
-                    </div>
-                  </DropdownMenuLabel>
-                </DropdownMenuGroup>
-                <DropdownMenuSeparator />
-
-                <DropdownMenuGroup>
-                  <DropdownMenuItem onClick={() => router.push(`${base}/profile`)}>
-                    <Icons.account className='mr-2 h-4 w-4' />
-                    Profile
-                  </DropdownMenuItem>
-                  {area === 'portal' && organization && (
-                    <DropdownMenuItem onClick={() => router.push('/app/billing')}>
-                      <Icons.creditCard className='mr-2 h-4 w-4' />
-                      Billing
-                    </DropdownMenuItem>
-                  )}
-                  <DropdownMenuItem onClick={() => router.push(area === 'admin' ? '/app' : '/admin')}>
-                    <Icons.arrowRight className='mr-2 h-4 w-4' />
-                    {area === 'admin' ? 'Customer portal' : 'Platform admin'}
-                  </DropdownMenuItem>
-                </DropdownMenuGroup>
-                <DropdownMenuSeparator />
-                <DropdownMenuGroup>
-                  <DropdownMenuItem onClick={() => signOut({ redirectUrl: '/auth/sign-in' })}>
-                    <Icons.logout aria-hidden className='mr-2 h-4 w-4' />
-                    Sign out
-                  </DropdownMenuItem>
-                </DropdownMenuGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
+                {area === 'admin' ? <Icons.arrowRight /> : <Icons.shield />}
+                <span className='font-medium'>{area === 'admin' ? 'Customer portal' : 'Platform admin'}</span>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          )}
+          <SidebarMenuItem className='group/me'>
+            <SidebarMenuButton size='lg' tooltip='Profile' isActive={pathname === `${base}/profile`} render={<Link href={`${base}/profile`} aria-label='Your profile' />}>
+              {user && <UserAvatarProfile className='h-8 w-8 rounded-lg' showInfo user={user} />}
+            </SidebarMenuButton>
+            <button
+              type='button'
+              aria-label='Sign out'
+              title='Sign out'
+              onClick={() => signOut({ redirectUrl: '/auth/sign-in' })}
+              className='text-sidebar-foreground hover:bg-sidebar-accent hover:text-destructive focus-visible:ring-sidebar-ring absolute top-1/2 right-1.5 flex size-8 -translate-y-1/2 items-center justify-center rounded-md outline-none focus-visible:ring-2 group-data-[collapsible=icon]:hidden md:opacity-0 md:group-hover/me:opacity-100 md:focus-visible:opacity-100'
+            >
+              <Icons.logout className='size-4' />
+            </button>
           </SidebarMenuItem>
         </SidebarMenu>
       </SidebarFooter>

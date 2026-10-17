@@ -160,18 +160,18 @@ function PersonForm({ d, user, onSaved }: { d: Ctx; user: UserRow; onSaved: () =
       </CardHeader>
       <CardContent className='grid gap-4'>
         <div className='grid gap-4 sm:grid-cols-2'>
-          <FormRow label='Role' htmlFor='mTitle'><Input id='mTitle' maxLength={120} value={f.title} onChange={set('title')} placeholder='e.g. Head of DevRel' /></FormRow>
-          <FormRow label='Product they work on most' htmlFor='mFocus'>
+          <FormRow label={user.me ? 'Your role' : 'Role'} htmlFor='mTitle'><Input id='mTitle' maxLength={120} value={f.title} onChange={set('title')} placeholder='e.g. Head of DevRel' /></FormRow>
+          <FormRow label={user.me ? 'Product you work on most' : 'Product they work on most'} htmlFor='mFocus'>
             <NativeSelect id='mFocus' value={f.focus_product} onChange={set('focus_product')}>
               <NativeSelectOption value=''>None</NativeSelectOption>
               {d.products.map((x) => <NativeSelectOption key={x.slug} value={x.slug}>{x.name}</NativeSelectOption>)}
             </NativeSelect>
           </FormRow>
         </div>
-        <FormRow label='What they care about' htmlFor='mInterests'>
+        <FormRow label={user.me ? 'What you care about' : 'What they care about'} htmlFor='mInterests'>
           <Textarea id='mInterests' rows={2} maxLength={1000} value={f.interests} onChange={set('interests')} placeholder='e.g. whether Claude Code picks us for queue work, and why we lose to BullMQ' />
         </FormRow>
-        <FormRow label='How they like answers' htmlFor='mStyle'>
+        <FormRow label={user.me ? 'How you like answers' : 'How they like answers'} htmlFor='mStyle'>
           <NativeSelect id='mStyle' value={f.answer_style} onChange={set('answer_style')}>
             <NativeSelectOption value=''>No preference</NativeSelectOption>
             <NativeSelectOption value='brief'>Brief</NativeSelectOption>
