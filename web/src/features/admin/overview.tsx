@@ -1,57 +1,36 @@
 'use client';
-// Overview: the onboarding funnel across every account, who needs a person, and which integrations are on.
-import type { ReactNode } from 'react';
+// Overview: the onboarding funnel for accounts created in a period, and the accounts that need a person.
+import { useMemo, useState } from 'react';
+import { DateRangePicker, last30, rangeQuery, type DateRange } from '@/components/layout/date-range-picker';
+import { Input } from '@/components/ui/input';
 import PageContainer from '@/components/layout/page-container';
 import { Icons } from '@/components/icons';
-import { usd } from '@/lib/octillion-format';
 import { useAdmin } from './lib';
-import { Rule, StatStrip } from '@/components/layout/section';
-import { ErrorBox, LoadingCards, Mono, Notice, Section, StatusBadge, When } from './ui';
+import { StatStrip } from '@/components/layout/section';
+import { DataList, ErrorBox, LoadingCards, Notice, Section, StatusBadge, When } from './ui';
 
 interface Overview {
   public_url: string;
   stripe_error?: string;
   requests: { pending: number; approved: number; declined: number; oldest_pending: string | null };
   funnel: { id: string; label: string; reached: number }[];
-  attention: { slug: string; name: string; stage_label: string; attention: string[] }[];
+  attention: { slug: string; name: string; stage_label: string; attention: string[]; contact: string | null; last_seen: string | null }[];
   active_7d: number;
   paying: number;
   trialing: number;
   orgs: number;
-  integrations: {
-    clerk?: boolean;
-    clerk_frontend_api?: string | null;
-    oauth_on_mcp: boolean;
-    stripe: boolean;
-    stripe_test_mode: boolean;
-    spend_meter: string | null;
-    require_subscription: boolean;
-    default_budget_usd: number;
-  };
-}
-
-function IntRow({ label, on, env, children }: { label: string; on: boolean; env?: string; children: ReactNode }) {
-  return (
-    <div className='flex flex-col gap-1 border-b py-3 last:border-0 sm:flex-row sm:items-center sm:gap-4'>
-      <div className='flex w-48 shrink-0 items-center gap-2 font-medium'>
-        {label}
-        <StatusBadge tone={on ? 'ok' : 'neutral'}>{on ? 'on' : 'off'}</StatusBadge>
-      </div>
-      <div className='text-muted-foreground flex-1 text-sm'>{children}</div>
-      {!on && env && (
-        <div className='text-muted-foreground text-xs'>
-          Set <Mono>{env}</Mono>
-        </div>
-      )}
-    </div>
-  );
 }
 
 export function AdminOverview() {
-  const { data: o, error, isLoading } = useAdmin<Overview>('/overview');
+  const [range, setRange] = useState<DateRange>(last30);
+  const [q, setQ] = useState('');
+  const { data: o, error, isLoading } = useAdmin<Overview>(`/overview?${rangeQuery(range)}`);
+  const attention = useMemo(() => {
+    const words = q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    return (o?.attention ?? []).filter((a) => words.every((w) => `${a.name} ${a.slug} ${a.contact ?? ''} ${a.stage_label} ${a.attention.join(' ')}`.toLowerCase().includes(w)));
+  }, [o, q]);
   const reported = o ? o.funnel[o.funnel.length - 1]?.reached ?? 0 : 0;
   const max = o ? Math.max(1, o.funnel[0]?.reached ?? 1) : 1;
-  const i = o?.integrations;
   return (
     <PageContainer pageTitle='Onboarding' pageDescription='From access request to first report, across every account.'>
       <ErrorBox error={error} />
@@ -71,88 +50,47 @@ export function AdminOverview() {
             ]}
           />
 
-          <div className='grid gap-8 lg:grid-cols-2 lg:gap-12'>
-            <Section title='Funnel' description='Accounts that reached each step.'>
-              <ol className='grid gap-2.5'>
-                {o.funnel.map((f, idx) => {
-                  const prev = idx ? o.funnel[idx - 1].reached : f.reached;
-                  const drop = idx && prev ? Math.round(((prev - f.reached) / prev) * 100) : 0;
-                  return (
-                    <li key={f.id} className='grid grid-cols-[minmax(0,9rem)_1fr_3rem] items-center gap-3 text-sm'>
-                      <span className='truncate'>{f.label}</span>
-                      <div className='bg-muted h-6 overflow-hidden rounded-md'>
-                        <div className='bg-primary/85 h-full rounded-md transition-all' style={{ width: `${(f.reached / max) * 100}%` }} />
-                      </div>
-                      <span className='text-right tabular-nums' title={drop > 0 ? `${drop}% drop from the step before` : undefined}>
-                        {f.reached}
-                      </span>
-                    </li>
-                  );
-                })}
-              </ol>
-            </Section>
+          <Section title='Funnel' description='Accounts created in the period, by the furthest step they reached.'
+            action={<DateRangePicker value={range} onChange={setRange} />}>
+            <ol className='grid gap-2.5'>
+              {o.funnel.map((f, idx) => {
+                const prev = idx ? o.funnel[idx - 1].reached : f.reached;
+                const drop = idx && prev ? Math.round(((prev - f.reached) / prev) * 100) : 0;
+                return (
+                  <li key={f.id} className='grid grid-cols-[minmax(0,11rem)_1fr_3rem_3.5rem] items-center gap-3 text-sm leading-none'>
+                    <span className='truncate'>{f.label}</span>
+                    <div className='bg-muted h-6 overflow-hidden rounded-md'>
+                      <div className='bg-primary/85 h-full rounded-md transition-all' style={{ width: `${(f.reached / max) * 100}%` }} />
+                    </div>
+                    <span className='text-right tabular-nums'>{f.reached}</span>
+                    <span className='text-muted-foreground text-right text-xs tabular-nums'>{drop > 0 ? `−${drop}%` : ''}</span>
+                  </li>
+                );
+              })}
+            </ol>
+          </Section>
 
-            <Section title='Needs attention' description='Accounts where a person should step in.'>
-              {o.attention.length ? (
-                <ul className='divide-y'>
-                  {o.attention.map((a) => (
-                    <li key={a.slug}>
-                      <div className='py-2.5'>
-                        <div className='flex items-center gap-2'>
-                          <span className='font-medium'>{a.name}</span>
-                          <StatusBadge>{a.stage_label}</StatusBadge>
-                        </div>
-                        <ul className='mt-1 list-disc pl-5 text-xs text-amber-700 dark:text-amber-400'>
-                          {a.attention.map((x) => (
-                            <li key={x}>{x}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className='text-muted-foreground py-8 text-center text-sm'>Nobody is stuck.</p>
-              )}
-            </Section>
-          </div>
-
-          {i && <Rule />}
-          {i && (
-            <Section title='Integrations' description={<>Connector: <Mono>{o.public_url}/mcp</Mono></>}>
-              <IntRow label='Clerk (people)' on={Boolean(i.clerk)} env='CLERK_SECRET_KEY'>
-                Organizations, users, invitations and roles live in Clerk; it sends the invitation emails.
-              </IntRow>
-              <IntRow label='Sign-in on /mcp' on={i.oauth_on_mcp} env='CLERK_PUBLISHABLE_KEY'>
-                {i.oauth_on_mcp ? (
-                  <>
-                    Clerk OAuth{i.clerk_frontend_api ? <> at <Mono>{i.clerk_frontend_api}</Mono></> : null}: clients sign people in, no secret links.
-                  </>
-                ) : (
-                  'Without it, people connect with a secret key link.'
-                )}
-              </IntRow>
-              <IntRow label='Stripe (billing)' on={i.stripe} env='STRIPE_SECRET_KEY'>
-                {i.stripe ? (
-                  <>
-                    {i.stripe_test_mode && <StatusBadge tone='warn' className='mr-1.5'>test mode</StatusBadge>}
-                    Plans, subscriptions, invoices and cards live in Stripe.
-                  </>
-                ) : (
-                  'Every account gets the default budget.'
-                )}
-              </IntRow>
-              <IntRow label='Usage meter' on={Boolean(i.spend_meter)} env='STRIPE_SPEND_METER'>
-                {i.spend_meter ? <>Agent model spend reported to meter <Mono>{i.spend_meter}</Mono>.</> : 'Model spend is not reported to Stripe.'}
-              </IntRow>
-              <IntRow label='Plan required' on={i.require_subscription} env='OCTILLION_REQUIRE_SUBSCRIPTION=1'>
-                {i.require_subscription ? 'Accounts without an active or trialing plan cannot start simulations.' : 'Accounts can run without a plan.'}
-              </IntRow>
-              <IntRow label='Default budget' on>
-                {usd(i.default_budget_usd)} a month of model spend for accounts whose plan sets none (<Mono>OCTILLION_ORG_MONTHLY_BUDGET_USD</Mono>)
-              </IntRow>
-            </Section>
-          )}
+          <Section title='Needs attention' description='Accounts where a person should step in.'>
+            <div className='relative'>
+              <Icons.search className='text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2' />
+              <Input type='search' value={q} onChange={(e) => setQ(e.target.value)} placeholder='Search accounts, contacts or issues' aria-label='Search accounts needing attention' className='h-9 pl-8' />
+            </div>
+            <div className='border-y'>
+              <DataList
+                noun='accounts'
+                minWidth={760}
+                rows={attention}
+                empty={q ? 'Nothing matches.' : 'Nobody is stuck.'}
+                cols={[
+                  { label: 'Account', className: 'w-48', render: (a) => <span className='font-medium'>{a.name}</span> },
+                  { label: 'Stage', className: 'w-40', render: (a) => <StatusBadge>{a.stage_label}</StatusBadge> },
+                  { label: 'Issues', render: (a) => <span className='block max-w-xl truncate text-amber-400' title={a.attention.join('\n')}>{a.attention.length > 1 ? `${a.attention.length} · ` : ''}{a.attention.join(' · ')}</span> },
+                  { label: 'Contact', className: 'w-56', render: (a) => <span className='text-muted-foreground block max-w-56 truncate'>{a.contact ?? '—'}</span> },
+                  { label: 'Last seen', className: 'w-28', render: (a) => <When d={a.last_seen} className='text-muted-foreground text-xs' /> }
+                ]}
+              />
+            </div>
+          </Section>
         </div>
       )}
     </PageContainer>

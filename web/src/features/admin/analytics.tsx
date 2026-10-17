@@ -6,7 +6,8 @@ import { Area, AreaChart, Bar, BarChart, CartesianGrid, XAxis, YAxis } from 'rec
 import PageContainer from '@/components/layout/page-container';
 import { buttonVariants } from '@/components/ui/button';
 import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent, type ChartConfig } from '@/components/ui/chart';
-import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
+import { Input } from '@/components/ui/input';
+import { DateRangePicker, last30, rangeQuery, type DateRange } from '@/components/layout/date-range-picker';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Icons } from '@/components/icons';
 import { num, usd } from '@/lib/octillion-format';
@@ -15,6 +16,7 @@ import { StatStrip } from '@/components/layout/section';
 import { DataList, ErrorBox, LoadingCards, Mono, Section, StatusBadge, Trend, When } from './ui';
 
 interface Analytics {
+  range?: { from: string; to: string; days: number };
   days: number;
   links: { posthog: string | null; new_relic: string | null; posthog_events: boolean; tracing: boolean };
   totals: {
@@ -30,7 +32,7 @@ interface Analytics {
   daily: { day: string; accounts: number; people: number; calls: number; errors: number }[];
   tools: { name: string; accounts: number; people: number; calls: number; error_pct: number; p50_ms: number | null; p95_ms: number | null }[];
   clients: { client: string; accounts: number; people: number; connections: number }[];
-  accounts: { slug: string; name: string; calls: number; prev_calls: number; errors: number; people: number; last_seen: string | null; trend: number | null; at_risk: boolean }[];
+  accounts: { slug: string; name: string; products: string | null; calls: number; prev_calls: number; errors: number; people: number; last_seen: string | null; trend: number | null; at_risk: boolean }[];
   retention: { cohort: string; size: number; weeks: (number | null)[] }[];
   ops: Record<string, number>;
   errors: { at: string; account: string; slug: string; method: string; name: string | null; client: string | null; error: string | null }[];
@@ -43,10 +45,11 @@ const callsConfig = { calls: { label: 'Tool calls', color: 'var(--chart-1)' }, e
 const activeConfig = { accounts: { label: 'Accounts', color: 'var(--chart-2)' }, people: { label: 'People', color: 'var(--chart-4)' } } satisfies ChartConfig;
 
 /** Every day of the period, zero-filled, oldest first. */
-function fillDays(rows: Analytics['daily'], days: number) {
+function fillDays(rows: Analytics['daily'], days: number, from?: string) {
   const by = new Map(rows.map((r) => [r.day, r]));
+  const start = from ? Date.parse(`${from}T00:00:00Z`) : Date.now() - (days - 1) * 86_400_000;
   return Array.from({ length: days }, (_, i) => {
-    const day = new Date(Date.now() - (days - 1 - i) * 86_400_000).toISOString().slice(0, 10);
+    const day = new Date(start + i * 86_400_000).toISOString().slice(0, 10);
     const r = by.get(day);
     return { day, calls: Number(r?.calls ?? 0), errors: Number(r?.errors ?? 0), accounts: Number(r?.accounts ?? 0), people: Number(r?.people ?? 0) };
   });
@@ -55,9 +58,10 @@ const shortDay = (d: string) => new Date(`${d}T00:00:00Z`).toLocaleDateString(un
 
 /** Product analytics (/admin/analytics) or the health of the machinery behind it (/admin/health), from one API. */
 export function AdminAnalytics({ view = 'analytics' }: { view?: 'analytics' | 'health' }) {
-  const [days, setDays] = useState(30);
-  const { data: a, error, isLoading } = useAdmin<Analytics>(`/analytics?days=${days}`);
-  const series = useMemo(() => (a ? fillDays(a.daily, a.days) : []), [a]);
+  const [range, setRange] = useState<DateRange>(last30);
+  const [q, setQ] = useState('');
+  const { data: a, error, isLoading } = useAdmin<Analytics>(`/analytics?${rangeQuery(range)}`);
+  const series = useMemo(() => (a ? fillDays(a.daily, a.days, a.range?.from) : []), [a]);
 
   return (
     <PageContainer
@@ -65,11 +69,13 @@ export function AdminAnalytics({ view = 'analytics' }: { view?: 'analytics' | 'h
       pageDescription={view === 'health' ? 'Errors, latency, simulations, sessions and the model gateway, across every account.' : "Product usage across every account. Customers see only their own team's usage."}
       pageHeaderAction={
         <div className='flex flex-wrap items-center justify-end gap-2'>
-          <NativeSelect value={String(days)} onChange={(e) => setDays(Number(e.target.value))} aria-label='Period'>
-            <NativeSelectOption value='7'>Last 7 days</NativeSelectOption>
-            <NativeSelectOption value='30'>Last 30 days</NativeSelectOption>
-            <NativeSelectOption value='90'>Last 90 days</NativeSelectOption>
-          </NativeSelect>
+          {view === 'analytics' && (
+            <div className='relative w-64'>
+              <Icons.search className='text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2' />
+              <Input type='search' value={q} onChange={(e) => setQ(e.target.value)} placeholder='Search account or product' aria-label='Search account or product' className='pl-8' />
+            </div>
+          )}
+          <DateRangePicker value={range} onChange={setRange} />
           {a?.links.posthog && (
             <a className={buttonVariants({ variant: 'outline' })} href={a.links.posthog} target='_blank' rel='noopener noreferrer'>
               PostHog <Icons.externalLink className='size-3.5' />
@@ -84,14 +90,6 @@ export function AdminAnalytics({ view = 'analytics' }: { view?: 'analytics' | 'h
       }
     >
       <ErrorBox error={error} />
-      {a && (!a.links.posthog || !a.links.new_relic) && (
-        <p className='text-muted-foreground mb-4 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs'>
-          PostHog events <StatusBadge tone={a.links.posthog_events ? 'ok' : 'neutral'}>{a.links.posthog_events ? 'on' : 'off'}</StatusBadge>
-          · tracing to New Relic <StatusBadge tone={a.links.tracing ? 'ok' : 'neutral'}>{a.links.tracing ? 'on' : 'off'}</StatusBadge>
-          {!a.links.posthog && <span>· set <Mono>POSTHOG_PROJECT_URL</Mono> for a PostHog link</span>}
-          {!a.links.new_relic && <span>· set <Mono>NEW_RELIC_DASHBOARD_URL</Mono> for a New Relic link</span>}
-        </p>
-      )}
       {isLoading || !a ? (
         <div className='grid gap-4'>
           <LoadingCards count={4} />
@@ -242,8 +240,8 @@ export function AdminAnalytics({ view = 'analytics' }: { view?: 'analytics' | 'h
 
             <Section title='Accounts' description='Activity per account; "at risk" means calls halved vs the previous period.'>
               <DataList
-                rows={a.accounts}
-                empty='No account activity.'
+                rows={a.accounts.filter((r) => { const w = q.trim().toLowerCase(); return !w || `${r.name} ${r.slug} ${r.products ?? ''}`.toLowerCase().includes(w); })}
+                empty={q ? 'No account or product matches.' : 'No account activity.'}
                 cols={[
                   {
                     label: 'Account',
@@ -254,6 +252,7 @@ export function AdminAnalytics({ view = 'analytics' }: { view?: 'analytics' | 'h
                       </span>
                     )
                   },
+                  { label: 'Products', render: (r) => <span className='text-muted-foreground text-xs'>{r.products ?? '—'}</span> },
                   { label: 'Calls', render: (r) => num(r.calls) },
                   { label: 'Trend', render: (r) => <Trend pct={r.trend} /> },
                   { label: 'People', render: (r) => r.people },

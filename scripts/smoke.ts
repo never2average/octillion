@@ -1234,7 +1234,12 @@ try {
       assert.ok(an.daily.length >= 1 && an.retention.length >= 1 && an.retention[0].weeks.length === 8 && an.retention[0].weeks[0] === 100, "retention: week 0 is everyone");
       assert.ok(an.accounts.some((a: any) => a.slug === slugW), "per-account activity");
       assert.ok(typeof an.ops.sessions === "number" && typeof an.ops.gateway_requests === "number");
-      assert.equal((await json(adm("GET", "/analytics?days=999"))).days, 90, "period capped at 90 days");
+      assert.equal((await json(adm("GET", "/analytics?days=999"))).days, 366, "period capped at a year");
+      const ranged = await json(adm("GET", "/analytics?from=2026-01-01&to=2026-01-07"));
+      assert.deepEqual(ranged.range, { from: "2026-01-01", to: "2026-01-07", days: 7 }, "a date range, both days included");
+      assert.equal((await json(adm("GET", "/analytics?from=2026-02-10&to=2026-02-01"))).days, 30, "a backwards range falls back to the default");
+      const usageR = await json(appCall(ownerC, "GET", "/usage?from=2026-01-01&to=2026-01-31"));
+      assert.equal(usageR.days, 31); assert.equal(usageR.range.to, "2026-01-31");
       console.log("✓ platform analytics: totals, daily, tool adoption, clients, retention cohorts, accounts at risk, ops health");
     }
 

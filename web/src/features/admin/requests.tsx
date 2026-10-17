@@ -44,10 +44,14 @@ export function AdminRequests() {
     ] : []),
     ...(q.status === 'declined' ? [{ label: 'Reopen', icon: <Icons.arrowRight />, onSelect: () => reopen.mutate(q) }] : [])
   ];
+  // One line per cell: company, status, who, product, the start of the message, when.
+  const host = (q: Req) => { const u = link(q); try { return u ? new URL(u).host.replace(/^www\./, '') : null; } catch { return q.product_url; } };
   const cols: RecordCol<Req>[] = [
-    { key: 'company', label: 'Company', keep: true, render: (q) => <div className='space-y-1'><p className='font-semibold'>{q.company}</p><StatusBadge tone={tone(q)}>{q.status}</StatusBadge></div> },
-    { key: 'contact', label: 'Contact', render: (q) => <span className='text-muted-foreground text-sm'>{q.email}</span> },
-    { key: 'message', label: 'Message', render: (q) => q.message ? <p className='line-clamp-2 text-sm'>{q.message}</p> : <span className='text-muted-foreground'>—</span> },
+    { key: 'company', label: 'Company', keep: true, render: (q) => <span className='font-medium'>{q.company}</span> },
+    { key: 'status', label: 'Status', className: 'w-28', keep: true, render: (q) => <StatusBadge tone={tone(q)}>{q.status}</StatusBadge> },
+    { key: 'email', label: 'Email', className: 'w-56', render: (q) => <span className='text-muted-foreground block max-w-56 truncate text-sm'>{q.email}</span> },
+    { key: 'product', label: 'Product', className: 'w-44', render: (q) => <span className='text-muted-foreground block max-w-44 truncate text-sm'>{host(q) ?? '—'}</span> },
+    { key: 'message', label: 'Message', render: (q) => q.message ? <span className='block max-w-md truncate text-sm'>{q.message}</span> : <span className='text-muted-foreground'>—</span> },
     { key: 'at', label: 'Requested', className: 'w-28', keep: true, render: (q) => <When d={q.created_at} className='text-muted-foreground text-xs' /> }
   ];
 

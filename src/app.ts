@@ -19,6 +19,7 @@ import { getPopulation } from "./populations.js";
 import * as playbooks from "./playbooks.js";
 import { markStage, playbooksFor, PlaybookError, syncProgress } from "./playbooks.js";
 import { TOOL_NAMES } from "./server.js";
+import { reportRange } from "./insights.js";
 import { capture, identifyPerson } from "./telemetry.js";
 import * as journeys from "./journeys.js";
 import * as limits from "./limits.js";
@@ -121,29 +122,29 @@ async function setup(s: Session, since?: string) {
   };
 }
 
-async function usage(s: Session, daysIn: unknown) {
-  const days = Math.min(90, Math.max(1, Number(daysIn) || 30));
+async function usage(s: Session, q: { from?: unknown; to?: unknown; days?: unknown }) {
+  const range = reportRange(q), days = range.days;
   const db = await getDb();
   const [daily, tools, people, runs] = await Promise.all([
     db.query<{ day: string; calls: number; errors: number }>(
       `SELECT to_char(date_trunc('day', at), 'YYYY-MM-DD') AS day, count(*) AS calls, count(*) FILTER (WHERE NOT ok) AS errors
-         FROM mcp_events WHERE org_id = $1 AND method = 'tools/call' AND at > now() - make_interval(days => $2) GROUP BY 1 ORDER BY 1`, [s.org, days]),
+         FROM mcp_events WHERE org_id = $1 AND method = 'tools/call' AND at >= $2 AND at < $3 GROUP BY 1 ORDER BY 1`, [s.org, range.start, range.end]),
     db.query<{ name: string; calls: number; errors: number; avg_ms: number }>(
       `SELECT name, count(*) AS calls, count(*) FILTER (WHERE NOT ok) AS errors, round(avg(ms)) AS avg_ms
-         FROM mcp_events WHERE org_id = $1 AND method = 'tools/call' AND at > now() - make_interval(days => $2) GROUP BY name ORDER BY count(*) DESC`, [s.org, days]),
+         FROM mcp_events WHERE org_id = $1 AND method = 'tools/call' AND at >= $2 AND at < $3 GROUP BY name ORDER BY count(*) DESC`, [s.org, range.start, range.end]),
     db.query<{ user_id: string | null; calls: number; last: Date; clients: string[] }>(
       `SELECT user_id, count(*) FILTER (WHERE method = 'tools/call') AS calls, max(at) AS last, array_remove(array_agg(DISTINCT client), NULL) AS clients
-         FROM mcp_events WHERE org_id = $1 AND at > now() - make_interval(days => $2) GROUP BY user_id ORDER BY max(at) DESC`, [s.org, days]),
+         FROM mcp_events WHERE org_id = $1 AND at >= $2 AND at < $3 GROUP BY user_id ORDER BY max(at) DESC`, [s.org, range.start, range.end]),
     db.query<{ simulations: number; sessions: number; completed: number }>(
-      `SELECT (SELECT count(*) FROM simulations WHERE org_id = $1 AND created_at > now() - make_interval(days => $2)) AS simulations,
+      `SELECT (SELECT count(*) FROM simulations WHERE org_id = $1 AND created_at >= $2 AND created_at < $3) AS simulations,
               count(*) AS sessions, count(*) FILTER (WHERE status = 'completed') AS completed
-         FROM agent_sessions WHERE org_id = $1 AND queued_at > now() - make_interval(days => $2)`, [s.org, days]),
+         FROM agent_sessions WHERE org_id = $1 AND queued_at >= $2 AND queued_at < $3`, [s.org, range.start, range.end]),
   ]);
   const t = await admin.team(s.slug);
   const emailOf = new Map(t.members.map((m) => [m.user_id, m.email]));
   const [{ budget }, spent] = await Promise.all([orgBudget(s.org).catch(() => ({ budget: 0 })), orgMonthSpendUsd(s.org)]);
   return {
-    days, daily, tools, runs: runs[0],
+    days, range: { from: range.from, to: range.to }, daily, tools, runs: runs[0],
     people: people.map((p) => ({ user_id: p.user_id, email: p.user_id ? emailOf.get(p.user_id) ?? "Former member" : "Connector key", calls: Number(p.calls), last: p.last, clients: p.clients })),
     spend: { month_usd: spent, budget_usd: budget },
   };
@@ -278,7 +279,7 @@ export function appRouter() {
     await markStage({ orgId: S(res).org, slug: S(res).slug }, S(res).user, String(req.params.id), String(req.params.stage), req.body?.done !== false);
     res.status(204).end();
   });
-  api.get("/usage", async (req, res) => void res.json(await usage(S(res), req.query.days)));
+  api.get("/usage", async (req, res) => void res.json(await usage(S(res), req.query)));
   api.get("/team", async (_req, res) => void res.json({ ...(await admin.team(S(res).slug, true)), me: S(res).user, can_manage: S(res).role === "admin" }));
   api.post("/team/invitations", async (req, res) => {
     adminOnly(res);

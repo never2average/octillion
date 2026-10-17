@@ -317,7 +317,7 @@ export function createApp() {
   ob.use((_req, res, next) => { res.set("Cache-Control", "no-store"); next(); }); // responses can carry a new key
   const slug = (req: Request) => String(req.params.slug);
   const done = (res: Response, _?: unknown) => void res.status(204).end();
-  ob.get("/overview", async (_req, res) => void res.json(await onboarding.overview()));
+  ob.get("/overview", async (req, res) => void res.json(await onboarding.overview(req.query)));
   ob.get("/requests", async (req, res) => void res.json({ requests: await onboarding.listRequests(req.query.status ? String(req.query.status) : undefined) }));
   ob.post("/requests/:id/approve", async (req, res) => void res.status(201).json(await onboarding.approveRequest(adminActor(req, res), Number(req.params.id), req.body ?? {})));
   ob.post("/requests/:id/decline", async (req, res) => done(res, await onboarding.declineRequest(adminActor(req, res), Number(req.params.id))));
@@ -340,7 +340,7 @@ export function createApp() {
   ob.post("/orgs/:slug/keys/:id/revoke", async (req, res) => done(res, await onboarding.revokeKey(adminActor(req, res), slug(req), Number(req.params.id))));
   ob.post("/orgs/:slug/keys/:id/rotate", async (req, res) => void res.status(201).json(await onboarding.rotateKey(adminActor(req, res), slug(req), Number(req.params.id))));
   // Platform analytics and health across every account (src/insights.ts).
-  ob.get("/analytics", async (req, res) => void res.json(await platformAnalytics(req.query.days)));
+  ob.get("/analytics", async (req, res) => void res.json(await platformAnalytics(req.query)));
   // Customer journeys (src/playbooks.ts): the use-case pipelines on /app Setup. Admins write them, promote the ones
   // customers see, and order them; adoption = accounts that started / finished each.
   ob.get("/playbooks", async (_req, res) => void res.json({ playbooks: await playbooks.templatesWithAdoption(), tools: TOOL_NAMES }));

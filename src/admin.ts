@@ -12,6 +12,7 @@
  * Without CLERK_SECRET_KEY the console falls back to per-org API keys (src/auth.ts) and hands out secret connector URLs.
  * Legacy keys keep working either way, for existing beta users and clients that can only send a header.
  */
+import { reportRange } from "./insights.js";
 import { createApiKey, createOrg, slugify } from "./auth.js";
 import { capture } from "./telemetry.js";
 import * as billing from "./billing.js";
@@ -231,9 +232,15 @@ async function orgBySlug(slug: string, fresh = false) {
   return (await shapeAll([await factsBySlug(slug)], fresh)).orgs[0];
 }
 
-export async function overview() {
+/** `q.from` / `q.to` (YYYY-MM-DD): the funnel covers accounts created in that period; everything else is current. */
+export async function overview(q: { from?: unknown; to?: unknown } = {}) {
   const db = await getDb();
   const { orgs, stripe_error } = await listOrgs();
+  const range = q.from && q.to ? reportRange(q) : null;
+  const cohort = range
+    ? new Set((await db.query<{ slug: string }>("SELECT slug FROM organizations WHERE created_at >= $1 AND created_at < $2", [range.start, range.end])).map((r) => r.slug))
+    : null;
+  const inCohort = cohort ? orgs.filter((o) => cohort.has(o.slug)) : orgs;
   const [req] = await db.query<{ pending: number; approved: number; declined: number; oldest_pending: Date | null }>(
     `SELECT count(*) FILTER (WHERE status = 'pending') AS pending, count(*) FILTER (WHERE status = 'approved') AS approved,
             count(*) FILTER (WHERE status = 'declined') AS declined, min(created_at) FILTER (WHERE status = 'pending') AS oldest_pending
@@ -243,8 +250,9 @@ export async function overview() {
     public_url: publicUrl(), integrations: integrations(), stripe_error,
     requests: { pending: Number(req.pending), approved: Number(req.approved), declined: Number(req.declined), oldest_pending: req.oldest_pending },
     // Cumulative: how many accounts reached each step, so the drop-off between steps is visible.
-    funnel: STAGES.map((s, i) => ({ id: s.id, label: s.label, reached: orgs.filter((o) => o.stage_index >= i).length })),
-    attention: orgs.filter((o) => o.attention.length).map((o) => ({ slug: o.slug, name: o.name, stage_label: o.stage_label, attention: o.attention })),
+    funnel: STAGES.map((s, i) => ({ id: s.id, label: s.label, reached: inCohort.filter((o) => o.stage_index >= i).length })),
+    range: range ? { from: range.from, to: range.to, days: range.days } : null,
+    attention: orgs.filter((o) => o.attention.length).map((o) => ({ slug: o.slug, name: o.name, stage_label: o.stage_label, attention: o.attention, contact: o.contact, last_seen: o.last_seen })),
     active_7d: orgs.filter((o) => o.calls_7d > 0).length,
     paying: subs.filter((s) => s.status === "active").length, trialing: subs.filter((s) => s.status === "trialing").length,
     orgs: orgs.length,

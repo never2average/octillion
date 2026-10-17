@@ -8,14 +8,14 @@ import { Badge } from '@/components/ui/badge';
 import { Rule, Section, StatStrip } from '@/components/layout/section';
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from '@/components/ui/chart';
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty';
-import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { appApi } from '@/lib/api-client';
 import { num, usd } from '@/lib/octillion-format';
+import { DateRangePicker, last30, rangeQuery, type DateRange } from '@/components/layout/date-range-picker';
 import { ErrorState, LoadingCards, SpendMeter, When, useOrgLoad } from './shared';
 
 interface Usage {
-  days: number; daily: { day: string; calls: number; errors: number }[];
+  days: number; range?: { from: string; to: string }; daily: { day: string; calls: number; errors: number }[];
   tools: { name: string; calls: number; errors: number; avg_ms: number | null }[];
   runs: { simulations: number; sessions: number; completed: number };
   people: { user_id: string | null; email: string; calls: number; last: string; clients: string[] | null }[];
@@ -25,14 +25,16 @@ interface Usage {
 const callsConfig = { calls: { label: 'Tool calls', color: 'var(--chart-1)' }, errors: { label: 'Errors', color: 'var(--destructive)' } } satisfies ChartConfig;
 
 export function UsagePage() {
-  const [days, setDays] = useState(30);
-  const { data: u, error } = useOrgLoad(() => appApi<Usage>('GET', `/usage?days=${days}`), [days]);
+  const [range, setRange] = useState<DateRange>(last30);
+  const { data: u, error } = useOrgLoad(() => appApi<Usage>('GET', `/usage?${rangeQuery(range)}`), [range.from, range.to]);
+  const days = u?.days ?? 30;
   // Every day of the period, zero-filled, so the charts have a continuous axis.
   const series = useMemo(() => {
     if (!u) return [];
     const by = new Map(u.daily.map((d) => [d.day, d]));
+    const start = u.range ? Date.parse(`${u.range.from}T00:00:00Z`) : Date.now() - (days - 1) * 86_400_000;
     return Array.from({ length: days }, (_, i) => {
-      const k = new Date(Date.now() - (days - 1 - i) * 86_400_000).toISOString().slice(0, 10);
+      const k = new Date(start + i * 86_400_000).toISOString().slice(0, 10);
       const d = by.get(k);
       return { day: k, calls: Number(d?.calls ?? 0), errors: Number(d?.errors ?? 0) };
     });
@@ -43,11 +45,7 @@ export function UsagePage() {
       pageTitle='Usage'
       pageDescription='Your whole team, across every AI client.'
       pageHeaderAction={
-        <NativeSelect value={days} onChange={(e) => setDays(Number(e.target.value))} aria-label='Period' className='w-36'>
-          <NativeSelectOption value={7}>Last 7 days</NativeSelectOption>
-          <NativeSelectOption value={30}>Last 30 days</NativeSelectOption>
-          <NativeSelectOption value={90}>Last 90 days</NativeSelectOption>
-        </NativeSelect>
+        <DateRangePicker value={range} onChange={setRange} />
       }
     >
       {error ? <ErrorState error={error} /> : !u ? <LoadingCards count={4} /> : (
