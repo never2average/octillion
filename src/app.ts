@@ -293,6 +293,15 @@ export function appRouter() {
     await playbooks.deleteUseCase(S(res).org, String(req.params.id), actor(res), S(res).role === "admin");
     res.status(204).end();
   });
+  // Adoption person by person: who uses each use case, how far they got, where they are stuck, who can help.
+  api.get("/adoption", async (_req, res) => {
+    const s = S(res);
+    const [rows, t] = await Promise.all([playbooks.adoptionByPerson(s.org), admin.team(s.slug)]);
+    const who = new Map(t.members.map((m) => [m.user_id, m.email ?? m.name ?? null]));
+    const label = (id: string | null) => (id ? (id === s.user ? "You" : who.get(id) ?? "Former member") : null);
+    res.json({ me: s.user, use_cases: rows.map((r) => ({ ...r, helper_label: label(r.helper), helper_email: r.helper ? who.get(r.helper) ?? null : null,
+      people: r.people.map((x) => ({ ...x, label: label(x.user_id), email: who.get(x.user_id) ?? null })) })) });
+  });
   api.post("/journeys/:id/view", async (req, res) => {
     capture({ distinctId: S(res).user ?? `org:${S(res).slug}`, orgSlug: S(res).slug }, "journey_viewed", { journey: String(req.params.id) });
     res.status(204).end();

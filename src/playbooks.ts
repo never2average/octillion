@@ -488,3 +488,49 @@ async function progressFor(orgId: number, templates: Playbook[]) {
              own, added_by: own ? ((p as { updated_by?: string | null }).updated_by ?? null) : null };
   });
 }
+
+// ---------- adoption per person (/app/adoption) ----------
+
+export interface PersonProgress {
+  user_id: string; done: number; total: number; calls: number; errors: number; last_error: string | null;
+  stuck: string | null; at: string | null; finished: boolean;
+}
+
+/**
+ * Each use case, person by person: the same stage rules as the account's progress (a stage counts tool calls after the
+ * previous one), on that person's own tool calls; plus their calls and failures on the use case's tools, where they
+ * are stuck, and who can help (whoever finished it, else got furthest).
+ */
+export async function adoptionByPerson(orgId: number) {
+  const db = await getDb();
+  const journeys = await playbooksFor(orgId);
+  const events = await db.query<{ user_id: string; name: string; ok: boolean; error: string | null; at: Date }>(
+    "SELECT user_id, name, ok, error, at FROM mcp_events WHERE org_id = $1 AND method = 'tools/call' AND user_id IS NOT NULL ORDER BY at", [orgId]);
+  const marked = await db.query<{ journey_id: string; stage_id: string; user_id: string | null; done_at: Date }>(
+    "SELECT journey_id, stage_id, user_id, done_at FROM journey_progress WHERE org_id = $1 AND source = 'manual'", [orgId]);
+  const byUser = new Map<string, typeof events>();
+  for (const e of events) (byUser.get(e.user_id) ?? byUser.set(e.user_id, []).get(e.user_id)!).push(e);
+  return journeys.map((j) => {
+    const tools = new Set(j.stages.flatMap((s) => s.tools));
+    const people: PersonProgress[] = [];
+    for (const [user, evs] of byUser) {
+      const mine = evs.filter((e) => tools.has(e.name));
+      const marks = marked.filter((m) => m.journey_id === j.id && m.user_id === user);
+      if (!mine.length && !marks.length) continue; // never touched this use case
+      let since = 0, done = 0, stuck: string | null = null, lastMs = 0;
+      for (const st of j.stages) {
+        const at = st.manual ? marks.find((m) => m.stage_id === st.id)?.done_at ?? null
+          : mine.find((e) => e.ok && st.tools.includes(e.name) && new Date(e.at).getTime() >= since)?.at ?? null;
+        if (at) { done++; since = Math.max(since, new Date(at).getTime()); lastMs = Math.max(lastMs, new Date(at).getTime()); }
+        else stuck ??= st.title;
+      }
+      const failed = mine.filter((e) => !e.ok);
+      const lastAt = mine.reduce((m, e) => Math.max(m, new Date(e.at).getTime()), lastMs);
+      people.push({ user_id: user, done, total: j.stages.length, calls: mine.length, errors: failed.length, last_error: failed.at(-1)?.error ?? null,
+        stuck: done < j.stages.length ? stuck : null, at: lastAt ? new Date(lastAt).toISOString() : null, finished: done === j.stages.length });
+    }
+    people.sort((a, b) => b.done - a.done || b.calls - a.calls);
+    const helper = people.find((x) => x.finished) ?? people.find((x) => x.done > 0) ?? null;
+    return { id: j.id, name: j.name, outcome: j.outcome, own: j.own, added_by: j.added_by, total: j.stages.length, people, helper: helper?.user_id ?? null };
+  });
+}

@@ -1,6 +1,7 @@
 'use client';
-// /app Adoption, a Notion-style database: the parts of the workflow your team has tried (from real tool calls), the
-// use cases (journeys from Octillion plus the account's own, added here) and the AI clients you connected. Click a row
+// /app Adoption, a Notion-style database, person by person: each use case (journeys from Octillion plus the account's
+// own) with everyone who has worked on it, how far they got and how much they used it, what went wrong, and which
+// teammate to ask (whoever finished it); then the team's workflow parts and the AI clients you connected. Click a row
 // to open it beside the table: stages with their prompts, what is done, and mark-done for steps without a tool.
 import { useCallback, useState } from 'react';
 import Link from 'next/link';
@@ -20,15 +21,19 @@ import { CopyButton, ErrorState, When, copy, fail, useOrgLoad } from './shared';
 interface Setup { clients: { client: string; last: string }[]; groups: { id: string; label: string; prompt: string; used: number; total: number }[] }
 interface Stage { id: string; title: string; why: string; prompt: string; tools: string[]; expect: string; manual?: boolean; done: boolean; at: string | null }
 interface Journey { id: string; name: string; outcome: string; who: string; time: string; stages: Stage[]; done: number; total: number; own?: boolean; added_by?: string | null }
+interface Person { user_id: string; label: string; email: string | null; done: number; total: number; calls: number; errors: number; last_error: string | null; stuck: string | null; at: string | null; finished: boolean }
+interface UseCaseUse { id: string; name: string; outcome: string; total: number; people: Person[]; helper: string | null; helper_label: string | null; helper_email: string | null }
 type Row =
   | { key: string; type: 'workflow'; name: string; detail: string; done: number; total: number; g: Setup['groups'][number] }
-  | { key: string; type: 'use case'; name: string; detail: string; done: number; total: number; j: Journey }
+  | { key: string; type: 'use case'; name: string; detail: string; done: number; total: number; j: Journey; who: Person | null; uc: UseCaseUse | null }
   | { key: string; type: 'client'; name: string; detail: string; done: number; total: number; at: string };
 
 
 export function AdoptionPage() {
   const { data: s, error } = useOrgLoad(() => appApi<Setup>('GET', '/setup'));
-  const { data: jr, reload } = useOrgLoad(() => appApi<{ journeys: Journey[] }>('GET', '/journeys'));
+  const { data: jr, reload: reloadJourneys } = useOrgLoad(() => appApi<{ journeys: Journey[] }>('GET', '/journeys'));
+  const { data: ad, reload: reloadAdoption } = useOrgLoad(() => appApi<{ use_cases: UseCaseUse[] }>('GET', '/adoption'));
+  const reload = () => { reloadJourneys(); reloadAdoption(); };
   const [adding, setAdding] = useState(false);
   const router = useRouter();
   const removeUseCase = (j: Journey) => {
@@ -36,21 +41,38 @@ export function AdoptionPage() {
     appApi('DELETE', `/journeys/${encodeURIComponent(j.id)}`).then(() => { toast.success('Use case removed'); reload(); }).catch(fail);
   };
   const rows: Row[] = !s ? [] : [
-    ...(jr?.journeys ?? []).map((j) => ({ key: `j-${j.id}`, type: 'use case' as const, name: j.name, detail: j.outcome, done: j.done, total: j.total, j })),
+    // One row per person who worked on a use case; a use case nobody touched gets one row of its own.
+    ...(jr?.journeys ?? []).flatMap((j): Row[] => {
+      const uc = ad?.use_cases.find((x) => x.id === j.id) ?? null;
+      const base = { type: 'use case' as const, name: j.name, detail: j.outcome, j, uc };
+      return uc?.people.length
+        ? uc.people.map((p) => ({ ...base, key: `j-${j.id}-${p.user_id}`, done: p.done, total: p.total, who: p }))
+        : [{ ...base, key: `j-${j.id}`, done: 0, total: j.total, who: null }];
+    }),
     ...s.groups.map((g) => ({ key: `w-${g.id}`, type: 'workflow' as const, name: g.label, detail: g.used ? `${g.used} of ${g.total} tools used` : 'Not tried yet', done: g.used, total: g.total, g })),
     ...s.clients.map((c) => ({ key: `c-${c.client}`, type: 'client' as const, name: c.client, detail: 'Connected', done: 1, total: 1, at: c.last }))
   ];
-  // Who a row belongs to: whoever added an account's own use case, Octillion for the built-ins, the team for workflow
-  // parts (counted team-wide), you for clients (the list is yours).
-  const userOf = (r: Row) => r.type === 'use case' ? (r.j.own ? (r.j.added_by?.replace(/^customer:/, '') ?? 'Your team') : 'Octillion') : r.type === 'workflow' ? 'Team' : 'You';
+  // Who a row is about: the person on a use case (nobody yet: "Not started"), the team for workflow parts (counted
+  // team-wide), you for clients (the list is yours).
+  const userOf = (r: Row) => r.type === 'use case' ? (r.who?.label ?? 'Not started') : r.type === 'workflow' ? 'Team' : 'You';
   const cols: RecordCol<Row>[] = [
     { key: 'item', label: 'Use case', keep: true, render: (r) => (<>
       <p className='text-sm leading-none font-medium'>{r.name}</p>
       <p className='text-muted-foreground mt-1.5 line-clamp-1 text-xs leading-none'>{r.detail}</p>
     </>) },
-    { key: 'user', label: 'User', className: 'w-56', keep: true, render: (r) => <span className={cn('block max-w-56 truncate text-sm', userOf(r) === 'Octillion' || userOf(r) === 'Team' ? 'text-muted-foreground' : '')}>{userOf(r)}</span> },
-    { key: 'progress', label: 'Progress', className: 'w-56', render: (r) => <Progress done={r.done} total={r.total} check={r.type === 'client'} /> },
-    { key: 'last', label: 'Last', className: 'hidden w-32 sm:table-cell', render: (r) => <span className='text-muted-foreground text-xs'>{r.type === 'client' ? <When d={r.at} /> : r.type === 'use case' ? lastDone(r.j) : '—'}</span> }
+    { key: 'user', label: 'User', className: 'w-48', keep: true, render: (r) => <span className={cn('block max-w-48 truncate text-sm', r.type === 'use case' && r.who ? '' : 'text-muted-foreground')}>{userOf(r)}</span> },
+    { key: 'usage', label: 'Usage', className: 'w-52', render: (r) => (
+      <div className='space-y-1.5'>
+        <Progress done={r.done} total={r.total} check={r.type === 'client'} />
+        {r.type === 'use case' && r.who && <p className='text-muted-foreground text-xs leading-none'>{r.who.calls} call{r.who.calls === 1 ? '' : 's'}{r.who.finished ? ' · outcome reached' : ''}</p>}
+      </div>
+    ) },
+    { key: 'issues', label: 'Issues', className: 'w-60', render: (r) => r.type !== 'use case' || !r.who ? <span className='text-muted-foreground'>—</span>
+      : r.who.errors ? <span className='text-destructive block max-w-60 truncate text-xs leading-none' title={r.who.last_error ?? undefined}>{r.who.errors} failed · {r.who.last_error ?? 'tool error'}</span>
+      : r.who.finished ? <span className='text-primary text-xs leading-none'>None · done</span>
+      : <span className='text-muted-foreground block max-w-60 truncate text-xs leading-none'>Next: {r.who.stuck}</span> },
+    { key: 'help', label: 'Help', className: 'w-56', render: (r) => <HelpCell r={r} /> },
+    { key: 'last', label: 'Last', className: 'hidden w-28 sm:table-cell', render: (r) => <span className='text-muted-foreground text-xs'>{r.type === 'client' ? <When d={r.at} /> : r.type === 'use case' && r.who?.at ? <When d={r.who.at} /> : '—'}</span> }
   ];
   if (error) return <PageContainer><ErrorState error={error} /></PageContainer>;
   return (
@@ -58,12 +80,13 @@ export function AdoptionPage() {
       <RecordView<Row>
         rows={rows} rowKey={(r) => r.key} cols={cols} loading={!s} noun='items'
         searchText={(r) => `${r.type} ${r.name} ${r.detail} ${userOf(r)}`}
-        searchPlaceholder='Search adoption: use cases, workflow, clients'
+        searchPlaceholder='Search adoption: use cases, people, issues'
         primary={<Button onClick={() => setAdding(true)}><Icons.add /> Add use case</Button>}
         empty='Nothing to show yet.'
         detailTitle={(r) => r.name}
         actions={(r) => r.type === 'use case' ? [
           { label: 'Open in Setup & training', icon: <Icons.arrowRight />, onSelect: () => router.push(`/app?journey=${encodeURIComponent(r.j.id)}`) },
+          ...(askLink(r) ? [{ label: `Ask ${r.uc!.helper_label} for help`, icon: <Icons.send />, onSelect: () => { window.location.href = askLink(r)!; } }] : []),
           ...(r.j.own ? [{ label: 'Remove use case', icon: <Icons.trash />, destructive: true, onSelect: () => removeUseCase(r.j) }] : [])
         ] : r.type === 'workflow' ? [{ label: 'Copy prompt', icon: <Icons.page />, onSelect: () => copy(r.g.prompt) }] : []}
         detail={(r) => r.type === 'use case' ? <UseCase j={r.j} onChanged={reload} />
@@ -74,10 +97,25 @@ export function AdoptionPage() {
   );
 }
 
-const lastDone = (j: Journey) => {
-  const at = j.stages.map((x) => x.at).filter(Boolean).sort().pop();
-  return at ? <When d={at} /> : '—';
-};
+
+/** A mailto that asks the teammate who finished (or got furthest on) a use case for help with it. */
+function askLink(r: Row) {
+  if (r.type !== 'use case' || !r.uc?.helper || !r.uc.helper_email || r.who?.finished || r.who?.user_id === r.uc.helper) return null;
+  const stuck = r.who?.stuck ? ` I'm stuck at "${r.who.stuck}".` : '';
+  return `mailto:${r.uc.helper_email}?subject=${encodeURIComponent(`Help with "${r.j.name}" in Octillion`)}&body=${encodeURIComponent(`Hi, you got through "${r.j.name}" in Octillion.${stuck} Could you show me how you did it?`)}`;
+}
+
+/** Nudges people to help each other: ask whoever finished it; the person who finished is the one others can ask. */
+function HelpCell({ r }: { r: Row }) {
+  if (r.type !== 'use case') return <span className='text-muted-foreground'>—</span>;
+  const uc = r.uc, link = askLink(r);
+  if (link) return <a href={link} onClick={(e) => e.stopPropagation()} className='text-primary block max-w-56 truncate text-xs leading-none hover:underline'>Ask {uc!.helper_label}{uc!.people.find((p) => p.user_id === uc!.helper)?.finished ? ' (finished it)' : ' (furthest along)'}</a>;
+  if (r.who?.finished) {
+    const waiting = (uc?.people ?? []).filter((p) => !p.finished).length;
+    return <span className='text-muted-foreground text-xs leading-none'>{waiting ? `Can help ${waiting} teammate${waiting === 1 ? '' : 's'}` : 'Finished'}</span>;
+  }
+  return <span className='text-muted-foreground text-xs leading-none'>{r.who ? 'Nobody ahead yet' : 'Be the first to try it'}</span>;
+}
 
 function Progress({ done, total, check }: { done: number; total: number; check?: boolean }) {
   return (

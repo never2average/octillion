@@ -1356,6 +1356,13 @@ try {
       const memJ = jg.find((j: any) => j.id === "team-memory");
       assert.deepEqual(memJ.stages.map((x: any) => x.tools), [["save_to_memory"], ["search_memory"], []]);
       assert.equal(jg.find((j: any) => j.id === "fix-loss").stages.at(-1).tools[0], "save_to_memory");
+      // Adoption person by person: progress from each person's own tool calls, and the teammate who can help.
+      const ad = await json(appCall(ownerC, "GET", "/adoption"));
+      assert.equal(ad.use_cases.length, jg.length, "every use case, with its people");
+      for (const uc of ad.use_cases) {
+        assert.ok(uc.people.every((x: any) => x.done >= 0 && x.done <= uc.total && x.calls >= x.errors && x.label));
+        if (uc.helper) assert.ok(uc.people.some((x: any) => x.user_id === uc.helper && x.done === Math.max(...uc.people.map((y: any) => y.done))), "the helper got furthest");
+      }
       for (const id of ["fix-loss", "head-to-head"]) assert.equal(jg.find((j: any) => j.id === id).stages[0].tools[0], "search_memory", `${id} starts from what the team remembers`);
       // The seed ledger: a deleted built-in stays deleted; an untouched one follows the code; an edited one is left alone.
       {
