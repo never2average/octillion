@@ -23,6 +23,7 @@ interface Usage {
   runs: { simulations: number; sessions: number; completed: number };
   people: { user_id: string; email: string; me: boolean; calls: number }[];
   active_people: number;
+  use_cases?: { id: string; name: string; own: boolean }[];
   spend: { month_usd: number; budget_usd: number; filtered?: boolean };
 }
 
@@ -31,8 +32,11 @@ const callsConfig = { calls: { label: 'Tool calls', color: 'var(--chart-1)' }, e
 export function UsagePage() {
   const [range, setRange] = useState<DateRange>(last30);
   const [users, setUsers] = useState<string[]>([]);
-  const userQ = users.length ? `&user=${encodeURIComponent(users.join(','))}` : '';
+  const [useCases, setUseCases] = useState<string[]>([]);
+  const userQ = (users.length ? `&user=${encodeURIComponent(users.join(','))}` : '') + (useCases.length ? `&use_case=${encodeURIComponent(useCases.join(','))}` : '');
   const { data: u, error } = useOrgLoad(() => appApi<Usage>('GET', `/usage?${rangeQuery(range)}${userQ}`), [range.from, range.to, userQ]);
+  const [ucOpts, setUcOpts] = useState<FilterOption[]>([]);
+  useEffect(() => { if (u?.use_cases) setUcOpts(u.use_cases.map((x) => ({ value: x.id, label: x.name, hint: x.own ? 'yours' : undefined }))); }, [u?.use_cases]);
   // keep the people list from the last load, so the picker does not empty while a new selection loads
   const [peopleOpts, setPeopleOpts] = useState<FilterOption[]>([]);
   useEffect(() => {
@@ -57,6 +61,7 @@ export function UsagePage() {
       pageDescription={users.length ? `${users.length === 1 ? 'One person' : `${users.length} people`} on your team, across every AI client.` : 'Your whole team, across every AI client.'}
       pageHeaderAction={
         <div className='flex flex-wrap items-center gap-2'>
+          <MultiSelectFilter noun='use cases' icon={<Icons.route />} options={ucOpts} value={useCases} onChange={setUseCases} />
           <MultiSelectFilter noun='people' icon={<Icons.teams />} options={peopleOpts} value={users} onChange={setUsers} />
           <DateRangePicker value={range} onChange={setRange} />
         </div>
@@ -68,7 +73,7 @@ export function UsagePage() {
             <StatStrip items={[
               { label: 'Tool calls', value: num(calls), hint: errs ? `${num(errs)} errors` : 'no errors' },
               { label: 'Active people', value: u.active_people },
-              { label: 'Simulations', value: num(u.runs.simulations) },
+              { label: 'Simulations', value: num(u.runs.simulations), hint: useCases.length ? 'all use cases' : undefined },
               { label: 'Agent sessions done', value: `${num(u.runs.completed)} / ${num(u.runs.sessions)}` },
               { label: u.spend.filtered ? 'Their model spend this month' : 'Model spend this month', value: usd(u.spend.month_usd), hint: u.spend.filtered ? 'runs they launched' : Number(u.spend.budget_usd) ? `of ${usd(u.spend.budget_usd)}` : 'no monthly cap' }
             ]} />

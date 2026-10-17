@@ -17,10 +17,9 @@ import { Input } from '@/components/ui/input';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Switch } from '@/components/ui/switch';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Icons } from '@/components/icons';
 import { appApi } from '@/lib/api-client';
-import { money, usd } from '@/lib/octillion-format';
+import { money, num, usd } from '@/lib/octillion-format';
 import { cn } from '@/lib/utils';
 import { ErrorState, LoadingCards, When, fail, useOrgLoad } from './shared';
 
@@ -39,8 +38,9 @@ interface Team { clerk: boolean; error: string | null; members: Member[]; invita
 type Mode = 'pool' | 'even' | 'custom';
 interface Policy { mode: Mode; reserve_usd: number; default_cap_usd: number | null; new_members_can_run: boolean; max_concurrent_runs: number | null; max_sessions_per_run: number | null }
 interface LimitTeam { id: number; name: string; budget_usd: number | null; max_concurrent_runs: number | null; members: number; spent: number }
-interface LimitMember { user_id: string; team_id: number | null; can_run: boolean; adjust_usd: number; cap_usd: number | null; max_concurrent_runs: number | null; allowance_usd: number | null; spent: number; running: number }
-interface Limits { policy: Policy; budget_usd: number; teams: LimitTeam[]; members: LimitMember[]; can_manage: boolean; me: string | null; clerk?: boolean }
+interface LimitMember { user_id: string; team_id: number | null; can_run: boolean; adjust_usd: number; cap_usd: number | null; max_concurrent_runs: number | null; allowance_usd: number | null; spent: number; running: number; tokens_in: number; tokens_out: number }
+interface Limits { policy: Policy; budget_usd: number; teams: LimitTeam[]; members: LimitMember[]; can_manage: boolean; me: string | null; clerk?: boolean;
+  allocated_usd?: number; unallocated_usd?: number | null; spent_usd?: number }
 
 const STATUS: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = { active: 'default', trialing: 'secondary', past_due: 'destructive', unpaid: 'destructive', canceled: 'outline' };
 const orNull = (v: string) => (v.trim() === '' ? null : Number(v));
@@ -189,10 +189,11 @@ function People({ t, l, reload }: { t: Team | undefined; l: Limits | undefined; 
       {t.error && <Alert variant='destructive'><AlertDescription>{t.error}</AlertDescription></Alert>}
       <div className='overflow-x-auto border-y'>
         <PagedTable items={rows} noun='people'>{(page) => (
-          <Table className='min-w-[760px]'>
+          <Table className='min-w-[1040px]'>
             <TableHeader><TableRow>
               <TableHead>Person</TableHead><TableHead className='w-24'>Role</TableHead><TableHead className='w-28'>Status</TableHead>
-              <TableHead className='w-36'>Team</TableHead><TableHead className='w-56'>Spend this month</TableHead><TableHead className='w-20'>Can run</TableHead>
+              <TableHead className='w-32'>Team</TableHead><TableHead className='w-56'>Spend this month</TableHead><TableHead className='w-28'>Tokens</TableHead>
+              <TableHead className='w-28'>Runs at once</TableHead><TableHead className='w-20'>Can run</TableHead><TableHead className='w-24'>Joined</TableHead>
               {manage && <TableHead className='w-10'><span className='sr-only'>Actions</span></TableHead>}
             </TableRow></TableHeader>
             <TableBody>
@@ -202,8 +203,11 @@ function People({ t, l, reload }: { t: Team | undefined; l: Limits | undefined; 
                   <TableCell className='text-muted-foreground'>{r.x.role === 'admin' ? 'Admin' : 'Member'}</TableCell>
                   <TableCell><Badge variant={r.x.state === 'expired' ? 'destructive' : 'outline'}>{r.x.state === 'expired' ? 'Expired' : 'Invited'}</Badge></TableCell>
                   <TableCell className='text-muted-foreground'>—</TableCell>
-                  <TableCell className='text-muted-foreground text-xs'>sent <When d={r.x.created_at} /></TableCell>
+                  <TableCell className='text-muted-foreground text-xs'>—</TableCell>
                   <TableCell className='text-muted-foreground'>—</TableCell>
+                  <TableCell className='text-muted-foreground'>—</TableCell>
+                  <TableCell className='text-muted-foreground'>—</TableCell>
+                  <TableCell className='text-muted-foreground text-xs'>sent <When d={r.x.created_at} /></TableCell>
                   {manage && <TableCell><ActionsMenu items={actions(r)} /></TableCell>}
                 </TableRow>
               ) : (
@@ -219,9 +223,15 @@ function People({ t, l, reload }: { t: Team | undefined; l: Limits | undefined; 
                   <TableCell>{!r.lim ? <span className='text-muted-foreground'>—</span> : r.lim.allowance_usd == null
                     ? <span className='text-xs tabular-nums'>{usd(r.lim.spent)} <span className='text-muted-foreground'>· shared budget</span></span>
                     : <Allowance spent={r.lim.spent} cap={r.lim.allowance_usd} />}
-                    {r.lim && r.lim.running > 0 && <span className='text-primary ml-2 text-xs'>{r.lim.running} running</span>}
+                  </TableCell>
+                  <TableCell className='text-xs tabular-nums'>{r.lim ? num(Number(r.lim.tokens_in) + Number(r.lim.tokens_out)) : '—'}</TableCell>
+                  <TableCell className='text-xs tabular-nums'>
+                    {r.lim ? (r.lim.max_concurrent_runs ?? l?.policy.max_concurrent_runs ?? <span className='text-muted-foreground'>any</span>) : '—'}
+                    {r.lim && r.lim.max_concurrent_runs == null && l?.policy.max_concurrent_runs != null && <span className='text-muted-foreground'> default</span>}
+                    {r.lim && r.lim.running > 0 && <span className='text-primary ml-1.5'>· {r.lim.running} now</span>}
                   </TableCell>
                   <TableCell className={r.lim?.can_run ? '' : 'text-muted-foreground'}>{r.lim ? (r.lim.can_run ? 'Yes' : 'No') : '—'}</TableCell>
+                  <TableCell className='text-muted-foreground text-xs'><When d={r.m.created_at} /></TableCell>
                   {manage && <TableCell><ActionsMenu items={actions(r)} /></TableCell>}
                 </TableRow>
               ))}
@@ -319,44 +329,101 @@ function LimitsDialog({ m, lim, l, mode, onClose, onSaved }: { m: Member; lim: L
 
 // ---------- budget rules (admins): how the cap is shared, rollout and throughput, teams ----------
 
-const HELP: Record<Mode, string> = {
-  pool: 'Everyone draws from the account cap (and their team budget, if it has one) until it runs out.',
-  even: 'Each person gets an equal share of what is left after the reserve and team budgets; adjust anyone up or down from their ⋯ menu.',
-  custom: 'Each person has their own monthly cap, set from their ⋯ menu; people without one get the default.'
-};
+const MODES: { id: Mode; title: string; body: string }[] = [
+  { id: 'pool', title: 'Shared pool', body: 'Everyone draws from the account cap, and their team budget if it has one, until it runs out.' },
+  { id: 'even', title: 'Split evenly', body: 'Each person gets an equal share of what is left after the reserve and team budgets; adjust anyone from their ⋯ menu.' },
+  { id: 'custom', title: 'Custom caps', body: 'Each person has their own monthly cap, set from their ⋯ menu; people without one get the default.' }
+];
+const SEG = ['bg-sky-500', 'bg-violet-500', 'bg-amber-500', 'bg-rose-500', 'bg-teal-500', 'bg-fuchsia-500'];
 
 function Rules({ l, reload }: { l: Limits; reload: () => void }) {
   const p = l.policy;
-  const [mode, setMode] = useState<Mode>(p.mode);
-  const [f, setF] = useState({ reserve: p.reserve_usd ? String(p.reserve_usd) : '', defaultCap: str(p.default_cap_usd), newRun: p.new_members_can_run, conc: str(p.max_concurrent_runs), sess: str(p.max_sessions_per_run) });
+  const init = () => ({ mode: p.mode, reserve: p.reserve_usd ? String(p.reserve_usd) : '', defaultCap: str(p.default_cap_usd), newRun: p.new_members_can_run, conc: str(p.max_concurrent_runs), sess: str(p.max_sessions_per_run) });
+  const [f, setF] = useState(init);
   const [busy, setBusy] = useState(false);
+  const dirty = JSON.stringify(f) !== JSON.stringify(init());
   const save = () => {
     setBusy(true);
-    appApi('PUT', '/limits/policy', { mode, reserve_usd: orNull(f.reserve) || 0, default_cap_usd: orNull(f.defaultCap), new_members_can_run: f.newRun,
+    appApi('PUT', '/limits/policy', { mode: f.mode, reserve_usd: orNull(f.reserve) || 0, default_cap_usd: orNull(f.defaultCap), new_members_can_run: f.newRun,
       max_concurrent_runs: orNull(f.conc), max_sessions_per_run: orNull(f.sess) })
       .then(() => { toast.success('Budget rules saved'); reload(); }).catch(fail).finally(() => setBusy(false));
   };
   return (
-    <Block id='limits' title='Budget rules' action={<Button size='sm' onClick={save} disabled={busy}>Save rules</Button>}>
-      <div className='grid gap-x-10 gap-y-5 lg:grid-cols-2'>
-        <div className='grid content-start gap-3'>
-          <Tabs value={mode} onValueChange={(v) => setMode(v as Mode)}>
-            <TabsList><TabsTrigger value='pool'>Shared pool</TabsTrigger><TabsTrigger value='even'>Split evenly</TabsTrigger><TabsTrigger value='custom'>Custom caps</TabsTrigger></TabsList>
-          </Tabs>
-          <p className='text-muted-foreground text-xs'>{HELP[mode]}</p>
-          {mode === 'even' && <label className='grid gap-1.5 text-sm'>Shared reserve kept out of the split ($)<Input type='number' min={0} step={1} value={f.reserve} onChange={(e) => setF({ ...f, reserve: e.target.value })} /></label>}
-          {mode === 'custom' && <label className='grid gap-1.5 text-sm'>Default monthly cap ($)<Input type='number' min={0} step={1} value={f.defaultCap} onChange={(e) => setF({ ...f, defaultCap: e.target.value })} placeholder='no cap' /></label>}
-        </div>
-        <div className='grid content-start gap-3'>
-          <div className='grid grid-cols-2 gap-3'>
-            <label className='grid gap-1.5 text-sm'>Running at once, per person<Input type='number' min={0} step={1} value={f.conc} onChange={(e) => setF({ ...f, conc: e.target.value })} placeholder='no limit' /></label>
-            <label className='grid gap-1.5 text-sm'>Agent sessions per launch<Input type='number' min={1} step={1} value={f.sess} onChange={(e) => setF({ ...f, sess: e.target.value })} placeholder="server's limit" /></label>
-          </div>
-          <label className='flex items-center justify-between gap-3 text-sm leading-none'>New members can launch simulations<Switch checked={f.newRun} onCheckedChange={(v) => setF({ ...f, newRun: Boolean(v) })} /></label>
-        </div>
+    <Block id='limits' title='Budget rules' action={
+      <div className='flex items-center gap-3'>
+        {dirty && <span className='text-muted-foreground text-xs leading-none'>Unsaved changes · <button type='button' className='hover:text-foreground underline-offset-4 hover:underline' onClick={() => setF(init())}>Reset</button></span>}
+        <Button size='sm' onClick={save} disabled={busy || !dirty}>{busy ? 'Saving…' : 'Save rules'}</Button>
+      </div>}>
+      <Allocation l={l} />
+      <div role='radiogroup' aria-label='How the cap is shared' className='grid gap-3 sm:grid-cols-3'>
+        {MODES.map((m) => (
+          <button key={m.id} type='button' role='radio' aria-checked={f.mode === m.id} onClick={() => setF({ ...f, mode: m.id })}
+            className={cn('flex flex-col gap-2 rounded-lg border p-4 text-left transition-colors', f.mode === m.id ? 'border-primary bg-primary/10' : 'hover:bg-muted/50')}>
+            <span className='flex items-center gap-2 text-sm leading-none font-medium'>
+              <span className={cn('flex size-4 items-center justify-center rounded-full border', f.mode === m.id ? 'border-primary' : 'border-muted-foreground/50')}>{f.mode === m.id && <span className='bg-primary size-2 rounded-full' />}</span>
+              {m.title}{p.mode === m.id && <span className='text-muted-foreground text-xs font-normal'>current</span>}
+            </span>
+            <span className='text-muted-foreground text-xs'>{m.body}</span>
+          </button>
+        ))}
+      </div>
+      <div className='grid gap-x-8 gap-y-4 sm:grid-cols-2 lg:grid-cols-4'>
+        {f.mode === 'even' && <NumberField label='Shared reserve' unit='$' value={f.reserve} onChange={(v) => setF({ ...f, reserve: v })} hint='Kept out of the even split.' />}
+        {f.mode === 'custom' && <NumberField label='Default monthly cap' unit='$' value={f.defaultCap} onChange={(v) => setF({ ...f, defaultCap: v })} placeholder='no cap' hint='For people without their own.' />}
+        <NumberField label='Runs at once, per person' value={f.conc} onChange={(v) => setF({ ...f, conc: v })} placeholder='no limit' hint='Simulations running together.' />
+        <NumberField label='Agent sessions per launch' value={f.sess} onChange={(v) => setF({ ...f, sess: v })} placeholder="server's limit" hint='The size of one run.' min={1} />
+        <label className='flex flex-col gap-2 text-sm leading-none'>
+          New members can launch
+          <span className='flex h-9 items-center gap-2'><Switch checked={f.newRun} onCheckedChange={(v) => setF({ ...f, newRun: Boolean(v) })} /><span className='text-muted-foreground text-xs'>{f.newRun ? 'Yes, from day one' : 'Only once allowed'}</span></span>
+        </label>
       </div>
       <Teams l={l} reload={reload} />
     </Block>
+  );
+}
+
+function NumberField({ label, unit, value, onChange, placeholder, hint, min = 0 }: { label: string; unit?: string; value: string; onChange: (v: string) => void; placeholder?: string; hint?: string; min?: number }) {
+  return (
+    <label className='flex flex-col gap-2 text-sm leading-none'>
+      {label}
+      <span className='relative'>
+        {unit && <span className='text-muted-foreground pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-sm'>{unit}</span>}
+        <Input type='number' min={min} step={1} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} className={cn('h-9', unit && 'pl-7')} />
+      </span>
+      {hint && <span className='text-muted-foreground text-xs'>{hint}</span>}
+    </label>
+  );
+}
+
+/** Where the month's cap goes: reserve, team budgets, people's shares, and what nobody has been given. */
+function Allocation({ l }: { l: Limits }) {
+  const cap = l.budget_usd;
+  if (!cap) return <p className='text-muted-foreground text-sm'>No monthly cap on this plan; limits apply per person and team only.</p>;
+  const p = l.policy;
+  const parts: { label: string; usd: number; cls: string }[] = [];
+  if (p.mode === 'even' && p.reserve_usd) parts.push({ label: 'Shared reserve', usd: Number(p.reserve_usd), cls: 'bg-muted-foreground/60' });
+  l.teams.filter((x) => x.budget_usd).forEach((x, i) => parts.push({ label: `Team ${x.name}`, usd: Number(x.budget_usd), cls: SEG[i % SEG.length] }));
+  if (p.mode !== 'pool') {
+    const teamless = l.members.filter((m) => m.team_id == null || !l.teams.find((x) => x.id === m.team_id)?.budget_usd);
+    const people = teamless.reduce((n, m) => n + (m.allowance_usd ?? 0), 0);
+    if (people) parts.push({ label: `People's shares (${teamless.length})`, usd: people, cls: 'bg-primary' });
+  }
+  const used = parts.reduce((n, x) => n + x.usd, 0);
+  const left = Math.max(0, cap - used);
+  return (
+    <div className='flex flex-col gap-2.5'>
+      <div className='flex items-baseline justify-between text-sm leading-none'>
+        <span className='font-medium'>Where the {usd(cap)} cap goes</span>
+        <span className='text-muted-foreground text-xs'>{usd(l.spent_usd ?? 0)} spent so far</span>
+      </div>
+      <div className='bg-muted flex h-3 overflow-hidden rounded-full'>
+        {parts.map((x) => <div key={x.label} className={x.cls} style={{ width: `${Math.min(100, (x.usd / cap) * 100)}%` }} title={`${x.label}: ${usd(x.usd)}`} />)}
+      </div>
+      <ul className='text-muted-foreground flex flex-wrap gap-x-5 gap-y-1.5 text-xs leading-none'>
+        {parts.map((x) => <li key={x.label} className='flex items-center gap-1.5'><span className={cn('size-2 rounded-full', x.cls)} />{x.label} <span className='text-foreground tabular-nums'>{usd(x.usd)}</span></li>)}
+        <li className='flex items-center gap-1.5'><span className='bg-muted size-2 rounded-full border' />{p.mode === 'pool' ? 'Shared by everyone' : 'Not allocated'} <span className='text-foreground tabular-nums'>{usd(left)}</span></li>
+      </ul>
+    </div>
   );
 }
 
@@ -376,15 +443,15 @@ function Teams({ l, reload }: { l: Limits; reload: () => void }) {
     <div className='flex flex-col gap-3'>
       <div className='overflow-x-auto border-y'>
         <Table>
-          <TableHeader><TableRow><TableHead>Team</TableHead><TableHead className='w-36'>Budget</TableHead><TableHead className='w-36'>Spent</TableHead><TableHead className='w-24'>People</TableHead><TableHead className='w-10'><span className='sr-only'>Actions</span></TableHead></TableRow></TableHeader>
+          <TableHeader><TableRow><TableHead>Team</TableHead><TableHead className='w-64'>Budget used</TableHead><TableHead className='w-32'>Runs at once</TableHead><TableHead className='w-24'>People</TableHead><TableHead className='w-10'><span className='sr-only'>Actions</span></TableHead></TableRow></TableHeader>
           <TableBody>
             {!l.teams.length && <TableRow><TableCell colSpan={5} className='text-muted-foreground py-6 text-center'>No teams: everyone shares the account cap.</TableCell></TableRow>}
             {l.teams.map((x) => (
               <TableRow key={x.id}>
                 <TableCell className='font-medium'>{x.name}</TableCell>
-                <TableCell className={x.budget_usd == null ? 'text-muted-foreground' : 'tabular-nums'}>{x.budget_usd == null ? 'no cap' : usd(x.budget_usd)}</TableCell>
-                <TableCell className='tabular-nums'>{usd(x.spent)}</TableCell>
-                <TableCell className='tabular-nums'>{x.members}</TableCell>
+                <TableCell>{x.budget_usd == null ? <span className='text-xs tabular-nums'>{usd(x.spent)} <span className='text-muted-foreground'>· no team cap</span></span> : <Allowance spent={x.spent} cap={x.budget_usd} />}</TableCell>
+                <TableCell className='text-xs tabular-nums'>{x.max_concurrent_runs ?? <span className='text-muted-foreground'>account default</span>}</TableCell>
+                <TableCell className='text-xs'>{x.members ? `${x.members} ${x.members === 1 ? 'person' : 'people'}` : <span className='text-muted-foreground'>nobody yet</span>}</TableCell>
                 <TableCell><ActionsMenu items={[
                   { label: 'Edit team', icon: <Icons.edit />, onSelect: () => setEdit({ id: x.id, name: x.name, budget: str(x.budget_usd), conc: str(x.max_concurrent_runs) }) },
                   { label: 'Delete team', icon: <Icons.trash />, destructive: true, onSelect: () => remove(x) }

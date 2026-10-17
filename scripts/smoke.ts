@@ -1135,6 +1135,11 @@ try {
     assert.deepEqual(usageD.filters.user, [devP.user_id]);
     assert.ok(usageD.daily.reduce((n: number, d: any) => n + Number(d.calls), 0) <= usageO.daily.reduce((n: number, d: any) => n + Number(d.calls), 0));
     assert.equal(usageD.spend.filtered, true, "spend is for the selected people");
+    // The use-case filter: tool calls narrow to that use case's tools.
+    assert.ok(usageO.use_cases.some((x: any) => x.id === "baseline"), "use cases are offered");
+    const usageU = await json(appCall(ownerC, "GET", "/usage?use_case=release-watch"));
+    assert.deepEqual(usageU.filters.use_case, ["release-watch"]);
+    assert.ok(usageU.tools.every((x: any) => ["run_simulation", "get_visibility_report"].includes(x.name)), "only the use case's tools");
     const usageN = await json(appCall(ownerC, "GET", "/usage?user=user_nobody"));
     assert.equal(usageN.daily.length + usageN.tools.length + Number(usageN.runs.simulations) + usageN.active_people, 0, "an unknown person has no usage");
     assert.equal((await appCall(ownerC, "POST", `/team/members/${acc2.user.id}/deactivate`)).status, 204);

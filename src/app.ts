@@ -129,11 +129,16 @@ async function setup(s: Session, since?: string) {
  * and those runs' model spend. Without a filter it is the whole team. `people` lists who can be picked: everyone on the
  * team plus anyone who used Octillion in the period.
  */
-async function usage(s: Session, q: { from?: unknown; to?: unknown; days?: unknown; user?: unknown }) {
+async function usage(s: Session, q: { from?: unknown; to?: unknown; days?: unknown; user?: unknown; use_case?: unknown }) {
   const range = reportRange(q), days = range.days;
-  const users = [...new Set(String(q.user ?? "").split(",").map((x) => x.trim()).filter(Boolean))].slice(0, 200);
+  const list = (v: unknown) => [...new Set(String(v ?? "").split(",").map((x) => x.trim()).filter(Boolean))].slice(0, 200);
+  const users = list(q.user), useCases = list(q.use_case);
   const db = await getDb();
-  const ev = users.length ? " AND user_id = ANY($4)" : "";
+  // A use case is its stages' tools: tool calls narrow to those (simulations and spend belong to no single use case).
+  const templates = await playbooks.listTemplates({ promotedOnly: true, orgId: s.org });
+  const ucTools = useCases.length ? [...new Set(templates.filter((t) => useCases.includes(t.id)).flatMap((t) => t.stages.flatMap((st) => st.tools)))] : null;
+  const toolSql = ucTools ? ` AND name = ANY('{${ucTools.map((t) => t.replace(/[^\w]/g, "")).join(",")}}'::text[])` : "";
+  const ev = (users.length ? " AND user_id = ANY($4)" : "") + toolSql;
   const sim = users.length ? " AND created_by = ANY($4)" : "";
   const p = users.length ? [s.org, range.start, range.end, users] : [s.org, range.start, range.end];
   const month = "date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'";
@@ -145,7 +150,7 @@ async function usage(s: Session, q: { from?: unknown; to?: unknown; days?: unkno
       `SELECT name, count(*) AS calls, count(*) FILTER (WHERE NOT ok) AS errors, round(avg(ms)) AS avg_ms
          FROM mcp_events WHERE org_id = $1 AND method = 'tools/call' AND at >= $2 AND at < $3${ev} GROUP BY name ORDER BY count(*) DESC`, p),
     db.query<{ user_id: string; calls: number }>(
-      `SELECT user_id, count(*) FILTER (WHERE method = 'tools/call') AS calls
+      `SELECT user_id, count(*) FILTER (WHERE method = 'tools/call'${toolSql}) AS calls
          FROM mcp_events WHERE org_id = $1 AND at >= $2 AND at < $3 AND user_id IS NOT NULL GROUP BY user_id`, [s.org, range.start, range.end]),
     db.query<{ simulations: number; sessions: number; completed: number }>(
       `SELECT (SELECT count(*) FROM simulations WHERE org_id = $1 AND created_at >= $2 AND created_at < $3${sim}) AS simulations,
@@ -163,7 +168,8 @@ async function usage(s: Session, q: { from?: unknown; to?: unknown; days?: unkno
   const known = new Set(t.members.map((m) => m.user_id));
   const [{ budget }, spent] = await Promise.all([orgBudget(s.org).catch(() => ({ budget: 0 })), orgMonthSpendUsd(s.org)]);
   return {
-    days, range: { from: range.from, to: range.to }, daily, tools, runs: runs[0], filters: { user: users },
+    days, range: { from: range.from, to: range.to }, daily, tools, runs: runs[0], filters: { user: users, use_case: useCases },
+    use_cases: templates.map((t) => ({ id: t.id, name: t.name, own: Boolean((t as { own?: boolean }).own) })),
     people: [
       ...t.members.map((m) => ({ user_id: m.user_id, email: m.email ?? m.name ?? "Unnamed member", me: m.user_id === s.user, calls: callsOf.get(m.user_id) ?? 0 })),
       ...people.filter((x) => !known.has(x.user_id)).map((x) => ({ user_id: x.user_id, email: "Former member", me: false, calls: Number(x.calls) })),
