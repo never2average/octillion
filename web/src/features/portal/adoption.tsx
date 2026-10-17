@@ -35,7 +35,7 @@ export function AdoptionPage() {
             { label: 'Setup', value: `${s.done}/${s.total}`, hint: 'steps done', href: '/app' },
             { label: 'Workflow', value: `${used}/${s.groups.length}`, hint: 'parts in use' },
             { label: 'Journeys', value: `${journeys.filter((j) => j.done === j.total && j.total > 0).length}/${journeys.length}`, hint: `${journeys.filter((j) => j.done > 0).length} started` },
-            { label: 'Tool calls', value: s.calls.toLocaleString(), hint: `${s.clients.length} client${s.clients.length === 1 ? '' : 's'} connected` }
+            { label: 'Your tool calls', value: s.calls.toLocaleString(), hint: `${s.clients.length} client${s.clients.length === 1 ? '' : 's'} you connected` }
           ]} />
 
           <div className='grid gap-x-12 gap-y-10 lg:grid-cols-2'>
@@ -78,7 +78,7 @@ export function AdoptionPage() {
                 )}
               </Section>
 
-              <Section title='AI clients' description='Clients that have called Octillion for this account, most recent first.'>
+              <Section title='Your AI clients' description='The clients you have connected to Octillion, most recent first.'>
                 {!s.clients.length ? <p className='text-muted-foreground text-sm'>None yet. Connect one from <Link className='text-primary underline-offset-4 hover:underline' href='/app'>Setup & training</Link>.</p> : (
                   <ul className='divide-y border-y'>
                     {s.clients.map((c) => (
