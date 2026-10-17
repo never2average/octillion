@@ -44,10 +44,7 @@ export function SetupPage() {
   const next = s?.steps.find((x) => !x.done && !x.optional);
   const journey = jr?.journeys.find((x) => x.id === selected) ?? null;
   return (
-    <PageContainer
-      pageTitle='Setup & training'
-      pageDescription={!s ? 'Connect your AI client and learn the workflow.' : next ? `Next: ${next.label.replace(' (team)', '')}.` : 'You are set up. Pick a journey to keep going.'}
-    >
+    <PageContainer>
       {error ? <ErrorState error={error} /> : !s ? <LoadingCards count={4} /> : (
         <div className='grid max-w-6xl gap-x-10 gap-y-6 lg:grid-cols-5 lg:items-start'>
           <div className='order-2 flex min-w-0 flex-col gap-8 lg:order-1 lg:col-span-3'>
@@ -117,16 +114,14 @@ function ConnectionBox({ s, onConnected }: { s: Setup; onConnected: () => void }
   };
   const groups: [Client['group'], string][] = [['chat', 'Chat apps'], ['agent', 'Coding agents · by share of developers'], ['editor', 'Editors']];
   return (
-    <FloatPanel title='Connection string'
-      description={s.connect.secret ? 'This link contains your key: keep it private.' : 'One URL for every client. No secret in it: your client asks you to sign in.'}>
-      <div className='space-y-4'>
+    <FloatPanel title='Connection string' description={s.connect.secret ? 'Contains your key: keep it private.' : undefined}>
+      <div className='space-y-2.5'>
         <div className='flex gap-2'>
           <Input readOnly value={s.connect.connector_url} className='bg-background font-mono text-xs' aria-label='Connection string' onFocus={(e) => e.currentTarget.select()} />
           <CopyButton text={s.connect.connector_url} />
         </div>
-        <div className='space-y-1.5'>
-          <label htmlFor='client-pick' className='text-muted-foreground text-xs font-medium'>Your AI client</label>
-          <NativeSelect id='client-pick' value={c?.id} onChange={(e) => choose(e.target.value)} className='bg-background w-full'>
+        <div className='flex gap-2'>
+          <NativeSelect id='client-pick' aria-label='Your AI client' value={c?.id} onChange={(e) => choose(e.target.value)} className='bg-background min-w-0 flex-1'>
             {groups.map(([g, label]) => (
               <NativeSelectOptGroup key={g} label={label}>
                 {clients.filter((x) => x.group === g).map((x) => (
@@ -135,14 +130,18 @@ function ConnectionBox({ s, onConnected }: { s: Setup; onConnected: () => void }
               </NativeSelectOptGroup>
             ))}
           </NativeSelect>
-        </div>
-        {c && <ClientSteps c={c} />}
-        <div className='flex flex-wrap items-center gap-3 border-t pt-3'>
-          <Button size='sm' variant='outline' onClick={test} disabled={live?.kind === 'wait'}>
-            {live?.kind === 'wait' ? <Icons.spinner className='animate-spin' /> : <Icons.plug />} Test my connection
+          <Button variant='outline' onClick={test} disabled={live?.kind === 'wait'} title='Test my connection'>
+            {live?.kind === 'wait' ? <Icons.spinner className='animate-spin' /> : <Icons.plug />} Test
           </Button>
-          {s.clients.length > 0 && <span className='text-muted-foreground text-xs'>Seen from: {s.clients.map((x) => x.client.split(' ')[0]).join(', ')}</span>}
         </div>
+        {c && (
+          <details className='group text-sm'>
+            <summary className='text-muted-foreground hover:text-foreground flex cursor-pointer list-none items-center gap-1 text-xs font-medium'>
+              <Icons.chevronRight className='size-3.5 transition-transform group-open:rotate-90' /> How to add it in {c.client}
+            </summary>
+            <div className='pt-2'><ClientSteps c={c} /></div>
+          </details>
+        )}
         {live && (
           <Alert variant={live.kind === 'bad' ? 'destructive' : 'default'} role='status' aria-live='polite'
             className={cn(live.kind === 'ok' && 'border-emerald-500/40 text-emerald-700 dark:text-emerald-400')}>
@@ -296,7 +295,7 @@ function JourneyView({ j, onChanged }: { j: Journey; onChanged: () => void }) {
 function Timeline({ s, next }: { s: Setup; next: Step | undefined }) {
   const pct = Math.round((s.done / Math.max(1, s.total)) * 100);
   return (
-    <Section title='Get set up' description={`${s.done} of ${s.total} steps done. Steps marked team are done once by anyone on your account.`}
+    <Section title='Get set up' description={`${s.done} of ${s.total} steps done.`}
       action={<Badge variant={pct === 100 ? 'default' : 'secondary'}>{pct}%</Badge>}>
       <div className='bg-muted h-1.5 overflow-hidden rounded-full'><div className='bg-primary h-full rounded-full transition-all' style={{ width: `${pct}%` }} /></div>
       <ol className='mt-3'>
@@ -313,14 +312,9 @@ function Timeline({ s, next }: { s: Setup; next: Step | undefined }) {
               <div className={cn('min-w-0 flex-1 pt-1', cur && 'bg-primary/5 -mt-1 rounded-lg px-4 py-3')}>
                 <div className='flex flex-wrap items-center gap-2'>
                   <span className={cn('font-medium', x.done && 'text-muted-foreground')}>{x.label.replace(' (team)', '')}</span>
-                  {x.label.includes('(team)') && <Badge variant='outline'>team</Badge>}
-                  {x.optional && <Badge variant='outline'>optional</Badge>}
                   {cur && <Badge>up next</Badge>}
                 </div>
                 <p className={cn('mt-1 text-sm', x.done ? 'text-muted-foreground/70' : 'text-muted-foreground')}>{x.help}</p>
-                <p className='text-muted-foreground mt-1.5 text-xs'>
-                  {x.done ? <>Done{x.at && <> · <When d={x.at} /></>}</> : cur ? 'Waiting for this step' : x.optional ? 'Whenever you like' : 'Not started'}
-                </p>
               </div>
             </li>
           );

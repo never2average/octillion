@@ -1053,6 +1053,8 @@ try {
       assert.deepEqual(mem.memories.map((m: any) => m.id), [om.id, cm.id], "newest first");
       assert.equal(mem.memories.find((m: any) => m.id === om.id).can_delete, false, "members cannot delete someone else's item");
       assert.equal((await appCall(devC, "DELETE", `/context/memories/${om.id}`)).status, 403);
+      assert.equal((await appCall(devC, "PUT", `/context/memories/${om.id}`, { kind: "fact", body: "x" })).status, 403, "nor edit it");
+      assert.equal((await json(appCall(devC, "PUT", `/context/memories/${cm.id}`, { kind: "decision", body: "We stopped competing on price with BullMQ." }))).body, "We stopped competing on price with BullMQ.");
       assert.equal((await appCall(devC, "POST", "/context/memories", { scope: "user", subject: accepted.user.id, body: "x" })).status, 403, "not someone else's personal memory");
       await json(appCall(devC, "POST", "/context/memories", { scope: "user", kind: "preference", body: "Lead with the Python numbers." }));
       assert.equal((await json(appCall(ownerC, "GET", `/context/memories?scope=user&subject=${acc2.user.id}`))).memories.length, 1, "admins see anyone's");

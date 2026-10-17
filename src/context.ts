@@ -98,6 +98,15 @@ export async function getMemory(orgId: number, id: number): Promise<Memory | nul
   return m ?? null;
 }
 
+export async function updateMemory(orgId: number, id: number, b: Record<string, unknown>): Promise<Memory | null> {
+  const kind = String(b.kind ?? "note");
+  if (!(MEMORY_KINDS as readonly string[]).includes(kind)) throw new ContextError(`kind must be one of ${MEMORY_KINDS.join(", ")}`);
+  const body = text(b.body, 1000);
+  if (!body) throw new ContextError("Write something to remember");
+  await (await getDb()).query("UPDATE context_memories SET kind = $3, body = $4 WHERE org_id = $1 AND id = $2", [orgId, id, kind, body]);
+  return getMemory(orgId, id);
+}
+
 export async function deleteMemory(orgId: number, id: number) {
   await (await getDb()).query("DELETE FROM context_memories WHERE org_id = $1 AND id = $2", [orgId, id]);
 }

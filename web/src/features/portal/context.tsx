@@ -1,45 +1,32 @@
 'use client';
-// /app Context: the company's context (admins), each user's context (admins edit anyone's, members their own), and
-// product profiles with their coding tasks (admins). Company and personal context reach the AI client on every connection; the side card shows what is sent.
-import { useCallback, useEffect, useState } from 'react';
+// /app Context: one full-page table per tab (company, users, products), the account's institutional memory. Rows are
+// the core fields (what the AI client always gets), memory items people add, and on products the coding tasks. The
+// floating Remember button and the docked editor add and change rows. Admins edit company and product fields; anyone
+// adds memory; a person edits their own user context, admins anyone's (src/app.ts enforces all of it).
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import PageContainer from '@/components/layout/page-container';
-import { Badge } from '@/components/ui/badge';
+import { PageTabs } from '@/components/layout/page-tabs';
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Switch } from '@/components/ui/switch';
-import { PageTabs } from '@/components/layout/page-tabs';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Textarea } from '@/components/ui/textarea';
 import { Icons } from '@/components/icons';
 import { appApi } from '@/lib/api-client';
-import { Memory } from './memory';
-import { ErrorState, FormRow, LoadingCards, fail, useOrgLoad } from './shared';
+import { cn } from '@/lib/utils';
+import { Dock, KINDS, RememberFab, TYPE_STYLE, type Kind, type MemoryItem, type MemoryScope } from './memory';
+import { ErrorState, LoadingCards, When, fail, useOrgLoad } from './shared';
 
 interface Company { about: string | null; audience: string | null; competitors: string[]; terms: string | null; notes_for_ai: string | null; updated_at: string | null; updated_by: string | null }
-interface Person { title: string | null; focus_product: string | null; interests: string | null; answer_style: string | null; notes: string | null }
+interface Person { title: string | null; focus_product: string | null; interests: string | null; answer_style: string | null; notes: string | null; updated_at?: string | null }
 interface Ctx { company: Company; person: Person | null; products: { slug: string; name: string }[]; can_manage: boolean; preview: string }
+interface UserRow { user_id: string; email: string | null; name: string | null; role: 'admin' | 'member'; active: boolean; me: boolean; context: Person }
 interface Product { slug: string; name: string; category: string | null; description: string | null; website_url: string | null; docs_url: string | null;
   aliases: string[]; packages: string[]; domains: string[]; competitors: { name: string; packages?: string[]; domains?: string[] }[] }
 interface Scenario { id: number; title: string; prompt: string; expectation: string; active: boolean }
-
-// Flat layout pieces: titled sections directly on the page, no boxes (same structure as before, so the forms read the same).
-type Kids = { children: React.ReactNode; className?: string };
-const Card = ({ children, className }: Kids) => <section className={['flex flex-col gap-4', className].filter(Boolean).join(' ')}>{children}</section>;
-const CardHeader = ({ children }: Kids) => <div className='flex flex-col gap-1'>{children}</div>;
-const CardTitle = ({ children }: Kids) => <h2 className='text-base font-semibold tracking-tight'>{children}</h2>;
-const CardDescription = ({ children }: Kids) => <p className='text-muted-foreground text-sm'>{children}</p>;
-const CardContent = ({ children, className }: Kids) => <div className={className}>{children}</div>;
-const CardFooter = ({ children }: Kids) => <div className='pt-1'>{children}</div>;
-
-/** A section that is a form. */
-function FormCard({ onSubmit, children }: { onSubmit: (e: React.FormEvent) => void; children: React.ReactNode }) {
-  return <form onSubmit={onSubmit}><Card>{children}</Card></form>;
-}
-
-const csv = (xs?: string[] | null) => (xs ?? []).join(', ');
-const parseCsv = (v: string) => v.split(',').map((x) => x.trim()).filter(Boolean);
-interface UserRow { user_id: string; email: string | null; name: string | null; role: 'admin' | 'member'; active: boolean; me: boolean; context: Person }
 
 export type ContextSection = 'company' | 'users' | 'products';
 const CONTEXT_TABS = [
@@ -48,247 +35,351 @@ const CONTEXT_TABS = [
   { href: '/app/context/products', label: 'Products', icon: Icons.product }
 ];
 
-/** Context: three pages (company, users, products) under one header with route tabs. */
+const csv = (xs?: string[] | null) => (xs ?? []).join(', ');
+const parseCsv = (v: string) => v.split(',').map((x) => x.trim()).filter(Boolean);
+const STYLES: Record<string, string> = { brief: 'Brief', detailed: 'Detailed, with numbers and quotes', executive: 'For an executive' };
+
+/** A core field: how it shows as a row and how the docked editor edits it. */
+interface Field { key: string; label: string; input: 'text' | 'textarea' | 'select'; options?: [string, string][]; placeholder?: string; hint?: string; mono?: boolean }
+type Row =
+  | { type: 'core'; key: string; field: Field; value: string; display: string; by: string | null; at: string | null; editable: boolean }
+  | { type: Kind; key: string; item: MemoryItem }
+  | { type: 'task'; key: string; task: Scenario; editable: boolean };
+type Editing = { mode: 'field'; field: Field; value: string } | { mode: 'memory'; item?: MemoryItem } | { mode: 'product' } | null;
+
+const FILTERS = [['all', 'All'], ['core', 'Core'], ['fact', 'Facts'], ['decision', 'Decisions'], ['preference', 'Preferences'], ['note', 'Notes'], ['task', 'Tasks']] as const;
+
+/** Context: three pages (company, users, products) under one header with route tabs; each is one table. */
 export function ContextPage({ section }: { section: ContextSection }) {
   const { data: d, error, reload } = useOrgLoad(() => appApi<Ctx>('GET', '/context'));
   const shown: ContextSection = section === 'users' && d && !d.person ? 'company' : section;
   return (
-    <PageContainer pageTitle='Context' pageDescription='What Octillion and your AI client should know about your company, its users, and each product.'>
+    <PageContainer pageTitle='Context' pageDescription='Your institutional memory: what Octillion and your AI client know about your company, its users and each product.'>
       <PageTabs items={d && !d.person ? CONTEXT_TABS.filter((t) => t.label !== 'Users') : CONTEXT_TABS} />
-      {error ? <ErrorState error={error} /> : !d ? <LoadingCards count={2} /> : (
-        <div className='flex max-w-6xl flex-col gap-6'>
-          <div className='grid gap-x-12 gap-y-8 lg:grid-cols-5'>
-            <div className='lg:col-span-3'>
-              {shown === 'company' ? <div className='flex flex-col gap-10'><CompanyForm key='c' d={d} onSaved={reload} /><Memory scope='company' label='Company' onChange={reload} /></div> : shown === 'users' ? <UsersSection key='u' d={d} onSaved={reload} /> : <Products key='p' d={d} onSaved={reload} />}
-            </div>
-            <Card className='h-fit lg:col-span-2'>
-              <CardHeader>
-                <CardTitle>What your AI client is told</CardTitle>
-                <CardDescription>Added to Octillion&apos;s instructions whenever you connect, as background. Product details are used by research and scoring.</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <pre className='bg-muted max-h-[480px] overflow-auto rounded-lg p-3 font-mono text-xs whitespace-pre-wrap'>
-                  {d.preview ? d.preview.trim() : 'Nothing yet. Fill in the company and your own context.'}
-                </pre>
-              </CardContent>
-            </Card>
-          </div>
-        </div>
-      )}
+      {error ? <ErrorState error={error} /> : !d ? <LoadingCards count={2} /> : <ContextTable key={shown} d={d} section={shown} onChanged={reload} />}
     </PageContainer>
   );
 }
 
-function CompanyForm({ d, onSaved }: { d: Ctx; onSaved: () => void }) {
-  const c = d.company, ro = !d.can_manage;
-  const [f, setF] = useState({ about: c.about ?? '', audience: c.audience ?? '', competitors: csv(c.competitors), terms: c.terms ?? '', notes_for_ai: c.notes_for_ai ?? '' });
-  const [busy, setBusy] = useState(false);
-  const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setF({ ...f, [k]: e.target.value });
-  const save = (e: React.FormEvent) => {
-    e.preventDefault(); setBusy(true);
-    appApi('PUT', '/context/company', { ...f, competitors: parseCsv(f.competitors) }).then(() => { toast.success('Company context saved'); onSaved(); }).catch(fail).finally(() => setBusy(false));
-  };
-  return (
-    <FormCard onSubmit={save}>
-      <CardHeader>
-        <CardTitle>Company</CardTitle>
-        <CardDescription>
-          {ro ? 'Set by your account admins.' : 'Account admins can change this.'}
-          {c.updated_at && ` Last changed ${new Date(c.updated_at).toLocaleDateString()}${c.updated_by ? ` by ${c.updated_by.replace(/^customer:/, '')}` : ''}.`}
-        </CardDescription>
-      </CardHeader>
-      <CardContent className='grid gap-4'>
-        <FormRow label='What the company does' htmlFor='cAbout'><Textarea id='cAbout' rows={3} maxLength={2000} disabled={ro} value={f.about} onChange={set('about')} /></FormRow>
-        <FormRow label='The developers you build for' htmlFor='cAudience'>
-          <Textarea id='cAudience' rows={2} maxLength={1000} disabled={ro} value={f.audience} onChange={set('audience')} placeholder='e.g. backend engineers at B2B SaaS companies, mostly Node and Python' />
-        </FormRow>
-        <FormRow label='Competitors to always track' htmlFor='cComp' hint='Comma-separated.'>
-          <Input id='cComp' disabled={ro} value={f.competitors} onChange={set('competitors')} placeholder='e.g. Postmark, SendGrid, Amazon SES' />
-        </FormRow>
-        <FormRow label='Internal product names and terms' htmlFor='cTerms'><Textarea id='cTerms' rows={2} maxLength={1000} disabled={ro} value={f.terms} onChange={set('terms')} /></FormRow>
-        <FormRow label='Anything else your AI client should know' htmlFor='cNotes'><Textarea id='cNotes' rows={2} maxLength={2000} disabled={ro} value={f.notes_for_ai} onChange={set('notes_for_ai')} /></FormRow>
-      </CardContent>
-      {!ro && <CardFooter><Button type='submit' disabled={busy}>Save company context</Button></CardFooter>}
-    </FormCard>
-  );
-}
+function ContextTable({ d, section, onChanged }: { d: Ctx; section: ContextSection; onChanged: () => void }) {
+  // The subject: the company, a person (Users) or a product (Products).
+  const [users, setUsers] = useState<UserRow[] | null>(null);
+  const [subject, setSubject] = useState<string>(section === 'products' ? d.products[0]?.slug ?? '' : '');
+  const [product, setProduct] = useState<Product | null>(null);
+  const [tasks, setTasks] = useState<Scenario[]>([]);
+  const [memories, setMemories] = useState<MemoryItem[] | null>(null);
+  const [q, setQ] = useState('');
+  const [filter, setFilter] = useState<(typeof FILTERS)[number][0]>('all');
+  const [editing, setEditing] = useState<Editing>(null);
+  const [preview, setPreview] = useState(false);
+  const scope: MemoryScope = section === 'company' ? 'company' : section === 'users' ? 'user' : 'product';
 
-/** Users: pick a person (admins see everyone, members only themselves) and edit what the AI client knows about them. */
-function UsersSection({ d, onSaved }: { d: Ctx; onSaved: () => void }) {
-  const [rows, setRows] = useState<UserRow[] | null>(null);
-  const [pick, setPick] = useState('');
-  const load = useCallback(() => appApi<{ users: UserRow[] }>('GET', '/context/users').then((r) => {
-    setRows(r.users);
-    setPick((cur) => cur || r.users.find((u) => u.me)?.user_id || r.users[0]?.user_id || '');
+  const loadUsers = useCallback(() => appApi<{ users: UserRow[] }>('GET', '/context/users').then((r) => {
+    setUsers(r.users);
+    setSubject((cur) => cur || r.users.find((u) => u.me)?.user_id || r.users[0]?.user_id || '');
   }).catch(fail), []);
-  useEffect(() => { load(); }, [load]);
-  if (!rows) return <LoadingCards count={1} />;
-  const user = rows.find((u) => u.user_id === pick);
-  const label = (u: UserRow) => `${u.name || u.email || 'Unnamed user'}${u.me ? ' (you)' : ''}${u.active ? '' : ' · suspended'}`;
-  return (
-    <div className='flex flex-col gap-10'>
-      {rows.length > 1 && (
-        <FormRow label='User' htmlFor='uPick'>
-          <NativeSelect id='uPick' value={pick} onChange={(e) => setPick(e.target.value)}>
-            {rows.map((u) => <NativeSelectOption key={u.user_id} value={u.user_id}>{label(u)}</NativeSelectOption>)}
-          </NativeSelect>
-        </FormRow>
-      )}
-      {user && <PersonForm key={user.user_id} d={d} user={user} onSaved={() => { load(); onSaved(); }} />}
-      {user && <Memory key={`m-${user.user_id}`} scope='user' subject={user.user_id} label={user.me ? 'You' : (user.name || user.email || 'this user')} onChange={onSaved} />}
-    </div>
-  );
-}
+  useEffect(() => { if (section === 'users') void loadUsers(); }, [section, loadUsers]);
 
-function PersonForm({ d, user, onSaved }: { d: Ctx; user: UserRow; onSaved: () => void }) {
-  const p = user.context;
-  const [f, setF] = useState({ title: p.title ?? '', focus_product: p.focus_product ?? '', interests: p.interests ?? '', answer_style: p.answer_style ?? '', notes: p.notes ?? '' });
-  const [busy, setBusy] = useState(false);
-  const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => setF({ ...f, [k]: e.target.value });
-  const who = user.me ? 'you' : (user.name || user.email || 'this user');
-  const save = (e: React.FormEvent) => {
-    e.preventDefault(); setBusy(true);
-    appApi('PUT', `/context/users/${encodeURIComponent(user.user_id)}`, { ...f, focus_product: f.focus_product || null, answer_style: f.answer_style || null })
-      .then(() => { toast.success(user.me ? 'Your context saved' : `Context saved for ${who}`); onSaved(); }).catch(fail).finally(() => setBusy(false));
-  };
-  return (
-    <FormCard onSubmit={save}>
-      <CardHeader>
-        <CardTitle>{user.me ? 'You' : who}</CardTitle>
-        <CardDescription>
-          {user.me ? 'Your AI client uses this to tailor answers to you.' : `Their AI client uses this to tailor answers to ${who}.`}
-          {d.can_manage ? ' Account admins can see and change every user’s context.' : ' Only you and your account admins see this.'}
-        </CardDescription>
-      </CardHeader>
-      <CardContent className='grid gap-4'>
-        <div className='grid gap-4 sm:grid-cols-2'>
-          <FormRow label={user.me ? 'Your role' : 'Role'} htmlFor='mTitle'><Input id='mTitle' maxLength={120} value={f.title} onChange={set('title')} placeholder='e.g. Head of DevRel' /></FormRow>
-          <FormRow label={user.me ? 'Product you work on most' : 'Product they work on most'} htmlFor='mFocus'>
-            <NativeSelect id='mFocus' value={f.focus_product} onChange={set('focus_product')}>
-              <NativeSelectOption value=''>None</NativeSelectOption>
-              {d.products.map((x) => <NativeSelectOption key={x.slug} value={x.slug}>{x.name}</NativeSelectOption>)}
-            </NativeSelect>
-          </FormRow>
-        </div>
-        <FormRow label={user.me ? 'What you care about' : 'What they care about'} htmlFor='mInterests'>
-          <Textarea id='mInterests' rows={2} maxLength={1000} value={f.interests} onChange={set('interests')} placeholder='e.g. whether Claude Code picks us for queue work, and why we lose to BullMQ' />
-        </FormRow>
-        <FormRow label={user.me ? 'How you like answers' : 'How they like answers'} htmlFor='mStyle'>
-          <NativeSelect id='mStyle' value={f.answer_style} onChange={set('answer_style')}>
-            <NativeSelectOption value=''>No preference</NativeSelectOption>
-            <NativeSelectOption value='brief'>Brief</NativeSelectOption>
-            <NativeSelectOption value='detailed'>Detailed, with numbers and quotes</NativeSelectOption>
-            <NativeSelectOption value='executive'>For an executive</NativeSelectOption>
-          </NativeSelect>
-        </FormRow>
-        <FormRow label='Notes' htmlFor='mNotes'><Textarea id='mNotes' rows={2} maxLength={1000} value={f.notes} onChange={set('notes')} /></FormRow>
-      </CardContent>
-      <CardFooter><Button type='submit' disabled={busy}>{user.me ? 'Save my context' : 'Save context'}</Button></CardFooter>
-    </FormCard>
-  );
-}
-
-const EMPTY = { name: '', category: '', website_url: '', docs_url: '', description: '', aliases: '', packages: '', domains: '', competitors: '' };
-
-function Products({ d, onSaved }: { d: Ctx; onSaved: () => void }) {
-  const [slug, setSlug] = useState<string>(d.products[0]?.slug ?? (d.can_manage ? '__new' : ''));
-  const [f, setF] = useState(EMPTY), [scenarios, setScenarios] = useState<Scenario[]>([]), [busy, setBusy] = useState(false);
-  const ro = !d.can_manage, isNew = slug === '__new';
-  const load = useCallback((s: string) => {
-    if (!s || s === '__new') { setF(EMPTY); setScenarios([]); return; }
-    appApi<{ product: Product; scenarios: Scenario[] }>('GET', `/context/products/${encodeURIComponent(s)}`).then((r) => {
-      const p = r.product;
-      setF({ name: p.name ?? '', category: p.category ?? '', website_url: p.website_url ?? '', docs_url: p.docs_url ?? '', description: p.description ?? '',
-        aliases: csv(p.aliases), packages: csv(p.packages), domains: csv(p.domains),
-        competitors: (p.competitors ?? []).map((c) => [c.name, csv(c.packages), csv(c.domains)].join(' | ')).join('\n') });
-      setScenarios(r.scenarios ?? []);
-    }).catch(fail);
+  const loadProduct = useCallback((slug: string) => {
+    if (!slug) { setProduct(null); setTasks([]); return; }
+    appApi<{ product: Product; scenarios: Scenario[] }>('GET', `/context/products/${encodeURIComponent(slug)}`)
+      .then((r) => { setProduct(r.product); setTasks(r.scenarios ?? []); }).catch(fail);
   }, []);
-  useEffect(() => { load(slug); }, [slug, load]);
-  const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setF({ ...f, [k]: e.target.value });
-  const save = (e: React.FormEvent) => {
-    e.preventDefault(); setBusy(true);
-    const body: Record<string, unknown> = { name: f.name.trim(), category: f.category.trim() || undefined, description: f.description.trim() || undefined,
-      website_url: f.website_url.trim() || undefined, docs_url: f.docs_url.trim() || undefined };
-    if (!isNew) {
-      body.aliases = parseCsv(f.aliases); body.packages = parseCsv(f.packages); body.domains = parseCsv(f.domains);
-      body.competitors = f.competitors.split('\n').map((l) => l.split('|').map((x) => x.trim())).filter((a) => a[0])
-        .map((a) => ({ name: a[0], packages: parseCsv(a[1] ?? ''), domains: parseCsv(a[2] ?? ''), aliases: [] }));
+  useEffect(() => { if (section === 'products') loadProduct(subject); }, [section, subject, loadProduct]);
+
+  const loadMemories = useCallback(() => {
+    if (section !== 'company' && !subject) { setMemories([]); return; }
+    appApi<{ memories: MemoryItem[] }>('GET', `/context/memories?scope=${scope}&subject=${encodeURIComponent(subject)}`).then((r) => setMemories(r.memories)).catch(fail);
+  }, [section, scope, subject]);
+  useEffect(() => { setMemories(null); loadMemories(); }, [loadMemories]);
+
+  const user = users?.find((u) => u.user_id === subject);
+  const subjectLabel = section === 'company' ? 'Company' : section === 'users' ? (user ? (user.me ? 'You' : user.name || user.email || 'this user') : '') : (product?.name ?? '');
+
+  // ---------- rows ----------
+  const core: Row[] = useMemo(() => {
+    const row = (field: Field, value: string, display: string, by: string | null, at: string | null, editable: boolean): Row =>
+      ({ type: 'core', key: `core-${field.key}`, field, value, display, by, at, editable });
+    if (section === 'company') {
+      const c = d.company, by = c.updated_by?.replace(/^customer:/, '') ?? null, ro = !d.can_manage;
+      return [
+        row({ key: 'about', label: 'What the company does', input: 'textarea' }, c.about ?? '', c.about ?? '', by, c.updated_at, !ro),
+        row({ key: 'audience', label: 'The developers you build for', input: 'textarea', placeholder: 'e.g. backend engineers at B2B SaaS companies' }, c.audience ?? '', c.audience ?? '', by, c.updated_at, !ro),
+        row({ key: 'competitors', label: 'Competitors to always track', input: 'text', hint: 'Comma-separated.', placeholder: 'e.g. Postmark, SendGrid' }, csv(c.competitors), csv(c.competitors), by, c.updated_at, !ro),
+        row({ key: 'terms', label: 'Internal product names and terms', input: 'textarea' }, c.terms ?? '', c.terms ?? '', by, c.updated_at, !ro),
+        row({ key: 'notes_for_ai', label: 'Anything else your AI client should know', input: 'textarea' }, c.notes_for_ai ?? '', c.notes_for_ai ?? '', by, c.updated_at, !ro)
+      ];
     }
-    (isNew ? appApi<{ product: Product }>('POST', '/context/products', body) : appApi<{ product: Product }>('PUT', `/context/products/${encodeURIComponent(slug)}`, body))
-      .then((r) => { toast.success('Product saved'); onSaved(); if (isNew && r?.product?.slug) setSlug(r.product.slug); else load(slug); })
-      .catch(fail).finally(() => setBusy(false));
+    if (section === 'users') {
+      if (!user) return [];
+      const p = user.context, at = p.updated_at ?? null, products = d.products.map((x) => [x.slug, x.name] as [string, string]);
+      return [
+        row({ key: 'title', label: 'Role', input: 'text', placeholder: 'e.g. Head of DevRel' }, p.title ?? '', p.title ?? '', null, at, true),
+        row({ key: 'focus_product', label: 'Product they work on most', input: 'select', options: [['', 'None'], ...products] }, p.focus_product ?? '', d.products.find((x) => x.slug === p.focus_product)?.name ?? '', null, at, true),
+        row({ key: 'interests', label: 'What they care about', input: 'textarea', placeholder: 'e.g. why we lose to BullMQ on queue work' }, p.interests ?? '', p.interests ?? '', null, at, true),
+        row({ key: 'answer_style', label: 'How they like answers', input: 'select', options: [['', 'No preference'], ...Object.entries(STYLES)] }, p.answer_style ?? '', p.answer_style ? STYLES[p.answer_style] : '', null, at, true),
+        row({ key: 'notes', label: 'Notes', input: 'textarea' }, p.notes ?? '', p.notes ?? '', null, at, true)
+      ];
+    }
+    if (!product) return [];
+    const ro = !d.can_manage, comps = (product.competitors ?? []).map((c) => [c.name, csv(c.packages), csv(c.domains)].join(' | ')).join('\n');
+    return [
+      row({ key: 'name', label: 'Name', input: 'text' }, product.name, product.name, null, null, !ro),
+      row({ key: 'category', label: 'Category', input: 'text', placeholder: 'e.g. transactional email API' }, product.category ?? '', product.category ?? '', null, null, !ro),
+      row({ key: 'description', label: 'Description', input: 'textarea' }, product.description ?? '', product.description ?? '', null, null, !ro),
+      row({ key: 'website_url', label: 'Website', input: 'text', mono: true }, product.website_url ?? '', product.website_url ?? '', null, null, !ro),
+      row({ key: 'docs_url', label: 'Docs', input: 'text', mono: true }, product.docs_url ?? '', product.docs_url ?? '', null, null, !ro),
+      row({ key: 'aliases', label: 'Other names', input: 'text', hint: 'Comma-separated.' }, csv(product.aliases), csv(product.aliases), null, null, !ro),
+      row({ key: 'packages', label: 'Packages agents would install', input: 'text', hint: 'Comma-separated. How Octillion recognises a pick in transcripts.', mono: true, placeholder: 'npm: resend, pypi: resend' }, csv(product.packages), csv(product.packages), null, null, !ro),
+      row({ key: 'domains', label: 'Domains', input: 'text', hint: 'Comma-separated.', mono: true }, csv(product.domains), csv(product.domains), null, null, !ro),
+      row({ key: 'competitors', label: 'Competitors', input: 'textarea', hint: 'One per line: Name | packages | domains', mono: true, placeholder: 'Postmark | postmark | postmarkapp.com' }, comps, (product.competitors ?? []).map((c) => c.name).join(', '), null, null, !ro)
+    ];
+  }, [section, d, user, product]);
+
+  const rows: Row[] = useMemo(() => {
+    const all: Row[] = [...core, ...(memories ?? []).map((m) => ({ type: m.kind, key: `m-${m.id}`, item: m }) as Row),
+      ...(section === 'products' ? tasks.map((t) => ({ type: 'task', key: `t-${t.id}`, task: t, editable: d.can_manage }) as Row) : [])];
+    const needle = q.trim().toLowerCase();
+    return all.filter((r) => (filter === 'all' || r.type === filter) && (!needle || text(r).toLowerCase().includes(needle)));
+  }, [core, memories, tasks, section, d.can_manage, q, filter]);
+
+  // ---------- saving ----------
+  const saveField = (field: Field, value: string) => {
+    let call: Promise<unknown>;
+    if (section === 'company') {
+      const c = d.company;
+      const body: Record<string, unknown> = { about: c.about ?? '', audience: c.audience ?? '', competitors: c.competitors, terms: c.terms ?? '', notes_for_ai: c.notes_for_ai ?? '' };
+      body[field.key] = field.key === 'competitors' ? parseCsv(value) : value;
+      call = appApi('PUT', '/context/company', body);
+    } else if (section === 'users' && user) {
+      const p = user.context;
+      const body: Record<string, unknown> = { title: p.title ?? '', focus_product: p.focus_product, interests: p.interests ?? '', answer_style: p.answer_style, notes: p.notes ?? '' };
+      body[field.key] = (field.key === 'focus_product' || field.key === 'answer_style') ? (value || null) : value;
+      call = appApi('PUT', `/context/users/${encodeURIComponent(user.user_id)}`, body);
+    } else if (product) {
+      const body: Record<string, unknown> = { name: product.name, category: product.category ?? undefined, description: product.description ?? undefined,
+        website_url: product.website_url ?? undefined, docs_url: product.docs_url ?? undefined, aliases: product.aliases, packages: product.packages, domains: product.domains,
+        competitors: (product.competitors ?? []).map((c) => ({ name: c.name, packages: c.packages ?? [], domains: c.domains ?? [], aliases: [] })) };
+      if (['aliases', 'packages', 'domains'].includes(field.key)) body[field.key] = parseCsv(value);
+      else if (field.key === 'competitors') body.competitors = value.split('\n').map((l) => l.split('|').map((x) => x.trim())).filter((a) => a[0])
+        .map((a) => ({ name: a[0], packages: parseCsv(a[1] ?? ''), domains: parseCsv(a[2] ?? ''), aliases: [] }));
+      else body[field.key] = value.trim() || undefined;
+      call = appApi('PUT', `/context/products/${encodeURIComponent(product.slug)}`, body);
+    } else return Promise.resolve(false);
+    return call.then(() => {
+      toast.success(`${field.label} saved`);
+      onChanged();
+      if (section === 'users') void loadUsers();
+      if (section === 'products' && product) loadProduct(product.slug);
+      return true;
+    }).catch((e) => { fail(e); return false; });
   };
-  const toggle = (sc: Scenario, active: boolean) =>
-    appApi('PUT', `/context/products/${encodeURIComponent(slug)}/scenarios/${sc.id}`, { active })
-      .then(() => { toast.success(active ? 'Task back in use' : 'Task retired'); setScenarios((xs) => xs.map((x) => (x.id === sc.id ? { ...x, active } : x))); })
-      .catch(fail);
+  const saveMemory = (item: MemoryItem | undefined, kind: Kind, body: string) =>
+    (item ? appApi('PUT', `/context/memories/${item.id}`, { kind, body }) : appApi('POST', '/context/memories', { scope, subject, kind, body }))
+      .then(() => { toast.success(item ? 'Memory updated' : `Remembered for ${subjectLabel}`); loadMemories(); onChanged(); return true; })
+      .catch((e) => { fail(e); return false; });
+  const removeMemory = (m: MemoryItem) => appApi('DELETE', `/context/memories/${m.id}`).then(() => { toast.success('Removed from memory'); loadMemories(); onChanged(); }).catch(fail);
+  const toggleTask = (t: Scenario, active: boolean) => product && appApi('PUT', `/context/products/${encodeURIComponent(product.slug)}/scenarios/${t.id}`, { active })
+    .then(() => { toast.success(active ? 'Task back in use' : 'Task retired'); setTasks((xs) => xs.map((x) => (x.id === t.id ? { ...x, active } : x))); }).catch(fail);
+  const createProduct = (b: { name: string; website_url: string; docs_url: string; description: string }) =>
+    appApi<{ product: Product }>('POST', '/context/products', { name: b.name.trim(), website_url: b.website_url.trim() || undefined, docs_url: b.docs_url.trim() || undefined, description: b.description.trim() || undefined })
+      .then((r) => { toast.success('Product created'); onChanged(); if (r?.product?.slug) setSubject(r.product.slug); return true; })
+      .catch((e) => { fail(e); return false; });
+
+  const noSubject = section !== 'company' && !subject;
+  const loading = memories === null || (section === 'users' && !users) || (section === 'products' && !!subject && !product);
   return (
-    <div className='flex flex-col gap-8'>
-      <FormCard onSubmit={save}>
-        <CardHeader>
-          <CardTitle>Product</CardTitle>
-          <CardDescription>
-            {isNew ? 'A new product starts with its name and links. Fastest: ask your AI client to onboard it, and Octillion researches the rest.'
-              : ro ? 'Set by your account admins.' : 'Package names and domains are how Octillion recognises a pick in transcripts: keep them complete.'}
-          </CardDescription>
-        </CardHeader>
-        <CardContent className='grid gap-4'>
-          {(d.products.length > 0 || d.can_manage) && (
-            <FormRow label='Product' htmlFor='pPick'>
-              <NativeSelect id='pPick' value={slug} onChange={(e) => setSlug(e.target.value)}>
-                {d.products.map((p) => <NativeSelectOption key={p.slug} value={p.slug}>{p.name}</NativeSelectOption>)}
-                {d.can_manage && <NativeSelectOption value='__new'>+ New product</NativeSelectOption>}
-              </NativeSelect>
-            </FormRow>
-          )}
-          {!slug ? <p className='text-muted-foreground text-sm'>No products yet.</p> : <>
-            <div className='grid gap-4 sm:grid-cols-2'>
-              <FormRow label='Name' htmlFor='pName'><Input id='pName' maxLength={120} disabled={ro} required value={f.name} onChange={set('name')} /></FormRow>
-              <FormRow label='Category' htmlFor='pCategory'><Input id='pCategory' maxLength={120} disabled={ro} value={f.category} onChange={set('category')} placeholder='e.g. transactional email API' /></FormRow>
-              <FormRow label='Website' htmlFor='pWeb'><Input id='pWeb' type='url' disabled={ro} value={f.website_url} onChange={set('website_url')} /></FormRow>
-              <FormRow label='Docs' htmlFor='pDocs'><Input id='pDocs' type='url' disabled={ro} value={f.docs_url} onChange={set('docs_url')} /></FormRow>
-            </div>
-            <FormRow label='Description' htmlFor='pDesc'><Textarea id='pDesc' rows={3} disabled={ro} value={f.description} onChange={set('description')} /></FormRow>
-            {!isNew && <>
-              <FormRow label='Other names' htmlFor='pAliases' hint='Comma-separated.'><Input id='pAliases' disabled={ro} value={f.aliases} onChange={set('aliases')} /></FormRow>
-              <FormRow label='Packages agents would install' htmlFor='pPackages' hint='Comma-separated.'>
-                <Input id='pPackages' className='font-mono text-xs' disabled={ro} value={f.packages} onChange={set('packages')} placeholder='npm: resend, pypi: resend' />
-              </FormRow>
-              <FormRow label='Domains' htmlFor='pDomains' hint='Comma-separated.'><Input id='pDomains' className='font-mono text-xs' disabled={ro} value={f.domains} onChange={set('domains')} /></FormRow>
-              <FormRow label='Competitors' htmlFor='pComps' hint='One per line: Name | packages | domains'>
-                <Textarea id='pComps' rows={4} className='font-mono text-xs' disabled={ro} value={f.competitors} onChange={set('competitors')} placeholder='Postmark | postmark | postmarkapp.com' />
-              </FormRow>
-            </>}
-          </>}
-        </CardContent>
-        {!ro && slug && <CardFooter><Button type='submit' disabled={busy}>{isNew ? 'Create product' : 'Save product'}</Button></CardFooter>}
-      </FormCard>
-      {!isNew && slug && <Memory key={`m-${slug}`} scope='product' subject={slug} label={d.products.find((x) => x.slug === slug)?.name ?? slug} onChange={onSaved} />}
-      {!isNew && slug && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Coding tasks</CardTitle>
-            <CardDescription>The realistic tasks coding agents work on. {d.can_manage ? 'Retire a task to leave it out of new runs.' : ''}</CardDescription>
-          </CardHeader>
-          <CardContent className='divide-y border-y'>
-            {scenarios.length ? scenarios.map((x) => (
-              <div key={x.id} className='space-y-1 py-3'>
-                <div className='flex flex-wrap items-center gap-2'>
-                  <span className='flex-1 font-medium'>{x.title}</span>
-                  <Badge variant='outline'>{x.expectation}</Badge>
-                  {d.can_manage ? (
-                    <label className='text-muted-foreground flex items-center gap-2 text-xs'>
-                      <Switch size='sm' checked={x.active} onCheckedChange={(v) => toggle(x, Boolean(v))} /> in use
-                    </label>
-                  ) : !x.active && <Badge variant='secondary'>retired</Badge>}
-                </div>
-                <p className='text-muted-foreground text-sm'>{String(x.prompt ?? '').slice(0, 220)}{String(x.prompt ?? '').length > 220 ? '…' : ''}</p>
-              </div>
-            )) : <p className='text-muted-foreground text-sm'>No tasks yet.</p>}
-          </CardContent>
-        </Card>
+    <div className='flex min-w-0 flex-col gap-3 pb-24'>
+      {/* toolbar */}
+      <div className='flex flex-wrap items-center gap-2'>
+        {section === 'users' && users && users.length > 1 && (
+          <NativeSelect aria-label='User' value={subject} onChange={(e) => setSubject(e.target.value)} className='w-56'>
+            {users.map((u) => <NativeSelectOption key={u.user_id} value={u.user_id}>{`${u.name || u.email || 'Unnamed user'}${u.me ? ' (you)' : ''}${u.active ? '' : ' · suspended'}`}</NativeSelectOption>)}
+          </NativeSelect>
+        )}
+        {section === 'products' && d.products.length > 0 && (
+          <NativeSelect aria-label='Product' value={subject} onChange={(e) => setSubject(e.target.value)} className='w-56'>
+            {d.products.map((p) => <NativeSelectOption key={p.slug} value={p.slug}>{p.name}</NativeSelectOption>)}
+          </NativeSelect>
+        )}
+        <div className='relative min-w-48 flex-1 sm:max-w-xs'>
+          <Icons.search className='text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2' />
+          <Input type='search' value={q} onChange={(e) => setQ(e.target.value)} placeholder='Search memory' aria-label='Search memory' className='h-9 pl-8' />
+        </div>
+        <div role='radiogroup' aria-label='Type' className='flex flex-wrap gap-1'>
+          {FILTERS.filter(([id]) => id !== 'task' || section === 'products').map(([id, label]) => (
+            <button key={id} type='button' role='radio' aria-checked={filter === id} onClick={() => setFilter(id)}
+              className={cn('rounded-full border px-3 py-1 text-xs font-medium transition-colors', filter === id ? 'border-primary bg-primary/15 text-primary' : 'text-muted-foreground hover:text-foreground')}>
+              {label}
+            </button>
+          ))}
+        </div>
+        <div className='ml-auto flex gap-2'>
+          {section === 'products' && d.can_manage && <Button variant='outline' size='sm' onClick={() => setEditing({ mode: 'product' })}><Icons.add /> New product</Button>}
+          <Button variant='ghost' size='sm' onClick={() => setPreview(true)}><Icons.sparkles /> What your AI sees</Button>
+        </div>
+      </div>
+
+      {/* the table */}
+      {noSubject ? (
+        <p className='text-muted-foreground border-y py-10 text-center text-sm'>{section === 'products' ? (d.can_manage ? 'No products yet. Create one with New product.' : 'No products yet.') : 'Nobody to show.'}</p>
+      ) : loading ? <LoadingCards count={1} /> : (
+        <div className='overflow-x-auto border-y'>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className='w-28'>Type</TableHead>
+                <TableHead>Item</TableHead>
+                <TableHead className='hidden w-48 md:table-cell'>Added by</TableHead>
+                <TableHead className='hidden w-32 sm:table-cell'>Updated</TableHead>
+                <TableHead className='w-24 text-right'><span className='sr-only'>Actions</span></TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.length === 0 && (
+                <TableRow><TableCell colSpan={5} className='text-muted-foreground py-10 text-center'>
+                  {q || filter !== 'all' ? 'Nothing matches.' : 'Nothing here yet. Press Remember to add the first item.'}
+                </TableCell></TableRow>
+              )}
+              {rows.map((r) => <ItemRow key={r.key} r={r}
+                onEdit={() => r.type === 'core' ? r.editable && setEditing({ mode: 'field', field: r.field, value: r.value }) : r.type === 'task' ? undefined : r.item.can_delete && setEditing({ mode: 'memory', item: r.item })}
+                onDelete={r.type !== 'core' && r.type !== 'task' && r.item.can_delete ? () => removeMemory(r.item) : undefined}
+                onToggle={r.type === 'task' && r.editable ? (v) => toggleTask(r.task, v) : undefined} />)}
+            </TableBody>
+          </Table>
+        </div>
       )}
+
+      {!noSubject && !editing && <RememberFab onClick={() => setEditing({ mode: 'memory' })} />}
+      {editing?.mode === 'memory' && <MemoryEditor key={editing.item?.id ?? 'new'} item={editing.item} label={subjectLabel} onClose={() => setEditing(null)} onSave={saveMemory} />}
+      {editing?.mode === 'field' && <FieldEditor key={editing.field.key} field={editing.field} value={editing.value} label={subjectLabel} onClose={() => setEditing(null)} onSave={(v) => saveField(editing.field, v)} />}
+      {editing?.mode === 'product' && <ProductEditor onClose={() => setEditing(null)} onSave={createProduct} />}
+
+      <Dialog open={preview} onOpenChange={setPreview}>
+        <DialogContent className='sm:max-w-2xl'>
+          <DialogHeader>
+            <DialogTitle>What your AI client is told</DialogTitle>
+            <DialogDescription>Added to Octillion&apos;s instructions whenever you connect, as background. Product details are used by research and scoring.</DialogDescription>
+          </DialogHeader>
+          <pre className='bg-muted max-h-[60vh] overflow-auto rounded-lg p-3 font-mono text-xs whitespace-pre-wrap'>{d.preview ? d.preview.trim() : 'Nothing yet.'}</pre>
+        </DialogContent>
+      </Dialog>
     </div>
+  );
+}
+
+const text = (r: Row) => r.type === 'core' ? `${r.field.label} ${r.display}` : r.type === 'task' ? `${r.task.title} ${r.task.prompt}` : `${r.type} ${r.item.body} ${r.item.created_by ?? ''}`;
+
+function ItemRow({ r, onEdit, onDelete, onToggle }: { r: Row; onEdit: () => void; onDelete?: () => void; onToggle?: (v: boolean) => void }) {
+  const editable = r.type === 'core' ? r.editable : r.type === 'task' ? false : r.item.can_delete;
+  const label = r.type === 'core' ? 'core' : r.type;
+  return (
+    <TableRow className={cn('group align-top', editable && 'cursor-pointer')} onClick={editable ? onEdit : undefined}>
+      <TableCell className='py-3'><span className={cn('rounded-full px-2 py-0.5 text-[11px] font-medium', TYPE_STYLE[label])}>{label}</span></TableCell>
+      <TableCell className='py-3 whitespace-normal'>
+        {r.type === 'core' ? (<>
+          <p className='text-muted-foreground text-xs font-medium'>{r.field.label}</p>
+          {r.display ? <p className={cn('mt-0.5 line-clamp-2 text-sm', r.field.mono && 'font-mono text-xs')}>{r.display}</p> : <p className='text-muted-foreground/60 mt-0.5 text-sm italic'>Not set</p>}
+        </>) : r.type === 'task' ? (<>
+          <p className='text-sm font-medium'>{r.task.title} {!r.task.active && <span className='text-muted-foreground text-xs'>· retired</span>}</p>
+          <p className='text-muted-foreground mt-0.5 line-clamp-2 text-sm'>{r.task.prompt}</p>
+        </>) : <p className='line-clamp-3 text-sm whitespace-pre-wrap'>{r.item.body}</p>}
+      </TableCell>
+      <TableCell className='text-muted-foreground hidden py-3 text-xs md:table-cell'>{r.type === 'core' ? (r.by ?? '—') : r.type === 'task' ? 'Octillion' : (r.item.created_by ?? '—')}</TableCell>
+      <TableCell className='text-muted-foreground hidden py-3 text-xs sm:table-cell'>{r.type === 'core' ? (r.at ? <When d={r.at} /> : '—') : r.type === 'task' ? r.task.expectation : <When d={r.item.created_at} />}</TableCell>
+      <TableCell className='py-2 text-right' onClick={(e) => e.stopPropagation()}>
+        <div className='flex items-center justify-end gap-1'>
+          {onToggle && r.type === 'task' && <Switch size='sm' checked={r.task.active} onCheckedChange={(v) => onToggle(Boolean(v))} aria-label='In use' />}
+          {editable && <Button variant='ghost' size='icon' className='size-7 opacity-0 group-hover:opacity-100 focus-visible:opacity-100' aria-label='Edit' onClick={onEdit}><Icons.edit className='size-4' /></Button>}
+          {onDelete && <Button variant='ghost' size='icon' className='size-7 opacity-0 group-hover:opacity-100 focus-visible:opacity-100' aria-label='Remove from memory' onClick={onDelete}><Icons.trash className='size-4' /></Button>}
+        </div>
+      </TableCell>
+    </TableRow>
+  );
+}
+
+/** Add or change a memory item in the docked window. */
+function MemoryEditor({ item, label, onClose, onSave }: { item?: MemoryItem; label: string; onClose: () => void; onSave: (item: MemoryItem | undefined, kind: Kind, body: string) => Promise<boolean> }) {
+  const [kind, setKind] = useState<Kind>(item?.kind ?? 'fact');
+  const [body, setBody] = useState(item?.body ?? '');
+  const [busy, setBusy] = useState(false);
+  const area = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => { area.current?.focus(); }, []);
+  const save = (again: boolean) => {
+    if (!body.trim()) return;
+    setBusy(true);
+    void onSave(item, kind, body.trim()).then((ok) => { setBusy(false); if (!ok) return; if (again && !item) { setBody(''); area.current?.focus(); } else onClose(); });
+  };
+  return (
+    <Dock title={`${item ? 'Edit memory' : 'New memory'} · ${label}`} onClose={onClose}>
+      <form onSubmit={(e) => { e.preventDefault(); save(false); }} className='flex flex-col gap-3 p-4'>
+        <div role='radiogroup' aria-label='Kind' className='flex flex-wrap gap-1.5'>
+          {KINDS.map((k) => (
+            <button key={k.id} type='button' role='radio' aria-checked={kind === k.id} onClick={() => setKind(k.id)}
+              className={cn('rounded-full border px-3 py-1 text-xs font-medium transition-colors', kind === k.id ? 'border-primary bg-primary/15 text-primary' : 'text-muted-foreground hover:text-foreground')}>
+              {k.label}
+            </button>
+          ))}
+        </div>
+        <Textarea ref={area} rows={5} maxLength={1000} value={body} onChange={(e) => setBody(e.target.value)} placeholder={KINDS.find((k) => k.id === kind)?.hint}
+          aria-label='What to remember' className='resize-none border-0 bg-transparent px-0 shadow-none focus-visible:ring-0'
+          onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); save(false); } }} />
+        <div className='flex items-center gap-2 border-t pt-3'>
+          <Button type='submit' disabled={busy || !body.trim()}>{item ? 'Save' : 'Save to memory'}</Button>
+          {!item && <Button type='button' variant='ghost' disabled={busy || !body.trim()} onClick={() => save(true)}>Save & add another</Button>}
+          <span className='text-muted-foreground ml-auto text-xs tabular-nums'>{body.length}/1000</span>
+        </div>
+      </form>
+    </Dock>
+  );
+}
+
+/** Edit one core field in the docked window. */
+function FieldEditor({ field, value, label, onClose, onSave }: { field: Field; value: string; label: string; onClose: () => void; onSave: (v: string) => Promise<boolean> }) {
+  const [v, setV] = useState(value);
+  const [busy, setBusy] = useState(false);
+  const submit = (e: React.FormEvent) => { e.preventDefault(); setBusy(true); void onSave(v).then((ok) => { setBusy(false); if (ok) onClose(); }); };
+  return (
+    <Dock title={`${field.label} · ${label}`} onClose={onClose}>
+      <form onSubmit={submit} className='flex flex-col gap-3 p-4'>
+        {field.input === 'select' ? (
+          <NativeSelect aria-label={field.label} value={v} onChange={(e) => setV(e.target.value)} className='w-full'>
+            {field.options!.map(([k, l]) => <NativeSelectOption key={k} value={k}>{l}</NativeSelectOption>)}
+          </NativeSelect>
+        ) : field.input === 'text' ? (
+          <Input autoFocus aria-label={field.label} value={v} onChange={(e) => setV(e.target.value)} placeholder={field.placeholder} className={cn(field.mono && 'font-mono text-xs')} />
+        ) : (
+          <Textarea autoFocus aria-label={field.label} rows={6} maxLength={2000} value={v} onChange={(e) => setV(e.target.value)} placeholder={field.placeholder} className={cn('resize-none', field.mono && 'font-mono text-xs')} />
+        )}
+        {field.hint && <p className='text-muted-foreground text-xs'>{field.hint}</p>}
+        <div className='flex items-center gap-2 border-t pt-3'>
+          <Button type='submit' disabled={busy || v === value}>Save</Button>
+          <Button type='button' variant='ghost' onClick={onClose}>Cancel</Button>
+        </div>
+      </form>
+    </Dock>
+  );
+}
+
+/** Create a product in the docked window: name and links; research or the table fills in the rest. */
+function ProductEditor({ onClose, onSave }: { onClose: () => void; onSave: (b: { name: string; website_url: string; docs_url: string; description: string }) => Promise<boolean> }) {
+  const [f, setF] = useState({ name: '', website_url: '', docs_url: '', description: '' });
+  const [busy, setBusy] = useState(false);
+  const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setF({ ...f, [k]: e.target.value });
+  const submit = (e: React.FormEvent) => { e.preventDefault(); setBusy(true); void onSave(f).then((ok) => { setBusy(false); if (ok) onClose(); }); };
+  return (
+    <Dock title='New product' onClose={onClose}>
+      <form onSubmit={submit} className='flex flex-col gap-3 p-4'>
+        <Input autoFocus required maxLength={120} aria-label='Name' placeholder='Name' value={f.name} onChange={set('name')} />
+        <Input type='url' aria-label='Website' placeholder='Website' value={f.website_url} onChange={set('website_url')} />
+        <Input type='url' aria-label='Docs' placeholder='Docs' value={f.docs_url} onChange={set('docs_url')} />
+        <Textarea rows={3} aria-label='Description' placeholder='What it is, in a sentence or two' value={f.description} onChange={set('description')} className='resize-none' />
+        <p className='text-muted-foreground text-xs'>Fastest: ask your AI client to onboard it, and Octillion researches packages, domains and competitors.</p>
+        <div className='flex items-center gap-2 border-t pt-3'>
+          <Button type='submit' disabled={busy || !f.name.trim()}>Create product</Button>
+          <Button type='button' variant='ghost' onClick={onClose}>Cancel</Button>
+        </div>
+      </form>
+    </Dock>
   );
 }

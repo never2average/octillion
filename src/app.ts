@@ -301,6 +301,12 @@ export function appRouter() {
     const scope = String(req.body?.scope ?? "");
     res.status(201).json(await context.addMemory(S(res).org, actor(res), req.body ?? {}, await memorySubject(res, scope, req.body?.subject)));
   });
+  api.put("/context/memories/:id", async (req, res) => {
+    const m = await context.getMemory(S(res).org, Number(req.params.id));
+    if (!m) throw new AppError("Not found", 404);
+    if (m.created_by !== actor(res)) adminOnly(res);
+    res.json(await context.updateMemory(S(res).org, m.id, req.body ?? {}));
+  });
   api.delete("/context/memories/:id", async (req, res) => {
     const m = await context.getMemory(S(res).org, Number(req.params.id));
     if (!m) throw new AppError("Not found", 404);
