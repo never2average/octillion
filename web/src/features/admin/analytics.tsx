@@ -1,8 +1,6 @@
 'use client';
 // Platform analytics and health across every account (src/insights.ts). PostHog and New Relic hold the full record;
 // this replicates what staff check daily, from the records Octillion already keeps.
-import Link from 'next/link';
-import { useRouter } from 'next/navigation';
 import { useMemo, useState } from 'react';
 import { Area, AreaChart, Bar, BarChart, CartesianGrid, XAxis, YAxis } from 'recharts';
 import PageContainer from '@/components/layout/page-container';
@@ -12,8 +10,8 @@ import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select'
 import { Skeleton } from '@/components/ui/skeleton';
 import { Icons } from '@/components/icons';
 import { num, usd } from '@/lib/octillion-format';
-import { accountHref, useAdmin } from './lib';
-import { Rule, StatStrip } from '@/components/layout/section';
+import { useAdmin } from './lib';
+import { StatStrip } from '@/components/layout/section';
 import { DataList, ErrorBox, LoadingCards, Mono, Section, StatusBadge, Trend, When } from './ui';
 
 interface Analytics {
@@ -55,16 +53,16 @@ function fillDays(rows: Analytics['daily'], days: number) {
 }
 const shortDay = (d: string) => new Date(`${d}T00:00:00Z`).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
 
-export function AdminAnalytics() {
-  const router = useRouter();
+/** Product analytics (/admin/analytics) or the health of the machinery behind it (/admin/health), from one API. */
+export function AdminAnalytics({ view = 'analytics' }: { view?: 'analytics' | 'health' }) {
   const [days, setDays] = useState(30);
   const { data: a, error, isLoading } = useAdmin<Analytics>(`/analytics?days=${days}`);
   const series = useMemo(() => (a ? fillDays(a.daily, a.days) : []), [a]);
 
   return (
     <PageContainer
-      pageTitle='Analytics & health'
-      pageDescription="Product usage across every account, and the health of the machinery behind it. Customers see only their own team's usage."
+      pageTitle={view === 'health' ? 'Health' : 'Analytics'}
+      pageDescription={view === 'health' ? 'Errors, latency, simulations, sessions and the model gateway, across every account.' : "Product usage across every account. Customers see only their own team's usage."}
       pageHeaderAction={
         <div className='flex flex-wrap items-center justify-end gap-2'>
           <NativeSelect value={String(days)} onChange={(e) => setDays(Number(e.target.value))} aria-label='Period'>
@@ -104,8 +102,7 @@ export function AdminAnalytics() {
         </div>
       ) : (
         <div className='flex max-w-6xl flex-col gap-10'>
-          <section className='flex flex-col gap-8'>
-            <h3 className='text-lg font-semibold tracking-tight'>Product analytics</h3>
+          {view === 'analytics' && <section className='flex flex-col gap-8'>
             <StatStrip
               items={[
                 { label: 'Active accounts', value: num(a.totals.active_accounts), hint: <><Trend pct={a.totals.change.active_accounts} /> vs previous {a.days} days</> },
@@ -247,7 +244,6 @@ export function AdminAnalytics() {
               <DataList
                 rows={a.accounts}
                 empty='No account activity.'
-                onRow={(r) => router.push(accountHref(r.slug))}
                 cols={[
                   {
                     label: 'Account',
@@ -266,12 +262,9 @@ export function AdminAnalytics() {
                 ]}
               />
             </Section>
-          </section>
+          </section>}
 
-          <Rule />
-
-          <section className='flex flex-col gap-8'>
-            <h3 className='text-lg font-semibold tracking-tight'>Health</h3>
+          {view === 'health' && <section className='flex flex-col gap-8'>
             <StatStrip
               items={[
                 { label: 'Tool error rate', value: `${a.totals.error_pct}%`, hint: `p50 ${ms(a.totals.p50_ms)}` },
@@ -298,11 +291,7 @@ export function AdminAnalytics() {
                   { label: 'When', render: (e) => <When d={e.at} /> },
                   {
                     label: 'Account',
-                    render: (e) => (
-                      <Link className='text-primary underline-offset-4 hover:underline' href={accountHref(e.slug)}>
-                        {e.account}
-                      </Link>
-                    )
+                    render: (e) => <span>{e.account}</span>
                   },
                   { label: 'Call', render: (e) => <Mono>{e.name || e.method}</Mono> },
                   { label: 'Client', render: (e) => <span className='text-muted-foreground text-xs'>{e.client ?? ''}</span> },
@@ -310,7 +299,7 @@ export function AdminAnalytics() {
                 ]}
               />
             </Section>
-          </section>
+          </section>}
         </div>
       )}
     </PageContainer>

@@ -11,7 +11,7 @@ import { Label } from '@/components/ui/label';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Icons } from '@/components/icons';
 import { usd } from '@/lib/octillion-format';
-import { accountHref, post, useAdmin, useAdminAction, type InviteResult, type OrgList, type OrgRow } from './lib';
+import { post, useAdmin, useAdminAction, type InviteResult, type OrgList, type OrgRow } from './lib';
 import { useResult } from './result-dialog';
 import { Field, RecordView, type RecordCol } from '@/components/layout/record-view';
 import { ErrorBox, Notice, StageDots, StatusBadge, SubBadge, When } from './ui';
@@ -104,7 +104,6 @@ export function AdminAccounts() {
                 <ul className='list-disc space-y-1 pl-5 text-sm text-amber-400'>{o.attention.map((a) => <li key={a}>{a}</li>)}</ul>
               </div>
             )}
-            <div><Button onClick={() => router.push(accountHref(o.slug))}>Open account <Icons.arrowRight /></Button></div>
           </div>
         )}
       />

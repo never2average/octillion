@@ -109,13 +109,17 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
       <RecordView<MemoryItem>
         key={subject}
         rows={items ?? []} rowKey={(m) => String(m.id)} cols={cols} loading={items === null && !noSubject} noun='memories'
+        actions={(m) => m.can_delete ? [
+          { label: 'Edit', icon: <Icons.edit />, onSelect: () => setEditing({ item: m }) },
+          { label: 'Remove', icon: <Icons.trash />, destructive: true, onSelect: () => void remove(m) }
+        ] : []}
         searchText={(m) => `${m.kind} ${m.body} ${m.created_by ?? ''} ${m.subject_name ?? ''}`}
         searchPlaceholder={`Search ${label ? `${label === 'You' ? 'your' : `${label}'s`} ` : ''}memory`}
         filters={picker || undefined}
         primary={primary || undefined}
         empty={noSubject ? 'Nobody to show.' : 'Nothing remembered yet. Add the first memory, or import a CSV or JSON file.'}
         detailTitle={(m) => `${m.kind[0].toUpperCase()}${m.kind.slice(1)}${m.subject_name && section === 'products' ? ` · ${m.subject_name}` : ''}`}
-        detail={(m, close) => (
+        detail={(m) => (
           <div className='flex flex-col gap-5'>
             <p className='text-base whitespace-pre-wrap'>{m.body}</p>
             <dl>
@@ -124,12 +128,6 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
               <Field label='Added by'>{m.created_by ?? '—'}</Field>
               <Field label='Added'><When d={m.created_at} /></Field>
             </dl>
-            {m.can_delete && (
-              <div className='flex gap-2 border-t pt-4'>
-                <Button onClick={() => setEditing({ item: m })}><Icons.edit /> Edit</Button>
-                <Button variant='ghost' className='text-destructive' onClick={() => { close(); void remove(m); }}><Icons.trash /> Remove</Button>
-              </div>
-            )}
           </div>
         )}
       />

@@ -1,19 +1,18 @@
 'use client';
 // Access requests from the landing page: approve (a new account, or a person added to one), decline, reopen.
-import Link from 'next/link';
 import { useMemo, useState } from 'react';
 import PageContainer from '@/components/layout/page-container';
-import { Button, buttonVariants } from '@/components/ui/button';
+import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Icons } from '@/components/icons';
-import { accountHref, post, useAdmin, useAdminAction, type InviteResult, type OrgList } from './lib';
+import { post, useAdmin, useAdminAction, type InviteResult, type OrgList } from './lib';
 import { useResult } from './result-dialog';
-import { Field, RecordView, type RecordCol } from '@/components/layout/record-view';
-import { ConfirmButton, ErrorBox, StatusBadge, When } from './ui';
+import { Field, RecordView, type RecordCol, type RowAction } from '@/components/layout/record-view';
+import { ErrorBox, StatusBadge, When } from './ui';
 
 interface Req {
   id: number;
@@ -38,16 +37,13 @@ export function AdminRequests() {
 
   const link = (q: Req) => (q.product_url ? (/^https?:\/\//.test(q.product_url) ? q.product_url : `https://${q.product_url}`) : null);
   const tone = (q: Req) => (q.status === 'pending' ? 'info' : q.status === 'approved' ? 'ok' : 'neutral') as 'info' | 'ok' | 'neutral';
-  const actions = (q: Req) => (
-    <div className='flex flex-wrap gap-2'>
-      {q.status === 'pending' && (<>
-        <Button size='sm' onClick={() => setApproving(q)}><Icons.check className='size-3.5' /> Approve</Button>
-        <ConfirmButton label='Decline' title={`Decline ${q.company}?`} description='Nothing is sent to them. You can reopen the request later.' confirmLabel='Decline' onConfirm={() => decline.mutate(q)} />
-      </>)}
-      {q.status === 'declined' && <Button variant='outline' size='sm' disabled={reopen.isPending} onClick={() => reopen.mutate(q)}>Reopen</Button>}
-      {q.status === 'approved' && q.org_slug && <Link className={buttonVariants({ variant: 'outline', size: 'sm' })} href={accountHref(q.org_slug)}>Open {q.org_name}</Link>}
-    </div>
-  );
+  const actions = (q: Req): RowAction[] => [
+    ...(q.status === 'pending' ? [
+      { label: 'Approve', icon: <Icons.check />, onSelect: () => setApproving(q) },
+      { label: 'Decline', icon: <Icons.close />, destructive: true, onSelect: () => { if (window.confirm(`Decline ${q.company}? Nothing is sent to them; you can reopen it later.`)) decline.mutate(q); } }
+    ] : []),
+    ...(q.status === 'declined' ? [{ label: 'Reopen', icon: <Icons.arrowRight />, onSelect: () => reopen.mutate(q) }] : [])
+  ];
   const cols: RecordCol<Req>[] = [
     { key: 'company', label: 'Company', keep: true, render: (q) => <div className='space-y-1'><p className='font-semibold'>{q.company}</p><StatusBadge tone={tone(q)}>{q.status}</StatusBadge></div> },
     { key: 'contact', label: 'Contact', render: (q) => <span className='text-muted-foreground text-sm'>{q.email}</span> },
@@ -59,7 +55,7 @@ export function AdminRequests() {
     <PageContainer>
       <ErrorBox error={error} />
       <RecordView<Req>
-        rows={data?.requests ?? []} rowKey={(q) => String(q.id)} cols={cols} loading={isLoading || !data} noun='requests'
+        rows={data?.requests ?? []} rowKey={(q) => String(q.id)} cols={cols} actions={actions} loading={isLoading || !data} noun='requests'
         searchText={(q) => `${q.company} ${q.email} ${q.product_url ?? ''} ${q.message ?? ''} ${q.status}`}
         searchPlaceholder='Search access requests'
         filters={
@@ -84,7 +80,6 @@ export function AdminRequests() {
                 {q.org_name && <Field label='Account'>{q.org_name}</Field>}
                 <Field label='Message'>{q.message ? <p className='whitespace-pre-wrap'>{q.message}</p> : '—'}</Field>
               </dl>
-              {actions(q)}
             </div>
           );
         }}

@@ -4,6 +4,7 @@
 // to open it beside the table: stages with their prompts, what is done, and mark-done for steps without a tool.
 import { useCallback, useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 import PageContainer from '@/components/layout/page-container';
 import { Field, RecordView, type RecordCol } from '@/components/layout/record-view';
@@ -14,7 +15,7 @@ import { Icons } from '@/components/icons';
 import { appApi } from '@/lib/api-client';
 import { cn } from '@/lib/utils';
 import { Dock } from './memory';
-import { CopyButton, ErrorState, When, fail, useOrgLoad } from './shared';
+import { CopyButton, ErrorState, When, copy, fail, useOrgLoad } from './shared';
 
 interface Setup { clients: { client: string; last: string }[]; groups: { id: string; label: string; prompt: string; used: number; total: number }[] }
 interface Stage { id: string; title: string; why: string; prompt: string; tools: string[]; expect: string; manual?: boolean; done: boolean; at: string | null }
@@ -30,6 +31,11 @@ export function AdoptionPage() {
   const { data: s, error } = useOrgLoad(() => appApi<Setup>('GET', '/setup'));
   const { data: jr, reload } = useOrgLoad(() => appApi<{ journeys: Journey[] }>('GET', '/journeys'));
   const [adding, setAdding] = useState(false);
+  const router = useRouter();
+  const removeUseCase = (j: Journey) => {
+    if (!window.confirm(`Remove ${j.name}?`)) return;
+    appApi('DELETE', `/journeys/${encodeURIComponent(j.id)}`).then(() => { toast.success('Use case removed'); reload(); }).catch(fail);
+  };
   const rows: Row[] = !s ? [] : [
     ...(jr?.journeys ?? []).map((j) => ({ key: `j-${j.id}`, type: 'use case' as const, name: j.name, detail: j.outcome, done: j.done, total: j.total, j })),
     ...s.groups.map((g) => ({ key: `w-${g.id}`, type: 'workflow' as const, name: g.label, detail: g.used ? `${g.used} of ${g.total} tools used` : 'Not tried yet', done: g.used, total: g.total, g })),
@@ -54,7 +60,11 @@ export function AdoptionPage() {
         primary={<Button onClick={() => setAdding(true)}><Icons.add /> Add use case</Button>}
         empty='Nothing to show yet.'
         detailTitle={(r) => r.name}
-        detail={(r, close) => r.type === 'use case' ? <UseCase j={r.j} onChanged={reload} onRemoved={() => { close(); reload(); }} />
+        actions={(r) => r.type === 'use case' ? [
+          { label: 'Open in Setup & training', icon: <Icons.arrowRight />, onSelect: () => router.push(`/app?journey=${encodeURIComponent(r.j.id)}`) },
+          ...(r.j.own ? [{ label: 'Remove use case', icon: <Icons.trash />, destructive: true, onSelect: () => removeUseCase(r.j) }] : [])
+        ] : r.type === 'workflow' ? [{ label: 'Copy prompt', icon: <Icons.page />, onSelect: () => copy(r.g.prompt) }] : []}
+        detail={(r) => r.type === 'use case' ? <UseCase j={r.j} onChanged={reload} />
           : r.type === 'workflow' ? <Workflow g={r.g} /> : <Client name={r.name} at={r.at} />}
       />
       {adding && <UseCaseEditor onClose={() => setAdding(false)} onSaved={() => { setAdding(false); reload(); }} />}
@@ -76,14 +86,13 @@ function Progress({ done, total, check }: { done: number; total: number; check?:
   );
 }
 
-function UseCase({ j, onChanged, onRemoved }: { j: Journey; onChanged: () => void; onRemoved: () => void }) {
+function UseCase({ j, onChanged }: { j: Journey; onChanged: () => void }) {
   const [busy, setBusy] = useState<string | null>(null);
   const mark = (st: Stage) => {
     setBusy(st.id);
     appApi('POST', `/journeys/${encodeURIComponent(j.id)}/stages/${encodeURIComponent(st.id)}`, { done: !st.done })
       .then(() => { toast.success(st.done ? 'Marked not done' : 'Marked done'); onChanged(); }).catch(fail).finally(() => setBusy(null));
   };
-  const remove = () => appApi('DELETE', `/journeys/${encodeURIComponent(j.id)}`).then(() => { toast.success('Use case removed'); onRemoved(); }).catch(fail);
   return (
     <div className='flex flex-col gap-5'>
       <dl>
@@ -114,10 +123,6 @@ function UseCase({ j, onChanged, onRemoved }: { j: Journey; onChanged: () => voi
           </li>
         ))}
       </ol>
-      <div className='flex flex-wrap gap-2 border-t pt-4'>
-        <Button variant='outline' render={<Link href={`/app?journey=${encodeURIComponent(j.id)}`} />}>Open in Setup & training</Button>
-        {j.own && <Button variant='ghost' className='text-destructive' onClick={remove}><Icons.trash /> Remove</Button>}
-      </div>
     </div>
   );
 }

@@ -1,124 +1,32 @@
 'use client';
-// Customer journeys: the use-case pipelines customers follow on /app Setup. Write them here, promote the ones
-// customers see, and set their order. Progress on /app comes from real tool calls (src/playbooks.ts).
+// Customer journeys: the use-case pipelines customers follow on /app Setup. The editor and journey stats used by the
+// Journeys table (journeys.tsx); write journeys there and promote the ones customers see. Progress on /app comes from real tool calls (src/playbooks.ts).
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import { Icons } from '@/components/icons';
 import { adminApi } from '@/lib/api-client';
-import { post, useAdmin, useAdminAction } from './lib';
-import { Field as Prop, RecordView, type RecordCol } from '@/components/layout/record-view';
-import { ConfirmButton, ErrorBox, When } from './ui';
+import { post, useAdminAction } from './lib';
 
 interface Stage { id?: string; title: string; why: string; prompt: string; tools: string[]; expect: string; manual?: boolean }
-interface Playbook {
+export interface Playbook {
   id: string; name: string; outcome: string; who: string; time: string; example: { title: string; result: string };
   stages: Stage[]; promoted: boolean; position: number; updated_at: string; updated_by: string | null;
   adoption?: { started: number; completed: number; median_hours_to_complete: number | null; dropoff: { id: string; title: string; lost: number } | null;
     last_activity: string | null; funnel: { id: string; title: string; reached: number }[] };
   accounts_active?: number;
 }
-type Draft = Omit<Playbook, 'promoted' | 'position' | 'updated_at' | 'updated_by' | 'adoption' | 'accounts_active'> & { isNew: boolean };
+export type Draft = Omit<Playbook, 'promoted' | 'position' | 'updated_at' | 'updated_by' | 'adoption' | 'accounts_active'> & { isNew: boolean };
 
 const emptyStage = (): Stage => ({ title: '', why: '', prompt: '', tools: [], expect: '' });
-const blank = (): Draft => ({ id: '', name: '', outcome: '', who: '', time: '', example: { title: '', result: '' }, stages: [emptyStage()], isNew: true });
-
-export function CustomerJourneys({ switcher }: { switcher?: React.ReactNode }) {
-  const { data, error, isLoading } = useAdmin<{ playbooks: Playbook[]; tools: string[] }>('/playbooks');
-  const [draft, setDraft] = useState<Draft | null>(null);
-  const promote = useAdminAction((v: { id: string; on: boolean }) => post(`/playbooks/${v.id}/promote`, { promoted: v.on }), { success: 'Saved' });
-  const move = useAdminAction((ids: string[]) => post('/playbooks/reorder', { ids }), { success: 'Order saved' });
-  const remove = useAdminAction((id: string) => adminApi('DELETE', `/playbooks/${id}`), { success: 'Journey deleted' });
-  const list = data?.playbooks ?? [];
-  const reorder = (id: string, dir: -1 | 1) => {
-    const ids = list.map((p) => p.id);
-    const i = ids.indexOf(id), j = i + dir;
-    if (i < 0 || j < 0 || j >= ids.length) return;
-    [ids[i], ids[j]] = [ids[j], ids[i]];
-    move.mutate(ids);
-  };
-  const edit = (p: Playbook) => setDraft({ ...p, stages: p.stages.map((s) => ({ ...s, tools: [...s.tools] })), example: { ...p.example }, isNew: false });
-  const cols: RecordCol<Playbook>[] = [
-    { key: 'pos', label: '#', className: 'w-10', keep: true, render: (p) => <span className='text-muted-foreground tabular-nums'>{list.indexOf(p) + 1}</span> },
-    { key: 'name', label: 'Journey', keep: true, render: (p) => (<>
-      <p className='font-medium'>{p.name}</p>
-      <p className='text-muted-foreground line-clamp-1 text-xs'>{p.outcome}</p>
-    </>) },
-    { key: 'stages', label: 'Stages', className: 'w-20', render: (p) => <span className='tabular-nums'>{p.stages.length}</span> },
-    { key: 'promoted', label: 'Promoted', className: 'w-24', keep: true, render: (p) => (
-      <span onClick={(e) => e.stopPropagation()}><Switch checked={p.promoted} onCheckedChange={(on) => promote.mutate({ id: p.id, on })} aria-label={`Promote ${p.name}`} /></span>
-    ) },
-    { key: 'use', label: 'Started / finished', className: 'w-36', render: (p) => p.adoption ? <span className='tabular-nums'>{p.adoption.started} / {p.adoption.completed}</span> : '—' },
-    { key: 'edited', label: 'Edited', className: 'w-28', render: (p) => <When d={p.updated_at} className='text-muted-foreground text-xs' /> }
-  ];
-  const promoted = list.filter((p) => p.promoted).length;
-  return (
-    <>
-      <ErrorBox error={error} />
-      <RecordView<Playbook>
-        rows={list} rowKey={(p) => p.id} cols={cols} loading={isLoading} noun='journeys'
-        searchText={(p) => `${p.name} ${p.outcome} ${p.who} ${p.stages.map((s) => s.title).join(' ')}`}
-        searchPlaceholder={`Search ${list.length} customer journeys (${promoted} promoted)`}
-        filters={switcher}
-        primary={<Button onClick={() => setDraft(blank())}><Icons.add /> New journey</Button>}
-        empty='No journeys yet.'
-        detailTitle={(p) => p.name}
-        detail={(p) => {
-          const i = list.indexOf(p);
-          return (
-            <div className='flex flex-col gap-5'>
-              <dl>
-                <Prop label='Outcome'>{p.outcome}</Prop>
-                {p.who && <Prop label='For'>{p.who}</Prop>}
-                {p.time && <Prop label='Takes'>{p.time}</Prop>}
-                <Prop label='Shown to customers'>
-                  <label className='flex items-center gap-2'><Switch checked={p.promoted} onCheckedChange={(on) => promote.mutate({ id: p.id, on })} aria-label={`Promote ${p.name}`} /> {p.promoted ? 'Promoted' : 'Hidden'}</label>
-                </Prop>
-                <Prop label='Order'>
-                  <span className='inline-flex items-center gap-1'>
-                    #{i + 1}
-                    <Button size='icon-sm' variant='ghost' aria-label='Move up' disabled={i === 0 || move.isPending} onClick={() => reorder(p.id, -1)}><Icons.chevronUp /></Button>
-                    <Button size='icon-sm' variant='ghost' aria-label='Move down' disabled={i === list.length - 1 || move.isPending} onClick={() => reorder(p.id, 1)}><Icons.chevronDown /></Button>
-                  </span>
-                </Prop>
-                {p.updated_by && <Prop label='Edited'>{p.updated_by} · <When d={p.updated_at} /></Prop>}
-              </dl>
-              {p.adoption && <JourneyStats p={p} />}
-              <div className='space-y-3'>
-                <p className='text-sm font-medium'>Stages</p>
-                <ol className='flex flex-col gap-3'>
-                  {p.stages.map((st, k) => (
-                    <li key={st.id ?? k} className='flex gap-3'>
-                      <span className='text-muted-foreground w-5 shrink-0 text-xs tabular-nums'>{k + 1}</span>
-                      <div className='min-w-0 flex-1 space-y-1'>
-                        <p className='text-sm font-medium'>{st.title}</p>
-                        <code className='bg-muted block rounded px-2 py-1 text-xs whitespace-pre-wrap'>{st.prompt}</code>
-                        <p className='text-muted-foreground text-xs'>{st.manual || !st.tools.length ? 'Marked by the customer' : `Done by ${st.tools.join(', ')}`}</p>
-                      </div>
-                    </li>
-                  ))}
-                </ol>
-              </div>
-              <div className='flex flex-wrap gap-2 border-t pt-4'>
-                <Button onClick={() => edit(p)}><Icons.edit /> Edit</Button>
-                <ConfirmButton variant='ghost' label='Delete' title={`Delete ${p.name}?`} description='Customers stop seeing it at once. This cannot be undone.' onConfirm={() => remove.mutate(p.id)} />
-              </div>
-            </div>
-          );
-        }}
-      />
-      {draft && <Editor draft={draft} tools={data?.tools ?? []} onClose={() => setDraft(null)} />}
-    </>
-  );
-}
+export const blank = (): Draft => ({ id: '', name: '', outcome: '', who: '', time: '', example: { title: '', result: '' }, stages: [emptyStage()], isNew: true });
 
 /** Journey-level usage: started and finished accounts, time to finish, where accounts stop, and the stage funnel. */
-function JourneyStats({ p }: { p: Playbook }) {
+export function JourneyStats({ p }: { p: Playbook }) {
   const a = p.adoption!;
   const [open, setOpen] = useState(true);
   const active = Math.max(1, p.accounts_active ?? 0);
@@ -150,7 +58,7 @@ function JourneyStats({ p }: { p: Playbook }) {
   );
 }
 
-function Editor({ draft: initial, tools, onClose }: { draft: Draft; tools: string[]; onClose: () => void }) {
+export function Editor({ draft: initial, tools, onClose }: { draft: Draft; tools: string[]; onClose: () => void }) {
   const [d, setD] = useState<Draft>(initial);
   const [err, setErr] = useState('');
   const save = useAdminAction(() => (d.isNew ? post('/playbooks', d) : adminApi('PUT', `/playbooks/${d.id}`, d)),

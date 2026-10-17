@@ -19,15 +19,9 @@ export const adminNav: NavGroup[] = [
   },
   {
     label: 'Insights',
-    items: [{ title: 'Analytics & health', url: '/admin/analytics', icon: 'chartBar', shortcut: ['g', 'h'], items: [] }]
-  },
-  {
-    label: 'Systems of record',
     items: [
-      { title: 'Clerk · people', url: 'https://dashboard.clerk.com', icon: 'externalLink', external: true, items: [] },
-      { title: 'Stripe · billing', url: 'https://dashboard.stripe.com', icon: 'externalLink', external: true, items: [] },
-      { title: 'PostHog · analytics', url: 'https://us.posthog.com', icon: 'externalLink', external: true, items: [] },
-      { title: 'New Relic · traces', url: 'https://one.newrelic.com', icon: 'externalLink', external: true, items: [] }
+      { title: 'Analytics', url: '/admin/analytics', icon: 'chartBar', shortcut: ['g', 'n'], items: [] },
+      { title: 'Health', url: '/admin/health', icon: 'gauge', shortcut: ['g', 'h'], items: [] }
     ]
   }
 ];

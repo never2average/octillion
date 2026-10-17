@@ -1,11 +1,10 @@
 'use client';
 // Overview: the onboarding funnel across every account, who needs a person, and which integrations are on.
-import Link from 'next/link';
 import type { ReactNode } from 'react';
 import PageContainer from '@/components/layout/page-container';
 import { Icons } from '@/components/icons';
 import { usd } from '@/lib/octillion-format';
-import { accountHref, useAdmin } from './lib';
+import { useAdmin } from './lib';
 import { Rule, StatStrip } from '@/components/layout/section';
 import { ErrorBox, LoadingCards, Mono, Notice, Section, StatusBadge, When } from './ui';
 
@@ -98,18 +97,17 @@ export function AdminOverview() {
                 <ul className='divide-y'>
                   {o.attention.map((a) => (
                     <li key={a.slug}>
-                      <Link href={accountHref(a.slug)} className='hover:bg-muted/60 -mx-2 block rounded-md px-2 py-2.5'>
+                      <div className='py-2.5'>
                         <div className='flex items-center gap-2'>
                           <span className='font-medium'>{a.name}</span>
                           <StatusBadge>{a.stage_label}</StatusBadge>
-                          <Icons.chevronRight className='text-muted-foreground ml-auto size-4' />
                         </div>
                         <ul className='mt-1 list-disc pl-5 text-xs text-amber-700 dark:text-amber-400'>
                           {a.attention.map((x) => (
                             <li key={x}>{x}</li>
                           ))}
                         </ul>
-                      </Link>
+                      </div>
                     </li>
                   ))}
                 </ul>
