@@ -387,7 +387,7 @@ export function createApp() {
     const id = Number(req.params.id);
     await onboarding.requestExists(id);
     await prospect.researchRequest(id);
-    res.json({ ok: true, deep: await prospect.queueDeepResearch(id) });
+    res.json({ ok: true, deep: await prospect.queueDeepResearch(id, { manual: true }) });
   });
   ob.post("/requests/:id/reopen", async (req, res) => done(res, await onboarding.reopenRequest(adminActor(req, res), Number(req.params.id))));
   ob.get("/orgs", async (_req, res) => void res.json(await onboarding.listOrgs()));

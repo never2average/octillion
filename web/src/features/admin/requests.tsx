@@ -14,7 +14,6 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Icons } from '@/components/icons';
 import { cn } from '@/lib/utils';
 import { post, useAdmin, useAdminAction, type InviteResult, type OrgList, type OrgRow } from './lib';
@@ -252,12 +251,15 @@ function ApproveDialog({ req, onClose, onDone }: { req: Req; onClose: () => void
               {req.company} · {req.email}
             </DialogDescription>
           </DialogHeader>
-          <Tabs value={m} onValueChange={(v) => setMode(v as 'new' | 'existing')}>
-            <TabsList>
-              <TabsTrigger value='new'>New account</TabsTrigger>
-              <TabsTrigger value='existing'>Add to an existing account</TabsTrigger>
-            </TabsList>
-          </Tabs>
+          <div role='radiogroup' aria-label='Approve into' className='grid gap-1.5'>
+            {([['new', 'A new account', 'They become its admin.'], ['existing', 'An existing account', 'They join as a member.']] as const).map(([v, label, hint]) => (
+              <label key={v} className={cn('flex cursor-pointer items-center gap-3 rounded-md border px-3 py-2.5 text-sm leading-none', m === v ? 'border-primary bg-primary/10' : 'hover:bg-muted')}>
+                <input type='radio' name='ap-mode' value={v} checked={m === v} onChange={() => setMode(v)} className='accent-[var(--primary)]' />
+                <span className='font-medium'>{label}</span>
+                <span className='text-muted-foreground text-xs'>{hint}</span>
+              </label>
+            ))}
+          </div>
           {m === 'new' ? (
             <div className='grid gap-3'>
               <div className='grid gap-1.5'>

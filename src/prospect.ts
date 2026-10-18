@@ -218,13 +218,23 @@ function sanitizeBrief(b: Record<string, any>): Partial<ProspectBrief> {
 const harnessOn = () => process.env.OCTILLION_PROSPECT_HARNESS !== "off";
 
 /** Queue a deep research job for a request, unless one is already queued or running. Returns its id, or null. */
-export async function queueDeepResearch(requestId: number): Promise<string | null> {
+/** Requests from the landing form queue at most this many deep jobs a day (each starts a boat sandbox); an admin's
+ *  Research button is never capped. */
+const DAILY_LIMIT = () => Number(process.env.PROSPECT_DAILY_LIMIT ?? 20);
+
+export async function queueDeepResearch(requestId: number, opts: { manual?: boolean } = {}): Promise<string | null> {
   if (!harnessOn()) return null;
   const db = await getDb();
   const [live] = await db.query<{ id: string }>("SELECT id FROM product_research WHERE kind = 'prospect' AND request_id = $1 AND status IN ('queued', 'running')", [requestId]);
   if (live) return live.id;
   const [q] = await db.query<any>("SELECT email, company, product_url, message, name, role, team_size, agents, research FROM access_requests WHERE id = $1", [requestId]);
   if (!q) return null;
+  if (!opts.manual) {
+    // Automatic deep research only for a company we can find: a website, or a work email domain. Others wait for an admin.
+    if (!q.product_url && FREE_MAIL.test(String(q.email).split("@")[1] ?? "")) return null;
+    const [{ n }] = await db.query<{ n: number }>("SELECT count(*) AS n FROM product_research WHERE kind = 'prospect' AND created_at > now() - interval '1 day'");
+    if (Number(n) >= DAILY_LIMIT()) return null;
+  }
   const id = randomId("rsh_", 9);
   const quick = q.research as ProspectBrief | null;
   const input = { company: q.company, email_domain: String(q.email).split("@")[1] ?? "", website_url: q.product_url ?? quick?.site?.url ?? null,
