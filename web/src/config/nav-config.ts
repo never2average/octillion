@@ -23,6 +23,17 @@ export const adminNav: NavGroup[] = [
       { title: 'Analytics', url: '/admin/analytics', icon: 'chartBar', shortcut: ['g', 'n'], items: [] },
       { title: 'Health', url: '/admin/health', icon: 'gauge', shortcut: ['g', 'h'], items: [] }
     ]
+  },
+  {
+    label: 'Library',
+    items: [
+      { title: 'Personas', url: '/admin/personas', icon: 'userPen', shortcut: ['g', 'p'], items: [] },
+      { title: 'Tasks', url: '/admin/tasks', icon: 'kanban', shortcut: ['g', 't'], items: [] }
+    ]
+  },
+  {
+    label: 'Operations',
+    items: [{ title: 'Compute', url: '/admin/compute', icon: 'adjustments', shortcut: ['g', 'c'], items: [] }]
   }
 ];
 

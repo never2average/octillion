@@ -1,17 +1,19 @@
 'use client';
 // Data layer for the admin pages: React Query over adminApi (lib/api-client), shared types and labels.
-import { useMutation, useQuery, useQueryClient, type QueryKey } from '@tanstack/react-query';
+import { keepPreviousData, useMutation, useQuery, useQueryClient, type QueryKey } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { adminApi } from '@/lib/api-client';
 
-/** GET /api/admin/onboarding<path>, cached under ['admin', path]. */
-export function useAdmin<T>(path: string | null, opts: { refetchInterval?: number } = {}) {
+/** GET /api/admin/onboarding<path>, cached under ['admin', path]. `keep`: show the last result while a new path loads
+ * (server-paged tables), so the table does not flash empty between pages. */
+export function useAdmin<T>(path: string | null, opts: { refetchInterval?: number; keep?: boolean } = {}) {
   return useQuery<T>({
     queryKey: ['admin', path],
     queryFn: () => adminApi<T>('GET', path!),
     enabled: path != null,
     staleTime: 15_000,
-    refetchInterval: opts.refetchInterval
+    refetchInterval: opts.refetchInterval,
+    placeholderData: opts.keep ? keepPreviousData : undefined
   });
 }
 

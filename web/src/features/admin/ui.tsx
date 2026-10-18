@@ -231,3 +231,26 @@ export function StageDots({ index, total = 8 }: { index: number; total?: number 
 }
 
 export const Mono = ({ children }: { children: ReactNode }) => <span className='font-mono text-xs'>{children}</span>;
+
+/** One form input per row: its label above, the input, then an optional hint. */
+export function FormRow({ id, label, hint, children }: { id: string; label: ReactNode; hint?: ReactNode; children: ReactNode }) {
+  return (
+    <div className='grid gap-1.5'>
+      <label htmlFor={id} className='text-sm leading-none font-medium'>{label}</label>
+      {children}
+      {hint && <p className='text-muted-foreground text-xs'>{hint}</p>}
+    </div>
+  );
+}
+
+/** Values as small chips (a stack, tags); "—" when there are none. */
+export function Chips({ items, max }: { items: readonly string[] | null | undefined; max?: number }) {
+  const list = items ?? [], shown = max ? list.slice(0, max) : list;
+  if (!list.length) return <span className='text-muted-foreground'>—</span>;
+  return (
+    <span className='inline-flex flex-wrap gap-1'>
+      {shown.map((s) => <Badge key={s} variant='secondary' className='border-transparent font-normal'>{s}</Badge>)}
+      {list.length > shown.length && <span className='text-muted-foreground text-xs leading-5'>+{list.length - shown.length}</span>}
+    </span>
+  );
+}

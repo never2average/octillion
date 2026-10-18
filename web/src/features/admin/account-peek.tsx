@@ -288,7 +288,7 @@ function useConfirm() {
 
 /** Flat list: muted header, no borders between columns; one muted line, or nothing, when empty. */
 /** A section of the panel: an outlined table, paged (10 a page) with the item count, empty ones keep their outline. */
-function List<T>({ title, rows, cols, empty, actions, rowClassName }: {
+export function List<T>({ title, rows, cols, empty, actions, rowClassName }: {
   title: string; rows: T[]; cols: [string, (r: T) => ReactNode, string?][]; empty?: string; actions?: (r: T) => RowAction[]; rowClassName?: (r: T) => string | undefined;
 }) {
   const p = usePaged(rows, 10);
