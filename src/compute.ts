@@ -286,7 +286,7 @@ export function computeKnobs(runtime: "vm" | "vercel") {
     { name: "OCTILLION_BOAT_NAMESPACE", value: lib.BOAT_NAMESPACE, source: set("OCTILLION_BOAT_NAMESPACE") ? "env" as const : "default" as const,
       meaning: "Name prefix of this deployment's sandboxes; it only ever touches sandboxes named with it." },
     { name: "Runtime", value: runtime === "vercel" ? "Vercel" : "VM", source: set("VERCEL") ? "env" as const : "default" as const,
-      meaning: runtime === "vercel" ? "Serverless: the autoscaler ticks on events and a daily 06:00 UTC cron." : "A long-running server: the autoscaler ticks on a timer." },
+      meaning: runtime === "vercel" ? "Serverless: the autoscaler ticks on events and a cron every 5 minutes." : "A long-running server: the autoscaler ticks on a timer." },
     { name: "Kick configured", value: kickConfigured() ? "yes" : "no", source: "env" as const,
       meaning: "Events can trigger a tick: the autoscaler is on, PUBLIC_URL is HTTPS and OCTILLION_WORKER_TOKEN is set." },
   ];

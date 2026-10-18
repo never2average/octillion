@@ -10,6 +10,7 @@ import { BOAT } from "../orchestrator/core/config.js";
 import { freshSettings, setting, settingNumber } from "./settings.js";
 import { freshPlatformHarnesses } from "./harnesses.js";
 import { launchFailure, recordComputeEvent } from "./compute-events.js";
+import { pruneComputeHistory, recordTick } from "./autoscaler-ticks.js";
 import * as lib from "../orchestrator/deploy/boat-lib.js";
 
 /**
@@ -130,7 +131,10 @@ export interface TickState {
   jobs?: { id: string; kind: string; sessions: number; served: boolean }[];
   /** Per-job mode: boat plan sandboxes left after this tick's launches (plan - other deployments - ours reserved). */
   free?: number;
+  /** What `launched` names, as data: the orchestrator row inserted, and its job and pods (per-job mode). */
+  launches?: Launch[];
 }
+export interface Launch { row: number; job_id: string | null; pods: number | null; label: string }
 
 export class Autoscaler {
   readonly holder = `${hostname()}-${process.pid}-${randomBytes(3).toString("hex")}`;
@@ -149,8 +153,14 @@ export class Autoscaler {
 
   start() {
     if (this.timer) return;
+    let prunedAt = 0;
     const loop = async () => {
       try { await this.tick(); } catch (e) { this.log(`tick failed: ${(e as Error).message}`); }
+      // History retention (autoscaler_ticks 14 days, compute_events 90), never inside a tick. Vercel prunes from its cron.
+      if (Date.now() - prunedAt > 6 * 3600_000) {
+        prunedAt = Date.now();
+        await pruneComputeHistory().catch((e) => this.log(`prune failed: ${(e as Error).message}`));
+      }
       this.timer = setTimeout(loop, AUTOSCALE.tickMs());
       this.timer.unref();
     };
@@ -318,10 +328,13 @@ export class Autoscaler {
           desired = 0;
         }
         st.active = active; st.cap = cap; st.desired = desired;
-        st.launched = [];
+        st.launched = []; st.launches = [];
         const image = AUTOSCALE.snapshots() ? await this.readyImage() : null;
         st.image = image;
-        for (let i = 0; i < Math.min(desired - active, AUTOSCALE.maxLaunchesPerTick()); i++) st.launched.push(await this.launch(image));
+        for (let i = 0; i < Math.min(desired - active, AUTOSCALE.maxLaunchesPerTick()); i++) {
+          const l = await this.launch(image);
+          st.launched.push(l.label); st.launches.push(l);
+        }
       }
 
       // 3. keep the image current (built in the background, once per code hash)
@@ -337,6 +350,7 @@ export class Autoscaler {
     }
     this.last = st;
     await db.query("UPDATE autoscaler_lease SET state = $2 WHERE name = 'autoscaler' AND holder = $1", [this.holder, JSON.stringify(st)]).catch(() => {});
+    await recordTick(st); // history for the Compute page: acting ticks, and a sample once a minute
     return st;
   }
 
@@ -373,7 +387,7 @@ export class Autoscaler {
     let active = live.filter((r) => !isRetiring(r)).length;
     const image = AUTOSCALE.snapshots() ? await this.readyImage() : null;
     const notes: string[] = [];
-    st.launched = [];
+    st.launched = []; st.launches = [];
     st.image = image;
     for (const j of jobs) {
       if (served.has(j.id)) continue;
@@ -386,7 +400,8 @@ export class Autoscaler {
       }
       const pods = j.kind === "research" ? 0 : Math.min(AUTOSCALE.jobPodCapacity(), j.sessions, free - 1);
       if (free < 1 || (j.kind === "simulation" && pods < 1)) { notes.push(`${j.id} waits for boat plan capacity (${Math.max(0, free)} free)`); continue; }
-      st.launched.push(await this.launch(image, { id: j.id, pods }));
+      const l = await this.launch(image, { id: j.id, pods });
+      st.launched.push(l.label); st.launches.push(l);
       served.add(j.id);
       free -= 1 + pods;
       active++;
@@ -397,7 +412,7 @@ export class Autoscaler {
   }
 
   /** Insert the row first (counts toward `active` at once), then create + configure + start in the background. */
-  private async launch(image: string | null, job?: { id: string; pods: number }): Promise<string> {
+  private async launch(image: string | null, job?: { id: string; pods: number }): Promise<Launch> {
     const db = await getDb();
     const [row] = await db.query<{ id: number }>(
       "INSERT INTO orchestrator_sandboxes (state, from_image, code_hash, job_id, pods) VALUES ('booting', $1, $2, $3, $4) RETURNING id",
@@ -427,7 +442,7 @@ export class Autoscaler {
       this.log(`launch failed: ${f.message}`);
     }).finally(() => { this.inflight.delete(id); });
     this.inflight.set(id, p);
-    return job ? `row ${id} (${job.id}, ${job.pods} pods)` : `row ${id}`;
+    return { row: id, job_id: job?.id ?? null, pods: job ? job.pods : null, label: job ? `row ${id} (${job.id}, ${job.pods} pods)` : `row ${id}` };
   }
 }
 
@@ -435,7 +450,7 @@ let singleton: Autoscaler | null = null;
 
 /**
  * Serverless (Vercel) has no ticking loop, so the autoscaler runs on events instead: a deep research job queued, an
- * orchestrator checking in or leaving, and a daily cron. One tick, then wait for its launches (boat create + code
+ * orchestrator checking in or leaving, and a cron every 5 minutes (vercel.json). One tick, then wait for its launches (boat create + code
  * upload + start) so the function is not frozen mid-launch. At most one kick per instance every 10 seconds.
  */
 let lastKick = 0;
@@ -449,7 +464,7 @@ export async function kickAutoscaler(opts: { force?: boolean } = {}): Promise<Ti
   singleton ??= new Autoscaler();
   let st = await singleton.tick();
   // Another instance holds the lease (it ticked moments ago): wait for it to lapse, then tick here, so work that only
-  // this event announces (an orchestrator that just left) is not left for the daily cron.
+  // this event announces (an orchestrator that just left) is not left for the next cron.
   if (!st.leader && st.enabled) {
     const db = await getDb();
     const [l] = await db.query<{ expires_at: Date }>("SELECT expires_at FROM autoscaler_lease WHERE name = 'autoscaler'");

@@ -36,6 +36,8 @@ import * as library from "./library.js";
 import { computeSummary } from "./compute.js";
 import * as records from "./compute-records.js";
 import * as jobs from "./compute-jobs.js";
+import * as ticks from "./autoscaler-ticks.js";
+import { pruneComputeHistory } from "./autoscaler-ticks.js";
 import { freshSettings, SettingError } from "./settings.js";
 import { freshPlatformHarnesses } from "./harnesses.js";
 
@@ -74,11 +76,14 @@ export function createApp() {
   // synchronously from caches: load them, and keep them at most 30s old.
   app.use((_req, _res, next) => void Promise.all([freshSettings(), freshPlatformHarnesses()]).then(() => next()));
 
-  // Daily backstop for the event-driven autoscaler on Vercel (vercel.json crons; Vercel sends CRON_SECRET as a bearer).
+  // 5-minute backstop for the event-driven autoscaler on Vercel (vercel.json crons; Vercel sends CRON_SECRET as a
+  // bearer). It also prunes the autoscaler's history (src/autoscaler-ticks.ts), which a VM does from its ticking loop.
   app.get("/api/cron/autoscale", async (req, res) => {
     const secret = process.env.CRON_SECRET || process.env.OCTILLION_ADMIN_TOKEN;
     if (!secret || req.headers.authorization !== `Bearer ${secret}`) return void res.status(401).json({ error: "unauthorized" });
-    res.json({ tick: await kickAutoscaler() });
+    const tick = await kickAutoscaler();
+    const pruned = await pruneComputeHistory().catch((e) => ({ error: (e as Error).message }));
+    res.json({ tick, pruned });
   });
 
   const recent = new Map<string, number[]>();
@@ -454,6 +459,9 @@ export function createApp() {
   ob.get("/compute/jobs", async (req, res) => void res.json(await jobs.listJobs(req.query as Record<string, unknown>)));
   ob.get("/compute/jobs/:id", async (req, res) => void res.json(await jobs.jobDetail(String(req.params.id))));
   ob.get("/compute/failures", async (req, res) => void res.json(await jobs.computeFailures(req.query as Record<string, unknown>)));
+  // The autoscaler's history (src/autoscaler-ticks.ts): its decisions log and the Activity chart. Read only.
+  ob.get("/compute/ticks", async (req, res) => void res.json(await ticks.listTicks(req.query as Record<string, unknown>)));
+  ob.get("/compute/activity", async (req, res) => void res.json(await ticks.computeActivity(req.query as Record<string, unknown>)));
   // Admin-added harnesses (src/harnesses.ts): variants of a registry.json CLI; a new one joins the mix at weight 0, off.
   ob.get("/compute/harnesses", async (_req, res) => void res.json(await library.listHarnesses()));
   ob.post("/compute/harnesses", async (req, res) => void res.status(201).json(await library.addHarness(adminActor(req, res), req.body ?? {})));

@@ -1415,6 +1415,94 @@ try {
     console.log("✓ compute jobs: state rules, why waiting (boat capacity, cap, cooldown, unscheduled), spend, filters, peek; failures by reason (launches, reaps, unattended, session classes)");
   }
 
+  // ---------- autoscaler history (src/autoscaler-ticks.ts): acting ticks and minute samples, decisions, activity, pruning ----------
+  {
+    const { tickWrite, recordTick, bucketActivity, pruneComputeHistory, SAMPLE_MS } = await import("../src/autoscaler-ticks.js");
+    const t0 = Date.parse("2026-01-01T00:00:00Z");
+    const st = (ms: number, x: Record<string, unknown> = {}) => ({ at: new Date(t0 + ms).toISOString(), enabled: true, leader: true, holder: "smoke-h", ...x }) as any;
+    const prev = (ms: number, note: string | null = null, error: string | null = null) => ({ at: new Date(t0 + ms), note, error });
+    // Only the leader writes; an acting tick always; otherwise one sample a minute. A note or error that repeats is not news.
+    assert.equal(tickWrite(st(0, { leader: false, launched: ["row 1"] }), null), null, "a follower writes nothing");
+    assert.equal(tickWrite(st(0), null), "sample", "the first row is a sample");
+    assert.equal(tickWrite(st(20_000), prev(0)), null, "nothing changed within the minute");
+    assert.equal(tickWrite(st(SAMPLE_MS), prev(0)), "sample");
+    assert.equal(tickWrite(st(15_000, { launched: ["row 2"] }), prev(0)), "acted");
+    assert.equal(tickWrite(st(15_000, { reaped: [{ sandbox_id: "x", reason: "drained" }] }), prev(0)), "acted");
+    assert.equal(tickWrite(st(15_000, { note: "sim_a waits for boat plan capacity (0 free)" }), prev(0)), "acted", "a new note");
+    assert.equal(tickWrite(st(30_000, { note: "same" }), prev(15_000, "same")), null, "the same note again");
+    assert.equal(tickWrite(st(30_000, { error: "boom" }), prev(15_000, null, "boom")), null, "the same error again");
+    assert.equal(tickWrite(st(30_000), prev(15_000, null, "boom")), "acted", "the error cleared");
+
+    // Buckets hold the latest row up to the hold, then are gaps; the bucket in progress waits for its row.
+    const pt = (ms: number, q: number) => ({ at: t0 + ms, queued: q, running: 1, research: 0, orchestrators: 2 });
+    const b = bucketActivity([pt(-30_000, 5), pt(70_000, 6), pt(130_000, 7), pt(600_000, 9)], t0, t0 + 630_000, 60_000, 150_000);
+    assert.deepEqual(b.slice(0, 4).map((x) => x.queued), [5, 6, 7, 7], "held between rows a minute apart");
+    assert.ok(b.slice(5, 10).every((x) => x.gap && x.queued === null), "no tick for 8 minutes: gaps, never interpolated");
+    assert.deepEqual([b.length, b.at(-1)!.queued, b.at(-1)!.gap], [11, 9, false], "the bucket in progress shows once it has a row");
+    assert.equal(bucketActivity([pt(0, 1)], t0, t0 + 90_000, 60_000, 150_000).length, 1, "an empty bucket in progress is left out");
+
+    // recordTick: the row carries the counts it saw; the same tick again within the minute writes nothing.
+    await db.query("DELETE FROM autoscaler_ticks");
+    const [orch] = await db.query<any>("INSERT INTO orchestrator_sandboxes (state, sandbox_id, orchestrator_id, job_id, pods) VALUES ('running', 'smoke-at-sb', 'orch-smoke-at', 'sim_smoke_at', 3) RETURNING id");
+    const [gone] = await db.query<any>("INSERT INTO orchestrator_sandboxes (state, sandbox_id, orchestrator_id, job_id, deleted_at, reap_reason) VALUES ('deleted', 'smoke-at-old', 'orch-smoke-old', 'sim_smoke_at', now(), 'drained (idle exit)') RETURNING id");
+    const demand = { sessions: 9, queued_sessions: 4, research: 1, unclaimable_sessions: 2 };
+    const now = Date.now();
+    const live = (ms: number, x: Record<string, unknown> = {}) => ({ at: new Date(now - 120_000 + ms).toISOString(), enabled: true, leader: true, holder: "smoke-h", demand, desired: 2, cap: 12, active: 1, free: 30, ...x }) as any;
+    await recordTick(live(0));
+    await recordTick(live(15_000));
+    await recordTick(live(30_000, { launched: [`row ${orch.id} (sim_smoke_at, 3 pods)`], launches: [{ row: Number(orch.id), job_id: "sim_smoke_at", pods: 3, label: "x" }],
+      reaped: [{ sandbox_id: "smoke-at-old", reason: "drained (idle exit)" }], jobs: [{ id: "sim_smoke_at", kind: "simulation", sessions: 9, served: true }] }));
+    await recordTick(live(45_000, { error: "boat.dev 500", note: "sim_x waits for boat plan capacity (0 free)" }));
+    await recordTick(live(60_000, { leader: false, launched: ["row 99"] }));
+    const rows = await db.query<any>("SELECT acted, queued, running, research, unclaimable, orchestrators, free FROM autoscaler_ticks ORDER BY at");
+    assert.deepEqual(rows.map((r) => r.acted), [false, true, true], "a sample, then two acting ticks; the repeat and the follower wrote nothing");
+    assert.deepEqual([rows[0].queued, rows[0].running, rows[0].research, rows[0].unclaimable, rows[0].free], [4, 5, 1, 2, 30]);
+    assert.ok(rows[0].orchestrators >= 1);
+
+    assert.equal((await fetch(`${base}/api/admin/onboarding/compute/ticks`)).status, 401, "ticks need the admin token");
+    const acted = await json(adm("GET", "/compute/ticks"));
+    assert.deepEqual([acted.total, acted.rows[0].error], [2, "boat.dev 500"], "acting ticks only, newest first");
+    const l = acted.rows[1].launched[0], r = acted.rows[1].reaped[0];
+    assert.deepEqual([l.row, l.orchestrator_id, l.job_id, l.pods, l.state], [Number(orch.id), "orch-smoke-at", "sim_smoke_at", 3, "running"], "a launch is linked to its orchestrator row");
+    assert.deepEqual([r.row, r.orchestrator_id, r.reason], [Number(gone.id), "orch-smoke-old", "drained (idle exit)"], "a reap is linked to its row");
+    assert.equal((await json(adm("GET", "/compute/ticks?acted=0"))).total, 3, "with the minute samples");
+    assert.equal((await json(adm("GET", "/compute/ticks?has=error"))).total, 1);
+    assert.equal((await json(adm("GET", "/compute/ticks?has=launch,reap"))).total, 1);
+    assert.equal((await json(adm("GET", "/compute/ticks?has=error,launch"))).total, 0, "has filters all hold");
+    assert.equal((await json(adm("GET", "/compute/ticks?q=plan%20capacity"))).total, 1, "note contains");
+    assert.equal((await json(adm("GET", "/compute/ticks?q=100%25"))).total, 0, "% is matched literally");
+    assert.equal((await adm("GET", "/compute/ticks?has=bogus")).status, 400);
+
+    await db.query("INSERT INTO compute_events (kind, sandbox_id, orchestrator_id, reason) VALUES ('reaped', 'smoke-at-old', 'orch-smoke-old', 'drained (idle exit)')");
+    const act = await json(adm("GET", "/compute/activity?minutes=60"));
+    assert.equal(act.bucket_s, 60);
+    assert.ok(act.samples.length >= 59 && act.samples.length <= 61, `an hour of 1-minute buckets (${act.samples.length})`);
+    assert.ok(act.samples.some((x: any) => !x.gap && x.queued === 4) && act.samples[0].gap, "recent buckets hold samples; the start of the hour has none");
+    assert.ok(act.events.some((e: any) => e.kind === "launch" && e.row_id === Number(orch.id) && e.reason === "for sim_smoke_at"));
+    assert.ok(act.events.some((e: any) => e.kind === "reap" && e.row_id === Number(gone.id) && e.reason === "drained (idle exit)"));
+    assert.ok(act.first_at && act.last_at);
+    assert.equal((await json(adm("GET", "/compute/activity?minutes=1440"))).bucket_s, 300);
+    assert.equal((await json(adm("GET", "/compute/activity"))).minutes, 120);
+    assert.equal((await adm("GET", "/compute/activity?minutes=7")).status, 400);
+
+    // Pruning: ticks past 14 days and compute events past 90 go; newer stay. The cron runs it after its tick.
+    await db.query("INSERT INTO autoscaler_ticks (at, acted) VALUES (now() - interval '15 days', false), (now() - interval '13 days', false)");
+    await db.query("INSERT INTO compute_events (at, kind, sandbox_id) VALUES (now() - interval '91 days', 'reaped', 'smoke-at-p1'), (now() - interval '89 days', 'reaped', 'smoke-at-p2')");
+    const pruned = await pruneComputeHistory();
+    assert.ok(pruned.ticks >= 1 && pruned.events >= 1, JSON.stringify(pruned));
+    assert.equal(Number((await db.query<any>("SELECT count(*) AS n FROM autoscaler_ticks WHERE at < now() - interval '14 days'"))[0].n), 0);
+    assert.equal(Number((await db.query<any>("SELECT count(*) AS n FROM autoscaler_ticks"))[0].n), 4, "the 13-day row and today's stay");
+    assert.deepEqual((await db.query<any>("SELECT sandbox_id FROM compute_events WHERE sandbox_id LIKE 'smoke-at-p%'")).map((x) => x.sandbox_id), ["smoke-at-p2"]);
+    assert.equal((await fetch(`${base}/api/cron/autoscale`)).status, 401, "the cron needs its secret");
+    const cron = await (await fetch(`${base}/api/cron/autoscale`, { headers: { authorization: `Bearer ${process.env.CRON_SECRET || process.env.OCTILLION_ADMIN_TOKEN}` } })).json();
+    assert.deepEqual(cron.pruned, { ticks: 0, events: 0 }, "the cron prunes (nothing left to prune)");
+
+    await db.query("DELETE FROM autoscaler_ticks");
+    await db.query("DELETE FROM compute_events WHERE sandbox_id LIKE 'smoke-at-%'");
+    await db.query("DELETE FROM orchestrator_sandboxes WHERE sandbox_id LIKE 'smoke-at-%'");
+    console.log("✓ autoscaler history: leader-only acting ticks and minute samples, decisions (filters, linked launches and reaps), activity buckets and gaps, pruning (cron)");
+  }
+
   // ---------- global compute settings (/admin/compute): set here > environment > default ----------
   {
     const { config } = await import("../src/queries.js");

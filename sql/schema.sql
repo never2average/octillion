@@ -243,6 +243,34 @@ CREATE TABLE IF NOT EXISTS compute_events (
 CREATE INDEX IF NOT EXISTS compute_events_at_idx ON compute_events (at DESC);
 CREATE INDEX IF NOT EXISTS compute_events_sandbox_idx ON compute_events (sandbox_id);
 
+-- The autoscaler's history (src/autoscaler-ticks.ts): the leader writes a row for every tick that acted (launched,
+-- reaped, or its note or error changed) and a sample row (acted = false) when the last row is a minute old. The
+-- Compute page's Activity chart reads the samples, its Autoscaler decisions log the acting rows. Kept 14 days.
+CREATE TABLE IF NOT EXISTS autoscaler_ticks (
+  id             BIGSERIAL PRIMARY KEY,
+  at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+  holder         TEXT,
+  acted          BOOLEAN NOT NULL,
+  queued         INT,
+  running        INT,
+  research       INT,
+  unclaimable    INT,
+  orchestrators  INT,
+  desired        INT,
+  cap            INT,
+  active         INT,
+  free           INT,
+  demand         JSONB,
+  jobs           JSONB,
+  launched       JSONB NOT NULL DEFAULT '[]',
+  reaped         JSONB NOT NULL DEFAULT '[]',
+  note           TEXT,
+  error          TEXT,
+  trace_id       TEXT
+);
+CREATE INDEX IF NOT EXISTS autoscaler_ticks_at_idx ON autoscaler_ticks (at DESC);
+CREATE INDEX IF NOT EXISTS autoscaler_ticks_acted_idx ON autoscaler_ticks (at DESC) WHERE acted;
+
 -- Single-leader lease for the autoscaler across server replicas; `state` holds the leader's last tick for status.
 CREATE TABLE IF NOT EXISTS autoscaler_lease (
   name        TEXT PRIMARY KEY,

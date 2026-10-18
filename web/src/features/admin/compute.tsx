@@ -2,7 +2,8 @@
 // Operations pages over src/settings.ts and the default population: Agent configuration (models, run sizes, research
 // limits), Harness mix (the coding-agent mix and admin-added harnesses) and Compute (/admin/compute: the on-call
 // console over GET /compute/summary, src/compute.ts, with the capacity settings in its Limits table, and its Sessions
-// and Orchestrators tables in compute-sessions.tsx / compute-orchestrators.tsx). Each setting
+// and Orchestrators tables in compute-sessions.tsx / compute-orchestrators.tsx, its Activity chart and Autoscaler
+// decisions in compute-decisions.tsx). Each setting
 // shows the value in force and where it comes from: set here, the server's environment, or the built-in default.
 // Saving writes platform_settings (every server picks it up within 30s) and an audit log line. Model keys are the key
 // vault's credentials: a key is typed once and never shown again, only its hint.
@@ -32,6 +33,7 @@ import { ComputeSessions } from './compute-sessions';
 import { ComputeOrchestrators } from './compute-orchestrators';
 import { ComputeJobs } from './compute-jobs';
 import { ComputeFailures } from './compute-failures';
+import { ComputeActivity, ComputeDecisions } from './compute-decisions';
 
 interface Setting {
   key: string; group: string; label: string; help: string; kind: 'text' | 'int' | 'number' | 'choice'; default: string | number;
@@ -405,7 +407,7 @@ export function AdminCompute() {
     setRefreshing(true);
     try {
       qc.setQueryData(['admin', SUMMARY], await adminApi<Summary>('GET', `${SUMMARY}?fresh=1`));
-      void qc.invalidateQueries({ predicate: (q) => q.queryKey[0] === 'admin' && /^\/compute\/(jobs|sessions|orchestrators|failures)/.test(String(q.queryKey[1])) });
+      void qc.invalidateQueries({ predicate: (q) => q.queryKey[0] === 'admin' && /^\/compute\/(jobs|sessions|orchestrators|failures|ticks|activity)/.test(String(q.queryKey[1])) });
     }
     catch (e) { toast.error((e as Error).message); }
     finally { setRefreshing(false); }
@@ -420,10 +422,12 @@ export function AdminCompute() {
   // filters and open record from the URL (useSearchParams needs a Suspense boundary).
   const tables = (
     <Suspense fallback={<Skeleton className='h-72 rounded-lg' />}>
+      <ComputeActivity />
       <ComputeJobs />
       <ComputeSessions />
       <ComputeOrchestrators verdict={data?.verdict ?? []} />
       <ComputeFailures />
+      <ComputeDecisions runtime={data?.runtime ?? null} />
     </Suspense>
   );
   return (
@@ -466,7 +470,7 @@ function Freshness({ s }: { s: Summary }) {
   const tone = age == null || age > 600 ? 'red' : age > 3 * s.tick.tick_seconds ? 'amber' : null;
   const runtime = s.runtime === 'vercel' ? 'Vercel' : 'VM';
   const text = age == null ? 'The autoscaler has not ticked yet'
-    : tone === 'red' && s.runtime === 'vercel' ? `No autoscaler tick for ${Math.round(age / 60)} min. On Vercel, ticks only happen when something happens; queued work may wait until the 06:00 UTC cron.`
+    : tone === 'red' && s.runtime === 'vercel' ? `No autoscaler tick for ${Math.round(age / 60)} min. On Vercel, ticks only happen when something happens; queued work may wait for the next 5-minute cron.`
     : `Last autoscaler tick ${dur(age)} ago`;
   return (
     <span id='tick' className={cn('text-muted-foreground max-w-xl text-xs', tone && LEVEL[tone].text)} title={s.tick.at ? `Last tick ${new Date(s.tick.at).toLocaleString()}${s.tick.holder ? ` by ${s.tick.holder}` : ''}` : undefined}>
