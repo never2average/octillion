@@ -399,7 +399,7 @@ const LEVEL: Record<Level, { border: string; text: string }> = {
  */
 export function AdminCompute() {
   // useSearchParams (the tab, filters and open records) needs a Suspense boundary for the static render.
-  return <Suspense fallback={<PageContainer pageTitle='Compute'><Skeleton className='h-72 rounded-lg' /></PageContainer>}><ComputePage /></Suspense>;
+  return <Suspense fallback={<PageContainer><Skeleton className='h-72 rounded-lg' /></PageContainer>}><ComputePage /></Suspense>;
 }
 
 function ComputePage() {
@@ -437,18 +437,20 @@ function ComputePage() {
   const tab = TABS.some(([id]) => id === section) ? section! : section === 'activity' ? 'decisions' : 'orchestrators';
   const s = data;
   return (
-    <PageContainer pageTitle='Compute' pageDescription='Orchestrators and agent sandboxes on boat.dev: what is running, what is waiting, and why.'
-      pageHeaderAction={
-        <div className='flex flex-wrap items-center gap-2'>
-          {data && <Freshness s={data} />}
-          {paused && <Button variant='outline' size='xs' onClick={() => setResumed(true)} title={editing ? 'Refresh is paused while a setting has an unsaved edit' : 'Refresh is paused while a record is open'}><Icons.clock /> Paused · Resume</Button>}
-          <Button variant='outline' size='sm' disabled={refreshing} onClick={() => void refresh()}>{refreshing ? <Icons.spinner className='animate-spin' /> : <Icons.chartLine />} Refresh</Button>
-          {data && <RunTick s={data} />}
-          {data?.links.newrelic && <ActionsMenu label='More' items={[{ label: 'Open in New Relic', icon: <Icons.externalLink />, onSelect: () => window.open(data.links.newrelic!, '_blank', 'noopener') }]} />}
-        </div>
-      }>
+    <PageContainer>
       <div className='flex min-w-0 flex-col gap-3'>
-        <UrlTabs tabs={TABS} tab={tab} base='/admin/compute' right={data && <VerdictLine verdict={data.verdict} />} />
+        <UrlTabs tabs={TABS} tab={tab} base='/admin/compute' right={
+          <div className='flex flex-wrap items-center justify-end gap-x-4 gap-y-2'>
+            {data && <VerdictLine verdict={data.verdict} />}
+            <div className='flex flex-wrap items-center gap-2'>
+              {data && <Freshness s={data} />}
+              {paused && <Button variant='outline' size='sm' onClick={() => setResumed(true)} title={editing ? 'Refresh is paused while a setting has an unsaved edit' : 'Refresh is paused while a record is open'}><Icons.clock /> Paused · Resume</Button>}
+              <Button variant='outline' size='sm' disabled={refreshing} onClick={() => void refresh()} title='Ask boat.dev again and reload every figure'>{refreshing ? <Icons.spinner className='animate-spin' /> : <Icons.refresh />} Refresh</Button>
+              {data && <RunTick s={data} />}
+              {data?.links.newrelic && <ActionsMenu label='More' items={[{ label: 'Open in New Relic', icon: <Icons.externalLink />, onSelect: () => window.open(data.links.newrelic!, '_blank', 'noopener') }]} />}
+            </div>
+          </div>
+        } />
         {error && !data && (
           <div role='alert' className='border-destructive/30 bg-destructive/5 text-destructive flex items-center gap-3 rounded-lg border px-4 py-3 text-sm'>
             <span className='min-w-0 flex-1'>Could not load compute status: {error.message}</span>
@@ -490,7 +492,7 @@ function RunTick({ s }: { s: Summary }) {
     <>
       <Button variant='outline' size='sm' disabled={tick.isPending || blocked} onClick={() => setAsking(true)}
         title={blocked ? 'This deployment cannot trigger the autoscaler: PUBLIC_URL is not HTTPS or the worker token is unset' : 'Run one autoscaler tick now instead of waiting for the next one'}>
-        {tick.isPending ? <Icons.spinner className='animate-spin' /> : <Icons.clock />} Run a tick now
+        {tick.isPending ? <Icons.spinner className='animate-spin' /> : <Icons.play />} Run a tick
       </Button>
       <AlertDialog open={asking} onOpenChange={setAsking}>
         <AlertDialogContent>
@@ -528,7 +530,8 @@ function Freshness({ s }: { s: Summary }) {
 
 /** The worst true rule, on the tabs row: a coloured dot and its line (a link to the records behind it); the rest on hover. */
 function VerdictLine({ verdict }: { verdict: Verdict[] }) {
-  const [first, ...rest] = verdict;
+  // Healthy needs no words: the line shows only when something is amber or red.
+  const [first, ...rest] = verdict.filter((v) => v.level !== 'green');
   if (!first) return null;
   const dot = first.level === 'red' ? 'bg-destructive' : first.level === 'amber' ? 'bg-amber-500' : 'bg-emerald-500';
   return (
