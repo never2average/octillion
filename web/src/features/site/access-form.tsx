@@ -104,7 +104,7 @@ export function AccessForm() {
   return (
         <form onSubmit={submit} noValidate className='space-y-2'>
           {/* What we need first; everything else is optional and folded away. */}
-          <div className='grid gap-x-4 sm:grid-cols-2'>
+          <div className='grid'>
             {field('email', 'Work email', { type: 'email', autoComplete: 'email', placeholder: 'you@company.com', maxLength: 254, required: true, autoFocus: true })}
             {field('company', 'Company', { autoComplete: 'organization', placeholder: 'Acme', maxLength: 200, required: true })}
           </div>
@@ -116,7 +116,7 @@ export function AccessForm() {
               <IconChevronDown className='size-4 transition-transform group-open:rotate-180' />
             </summary>
             <div className='space-y-2 pt-4'>
-              <div className='grid gap-x-4 sm:grid-cols-[1fr_1fr_9rem]'>
+              <div className='grid'>
                 {field('name', 'Your name', { autoComplete: 'name', maxLength: 120 })}
                 {field('role', 'Role', { autoComplete: 'organization-title', placeholder: 'Head of DevRel', maxLength: 120 })}
                 <div className='space-y-1.5'>
@@ -127,11 +127,11 @@ export function AccessForm() {
                   </NativeSelect>
                 </div>
               </div>
-              <div className='grid gap-x-4 sm:grid-cols-2'>
+              <div className='grid'>
                 {field('docs_url', 'Docs URL', { type: 'url', inputMode: 'url', placeholder: 'https://docs.yourproduct.dev', maxLength: 500 })}
                 {field('competitors', 'Main competitors', { placeholder: 'Who agents pick instead of you', maxLength: 500 })}
               </div>
-              <div className='grid gap-x-4 pb-4 sm:grid-cols-[1.4fr_1fr]'>
+              <div className='grid gap-y-2 pb-4'>
                 <div className='space-y-1.5'>
                   <Label htmlFor='f-goal'>What do you want first?</Label>
                   <NativeSelect id='f-goal' name='goal' value={v.goal} onChange={(e) => setV({ ...v, goal: e.target.value })} className='w-full'>
@@ -161,7 +161,7 @@ export function AccessForm() {
               </fieldset>
               <div className='space-y-1.5 pb-4'>
                 <Label htmlFor='f-heard'>Where did you hear about us?</Label>
-                <NativeSelect id='f-heard' name='heard_from' value={v.heard_from} onChange={(e) => setV({ ...v, heard_from: e.target.value })} className='w-full sm:w-1/2'>
+                <NativeSelect id='f-heard' name='heard_from' value={v.heard_from} onChange={(e) => setV({ ...v, heard_from: e.target.value })} className='w-full'>
                   <NativeSelectOption value=''>Choose</NativeSelectOption>
                   {HEARD.map((h) => <NativeSelectOption key={h} value={h}>{h}</NativeSelectOption>)}
                 </NativeSelect>
