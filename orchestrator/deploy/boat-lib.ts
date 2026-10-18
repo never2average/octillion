@@ -315,24 +315,31 @@ export interface LaunchResult { sandboxId: string; orchId: string; fromImage: bo
 export async function launchOrchestrator(ctx: LaunchContext, opts: { image?: string | null; ttlSeconds?: number; onCreated?: (sandboxId: string, orchId: string) => Promise<void> | void; requirePreflight?: boolean } = {}): Promise<LaunchResult> {
   const t0 = Date.now();
   const timings: Record<string, number> = {};
+  let step = "create";
   const mark = (k: string) => { timings[k] = Date.now() - t0; };
   const c = await boatCreate({ type: "small", ttlSeconds: opts.ttlSeconds ?? MAX_TTL_SECONDS, noEnv: true, snapshots: false, ...(opts.image ? { from: opts.image } : {}) });
   const id: string = c.sandbox.id;
   const orchId = orchIdOf(id);
   mark("created");
   try {
+    step = "name";
     await opts.onCreated?.(id, orchId);
     await boatApi(`/sandboxes/${id}`, { method: "PATCH", json: { name: `${ORCH_PREFIX}${id.replace(/^bx_/, "")}` } });
+    step = "ready";
     await waitReady(id);
     mark("ready");
     let fromImage = false;
     if (opts.image) fromImage = (await run(id, `test -x ${HOME}/app/orchestrator/node_modules/.bin/tsx && echo yes || echo no`, 30)).stdout.includes("yes");
+    step = "code upload";
     if (!fromImage) { await uploadCode(id, ctx.root); mark("code"); }
+    step = "configure";
     await configure(id, orchId, ctx);
     mark("configured");
+    step = "preflight";
     const pf = await preflight(id);
     mark("preflight");
     if (!pf.ok && opts.requirePreflight !== false) throw new Error(`preflight failed: ${pf.reason}`);
+    step = "start";
     const svc = await startService(id);
     mark("started");
     // "activating" = (re)starting; a crash loop never checks in and the autoscaler's stale reaper deletes it.
@@ -340,7 +347,8 @@ export async function launchOrchestrator(ctx: LaunchContext, opts: { image?: str
     return { sandboxId: id, orchId, fromImage, timings, preflight: pf };
   } catch (e) {
     await deleteSandbox(id).catch(() => {});
-    throw e;
+    // Say which step failed and how long in (a bare boat error does not).
+    throw Object.assign(e as Error, { message: `${step} (${Math.round((Date.now() - t0) / 1000)}s): ${(e as Error).message}` });
   }
 }
 
