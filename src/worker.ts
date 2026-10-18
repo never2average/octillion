@@ -180,6 +180,8 @@ async function allEvents(orgId: number, sessionId: string): Promise<StoredEvent[
  * retrying those only fails again and spends twice.
  */
 const INFRA_FAILURE = /boat runner:|boat command stream error|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up|socket connection was closed|fetch failed|No heartbeat for \d+ minutes|\b(502|503|504|529)\b|overloaded/i;
+/** Config errors that can carry an infrastructure-looking number (a status, an id): a spent budget, a missing vault key. */
+const NOT_INFRA = /budget is used up|missing_credential|No vault provider supplies/i;
 const INFRA_RETRIES = () => Math.max(0, Number(process.env.OCTILLION_SESSION_INFRA_RETRIES ?? 1));
 
 /**
@@ -191,7 +193,7 @@ const INFRA_RETRIES = () => Math.max(0, Number(process.env.OCTILLION_SESSION_INF
 async function retryInfraFailure(s: SessionRef, input: CompleteInput): Promise<boolean> {
   if (input.status !== "failed" && input.status !== "timeout") return false;
   const msg = input.error_message ?? "";
-  if (!INFRA_FAILURE.test(msg) || /budget is used up/i.test(msg)) return false;
+  if (!INFRA_FAILURE.test(msg) || NOT_INFRA.test(msg)) return false;
   const db = await getDb();
   const [row] = await db.query<{ retries: number; sim: string }>(
     `/* tenant: session checked against the job token in http.ts, or internal stale sweep */ SELECT coalesce((a.metadata->>'infra_retries')::int, 0) AS retries, m.status AS sim

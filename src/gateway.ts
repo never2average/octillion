@@ -67,7 +67,10 @@ export async function brokerSessionCredentials(sessionId: string) {
     throw Object.assign(new Error(`Real vendor keys (${withheld.join(", ")}) are not given to this session: direct-mode keys are off ` +
                                   "(OCTILLION_DIRECT_KEYS) or the task was written by a customer"), { status: 403 });
   const missing = needs.filter((v) => !providers.some((p) => p.env_vars.includes(v)));
-  if (missing.length) throw Object.assign(new Error(`No vault provider supplies ${missing.join(", ")}`), { status: 503 });
+  // 424, not 5xx: a missing key is configuration, not an outage. A 503 here matched the infrastructure-failure rule in
+  // src/worker.ts, so the session was requeued and failed again on the same missing key.
+  if (missing.length)
+    throw Object.assign(new Error(`No vault provider supplies ${missing.join(", ")}`), { status: 424, code: "missing_credential", env: missing.join(",") });
 
   // Must outlive the longest session (orchestrator MAX_SESSION_MINUTES, 45): a 30-minute token killed slow sessions
   // mid-run ("Gateway token is invalid, expired or revoked" at 30:00, seen 2026-10-13). The token is revoked when

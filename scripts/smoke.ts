@@ -474,6 +474,13 @@ try {
   });
   await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", r));
   process.env.PUBLIC_URL = base;
+  // No provider covers the agent's keys yet: a 424 with a machine-readable reason, not a masked 503 (which the
+  // infrastructure rule in src/worker.ts used to requeue).
+  const noKey = await worker(`/sessions/${jobs[0].session_id}/credentials`, {});
+  const noKeyBody = await noKey.json();
+  assert.equal(noKey.status, 424, "a missing vault key is a 424");
+  assert.equal(noKeyBody.code, "missing_credential");
+  assert.ok(/No vault provider supplies/.test(noKeyBody.error) && noKeyBody.env.includes("SMOKE_LLM_API_KEY"), `names the env var: ${JSON.stringify(noKeyBody)}`);
   await kv.upsertProvider({ slug: "smoke_llm", mode: "gateway", upstream_url: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`,
                             auth_header: "x-api-key", auth_prefix: "", env_vars: ["SMOKE_LLM_API_KEY"] });
   await kv.upsertProvider({ slug: "smoke_vendor", mode: "direct", env_vars: ["SMOKE_VENDOR_TOKEN"] });
@@ -881,7 +888,17 @@ try {
   assert.equal(row.status, "failed", "a second infrastructure failure is final (one retry)");
   await worker(`/sessions/${broken}/complete`, { status: "failed", error_message: "/v1/chat/completions is not available on Vertex AI (only /v1/messages and /v1/messages/count_tokens)" });
   assert.equal((await sessionRow(broken)).status, "failed", "a configuration error is not retried");
-  console.log("✓ infrastructure failures are retried once with a clean transcript; config errors fail at once");
+  // A missing vault key, as the orchestrator reports it, fails once with the real cause and classifies as such.
+  const keyless = fair.find((j: any) => j.session_id !== flaky && j.session_id !== broken)!.session_id;
+  await worker(`/sessions/${keyless}/complete`, { status: "failed", error_message:
+    `credentials: POST /api/worker/sessions/${keyless}/credentials -> 424: {"error":"No vault provider supplies X_API_KEY","code":"missing_credential","env":"X_API_KEY"}` });
+  row = await sessionRow(keyless);
+  assert.equal(row.status, "failed", "a missing credential is not requeued as an infrastructure failure");
+  const { classifySession } = await import("../src/error-classes.js");
+  assert.equal(classifySession(row)?.key, "credentials");
+  assert.equal(classifySession({ status: "failed", error_message: "No heartbeat for 10 minutes" })?.key, "heartbeat");
+  console.log("✓ infrastructure failures are retried once with a clean transcript; config errors (and missing keys) fail at once");
+  await import("./error-classes-test.js"); // the error-class unit tests run as part of smoke
 
   await call(A, "cancel_simulation", { simulation_id: runA.simulation.id });
   await call(B, "cancel_simulation", { simulation_id: runB.simulation.id });

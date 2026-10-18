@@ -485,10 +485,13 @@ export function createApp() {
     });
   }
 
-  app.use((err: Error & { status?: number }, _req: Request, res: Response, _next: NextFunction) => {
+  app.use((err: Error & { status?: number; code?: unknown; env?: unknown }, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status ?? 500;
     if (status >= 500) console.error(err);
-    res.status(status).json({ error: status >= 500 ? "Internal error" : err.message });
+    if (status >= 500) return void res.status(status).json({ error: "Internal error" });
+    // A machine-readable reason (e.g. code "missing_credential" with the env var) so callers need not parse the message.
+    const extra = { ...(typeof err.code === "string" ? { code: err.code } : {}), ...(typeof err.env === "string" ? { env: err.env } : {}) };
+    res.status(status).json({ error: err.message, ...extra });
   });
   return app;
 }
