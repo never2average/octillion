@@ -47,16 +47,16 @@ export function SetupPage() {
   return (
     <PageContainer>
       {error ? <ErrorState error={error} /> : !s ? <LoadingCards count={4} /> : (
-        <div className='grid w-full gap-x-10 gap-y-6 lg:grid-cols-5 lg:items-start'>
-          <div className='order-2 flex min-w-0 flex-col gap-8 lg:order-1 lg:col-span-3'>
+        <div className='grid w-full gap-x-10 gap-y-6 lg:grid-cols-[minmax(0,1fr)_22rem] lg:items-start xl:grid-cols-[minmax(0,1fr)_24rem]'>
+          <div className='order-2 flex min-w-0 flex-col gap-8 lg:order-1'>
             {selected === 'setup' || !journey ? (<>
               <Timeline s={s} next={next} />
               {s.errors.length > 0 && <Problems errors={s.errors} />}
             </>) : <JourneyView key={journey.id} j={journey} onChanged={reloadJourneys} />}
             <TipsSection />
           </div>
-          {/* Two floating panels, pinned while the main column scrolls: the connection string and the journey picker. */}
-          <div className='order-1 flex min-w-0 flex-col gap-4 lg:sticky lg:top-[4.5rem] lg:order-2 lg:col-span-2'>
+          {/* Two floating panels at a fixed width, pinned while the main column (which takes the rest) scrolls: the connection string and the journey picker. */}
+          <div className='order-1 flex min-w-0 flex-col gap-4 lg:sticky lg:top-[4.5rem] lg:order-2'>
             <ConnectionBox s={s} onConnected={reload} />
             <JourneyPicker setup={{ done: s.done, total: s.total }} journeys={jr?.journeys ?? []} selected={journey ? selected : 'setup'} onSelect={(id) => {
               void setSelected(id === 'setup' ? null : id);
