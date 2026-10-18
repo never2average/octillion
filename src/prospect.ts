@@ -1,6 +1,8 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { randomId } from "./auth.js";
+import { kickAutoscaler } from "./autoscaler.js";
+import { keepAlive } from "./telemetry.js";
 import { getDb } from "./db.js";
 import { orchestratorBrain } from "./gateway.js";
 import { getProvider, useCredential, VERTEX_LABEL } from "./keyvault.js";
@@ -178,13 +180,14 @@ async function cloudflareText(evidence: unknown) {
 
 async function openaiText(evidence: unknown, model: string) {
   const p = await getProvider("openai");
-  let base = "https://api.openai.com", auth: Record<string, string>;
-  if (p?.enabled && p.upstream_url) {
-    const cred = await useCredential("openai", { excludeLabel: VERTEX_LABEL });
-    base = p.upstream_url.replace(/\/$/, "").replace(/\/v1$/, "");
-    auth = { [p.auth_header]: `${p.auth_prefix}${cred.secret}` };
+  let base = "https://api.openai.com", auth: Record<string, string> | null = null;
+  // The vault's key when it has one (a provider row without a credential falls through to OPENAI_API_KEY).
+  const cred = p?.enabled && p.upstream_url ? await useCredential("openai", { excludeLabel: VERTEX_LABEL }).catch(() => null) : null;
+  if (cred) {
+    base = p!.upstream_url!.replace(/\/$/, "").replace(/\/v1$/, "");
+    auth = { [p!.auth_header]: `${p!.auth_prefix}${cred.secret}` };
   } else if (process.env.OPENAI_API_KEY) auth = { authorization: `Bearer ${process.env.OPENAI_API_KEY}` };
-  else throw new Error("no OpenAI provider in the vault (or OPENAI_API_KEY)");
+  if (!auth) throw new Error("no OpenAI key in the vault (or OPENAI_API_KEY)");
   const r = await fetch(`${base}/v1/chat/completions`, { method: "POST", signal: AbortSignal.timeout(90_000),
     headers: { "content-type": "application/json", ...auth },
     body: JSON.stringify({ model, response_format: { type: "json_object" }, messages: [{ role: "system", content: SYSTEM }, { role: "user", content: `Evidence:\n${JSON.stringify(evidence)}` }] }) });
@@ -250,6 +253,8 @@ function sanitizeBrief(b: Record<string, any>): Partial<ProspectBrief> {
 // RESEARCH_MAX_MINUTES, its own fetch and search budgets, and it replaces the quick brief when it is accepted.
 
 const harnessOn = () => process.env.OCTILLION_PROSPECT_HARNESS !== "off";
+/** On Vercel nothing ticks the autoscaler on its own: start an orchestrator for queued work now. */
+const kick = () => { if (process.env.VERCEL) keepAlive(kickAutoscaler().catch((e) => console.error("autoscaler kick:", (e as Error).message))); };
 
 /** Queue a deep research job for a request, unless one is already queued or running. Returns its id, or null. */
 /** Requests from the landing form queue at most this many deep jobs a day (each starts a boat sandbox); an admin's
@@ -260,7 +265,7 @@ export async function queueDeepResearch(requestId: number, opts: { manual?: bool
   if (!harnessOn()) return null;
   const db = await getDb();
   const [live] = await db.query<{ id: string }>("SELECT id FROM product_research WHERE kind = 'prospect' AND request_id = $1 AND status IN ('queued', 'running')", [requestId]);
-  if (live) return live.id;
+  if (live) { kick(); return live.id; }
   const [q] = await db.query<any>("SELECT email, company, product_url, message, name, role, team_size, agents, research FROM access_requests WHERE id = $1", [requestId]);
   if (!q) return null;
   if (!opts.manual) {
@@ -275,6 +280,7 @@ export async function queueDeepResearch(requestId: number, opts: { manual?: bool
     name: q.name, role: q.role, team_size: q.team_size, agents: q.agents ?? [], message: q.message ?? "",
     quick: quick ? { summary: quick.summary, flags: quick.flags, competitors: quick.competitors, packages: quick.packages, sources: quick.sources } : null };
   await db.query("INSERT INTO product_research (id, kind, request_id, input) VALUES ($1, 'prospect', $2, $3)", [id, requestId, JSON.stringify(input)]);
+  kick();
   return id;
 }
 

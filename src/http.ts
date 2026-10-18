@@ -21,7 +21,9 @@ import { getDb } from "./db.js";
 import { parseJsonl, transcripts, type RawEvent } from "./transcripts.js";
 import { appendEvents, claimJobs, completeSession, heartbeat } from "./worker.js";
 import { fleetCheckin, fleetLeave, fleetStatus } from "./fleet.js";
-import { autoscalerStatus, startAutoscaler, stopAutoscaler } from "./autoscaler.js";
+import { autoscalerStatus, kickAutoscaler, startAutoscaler, stopAutoscaler } from "./autoscaler.js";
+/** On Vercel, orchestrator traffic drives the autoscaler (no ticking loop there); elsewhere the loop does. */
+const serverlessTick = () => { if (process.env.VERCEL) telemetry.keepAlive(kickAutoscaler().catch((e) => console.error("autoscaler kick:", (e as Error).message))); };
 import { startArchiver, stopArchiver } from "./archive.js";
 import { storageEnabled } from "./storage.js";
 import { brokerOrchestratorCredentials, brokerSessionCredentials, gatewayHandler } from "./gateway.js";
@@ -62,6 +64,13 @@ export function createApp() {
     setHeaders: (res, file) => { if (file.includes(`${path.sep}_next${path.sep}static${path.sep}`)) res.setHeader("Cache-Control", "public, max-age=31536000, immutable"); },
   }));
   app.use(express.static(PUBLIC_DIR, { extensions: ["html"], maxAge: "5m" }));
+
+  // Daily backstop for the event-driven autoscaler on Vercel (vercel.json crons; Vercel sends CRON_SECRET as a bearer).
+  app.get("/api/cron/autoscale", async (req, res) => {
+    const secret = process.env.CRON_SECRET || process.env.OCTILLION_ADMIN_TOKEN;
+    if (!secret || req.headers.authorization !== `Bearer ${secret}`) return void res.status(401).json({ error: "unauthorized" });
+    res.json({ tick: await kickAutoscaler() });
+  });
 
   const recent = new Map<string, number[]>();
   app.post("/api/access-requests", express.json({ limit: "16kb" }), async (req, res) => {
@@ -252,11 +261,13 @@ export function createApp() {
     if (!(await canActAsOrchestrator(authOf(res), orchestrator_id))) return forbidden(res);
     const job = jobOnly(res);
     res.json(await fleetCheckin(orchestrator_id, capacity, meta, job ? job.jobId : undefined));
+    serverlessTick();
   });
   worker.delete("/fleet/:id", async (req, res) => {
     if (!(await canActAsOrchestrator(authOf(res), String(req.params.id)))) return forbidden(res);
     await fleetLeave(String(req.params.id));
     res.status(204).end();
+    serverlessTick(); // the next tick deletes the sandbox it leaves behind
   });
   // The global plan (every orchestrator, every job) is for the fleet only.
   worker.get("/fleet", async (_req, res) => (jobOnly(res) ? forbidden(res) : void res.json(await fleetStatus())));

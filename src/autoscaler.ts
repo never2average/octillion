@@ -155,7 +155,7 @@ export class Autoscaler {
     this.stop();
     await (await getDb()).query("DELETE FROM autoscaler_lease WHERE name = 'autoscaler' AND holder = $1", [this.holder]).catch(() => {});
   }
-  /** Wait for in-flight launches and image builds (tests). */
+  /** Wait for in-flight launches and image builds (tests; serverless, before the function is frozen). */
   async settle() { await Promise.allSettled([...this.inflight.values(), this.imageBuild]); }
 
   /** Lease row: one leader across replicas; renewed every tick, expires after 3 ticks. */
@@ -410,6 +410,23 @@ export class Autoscaler {
 }
 
 let singleton: Autoscaler | null = null;
+
+/**
+ * Serverless (Vercel) has no ticking loop, so the autoscaler runs on events instead: a deep research job queued, an
+ * orchestrator checking in or leaving, and a daily cron. One tick, then wait for its launches (boat create + code
+ * upload + start) so the function is not frozen mid-launch. At most one kick per instance every 10 seconds.
+ */
+let lastKick = 0;
+export async function kickAutoscaler(): Promise<TickState | null> {
+  if (!AUTOSCALE.enabled() || !/^https:\/\//.test(AUTOSCALE.publicUrl()) || !env.OCTILLION_WORKER_TOKEN) return null;
+  if (Date.now() - lastKick < 10_000) return null;
+  lastKick = Date.now();
+  singleton ??= new Autoscaler();
+  const st = await singleton.tick();
+  await singleton.settle();
+  return st;
+}
+
 /** Graceful shutdown: stop this process's autoscaler and release its lease. */
 export async function stopAutoscaler(): Promise<void> { await singleton?.release(); }
 

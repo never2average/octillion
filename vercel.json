@@ -10,8 +10,14 @@
   ],
   "functions": {
     "api/index.ts": {
-      "includeFiles": "{public/**,sql/**,harnesses/**,src/ui/**}",
-      "maxDuration": 60
+      "includeFiles": "{public/**,sql/**,harnesses/**,src/ui/**,orchestrator/**}",
+      "maxDuration": 300
     }
-  }
+  },
+  "crons": [
+    {
+      "path": "/api/cron/autoscale",
+      "schedule": "0 6 * * *"
+    }
+  ]
 }
