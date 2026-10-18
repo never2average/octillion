@@ -431,7 +431,7 @@ ${boatRunAs()} env -i HOME=${AGENT_HOME} PATH="$(cat ${BOAT_DIR}/path)" WORK=${A
 
 /** Worker sandbox name: lets `boat-orchestrators status` attribute worker sandboxes to their orchestrator. */
 export function workerSandboxName(agentId: string): string {
-  return `octi-w-${CFG.orchestratorId}-${agentId}`.toLowerCase().replace(/[^a-z0-9-]+/g, "-").slice(0, 60);
+  return `${(process.env.OCTILLION_BOAT_NAMESPACE || "octi").toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 8) || "octi"}-w-${CFG.orchestratorId}-${agentId}`.toLowerCase().replace(/[^a-z0-9-]+/g, "-").slice(0, 60);
 }
 
 /** Pinned harness version from the registry (by agent id, else the first agent of that harness). */

@@ -392,6 +392,7 @@ export class Autoscaler {
     const tuning: Record<string, string> = { OCTILLION_ORCH_IDLE_MINUTES: String(AUTOSCALE.idleMinutes()) };
     for (const k of lib.TUNING_VARS) if (env[k]) tuning[k] = env[k]!;
     if (job) tuning.ORCHESTRATOR_JOB = job.id;
+    tuning.OCTILLION_BOAT_NAMESPACE = lib.BOAT_NAMESPACE; // its worker sandboxes carry this deployment's prefix
     const p = lib.launchOrchestrator(
       { url: AUTOSCALE.publicUrl(), workerToken, podCapacity: job ? Math.max(1, job.pods) : AUTOSCALE.podCapacity(), tuning, root: this.opts.root, log: (m) => this.log(m) },
       { image, onCreated: async (sandboxId, orchId) => { await db.query("UPDATE orchestrator_sandboxes SET sandbox_id = $2, orchestrator_id = $3 WHERE id = $1", [id, sandboxId, orchId]); } },

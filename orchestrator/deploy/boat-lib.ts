@@ -20,10 +20,16 @@ import { boatApi, boatCreate, boatExec, BoatError } from "../core/boat.js";
 import { sleep } from "../core/util.js";
 
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-export const ORCH_PREFIX = "octi-orch-";
-export const WORKER_PREFIX = "octi-w-";
-export const IMAGE_PREFIX = "octi-orch-img-";
-export const IMAGE_BUILDER_NAME = "octi-img-build";
+/**
+ * Sandbox names start with a namespace so two deployments sharing one boat account never touch each other's
+ * sandboxes: each autoscaler reaps "orphans" by name prefix. "octi" (the VM production) by default; the Vercel
+ * preview uses "octv". Orchestrators get it as a tuning var, so their worker sandboxes carry it too.
+ */
+export const BOAT_NAMESPACE = (process.env.OCTILLION_BOAT_NAMESPACE || (process.env.VERCEL ? "octv" : "octi")).toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 8) || "octi";
+export const ORCH_PREFIX = `${BOAT_NAMESPACE}-orch-`;
+export const WORKER_PREFIX = `${BOAT_NAMESPACE}-w-`;
+export const IMAGE_PREFIX = `${BOAT_NAMESPACE}-orch-img-`;
+export const IMAGE_BUILDER_NAME = `${BOAT_NAMESPACE}-img-build`;
 export const MAX_TTL_SECONDS = 2_592_000; // 30 days: boat's maximum numeric TTL (docs.boat.dev/long-running-tasks)
 export const HOME = "/home/user/octillion";
 /** Unprivileged system user the orchestrator service runs as (no sudo); created by configure(). */
@@ -33,7 +39,7 @@ const CHUNK = 3_500_000; // raw bytes per files-API PUT (limit: 5 MiB after base
 
 /** Non-secret tuning knobs that may go into an orchestrator's env file (nothing else is ever written). */
 export const TUNING_VARS = ["MAX_SESSION_MINUTES", "MAX_BUDGET_USD", "MAX_USER_TURNS", "ORCHESTRATOR_THINKING", "BOAT_SANDBOX_SIZE",
-  "RESEARCH_MAX_COST_USD", "OCTILLION_ORCH_IDLE_MINUTES", "MAX_AGENT_TURNS", "GIVE_UP_RUNS", "ORCHESTRATOR_JOB", "OCTILLION_ZED_ACP", "OCTILLION_EGRESS"] as const;
+  "RESEARCH_MAX_COST_USD", "OCTILLION_ORCH_IDLE_MINUTES", "MAX_AGENT_TURNS", "GIVE_UP_RUNS", "ORCHESTRATOR_JOB", "OCTILLION_ZED_ACP", "OCTILLION_EGRESS", "OCTILLION_BOAT_NAMESPACE"] as const;
 
 export interface LaunchContext {
   url: string;               // public HTTPS server URL
