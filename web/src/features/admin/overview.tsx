@@ -37,7 +37,7 @@ export function AdminOverview() {
       {isLoading || !o ? (
         <LoadingCards count={5} />
       ) : (
-        <div className='flex max-w-6xl flex-col gap-8'>
+        <div className='flex w-full flex-col gap-8'>
           {o.stripe_error && <Notice>Stripe: {o.stripe_error}</Notice>}
           <StatStrip
             items={[

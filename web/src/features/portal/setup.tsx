@@ -47,7 +47,7 @@ export function SetupPage() {
   return (
     <PageContainer>
       {error ? <ErrorState error={error} /> : !s ? <LoadingCards count={4} /> : (
-        <div className='grid max-w-6xl gap-x-10 gap-y-6 lg:grid-cols-5 lg:items-start'>
+        <div className='grid w-full gap-x-10 gap-y-6 lg:grid-cols-5 lg:items-start'>
           <div className='order-2 flex min-w-0 flex-col gap-8 lg:order-1 lg:col-span-3'>
             {selected === 'setup' || !journey ? (<>
               <Timeline s={s} next={next} />

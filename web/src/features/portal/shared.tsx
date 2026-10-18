@@ -61,7 +61,7 @@ export function SpendMeter({ spent, budget, className }: { spent: number; budget
 /** Loading placeholder: skeleton lines, no boxes (the pages are flat). */
 export function LoadingCards({ count = 3 }: { count?: number }) {
   return (
-    <div className='flex max-w-6xl flex-col gap-6'>
+    <div className='flex w-full flex-col gap-6'>
       <Skeleton className='h-16 w-full' />
       {Array.from({ length: count }, (_, i) => (
         <div key={i} className='space-y-2'>

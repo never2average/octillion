@@ -65,7 +65,7 @@ export function BillingPage() {
   return (
     <PageContainer pageTitle='Billing'>
       {error ? <ErrorState error={error} /> : !b ? <LoadingCards count={3} /> : (
-        <div className='flex max-w-6xl flex-col gap-12'>
+        <div className='flex w-full flex-col gap-12'>
           <ThisMonth b={b} u={u ?? undefined} l={l ?? undefined} />
           <People t={t ?? undefined} l={l ?? undefined} reload={reload} />
           {l?.can_manage && <Rules l={l} reload={reloadLimits} />}

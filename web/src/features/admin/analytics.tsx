@@ -394,7 +394,7 @@ function AnalyticsBody({ a, match }: { a: Analytics; match: (r: object) => boole
   const tools = a.tools.filter(match), accounts = a.accounts.filter(match);
   const maxClient = Math.max(...a.clients.map((c) => c.accounts), 1);
   return (
-    <div className='flex max-w-6xl flex-col gap-10 pb-4'>
+    <div className='flex w-full flex-col gap-10 pb-4'>
       <StatStrip items={[
         { label: 'Active accounts', value: num(a.totals.active_accounts), hint: <><Trend pct={a.totals.change.active_accounts} /> vs previous {a.days} days</>, spark: series.map((d) => d.accounts) },
         { label: 'Active people', value: num(a.totals.active_people), hint: <><Trend pct={a.totals.change.active_people} /> vs previous {a.days} days</>, spark: series.map((d) => d.people) },

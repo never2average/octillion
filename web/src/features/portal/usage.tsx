@@ -68,7 +68,7 @@ export function UsagePage() {
       }
     >
       {error ? <ErrorState error={error} /> : !u ? <LoadingCards count={4} /> : (
-        <div className='flex max-w-6xl flex-col gap-8'>
+        <div className='flex w-full flex-col gap-8'>
           <div className='flex flex-col gap-3'>
             <StatStrip items={[
               { label: 'Tool calls', value: num(calls), hint: errs ? `${num(errs)} errors` : 'no errors' },

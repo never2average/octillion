@@ -45,7 +45,7 @@ export function AdminAccountDetail({ slug }: { slug: string }) {
           <Skeleton className='h-64' />
         </div>
       ) : (
-        <div className='flex max-w-6xl flex-col gap-8'>
+        <div className='flex w-full flex-col gap-8'>
           <StatStrip
             items={[
               { label: 'Stage', value: <span className='text-lg'>{d.org.stage_label}</span>, hint: `Next: ${d.org.next_step}` },
