@@ -57,7 +57,7 @@ export function AdminPersonas() {
     { key: 'experience', label: 'Experience', className: 'w-24 text-right', type: 'number', value: years,
       render: (p) => (years(p) == null ? NA : <span className='tabular-nums'>{years(p)} yrs</span>) },
     { key: 'company_size', label: 'Company size', className: 'w-44', type: 'select', value: (p) => p.attributes.company_size ?? null, render: (p) => p.attributes.company_size ?? NA },
-    { key: 'stack', label: 'Stack', className: 'min-w-56', type: 'text', value: (p) => (p.attributes.stack ?? []).join(', '), render: (p) => <Chips items={p.attributes.stack} max={5} /> },
+    { key: 'stack', label: 'Stack', className: 'min-w-56', type: 'text', value: (p) => (p.attributes.stack ?? []).join(', '), render: (p) => <Chips items={p.attributes.stack} max={3} oneLine /> },
     { key: 'tone', label: 'Tone', hidden: true, type: 'text', value: (p) => p.attributes.tone ?? null, render: (p) => p.attributes.tone ?? NA },
     { key: 'source', label: 'Origin', hidden: true, className: 'w-36', type: 'select', value: originOf,
       options: [{ value: 'Vault' }, { value: 'Vault, edited here' }, { value: 'Written here' }], render: (p) => <span className='text-muted-foreground text-sm'>{originOf(p)}</span> },

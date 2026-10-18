@@ -32,7 +32,17 @@ interface Compute { groups: { id: string; label: string }[]; settings: Setting[]
 
 const pct = (x: number) => `${(x * 100).toFixed(x > 0 && x < 0.01 ? 1 : 0)}%`;
 
-export function AdminCompute() {
+/** Compute: capacity settings and the default coding-agent mix. */
+export const AdminCompute = () => <SettingsPage groups={['capacity']} mix />;
+/** Configuration: models, run sizes and research limits. */
+export const AdminConfiguration = () => <SettingsPage groups={['models', 'runs', 'research']} />;
+/** Key vault: provider keys for agents, orchestrators and research. */
+export function AdminKeyVault() {
+  return <PageContainer><div className='flex w-full flex-col gap-10 pb-10'><ModelKeys /></div></PageContainer>;
+}
+
+/** The settings of some groups (one input per row, a sticky save bar), optionally followed by the agent mix. */
+function SettingsPage({ groups, mix }: { groups: string[]; mix?: boolean }) {
   const { data, error, isLoading } = useAdmin<Compute>('/compute');
   // Edits not saved yet: key -> the typed text, or null for "reset to the environment / default".
   const [edits, setEdits] = useState<Record<string, string | null>>({});
@@ -44,10 +54,10 @@ export function AdminCompute() {
     <PageContainer>
       <ErrorBox error={error} />
       {data && (
-        <div className='flex max-w-3xl flex-col gap-10 pb-10'>
-          {data.groups.map((g) => (
+        <div className='flex w-full flex-col gap-10 pb-10'>
+          {data.groups.filter((g) => groups.includes(g.id)).map((g) => (
             <Section key={g.id} title={g.label}>
-              <div className='grid gap-6'>
+              <div className='grid gap-x-12 gap-y-6 xl:grid-cols-2'>
                 {data.settings.filter((s) => s.group === g.id).map((s) => (
                   <SettingRow key={s.key} s={s} edit={edits[s.key]} setEdit={(v) => setEdits((e) => {
                     const { [s.key]: _, ...rest } = e;
@@ -65,8 +75,7 @@ export function AdminCompute() {
               <Button size='sm' disabled={save.isPending} onClick={() => save.mutate(undefined, { onSuccess: () => setEdits({}) })}>Save changes</Button>
             </div>
           )}
-          <AgentMix pop={data.population} />
-          <ModelKeys />
+          {mix && <AgentMix pop={data.population} />}
         </div>
       )}
     </PageContainer>

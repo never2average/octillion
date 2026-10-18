@@ -187,7 +187,7 @@ export function AdminTasks() {
                         <TableCell className='px-3 py-3.5'>{t.language ?? NA}</TableCell>
                         <TableCell className='px-3 py-3.5'>{t.category ?? NA}</TableCell>
                         <TableCell className='px-3 py-3.5'>{t.repo_url ? <span className='text-muted-foreground block max-w-56 truncate text-xs' title={t.repo_url}>{repoName(t.repo_url)}</span> : NA}</TableCell>
-                        <TableCell className='px-3 py-3.5 whitespace-normal'><Chips items={t.tags} max={3} /></TableCell>
+                        <TableCell className='px-3 py-3.5'><Chips items={t.tags} max={2} oneLine /></TableCell>
                       </>)}
                       <TableCell className='px-3 py-3.5'><StatusBadge tone={t.active ? 'ok' : 'neutral'}>{t.active ? 'active' : 'inactive'}</StatusBadge></TableCell>
                       <TableCell className='w-10 py-1.5 text-center' onClick={(e) => e.stopPropagation()}><ActionsMenu items={actions(t)} /></TableCell>

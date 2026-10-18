@@ -244,11 +244,12 @@ export function FormRow({ id, label, hint, children }: { id: string; label: Reac
 }
 
 /** Values as small chips (a stack, tags); "—" when there are none. */
-export function Chips({ items, max }: { items: readonly string[] | null | undefined; max?: number }) {
+/** `oneLine` keeps table rows one height: the chips never wrap, the rest is a +N count. */
+export function Chips({ items, max, oneLine }: { items: readonly string[] | null | undefined; max?: number; oneLine?: boolean }) {
   const list = items ?? [], shown = max ? list.slice(0, max) : list;
   if (!list.length) return <span className='text-muted-foreground'>—</span>;
   return (
-    <span className='inline-flex flex-wrap gap-1'>
+    <span className={cn('inline-flex gap-1', oneLine ? 'max-w-full flex-nowrap overflow-hidden' : 'flex-wrap')} title={oneLine ? list.join(', ') : undefined}>
       {shown.map((s) => <Badge key={s} variant='secondary' className='border-transparent font-normal'>{s}</Badge>)}
       {list.length > shown.length && <span className='text-muted-foreground text-xs leading-5'>+{list.length - shown.length}</span>}
     </span>
