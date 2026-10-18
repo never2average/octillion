@@ -35,6 +35,7 @@ import * as onboarding from "./admin.js";
 import * as library from "./library.js";
 import { computeSummary } from "./compute.js";
 import * as records from "./compute-records.js";
+import * as jobs from "./compute-jobs.js";
 import { freshSettings, SettingError } from "./settings.js";
 import { freshPlatformHarnesses } from "./harnesses.js";
 
@@ -449,6 +450,10 @@ export function createApp() {
   ob.get("/compute/orchestrators", async (req, res) => void res.json(await records.listOrchestrators(req.query as Record<string, unknown>)));
   ob.get("/compute/orchestrators/:id", async (req, res) => void res.json(await records.orchestratorDetail(Number(req.params.id))));
   ob.get("/compute/agents/runnable", async (_req, res) => void res.json(await records.agentRunnability()));
+  // Jobs (simulations and research) with why each waits, and failures by reason (src/compute-jobs.ts). Read only.
+  ob.get("/compute/jobs", async (req, res) => void res.json(await jobs.listJobs(req.query as Record<string, unknown>)));
+  ob.get("/compute/jobs/:id", async (req, res) => void res.json(await jobs.jobDetail(String(req.params.id))));
+  ob.get("/compute/failures", async (req, res) => void res.json(await jobs.computeFailures(req.query as Record<string, unknown>)));
   // Admin-added harnesses (src/harnesses.ts): variants of a registry.json CLI; a new one joins the mix at weight 0, off.
   ob.get("/compute/harnesses", async (_req, res) => void res.json(await library.listHarnesses()));
   ob.post("/compute/harnesses", async (req, res) => void res.status(201).json(await library.addHarness(adminActor(req, res), req.body ?? {})));

@@ -33,7 +33,7 @@ const page = (q: Record<string, unknown>, def: number) => ({
 const HEARTBEAT_STALE_S = 90;
 
 /** The agent ids the current population schedules (with their model variants). Null when there is no population. */
-async function scheduledIds(): Promise<Set<string> | null> {
+export async function scheduledIds(): Promise<Set<string> | null> {
   try { return new Set(scheduledAgents(await getPopulation()).flatMap((a) => [a.id, ...variantsOf(a).map((v) => v.id)])); }
   catch { return null; }
 }
@@ -289,18 +289,27 @@ export async function listOrchestrators(q: Record<string, unknown>) {
   const job = str(q.job_id);
   if (job) { params.push(job); where.push(`o.job_id = $${params.length}`); }
   const reason = str(q.reason);
-  if (reason) { params.push(reason); where.push(`(o.launch_step = $${params.length} OR o.reap_reason ILIKE $${params.length} || '%')`); }
+  // `launch:<step>` / `reap:<kind>` (Failures by reason) is a class from src/error-classes.ts, matched after the query.
+  const byClass = reason && /^(launch|reap):/.test(reason) ? reason : null;
+  if (reason && !byClass) { params.push(reason); where.push(`(o.launch_step = $${params.length} OR o.reap_reason ILIKE $${params.length} || '%')`); }
   const include = Number(q.include);
   let match = where.join(" AND ");
   if (Number.isInteger(include) && include > 0) { params.push(include); match = `((${match}) OR o.id = $${params.length})`; }
+  const sb = new Map(listing.sandboxes.map((s) => [s.id, s]));
+  let current: string | null = null;
+  try { current = currentCodeHash(); } catch { /* no code on this deployment: "current" is unknown */ }
+  if (byClass) {
+    const all = (await db.query<OrchDb>(`/* tenant: internal: admin Compute page, gateway spend summed per orchestrator id */
+      SELECT ${ORCH_COLS} ${ORCH_FROM} WHERE ${match} ORDER BY o.id DESC LIMIT 5000`, params))
+      .filter((r) => classifyOrchestrator(r)?.key === byClass || (Number.isInteger(include) && r.id === include));
+    if (Number.isInteger(include) && include > 0) all.sort((a, b) => Number(b.id === include) - Number(a.id === include));
+    return { total: all.length, boat, limits: recordLimits(), rows: all.slice(offset, offset + limit).map((r) => orchRow(r, sb, now, current)) };
+  }
   const [{ total }] = await db.query<{ total: unknown }>(`SELECT count(*) AS total ${ORCH_FROM} WHERE ${match}`, params);
   const rows = await db.query<OrchDb>(
     `/* tenant: internal: admin Compute page, gateway spend summed per orchestrator id */
      SELECT ${ORCH_COLS} ${ORCH_FROM} WHERE ${match}
       ORDER BY ${Number.isInteger(include) && include > 0 ? `(o.id = $${params.length}) DESC, ` : ""}o.id DESC LIMIT ${limit} OFFSET ${offset}`, params);
-  const sb = new Map(listing.sandboxes.map((s) => [s.id, s]));
-  let current: string | null = null;
-  try { current = currentCodeHash(); } catch { /* no code on this deployment: "current" is unknown */ }
   return { total: n(total), boat, limits: recordLimits(), rows: rows.map((r) => orchRow(r, sb, now, current)) };
 }
 

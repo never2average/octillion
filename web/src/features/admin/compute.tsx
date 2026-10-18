@@ -30,6 +30,8 @@ import { ActionsMenu, Field, RecordView, type RecordCol } from '@/components/lay
 import { ageOf, dur, EST, money, useNow } from './compute-common';
 import { ComputeSessions } from './compute-sessions';
 import { ComputeOrchestrators } from './compute-orchestrators';
+import { ComputeJobs } from './compute-jobs';
+import { ComputeFailures } from './compute-failures';
 
 interface Setting {
   key: string; group: string; label: string; help: string; kind: 'text' | 'int' | 'number' | 'choice'; default: string | number;
@@ -403,7 +405,7 @@ export function AdminCompute() {
     setRefreshing(true);
     try {
       qc.setQueryData(['admin', SUMMARY], await adminApi<Summary>('GET', `${SUMMARY}?fresh=1`));
-      void qc.invalidateQueries({ predicate: (q) => q.queryKey[0] === 'admin' && /^\/compute\/(sessions|orchestrators)/.test(String(q.queryKey[1])) });
+      void qc.invalidateQueries({ predicate: (q) => q.queryKey[0] === 'admin' && /^\/compute\/(jobs|sessions|orchestrators|failures)/.test(String(q.queryKey[1])) });
     }
     catch (e) { toast.error((e as Error).message); }
     finally { setRefreshing(false); }
@@ -418,8 +420,10 @@ export function AdminCompute() {
   // filters and open record from the URL (useSearchParams needs a Suspense boundary).
   const tables = (
     <Suspense fallback={<Skeleton className='h-72 rounded-lg' />}>
+      <ComputeJobs />
       <ComputeSessions />
       <ComputeOrchestrators verdict={data?.verdict ?? []} />
+      <ComputeFailures />
     </Suspense>
   );
   return (
@@ -526,7 +530,7 @@ function Tiles({ s }: { s: Summary }) {
       href: '/admin/compute?section=failures', warn: f.rate > 0.1, title: f.ended ? `${Math.round(f.rate * 100)}% of the ${f.ended} sessions that ended in 24 h failed` : undefined },
     { label: 'Spend today (UTC)', value: money(sp.total_usd), title: `Sandbox: ${EST}`,
       hint: `${money(sp.session_model_usd)} model (finished sessions) · ${money(sp.orchestrator_model_usd)} orchestrators · ${money(sp.sandbox_est_usd)} sandbox est.`,
-      href: '/admin/compute?section=jobs&sort=spend' }
+      href: '/admin/compute?section=jobs&jsort=spend' }
   ];
   return (
     <dl className='grid grid-cols-2 border-y md:grid-cols-3 xl:grid-cols-6'>

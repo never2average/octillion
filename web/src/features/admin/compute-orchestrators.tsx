@@ -67,10 +67,10 @@ const lateOf = (o: OrchRow, l: Limits) => (o.state === 'booting' && (since(o.cre
 export function ComputeOrchestrators({ verdict }: { verdict: Verdict[] }) {
   const url = useComputeParams();
   useNow(15_000);
-  const state = url.get('state') ?? 'live', job = url.get('job_id');
+  const state = url.get('state') ?? 'live', job = url.get('job_id'), reason = url.get('oreason');
   const open = url.get('orch');
   const unmatched = state === 'unmatched';
-  const qs = new URLSearchParams({ state, limit: String(LIMIT), ...(job && !unmatched ? { job_id: job } : {}) });
+  const qs = new URLSearchParams({ state, limit: String(LIMIT), ...(job && !unmatched ? { job_id: job } : {}), ...(reason && !unmatched ? { reason } : {}) });
   const [pinned, setPinned] = useState<string | null>(null);
   if (pinned) qs.set('include', pinned);
   const { data, error, isLoading, refetch } = useAdmin<{ total: number; boat: Boat; limits: Limits; rows: (OrchRow | Unmatched)[] }>(
@@ -82,7 +82,7 @@ export function ComputeOrchestrators({ verdict }: { verdict: Verdict[] }) {
   if (pin !== pinned) setPinned(pin);
   useScrollTo('orchestrators', !!data);
   const limits: Limits = data?.limits ?? { boot_minutes: 10, stale_minutes: 5, heartbeat_stale_s: 90 };
-  const setState = (id: string) => url.write({ state: id === 'live' ? null : id, orch: null });
+  const setState = (id: string) => url.write({ state: id === 'live' ? null : id, orch: null, oreason: null });
 
   const off = verdict.find((v) => v.code === 'autoscale_off' || v.code === 'kick_unconfigured');
   const empty = state === 'live' ? (off ? off.text : 'No orchestrators running. One launches when a job queues work.')
@@ -97,6 +97,7 @@ export function ComputeOrchestrators({ verdict }: { verdict: Verdict[] }) {
           <Button key={c.id} role='tab' aria-selected={state === c.id} size='xs' variant={state === c.id ? 'default' : 'outline'} onClick={() => setState(c.id)}>{c.label}</Button>
         ))}
         {job && !unmatched && <Button size='xs' variant='outline' onClick={() => url.write({ job_id: null })} title='Show every job'><Mono>{job}</Mono><Icons.close /></Button>}
+        {reason && !unmatched && <Button size='xs' variant='outline' onClick={() => url.write({ oreason: null })} title='Show every reason'>{reason.replace(/^(launch|reap):/, '$1: ').replace(/_/g, ' ')}<Icons.close /></Button>}
         {data && (!data.boat.ok || data.boat.stale) && (
           <span className={cn('ml-auto text-xs', AMBER)} title={data.boat.error ?? undefined}>
             {data.boat.ok ? 'boat.dev did not answer just now; boat columns show its last answer.' : 'boat.dev did not answer: boat columns show —.'}
@@ -112,7 +113,7 @@ export function ComputeOrchestrators({ verdict }: { verdict: Verdict[] }) {
       {unmatched
         ? <UnmatchedTable rows={rows as Unmatched[]} loading={isLoading || !fits} empty={empty} />
         : <OrchTable rows={rows as OrchRow[]} loading={(isLoading && !data) || !fits} limits={limits} boat={data?.boat ?? null} empty={empty}
-            open={open} onOpen={(k) => url.write({ orch: k })} onJob={(j) => url.write({ section: 'sessions', job_id: j, orch: null })} />}
+            open={open} onOpen={(k) => url.write({ orch: k, ...(k ? {} : { back: null }) })} onJob={(j) => url.write({ section: 'sessions', job_id: j, orch: null })} />}
     </Section>
   );
 }
@@ -216,8 +217,11 @@ function OrchPeek({ id, onJob }: { id: number; onJob: (job: string) => void }) {
   if (!data) return <ErrorBox error={error} />;
   const o = data.row;
   const openSession = (sid: string) => url.write({ section: 'sessions', session: sid, orch: null });
+  // Opened from a job's peek: back returns to it.
+  const back = url.get('back');
   return (
     <div className='grid gap-6'>
+      {back && <Button variant='ghost' size='xs' className='justify-self-start' onClick={() => url.write({ section: 'jobs', job: back, orch: null, back: null })}>← Back to <Mono>{back}</Mono></Button>}
       <PeekSection title='Summary'>
         <dl>
           <Field label='State'>{o.state === 'deleted' ? 'ended' : o.state}{o.boat_state && <span className='text-muted-foreground'> · boat: {o.boat_state}</span>}</Field>

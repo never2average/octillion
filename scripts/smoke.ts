@@ -1294,6 +1294,127 @@ try {
     console.log("✓ compute records: sessions (filters, class, include, peek with hint), orchestrators (chips, peek), unmatched on boat, runnability, BOAT_SETUP_HARNESSES");
   }
 
+  // ---------- Compute jobs and failures by reason (src/compute-jobs.ts) ----------
+  {
+    const { jobState, whyWaiting, groupOrchestratorEnds, groupSessionFailures } = await import("../src/compute-jobs.js");
+    const { resetComputeCaches } = await import("../src/compute.js");
+    // State rules, first match wins.
+    const f = { failed: false, finished: false, orchestrators: [] as string[], running_sessions: 0, research_running: false, queued_work: false, unserved: false };
+    assert.equal(jobState({ ...f, failed: true, finished: true }), "failed");
+    assert.equal(jobState({ ...f, finished: true, orchestrators: ["running"] }), "finished");
+    assert.equal(jobState({ ...f, orchestrators: ["running", "draining"], running_sessions: 3 }), "draining");
+    assert.equal(jobState({ ...f, orchestrators: ["running"], running_sessions: 3 }), "running");
+    assert.equal(jobState({ ...f, research_running: true }), "running");
+    assert.equal(jobState({ ...f, orchestrators: ["booting"], queued_work: true }), "booting");
+    assert.equal(jobState({ ...f, queued_work: true }), "waiting", "queued work and no live orchestrator");
+    assert.equal(jobState({ ...f, orchestrators: ["running"], unserved: true }), "waiting");
+    assert.equal(jobState({ ...f, orchestrators: ["running"] }), "queued", "an orchestrator with nothing running yet");
+    // Why it waits, from the last tick's note.
+    const o = { per_job: true, job_pod_capacity: 40, live_orchestrators: 0 };
+    const tick = { enabled: true, free: 3, cap: 4, note: "sim_b waits for boat plan capacity (3 free); cooldown: sim_c's orchestrator idled out with its sessions still queued; at OCTILLION_MAX_JOB_ORCHESTRATORS (4)",
+      jobs: [{ id: "sim_a", kind: "simulation", sessions: 2, served: true }, { id: "sim_b", kind: "simulation", sessions: 60, served: false },
+             { id: "sim_c", kind: "simulation", sessions: 1, served: false }, { id: "sim_d", kind: "simulation", sessions: 1, served: false }] };
+    const sim = (id: string, unfinished = 1) => ({ id, kind: "simulation" as const, unfinished, unclaimable: false });
+    assert.equal(whyWaiting(sim("sim_a"), tick, o), null, "served: nothing to explain");
+    assert.deepEqual(whyWaiting(sim("sim_b", 60), tick, o), { text: "Waiting for boat capacity (3 free, needs 41)", note: "sim_b waits for boat plan capacity (3 free)", free: 3, needed: 41, cap: 4 });
+    assert.match(whyWaiting(sim("sim_c"), tick, o)!.text, /^Relaunch cooldown/);
+    assert.match(whyWaiting(sim("sim_d"), tick, o)!.text, /^At the orchestrator limit \(4 /);
+    assert.equal(whyWaiting(sim("sim_e"), { ...tick, note: undefined }, o)!.text, "No orchestrator yet");
+    assert.match(whyWaiting({ ...sim("sim_b"), unclaimable: true }, tick, o)!.text, /^Agents not scheduled/);
+    assert.equal(whyWaiting(sim("sim_e"), { ...tick, enabled: false }, o)!.text, "The autoscaler is off");
+    assert.equal(whyWaiting(sim("sim_e"), null, { ...o, per_job: false, live_orchestrators: 2 }), null, "shared fleet running: served");
+    // Orchestrator ends grouped: failed launches by step, reaps by kind, routine ones after the failures.
+    const now = new Date();
+    const ends = groupOrchestratorEnds([
+      { at: now, launch_step: "ready", launch_error: "sandbox bx1 not ready after 240s" }, { at: new Date(+now - 1000), error: "ready (240s): sandbox bx0 not ready after 240s" },
+      { at: now, reap_reason: "drained (idle 10 min)" }, { at: now, reap_reason: "stale: no heartbeat for 6 min" }, { at: now, reap_reason: "stale: no heartbeat for 9 min" },
+      { at: now, reap_reason: "drained (idle 10 min)", deleted: false },
+    ]);
+    assert.deepEqual(ends.launches.map((l) => [l.step, l.count, l.message]), [["ready", 2, "sandbox bx1 not ready after 240s"]], "a legacy error column counts too");
+    assert.deepEqual(ends.reaps.map((r) => [r.key, r.count, r.routine]), [["reap:stale", 2, false], ["reap:idle_drain", 1, true]], "a live one is not a reap");
+    // Session failures by class: share of the sessions that ended, jobs, top agent, the fix page.
+    const fs = groupSessionFailures([
+      { status: "failed", agent_id: "a1", simulation_id: "s1", error_message: "No vault provider supplies X_KEY", completed_reason: null, infra_error: null, at: now },
+      { status: "failed", agent_id: "a1", simulation_id: "s2", error_message: "missing_credential", completed_reason: null, infra_error: null, at: now },
+      { status: "timeout", agent_id: "a2", simulation_id: "s1", error_message: "No heartbeat for 300s", completed_reason: null, infra_error: null, at: now },
+      { status: "queued", agent_id: "gone", simulation_id: "s3", error_message: null, completed_reason: null, infra_error: null, at: now },
+    ], 10, new Set(["a1", "a2"]));
+    assert.deepEqual(fs.map((g) => [g.key, g.count, g.share, g.jobs, g.top_agent, g.fix?.href ?? null]),
+      [["credentials", 2, 0.2, 2, "a1", "/admin/keys"], ["heartbeat", 1, 0.1, 1, "a2", null], ["unclaimable", 1, null, 1, "gone", "/admin/agents"]]);
+
+    // The endpoints over real rows: a simulation with a queued, a running and a failed session on a running
+    // orchestrator (and one failed launch before it), and a research job the last tick could not serve.
+    resetComputeCaches();
+    const [lease] = await db.query<any>("SELECT holder, expires_at, state FROM autoscaler_lease WHERE name = 'autoscaler'");
+    await db.query(`/* tenant: smoke fixture */ INSERT INTO simulations (id, org_id, product_id, name, models, harness, repeats, status, started_at)
+      SELECT 'sim_smoke_cj', org_id, product_id, 'smoke jobs', '{m}', 'claude-code', 1, 'running', now() - interval '20 minutes' FROM agent_sessions ORDER BY queued_at LIMIT 1`);
+    const copy = (id: string, set: string) => db.query(`/* tenant: smoke fixture */ INSERT INTO agent_sessions (id, simulation_id, org_id, product_id, scenario_id, model, harness, agent_id, status, queued_at, started_at, ended_at, error_message, cost_usd, metadata)
+      SELECT $1, 'sim_smoke_cj', org_id, product_id, scenario_id, model, harness, agent_id, ${set} FROM agent_sessions ORDER BY queued_at LIMIT 1`, [id]);
+    await copy("ses_smoke_cj_q", "'queued', now() - interval '3 minutes', NULL, NULL, NULL, 0, '{}'::jsonb");
+    await copy("ses_smoke_cj_r", "'running', now() - interval '10 minutes', now() - interval '9 minutes', NULL, NULL, 0, '{}'::jsonb");
+    await copy("ses_smoke_cj_f", `'failed', now() - interval '10 minutes', now() - interval '9 minutes', now() - interval '5 minutes', 'credentials -> 424: {"error":"No vault provider supplies DASHSCOPE_API_KEY","code":"missing_credential"}', 0.5, '{"boat_est_cost_usd": 0.01}'::jsonb`);
+    await db.query(`INSERT INTO orchestrator_sandboxes (sandbox_id, orchestrator_id, state, created_at, ready_at, job_id, pods)
+      VALUES ('smoke-cj-live', 'orch-smoke-cj', 'running', now() - interval '15 minutes', now() - interval '14 minutes', 'sim_smoke_cj', 4)`);
+    await db.query(`INSERT INTO orchestrator_sandboxes (sandbox_id, state, created_at, deleted_at, job_id, launch_step, launch_error, error)
+      VALUES ('smoke-cj-fail', 'deleted', now() - interval '18 minutes', now() - interval '16 minutes', 'sim_smoke_cj', 'ready', 'sandbox bx not ready after 240s', 'ready (240s): sandbox bx not ready after 240s')`);
+    await db.query(`INSERT INTO orchestrators (id, capacity, meta, last_seen) VALUES ('orch-smoke-cj', 4, '{"worker_id": "host-smoke-cj", "running": {"codex/gpt": 1}}', now())
+      ON CONFLICT (id) DO UPDATE SET meta = excluded.meta, last_seen = excluded.last_seen`);
+    await db.query("INSERT INTO gateway_usage (token_hash, provider, orchestrator_id, requests, cost_usd) VALUES ('smoke-cj-orch', 'anthropic', 'orch-smoke-cj', 2, 0.2)");
+    await db.query(`/* tenant: smoke fixture */ INSERT INTO product_research (id, org_id, product_id, status, input, created_at)
+      SELECT 'rsh_smoke_cj', org_id, product_id, 'queued', '{}', now() - interval '4 minutes' FROM agent_sessions ORDER BY queued_at LIMIT 1`);
+    await db.query(`INSERT INTO autoscaler_lease (name, holder, expires_at, state) VALUES ('autoscaler', 'smoke', now(), $1)
+      ON CONFLICT (name) DO UPDATE SET state = excluded.state`, [JSON.stringify({ at: new Date().toISOString(), enabled: true, leader: true, holder: "smoke", free: 0, cap: 4,
+        note: "rsh_smoke_cj waits for boat plan capacity (0 free)", jobs: [{ id: "rsh_smoke_cj", kind: "research", sessions: 0, served: false }, { id: "sim_smoke_cj", kind: "simulation", sessions: 2, served: true }] })]);
+    await db.query("INSERT INTO compute_events (kind, sandbox_id, reason) VALUES ('orphan_deleted', 'smoke-cj-orphan', 'orphan orchestrator sandbox (no row)')");
+
+    assert.equal((await fetch(`${base}/api/admin/onboarding/compute/jobs`)).status, 401, "jobs need the admin token");
+    const list = await json(adm("GET", "/compute/jobs?limit=500"));
+    const sj = list.rows.find((x: any) => x.id === "sim_smoke_cj"), rj = list.rows.find((x: any) => x.id === "rsh_smoke_cj");
+    assert.ok(sj && rj, "active jobs are listed by default");
+    assert.deepEqual([sj.state, sj.kind, sj.sessions.queued, sj.sessions.running, sj.sessions.failed, sj.orchestrator.orchestrator_id, sj.orchestrators_total, sj.failed_launches],
+      ["running", "simulation", 1, 1, 1, "orch-smoke-cj", 2, 1]);
+    assert.deepEqual([sj.pods, sj.failures.count, sj.failures.top_key, sj.why_waiting], [{ running: 1, reserved: 4 }, 1, "credentials", null]);
+    assert.ok(sj.spend.session_model_usd === 0.5 && sj.spend.orchestrator_model_usd === 0.2 && sj.spend.sandbox_est_usd > 0.01
+      && Math.abs(sj.spend.total_usd - (0.7 + sj.spend.sandbox_est_usd)) < 0.001, "spend: sessions + orchestrator gateway + sandbox est.");
+    assert.ok(sj.waiting_since && sj.running_since && sj.org?.slug);
+    assert.deepEqual([rj.state, rj.kind, rj.why_waiting, rj.note], ["waiting", "research", "Waiting for boat capacity (0 free, needs 1)", "rsh_smoke_cj waits for boat plan capacity (0 free)"]);
+    assert.ok(list.rows.findIndex((x: any) => x.id === "rsh_smoke_cj") < list.rows.findIndex((x: any) => x.id === "sim_smoke_cj"), "waiting before running");
+    assert.deepEqual((await json(adm("GET", "/compute/jobs?state=waiting&kind=research&limit=500"))).rows.map((x: any) => x.state).filter((s: string) => s !== "waiting"), []);
+    assert.ok(!(await json(adm("GET", "/compute/jobs?kind=simulation&limit=500"))).rows.some((x: any) => x.id === "rsh_smoke_cj"));
+    assert.ok((await json(adm("GET", "/compute/jobs?has_failures=1&limit=500"))).rows.some((x: any) => x.id === "sim_smoke_cj"));
+    assert.deepEqual((await json(adm("GET", "/compute/jobs?q=smoke%20jobs"))).rows.map((x: any) => x.id), ["sim_smoke_cj"], "search by job name");
+    assert.equal((await json(adm("GET", "/compute/jobs?state=finished&include=sim_smoke_cj"))).rows[0].id, "sim_smoke_cj", "include: a deep link whatever the filters");
+    assert.equal((await adm("GET", "/compute/jobs?state=bogus")).status, 400);
+    const peek = await json(adm("GET", "/compute/jobs/sim_smoke_cj"));
+    assert.ok(peek.job.id === "sim_smoke_cj" && peek.why === null && peek.research === null);
+    assert.equal(peek.agents.reduce((a: number, x: any) => a + x.queued + x.running + x.failed, 0), 3, "sessions by agent");
+    assert.deepEqual(peek.orchestrators.map((x: any) => [x.orchestrator_id, x.end_reason?.key ?? null]), [["orch-smoke-cj", null], [null, "launch:ready"]]);
+    const rpeek = await json(adm("GET", "/compute/jobs/rsh_smoke_cj"));
+    assert.deepEqual([rpeek.why.free, rpeek.why.needed, rpeek.why.cap, rpeek.research.status, rpeek.agents.length], [0, 1, 4, "queued", 0]);
+    assert.equal((await adm("GET", "/compute/jobs/sim_nope")).status, 404);
+
+    const fl = await json(adm("GET", "/compute/failures"));
+    assert.ok(fl.launches.some((l: any) => l.step === "ready" && l.count >= 1) && fl.unattended.some((u: any) => u.kind === "orphan_deleted"));
+    const cred = fl.sessions.find((s: any) => s.key === "credentials");
+    assert.ok(cred && cred.count >= 1 && cred.fix.href === "/admin/keys" && cred.share > 0);
+    assert.equal((await json(adm("GET", "/compute/failures?hours=168"))).hours, 168);
+    assert.equal((await adm("GET", "/compute/failures?hours=3")).status, 400);
+    // A Failures row filters Orchestrators by its class.
+    const byReason = await json(adm("GET", "/compute/orchestrators?state=ended&reason=launch:ready"));
+    assert.ok(byReason.rows.some((x: any) => x.sandbox_id === "smoke-cj-fail") && byReason.rows.every((x: any) => x.launch_step === "ready"));
+
+    if (lease) await db.query("UPDATE autoscaler_lease SET holder = $1, expires_at = $2, state = $3 WHERE name = 'autoscaler'", [lease.holder, lease.expires_at, JSON.stringify(lease.state)]);
+    else await db.query("DELETE FROM autoscaler_lease WHERE name = 'autoscaler'");
+    await db.query("/* tenant: smoke fixture */ DELETE FROM gateway_usage WHERE token_hash LIKE 'smoke-cj-%'");
+    await db.query("/* tenant: smoke fixture */ DELETE FROM product_research WHERE id = 'rsh_smoke_cj'");
+    await db.query("/* tenant: smoke fixture */ DELETE FROM simulations WHERE id = 'sim_smoke_cj'");
+    await db.query("DELETE FROM orchestrator_sandboxes WHERE sandbox_id LIKE 'smoke-cj-%'");
+    await db.query("DELETE FROM orchestrators WHERE id = 'orch-smoke-cj'");
+    await db.query("DELETE FROM compute_events WHERE sandbox_id LIKE 'smoke-cj-%'");
+    resetComputeCaches();
+    console.log("✓ compute jobs: state rules, why waiting (boat capacity, cap, cooldown, unscheduled), spend, filters, peek; failures by reason (launches, reaps, unattended, session classes)");
+  }
+
   // ---------- global compute settings (/admin/compute): set here > environment > default ----------
   {
     const { config } = await import("../src/queries.js");
