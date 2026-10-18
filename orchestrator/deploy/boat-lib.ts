@@ -38,7 +38,7 @@ export const UNIT = "octillion-orchestrator";
 const CHUNK = 3_500_000; // raw bytes per files-API PUT (limit: 5 MiB after base64 decoding)
 
 /** Non-secret tuning knobs that may go into an orchestrator's env file (nothing else is ever written). */
-export const TUNING_VARS = ["MAX_SESSION_MINUTES", "MAX_BUDGET_USD", "MAX_USER_TURNS", "ORCHESTRATOR_THINKING", "BOAT_SANDBOX_SIZE",
+export const TUNING_VARS = ["ORCHESTRATOR_MODEL", "MAX_SESSION_MINUTES", "MAX_BUDGET_USD", "MAX_USER_TURNS", "ORCHESTRATOR_THINKING", "BOAT_SANDBOX_SIZE",
   "RESEARCH_MAX_COST_USD", "OCTILLION_ORCH_IDLE_MINUTES", "MAX_AGENT_TURNS", "GIVE_UP_RUNS", "ORCHESTRATOR_JOB", "OCTILLION_ZED_ACP", "OCTILLION_EGRESS", "OCTILLION_BOAT_NAMESPACE"] as const;
 
 export interface LaunchContext {

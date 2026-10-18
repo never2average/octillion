@@ -1,6 +1,7 @@
 import { open as openText, openJson, openRows } from "./orgcrypto.js";
 import { PLATFORMS, isPlatform, platformOf, type Platform } from "./platform.js";
 import { getDb, type Queryable } from "./db.js";
+import { settingNumber } from "./settings.js";
 import { orgBudget } from "./billing.js";
 import { checkRun, launcherOverLimit } from "./limits.js";
 import { randomId, type Org } from "./auth.js";
@@ -44,13 +45,14 @@ export async function listAgents(org: Org, input: { population?: string } = {}) 
 export const config = {
   models: async () => [...new Set(enabledAgents(await getPopulation()).map((a) => a.model))],
   agents: async () => scheduledAgents(await getPopulation()).map((a) => ({ id: a.id, label: a.label, model: a.model, harness: a.harness, weight: a.weight })),
-  defaultSamples: () => Number(process.env.OCTILLION_DEFAULT_SAMPLES ?? 10),
-  maxSessionsPerRun: () => Number(process.env.OCTILLION_MAX_SESSIONS_PER_RUN ?? 100),
+  // These three are global settings (/admin/compute, src/settings.ts): set there, else the environment, else the default.
+  defaultSamples: () => settingNumber("OCTILLION_DEFAULT_SAMPLES"),
+  maxSessionsPerRun: () => settingNumber("OCTILLION_MAX_SESSIONS_PER_RUN"),
   /**
    * Adaptive sampling: a task is sampled until its hit rate is known to within +/- samplingMargin (95% interval), or
    * until maxSamples sessions. Tasks where agents agree settle after a handful; contested ones run to the cap.
    */
-  maxSamples: () => Math.max(1, Number(process.env.OCTILLION_MAX_SAMPLES ?? 20)),
+  maxSamples: () => Math.max(1, settingNumber("OCTILLION_MAX_SAMPLES")),
   samplingMargin: () => Number(process.env.OCTILLION_SAMPLING_MARGIN ?? 0.2),
   samplingMin: () => Math.max(1, Number(process.env.OCTILLION_SAMPLING_MIN ?? 6)),
   samplingBatch: () => Math.max(1, Number(process.env.OCTILLION_SAMPLING_BATCH ?? 4)),

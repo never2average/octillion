@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { Readable } from "node:stream";
 import type { Request, Response } from "express";
 import { getDb } from "./db.js";
+import { settingText } from "./settings.js";
 import { findAgent } from "./agents.js";
 import { getProvider, providersForEnv, useCredential, VERTEX_LABEL, type ProviderRow } from "./keyvault.js";
 import { adaptGeminiBody, geminiWantsThinkingLevel, toVertex, toVertexGemini, vertexAccessToken } from "./vertex.js";
@@ -93,7 +94,7 @@ export async function brokerSessionCredentials(sessionId: string) {
 /** What the orchestrator's brain (Pi) runs on; one place for every orchestrator. Default: GPT via the gateway. */
 export const orchestratorBrain = () => ({
   provider: process.env.ORCHESTRATOR_PROVIDER ?? "openai",
-  model: process.env.ORCHESTRATOR_MODEL ?? "gpt-6.1-sol",
+  model: settingText("ORCHESTRATOR_MODEL"), // global setting (/admin/compute), else ORCHESTRATOR_MODEL, else gpt-6.1-sol
 });
 /** Path SDKs expect after the provider's host (OpenAI-style clients append /responses, /chat/completions to .../v1). */
 const SDK_BASE_SUFFIX: Record<string, string> = { openai: "/v1", dashscope: "/compatible-mode/v1" };

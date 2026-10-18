@@ -7,6 +7,7 @@ import { scheduledAgents, variantsOf } from "./agents.js";
 import { getPopulation } from "./populations.js";
 import { JOB_POD_CAPACITY, jobState, orchestratorBusy, setCurrentCodeHash, staleOrchestratorIds } from "./fleet.js";
 import { BOAT } from "../orchestrator/core/config.js";
+import { freshSettings, setting, settingNumber } from "./settings.js";
 import * as lib from "../orchestrator/deploy/boat-lib.js";
 
 /**
@@ -41,7 +42,7 @@ export const AUTOSCALE = {
   enabled: () => (env.OCTILLION_AUTOSCALE ?? "on").toLowerCase() !== "off",
   tickMs: () => Math.max(1, num(env.OCTILLION_AUTOSCALE_TICK_SECONDS, 15)) * 1000,
   podCapacity: () => Math.max(1, Math.min(20, num(env.OCTILLION_POD_CAPACITY, num(env.OCTILLION_PODS_PER_ORCHESTRATOR, 20)))),
-  maxOrchestrators: () => num(env.OCTILLION_MAX_ORCHESTRATORS, 4),
+  maxOrchestrators: () => settingNumber("OCTILLION_MAX_ORCHESTRATORS"), // global setting (/admin/compute), else env
   idleMinutes: () => num(env.OCTILLION_ORCH_IDLE_MINUTES, 10),
   staleMinutes: () => num(env.OCTILLION_ORCH_STALE_MINUTES, 5),
   bootMinutes: () => num(env.OCTILLION_ORCH_BOOT_MINUTES, 10),
@@ -51,7 +52,7 @@ export const AUTOSCALE = {
   maxLaunchesPerTick: () => Math.max(1, num(env.OCTILLION_ORCH_LAUNCHES_PER_TICK, 2)),
   perJob: () => (env.OCTILLION_ORCH_PER_JOB ?? "on").toLowerCase() !== "off",
   jobPodCapacity: () => JOB_POD_CAPACITY(),
-  maxJobOrchestrators: () => Math.max(1, num(env.OCTILLION_MAX_JOB_ORCHESTRATORS, 12)),
+  maxJobOrchestrators: () => Math.max(1, settingNumber("OCTILLION_MAX_JOB_ORCHESTRATORS")),
   // Where orchestrators reach the API: OCTILLION_INTERNAL_URL (the API itself) when the public URL is a proxy in front of it.
   publicUrl: () => (env.OCTILLION_INTERNAL_URL || env.PUBLIC_URL || "").replace(/\/$/, ""),
 };
@@ -188,6 +189,7 @@ export class Autoscaler {
   }
 
   async tick(): Promise<TickState> {
+    await freshSettings(); // caps and launch tuning come from global settings
     const st: TickState = { at: new Date().toISOString(), enabled: AUTOSCALE.enabled(), leader: false, holder: this.holder };
     if (!st.enabled) { this.last = { ...st, note: "OCTILLION_AUTOSCALE=off" }; return this.last; }
     if (!(await this.acquireLease())) { this.last = { ...st, note: "not the leader" }; return this.last; }
@@ -391,7 +393,8 @@ export class Autoscaler {
     // A per-job orchestrator gets a token bound to its job, never the fleet token (docs/security.md, phase 0b).
     const workerToken = job ? await mintJobWorkerToken(job.id, id) : env.OCTILLION_WORKER_TOKEN ?? "";
     const tuning: Record<string, string> = { OCTILLION_ORCH_IDLE_MINUTES: String(AUTOSCALE.idleMinutes()) };
-    for (const k of lib.TUNING_VARS) if (env[k]) tuning[k] = env[k]!;
+    // Global settings (/admin/compute) win over this server's env: e.g. BOAT_SANDBOX_SIZE, RESEARCH_MAX_COST_USD, ORCHESTRATOR_MODEL.
+    for (const k of lib.TUNING_VARS) { const v = setting(k) ?? env[k]; if (v != null && v !== "") tuning[k] = String(v); }
     if (job) tuning.ORCHESTRATOR_JOB = job.id;
     tuning.OCTILLION_BOAT_NAMESPACE = lib.BOAT_NAMESPACE; // its worker sandboxes carry this deployment's prefix
     const p = lib.launchOrchestrator(

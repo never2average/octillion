@@ -966,6 +966,131 @@ try {
     assert.equal((await adm("POST", "/requests/999999/research")).status, 404);
     console.log("✓ access request inputs and background research");
   }
+
+  // ---------- shared libraries (/admin/personas, /admin/tasks): edits stick, the vault sync leaves them alone ----------
+  {
+    const { syncVault } = await import("../src/vault.js");
+    const pl = await json(adm("GET", "/personas"));
+    const agency = pl.personas.find((p: any) => p.slug === "example-agency-frontend");
+    assert.ok(agency && agency.source === "vault" && !agency.edited_at, "vault personas are listed");
+    assert.ok(pl.personas.every((p: any) => p.source === "vault" || p.source === "admin"), "only shared personas, never an org's private ones");
+    const ed = await json(adm("PATCH", "/personas/example-agency-frontend", { name: "Agency frontend lead (edited)", stack: ["React", "Next.js"], experience_years: 9, tone: "Brisk" }));
+    assert.ok(ed.name === "Agency frontend lead (edited)" && ed.attributes.stack.join() === "React,Next.js" && ed.attributes.experience_years === 9
+      && ed.attributes.tone === "Brisk" && ed.edited_at && ed.edited_by === "smoke", "persona edited and stamped");
+    assert.deepEqual(ed.attributes.role, agency.attributes.role, "attributes not sent are kept");
+    assert.equal((await adm("PATCH", "/personas/example-agency-frontend", { name: "" })).status, 400, "a persona needs a name");
+    assert.equal((await adm("PATCH", "/personas/nobody-here", { name: "x" })).status, 404);
+    const made = await json(adm("POST", "/personas", { name: `Smoke persona ${stamp}`, role: "SRE", stack: "Go, Terraform", instructions: "Answer briefly." }));
+    assert.ok(made.source === "admin" && made.active && made.attributes.stack.join() === "Go,Terraform", "admin-written persona is shared and active");
+    assert.equal((await json(adm("POST", "/personas/active", { slugs: ["example-agency-frontend"], active: false }))).updated, 1);
+    assert.ok(!(await call(A, "list_developer_profiles", {})).profiles.some((p: any) => p.slug === "example-agency-frontend"), "a deactivated persona is not offered");
+    assert.ok((await call(A, "list_developer_profiles", {})).profiles.some((p: any) => p.slug === made.slug), "an admin-written persona is offered");
+
+    const found = await json(adm("GET", "/tasks?q=rename%20script&limit=5"));
+    const rename = found.tasks.find((t: any) => t.slug === "example-rename-script");
+    assert.ok(rename && found.total >= 1 && found.languages.length > 0 && found.categories.length > 0, "tasks searched on the server, with facets");
+    const page = await json(adm("GET", "/tasks?limit=2&offset=2"));
+    assert.ok(page.tasks.length === 2 && page.total >= 7 && page.offset === 2, "tasks paged on the server");
+    assert.ok((await json(adm("GET", `/tasks?language=${encodeURIComponent(rename.language)}`))).tasks.every((t: any) => t.language === rename.language), "language filter");
+    const te = await json(adm("PATCH", `/tasks/${rename.id}`, { title: "Rename files in bulk (edited)", tags: ["scripts", "files"] }));
+    assert.ok(te.title === "Rename files in bulk (edited)" && te.tags.join() === "scripts,files" && te.prompt === rename.prompt && te.edited_at, "task edited");
+    assert.equal((await adm("PATCH", `/tasks/${rename.id}`, { repo_url: "ftp://example.com/x" })).status, 400, "repo must be an https link");
+    const nt = await json(adm("POST", "/tasks", { title: `Smoke task ${stamp}`, prompt: "Add a health check endpoint to this Go service.", language: "Go", category: "observability" }));
+    assert.ok(nt.source === "admin" && nt.active && nt.platform === "backend", "admin-written task, platform derived");
+    assert.equal((await json(adm("POST", "/tasks/active", { ids: [rename.id], active: false }))).updated, 1);
+    assert.ok((await json(adm("GET", `/tasks?active=false&q=${encodeURIComponent("rename files")}`))).tasks.some((t: any) => t.id === rename.id), "active filter");
+
+    // A vault row nobody edited is still refreshed from the vault; edited and admin-written rows are left as they are.
+    await db.query("UPDATE developer_profiles SET summary = 'drifted' WHERE slug = 'example-startup-backend'");
+    const r = await syncVault();
+    assert.ok(r.kept_profiles >= 1 && r.kept_tasks >= 1, `sync reports the rows it kept (${r.kept_profiles}, ${r.kept_tasks})`);
+    const prof = async (slug: string) => (await db.query<any>("SELECT name, summary, active, attributes FROM developer_profiles WHERE slug = $1", [slug]))[0];
+    assert.notEqual((await prof("example-startup-backend")).summary, "drifted", "unedited vault rows are still synced");
+    const kept = await prof("example-agency-frontend");
+    assert.ok(kept.name === "Agency frontend lead (edited)" && !kept.active && kept.attributes.tone === "Brisk", "sync did not overwrite or reactivate the edited persona");
+    assert.ok((await prof(made.slug))?.active, "sync never retires an admin-written persona");
+    const task = async (id: number) => (await db.query<any>("SELECT title, active FROM library_tasks WHERE id = $1", [id]))[0];
+    assert.ok((await task(rename.id)).title === "Rename files in bulk (edited)" && !(await task(rename.id)).active, "sync did not overwrite or reactivate the edited task");
+    assert.ok((await task(nt.id)).active, "sync never retires an admin-written task");
+    // Back to the vault's version for the rest of the run.
+    await db.query("UPDATE developer_profiles SET edited_at = NULL WHERE slug = 'example-agency-frontend'");
+    await db.query("UPDATE library_tasks SET edited_at = NULL WHERE id = $1", [rename.id]);
+    await db.query("DELETE FROM developer_profiles WHERE slug = $1", [made.slug]);
+    await db.query("DELETE FROM library_tasks WHERE id = $1", [nt.id]);
+    await syncVault();
+    assert.ok((await prof("example-agency-frontend")).active && (await task(rename.id)).title === rename.title, "clearing edited_at hands the row back to the vault");
+    console.log("✓ persona and task libraries: list, search, page, edit, deactivate; the vault sync keeps admin edits");
+  }
+
+  // ---------- global compute settings (/admin/compute): set here > environment > default ----------
+  {
+    const { config } = await import("../src/queries.js");
+    const { AUTOSCALE } = await import("../src/autoscaler.js");
+    const { refreshSettings } = await import("../src/settings.js");
+    const keys = ["OCTILLION_MAX_JOB_ORCHESTRATORS", "OCTILLION_MAX_SAMPLES", "OCTILLION_DEFAULT_SAMPLES", "BOAT_SANDBOX_SIZE", "ORCHESTRATOR_MODEL", "OCTILLION_JOB_POD_CAPACITY"];
+    const reset = () => adm("PUT", "/compute/settings", { values: Object.fromEntries(keys.map((k) => [k, null])) });
+    const c0 = await json(adm("GET", "/compute"));
+    const byKey = (c: any, k: string) => c.settings.find((x: any) => x.key === k);
+    assert.ok(c0.groups.length === 4 && c0.settings.length >= 11, "every setting listed, grouped");
+    process.env.OCTILLION_MAX_JOB_ORCHESTRATORS = "7";
+    assert.equal(AUTOSCALE.maxJobOrchestrators(), 7, "the environment applies when nothing is set here");
+    assert.equal(byKey(await json(adm("GET", "/compute")), "OCTILLION_MAX_JOB_ORCHESTRATORS").source, "env");
+    const c1 = await json(adm("PUT", "/compute/settings", { values: { OCTILLION_MAX_JOB_ORCHESTRATORS: 3, OCTILLION_MAX_SAMPLES: "33", OCTILLION_DEFAULT_SAMPLES: 4,
+      OCTILLION_JOB_POD_CAPACITY: 9, BOAT_SANDBOX_SIZE: "large", ORCHESTRATOR_MODEL: "gpt-smoke-1" } }));
+    assert.ok(byKey(c1, "OCTILLION_MAX_JOB_ORCHESTRATORS").source === "set" && byKey(c1, "OCTILLION_MAX_JOB_ORCHESTRATORS").updated_by === "smoke");
+    assert.equal(AUTOSCALE.maxJobOrchestrators(), 3, "a setting wins over the environment");
+    assert.equal(AUTOSCALE.jobPodCapacity(), 9);
+    assert.equal(config.maxSamples(), 33);
+    assert.equal(config.defaultSamples(), 4);
+    const brain = await (await worker("/orchestrator/credentials", { orchestrator_id: "smoke-orch" })).json();
+    assert.equal(brain.llm?.model, "gpt-smoke-1", "the broker hands orchestrators the model set here");
+    assert.equal((await adm("PUT", "/compute/settings", { values: { BOAT_SANDBOX_SIZE: "huge" } })).status, 400, "choices are checked");
+    assert.equal((await adm("PUT", "/compute/settings", { values: { OCTILLION_MAX_SAMPLES: 2.5 } })).status, 400, "whole numbers are checked");
+    assert.equal((await adm("PUT", "/compute/settings", { values: { NOT_A_SETTING: 1 } })).status, 400);
+    assert.equal(config.maxSamples(), 33, "a refused save changes nothing");
+    // Another replica's save reaches this one on its next refresh (every 30s, or at once here).
+    await db.query("UPDATE platform_settings SET value = '44' WHERE key = 'OCTILLION_MAX_SAMPLES'");
+    await refreshSettings();
+    assert.equal(config.maxSamples(), 44, "settings are read from Postgres, cached");
+    assert.ok((await reset()).ok);
+    assert.equal(AUTOSCALE.maxJobOrchestrators(), 7, "reset goes back to the environment");
+    delete process.env.OCTILLION_MAX_JOB_ORCHESTRATORS;
+    assert.equal(AUTOSCALE.maxJobOrchestrators(), 12, "and without it, to the default");
+    assert.equal(config.maxSamples(), Number(process.env.OCTILLION_MAX_SAMPLES ?? 20));
+    assert.equal((await (await worker("/orchestrator/credentials", { orchestrator_id: "smoke-orch" })).json()).llm?.model, "gpt-6.1-sol");
+
+    // The default population's agent mix: weights and on/off, then put back.
+    const running = c0.population.agents.find((a: any) => a.status === "On");
+    assert.ok(running && c0.population.agents.length >= 3, "the mix lists every registry agent");
+    const mix1 = await json(adm("PUT", `/compute/agents/${encodeURIComponent(running.id)}`, { market_share: running.weight * 2 }));
+    assert.ok(Math.abs(mix1.population.agents.find((a: any) => a.id === running.id).weight - running.weight * 2) < 1e-6, "weight changed");
+    const mix2 = await json(adm("PUT", `/compute/agents/${encodeURIComponent(running.id)}`, { paused: true }));
+    assert.ok(mix2.population.agents.find((a: any) => a.id === running.id).status === "Off", "agent turned off");
+    assert.ok(!(await call(A, "list_agents")).agents.some((a: any) => a.id === running.id && a.enabled), "a turned-off agent is not sampled");
+    await json(adm("PUT", `/compute/agents/${encodeURIComponent(running.id)}`, { market_share: running.weight, paused: false }));
+    assert.equal((await adm("PUT", "/compute/agents/nope%2Fx", { paused: false })).status, 404);
+    // Model keys: a secret goes in once; the page's list (and the add response) only ever carry its hint.
+    const PAGE_KEY = `sk-ant-smoke-page-${stamp}-SECRETTAIL`;
+    const addedKey = await json(adm("POST", "/compute/keys", { provider: "anthropic", label: "smoke-page", secret: PAGE_KEY }));
+    assert.ok(addedKey.id && addedKey.hint && !JSON.stringify(addedKey).includes(PAGE_KEY), "the add response has the hint, not the key");
+    const keysView = await (await adm("GET", "/compute/keys")).text();
+    assert.ok(!keysView.includes(PAGE_KEY) && !keysView.includes("ciphertext"), "the key list never carries a secret");
+    const kj = JSON.parse(keysView);
+    const listedKey = kj.credentials.find((c: any) => c.id === addedKey.id);
+    assert.ok(listedKey && listedKey.hint === addedKey.hint && listedKey.enabled, "the new key is listed by its hint");
+    assert.ok(kj.providers.find((p: any) => p.slug === "anthropic").keys >= 1, "providers count their keys");
+    assert.equal((await adm("POST", "/compute/keys", { provider: "cursor", secret: "cursor-secret-123456" })).status, 400, "direct-mode keys still refused");
+    assert.equal((await adm("POST", "/compute/keys", { provider: "anthropic", secret: "" })).status, 400);
+    assert.equal((await adm("POST", `/compute/keys/${addedKey.id}/enabled`, { enabled: false })).status, 204);
+    assert.equal((await json(adm("GET", "/compute/keys"))).credentials.find((c: any) => c.id === addedKey.id).enabled, false, "key disabled");
+    assert.equal((await adm("POST", "/compute/providers/dashscope/enabled", { enabled: false })).status, 204);
+    assert.equal((await json(adm("GET", "/compute/keys"))).providers.find((p: any) => p.slug === "dashscope").enabled, false, "provider disabled");
+    assert.equal((await adm("POST", "/compute/providers/dashscope/enabled", { enabled: true })).status, 204);
+    assert.equal((await adm("POST", "/compute/providers/no_such_provider/enabled", { enabled: true })).status, 404, "never creates a provider");
+    assert.equal((await adm("DELETE", `/compute/keys/${addedKey.id}`)).status, 204);
+    assert.ok(!(await json(adm("GET", "/compute/keys"))).credentials.some((c: any) => c.id === addedKey.id), "key deleted");
+    console.log("✓ compute settings: set here > env > default, cached, reset; agent mix weights and on/off; model keys hint-only");
+  }
   const request = (await json(adm("GET", "/requests?status=pending"))).requests.find((q: any) => q.email === `smoke+${stamp}@example.com`);
   assert.ok(request, "new access request is pending");
   const ap = await json(adm("POST", `/requests/${request.id}/approve`, { name: `Smoke Admin ${stamp}`, slug: `smoke-admin-${stamp}` }));

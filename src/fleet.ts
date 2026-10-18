@@ -1,4 +1,5 @@
 import { getDb } from "./db.js";
+import { settingNumber } from "./settings.js";
 import { apportion, findAgent, scheduledAgents, variantsOf } from "./agents.js";
 import { codeHash } from "../orchestrator/deploy/boat-lib.js";
 
@@ -23,7 +24,7 @@ import { getPopulation } from "./populations.js";
 
 export const PODS_PER_ORCHESTRATOR = () => Math.max(1, Number(process.env.OCTILLION_PODS_PER_ORCHESTRATOR ?? 20));
 /** Worker sandboxes one per-job orchestrator may run at once (one simulation's sessions). */
-export const JOB_POD_CAPACITY = () => Math.max(1, Math.min(50, Number(process.env.OCTILLION_JOB_POD_CAPACITY ?? 40)));
+export const JOB_POD_CAPACITY = () => Math.max(1, Math.min(50, settingNumber("OCTILLION_JOB_POD_CAPACITY"))); // global setting (/admin/compute), else env
 export const JOB_ID = /^(sim|rsh)_[A-Za-z0-9_-]{1,40}$/;
 const STALE_SECONDS = () => Number(process.env.OCTILLION_FLEET_STALE_SECONDS ?? 90);
 

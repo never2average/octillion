@@ -668,9 +668,15 @@ CREATE INDEX IF NOT EXISTS library_tasks_platform_idx ON library_tasks (platform
 -- Tenant safety (docs/security.md): a developer profile is shared (org_id NULL) exactly when it comes from the vault.
 -- A private persona inserted without its org fails instead of silently becoming visible to every organization.
 ALTER TABLE developer_profiles ALTER COLUMN source DROP DEFAULT;
+-- Shared rows come from the vault or were written by Octillion staff on /admin/personas ('admin'); both are public.
+-- Re-created when an older definition (vault only) is in place.
 DO $$ BEGIN
-  ALTER TABLE developer_profiles ADD CONSTRAINT developer_profiles_owner_matches_source CHECK ((org_id IS NULL) = (source = 'vault'));
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'developer_profiles_owner_matches_source'
+                   AND pg_get_constraintdef(oid) LIKE '%admin%') THEN
+    ALTER TABLE developer_profiles DROP CONSTRAINT IF EXISTS developer_profiles_owner_matches_source;
+    ALTER TABLE developer_profiles ADD CONSTRAINT developer_profiles_owner_matches_source CHECK ((org_id IS NULL) = (source IN ('vault', 'admin')));
+  END IF;
+END $$;
 
 -- Per-job worker tokens (src/workerauth.ts): an autoscaled per-job orchestrator gets a token bound to its one job and
 -- organization instead of the fleet-wide OCTILLION_WORKER_TOKEN. Hash only; revoked when its sandbox is deleted.
@@ -780,4 +786,21 @@ ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS untracked JSONB;
 CREATE TABLE IF NOT EXISTS journey_seed (
   id         TEXT PRIMARY KEY,
   seeded_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- The persona and task libraries are edited on /admin (src/library.ts). An edited or admin-written row is the admin's:
+-- the vault sync (src/vault.ts) leaves rows with edited_at set alone, and never retires a source = 'admin' row.
+ALTER TABLE developer_profiles ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ;
+ALTER TABLE developer_profiles ADD COLUMN IF NOT EXISTS edited_by TEXT;
+ALTER TABLE library_tasks ADD COLUMN IF NOT EXISTS source    TEXT NOT NULL DEFAULT 'vault';  -- vault | admin
+ALTER TABLE library_tasks ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ;
+ALTER TABLE library_tasks ADD COLUMN IF NOT EXISTS edited_by TEXT;
+
+-- Global settings edited on /admin/compute (src/settings.ts): models, run sizes, capacity, research limits. A row here
+-- wins over the environment variable of the same name, which wins over the code default. No row: not set here.
+CREATE TABLE IF NOT EXISTS platform_settings (
+  key         TEXT PRIMARY KEY,               -- the environment variable it overrides, e.g. OCTILLION_MAX_SAMPLES
+  value       JSONB NOT NULL,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_by  TEXT
 );

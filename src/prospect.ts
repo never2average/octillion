@@ -4,6 +4,7 @@ import { randomId } from "./auth.js";
 import { kickAutoscaler } from "./autoscaler.js";
 import { keepAlive } from "./telemetry.js";
 import { getDb } from "./db.js";
+import { settingNumber, settingText } from "./settings.js";
 import { orchestratorBrain } from "./gateway.js";
 import { getProvider, useCredential, VERTEX_LABEL } from "./keyvault.js";
 import { toVertex, vertexAccessToken } from "./vertex.js";
@@ -167,7 +168,7 @@ async function claudeBrief(evidence: unknown): Promise<(Partial<ProspectBrief> &
   throw new Error(errors.join("; "));
 }
 
-const cloudflareModel = () => process.env.CLOUDFLARE_AI_MODEL ?? "@cf/zai-org/glm-5.3-flash";
+const cloudflareModel = () => settingText("CLOUDFLARE_AI_MODEL"); // global setting (/admin/compute), else env
 
 /** Cloudflare Workers AI (OpenAI-compatible endpoint), from CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN. */
 async function cloudflareText(evidence: unknown) {
@@ -263,7 +264,7 @@ const kick = () => { if (process.env.VERCEL) keepAlive(kickAutoscaler().catch((e
 /** Queue a deep research job for a request, unless one is already queued or running. Returns its id, or null. */
 /** Requests from the landing form queue at most this many deep jobs a day (each starts a boat sandbox); an admin's
  *  Research button is never capped. */
-const DAILY_LIMIT = () => Number(process.env.PROSPECT_DAILY_LIMIT ?? 20);
+const DAILY_LIMIT = () => settingNumber("PROSPECT_DAILY_LIMIT"); // global setting (/admin/compute), else env
 
 export async function queueDeepResearch(requestId: number, opts: { manual?: boolean } = {}): Promise<string | null> {
   if (!harnessOn()) return null;

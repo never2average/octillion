@@ -32,6 +32,8 @@ import { usageReport } from "./usage.js";
 import * as kv from "./keyvault.js";
 import * as populations from "./populations.js";
 import * as onboarding from "./admin.js";
+import * as library from "./library.js";
+import { freshSettings, SettingError } from "./settings.js";
 
 const PORT = Number(process.env.PORT ?? 3333);
 const HOST = process.env.HOST ?? "127.0.0.1";
@@ -64,6 +66,8 @@ export function createApp() {
     setHeaders: (res, file) => { if (file.includes(`${path.sep}_next${path.sep}static${path.sep}`)) res.setHeader("Cache-Control", "public, max-age=31536000, immutable"); },
   }));
   app.use(express.static(PUBLIC_DIR, { extensions: ["html"], maxAge: "5m" }));
+  // Global settings (src/settings.ts) are read synchronously from a cache: load it, and keep it at most 30s old.
+  app.use((_req, _res, next) => void freshSettings().then(() => next()));
 
   // Daily backstop for the event-driven autoscaler on Vercel (vercel.json crons; Vercel sends CRON_SECRET as a bearer).
   app.get("/api/cron/autoscale", async (req, res) => {
@@ -421,9 +425,28 @@ export function createApp() {
   ob.get("/journeys", async (_req, res) => void res.json(await journeys.adminView()));
   ob.post("/journeys/nudges", async (req, res) => void res.status(201).json(await journeys.sendFromAdmin(adminActor(req, res), req.body ?? {})));
   ob.delete("/journeys/nudges/:id", async (req, res) => { await journeys.adminDelete(adminActor(req, res), Number(req.params.id)); res.status(204).end(); });
+  // Shared libraries (src/library.ts): personas and the task library. Edits stamp edited_at, which the vault sync respects.
+  ob.get("/personas", async (_req, res) => void res.json(await library.listPersonas()));
+  ob.post("/personas", async (req, res) => void res.status(201).json(await library.createPersona(adminActor(req, res), req.body ?? {})));
+  ob.post("/personas/active", async (req, res) => void res.json(await library.setPersonasActive(adminActor(req, res), req.body?.slugs, req.body?.active)));
+  ob.patch("/personas/:slug", async (req, res) => void res.json(await library.updatePersona(adminActor(req, res), slug(req), req.body ?? {})));
+  ob.get("/tasks", async (req, res) => void res.json(await library.listTasks(req.query)));
+  ob.post("/tasks", async (req, res) => void res.status(201).json(await library.createTask(adminActor(req, res), req.body ?? {})));
+  ob.post("/tasks/active", async (req, res) => void res.json(await library.setTasksActive(adminActor(req, res), req.body?.ids, req.body?.active)));
+  ob.patch("/tasks/:id", async (req, res) => void res.json(await library.updateTask(adminActor(req, res), Number(req.params.id), req.body ?? {})));
+  // Global compute settings (src/settings.ts) and the default population's agent mix.
+  ob.get("/compute", async (_req, res) => void res.json(await library.compute()));
+  ob.put("/compute/settings", async (req, res) => void res.json(await library.saveSettings(adminActor(req, res), req.body?.values)));
+  ob.put("/compute/agents/:agent", async (req, res) => void res.json(await library.setAgent(adminActor(req, res), decodeURIComponent(String(req.params.agent)), req.body ?? {})));
+  // Model keys on /admin/compute: the key vault (src/keyvault.ts). A secret is posted once; only its hint comes back.
+  ob.get("/compute/keys", async (_req, res) => void res.json(await library.modelKeys()));
+  ob.post("/compute/keys", async (req, res) => void res.status(201).json(await library.addModelKey(adminActor(req, res), req.body ?? {})));
+  ob.post("/compute/keys/:id/enabled", async (req, res) => done(res, await library.setModelKeyEnabled(adminActor(req, res), Number(req.params.id), req.body?.enabled)));
+  ob.delete("/compute/keys/:id", async (req, res) => done(res, await library.deleteModelKey(adminActor(req, res), Number(req.params.id))));
+  ob.post("/compute/providers/:slug/enabled", async (req, res) => done(res, await library.setProviderEnabled(adminActor(req, res), slug(req), req.body?.enabled)));
   // Clerk / Stripe failures are the admin's to see (a bad key, a rate limit), not a generic 500.
   ob.use((err: Error & { status?: number }, _req: Request, res: Response, next: NextFunction) => {
-    if (!(err instanceof onboarding.AdminError || err instanceof journeys.JourneyError || err instanceof playbooks.PlaybookError || err instanceof ClerkError || err instanceof StripeError)) return next(err);
+    if (!(err instanceof onboarding.AdminError || err instanceof journeys.JourneyError || err instanceof playbooks.PlaybookError || err instanceof SettingError || err instanceof ClerkError || err instanceof StripeError)) return next(err);
     res.status(err.status ?? 400).json({ error: err.message });
   });
   admin.use("/onboarding", ob);

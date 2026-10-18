@@ -10,7 +10,8 @@ import { getDb } from "./db.js";
  *   VAULT_URL (+ VAULT_TOKEN)  GET {VAULT_URL}/profiles and {VAULT_URL}/tasks, JSON array or {items|data: [...]}
  *   VAULT_DIR                  profiles.json / tasks.json (arrays) or .jsonl files in a directory
  * Records are upserted by slug (or external id); anything no longer in the vault is deactivated, never deleted,
- * so past sessions keep their profile.
+ * so past sessions keep their profile. Rows an admin edited on /admin (edited_at set) or wrote there (source 'admin')
+ * are the admin's: the sync never overwrites, reactivates or retires them (src/library.ts).
  */
 
 export interface VaultProfile {
@@ -61,21 +62,25 @@ export async function syncVault() {
   const db = await getDb();
   const bad = (what: string, i: number, field: string) => new Error(`Vault ${what} #${i + 1} is missing ${field}`);
   return db.transaction(async (tx) => {
+    let keptProfiles = 0, keptTasks = 0;
     const profileSlugs: string[] = [];
     for (const [i, p] of profiles.entries()) {
       if (!p?.name) throw bad("profile", i, "name");
       const { id, slug, name, summary, instructions, attributes, ...rest } = p;
       const s = slug ? slugify(slug) : slugify(String(id ?? name));
       profileSlugs.push(s);
-      await tx.query(
-        // Shared rows only: a vault slug that collides with an organization's private persona never overwrites it.
+      const wrote = await tx.query(
+        // Shared vault rows only: a vault slug that collides with an organization's private persona, or with a persona an
+        // admin edited or wrote, never overwrites it.
         `INSERT INTO developer_profiles (slug, external_id, name, summary, attributes, instructions, source, active, synced_at)
          VALUES ($1, $2, $3, $4, $5, $6, 'vault', true, now())
          ON CONFLICT (slug) DO UPDATE SET external_id = excluded.external_id, name = excluded.name, summary = excluded.summary,
            attributes = excluded.attributes, instructions = excluded.instructions, active = true, synced_at = now()
-         WHERE developer_profiles.org_id IS NULL`,
+         WHERE developer_profiles.org_id IS NULL AND developer_profiles.source = 'vault' AND developer_profiles.edited_at IS NULL
+         RETURNING 1`,
         [s, id == null ? null : String(id), name, summary ?? "", JSON.stringify({ ...rest, ...(attributes ?? {}) }), instructions ?? ""],
       );
+      if (!wrote.length) keptProfiles++;
     }
     const taskSlugs: string[] = [];
     for (const [i, t] of tasks.entries()) {
@@ -83,27 +88,31 @@ export async function syncVault() {
       const { id, slug, title, prompt, repo_url, language, category, tags, attributes, ...rest } = t;
       const s = slug ? slugify(slug) : slugify(String(id ?? title ?? prompt.slice(0, 48)));
       taskSlugs.push(s);
-      await tx.query(
+      const wrote = await tx.query(
         `INSERT INTO library_tasks (slug, external_id, title, prompt, repo_url, language, category, tags, attributes, platform, active, synced_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, now())
          ON CONFLICT (slug) DO UPDATE SET external_id = excluded.external_id, title = excluded.title, prompt = excluded.prompt,
            repo_url = excluded.repo_url, language = excluded.language, category = excluded.category, tags = excluded.tags,
-           attributes = excluded.attributes, platform = excluded.platform, active = true, synced_at = now()`,
+           attributes = excluded.attributes, platform = excluded.platform, active = true, synced_at = now()
+         WHERE library_tasks.source = 'vault' AND library_tasks.edited_at IS NULL
+         RETURNING 1`,
         [s, id == null ? null : String(id), title || prompt.slice(0, 80), prompt, repo_url ?? null, language ?? null,
          category ?? null, tags ?? [], JSON.stringify({ ...rest, ...(attributes ?? {}) }),
          // A vault task may state its platform; otherwise it is derived like every other task's.
          isPlatform(t.platform ?? attributes?.platform) ? (t.platform ?? attributes?.platform)
            : platformOf({ template: (attributes?.template ?? rest.template) as string | undefined, language, tags, prompt })],
       );
+      if (!wrote.length) keptTasks++;
     }
     const [{ n: retiredProfiles }] = await tx.query<{ n: number }>(
-      "WITH u AS (UPDATE developer_profiles SET active = false WHERE active AND source = 'vault' AND NOT (slug = ANY($1)) RETURNING 1) SELECT count(*) AS n FROM u",
+      "WITH u AS (UPDATE developer_profiles SET active = false WHERE active AND source = 'vault' AND edited_at IS NULL AND NOT (slug = ANY($1)) RETURNING 1) SELECT count(*) AS n FROM u",
       [profileSlugs],
     );
     const [{ n: retiredTasks }] = await tx.query<{ n: number }>(
-      "WITH u AS (UPDATE library_tasks SET active = false WHERE active AND NOT (slug = ANY($1)) RETURNING 1) SELECT count(*) AS n FROM u",
+      "WITH u AS (UPDATE library_tasks SET active = false WHERE active AND source = 'vault' AND edited_at IS NULL AND NOT (slug = ANY($1)) RETURNING 1) SELECT count(*) AS n FROM u",
       [taskSlugs],
     );
-    return { profiles: profiles.length, tasks: tasks.length, retired_profiles: Number(retiredProfiles), retired_tasks: Number(retiredTasks) };
+    return { profiles: profiles.length, tasks: tasks.length, retired_profiles: Number(retiredProfiles), retired_tasks: Number(retiredTasks),
+             kept_profiles: keptProfiles, kept_tasks: keptTasks };
   });
 }

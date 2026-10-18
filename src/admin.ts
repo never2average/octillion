@@ -26,7 +26,7 @@ export class AdminError extends Error {
 
 const publicUrl = () => (process.env.PUBLIC_URL ?? `http://127.0.0.1:${process.env.PORT ?? 3333}`).replace(/\/$/, "");
 /** One stderr line per admin change, and the same as a PostHog event (without emails) for the onboarding funnel. */
-function log(actor: string, action: string, slug: string | null, detail: Record<string, unknown> = {}) {
+export function log(actor: string, action: string, slug: string | null, detail: Record<string, unknown> = {}) {
   console.error(`admin ${actor} ${action}${slug ? ` org=${slug}` : ""} ${JSON.stringify(detail)}`);
   const { email: _email, ...safe } = detail;
   capture({ distinctId: `admin:${actor}`, orgSlug: slug }, `admin_${action.replace(/\./g, "_")}`, safe);
