@@ -17,7 +17,9 @@ import { costOf, recordModelUsage } from "./usage.js";
  */
 
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
-const PUBLIC_URL = () => (process.env.PUBLIC_URL ?? `http://127.0.0.1:${process.env.PORT ?? 3333}`).replace(/\/$/, "");
+/** Agent sandboxes and orchestrators call the gateway here: the API directly (OCTILLION_INTERNAL_URL) when the public
+ *  URL is a proxy in front of it (long model streams should not take the extra hop), else PUBLIC_URL. */
+const PUBLIC_URL = () => (process.env.OCTILLION_INTERNAL_URL || process.env.PUBLIC_URL || `http://127.0.0.1:${process.env.PORT ?? 3333}`).replace(/\/$/, "");
 const SESSION_TOKEN_MINUTES = () => Number(process.env.OCTILLION_SESSION_TOKEN_MINUTES ?? 90);
 const MAX_REQUESTS = () => Number(process.env.OCTILLION_GATEWAY_MAX_REQUESTS ?? 1000);
 // Per-session budget. Cost is the real limit: token counts include cache reads, so long agent sessions re-read

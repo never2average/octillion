@@ -52,7 +52,8 @@ export const AUTOSCALE = {
   perJob: () => (env.OCTILLION_ORCH_PER_JOB ?? "on").toLowerCase() !== "off",
   jobPodCapacity: () => JOB_POD_CAPACITY(),
   maxJobOrchestrators: () => Math.max(1, num(env.OCTILLION_MAX_JOB_ORCHESTRATORS, 12)),
-  publicUrl: () => (env.PUBLIC_URL ?? "").replace(/\/$/, ""),
+  // Where orchestrators reach the API: OCTILLION_INTERNAL_URL (the API itself) when the public URL is a proxy in front of it.
+  publicUrl: () => (env.OCTILLION_INTERNAL_URL || env.PUBLIC_URL || "").replace(/\/$/, ""),
 };
 
 export interface Demand {
