@@ -1,3 +1,4 @@
+import { Fragment } from 'react';
 import Link from 'next/link';
 import {
   IconArrowRight, IconBolt, IconCode, IconEyeOff, IconGitCompare, IconMessageChatbot, IconSearch, IconSparkles, IconTerminal2
@@ -127,43 +128,78 @@ function DecisionGraph() {
 
 const SESSION = [
   ['prompt', '> add background jobs to this app'],
+  ['agent', 'agent ▸ I need a durable job queue with retries.'],
   ['agent', 'agent ▸ I\'ll use BullMQ with Redis.'],
   ['cmd', 'agent ▸ $ npm install bullmq ioredis'],
-  ['ok', 'agent ▸ ✓ done. 3 files changed.'],
-  ['comment', '# was your product considered?']
+  ['ok', 'agent ▸ ✓ done. 3 files changed.']
 ] as const;
 
+/** What the agent actually weighed before writing that line: the shortlist nobody sees. */
+const WEIGHED = [
+  { name: 'BullMQ', note: 'picked and installed', tone: 'pick' },
+  { name: 'Inngest', note: 'mentioned, not used', tone: 'meh' },
+  { name: 'Trigger.dev', note: 'not considered', tone: 'out' },
+  { name: 'Your product', note: 'not considered', tone: 'you' }
+] as const;
+const WEIGHED_TONE = {
+  pick: 'border-primary/50 bg-primary/10 text-primary',
+  meh: 'text-foreground/80',
+  out: 'text-muted-foreground',
+  you: 'border-destructive/40 bg-destructive/10 text-destructive'
+};
+
 const REASONS = [
-  { icon: IconEyeOff, title: 'Invisible', body: 'No click, no referrer.' },
-  { icon: IconGitCompare, title: 'Per model', body: 'Each agent picks differently.' },
-  { icon: IconCode, title: 'Mid-task', body: 'Decided in code, not chat.' }
+  { icon: IconEyeOff, title: 'Invisible', body: 'No click, no referrer, no analytics event. You never see the decision being made.' },
+  { icon: IconGitCompare, title: 'Different per agent', body: 'Claude Code, Codex and Cursor each have their own favourites for the same task.' },
+  { icon: IconCode, title: 'Made mid-task', body: 'The choice lands inside a diff the developer accepts without a second look.' }
 ];
+
+// One line or row after another, 380 ms apart, when the visitor has not asked for reduced motion.
+const stagger = (i: number, base = 0) => ({ animationDelay: `${base + i * 380}ms` });
+const LINE_IN = 'motion-safe:animate-[line-in_.45s_ease-out_both]';
 
 export function WhyNow() {
   return (
     <Section id='why' eyebrow='Why now' title='Agents pick the stack now.'
       lead='Developers type a task into Claude Code, Codex or Cursor and accept the diff. The agent picks the database, queue or auth library, and nobody reads your landing page.'>
-      <div className='grid gap-10 lg:grid-cols-[1.2fr_1fr] lg:items-center'>
+      <div className='grid gap-6 lg:grid-cols-[1.25fr_1fr]'>
         <div className='overflow-hidden rounded-xl border bg-black/40'>
           <div className='flex items-center gap-1.5 border-b px-4 py-3'>
             <span className='size-2.5 rounded-full bg-white/15' /><span className='size-2.5 rounded-full bg-white/15' /><span className='size-2.5 rounded-full bg-white/15' />
-            <IconTerminal2 className='text-muted-foreground ml-2 size-4' />
+            <span className='text-muted-foreground ml-2 font-mono text-xs'>claude-code · ~/acme-app</span>
           </div>
           <pre className='overflow-x-auto p-5 font-mono text-[13px] leading-7 whitespace-pre-wrap'>
             {SESSION.map(([k, line], i) => (
-              <div key={i} className={cn(k === 'comment' && 'text-primary mt-2', k === 'prompt' && 'text-foreground', k === 'cmd' && 'text-amber-300', k === 'ok' && 'text-foreground/80', k === 'agent' && 'text-foreground/70')}>{line}</div>
+              <div key={i} style={stagger(i)} className={cn(LINE_IN, k === 'prompt' && 'text-foreground', k === 'cmd' && 'text-amber-300', k === 'ok' && 'text-foreground/80', k === 'agent' && 'text-foreground/70')}>{line}</div>
             ))}
+            <div style={stagger(SESSION.length)} className={cn(LINE_IN, 'text-primary mt-3')}># was your product even considered?</div>
           </pre>
         </div>
-        <ul className='grid gap-8 sm:grid-cols-3 lg:grid-cols-1'>
-          {REASONS.map((r) => (
-            <li key={r.title} className='flex items-center gap-4'>
-              <r.icon className='text-primary size-8 shrink-0' stroke={1.5} />
-              <div><p className='text-lg font-semibold'>{r.title}</p><p className='text-muted-foreground text-sm'>{r.body}</p></div>
-            </li>
-          ))}
-        </ul>
+
+        <div className='flex flex-col justify-center gap-3 rounded-xl border p-5'>
+          <p className='text-muted-foreground font-mono text-xs tracking-wide uppercase'>What it weighed</p>
+          <ul className='flex flex-col gap-2'>
+            {WEIGHED.map((w, i) => (
+              <li key={w.name} style={stagger(i, SESSION.length * 380 + 200)}
+                className={cn(LINE_IN, 'flex items-center justify-between gap-3 rounded-lg border px-3.5 py-3', WEIGHED_TONE[w.tone])}>
+                <span className='font-medium'>{w.name}</span>
+                <span className={cn('text-xs', w.tone === 'meh' || w.tone === 'out' ? 'text-muted-foreground' : '')}>{w.note}</span>
+              </li>
+            ))}
+          </ul>
+          <p className='text-muted-foreground text-sm'>Octillion shows you this shortlist for every agent, on tasks your buyers really give them.</p>
+        </div>
       </div>
+
+      <ul className='mt-12 grid gap-8 sm:grid-cols-3'>
+        {REASONS.map((r) => (
+          <li key={r.title} className='flex flex-col gap-3'>
+            <r.icon className='text-primary size-7' stroke={1.5} />
+            <p className='text-lg font-semibold'>{r.title}</p>
+            <p className='text-muted-foreground text-sm leading-relaxed'>{r.body}</p>
+          </li>
+        ))}
+      </ul>
     </Section>
   );
 }
@@ -171,30 +207,35 @@ export function WhyNow() {
 // ---------- what is APO ----------
 
 const ERAS = [
-  { icon: IconSearch, short: 'SEO', who: 'People', win: 'a click' },
-  { icon: IconMessageChatbot, short: 'GEO', who: 'Chatbots', win: 'a mention' },
-  { icon: IconTerminal2, short: 'APO', who: 'Coding agents', win: 'an install', current: true }
+  { icon: IconSearch, short: 'SEO', who: 'People', win: 'A click', measure: 'Rankings' },
+  { icon: IconMessageChatbot, short: 'GEO', who: 'Chatbots', win: 'A mention', measure: 'Citations' },
+  { icon: IconTerminal2, short: 'APO', who: 'Coding agents', win: 'An install', measure: 'Pick rate per agent', current: true }
 ];
+const ERA_ROWS: [string, 'who' | 'win' | 'measure'][] = [['Who decides', 'who'], ['You win', 'win'], ['You measure', 'measure']];
 
 export function WhatIsApo() {
   return (
     <Section id='apo' eyebrow='What is APO' title='Earn the agent’s pick, and prove it.'
       lead='Agentic Preference Optimization measures and improves how often coding agents choose your product in the middle of real work. Like SEO, you can’t buy the pick, but you can earn it.'>
-      <div className='grid gap-14 lg:grid-cols-2 lg:items-center'>
-        <ol className='flex flex-col gap-2'>
-          {ERAS.map((e, i) => (
-            <li key={e.short}>
-              <div className={cn('flex items-center gap-5 rounded-xl px-4 py-4', e.current && 'bg-primary/10')}>
-                <span className={cn('flex size-12 shrink-0 items-center justify-center rounded-full border', e.current ? 'border-primary text-primary' : 'text-muted-foreground')}>
-                  <e.icon className='size-6' stroke={1.5} />
-                </span>
-                <span className={cn('w-16 font-mono text-2xl font-semibold', e.current && 'text-primary')}>{e.short}</span>
-                <span className='text-muted-foreground min-w-0 text-sm'>{e.who} <IconArrowRight className='inline size-3.5' /> <span className='text-foreground'>{e.win}</span></span>
-              </div>
-              {i < ERAS.length - 1 && <div aria-hidden='true' className='bg-border ml-10 h-4 w-px' />}
-            </li>
+      <div className='grid gap-14 lg:grid-cols-[1.1fr_1fr] lg:items-center'>
+        <div className='grid grid-cols-[auto_1fr_1fr_1fr] text-sm'>
+          <span />
+          {ERAS.map((e) => (
+            <div key={e.short} className={cn('flex flex-col items-center gap-2 rounded-t-xl px-2 pt-4 pb-3', e.current && 'bg-primary/10 border-primary/40 border-x border-t')}>
+              <e.icon className={cn('size-6', e.current ? 'text-primary' : 'text-muted-foreground')} stroke={1.5} />
+              <span className={cn('font-mono text-xl font-semibold', e.current ? 'text-primary' : 'text-foreground/80')}>{e.short}</span>
+            </div>
           ))}
-        </ol>
+          {ERA_ROWS.map(([label, key], r) => (<Fragment key={key}>
+            <span className='text-muted-foreground border-t py-4 pr-4 text-xs leading-tight sm:text-sm'>{label}</span>
+            {ERAS.map((e) => (
+              <span key={`${key}-${e.short}`} className={cn('border-t px-2 py-4 text-center leading-tight',
+                e.current ? cn('bg-primary/10 border-x-primary/40 border-x font-medium', r === ERA_ROWS.length - 1 && 'border-b-primary/40 rounded-b-xl border-b') : 'text-muted-foreground')}>
+                {e[key]}
+              </span>
+            ))}
+          </Fragment>))}
+        </div>
         <ApoLoop />
       </div>
     </Section>
@@ -202,24 +243,25 @@ export function WhatIsApo() {
 }
 
 const LOOP = [
-  { x: 200, y: 60, label: 'Profile product' },
-  { x: 340, y: 200, label: 'Blind tasks' },
-  { x: 200, y: 340, label: 'Agents run' },
-  { x: 60, y: 200, label: 'Score & fix' }
+  { x: 210, y: 52, label: 'Profile product', sub: 'what you sell, who buys it' },
+  { x: 368, y: 210, label: 'Blind tasks', sub: 'real work, never naming you' },
+  { x: 210, y: 368, label: 'Agents run', sub: 'every major coding agent' },
+  { x: 52, y: 210, label: 'Score & fix', sub: 'docs, SDKs, examples' }
 ];
 
 function ApoLoop() {
   return (
-    <svg viewBox='-20 0 440 400' className='mx-auto h-auto w-full max-w-md' role='img' aria-label='The APO loop: profile your product, pose blind tasks, agents run them, score and fix, repeat.'>
-      <circle cx='200' cy='200' r='140' fill='none' className='stroke-border' strokeWidth='1.5' />
-      <circle cx='200' cy='200' r='140' fill='none' className={FLOW} strokeWidth='2' />
-      <text x='200' y='204' textAnchor='middle' className='fill-primary font-mono text-[34px] font-semibold'>APO</text>
-      <text x='200' y='230' textAnchor='middle' className='fill-muted-foreground font-mono text-[13px]'>repeat every release</text>
+    <svg viewBox='-60 -10 540 440' className='mx-auto h-auto w-full max-w-lg' role='img' aria-label='The APO loop: profile your product, pose blind tasks, agents run them, score and fix, repeat every release.'>
+      <circle cx='210' cy='210' r='158' fill='none' className='stroke-border' strokeWidth='1.5' />
+      <circle cx='210' cy='210' r='158' fill='none' className={FLOW} strokeWidth='2' />
+      <text x='210' y='212' textAnchor='middle' className='fill-primary font-mono text-[34px] font-semibold'>APO</text>
+      <text x='210' y='238' textAnchor='middle' className='fill-muted-foreground font-mono text-[12px]'>repeat every release</text>
       {LOOP.map((s, i) => (
         <g key={s.label}>
-          <rect x={s.x - 70} y={s.y - 22} width='140' height='44' rx='22' className='fill-background stroke-primary/60' />
-          <text x={s.x - 52} y={s.y + 5} className='fill-primary font-mono text-[13px]'>{`0${i + 1}`}</text>
-          <text x={s.x - 28} y={s.y + 5} className='fill-foreground text-[14px]'>{s.label}</text>
+          <rect x={s.x - 92} y={s.y - 30} width='184' height='60' rx='14' className='fill-background stroke-primary/60' />
+          <text x={s.x - 76} y={s.y - 4} className='fill-primary font-mono text-[12px]'>{`0${i + 1}`}</text>
+          <text x={s.x - 52} y={s.y - 4} className='fill-foreground text-[14px] font-medium'>{s.label}</text>
+          <text x={s.x - 76} y={s.y + 16} className='fill-muted-foreground text-[11.5px]'>{s.sub}</text>
         </g>
       ))}
     </svg>
