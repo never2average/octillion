@@ -169,7 +169,7 @@ export function AccessForm() {
               <div className='space-y-1.5'>
                 <Label htmlFor='f-message'>Anything else we should know?</Label>
                 <Textarea id='f-message' name='message' rows={3} maxLength={4000} value={v.message} onChange={set('message')}
-                  placeholder='Competitors you track, scenarios you care about, models your users run…' />
+                  placeholder='Scenarios you care about, models your users run, anything we should know…' />
               </div>
             </div>
           </details>
