@@ -88,7 +88,7 @@ export function Editor({ draft: initial, tools, onClose }: { draft: Draft; tools
 
   return (
     <Sheet open onOpenChange={(o) => !o && close()}>
-      <SheetContent side='right' showCloseButton={false} className='w-full gap-0 p-0 sm:max-w-3xl'>
+      <SheetContent side='right' showCloseButton={false} className='gap-0 p-0 data-[side=right]:w-full data-[side=right]:sm:max-w-3xl'>
         <div className='flex items-center gap-2 border-b px-6 py-3'>
           <SheetTitle className='text-muted-foreground text-sm font-normal'>{d.isNew ? 'New journey' : 'Edit journey'}</SheetTitle>
           <SheetDescription className='sr-only'>Stages a customer follows in their AI client; a stage is done when one of its tools runs, or when the customer marks it.</SheetDescription>
