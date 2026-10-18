@@ -50,7 +50,7 @@ const str = (v: number | null | undefined) => (v == null ? '' : String(v));
 function Block({ id, title, action, children }: { id?: string; title: string; action?: React.ReactNode; children: React.ReactNode }) {
   return (
     <section id={id} className='flex scroll-mt-20 flex-col gap-4'>
-      <div className='flex items-center justify-between gap-2'><h2 className='text-base leading-none font-semibold'>{title}</h2>{action}</div>
+      <div className='flex items-center justify-between gap-2'>{title ? <h2 className='text-base leading-none font-semibold'>{title}</h2> : <span />}{action}</div>
       {children}
     </section>
   );
@@ -350,7 +350,7 @@ function Rules({ l, reload }: { l: Limits; reload: () => void }) {
       .then(() => { toast.success('Budget rules saved'); reload(); }).catch(fail).finally(() => setBusy(false));
   };
   return (
-    <Block id='limits' title='Budget rules' action={
+    <Block id='limits' title='' action={
       <div className='flex items-center gap-3'>
         {dirty && <span className='text-muted-foreground text-xs leading-none'>Unsaved changes · <button type='button' className='hover:text-foreground underline-offset-4 hover:underline' onClick={() => setF(init())}>Reset</button></span>}
         <Button size='sm' onClick={save} disabled={busy || !dirty}>{busy ? 'Saving…' : 'Save rules'}</Button>
