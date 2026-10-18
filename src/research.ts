@@ -7,6 +7,7 @@ import { completeProspect, prospectIssues } from "./prospect.js";
 import { capture, orgEvent } from "./telemetry.js";
 import { randomId, type Org } from "./auth.js";
 import { NO_PLAN, WORKSPACE_TEMPLATES, config, getProduct, resolveProduct, runSimulation, saveProduct, browseTaskLibrary } from "./queries.js";
+import { sessionsLimit } from "./limits.js";
 import { orgBudget } from "./billing.js";
 import { PLATFORMS, isPlatform, platformOf } from "./platform.js";
 import type { Tool } from "./scoring.js";
@@ -584,18 +585,25 @@ export async function completeResearch(id: string, body: { status?: string; erro
       [id, JSON.stringify(r)]);
   });
 
-  // Launch the representative run unless the customer opted out; fit it under the per-run session cap.
+  // Launch the representative run unless the customer opted out; fit it under the per-run session cap (the server's,
+  // or the account's own Budget rules limit if lower), so a low limit makes the run smaller instead of failing it.
   let simulation_id: string | null = null;
   let run_error: string | null = null;
   if (job.run) {
-    const cap = config.maxSessionsPerRun();
-    const n = r.scenarios.length;
+    const cap = await sessionsLimit(org.orgId);
+    // More tasks than the cap allows sessions: run the first `cap` of them (the rest stay ready for a later run).
+    const scenario_ids = r.scenarios.length > cap
+      ? (await db.query<{ id: number }>("/* tenant: product of the research job (job checked against the job token in http.ts) */ SELECT id FROM scenarios WHERE product_id = $1 AND active ORDER BY id LIMIT $2",
+          [job.product_id, cap])).map((x) => Number(x.id))
+      : undefined;
+    const n = Math.max(1, scenario_ids?.length ?? r.scenarios.length);
     let profiles = personaSlugs;
     if (n * profiles.length > cap) profiles = profiles.slice(0, Math.max(1, Math.floor(cap / n)));
-    const samples = job.run.samples ?? Math.max(1, Math.min(config.defaultSamples(), Math.floor(cap / (n * profiles.length))));
+    const fit = Math.max(1, Math.floor(cap / (n * Math.max(1, profiles.length))));
+    const samples = Math.min(job.run.samples ?? config.defaultSamples(), fit);
     try {
       // `samples` is the first batch; unless the customer fixed the size, each task then samples adaptively up to the cap.
-      const sim = await runSimulation(org, { product: prod.slug, profiles, samples, population: job.run.population ?? undefined,
+      const sim = await runSimulation(org, { product: prod.slug, profiles, samples, population: job.run.population ?? undefined, ...(scenario_ids ? { scenario_ids } : {}),
                                              ...(job.run.samples == null ? { max_samples: config.maxSamples() } : {}),
                                              name: `Onboarding: ${p.name}` });
       simulation_id = sim.simulation.id;

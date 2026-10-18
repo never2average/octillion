@@ -402,20 +402,40 @@ export function appRouter() {
   // Usage limits (src/limits.ts): admins split the budget across teams and people, roll out running, cap throughput.
   // Everyone sees their own allowance; only admins see and change everyone's.
   api.get("/limits", async (_req, res) => {
-    const s = S(res), o = await limits.overview({ orgId: s.org, slug: s.slug });
-    if (s.role === "admin") return void res.json({ ...o, can_manage: true, me: s.user });
-    res.json({ policy: { mode: o.policy.mode, max_concurrent_runs: o.policy.max_concurrent_runs, max_sessions_per_run: o.policy.max_sessions_per_run },
-               budget_usd: o.budget_usd, clerk: o.clerk, can_manage: false, me: s.user,
-               members: o.members.filter((m) => m.user_id === s.user), teams: o.teams.filter((t) => o.members.some((m) => m.user_id === s.user && m.team_id === t.id)) });
+    const s = S(res), org = { orgId: s.org, slug: s.slug };
+    if (s.role === "admin") {
+      // `version` goes back as If-Match on PUT /limits/plan, so a save can't overwrite someone else's change unseen. It is
+      // in the body, not an ETag: spend changes under the same version, and a 304 would show stale figures.
+      const [o, last_change] = await Promise.all([limits.page(org), limits.lastChange(org)]);
+      return void res.json({ ...o, last_change, can_manage: true, me: s.user });
+    }
+    // A member: their own row and team, and "Your budget" (what is left, the budget they draw on, the rules in plain words).
+    res.json(await limits.memberPage(org, s.user));
   });
+  // Every change below also appends a plain-sentence entry to the account's history (GET /limits/history).
   const limitsAdmin = (res: Response) => adminOnly(res);
-  api.put("/limits/policy", async (req, res) => { limitsAdmin(res); await limits.setPolicy(S(res).org, actor(res), req.body ?? {}); res.status(204).end(); });
-  api.post("/limits/teams", async (req, res) => { limitsAdmin(res); res.status(201).json(await limits.saveTeam(S(res).org, { ...req.body, id: undefined })); });
-  api.put("/limits/teams/:id", async (req, res) => { limitsAdmin(res); res.json(await limits.saveTeam(S(res).org, { ...req.body, id: Number(req.params.id) })); });
-  api.delete("/limits/teams/:id", async (req, res) => { limitsAdmin(res); await limits.deleteTeam(S(res).org, Number(req.params.id)); res.status(204).end(); });
+  const by = (res: Response): limits.Actor => ({ label: actor(res), user: S(res).user });
+  api.get("/limits/history", async (req, res) => {
+    limitsAdmin(res);
+    const before = req.query.before == null || req.query.before === "" ? undefined : Number(req.query.before);
+    if (before !== undefined && !(Number.isInteger(before) && before > 0)) throw new AppError("before must be the id of a history entry");
+    res.json(await limits.history({ orgId: S(res).org, slug: S(res).slug }, before));
+  });
+  // The whole tab at once: preview a draft (no writes), then save it as one plan (one transaction, one history entry).
+  api.post("/limits/preview", async (req, res) => { limitsAdmin(res); res.json(await limits.preview({ orgId: S(res).org, slug: S(res).slug }, req.body ?? {})); });
+  api.put("/limits/plan", async (req, res) => {
+    limitsAdmin(res);
+    const version = await limits.plan({ orgId: S(res).org, slug: S(res).slug }, by(res), req.body ?? {}, req.get("if-match"));
+    res.setHeader("ETag", `"${version}"`);
+    res.status(204).end();
+  });
+  api.put("/limits/policy", async (req, res) => { limitsAdmin(res); await limits.setPolicy(S(res).org, by(res), req.body ?? {}); res.status(204).end(); });
+  api.post("/limits/teams", async (req, res) => { limitsAdmin(res); res.status(201).json(await limits.saveTeam(S(res).org, by(res), { ...req.body, id: undefined })); });
+  api.put("/limits/teams/:id", async (req, res) => { limitsAdmin(res); res.json(await limits.saveTeam(S(res).org, by(res), { ...req.body, id: Number(req.params.id) })); });
+  api.delete("/limits/teams/:id", async (req, res) => { limitsAdmin(res); await limits.deleteTeam(S(res).org, by(res), Number(req.params.id)); res.status(204).end(); });
   api.put("/limits/members/:userId", async (req, res) => {
     limitsAdmin(res);
-    await limits.setMember({ orgId: S(res).org, slug: S(res).slug }, String(req.params.userId), req.body ?? {});
+    await limits.setMember({ orgId: S(res).org, slug: S(res).slug }, by(res), String(req.params.userId), req.body ?? {});
     res.status(204).end();
   });
 
@@ -526,7 +546,8 @@ export function appRouter() {
   api.post("/billing/checkout", async (req, res) => { adminOnly(res); res.json(await admin.checkoutLink(actor(res), S(res).slug, req.body?.price_id, `${publicUrl()}/app#billing`, { requireAllowed: true })); });
   api.use((err: Error & { status?: number }, _req: Request, res: Response, next: NextFunction) => {
     if (!(err instanceof AppError || err instanceof PlaybookError || err instanceof context.ContextError || err instanceof limits.LimitError || err instanceof journeys.JourneyError || err instanceof admin.AdminError || err instanceof clerk.ClerkError || err instanceof billing.StripeError)) return next(err);
-    res.status(err.status ?? 400).json({ error: err.message });
+    // A Budget rules refusal also says which rule (code), the limit and what's left, who set it and the admins to ask.
+    res.status(err.status ?? 400).json({ error: err.message, ...(err instanceof limits.LimitError ? err.info : {}) });
   });
   r.use("/api/app", api);
   return r;

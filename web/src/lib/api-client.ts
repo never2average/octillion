@@ -26,8 +26,8 @@ async function request<T>(url: string, method: string, body?: unknown, headers: 
 export const adminApi = <T = any>(method: string, path: string, body?: unknown) =>
   request<T>(`/api/admin/onboarding${path}`, method, body, method === 'GET' ? {} : { 'X-Octillion-Admin': '1' });
 
-/** /api/app/* (the signed-in person's active account). */
-export const appApi = <T = any>(method: string, path: string, body?: unknown) => request<T>(`/api/app${path}`, method, body);
+/** /api/app/* (the signed-in person's active account). `headers`: say, If-Match on a save that checks the version. */
+export const appApi = <T = any>(method: string, path: string, body?: unknown, headers?: Record<string, string>) => request<T>(`/api/app${path}`, method, body, headers);
 
 /** Back-compat for template code that used apiClient('/x'). */
 export async function apiClient<T>(endpoint: string, options?: RequestInit): Promise<T> {
