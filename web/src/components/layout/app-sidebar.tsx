@@ -144,9 +144,10 @@ export default function AppSidebar() {
           {canSwitch && (
             <SidebarMenuItem>
               <SidebarMenuButton
+                size='sm'
                 tooltip={area === 'admin' ? 'Customer portal' : 'Platform admin'}
                 render={<Link href={area === 'admin' ? '/app' : '/admin'} />}
-                className='border-primary/40 bg-primary/10 text-primary hover:bg-primary/20 hover:text-primary rounded-full border shadow-sm'
+                className='border-primary/40 bg-primary/10 text-primary hover:bg-primary/20 hover:text-primary h-6 w-fit gap-1.5 rounded-full border px-2.5 text-xs [&_svg]:size-3.5 group-data-[collapsible=icon]:w-8'
               >
                 {area === 'admin' ? <Icons.arrowRight /> : <Icons.shield />}
                 <span className='font-medium'>{area === 'admin' ? 'Customer portal' : 'Platform admin'}</span>
@@ -154,8 +155,8 @@ export default function AppSidebar() {
             </SidebarMenuItem>
           )}
           <SidebarMenuItem className='group/me'>
-            <SidebarMenuButton size='lg' tooltip='Profile' isActive={pathname === `${base}/profile`} render={<Link href={`${base}/profile`} aria-label='Your profile' />}>
-              {user && <UserAvatarProfile className='h-8 w-8 rounded-lg' showInfo user={user} />}
+            <SidebarMenuButton tooltip='Profile' className='h-10' isActive={pathname === `${base}/profile`} render={<Link href={`${base}/profile`} aria-label='Your profile' />}>
+              {user && <UserAvatarProfile className='size-7 rounded-lg' showInfo compact user={user} />}
             </SidebarMenuButton>
             <button
               type='button'

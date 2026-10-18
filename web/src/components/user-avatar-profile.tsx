@@ -10,7 +10,8 @@ interface UserAvatarProfileProps {
   } | null;
 }
 
-export function UserAvatarProfile({ className, showInfo = false, user }: UserAvatarProfileProps) {
+/** `compact`: smaller name and email, for the sidebar footer. */
+export function UserAvatarProfile({ className, showInfo = false, compact = false, user }: UserAvatarProfileProps & { compact?: boolean }) {
   return (
     <div className='flex items-center gap-2'>
       <Avatar className={className}>
@@ -21,9 +22,9 @@ export function UserAvatarProfile({ className, showInfo = false, user }: UserAva
       </Avatar>
 
       {showInfo && (
-        <div className='grid flex-1 text-left text-sm leading-tight'>
+        <div className={`grid flex-1 text-left leading-tight ${compact ? 'text-xs' : 'text-sm'}`}>
           <span className='truncate font-semibold'>{user?.fullName || ''}</span>
-          <span className='truncate text-xs'>{user?.emailAddresses[0].emailAddress || ''}</span>
+          <span className={`text-muted-foreground truncate ${compact ? 'text-[0.6875rem]' : 'text-xs'}`}>{user?.emailAddresses[0].emailAddress || ''}</span>
         </div>
       )}
     </div>
