@@ -180,15 +180,24 @@ export function allocate({ policy, teams, members, usage, cap, account_spent_usd
       cap_usd: p.cap_usd, adjust_usd: p.adjust_usd, max_concurrent_runs: p.max_concurrent_runs, effective_max_concurrent, concurrent_source,
       limit_usd: limit, limit_source, ...p.u, left_usd: blocked ? 0 : left, blocked, limited_by };
   });
+  // Per pot, for the page's "Who gets what": what each person in it can spend before own limits and adjustments (null:
+  // shared freely), how many can launch, what is running now, and whether the pot is what limits them (90% or more).
+  const potFigures = (pot: number | null, budget: number, spent: number) => {
+    const inPot = out.filter((x) => x.pot === pot);
+    const each_usd = zero ? 0 : policy.mode === "pool" ? null : policy.mode === "custom" ? policy.default_cap_usd : cents(shareOf(pot));
+    const limited_by: LimitCode | null = (pot != null || budgeted.size) && spent >= 0.9 * budget && !(budget === 0 && !inPot.length) ? (pot == null ? "rest_pot" : "team_budget") : null;
+    return { each_usd, launchers: inPot.filter((x) => x.can_run).length, in_flight_usd: cents(inPot.reduce((s, x) => s + x.in_flight_usd, 0)), limited_by };
+  };
   const teamsOut = teams.map((t) => {
     const ms = out.filter((x) => x.team_id === t.id), spent = ms.reduce((s, x) => s + x.spent, 0);
-    return { ...t, members: ms.length, spent, left_usd: t.budget_usd == null ? null : leftOf(t.budget_usd, spent) };
+    return { ...t, members: ms.length, spent, left_usd: t.budget_usd == null ? null : leftOf(t.budget_usd, spent),
+      ...(t.budget_usd == null ? { each_usd: null, launchers: 0, in_flight_usd: 0, limited_by: null } : potFigures(t.id, t.budget_usd, spent)) };
   });
   const restSpent = potSpent(null);
   return {
     account, buffer_usd, team_budgets_usd, set_aside_usd: cents(buffer_usd + team_budgets_usd),
     over_by_usd: Math.max(0, cents(buffer_usd + team_budgets_usd - cap)),
-    rest: { budget_usd: rest_usd, members: out.filter((x) => x.pot == null).length, spent: restSpent, left_usd: leftOf(rest_usd, restSpent) },
+    rest: { budget_usd: rest_usd, members: out.filter((x) => x.pot == null).length, spent: restSpent, left_usd: leftOf(rest_usd, restSpent), ...potFigures(null, rest_usd, restSpent) },
     teams: teamsOut, members: out,
   };
 }

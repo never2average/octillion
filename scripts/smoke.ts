@@ -1253,6 +1253,18 @@ try {
     assert.ok(of(r, "a").can_run && of(r, "a").own_can_run === true && !of(r, "b").can_run && of(r, "b").own_can_run === null && of(r, "b").blocked === "launch_access");
     r = allocate({ ...base, members: [{ user_id: "a", team_id: 99 }] });
     assert.ok(of(r, "a").team_id === null && of(r, "a").pot === null, "a deleted team is no team");
+    // Per pot, for "Who gets what": each person's amount before own limits, launchers, running now, and the pot limiting.
+    r = allocate({ ...base, usage: new Map([["a", { spent: 185, in_flight_usd: 5, tokens_in: 0, tokens_out: 0, running: 1 }]]) });
+    assert.ok(r.teams[0]!.each_usd === 100 && r.teams[0]!.launchers === 2 && r.teams[0]!.in_flight_usd === 5 && r.teams[0]!.limited_by === "team_budget", JSON.stringify(r.teams[0]));
+    assert.ok(r.teams[1]!.each_usd === null && r.rest.each_usd === 350 && r.rest.launchers === 2 && r.rest.limited_by === null, JSON.stringify(r.rest));
+    r = allocate({ ...base, policy: pol({ mode: "custom" }) });
+    assert.ok(r.rest.each_usd === 40 && Number(r.teams[0]!.each_usd) === 40, "custom: the set amount");
+    r = allocate({ ...base, policy: pol({ mode: "pool" }), usage: use({ c: 650 }) });
+    assert.ok(r.rest.each_usd === null && r.rest.limited_by === "rest_pot", "pool: shared freely; everyone else near its total");
+    r = allocate({ ...base, policy: pol({ mode: "pool", reserve_usd: 0 }), teams: [], usage: use({ c: 950 }) });
+    assert.equal(r.rest.limited_by, null, "no team budgets: everyone else is the account, not a pot");
+    r = allocate({ ...base, cap: 0 });
+    assert.ok(r.rest.each_usd === 0 && Number(r.teams[0]!.each_usd) === 0, "$0 allowance: $0 each");
     console.log(`✓ budget rules allocate(): ${cases}-case matrix (mode x teams x own limits x can launch x $0 allowance), check order, limited by, pots, buffer, rounding`);
   }
 
