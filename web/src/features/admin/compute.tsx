@@ -577,16 +577,16 @@ function OrchCards({ s }: { s: Summary }) {
   const o = s.running.orchestrators, l = s.limits, sp = s.spend_today;
   return <Cards
     a={[
-      { label: 'Orchestrators live', value: o.booting + o.running + o.draining, hint: `${o.running} running · ${o.booting} booting · ${o.draining} draining` },
-      { label: 'Worker pods used / reserved', value: `${s.running.pods_used} / ${s.running.pods_reserved}`, hint: `${plural(s.running.sessions, 'session')} running` },
-      { label: 'boat sandboxes in use', value: l.active_now != null && l.plan != null ? `${l.active_now} / ${l.plan}` : '—', hint: l.plan == null ? 'boat.dev did not answer' : `${l.others} by other deployments` },
-      { label: 'Room for more', value: l.available ?? '—', hint: `orchestrators of ${l.per_orchestrator} sandboxes` }
+      { label: 'Orchestrators live', value: o.booting + o.running + o.draining },
+      { label: 'Worker pods used / reserved', value: `${s.running.pods_used} / ${s.running.pods_reserved}` },
+      { label: 'boat sandboxes in use', value: l.active_now != null && l.plan != null ? `${l.active_now} / ${l.plan}` : '—' },
+      { label: 'Room for more', value: l.available ?? '—' }
     ]}
     b={[
-      { label: 'Failed launches, 24 h', value: s.failures_24h.launches, hint: 'orchestrators that did not start' },
-      { label: 'Queued work', value: s.queue.sessions + s.queue.research, hint: `${plural(s.queue.jobs_waiting, 'job')} waiting for an orchestrator` },
-      { label: 'Orchestrator model, today', value: money(sp.orchestrator_model_usd), hint: 'through the gateway (UTC day)' },
-      { label: 'Sandboxes, today', value: money(sp.sandbox_est_usd), hint: 'estimate from the boat price table' }
+      { label: 'Failed launches, 24 h', value: s.failures_24h.launches },
+      { label: 'Queued work', value: s.queue.sessions + s.queue.research },
+      { label: 'Orchestrator model, today', value: money(sp.orchestrator_model_usd) },
+      { label: 'Sandboxes, today', value: money(sp.sandbox_est_usd) }
     ]} />;
 }
 
@@ -596,16 +596,16 @@ function FailureCards({ f, hours }: { f: Failures | undefined; hours: number }) 
   const w = hours === 24 ? '24 h' : '7 d';
   return <Cards
     a={[
-      { label: `Session failures, ${w}`, value: f ? sessions : '—', hint: f?.ended ? `${Math.round((sessions / f.ended) * 100)}% of ${f.ended} that ended` : 'none ended' },
-      { label: `Failed launches, ${w}`, value: f ? sum(f.launches) : '—', hint: `${plural(f?.launches.length ?? 0, 'step')} failing` },
-      { label: `Unexpected reaps, ${w}`, value: f ? sum(f.reaps.filter((r) => !r.routine)) : '—', hint: 'stopped for a reason other than routine' },
-      { label: `Unattended deletes, ${w}`, value: f ? sum(f.unattended) : '—', hint: 'sandboxes gone with no reap recorded' }
+      { label: `Session failures, ${w}`, value: f ? sessions : '—' },
+      { label: `Failed launches, ${w}`, value: f ? sum(f.launches) : '—' },
+      { label: `Unexpected reaps, ${w}`, value: f ? sum(f.reaps.filter((r) => !r.routine)) : '—' },
+      { label: `Unattended deletes, ${w}`, value: f ? sum(f.unattended) : '—' }
     ]}
     b={[
-      { label: 'Top session failure', value: top ? top.count : '—', hint: top?.label ?? 'no session failures' },
-      { label: 'Failure classes seen', value: f ? f.sessions.length : '—', hint: 'distinct reasons sessions failed' },
+      { label: 'Top session failure', value: top ? <span className='text-base'>{top.label} · {top.count}</span> : 'None' },
+      { label: 'Failure classes seen', value: f ? f.sessions.length : '—' },
       { label: `Sessions ended, ${w}`, value: f ? f.ended : '—' },
-      { label: `Routine reaps, ${w}`, value: f ? sum(f.reaps.filter((r) => r.routine)) : '—', hint: 'idle, drained, retired: not failures' }
+      { label: `Routine reaps, ${w}`, value: f ? sum(f.reaps.filter((r) => r.routine)) : '—' }
     ]} />;
 }
 
@@ -614,13 +614,13 @@ function DecisionCards({ s, rows }: { s: Summary | undefined; rows: Tick[] }) {
   const age = ageOf(s?.tick.at);
   return <Cards
     a={[
-      { label: 'Last tick', value: age == null ? '—' : `${dur(age)} ago`, hint: s?.tick.holder ? `by ${s.tick.holder}` : undefined },
-      { label: 'Autoscaler', value: s ? (s.tick.enabled ? 'On' : 'Off') : '—', hint: s ? `every ${s.tick.tick_seconds} s on ${s.runtime === 'vercel' ? 'Vercel (events and 5-minute cron)' : 'the VM'}` : undefined },
-      { label: 'Free sandboxes', value: s?.tick.free ?? '—', hint: 'as the last tick saw them' },
-      { label: 'Last tick note', value: s?.tick.error ? 'Error' : s?.tick.note ? 'Note' : 'None', hint: s?.tick.error ?? s?.tick.note ?? 'nothing to report' }
+      { label: 'Last tick', value: age == null ? '—' : `${dur(age)} ago` },
+      { label: 'Autoscaler', value: s ? (s.tick.enabled ? 'On' : 'Off') : '—' },
+      { label: 'Free sandboxes', value: s?.tick.free ?? '—' },
+      { label: 'Event ticks', value: s ? (s.tick.kick_configured ? 'On' : 'Off') : '—' }
     ]}
     b={[
-      { label: 'Decisions shown', value: rows.length, hint: 'kept 14 days' },
+      { label: 'Decisions shown', value: rows.length },
       { label: 'Orchestrators launched', value: rows.reduce((t, r) => t + r.launched.length, 0) },
       { label: 'Orchestrators reaped', value: rows.reduce((t, r) => t + r.reaped.length, 0) },
       { label: 'Ticks with an error', value: rows.filter((r) => r.error).length }
@@ -743,18 +743,18 @@ function Limits({ s, onEditing }: { s: Summary; onEditing: (key: string, on: boo
   ];
   const cards = <Cards
     a={[
-      { label: 'boat sandboxes in use', value: l.active_now != null && l.plan != null ? `${l.active_now} / ${l.plan}` : '—', hint: l.plan == null ? 'boat.dev did not answer' : `free ${free}` },
-      { label: 'Room for more', value: l.available ?? '—', hint: `orchestrators of ${l.per_orchestrator} sandboxes` },
-      { label: 'Sessions a day, at most', value: l.sessions_per_day_ceiling ?? '—', hint: 'at the current limits' },
-      { label: 'Binding limit', value: binding ? binding.label : 'None', hint: l.note ? `Autoscaler: “${l.note}”` : l.stale ? `boat.dev is slow (${l.error}); last answer shown` : 'nothing holds work back' }
+      { label: 'boat sandboxes in use', value: l.active_now != null && l.plan != null ? `${l.active_now} / ${l.plan}` : '—' },
+      { label: 'Room for more', value: l.available ?? '—' },
+      { label: 'Sessions a day, at most', value: l.sessions_per_day_ceiling ?? '—' },
+      { label: 'Binding limit', value: binding ? binding.label : 'None' }
     ]}
     b={[
-      { label: 'Our starts this hour', value: l.starts ? `${l.our_starts.hour} / ${l.starts.per_hour}` : l.our_starts.hour, hint: `${l.our_starts.minute} this minute · ${l.our_starts.day} today` },
+      { label: 'Our starts this hour', value: l.starts ? `${l.our_starts.hour} / ${l.starts.per_hour}` : l.our_starts.hour },
       l.per_job_mode
-        ? { label: 'Job orchestrators', value: `${l.job_orch_live} / ${l.job_orch_cap}`, hint: l.job_orch_draining ? `${l.job_orch_draining} draining, not counted` : 'per-job mode' }
-        : { label: 'Shared orchestrators', value: `${l.shared_orch_live} / ${l.shared_orch_cap}`, hint: 'shared fleet mode' },
-      { label: 'Pods per orchestrator', value: `${l.pods_max_reserved} / ${l.pods_cap}`, hint: `most reserved by one · avg running ${l.pods_avg_running}` },
-      { label: 'Other deployments', value: l.others, hint: l.other_prefixes.length ? l.other_prefixes.join(', ') : 'sandboxes they hold on this boat account' }
+        ? { label: 'Job orchestrators', value: `${l.job_orch_live} / ${l.job_orch_cap}` }
+        : { label: 'Shared orchestrators', value: `${l.shared_orch_live} / ${l.shared_orch_cap}` },
+      { label: 'Pods per orchestrator', value: `${l.pods_max_reserved} / ${l.pods_cap}` },
+      { label: 'Other deployments', value: l.others }
     ]} />;
   return (
     <RecordView id='compute-limits' rows={rows} rowKey={(r) => r.key} cols={cols} noun='limits' initialSize={25} compact summary={cards}
@@ -805,16 +805,16 @@ function Environment({ s, onTest, testing }: { s: Summary; onTest: () => void; t
   ];
   const cards = <Cards
     a={[
-      { label: 'boat.dev', value: p.ok ? 'Connected' : 'Not connected', hint: p.ok ? p.name : `did not answer: ${p.error ?? 'no answer'}` },
-      { label: 'boat key', value: p.has_key ? <Mono>{p.key_hint}</Mono> : 'None', hint: p.has_key ? <>{p.key_label} · {p.uses} uses · <Link href='/admin/keys' className='hover:underline'>Key vault</Link></> : <Link href='/admin/keys' className='hover:underline'>Add one in Key vault</Link> },
-      { label: 'Namespace', value: <Mono>{p.namespace}</Mono>, hint: `only sandboxes named ${p.namespace}-…` },
-      { label: 'API', value: <span className='text-base'><Mono>{p.api.replace(/^https?:\/\//, '')}</Mono></span>, hint: p.last_used_at ? <>key used <When d={p.last_used_at} /></> : undefined }
+      { label: 'boat.dev', value: p.ok ? 'Connected' : 'Not connected' },
+      { label: 'boat key', value: p.has_key ? <Mono>{p.key_hint}</Mono> : 'None' },
+      { label: 'Namespace', value: <Mono>{p.namespace}</Mono> },
+      { label: 'API', value: <span className='text-base'><Mono>{p.api.replace(/^https?:\/\//, '')}</Mono></span> }
     ]}
     b={[
-      { label: 'Runtime', value: s.runtime === 'vercel' ? 'Vercel' : 'VM', hint: s.runtime === 'vercel' ? 'ticks on events and a 5-minute cron' : 'ticks on a timer' },
-      { label: 'Autoscaler', value: s.tick.enabled ? 'On' : 'Off', hint: `tick every ${s.tick.tick_seconds} s` },
-      { label: 'Event ticks', value: s.tick.kick_configured ? 'Configured' : 'Not configured', hint: 'tool calls and portal writes trigger a tick' },
-      { label: 'Settings shown', value: rows.length, hint: 'change them in the deployment environment' }
+      { label: 'Runtime', value: s.runtime === 'vercel' ? 'Vercel' : 'VM' },
+      { label: 'Autoscaler', value: s.tick.enabled ? 'On' : 'Off' },
+      { label: 'Event ticks', value: s.tick.kick_configured ? 'Configured' : 'Not configured' },
+      { label: 'Settings shown', value: rows.length }
     ]} />;
   return (
     <RecordView id='compute-environment' rows={rows} rowKey={(r) => r.name} cols={cols} noun='settings' initialSize={50} compact summary={cards}
