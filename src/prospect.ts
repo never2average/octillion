@@ -1,5 +1,6 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
+import { randomId } from "./auth.js";
 import { getDb } from "./db.js";
 import { orchestratorBrain } from "./gateway.js";
 import { getProvider, useCredential, VERTEX_LABEL } from "./keyvault.js";
@@ -41,6 +42,7 @@ async function run(id: number) {
   try {
     const brief = await research(q);
     await db.query("UPDATE access_requests SET research = $2, research_status = 'done', researched_at = now() WHERE id = $1", [id, JSON.stringify(brief)]);
+    await queueDeepResearch(id);
   } catch (e) {
     await db.query("UPDATE access_requests SET research_status = 'failed', research_error = $2, researched_at = now() WHERE id = $1", [id, String((e as Error).message).slice(0, 500)]);
   }
@@ -192,8 +194,11 @@ async function anthropicText(evidence: unknown): Promise<string> {
 }
 
 function parseBrief(text: string): Partial<ProspectBrief> {
-  const json = text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1);
-  const b = JSON.parse(json) as Record<string, any>;
+  return sanitizeBrief(JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1)));
+}
+
+/** A brief from a model (here or the research harness), cut to known fields and lengths; text is data (asData). */
+function sanitizeBrief(b: Record<string, any>): Partial<ProspectBrief> {
   const strs = (v: unknown, n: number, max = 300) => (Array.isArray(v) ? v : []).map((x) => asData(x, max)).filter(Boolean).slice(0, n);
   return {
     summary: asData(b.summary ?? "", 800), offering: asData(b.offering ?? "", 160), category: asData(b.category ?? "", 120),
@@ -203,4 +208,67 @@ function parseBrief(text: string): Partial<ProspectBrief> {
     competitors: (Array.isArray(b.competitors) ? b.competitors : []).slice(0, 8).map((c: any) => ({ name: asData(c?.name ?? "", 80), ...(c?.url ? { url: asData(c.url, 300) } : {}) })).filter((c: { name: string }) => c.name),
     starter_tasks: strs(b.starter_tasks, 4, 400), questions: strs(b.questions, 4), flags: strs(b.flags, 5),
   };
+}
+
+// ---------- deep research on the research harness ----------
+// The quick pass above fits in a request; the deep pass runs on the same harness as product onboarding research
+// (orchestrator/pi-octillion, a Pi session on a boat orchestrator, launched on demand by the autoscaler): up to
+// RESEARCH_MAX_MINUTES, its own fetch and search budgets, and it replaces the quick brief when it is accepted.
+
+const harnessOn = () => process.env.OCTILLION_PROSPECT_HARNESS !== "off";
+
+/** Queue a deep research job for a request, unless one is already queued or running. Returns its id, or null. */
+export async function queueDeepResearch(requestId: number): Promise<string | null> {
+  if (!harnessOn()) return null;
+  const db = await getDb();
+  const [live] = await db.query<{ id: string }>("SELECT id FROM product_research WHERE kind = 'prospect' AND request_id = $1 AND status IN ('queued', 'running')", [requestId]);
+  if (live) return live.id;
+  const [q] = await db.query<any>("SELECT email, company, product_url, message, name, role, team_size, agents, research FROM access_requests WHERE id = $1", [requestId]);
+  if (!q) return null;
+  const id = randomId("rsh_", 9);
+  const quick = q.research as ProspectBrief | null;
+  const input = { company: q.company, email_domain: String(q.email).split("@")[1] ?? "", website_url: q.product_url ?? quick?.site?.url ?? null,
+    name: q.name, role: q.role, team_size: q.team_size, agents: q.agents ?? [], message: q.message ?? "",
+    quick: quick ? { summary: quick.summary, flags: quick.flags, competitors: quick.competitors, packages: quick.packages, sources: quick.sources } : null };
+  await db.query("INSERT INTO product_research (id, kind, request_id, input) VALUES ($1, 'prospect', $2, $3)", [id, requestId, JSON.stringify(input)]);
+  return id;
+}
+
+/** What the harness must hand back before a brief is accepted. */
+export function prospectIssues(r: unknown): string[] {
+  const b = (r ?? {}) as Record<string, any>, issues: string[] = [];
+  if (typeof b.summary !== "string" || b.summary.trim().length < 40) issues.push("summary: 2-3 sentences on who they are and what they sell");
+  if (!["strong", "possible", "weak", "unknown"].includes(b.fit)) issues.push("fit: one of strong, possible, weak, unknown");
+  if (typeof b.fit_reason !== "string" || !b.fit_reason.trim()) issues.push("fit_reason: one sentence");
+  if (!Array.isArray(b.sources) || !b.sources.some((x: any) => /^https?:\/\//.test(String(x?.url ?? "")))) issues.push("sources: the pages you actually read, as [{url, title}]");
+  if (!Array.isArray(b.questions) || !b.questions.length) issues.push("questions: 2-4 questions for a first call");
+  return issues;
+}
+
+/** The harness finished: on success the deep brief replaces the quick one (keeping the quick pass's flags). */
+export async function completeProspect(job: { id: string; request_id: number }, body: { status?: string; error?: string; result?: unknown }) {
+  const db = await getDb();
+  if (body.status === "failed") {
+    await db.query("UPDATE product_research SET status = 'failed', error = $2, finished_at = now() WHERE id = $1", [job.id, String(body.error ?? "failed").slice(0, 2000)]);
+    return { status: "failed" };
+  }
+  const issues = prospectIssues(body.result);
+  if (issues.length) {
+    await db.query("UPDATE product_research SET attempts = attempts + 1, heartbeat_at = now(), stage = 'validating' WHERE id = $1", [job.id]);
+    throw Object.assign(new Error("invalid research result"), { status: 422, issues });
+  }
+  const r = body.result as Record<string, any>;
+  const [q] = await db.query<{ research: ProspectBrief | null }>("SELECT research FROM access_requests WHERE id = $1", [job.request_id]);
+  const quick = q?.research;
+  const deep = sanitizeBrief(r);
+  const sources = (r.sources as any[]).filter((x) => /^https?:\/\//.test(String(x?.url ?? ""))).slice(0, 20).map((x) => ({ url: asData(x.url, 400), title: asData(x.title ?? "", 200) }));
+  const packages = (Array.isArray(r.packages) ? r.packages : quick?.packages ?? []).map((x: unknown) => asData(x, 80)).slice(0, 10);
+  const brief: ProspectBrief & { depth: string; research_id: string } = {
+    ...(quick ?? {} as ProspectBrief), ...deep, packages, sources, site: quick?.site ?? null,
+    flags: [...new Set([...(quick?.flags ?? []).filter((f) => !/^AI summary unavailable/.test(f)), ...(deep.flags ?? [])])].slice(0, 10),
+    model: orchestratorBrain().model, depth: "harness", research_id: job.id,
+  } as ProspectBrief & { depth: string; research_id: string };
+  await db.query("UPDATE access_requests SET research = $2, research_status = 'done', research_error = NULL, researched_at = now() WHERE id = $1", [job.request_id, JSON.stringify(brief)]);
+  await db.query("UPDATE product_research SET status = 'completed', result = $2, finished_at = now() WHERE id = $1", [job.id, JSON.stringify(brief)]);
+  return { status: "completed", company: brief.offering || null };
 }

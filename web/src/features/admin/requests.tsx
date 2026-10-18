@@ -42,12 +42,14 @@ interface Req {
   research_status: 'running' | 'done' | 'failed' | null;
   research_error: string | null;
   researched_at: string | null;
+  /** The deep pass on the research harness (latest job), if any. */
+  deep: { id: string; status: 'queued' | 'running' | 'completed' | 'failed'; stage: string | null; note: string | null; error: string | null; created_at: string; finished_at: string | null } | null;
 }
 /** The AI's background research on the company (src/prospect.ts). */
 interface Brief {
   summary: string; offering: string; category: string; developer_tool: boolean | null; fit: 'strong' | 'possible' | 'weak' | 'unknown'; fit_reason: string;
   audience: string; stage: string; competitors: { name: string; url?: string }[]; packages: string[]; starter_tasks: string[]; questions: string[]; flags: string[];
-  site: { url: string; title: string; description: string } | null; sources: { url: string; title: string }[]; model: string | null;
+  site: { url: string; title: string; description: string } | null; sources: { url: string; title: string }[]; model: string | null; depth?: 'harness';
 }
 interface Confirm { title: string; body: ReactNode; label: string; run: () => void }
 
@@ -85,9 +87,10 @@ const VIEWS: RecordViewDef<Req>[] = [
 
 export function AdminRequests() {
   const [polling, setPolling] = useState(false);
-  const { data, error, isLoading } = useAdmin<{ requests: Req[] }>('/requests', { refetchInterval: polling ? 3000 : undefined });
-  const running = (data?.requests ?? []).some((q) => q.research_status === 'running');
+  const { data, error, isLoading } = useAdmin<{ requests: Req[] }>('/requests', { refetchInterval: polling ? 5000 : undefined });
+  const running = (data?.requests ?? []).some((q) => q.research_status === 'running' || q.deep?.status === 'running' || q.deep?.status === 'queued');
   useEffect(() => setPolling(running), [running]);
+  // Deep research on the harness takes minutes: poll gently while a job is queued or running.
   const { data: orgList } = useAdmin<OrgList>('/orgs');
   const [approving, setApproving] = useState<Req | null>(null);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
@@ -99,7 +102,7 @@ export function AdminRequests() {
   const runResearch = (q: Req) => {
     toast.info(`Researching ${q.company}…`);
     void qc.setQueryData<{ requests: Req[] }>(['admin', '/requests'], (d) => d && { requests: d.requests.map((x) => (x.id === q.id ? { ...x, research_status: 'running' } : x)) });
-    post(`/requests/${q.id}/research`).then(() => toast.success(`Research ready for ${q.company}`)).catch((e) => toast.error((e as Error).message))
+    post(`/requests/${q.id}/research`).then(() => toast.success(`Quick research ready for ${q.company}; deep research is queued on the research harness`)).catch((e) => toast.error((e as Error).message))
       .finally(() => void qc.invalidateQueries({ queryKey: ['admin', '/requests'] }));
   };
   const matches = useMemo(() => new Map(rows.map((q) => [q.id, matchOrg(q, orgList?.orgs)?.name ?? null])), [rows, orgList]);
@@ -339,6 +342,7 @@ function RequestPeek({ q, match, onResearch }: { q: Req; match: string | null; o
           </Button>
         </div>
         {q.research_status === 'failed' && <p className='text-destructive mb-3 leading-snug'>Research failed: {q.research_error}</p>}
+        <DeepStatus q={q} />
         {!q.research ? (
           q.research_status !== 'running' && <p className='text-muted-foreground leading-none'>Not researched yet.</p>
         ) : <Research b={q.research} at={q.researched_at} />}
@@ -383,7 +387,23 @@ function Research({ b, at }: { b: Brief; at: string | null }) {
           ))}</ul>
         </div>
       )}
-      <p className='text-muted-foreground text-xs leading-none'>Researched <When d={at} />{b.model ? ` · ${b.model}` : ' · no AI summary, evidence only'}</p>
+      <p className='text-muted-foreground text-xs leading-none'>Researched <When d={at} />{b.depth === 'harness' ? ` · deep research on the harness (${b.model})` : b.model ? ` · quick pass · ${b.model}` : ' · quick pass, no AI summary, evidence only'}</p>
     </div>
+  );
+}
+
+/** Where the deep pass on the research harness stands: queued, running (its stage), failed, or done. */
+function DeepStatus({ q }: { q: Req }) {
+  const d = q.deep;
+  if (!d) return null;
+  const line = d.status === 'queued' ? 'Deep research queued on the research harness'
+    : d.status === 'running' ? `Deep research running on the harness${d.stage ? ` · ${d.stage}` : ''}${d.note ? ` · ${d.note}` : ''}`
+    : d.status === 'failed' ? `Deep research failed: ${d.error ?? 'unknown error'}`
+    : null;
+  if (!line) return null;
+  return (
+    <p className={cn('mb-4 flex items-center gap-2 leading-snug', d.status === 'failed' ? 'text-destructive' : 'text-muted-foreground')}>
+      {d.status !== 'failed' && <Icons.spinner className='size-3.5 shrink-0 animate-spin' />}{line}
+    </p>
   );
 }

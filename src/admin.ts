@@ -302,7 +302,9 @@ export async function listRequests(status?: string) {
   if (status && !["pending", "approved", "declined"].includes(status)) throw new AdminError("status must be pending, approved or declined");
   return (await getDb()).query(
     `SELECT q.id, q.email, q.company, q.product_url, q.message, q.created_at, q.status, q.decided_at, o.slug AS org_slug, o.name AS org_name,
-            q.name, q.role, q.team_size, q.agents, q.source, q.research, q.research_status, q.research_error, q.researched_at
+            q.name, q.role, q.team_size, q.agents, q.source, q.research, q.research_status, q.research_error, q.researched_at,
+            (SELECT json_build_object('id', r.id, 'status', r.status, 'stage', r.stage, 'note', r.note, 'error', r.error, 'created_at', r.created_at, 'finished_at', r.finished_at)
+               FROM product_research r WHERE r.kind = 'prospect' AND r.request_id = q.id ORDER BY r.created_at DESC LIMIT 1) AS deep
        FROM access_requests q LEFT JOIN organizations o ON o.id = q.org_id
       WHERE $1::text IS NULL OR q.status = $1
       ORDER BY q.status = 'pending' DESC, q.created_at DESC LIMIT 500`, [status ?? null]);

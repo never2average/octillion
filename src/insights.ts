@@ -210,8 +210,8 @@ export async function platformAnalytics(q: AnalyticsQuery) {
               (SELECT count(*) FROM agent_sessions WHERE ${inW("queued_at")} AND status IN ('failed', 'timeout')${ORG("", "session")}) AS sessions_failed,
               (SELECT count(*) FROM agent_sessions WHERE status = 'queued'${ORG("", "session")}) AS sessions_queued,
               (SELECT coalesce(sum(cost_usd), 0) FROM agent_sessions WHERE ${inW("queued_at")}${ORG("", "session")}) AS model_cost_usd,
-              (SELECT count(*) FROM product_research WHERE ${inW("created_at")}${ORG("", "research")}) AS onboardings,
-              (SELECT count(*) FROM product_research WHERE ${inW("created_at")} AND status = 'failed'${ORG("", "research")}) AS onboardings_failed,
+              (SELECT count(*) FROM product_research WHERE kind = 'product' AND ${inW("created_at")}${ORG("", "research")}) AS onboardings,
+              (SELECT count(*) FROM product_research WHERE kind = 'product' AND ${inW("created_at")} AND status = 'failed'${ORG("", "research")}) AS onboardings_failed,
               (SELECT coalesce(sum(g.errors), 0) FROM ${GW}) AS gateway_errors,
               (SELECT coalesce(sum(g.requests), 0) FROM ${GW}) AS gateway_requests`),
     db.query(

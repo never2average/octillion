@@ -3,6 +3,7 @@ import { registryLinks } from "./registry-meta.js";
 import { isIP } from "node:net";
 import { getDb } from "./db.js";
 import { companyHintForResearch } from "./context.js";
+import { completeProspect, prospectIssues } from "./prospect.js";
 import { capture, orgEvent } from "./telemetry.js";
 import { randomId, type Org } from "./auth.js";
 import { WORKSPACE_TEMPLATES, config, getProduct, resolveProduct, runSimulation, saveProduct, browseTaskLibrary } from "./queries.js";
@@ -227,13 +228,13 @@ export async function claimResearch(workerId: string, limit = 1, researchId?: st
   await db.query(
     `/* tenant: internal: requeue stalled research across all orgs */ UPDATE product_research SET status = 'queued', worker_id = NULL WHERE status = 'running' AND heartbeat_at < now() - make_interval(mins => $1)`,
     [STALE_MINUTES()]);
-  const rows = await db.query<{ id: string; input: any }>(
+  const rows = await db.query<{ id: string; input: any; kind: string }>(
     `/* tenant: claim: a job token is pinned to its own research in http.ts, fleet claims across orgs */ UPDATE product_research SET status = 'running', worker_id = $1, started_at = coalesce(started_at, now()), heartbeat_at = now(), stage = 'reading'
       WHERE id IN (SELECT id FROM product_research WHERE status = 'queued' AND ($3::text IS NULL OR id = $3)
                     ORDER BY created_at LIMIT $2 FOR UPDATE SKIP LOCKED)
-      RETURNING id, input`,
+      RETURNING id, input, kind`,
     [workerId, Math.min(Math.max(limit, 1), 5), researchId ?? null]);
-  return rows.map((r) => ({ research_id: r.id, input: r.input, limits: LIMITS }));
+  return rows.map((r) => (r.kind === "prospect" ? { research_id: r.id, kind: r.kind, input: r.input } : { research_id: r.id, kind: "product", input: r.input, limits: LIMITS }));
 }
 
 async function runningJob(id: string) {
@@ -434,6 +435,7 @@ export async function competitorIssues(job: { sources?: { url: string }[]; input
 
 export async function validateResearchJob(id: string, result: ResearchResult) {
   const job = await runningJob(id);
+  if (job.kind === "prospect") { const issues = prospectIssues(result); return { ok: issues.length === 0, issues }; }
   const issues = [...validateResearch(result), ...(await libraryIssues(result)), ...(await profileIssues(result)), ...(await competitorIssues(job, result))];
   return { ok: issues.length === 0, issues };
 }
@@ -498,6 +500,7 @@ export async function reviewDraftTasks(org: Org, input: { product?: string; appr
 /** Apply a completed research result (or record a failure). Returns 422-style issues when invalid. */
 export async function completeResearch(id: string, body: { status?: string; error?: string; result?: ResearchResult }) {
   const job = await runningJob(id);
+  if (job.kind === "prospect") return completeProspect(job, body);
   const db = await getDb();
   if (body.status === "failed") {
     await db.query("/* tenant: research id checked against the job token in http.ts (/research/:id) */ UPDATE product_research SET status = 'failed', error = $2, finished_at = now() WHERE id = $1", [id, String(body.error ?? "failed").slice(0, 2000)]);

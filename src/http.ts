@@ -382,7 +382,13 @@ export function createApp() {
   ob.get("/requests", async (req, res) => void res.json({ requests: await onboarding.listRequests(req.query.status ? String(req.query.status) : undefined) }));
   ob.post("/requests/:id/approve", async (req, res) => void res.status(201).json(await onboarding.approveRequest(adminActor(req, res), Number(req.params.id), req.body ?? {})));
   ob.post("/requests/:id/decline", async (req, res) => done(res, await onboarding.declineRequest(adminActor(req, res), Number(req.params.id))));
-  ob.post("/requests/:id/research", async (req, res) => { await onboarding.requestExists(Number(req.params.id)); await prospect.researchRequest(Number(req.params.id)); res.json({ ok: true }); });
+  // Research the company: the quick pass now (it also queues the deep pass on the research harness).
+  ob.post("/requests/:id/research", async (req, res) => {
+    const id = Number(req.params.id);
+    await onboarding.requestExists(id);
+    await prospect.researchRequest(id);
+    res.json({ ok: true, deep: await prospect.queueDeepResearch(id) });
+  });
   ob.post("/requests/:id/reopen", async (req, res) => done(res, await onboarding.reopenRequest(adminActor(req, res), Number(req.params.id))));
   ob.get("/orgs", async (_req, res) => void res.json(await onboarding.listOrgs()));
   ob.post("/orgs", async (req, res) => void res.status(201).json(await onboarding.createAccount(adminActor(req, res), req.body ?? {})));

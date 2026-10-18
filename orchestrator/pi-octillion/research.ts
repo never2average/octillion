@@ -18,10 +18,13 @@ import { fetchReadable, FetchPolicy } from "../core/safe-fetch.js";
 import { isShuttingDown } from "../core/session.js";
 import { api, HttpError, log, sleep, withRetry } from "../core/util.js";
 import { RESEARCH_SYSTEM_PROMPT, researchPrompt, type ResearchInput, type ResearchLimits } from "./research-prompt.js";
+import { PROSPECT_SYSTEM_PROMPT, PROSPECT_TOOLS, prospectPrompt, type ProspectInput } from "./prospect-prompt.js";
 import { holdBusy } from "../core/activity.js";
 import { criticIssues, critiqueTasks } from "./critic.js";
 
-export interface ResearchJob { research_id: string; input: ResearchInput; limits?: ResearchLimits }
+/** kind 'prospect': the company behind an access request (prospect-prompt.ts), same tools minus the task library. */
+export type ResearchJob = { research_id: string; kind?: "product"; input: ResearchInput; limits?: ResearchLimits }
+  | { research_id: string; kind: "prospect"; input: ProspectInput; limits?: undefined };
 
 export interface BrainLike {
   modelRuntime: ModelRuntime;
@@ -37,6 +40,9 @@ export const RESEARCH = {
   maxFetches: num(env.RESEARCH_MAX_FETCHES, 25),
   /** Hard LLM spend cap per research job (Pi's price table); the session is aborted and the job failed above it. */
   maxCostUsd: num(env.RESEARCH_MAX_COST_USD, 2),
+  /** Prospect research is smaller: a brief, not a product profile with personas and problems. */
+  prospectMaxCostUsd: num(env.PROSPECT_MAX_COST_USD, 0.75),
+  prospectMaxMinutes: num(env.PROSPECT_MAX_MINUTES, 10),
   enabled: env.RESEARCH_DISABLED !== "1",
 };
 export const RESEARCH_TOOLS = ["fetch_url", "web_search", "find_similar", "package_search", "search_library", "search_profiles", "report_progress", "validate", "submit"] as const;
@@ -73,7 +79,9 @@ export class ResearchContext {
   criticRounds = 0;
 
   constructor(readonly job: ResearchJob) {
-    this.policy = new FetchPolicy([job.input.website_url, job.input.docs_url], RESEARCH.maxFetches, job.input.related_urls ?? []);
+    this.policy = job.kind === "prospect"
+      ? new FetchPolicy([job.input.website_url ?? (job.input.email_domain ? `https://${job.input.email_domain}` : undefined)], RESEARCH.maxFetches, [])
+      : new FetchPolicy([job.input.website_url, job.input.docs_url], RESEARCH.maxFetches, job.input.related_urls ?? []);
   }
 
   async progress(stage: string, note?: string) {
@@ -229,7 +237,9 @@ export async function runResearchJob(job: ResearchJob, brain: BrainLike): Promis
     return { status: "failed" };
   }
   await ctx.progress("reading", "research started");
-  ctx.critic = async (result: any) => {
+  const prospect = job.kind === "prospect";
+  const maxCost = prospect ? RESEARCH.prospectMaxCostUsd : RESEARCH.maxCostUsd, maxMinutes = prospect ? RESEARCH.prospectMaxMinutes : RESEARCH.maxMinutes;
+  if (!prospect) ctx.critic = async (result: any) => {
     const tasks = (Array.isArray(result?.scenarios) ? result.scenarios : []).map((x: any, index: number) =>
       ({ index, title: x?.title, prompt: String(x?.prompt ?? ""), expectation: x?.expectation, variants: x?.variants, decision: x?.decision }));
     if (!tasks.length) return null;
@@ -247,13 +257,13 @@ export async function runResearchJob(job: ResearchJob, brain: BrainLike): Promis
     const resourceLoader = new DefaultResourceLoader({
       cwd, agentDir: brain.dir,
       noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-      systemPrompt: RESEARCH_SYSTEM_PROMPT,
+      systemPrompt: prospect ? PROSPECT_SYSTEM_PROMPT : RESEARCH_SYSTEM_PROMPT,
       extensionFactories: [{ name: "octillion-research", factory: createResearchExtension(ctx) }],
     });
     await resourceLoader.reload();
     const { session } = await createAgentSession({
       cwd, agentDir: brain.dir, modelRuntime: brain.modelRuntime, model: brain.model, thinkingLevel: "low",
-      resourceLoader, tools: [...RESEARCH_TOOLS],
+      resourceLoader, tools: prospect ? [...PROSPECT_TOOLS] : [...RESEARCH_TOOLS],
       sessionManager: SessionManager.inMemory(cwd),
       settingsManager: SettingsManager.inMemory({ compaction: { enabled: true }, retry: { enabled: true, maxRetries: 3 } }),
     });
@@ -261,17 +271,17 @@ export async function runResearchJob(job: ResearchJob, brain: BrainLike): Promis
       if (ev.type === "tool_execution_start") log(`[${id}] research -> ${ev.toolName}`);
       if (ev.type === "message_end" && !ctx.outcome) {
         const cost = session.getSessionStats().cost;
-        if (cost > RESEARCH.maxCostUsd && !piError) { piError = `research LLM cost $${cost.toFixed(3)} exceeded RESEARCH_MAX_COST_USD=${RESEARCH.maxCostUsd}`; void session.abort(); }
+        if (cost > maxCost && !piError) { piError = `research LLM cost $${cost.toFixed(3)} exceeded the $${maxCost} cap`; void session.abort(); }
       }
     });
-    const budget = setTimeout(() => { piError = `research exceeded ${RESEARCH.maxMinutes} minutes`; void session.abort(); }, RESEARCH.maxMinutes * 60_000);
+    const budget = setTimeout(() => { piError = `research exceeded ${maxMinutes} minutes`; void session.abort(); }, maxMinutes * 60_000);
     const cancelWatch = setInterval(() => { if (ctx.cancelled || isShuttingDown()) { piError ??= ctx.cancelled ? "job cancelled by the server" : "worker shutting down"; void session.abort(); } }, 2000);
     try {
       const llmError = () => {
         const last: any = [...session.messages].reverse().find((m: any) => m.role === "assistant");
         return last?.stopReason === "error" || last?.stopReason === "aborted" ? `LLM unavailable: ${last.errorMessage ?? last.stopReason}` : null;
       };
-      await session.prompt(researchPrompt(job.input, job.limits ?? {}));
+      await session.prompt(job.kind === "prospect" ? prospectPrompt(job.input) : researchPrompt(job.input, job.limits ?? {}));
       if (!ctx.outcome) piError ??= llmError();
       // The model may end its turn without submitting; nudge it once (only if the LLM itself is working).
       if (!ctx.outcome && !piError) {

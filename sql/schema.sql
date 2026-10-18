@@ -756,6 +756,12 @@ ON CONFLICT (slug) DO NOTHING;
 -- Every result URL a research job's searches returned: a competitor's evidence_url must be one of them.
 ALTER TABLE product_research ADD COLUMN IF NOT EXISTS sources  JSONB NOT NULL DEFAULT '[]';
 ALTER TABLE product_research ADD COLUMN IF NOT EXISTS searches INT NOT NULL DEFAULT 0;
+-- The same research harness also researches the company behind an access request (src/prospect.ts): kind 'prospect',
+-- no org or product yet, the request it is for.
+ALTER TABLE product_research ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'product' CHECK (kind IN ('product', 'prospect'));
+ALTER TABLE product_research ADD COLUMN IF NOT EXISTS request_id INT REFERENCES access_requests(id) ON DELETE CASCADE;
+ALTER TABLE product_research ALTER COLUMN org_id DROP NOT NULL;
+ALTER TABLE product_research ALTER COLUMN product_id DROP NOT NULL;
 -- Packages the agent installed that match neither the product nor a tracked competitor ({name, ecosystem}): the
 -- alternatives research missed. The report lists them so the customer can add them as competitors.
 ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS untracked JSONB;
