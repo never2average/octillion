@@ -67,7 +67,8 @@ async function research(q: { email: string; company: string; product_url: string
     packageSearch(q.company, "npm", 5).catch(() => []),
     packageSearch(q.company, "pypi", 5).catch(() => []),
   ]);
-  const packages = [...npm, ...pypi].filter((p) => named(p.name, q.company) || (siteHost && `${p.homepage ?? ""} ${p.repository ?? ""}`.includes(siteHost)))
+  // Theirs when the package links to their site, or is named exactly for them (acme, acme-sdk, @acme/node).
+  const packages = [...npm, ...pypi].filter((p) => (siteHost && `${p.homepage ?? ""} ${p.repository ?? ""}`.includes(siteHost)) || named(p.name, q.company))
     .map((p) => `${p.ecosystem}:${p.name}`).slice(0, 8);
   const sources = [...(site ? [{ url: site.url, title: site.title }] : []), ...about, ...similar].map((h) => ({ url: h.url, title: h.title })).slice(0, 16);
 
@@ -88,7 +89,11 @@ async function research(q: { email: string; company: string; product_url: string
 
 const named = (pkg: string, company: string) => {
   const k = company.toLowerCase().replace(/[^a-z0-9]/g, "");
-  return k.length >= 3 && pkg.toLowerCase().replace(/[^a-z0-9]/g, "").includes(k);
+  if (k.length < 3) return false;
+  const n = pkg.toLowerCase(), scope = n.match(/^@([^/]+)\//)?.[1]?.replace(/[^a-z0-9]/g, "");
+  const base = n.replace(/^@[^/]+\//, "").replace(/[^a-z0-9]/g, "");
+  if (scope) return scope === k; // someone else's scope is someone else's package
+  return base === k || new RegExp(`^${k}(js|sdk|node|client|api|py|python)$`).test(base);
 };
 
 // ---------- the website ----------
