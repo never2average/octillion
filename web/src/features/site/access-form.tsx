@@ -11,6 +11,10 @@ const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const normalizeUrl = (v: string) => (!v ? '' : /^https?:\/\//i.test(v) ? v : `https://${v}`);
 const AGENTS = ['Claude Code', 'Codex', 'Cursor', 'GitHub Copilot', 'Gemini CLI', 'Windsurf', 'Cline'];
 const TEAM = ['1-10', '11-50', '51-200', '201-1000', '1000+'];
+const GOALS = [['baseline', 'See where agents pick us today'], ['competitor', 'Find out why agents pick a competitor'], ['docs', 'Fix our docs and SDKs for agents'],
+  ['monitor', 'Track agent preference every release'], ['other', 'Something else']] as const;
+const TIMELINES = [['now', 'This week'], ['month', 'This month'], ['quarter', 'This quarter'], ['exploring', 'Just exploring']] as const;
+const HEARD = ['Search', 'X / Twitter', 'LinkedIn', 'Hacker News', 'A friend or colleague', 'An AI assistant', 'Other'];
 /** Where the visitor came from: the referrer, utm_* tags and the page they landed on (first page of the visit). */
 function visitSource() {
   try {
@@ -22,7 +26,7 @@ function visitSource() {
 
 /** Landing-page access request: POST /api/access-requests (the API server, through the web app's proxy). */
 export function AccessForm() {
-  const [v, setV] = useState({ email: '', company: '', product_url: '', message: '', name: '', role: '', team_size: '' });
+  const [v, setV] = useState({ email: '', company: '', product_url: '', message: '', name: '', role: '', team_size: '', docs_url: '', competitors: '', goal: '', timeline: '', heard_from: '' });
   const [agents, setAgents] = useState<string[]>([]);
   const [more, setMore] = useState(false);
   const [errs, setErrs] = useState<Record<string, string>>({});
@@ -38,6 +42,11 @@ export function AccessForm() {
     if (!v.email.trim()) e.email = 'Enter your email.';
     else if (!EMAIL.test(v.email.trim())) e.email = 'Enter a valid email address.';
     if (!v.company.trim()) e.company = 'Enter your company name.';
+    if (v.docs_url.trim()) {
+      let ok = false;
+      try { ok = /\./.test(new URL(normalizeUrl(v.docs_url.trim())).hostname); } catch { /* invalid */ }
+      if (!ok) { e.docs_url = 'Enter a valid URL, e.g. https://docs.yourproduct.dev'; setMore(true); }
+    }
     if (v.product_url.trim()) {
       let ok = false;
       try { ok = /\./.test(new URL(normalizeUrl(v.product_url.trim())).hostname); } catch { /* invalid */ }
@@ -58,7 +67,8 @@ export function AccessForm() {
       const res = await fetch('/api/access-requests', {
         method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         body: JSON.stringify({ email: v.email.trim(), company: v.company.trim(), product_url: normalizeUrl(v.product_url.trim()), message: v.message.trim(),
-          name: v.name.trim(), role: v.role.trim(), team_size: v.team_size, agents, source: visitSource() })
+          name: v.name.trim(), role: v.role.trim(), team_size: v.team_size, agents, source: visitSource(),
+          docs_url: normalizeUrl(v.docs_url.trim()), competitors: v.competitors.trim(), goal: v.goal, timeline: v.timeline, heard_from: v.heard_from })
       });
       const data = await res.json().catch(() => null);
       if (res.ok) return setStatus('done');
@@ -83,7 +93,7 @@ export function AccessForm() {
     );
   }
 
-  const field = (k: 'email' | 'company' | 'product_url' | 'name' | 'role', label: string, props: React.ComponentProps<'input'>) => (
+  const field = (k: 'email' | 'company' | 'product_url' | 'name' | 'role' | 'docs_url' | 'competitors', label: string, props: React.ComponentProps<'input'>) => (
     <div className='space-y-1.5'>
       <Label htmlFor={`f-${k}`}>{label}</Label>
       <Input id={`f-${k}`} name={k} value={v[k]} onChange={set(k)} aria-invalid={Boolean(errs[k]) || undefined} aria-describedby={`e-${k}`} {...props} />
@@ -117,6 +127,26 @@ export function AccessForm() {
                   </NativeSelect>
                 </div>
               </div>
+              <div className='grid gap-x-4 sm:grid-cols-2'>
+                {field('docs_url', 'Docs URL', { type: 'url', inputMode: 'url', placeholder: 'https://docs.yourproduct.dev', maxLength: 500 })}
+                {field('competitors', 'Main competitors', { placeholder: 'Who agents pick instead of you', maxLength: 500 })}
+              </div>
+              <div className='grid gap-x-4 pb-4 sm:grid-cols-[1.4fr_1fr]'>
+                <div className='space-y-1.5'>
+                  <Label htmlFor='f-goal'>What do you want first?</Label>
+                  <NativeSelect id='f-goal' name='goal' value={v.goal} onChange={(e) => setV({ ...v, goal: e.target.value })} className='w-full'>
+                    <NativeSelectOption value=''>Choose</NativeSelectOption>
+                    {GOALS.map(([k, l]) => <NativeSelectOption key={k} value={k}>{l}</NativeSelectOption>)}
+                  </NativeSelect>
+                </div>
+                <div className='space-y-1.5'>
+                  <Label htmlFor='f-timeline'>When</Label>
+                  <NativeSelect id='f-timeline' name='timeline' value={v.timeline} onChange={(e) => setV({ ...v, timeline: e.target.value })} className='w-full'>
+                    <NativeSelectOption value=''>Choose</NativeSelectOption>
+                    {TIMELINES.map(([k, l]) => <NativeSelectOption key={k} value={k}>{l}</NativeSelectOption>)}
+                  </NativeSelect>
+                </div>
+              </div>
               <fieldset className='space-y-2 pb-4'>
                 <legend className='text-sm font-medium'>Coding agents you care about</legend>
                 <div className='flex flex-wrap gap-1.5 pt-1.5'>
@@ -129,8 +159,15 @@ export function AccessForm() {
                   })}
                 </div>
               </fieldset>
+              <div className='space-y-1.5 pb-4'>
+                <Label htmlFor='f-heard'>Where did you hear about us?</Label>
+                <NativeSelect id='f-heard' name='heard_from' value={v.heard_from} onChange={(e) => setV({ ...v, heard_from: e.target.value })} className='w-full sm:w-1/2'>
+                  <NativeSelectOption value=''>Choose</NativeSelectOption>
+                  {HEARD.map((h) => <NativeSelectOption key={h} value={h}>{h}</NativeSelectOption>)}
+                </NativeSelect>
+              </div>
               <div className='space-y-1.5'>
-                <Label htmlFor='f-message'>What do you want to learn?</Label>
+                <Label htmlFor='f-message'>Anything else we should know?</Label>
                 <Textarea id='f-message' name='message' rows={3} maxLength={4000} value={v.message} onChange={set('message')}
                   placeholder='Competitors you track, scenarios you care about, models your users run…' />
               </div>
@@ -138,11 +175,10 @@ export function AccessForm() {
           </details>
 
           {error && <p className='text-destructive text-sm' role='alert'>{error}</p>}
-          <div className='flex flex-col gap-3 pt-3 sm:flex-row sm:items-center'>
+          <div className='pt-3'>
             <Button type='submit' size='lg' disabled={status === 'sending'} aria-busy={status === 'sending'}>
               {status === 'sending' ? 'Sending…' : <>Get your APO baseline <IconArrowRight /></>}
             </Button>
-            <p className='text-muted-foreground text-xs'>No card needed. We only use your details to reply.</p>
           </div>
         </form>
   );

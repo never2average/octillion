@@ -37,6 +37,11 @@ interface Req {
   team_size: string | null;
   agents: string[] | null;
   source: Record<string, string> | null;
+  docs_url: string | null;
+  competitors: string | null;
+  goal: string | null;
+  timeline: string | null;
+  heard_from: string | null;
   research: Brief | null;
   research_status: 'running' | 'done' | 'failed' | null;
   research_error: string | null;
@@ -184,7 +189,7 @@ export function AdminRequests() {
       <RecordView<Req>
         id='admin-requests-v3' noun='requests' exportName='access-requests' views={VIEWS} defaultSort={[{ key: 'created_at', dir: 'desc' }]}
         rows={rows} rowKey={(q) => String(q.id)} cols={cols} actions={actions} bulk={bulk} loading={isLoading || !data}
-        searchText={(q) => `${q.company} ${q.email} ${q.name ?? ''} ${q.role ?? ''} ${q.product_url ?? ''} ${q.message ?? ''} ${q.status} ${q.org_name ?? ''} ${q.research?.category ?? ''} ${q.research?.fit ?? ''}`}
+        searchText={(q) => `${q.company} ${q.email} ${q.name ?? ''} ${q.role ?? ''} ${q.competitors ?? ''} ${q.product_url ?? ''} ${q.message ?? ''} ${q.status} ${q.org_name ?? ''} ${q.research?.category ?? ''} ${q.research?.fit ?? ''}`}
         searchPlaceholder='Search access requests'
         primaryMenu={[{ label: 'Copy emails (current view)', icon: <IconCopy />, onSelect: () => {
           const v = currentView(), list = v.match ? rows.filter(v.match) : rows;
@@ -312,6 +317,9 @@ function ApproveDialog({ req, onClose, onDone }: { req: Req; onClose: () => void
 
 // ---------- the open request ----------
 
+const GOAL_LABEL: Record<string, string> = { baseline: 'Their APO baseline', competitor: 'Why agents pick a competitor', docs: 'Fixing docs and SDKs for agents', monitor: 'Tracking every release', other: 'Something else' };
+const TIMELINE_LABEL: Record<string, string> = { now: 'this week', month: 'this month', quarter: 'this quarter', exploring: 'just exploring' };
+
 const Label2 = ({ children }: { children: ReactNode }) => <div className='text-muted-foreground mb-2 text-xs font-medium leading-none'>{children}</div>;
 const hostOf = (u: string) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return u; } };
 
@@ -330,7 +338,11 @@ function RequestPeek({ q, match, onResearch }: { q: Req; match: string | null; o
           <Field label='Email'><a className='hover:underline' href={`mailto:${q.email}`}>{q.email}</a>{!isWork(q) && <span className='text-amber-600 dark:text-amber-400'> · personal</span>}</Field>
           <Field label='Company'>{q.company}{q.team_size && <span className='text-muted-foreground'> · {q.team_size} people</span>}</Field>
           <Field label='Product'>{url ? <a className='text-primary hover:underline' href={url} target='_blank' rel='noopener noreferrer'>{host(q)}</a> : <span className='text-muted-foreground'>Not given</span>}</Field>
+          {q.docs_url && <Field label='Docs'><a className='text-primary hover:underline' href={q.docs_url} target='_blank' rel='noopener noreferrer'>{hostOf(q.docs_url)}</a></Field>}
+          {q.competitors && <Field label='Competitors'>{q.competitors}</Field>}
+          {q.goal && <Field label='Wants first'>{GOAL_LABEL[q.goal] ?? q.goal}{q.timeline && <span className='text-muted-foreground'> · {TIMELINE_LABEL[q.timeline] ?? q.timeline}</span>}</Field>}
           <Field label='Agents'>{q.agents?.length ? q.agents.join(', ') : <span className='text-muted-foreground'>Not given</span>}</Field>
+          {q.heard_from && <Field label='Heard from'>{q.heard_from}</Field>}
           <Field label='Came from'>{came || <span className='text-muted-foreground'>Unknown</span>}</Field>
           <Field label='Requested'><When d={q.created_at} />{q.status !== 'pending' && q.decided_at && <span className='text-muted-foreground'> · {q.status} <When d={q.decided_at} /></span>}</Field>
           {match && <Field label='Matches'>Same domain as {match}</Field>}

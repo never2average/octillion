@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import { IconChartBar, IconFileSearch, IconRefresh } from '@tabler/icons-react';
 import { AccessForm } from '@/features/site/access-form';
-import { AgentStrip, HeroBackdrop } from '@/features/site/sections';
+import { HeroBackdrop } from '@/features/site/sections';
 
 export const metadata: Metadata = { title: 'Early access', description: 'Request early access to Octillion and get your APO baseline.' };
 
@@ -13,10 +13,11 @@ const YOU_GET = [
 
 export default function EarlyAccessPage() {
   return (
-    <section className='relative overflow-hidden'>
+    // Fills the space between header and footer and centres the content in it.
+    <section className='relative flex min-h-[calc(100svh-8rem)] items-center overflow-hidden'>
       <HeroBackdrop />
-      <div className='relative mx-auto max-w-6xl px-4 pt-16 pb-14 sm:px-6 sm:pt-24 sm:pb-20'>
-        <div className='grid gap-12 lg:grid-cols-[1fr_1.1fr] lg:items-start'>
+      <div className='relative mx-auto w-full max-w-6xl px-4 py-12 sm:px-6 sm:py-16'>
+        <div className='grid gap-12 lg:grid-cols-[1fr_1.1fr] lg:items-center'>
           <div className='min-w-0'>
             <p className='text-primary font-mono text-xs tracking-wider uppercase'>Early access</p>
             <h1 className='mt-4 text-3xl font-semibold tracking-tight text-balance sm:text-4xl lg:text-[2.75rem] lg:leading-[1.1]'>
@@ -36,7 +37,6 @@ export default function EarlyAccessPage() {
             <AccessForm />
           </div>
         </div>
-        <AgentStrip className='mt-16' />
       </div>
     </section>
   );

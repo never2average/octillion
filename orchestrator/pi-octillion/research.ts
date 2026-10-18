@@ -80,7 +80,7 @@ export class ResearchContext {
 
   constructor(readonly job: ResearchJob) {
     this.policy = job.kind === "prospect"
-      ? new FetchPolicy([job.input.website_url ?? (job.input.email_domain ? `https://${job.input.email_domain}` : undefined)], RESEARCH.maxFetches, [])
+      ? new FetchPolicy([job.input.website_url ?? (job.input.email_domain ? `https://${job.input.email_domain}` : undefined), job.input.docs_url ?? undefined], RESEARCH.maxFetches, [])
       : new FetchPolicy([job.input.website_url, job.input.docs_url], RESEARCH.maxFetches, job.input.related_urls ?? []);
   }
 
