@@ -1,7 +1,9 @@
 'use client';
-// /app Billing: this month (plan, spend against the cap, daily spend) above three tabs. People: one searchable table of
-// who is in the account, their role, access, team and spend against their allowance (invite, roles, limits and
-// suspension in each row's ⋯ menu). Teams: a searchable table of team budgets. Budget rules (admins): the policy as
+// /app Billing: this month (plan, spend against the cap, daily spend; for a member, their own budget and the rules in
+// plain words; for an admin, a banner from 80% of the allowance or when the pace runs out) above three tabs. People: one
+// searchable table of who is in the account, their role, access, team, limit, what is left and what limits them (invite,
+// roles, limits and suspension in each row's ⋯ menu; "own settings only" narrows it to the exceptions). Teams: a
+// searchable table of team budgets (deleting one first shows what it changes). Budget rules (admins): the policy as
 // sentences (buffer, team budgets, how people share a budget, who can launch), run limits and exceptions, with who gets
 // what previewed live by the server's allocate() and saved as one plan. Plans and cards are Stripe's; people are Clerk's.
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -43,12 +45,15 @@ type LimitCode = 'no_allowance' | 'account_cap' | 'budget_error' | 'launch_acces
 interface Pot { each_usd: number | null; launchers: number; in_flight_usd: number; limited_by: LimitCode | null }
 interface LimitTeam extends Pot { id: number; name: string; budget_usd: number | null; max_concurrent_runs: number | null; members: number; spent: number; left_usd: number | null }
 interface LimitMember { user_id: string; name?: string | null; email?: string | null; team_id: number | null; pot?: number | null; can_run: boolean; own_can_run?: boolean | null;
-  adjust_usd: number; cap_usd: number | null; max_concurrent_runs: number | null; allowance_usd: number | null; spent: number; in_flight_usd?: number; running: number;
+  adjust_usd: number; cap_usd: number | null; max_concurrent_runs: number | null; spent: number; in_flight_usd?: number; running: number;
   tokens_in: number; tokens_out: number; limit_usd?: number | null; limit_source?: 'own' | 'share' | 'default' | 'pool'; left_usd?: number | null; blocked?: LimitCode | null;
   limited_by?: LimitCode | null; effective_max_concurrent?: number | null; concurrent_source?: 'you' | 'team' | 'account' }
+/** A member's own budget (GET /limits for a member): the budget they draw on, run limits, the account's totals, the rules in plain words. */
+interface You { pot: { kind: 'team' | 'rest'; name: string; budget_usd: number; left_usd: number } | null; max_sessions: number; max_run_usd: number | null;
+  account: { cap_usd: number; spent_usd: number; left_usd: number }; summary: string[] }
 interface Limits { policy: Policy; budget_usd: number; teams: LimitTeam[]; members: LimitMember[]; can_manage: boolean; me: string | null; clerk?: boolean; budget_error?: boolean;
   admins?: { name: string }[]; last_change?: { by_name: string; at: string; summary: string | null } | null; server_max_sessions?: number; avg_session_usd?: number | null;
-  period_end?: string; version?: string }
+  period_end?: string; version?: string; you?: You; alert?: { used_pct: number; runs_out_on: string | null } | null }
 /** The picture of a set of rules (saved, or a draft) that GET /limits and the preview both send an admin. */
 interface Picture extends Limits { budget_error: boolean; buffer_usd: number; set_aside_usd: number; over_by_usd: number;
   account: { cap_usd: number; spent_usd: number; launchable_usd: number; left_usd: number; blocked: LimitCode | null };
@@ -76,15 +81,21 @@ function Block({ id, title, action, children }: { id?: string; title: string; ac
   );
 }
 
+const urlParam = (k: string) => (typeof window === 'undefined' ? null : new URLSearchParams(window.location.search).get(k));
+
 export function BillingPage() {
   const { data: b, error } = useOrgLoad(() => appApi<Billing>('GET', '/billing'));
   const { data: u } = useOrgLoad(() => appApi<Usage>('GET', '/billing/usage'));
   const { data: t, reload: reloadTeam } = useOrgLoad(() => appApi<Team>('GET', '/team'));
   const { data: l, reload: reloadLimits } = useOrgLoad(() => appApi<Limits>('GET', '/limits'));
   const reload = () => { reloadTeam(); reloadLimits(); };
-  // Budget rules links to People (a person's Edit limits) and Teams, so the tab is controlled here.
-  const [tab, setTab] = useState('people');
+  // Budget rules links to People (a person's Edit limits, or everyone with their own settings) and Teams, so the tab and
+  // People's filter are controlled here; ?tab=people&filter=exceptions opens them directly.
+  // (The tabs only render once billing has loaded, in the browser, so reading the URL here can't mismatch the server's HTML.)
+  const [tab, setTab] = useState(() => { const v = urlParam('tab'); return v && ['people', 'teams', 'rules'].includes(v) ? v : 'people'; });
+  const [peopleFilter, setPeopleFilter] = useState<PeopleFilter>(() => (urlParam('filter') === 'exceptions' ? 'exceptions' : 'all'));
   const [editUser, setEditUser] = useState<string | null>(null);
+  const onTab = (to: 'people' | 'teams', filter?: PeopleFilter) => { setTab(to); if (filter) setPeopleFilter(filter); };
   return (
     <PageContainer pageTitle='Billing'>
       {error ? <ErrorState error={error} /> : !b ? <LoadingCards count={3} /> : (
@@ -97,10 +108,10 @@ export function BillingPage() {
               <TabsTrigger value='teams' className='flex-none px-0'>Teams{l && <span className='text-muted-foreground ml-1.5 font-normal tabular-nums'>{l.teams.length}</span>}</TabsTrigger>
               {l?.can_manage && <TabsTrigger value='rules' className='flex-none px-0'>Budget rules</TabsTrigger>}
             </TabsList>
-            <TabsContent value='people'><People t={t ?? undefined} l={l ?? undefined} reload={reload} openUser={editUser} onOpened={() => setEditUser(null)} /></TabsContent>
+            <TabsContent value='people'><People t={t ?? undefined} l={l ?? undefined} reload={reload} openUser={editUser} onOpened={() => setEditUser(null)} filter={peopleFilter} setFilter={setPeopleFilter} /></TabsContent>
             <TabsContent value='teams'>{l ? <Teams l={l} reload={reload} /> : <LoadingCards count={1} />}</TabsContent>
             {l?.can_manage && <TabsContent value='rules'>
-              <Rules l={l as AdminLimits} reload={reloadLimits} onTab={setTab} onEditPerson={(id) => { setEditUser(id); setTab('people'); }} />
+              <Rules l={l as AdminLimits} reload={reloadLimits} onTab={onTab} onEditPerson={(id) => { setEditUser(id); setTab('people'); }} />
             </TabsContent>}
           </Tabs>
         </div>
@@ -118,7 +129,8 @@ function ThisMonth({ b, u, l }: { b: Billing; u: Usage | undefined; l: Limits | 
     appApi<{ url: string }>('POST', path, body).then((r) => { window.location.href = r.url; }).catch((e) => { setBusy(null); fail(e); });
   };
   const s = b.subscription, live = s && ['active', 'trialing', 'past_due'].includes(s.status);
-  const mine = !l?.can_manage ? l?.members.find((m) => m.user_id === l.me) : undefined;
+  // A member's own budget leads; the account's totals move to a smaller line under it.
+  const mine = !l?.can_manage && l?.you && !l.budget_error ? l.members.find((m) => m.user_id === l.me) : undefined;
   const cap = u?.budget_usd ?? b.budget_usd;
   const pct = (v: number) => (cap ? Math.min(100, (v / cap) * 100) : 0);
   const over = !!u && cap > 0 && u.projected_usd > cap;
@@ -126,8 +138,10 @@ function ThisMonth({ b, u, l }: { b: Billing; u: Usage | undefined; l: Limits | 
     <Block title='This month' action={b.enabled && b.can_manage && b.customer
       ? <Button variant='outline' size='sm' disabled={busy !== null} onClick={() => go('/billing/portal')}>{busy ? <Icons.spinner className='animate-spin' /> : <Icons.creditCard />} Manage billing</Button> : undefined}>
       {s && ['past_due', 'unpaid'].includes(s.status) && <Alert variant='destructive'><Icons.warning /><AlertDescription>The last payment failed. Update the card to keep running simulations.</AlertDescription></Alert>}
+      {l?.can_manage && l.alert && <UsageBanner a={l.alert} />}
+      {mine && l?.you && <YourBudget m={mine} l={l} you={l.you} />}
       <div className='flex flex-wrap items-baseline gap-x-6 gap-y-2 leading-none'>
-        <span className='text-4xl font-semibold tabular-nums'>{usd(u?.spent_usd ?? 0)}</span>
+        <span className={cn('font-semibold tabular-nums', mine ? 'text-base' : 'text-4xl')}>{mine && 'Account: '}{usd(u?.spent_usd ?? 0)}</span>
         <span className='text-muted-foreground text-sm'>{cap ? `of ${usd(cap)} prepaid this month` : 'no prepaid allowance'}</span>
         <span className='ml-auto flex items-center gap-2 text-sm'>
           {b.budget_source === 'override' ? <span className='text-muted-foreground'>Allowance set by Octillion</span> : !b.enabled ? null : <>
@@ -149,7 +163,6 @@ function ThisMonth({ b, u, l }: { b: Billing; u: Usage | undefined; l: Limits | 
           <span>{usd(u.metered_usd)} metered{u.meter.enabled ? ' to Stripe' : ''} · {u.sessions.finished} sessions</span>
           {u.in_flight_usd > 0 && <span>{usd(u.in_flight_usd)} in flight · {u.sessions.running} running</span>}
           <span>Day {Math.ceil(u.period.elapsed_days)} of {u.period.days}</span>
-          {mine && <span className='text-foreground'>Your allowance: {mine.allowance_usd == null ? 'shared' : `${usd(mine.spent)} of ${usd(mine.allowance_usd)}`}</span>}
         </p>
       )}
       {u && <Daily u={u} />}
@@ -175,6 +188,54 @@ function ThisMonth({ b, u, l }: { b: Billing; u: Usage | undefined; l: Limits | 
   );
 }
 
+/** Admins, from 80% of the allowance or when the month's pace runs out before it ends (worked out on GET; nothing is sent). */
+function UsageBanner({ a }: { a: NonNullable<Limits['alert']> }) {
+  const lines = [
+    ...(a.used_pct >= 80 ? [`Your account has used ${a.used_pct}% of this month's allowance.`] : []),
+    ...(a.runs_out_on ? [`Your account is on pace to run out on ${utcDate(Date.parse(a.runs_out_on), { month: 'short', day: 'numeric' })}.`] : [])
+  ];
+  return (
+    <Alert variant={a.used_pct >= 100 ? 'destructive' : 'default'} className={a.used_pct >= 100 ? undefined : 'border-amber-500/50'}>
+      <Icons.warning /><AlertDescription>{lines.join(' ')}</AlertDescription>
+    </Alert>
+  );
+}
+
+/**
+ * A member's own budget (members never see Budget rules): what is left of their limit this month (or, with no personal
+ * limit, of the budget they draw on), their team, runs at once, run size and the reset, then the rules in plain words.
+ */
+function YourBudget({ m, l, you }: { m: LimitMember; l: Limits; you: You }) {
+  const reset = l.period_end ? utcDate(Date.parse(l.period_end), { month: 'short', day: 'numeric' }) : null;
+  const near = m.limit_usd != null && m.limit_usd > 0 && !m.blocked && m.spent >= 0.8 * m.limit_usd;
+  const word = m.limited_by && m.limited_by !== 'launch_access' ? limitedWord(m.limited_by, l.teams, m.team_id, 'Your limit') : null;
+  const team = l.teams.find((x) => x.id === m.team_id);
+  const details = [
+    // The budget they draw on, unless the headline already is it (no personal limit).
+    team && team.budget_usd != null ? (m.limit_usd != null ? `Team ${team.name}: ${usd(team.left_usd ?? 0)} left` : `Team ${team.name}`) : team ? `Team ${team.name}` : '',
+    m.effective_max_concurrent != null ? `${m.running} of ${m.effective_max_concurrent} running` : m.running ? `${m.running} running` : '',
+    `up to ${plural(you.max_sessions, 'session')}${you.max_run_usd != null ? ` and ${usd(you.max_run_usd)}` : ''} per run`,
+    reset ? `resets ${reset}` : ''
+  ].filter(Boolean);
+  return (
+    <div className='flex flex-col gap-3'>
+      <span className='text-muted-foreground text-xs leading-none'>Your budget</span>
+      <div className='flex flex-wrap items-baseline gap-x-3 gap-y-2 leading-none'>
+        {!m.can_run ? <span className='text-2xl font-semibold'>You can&apos;t launch simulations yet</span>
+          : m.limit_usd == null ? <><span className='text-4xl font-semibold tabular-nums'>{usd(you.pot?.left_usd ?? 0)}</span>
+            <span className='text-muted-foreground text-sm'>No personal limit · {you.pot?.name ?? 'Everyone'} has this left</span></>
+          : <><span className='text-4xl font-semibold tabular-nums'>{usd(m.left_usd ?? 0)}</span><span className='text-muted-foreground text-sm'>left of {usd(m.limit_usd)} this month</span></>}
+        <span className='flex flex-wrap gap-1.5'>
+          {near && <Badge variant='outline' className='border-amber-500/50 text-amber-700 dark:text-amber-400'>Near your limit</Badge>}
+          {word && <Badge variant={m.blocked ? 'destructive' : 'outline'}>Limited by: {word}</Badge>}
+        </span>
+      </div>
+      <p className='text-muted-foreground text-xs leading-none'>{details.join(' · ')}</p>
+      {you.summary.length > 0 && <p className='max-w-3xl text-sm leading-relaxed'>{you.summary.join(' ')}</p>}
+    </div>
+  );
+}
+
 function Daily({ u }: { u: Usage }) {
   const by = new Map(u.daily.map((d) => [d.day, d.usd]));
   const start = Date.parse(u.period.start), today = new Date().toISOString().slice(0, 10);
@@ -196,8 +257,21 @@ function Daily({ u }: { u: Usage }) {
 type PersonRow =
   | { kind: 'member'; key: string; m: Member; lim: LimitMember | undefined }
   | { kind: 'invite'; key: string; x: Invite };
+type PeopleFilter = 'all' | 'exceptions';
 
-function People({ t, l, reload, openUser, onOpened }: { t: Team | undefined; l: Limits | undefined; reload: () => void; openUser?: string | null; onOpened?: () => void }) {
+/** A person's own settings, in words ("own limit $150.00", "can't launch"); none: they follow the defaults. Budget rules' Exceptions and People's filter. */
+function exceptionWords(m: LimitMember, p: Policy) {
+  return [
+    ...(m.cap_usd != null ? [`own limit ${usd(m.cap_usd)}`] : []),
+    ...(m.adjust_usd ? [`${m.adjust_usd > 0 ? '+' : '−'}${usd(Math.abs(m.adjust_usd))} ${p.mode === 'even' ? 'on top of equal share' : 'adjustment (only applies with an equal share)'}`] : []),
+    ...(m.own_can_run != null && m.own_can_run !== p.new_members_can_run ? [m.own_can_run ? 'allowed to launch' : "can't launch"] : []),
+    ...(m.max_concurrent_runs != null ? [plural(m.max_concurrent_runs, 'run') + ' at once'] : [])
+  ];
+}
+const SOURCE_WORD = { you: 'own', team: 'team', account: 'account' } as const;
+
+function People({ t, l, reload, openUser, onOpened, filter = 'all', setFilter }: { t: Team | undefined; l: Limits | undefined; reload: () => void; openUser?: string | null; onOpened?: () => void;
+  filter?: PeopleFilter; setFilter?: (f: PeopleFilter) => void }) {
   const [inviting, setInviting] = useState(false);
   const [editing, setEditing] = useState<{ m: Member; lim: LimitMember } | null>(null);
   const [suspend, setSuspend] = useState<Member | null>(null);
@@ -207,10 +281,15 @@ function People({ t, l, reload, openUser, onOpened }: { t: Team | undefined; l: 
   const asked = openUser ? { m: t.members.find((x) => x.user_id === openUser), lim: l?.members.find((x) => x.user_id === openUser) } : null;
   const dialog = editing ?? (asked?.m && asked.lim ? { m: asked.m, lim: asked.lim } : null);
   const act = (p: Promise<unknown>, msg: string) => p.then(() => { toast.success(msg); reload(); }).catch(fail);
-  const rows: PersonRow[] = [
+  const all: PersonRow[] = [
     ...t.members.map((m) => ({ kind: 'member' as const, key: m.id, m, lim: l?.members.find((x) => x.user_id === m.user_id) })),
     ...t.invitations.map((x) => ({ kind: 'invite' as const, key: x.id, x }))
   ];
+  // "Own settings only" (?filter=exceptions, or See all on Budget rules): the people who don't follow the defaults.
+  const own = (r: PersonRow) => r.kind === 'member' && !!r.lim && !!l && exceptionWords(r.lim, l.policy).length > 0;
+  const exceptions = manage && l?.can_manage ? all.filter(own).length : 0;
+  const filtered = filter === 'exceptions' && manage && l?.can_manage;
+  const rows = filtered ? all.filter(own) : all;
   const teamName = (id: number | null | undefined) => (id == null ? null : l?.teams.find((x) => x.id === id)?.name ?? null);
   const actions = (r: PersonRow): RowAction[] => {
     if (!manage) return [];
@@ -243,15 +322,24 @@ function People({ t, l, reload, openUser, onOpened }: { t: Team | undefined; l: 
     { key: 'team', label: 'Team', className: 'w-36', type: 'select', value: (r) => (r.kind === 'member' ? teamName(r.lim?.team_id) ?? 'No team' : 'No team'),
       render: (r) => <span className='text-muted-foreground'>{r.kind === 'member' ? teamName(r.lim?.team_id) ?? '—' : '—'}</span> },
     { key: 'spend', label: 'Spend this month', className: 'w-56', type: 'number', value: (r) => (r.kind === 'member' ? r.lim?.spent ?? 0 : 0),
-      render: (r) => r.kind === 'invite' || !r.lim ? <span className='text-muted-foreground'>—</span> : r.lim.allowance_usd == null
+      render: (r) => r.kind === 'invite' || !r.lim ? <span className='text-muted-foreground'>—</span> : r.lim.limit_usd == null
         ? <span className='text-xs tabular-nums'>{usd(r.lim.spent)} <span className='text-muted-foreground'>· shared budget</span></span>
-        : <Allowance spent={r.lim.spent} cap={r.lim.allowance_usd} /> },
+        : <Allowance spent={r.lim.spent} cap={r.lim.limit_usd} /> },
+    // What is left before the first limit that applies (their own, their budget, the buffer, the account), and which one binds.
+    { key: 'left', label: 'Left', className: 'w-24', type: 'number', value: (r) => (r.kind === 'member' && r.lim ? r.lim.left_usd ?? undefined : undefined),
+      render: (r) => <span className='text-xs tabular-nums'>{r.kind === 'member' && r.lim?.left_usd != null ? usd(r.lim.left_usd) : <span className='text-muted-foreground'>—</span>}</span> },
+    { key: 'limited', label: 'Limited by', className: 'w-36', type: 'select', value: (r) => (r.kind === 'member' && r.lim ? limitedWord(r.lim.limited_by, l?.teams ?? [], r.lim.team_id) ?? '—' : '—'),
+      render: (r) => {
+        const w = r.kind === 'member' && r.lim ? limitedWord(r.lim.limited_by, l?.teams ?? [], r.lim.team_id) : null;
+        return w ? <span className={cn('text-xs', r.kind === 'member' && r.lim?.blocked && 'text-destructive')}>{w}</span> : <span className='text-muted-foreground'>—</span>;
+      } },
     { key: 'tokens', label: 'Tokens', className: 'w-28', type: 'number', value: (r) => (r.kind === 'member' && r.lim ? Number(r.lim.tokens_in) + Number(r.lim.tokens_out) : 0),
       render: (r) => <span className='text-xs tabular-nums'>{r.kind === 'member' && r.lim ? num(Number(r.lim.tokens_in) + Number(r.lim.tokens_out)) : '—'}</span> },
-    { key: 'runs', label: 'Runs at once', className: 'w-32', render: (r) => r.kind === 'invite' || !r.lim ? <span className='text-muted-foreground'>—</span> : (
+    // The one that applies (the most specific: their own, their team's, the account's) and where it comes from: "2 · team".
+    { key: 'runs', label: 'Runs at once', className: 'w-36', render: (r) => r.kind === 'invite' || !r.lim ? <span className='text-muted-foreground'>—</span> : (
       <span className='text-xs tabular-nums'>
-        {r.lim.max_concurrent_runs ?? l?.policy.max_concurrent_runs ?? <span className='text-muted-foreground'>any</span>}
-        {r.lim.max_concurrent_runs == null && l?.policy.max_concurrent_runs != null && <span className='text-muted-foreground'> default</span>}
+        {r.lim.effective_max_concurrent == null ? <span className='text-muted-foreground'>no limit</span>
+          : <>{r.lim.effective_max_concurrent}<span className='text-muted-foreground'> · {SOURCE_WORD[r.lim.concurrent_source ?? 'account']}</span></>}
         {r.lim.running > 0 && <span className='text-primary ml-1.5'>· {r.lim.running} now</span>}
       </span>) },
     { key: 'can_run', label: 'Can run', className: 'w-24', type: 'select', value: (r) => (r.kind === 'member' && r.lim ? (r.lim.can_run ? 'Yes' : 'No') : '—'),
@@ -265,10 +353,15 @@ function People({ t, l, reload, openUser, onOpened }: { t: Team | undefined; l: 
       <RecordView compact id='billing-people' rows={rows} rowKey={(r) => r.key} cols={cols} noun='people'
         searchText={(r) => (r.kind === 'invite' ? r.x.email : `${r.m.name ?? ''} ${r.m.email ?? ''} ${teamName(r.lim?.team_id) ?? ''}`)}
         searchPlaceholder='Search people by name, email or team'
+        filters={manage && l?.can_manage ? (
+          <Button variant={filtered ? 'secondary' : 'outline'} size='sm' aria-pressed={!!filtered} onClick={() => setFilter?.(filtered ? 'all' : 'exceptions')}
+            title='People with their own limit, adjustment, launch access or runs at once'>
+            Own settings only<span className='text-muted-foreground ml-1 tabular-nums'>{exceptions}</span>
+          </Button>) : undefined}
         views={[{ id: 'all', label: 'Everyone' }, { id: 'active', label: 'Active', match: (r) => statusOf(r) === 'Active' }, { id: 'invited', label: 'Invited', match: (r) => r.kind === 'invite' },
           { id: 'suspended', label: 'Suspended', match: (r) => statusOf(r) === 'Suspended' }]}
         primary={manage ? <Button onClick={() => setInviting(true)}><Icons.add /> Invite</Button> : undefined}
-        actions={manage ? actions : undefined} exportName='people' empty='Nobody here yet.' />
+        actions={manage ? actions : undefined} exportName='people' empty={filtered ? 'Nobody has their own settings.' : 'Nobody here yet.'} />
       {inviting && <InviteDialog onClose={() => setInviting(false)} onSent={reload} />}
       {dialog && l && <LimitsDialog m={dialog.m} lim={dialog.lim} l={l} mode={mode} onClose={() => { setEditing(null); onOpened?.(); }} onSaved={reload} />}
       <Dialog open={!!suspend} onOpenChange={(o) => !o && setSuspend(null)}>
@@ -322,18 +415,32 @@ function InviteDialog({ onClose, onSent }: { onClose: () => void; onSent: () => 
   );
 }
 
-/** One person's limits: team, whether they may launch simulations, their own limit (any mode), their adjustment (even mode), concurrency. */
+const runWord = (v: boolean | null) => (v == null ? 'default' : v ? 'yes' : 'no');
+
+/**
+ * One person's limits, one per row: their monthly limit (the default for how the account shares budgets, or their own,
+ * in every mode), their adjustment (equal share only), team, launch access (the account's setting, or yes or no) and
+ * runs at once (empty: their team's or the account's). Only what was changed is sent, so opening and saving never pins
+ * a default onto the person.
+ */
 function LimitsDialog({ m, lim, l, mode, onClose, onSaved }: { m: Member; lim: LimitMember; l: Limits; mode: Mode; onClose: () => void; onSaved: () => void }) {
-  const init = { team: lim.team_id == null ? '' : String(lim.team_id), run: lim.can_run, cap: str(lim.cap_usd), adjust: lim.adjust_usd ? String(lim.adjust_usd) : '', conc: str(lim.max_concurrent_runs) };
+  const init = { team: lim.team_id == null ? '' : String(lim.team_id), run: runWord(lim.own_can_run ?? null), limit: lim.cap_usd == null ? 'default' : 'own', cap: str(lim.cap_usd),
+    adjust: lim.adjust_usd ? String(lim.adjust_usd) : '', conc: str(lim.max_concurrent_runs) };
   const [f, setF] = useState(init);
-  // Only what was changed is sent, so opening and saving never pins a default (say, "can launch") onto the person.
+  const p = l.policy;
+  // The default, as it stands for this person's budget: the shared pot, their equal share, or the account's set amount.
+  const pot = lim.pot == null ? (l as Partial<Picture>).rest : l.teams.find((x) => x.id === lim.pot);
+  const byDefault = mode === 'pool' ? 'shared budget, no personal limit' : mode === 'custom' ? `${usd(p.default_cap_usd ?? 0)} for everyone` : `equal share: ${usd(pot?.each_usd ?? 0)}`;
+  const team = l.teams.find((x) => String(x.id) === f.team);
+  const runsDefault = team?.max_concurrent_runs ?? p.max_concurrent_runs;
   const save = (e: React.FormEvent) => {
     e.preventDefault();
     const body: Record<string, unknown> = {};
     if (f.team !== init.team) body.team_id = f.team === '' ? null : Number(f.team);
-    if (f.run !== init.run) body.can_run = f.run;
+    if (f.run !== init.run) body.can_run = f.run === 'default' ? null : f.run === 'yes';
     if (f.conc !== init.conc) body.max_concurrent_runs = orNull(f.conc);
-    if (f.cap !== init.cap) body.cap_usd = orNull(f.cap);
+    const cap = f.limit === 'own' ? orNull(f.cap) : null;
+    if (cap !== lim.cap_usd) body.cap_usd = cap;
     if (mode === 'even' && f.adjust !== init.adjust) body.adjust_usd = orNull(f.adjust) ?? 0;
     if (!Object.keys(body).length) return onClose();
     appApi('PUT', `/limits/members/${encodeURIComponent(m.user_id)}`, body)
@@ -343,17 +450,31 @@ function LimitsDialog({ m, lim, l, mode, onClose, onSaved }: { m: Member; lim: L
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className='sm:max-w-md'>
         <form onSubmit={save} className='grid gap-4'>
-          <DialogHeader><DialogTitle>Limits for {m.name || m.email}</DialogTitle><DialogDescription>Spent {usd(lim.spent)} this month{lim.allowance_usd != null ? ` of ${usd(lim.allowance_usd)}` : ''}.</DialogDescription></DialogHeader>
+          <DialogHeader><DialogTitle>Limits for {m.name || m.email}</DialogTitle>
+            <DialogDescription>Spent {usd(lim.spent)} this month{lim.limit_usd != null ? ` of ${usd(lim.limit_usd)}` : ''}{lim.left_usd != null ? `, ${usd(lim.left_usd)} left` : ''}.</DialogDescription></DialogHeader>
+          <label className='grid gap-1.5 text-sm'>Monthly limit
+            <NativeSelect value={f.limit} onChange={(e) => setF({ ...f, limit: e.target.value })} className='w-full'>
+              <NativeSelectOption value='default'>Use the default ({byDefault})</NativeSelectOption>
+              <NativeSelectOption value='own'>Own limit</NativeSelectOption>
+            </NativeSelect>
+          </label>
+          {f.limit === 'own' && <label className='grid gap-1.5 text-sm'>Own limit ($ a month)<Input type='number' inputMode='decimal' required min={0} step={0.01} value={f.cap} onChange={(e) => setF({ ...f, cap: e.target.value })} /></label>}
+          {mode === 'even' && <label className='grid gap-1.5 text-sm'>Adjustment on top of equal share (± $)<Input type='number' inputMode='decimal' step={0.01} value={f.adjust} onChange={(e) => setF({ ...f, adjust: e.target.value })} placeholder='0' /></label>}
           <label className='grid gap-1.5 text-sm'>Team
             <NativeSelect value={f.team} onChange={(e) => setF({ ...f, team: e.target.value })} className='w-full'>
               <NativeSelectOption value=''>No team</NativeSelectOption>
               {l.teams.map((x) => <NativeSelectOption key={x.id} value={String(x.id)}>{x.name}</NativeSelectOption>)}
             </NativeSelect>
           </label>
-          <label className='grid gap-1.5 text-sm'>Own monthly limit ($)<Input type='number' min={0} step={1} value={f.cap} onChange={(e) => setF({ ...f, cap: e.target.value })} placeholder={mode === 'custom' && l.policy.default_cap_usd != null ? `default ${l.policy.default_cap_usd}` : mode === 'even' ? 'equal share' : 'no own limit'} /></label>
-          {mode === 'even' && <label className='grid gap-1.5 text-sm'>Adjust their even share (± $)<Input type='number' step={1} value={f.adjust} onChange={(e) => setF({ ...f, adjust: e.target.value })} placeholder='0' /></label>}
-          <label className='grid gap-1.5 text-sm'>Simulations running at once<Input type='number' min={1} step={1} value={f.conc} onChange={(e) => setF({ ...f, conc: e.target.value })} placeholder={l.policy.max_concurrent_runs == null ? 'no limit' : `default ${l.policy.max_concurrent_runs}`} /></label>
-          <label className='flex items-center gap-2 text-sm leading-none'><Checkbox checked={f.run} onCheckedChange={(v) => setF({ ...f, run: Boolean(v) })} /> Can launch simulations</label>
+          <label className='grid gap-1.5 text-sm'>Can launch simulations
+            <NativeSelect value={f.run} onChange={(e) => setF({ ...f, run: e.target.value })} className='w-full'>
+              <NativeSelectOption value='default'>Use the account setting ({p.new_members_can_run ? 'everyone can launch' : 'only people allowed'})</NativeSelectOption>
+              <NativeSelectOption value='yes'>Yes</NativeSelectOption>
+              <NativeSelectOption value='no'>No</NativeSelectOption>
+            </NativeSelect>
+          </label>
+          <label className='grid gap-1.5 text-sm'>Runs at once<Input type='number' inputMode='numeric' min={1} step={1} value={f.conc} onChange={(e) => setF({ ...f, conc: e.target.value })}
+            placeholder={`Use team or account setting (${runsDefault ?? 'no limit'})`} /></label>
           <DialogFooter><Button type='button' variant='outline' onClick={onClose}>Cancel</Button><Button type='submit'>Save limits</Button></DialogFooter>
         </form>
       </DialogContent>
@@ -457,16 +578,16 @@ function planOf(l: AdminLimits, f: RulesDraft) {
   return { body: { policy, team_budgets, member_resets: f.resets }, errors };
 }
 
-/** What a limit is called beside a person or budget: "Their limit", "Mobile budget". */
-function limitedWord(c: LimitCode | null | undefined, o: Picture, teamId?: number | null) {
+/** What a limit is called beside a person or budget: "Their limit" (to a member, "Your limit"), "Mobile budget". */
+function limitedWord(c: LimitCode | null | undefined, teams: { id: number; name: string }[], teamId?: number | null, person = 'Their limit') {
   if (!c) return null;
-  const team = o.teams.find((t) => t.id === teamId)?.name ?? 'Team';
+  const team = teams.find((t) => t.id === teamId)?.name ?? 'Team';
   const words: Record<LimitCode, string> = { no_allowance: 'No allowance', account_cap: 'Allowance', budget_error: 'Allowance', launch_access: "Can't launch",
-    person_limit: 'Their limit', team_budget: `${team} budget`, rest_pot: 'Everyone else', buffer: 'Buffer', runs_at_once: 'Runs at once', run_sessions: 'Sessions per run' };
+    person_limit: person, team_budget: `${team} budget`, rest_pot: 'Everyone else', buffer: 'Buffer', runs_at_once: 'Runs at once', run_sessions: 'Sessions per run' };
   return words[c];
 }
 
-function Rules({ l, reload, onEditPerson, onTab }: { l: AdminLimits; reload: () => Promise<Limits | null>; onEditPerson: (userId: string) => void; onTab: (tab: 'people' | 'teams') => void }) {
+function Rules({ l, reload, onEditPerson, onTab }: { l: AdminLimits; reload: () => Promise<Limits | null>; onEditPerson: (userId: string) => void; onTab: (tab: 'people' | 'teams', filter?: PeopleFilter) => void }) {
   const base = useMemo(() => draftOf(l), [l]);
   const [f, setF] = useState(base);
   const [pv, setPv] = useState<Preview | null>(null);
@@ -649,7 +770,7 @@ type SetDraft = <K extends keyof RulesDraft>(k: K, v: RulesDraft[K]) => void;
 
 /** P1–P6: the allowance, the buffer, team budgets, what everyone else shares, how people share a budget, who can launch. */
 function PolicySentences({ l, o, f, set, errors, month, warnings, launchStops, onTab }: { l: AdminLimits; o: Picture; f: RulesDraft; set: SetDraft; errors: Record<string, string>; month: string;
-  warnings: Warning[]; launchStops: number | null; onTab: (tab: 'people' | 'teams') => void }) {
+  warnings: Warning[]; launchStops: number | null; onTab: (tab: 'people' | 'teams', filter?: PeopleFilter) => void }) {
   const cap = l.budget_usd, none = !l.budget_error && cap <= 0;
   const free = l.teams.filter((t) => !f.budgets.some(([id]) => id === t.id));
   const setBudget = (i: number, row: [number, string] | null) => set('budgets', row ? f.budgets.map((x, j) => (j === i ? row : x)) : f.budgets.filter((_, j) => j !== i));
@@ -748,16 +869,10 @@ function RunLimits({ l, f, set, errors }: { l: AdminLimits; f: RulesDraft; set: 
 }
 
 /** People and teams with their own settings. Reset is part of the draft (it shows in the preview and saves with the rest). */
-function Exceptions({ l, resets, setResets, onEditPerson, onTab }: { l: AdminLimits; resets: string[]; setResets: (r: string[]) => void; onEditPerson: (userId: string) => void; onTab: (tab: 'people' | 'teams') => void }) {
+function Exceptions({ l, resets, setResets, onEditPerson, onTab }: { l: AdminLimits; resets: string[]; setResets: (r: string[]) => void; onEditPerson: (userId: string) => void; onTab: (tab: 'people' | 'teams', filter?: PeopleFilter) => void }) {
   const [all, setAll] = useState(false);
-  const p = l.policy;
   const people = l.members.flatMap((m) => {
-    const words = [
-      ...(m.cap_usd != null ? [`own limit ${usd(m.cap_usd)}`] : []),
-      ...(m.adjust_usd ? [`${m.adjust_usd > 0 ? '+' : '−'}${usd(Math.abs(m.adjust_usd))} ${p.mode === 'even' ? 'on top of equal share' : 'adjustment (only applies with an equal share)'}`] : []),
-      ...(m.own_can_run != null && m.own_can_run !== p.new_members_can_run ? [m.own_can_run ? 'allowed to launch' : "can't launch"] : []),
-      ...(m.max_concurrent_runs != null ? [plural(m.max_concurrent_runs, 'run') + ' at once'] : [])
-    ];
+    const words = exceptionWords(m, l.policy);
     return words.length ? [{ m, words }] : [];
   });
   const teams = l.teams.filter((t) => t.max_concurrent_runs != null);
@@ -794,7 +909,7 @@ function Exceptions({ l, resets, setResets, onEditPerson, onTab }: { l: AdminLim
       {people.length > 5 && (
         <p className='text-muted-foreground text-xs'>
           {all ? <button type='button' className='underline underline-offset-4' onClick={() => setAll(false)}>Show fewer</button>
-            : <><button type='button' className='underline underline-offset-4' onClick={() => setAll(true)}>+{people.length - 5} more</button> · <button type='button' className='underline underline-offset-4' onClick={() => onTab('people')}>See all on People →</button></>}
+            : <><button type='button' className='underline underline-offset-4' onClick={() => setAll(true)}>+{people.length - 5} more</button> · <button type='button' className='underline underline-offset-4' onClick={() => onTab('people', 'exceptions')}>See all on People →</button></>}
         </p>
       )}
     </div>
@@ -855,11 +970,11 @@ function WhoGetsWhat({ l, o, changes, draftReserve, openRow, setOpenRow }: { l: 
     ...(o.buffer_usd > 0 || l.buffer_usd > 0 ? [{ id: 'buffer', name: 'Buffer', count: null, each: '—', spent: null, left: o.buffer_usd, limited: null, change: was(l.buffer_usd, o.buffer_usd), people: [] }] : []),
     ...o.teams.filter((t) => t.budget_usd != null).map((t) => {
       const saved = l.teams.find((x) => x.id === t.id);
-      return { id: `team:${t.id}`, name: t.name, count: t.members, each: each(t.each_usd), spent: t.spent, left: t.left_usd, limited: limitedWord(t.limited_by, o, t.id),
+      return { id: `team:${t.id}`, name: t.name, count: t.members, each: each(t.each_usd), spent: t.spent, left: t.left_usd, limited: limitedWord(t.limited_by, o.teams, t.id),
         change: was(saved?.budget_usd, t.budget_usd), people: o.members.filter((m) => m.pot === t.id) };
     }),
     { id: 'rest', name: o.teams.some((t) => t.budget_usd != null) ? 'Everyone else' : 'Everyone', count: o.rest.members, each: each(o.rest.each_usd), spent: o.rest.spent,
-      left: o.rest.left_usd, limited: limitedWord(o.rest.limited_by, o), change: o.policy.mode === 'pool' || l.policy.mode === 'pool' ? was(l.rest.budget_usd, o.rest.budget_usd) : was(l.rest.each_usd, o.rest.each_usd, true),
+      left: o.rest.left_usd, limited: limitedWord(o.rest.limited_by, o.teams), change: o.policy.mode === 'pool' || l.policy.mode === 'pool' ? was(l.rest.budget_usd, o.rest.budget_usd) : was(l.rest.each_usd, o.rest.each_usd, true),
       people: o.members.filter((m) => m.pot == null) }
   ];
   const byUser = new Map(changes.map((c) => [c.user_id, c]));
@@ -922,7 +1037,7 @@ function RowGroup({ r, o, open, toggle, byUser }: { r: BudgetRow; o: Picture; op
     </TableRow>
     {open && people.map((m) => {
       const c = byUser.get(m.user_id);
-      const word = limitedWord(m.limited_by, o, m.team_id);
+      const word = limitedWord(m.limited_by, o.teams, m.team_id);
       return (
         <TableRow key={m.user_id} className='bg-muted/30' title={word ? `Limited by: ${word}${m.left_usd != null ? ` (${usd(m.left_usd)} left)` : ''}` : undefined}>
           <PersonCells m={m} o={o} c={c} />
@@ -941,7 +1056,7 @@ function RowGroup({ r, o, open, toggle, byUser }: { r: BudgetRow; o: Picture; op
 function PersonCells({ m, o, c, stacked }: { m: LimitMember; o: Picture; c: PreviewChange | undefined; stacked?: boolean }) {
   const limit = !m.can_run ? '—' : m.limit_usd == null ? 'Shared' : usd(m.limit_usd);
   const near = m.limit_usd != null && m.limit_usd > 0 && !m.blocked && m.spent >= 0.8 * m.limit_usd;
-  const word = limitedWord(m.limited_by, o, m.team_id);
+  const word = limitedWord(m.limited_by, o.teams, m.team_id);
   const change = c && !c.blocked_now && c.before !== c.after ? `was ${c.before == null ? 'shared' : usd(c.before)}` : null;
   const chips = (
     <span className='flex flex-wrap gap-1.5'>
@@ -1115,9 +1230,10 @@ function History({ onClose }: { onClose: () => void }) {
   );
 }
 
-/** Teams as one full table: budget used against the team cap, runs at once, people. Add, edit and delete (admins). */
+/** Teams as one full table: budget used against the team cap, what is left, runs at once, people. Add, edit and delete (admins). */
 function Teams({ l, reload }: { l: Limits; reload: () => void }) {
   const [edit, setEdit] = useState<{ id: number | null; name: string; budget: string; conc: string } | null>(null);
+  const [removing, setRemoving] = useState<LimitTeam | null>(null);
   const manage = l.can_manage;
   const save = (e: React.FormEvent) => {
     e.preventDefault(); if (!edit) return;
@@ -1125,12 +1241,14 @@ function Teams({ l, reload }: { l: Limits; reload: () => void }) {
     (edit.id == null ? appApi('POST', '/limits/teams', body) : appApi('PUT', `/limits/teams/${edit.id}`, body))
       .then(() => { setEdit(null); toast.success(edit.id == null ? 'Team added' : 'Team saved'); reload(); }).catch(fail);
   };
-  const remove = (x: LimitTeam) => { if (window.confirm(`Delete team ${x.name}? Its people go back to the shared budget.`)) appApi('DELETE', `/limits/teams/${x.id}`).then(() => { toast.success('Team deleted'); reload(); }).catch(fail); };
   const cols: RecordCol<LimitTeam>[] = [
     { key: 'team', label: 'Team', keep: true, type: 'text', value: (x) => x.name, render: (x) => <span className='font-medium'>{x.name}</span> },
     { key: 'budget', label: 'Budget used this month', className: 'w-72', type: 'number', value: (x) => x.spent,
       render: (x) => (x.budget_usd == null ? <span className='text-xs tabular-nums'>{usd(x.spent)} <span className='text-muted-foreground'>· no team cap</span></span> : <Allowance spent={x.spent} cap={x.budget_usd} />) },
     { key: 'cap', label: 'Monthly cap', className: 'w-32', type: 'number', value: (x) => x.budget_usd ?? undefined, render: (x) => <span className='tabular-nums'>{x.budget_usd == null ? <span className='text-muted-foreground'>none</span> : usd(x.budget_usd)}</span> },
+    { key: 'left', label: 'Left', className: 'w-28', type: 'number', value: (x) => x.left_usd ?? undefined,
+      render: (x) => <span className={cn('text-xs tabular-nums', x.limited_by && 'text-amber-700 dark:text-amber-400')} title={x.limited_by ? 'Limits its people (90% or more used)' : undefined}>
+        {x.left_usd == null ? <span className='text-muted-foreground'>—</span> : usd(x.left_usd)}</span> },
     { key: 'conc', label: 'Runs at once, per person', className: 'w-48', type: 'number', value: (x) => x.max_concurrent_runs ?? undefined,
       render: (x) => <span className='text-xs tabular-nums'>{x.max_concurrent_runs ?? <span className='text-muted-foreground'>account default</span>}</span> },
     { key: 'people', label: 'People', className: 'w-28', type: 'number', value: (x) => x.members, render: (x) => <span className='text-xs'>{x.members ? `${x.members} ${x.members === 1 ? 'person' : 'people'}` : <span className='text-muted-foreground'>nobody yet</span>}</span> }
@@ -1142,14 +1260,14 @@ function Teams({ l, reload }: { l: Limits; reload: () => void }) {
         primary={manage ? <Button onClick={() => setEdit({ id: null, name: '', budget: '', conc: '' })}><Icons.add /> Add team</Button> : undefined}
         actions={manage ? (x) => [
           { label: 'Edit team', icon: <Icons.edit />, onSelect: () => setEdit({ id: x.id, name: x.name, budget: str(x.budget_usd), conc: str(x.max_concurrent_runs) }) },
-          { label: 'Delete team', icon: <Icons.trash />, destructive: true, separator: true, onSelect: () => remove(x) }
+          { label: 'Delete team', icon: <Icons.trash />, destructive: true, separator: true, onSelect: () => setRemoving(x) }
         ] : undefined}
         exportName='teams' empty='No teams: everyone shares the account cap. Put people in teams from their row on People (Edit limits).' />
       <Dialog open={edit !== null} onOpenChange={(o) => { if (!o) setEdit(null); }}>
         <DialogContent className='sm:max-w-md'>
           {edit && (
             <form onSubmit={save} className='grid gap-4'>
-              <DialogHeader><DialogTitle>{edit.id == null ? 'Add a team' : 'Edit team'}</DialogTitle><DialogDescription>A team budget caps the team&apos;s combined spend; in Split evenly it is shared among its people.</DialogDescription></DialogHeader>
+              <DialogHeader><DialogTitle>{edit.id == null ? 'Add a team' : 'Edit team'}</DialogTitle><DialogDescription>This budget is set aside for the team and is the most it can spend. Leave it empty and the team shares Everyone else&apos;s.</DialogDescription></DialogHeader>
               <label className='grid gap-1.5 text-sm'>Name<Input required autoFocus value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} /></label>
               <label className='grid gap-1.5 text-sm'>Monthly budget ($)<Input type='number' min={0} step={1} value={edit.budget} onChange={(e) => setEdit({ ...edit, budget: e.target.value })} placeholder='no cap' /></label>
               <label className='grid gap-1.5 text-sm'>Runs at once, per person<Input type='number' min={1} step={1} value={edit.conc} onChange={(e) => setEdit({ ...edit, conc: e.target.value })} placeholder='account default' /></label>
@@ -1158,6 +1276,49 @@ function Teams({ l, reload }: { l: Limits; reload: () => void }) {
           )}
         </DialogContent>
       </Dialog>
+      {removing && <DeleteTeam team={removing} l={l} onClose={() => setRemoving(null)} onDeleted={reload} />}
     </>
+  );
+}
+
+/**
+ * Before a team is deleted: what it changes, from the preview (the server's allocate() with the team gone). Its people
+ * move to Everyone else, their limits there, its budget going back, and who would be blocked right away.
+ */
+function DeleteTeam({ team, l, onClose, onDeleted }: { team: LimitTeam; l: Limits; onClose: () => void; onDeleted: () => void }) {
+  const [pv, setPv] = useState<Preview | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { appApi<Preview>('POST', '/limits/preview', { remove_teams: [team.id] }).then(setPv, () => setFailed(true)); }, [team.id]);
+  const ids = new Set(l.members.filter((m) => m.team_id === team.id).map((m) => m.user_id));
+  const moved = pv?.members.filter((m) => ids.has(m.user_id)) ?? [];
+  const limits = [...new Set(moved.filter((m) => m.can_run && m.limit_source !== 'own').map((m) => m.limit_usd ?? 0))];
+  const blocked = pv?.changes.filter((c) => c.blocked_now).length ?? 0;
+  const n = ids.size, they = n === 1 ? 'Their limit becomes' : 'Their limits become';
+  const lines = [
+    n ? `Its ${plural(n, 'person', 'people')} ${n === 1 ? 'moves' : 'move'} to Everyone else.` : 'Nobody is in it.',
+    ...(!n || !pv ? [] : pv.policy.mode === 'pool' ? ["They share Everyone else's budget, with no personal limit."]
+      : limits.length === 1 ? [`${they} ${usd(limits[0]!)}${n > 1 ? ' each' : ''}.`] : limits.length ? [`${they} ${limits.map(usd).join(', ')}.`] : []),
+    ...(moved.some((m) => m.limit_source === 'own') ? ['Own limits stay.'] : []),
+    ...(team.budget_usd != null ? [`The ${usd(team.budget_usd)} set aside goes back to Everyone else.`] : []),
+    ...(blocked ? [`${plural(blocked, 'person', 'people')} will be blocked right away.`] : [])
+  ];
+  const remove = () => {
+    setBusy(true);
+    appApi('DELETE', `/limits/teams/${team.id}`).then(() => { toast.success('Team deleted'); onDeleted(); onClose(); }).catch(fail).finally(() => setBusy(false));
+  };
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className='sm:max-w-md'>
+        <DialogHeader>
+          <DialogTitle>Delete team {team.name}?</DialogTitle>
+          <DialogDescription>{!pv && !failed ? 'Working out what changes…' : failed ? "We couldn't work out what changes. Its people move to Everyone else." : lines.join(' ')}</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant='outline' onClick={onClose}>Keep team</Button>
+          <Button variant='destructive' disabled={busy || (!pv && !failed)} onClick={remove}>{blocked ? `Delete and block ${blocked}` : 'Delete team'}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

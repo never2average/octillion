@@ -228,18 +228,11 @@ function shape({ policy, teams, rows }: Saved, { people, usage, account_spent, b
   const a = allocate({ policy, teams, usage, cap: budget, account_spent_usd: account_spent,
     members: active.map((m) => ({ user_id: m.user_id, ...rows.get(m.user_id) })) });
   const byId = new Map(a.members.map((x) => [x.user_id, x]));
-  const members = active.map((m) => {
-    const x = byId.get(m.user_id)!;
-    // allowance_usd and remaining_usd are the old names, for the current tab.
-    return { email: m.email, name: m.name, role: m.role, ...x,
-      allowance_usd: x.limit_usd, remaining_usd: x.limit_usd == null ? null : leftOf(x.limit_usd, x.spent) };
-  });
-  const allocated = a.set_aside_usd + (policy.mode === "pool" ? 0 : members.filter((m) => m.pot == null).reduce((s, m) => s + (m.limit_usd ?? 0), 0));
+  const members = active.map((m) => ({ email: m.email, name: m.name, role: m.role, ...byId.get(m.user_id)! }));
   const admins = members.filter((m) => m.role === "admin").map((m) => ({ name: m.name || m.email || "an admin" }));
   return { policy, budget_usd: budget, budget_error, plan: subscription?.plan ?? null, clerk: people.clerk, admins,
     account: a.account, buffer_usd: a.buffer_usd, set_aside_usd: a.set_aside_usd, over_by_usd: a.over_by_usd, rest: a.rest,
-    teams: a.teams, members, allocated_usd: cents(allocated), unallocated_usd: budget > 0 ? cents(budget - allocated) : null,
-    spent_usd: members.reduce((s, m) => s + m.spent, 0) };
+    teams: a.teams, members };
 }
 
 /** The full picture for /app Billing, Budget rules: policy, teams, every active member's limit, usage and what blocks them. */
@@ -258,6 +251,24 @@ export function pace(spent_usd: number, now = new Date()) {
   return { period_end: new Date(end).toISOString(), projected_usd: now.getUTCDate() < 3 ? null : cents((spent_usd / elapsed) * days) };
 }
 
+/**
+ * The admin banner on Billing, worked out on every GET (nothing is stored or sent): how much of the allowance is used,
+ * once it is 80% or more, and the day (UTC) the month's pace runs out of it, when it is on pace to go over. Null when
+ * neither applies, or with no allowance.
+ */
+export function usageAlert(spent_usd: number, cap: number, now = new Date()) {
+  if (!(cap > 0)) return null;
+  const used_pct = Math.floor((spent_usd / cap) * 100);
+  const { projected_usd } = pace(spent_usd, now);
+  let runs_out_on: string | null = null;
+  if (projected_usd != null && projected_usd > cap && spent_usd < cap) {
+    const start = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1);
+    const perDay = spent_usd / ((now.getTime() - start) / 864e5);
+    runs_out_on = new Date(start + (cap / perDay) * 864e5).toISOString().slice(0, 10);
+  }
+  return used_pct >= 80 || runs_out_on ? { used_pct, runs_out_on } : null;
+}
+
 /** Fewer finished sessions than this this month, and the average spend per session is too noisy to estimate with. */
 const AVG_MIN_SESSIONS = 20;
 
@@ -265,7 +276,7 @@ const AVG_MIN_SESSIONS = 20;
  * The "This month" figures, live: what is running now (spend and runs), spend no person's limit covers (runs launched
  * with a connector key), and the average spend per finished session (for "≈ n sessions" beside the run dollar cap).
  */
-async function monthFigures(orgId: number) {
+export async function monthFigures(orgId: number) {
   const [r] = await (await getDb()).query<{ in_flight: number; unattributed: number; finished: number; avg_usd: number | null; running: number }>(
     `WITH s AS (SELECT a.status, sim.created_by,
                        GREATEST(a.cost_usd, coalesce((SELECT sum(g.cost_usd) FROM gateway_usage g WHERE g.session_id = a.id), 0)) AS usd
@@ -317,7 +328,8 @@ function tiles(o: ReturnType<typeof shape>, { figures, budget_error }: PageLive)
   const { period_end, projected_usd } = pace(o.account.spent_usd);
   return { spent_live_usd: o.account.spent_usd, in_flight_usd: figures.in_flight_usd, running_count: figures.running_count, projected_usd,
     left_usd: budget_error ? null : leftOf(o.budget_usd, o.account.spent_usd), period_end, avg_session_usd: figures.avg_session_usd,
-    unattributed_spent_usd: figures.unattributed_spent_usd, server_max_sessions: settingNumber("OCTILLION_MAX_SESSIONS_PER_RUN"), max_run_usd: o.policy.max_run_usd };
+    unattributed_spent_usd: figures.unattributed_spent_usd, server_max_sessions: settingNumber("OCTILLION_MAX_SESSIONS_PER_RUN"), max_run_usd: o.policy.max_run_usd,
+    alert: budget_error ? null : usageAlert(o.account.spent_usd, o.budget_usd) };
 }
 
 /** GET /limits for an admin: the overview, the month's figures, and the version to send back with a plan. */
@@ -326,6 +338,76 @@ export async function page(org: { orgId: number; slug: string }) {
   const o = shape(saved, lv);
   return { ...o, ...tiles(o, lv), version };
 }
+
+const $usd = (v: number) => `$${v.toFixed(2)}`;
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/**
+ * "Your budget" in plain words, for a member (who never sees Budget rules): the rules written in the second person,
+ * read-only. `a` is allocate()'s picture of the saved rules; `run` the run limits that apply to them.
+ */
+export function explain(a: Pick<Allocation, "account" | "buffer_usd" | "rest" | "teams" | "members">, userId: string | null,
+  run: { max_sessions: number; max_run_usd: number | null }, now = new Date()): string[] {
+  const cap = a.account.cap_usd;
+  if (cap <= 0) return ["Your account has no prepaid allowance this month, so nobody can launch simulations. Contact Octillion to add one."];
+  const out: string[] = [];
+  const me = a.members.find((m) => m.user_id === userId);
+  if (me) {
+    const team = a.teams.find((t) => t.id === me.pot);
+    out.push(team ? `You're in ${team.name}, which has its own ${$usd(team.budget_usd ?? 0)} this month.`
+      : a.teams.some((t) => t.budget_usd != null) ? `You're in Everyone else, which shares ${$usd(a.rest.budget_usd)}.`
+      : `Everyone on the account shares ${$usd(a.rest.budget_usd)}.`);
+    const adj = me.adjust_usd ? ` (with your ${me.adjust_usd > 0 ? "+" : "-"}${$usd(Math.abs(me.adjust_usd))} adjustment)` : "";
+    out.push(!me.can_run ? "You haven't been allowed to launch simulations yet. Reports and transcripts stay available."
+      : me.limit_source === "own" ? `You have your own limit of ${$usd(me.limit_usd ?? 0)} a month.`
+      : me.limit_source === "pool" ? "People share it freely, so you have no personal limit. It stops when the budget runs out."
+      : me.limit_source === "default" ? `Everyone can spend up to ${$usd(me.limit_usd ?? 0)} a month. The budget still stops at its total.`
+      : `People get an equal share, so yours is ${$usd(me.limit_usd ?? 0)}${adj} and changes if people join.`);
+    if (me.effective_max_concurrent != null) out.push(`You can have ${plural(me.effective_max_concurrent, "simulation")} running at once.`);
+  }
+  if (a.buffer_usd > 0) out.push(`${$usd(a.buffer_usd)} of the account's ${$usd(cap)} is held back for runs that go over. Nobody can launch into it.`);
+  out.push(`Each simulation can use up to ${plural(run.max_sessions, "agent session")}${run.max_run_usd != null ? ` and spend up to ${$usd(run.max_run_usd)}` : ""}.`);
+  out.push(`Spend starts over on ${monthWords(now).reset}.`);
+  return out;
+}
+
+/**
+ * GET /limits for a member: their own row and team (nobody else's), the run limits, and "Your budget": the budget they
+ * draw on (their team's, or Everyone else's) with what is left of it, the account's totals, and the plain summary.
+ */
+export async function memberPage(org: { orgId: number; slug: string }, userId: string | null) {
+  const o = await overview(org);
+  const me = o.members.find((m) => m.user_id === userId) ?? null;
+  const p = o.policy;
+  const max_sessions = Math.min(settingNumber("OCTILLION_MAX_SESSIONS_PER_RUN"), p.max_sessions_per_run ?? Infinity);
+  const team = me ? o.teams.find((t) => t.id === me.team_id) ?? null : null;
+  const budgeted = o.teams.some((t) => t.budget_usd != null);
+  const pot = !me ? null : me.pot != null && team
+    ? { kind: "team" as const, name: team.name, budget_usd: team.budget_usd ?? 0, left_usd: team.left_usd ?? 0 }
+    : { kind: "rest" as const, name: budgeted ? "Everyone else" : "Everyone", budget_usd: o.rest.budget_usd, left_usd: o.rest.left_usd };
+  return {
+    policy: { mode: p.mode, max_concurrent_runs: p.max_concurrent_runs, max_sessions_per_run: p.max_sessions_per_run, max_run_usd: p.max_run_usd },
+    budget_usd: o.budget_usd, budget_error: o.budget_error, admins: o.admins, clerk: o.clerk, can_manage: false, me: userId, period_end: pace(0).period_end,
+    members: me ? [me] : [], teams: team ? [team] : [],
+    you: { pot, max_sessions, max_run_usd: p.max_run_usd, account: { cap_usd: o.account.cap_usd, spent_usd: o.account.spent_usd, left_usd: leftOf(o.account.cap_usd, o.account.spent_usd) },
+      summary: o.budget_error ? [] : explain(o, userId, { max_sessions, max_run_usd: p.max_run_usd }) },
+  };
+}
+
+/**
+ * The line a launch reports beside its run: what is left for the person this month (of their limit, when they have
+ * one), and the run's estimated cost at this month's average per session. More than what is left is a warning, not a
+ * refusal: the run starts, and the limits stop new launches and adaptive top-ups once they are reached.
+ */
+export function launchNote(left_usd: number, limit_usd: number | null, sessions: number, avg_session_usd: number | null) {
+  const estimate_usd = avg_session_usd == null ? null : cents(avg_session_usd * sessions);
+  const line = `${$usd(left_usd)} left${limit_usd != null ? ` of ${$usd(limit_usd)}` : ""} this month.` +
+    (estimate_usd == null ? "" : ` ≈ ${$usd(estimate_usd)} for ${plural(sessions, "session")} at this month's average.`);
+  const warning = estimate_usd != null && estimate_usd > left_usd
+    ? `That's more than the ${$usd(left_usd)} left. The run starts; once the limit is reached, nothing new launches and adaptive runs stop adding sessions.` : null;
+  return { left_usd, limit_usd, estimate_usd, line, warning };
+}
+export type LaunchNote = ReturnType<typeof launchNote>;
 
 /** The end of every refusal: who can change it, and (for money) when the month starts over. */
 export function askAdmins(admins: { name: string }[], untilReset: boolean) {
@@ -372,21 +454,21 @@ function refusal(o: Awaited<ReturnType<typeof overview>>, code: LimitCode, me?: 
  * looked up, nothing starts (budget_error): a lookup failure must not read as "no limit". Someone not among the active
  * members (say Clerk is unavailable) still meets the account's checks, the buffer among them.
  */
-export async function checkRun(org: Org): Promise<{ maxSessions: number | null; admins: { name: string }[] }> {
-  if (!org.userId) return { maxSessions: null, admins: [] };
+export async function checkRun(org: Org): Promise<{ maxSessions: number | null; admins: { name: string }[]; left_usd: number | null; limit_usd: number | null }> {
+  if (!org.userId) return { maxSessions: null, admins: [], left_usd: null, limit_usd: null };
   const o = await overview(org);
   if (o.budget_error)
     throw new LimitError("We couldn't check your account's allowance. Try again in a minute.", 503, { code: "budget_error", admins: o.admins });
   const me = o.members.find((m) => m.user_id === org.userId);
   const blocked = me ? me.blocked : o.account.blocked;
   if (blocked) throw refusal(o, blocked, me);
-  if (!me) return { maxSessions: o.policy.max_sessions_per_run, admins: o.admins };
+  if (!me) return { maxSessions: o.policy.max_sessions_per_run, admins: o.admins, left_usd: o.account.left_usd, limit_usd: null };
   const maxRuns = me.effective_max_concurrent, runsSetBy = me.concurrent_source;
   if (maxRuns != null && me.running >= maxRuns)
     throw new LimitError(`You have ${me.running} simulation${me.running === 1 ? "" : "s"} running; you can have ${maxRuns} at once ` +
       `(set for ${runsSetBy === "you" ? "you" : runsSetBy === "team" ? "your team" : "the account"}). Wait for one to finish. ${askAdmins(o.admins, false)}`, 429,
       { code: "runs_at_once", set_by: runsSetBy, admins: o.admins, limit_usd: null, left_usd: null });
-  return { maxSessions: o.policy.max_sessions_per_run, admins: o.admins };
+  return { maxSessions: o.policy.max_sessions_per_run, admins: o.admins, left_usd: me.left_usd, limit_usd: me.limit_usd };
 }
 
 /**
@@ -651,8 +733,11 @@ export async function setMember(org: { orgId: number; slug: string }, actor: Act
 
 // ---------- the whole tab at once: a draft previewed, then saved as one plan ----------
 
-/** What Budget rules sends: the policy fields changed, team budgets (null removes one), people reset to the defaults. */
-export interface Draft { policy?: Partial<Record<keyof Policy, unknown>>; team_budgets?: unknown; member_resets?: unknown; clear_inactive?: unknown }
+/**
+ * What Budget rules sends: the policy fields changed, team budgets (null removes one), people reset to the defaults.
+ * remove_teams is for the preview only (Teams asks what deleting a team would do before it does); a plan refuses it.
+ */
+export interface Draft { policy?: Partial<Record<keyof Policy, unknown>>; team_budgets?: unknown; member_resets?: unknown; clear_inactive?: unknown; remove_teams?: unknown }
 const DEFAULTS = { cap_usd: null, adjust_usd: 0, can_run: null, max_concurrent_runs: null };
 const isDefault = (r: MemberRow) => r.cap_usd == null && !r.adjust_usd && r.can_run == null && r.max_concurrent_runs == null;
 
@@ -678,6 +763,14 @@ function applyDraft(saved: Saved, d: Draft, cap: number | null, names: Map<strin
     parts.push(...diff(`${t.name} budget`, t.budget_usd, v, (x) => usdWord(x)));
     t.budget_usd = v;
   }
+  // A removed team's people fall to Everyone else: allocate() reads a team it doesn't know as none.
+  if (d.remove_teams !== undefined && !Array.isArray(d.remove_teams)) throw new LimitError("remove_teams must be a list", 422);
+  const removed = new Set(((d.remove_teams ?? []) as unknown[]).map(Number));
+  for (const id of removed) {
+    const t = teams.find((x) => x.id === id);
+    if (!t) throw new LimitError("No such team", 422);
+    parts.push(`Removed team ${t.name}`);
+  }
   const rows = new Map([...saved.rows].map(([k, r]) => [k, { ...r }]));
   const who = (id: string) => names.get(id) || id;
   const resets: string[] = [];
@@ -694,7 +787,8 @@ function applyDraft(saved: Saved, d: Draft, cap: number | null, names: Map<strin
     parts.push(`${who(id)}: adjustment ${usdWord(rows.get(id)!.adjust_usd)} cleared (it only applies with an equal share)`);
     rows.set(id, { ...rows.get(id)!, adjust_usd: 0 });
   }
-  return { next: { policy: { ...policy!, updated_at: saved.policy.updated_at, updated_by: saved.policy.updated_by }, teams, rows }, parts, inactive, resets, cleared };
+  return { next: { policy: { ...policy!, updated_at: saved.policy.updated_at, updated_by: saved.policy.updated_by }, teams: teams.filter((t) => !removed.has(t.id)), rows },
+    parts, inactive, resets, cleared };
 }
 
 type Shape = ReturnType<typeof shape>;
@@ -755,6 +849,7 @@ export async function preview(org: { orgId: number; slug: string }, d: Draft) {
 export async function plan(org: { orgId: number; slug: string }, actor: Actor, d: Draft, version: string | undefined) {
   const want = version?.replace(/^W\//, "").replace(/"/g, "").trim();
   if (!want) throw new LimitError("Send If-Match with the version of the rules you edited (from GET /limits).", 428);
+  if (Array.isArray(d.remove_teams) && d.remove_teams.length) throw new LimitError("Delete a team on Teams; a plan doesn't remove teams.", 422);
   const [cap, names] = await Promise.all([capFor(org.orgId), namesOf(org.slug)]);
   const db = await getDb();
   return db.transaction(async (tx) => {

@@ -94,7 +94,8 @@ function summarize(d: Data): string {
         ? ` Adaptive sampling: up to ${s.max_samples} sessions per scenario, more are added until each result is stable.`
         : ` Adaptive sampling (up to ${s.max_samples} per scenario): ${count("settled")} scenario(s) settled, ${count("cap reached")} at the cap, ${count("sampling more")} still being sampled${sampling.some((x) => x.status.startsWith("stopped")) ? `, ${sampling.filter((x) => x.status.startsWith("stopped")).length} stopped by a limit` : ""}.`;
       const base = `Simulation ${s.id} "${s.name}" for ${s.product}: ${s.status}. ${d.totals.sessions} agent sessions (${Object.entries(d.status).map(([k, v]) => `${v} ${k}`).join(", ")}). Hit rate ${pct(d.totals.hit_rate)} over ${d.totals.scored} scored. Verdicts: ${Object.entries(d.verdicts).map(([k, v]) => `${k} ${v}`).join(", ") || "none yet"}.${Object.keys(d.completed_reasons ?? {}).length ? ` Ended: ${Object.entries(d.completed_reasons).map(([k, v]) => `${k} ${v}`).join(", ")}.` : ""} By agent: ${d.by_agent.map((a: any) => `${a.label} ${pct(a.hit_rate)} (n=${a.scored})`).join(", ")}.${d.capacity ? ` Capacity: ${d.capacity.message}` : ""}`;
-      return base + adaptive;
+      const budget = d.budget ? ` Budget: ${d.budget.line}${d.budget.warning ? ` ${d.budget.warning}` : ""}` : "";
+      return base + adaptive + budget;
     }
     case "report":
       return reportMarkdown(d);

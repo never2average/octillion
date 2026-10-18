@@ -3,7 +3,7 @@ import { PLATFORMS, isPlatform, platformOf, type Platform } from "./platform.js"
 import { getDb, type Queryable } from "./db.js";
 import { settingNumber } from "./settings.js";
 import { orgBudget } from "./billing.js";
-import { LimitError, askAdmins, checkRun, launcherOverLimit, monthWords, sessionsLimit } from "./limits.js";
+import { LimitError, askAdmins, checkRun, launchNote, launcherOverLimit, monthFigures, monthWords, sessionsLimit, type LaunchNote } from "./limits.js";
 import { randomId, type Org } from "./auth.js";
 import { transcripts, type SearchParams } from "./transcripts.js";
 import type { Tool } from "./scoring.js";
@@ -451,7 +451,10 @@ export async function runSimulation(org: Org, input: RunInput) {
         [randomId("ses_"), id, org.orgId, p.id, x.scenarioId, x.agent.model, x.agent.harness, x.agent.id, x.attempt, x.profileId],
       );
   });
-  return getSimulation(org, id);
+  // What is left for the launcher (connector keys: the account's), and what this run is likely to cost (Budget rules).
+  const { avg_session_usd } = await monthFigures(org.orgId);
+  const budgetNote = launchNote(personal.left_usd ?? Math.max(0, Math.round((budget - spent) * 100) / 100), personal.limit_usd, plan.length, avg_session_usd);
+  return { ...(await getSimulation(org, id)), budget: budgetNote };
 }
 
 /**
@@ -599,6 +602,8 @@ export async function getSimulation(org: Org, simulationId: string) {
   return {
     view: "simulation" as const,
     capacity,
+    // Set on launch only (runSimulation): what is left for the launcher and the run's estimated cost.
+    budget: null as LaunchNote | null,
     simulation: sim,
     totals: { ...summarize(sessions), cost_usd: sessions.reduce((a, s) => a + Number(s.cost_usd), 0) },
     status: statusCounts,

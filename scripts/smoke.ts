@@ -1278,6 +1278,44 @@ try {
     console.log("✓ budget rules pace: projected month spend from live spend per elapsed UTC day, too early before the 3rd, reset date");
   }
 
+  // ---------- budget rules: member surfaces and the admin banner (src/limits.ts usageAlert, explain, launchNote), pure ----------
+  {
+    const { usageAlert, explain, launchNote, allocate } = await import("../src/limits.js");
+    const oct11 = new Date("2026-10-11T00:00:00Z");
+    assert.equal(usageAlert(100, 1000, oct11), null, "10% used, on pace for $310: no banner");
+    assert.deepEqual(usageAlert(100, 200, oct11), { used_pct: 50, runs_out_on: "2026-10-21" }, "$10 a day runs out of $200 on day 20");
+    assert.deepEqual(usageAlert(850, 1000, new Date("2026-10-30T00:00:00Z")), { used_pct: 85, runs_out_on: null }, "85% used, on pace for less than the allowance");
+    assert.deepEqual(usageAlert(1200, 1000, oct11), { used_pct: 120, runs_out_on: null }, "already over: no run-out date");
+    assert.equal(usageAlert(50, 0, oct11), null, "no allowance: no banner");
+    assert.equal(usageAlert(900, 1000, new Date("2026-10-02T00:00:00Z"))?.runs_out_on, null, "before the 3rd: no pace, the percentage still shows");
+
+    const pol = { mode: "even" as const, reserve_usd: 30, default_cap_usd: null, new_members_can_run: true, max_concurrent_runs: 2 };
+    const teams = [{ id: 1, name: "Platform", budget_usd: 100, max_concurrent_runs: null }];
+    const members = [{ user_id: "a" }, { user_id: "b", adjust_usd: 6 }, { user_id: "c", team_id: 1 }, { user_id: "d", cap_usd: 150 }, { user_id: "e", can_run: false }];
+    const a = allocate({ policy: pol, teams, members, usage: new Map(), cap: 300, account_spent_usd: 0 });
+    const run = { max_sessions: 20, max_run_usd: 5 }, now = new Date("2026-10-11T00:00:00Z");
+    const ex = (id: string) => explain(a, id, run, now);
+    // Everyone else: 300 - 30 - 100 = 170; less d's own 150 = 20, split between a and b (e can't launch).
+    assert.deepEqual(ex("a"), ["You're in Everyone else, which shares $170.00.", "People get an equal share, so yours is $10.00 and changes if people join.",
+      "You can have 2 simulations running at once.", "$30.00 of the account's $300.00 is held back for runs that go over. Nobody can launch into it.",
+      "Each simulation can use up to 20 agent sessions and spend up to $5.00.", "Spend starts over on November 1."]);
+    assert.equal(ex("b")[1], "People get an equal share, so yours is $16.00 (with your +$6.00 adjustment) and changes if people join.");
+    assert.equal(ex("c")[0], "You're in Platform, which has its own $100.00 this month.");
+    assert.equal(ex("d")[1], "You have your own limit of $150.00 a month.");
+    assert.equal(ex("e")[1], "You haven't been allowed to launch simulations yet. Reports and transcripts stay available.");
+    const pool = allocate({ policy: { ...pol, mode: "pool", reserve_usd: 0, max_concurrent_runs: null }, teams: [], members: [{ user_id: "a" }], usage: new Map(), cap: 300, account_spent_usd: 0 });
+    assert.deepEqual(explain(pool, "a", { max_sessions: 1, max_run_usd: null }, now), ["Everyone on the account shares $300.00.",
+      "People share it freely, so you have no personal limit. It stops when the budget runs out.", "Each simulation can use up to 1 agent session.", "Spend starts over on November 1."]);
+    assert.equal(explain(allocate({ policy: pol, teams, members, usage: new Map(), cap: 0, account_spent_usd: 0 }), "a", run, now).length, 1, "no allowance: one sentence");
+    assert.equal(explain(a, "nobody", run, now)[0], "$30.00 of the account's $300.00 is held back for runs that go over. Nobody can launch into it.", "not a member: the account's rules only");
+
+    assert.deepEqual(launchNote(12, 24, 10, 1.5), { left_usd: 12, limit_usd: 24, estimate_usd: 15, line: "$12.00 left of $24.00 this month. ≈ $15.00 for 10 sessions at this month's average.",
+      warning: "That's more than the $12.00 left. The run starts; once the limit is reached, nothing new launches and adaptive runs stop adding sessions." });
+    assert.deepEqual(launchNote(50, null, 1, null), { left_usd: 50, limit_usd: null, estimate_usd: null, line: "$50.00 left this month.", warning: null }, "too few runs to estimate");
+    assert.equal(launchNote(50, null, 4, 2).warning, null, "under what is left: no warning");
+    console.log("✓ budget rules member surfaces: admin banner (80% used, the day the pace runs out), the plain summary in the second person (every way of sharing, own limit, can't launch, buffer, run limits), the launch line and estimate");
+  }
+
   // ---------- Compute record tables (src/compute-records.ts): sessions, orchestrators, unmatched sandboxes, runnability ----------
   {
     const { readdirSync } = await import("node:fs");
@@ -1772,13 +1810,14 @@ try {
         await c.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${t}` } } }));
         const r = await c.callTool({ name: "run_simulation", arguments: args });
         await c.close();
-        return { error: r.isError ? (r.content as any[])[0].text as string : null, id: (r.structuredContent as any)?.simulation?.id as string | undefined };
+        return { error: r.isError ? (r.content as any[])[0].text as string : null, id: (r.structuredContent as any)?.simulation?.id as string | undefined,
+          budget: (r.structuredContent as any)?.budget, text: (r.content as any[])[0]?.text as string };
       };
       const ownerT = await token({ user_id: accepted.user.id }), devT = await token({ user_id: acc2.user.id });
       const lim0 = await json(appCall(ownerC, "GET", "/limits"));
       assert.equal(lim0.policy.mode, "pool");
       assert.equal(lim0.members.length, 2);
-      assert.ok(lim0.members.every((m: any) => m.allowance_usd === null && m.can_run), "pool: no personal caps");
+      assert.ok(lim0.members.every((m: any) => m.limit_usd === null && m.can_run), "pool: no personal caps");
       assert.equal(lim0.last_change, null, "never saved: no last change (the page reads \"Using Octillion's default rules\")");
       assert.equal((await appCall(devC, "PUT", "/limits/policy", { mode: "even" })).status, 403, "members cannot change limits");
       const devView = await json(appCall(devC, "GET", "/limits"));
@@ -1789,15 +1828,15 @@ try {
       assert.equal((await appCall(ownerC, "PUT", `/limits/members/${acc2.user.id}`, { adjust_usd: -50 })).status, 204);
       let lim = await json(appCall(ownerC, "GET", "/limits"));
       const share = (budget - 100) / 2;
-      assert.equal(lim.members.find((m: any) => m.user_id === accepted.user.id).allowance_usd, share);
-      assert.equal(lim.members.find((m: any) => m.user_id === acc2.user.id).allowance_usd, share - 50, "minus the adjustment");
+      assert.equal(lim.members.find((m: any) => m.user_id === accepted.user.id).limit_usd, share);
+      assert.equal(lim.members.find((m: any) => m.user_id === acc2.user.id).limit_usd, share - 50, "minus the adjustment");
       // A team with a budget: its people share it; everyone else shares the rest.
       const devrel = await json(appCall(ownerC, "POST", "/limits/teams", { name: "DevRel", budget_usd: 200 }));
       assert.equal((await appCall(ownerC, "POST", "/limits/teams", { name: "DevRel" })).status, 409, "team names are unique");
       await appCall(ownerC, "PUT", `/limits/members/${acc2.user.id}`, { team_id: devrel.id });
       lim = await json(appCall(ownerC, "GET", "/limits"));
-      assert.equal(lim.members.find((m: any) => m.user_id === acc2.user.id).allowance_usd, 150, "team budget / team size, minus 50");
-      assert.equal(lim.members.find((m: any) => m.user_id === accepted.user.id).allowance_usd, budget - 100 - 200, "the rest after reserve and team budgets");
+      assert.equal(lim.members.find((m: any) => m.user_id === acc2.user.id).limit_usd, 150, "team budget / team size, minus 50");
+      assert.equal(lim.members.find((m: any) => m.user_id === accepted.user.id).limit_usd, budget - 100 - 200, "the rest after reserve and team budgets");
       assert.equal((await appCall(ownerC, "PUT", "/limits/members/user_nobody", { cap_usd: 5 })).status, 404, "only members of the account");
       // Rollout: turn running off for one person.
       await appCall(ownerC, "PUT", `/limits/members/${acc2.user.id}`, { can_run: false });
@@ -1846,7 +1885,7 @@ try {
       const capped = await refusal(ownerOrg);
       assert.ok(capped?.info.code === "person_limit" && capped.info.limit_usd === 0 && capped.info.left_usd === 0 && capped.info.set_by === "you");
       lim = await json(appCall(ownerC, "GET", "/limits"));
-      assert.equal(lim.members.find((m: any) => m.user_id === accepted.user.id).allowance_usd, 0);
+      assert.equal(lim.members.find((m: any) => m.user_id === accepted.user.id).limit_usd, 0);
       // An own limit applies in every mode, pool included.
       await appCall(ownerC, "PUT", "/limits/policy", { mode: "pool" });
       assert.equal((await refusal(ownerOrg))?.info.code, "person_limit", "own limit in pool mode");
@@ -2075,6 +2114,30 @@ try {
       await db.query("DELETE FROM gateway_usage WHERE token_hash = 'smoke-lim-runcap'");
       assert.ok((await json(appCall(ownerC, "GET", "/limits/history"))).entries.some((e: any) => e.summary === "Most a run can spend $1 → $100"), "the run cap is in the history");
       await appCall(ownerC, "PUT", "/limits/policy", { max_run_usd: null });
+
+      // ---------- member surfaces, the admin banner, the team-delete preview, the launch line ----------
+      const you = (await json(appCall(devC, "GET", "/limits"))).you;
+      assert.ok(you.pot.kind === "rest" && you.pot.name === "Everyone else" && you.pot.budget_usd === budget - 200 && you.max_sessions >= 1 && you.account.cap_usd === budget &&
+        you.max_run_usd === null, JSON.stringify(you));
+      assert.ok(you.summary[0] === `You're in Everyone else, which shares $${(budget - 200).toFixed(2)}.` && /^Spend starts over on \w+ 1\.$/.test(you.summary.at(-1)), JSON.stringify(you.summary));
+      const pgA = await json(appCall(ownerC, "GET", "/limits"));
+      assert.ok("alert" in pgA && (pgA.alert === null || pgA.alert.used_pct >= 80 || pgA.alert.runs_out_on), "admins get the banner's figures (null when nothing to say)");
+      await appCall(ownerC, "PUT", `/limits/members/${acc2.user.id}`, { team_id: devrel.id });
+      assert.equal((await json(appCall(devC, "GET", "/limits"))).you.pot.name, "DevRel", "in a budgeted team: the team's budget");
+      pv = await json(appCall(ownerC, "POST", "/limits/preview", { remove_teams: [devrel.id] }));
+      assert.ok(!pv.teams.some((t: any) => t.id === devrel.id) && pv.members.find((m: any) => m.user_id === acc2.user.id).pot === null && pv.rest.budget_usd === budget &&
+        pv.summary.includes("Removed team DevRel"), "deleting a team, previewed: its people move to Everyone else and its budget goes back");
+      assert.ok((await json(appCall(ownerC, "GET", "/limits"))).teams.some((t: any) => t.id === devrel.id), "the preview deletes nothing");
+      assert.equal((await appCall(ownerC, "POST", "/limits/preview", { remove_teams: [999999] })).status, 422, "an unknown team");
+      const pgB = await json(appCall(ownerC, "GET", "/limits"));
+      assert.equal((await appCall(ownerC, "PUT", "/limits/plan", { remove_teams: [devrel.id] }, { "if-match": pgB.version })).status, 422, "a plan doesn't delete teams");
+      await appCall(ownerC, "PUT", `/limits/members/${acc2.user.id}`, { team_id: null });
+      const noted = await run(ownerT, { samples: 1, name: "limits-launch-line" });
+      assert.ok(noted.id && noted.budget && typeof noted.budget.left_usd === "number" && /left this month\./.test(noted.budget.line) && noted.text.includes(` Budget: ${noted.budget.line}`),
+        `a launch says what is left (${noted.error ?? JSON.stringify(noted.budget)})`);
+      await db.query("UPDATE simulations SET status = 'cancelled' WHERE id = $1", [noted.id]);
+      await db.query("UPDATE agent_sessions SET status = 'cancelled' WHERE simulation_id = $1 AND status IN ('queued', 'running')", [noted.id]);
+      console.log("✓ budget rules member surfaces: Your budget on GET /limits (the budget drawn on, the account's totals, the plain summary), the admin banner figures, team delete previewed (not saved by a plan), a launch reports what is left and its estimate");
       console.log("✓ budget rules preview and plan: GET figures (version, reset, This month tiles, server's session maximum), preview of a draft (changes, blocked right away, over by, inactive adjustments, launch access, warnings, 422s, no writes), plan in one transaction with If-Match (428, 409 when stale), one history entry, over-allocation saves");
       console.log("✓ budget rules run dollar cap: max_run_usd checked (at least $0.01, at most the allowance), adaptive runs stop adding sessions once the run's live spend reaches it");
       console.log("✓ usage limits: even split with reserve and adjustments, team budgets, rollout, sessions per launch, runs at once, custom caps");
