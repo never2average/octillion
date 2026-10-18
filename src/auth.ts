@@ -29,14 +29,15 @@ export async function createOrg(name: string, slug = slugify(name)) {
   return { org: { orgId: org.id, slug: org.slug, name: org.name } satisfies Org, key };
 }
 
-export async function createApiKey(orgId: number, label = "default"): Promise<string> {
+export async function createApiKey(orgId: number, label = "default", userId: string | null = null): Promise<string> {
   const key = randomId(KEY_PREFIX, 24);
   const db = await getDb();
-  await db.query("INSERT INTO api_keys (org_id, label, key_prefix, key_hash) VALUES ($1, $2, $3, $4)", [
+  await db.query("INSERT INTO api_keys (org_id, label, key_prefix, key_hash, user_id) VALUES ($1, $2, $3, $4, $5)", [
     orgId,
     label,
     key.slice(0, KEY_PREFIX.length + 6),
     sha256(key),
+    userId,
   ]);
   return key;
 }
@@ -45,8 +46,8 @@ export async function createApiKey(orgId: number, label = "default"): Promise<st
 export async function resolveKey(key: string | undefined | null): Promise<Org | null> {
   if (!key || !key.startsWith(KEY_PREFIX)) return null;
   const db = await getDb();
-  const [row] = await db.query<{ id: number; org_id: number; slug: string; name: string }>(
-    `SELECT k.id, k.org_id, o.slug, o.name
+  const [row] = await db.query<{ id: number; org_id: number; slug: string; name: string; user_id: string | null }>(
+    `SELECT k.id, k.org_id, o.slug, o.name, k.user_id
        FROM api_keys k JOIN organizations o ON o.id = k.org_id
       WHERE k.key_hash = $1 AND k.revoked_at IS NULL`,
     [sha256(key)],
@@ -54,7 +55,8 @@ export async function resolveKey(key: string | undefined | null): Promise<Org | 
   if (!row) return null;
   // Best effort; never block the request on it.
   db.query("/* tenant: the key row just resolved by its hash */ UPDATE api_keys SET last_used_at = now() WHERE id = $1", [row.id]).catch(() => {});
-  return { orgId: row.org_id, slug: row.slug, name: row.name };
+  // A key issued to a person acts as that person (usage, adoption, limits); an account key has no person.
+  return { orgId: row.org_id, slug: row.slug, name: row.name, ...(row.user_id ? { userId: row.user_id } : {}) };
 }
 
 /** Constant-time check of the orchestrator's shared worker token (OCTILLION_WORKER_TOKEN). */

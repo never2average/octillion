@@ -554,7 +554,9 @@ export async function portalLink(actor: string, slug: string, returnUrl = `${pub
 export async function issueKey(actor: string, slug: string, label?: string) {
   const f = await factsBySlug(slug);
   const l = String(label ?? "").trim().slice(0, 200) || "extra";
-  const key = await createApiKey(f.id, l);
+  // Labelled with a member's email: the key is that person's, so their calls are theirs (not "Connector key").
+  const owner = l.includes("@") ? (await team(slug).catch(() => null))?.members.find((m) => (m.email ?? "").toLowerCase() === l.toLowerCase())?.user_id ?? null : null;
+  const key = await createApiKey(f.id, l, owner);
   log(actor, "key.create", slug, { label: l, key_prefix: key.slice(0, 10) });
   return result(slug, l.includes("@") ? l : null, { key });
 }

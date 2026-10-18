@@ -26,6 +26,9 @@ CREATE TABLE IF NOT EXISTS api_keys (
   last_used_at TIMESTAMPTZ,
   revoked_at   TIMESTAMPTZ
 );
+-- The person a key belongs to (a Clerk user id), when it was issued for one: their calls count as theirs in usage,
+-- adoption and limits. Null = the account's key, shown as "Connector key".
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS user_id TEXT;
 
 CREATE TABLE IF NOT EXISTS products (
   id            SERIAL PRIMARY KEY,
