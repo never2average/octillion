@@ -26,18 +26,19 @@ import type { Subscription } from './lib';
 
 export type Tone = 'ok' | 'warn' | 'bad' | 'info' | 'neutral';
 const TONES: Record<Tone, string> = {
-  ok: 'bg-emerald-500/12 text-emerald-700 dark:text-emerald-400',
-  warn: 'bg-amber-500/15 text-amber-700 dark:text-amber-400',
-  bad: 'bg-destructive/12 text-destructive',
-  info: 'bg-primary/12 text-primary',
-  neutral: 'bg-muted text-muted-foreground'
+  ok: 'bg-emerald-500/10 text-emerald-700 ring-emerald-600/20 dark:text-emerald-400 dark:ring-emerald-400/25',
+  warn: 'bg-amber-500/10 text-amber-800 ring-amber-600/25 dark:text-amber-300 dark:ring-amber-400/25',
+  bad: 'bg-destructive/10 text-destructive ring-destructive/25',
+  info: 'bg-primary/10 text-primary ring-primary/25',
+  neutral: 'bg-muted/60 text-muted-foreground ring-border'
 };
 
-/** A status badge in one of five tones. */
+/** A status badge in one of five tones: a tinted chip with a dot in the tone's colour, first letter capitalised. */
 export function StatusBadge({ tone = 'neutral', children, title, className }: { tone?: Tone; children: ReactNode; title?: string; className?: string }) {
   return (
-    <Badge variant='secondary' title={title} className={cn('border-transparent font-medium', TONES[tone], className)}>
-      {children}
+    <Badge variant='secondary' title={title} className={cn('gap-1.5 ring-1 ring-inset', TONES[tone], className)}>
+      <span aria-hidden className='size-1.5 shrink-0 rounded-full bg-current opacity-80' />
+      {typeof children === 'string' ? children.charAt(0).toUpperCase() + children.slice(1) : children}
     </Badge>
   );
 }
@@ -250,7 +251,7 @@ export function Chips({ items, max, oneLine }: { items: readonly string[] | null
   if (!list.length) return <span className='text-muted-foreground'>—</span>;
   return (
     <span className={cn('inline-flex gap-1', oneLine ? 'max-w-full flex-nowrap overflow-hidden' : 'flex-wrap')} title={oneLine ? list.join(', ') : undefined}>
-      {shown.map((s) => <Badge key={s} variant='secondary' className='border-transparent font-normal'>{s}</Badge>)}
+      {shown.map((s) => <Badge key={s} variant='outline' className='font-normal'>{s}</Badge>)}
       {list.length > shown.length && <span className='text-muted-foreground text-xs leading-5'>+{list.length - shown.length}</span>}
     </span>
   );

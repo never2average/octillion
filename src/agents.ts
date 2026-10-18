@@ -192,6 +192,37 @@ export function schedulingShares(pop: Population): AgentSpec[] {
   return sandboxMix(pop).filter((r) => r.sandboxes > 0).map((r) => r.agent);
 }
 
+/**
+ * A task's harness preference (library_tasks.harnesses: harness names such as "pi", or admin-added agent ids): the
+ * scheduled agents it allows, at their usual weights. Empty, or none of them scheduled, is the whole mix, so a task
+ * never goes unrun because its harnesses are paused.
+ */
+export function preferredShares(shares: AgentSpec[], prefer: string[] | null | undefined): AgentSpec[] {
+  if (!prefer?.length) return shares;
+  const only = shares.filter((a) => prefer.includes(a.harness) || prefer.includes(a.id));
+  return only.length ? only : shares;
+}
+
+/**
+ * dealToCells with each task's harness preference: cells whose tasks share a preference are dealt together, from the
+ * agents it allows. Same arguments as dealToCells plus `prefer`, one entry per cell. Cells come back in input order.
+ */
+export function dealByPreference(sizes: number[], shares: AgentSpec[], prefer: (string[] | null | undefined)[],
+  opts: { floor?: number; groups?: number[] } = {}): AgentSpec[][] {
+  const out: AgentSpec[][] = sizes.map(() => []);
+  const parts = new Map<string, number[]>();
+  sizes.forEach((_, i) => {
+    const key = [...(prefer[i] ?? [])].sort().join(",");
+    parts.set(key, [...(parts.get(key) ?? []), i]);
+  });
+  for (const idx of parts.values()) {
+    const cells = dealToCells(idx.map((i) => sizes[i]!), preferredShares(shares, prefer[idx[0]!]),
+      { floor: opts.floor, groups: opts.groups ? idx.map((i) => opts.groups![i]!) : undefined });
+    idx.forEach((i, k) => (out[i] = cells[k]!));
+  }
+  return out;
+}
+
 export function findAgent(id: string): AgentSpec | undefined {
   return registry().agents.find((a) => a.id === id);
 }

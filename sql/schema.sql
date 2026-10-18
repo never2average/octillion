@@ -980,3 +980,7 @@ CREATE TABLE IF NOT EXISTS platform_harnesses (
   updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_by       TEXT
 );
+
+-- A task's harness preference (/admin/tasks): harness names ("pi", "claude-code") or admin-added agent ids. Sessions for
+-- the task are dealt only among those, at their usual weights; empty is the whole mix (src/agents.ts dealByPreference).
+ALTER TABLE library_tasks ADD COLUMN IF NOT EXISTS harnesses TEXT[] NOT NULL DEFAULT '{}';

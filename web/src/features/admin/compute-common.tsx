@@ -29,8 +29,8 @@ export function useNow(ms = 5_000) {
 /** A small outlined chip beside a value ("image", "retiring", "infra retry"). */
 export function Chip({ children, title, tone }: { children: ReactNode; title?: string; tone?: 'warn' | 'bad' }) {
   return (
-    <span title={title} className={cn('shrink-0 rounded border px-1 py-px text-[10px] leading-none whitespace-nowrap',
-      tone === 'bad' ? 'border-destructive/40 text-destructive' : tone === 'warn' ? 'border-amber-500/50 ' + AMBER : 'text-muted-foreground')}>
+    <span title={title} className={cn('inline-flex h-4.5 shrink-0 items-center rounded-md px-1.5 text-[10px] leading-none font-medium whitespace-nowrap ring-1 ring-inset',
+      tone === 'bad' ? 'bg-destructive/10 text-destructive ring-destructive/25' : tone === 'warn' ? 'bg-amber-500/10 ring-amber-600/25 ' + AMBER : 'text-muted-foreground ring-border')}>
       {children}
     </span>
   );

@@ -3,9 +3,11 @@
 // searched, filtered and paged on the server (GET /tasks); RecordView pages in the browser, so this is the same layout
 // (toolbar, outlined table that scrolls inside, ⋯ menus, bulk bar, side peek) over one server page at a time. An edit
 // (or turning a task on or off) makes the row the admin's: the vault sync leaves it alone from then on (src/vault.ts).
+// A task's harnesses limit which coding agents its sessions go to (empty: the whole Harness mix; src/agents.ts).
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import PageContainer from '@/components/layout/page-container';
 import { ActionsMenu, Field, type RowAction } from '@/components/layout/record-view';
+import { MultiSelectFilter, type FilterOption } from '@/components/layout/multi-select-filter';
 import { TablePager, type Paged } from '@/components/layout/table-pager';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -25,11 +27,11 @@ import { Chips, ErrorBox, FormRow, Mono, StatusBadge, When } from './ui';
 export interface Task {
   id: number; slug: string; external_id: string | null; title: string; prompt: string; repo_url: string | null; language: string | null;
   category: string | null; tags: string[]; platform: string | null; active: boolean; source: 'vault' | 'admin';
-  synced_at: string; edited_at: string | null; edited_by: string | null; attributes: Record<string, unknown>;
+  synced_at: string; edited_at: string | null; edited_by: string | null; attributes: Record<string, unknown>; harnesses: string[];
 }
 interface Facet { value: string; n: number }
-interface TaskPage { tasks: Task[]; total: number; limit: number; offset: number; all: number; active: number; languages: Facet[]; categories: Facet[] }
-interface Draft { id?: number; title: string; prompt: string; language: string; category: string; tags: string; repo_url: string }
+interface TaskPage { tasks: Task[]; total: number; limit: number; offset: number; all: number; active: number; languages: Facet[]; categories: Facet[]; harnesses: FilterOption[] }
+interface Draft { id?: number; title: string; prompt: string; language: string; category: string; tags: string; repo_url: string; harnesses: string[] }
 
 const NA = <span className='text-muted-foreground'>—</span>;
 const META = 'text-muted-foreground flex flex-wrap items-center gap-x-2 gap-y-1 text-xs leading-none';
@@ -40,12 +42,17 @@ const Label = ({ children }: { children: ReactNode }) => <div className='text-mu
 const repoName = (u: string) => { try { const x = new URL(u); return `${x.host}${x.pathname.replace(/\/$/, '')}`; } catch { return u.replace(/^https?:\/\//, ''); } };
 const originOf = (t: Task) => (t.source === 'admin' ? 'Written here' : t.edited_at ? 'Vault, edited here' : 'Vault');
 const text = (v: unknown) => (v == null || v === '' ? null : typeof v === 'object' ? JSON.stringify(v) : String(v));
-const toDraft = (t: Task): Draft => ({ id: t.id, title: t.title, prompt: t.prompt, language: t.language ?? '', category: t.category ?? '', tags: t.tags.join(', '), repo_url: t.repo_url ?? '' });
-const blank = (): Draft => ({ title: '', prompt: '', language: '', category: '', tags: '', repo_url: '' });
+const toDraft = (t: Task): Draft => ({ id: t.id, title: t.title, prompt: t.prompt, language: t.language ?? '', category: t.category ?? '', tags: t.tags.join(', '), repo_url: t.repo_url ?? '', harnesses: t.harnesses ?? [] });
+const blank = (): Draft => ({ title: '', prompt: '', language: '', category: '', tags: '', repo_url: '', harnesses: [] });
+/** "Any harness", or the names of the ones a task is limited to. */
+const harnessWords = (hs: string[] | undefined, opts: FilterOption[]) =>
+  !hs?.length ? null : hs.map((h) => opts.find((o) => o.value === h)?.label ?? h);
+const EMPTY_F = { language: '', category: '', active: '', has_repo: '', harness: '' };
 
 export function AdminTasks() {
   const [q, setQ] = useState('');
-  const [f, setF] = useState({ language: '', category: '', active: '', has_repo: '' });
+  const [f, setF] = useState(EMPTY_F);
+  const [bulkHarness, setBulkHarness] = useState(false);
   const [size, setSize] = useState(25);
   const [open, setOpen] = useState<Task | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -64,6 +71,7 @@ export function AdminTasks() {
   const { data, error, isLoading, isFetching } = useAdmin<TaskPage>(`/tasks?${params}`, { keep: true });
   const setActive = useAdminAction((v: { ids: number[]; active: boolean }) => post<{ updated: number }>('/tasks/active', v),
     { success: (r) => `${r.updated} task${r.updated === 1 ? '' : 's'} updated` });
+  const opts = data?.harnesses ?? [];
 
   const rows = useMemo(() => data?.tasks ?? [], [data]);
   const total = data?.total ?? 0;
@@ -90,6 +98,7 @@ export function AdminTasks() {
 
   const actions = (t: Task): RowAction[] => [
     { label: 'Edit', icon: <Icons.edit />, onSelect: () => setDraft(toDraft(t)) },
+    { label: 'Set harnesses…', icon: <Icons.adjustments />, onSelect: () => { setSel(new Map([[t.id, t]])); setBulkHarness(true); } },
     { label: t.active ? 'Deactivate' : 'Activate', icon: t.active ? <Icons.eyeOff /> : <Icons.check />, separator: true,
       onSelect: () => setActive.mutate({ ids: [t.id], active: !t.active }) }
   ];
@@ -126,6 +135,12 @@ export function AdminTasks() {
             <NativeSelectOption value='true'>Has a repo</NativeSelectOption>
             <NativeSelectOption value='false'>No repo (starter template)</NativeSelectOption>
           </NativeSelect>
+          <NativeSelect aria-label='Harness' value={f.harness} onChange={(e) => setF({ ...f, harness: e.target.value })}>
+            <NativeSelectOption value=''>Any harness preference</NativeSelectOption>
+            <NativeSelectOption value='any'>Whole mix (no preference)</NativeSelectOption>
+            <NativeSelectOption value='set'>Limited to some harnesses</NativeSelectOption>
+            {opts.map((o) => <NativeSelectOption key={o.value} value={o.value}>Runs on {o.label}</NativeSelectOption>)}
+          </NativeSelect>
           <Button onClick={() => setDraft(blank())}><Icons.add /> New task</Button>
         </div>
 
@@ -134,12 +149,13 @@ export function AdminTasks() {
             <span className='mr-2 font-medium tabular-nums'>{selRows.length} selected</span>
             {toOn.length > 0 && <Button variant='ghost' size='sm' onClick={() => bulkGo(toOn, true)}><Icons.check /> Activate {toOn.length}</Button>}
             {toOff.length > 0 && <Button variant='ghost' size='sm' onClick={() => bulkGo(toOff, false)}><Icons.eyeOff /> Deactivate {toOff.length}</Button>}
+            <Button variant='ghost' size='sm' onClick={() => setBulkHarness(true)}><Icons.adjustments /> Set harnesses</Button>
             <Button variant='ghost' size='sm' className='text-muted-foreground ml-auto' onClick={() => setSel(new Map())}>Clear</Button>
           </div>
         ) : narrowed && (
           <div className='flex min-h-8 shrink-0 items-center gap-2 text-sm leading-none'>
             <span className='text-muted-foreground tabular-nums'>{total} of {data?.all ?? '…'} tasks match</span>
-            <Button variant='ghost' size='xs' className='text-muted-foreground ml-auto' onClick={() => { setQ(''); setF({ language: '', category: '', active: '', has_repo: '' }); }}>Reset</Button>
+            <Button variant='ghost' size='xs' className='text-muted-foreground ml-auto' onClick={() => { setQ(''); setF(EMPTY_F); }}>Reset</Button>
           </div>
         )}
 
@@ -158,6 +174,7 @@ export function AdminTasks() {
                       <TableHead className='w-36 px-3'>Category</TableHead>
                       <TableHead className='w-56 px-3'>Repository</TableHead>
                       <TableHead className='min-w-40 px-3'>Tags</TableHead>
+                      <TableHead className='w-44 px-3'>Harnesses</TableHead>
                     </>)}
                     <TableHead className='w-24 px-3'>Status</TableHead>
                     <TableHead className='w-10'><span className='sr-only'>Actions</span></TableHead>
@@ -165,9 +182,9 @@ export function AdminTasks() {
                 </TableHeader>
                 <TableBody>
                   {isLoading ? (
-                    <TableRow><TableCell colSpan={8} className='text-muted-foreground py-12 text-center'>Loading…</TableCell></TableRow>
+                    <TableRow><TableCell colSpan={9} className='text-muted-foreground py-12 text-center'>Loading…</TableCell></TableRow>
                   ) : !rows.length ? (
-                    <TableRow><TableCell colSpan={8} className='text-muted-foreground py-12 text-center whitespace-normal'>
+                    <TableRow><TableCell colSpan={9} className='text-muted-foreground py-12 text-center whitespace-normal'>
                       {narrowed ? 'Nothing matches.' : 'No tasks yet. Run the vault sync or add one.'}
                     </TableCell></TableRow>
                   ) : rows.map((t) => (
@@ -188,6 +205,7 @@ export function AdminTasks() {
                         <TableCell className='px-3 py-3.5'>{t.category ?? NA}</TableCell>
                         <TableCell className='px-3 py-3.5'>{t.repo_url ? <span className='text-muted-foreground block max-w-56 truncate text-xs' title={t.repo_url}>{repoName(t.repo_url)}</span> : NA}</TableCell>
                         <TableCell className='px-3 py-3.5'><Chips items={t.tags} max={2} oneLine /></TableCell>
+                        <TableCell className='px-3 py-3.5'>{harnessWords(t.harnesses, opts) ? <Chips items={harnessWords(t.harnesses, opts)!} max={2} oneLine /> : <span className='text-muted-foreground text-xs'>Whole mix</span>}</TableCell>
                       </>)}
                       <TableCell className='px-3 py-3.5'><StatusBadge tone={t.active ? 'ok' : 'neutral'}>{t.active ? 'active' : 'inactive'}</StatusBadge></TableCell>
                       <TableCell className='w-10 py-1.5 text-center' onClick={(e) => e.stopPropagation()}><ActionsMenu items={actions(t)} /></TableCell>
@@ -208,19 +226,20 @@ export function AdminTasks() {
                 <ActionsMenu items={actions(current).filter((a) => a.label !== 'Edit')} />
                 <Button variant='ghost' size='icon-sm' aria-label='Close' onClick={() => setOpen(null)}><Icons.close /></Button>
               </div>
-              <div className='min-h-0 flex-1 overflow-y-auto p-5'><TaskBody t={current} /></div>
+              <div className='min-h-0 flex-1 overflow-y-auto p-5'><TaskBody t={current} opts={opts} /></div>
             </aside>
           )}
         </div>
       </div>
-      {draft && <TaskEditor draft={draft} languages={data?.languages ?? []} categories={data?.categories ?? []} onClose={() => setDraft(null)} />}
+      {draft && <TaskEditor draft={draft} languages={data?.languages ?? []} categories={data?.categories ?? []} harnesses={opts} onClose={() => setDraft(null)} />}
+      {bulkHarness && selRows.length > 0 && <HarnessDialog tasks={selRows} opts={opts} onClose={(done) => { setBulkHarness(false); if (done) setSel(new Map()); }} />}
     </PageContainer>
   );
 }
 
 /** The task peek: one meta line, the properties, the prompt in full, the vendor-neutral version if it differs, then the
  * rest of its attributes as a table. */
-function TaskBody({ t }: { t: Task }) {
+function TaskBody({ t, opts }: { t: Task; opts: FilterOption[] }) {
   const a = t.attributes ?? {};
   const generic = typeof a.generic_prompt === 'string' && a.generic_prompt.trim() && a.generic_prompt !== t.prompt ? a.generic_prompt : null;
   const src = a.source && typeof a.source === 'object' ? (a.source as Record<string, unknown>) : null;
@@ -243,6 +262,7 @@ function TaskBody({ t }: { t: Task }) {
             : <span className='text-muted-foreground'>None: runs in the {typeof a.template === 'string' ? <Mono>{a.template}</Mono> : 'matching'} starter workspace</span>}
         </Field>
         <Field label='Tags'><Chips items={t.tags} /></Field>
+        <Field label='Harnesses'>{harnessWords(t.harnesses, opts) ? <Chips items={harnessWords(t.harnesses, opts)!} /> : <span className='text-muted-foreground'>Whole mix: any harness, by its share</span>}</Field>
         {typeof a.generic_title === 'string' && a.generic_title !== t.title && <Field label='Generic title'>{a.generic_title}</Field>}
         {src?.dataset != null && <Field label='From'>{String(src.dataset)}{src.license != null && <span className='text-muted-foreground'> · {String(src.license)}</span>}</Field>}
       </dl>
@@ -259,13 +279,13 @@ function TaskBody({ t }: { t: Task }) {
 }
 
 /** Edit a task or add one. One input per row; language and category suggest the values already in the library. */
-function TaskEditor({ draft, languages, categories, onClose }: { draft: Draft; languages: Facet[]; categories: Facet[]; onClose: () => void }) {
+function TaskEditor({ draft, languages, categories, harnesses, onClose }: { draft: Draft; languages: Facet[]; categories: Facet[]; harnesses: FilterOption[]; onClose: () => void }) {
   const [d, setD] = useState<Draft>(draft);
   const [err, setErr] = useState('');
   const isNew = d.id == null;
   const set = (k: keyof Draft) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setD({ ...d, [k]: e.target.value });
   const body = () => ({ title: d.title, prompt: d.prompt, language: d.language, category: d.category, repo_url: d.repo_url,
-    tags: d.tags.split(',').map((s) => s.trim()).filter(Boolean) });
+    tags: d.tags.split(',').map((s) => s.trim()).filter(Boolean), harnesses: d.harnesses });
   const save = useAdminAction(() => (isNew ? post('/tasks', body()) : adminApi('PATCH', `/tasks/${d.id}`, body())), { success: isNew ? 'Task added' : 'Task saved' });
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -296,12 +316,39 @@ function TaskEditor({ draft, languages, categories, onClose }: { draft: Draft; l
           <FormRow id='te-repo' label='Repository (optional)' hint='An https:// link. Without one, the task runs in a starter workspace for its language.'>
             <Input id='te-repo' type='url' maxLength={500} placeholder='https://github.com/owner/repo' value={d.repo_url} onChange={set('repo_url')} />
           </FormRow>
+          <FormRow id='te-harnesses' label='Harnesses' hint={HARNESS_HINT}>
+            <MultiSelectFilter options={harnesses} value={d.harnesses} onChange={(v) => setD({ ...d, harnesses: v })} noun='harnesses' className='max-w-none w-full' />
+          </FormRow>
           {err && <p className='text-destructive text-sm'>{err}</p>}
           <DialogFooter>
             <Button type='button' variant='outline' onClick={onClose}>Cancel</Button>
             <Button type='submit' disabled={save.isPending || !d.title.trim() || !d.prompt.trim()}>{isNew ? 'Add task' : 'Save'}</Button>
           </DialogFooter>
         </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+const HARNESS_HINT = 'Sessions for this task go only to these harnesses, at their usual shares. None picked: the whole Harness mix. If every one picked is off, the task falls back to the whole mix.';
+
+/** Set the harnesses of the selected tasks (or one task from its ⋯ menu): POST /tasks/harnesses. */
+function HarnessDialog({ tasks, opts, onClose }: { tasks: Task[]; opts: FilterOption[]; onClose: (done: boolean) => void }) {
+  const [v, setV] = useState<string[]>(() => (tasks.length === 1 ? tasks[0]!.harnesses ?? [] : []));
+  const save = useAdminAction(() => post<{ updated: number }>('/tasks/harnesses', { ids: tasks.map((t) => t.id), harnesses: v }),
+    { success: (r) => `${r.updated} task${r.updated === 1 ? '' : 's'} updated` });
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose(false)}>
+      <DialogContent className='sm:max-w-md'>
+        <DialogHeader>
+          <DialogTitle>Harnesses for {tasks.length === 1 ? tasks[0]!.title : `${tasks.length} tasks`}</DialogTitle>
+          <DialogDescription>{HARNESS_HINT}</DialogDescription>
+        </DialogHeader>
+        <MultiSelectFilter options={opts} value={v} onChange={setV} noun='harnesses' className='max-w-none w-full' />
+        <DialogFooter>
+          <Button variant='outline' onClick={() => onClose(false)}>Cancel</Button>
+          <Button disabled={save.isPending} onClick={() => save.mutate(undefined, { onSuccess: () => onClose(true) })}>{v.length ? 'Save' : 'Use the whole mix'}</Button>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

@@ -16,10 +16,10 @@ export const KINDS: { id: Kind; label: string; hint: string }[] = [
   { id: 'note', label: 'Note', hint: 'Anything the team should not have to explain twice.' }
 ];
 export const TYPE_STYLE: Record<string, string> = {
-  fact: 'bg-primary/15 text-primary',
-  decision: 'bg-amber-500/15 text-amber-400',
-  preference: 'bg-sky-500/15 text-sky-400',
-  note: 'bg-muted text-muted-foreground'
+  fact: 'bg-primary/10 text-primary ring-primary/25',
+  decision: 'bg-amber-500/10 text-amber-800 ring-amber-600/25 dark:text-amber-300 dark:ring-amber-400/25',
+  preference: 'bg-sky-500/10 text-sky-700 ring-sky-600/25 dark:text-sky-300 dark:ring-sky-400/25',
+  note: 'bg-muted/60 text-muted-foreground ring-border'
 };
 
 /** A compose window docked bottom-right, Gmail-style: title bar that minimises, close, and the form inside. */

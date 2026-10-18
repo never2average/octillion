@@ -444,6 +444,7 @@ export function createApp() {
   ob.get("/tasks", async (req, res) => void res.json(await library.listTasks(req.query)));
   ob.post("/tasks", async (req, res) => void res.status(201).json(await library.createTask(adminActor(req, res), req.body ?? {})));
   ob.post("/tasks/active", async (req, res) => void res.json(await library.setTasksActive(adminActor(req, res), req.body?.ids, req.body?.active)));
+  ob.post("/tasks/harnesses", async (req, res) => void res.json(await library.setTasksHarnesses(adminActor(req, res), req.body?.ids, req.body?.harnesses)));
   ob.patch("/tasks/:id", async (req, res) => void res.json(await library.updateTask(adminActor(req, res), Number(req.params.id), req.body ?? {})));
   // Global compute settings (src/settings.ts) and the default population's agent mix.
   ob.get("/compute", async (_req, res) => void res.json(await library.compute()));

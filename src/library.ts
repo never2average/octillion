@@ -100,7 +100,26 @@ export async function setPersonasActive(actor: string, slugs: unknown, active: u
 
 // ---------- tasks ----------
 
-const TASK_COLS = `id, slug, external_id, title, prompt, repo_url, language, category, tags, attributes, platform, active, source, synced_at, edited_at, edited_by`;
+const TASK_COLS = `id, slug, external_id, title, prompt, repo_url, language, category, tags, attributes, platform, active, source, synced_at, edited_at, edited_by, harnesses`;
+
+/**
+ * What a task's harness preference may name: each harness in the registry (its sessions go to that CLI, any model), and
+ * each admin-added agent by id (a variant of a CLI, e.g. a custom Pi setup).
+ */
+export function harnessOptions(): { value: string; label: string; hint?: string }[] {
+  const agents = registry().agents;
+  const byHarness = new Map<string, string>();
+  for (const a of agents) if (a.origin !== "admin" && !byHarness.has(a.harness)) byHarness.set(a.harness, a.label.split(" · ")[0]!.trim() || a.harness);
+  return [...[...byHarness].map(([value, label]) => ({ value, label })).sort((a, b) => a.label.localeCompare(b.label)),
+          ...agents.filter((a) => a.origin === "admin").map((a) => ({ value: a.id, label: a.label, hint: "added here" }))];
+}
+const harnessList = (v: unknown) => {
+  const want = list(v, 40, 120);
+  const known = new Set(harnessOptions().map((o) => o.value));
+  const bad = want.filter((x) => !known.has(x));
+  if (bad.length) throw new AdminError(`Unknown harness${bad.length === 1 ? "" : "es"}: ${bad.join(", ")}`);
+  return [...new Set(want)];
+};
 
 /** One page of the task library: ?q (every word must appear), language, category, active, has_repo, limit, offset. */
 export async function listTasks(q: Record<string, unknown> = {}) {
@@ -115,6 +134,9 @@ export async function listTasks(q: Record<string, unknown> = {}) {
   if (q.has_repo === "false") where.push("coalesce(repo_url, '') = ''");
   if (q.source === "vault" || q.source === "admin") add("source = $?", q.source);
   if (q.edited === "true") where.push("edited_at IS NOT NULL");
+  if (q.harness === "any") where.push("cardinality(harnesses) = 0");
+  else if (q.harness === "set") where.push("cardinality(harnesses) > 0");
+  else if (str(q.harness, 120)) add("$? = ANY(harnesses)", str(q.harness, 120));
   const limit = Math.max(1, Math.min(200, Math.trunc(Number(q.limit ?? 50)) || 50));
   const offset = Math.max(0, Math.trunc(Number(q.offset ?? 0)) || 0);
   const w = where.length ? `WHERE ${where.join(" AND ")}` : "";
@@ -127,7 +149,8 @@ export async function listTasks(q: Record<string, unknown> = {}) {
     db.query<{ total: number; active: number }>("SELECT count(*) AS total, count(*) FILTER (WHERE active) AS active FROM library_tasks"),
   ]);
   return { tasks: rows, total: Number(n), limit, offset, all: Number(all?.total ?? 0), active: Number(all?.active ?? 0),
-           languages: languages.map((r) => ({ value: r.value, n: Number(r.n) })), categories: categories.map((r) => ({ value: r.value, n: Number(r.n) })) };
+           languages: languages.map((r) => ({ value: r.value, n: Number(r.n) })), categories: categories.map((r) => ({ value: r.value, n: Number(r.n) })),
+           harnesses: harnessOptions() };
 }
 
 async function taskById(id: number) {
@@ -145,6 +168,7 @@ function taskPatch(b: Record<string, unknown>) {
   if (has(b, "language")) out.language = str(b.language, 60) || null;
   if (has(b, "category")) out.category = str(b.category, 60) || null;
   if (has(b, "tags")) out.tags = list(b.tags, 30, 60);
+  if (has(b, "harnesses")) out.harnesses = harnessList(b.harnesses);
   if (has(b, "repo_url")) {
     const u = str(b.repo_url, 500);
     if (u && !/^https:\/\/[^\s/]+\.[^\s/]+\/\S+$/.test(u)) throw new AdminError("The repository must be an https:// link, e.g. https://github.com/owner/repo");
@@ -158,10 +182,10 @@ export async function createTask(actor: string, body: Record<string, unknown>) {
   const db = await getDb();
   const slug = `admin-${slugify(String(t.title))}-${suffix()}`;
   const [row] = await db.query<{ id: number }>(
-    `INSERT INTO library_tasks (slug, title, prompt, repo_url, language, category, tags, attributes, platform, source, active, edited_at, edited_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, '{}', $8, 'admin', $9, now(), $10) RETURNING id`,
+    `INSERT INTO library_tasks (slug, title, prompt, repo_url, language, category, tags, attributes, platform, source, active, edited_at, edited_by, harnesses)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, '{}', $8, 'admin', $9, now(), $10, $11) RETURNING id`,
     [slug, t.title, t.prompt, t.repo_url ?? null, t.language ?? null, t.category ?? null, t.tags ?? [],
-     platformOf({ language: t.language as string | null, tags: t.tags as string[], prompt: t.prompt as string }), body.active !== false, actor]);
+     platformOf({ language: t.language as string | null, tags: t.tags as string[], prompt: t.prompt as string }), body.active !== false, actor, t.harnesses ?? []]);
   log(actor, "task.create", null, { task: row!.id });
   return taskById(row!.id);
 }
@@ -173,10 +197,21 @@ export async function updateTask(actor: string, id: number, body: Record<string,
   const platform = platformOf({ template: cur.attributes?.template as string | undefined, language: next.language, tags: next.tags, prompt: next.prompt });
   await (await getDb()).query(
     `UPDATE library_tasks SET title = $2, prompt = $3, repo_url = $4, language = $5, category = $6, tags = $7, platform = $8,
-       edited_at = now(), edited_by = $9 WHERE id = $1`,
-    [id, next.title, next.prompt, (next as any).repo_url ?? null, next.language ?? null, (next as any).category ?? null, next.tags ?? [], platform, actor]);
+       edited_at = now(), edited_by = $9, harnesses = $10 WHERE id = $1`,
+    [id, next.title, next.prompt, (next as any).repo_url ?? null, next.language ?? null, (next as any).category ?? null, next.tags ?? [], platform, actor,
+     (next as any).harnesses ?? []]);
   log(actor, "task.edit", null, { task: id, fields: Object.keys(t) });
   return taskById(id);
+}
+
+/** Set the harness preference of one or many tasks (empty: any harness in the mix). Counts as an edit. */
+export async function setTasksHarnesses(actor: string, ids: unknown, harnesses: unknown) {
+  const nums = (Array.isArray(ids) ? ids : []).map(Number).filter(Number.isInteger).slice(0, 1000);
+  if (!nums.length) throw new AdminError("ids are required");
+  const h = harnessList(harnesses);
+  const rows = await (await getDb()).query("UPDATE library_tasks SET harnesses = $2, edited_at = now(), edited_by = $3 WHERE id = ANY($1) RETURNING id", [nums, h, actor]);
+  log(actor, "task.harnesses", null, { tasks: rows.length, harnesses: h });
+  return { updated: rows.length };
 }
 
 /** Turn tasks on or off (one or many). Counts as an edit, so a sync never turns them back. */

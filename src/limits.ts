@@ -458,21 +458,31 @@ function refusal(o: Awaited<ReturnType<typeof overview>>, code: LimitCode, me?: 
  * looked up, nothing starts (budget_error): a lookup failure must not read as "no limit". Someone not among the active
  * members (say Clerk is unavailable) still meets the account's checks, the buffer among them.
  */
-export async function checkRun(org: Org): Promise<{ maxSessions: number | null; admins: { name: string }[]; left_usd: number | null; limit_usd: number | null }> {
-  if (!org.userId) return { maxSessions: null, admins: [], left_usd: null, limit_usd: null };
+export interface RunCheck {
+  maxSessions: number | null; admins: { name: string }[]; left_usd: number | null; limit_usd: number | null;
+  /** Runs at once for this person (null: no limit) and who set it; runSimulation counts again under the launch lock. */
+  max_runs: number | null; runs_set_by: "you" | "team" | "account" | null;
+}
+
+/** "You have 2 simulations running; you can have 2 at once …": the refusal for runs at once. */
+export function runsAtOnceError(running: number, maxRuns: number, setBy: "you" | "team" | "account" | null, admins: { name: string }[]) {
+  return new LimitError(`You have ${running} simulation${running === 1 ? "" : "s"} running; you can have ${maxRuns} at once ` +
+    `(set for ${setBy === "you" ? "you" : setBy === "team" ? "your team" : "the account"}). Wait for one to finish. ${askAdmins(admins, false)}`, 429,
+    { code: "runs_at_once", set_by: setBy ?? undefined, admins, limit_usd: null, left_usd: null });
+}
+
+export async function checkRun(org: Org): Promise<RunCheck> {
+  if (!org.userId) return { maxSessions: null, admins: [], left_usd: null, limit_usd: null, max_runs: null, runs_set_by: null };
   const o = await overview(org);
   if (o.budget_error)
     throw new LimitError("We couldn't check your account's allowance. Try again in a minute.", 503, { code: "budget_error", admins: o.admins });
   const me = o.members.find((m) => m.user_id === org.userId);
   const blocked = me ? me.blocked : o.account.blocked;
   if (blocked) throw refusal(o, blocked, me);
-  if (!me) return { maxSessions: o.policy.max_sessions_per_run, admins: o.admins, left_usd: o.account.left_usd, limit_usd: null };
+  if (!me) return { maxSessions: o.policy.max_sessions_per_run, admins: o.admins, left_usd: o.account.left_usd, limit_usd: null, max_runs: null, runs_set_by: null };
   const maxRuns = me.effective_max_concurrent, runsSetBy = me.concurrent_source;
-  if (maxRuns != null && me.running >= maxRuns)
-    throw new LimitError(`You have ${me.running} simulation${me.running === 1 ? "" : "s"} running; you can have ${maxRuns} at once ` +
-      `(set for ${runsSetBy === "you" ? "you" : runsSetBy === "team" ? "your team" : "the account"}). Wait for one to finish. ${askAdmins(o.admins, false)}`, 429,
-      { code: "runs_at_once", set_by: runsSetBy, admins: o.admins, limit_usd: null, left_usd: null });
-  return { maxSessions: o.policy.max_sessions_per_run, admins: o.admins, left_usd: me.left_usd, limit_usd: me.limit_usd };
+  if (maxRuns != null && me.running >= maxRuns) throw runsAtOnceError(me.running, maxRuns, runsSetBy, o.admins);
+  return { maxSessions: o.policy.max_sessions_per_run, admins: o.admins, left_usd: me.left_usd, limit_usd: me.limit_usd, max_runs: maxRuns, runs_set_by: runsSetBy };
 }
 
 /**

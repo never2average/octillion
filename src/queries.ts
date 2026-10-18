@@ -3,11 +3,11 @@ import { PLATFORMS, isPlatform, platformOf, type Platform } from "./platform.js"
 import { getDb, type Queryable } from "./db.js";
 import { settingNumber } from "./settings.js";
 import { orgBudget } from "./billing.js";
-import { LimitError, askAdmins, checkRun, launchNote, launcherOverLimit, monthFigures, monthWords, sessionsLimit, type LaunchNote } from "./limits.js";
+import { LimitError, askAdmins, checkRun, launchNote, runsAtOnceError, launcherOverLimit, monthFigures, monthWords, sessionsLimit, type LaunchNote } from "./limits.js";
 import { randomId, type Org } from "./auth.js";
 import { transcripts, type SearchParams } from "./transcripts.js";
 import type { Tool } from "./scoring.js";
-import { dealToCells, planFirstBatch, schedulingShares, drawVariant, enabledAgents, findAgent, isRunnable, runnableCoverage, sandboxMix, scheduledAgents, variantsOf, type AgentSpec } from "./agents.js";
+import { dealByPreference, planFirstBatch, schedulingShares, drawVariant, enabledAgents, findAgent, isRunnable, runnableCoverage, sandboxMix, scheduledAgents, variantsOf, type AgentSpec } from "./agents.js";
 import { getPopulation, listPopulations } from "./populations.js";
 import { capacityStatus } from "./autoscaler.js";
 
@@ -332,6 +332,15 @@ export async function orgMonthSpendUsd(orgId: number): Promise<number> {
 export const NO_PLAN = (name?: string | null) => `${name ?? "This organization"} has no prepaid plan, so it can't start runs. ` +
   "Plans are invite-only while we keep inference costs in check: ask your Octillion contact for access.";
 
+/** Each scenario's harness preference, from the library task it came from (empty: any harness in the mix). */
+async function harnessPreferences(scenarioIds: number[]): Promise<Map<number, string[]>> {
+  if (!scenarioIds.length) return new Map();
+  const rows = await (await getDb()).query<{ id: number; harnesses: string[] }>(
+    `/* tenant: internal: scenario ids already scoped by the caller */ SELECT sc.id, lt.harnesses FROM scenarios sc
+       JOIN library_tasks lt ON lt.id = sc.library_task_id WHERE sc.id = ANY($1) AND cardinality(lt.harnesses) > 0`, [scenarioIds]);
+  return new Map(rows.map((r) => [Number(r.id), r.harnesses]));
+}
+
 export async function runSimulation(org: Org, input: RunInput) {
   // No plan, no runs: checked before anything else so the reason is the first thing the customer hears.
   const { budget } = await orgBudget(org.orgId); // admin allowance, else the prepaid plan's cap, else 0
@@ -423,9 +432,12 @@ export async function runSimulation(org: Org, input: RunInput) {
     plan = slots.flatMap((slot) => chosen.flatMap((agent) => Array.from({ length: repeats }, (_, i) => ({ ...slot, agent, attempt: i + 1 }))));
   } else {
     // Slot agents with model_variants (e.g. pi) run each sampled session as one of their models, drawn by share.
-    // Each scenario x profile cell gets a near-proportional share of the weighted mix (agents.ts dealToCells).
+    // Each scenario x profile cell gets a near-proportional share of the weighted mix (agents.ts dealToCells, by harness preference).
     // First batch: every scheduled harness gets at least one session; the rest by weight, spread over problems.
-    const cells = dealToCells(slots.map(() => samples), schedulingShares(pop), { floor: 1, groups: slots.map((s) => s.scenarioId) });
+    // A task with a harness preference (Tasks library) is dealt only among the harnesses it names.
+    const prefer = await harnessPreferences(scenarios.map((s) => s.id));
+    const cells = dealByPreference(slots.map(() => samples), schedulingShares(pop), slots.map((s) => prefer.get(s.scenarioId)),
+      { floor: 1, groups: slots.map((s) => s.scenarioId) });
     plan = slots.flatMap((slot, si) => cells[si]!.map((a, i) => ({ ...slot, agent: drawVariant(a), attempt: i + 1 })));
   }
   if (plan.length > maxSessions)
@@ -438,6 +450,14 @@ export async function runSimulation(org: Org, input: RunInput) {
   const id = randomId("sim_");
   const name = input.name?.trim() || `${p.name} · ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC`;
   await db.transaction(async (tx) => {
+    // Launches for one account take turns (released at COMMIT), and runs at once is counted again inside the turn:
+    // two launches at the same moment both passed checkRun's count, which saw neither of them.
+    await tx.query("SELECT pg_advisory_xact_lock(7270012, $1)", [org.orgId]);
+    if (personal.max_runs != null && org.userId) {
+      const [{ n }] = await tx.query<{ n: number }>(
+        "SELECT count(*) AS n FROM simulations WHERE org_id = $1 AND created_by = $2 AND status IN ('queued', 'running')", [org.orgId, org.userId]);
+      if (Number(n) >= personal.max_runs) throw runsAtOnceError(Number(n), personal.max_runs, personal.runs_set_by, personal.admins);
+    }
     await tx.query(
       `INSERT INTO simulations (id, org_id, product_id, name, models, harness, repeats, profile_ids, mode, agent_ids, population_id, max_samples, research_id, created_by, private)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, (SELECT research->>'research_id' FROM products WHERE id = $3), $13, $14)`,
@@ -489,6 +509,9 @@ export async function extendAdaptive(simulationId: string): Promise<number> {
   // Sessions per run applies to the whole run, top-ups included: the server's limit, or the account's if lower.
   const maxSessions = await sessionsLimit(pre.org_id);
   const pop = await getPopulation(pre.slug ?? undefined);
+  const prefer = await harnessPreferences((await db.query<{ scenario_id: number }>(
+    "/* tenant: internal: adaptive sampling of a finished session's simulation */ SELECT DISTINCT scenario_id FROM agent_sessions WHERE simulation_id = $1",
+    [simulationId])).map((r) => Number(r.scenario_id)));
   return db.transaction(async (tx) => {
     const [sim] = await tx.query<{ id: string; org_id: number; product_id: number; mode: string; status: string; max_samples: number | null;
                                    population_id: number | null; profile_ids: number[] | null }>(
@@ -521,7 +544,8 @@ export async function extendAdaptive(simulationId: string): Promise<number> {
     const total = more.reduce((t, m) => t + m.count, 0);
     if (!total) return 0;
     // Top-ups are dealt the same way: each scenario's batch gets a near-proportional share of the weighted mix.
-    const cells = dealToCells(more.map((m) => m.count), schedulingShares(pop)); // top-ups: by usage share only
+    // top-ups: by usage share only, within each task's harness preference
+    const cells = dealByPreference(more.map((m) => m.count), schedulingShares(pop), more.map((m) => prefer.get(m.scenarioId)));
     const profileIds: (number | null)[] = sim.profile_ids?.length ? sim.profile_ids : [null];
     for (const [mi, m] of more.entries())
       for (let i = 0; i < m.count; i++) {

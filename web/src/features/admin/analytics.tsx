@@ -390,6 +390,8 @@ function Report({ view }: { view: 'analytics' | 'health' }) {
 
 function ErrorsReport({ view }: { view: 'analytics' | 'health' }) {
   const p = useReportParams();
+  // Health's table shows one kind of failure at a time, picked on the search row.
+  const [kind, setKind] = useState<ErrorKind>('tool');
   const [q, setQ] = useState('');
   const { data: a, error, isLoading } = useReport<Analytics>(`/analytics?${p.base}`);
   const w = q.trim().toLowerCase();
@@ -406,6 +408,11 @@ function ErrorsReport({ view }: { view: 'analytics' | 'health' }) {
             <Input type='search' value={q} onChange={(e) => setQ(e.target.value)} className='h-9 pl-8'
               placeholder={view === 'health' ? 'Search errors' : 'Search accounts, products or tools'} aria-label='Search' />
           </div>
+          {view === 'health' && (
+            <NativeSelect aria-label='Errors from' value={kind} onChange={(e) => setKind(e.target.value as ErrorKind)}>
+              {KINDS.map((k) => <NativeSelectOption key={k.id} value={k.id}>{k.label}{a ? ` · ${num(errorCounts(a)[k.id])}` : ''}</NativeSelectOption>)}
+            </NativeSelect>
+          )}
           <DateRangePicker value={p.range} onChange={p.setRange} />
           <UsersPicker p={p} facets={a?.facets} />
           <FiltersPopover p={p} facets={a?.facets} />
@@ -419,7 +426,7 @@ function ErrorsReport({ view }: { view: 'analytics' | 'health' }) {
               <LoadingCards count={4} />
               <div className='grid gap-8 lg:grid-cols-2 lg:gap-12'><Skeleton className='h-72 rounded-xl' /><Skeleton className='h-72 rounded-xl' /></div>
             </div>
-          ) : view === 'analytics' ? <AnalyticsBody a={a} match={match} /> : <HealthBody a={a} base={p.base} match={match} />}
+          ) : view === 'analytics' ? <AnalyticsBody a={a} match={match} /> : <HealthBody a={a} base={p.base} match={match} kind={kind} />}
         </div>
       </div>
     </PageContainer>
@@ -595,8 +602,10 @@ const ERROR_TABLE: Record<ErrorKind, { label: string; render: (r: ErrorRow) => R
   ]
 };
 
-function HealthBody({ a, base, match }: { a: Analytics; base: string; match: (r: object) => boolean }) {
-  const [kind, setKind] = useState<ErrorKind>('tool');
+const errorCounts = (a: Analytics): Record<ErrorKind, number> =>
+  ({ tool: a.errors_total, session: a.ops.sessions_failed ?? 0, onboarding: a.ops.onboardings_failed ?? 0 });
+
+function HealthBody({ a, base, match, kind }: { a: Analytics; base: string; match: (r: object) => boolean; kind: ErrorKind }) {
   const [page, setPage] = useState(1), [size, setSize] = useState(25);
   useEffect(() => setPage(1), [base, kind, size]);
   // paged on the server: the full set can be far larger than a page
@@ -606,7 +615,6 @@ function HealthBody({ a, base, match }: { a: Analytics; base: string; match: (r:
   const total = fresh?.total ?? 0;
   const pager: Paged<ErrorRow> = { rows, page, pages: Math.max(1, Math.ceil(total / size)), size, total, setPage, setSize };
   const series = useMemo(() => fillDays(a.daily, a.days, a.range?.from), [a]);
-  const counts: Record<ErrorKind, number> = { tool: a.errors_total, session: a.ops.sessions_failed ?? 0, onboarding: a.ops.onboardings_failed ?? 0 };
   const cols = [{ label: 'When', render: (r: ErrorRow) => <When d={r.at} /> }, { label: 'Account', render: (r: ErrorRow) => <span className='leading-none'>{r.account}</span> },
     ...ERROR_TABLE[kind], { label: 'Error', render: (r: ErrorRow) => <span className='line-clamp-2 text-sm whitespace-normal' title={String(r.error ?? '')}>{r.error ?? '—'}</span>, className: 'min-w-64' }];
   return (
@@ -625,13 +633,7 @@ function HealthBody({ a, base, match }: { a: Analytics; base: string; match: (r:
           { label: 'Model cost', value: usd(a.ops.model_cost_usd), hint: `in the last ${a.days} days` }
         ]} />
       </div>
-      <div className='flex min-h-0 flex-1 flex-col gap-2'>
-        <div className='flex shrink-0 items-center gap-2'>
-          <NativeSelect size='sm' aria-label='Errors from' value={kind} onChange={(e) => setKind(e.target.value as ErrorKind)}>
-            {KINDS.map((k) => <NativeSelectOption key={k.id} value={k.id}>{k.label} · {num(counts[k.id])}</NativeSelectOption>)}
-          </NativeSelect>
-          {isFetching && <Icons.spinner className='text-muted-foreground size-4 animate-spin' />}
-        </div>
+      <div className={cn('flex min-h-0 flex-1 flex-col gap-2', isFetching && 'opacity-70')}>
         <ErrorBox error={error} />
         <div className='flex min-h-[16rem] flex-1 flex-col border-y'>
           <div className='min-h-0 flex-1 overflow-auto'>

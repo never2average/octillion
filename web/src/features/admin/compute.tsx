@@ -118,7 +118,7 @@ export function AdminAgentMix() {
       render: (a) => (
         <span title={a.id} className='flex min-w-0 items-center gap-1.5 leading-none'>
           <span className={cn('truncate', a.status === 'On' && 'font-medium')}>{a.label}</span>
-          {a.origin === 'admin' && <span title={`Added on this page; inherits ${a.base_agent ?? a.harness}`} className='text-muted-foreground shrink-0 rounded border px-1 py-px text-[10px] leading-none'>added</span>}
+          {a.origin === 'admin' && <span title={`Added on this page; inherits ${a.base_agent ?? a.harness}`} className='text-muted-foreground inline-flex h-4.5 shrink-0 items-center rounded-md px-1.5 text-[10px] leading-none font-medium ring-1 ring-border ring-inset'>added</span>}
         </span>
       ) },
     { key: 'cli', label: 'CLI', type: 'select', value: (a) => a.harness, render: (a) => <Mono>{a.harness}</Mono> },

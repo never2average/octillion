@@ -62,7 +62,14 @@ console.log(`database: ${db.kind}, transcripts: ${transcripts().kind}`);
   const counts = Object.fromEntries(agents.map((a) => [a.id, plan.filter((x) => x.id === a.id).length]));
   assert.deepEqual(counts, { "claude-code/sonnet": 10, "codex/default": 6, "cursor-agent/default": 4 });
   assert.ok(new Set(plan.slice(0, 5).map((x) => x.id)).size >= 2, "agents interleaved, not bunched");
-  console.log("✓ agent apportionment");
+  // Task harness preference: dealt only among the preferred harnesses; none scheduled falls back to the whole mix.
+  const { dealByPreference, preferredShares } = await import("../src/agents.js");
+  const dealt = dealByPreference([4, 4, 4], agents, [["codex"], null, ["no-such-harness"]], { floor: 1, groups: [1, 2, 3] });
+  assert.ok(dealt[0]!.length === 4 && dealt[0]!.every((a) => a.harness === "codex"), "a task limited to codex runs only on codex");
+  assert.equal(dealt[1]!.length, 4, "a task without a preference gets the mix");
+  assert.equal(dealt[2]!.length, 4, "a preference naming no scheduled harness falls back to the mix");
+  assert.equal(preferredShares(agents, ["cursor-agent/default"]).length, 1, "an agent id works as a preference too");
+  console.log("✓ agent apportionment, task harness preferences");
 }
 
 // ---------- global pod fleet (no I/O) ----------
@@ -1058,6 +1065,13 @@ try {
     assert.equal((await adm("PATCH", `/tasks/${rename.id}`, { repo_url: "ftp://example.com/x" })).status, 400, "repo must be an https link");
     const nt = await json(adm("POST", "/tasks", { title: `Smoke task ${stamp}`, prompt: "Add a health check endpoint to this Go service.", language: "Go", category: "observability" }));
     assert.ok(nt.source === "admin" && nt.active && nt.platform === "backend", "admin-written task, platform derived");
+    // Harness preference: names harnesses the registry knows; set in bulk, filtered on, cleared with an empty list.
+    assert.equal((await adm("POST", "/tasks/harnesses", { ids: [nt.id], harnesses: ["no-such-cli"] })).status, 400, "unknown harness refused");
+    assert.equal((await json(adm("POST", "/tasks/harnesses", { ids: [nt.id, rename.id], harnesses: ["codex"] }))).updated, 2);
+    const byCodex = await json(adm("GET", "/tasks?harness=codex&limit=200"));
+    assert.ok(byCodex.tasks.some((t: any) => t.id === nt.id && t.harnesses.join() === "codex") && byCodex.harnesses.some((o: any) => o.value === "codex"), "harness filter and options");
+    assert.deepEqual((await json(adm("PATCH", `/tasks/${nt.id}`, { harnesses: [] }))).harnesses, [], "cleared back to the whole mix");
+    await json(adm("POST", "/tasks/harnesses", { ids: [rename.id], harnesses: [] }));
     assert.equal((await json(adm("POST", "/tasks/active", { ids: [rename.id], active: false }))).updated, 1);
     assert.ok((await json(adm("GET", `/tasks?active=false&q=${encodeURIComponent("rename files")}`))).tasks.some((t: any) => t.id === rename.id), "active filter");
 
@@ -2198,6 +2212,14 @@ try {
       assert.equal((await refusal(ownerOrg))?.info.code, "runs_at_once");
       await db.query("UPDATE simulations SET status = 'cancelled' WHERE id = $1", [first.id]);
       await db.query("UPDATE agent_sessions SET status = 'cancelled' WHERE simulation_id = $1", [first.id]);
+      // Two launches at the same moment: they take turns under the account's launch lock, so only one starts.
+      const pair = await Promise.all([run(ownerT, { samples: 1, name: "race-a" }), run(ownerT, { samples: 1, name: "race-b" })]);
+      assert.equal(pair.filter((r) => r.id && !r.error).length, 1, `one of two launches at once starts (${pair.map((r) => r.error ?? r.id).join(" | ")})`);
+      assert.match(pair.find((r) => r.error)?.error ?? "", /you can have 1 at once/, "the other is refused for runs at once");
+      for (const r of pair.filter((r) => r.id)) {
+        await db.query("UPDATE simulations SET status = 'cancelled' WHERE id = $1", [r.id]);
+        await db.query("UPDATE agent_sessions SET status = 'cancelled' WHERE simulation_id = $1", [r.id]);
+      }
       // Custom caps: a person at their cap cannot launch. Custom needs a default (own limits apply in every mode anyway).
       const noDefault = await appCall(ownerC, "PUT", "/limits/policy", { mode: "custom", max_concurrent_runs: null, default_cap_usd: null });
       assert.ok(noDefault.status === 400 && /need a default monthly cap/.test((await noDefault.json()).error), "custom without a default is refused");
