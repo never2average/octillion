@@ -119,7 +119,7 @@ export function AccessForm() {
               <div className='grid'>
                 {field('name', 'Your name', { autoComplete: 'name', maxLength: 120 })}
                 {field('role', 'Role', { autoComplete: 'organization-title', placeholder: 'Head of DevRel', maxLength: 120 })}
-                <div className='space-y-1.5'>
+                <div className='space-y-1.5 pb-5'>
                   <Label htmlFor='f-team_size'>Team size</Label>
                   <NativeSelect id='f-team_size' name='team_size' value={v.team_size} onChange={(e) => setV({ ...v, team_size: e.target.value })} className='w-full'>
                     <NativeSelectOption value=''>Choose</NativeSelectOption>
@@ -131,15 +131,15 @@ export function AccessForm() {
                 {field('docs_url', 'Docs URL', { type: 'url', inputMode: 'url', placeholder: 'https://docs.yourproduct.dev', maxLength: 500 })}
                 {field('competitors', 'Main competitors', { placeholder: 'Who agents pick instead of you', maxLength: 500 })}
               </div>
-              <div className='grid gap-y-2 pb-4'>
-                <div className='space-y-1.5'>
+              <div className='grid'>
+                <div className='space-y-1.5 pb-5'>
                   <Label htmlFor='f-goal'>What do you want first?</Label>
                   <NativeSelect id='f-goal' name='goal' value={v.goal} onChange={(e) => setV({ ...v, goal: e.target.value })} className='w-full'>
                     <NativeSelectOption value=''>Choose</NativeSelectOption>
                     {GOALS.map(([k, l]) => <NativeSelectOption key={k} value={k}>{l}</NativeSelectOption>)}
                   </NativeSelect>
                 </div>
-                <div className='space-y-1.5'>
+                <div className='space-y-1.5 pb-5'>
                   <Label htmlFor='f-timeline'>When</Label>
                   <NativeSelect id='f-timeline' name='timeline' value={v.timeline} onChange={(e) => setV({ ...v, timeline: e.target.value })} className='w-full'>
                     <NativeSelectOption value=''>Choose</NativeSelectOption>
@@ -159,7 +159,7 @@ export function AccessForm() {
                   })}
                 </div>
               </fieldset>
-              <div className='space-y-1.5 pb-4'>
+              <div className='space-y-1.5 pb-5'>
                 <Label htmlFor='f-heard'>Where did you hear about us?</Label>
                 <NativeSelect id='f-heard' name='heard_from' value={v.heard_from} onChange={(e) => setV({ ...v, heard_from: e.target.value })} className='w-full'>
                   <NativeSelectOption value=''>Choose</NativeSelectOption>
