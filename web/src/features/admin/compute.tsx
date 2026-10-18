@@ -4,7 +4,7 @@
 // shows the value in force and where it comes from: set here, the server's environment, or the built-in default.
 // Saving writes platform_settings (every server picks it up within 30s) and an audit log line. Model keys are the key
 // vault's credentials: a key is typed once and never shown again, only its hint.
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { Icons } from '@/components/icons';
 import { List } from './account-peek';
@@ -20,7 +20,7 @@ import { adminApi } from '@/lib/api-client';
 import { cn } from '@/lib/utils';
 import { post, useAdmin, useAdminAction } from './lib';
 import { ErrorBox, FormRow, LoadingCards, Mono, Notice, Section, When } from './ui';
-import { Field } from '@/components/layout/record-view';
+import { Field, RecordView, type RecordCol } from '@/components/layout/record-view';
 
 interface Setting {
   key: string; group: string; label: string; help: string; kind: 'text' | 'int' | 'number' | 'choice'; default: string | number;
@@ -37,15 +37,15 @@ const pct = (x: number) => `${(x * 100).toFixed(x > 0 && x < 0.01 ? 1 : 0)}%`;
 
 /** Compute: the sandbox provider and capacity settings. */
 export const AdminCompute = () => <SettingsPage groups={['capacity']} sandbox />;
-/** Configuration: models, run sizes, research limits and the default coding-agent mix. */
-export const AdminConfiguration = () => <SettingsPage groups={['models', 'runs', 'research']} mix />;
+/** Configuration: models, run sizes and research limits. */
+export const AdminConfiguration = () => <SettingsPage groups={['models', 'runs', 'research']} />;
 /** Key vault: provider keys for agents, orchestrators and research. */
 export function AdminKeyVault() {
   return <PageContainer><div className='flex w-full flex-col gap-10 pb-10'><ModelKeys /></div></PageContainer>;
 }
 
 /** The settings of some groups (one input per row, a sticky save bar), optionally followed by the agent mix. */
-function SettingsPage({ groups, mix, sandbox }: { groups: string[]; mix?: boolean; sandbox?: boolean }) {
+function SettingsPage({ groups, sandbox }: { groups: string[]; sandbox?: boolean }) {
   const { data, error, isLoading } = useAdmin<Compute>('/compute');
   // Edits not saved yet: key -> the typed text, or null for "reset to the environment / default".
   const [edits, setEdits] = useState<Record<string, string | null>>({});
@@ -79,7 +79,6 @@ function SettingsPage({ groups, mix, sandbox }: { groups: string[]; mix?: boolea
               <Button size='sm' disabled={save.isPending} onClick={() => save.mutate(undefined, { onSuccess: () => setEdits({}) })}>Save changes</Button>
             </div>
           )}
-          {mix && <AgentMix pop={data.population} />}
         </div>
       )}
     </PageContainer>
@@ -128,50 +127,62 @@ function SettingRow({ s, edit, setEdit }: { s: Setting; edit: string | null | un
 
 /** The default population's mix: every registry agent with its weight, its share of the running mix, its sandboxes out
  * of the unit, and a switch. Weights need not sum to 1: shares are renormalised over the agents that are on. */
-function AgentMix({ pop }: { pop: Compute['population'] }) {
+/**
+ * The agent mix, full screen: every coding agent in the registry with its weight in the default population, its share
+ * of runs and sandboxes, and an on/off switch. Weights save as you leave the field; changes apply to new runs.
+ */
+export function AdminAgentMix() {
+  const { data, error, isLoading } = useAdmin<Compute>('/compute');
   const set = useAdminAction((v: { id: string; market_share?: number; paused?: boolean }) =>
     adminApi('PUT', `/compute/agents/${encodeURIComponent(v.id)}`, { market_share: v.market_share, paused: v.paused }), { success: 'Agent mix saved' });
-  const [showAll, setShowAll] = useState(false);
-  const rows = useMemo(() => pop.agents.filter((a) => showAll || a.in_mix || a.weight > 0), [pop.agents, showAll]);
-  const hidden = pop.agents.length - pop.agents.filter((a) => a.in_mix || a.weight > 0).length;
-  const on = pop.agents.filter((a) => a.status === 'On').length;
+  const pop = data?.population;
+  const cols: RecordCol<Agent>[] = [
+    { key: 'agent', label: 'Agent', keep: true, type: 'text', value: (a) => a.label,
+      render: (a) => <span className='flex min-w-0 flex-col gap-1'><span className={cn('leading-none', a.status === 'On' && 'font-medium')}>{a.label}</span><Mono>{a.id}</Mono></span> },
+    { key: 'vendor', label: 'Vendor', type: 'select', value: (a) => a.vendor ?? '', render: (a) => a.vendor ?? NA },
+    { key: 'harness', label: 'Harness', type: 'select', value: (a) => a.harness, render: (a) => <Mono>{a.harness}</Mono> },
+    { key: 'model', label: 'Model', type: 'text', value: (a) => a.model, render: (a) => <Mono>{a.model}</Mono> },
+    { key: 'weight', label: 'Weight', className: 'w-32 text-right', type: 'number', value: (a) => a.weight,
+      render: (a) => <span onClick={(e) => e.stopPropagation()}><WeightInput key={a.weight} value={a.weight} disabled={set.isPending} onSave={(w) => set.mutate({ id: a.id, market_share: w })} label={`Weight of ${a.label}`} /></span> },
+    { key: 'share', label: 'Share of runs', className: 'text-right', type: 'number', value: (a) => a.share, render: (a) => <span className='tabular-nums'>{a.share ? pct(a.share) : '—'}</span> },
+    { key: 'sandboxes', label: 'Sandboxes', className: 'text-right', type: 'number', value: (a) => a.sandboxes, render: (a) => <span className='tabular-nums'>{a.sandboxes || '—'}</span> },
+    { key: 'status', label: 'Status', type: 'select', value: (a) => a.status, render: (a) => <span title={a.paused_reason ?? undefined} className={a.status === 'On' ? undefined : 'text-muted-foreground'}>{a.status}</span> },
+    { key: 'on', label: 'On', className: 'w-12 text-right', keep: true,
+      render: (a) => <span onClick={(e) => e.stopPropagation()}><Switch aria-label={`${a.label} on`} checked={a.status === 'On'} disabled={!a.runnable || set.isPending} onCheckedChange={(c) => set.mutate({ id: a.id, paused: !c })} /></span> }
+  ];
   return (
-    <Section title='Agent mix' description={<>The coding agents runs sample, by weight, in the default population ({pop.name}). {on} on, {pop.sandbox_unit} sandboxes per unit{pop.as_of && <>, shares as of {pop.as_of}</>}.</>}
-      action={hidden > 0 ? <Button variant='ghost' size='sm' onClick={() => setShowAll(!showAll)}>{showAll ? 'Hide agents not in the mix' : `Show all ${pop.agents.length} agents`}</Button> : undefined}>
-      <div className='overflow-x-auto border-y'>
-        <Table>
-          <TableHeader>
-            <TableRow className='hover:bg-transparent'>
-              {['Agent', 'Weight', 'Share', 'Sandboxes', 'Status', 'On'].map((h, i) => (
-                <TableHead key={h} className={cn('text-muted-foreground h-8 px-3 text-xs font-normal', i > 0 && i < 4 && 'text-right', i === 5 && 'w-12 text-right')}>{h}</TableHead>
-              ))}
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rows.map((a) => (
-              <TableRow key={a.id} className={cn(a.status !== 'On' && 'text-muted-foreground')}>
-                <TableCell className='px-3 py-2.5 text-sm leading-none'>
-                  <span className='flex flex-col gap-1'><span className={cn(a.status === 'On' && 'text-foreground font-medium')}>{a.label}</span><Mono>{a.id}</Mono></span>
-                </TableCell>
-                <TableCell className='px-3 py-1.5 text-right'>
-                  <WeightInput key={a.weight} value={a.weight} disabled={set.isPending} onSave={(w) => set.mutate({ id: a.id, market_share: w })} label={`Weight of ${a.label}`} />
-                </TableCell>
-                <TableCell className='px-3 py-2.5 text-right text-sm tabular-nums'>{a.share ? pct(a.share) : '—'}</TableCell>
-                <TableCell className='px-3 py-2.5 text-right text-sm tabular-nums'>{a.sandboxes || '—'}</TableCell>
-                <TableCell className='px-3 py-2.5 text-sm leading-none' title={a.paused_reason ?? undefined}>{a.status}</TableCell>
-                <TableCell className='w-12 px-3 py-2.5 text-right'>
-                  <Switch aria-label={`${a.label} on`} checked={a.status === 'On'}
-                    disabled={!a.runnable || set.isPending} onCheckedChange={(c) => set.mutate({ id: a.id, paused: !c })} />
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
-      <p className='text-muted-foreground text-xs'>Turning on an agent with no weight gives it the smallest weight in the mix. Changes apply to runs started from now on.</p>
-    </Section>
+    <PageContainer>
+      <ErrorBox error={error} />
+      <RecordView
+        id='agent-mix'
+        rows={pop?.agents ?? []}
+        loading={isLoading}
+        rowKey={(a) => a.id}
+        cols={cols}
+        noun='agents'
+        searchText={(a) => `${a.label} ${a.id} ${a.vendor ?? ''} ${a.model} ${a.harness}`}
+        searchPlaceholder={pop ? `Search ${pop.agents.length} agents · ${pop.name}: ${pop.agents.filter((a) => a.status === 'On').length} on, ${pop.sandbox_unit} sandboxes per unit` : 'Search agents'}
+        views={[
+          { id: 'mix', label: 'In the mix', match: (a) => a.in_mix || a.weight > 0 },
+          { id: 'on', label: 'On', match: (a) => a.status === 'On' },
+          { id: 'all', label: 'All agents' }
+        ]}
+        defaultSort={[{ key: 'weight', dir: 'desc' }]}
+        actions={(a) => [
+          { label: a.status === 'On' ? 'Turn off' : 'Turn on', icon: a.status === 'On' ? <Icons.eyeOff /> : <Icons.check />, disabled: !a.runnable, onSelect: () => set.mutate({ id: a.id, paused: a.status === 'On' }) }
+        ]}
+        bulk={(rows, clear) => [
+          { label: 'Turn on', icon: <Icons.check />, onSelect: () => { rows.filter((a) => a.runnable).forEach((a) => set.mutate({ id: a.id, paused: false })); clear(); } },
+          { label: 'Turn off', icon: <Icons.eyeOff />, onSelect: () => { rows.forEach((a) => set.mutate({ id: a.id, paused: true })); clear(); } }
+        ]}
+        exportName='agent-mix'
+        empty='No agents.'
+      />
+    </PageContainer>
   );
 }
+
+const NA = <span className='text-muted-foreground'>—</span>;
 
 /** A weight that saves when you leave the field or press Enter, if it changed (keyed by the saved weight, so a save resets it). */
 function WeightInput({ value, onSave, disabled, label }: { value: number; onSave: (v: number) => void; disabled?: boolean; label: string }) {
