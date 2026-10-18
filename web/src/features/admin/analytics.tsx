@@ -472,46 +472,44 @@ function AnalyticsBody({ a, match }: { a: Analytics; match: (r: object) => boole
         ) : <p className='text-muted-foreground py-6 text-center text-sm'>No cohorts in the last 8 weeks.</p>}
       </Section>
 
-      <div className='grid gap-8 xl:grid-cols-5 xl:gap-12'>
-        <Section title='Tool adoption' className='min-w-0 xl:col-span-3'>
-          <PagedTable items={tools} noun='tools' initialSize={10} empty={a.tools.length ? 'No tool matches.' : 'No tool calls in this period.'}>
-            {(rows) => (
-              <Table className='min-w-[560px]'>
-                <TableHeader><TableRow>{['Tool', 'Accounts', 'People', 'Calls', 'Errors', 'p50 / p95'].map((h) => <TableHead key={h}>{h}</TableHead>)}</TableRow></TableHeader>
-                <TableBody>
-                  {rows.map((t) => (
-                    <TableRow key={t.name}>
-                      <TableCell><Mono>{t.name}</Mono></TableCell>
-                      <TableCell className='tabular-nums'>{t.accounts}</TableCell>
-                      <TableCell className='tabular-nums'>{t.people}</TableCell>
-                      <TableCell className='tabular-nums'>{num(t.calls)}</TableCell>
-                      <TableCell>{Number(t.error_pct) ? <StatusBadge tone={Number(t.error_pct) >= 5 ? 'bad' : 'warn'}>{t.error_pct}%</StatusBadge> : '0%'}</TableCell>
-                      <TableCell className='text-xs whitespace-nowrap'>{ms(t.p50_ms)} / {ms(t.p95_ms)}</TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            )}
-          </PagedTable>
-        </Section>
-        <Section title='Clients' description='AI clients that connected.' className='xl:col-span-2'>
-          {a.clients.length ? (
-            <ul className='grid gap-3'>
-              {a.clients.map((c) => (
-                <li key={c.client} className='grid gap-1.5'>
-                  <div className='flex items-center justify-between gap-2 text-sm leading-none'>
-                    <Mono>{c.client}</Mono>
-                    <span className='text-muted-foreground text-xs'>{c.accounts} accounts · {c.people} people · {num(c.connections)} connections</span>
-                  </div>
-                  <div className='bg-muted h-2 overflow-hidden rounded-full'>
-                    <div className='h-full rounded-full' style={{ width: `${(c.accounts / maxClient) * 100}%`, background: 'var(--chart-3)' }} />
-                  </div>
-                </li>
-              ))}
-            </ul>
-          ) : <p className='text-muted-foreground py-6 text-center text-sm'>No connections in this period.</p>}
-        </Section>
-      </div>
+      <Section title='Tool adoption' className='min-w-0'>
+        <PagedTable items={tools} noun='tools' initialSize={10} empty={a.tools.length ? 'No tool matches.' : 'No tool calls in this period.'}>
+          {(rows) => (
+            <Table className='min-w-[560px]'>
+              <TableHeader><TableRow>{['Tool', 'Accounts', 'People', 'Calls', 'Errors', 'p50 / p95'].map((h) => <TableHead key={h}>{h}</TableHead>)}</TableRow></TableHeader>
+              <TableBody>
+                {rows.map((t) => (
+                  <TableRow key={t.name}>
+                    <TableCell><Mono>{t.name}</Mono></TableCell>
+                    <TableCell className='tabular-nums'>{t.accounts}</TableCell>
+                    <TableCell className='tabular-nums'>{t.people}</TableCell>
+                    <TableCell className='tabular-nums'>{num(t.calls)}</TableCell>
+                    <TableCell>{Number(t.error_pct) ? <StatusBadge tone={Number(t.error_pct) >= 5 ? 'bad' : 'warn'}>{t.error_pct}%</StatusBadge> : '0%'}</TableCell>
+                    <TableCell className='text-xs whitespace-nowrap'>{ms(t.p50_ms)} / {ms(t.p95_ms)}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </PagedTable>
+      </Section>
+      <Section title='Clients' description='AI clients that connected.'>
+        {a.clients.length ? (
+          <ul className='grid gap-3'>
+            {a.clients.map((c) => (
+              <li key={c.client} className='grid gap-1.5'>
+                <div className='flex items-center justify-between gap-2 text-sm leading-none'>
+                  <Mono>{c.client}</Mono>
+                  <span className='text-muted-foreground text-xs'>{c.accounts} accounts · {c.people} people · {num(c.connections)} connections</span>
+                </div>
+                <div className='bg-muted h-2 overflow-hidden rounded-full'>
+                  <div className='h-full rounded-full' style={{ width: `${(c.accounts / maxClient) * 100}%`, background: 'var(--chart-3)' }} />
+                </div>
+              </li>
+            ))}
+          </ul>
+        ) : <p className='text-muted-foreground py-6 text-center text-sm'>No connections in this period.</p>}
+      </Section>
 
       <Section title='Accounts'
         description={<>Activity per account; &quot;at risk&quot; means calls halved vs the previous period.{a.accounts_total > a.accounts.length && ` Showing the ${a.accounts.length} busiest of ${num(a.accounts_total)}; the export has all.`}</>}>
