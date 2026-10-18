@@ -672,7 +672,14 @@ SELECT org_id, 'Cleared the unused buffer (it only applied with an even split; n
  WHERE mode <> 'even' AND reserve_usd <> 0 AND NOT EXISTS (SELECT 1 FROM usage_rule_migrations WHERE name = 'set_aside_every_mode');
 UPDATE usage_policies SET reserve_usd = 0
  WHERE mode <> 'even' AND reserve_usd <> 0 AND NOT EXISTS (SELECT 1 FROM usage_rule_migrations WHERE name = 'set_aside_every_mode');
-INSERT INTO usage_rule_migrations (name) VALUES ('own_limit_every_mode'), ('set_aside_every_mode') ON CONFLICT (name) DO NOTHING;
+-- C: an equal share is split only between people who can launch. Logged for accounts it changes shares for: even
+-- mode, with someone who can't launch (their own setting, or new members can't by default).
+INSERT INTO usage_rule_changes (org_id, summary)
+SELECT p.org_id, 'Equal shares now count only people who can launch, so shares went up for the people who can'
+  FROM usage_policies p
+ WHERE p.mode = 'even' AND NOT EXISTS (SELECT 1 FROM usage_rule_migrations WHERE name = 'share_counts_launchers')
+   AND (NOT p.new_members_can_run OR EXISTS (SELECT 1 FROM usage_members m WHERE m.org_id = p.org_id AND m.can_run = false));
+INSERT INTO usage_rule_migrations (name) VALUES ('own_limit_every_mode'), ('set_aside_every_mode'), ('share_counts_launchers') ON CONFLICT (name) DO NOTHING;
 
 -- Context for the AI client (src/context.ts, /app Context): the company's, set by its admins, and each person's own.
 CREATE TABLE IF NOT EXISTS account_context (

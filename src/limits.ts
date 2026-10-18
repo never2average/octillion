@@ -148,7 +148,7 @@ export function allocate({ policy, teams, members, usage, cap, account_spent_usd
 
   const account = {
     cap_usd: cap, spent_usd: cents(account_spent_usd), launchable_usd, left_usd: leftOf(launchable_usd, account_spent_usd),
-    blocked: (zero ? "no_allowance" : account_spent_usd >= cap ? "account_cap" : account_spent_usd >= launchable_usd ? "buffer" : null) as LimitCode | null,
+    blocked: (zero ? "no_allowance" : cents(account_spent_usd) >= cap ? "account_cap" : cents(account_spent_usd) >= launchable_usd ? "buffer" : null) as LimitCode | null,
   };
   const out = people.map((p) => {
     const limit_source: "own" | "share" | "default" | "pool" = p.cap_usd != null ? "own" : policy.mode === "even" ? "share" : policy.mode === "custom" ? "default" : "pool";
@@ -170,15 +170,19 @@ export function allocate({ policy, teams, members, usage, cap, account_spent_usd
       [p.pot == null ? "rest_pot" : "team_budget", p.pot == null && !budgeted.size ? null : pot, potSpent(p.pot)],
       ["buffer", zero || buffer_usd <= 0 ? null : launchable_usd, account_spent_usd],
     ];
-    const blocked = checks.find(([, l, s]) => l != null && s >= l)?.[0] ?? null;
-    const limited_by = blocked ?? checks.find(([, l, s]) => l != null && l > 0 && s >= 0.9 * l)?.[0] ?? null;
+    // Spend is compared in cents, like the limits and what is left, so "$0.00 left" is always blocked.
+    const fails = ([, l, s]: (typeof checks)[number]) => l != null && cents(s) >= l;
+    const blocked = checks.find(fails)?.[0] ?? null;
+    // The first money limit reached, launch access aside: what stops an adaptive run that is already going.
+    const over_limit = checks.filter(([c]) => c !== "launch_access").find(fails)?.[0] ?? null;
+    const limited_by = blocked ?? checks.find(([, l, s]) => l != null && l > 0 && cents(s) >= 0.9 * l)?.[0] ?? null;
     const left = Math.min(...checks.slice(1).filter(([c, l]) => l != null && c !== "launch_access").map(([, l, s]) => leftOf(l!, s)));
     const team = teams.find((t) => t.id === p.team_id);
     const effective_max_concurrent = p.max_concurrent_runs ?? team?.max_concurrent_runs ?? policy.max_concurrent_runs;
     const concurrent_source: "you" | "team" | "account" = p.max_concurrent_runs != null ? "you" : team?.max_concurrent_runs != null ? "team" : "account";
     return { user_id: p.user_id, team_id: p.team_id, pot: p.pot, can_run: p.can_run, own_can_run: p.own_can_run,
       cap_usd: p.cap_usd, adjust_usd: p.adjust_usd, max_concurrent_runs: p.max_concurrent_runs, effective_max_concurrent, concurrent_source,
-      limit_usd: limit, limit_source, ...p.u, left_usd: blocked ? 0 : left, blocked, limited_by };
+      limit_usd: limit, limit_source, ...p.u, left_usd: blocked ? 0 : left, blocked, over_limit, limited_by };
   });
   // Per pot, for the page's "Who gets what": what each person in it can spend before own limits and adjustments (null:
   // shared freely), how many can launch, what is running now, and whether the pot is what limits them (90% or more).
@@ -481,8 +485,8 @@ export async function launcherOverLimit(orgId: number, slug: string, userId: str
   const o = await overview({ orgId, slug }).catch(() => null);
   if (!o || o.budget_error) return true;
   const me = o.members.find((m) => m.user_id === userId);
-  const blocked = me ? me.blocked : o.account.blocked;
-  return blocked != null && blocked !== "launch_access";
+  // over_limit skips launch access but still runs every money check after it (a person who can't launch keeps their limits).
+  return (me ? me.over_limit : o.account.blocked) != null;
 }
 
 // ---------- change history: one plain sentence per save, shown on Budget rules ----------
@@ -510,7 +514,10 @@ async function logChange(q: Queryable, orgId: number, actor: Actor | null, parts
     [orgId, actor?.label ?? null, actor?.user ?? null, parts.join("; "), before == null ? null : JSON.stringify(before), after == null ? null : JSON.stringify(after)]);
 }
 
-/** The account's rules lock, held to the end of the transaction (PUT /limits/plan takes it before its version check). */
+/**
+ * The account's rules lock, held to the end of the transaction. Every writer takes it first, before reading or
+ * locking any row, so writers queue in one order (no deadlock) and each reads the rules the last one saved.
+ */
 const lockRules = (q: Queryable, orgId: number) => q.query("SELECT pg_advisory_xact_lock(7270011, $1)", [orgId]);
 
 /** People's names by user id (Clerk), so history shows a person's current name; past members fall back to their email. */
@@ -586,11 +593,15 @@ function parsePolicy(cur: PolicyFields, p: Partial<Record<keyof Policy, unknown>
   // Own limits apply in every mode, so custom with no default would just be the shared pool under another name.
   if (next.mode === "custom" && next.default_cap_usd == null)
     throw new LimitError("Custom caps need a default monthly cap for everyone. Enter an amount, or share the budget freely instead.");
+  // $0 would block everyone without an own limit; "can launch" is the way to stop launches.
+  if (p.default_cap_usd !== undefined && next.default_cap_usd != null && next.default_cap_usd < 0.01)
+    throw new LimitError("Each person's default cap must be at least $0.01.");
   // Empty is "no limit"; $0 would stop every adaptive run after its first batch, which "can launch" says better.
   if (next.max_run_usd != null && next.max_run_usd < 0.01) throw new LimitError("Most a simulation can spend must be at least $0.01, or empty for no limit.");
   if (cap != null && cap > 0) {
     if (p.reserve_usd !== undefined && next.reserve_usd > cap) throw new LimitError(`Can't hold back more than your ${$cap(cap)} allowance.`);
     if (p.max_run_usd !== undefined && next.max_run_usd != null && next.max_run_usd > cap) throw new LimitError(`A simulation can't spend more than your ${$cap(cap)} allowance.`);
+    if (p.default_cap_usd !== undefined && next.default_cap_usd != null && next.default_cap_usd > cap) throw new LimitError(`Each person's default cap can't be more than your ${$cap(cap)} allowance.`);
   }
   return next;
 }
@@ -624,9 +635,11 @@ async function writePolicy(q: Queryable, orgId: number, actor: Actor, next: Poli
 const capFor = (orgId: number) => orgBudget(orgId).then((b) => b.budget, () => null);
 
 export async function setPolicy(orgId: number, actor: Actor, p: Partial<Record<keyof Policy, unknown>>) {
-  const [saved, cap] = await Promise.all([load(orgId), p.reserve_usd !== undefined || p.max_run_usd !== undefined ? capFor(orgId) : null]);
-  const before = policyOnly(saved.policy), next = parsePolicy(before, p, cap);
+  const cap = p.reserve_usd !== undefined || p.max_run_usd !== undefined || p.default_cap_usd !== undefined ? await capFor(orgId) : null;
   await (await getDb()).transaction(async (tx) => {
+    // Read under the lock, so only the fields sent change and a save made meanwhile is kept (and in the history's diff).
+    await lockRules(tx, orgId);
+    const before = policyOnly((await load(orgId, tx)).policy), next = parsePolicy(before, p, cap);
     await writePolicy(tx, orgId, actor, next);
     await logChange(tx, orgId, actor, policyParts(before, next), { policy: before }, { policy: next });
   });
@@ -652,6 +665,7 @@ export async function saveTeam(orgId: number, actor: Actor, t: { id?: unknown; n
       if (has("budget_usd")) set("budget_usd", money(t.budget_usd, "Team budget"));
       if (has("max_concurrent_runs")) set("max_concurrent_runs", count(t.max_concurrent_runs, RUNS));
       await db.transaction(async (tx) => {
+        await lockRules(tx, orgId);
         const cols = "id, name, budget_usd, max_concurrent_runs";
         const read = (sql: string, params: unknown[]) => tx.query<Team>(sql, params).then((r) => r.map((x) => ({ ...x, id: Number(x.id), budget_usd: num(x.budget_usd), max_concurrent_runs: num(x.max_concurrent_runs) })));
         const [before] = await read(`SELECT ${cols} FROM usage_teams WHERE org_id = $1 AND id = $2 FOR UPDATE`, vals.slice(0, 2));
@@ -668,6 +682,7 @@ export async function saveTeam(orgId: number, actor: Actor, t: { id?: unknown; n
     }
     const vals = [orgId, name, money(t.budget_usd, "Team budget"), count(t.max_concurrent_runs, RUNS)] as const;
     return await db.transaction(async (tx) => {
+      await lockRules(tx, orgId);
       const [r] = await tx.query<{ id: number }>("INSERT INTO usage_teams (org_id, name, budget_usd, max_concurrent_runs) VALUES ($1, $2, $3, $4) RETURNING id", [...vals]);
       const after = { id: Number(r!.id), name, budget_usd: vals[2], max_concurrent_runs: vals[3] };
       await logChange(tx, orgId, actor, [`Added team ${name} (${teamWords(after)})`], null, { team: after });
@@ -682,6 +697,7 @@ export async function saveTeam(orgId: number, actor: Actor, t: { id?: unknown; n
 /** Remove a team; its people move to Everyone else (their own settings stay). */
 export async function deleteTeam(orgId: number, actor: Actor, id: number) {
   await (await getDb()).transaction(async (tx) => {
+    await lockRules(tx, orgId);
     const [t] = await tx.query<Team & { people: number }>(
       `SELECT id, name, budget_usd, max_concurrent_runs, (SELECT count(*) FROM usage_members m WHERE m.org_id = $1 AND m.team_id = $2) AS people
          FROM usage_teams WHERE org_id = $1 AND id = $2`, [orgId, id]);
@@ -701,27 +717,29 @@ export async function setMember(org: { orgId: number; slug: string }, actor: Act
   const db = await getDb();
   if (m.team_id != null && m.team_id !== "" && !(await db.query("SELECT 1 FROM usage_teams WHERE org_id = $1 AND id = $2", [org.orgId, Number(m.team_id)])).length)
     throw new LimitError("No such team", 404);
-  const { rows, teams } = await load(org.orgId);
-  const cur = rows.get(userId);
-  const pick = <T>(k: string, parse: () => T, fallback: T) => (k in m ? parse() : fallback);
-  const next = {
-    team_id: pick("team_id", () => (m.team_id == null || m.team_id === "" ? null : Number(m.team_id)), cur?.team_id ?? null),
-    cap_usd: pick("cap_usd", () => money(m.cap_usd, "cap_usd"), cur?.cap_usd ?? null),
-    adjust_usd: pick("adjust_usd", () => money(m.adjust_usd, "adjust_usd", true) ?? 0, cur?.adjust_usd ?? 0),
-    can_run: pick("can_run", () => (m.can_run == null ? null : Boolean(m.can_run)), cur?.can_run ?? null),
-    max_concurrent_runs: pick("max_concurrent_runs", () => count(m.max_concurrent_runs, RUNS), cur?.max_concurrent_runs ?? null),
-  };
-  const before = { team_id: cur?.team_id ?? null, cap_usd: cur?.cap_usd ?? null, adjust_usd: cur?.adjust_usd ?? 0, can_run: cur?.can_run ?? null,
-    max_concurrent_runs: cur?.max_concurrent_runs ?? null };
-  const teamName = (id: number | null) => (id == null ? "Everyone else" : teams.find((t) => t.id === id)?.name ?? "a removed team");
-  const parts = [
-    ...diff("team", before.team_id, next.team_id, teamName),
-    ...diff("own limit", before.cap_usd, next.cap_usd, (v) => usdWord(v)),
-    ...diff("adjustment", before.adjust_usd, next.adjust_usd, (v) => usdWord(v)),
-    ...diff("can launch:", before.can_run, next.can_run, (v) => (v == null ? "account setting" : v ? "yes" : "no")),
-    ...diff("runs at once", before.max_concurrent_runs, next.max_concurrent_runs, (v) => countWord(v, "team or account setting")),
-  ];
+  // Read under the rules lock, so only the fields sent change: a plan's reset or another admin's save made meanwhile stays.
   await db.transaction(async (tx) => {
+    await lockRules(tx, org.orgId);
+    const { rows, teams } = await load(org.orgId, tx);
+    const cur = rows.get(userId);
+    const pick = <T>(k: string, parse: () => T, fallback: T) => (k in m ? parse() : fallback);
+    const next = {
+      team_id: pick("team_id", () => (m.team_id == null || m.team_id === "" ? null : Number(m.team_id)), cur?.team_id ?? null),
+      cap_usd: pick("cap_usd", () => money(m.cap_usd, "cap_usd"), cur?.cap_usd ?? null),
+      adjust_usd: pick("adjust_usd", () => money(m.adjust_usd, "adjust_usd", true) ?? 0, cur?.adjust_usd ?? 0),
+      can_run: pick("can_run", () => (m.can_run == null ? null : Boolean(m.can_run)), cur?.can_run ?? null),
+      max_concurrent_runs: pick("max_concurrent_runs", () => count(m.max_concurrent_runs, RUNS), cur?.max_concurrent_runs ?? null),
+    };
+    const before = { team_id: cur?.team_id ?? null, cap_usd: cur?.cap_usd ?? null, adjust_usd: cur?.adjust_usd ?? 0, can_run: cur?.can_run ?? null,
+      max_concurrent_runs: cur?.max_concurrent_runs ?? null };
+    const teamName = (id: number | null) => (id == null ? "Everyone else" : teams.find((t) => t.id === id)?.name ?? "a removed team");
+    const parts = [
+      ...diff("team", before.team_id, next.team_id, teamName),
+      ...diff("own limit", before.cap_usd, next.cap_usd, (v) => usdWord(v)),
+      ...diff("adjustment", before.adjust_usd, next.adjust_usd, (v) => usdWord(v)),
+      ...diff("can launch:", before.can_run, next.can_run, (v) => (v == null ? "account setting" : v ? "yes" : "no")),
+      ...diff("runs at once", before.max_concurrent_runs, next.max_concurrent_runs, (v) => countWord(v, "team or account setting")),
+    ];
     await tx.query(
       `INSERT INTO usage_members (org_id, user_id, team_id, cap_usd, adjust_usd, can_run, max_concurrent_runs) VALUES ($1, $2, $3, $4, $5, $6, $7)
        ON CONFLICT (org_id, user_id) DO UPDATE SET team_id = $3, cap_usd = $4, adjust_usd = $5, can_run = $6, max_concurrent_runs = $7`,

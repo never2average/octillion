@@ -110,7 +110,8 @@ export function BillingPage() {
             </TabsList>
             <TabsContent value='people'><People t={t ?? undefined} l={l ?? undefined} reload={reload} openUser={editUser} onOpened={() => setEditUser(null)} filter={peopleFilter} setFilter={setPeopleFilter} /></TabsContent>
             <TabsContent value='teams'>{l ? <Teams l={l} reload={reload} /> : <LoadingCards count={1} />}</TabsContent>
-            {l?.can_manage && <TabsContent value='rules'>
+            {/* Kept mounted, so an unsaved draft survives a trip to People or Teams (the tab links there). */}
+            {l?.can_manage && <TabsContent value='rules' keepMounted>
               <Rules l={l as AdminLimits} reload={reloadLimits} onTab={onTab} onEditPerson={(id) => { setEditUser(id); setTab('people'); }} />
             </TabsContent>}
           </Tabs>
@@ -590,6 +591,14 @@ function limitedWord(c: LimitCode | null | undefined, teams: { id: number; name:
 function Rules({ l, reload, onEditPerson, onTab }: { l: AdminLimits; reload: () => Promise<Limits | null>; onEditPerson: (userId: string) => void; onTab: (tab: 'people' | 'teams', filter?: PeopleFilter) => void }) {
   const base = useMemo(() => draftOf(l), [l]);
   const [f, setF] = useState(base);
+  // The rules reloaded (a save here, or a change on People or Teams): an untouched draft follows them; an edited one
+  // keeps this person's edits on top of the latest rules.
+  const shown = useRef(base);
+  useEffect(() => {
+    const was = shown.current;
+    shown.current = base;
+    if (was !== base) setF((x) => (JSON.stringify(x) === JSON.stringify(was) ? base : rebase(x, was, base)));
+  }, [base]);
   const [pv, setPv] = useState<Preview | null>(null);
   const [pvState, setPvState] = useState<'idle' | 'loading' | 'failed'>('idle');
   const [review, setReview] = useState(false);
@@ -634,10 +643,9 @@ function Rules({ l, reload, onEditPerson, onTab }: { l: AdminLimits; reload: () 
       .catch((e) => { if (e instanceof ApiError && e.status === 409) { setReview(false); setConflict(true); } else fail(e); })
       .finally(() => setSaving(false));
   };
-  // Someone else saved meanwhile: load their rules and put this person's edits back on top.
+  // Someone else saved meanwhile: load their rules; the effect above puts this person's edits back on top.
   const rebaseOnLatest = async () => {
-    const fresh = await reload();
-    if (fresh) setF((x) => rebase(x, base, draftOf(fresh as AdminLimits)));
+    await reload();
     setConflict(false);
   };
   const needsReview = !pv || pvState !== 'idle' || blockedNow.length > 0 || pv.over_by_usd > 0 || pv.inactive.length > 0 || pv.launch_access_stops > 0;
@@ -660,6 +668,7 @@ function Rules({ l, reload, onEditPerson, onTab }: { l: AdminLimits; reload: () 
       </header>
 
       {l.budget_error && <Alert variant='destructive'><Icons.warning /><AlertDescription>We couldn&apos;t load your monthly allowance, so the preview is unavailable and saving is off. Try again in a minute.</AlertDescription></Alert>}
+      <ShareNotice l={l} />
       {conflict && (
         <Alert variant='destructive'><Icons.warning />
           <AlertDescription className='flex flex-wrap items-center gap-x-3 gap-y-2'>
@@ -695,8 +704,29 @@ function Rules({ l, reload, onEditPerson, onTab }: { l: AdminLimits; reload: () 
         <SaveBar pv={pv} pvState={pvState} bad={bad} blocked={blockedNow.map((c) => c.name || 'someone')} changes={changes} needsReview={needsReview}
           disabled={saving || bad || !!l.budget_error} onDiscard={() => { setF(base); setConflict(false); }} onSave={onSave} />
       )}
-      {review && <ReviewDialog l={l} pv={pvState === 'idle' ? pv : null} saving={saving} onClose={() => setReview(false)} onSave={save} />}
+      {review && <ReviewDialog l={l} pv={pvState === 'idle' ? pv : null} loading={pvState === 'loading'} saving={saving} onClose={() => setReview(false)} onSave={save} />}
     </div>
+  );
+}
+
+/**
+ * The one-time notice for a change in meaning: equal shares now leave out people who can't launch. Shown in even mode
+ * while someone's share is bigger for it (they share a budget with someone who can't launch), until dismissed (per browser).
+ */
+const SHARE_NOTICE = 'oct_budget_share_notice';
+function ShareNotice({ l }: { l: AdminLimits }) {
+  const [gone, setGone] = useState(() => { try { return localStorage.getItem(SHARE_NOTICE) === '1'; } catch { return false; } });
+  const left = new Set(l.members.filter((m) => !m.can_run && m.cap_usd == null).map((m) => m.pot ?? null));
+  const n = l.members.filter((m) => m.can_run && m.limit_source === 'share' && left.has(m.pot ?? null)).length;
+  if (gone || l.policy.mode !== 'even' || !n) return null;
+  const dismiss = () => { setGone(true); try { localStorage.setItem(SHARE_NOTICE, '1'); } catch { /* private mode */ } };
+  return (
+    <Alert><Icons.info />
+      <AlertDescription className='flex flex-wrap items-center gap-x-3 gap-y-2'>
+        Equal shares now count only people who can launch. Shares went up for {plural(n, 'person', 'people')}.
+        <Button size='sm' variant='ghost' onClick={dismiss}>Dismiss</Button>
+      </AlertDescription>
+    </Alert>
   );
 }
 
@@ -943,8 +973,9 @@ function Ledger({ o, onOpen }: { o: Picture; onOpen: (id: string) => void }) {
               </button>
             );
           })}
-          {o.over_by_usd > 0 && <div className='bg-destructive/70 h-full' style={{ width: pct(o.over_by_usd) }} title={`${usd(o.over_by_usd)} more than your allowance`} />}
         </div>
+        {/* The segments already add up to the set-aside total, so the excess is the part past the allowance, shaded over them. */}
+        {o.over_by_usd > 0 && <div className='bg-destructive/50 pointer-events-none absolute inset-y-0 right-0 rounded-r-sm' style={{ left: pct(cap) }} title={`${usd(o.over_by_usd)} more than your allowance`} />}
         {o.over_by_usd > 0 && <div className='bg-foreground absolute -top-1 -bottom-1 w-0.5' style={{ left: `calc(${pct(cap)} - 1px)` }} aria-hidden />}
       </div>
       <ul className='text-muted-foreground flex flex-col gap-1.5 text-xs leading-none sm:flex-row sm:flex-wrap sm:gap-x-5'>
@@ -1115,15 +1146,17 @@ function SaveBar({ pv, pvState, bad, blocked, changes, needsReview, disabled, on
 }
 
 /** Before a save that blocks someone, goes over the allowance or could not be previewed: the changes, who they affect, and a checkbox. */
-function ReviewDialog({ l, pv, saving, onClose, onSave }: { l: AdminLimits; pv: Preview | null; saving: boolean; onClose: () => void; onSave: (clear: boolean) => void }) {
+function ReviewDialog({ l, pv, loading, saving, onClose, onSave }: { l: AdminLimits; pv: Preview | null; loading: boolean; saving: boolean; onClose: () => void; onSave: (clear: boolean) => void }) {
   const [ok, setOk] = useState(false);
   const [clear, setClear] = useState(true);
   const blocked = pv?.changes.filter((c) => c.blocked_now) ?? [];
   const over = pv?.over_by_usd ?? 0;
   const outside = pv ? pv.rest.members : 0;
-  const ask = !pv ? "I understand I'm saving without seeing who this affects."
+  const ask = loading ? null : !pv ? "I understand I'm saving without seeing who this affects."
     : blocked.length ? `I understand ${plural(blocked.length, 'person', 'people')} will be blocked right away.`
     : over > 0 ? `I understand this is ${usd(over)} more than the allowance${outside && pv.rest.budget_usd === 0 ? ` and ${plural(outside, 'person', 'people')} outside teams get $0` : ''}.` : null;
+  // A tick is for the sentence it was ticked against: when the preview arrives or changes, it asks again.
+  useEffect(() => setOk(false), [ask]);
   const who = new Map(l.members.map((m) => [m.user_id, m.name || m.email || m.user_id]));
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
@@ -1133,7 +1166,8 @@ function ReviewDialog({ l, pv, saving, onClose, onSave }: { l: AdminLimits; pv: 
           <DialogDescription>They apply to this month&apos;s spend as soon as you save.</DialogDescription>
         </DialogHeader>
         <div className='flex max-h-[60vh] flex-col gap-4 overflow-y-auto text-sm'>
-          {!pv ? <Alert><Icons.info /><AlertDescription>Preview unavailable, so we can&apos;t show who this affects. Your edits are kept.</AlertDescription></Alert> : (<>
+          {loading ? <p className='text-muted-foreground'>Working out who this affects…</p>
+            : !pv ? <Alert><Icons.info /><AlertDescription>Preview unavailable, so we can&apos;t show who this affects. Your edits are kept.</AlertDescription></Alert> : (<>
             <div className='flex flex-col gap-1.5'>
               <p className='font-medium'>Changes</p>
               <ul className='text-muted-foreground flex list-disc flex-col gap-1 pl-5'>{(pv.summary.length ? pv.summary : ['Nothing changes in the rules themselves.']).map((s) => <li key={s}>{s}</li>)}</ul>
@@ -1168,7 +1202,7 @@ function ReviewDialog({ l, pv, saving, onClose, onSave }: { l: AdminLimits; pv: 
         </div>
         <DialogFooter>
           <Button variant='outline' onClick={onClose}>Keep editing</Button>
-          <Button variant={blocked.length ? 'destructive' : 'default'} disabled={saving || (!!ask && !ok)} onClick={() => onSave(clear)}>
+          <Button variant={blocked.length ? 'destructive' : 'default'} disabled={saving || loading || (!!ask && !ok)} onClick={() => onSave(clear)}>
             {saving ? 'Saving…' : blocked.length ? `Save and block ${blocked.length}` : 'Save rules'}
           </Button>
         </DialogFooter>
@@ -1232,12 +1266,15 @@ function History({ onClose }: { onClose: () => void }) {
 
 /** Teams as one full table: budget used against the team cap, what is left, runs at once, people. Add, edit and delete (admins). */
 function Teams({ l, reload }: { l: Limits; reload: () => void }) {
-  const [edit, setEdit] = useState<{ id: number | null; name: string; budget: string; conc: string } | null>(null);
+  const [edit, setEdit] = useState<{ id: number | null; name: string; budget: string; conc: string; was?: { name: string; budget: string; conc: string } } | null>(null);
   const [removing, setRemoving] = useState<LimitTeam | null>(null);
   const manage = l.can_manage;
   const save = (e: React.FormEvent) => {
     e.preventDefault(); if (!edit) return;
-    const body = { name: edit.name, budget_usd: orNull(edit.budget), max_concurrent_runs: orNull(edit.conc) };
+    // An edit sends only what changed, so a rename can't put back a budget someone saved on Budget rules meanwhile.
+    const w = edit.was;
+    const body = { ...(!w || edit.name !== w.name ? { name: edit.name } : {}), ...(!w || edit.budget !== w.budget ? { budget_usd: orNull(edit.budget) } : {}),
+      ...(!w || edit.conc !== w.conc ? { max_concurrent_runs: orNull(edit.conc) } : {}) };
     (edit.id == null ? appApi('POST', '/limits/teams', body) : appApi('PUT', `/limits/teams/${edit.id}`, body))
       .then(() => { setEdit(null); toast.success(edit.id == null ? 'Team added' : 'Team saved'); reload(); }).catch(fail);
   };
@@ -1259,7 +1296,7 @@ function Teams({ l, reload }: { l: Limits; reload: () => void }) {
         searchText={(x) => x.name} searchPlaceholder='Search teams'
         primary={manage ? <Button onClick={() => setEdit({ id: null, name: '', budget: '', conc: '' })}><Icons.add /> Add team</Button> : undefined}
         actions={manage ? (x) => [
-          { label: 'Edit team', icon: <Icons.edit />, onSelect: () => setEdit({ id: x.id, name: x.name, budget: str(x.budget_usd), conc: str(x.max_concurrent_runs) }) },
+          { label: 'Edit team', icon: <Icons.edit />, onSelect: () => { const v = { name: x.name, budget: str(x.budget_usd), conc: str(x.max_concurrent_runs) }; setEdit({ id: x.id, ...v, was: v }); } },
           { label: 'Delete team', icon: <Icons.trash />, destructive: true, separator: true, onSelect: () => setRemoving(x) }
         ] : undefined}
         exportName='teams' empty='No teams: everyone shares the account cap. Put people in teams from their row on People (Edit limits).' />
@@ -1269,7 +1306,7 @@ function Teams({ l, reload }: { l: Limits; reload: () => void }) {
             <form onSubmit={save} className='grid gap-4'>
               <DialogHeader><DialogTitle>{edit.id == null ? 'Add a team' : 'Edit team'}</DialogTitle><DialogDescription>This budget is set aside for the team and is the most it can spend. Leave it empty and the team shares Everyone else&apos;s.</DialogDescription></DialogHeader>
               <label className='grid gap-1.5 text-sm'>Name<Input required autoFocus value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} /></label>
-              <label className='grid gap-1.5 text-sm'>Monthly budget ($)<Input type='number' min={0} step={1} value={edit.budget} onChange={(e) => setEdit({ ...edit, budget: e.target.value })} placeholder='no cap' /></label>
+              <label className='grid gap-1.5 text-sm'>Monthly budget ($)<Input type='number' min={0} step={0.01} value={edit.budget} onChange={(e) => setEdit({ ...edit, budget: e.target.value })} placeholder='no cap' /></label>
               <label className='grid gap-1.5 text-sm'>Runs at once, per person<Input type='number' min={1} step={1} value={edit.conc} onChange={(e) => setEdit({ ...edit, conc: e.target.value })} placeholder='account default' /></label>
               <DialogFooter><Button type='button' variant='outline' onClick={() => setEdit(null)}>Cancel</Button><Button type='submit'>{edit.id == null ? 'Add team' : 'Save team'}</Button></DialogFooter>
             </form>
