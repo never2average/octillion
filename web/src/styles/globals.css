@@ -657,8 +657,7 @@ main .flex-col > * {
   to { opacity: 1; transform: none; }
 }
 
-/* Large screens: text, spacing, max widths and the sidebar are all in rem, so raising the root size scales the whole
-   interface with the screen instead of leaving a laptop-sized island in the middle. Laptops (below 1920px) keep 16px. */
-@media (min-width: 1920px) { html { font-size: 17.5px; } }
-@media (min-width: 2400px) { html { font-size: 20px; } }
-@media (min-width: 3200px) { html { font-size: 24px; } }
+/* Large screens: text, spacing, max widths and the sidebar are all in rem, so a root size that grows with the window
+   scales the whole interface instead of leaving a laptop-sized island in the middle. Smooth from 1440px (16px, laptops
+   unchanged) to about 19.5px at 2240px and 21px at 2560px, capped at 24px. */
+@media (min-width: 1440px) { html { font-size: clamp(16px, calc(0.4375vw + 9.7px), 24px); } }
