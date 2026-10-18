@@ -28,7 +28,7 @@ interface Setting {
   env: string | null; updated_at: string | null; updated_by: string | null;
 }
 interface Agent {
-  id: string; label: string; harness: string; model: string; vendor: string | null; in_mix: boolean; weight: number; share: number;
+  id: string; label: string; harness: string; model: string | null; vendor: string | null; in_mix: boolean; weight: number; share: number;
   sandboxes: number; paused: boolean; paused_reason: string | null; runnable: boolean; status: string;
 }
 interface Compute { groups: { id: string; label: string }[]; settings: Setting[]; population: { slug: string; name: string; sandbox_unit: number; as_of: string | null; agents: Agent[] } }
@@ -180,7 +180,7 @@ export function AdminAgentMix() {
     { key: 'harness', label: 'Harness', keep: true, type: 'text', value: (a) => a.label,
       render: (a) => <span title={a.id} className={cn('block truncate leading-none', a.status === 'On' && 'font-medium')}>{a.label}</span> },
     { key: 'cli', label: 'CLI', type: 'select', value: (a) => a.harness, render: (a) => <Mono>{a.harness}</Mono> },
-    { key: 'model', label: 'Model', type: 'select', value: (a) => a.model, render: (a) => <Mono>{a.model.replace(/^.*\//, '')}</Mono> },
+    { key: 'model', label: 'Model', type: 'select', value: (a) => a.model ?? '', render: (a) => (a.model ? <Mono>{a.model.replace(/^.*\//, '')}</Mono> : <span className='text-muted-foreground'>its own</span>) },
     { key: 'weight', label: 'Weight', className: 'w-28 text-right', type: 'number', value: (a) => a.weight,
       render: (a) => <span onClick={(e) => e.stopPropagation()}><WeightInput key={a.weight} value={a.weight} disabled={set.isPending} onSave={(w) => set.mutate({ id: a.id, market_share: w })} label={`Weight of ${a.label}`} /></span> },
     { key: 'share', label: 'Share', className: 'text-right', type: 'number', value: (a) => a.share, render: (a) => <span className='tabular-nums'>{a.share ? pct(a.share) : '—'}</span> },
@@ -199,7 +199,7 @@ export function AdminAgentMix() {
         rowKey={(a) => a.id}
         cols={cols}
         noun='harnesses'
-        searchText={(a) => `${a.label} ${a.id} ${a.model} ${a.harness}`}
+        searchText={(a) => `${a.label} ${a.id} ${a.model ?? ''} ${a.harness}`}
         searchPlaceholder={pop ? `Search ${pop.agents.length} harnesses (${pop.agents.filter((a) => a.status === 'On').length} on)` : 'Search harnesses'}
         views={[
           { id: 'all', label: 'All harnesses' },
