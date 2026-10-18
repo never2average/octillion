@@ -37,8 +37,47 @@ const pct = (x: number) => `${(x * 100).toFixed(x > 0 && x < 0.01 ? 1 : 0)}%`;
 
 /** Compute: the sandbox provider and capacity settings. */
 export const AdminCompute = () => <SettingsPage groups={['capacity']} sandbox />;
-/** Configuration: models, run sizes and research limits. */
-export const AdminConfiguration = () => <SettingsPage groups={['models', 'runs', 'research']} />;
+/** Agent configuration: one row per setting (models, run sizes, research limits), edited in place. */
+export function AdminConfiguration() {
+  const { data, error, isLoading } = useAdmin<Compute>('/compute');
+  const save = useAdminAction((v: Record<string, string | null>) => adminApi<Compute>('PUT', '/compute/settings', { values: v }), { success: 'Setting saved' });
+  const groupName = (id: string) => data?.groups.find((g) => g.id === id)?.label ?? id;
+  const rows = (data?.settings ?? []).filter((x) => ['models', 'runs', 'research'].includes(x.group));
+  const cols: RecordCol<Setting>[] = [
+    { key: 'setting', label: 'Setting', keep: true, type: 'text', value: (x) => x.label,
+      render: (x) => <span className='flex min-w-0 flex-col gap-1'><span className='leading-none font-medium'>{x.label}</span><span className='text-muted-foreground truncate text-xs' title={x.help}>{x.help}</span></span> },
+    { key: 'group', label: 'Group', type: 'select', value: (x) => groupName(x.group), render: (x) => groupName(x.group) },
+    { key: 'value', label: 'Value', className: 'w-72', keep: true, render: (x) => <span onClick={(e) => e.stopPropagation()}><InlineValue key={String(x.value)} s={x} disabled={save.isPending} onSave={(v) => save.mutate({ [x.key]: v })} /></span> },
+    { key: 'source', label: 'From', type: 'select', value: (x) => (x.source === 'set' ? 'Set here' : x.source === 'env' ? 'Environment' : 'Default'),
+      render: (x) => (x.source === 'set' ? <span>Set here{x.updated_at && <span className='text-muted-foreground'> · <When d={x.updated_at} /></span>}</span> : <span className='text-muted-foreground'>{x.source === 'env' ? 'Environment' : 'Default'}</span>) },
+    { key: 'default', label: 'Default', type: 'text', value: (x) => String(x.default), render: (x) => <Mono>{String(x.default)}</Mono> },
+    { key: 'key', label: 'Variable', type: 'text', value: (x) => x.key, render: (x) => <Mono>{x.key}</Mono> }
+  ];
+  return (
+    <PageContainer>
+      <ErrorBox error={error} />
+      <RecordView id='agent-configuration' rows={rows} loading={isLoading} rowKey={(x) => x.key} cols={cols} noun='settings'
+        searchText={(x) => `${x.label} ${x.key} ${x.help} ${groupName(x.group)}`} searchPlaceholder='Search settings'
+        defaultSort={[{ key: 'group', dir: 'asc' }]} groupable
+        actions={(x) => x.source === 'set' ? [{ label: `Reset to ${x.env != null ? 'environment' : 'default'}`, icon: <Icons.close />, onSelect: () => save.mutate({ [x.key]: null }) }] : []}
+        exportName='agent-configuration' empty='No settings.' />
+    </PageContainer>
+  );
+}
+
+/** One setting's value, edited in its row: saves on Enter or when you leave the field, if it changed. */
+function InlineValue({ s, onSave, disabled }: { s: Setting; onSave: (v: string) => void; disabled?: boolean }) {
+  const [v, setV] = useState(String(s.value));
+  const commit = (x: string) => { if (x.trim() !== '' && x !== String(s.value)) onSave(x); };
+  return s.kind === 'choice' ? (
+    <NativeSelect aria-label={s.label} value={v} disabled={disabled} onChange={(e) => { setV(e.target.value); commit(e.target.value); }} className='w-48'>
+      {s.options!.map((o) => <NativeSelectOption key={o} value={o}>{o}</NativeSelectOption>)}
+    </NativeSelect>
+  ) : (
+    <Input aria-label={s.label} value={v} disabled={disabled} onChange={(e) => setV(e.target.value)} onBlur={() => commit(v)} onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+      className={cn('h-8', s.kind === 'text' ? 'w-64 font-mono text-sm' : 'w-28 tabular-nums')} type={s.kind === 'text' ? 'text' : 'number'} min={s.min} max={s.max} step={s.kind === 'number' ? 'any' : 1} />
+  );
+}
 /** Key vault: provider keys for agents, orchestrators and research. */
 export function AdminKeyVault() {
   return <PageContainer><div className='flex w-full flex-col gap-10 pb-10'><ModelKeys /></div></PageContainer>;
@@ -134,7 +173,7 @@ function SettingRow({ s, edit, setEdit }: { s: Setting; edit: string | null | un
 export function AdminAgentMix() {
   const { data, error, isLoading } = useAdmin<Compute>('/compute');
   const set = useAdminAction((v: { id: string; market_share?: number; paused?: boolean }) =>
-    adminApi('PUT', `/compute/agents/${encodeURIComponent(v.id)}`, { market_share: v.market_share, paused: v.paused }), { success: 'Agent mix saved' });
+    adminApi('PUT', `/compute/agents/${encodeURIComponent(v.id)}`, { market_share: v.market_share, paused: v.paused }), { success: 'Harness mix saved' });
   const pop = data?.population;
   const cols: RecordCol<Agent>[] = [
     { key: 'agent', label: 'Agent', keep: true, type: 'text', value: (a) => a.label,
@@ -154,7 +193,7 @@ export function AdminAgentMix() {
     <PageContainer>
       <ErrorBox error={error} />
       <RecordView
-        id='agent-mix'
+        id='harness-mix'
         rows={pop?.agents ?? []}
         loading={isLoading}
         rowKey={(a) => a.id}
@@ -175,7 +214,7 @@ export function AdminAgentMix() {
           { label: 'Turn on', icon: <Icons.check />, onSelect: () => { rows.filter((a) => a.runnable).forEach((a) => set.mutate({ id: a.id, paused: false })); clear(); } },
           { label: 'Turn off', icon: <Icons.eyeOff />, onSelect: () => { rows.forEach((a) => set.mutate({ id: a.id, paused: true })); clear(); } }
         ]}
-        exportName='agent-mix'
+        exportName='harness-mix'
         empty='No agents.'
       />
     </PageContainer>
