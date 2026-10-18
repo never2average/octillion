@@ -656,3 +656,9 @@ main .flex-col > * {
   from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: none; }
 }
+
+/* Large screens: text, spacing, max widths and the sidebar are all in rem, so raising the root size scales the whole
+   interface with the screen instead of leaving a laptop-sized island in the middle. Laptops (below 1920px) keep 16px. */
+@media (min-width: 1920px) { html { font-size: 17.5px; } }
+@media (min-width: 2400px) { html { font-size: 20px; } }
+@media (min-width: 3200px) { html { font-size: 24px; } }
