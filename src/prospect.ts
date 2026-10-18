@@ -10,8 +10,8 @@ import { asData } from "../orchestrator/core/text-guard.js";
 
 /**
  * Background research on the company behind an access request, run once when the request comes in (and again from
- * /admin on demand): their website, web search and look-alike sites (Exa), their packages on npm and PyPI, then Claude (or the
- * orchestrator's model) reads that evidence and writes a short brief for whoever reviews the request: what they sell, whether it is a
+ * /admin on demand): their website, web search and look-alike sites (Exa), their packages on npm and PyPI, then a model
+ * (GLM 5.3 Flash on Cloudflare, else Claude, else the orchestrator's) reads that evidence and writes a short brief for whoever reviews the request: what they sell, whether it is a
  * developer tool Octillion fits, competitors, starter tasks, questions for the call and red flags. Without a model the
  * brief is the raw evidence. Everything fetched is data, never instructions (asData), and only public hosts are fetched.
  */
@@ -144,14 +144,14 @@ Reply with one JSON object and nothing else:
  "questions": ["2-4 questions to ask them on a first call"], "flags": ["anything that looks off: mismatched domains, no product, not a developer tool"]}`;
 
 /** The brief from Claude, else from the orchestrator's own model (OpenAI) when the vault has no Anthropic key. */
-/** The brief from the first model that answers: Claude (vault, ANTHROPIC_API_KEY or Vertex AI), then the orchestrator's
- *  OpenAI model, then Cloudflare Workers AI. Each failure is kept so the flag says why none answered. */
+/** The brief from the first model that answers: GLM 5.3 Flash on Cloudflare Workers AI, then Claude (vault,
+ *  ANTHROPIC_API_KEY or Vertex AI), then the orchestrator's OpenAI model. Each failure is kept so the flag says why. */
 async function claudeBrief(evidence: unknown): Promise<(Partial<ProspectBrief> & { model: string }) | null> {
   const brain = orchestratorBrain();
   const tries: [string, () => Promise<string>][] = [
+    [cloudflareModel(), () => cloudflareText(evidence)],
     [MODEL(), () => anthropicText(evidence)],
     ...(brain.provider === "openai" ? [[brain.model, () => openaiText(evidence, brain.model)] as [string, () => Promise<string>]] : []),
-    [cloudflareModel(), () => cloudflareText(evidence)],
   ];
   const errors: string[] = [];
   for (const [model, ask] of tries) {
@@ -161,15 +161,15 @@ async function claudeBrief(evidence: unknown): Promise<(Partial<ProspectBrief> &
   throw new Error(errors.join("; "));
 }
 
-const cloudflareModel = () => process.env.CLOUDFLARE_AI_MODEL ?? "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+const cloudflareModel = () => process.env.CLOUDFLARE_AI_MODEL ?? "@cf/zai-org/glm-5.3-flash";
 
 /** Cloudflare Workers AI (OpenAI-compatible endpoint), from CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN. */
 async function cloudflareText(evidence: unknown) {
   const account = process.env.CLOUDFLARE_ACCOUNT_ID ?? process.env.CF_ACCOUNT_ID, token = process.env.CLOUDFLARE_API_TOKEN ?? process.env.CF_API_TOKEN;
   if (!account || !token) throw new Error("no Cloudflare Workers AI key (CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN)");
   const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(account)}/ai/v1/chat/completions`, {
-    method: "POST", signal: AbortSignal.timeout(90_000), headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-    body: JSON.stringify({ model: cloudflareModel(), max_tokens: 1500, messages: [{ role: "system", content: SYSTEM }, { role: "user", content: `Evidence:\n${JSON.stringify(evidence)}` }] }),
+    method: "POST", signal: AbortSignal.timeout(120_000), headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify({ model: cloudflareModel(), max_tokens: 8000 /* a thinking model: room to reason, then answer */, messages: [{ role: "system", content: SYSTEM }, { role: "user", content: `Evidence:\n${JSON.stringify(evidence)}` }] }),
   });
   if (!r.ok) throw new Error(`Cloudflare answered ${r.status}`);
   const out = await r.json() as { choices?: { message?: { content?: string } }[] };
