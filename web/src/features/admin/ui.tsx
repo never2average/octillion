@@ -99,13 +99,15 @@ export interface Col<T> {
 }
 
 /** A simple table on the page; scrolls sideways on small screens. */
-export function DataList<T>({ cols, rows, empty, onRow, minWidth = 640, noun }: { cols: Col<T>[]; rows: T[] | undefined; empty: ReactNode; onRow?: (r: T) => void; minWidth?: number; noun?: string }) {
+/** `height` (a class, e.g. 'h-[28rem]') gives the list a fixed height like the full-page tables: the rows scroll under a
+ *  sticky header and the pager stays put, however many rows there are. */
+export function DataList<T>({ cols, rows, empty, onRow, minWidth = 640, noun, height }: { cols: Col<T>[]; rows: T[] | undefined; empty: ReactNode; onRow?: (r: T) => void; minWidth?: number; noun?: string; height?: string }) {
   const p = usePaged(rows ?? []);
   return (
     <div>
-    <div className='overflow-x-auto'>
+    <div className={cn('overflow-x-auto', height && cn('overflow-y-auto overscroll-contain', height))}>
       <Table style={{ minWidth }}>
-        <TableHeader>
+        <TableHeader className={height ? 'bg-background sticky top-0 z-10' : undefined}>
           <TableRow>
             {cols.map((c) => (
               <TableHead key={c.key ?? c.label} className={c.className}>

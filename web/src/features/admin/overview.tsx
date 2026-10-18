@@ -79,6 +79,7 @@ export function AdminOverview() {
               <DataList
                 noun='accounts'
                 minWidth={760}
+                height='h-[28rem]'
                 rows={attention}
                 empty={q ? 'Nothing matches.' : 'Nobody is stuck.'}
                 cols={[
