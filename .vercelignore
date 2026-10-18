@@ -12,7 +12,5 @@ node_modules
 skills-lock.json
 /scripts
 orchestrator/node_modules
-orchestrator/workspaces
-orchestrator/images
 web
 web-static
