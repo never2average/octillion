@@ -256,7 +256,7 @@ export function appRouter() {
     if (!m) return void res.status(403).json({ error: "You are not in an Octillion account yet. Ask your admin to invite you.", code: "no_account" });
     if (clerk.isSuspended(m)) return void res.status(403).json({ error: "Your access to this account was suspended. Ask your account admin.", code: "suspended" });
     const org = await orgForClerk(m.organization!.id);
-    if (!org) return void res.status(403).json({ error: "This account is not set up in Octillion yet.", code: "no_account" });
+    if (!org) return void res.status(403).json({ error: "This organization is not an Octillion account. Octillion is invite-only for now: ask your Octillion contact for an invitation.", code: "no_account" });
     const user = await clerk.users.get(c.userId);
     const s: Session = { org: org.orgId, slug: org.slug, user: c.userId, email: clerk.primaryEmail(user).email, role: clerk.roleOf(m.role), clerkOrgId: m.organization!.id };
     if (!identified.has(c.userId)) {
