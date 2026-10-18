@@ -1,9 +1,10 @@
 'use client';
 import { useState } from 'react';
-import { IconArrowRight, IconCircleCheck } from '@tabler/icons-react';
+import { IconArrowRight, IconChevronDown, IconCircleCheck } from '@tabler/icons-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Textarea } from '@/components/ui/textarea';
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -23,6 +24,7 @@ function visitSource() {
 export function AccessForm() {
   const [v, setV] = useState({ email: '', company: '', product_url: '', message: '', name: '', role: '', team_size: '' });
   const [agents, setAgents] = useState<string[]>([]);
+  const [more, setMore] = useState(false);
   const [errs, setErrs] = useState<Record<string, string>>({});
   const [status, setStatus] = useState<'idle' | 'sending' | 'done'>('idle');
   const [error, setError] = useState('');
@@ -71,8 +73,12 @@ export function AccessForm() {
     return (
       <div className='flex flex-col items-start gap-3 py-6' role='status' tabIndex={-1}>
           <IconCircleCheck className='text-primary size-10' />
-          <h3 className='text-lg font-semibold'>Thanks — we&apos;ll be in touch shortly</h3>
-          <p className='text-muted-foreground'>Your request is in. Expect a reply from the Octillion team soon.</p>
+          <h3 className='text-lg font-semibold'>You&apos;re on the list</h3>
+          <ol className='text-muted-foreground mt-1 space-y-2 text-sm'>
+            <li><span className='text-foreground font-medium'>1.</span> We research {v.company.trim() || 'your company'} and the tools agents pick in your category.</li>
+            <li><span className='text-foreground font-medium'>2.</span> We email {v.email.trim() || 'you'} to set up your account.</li>
+            <li><span className='text-foreground font-medium'>3.</span> You run your first baseline across the coding agents.</li>
+          </ol>
       </div>
     );
   }
@@ -87,46 +93,56 @@ export function AccessForm() {
 
   return (
         <form onSubmit={submit} noValidate className='space-y-2'>
+          {/* What we need first; everything else is optional and folded away. */}
           <div className='grid gap-x-4 sm:grid-cols-2'>
-            {field('name', 'Your name', { autoComplete: 'name', maxLength: 120 })}
-            {field('role', 'Role (optional)', { autoComplete: 'organization-title', placeholder: 'e.g. Head of DevRel', maxLength: 120 })}
-            {field('email', 'Work email', { type: 'email', autoComplete: 'email', placeholder: 'you@company.com', maxLength: 254, required: true })}
-            {field('company', 'Company', { autoComplete: 'organization', maxLength: 200, required: true })}
+            {field('email', 'Work email', { type: 'email', autoComplete: 'email', placeholder: 'you@company.com', maxLength: 254, required: true, autoFocus: true })}
+            {field('company', 'Company', { autoComplete: 'organization', placeholder: 'Acme', maxLength: 200, required: true })}
           </div>
-          <div className='grid gap-x-4 sm:grid-cols-[1fr_10rem]'>
-            {field('product_url', 'Product URL (optional)', { type: 'url', inputMode: 'url', autoComplete: 'url', placeholder: 'https://yourproduct.dev', maxLength: 500 })}
-            <div className='space-y-1.5'>
-              <Label htmlFor='f-team_size'>Team size (optional)</Label>
-              <select id='f-team_size' name='team_size' value={v.team_size} onChange={(e) => setV({ ...v, team_size: e.target.value })}
-                className='border-input bg-background h-9 w-full rounded-md border px-3 text-sm'>
-                <option value=''>Choose</option>
-                {TEAM.map((t) => <option key={t} value={t}>{t}</option>)}
-              </select>
+          {field('product_url', 'Product URL', { type: 'url', inputMode: 'url', autoComplete: 'url', placeholder: 'https://yourproduct.dev', maxLength: 500 })}
+
+          <details className='group border-y py-3 [&_summary::-webkit-details-marker]:hidden' open={more} onToggle={(e) => setMore((e.target as HTMLDetailsElement).open)}>
+            <summary className='text-muted-foreground hover:text-foreground flex cursor-pointer list-none items-center justify-between text-sm'>
+              <span>Add details <span className='text-muted-foreground/70'>(optional, helps us prepare your baseline)</span></span>
+              <IconChevronDown className='size-4 transition-transform group-open:rotate-180' />
+            </summary>
+            <div className='space-y-2 pt-4'>
+              <div className='grid gap-x-4 sm:grid-cols-[1fr_1fr_9rem]'>
+                {field('name', 'Your name', { autoComplete: 'name', maxLength: 120 })}
+                {field('role', 'Role', { autoComplete: 'organization-title', placeholder: 'Head of DevRel', maxLength: 120 })}
+                <div className='space-y-1.5'>
+                  <Label htmlFor='f-team_size'>Team size</Label>
+                  <NativeSelect id='f-team_size' name='team_size' value={v.team_size} onChange={(e) => setV({ ...v, team_size: e.target.value })} className='w-full'>
+                    <NativeSelectOption value=''>Choose</NativeSelectOption>
+                    {TEAM.map((t) => <NativeSelectOption key={t} value={t}>{t}</NativeSelectOption>)}
+                  </NativeSelect>
+                </div>
+              </div>
+              <fieldset className='space-y-2 pb-4'>
+                <legend className='text-sm font-medium'>Coding agents you care about</legend>
+                <div className='flex flex-wrap gap-1.5 pt-1.5'>
+                  {AGENTS.map((a) => {
+                    const on = agents.includes(a);
+                    return (
+                      <button key={a} type='button' aria-pressed={on} onClick={() => setAgents(on ? agents.filter((x) => x !== a) : [...agents, a])}
+                        className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${on ? 'border-primary bg-primary/15 text-primary' : 'text-muted-foreground hover:text-foreground'}`}>{a}</button>
+                    );
+                  })}
+                </div>
+              </fieldset>
+              <div className='space-y-1.5'>
+                <Label htmlFor='f-message'>What do you want to learn?</Label>
+                <Textarea id='f-message' name='message' rows={3} maxLength={4000} value={v.message} onChange={set('message')}
+                  placeholder='Competitors you track, scenarios you care about, models your users run…' />
+              </div>
             </div>
-          </div>
-          <fieldset className='space-y-2 pb-4'>
-            <legend className='text-sm font-medium'>Coding agents you care about (optional)</legend>
-            <div className='flex flex-wrap gap-1.5 pt-1.5'>
-              {AGENTS.map((a) => {
-                const on = agents.includes(a);
-                return (
-                  <button key={a} type='button' aria-pressed={on} onClick={() => setAgents(on ? agents.filter((x) => x !== a) : [...agents, a])}
-                    className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${on ? 'border-primary bg-primary/15 text-primary' : 'text-muted-foreground hover:text-foreground'}`}>{a}</button>
-                );
-              })}
-            </div>
-          </fieldset>
-          <div className='space-y-1.5'>
-            <Label htmlFor='f-message'>What do you want to learn? (optional)</Label>
-            <Textarea id='f-message' name='message' rows={3} maxLength={4000} value={v.message} onChange={set('message')}
-              placeholder='Competitors you track, scenarios you care about, models your users run…' />
-          </div>
+          </details>
+
           {error && <p className='text-destructive text-sm' role='alert'>{error}</p>}
           <div className='flex flex-col gap-3 pt-3 sm:flex-row sm:items-center'>
             <Button type='submit' size='lg' disabled={status === 'sending'} aria-busy={status === 'sending'}>
               {status === 'sending' ? 'Sending…' : <>Get your APO baseline <IconArrowRight /></>}
             </Button>
-            <p className='text-muted-foreground text-xs'>We&apos;ll only use your details to respond to this request.</p>
+            <p className='text-muted-foreground text-xs'>No card needed. We only use your details to reply.</p>
           </div>
         </form>
   );
