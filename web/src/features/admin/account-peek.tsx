@@ -60,7 +60,7 @@ export const dollars = (n: number | null | undefined) => {
 };
 const dash = <span className='text-muted-foreground'>—</span>;
 
-type Kind = 'invite' | 'rename' | 'checkout' | 'key' | 'tip';
+type Kind = 'invite' | 'rename' | 'checkout' | 'key' | 'tip' | 'allowance';
 export type AccountCtl = ReturnType<typeof useAccountActions>;
 
 /** Dialog state, on-demand detail and plain writes for account actions; render `dialogs` once on the page. */
@@ -100,7 +100,9 @@ function actionsOf(o: Org, ctl: AccountCtl) {
     linkClerk: () => void ctl.run(() => post(`${p}/clerk`), 'Moved to Clerk: invite people by email now'),
     welcome: fromDetail((x) => copyText(`Subject: ${x.connect.email.subject}\n\n${x.connect.email.body}`, 'Welcome email copied')),
     connector: fromDetail((x) => copyText(x.connect.connector_url, 'Connector URL copied')),
-    portal: () => void ctl.run(() => post<{ url: string }>(`${p}/billing/portal`)).then((r) => r && copyText(r.url, 'Billing portal link copied'))
+    portal: () => void ctl.run(() => post<{ url: string }>(`${p}/billing/portal`)).then((r) => r && copyText(r.url, 'Billing portal link copied')),
+    prepaid: (allowed: boolean) => void ctl.run(() => post(`${p}/prepaid`, { allowed }), allowed ? `${o.name} can now subscribe to a prepaid plan` : `${o.name} can no longer subscribe`),
+    allowance: () => ctl.open('allowance', o)
   };
 }
 
@@ -120,8 +122,12 @@ export function accountActions(o: Org, ctl: AccountCtl, d: OrgDetail | undefined
       { label: 'Copy welcome email', icon: <Icons.post />, onSelect: x.welcome }
     ],
     [
+      o.prepaid_allowed
+        ? { label: 'Stop allowing a prepaid plan', icon: <Icons.close />, onSelect: () => x.prepaid(false) }
+        : { label: 'Allow a prepaid plan', icon: <Icons.check />, onSelect: () => x.prepaid(true) },
+      { label: o.allowance_usd != null ? 'Change monthly allowance…' : 'Set monthly allowance…', icon: <Icons.billing />, onSelect: x.allowance },
       { label: 'Copy billing portal link', icon: <Icons.billing />, onSelect: x.portal },
-      { label: 'Copy checkout link…', icon: <Icons.creditCard />, onSelect: () => ctl.open('checkout', o) }
+      ...(o.prepaid_allowed ? [{ label: 'Copy checkout link…', icon: <Icons.creditCard />, onSelect: () => ctl.open('checkout', o) }] : [])
     ],
     [{ label: 'Rename…', icon: <Icons.edit />, onSelect: () => ctl.open('rename', o) }],
     [
@@ -143,7 +149,7 @@ export function AccountPeekActions({ org, ctl }: { org: Org; ctl: AccountCtl }) 
 function AccountDialog({ kind, orgs, run, show, close }: { kind: Kind; orgs: Org[]; run: AccountCtl['run']; show: AccountCtl['show']; close: () => void }) {
   const o = orgs[0];
   const p = orgPath(o.slug);
-  const [a, setA] = useState(kind === 'rename' ? o.name : '');
+  const [a, setA] = useState(kind === 'rename' ? o.name : kind === 'allowance' && o.allowance_usd != null ? String(o.allowance_usd) : '');
   const [role, setRole] = useState('member');
   const [pick, setPick] = useState('');
   const [busy, setBusy] = useState(false);
@@ -180,6 +186,16 @@ function AccountDialog({ kind, orgs, run, show, close }: { kind: Kind; orgs: Org
         </NativeSelect>
       ) : <p className='text-muted-foreground text-sm'>No plans: add Stripe prices with a lookup_key starting <Mono>octillion_</Mono>.</p>,
       act: async () => { const r = await run(() => post<{ url: string }>(`${p}/billing/checkout`, { price_id: plan })); if (r) { copyText(r.url, 'Checkout link copied'); close(); } }
+    },
+    allowance: {
+      title: `Monthly allowance for ${o.name}`,
+      description: 'Model spend this account may use each month, set by you: for your own account, trials or comps. It overrides any plan. Leave it empty to clear it (then a plan, or $0, applies).',
+      submit: a.trim() ? 'Set allowance' : 'Clear allowance', ok: a.trim() === '' ? o.allowance_usd != null : Number(a) >= 0,
+      body: (<div className='relative'>
+        <span className='text-muted-foreground pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-sm'>$</span>
+        <Input autoFocus inputMode='decimal' placeholder='e.g. 200' aria-label='Monthly allowance in US dollars' value={a} onChange={(e) => setA(e.target.value.replace(/[^0-9.]/g, ''))} className='pl-7' />
+      </div>),
+      act: async () => { if (await run(() => post(`${p}/allowance`, { usd: a.trim() === '' ? null : Number(a) }), a.trim() ? 'Allowance set' : 'Allowance cleared') !== undefined) close(); }
     },
     key: {
       title: 'Issue a key', description: 'A secret connector link, shown once. One per person.', submit: 'Issue key', ok: true,
@@ -431,9 +447,17 @@ export function AccountPeek({ org, ctl }: { org: Org; ctl: AccountCtl }) {
             {running > 0 && <> · {running} running</>}
           </>) : <span className='text-muted-foreground'>Never connected</span>}
         </Field>
-        <Field label='Plan'>{planLine(s, stripeOn)}</Field>
+        <Field label='Plan'>
+          {planLine(s, stripeOn)}
+          <span className='text-muted-foreground'> · {org.prepaid_allowed ? 'may subscribe' : 'invite-only, not allowed'}</span>
+        </Field>
+        <Field label='Allowance'>
+          {org.budget_source === 'override' ? <>{dollars(org.allowance_usd)}/month <span className='text-muted-foreground'>· set by an admin</span></>
+            : org.budget_source === 'plan' ? <>{dollars(org.budget_usd)}/month <span className='text-muted-foreground'>· from the plan</span></>
+            : <span className={amber}>$0: no runs until a plan or an allowance</span>}
+        </Field>
         <Field label='Spend'>
-          <span className={cn('tabular-nums', over && amber)}>{dollars(org.month_spend_usd)} of {org.budget_usd ? dollars(org.budget_usd) : 'no cap'} this month</span>
+          <span className={cn('tabular-nums', over && amber)}>{dollars(org.month_spend_usd)} of {dollars(org.budget_usd)} this month</span>
         </Field>
         {org.contact && (
           <Field label='Contact'>

@@ -78,6 +78,11 @@ export interface OrgRow {
   errors_7d: number;
   month_spend_usd: number;
   budget_usd: number;
+  /** Where budget_usd comes from: an admin-set allowance, a live prepaid plan, or the default ($0: no runs). */
+  budget_source: 'override' | 'plan' | 'default';
+  /** Plans are invite-only: may this account subscribe? */
+  prepaid_allowed: boolean;
+  allowance_usd: number | null;
   attention: string[];
 }
 

@@ -326,16 +326,20 @@ export async function orgMonthSpendUsd(orgId: number): Promise<number> {
   return Number(r?.usd ?? 0);
 }
 
+/** Why an account without a plan or allowance cannot run anything that spends on models. */
+export const NO_PLAN = (name?: string | null) => `${name ?? "This organization"} has no prepaid plan, so it can't start runs. ` +
+  "Plans are invite-only while we keep inference costs in check: ask your Octillion contact for access.";
+
 export async function runSimulation(org: Org, input: RunInput) {
+  // No plan, no runs: checked before anything else so the reason is the first thing the customer hears.
+  const { budget } = await orgBudget(org.orgId); // admin allowance, else the prepaid plan's cap, else 0
+  if (budget <= 0) throw new Error(NO_PLAN(org.name));
   const p = await resolveProduct(org, input.product);
   const db = await getDb();
-  const { budget } = await orgBudget(org.orgId); // the Stripe plan's cap, else the default; may refuse without a plan
-  if (budget > 0) {
-    const spent = await orgMonthSpendUsd(org.orgId);
-    if (spent >= budget)
-      throw new Error(`${org.name ?? "This organization"} has used its $${budget} simulation budget for this month ($${spent.toFixed(2)} spent). ` +
-        "Results so far stay available; reply to your Octillion contact to raise the limit.");
-  }
+  const spent = await orgMonthSpendUsd(org.orgId);
+  if (spent >= budget)
+    throw new Error(`${org.name ?? "This organization"} has used its $${budget} allowance for this month ($${spent.toFixed(2)} spent). ` +
+      "Results so far stay available; reply to your Octillion contact to raise the limit.");
   // The account's own limits for this person (src/limits.ts): rollout, allowance, team budget, concurrency, run size.
   const personal = await checkRun(org);
   const maxSessions = Math.min(config.maxSessionsPerRun(), personal.maxSessions ?? Infinity);
@@ -458,9 +462,9 @@ export async function extendAdaptive(simulationId: string): Promise<number> {
        FROM simulations sim JOIN organizations o ON o.id = sim.org_id LEFT JOIN developer_populations dp ON dp.id = sim.population_id
       WHERE sim.id = $1`, [simulationId]);
   if (!pre || pre.mode !== "representative" || !pre.max_samples) return 0;
-  const budget = await orgBudget(pre.org_id).then((b) => b.budget, () => 0); // no plan any more: let the run finish
+  const budget = await orgBudget(pre.org_id).then((b) => b.budget, () => Infinity); // lookup failed: let the run finish
   // The account's budget, or the launcher's own allowance or team budget (src/limits.ts), stops sampling early.
-  const overBudget = (budget > 0 && (await orgMonthSpendUsd(pre.org_id)) >= budget) || (await launcherOverLimit(pre.org_id, pre.org_slug, pre.created_by));
+  const overBudget = budget <= 0 || (await orgMonthSpendUsd(pre.org_id)) >= budget || (await launcherOverLimit(pre.org_id, pre.org_slug, pre.created_by));
   const pop = await getPopulation(pre.slug ?? undefined);
   return db.transaction(async (tx) => {
     const [sim] = await tx.query<{ id: string; org_id: number; product_id: number; mode: string; status: string; max_samples: number | null;

@@ -38,7 +38,7 @@ export function integrations() {
     clerk: clerk.clerkEnabled(), clerk_frontend_api: clerk.frontendApi(), oauth_on_mcp: Boolean(clerk.clerkEnabled() && clerk.frontendApi()),
     stripe: billing.stripeEnabled(), stripe_test_mode: /^(sk|rk)_test_/.test(key), spend_meter: process.env.STRIPE_SPEND_METER || null,
     require_subscription: process.env.OCTILLION_REQUIRE_SUBSCRIPTION === "1",
-    default_budget_usd: Number(process.env.OCTILLION_ORG_MONTHLY_BUDGET_USD ?? 1000),
+    default_budget_usd: Number(process.env.OCTILLION_ORG_MONTHLY_BUDGET_USD ?? 0),
   };
 }
 
@@ -71,12 +71,13 @@ Reply to this email with anything that gets in your way.`;
 
 interface OrgFacts {
   id: number; slug: string; name: string; created_at: Date; clerk_org_id: string | null; stripe_customer_id: string | null;
+  prepaid_allowed: boolean; budget_override_usd: string | number | null;
   active_keys: number; key_last_used: Date | null; first_seen: Date | null; last_seen: Date | null; first_call_at: Date | null;
   onboarded_at: Date | null; onboarding_running: number; onboarding_failed: number; first_sim_at: Date | null; sims_running: number;
   first_report_at: Date | null; calls_7d: number; errors_7d: number; month_spend_usd: number;
 }
 const ORG_FACTS = `
-  SELECT o.id, o.slug, o.name, o.created_at, o.clerk_org_id, o.stripe_customer_id,
+  SELECT o.id, o.slug, o.name, o.created_at, o.clerk_org_id, o.stripe_customer_id, o.prepaid_allowed, o.budget_override_usd,
     (SELECT count(*) FROM api_keys k WHERE k.org_id = o.id AND k.revoked_at IS NULL) AS active_keys,
     (SELECT max(k.last_used_at) FROM api_keys k WHERE k.org_id = o.id) AS key_last_used,
     (SELECT min(e.at) FROM mcp_events e WHERE e.org_id = o.id) AS first_seen,
@@ -178,7 +179,10 @@ function shapeOrg(f: OrgFacts, people: People | null, sub: billing.SubscriptionS
   const activeMembers = members.filter((m) => m.status === "active").length;
   const pendingInvites = invites.filter((x) => x.state === "pending");
   const live = sub && ["active", "trialing"].includes(sub.status);
-  const budget = live && sub!.monthly_budget_usd != null ? sub!.monthly_budget_usd : defaultBudget;
+  // Same order as billing.orgBudget: the admin-set allowance, else a live plan's cap, else the default (0 = no runs).
+  const override = f.budget_override_usd != null ? Number(f.budget_override_usd) : null;
+  const budget = override ?? (live && sub!.monthly_budget_usd != null ? sub!.monthly_budget_usd : defaultBudget);
+  const budgetSource = override != null ? "override" : live && sub!.monthly_budget_usd != null ? "plan" : "default";
 
   const attention: string[] = [];
   if (people?.error) attention.push(`Clerk: ${people.error}`);
@@ -206,7 +210,8 @@ function shapeOrg(f: OrgFacts, people: People | null, sub: billing.SubscriptionS
     members: activeMembers, pending_invites: pendingInvites.length, contact: members[0]?.email ?? invites[0]?.email ?? null,
     active_keys: Number(f.active_keys), key_last_used: f.key_last_used, last_seen: f.last_seen,
     calls_7d: Number(f.calls_7d), errors_7d: Number(f.errors_7d), onboarding_running: Number(f.onboarding_running), sims_running: Number(f.sims_running),
-    subscription: sub, month_spend_usd: Number(f.month_spend_usd), budget_usd: budget, attention,
+    subscription: sub, month_spend_usd: Number(f.month_spend_usd), budget_usd: budget, budget_source: budgetSource,
+    prepaid_allowed: Boolean(f.prepaid_allowed), allowance_usd: override, attention,
   };
 }
 export type AdminOrg = ReturnType<typeof shapeOrg>;
@@ -503,7 +508,30 @@ export async function ensureCustomer(actor: string, slug: string, email?: string
 }
 
 /** A Stripe Checkout link for a plan, to send to the account's billing contact. */
-export async function checkoutLink(actor: string, slug: string, priceId: unknown, returnUrl = `${publicUrl()}/app/billing`) {
+/** Allow (or stop allowing) an account to subscribe to a prepaid plan. Plans are invite-only. */
+export async function setPrepaidAllowed(actor: string, slug: string, allowed: unknown) {
+  if (typeof allowed !== "boolean") throw new AdminError("allowed must be true or false");
+  const [r] = await (await getDb()).query<{ slug: string }>("UPDATE organizations SET prepaid_allowed = $2 WHERE slug = $1 RETURNING slug", [slug, allowed]);
+  if (!r) throw new AdminError(`No account ${slug}`, 404);
+  log(actor, allowed ? "billing.prepaid_allowed" : "billing.prepaid_revoked", slug, {});
+  return { slug, prepaid_allowed: allowed };
+}
+
+/** Set an account's monthly allowance by hand (USD; null clears it, so its plan or $0 applies again). */
+export async function setAllowance(actor: string, slug: string, usd: unknown) {
+  const v = usd === null || usd === "" ? null : Number(usd);
+  if (v !== null && (!Number.isFinite(v) || v < 0 || v > 1_000_000)) throw new AdminError("allowance must be a dollar amount from 0 to 1,000,000, or null to clear it");
+  const [r] = await (await getDb()).query<{ slug: string }>("UPDATE organizations SET budget_override_usd = $2 WHERE slug = $1 RETURNING slug", [slug, v]);
+  if (!r) throw new AdminError(`No account ${slug}`, 404);
+  log(actor, "billing.allowance_set", slug, { usd: v });
+  return { slug, allowance_usd: v };
+}
+
+export async function checkoutLink(actor: string, slug: string, priceId: unknown, returnUrl = `${publicUrl()}/app/billing`, opts: { requireAllowed?: boolean } = {}) {
+  if (opts.requireAllowed) {
+    const [o] = await (await getDb()).query<{ prepaid_allowed: boolean }>("SELECT prepaid_allowed FROM organizations WHERE slug = $1", [slug]);
+    if (!o?.prepaid_allowed) throw new AdminError("Prepaid plans are invite-only: ask your Octillion contact to enable one for this account.", 403);
+  }
   const plans = await billing.listPlans();
   const plan = plans.find((p) => p.price_id === priceId);
   if (!plan) throw new AdminError("Unknown plan: use a price whose lookup_key starts with octillion_");

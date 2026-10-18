@@ -17,6 +17,8 @@ process.env.OCTILLION_WORKER_TOKEN ??= "smoke-worker-token";
 process.env.OCTILLION_VAULT_KEY ??= (await import("node:crypto")).randomBytes(32).toString("base64");
 process.env.OCTILLION_ADMIN_TOKEN ??= "smoke-admin-token";
 process.env.OCTILLION_REGISTRY = "scripts/fixtures/registry.json"; // fixed weights, independent of the live registry
+// Accounts without a plan get $0 by default (prepaid, invite-only); the smoke run gives every test account an allowance.
+process.env.OCTILLION_ORG_MONTHLY_BUDGET_USD ??= "1000";
 const WORKER_TOKEN = process.env.OCTILLION_WORKER_TOKEN;
 // Stand-ins for Exa and the npm registry search (src/websearch.ts): research search runs on the server.
 const searchStub = (await import("node:http")).createServer((req, res) => {
@@ -1631,6 +1633,35 @@ try {
     process.env.OCTILLION_REQUIRE_SUBSCRIPTION = "1";
     await assert.rejects(orgBudget(a.org.orgId), /no active Octillion plan/, "OCTILLION_REQUIRE_SUBSCRIPTION refuses orgs without a plan");
     delete process.env.OCTILLION_REQUIRE_SUBSCRIPTION;
+
+    // Prepaid, invite-only: without a plan or an allowance an account gets $0 and can't run or onboard; an admin-set
+    // allowance wins over everything; plans (and checkout) are offered only to accounts an admin allowed.
+    {
+      const defaultBefore = process.env.OCTILLION_ORG_MONTHLY_BUDGET_USD;
+      process.env.OCTILLION_ORG_MONTHLY_BUDGET_USD = "0";
+      const { runSimulation } = await import("../src/queries.js");
+      const { onboardProduct } = await import("../src/research.js");
+      assert.equal((await orgBudget(a.org.orgId)).budget, 0, "no plan, no allowance: $0");
+      await assert.rejects(runSimulation(a.org, {}), /no prepaid plan/, "no runs without a plan");
+      await assert.rejects(onboardProduct(a.org, { prompt: "A queue for Node.js teams that need retries and cron.", website_url: "https://example.com" }), /no prepaid plan/, "no onboarding without a plan");
+      assert.equal((await adm("POST", `/orgs/${a.org.slug}/allowance`, { usd: -5 })).status, 400);
+      await json(adm("POST", `/orgs/${a.org.slug}/allowance`, { usd: 150 }));
+      const ob = await orgBudget(a.org.orgId);
+      assert.ok(ob.budget === 150 && ob.source === "override", "the admin-set allowance applies");
+      assert.equal((await orgRow(a.org.slug)).allowance_usd, 150);
+      await json(adm("POST", `/orgs/${a.org.slug}/allowance`, { usd: null }));
+      assert.equal((await orgBudget(a.org.orgId)).budget, 0, "clearing the allowance drops back to $0");
+      // Plans: hidden and refused until allowed.
+      await db.query("UPDATE organizations SET prepaid_allowed = false WHERE id = $1", [rowW.id]);
+      assert.deepEqual((await json(appCall(ownerC, "GET", "/billing"))).plans, [], "plans are invite-only");
+      assert.equal((await appCall(ownerC, "POST", "/billing/checkout", { price_id: "price_mock_starter" })).status, 403, "no checkout unless allowed");
+      await json(adm("POST", `/orgs/${slugW}/prepaid`, { allowed: true }));
+      const allowedView = await json(appCall(ownerC, "GET", "/billing"));
+      assert.ok(allowedView.prepaid_allowed && allowedView.plans.length >= 1, "an allowed account sees the plans");
+      assert.match((await json(appCall(ownerC, "POST", "/billing/checkout", { price_id: "price_mock_starter" }))).url, /\/checkout\//);
+      process.env.OCTILLION_ORG_MONTHLY_BUDGET_USD = defaultBefore;
+      console.log("✓ prepaid, invite-only: $0 without a plan, admin allowances, plans and checkout only for allowed accounts");
+    }
 
     // Usage metering: a finished session's cost goes to the Stripe meter once.
     const { reportSessionSpend } = await import("../src/billing.js");

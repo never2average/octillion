@@ -465,6 +465,10 @@ ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAUL
 ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS org_id INT REFERENCES organizations(id) ON DELETE SET NULL;
 ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS decided_at TIMESTAMPTZ;
 -- More of what the person told us, where they came from, and the AI's background research on the company (src/prospect.ts).
+-- Prepaid plans are invite-only (src/billing.ts): an admin allows an account to subscribe, or sets its monthly
+-- allowance by hand (your own account, trials, comps). Without either the account's allowance is $0: no runs.
+ALTER TABLE organizations ADD COLUMN IF NOT EXISTS prepaid_allowed BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE organizations ADD COLUMN IF NOT EXISTS budget_override_usd NUMERIC;
 ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS name TEXT;
 ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS role TEXT;
 ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS team_size TEXT;

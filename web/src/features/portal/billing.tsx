@@ -25,7 +25,7 @@ import { ErrorState, LoadingCards, When, fail, useOrgLoad } from './shared';
 
 interface Sub { status: string; plan: string | null; renews_at: string | null; cancel_at_period_end: boolean; trial_end: string | null }
 interface Plan { price_id: string; name: string; amount: number | null; currency: string; interval: string | null; monthly_budget_usd: number | null }
-interface Billing { enabled: boolean; customer: boolean; subscription: Sub | null; budget_usd: number; plans: Plan[]; can_manage: boolean }
+interface Billing { enabled: boolean; customer: boolean; subscription: Sub | null; budget_usd: number; budget_source?: 'override' | 'plan' | 'default'; prepaid_allowed?: boolean; plans: Plan[]; can_manage: boolean }
 interface Usage {
   period: { start: string; end: string; days: number; elapsed_days: number };
   spent_usd: number; budget_usd: number; projected_usd: number; metered_usd: number; in_flight_usd: number;
@@ -94,9 +94,9 @@ function ThisMonth({ b, u, l }: { b: Billing; u: Usage | undefined; l: Limits | 
       {s && ['past_due', 'unpaid'].includes(s.status) && <Alert variant='destructive'><Icons.warning /><AlertDescription>The last payment failed. Update the card to keep running simulations.</AlertDescription></Alert>}
       <div className='flex flex-wrap items-baseline gap-x-6 gap-y-2 leading-none'>
         <span className='text-4xl font-semibold tabular-nums'>{usd(u?.spent_usd ?? 0)}</span>
-        <span className='text-muted-foreground text-sm'>{cap ? `of ${usd(cap)} cap` : 'no monthly cap'}</span>
+        <span className='text-muted-foreground text-sm'>{cap ? `of ${usd(cap)} prepaid this month` : 'no prepaid allowance'}</span>
         <span className='ml-auto flex items-center gap-2 text-sm'>
-          {!b.enabled ? <span className='text-muted-foreground'>Free during the beta</span> : <>
+          {b.budget_source === 'override' ? <span className='text-muted-foreground'>Allowance set by Octillion</span> : !b.enabled ? null : <>
             <span className='font-medium'>{s?.plan ?? 'No plan'}</span>
             {s && <Badge variant={STATUS[s.status] ?? 'outline'}>{s.status.replace('_', ' ')}</Badge>}
             {s?.renews_at && <span className='text-muted-foreground'>{s.cancel_at_period_end ? 'ends' : 'renews'} {new Date(s.renews_at).toLocaleDateString()}</span>}
@@ -119,6 +119,12 @@ function ThisMonth({ b, u, l }: { b: Billing; u: Usage | undefined; l: Limits | 
         </p>
       )}
       {u && <Daily u={u} />}
+      {/* No plan and no allowance: runs are off. Plans are invite-only while inference costs are high. */}
+      {cap <= 0 && !(b.enabled && b.plans.length > 0) && (
+        <Alert><Icons.lock /><AlertDescription>
+          Running simulations and onboarding needs a prepaid plan. Plans are invite-only for now: reply to your Octillion contact, or write to us, and we&apos;ll set one up for your team.
+        </AlertDescription></Alert>
+      )}
       {b.enabled && b.plans.length > 0 && !(live && b.customer) && (
         <ul className='divide-y border-y'>
           {b.plans.map((p) => (

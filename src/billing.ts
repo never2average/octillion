@@ -3,7 +3,11 @@
  * Octillion keeps only organizations.stripe_customer_id (also recorded in the Clerk organization's public_metadata, so
  * Clerk and Stripe can be joined either way). Customers self-serve through Stripe Checkout and the Stripe customer
  * portal; nothing about a plan is stored here.
- * Plain REST over fetch. Unset STRIPE_SECRET_KEY = billing is off and every org gets OCTILLION_ORG_MONTHLY_BUDGET_USD.
+ * Plain REST over fetch. Unset STRIPE_SECRET_KEY = billing is off.
+ *
+ * Plans are prepaid and invite-only: inference is expensive, so an account may subscribe only when an admin allows it
+ * (organizations.prepaid_allowed), a plan is a fixed monthly price with a hard spend cap (no overage), and an account
+ * with neither a live plan nor an admin-set allowance (organizations.budget_override_usd) gets $0: it cannot start runs.
  *
  *   STRIPE_SECRET_KEY            sk_test_... / rk_... (customers, checkout, billing portal, subscriptions, prices, meter events)
  *   Plans                        active Stripe prices whose lookup_key starts with "octillion_". A price's (or its
@@ -132,20 +136,27 @@ export async function recentInvoices(customer: string) {
 
 // ---------- what the org may spend ----------
 
-/** The org's monthly model-spend cap: its Stripe plan's monthly_budget_usd, else OCTILLION_ORG_MONTHLY_BUDGET_USD. 0 = no cap. */
-export async function orgBudget(orgId: number): Promise<{ budget: number; subscription: SubscriptionSummary | null }> {
-  const fallback = Number(process.env.OCTILLION_ORG_MONTHLY_BUDGET_USD ?? 1000);
-  if (!stripeEnabled()) return { budget: fallback, subscription: null };
-  const [o] = await (await getDb()).query<{ stripe_customer_id: string | null }>("SELECT stripe_customer_id FROM organizations WHERE id = $1", [orgId]);
+export type BudgetSource = "override" | "plan" | "default";
+
+/**
+ * The org's monthly model-spend allowance (a hard cap): an admin-set allowance first (your own account, trials, comps),
+ * else its live Stripe plan's monthly_budget_usd, else OCTILLION_ORG_MONTHLY_BUDGET_USD (default 0). 0 = no runs.
+ */
+export async function orgBudget(orgId: number): Promise<{ budget: number; subscription: SubscriptionSummary | null; source: BudgetSource }> {
+  const fallback = Number(process.env.OCTILLION_ORG_MONTHLY_BUDGET_USD ?? 0);
+  const [o] = await (await getDb()).query<{ stripe_customer_id: string | null; budget_override_usd: string | number | null }>(
+    "SELECT stripe_customer_id, budget_override_usd FROM organizations WHERE id = $1", [orgId]);
+  if (o?.budget_override_usd != null) return { budget: Number(o.budget_override_usd), subscription: null, source: "override" };
+  if (!stripeEnabled()) return { budget: fallback, subscription: null, source: "default" };
   let sub: SubscriptionSummary | null = null;
   if (o?.stripe_customer_id) {
     try { sub = (await subscriptionsByCustomer()).get(o.stripe_customer_id) ?? null; }
-    catch (err) { console.error("stripe subscription lookup failed:", (err as Error).message); return { budget: fallback, subscription: null }; }
+    catch (err) { console.error("stripe subscription lookup failed:", (err as Error).message); return { budget: fallback, subscription: null, source: "default" }; }
   }
   const live = sub && ["active", "trialing"].includes(sub.status);
   if (process.env.OCTILLION_REQUIRE_SUBSCRIPTION === "1" && !live)
     throw new Error("This organization has no active Octillion plan. Ask your admin to subscribe, then try again; existing results stay available.");
-  return { budget: live && sub!.monthly_budget_usd != null ? sub!.monthly_budget_usd : fallback, subscription: sub };
+  return live && sub!.monthly_budget_usd != null ? { budget: sub!.monthly_budget_usd, subscription: sub, source: "plan" } : { budget: fallback, subscription: sub, source: "default" };
 }
 
 /** Report a finished session's model cost to the usage meter (STRIPE_SPEND_METER). Best effort, never throws. */

@@ -6,7 +6,8 @@ import { companyHintForResearch } from "./context.js";
 import { completeProspect, prospectIssues } from "./prospect.js";
 import { capture, orgEvent } from "./telemetry.js";
 import { randomId, type Org } from "./auth.js";
-import { WORKSPACE_TEMPLATES, config, getProduct, resolveProduct, runSimulation, saveProduct, browseTaskLibrary } from "./queries.js";
+import { NO_PLAN, WORKSPACE_TEMPLATES, config, getProduct, resolveProduct, runSimulation, saveProduct, browseTaskLibrary } from "./queries.js";
+import { orgBudget } from "./billing.js";
 import { PLATFORMS, isPlatform, platformOf } from "./platform.js";
 import type { Tool } from "./scoring.js";
 import { capacityStatus } from "./autoscaler.js";
@@ -158,6 +159,8 @@ export async function onboardProduct(org: Org, input: OnboardInput) {
   for (const k of ["website_url", "docs_url"] as const)
     if (input[k] !== undefined && !httpUrl(input[k])) throw new Error(`${k} must be a public http(s) URL with a host name (not an IP address)`);
   if (!input.website_url && !input.docs_url) throw new Error("Give at least a website_url or a docs_url so the orchestrator can research the product.");
+  // Research runs on Octillion's models: only accounts with a prepaid plan or an allowance may start it.
+  if ((await orgBudget(org.orgId).catch(() => ({ budget: 0 }))).budget <= 0) throw new Error(NO_PLAN(org.name));
   // A registry page (PyPI, npm, crates.io) rarely holds the docs: add the package's own links from its metadata.
   const relatedUrls = await registryLinks([input.website_url, input.docs_url]);
 

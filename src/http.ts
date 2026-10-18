@@ -394,6 +394,8 @@ export function createApp() {
   ob.post("/orgs/:slug/members/:id/role", async (req, res) => done(res, await onboarding.setMemberRole(adminActor(req, res), slug(req), String(req.params.id), req.body?.role)));
   ob.post("/orgs/:slug/clerk", async (req, res) => void res.json(await onboarding.linkClerk(adminActor(req, res), slug(req))));
   ob.post("/orgs/:slug/billing/customer", async (req, res) => void res.json({ customer: await onboarding.ensureCustomer(adminActor(req, res), slug(req)) }));
+  ob.post("/orgs/:slug/prepaid", async (req, res) => void res.json(await onboarding.setPrepaidAllowed(adminActor(req, res), slug(req), req.body?.allowed)));
+  ob.post("/orgs/:slug/allowance", async (req, res) => void res.json(await onboarding.setAllowance(adminActor(req, res), slug(req), req.body?.usd ?? null)));
   ob.post("/orgs/:slug/billing/checkout", async (req, res) => void res.json(await onboarding.checkoutLink(adminActor(req, res), slug(req), req.body?.price_id)));
   ob.post("/orgs/:slug/billing/portal", async (req, res) => void res.json(await onboarding.portalLink(adminActor(req, res), slug(req))));
   ob.post("/orgs/:slug/keys", async (req, res) => void res.status(201).json(await onboarding.issueKey(adminActor(req, res), slug(req), req.body?.label)));

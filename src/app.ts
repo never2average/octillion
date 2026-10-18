@@ -181,11 +181,12 @@ async function usage(s: Session, q: { from?: unknown; to?: unknown; days?: unkno
 
 async function billingView(s: Session) {
   const f = await admin.accountFacts(s.slug);
-  const { budget, subscription } = await orgBudget(s.org).catch(() => ({ budget: 0, subscription: null }));
+  const { budget, subscription, source } = await orgBudget(s.org).catch(() => ({ budget: 0, subscription: null, source: "default" as const }));
+  // Plans are invite-only: only an account an admin has allowed sees them (and may check out).
   return {
-    enabled: billing.stripeEnabled(), customer: Boolean(f.stripe_customer_id), subscription, budget_usd: budget,
-    month_spend_usd: await orgMonthSpendUsd(s.org),
-    plans: billing.stripeEnabled() ? (await billing.listPlans().catch(() => [])).map((p) => ({ price_id: p.price_id, name: p.name, amount: p.amount, currency: p.currency, interval: p.interval, monthly_budget_usd: p.monthly_budget_usd })) : [],
+    enabled: billing.stripeEnabled(), customer: Boolean(f.stripe_customer_id), subscription, budget_usd: budget, budget_source: source,
+    prepaid_allowed: Boolean(f.prepaid_allowed), month_spend_usd: await orgMonthSpendUsd(s.org),
+    plans: billing.stripeEnabled() && f.prepaid_allowed ? (await billing.listPlans().catch(() => [])).map((p) => ({ price_id: p.price_id, name: p.name, amount: p.amount, currency: p.currency, interval: p.interval, monthly_budget_usd: p.monthly_budget_usd })) : [],
   };
 }
 
@@ -494,7 +495,7 @@ export function appRouter() {
   api.get("/billing", async (_req, res) => void res.json({ ...(await billingView(S(res))), can_manage: S(res).role === "admin" }));
   api.get("/billing/usage", async (_req, res) => void res.json(await billingUsage(S(res))));
   api.post("/billing/portal", async (_req, res) => { adminOnly(res); res.json(await admin.portalLink(actor(res), S(res).slug, `${publicUrl()}/app#billing`)); });
-  api.post("/billing/checkout", async (req, res) => { adminOnly(res); res.json(await admin.checkoutLink(actor(res), S(res).slug, req.body?.price_id, `${publicUrl()}/app#billing`)); });
+  api.post("/billing/checkout", async (req, res) => { adminOnly(res); res.json(await admin.checkoutLink(actor(res), S(res).slug, req.body?.price_id, `${publicUrl()}/app#billing`, { requireAllowed: true })); });
   api.use((err: Error & { status?: number }, _req: Request, res: Response, next: NextFunction) => {
     if (!(err instanceof AppError || err instanceof PlaybookError || err instanceof context.ContextError || err instanceof limits.LimitError || err instanceof journeys.JourneyError || err instanceof admin.AdminError || err instanceof clerk.ClerkError || err instanceof billing.StripeError)) return next(err);
     res.status(err.status ?? 400).json({ error: err.message });
