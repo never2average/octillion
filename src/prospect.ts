@@ -149,11 +149,15 @@ async function claudeBrief(evidence: unknown): Promise<(Partial<ProspectBrief> &
 
 async function openaiText(evidence: unknown, model: string) {
   const p = await getProvider("openai");
-  if (!p?.enabled || !p.upstream_url) throw new Error("no OpenAI provider in the vault");
-  const cred = await useCredential("openai", { excludeLabel: VERTEX_LABEL });
-  const base = p.upstream_url.replace(/\/$/, "").replace(/\/v1$/, "");
+  let base = "https://api.openai.com", auth: Record<string, string>;
+  if (p?.enabled && p.upstream_url) {
+    const cred = await useCredential("openai", { excludeLabel: VERTEX_LABEL });
+    base = p.upstream_url.replace(/\/$/, "").replace(/\/v1$/, "");
+    auth = { [p.auth_header]: `${p.auth_prefix}${cred.secret}` };
+  } else if (process.env.OPENAI_API_KEY) auth = { authorization: `Bearer ${process.env.OPENAI_API_KEY}` };
+  else throw new Error("no OpenAI provider in the vault (or OPENAI_API_KEY)");
   const r = await fetch(`${base}/v1/chat/completions`, { method: "POST", signal: AbortSignal.timeout(90_000),
-    headers: { "content-type": "application/json", [p.auth_header]: `${p.auth_prefix}${cred.secret}` },
+    headers: { "content-type": "application/json", ...auth },
     body: JSON.stringify({ model, response_format: { type: "json_object" }, messages: [{ role: "system", content: SYSTEM }, { role: "user", content: `Evidence:\n${JSON.stringify(evidence)}` }] }) });
   if (!r.ok) throw new Error(`OpenAI answered ${r.status}`);
   const out = await r.json() as { choices?: { message?: { content?: string } }[] };
@@ -162,25 +166,29 @@ async function openaiText(evidence: unknown, model: string) {
 
 async function anthropicText(evidence: unknown): Promise<string> {
   const p = await getProvider("anthropic");
-  if (!p?.enabled) throw new Error("no Anthropic provider in the vault");
-  const payload = { model: MODEL(), max_tokens: 1500, system: SYSTEM, messages: [{ role: "user", content: `Evidence:\n${JSON.stringify(evidence)}` }] };
-  let url: string, init: RequestInit;
+  const direct = { "content-type": "application/json", "anthropic-version": "2023-06-01" };
+  // No vault provider: a plain ANTHROPIC_API_KEY in the environment works too.
+  if (!p?.enabled && process.env.ANTHROPIC_API_KEY) return anthropicCall("https://api.anthropic.com/v1/messages", { ...direct, "x-api-key": process.env.ANTHROPIC_API_KEY });
+  if (!p?.enabled) throw new Error("no Anthropic provider in the vault (or ANTHROPIC_API_KEY)");
   if (p.backend === "vertex") {
     const credProvider = (p.backend_config as { credential_provider?: string })?.credential_provider ?? "anthropic";
     const cred = await useCredential(credProvider, { label: VERTEX_LABEL });
-    const v = toVertex(p.backend_config, "/v1/messages", Buffer.from(JSON.stringify(payload)));
-    url = v.url;
-    init = { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${await vertexAccessToken(cred.id, cred.secret)}` }, body: v.body };
-  } else {
-    if (!p.upstream_url) throw new Error("the Anthropic provider has no upstream URL");
-    const cred = await useCredential("anthropic", { excludeLabel: VERTEX_LABEL });
-    url = `${p.upstream_url.replace(/\/$/, "")}/v1/messages`;
-    init = { method: "POST", headers: { "content-type": "application/json", "anthropic-version": "2023-06-01", [p.auth_header]: `${p.auth_prefix}${cred.secret}` }, body: JSON.stringify(payload) };
+    const auth = { "content-type": "application/json", authorization: `Bearer ${await vertexAccessToken(cred.id, cred.secret)}` };
+    return anthropicCall("", auth, (payload) => toVertex(p.backend_config, "/v1/messages", Buffer.from(JSON.stringify(payload))));
   }
-  const r = await fetch(url, { ...init, signal: AbortSignal.timeout(60_000) });
-  if (!r.ok) throw new Error(`model answered ${r.status}`);
-  const out = await r.json() as { content?: { type: string; text?: string }[] };
-  return (out.content ?? []).filter((c) => c.type === "text").map((c) => c.text).join("");
+  if (!p.upstream_url) throw new Error("the Anthropic provider has no upstream URL");
+  const cred = await useCredential("anthropic", { excludeLabel: VERTEX_LABEL });
+  return anthropicCall(`${p.upstream_url.replace(/\/$/, "")}/v1/messages`, { ...direct, [p.auth_header]: `${p.auth_prefix}${cred.secret}` });
+
+  /** One Messages call; `rewrite` turns the request into Vertex's URL and body. */
+  async function anthropicCall(url: string, headers: Record<string, string>, rewrite?: (payload: object) => { url: string; body: string }) {
+    const payload = { model: MODEL(), max_tokens: 1500, system: SYSTEM, messages: [{ role: "user", content: `Evidence:\n${JSON.stringify(evidence)}` }] };
+    const req = rewrite ? rewrite(payload) : { url, body: JSON.stringify(payload) };
+    const r = await fetch(req.url, { method: "POST", headers, body: req.body, signal: AbortSignal.timeout(60_000) });
+    if (!r.ok) throw new Error(`Anthropic answered ${r.status}`);
+    const out = await r.json() as { content?: { type: string; text?: string }[] };
+    return (out.content ?? []).filter((c) => c.type === "text").map((c) => c.text).join("");
+  }
 }
 
 function parseBrief(text: string): Partial<ProspectBrief> {
