@@ -440,6 +440,7 @@ export function createApp() {
   ob.put("/compute/agents/:agent", async (req, res) => void res.json(await library.setAgent(adminActor(req, res), decodeURIComponent(String(req.params.agent)), req.body ?? {})));
   // Model keys on /admin/compute: the key vault (src/keyvault.ts). A secret is posted once; only its hint comes back.
   ob.get("/compute/keys", async (_req, res) => void res.json(await library.modelKeys()));
+  ob.get("/compute/sandbox", async (_req, res) => void res.json(await library.sandboxProvider()));
   ob.post("/compute/keys", async (req, res) => void res.status(201).json(await library.addModelKey(adminActor(req, res), req.body ?? {})));
   ob.post("/compute/keys/:id/enabled", async (req, res) => done(res, await library.setModelKeyEnabled(adminActor(req, res), Number(req.params.id), req.body?.enabled)));
   ob.delete("/compute/keys/:id", async (req, res) => done(res, await library.deleteModelKey(adminActor(req, res), Number(req.params.id))));

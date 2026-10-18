@@ -10,7 +10,9 @@ import { Icons } from '@/components/icons';
 import { List } from './account-peek';
 import PageContainer from '@/components/layout/page-container';
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Switch } from '@/components/ui/switch';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -18,6 +20,7 @@ import { adminApi } from '@/lib/api-client';
 import { cn } from '@/lib/utils';
 import { post, useAdmin, useAdminAction } from './lib';
 import { ErrorBox, FormRow, LoadingCards, Mono, Notice, Section, When } from './ui';
+import { Field } from '@/components/layout/record-view';
 
 interface Setting {
   key: string; group: string; label: string; help: string; kind: 'text' | 'int' | 'number' | 'choice'; default: string | number;
@@ -33,7 +36,7 @@ interface Compute { groups: { id: string; label: string }[]; settings: Setting[]
 const pct = (x: number) => `${(x * 100).toFixed(x > 0 && x < 0.01 ? 1 : 0)}%`;
 
 /** Compute: capacity settings and the default coding-agent mix. */
-export const AdminCompute = () => <SettingsPage groups={['capacity']} mix />;
+export const AdminCompute = () => <SettingsPage groups={['capacity']} mix sandbox />;
 /** Configuration: models, run sizes and research limits. */
 export const AdminConfiguration = () => <SettingsPage groups={['models', 'runs', 'research']} />;
 /** Key vault: provider keys for agents, orchestrators and research. */
@@ -42,7 +45,7 @@ export function AdminKeyVault() {
 }
 
 /** The settings of some groups (one input per row, a sticky save bar), optionally followed by the agent mix. */
-function SettingsPage({ groups, mix }: { groups: string[]; mix?: boolean }) {
+function SettingsPage({ groups, mix, sandbox }: { groups: string[]; mix?: boolean; sandbox?: boolean }) {
   const { data, error, isLoading } = useAdmin<Compute>('/compute');
   // Edits not saved yet: key -> the typed text, or null for "reset to the environment / default".
   const [edits, setEdits] = useState<Record<string, string | null>>({});
@@ -55,6 +58,7 @@ function SettingsPage({ groups, mix }: { groups: string[]; mix?: boolean }) {
       <ErrorBox error={error} />
       {data && (
         <div className='flex w-full flex-col gap-10 pb-10'>
+          {sandbox && <SandboxProvider />}
           {data.groups.filter((g) => groups.includes(g.id)).map((g) => (
             <Section key={g.id} title={g.label}>
               <div className='grid gap-x-12 gap-y-6 xl:grid-cols-2'>
@@ -183,66 +187,95 @@ function WeightInput({ value, onSave, disabled, label }: { value: number; onSave
 interface Provider { slug: string; mode: 'gateway' | 'direct'; backend: string; enabled: boolean; keys: number; enabled_keys: number; last_used_at: string | null }
 interface Credential { id: number; provider: string; label: string; hint: string; priority: number; enabled: boolean; uses: number; last_used_at: string | null; created_at: string; rotated_at: string | null }
 
-/** The key vault: providers (on/off, how many keys), their keys by hint, and a form to add one. The key itself is
- * posted once and the field is cleared; nothing on this page can show it again. */
+/** What each vault provider is for: the one Key vault table groups and filters by it. */
+const TYPE: Record<string, string> = {
+  anthropic: 'Inference', openai: 'Inference', google: 'Inference', cloudflare: 'Inference', dashscope: 'Inference',
+  boat: 'Sandbox', exa: 'Search', libraries_io: 'Search',
+  amp: 'Coding agent', cursor: 'Coding agent', factory: 'Coding agent', github_copilot: 'Coding agent'
+};
+const typeOf = (slug: string) => TYPE[slug] ?? 'Other';
+const TYPE_ORDER = ['Inference', 'Sandbox', 'Search', 'Coding agent', 'Other'];
+
+/**
+ * The key vault as one table: a row per provider (inference, sandbox, search, coding-agent subscriptions) with its
+ * type, keys by hint, and an on/off switch. Keys are added, disabled and deleted from the row's ⋯ menu. A key is posted
+ * once and never shown again, only its hint.
+ */
 function ModelKeys() {
   const { data, error } = useAdmin<{ unlocked: boolean; providers: Provider[]; credentials: Credential[] }>('/compute/keys');
-  const [f, setF] = useState({ provider: '', label: '', secret: '' });
+  const [adding, setAdding] = useState<string | null>(null);
+  const [f, setF] = useState({ label: '', secret: '' });
   const [err, setErr] = useState('');
   const [del, setDel] = useState<Credential | null>(null);
-  const add = useAdminAction(() => post<{ hint: string }>('/compute/keys', { provider: f.provider || data?.providers[0]?.slug, label: f.label.trim() || undefined, secret: f.secret }),
+  const [type, setType] = useState('');
+  const add = useAdminAction(() => post<{ hint: string }>('/compute/keys', { provider: adding, label: f.label.trim() || undefined, secret: f.secret }),
     { success: (r) => `Key saved (${r.hint})` });
   const keyOn = useAdminAction((v: { id: number; enabled: boolean }) => post(`/compute/keys/${v.id}/enabled`, { enabled: v.enabled }), { success: 'Key updated' });
   const remove = useAdminAction((id: number) => adminApi('DELETE', `/compute/keys/${id}`), { success: 'Key deleted' });
   const provOn = useAdminAction((v: { slug: string; enabled: boolean }) => post(`/compute/providers/${encodeURIComponent(v.slug)}/enabled`, { enabled: v.enabled }), { success: 'Provider updated' });
-  const providers = data?.providers ?? [];
-  const provider = f.provider || providers[0]?.slug || '';
+  const creds = data?.credentials ?? [];
+  const rows = (data?.providers ?? [])
+    .filter((p) => !type || typeOf(p.slug) === type)
+    .sort((a, b) => TYPE_ORDER.indexOf(typeOf(a.slug)) - TYPE_ORDER.indexOf(typeOf(b.slug)) || a.slug.localeCompare(b.slug));
+  const close = () => { setAdding(null); setF({ label: '', secret: '' }); setErr(''); };
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     setErr('');
     // The key leaves the form whatever happens: a failed save asks for it again rather than keeping it on screen.
-    add.mutate(undefined, { onSuccess: () => setF({ ...f, label: '', secret: '' }), onError: (x) => { setErr(x.message); setF({ ...f, secret: '' }); } });
+    add.mutate(undefined, { onSuccess: close, onError: (x) => { setErr(x.message); setF({ ...f, secret: '' }); } });
   };
   return (
-    <Section title='Model keys' description='Provider keys in the key vault, encrypted at rest. Agents and orchestrators get scoped gateway tokens, never these keys.'>
+    <Section title='Key vault' description='Every key Octillion uses, encrypted at rest: inference providers, the sandbox provider, search and coding-agent subscriptions. Agents and orchestrators get scoped gateway tokens, never these keys.'
+      action={<NativeSelect aria-label='Type' value={type} onChange={(e) => setType(e.target.value)}>
+        <NativeSelectOption value=''>All types</NativeSelectOption>
+        {TYPE_ORDER.map((t) => <NativeSelectOption key={t} value={t}>{t}</NativeSelectOption>)}
+      </NativeSelect>}>
       <ErrorBox error={error} />
       {data && !data.unlocked && <Notice>The key vault is locked: set <Mono>OCTILLION_VAULT_KEY</Mono> on the server to add keys.</Notice>}
-      <List title='Providers' rows={providers} empty='No providers.' cols={[
-        ['Provider', (p) => <Mono>{p.slug}</Mono>],
-        ['Mode', (p) => <span className='text-muted-foreground'>{p.mode}{p.backend !== 'direct' && ` · ${p.backend}`}</span>],
-        ['Keys', (p) => <span className='tabular-nums'>{p.keys ? `${p.enabled_keys} of ${p.keys} on` : '—'}</span>, 'text-right'],
-        ['Last used', (p) => (p.last_used_at ? <When d={p.last_used_at} /> : <span className='text-muted-foreground'>never</span>)],
-        ['On', (p) => <Switch aria-label={`${p.slug} on`} checked={p.enabled} disabled={provOn.isPending} onCheckedChange={(c) => provOn.mutate({ slug: p.slug, enabled: c })} />, 'w-12 text-right']
-      ]} />
-      <List title='Keys' rows={data?.credentials ?? []} empty='No keys yet.' rowClassName={(c) => (c.enabled ? undefined : 'text-muted-foreground')}
-        actions={(c) => [
-          { label: c.enabled ? 'Disable' : 'Enable', icon: c.enabled ? <Icons.eyeOff /> : <Icons.check />, onSelect: () => keyOn.mutate({ id: c.id, enabled: !c.enabled }) },
-          { label: 'Delete…', icon: <Icons.trash />, destructive: true, separator: true, onSelect: () => setDel(c) }
+      <List title='Providers' rows={rows} empty='No providers.'
+        rowClassName={(p) => (p.enabled ? undefined : 'text-muted-foreground')}
+        actions={(p) => [
+          { label: 'Add a key…', icon: <Icons.add />, disabled: data?.unlocked === false, onSelect: () => setAdding(p.slug) },
+          ...creds.filter((c) => c.provider === p.slug).flatMap((c, i) => [
+            { label: `${c.enabled ? 'Disable' : 'Enable'} ${c.label} (${c.hint})`, icon: c.enabled ? <Icons.eyeOff /> : <Icons.check />, separator: i === 0, onSelect: () => keyOn.mutate({ id: c.id, enabled: !c.enabled }) },
+            { label: `Delete ${c.label}…`, icon: <Icons.trash />, destructive: true, onSelect: () => setDel(c) }
+          ])
         ]}
         cols={[
-          ['Provider', (c) => <Mono>{c.provider}</Mono>],
-          ['Label', (c) => c.label],
-          ['Key', (c) => <Mono>{c.hint}</Mono>],
-          ['Uses', (c) => <span className='tabular-nums'>{c.uses}</span>, 'text-right'],
-          ['Last used', (c) => (c.last_used_at ? <When d={c.last_used_at} /> : <span className='text-muted-foreground'>never</span>)],
-          ['Status', (c) => (c.enabled ? 'on' : 'off')]
+          ['Provider', (p) => <Mono>{p.slug}</Mono>],
+          ['Type', (p) => typeOf(p.slug)],
+          ['How it is used', (p) => <span className='text-muted-foreground'>{p.mode === 'gateway' ? 'through the gateway' : 'handed to the orchestrator'}{p.backend !== 'direct' && ` · ${p.backend}`}</span>],
+          ['Keys', (p) => {
+            const mine = creds.filter((c) => c.provider === p.slug);
+            return mine.length ? <span className='flex flex-wrap gap-x-3 gap-y-1'>{mine.map((c) => <span key={c.id} className={c.enabled ? undefined : 'text-muted-foreground line-through'}><Mono>{c.hint}</Mono> <span className='text-muted-foreground'>{c.label} · {c.uses} uses</span></span>)}</span>
+              : <span className='text-amber-700 dark:text-amber-400'>no key</span>;
+          }],
+          ['Last used', (p) => (p.last_used_at ? <When d={p.last_used_at} /> : <span className='text-muted-foreground'>never</span>)],
+          ['On', (p) => <Switch aria-label={`${p.slug} on`} checked={p.enabled} disabled={provOn.isPending} onCheckedChange={(c) => provOn.mutate({ slug: p.slug, enabled: c })} />, 'w-12 text-right']
         ]} />
-      <form onSubmit={submit} className='grid max-w-md gap-4' autoComplete='off'>
-        <p className='text-sm leading-none font-medium'>Add a key</p>
-        <FormRow id='mk-provider' label='Provider'>
-          <NativeSelect id='mk-provider' value={provider} onChange={(e) => setF({ ...f, provider: e.target.value })} className='w-full'>
-            {providers.map((p) => <NativeSelectOption key={p.slug} value={p.slug}>{p.slug} ({p.mode})</NativeSelectOption>)}
-          </NativeSelect>
-        </FormRow>
-        <FormRow id='mk-label' label='Label (optional)' hint='A second key under a new label adds to the pool; the same label replaces that key.'>
-          <Input id='mk-label' maxLength={60} placeholder='default' value={f.label} onChange={(e) => setF({ ...f, label: e.target.value })} />
-        </FormRow>
-        <FormRow id='mk-secret' label='Key' hint='Shown only as a hint once saved.'>
-          <Input id='mk-secret' type='password' autoComplete='new-password' spellCheck={false} required value={f.secret} onChange={(e) => setF({ ...f, secret: e.target.value })} />
-        </FormRow>
-        {err && <p className='text-destructive text-sm'>{err}</p>}
-        <div><Button type='submit' disabled={add.isPending || !f.secret.trim() || !provider || data?.unlocked === false}>Save key</Button></div>
-      </form>
+      <Dialog open={!!adding} onOpenChange={(o) => !o && close()}>
+        <DialogContent className='sm:max-w-md'>
+          <form onSubmit={submit} className='grid gap-4' autoComplete='off'>
+            <DialogHeader>
+              <DialogTitle>Add a {adding} key</DialogTitle>
+              <DialogDescription>{adding && typeOf(adding)}. Shown only as a hint once saved.</DialogDescription>
+            </DialogHeader>
+            <FormRow id='mk-label' label='Label (optional)' hint={adding === 'anthropic' ? 'Use the label vertex for a Google service-account JSON (Claude on Vertex AI).' : 'A new label adds to the pool; the same label replaces that key.'}>
+              <Input id='mk-label' maxLength={60} placeholder='default' value={f.label} onChange={(e) => setF({ ...f, label: e.target.value })} />
+            </FormRow>
+            <FormRow id='mk-secret' label='Key'>
+              {f.label.trim() === 'vertex'
+                ? <Textarea id='mk-secret' rows={6} spellCheck={false} required className='font-mono text-xs' placeholder='{ "type": "service_account", … }' value={f.secret} onChange={(e) => setF({ ...f, secret: e.target.value })} />
+                : <Input id='mk-secret' type='password' autoComplete='new-password' spellCheck={false} required value={f.secret} onChange={(e) => setF({ ...f, secret: e.target.value })} />}
+            </FormRow>
+            {err && <p className='text-destructive text-sm'>{err}</p>}
+            <DialogFooter>
+              <Button type='button' variant='outline' onClick={close}>Cancel</Button>
+              <Button type='submit' disabled={add.isPending || !f.secret.trim()}>Save key</Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
       <AlertDialog open={!!del} onOpenChange={(o) => !o && setDel(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -255,6 +288,38 @@ function ModelKeys() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+    </Section>
+  );
+}
+
+interface Sandbox {
+  provider: string; api: string; namespace: string; ok: boolean; error: string | null;
+  keys: { id: number; label: string; hint: string; enabled: boolean; uses: number; last_used_at: string | null }[];
+  limits: { activeSandboxes: number; startsPerMinute: number; startsPerHour: number; startsPerDay: number; activeNow: number } | null;
+  running: { total: number; ours: number; orchestrators: number; others: number } | null;
+  orchestrators: Record<string, number>;
+}
+
+/** The sandbox provider: which account and key, live plan limits and what is running. Refresh = a live connection test. */
+function SandboxProvider() {
+  const { data, error, isFetching, refetch } = useAdmin<Sandbox>('/compute/sandbox');
+  const key = data?.keys.find((k) => k.enabled);
+  return (
+    <Section title='Sandbox provider' description='Where orchestrators and agent sandboxes run. Its key lives in Key vault (provider boat): add a new one there to rotate it or switch to another boat.dev account.'
+      action={<Button variant='outline' size='sm' disabled={isFetching} onClick={() => void refetch()}>{isFetching ? <Icons.spinner className='animate-spin' /> : <Icons.plug />} Test connection</Button>}>
+      <ErrorBox error={error} />
+      {data && (<>
+        {!data.ok && <Notice>boat.dev did not answer: {data.error}</Notice>}
+        <dl className='grid gap-x-12 xl:grid-cols-2'>
+          <Field label='Provider'>{data.provider} <span className='text-muted-foreground'>· {data.ok ? 'connected' : 'not connected'}</span></Field>
+          <Field label='Key'>{key ? <><Mono>{key.hint}</Mono> <span className='text-muted-foreground'>· {key.label} · used <When d={key.last_used_at} /></span></> : <span className='text-amber-700 dark:text-amber-400'>No boat key: add one in Key vault</span>}</Field>
+          <Field label='API'><Mono>{data.api}</Mono></Field>
+          <Field label='Namespace'><Mono>{data.namespace}</Mono> <span className='text-muted-foreground'>· this deployment only touches sandboxes named {data.namespace}-…</span></Field>
+          {data.limits && <Field label='Plan'>{data.limits.activeSandboxes} sandboxes at once · {data.limits.startsPerDay} starts a day <span className='text-muted-foreground'>({data.limits.startsPerHour}/hour, {data.limits.startsPerMinute}/minute)</span></Field>}
+          {data.running && <Field label='Running now'>{data.running.total} of {data.limits?.activeSandboxes ?? '?'} <span className='text-muted-foreground'>· ours {data.running.ours} ({data.running.orchestrators} orchestrators) · other deployments {data.running.others}</span></Field>}
+          <Field label='Orchestrators'>{Object.keys(data.orchestrators).length ? Object.entries(data.orchestrators).map(([s, n]) => `${n} ${s}`).join(' · ') : <span className='text-muted-foreground'>none running</span>}</Field>
+        </dl>
+      </>)}
     </Section>
   );
 }

@@ -289,3 +289,31 @@ export async function setProviderEnabled(actor: string, slug: string, enabled: u
   await kv.upsertProvider({ slug, enabled }).catch((e) => { throw vaultError(e); });
   log(actor, enabled ? "model_provider.enable" : "model_provider.disable", null, { provider: slug });
 }
+
+// ---------- sandbox provider (boat.dev) ----------
+
+/**
+ * The sandbox provider as Compute shows it: boat.dev, the vault key it uses (hint only; replace or rotate it in Key
+ * vault), live plan limits and what is running, ours (this deployment's namespace) and anyone else's on the account.
+ * Each call asks boat.dev directly, so it doubles as a connection test.
+ */
+export async function sandboxProvider() {
+  const lib = await import("../orchestrator/deploy/boat-lib.js");
+  const { BOAT } = await import("../orchestrator/core/config.js");
+  const creds = (await kv.listCredentials() as any[]).filter((c) => c.provider === "boat").map(({ key_id: _k, ...c }) => ({ ...c, uses: Number(c.uses) }));
+  const db = await getDb();
+  const orchestrators = await db.query<{ state: string; n: number }>(
+    "SELECT state, count(*)::int AS n FROM orchestrator_sandboxes WHERE state IN ('booting', 'running', 'draining') GROUP BY state");
+  const base = { provider: "boat.dev", api: BOAT.apiUrl, namespace: lib.BOAT_NAMESPACE, keys: creds,
+    orchestrators: Object.fromEntries(orchestrators.map((o) => [o.state, Number(o.n)])) };
+  try {
+    BOAT.apiKey = (await kv.useCredential("boat")).secret;
+    const [limits, list] = await Promise.all([lib.boatLimits(), lib.listSandboxes()]);
+    const live = list.filter((s) => lib.isLive(s));
+    const ours = live.filter((s) => s.name?.startsWith(lib.ORCH_PREFIX) || s.name?.startsWith(lib.WORKER_PREFIX));
+    return { ...base, ok: true, error: null, limits,
+      running: { total: live.length, ours: ours.length, orchestrators: ours.filter((s) => s.name?.startsWith(lib.ORCH_PREFIX)).length, others: live.length - ours.length } };
+  } catch (e) {
+    return { ...base, ok: false, error: (e as Error).message.slice(0, 300), limits: null, running: null };
+  }
+}
