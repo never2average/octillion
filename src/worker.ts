@@ -28,7 +28,13 @@ const FINAL = ["completed", "failed", "timeout", "cancelled"];
 
 export interface Job {
   session_id: string; simulation_id: string; org_id: number; product_id: number; model: string; harness: string; attempt: number;
-  agent_id: string | null; agent: { label: string; harness_version?: string; event_format?: string; image?: { docker?: string; boat_snapshot?: string }; requires_env?: string[] } | null;
+  agent_id: string | null;
+  /**
+   * The session's registry agent spec. Orchestrators add it to their registry view (orchestrator/fleet/plan.ts
+   * rememberAgents), which is how they learn harnesses added on /admin/agents (not in their registry.json copy).
+   */
+  agent: { id: string; harness: string; model: string; label: string; harness_version?: string; event_format?: string; image?: { docker?: string; boat_snapshot?: string };
+           requires_env?: string[]; cli?: string; worker_adapter?: string; boat_preinstalled?: boolean; resume?: boolean; origin?: string; base_agent?: string } | null;
   prompt: string; repo_url: string | null; language: string | null; max_user_turns: number;
   /** Starter workspace hint + scenario tags/title (the orchestrator picks a template when repo_url is null). */
   template: string | null; tags: string[]; title: string;
@@ -98,7 +104,11 @@ export async function claimJobs(workerId: string, opts: { limit?: number; models
     return rows.map(({ profile_id, prompt_variants, ...r }) => {
       const p = profiles.find((x) => x!.id === profile_id);
       const spec = r.agent_id ? findAgent(r.agent_id) : undefined;
-      const agent = spec ? { label: spec.label, harness_version: spec.harness_version, event_format: spec.event_format, image: spec.image, requires_env: spec.requires_env } : null;
+      const agent: Job["agent"] = spec ? {
+        id: spec.id, harness: spec.harness, model: spec.model, label: spec.label, harness_version: spec.harness_version, event_format: spec.event_format,
+        image: spec.image, requires_env: spec.requires_env, cli: spec.cli, worker_adapter: spec.worker_adapter, boat_preinstalled: spec.boat_preinstalled,
+        resume: spec.resume, origin: spec.origin, base_agent: spec.base_agent,
+      } : null;
       const environment = devEnv ? resolveEnvironment(p?.environment ?? null, languageOf(r.language, r.template), words.get(r.product_id) ?? []) : null;
       // The developer phrases the task in their own words when research wrote a version for this persona.
       const prompt = (p && prompt_variants?.[p.slug]) || r.prompt;

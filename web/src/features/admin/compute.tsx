@@ -30,7 +30,11 @@ interface Setting {
 interface Agent {
   id: string; label: string; harness: string; model: string | null; vendor: string | null; in_mix: boolean; weight: number; share: number;
   sandboxes: number; paused: boolean; paused_reason: string | null; runnable: boolean; status: string;
+  origin: 'registry' | 'admin'; base_agent: string | null; harness_version: string | null;
 }
+/** A CLI of harnesses/registry.json that an added harness can use, and its added rows (GET /compute/harnesses). */
+interface HarnessBase { harness: string; cli: string | null; label: string; harness_version: string | null; routes: string[]; models: string[] }
+interface AddedHarness { id: string; harness: string; model: string; label: string; harness_version: string | null; notes: string | null; enabled: boolean }
 interface Compute { groups: { id: string; label: string }[]; settings: Setting[]; population: { slug: string; name: string; sandbox_unit: number; as_of: string | null; agents: Agent[] } }
 
 const pct = (x: number) => `${(x * 100).toFixed(x > 0 && x < 0.01 ? 1 : 0)}%`;
@@ -175,10 +179,20 @@ export function AdminAgentMix() {
   const set = useAdminAction((v: { id: string; market_share?: number; paused?: boolean }) =>
     adminApi('PUT', `/compute/agents/${encodeURIComponent(v.id)}`, { market_share: v.market_share, paused: v.paused }), { success: 'Harness mix saved' });
   const pop = data?.population;
+  const [form, setForm] = useState<{ edit: AddedHarness | null } | null>(null);
+  const [del, setDel] = useState<Agent | null>(null);
+  const added = useAdmin<{ harnesses: AddedHarness[]; bases: HarnessBase[] }>('/compute/harnesses');
+  const remove = useAdminAction((id: string) => adminApi('DELETE', `/compute/harnesses/${encodeURIComponent(id)}`), { success: 'Harness deleted' });
+  const addedRow = (id: string) => added.data?.harnesses.find((h) => h.id === id) ?? null;
   // Compact: one line per harness, its model beside it, and the numbers that matter. Ids are in the export and on hover.
   const cols: RecordCol<Agent>[] = [
     { key: 'harness', label: 'Harness', keep: true, type: 'text', value: (a) => a.label,
-      render: (a) => <span title={a.id} className={cn('block truncate leading-none', a.status === 'On' && 'font-medium')}>{a.label}</span> },
+      render: (a) => (
+        <span title={a.id} className='flex min-w-0 items-center gap-1.5 leading-none'>
+          <span className={cn('truncate', a.status === 'On' && 'font-medium')}>{a.label}</span>
+          {a.origin === 'admin' && <span title={`Added on this page; inherits ${a.base_agent ?? a.harness}`} className='text-muted-foreground shrink-0 rounded border px-1 py-px text-[10px] leading-none'>added</span>}
+        </span>
+      ) },
     { key: 'cli', label: 'CLI', type: 'select', value: (a) => a.harness, render: (a) => <Mono>{a.harness}</Mono> },
     { key: 'model', label: 'Model', type: 'select', value: (a) => a.model ?? '', render: (a) => (a.model ? <Mono>{a.model.replace(/^.*\//, '')}</Mono> : <span className='text-muted-foreground'>its own</span>) },
     { key: 'weight', label: 'Weight', className: 'w-28 text-right', type: 'number', value: (a) => a.weight,
@@ -199,7 +213,8 @@ export function AdminAgentMix() {
         rowKey={(a) => a.id}
         cols={cols}
         noun='harnesses'
-        searchText={(a) => `${a.label} ${a.id} ${a.model ?? ''} ${a.harness}`}
+        searchText={(a) => `${a.label} ${a.id} ${a.model ?? ''} ${a.harness}${a.origin === 'admin' ? ' added' : ''}`}
+        primary={<Button onClick={() => setForm({ edit: null })} disabled={!added.data}><Icons.add /> Add harness</Button>}
         searchPlaceholder={pop ? `Search ${pop.agents.length} harnesses (${pop.agents.filter((a) => a.status === 'On').length} on)` : 'Search harnesses'}
         views={[
           { id: 'all', label: 'All harnesses' },
@@ -209,7 +224,11 @@ export function AdminAgentMix() {
         initialSize={50}
         defaultSort={[{ key: 'weight', dir: 'desc' }]}
         actions={(a) => [
-          { label: a.status === 'On' ? 'Turn off' : 'Turn on', icon: a.status === 'On' ? <Icons.eyeOff /> : <Icons.check />, disabled: !a.runnable, onSelect: () => set.mutate({ id: a.id, paused: a.status === 'On' }) }
+          { label: a.status === 'On' ? 'Turn off' : 'Turn on', icon: a.status === 'On' ? <Icons.eyeOff /> : <Icons.check />, disabled: !a.runnable, onSelect: () => set.mutate({ id: a.id, paused: a.status === 'On' }) },
+          ...(a.origin === 'admin' ? [
+            { label: 'Edit…', icon: <Icons.edit />, separator: true, disabled: !addedRow(a.id), onSelect: () => setForm({ edit: addedRow(a.id) }) },
+            { label: 'Delete…', icon: <Icons.trash />, destructive: true, onSelect: () => setDel(a) }
+          ] : [])
         ]}
         bulk={(rows, clear) => [
           { label: 'Turn on', icon: <Icons.check />, onSelect: () => { rows.filter((a) => a.runnable).forEach((a) => set.mutate({ id: a.id, paused: false })); clear(); } },
@@ -218,7 +237,71 @@ export function AdminAgentMix() {
         exportName='harness-mix'
         empty='No agents.'
       />
+      {form && added.data && <HarnessDialog bases={added.data.bases} edit={form.edit} onClose={() => setForm(null)} />}
+      <AlertDialog open={!!del} onOpenChange={(o) => !o && setDel(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete {del?.label}?</AlertDialogTitle>
+            <AlertDialogDescription>It leaves the harness mix at once; runs already done keep their results. To use it again, add it again.</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction variant='destructive' onClick={() => { if (del) remove.mutate(del.id); setDel(null); }}>Delete</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </PageContainer>
+  );
+}
+
+/**
+ * Add (or edit) a harness: a variant of a CLI the registry already runs, with its own model, label and optionally
+ * another version pin. A new one joins the mix at weight 0 and off.
+ */
+function HarnessDialog({ bases, edit, onClose }: { bases: HarnessBase[]; edit: AddedHarness | null; onClose: () => void }) {
+  const [f, setF] = useState({ harness: edit?.harness ?? bases[0]?.harness ?? '', model: edit?.model ?? '', label: edit?.label ?? '', version: edit?.harness_version ?? '' });
+  const [labelTouched, setLabelTouched] = useState(!!edit);
+  const [err, setErr] = useState('');
+  const base = bases.find((b) => b.harness === f.harness);
+  const autoLabel = (h: string, m: string) => `${bases.find((b) => b.harness === h)?.label ?? h} · ${m.trim().replace(/^.*\//, '') || 'model'}`;
+  const label = labelTouched ? f.label : autoLabel(f.harness, f.model);
+  const save = useAdminAction(() => edit
+    ? adminApi('PATCH', `/compute/harnesses/${encodeURIComponent(edit.id)}`, { model: f.model.trim(), label: label.trim(), harness_version: f.version.trim() || null })
+    : post('/compute/harnesses', { harness: f.harness, model: f.model.trim(), label: label.trim(), harness_version: f.version.trim() || undefined }),
+  { success: edit ? 'Harness saved' : 'Harness added: give it a weight and turn it on' });
+  const routes = base?.routes.map((r) => (r === 'bare' ? 'a plain model id' : `${r}/…`)).join(' or ');
+  const submit = (e: React.FormEvent) => { e.preventDefault(); setErr(''); save.mutate(undefined, { onSuccess: onClose, onError: (x) => setErr(x.message) }); };
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className='sm:max-w-md'>
+        <form onSubmit={submit} className='grid gap-4' autoComplete='off'>
+          <DialogHeader>
+            <DialogTitle>{edit ? `Edit ${edit.label}` : 'Add harness'}</DialogTitle>
+            <DialogDescription>{edit ? <Mono>{edit.id}</Mono> : 'A CLI the registry already runs, on another model. It joins the mix at weight 0, off.'}</DialogDescription>
+          </DialogHeader>
+          <FormRow id='hx-base' label='CLI' hint={base && <>Pinned at <Mono>{base.harness_version ?? 'latest'}</Mono>{base.cli && <> · runs <Mono>{base.cli}</Mono></>}</>}>
+            <NativeSelect id='hx-base' value={f.harness} disabled={!!edit} onChange={(e) => setF({ ...f, harness: e.target.value })} className='w-full'>
+              {bases.map((b) => <NativeSelectOption key={b.harness} value={b.harness}>{b.label} ({b.harness_version ?? 'latest'})</NativeSelectOption>)}
+            </NativeSelect>
+          </FormRow>
+          <FormRow id='hx-model' label='Model' hint={routes && <>Use {routes}: the routes this CLI is verified on through the gateway.</>}>
+            <Input id='hx-model' required list='hx-models' spellCheck={false} className='font-mono text-sm' placeholder={base?.models[0] ?? ''} value={f.model} onChange={(e) => setF({ ...f, model: e.target.value })} />
+            <datalist id='hx-models'>{base?.models.map((m) => <option key={m} value={m} />)}</datalist>
+          </FormRow>
+          <FormRow id='hx-label' label='Label'>
+            <Input id='hx-label' required maxLength={80} value={label} onChange={(e) => { setLabelTouched(true); setF({ ...f, label: e.target.value }); }} />
+          </FormRow>
+          <FormRow id='hx-version' label='Version pin (optional)' hint={`Empty: the CLI's pin${base?.harness_version ? ` (${base.harness_version})` : ''}. Another version is installed in each sandbox.`}>
+            <Input id='hx-version' spellCheck={false} className='font-mono text-sm' maxLength={60} placeholder={base?.harness_version ?? ''} value={f.version} onChange={(e) => setF({ ...f, version: e.target.value })} />
+          </FormRow>
+          {err && <p className='text-destructive text-sm'>{err}</p>}
+          <DialogFooter>
+            <Button type='button' variant='outline' onClick={onClose}>Cancel</Button>
+            <Button type='submit' disabled={save.isPending || !f.model.trim() || !label.trim()}>{edit ? 'Save' : 'Add harness'}</Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
 

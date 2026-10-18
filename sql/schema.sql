@@ -804,3 +804,21 @@ CREATE TABLE IF NOT EXISTS platform_settings (
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_by  TEXT
 );
+
+-- Harnesses added on /admin/agents (src/harnesses.ts): each a variant of a CLI that harnesses/registry.json supports.
+-- registry() merges them after the file's entries (an id here never shadows a file id) and inherits the CLI spec
+-- (install script, headless command, event format, adapter, requires_env for the model's route) from a file entry
+-- of the same harness. They join the default population only when the admin gives them a weight.
+CREATE TABLE IF NOT EXISTS platform_harnesses (
+  id               TEXT PRIMARY KEY,          -- <harness>/<slug>, e.g. opencode/cf-qwen3-coder
+  harness          TEXT NOT NULL,             -- base CLI: a harness id of registry.json
+  model            TEXT NOT NULL,
+  label            TEXT NOT NULL,
+  harness_version  TEXT,                      -- NULL: the base entry's pin
+  notes            TEXT,
+  enabled          BOOLEAN NOT NULL DEFAULT true,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_by       TEXT,
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_by       TEXT
+);

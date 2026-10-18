@@ -20,8 +20,32 @@ export interface PodGroup {
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
+/**
+ * Agents this orchestrator learned from the server, by id: each claimed session's `agent` payload carries its full
+ * registry spec (src/worker.ts), so harnesses added on /admin/agents (platform_harnesses; not in the registry.json this
+ * orchestrator was deployed with) resolve here too: their harness_version pin, image, requires_env. Weight 0: they are
+ * never planned standalone (the server plans the mix, src/fleet.ts).
+ */
+const remembered = new Map<string, RegistryAgent>();
+
+/** Add specs from claimed sessions (ignores malformed ones). */
+export function rememberAgents(specs: unknown[]): void {
+  for (const s of specs) {
+    const a = s as Partial<RegistryAgent> | null;
+    if (!a || typeof a.id !== "string" || !a.id || typeof a.harness !== "string" || typeof a.model !== "string") continue;
+    remembered.set(a.id, { ...(a as RegistryAgent), weight: 0 });
+  }
+}
+
+/** Registry file entries, then remembered server agents; a remembered one never shadows a file id. Pure. */
+export function mergeAgents(file: RegistryAgent[], extra: Iterable<RegistryAgent>): RegistryAgent[] {
+  const ids = new Set(file.map((a) => a.id));
+  return [...file, ...[...extra].filter((a) => !ids.has(a.id) && ids.add(a.id))];
+}
+
 export function loadRegistry(file = process.env.OCTILLION_REGISTRY ?? "harnesses/registry.json"): { agents: RegistryAgent[] } {
-  return JSON.parse(readFileSync(path.resolve(ROOT, file), "utf8"));
+  const reg = JSON.parse(readFileSync(path.resolve(ROOT, file), "utf8")) as { agents: RegistryAgent[] };
+  return remembered.size ? { ...reg, agents: mergeAgents(reg.agents, remembered.values()) } : reg;
 }
 
 export function planFleet(size: number, agents: RegistryAgent[] = loadRegistry().agents): PodGroup[] {

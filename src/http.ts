@@ -34,6 +34,7 @@ import * as populations from "./populations.js";
 import * as onboarding from "./admin.js";
 import * as library from "./library.js";
 import { freshSettings, SettingError } from "./settings.js";
+import { freshPlatformHarnesses } from "./harnesses.js";
 
 const PORT = Number(process.env.PORT ?? 3333);
 const HOST = process.env.HOST ?? "127.0.0.1";
@@ -66,8 +67,9 @@ export function createApp() {
     setHeaders: (res, file) => { if (file.includes(`${path.sep}_next${path.sep}static${path.sep}`)) res.setHeader("Cache-Control", "public, max-age=31536000, immutable"); },
   }));
   app.use(express.static(PUBLIC_DIR, { extensions: ["html"], maxAge: "5m" }));
-  // Global settings (src/settings.ts) are read synchronously from a cache: load it, and keep it at most 30s old.
-  app.use((_req, _res, next) => void freshSettings().then(() => next()));
+  // Global settings (src/settings.ts) and admin-added harnesses (src/harnesses.ts, merged into registry()) are read
+  // synchronously from caches: load them, and keep them at most 30s old.
+  app.use((_req, _res, next) => void Promise.all([freshSettings(), freshPlatformHarnesses()]).then(() => next()));
 
   // Daily backstop for the event-driven autoscaler on Vercel (vercel.json crons; Vercel sends CRON_SECRET as a bearer).
   app.get("/api/cron/autoscale", async (req, res) => {
@@ -437,6 +439,11 @@ export function createApp() {
   // Global compute settings (src/settings.ts) and the default population's agent mix.
   ob.get("/compute", async (_req, res) => void res.json(await library.compute()));
   ob.put("/compute/settings", async (req, res) => void res.json(await library.saveSettings(adminActor(req, res), req.body?.values)));
+  // Admin-added harnesses (src/harnesses.ts): variants of a registry.json CLI; a new one joins the mix at weight 0, off.
+  ob.get("/compute/harnesses", async (_req, res) => void res.json(await library.listHarnesses()));
+  ob.post("/compute/harnesses", async (req, res) => void res.status(201).json(await library.addHarness(adminActor(req, res), req.body ?? {})));
+  ob.patch("/compute/harnesses/:id", async (req, res) => void res.json(await library.editHarness(adminActor(req, res), decodeURIComponent(String(req.params.id)), req.body ?? {})));
+  ob.delete("/compute/harnesses/:id", async (req, res) => void res.json(await library.deleteHarness(adminActor(req, res), decodeURIComponent(String(req.params.id)))));
   ob.put("/compute/agents/:agent", async (req, res) => void res.json(await library.setAgent(adminActor(req, res), decodeURIComponent(String(req.params.agent)), req.body ?? {})));
   // Model keys on /admin/compute: the key vault (src/keyvault.ts). A secret is posted once; only its hint comes back.
   ob.get("/compute/keys", async (_req, res) => void res.json(await library.modelKeys()));

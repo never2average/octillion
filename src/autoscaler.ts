@@ -8,6 +8,7 @@ import { getPopulation } from "./populations.js";
 import { JOB_POD_CAPACITY, jobState, orchestratorBusy, setCurrentCodeHash, staleOrchestratorIds } from "./fleet.js";
 import { BOAT } from "../orchestrator/core/config.js";
 import { freshSettings, setting, settingNumber } from "./settings.js";
+import { freshPlatformHarnesses } from "./harnesses.js";
 import * as lib from "../orchestrator/deploy/boat-lib.js";
 
 /**
@@ -190,6 +191,7 @@ export class Autoscaler {
 
   async tick(): Promise<TickState> {
     await freshSettings(); // caps and launch tuning come from global settings
+    await freshPlatformHarnesses(); // demand and pod plans count admin-added harnesses (registry())
     const st: TickState = { at: new Date().toISOString(), enabled: AUTOSCALE.enabled(), leader: false, holder: this.holder };
     if (!st.enabled) { this.last = { ...st, note: "OCTILLION_AUTOSCALE=off" }; return this.last; }
     if (!(await this.acquireLease())) { this.last = { ...st, note: "not the leader" }; return this.last; }

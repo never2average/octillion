@@ -5,6 +5,7 @@ import { getDb } from "./db.js";
 import { platformOf } from "./platform.js";
 import * as kv from "./keyvault.js";
 import * as populations from "./populations.js";
+import * as harnesses from "./harnesses.js";
 import { listSettings, SETTING_GROUPS, setSettings } from "./settings.js";
 
 /**
@@ -203,9 +204,10 @@ async function agentMix() {
       const running = runnable && a.weight > 0 && !a.paused;
       return {
         id: a.id, label: a.label, harness: a.harness, model: a.model, vendor: a.vendor ?? null, in_mix: inMix.has(a.id),
+        origin: a.origin ?? "registry", base_agent: a.base_agent ?? null, harness_version: a.harness_version ?? null,
         weight: a.weight, share: running && total ? a.weight / total : 0, sandboxes: mix.get(a.id)?.sandboxes ?? 0,
         paused: Boolean(a.paused), paused_reason: a.paused_reason ?? null, runnable,
-        status: !runnable ? (a.enabled === false ? "Can't run headless" : "Adapter pending") : a.paused ? "Off" : a.weight > 0 ? "On" : "No share",
+        status: !runnable ? (a.enabled === false ? (a.origin === "admin" ? "Disabled" : "Can't run headless") : "Adapter pending") : a.paused ? "Off" : a.weight > 0 ? "On" : "No share",
       };
     }).sort((x, y) => y.weight - x.weight || x.label.localeCompare(y.label)),
   };
@@ -228,14 +230,44 @@ export async function setAgent(actor: string, agentId: string, body: { market_sh
   const share = body.market_share === undefined ? undefined : Number(body.market_share);
   if (share !== undefined && !(Number.isFinite(share) && share >= 0 && share <= 1000)) throw new AdminError("The weight must be a number of 0 or more");
   const db = await getDb();
-  const [row] = await db.query("SELECT 1 FROM developer_population_agents WHERE population_id = $1 AND agent_id = $2", [pop.id, agentId]);
-  // Turning on an agent that has no share yet needs a weight; it gets the smallest share in the mix unless one was sent.
-  if (share !== undefined || !row) {
+  const [row] = await db.query<{ market_share: number }>("SELECT market_share FROM developer_population_agents WHERE population_id = $1 AND agent_id = $2", [pop.id, agentId]);
+  // Turning on an agent that has no share yet (or a 0 share, as a newly added harness has) needs a weight; it gets the
+  // smallest share in the mix unless one was sent.
+  if (share !== undefined || !row || (body.paused === false && !(Number(row.market_share) > 0))) {
     const [{ w }] = await db.query<{ w: number | null }>("SELECT min(market_share) FILTER (WHERE market_share > 0) AS w FROM developer_population_agents WHERE population_id = $1", [pop.id]);
     await populations.setShare(pop.slug, agentId, share ?? (body.paused === false ? Number(w ?? 0.01) : 0));
   }
   if (body.paused !== undefined) await populations.setPaused(pop.slug, agentId, Boolean(body.paused), body.paused ? `turned off on /admin/compute by ${actor}` : undefined);
   log(actor, "agent_mix.edit", null, { population: pop.slug, agent: agentId, ...(share !== undefined ? { weight: share } : {}), ...(body.paused !== undefined ? { paused: Boolean(body.paused) } : {}) });
+  return compute();
+}
+
+// ---------- admin-added harnesses (src/harnesses.ts) ----------
+// Variants of a CLI that harnesses/registry.json supports. A new one joins the default population at weight 0 and off.
+
+const harnessError = (e: unknown) => (e instanceof harnesses.HarnessError ? new AdminError(e.message, e.status) : e);
+
+export const listHarnesses = () => harnesses.listPlatformHarnesses();
+
+export async function addHarness(actor: string, body: Record<string, unknown>) {
+  const row = await harnesses.createPlatformHarness(actor, body).catch((e) => { throw harnessError(e); });
+  const pop = await populations.getPopulation();
+  await (await getDb()).query(
+    `INSERT INTO developer_population_agents (population_id, agent_id, market_share, paused, paused_reason) VALUES ($1, $2, 0, true, $3)
+     ON CONFLICT DO NOTHING`, [pop.id, row.id, `added on /admin/agents by ${actor}; set a weight and turn it on`]);
+  log(actor, "harness.add", null, { harness: row.id, base: row.harness, model: row.model, version: row.harness_version });
+  return { harness: row, ...(await compute()) };
+}
+
+export async function editHarness(actor: string, id: string, body: Record<string, unknown>) {
+  const { harness, changes } = await harnesses.updatePlatformHarness(actor, id, body).catch((e) => { throw harnessError(e); });
+  if (Object.keys(changes).length) log(actor, "harness.edit", null, { harness: id, changes });
+  return { harness, ...(await compute()) };
+}
+
+export async function deleteHarness(actor: string, id: string) {
+  const { harness, mixes } = await harnesses.deletePlatformHarness(id).catch((e) => { throw harnessError(e); });
+  log(actor, "harness.delete", null, { harness: id, base: harness.harness, model: harness.model, populations: mixes });
   return compute();
 }
 

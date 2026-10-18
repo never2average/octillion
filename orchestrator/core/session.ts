@@ -20,6 +20,7 @@ import { CREDENTIALS_MODE, redact, sessionCredentials, sessionCredsExpiring, typ
 import { harnessCredentials, withCredentialSetup, providersFromEnv, CRED_SPECS } from "../harnesses/credentials.js";
 import type { Runner, Sandbox, RunExit } from "./runners.js";
 import { EventSink } from "./sink.js";
+import { rememberAgents } from "../fleet/plan.js";
 import { UsageTracker } from "./usage.js";
 import { api, HttpError, log, withRetry } from "./util.js";
 import { assessDiff, type Progress } from "./progress.js";
@@ -44,6 +45,9 @@ export interface Job {
   harness: string;
   /** Registry agent (harness + model), e.g. "claude-code/opus". */
   agent_id?: string | null;
+  /** The agent's registry spec from the server (src/worker.ts): how admin-added harnesses reach this orchestrator. */
+  agent?: { id?: string; harness?: string; model?: string; label?: string; harness_version?: string; requires_env?: string[];
+            image?: { docker?: string; boat_snapshot?: string }; origin?: string; base_agent?: string } | null;
   attempt: number;
   prompt: string;
   repo_url: string | null;
@@ -148,7 +152,9 @@ export async function claimJobs(limit: number, filter: { harness?: string; agent
     json: { worker_id: CFG.workerId, limit: Math.max(1, Math.min(limit, 50)), models: CFG.models, harness: filter.harness, agent_ids: filter.agentIds,
             simulation_id: CFG.job?.startsWith("sim_") ? CFG.job : undefined },
   })) as { jobs?: Job[] };
-  return res?.jobs ?? [];
+  const jobs = res?.jobs ?? [];
+  rememberAgents(jobs.map((j) => j.agent)); // harness_version pins etc. of agents not in our registry.json (runners.ts harnessPin)
+  return jobs;
 }
 
 export class WorkerSession {

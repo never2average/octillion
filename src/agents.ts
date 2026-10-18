@@ -21,13 +21,19 @@ export interface AgentSpec {
    * Keeps a small harness at its real share instead of one minimum sandbox per model.
    */
   model_variants?: Record<string, number>;
+  /** "admin": added on /admin/agents (platform_harnesses, src/harnesses.ts), a variant of a file entry's CLI. */
+  origin?: "registry" | "admin";
+  /** For an admin-added harness: the registry.json entry it inherits its CLI spec (and gateway routing) from. */
+  base_agent?: string;
+  cli?: string; headless?: string | null; boat_preinstalled?: boolean; resume?: boolean;
 }
 export interface Registry { version: number; as_of?: string; unrepresented_share?: number; sources?: unknown[]; agents: AgentSpec[] }
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 let cached: { file: string; registry: Registry } | undefined;
 
-export function registry(): Registry {
+/** harnesses/registry.json only (or the env fallback), without admin-added harnesses. */
+export function fileRegistry(): Registry {
   const file = path.resolve(ROOT, process.env.OCTILLION_REGISTRY ?? "harnesses/registry.json");
   if (cached?.file === file) return cached.registry;
   let reg: Registry;
@@ -38,8 +44,89 @@ export function registry(): Registry {
     const harness = process.env.OCTILLION_HARNESS ?? "claude-code";
     reg = { version: 0, agents: models.map((model) => ({ id: `${harness}/${model}`, harness, label: `${harness} · ${model}`, model, weight: 1 / models.length, enabled: true })) };
   }
+  for (const a of reg.agents) a.origin ??= "registry";
   cached = { file, registry: reg };
   return reg;
+}
+
+/** One admin-added harness (a platform_harnesses row; src/harnesses.ts keeps them cached here). */
+export interface PlatformHarness {
+  id: string; harness: string; model: string; label: string; harness_version: string | null; notes: string | null; enabled: boolean;
+  created_at?: string; created_by?: string | null; updated_at?: string; updated_by?: string | null;
+}
+let platform: PlatformHarness[] = [];
+let merged: { base: Registry; platform: PlatformHarness[]; registry: Registry } | undefined;
+
+/** Replace the cached admin-added harnesses (src/harnesses.ts refreshes them from Postgres every ~30s). */
+export function setPlatformHarnesses(rows: PlatformHarness[]) { platform = rows; merged = undefined; }
+
+/**
+ * The full registry: registry.json entries, then the admin-added harnesses (variants of a file entry's CLI). Synchronous:
+ * admin-added rows come from an in-process cache. A row never shadows a file entry id.
+ */
+export function registry(): Registry {
+  const base = fileRegistry();
+  if (merged?.base === base && merged.platform === platform) return merged.registry;
+  const reg = mergeRegistry(base, platform);
+  merged = { base, platform, registry: reg };
+  return reg;
+}
+
+/**
+ * A registry.json entry that can be the base of an admin-added harness: a CLI workers run headless with a model. A
+ * documented headless command counts even when the entry itself is off (gemini-cli waits for credentials); without
+ * one, the entry must be enabled (IDE-only products have headless null and enabled false).
+ */
+export const isBaseEntry = (a: AgentSpec) => a.origin !== "admin" && a.worker_adapter !== "todo" && !!a.model &&
+  (typeof a.headless === "string" || (a.headless === undefined && a.enabled !== false));
+
+/**
+ * How a model string reaches a provider: its `provider/` prefix (anthropic/, openai/, cloudflare/, ...) or "bare" (the
+ * CLI's own provider: claude-code -> Anthropic, codex -> OpenAI, copilot -> GitHub). Each CLI's credential mapping
+ * (orchestrator/harnesses/credentials.ts) routes by exactly this, so a new model inherits requires_env from a file
+ * entry of the same CLI with the same route, and a route no file entry has is refused (it was never verified).
+ */
+export const modelRoute = (model: string) => (model.includes("/") ? model.slice(0, model.indexOf("/")).toLowerCase() : "bare");
+
+/** File entries of `harness` whose spec an admin-added variant inherits, best match for `model` first. */
+export function baseEntriesFor(harness: string, model?: string, agents: AgentSpec[] = fileRegistry().agents): AgentSpec[] {
+  const list = agents.filter((a) => a.harness === harness && isBaseEntry(a));
+  return model ? list.filter((a) => modelRoute(a.model) === modelRoute(model)) : list;
+}
+
+/** Fields of the base entry that describe its own model or market share, never inherited by a variant. */
+const OWN_FIELDS = new Set(["weight", "usage_share", "weight_source", "model_variants", "paused", "paused_reason", "model_verified", "model_mix",
+  "unrepresented_share", "notes", "enabled", "origin", "base_agent", "vendor_note"]);
+
+/** The registry spec of one admin-added harness, or null when its CLI / model route is not (or no longer) in the file. */
+export function platformAgent(row: PlatformHarness, fileAgents: AgentSpec[]): AgentSpec | null {
+  const template = baseEntriesFor(row.harness, row.model, fileAgents)[0];
+  if (!template) return null;
+  const inherited = Object.fromEntries(Object.entries(template).filter(([k]) => !OWN_FIELDS.has(k) && !k.endsWith("_note")));
+  const version = row.harness_version || template.harness_version;
+  const repinned = version !== template.harness_version;
+  return {
+    ...(inherited as Partial<AgentSpec>),
+    id: row.id, harness: row.harness, label: row.label, model: row.model, harness_version: version, weight: 0, enabled: row.enabled !== false,
+    ...(row.notes ? { notes: row.notes } : {}),
+    // Another pin: the base's image / snapshot are for its version; workers install the pin with boat-setup/<harness>.sh.
+    ...(repinned ? { image: { docker: `octillion/agent-${row.harness}:${version}` }, boat_preinstalled: false } : {}),
+    origin: "admin", base_agent: template.id,
+  };
+}
+
+/** registry.json + admin-added harnesses (skipping any that would shadow a file id or lost their base). Pure. */
+export function mergeRegistry(base: Registry, rows: PlatformHarness[]): Registry {
+  const ids = new Set(base.agents.map((a) => a.id));
+  const extra: AgentSpec[] = [];
+  for (const row of rows) {
+    if (ids.has(row.id)) continue;
+    const spec = platformAgent(row, base.agents);
+    if (!spec) continue;
+    ids.add(row.id);
+    extra.push(spec);
+  }
+  return extra.length ? { ...base, agents: [...base.agents, ...extra] } : base;
 }
 
 export const isRunnable = (a: AgentSpec) => a.enabled !== false && a.weight > 0 && a.worker_adapter !== "todo" && !a.paused;

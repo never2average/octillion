@@ -1069,6 +1069,71 @@ try {
     assert.ok(!(await call(A, "list_agents")).agents.some((a: any) => a.id === running.id && a.enabled), "a turned-off agent is not sampled");
     await json(adm("PUT", `/compute/agents/${encodeURIComponent(running.id)}`, { market_share: running.weight, paused: false }));
     assert.equal((await adm("PUT", "/compute/agents/nope%2Fx", { paused: false })).status, 404);
+
+    // Admin-added harnesses (src/harnesses.ts): a variant of a registry.json CLI, weight 0 and off until turned on.
+    {
+      const { registry, findAgent, mergeRegistry, fileRegistry, scheduledAgents, sandboxMix } = await import("../src/agents.js");
+      const { getPopulation } = await import("../src/populations.js");
+      const hx = await json(adm("GET", "/compute/harnesses"));
+      const ccBase = hx.bases.find((b: any) => b.harness === "claude-code");
+      assert.ok(ccBase && ccBase.harness_version === "2.1.296" && ccBase.models.includes("claude-sonnet-5-5"), "bases list each CLI with its pin and models");
+      assert.ok(!hx.bases.some((b: any) => b.harness === "ide-only"), "a CLI that cannot run headless is no base");
+      assert.equal((await adm("POST", "/compute/harnesses", { harness: "ide-only", model: "m" })).status, 400, "unknown / non-runnable base refused");
+      assert.equal((await adm("POST", "/compute/harnesses", { harness: "claude-code", model: "openai/gpt-x" })).status, 400, "a model route the CLI was never verified on is refused");
+      assert.equal((await adm("POST", "/compute/harnesses", { harness: "claude-code", model: "bad model; rm" })).status, 400, "model ids are checked");
+      assert.equal((await adm("POST", "/compute/harnesses", { harness: "claude-code", model: "claude-x", slug: "sonnet" })).status, 409, "cannot shadow a registry.json id");
+      const r1 = await adm("POST", "/compute/harnesses", { harness: "claude-code", model: "claude-haiku-smoke" });
+      assert.equal(r1.status, 201);
+      const created = await r1.json();
+      const id = created.harness.id;
+      assert.equal(id, "claude-code/claude-haiku-smoke");
+      assert.equal(created.harness.label, "claude-code · claude-haiku-smoke".replace("claude-code", fileRegistry().agents.find((a) => a.id === "claude-code/sonnet")!.label.split(" · ")[0]!), "label defaults to <CLI> · <model>");
+      assert.equal((await adm("POST", "/compute/harnesses", { harness: "claude-code", model: "claude-haiku-smoke" })).status, 409, "no duplicate id");
+      const spec = findAgent(id)!;
+      const base = findAgent("claude-code/sonnet")!;
+      assert.ok(spec && spec.origin === "admin" && spec.base_agent === "claude-code/sonnet" && spec.model === "claude-haiku-smoke", "registry() has the added harness");
+      assert.deepEqual(spec.requires_env, base.requires_env, "it inherits the base's gateway routing (requires_env)");
+      assert.equal(spec.harness_version, "2.1.296", "and its version pin by default");
+      const row1 = created.population.agents.find((a: any) => a.id === id);
+      assert.ok(row1 && row1.weight === 0 && row1.status === "Off" && row1.in_mix && row1.origin === "admin", "it enters the default mix at weight 0, off");
+      assert.ok(!scheduledAgents(await getPopulation()).some((a) => a.id === id), "not scheduled yet");
+      // Shadowing is impossible in the merge as well (e.g. a row written before the file gained that id).
+      const shadow = mergeRegistry(fileRegistry(), [{ id: "claude-code/sonnet", harness: "claude-code", model: "evil", label: "x", harness_version: null, notes: null, enabled: true }]);
+      assert.equal(shadow.agents.find((a) => a.id === "claude-code/sonnet")!.model, "claude-sonnet-5-5", "a DB row never shadows a file entry");
+      // Edit: a new pin moves the image off the base's.
+      const ed = await json(adm("PATCH", `/compute/harnesses/${encodeURIComponent(id)}`, { harness_version: "2.2.0-smoke", label: "Claude Code · Haiku (smoke)" }));
+      assert.equal(ed.harness.harness_version, "2.2.0-smoke");
+      assert.ok(findAgent(id)!.harness_version === "2.2.0-smoke" && findAgent(id)!.image?.docker === "octillion/agent-claude-code:2.2.0-smoke" && findAgent(id)!.label === "Claude Code · Haiku (smoke)", "edits reach registry()");
+      assert.equal((await adm("PATCH", "/compute/harnesses/claude-code%2Fsonnet", { label: "x" })).status, 400, "file entries are not editable here");
+      // Weight + on -> scheduled and in the sandbox mix.
+      const on = await json(adm("PUT", `/compute/agents/${encodeURIComponent(id)}`, { paused: false }));
+      const row2 = on.population.agents.find((a: any) => a.id === id);
+      assert.ok(row2.status === "On" && row2.weight > 0, "turning it on gives it the smallest share");
+      await json(adm("PUT", `/compute/agents/${encodeURIComponent(id)}`, { market_share: 1 }));
+      const pop = await getPopulation();
+      assert.ok(scheduledAgents(pop).some((a) => a.id === id) && (sandboxMix(pop).find((m) => m.agent.id === id)?.sandboxes ?? 0) > 0, "with a weight and on, it is scheduled");
+      assert.ok((await call(A, "list_agents")).agents.some((a: any) => a.id === id && a.enabled), "and sampled for runs");
+      // Orchestrator side: the claim payload's spec is remembered; its pin resolves though registry.json lacks it.
+      const plan = await import("../orchestrator/fleet/plan.js");
+      const { harnessPin } = await import("../orchestrator/core/runners.js");
+      assert.ok(!plan.loadRegistry().agents.some((a) => a.id === id), "the orchestrator's registry.json copy does not have it");
+      assert.equal(harnessPin(id, "claude-code"), "2.1.296", "before a claim, the pin falls back to the CLI's");
+      plan.rememberAgents([{ ...findAgent(id)! }, { id: "claude-code/sonnet", harness: "claude-code", model: "evil", harness_version: "9.9.9" }, null, { id: 3 }]);
+      assert.ok(plan.loadRegistry().agents.some((a) => a.id === id && a.weight === 0), "after a claim the orchestrator registry has it (weight 0: never planned standalone)");
+      assert.equal(harnessPin(id, "claude-code"), "2.2.0-smoke", "the worker installs its own pin");
+      assert.equal(harnessPin("claude-code/sonnet", "claude-code"), "2.1.296", "a remembered spec never shadows the file");
+      assert.deepEqual(plan.mergeAgents([{ id: "a", harness: "h", label: "", model: "m", weight: 1 }], [{ id: "a", harness: "h", label: "", model: "x", weight: 0 }, { id: "b", harness: "h", label: "", model: "y", weight: 0 }]).map((a) => a.model), ["m", "y"]);
+      assert.ok(!plan.planFleet(10).some((g) => g.agent_id === id), "standalone plans ignore remembered agents");
+      // Delete: gone from registry() and from every mix; file entries cannot be deleted here.
+      assert.equal((await adm("DELETE", "/compute/harnesses/claude-code%2Fsonnet")).status, 400);
+      const gone = await json(adm("DELETE", `/compute/harnesses/${encodeURIComponent(id)}`));
+      assert.ok(!findAgent(id) && !gone.population.agents.some((a: any) => a.id === id), "deleted: out of registry() and the mix");
+      assert.equal((await db.query("SELECT 1 FROM developer_population_agents WHERE agent_id = $1", [id])).length, 0, "its shares are removed");
+      assert.ok(!scheduledAgents(await getPopulation()).some((a) => a.id === id));
+      assert.equal((await adm("DELETE", `/compute/harnesses/${encodeURIComponent(id)}`)).status, 404);
+      assert.equal(registry().agents.length, fileRegistry().agents.length, "registry back to the file entries");
+      console.log("✓ admin-added harnesses: variant of a registry CLI, weight 0 and off, scheduled once on, pinned on the orchestrator, no shadowing, delete leaves the mix");
+    }
     // Model keys: a secret goes in once; the page's list (and the add response) only ever carry its hint.
     const PAGE_KEY = `sk-ant-smoke-page-${stamp}-SECRETTAIL`;
     const addedKey = await json(adm("POST", "/compute/keys", { provider: "anthropic", label: "smoke-page", secret: PAGE_KEY }));
