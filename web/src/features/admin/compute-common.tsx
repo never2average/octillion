@@ -29,7 +29,7 @@ export function useNow(ms = 5_000) {
 /** A small outlined chip beside a value ("image", "retiring", "infra retry"). */
 export function Chip({ children, title, tone }: { children: ReactNode; title?: string; tone?: 'warn' | 'bad' }) {
   return (
-    <span title={title} className={cn('inline-flex h-4.5 shrink-0 items-center rounded-md px-1.5 text-[10px] leading-none font-medium whitespace-nowrap ring-1 ring-inset',
+    <span title={title} className={cn('inline-flex h-5 shrink-0 items-center rounded-md px-1.5 text-xs leading-none font-medium whitespace-nowrap ring-1 ring-inset',
       tone === 'bad' ? 'bg-destructive/10 text-destructive ring-destructive/25' : tone === 'warn' ? 'bg-amber-500/10 ring-amber-600/25 ' + AMBER : 'text-muted-foreground ring-border')}>
       {children}
     </span>
@@ -130,4 +130,25 @@ export const jobSessions = (job: string) =>
 export function nextPinned(open: string | null, ids: string[] | undefined, pinned: string | null): string | null {
   if (!open) return null;
   return ids && pinned !== open && !ids.includes(open) ? open : pinned;
+}
+
+/**
+ * A page's tabs held in ?section= (Health: errors · jobs · sessions; Compute: orchestrators · failures · …): the first
+ * is the default and clears the query. `right` sits at the end of the row (a status line).
+ */
+export function UrlTabs({ tabs, tab, base, right }: { tabs: readonly (readonly [string, string])[]; tab: string; base: string; right?: ReactNode }) {
+  const router = useRouter();
+  return (
+    <div className='flex shrink-0 flex-wrap items-end gap-x-6 gap-y-2 border-b'>
+      <nav className='flex gap-6 text-sm' aria-label='Sections'>
+        {tabs.map(([id, label], i) => (
+          <button key={id} type='button' onClick={() => id !== tab && router.replace(i === 0 ? base : `${base}?section=${id}`, { scroll: false })}
+            className={cn('-mb-px border-b-2 pb-2 font-medium', id === tab ? 'border-foreground text-foreground' : 'text-muted-foreground hover:text-foreground border-transparent')}>
+            {label}
+          </button>
+        ))}
+      </nav>
+      {right && <div className='ml-auto min-w-0 pb-2'>{right}</div>}
+    </div>
+  );
 }

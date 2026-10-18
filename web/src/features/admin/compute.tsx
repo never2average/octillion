@@ -8,6 +8,7 @@
 // Saving writes platform_settings (every server picks it up within 30s) and an audit log line. Model keys are the key
 // vault's credentials: a key is typed once and never shown again, only its hint.
 import { Suspense, useEffect, useState, type ReactNode } from 'react';
+import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
@@ -28,10 +29,11 @@ import { cn } from '@/lib/utils';
 import { post, useAdmin, useAdminAction } from './lib';
 import { ErrorBox, FormRow, LoadingCards, Mono, Notice, Section, When } from './ui';
 import { ActionsMenu, Field, RecordView, type RecordCol } from '@/components/layout/record-view';
-import { ageOf, dur, EST, money, SectionLink, useComputeParams, useNow } from './compute-common';
+import { ageOf, dur, EST, money, SectionLink, UrlTabs, useComputeParams, useNow } from './compute-common';
+import { StatStrip } from '@/components/layout/section';
 import { ComputeOrchestrators } from './compute-orchestrators';
-import { ComputeFailures } from './compute-failures';
-import { ComputeActivity, ComputeDecisions } from './compute-decisions';
+import { ComputeFailures, type Failures } from './compute-failures';
+import { ComputeDecisions, type Tick } from './compute-decisions';
 
 interface Setting {
   key: string; group: string; label: string; help: string; kind: 'text' | 'int' | 'number' | 'choice'; default: string | number;
@@ -118,7 +120,7 @@ export function AdminAgentMix() {
       render: (a) => (
         <span title={a.id} className='flex min-w-0 items-center gap-1.5 leading-none'>
           <span className={cn('truncate', a.status === 'On' && 'font-medium')}>{a.label}</span>
-          {a.origin === 'admin' && <span title={`Added on this page; inherits ${a.base_agent ?? a.harness}`} className='text-muted-foreground inline-flex h-4.5 shrink-0 items-center rounded-md px-1.5 text-[10px] leading-none font-medium ring-1 ring-border ring-inset'>added</span>}
+          {a.origin === 'admin' && <span title={`Added on this page; inherits ${a.base_agent ?? a.harness}`} className='text-muted-foreground inline-flex h-5 shrink-0 items-center rounded-md px-1.5 text-xs leading-none font-medium ring-1 ring-border ring-inset'>added</span>}
         </span>
       ) },
     { key: 'cli', label: 'CLI', type: 'select', value: (a) => a.harness, render: (a) => <Mono>{a.harness}</Mono> },
@@ -395,6 +397,11 @@ const LEVEL: Record<Level, { border: string; text: string }> = {
  * peek is open.
  */
 export function AdminCompute() {
+  // useSearchParams (the tab, filters and open records) needs a Suspense boundary for the static render.
+  return <Suspense fallback={<PageContainer pageTitle='Compute'><Skeleton className='h-72 rounded-lg' /></PageContainer>}><ComputePage /></Suspense>;
+}
+
+function ComputePage() {
   const qc = useQueryClient();
   const [dirty, setDirty] = useState<Record<string, boolean>>({});
   const [resumed, setResumed] = useState(false);
@@ -423,17 +430,11 @@ export function AdminCompute() {
     setPeeking(on);
     if (!on && !editing) setResumed(false);
   };
-  // The record tables load and fail on their own, so they show even when the summary did not load. They read their
-  // filters and open record from the URL (useSearchParams needs a Suspense boundary).
-  const tables = (
-    <Suspense fallback={<Skeleton className='h-72 rounded-lg' />}>
-      <PeekWatch onChange={setPeek} />
-      <ComputeActivity />
-      <ComputeOrchestrators verdict={data?.verdict ?? []} />
-      <ComputeFailures />
-      <ComputeDecisions runtime={data?.runtime ?? null} />
-    </Suspense>
-  );
+  // ?section= picks the tab (orchestrators by default); each tab is its headline numbers and one table. The record
+  // tables load and fail on their own, so they show even when the summary did not load.
+  const section = useSearchParams().get('section');
+  const tab = TABS.some(([id]) => id === section) ? section! : section === 'activity' ? 'decisions' : 'orchestrators';
+  const s = data;
   return (
     <PageContainer pageTitle='Compute' pageDescription='Orchestrators and agent sandboxes on boat.dev: what is running, what is waiting, and why.'
       pageHeaderAction={
@@ -445,28 +446,26 @@ export function AdminCompute() {
           {data?.links.newrelic && <ActionsMenu label='More' items={[{ label: 'Open in New Relic', icon: <Icons.externalLink />, onSelect: () => window.open(data.links.newrelic!, '_blank', 'noopener') }]} />}
         </div>
       }>
-      {error && !data && (
-        <div role='alert' className='border-destructive/30 bg-destructive/5 text-destructive flex items-center gap-3 rounded-lg border px-4 py-3 text-sm'>
-          <span className='min-w-0 flex-1'>Could not load compute status: {error.message}</span>
-          <Button variant='outline' size='xs' onClick={() => void refetch()}>Retry</Button>
-        </div>
-      )}
-      {error && !data && <div className='flex w-full flex-col gap-10 pb-10'>{tables}</div>}
-      {isLoading && <div className='grid gap-6'><Skeleton className='h-11 rounded-lg' /><LoadingCards count={6} /><Skeleton className='h-72 rounded-lg' /></div>}
-      {data && (
-        <div className='flex w-full flex-col gap-10 pb-10'>
-          <div className='flex flex-col gap-6'>
-            <VerdictBanner verdict={data.verdict} />
-            <Tiles s={data} />
+      <div className='flex min-w-0 flex-col gap-3'>
+        <UrlTabs tabs={TABS} tab={tab} base='/admin/compute' right={data && <VerdictLine verdict={data.verdict} />} />
+        {error && !data && (
+          <div role='alert' className='border-destructive/30 bg-destructive/5 text-destructive flex items-center gap-3 rounded-lg border px-4 py-3 text-sm'>
+            <span className='min-w-0 flex-1'>Could not load compute status: {error.message}</span>
+            <Button variant='outline' size='xs' onClick={() => void refetch()}>Retry</Button>
           </div>
-          <Limits s={data} onEditing={setEdit} />
-          {tables}
-          <Environment s={data} onTest={() => void refresh()} testing={refreshing} />
-        </div>
-      )}
+        )}
+        <PeekWatch onChange={setPeek} />
+        {tab === 'orchestrators' && <ComputeOrchestrators verdict={data?.verdict ?? []} summary={s && <OrchCards s={s} />} />}
+        {tab === 'failures' && <ComputeFailures stats={(f, hours) => <FailureCards f={f} hours={hours} />} />}
+        {tab === 'decisions' && <ComputeDecisions runtime={data?.runtime ?? null} stats={(rows) => <DecisionCards s={s} rows={rows} />} />}
+        {tab === 'limits' && (isLoading ? <Skeleton className='h-72 rounded-lg' /> : s && <Limits s={s} onEditing={setEdit} />)}
+        {tab === 'environment' && (isLoading ? <Skeleton className='h-72 rounded-lg' /> : s && <Environment s={s} onTest={() => void refresh()} testing={refreshing} />)}
+      </div>
     </PageContainer>
   );
 }
+
+const TABS = [['orchestrators', 'Orchestrators'], ['failures', 'Failures'], ['decisions', 'Autoscaler decisions'], ['limits', 'Limits'], ['environment', 'Environment']] as const;
 
 /** Tells the page whether a record peek is open (?session, ?orch, ?job or ?tick), so the summary stops refreshing. */
 function PeekWatch({ onChange }: { onChange: (open: boolean) => void }) {
@@ -526,76 +525,80 @@ function Freshness({ s }: { s: Summary }) {
   );
 }
 
-/** The worst true rule on one line; "+N more" lists the rest. Each links to the records behind it. */
-function VerdictBanner({ verdict }: { verdict: Verdict[] }) {
-  const [open, setOpen] = useState(false);
+/** The worst true rule, on the tabs row: a coloured dot and its line (a link to the records behind it); the rest on hover. */
+function VerdictLine({ verdict }: { verdict: Verdict[] }) {
   const [first, ...rest] = verdict;
   if (!first) return null;
-  const line = (v: Verdict) => (
-    <span className='min-w-0'>
-      {v.href ? <SectionLink href={v.href} className='hover:underline'>{v.text}</SectionLink> : v.text}
-    </span>
-  );
+  const dot = first.level === 'red' ? 'bg-destructive' : first.level === 'amber' ? 'bg-amber-500' : 'bg-emerald-500';
   return (
-    <div role='status' className={cn('rounded-r-lg border border-l-4 px-4 py-3 text-sm', LEVEL[first.level].border)}>
-      <div className='flex flex-wrap items-baseline gap-x-3 gap-y-1'>
-        <span className={cn('font-medium', LEVEL[first.level].text)}>{line(first)}</span>
-        {rest.length > 0 && (
-          <Button variant='ghost' size='xs' className='text-muted-foreground -my-1 ml-auto' onClick={() => setOpen(!open)}>
-            {open ? 'Show less' : `+${rest.length} more`}
-          </Button>
-        )}
-      </div>
-      {open && (
-        <ul className='mt-2 grid gap-1.5 border-t pt-2'>
-          {rest.map((v) => (
-            <li key={v.code} className='flex gap-2'>
-              <span className={cn('mt-1.5 size-2 shrink-0 rounded-full', v.level === 'red' ? 'bg-destructive' : v.level === 'amber' ? 'bg-amber-500' : 'bg-emerald-500')} aria-label={v.level} />
-              {line(v)}
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
+    <span role='status' className={cn('flex min-w-0 items-center gap-2 text-sm', LEVEL[first.level].text)} title={rest.map((v) => v.text).join('\n') || undefined}>
+      <span aria-hidden className={cn('size-2 shrink-0 rounded-full', dot)} />
+      <span className='truncate'>{first.href ? <SectionLink href={first.href} className='hover:underline'>{first.text}</SectionLink> : first.text}</span>
+      {rest.length > 0 && <span className='text-muted-foreground shrink-0 text-xs'>+{rest.length} more</span>}
+    </span>
   );
 }
 
-interface Tile { label: string; value: ReactNode; hint: ReactNode; href: string; warn?: boolean; title?: string }
+type Card = { label: ReactNode; value: ReactNode; hint?: ReactNode };
+/** Two rows of four headline numbers, as on Health › Errors. */
+function Cards({ a, b }: { a: Card[]; b: Card[] }) {
+  return <><StatStrip items={a} /><StatStrip className='border-t-0' items={b} /></>;
+}
+const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`;
 
-/** Six headline numbers: one row on wide screens, three per row on medium, two on phones. Each opens its records. */
-function Tiles({ s }: { s: Summary }) {
+function OrchCards({ s }: { s: Summary }) {
   useNow();
-  const o = s.running.orchestrators, live = o.booting + o.running + o.draining;
-  const oldest = Math.max(ageOf(s.queue.oldest_session_at) ?? 0, ageOf(s.queue.oldest_research_at) ?? 0);
-  const queued = s.queue.sessions + s.queue.research;
-  const f = s.failures_24h, sp = s.spend_today;
-  const tiles: Tile[] = [
-    { label: 'Queued', value: queued, hint: queued ? `oldest ${dur(oldest)} · ${s.queue.jobs_waiting} job${s.queue.jobs_waiting === 1 ? '' : 's'}` : 'nothing waiting',
-      href: '/admin/health?section=sessions&status=queued', warn: s.verdict.some((v) => v.code === 'queue_old') },
-    { label: 'Running', value: s.running.sessions + s.running.research, hint: `on ${live} orchestrator${live === 1 ? '' : 's'} · ${s.running.pods_used} of ${s.running.pods_reserved} pods`,
-      href: '/admin/health?section=sessions&status=running', title: s.running.research ? `${s.running.sessions} sessions and ${s.running.research} research jobs` : undefined },
-    { label: 'Queue wait p50 / p95 (1 h)', value: s.wait_1h.n ? `${dur(s.wait_1h.p50_s)} / ${dur(s.wait_1h.p95_s)}` : '—', hint: `queued → started, n=${s.wait_1h.n}`,
-      href: '/admin/health?section=sessions&sort=wait' },
-    { label: 'Orchestrators', value: live, hint: `${o.running} running · ${o.booting} booting · ${o.draining} draining`, href: '/admin/compute?section=orchestrators' },
-    { label: 'Failures (24 h)', value: f.sessions + f.launches, hint: `${f.sessions} session${f.sessions === 1 ? '' : 's'} · ${f.launches} launch${f.launches === 1 ? '' : 'es'}${f.top ? ` · top: ${f.top.label}` : ''}`,
-      href: '/admin/compute?section=failures', warn: f.rate > 0.1, title: f.ended ? `${Math.round(f.rate * 100)}% of the ${f.ended} sessions that ended in 24 h failed` : undefined },
-    { label: 'Spend today (UTC)', value: money(sp.total_usd), title: `Sandbox: ${EST}`,
-      hint: `${money(sp.session_model_usd)} model (finished sessions) · ${money(sp.orchestrator_model_usd)} orchestrators · ${money(sp.sandbox_est_usd)} sandbox est.`,
-      href: '/admin/health?section=jobs&jsort=spend&jsince=24h' }
-  ];
-  return (
-    // Below xl every tile draws its own bottom line, so the list adds only the top one (and the bottom one at xl).
-    <dl className='grid grid-cols-2 border-t md:grid-cols-3 xl:grid-cols-6 xl:border-b'>
-      {tiles.map((t) => (
-        <SectionLink key={t.label} href={t.href} title={t.title}
-          className='hover:bg-muted/40 min-w-0 border-b px-4 py-3 transition-colors max-md:odd:pl-0 max-md:even:border-l md:border-l md:[&:nth-child(3n+1)]:border-l-0 md:[&:nth-child(3n+1)]:pl-0 xl:border-b-0 xl:[&:nth-child(3n+1)]:border-l xl:[&:nth-child(3n+1)]:pl-4 xl:first:border-l-0 xl:first:pl-0'>
-          <dt className='text-muted-foreground text-xs font-medium'>{t.label}</dt>
-          <dd className={cn('mt-1 text-2xl font-semibold tabular-nums tracking-tight', t.warn && 'text-amber-700 dark:text-amber-400')}>{t.value}</dd>
-          <dd className='text-muted-foreground mt-0.5 truncate text-xs' title={typeof t.hint === 'string' ? t.hint : undefined}>{t.hint}</dd>
-        </SectionLink>
-      ))}
-    </dl>
-  );
+  const o = s.running.orchestrators, l = s.limits, sp = s.spend_today;
+  return <Cards
+    a={[
+      { label: 'Orchestrators live', value: o.booting + o.running + o.draining, hint: `${o.running} running · ${o.booting} booting · ${o.draining} draining` },
+      { label: 'Worker pods used / reserved', value: `${s.running.pods_used} / ${s.running.pods_reserved}`, hint: `${plural(s.running.sessions, 'session')} running` },
+      { label: 'boat sandboxes in use', value: l.active_now != null && l.plan != null ? `${l.active_now} / ${l.plan}` : '—', hint: l.plan == null ? 'boat.dev did not answer' : `${l.others} by other deployments` },
+      { label: 'Room for more', value: l.available ?? '—', hint: `orchestrators of ${l.per_orchestrator} sandboxes` }
+    ]}
+    b={[
+      { label: 'Failed launches, 24 h', value: s.failures_24h.launches, hint: 'orchestrators that did not start' },
+      { label: 'Queued work', value: s.queue.sessions + s.queue.research, hint: `${plural(s.queue.jobs_waiting, 'job')} waiting for an orchestrator` },
+      { label: 'Orchestrator model, today', value: money(sp.orchestrator_model_usd), hint: 'through the gateway (UTC day)' },
+      { label: 'Sandboxes, today', value: money(sp.sandbox_est_usd), hint: 'estimate from the boat price table' }
+    ]} />;
+}
+
+function FailureCards({ f, hours }: { f: Failures | undefined; hours: number }) {
+  const sum = (xs: { count: number }[] | undefined) => (xs ?? []).reduce((t, x) => t + x.count, 0);
+  const sessions = sum(f?.sessions), top = f?.sessions.slice().sort((x, y) => y.count - x.count)[0];
+  const w = hours === 24 ? '24 h' : '7 d';
+  return <Cards
+    a={[
+      { label: `Session failures, ${w}`, value: f ? sessions : '—', hint: f?.ended ? `${Math.round((sessions / f.ended) * 100)}% of ${f.ended} that ended` : 'none ended' },
+      { label: `Failed launches, ${w}`, value: f ? sum(f.launches) : '—', hint: `${plural(f?.launches.length ?? 0, 'step')} failing` },
+      { label: `Unexpected reaps, ${w}`, value: f ? sum(f.reaps.filter((r) => !r.routine)) : '—', hint: 'stopped for a reason other than routine' },
+      { label: `Unattended deletes, ${w}`, value: f ? sum(f.unattended) : '—', hint: 'sandboxes gone with no reap recorded' }
+    ]}
+    b={[
+      { label: 'Top session failure', value: top ? top.count : '—', hint: top?.label ?? 'no session failures' },
+      { label: 'Failure classes seen', value: f ? f.sessions.length : '—', hint: 'distinct reasons sessions failed' },
+      { label: `Sessions ended, ${w}`, value: f ? f.ended : '—' },
+      { label: `Routine reaps, ${w}`, value: f ? sum(f.reaps.filter((r) => r.routine)) : '—', hint: 'idle, drained, retired: not failures' }
+    ]} />;
+}
+
+function DecisionCards({ s, rows }: { s: Summary | undefined; rows: Tick[] }) {
+  useNow();
+  const age = ageOf(s?.tick.at);
+  return <Cards
+    a={[
+      { label: 'Last tick', value: age == null ? '—' : `${dur(age)} ago`, hint: s?.tick.holder ? `by ${s.tick.holder}` : undefined },
+      { label: 'Autoscaler', value: s ? (s.tick.enabled ? 'On' : 'Off') : '—', hint: s ? `every ${s.tick.tick_seconds} s on ${s.runtime === 'vercel' ? 'Vercel (events and 5-minute cron)' : 'the VM'}` : undefined },
+      { label: 'Free sandboxes', value: s?.tick.free ?? '—', hint: 'as the last tick saw them' },
+      { label: 'Last tick note', value: s?.tick.error ? 'Error' : s?.tick.note ? 'Note' : 'None', hint: s?.tick.error ?? s?.tick.note ?? 'nothing to report' }
+    ]}
+    b={[
+      { label: 'Decisions shown', value: rows.length, hint: 'kept 14 days' },
+      { label: 'Orchestrators launched', value: rows.reduce((t, r) => t + r.launched.length, 0) },
+      { label: 'Orchestrators reaped', value: rows.reduce((t, r) => t + r.reaped.length, 0) },
+      { label: 'Ticks with an error', value: rows.filter((r) => r.error).length }
+    ]} />;
 }
 
 type Status = 'ok' | 'near' | 'binding';
@@ -675,66 +678,62 @@ function Limits({ s, onEditing }: { s: Summary; onEditing: (key: string, on: boo
     { key: 'size', label: 'Worker sandbox size', used: null, limit: null, setting: size, status: null, source: null,
       sub: size && <>{money(l.sandbox_prices[String(size.value)] ?? 0)}/h per sandbox (est.)</> }
   ];
+  const binding = rows.find((r) => r.status === 'binding');
+  const cols: RecordCol<LimitRow>[] = [
+    { key: 'limit', label: 'Limit', title: true, keep: true, type: 'text', value: (r) => r.label, render: (r) => (
+      <span className='flex flex-col gap-1'>
+        <span className='leading-none font-medium' title={r.help ?? r.setting?.help}>{r.label}</span>
+        {r.sub && <span className='text-muted-foreground text-xs'>{r.sub}</span>}
+      </span>
+    ) },
+    { key: 'used', label: 'Used / Limit', className: 'w-64', type: 'number', value: (r) => (r.limit ? (r.used ?? 0) / r.limit : null), render: (r) => (
+      r.unavailable ? <span className='text-muted-foreground' title={r.unavailable}>—</span>
+        : r.limit != null && r.used != null ? (
+          <span className='flex flex-col gap-1.5'>
+            <span className='text-sm tabular-nums'>{r.used} <span className='text-muted-foreground'>of {r.limit}</span></span>
+            <Meter used={r.used} limit={r.limit} parts={r.parts} status={r.status} />
+          </span>
+        ) : r.setting ? <Mono>{String(r.setting.value)}</Mono> : <span className='text-muted-foreground'>—</span>
+    ) },
+    { key: 'status', label: 'Status', type: 'select', value: (r) => (r.unavailable || !r.status ? '' : r.status), render: (r) => (
+      <span title={r.noBinding ? 'Never marked binding on its own: other deployments share the account\'s starts.' : undefined}>
+        {r.unavailable || !r.status ? <span className='text-muted-foreground'>—</span> : STATUS[r.status]}
+      </span>
+    ) },
+    { key: 'source', label: 'Source', type: 'text', value: (r) => r.setting?.source ?? '', render: (r) => (r.setting ? <SourceOf s={r.setting} /> : r.source) },
+    { key: 'change', label: 'Change', className: 'w-64', render: (r) => (
+      r.setting ? (
+        <span className='flex items-center gap-1' onClick={(e) => e.stopPropagation()}>
+          <LimitInput key={`${String(r.setting.value)}:${rejected}`} s={r.setting} disabled={save.isPending} onDirty={(on) => onEditing(r.setting!.key, on)}
+            onSave={(v) => save.mutate({ [r.setting!.key]: v }, { onError: () => setRejected((k) => k + 1), onSettled: () => onEditing(r.setting!.key, false) })} />
+          {r.setting.source === 'set' && (
+            <Button variant='ghost' size='xs' className='text-muted-foreground hover:text-foreground' disabled={save.isPending}
+              title={`Back to ${r.setting.env != null ? `the environment (${r.setting.env})` : `the default (${r.setting.default})`}`}
+              onClick={() => save.mutate({ [r.setting!.key]: null })}>Reset</Button>
+          )}
+        </span>
+      ) : <span className='text-muted-foreground text-xs'>{r.fixed ?? '—'}</span>
+    ) }
+  ];
+  const cards = <Cards
+    a={[
+      { label: 'boat sandboxes in use', value: l.active_now != null && l.plan != null ? `${l.active_now} / ${l.plan}` : '—', hint: l.plan == null ? 'boat.dev did not answer' : `free ${free}` },
+      { label: 'Room for more', value: l.available ?? '—', hint: `orchestrators of ${l.per_orchestrator} sandboxes` },
+      { label: 'Sessions a day, at most', value: l.sessions_per_day_ceiling ?? '—', hint: 'at the current limits' },
+      { label: 'Binding limit', value: binding ? binding.label : 'None', hint: l.note ? `Autoscaler: “${l.note}”` : l.stale ? `boat.dev is slow (${l.error}); last answer shown` : 'nothing holds work back' }
+    ]}
+    b={[
+      { label: 'Our starts this hour', value: l.starts ? `${l.our_starts.hour} / ${l.starts.per_hour}` : l.our_starts.hour, hint: `${l.our_starts.minute} this minute · ${l.our_starts.day} today` },
+      l.per_job_mode
+        ? { label: 'Job orchestrators', value: `${l.job_orch_live} / ${l.job_orch_cap}`, hint: l.job_orch_draining ? `${l.job_orch_draining} draining, not counted` : 'per-job mode' }
+        : { label: 'Shared orchestrators', value: `${l.shared_orch_live} / ${l.shared_orch_cap}`, hint: 'shared fleet mode' },
+      { label: 'Pods per orchestrator', value: `${l.pods_max_reserved} / ${l.pods_cap}`, hint: `most reserved by one · avg running ${l.pods_avg_running}` },
+      { label: 'Other deployments', value: l.others, hint: l.other_prefixes.length ? l.other_prefixes.join(', ') : 'sandboxes they hold on this boat account' }
+    ]} />;
   return (
-    <Section title={<span id='limits'>Limits</span>} description='Which ceiling holds work back. Capacity settings are changed on the row of the limit they set; every server picks a change up within 30 s.'>
-      <div className='overflow-x-auto border-y'>
-        <Table className='min-w-[760px]'>
-          <TableHeader>
-            <TableRow className='hover:bg-transparent'>
-              {['Limit', 'Used / Limit', 'Status', 'Source', 'Change'].map((h) => <TableHead key={h} className='text-muted-foreground h-8 px-3 text-xs font-normal'>{h}</TableHead>)}
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rows.map((r) => (
-              <TableRow key={r.key} className='hover:bg-transparent'>
-                <TableCell className='px-3 py-2.5 align-top'>
-                  <span className='flex flex-col gap-1'>
-                    <span className='leading-none font-medium' title={r.help ?? r.setting?.help}>{r.label}</span>
-                    {r.sub && <span className='text-muted-foreground text-xs'>{r.sub}</span>}
-                  </span>
-                </TableCell>
-                <TableCell className='w-64 px-3 py-2.5 align-top'>
-                  {r.unavailable ? <span className='text-muted-foreground' title={r.unavailable}>—</span>
-                    : r.limit != null && r.used != null ? (
-                      <span className='flex flex-col gap-1.5'>
-                        <span className='text-sm tabular-nums'>{r.used} <span className='text-muted-foreground'>of {r.limit}</span></span>
-                        <Meter used={r.used} limit={r.limit} parts={r.parts} status={r.status} />
-                      </span>
-                    ) : r.setting ? <Mono>{String(r.setting.value)}</Mono> : <span className='text-muted-foreground'>—</span>}
-                </TableCell>
-                <TableCell className='px-3 py-2.5 align-top text-sm' title={r.noBinding ? 'Never marked binding on its own: other deployments share the account\'s starts.' : undefined}>
-                  {r.unavailable || !r.status ? <span className='text-muted-foreground'>—</span> : STATUS[r.status]}
-                </TableCell>
-                <TableCell className='px-3 py-2.5 align-top text-sm'>{r.setting ? <SourceOf s={r.setting} /> : r.source}</TableCell>
-                <TableCell className='w-64 px-3 py-1.5 align-top'>
-                  {r.setting ? (
-                    <span className='flex items-center gap-1'>
-                      <LimitInput key={`${String(r.setting.value)}:${rejected}`} s={r.setting} disabled={save.isPending} onDirty={(on) => onEditing(r.setting!.key, on)}
-                        onSave={(v) => save.mutate({ [r.setting!.key]: v }, { onError: () => setRejected((k) => k + 1), onSettled: () => onEditing(r.setting!.key, false) })} />
-                      {r.setting.source === 'set' && (
-                        <Button variant='ghost' size='xs' className='text-muted-foreground hover:text-foreground' disabled={save.isPending}
-                          title={`Back to ${r.setting.env != null ? `the environment (${r.setting.env})` : `the default (${r.setting.default})`}`}
-                          onClick={() => save.mutate({ [r.setting!.key]: null })}>Reset</Button>
-                      )}
-                    </span>
-                  ) : <span className='text-muted-foreground text-xs'>{r.fixed ?? '—'}</span>}
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
-      <div className='text-muted-foreground grid gap-1 text-sm'>
-        {l.per_job_mode && <p className='text-xs'>Shared orchestrators: not used in per-job mode (limit {l.shared_orch_cap}).</p>}
-        <p>
-          {l.available != null ? <>Room for {l.available} more orchestrator{l.available === 1 ? '' : 's'} of {l.per_orchestrator} sandboxes</> : <>Room unknown (boat did not answer)</>}
-          {l.sessions_per_day_ceiling != null && <>; about {l.sessions_per_day_ceiling} sessions a day</>}.
-          {l.note && <> Autoscaler says: &ldquo;{l.note}&rdquo;</>}
-        </p>
-        {l.others > 0 && <p>Other deployments on this boat account{l.other_prefixes.length ? ` (${l.other_prefixes.join(', ')})` : ''} use {l.others} sandboxes. They share the plan.</p>}
-        {l.stale && <p className='text-amber-700 dark:text-amber-400'>boat.dev did not answer just now ({l.error}); showing its last answer.</p>}
-      </div>
-    </Section>
+    <RecordView id='compute-limits' rows={rows} rowKey={(r) => r.key} cols={cols} noun='limits' initialSize={25} compact summary={cards}
+      searchText={(r) => `${r.label} ${r.setting?.key ?? ''} ${r.help ?? ''}`} searchPlaceholder='Search limits'
+      empty='No limits.' />
   );
 }
 
@@ -761,59 +760,40 @@ const RELATED: { key: string; page: string; href: string }[] = [
   { key: 'RESEARCH_MAX_COST_USD', page: 'Agent configuration', href: '/admin/configuration' }
 ];
 
-/** The environment the autoscaler runs with (read only) and the boat account. */
+/** The environment the autoscaler runs with (read only), settings changed elsewhere, and the boat account in the cards. */
+interface EnvRow { name: string; value: string; source: ReactNode; sourceText: string; meaning: ReactNode; meaningText: string }
 function Environment({ s, onTest, testing }: { s: Summary; onTest: () => void; testing: boolean }) {
   const p = s.provider;
-  const related = RELATED.map((r) => ({ ...r, s: s.settings.find((x) => x.key === r.key) })).filter((r) => r.s);
+  const rows: EnvRow[] = [
+    ...s.knobs.map((k) => ({ name: k.name, value: k.value, source: k.source, sourceText: k.source, meaning: k.meaning, meaningText: k.meaning })),
+    ...RELATED.map((r) => ({ ...r, s: s.settings.find((x) => x.key === r.key) })).filter((r) => r.s).map((r) => ({
+      name: r.key, value: String(r.s!.value), source: <SourceOf s={r.s!} />, sourceText: r.s!.source, meaningText: `${r.s!.label}. Change it in ${r.page}`,
+      meaning: <>{r.s!.label}. <Link href={r.href} className='text-foreground hover:underline'>Change it in {r.page}</Link></>
+    }))
+  ];
+  const cols: RecordCol<EnvRow>[] = [
+    { key: 'name', label: 'Name', title: true, keep: true, type: 'text', value: (r) => r.name, render: (r) => <Mono>{r.name}</Mono> },
+    { key: 'value', label: 'Value', type: 'text', value: (r) => r.value, render: (r) => <Mono>{r.value}</Mono> },
+    { key: 'source', label: 'Source', type: 'select', value: (r) => r.sourceText, render: (r) => <span className='text-xs'>{r.source}</span> },
+    { key: 'meaning', label: 'Meaning', className: 'min-w-80', type: 'text', value: (r) => r.meaningText, render: (r) => <span className='text-muted-foreground text-xs whitespace-normal'>{r.meaning}</span> }
+  ];
+  const cards = <Cards
+    a={[
+      { label: 'boat.dev', value: p.ok ? 'Connected' : 'Not connected', hint: p.ok ? p.name : `did not answer: ${p.error ?? 'no answer'}` },
+      { label: 'boat key', value: p.has_key ? <Mono>{p.key_hint}</Mono> : 'None', hint: p.has_key ? <>{p.key_label} · {p.uses} uses · <Link href='/admin/keys' className='hover:underline'>Key vault</Link></> : <Link href='/admin/keys' className='hover:underline'>Add one in Key vault</Link> },
+      { label: 'Namespace', value: <Mono>{p.namespace}</Mono>, hint: `only sandboxes named ${p.namespace}-…` },
+      { label: 'API', value: <span className='text-base'><Mono>{p.api.replace(/^https?:\/\//, '')}</Mono></span>, hint: p.last_used_at ? <>key used <When d={p.last_used_at} /></> : undefined }
+    ]}
+    b={[
+      { label: 'Runtime', value: s.runtime === 'vercel' ? 'Vercel' : 'VM', hint: s.runtime === 'vercel' ? 'ticks on events and a 5-minute cron' : 'ticks on a timer' },
+      { label: 'Autoscaler', value: s.tick.enabled ? 'On' : 'Off', hint: `tick every ${s.tick.tick_seconds} s` },
+      { label: 'Event ticks', value: s.tick.kick_configured ? 'Configured' : 'Not configured', hint: 'tool calls and portal writes trigger a tick' },
+      { label: 'Settings shown', value: rows.length, hint: 'change them in the deployment environment' }
+    ]} />;
   return (
-    <Section title={<span id='environment'>Environment and boat account</span>} description='Change these in the deployment environment.' className='text-muted-foreground [&_h2]:text-foreground'>
-      <div className='grid gap-8 xl:grid-cols-[3fr_2fr]'>
-        <div className='grid gap-6'>
-          <div className='overflow-x-auto border-y'>
-            <Table className='min-w-[640px]'>
-              <TableHeader>
-                <TableRow className='hover:bg-transparent'>
-                  {['Name', 'Value', 'Source', 'Meaning'].map((h) => <TableHead key={h} className='text-muted-foreground h-8 px-3 text-xs font-normal'>{h}</TableHead>)}
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {s.knobs.map((k) => (
-                  <TableRow key={k.name} className='hover:bg-transparent'>
-                    <TableCell className='px-3 py-2'><Mono>{k.name}</Mono></TableCell>
-                    <TableCell className='px-3 py-2'><Mono>{k.value}</Mono></TableCell>
-                    <TableCell className='px-3 py-2 text-xs'>{k.source}</TableCell>
-                    <TableCell className='px-3 py-2 text-xs whitespace-normal'>{k.meaning}</TableCell>
-                  </TableRow>
-                ))}
-                {related.map((r) => (
-                  <TableRow key={r.key} className='hover:bg-transparent'>
-                    <TableCell className='px-3 py-2'><Mono>{r.key}</Mono></TableCell>
-                    <TableCell className='px-3 py-2'><Mono>{String(r.s!.value)}</Mono></TableCell>
-                    <TableCell className='px-3 py-2 text-xs'><SourceOf s={r.s!} /></TableCell>
-                    <TableCell className='px-3 py-2 text-xs whitespace-normal'>{r.s!.label}. <Link href={r.href} className='text-foreground hover:underline'>Change it in {r.page}</Link></TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-        </div>
-        <div className='grid content-start gap-3'>
-          <div className='flex flex-wrap items-center justify-between gap-2'>
-            <p className='text-foreground text-sm font-medium'>
-              <span className={cn('mr-2 inline-block size-2 rounded-full', p.ok ? 'bg-emerald-500' : 'bg-destructive')} aria-hidden />
-              {p.name} · {p.ok ? 'connected' : 'not connected'}
-            </p>
-            <Button variant='outline' size='sm' disabled={testing} onClick={onTest}>{testing ? <Icons.spinner className='animate-spin' /> : <Icons.plug />} Test connection</Button>
-          </div>
-          {!p.ok && p.error && <Notice>boat.dev did not answer: {p.error}</Notice>}
-          <dl>
-            <Field label='Key'>{p.has_key ? <><Mono>{p.key_hint}</Mono> <span className='text-muted-foreground'>· {p.key_label} · {p.uses} uses · used <When d={p.last_used_at} /></span></>
-              : <span className='text-amber-700 dark:text-amber-400'>No boat key</span>} · <Link href='/admin/keys' className='hover:underline'>Key vault</Link></Field>
-            <Field label='API'><Mono>{p.api}</Mono></Field>
-            <Field label='Namespace'><Mono>{p.namespace}</Mono> <span className='text-muted-foreground'>· this deployment only touches sandboxes named {p.namespace}-…</span></Field>
-          </dl>
-        </div>
-      </div>
-    </Section>
+    <RecordView id='compute-environment' rows={rows} rowKey={(r) => r.name} cols={cols} noun='settings' initialSize={50} compact summary={cards}
+      searchText={(r) => `${r.name} ${r.value} ${r.sourceText} ${r.meaningText}`} searchPlaceholder='Search settings'
+      filters={<Button variant='outline' disabled={testing} onClick={onTest}>{testing ? <Icons.spinner className='animate-spin' /> : <Icons.plug />} Test connection</Button>}
+      empty='No settings.' />
   );
 }

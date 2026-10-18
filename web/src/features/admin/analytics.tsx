@@ -30,6 +30,7 @@ import { num, usd } from '@/lib/octillion-format';
 import { cn } from '@/lib/utils';
 import { ErrorBox, LoadingCards, Mono, Section, StatusBadge, Trend, When } from './ui';
 import { ComputeJobs } from './compute-jobs';
+import { UrlTabs } from './compute-common';
 import { ComputeSessions } from './compute-sessions';
 
 type ErrorKind = 'tool' | 'session' | 'onboarding';
@@ -210,7 +211,7 @@ function FiltersPopover({ p, facets }: { p: ReturnType<typeof useReportParams>; 
   return (
     <Popover>
       <PopoverTrigger render={<Button variant='outline' className={cn(p.active && 'text-primary')} />}>
-        <IconFilter /> Filters {p.active > 0 && <Badge className='h-4 min-w-4 px-1 text-[10px] leading-none'>{p.active}</Badge>}
+        <IconFilter /> Filters {p.active > 0 && <Badge className='h-5 min-w-5 px-1.5 text-xs leading-none'>{p.active}</Badge>}
       </PopoverTrigger>
       <PopoverContent align='end' className='flex max-h-[75svh] w-80 flex-col gap-4 overflow-y-auto'>
         {LISTS.filter((l) => l.key !== 'user').map((l) => <FacetList key={l.key} label={l.label} options={opts[l.key]} value={p.filters[l.key]} onChange={(v) => p.setList(l.key, v)} />)}
@@ -358,17 +359,7 @@ export function AdminAnalytics({ view = 'analytics' }: { view?: 'analytics' | 'h
 const HEALTH_TABS = [['errors', 'Errors'], ['jobs', 'Jobs'], ['sessions', 'Sessions']] as const;
 
 function HealthTabs({ tab }: { tab: string }) {
-  const router = useRouter();
-  return (
-    <nav className='flex shrink-0 gap-6 border-b text-sm' aria-label='Health'>
-      {HEALTH_TABS.map(([id, label]) => (
-        <button key={id} type='button' onClick={() => id !== tab && router.replace(id === 'errors' ? '/admin/health' : `/admin/health?section=${id}`, { scroll: false })}
-          className={cn('-mb-px border-b-2 pb-2 font-medium', id === tab ? 'border-foreground text-foreground' : 'text-muted-foreground hover:text-foreground border-transparent')}>
-          {label}
-        </button>
-      ))}
-    </nav>
-  );
+  return <UrlTabs tabs={HEALTH_TABS} tab={tab} base='/admin/health' />;
 }
 
 function Report({ view }: { view: 'analytics' | 'health' }) {

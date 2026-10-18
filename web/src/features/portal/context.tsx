@@ -79,7 +79,7 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
       .catch(fail);
   };
   const cols: RecordCol<MemoryItem>[] = [
-    { key: 'kind', label: 'Type', className: 'w-28', keep: true, render: (m) => <span className={cn('inline-flex h-5 items-center rounded-md px-1.5 text-[11px] leading-none font-medium capitalize ring-1 ring-inset', TYPE_STYLE[m.kind] ?? TYPE_STYLE.note)}>{m.kind}</span> },
+    { key: 'kind', label: 'Type', className: 'w-28', keep: true, render: (m) => <span className={cn('inline-flex h-6 items-center rounded-md px-2 text-xs leading-none font-medium capitalize ring-1 ring-inset', TYPE_STYLE[m.kind] ?? TYPE_STYLE.note)}>{m.kind}</span> },
     ...(section === 'products' ? [{ key: 'product', label: 'Product', className: 'w-44', keep: true, render: (m: MemoryItem) => <span className='text-sm font-medium'>{m.subject_name}</span> }] : []),
     { key: 'body', label: 'Memory', keep: true, render: (m) => <p className='line-clamp-3 text-sm whitespace-pre-wrap'>{m.body}</p> },
     { key: 'by', label: 'Added by', className: 'hidden w-48 md:table-cell', render: (m) => <span className='text-muted-foreground text-xs'>{m.created_by ?? '—'}</span> },
@@ -124,7 +124,7 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
           <div className='flex flex-col gap-5'>
             <p className='text-base whitespace-pre-wrap'>{m.body}</p>
             <dl>
-              <Field label='Type'><span className={cn('inline-flex h-5 items-center rounded-md px-1.5 text-[11px] leading-none font-medium capitalize ring-1 ring-inset', TYPE_STYLE[m.kind] ?? TYPE_STYLE.note)}>{m.kind}</span></Field>
+              <Field label='Type'><span className={cn('inline-flex h-6 items-center rounded-md px-2 text-xs leading-none font-medium capitalize ring-1 ring-inset', TYPE_STYLE[m.kind] ?? TYPE_STYLE.note)}>{m.kind}</span></Field>
               {section === 'products' && <Field label='Product'>{m.subject_name}</Field>}
               <Field label='Added by'>{m.created_by ?? '—'}</Field>
               <Field label='Added'><When d={m.created_at} /></Field>

@@ -9,6 +9,8 @@ import { CartesianGrid, Line, LineChart, ReferenceArea, ReferenceDot, XAxis, YAx
 import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent, type ChartConfig } from '@/components/ui/chart';
 import { RecordView, useStored, type RecordCol } from '@/components/layout/record-view';
 import { Button } from '@/components/ui/button';
+import { MultiSelectFilter } from '@/components/layout/multi-select-filter';
+import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Icons } from '@/components/icons';
 import { cn } from '@/lib/utils';
@@ -170,7 +172,7 @@ function MarkerShape({ cx, cy, e }: { cx: number; cy: number; e: Marker }) {
 
 interface Launched { row: number | null; job_id: string | null; pods: number | null; label: string | null; orchestrator_id: string | null; sandbox_id: string | null; state: string | null; launch_step: string | null }
 interface Reaped { sandbox_id: string; reason: string; row: number | null; orchestrator_id: string | null; job_id: string | null }
-interface Tick {
+export interface Tick {
   id: number; at: string; holder: string | null; acted: boolean;
   queued: number | null; running: number | null; research: number | null; unclaimable: number | null; orchestrators: number | null;
   desired: number | null; cap: number | null; active: number | null; free: number | null;
@@ -197,7 +199,7 @@ const did = (t: Tick) => [
 ].join(' · ');
 
 /** The decisions log: acting ticks, newest first; "Include minute samples" adds the rest. Filters live in the URL. */
-export function ComputeDecisions({ runtime }: { runtime: 'vm' | 'vercel' | null }) {
+export function ComputeDecisions({ runtime, stats }: { runtime: 'vm' | 'vercel' | null; stats?: (rows: Tick[]) => ReactNode }) {
   const url = useComputeParams();
   const has = (url.get('has') ?? '').split(',').filter((h) => HAS.some((x) => x.id === h));
   const samples = url.get('dsamples') === '1';
@@ -207,7 +209,6 @@ export function ComputeDecisions({ runtime }: { runtime: 'vm' | 'vercel' | null 
   const rows = useMemo(() => data?.rows ?? [], [data]);
   useScrollTo('decisions', !!data);
   const set = (patch: Record<string, string | null>) => url.write({ ...patch, tick: null });
-  const toggle = (h: string) => { const next = has.includes(h) ? has.filter((x) => x !== h) : [...has, h]; set({ has: next.length ? next.join(',') : null }); };
   const showOrch = (row: number) => url.write({ section: 'orchestrators', orch: String(row), state: 'all', tick: null });
 
   const cols: RecordCol<Tick>[] = [
@@ -226,10 +227,11 @@ export function ComputeDecisions({ runtime }: { runtime: 'vm' | 'vercel' | null 
 
   const filters = (
     <>
-      {HAS.map((h) => <Button key={h.id} variant={has.includes(h.id) ? 'default' : 'outline'} onClick={() => toggle(h.id)}>{h.icon} {h.label}</Button>)}
-      <Button variant={samples ? 'default' : 'outline'} onClick={() => set({ dsamples: samples ? null : '1' })} title='Also list the once-a-minute rows where nothing changed'>
-        <Icons.clock /> Include minute samples
-      </Button>
+      <MultiSelectFilter noun='decisions' options={HAS.map((h) => ({ value: h.id, label: h.label }))} value={has} onChange={(v) => set({ has: v.length ? v.join(',') : null })} />
+      <NativeSelect aria-label='Minute samples' value={samples ? '1' : ''} onChange={(e) => set({ dsamples: e.target.value || null })} title='The once-a-minute rows where nothing changed'>
+        <NativeSelectOption value=''>Ticks that acted</NativeSelectOption>
+        <NativeSelectOption value='1'>Include minute samples</NativeSelectOption>
+      </NativeSelect>
     </>
   );
   const filtered = has.length > 0;
@@ -237,8 +239,7 @@ export function ComputeDecisions({ runtime }: { runtime: 'vm' | 'vercel' | null 
     : `No decisions in this window. Only ticks that changed something are recorded.${runtime === 'vercel' ? ' On Vercel, ticks run only on events and on the cron every 5 minutes.' : ''}`;
 
   return (
-    <Section title={<span id='compute-decisions'>Autoscaler decisions</span>}
-      description='Each tick that launched, reaped, or changed its note or error, newest first: what it saw, what it wanted within the limit, and what it did. Kept 14 days.'>
+    <div id='compute-decisions-anchor' className='flex min-w-0 flex-col gap-3'>
       {error && !data && (
         <div role='alert' className='border-destructive/30 bg-destructive/5 text-destructive flex items-center gap-3 rounded-lg border px-4 py-3 text-sm'>
           <span className='min-w-0 flex-1'>Could not load decisions: {error.message}</span>
@@ -255,8 +256,8 @@ export function ComputeDecisions({ runtime }: { runtime: 'vm' | 'vercel' | null 
         ]}
         detailTitle={(t) => <span className='flex items-center gap-2'>Tick <When d={t.at} />{!t.acted && <Chip>sample</Chip>}</span>}
         detail={(t) => <TickPeek t={t} onOrch={showOrch} />}
-        empty={empty} />
-    </Section>
+        empty={empty} summary={stats?.(rows)} compact />
+    </div>
   );
 }
 

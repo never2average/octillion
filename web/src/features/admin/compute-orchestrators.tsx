@@ -8,6 +8,7 @@ import { useMemo, useState, type ReactNode } from 'react';
 import { Field, RecordView, type RecordCol } from '@/components/layout/record-view';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
+import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Icons } from '@/components/icons';
 import { cn } from '@/lib/utils';
 import { useAdmin } from './lib';
@@ -64,7 +65,7 @@ const lateOf = (o: OrchRow, l: Limits) => (o.state === 'booting' && (since(o.cre
   || (o.state === 'running' && (hbAge(o) ?? Infinity) > l.heartbeat_stale_s);
 
 /** The Orchestrators section. `verdict` (from the summary) explains an empty Live list when the autoscaler is off. */
-export function ComputeOrchestrators({ verdict }: { verdict: Verdict[] }) {
+export function ComputeOrchestrators({ verdict, summary }: { verdict: Verdict[]; summary?: ReactNode }) {
   const url = useComputeParams();
   useNow(15_000);
   // Its own job filter (ojob): Sessions' job_id narrows Sessions only.
@@ -92,21 +93,21 @@ export function ComputeOrchestrators({ verdict }: { verdict: Verdict[] }) {
     : unmatched ? (data?.boat.ok === false ? `boat.dev did not answer: ${data.boat.error}` : 'Every sandbox on boat matches a live orchestrator of ours.')
     : 'No orchestrators in this state.';
 
+  // State, and the job or reason a link narrowed to (shown only when set), sit on the search row.
+  const filters = (
+    <>
+      <NativeSelect aria-label='Orchestrator state' value={state} onChange={(e) => setState(e.target.value)}>
+        {CHIPS.map((c) => <NativeSelectOption key={c.id} value={c.id}>{c.label}</NativeSelectOption>)}
+      </NativeSelect>
+      {job && !unmatched && <Button variant='outline' onClick={() => url.write({ ojob: null })} title='Show every job'><Mono>{job}</Mono><Icons.close /></Button>}
+      {reason && !unmatched && <Button variant='outline' onClick={() => url.write({ oreason: null })} title='Show every reason'>{reason.replace(/^(launch|reap):/, '$1: ').replace(/_/g, ' ')}<Icons.close /></Button>}
+      {data && (!data.boat.ok || data.boat.stale) && (
+        <span className={cn('text-xs', AMBER)} title={data.boat.error ?? undefined}>{data.boat.ok ? 'boat.dev is slow: last answer shown' : 'boat.dev did not answer'}</span>
+      )}
+    </>
+  );
   return (
-    <Section title={<span id='compute-orchestrators'>Orchestrators</span>}
-      description={data && data.total > rows.length ? `The newest ${rows.length} of ${data.total}.` : 'Orchestrator sandboxes on boat.dev: each runs one job\'s worker sandboxes (or a shared fleet\'s).'}>
-      <div className='flex flex-wrap items-center gap-1.5' role='tablist' aria-label='Orchestrator state'>
-        {CHIPS.map((c) => (
-          <Button key={c.id} role='tab' aria-selected={state === c.id} size='xs' variant={state === c.id ? 'default' : 'outline'} onClick={() => setState(c.id)}>{c.label}</Button>
-        ))}
-        {job && !unmatched && <Button size='xs' variant='outline' onClick={() => url.write({ ojob: null })} title='Show every job'><Mono>{job}</Mono><Icons.close /></Button>}
-        {reason && !unmatched && <Button size='xs' variant='outline' onClick={() => url.write({ oreason: null })} title='Show every reason'>{reason.replace(/^(launch|reap):/, '$1: ').replace(/_/g, ' ')}<Icons.close /></Button>}
-        {data && (!data.boat.ok || data.boat.stale) && (
-          <span className={cn('ml-auto text-xs', AMBER)} title={data.boat.error ?? undefined}>
-            {data.boat.ok ? 'boat.dev did not answer just now; boat columns show its last answer.' : 'boat.dev did not answer: boat columns show —.'}
-          </span>
-        )}
-      </div>
+    <div id='compute-orchestrators-anchor' className='flex min-w-0 flex-col gap-3'>
       {error && !data && (
         <div role='alert' className='border-destructive/30 bg-destructive/5 text-destructive flex items-center gap-3 rounded-lg border px-4 py-3 text-sm'>
           <span className='min-w-0 flex-1'>Could not load orchestrators: {error.message}</span>
@@ -114,15 +115,16 @@ export function ComputeOrchestrators({ verdict }: { verdict: Verdict[] }) {
         </div>
       )}
       {unmatched
-        ? <UnmatchedTable rows={rows as Unmatched[]} loading={isLoading || !fits} empty={empty} />
-        : <OrchTable rows={rows as OrchRow[]} loading={(isLoading && !data) || !fits} limits={limits} boat={data?.boat ?? null} empty={empty}
+        ? <UnmatchedTable rows={rows as Unmatched[]} loading={isLoading || !fits} empty={empty} filters={filters} summary={summary} />
+        : <OrchTable rows={rows as OrchRow[]} loading={(isLoading && !data) || !fits} limits={limits} boat={data?.boat ?? null} empty={empty} filters={filters} summary={summary}
             open={open} onOpen={(k) => url.write({ orch: k, ...(k ? {} : { back: null }) })} onJob={(j) => url.write({ ...jobSessions(j), orch: null })} />}
-    </Section>
+    </div>
   );
 }
 
-function OrchTable({ rows, loading, limits, boat, empty, open, onOpen, onJob }: {
+function OrchTable({ rows, loading, limits, boat, empty, open, onOpen, onJob, filters, summary }: {
   rows: OrchRow[]; loading: boolean; limits: Limits; boat: Boat | null; empty: string; open: string | null; onOpen: (k: string | null) => void; onJob: (job: string) => void;
+  filters: ReactNode; summary?: ReactNode;
 }) {
   const boatNA = (v: ReactNode) => (boat && !boat.ok ? <span className='text-muted-foreground' title={`boat.dev did not answer: ${boat.error}`}>—</span> : v);
   const cols: RecordCol<OrchRow>[] = [
@@ -171,7 +173,7 @@ function OrchTable({ rows, loading, limits, boat, empty, open, onOpen, onJob }: 
   return (
     <RecordView id='compute-orchestrators' rows={rows} loading={loading} rowKey={(o) => String(o.id)} cols={cols} noun='orchestrators' initialSize={25}
       searchText={(o) => `${o.orchestrator_id ?? ''} ${o.sandbox_id ?? ''} ${o.job_id ?? 'shared'} ${o.state} ${workersText(o)} ${o.reap_reason ?? ''} ${o.launch_step ?? ''} ${o.launch_error ?? ''} ${o.code_hash ?? ''}`}
-      searchPlaceholder='Search orchestrators, sandboxes, jobs, reasons' exportName='compute-orchestrators'
+      searchPlaceholder='Search orchestrators, sandboxes, jobs, reasons' exportName='compute-orchestrators' filters={filters} summary={summary} compact
       openKey={open} onOpenChange={onOpen}
       actions={(o) => [
         ...(o.sandbox_id ? [{ label: 'Copy logs command', icon: <Icons.code />, onSelect: () => copyLogs(o.sandbox_id!) }] : []),
@@ -194,7 +196,7 @@ const phasesText = (t: Record<string, number> | null) =>
   t ? PHASES.filter((p) => t[p.key] != null).map((p) => `${p.label} ${dur(t[p.key] / 1000)}`).join(' → ') : undefined;
 
 /** Unmatched on boat: boat's live sandboxes that match no live orchestrator row of ours. Read only. */
-function UnmatchedTable({ rows, loading, empty }: { rows: Unmatched[]; loading: boolean; empty: string }) {
+function UnmatchedTable({ rows, loading, empty, filters, summary }: { rows: Unmatched[]; loading: boolean; empty: string; filters: ReactNode; summary?: ReactNode }) {
   const cols: RecordCol<Unmatched>[] = [
     { key: 'name', label: 'Name', title: true, keep: true, type: 'text', value: (u) => u.name ?? '',
       render: (u) => <span className='flex min-w-0 flex-col gap-1'><span className='truncate'>{u.name ?? <span className='text-muted-foreground'>(unnamed)</span>}</span><Mono>{u.sandbox_id}</Mono></span> },
@@ -208,7 +210,7 @@ function UnmatchedTable({ rows, loading, empty }: { rows: Unmatched[]; loading: 
     <RecordView id='compute-unmatched' rows={rows} loading={loading} rowKey={(u) => u.sandbox_id} cols={cols} noun='sandboxes' initialSize={25}
       searchText={(u) => `${u.name ?? ''} ${u.sandbox_id} ${UNMATCHED_KIND[u.kind]} ${u.parent_orchestrator_id ?? ''}`} searchPlaceholder='Search sandboxes on boat'
       actions={(u) => [{ label: 'Copy id', icon: <Icons.page />, onSelect: () => copyText(u.sandbox_id, 'Sandbox id copied') }]}
-      exportName='compute-unmatched' empty={empty} />
+      exportName='compute-unmatched' empty={empty} filters={filters} summary={summary} compact />
   );
 }
 
