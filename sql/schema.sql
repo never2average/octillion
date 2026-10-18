@@ -583,6 +583,8 @@ CREATE TABLE IF NOT EXISTS usage_policies (
   updated_at            TIMESTAMPTZ,
   updated_by            TEXT
 );
+-- The most one simulation may spend (live): adaptive runs stop adding sessions once a run reaches it. Null: no limit.
+ALTER TABLE usage_policies ADD COLUMN IF NOT EXISTS max_run_usd NUMERIC;
 CREATE TABLE IF NOT EXISTS usage_teams (
   id                    SERIAL PRIMARY KEY,
   org_id                INT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,

@@ -459,13 +459,19 @@ export async function runSimulation(org: Org, input: RunInput) {
  * whether its result is settled, and queue another batch for the ones that are not. A task is settled when its hit rate
  * is known to within +/- samplingMargin (Wilson 95% interval, at least samplingMin scored sessions), or when it has had
  * max_samples sessions. Unanimous tasks settle after a handful; split ones run to the cap. Also stops at the per-run
- * session limit and the organization's monthly budget. Returns the number of sessions queued (0 = the run is done).
+ * session limit, the organization's monthly budget, the launcher's limits, and the account's dollar cap per run.
+ * Returns the number of sessions queued (0 = the run is done).
  */
 export async function extendAdaptive(simulationId: string): Promise<number> {
   const db = await getDb();
   // Read what needs its own queries before taking the row lock (no nested queries inside the transaction).
-  const [pre] = await db.query<{ org_id: number; mode: string; max_samples: number | null; slug: string | null; created_by: string | null; org_slug: string }>(
-    `SELECT sim.org_id, sim.mode, sim.max_samples, dp.slug, sim.created_by, o.slug AS org_slug
+  // The run's live spend (as orgMonthSpendUsd, per session) and the account's dollar cap per run (Budget rules).
+  const [pre] = await db.query<{ org_id: number; mode: string; max_samples: number | null; slug: string | null; created_by: string | null; org_slug: string;
+                                 max_run_usd: number | null; run_usd: number }>(
+    `SELECT sim.org_id, sim.mode, sim.max_samples, dp.slug, sim.created_by, o.slug AS org_slug,
+            (SELECT p.max_run_usd FROM usage_policies p WHERE p.org_id = sim.org_id) AS max_run_usd,
+            (SELECT coalesce(sum(GREATEST(a.cost_usd, coalesce((SELECT sum(g.cost_usd) FROM gateway_usage g WHERE g.session_id = a.id), 0))), 0)
+               FROM agent_sessions a WHERE a.simulation_id = sim.id) AS run_usd
        FROM simulations sim JOIN organizations o ON o.id = sim.org_id LEFT JOIN developer_populations dp ON dp.id = sim.population_id
       WHERE sim.id = $1`, [simulationId]);
   if (!pre || pre.mode !== "representative" || !pre.max_samples) return 0;
@@ -473,7 +479,10 @@ export async function extendAdaptive(simulationId: string): Promise<number> {
   const budget = await orgBudget(pre.org_id).then((b) => b.budget, () => null);
   // The account's budget, or the launcher's own allowance or team budget (src/limits.ts), stops sampling early.
   const overBudget = budget == null || budget <= 0 || (await orgMonthSpendUsd(pre.org_id)) >= budget || (await launcherOverLimit(pre.org_id, pre.org_slug, pre.created_by));
-  const stopped = budget == null ? "stopped: couldn't check the allowance" : "stopped: monthly budget";
+  // The run's own dollar cap: once it has spent that much, no more sessions (the ones running still finish).
+  const runCapped = !overBudget && pre.max_run_usd != null && Number(pre.run_usd) >= Number(pre.max_run_usd);
+  const stopped = budget == null ? "stopped: couldn't check the allowance" : overBudget ? "stopped: monthly budget" : "stopped: run spend limit";
+  const stop = overBudget || runCapped;
   // Sessions per run applies to the whole run, top-ups included: the server's limit, or the account's if lower.
   const maxSessions = await sessionsLimit(pre.org_id);
   const pop = await getPopulation(pre.slug ?? undefined);
@@ -497,11 +506,11 @@ export async function extendAdaptive(simulationId: string): Promise<number> {
       const ci = wilson(hits, n);
       const margin = ci ? (ci[1] - ci[0]) / 2 : 1;
       const settled = n >= config.samplingMin() && margin <= config.samplingMargin();
-      const want = settled || attempts >= sim.max_samples || overBudget ? 0 : Math.max(0, Math.min(config.samplingBatch(), sim.max_samples - attempts, room));
+      const want = settled || attempts >= sim.max_samples || stop ? 0 : Math.max(0, Math.min(config.samplingBatch(), sim.max_samples - attempts, room));
       room -= want;
       decisions[String(r.scenario_id)] = {
         attempts, scored: n, hits, margin: Math.round(margin * 100) / 100,
-        status: settled ? "settled" : attempts >= sim.max_samples ? "cap reached" : overBudget ? stopped : want ? "sampling more" : "stopped: run limit",
+        status: settled ? "settled" : attempts >= sim.max_samples ? "cap reached" : stop ? stopped : want ? "sampling more" : "stopped: run limit",
       };
       if (want) more.push({ scenarioId: Number(r.scenario_id), from: attempts, count: want });
     }

@@ -37,11 +37,12 @@ interface Member { id: string; user_id: string; status: string; role: string; cr
 interface Invite { id: string; email: string; state: string; role?: string; created_at: string }
 interface Team { clerk: boolean; error: string | null; members: Member[]; invitations: Invite[]; me: string | null; can_manage: boolean }
 type Mode = 'pool' | 'even' | 'custom';
-interface Policy { mode: Mode; reserve_usd: number; default_cap_usd: number | null; new_members_can_run: boolean; max_concurrent_runs: number | null; max_sessions_per_run: number | null }
+interface Policy { mode: Mode; reserve_usd: number; default_cap_usd: number | null; new_members_can_run: boolean; max_concurrent_runs: number | null; max_sessions_per_run: number | null; max_run_usd: number | null }
 interface LimitTeam { id: number; name: string; budget_usd: number | null; max_concurrent_runs: number | null; members: number; spent: number }
 interface LimitMember { user_id: string; team_id: number | null; can_run: boolean; adjust_usd: number; cap_usd: number | null; max_concurrent_runs: number | null; allowance_usd: number | null; spent: number; running: number; tokens_in: number; tokens_out: number }
 interface Limits { policy: Policy; budget_usd: number; teams: LimitTeam[]; members: LimitMember[]; can_manage: boolean; me: string | null; clerk?: boolean;
-  allocated_usd?: number; unallocated_usd?: number | null; spent_usd?: number; last_change?: { by_name: string; at: string; summary: string | null } | null }
+  allocated_usd?: number; unallocated_usd?: number | null; spent_usd?: number; last_change?: { by_name: string; at: string; summary: string | null } | null;
+  server_max_sessions?: number; avg_session_usd?: number | null; period_end?: string; version?: string }
 interface Change { id: number; at: string; by_name: string; summary: string }
 
 const STATUS: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = { active: 'default', trialing: 'secondary', past_due: 'destructive', unpaid: 'destructive', canceled: 'outline' };
@@ -344,16 +345,21 @@ const MODES: { id: Mode; title: string; body: string }[] = [
 ];
 const SEG = ['bg-sky-500', 'bg-violet-500', 'bg-amber-500', 'bg-rose-500', 'bg-teal-500', 'bg-fuchsia-500'];
 
+/** "≈ 16 sessions at this month's average of $1.24 per session", beside the run dollar cap. */
+const runEstimate = (cap: number | null, avg: number | null | undefined) =>
+  avg == null ? 'Not enough runs yet to estimate.' : cap == null || !(cap > 0) ? `This month's average is $${avg.toFixed(2)} per session.`
+  : cap < avg ? `That is less than one session at this month's average of $${avg.toFixed(2)}.` : `≈ ${Math.floor(cap / avg)} sessions at this month's average of $${avg.toFixed(2)} per session.`;
+
 function Rules({ l, reload }: { l: Limits; reload: () => void }) {
   const p = l.policy;
-  const init = () => ({ mode: p.mode, reserve: p.reserve_usd ? String(p.reserve_usd) : '', defaultCap: str(p.default_cap_usd), newRun: p.new_members_can_run, conc: str(p.max_concurrent_runs), sess: str(p.max_sessions_per_run) });
+  const init = () => ({ mode: p.mode, reserve: p.reserve_usd ? String(p.reserve_usd) : '', defaultCap: str(p.default_cap_usd), newRun: p.new_members_can_run, conc: str(p.max_concurrent_runs), sess: str(p.max_sessions_per_run), runUsd: str(p.max_run_usd) });
   const [f, setF] = useState(init);
   const [busy, setBusy] = useState(false);
   const dirty = JSON.stringify(f) !== JSON.stringify(init());
   const save = () => {
     setBusy(true);
     appApi('PUT', '/limits/policy', { mode: f.mode, reserve_usd: orNull(f.reserve) || 0, default_cap_usd: orNull(f.defaultCap), new_members_can_run: f.newRun,
-      max_concurrent_runs: orNull(f.conc), max_sessions_per_run: orNull(f.sess) })
+      max_concurrent_runs: orNull(f.conc), max_sessions_per_run: orNull(f.sess), max_run_usd: orNull(f.runUsd) })
       .then(() => { toast.success('Budget rules saved'); reload(); }).catch(fail).finally(() => setBusy(false));
   };
   return (
@@ -386,7 +392,10 @@ function Rules({ l, reload }: { l: Limits; reload: () => void }) {
         <NumberField label='Buffer' unit='$' value={f.reserve} onChange={(v) => setF({ ...f, reserve: v })} hint='Held back for runs that go over. Nobody can launch into it.' />
         {f.mode === 'custom' && <NumberField label='Default monthly cap' unit='$' value={f.defaultCap} onChange={(v) => setF({ ...f, defaultCap: v })} placeholder='no cap' hint='For people without their own.' />}
         <NumberField label='Runs at once, per person' value={f.conc} onChange={(v) => setF({ ...f, conc: v })} placeholder='no limit' hint='Simulations running together.' min={1} />
-        <NumberField label='Agent sessions per launch' value={f.sess} onChange={(v) => setF({ ...f, sess: v })} placeholder="server's limit" hint='The size of one run.' min={1} />
+        <NumberField label='Agent sessions per launch' value={f.sess} onChange={(v) => setF({ ...f, sess: v })} placeholder={l.server_max_sessions ? String(l.server_max_sessions) : "server's limit"}
+          hint={`The size of one run, adaptive top-ups included.${l.server_max_sessions ? ` Octillion's maximum is ${l.server_max_sessions}.` : ''}`} min={1} />
+        <NumberField label='Most a simulation can spend' unit='$' value={f.runUsd} onChange={(v) => setF({ ...f, runUsd: v })} placeholder='no limit'
+          hint={`Adaptive runs stop adding sessions once a run reaches this; sessions already running finish. ${runEstimate(orNull(f.runUsd), l.avg_session_usd)}`} />
         <label className='flex flex-col gap-2 text-sm leading-none'>
           New members can launch
           <span className='flex h-9 items-center gap-2'><Switch checked={f.newRun} onCheckedChange={(v) => setF({ ...f, newRun: Boolean(v) })} /><span className='text-muted-foreground text-xs'>{f.newRun ? 'Yes, from day one' : 'Only once allowed'}</span></span>

@@ -38,24 +38,25 @@ export function monthWords(now = new Date()) {
 export type Mode = "pool" | "even" | "custom";
 
 interface Policy { mode: Mode; reserve_usd: number; default_cap_usd: number | null; new_members_can_run: boolean;
-  max_concurrent_runs: number | null; max_sessions_per_run: number | null; updated_at: Date | null; updated_by: string | null }
+  max_concurrent_runs: number | null; max_sessions_per_run: number | null; max_run_usd: number | null; updated_at: Date | null; updated_by: string | null }
 interface Team { id: number; name: string; budget_usd: number | null; max_concurrent_runs: number | null }
 interface MemberRow { user_id: string; team_id: number | null; cap_usd: number | null; adjust_usd: number; can_run: boolean | null; max_concurrent_runs: number | null }
 
 const DEFAULT_POLICY: Policy = { mode: "pool", reserve_usd: 0, default_cap_usd: null, new_members_can_run: true,
-  max_concurrent_runs: null, max_sessions_per_run: null, updated_at: null, updated_by: null };
+  max_concurrent_runs: null, max_sessions_per_run: null, max_run_usd: null, updated_at: null, updated_by: null };
 const num = (v: unknown) => (v == null ? null : Number(v));
 const MONTH = `date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'`;
 
-async function load(orgId: number) {
-  const db = await getDb();
+/** The saved rules. Pass the transaction when inside one (a nested query outside it would wait on it). */
+async function load(orgId: number, q?: Queryable) {
+  const db = q ?? await getDb();
   const [p] = await db.query<Policy>("SELECT * FROM usage_policies WHERE org_id = $1", [orgId]);
   const teams = (await db.query<Team>("SELECT id, name, budget_usd, max_concurrent_runs FROM usage_teams WHERE org_id = $1 ORDER BY name", [orgId]))
     .map((t) => ({ ...t, id: Number(t.id), budget_usd: num(t.budget_usd), max_concurrent_runs: num(t.max_concurrent_runs) }));
   const rows = (await db.query<MemberRow>("SELECT user_id, team_id, cap_usd, adjust_usd, can_run, max_concurrent_runs FROM usage_members WHERE org_id = $1", [orgId]))
     .map((m) => ({ ...m, team_id: num(m.team_id), cap_usd: num(m.cap_usd), adjust_usd: Number(m.adjust_usd ?? 0), max_concurrent_runs: num(m.max_concurrent_runs) }));
   const policy: Policy = p ? { ...p, reserve_usd: Number(p.reserve_usd), default_cap_usd: num(p.default_cap_usd),
-    max_concurrent_runs: num(p.max_concurrent_runs), max_sessions_per_run: num(p.max_sessions_per_run) } : DEFAULT_POLICY;
+    max_concurrent_runs: num(p.max_concurrent_runs), max_sessions_per_run: num(p.max_sessions_per_run), max_run_usd: num(p.max_run_usd) } : DEFAULT_POLICY;
   return { policy, teams, rows: new Map(rows.map((m) => [m.user_id, m])) };
 }
 
@@ -199,14 +200,21 @@ async function accountSpent(orgId: number) {
   return orgMonthSpendUsd(orgId);
 }
 
-/** The full picture for /app Billing, Budget rules: policy, teams, every active member's limit, usage and what blocks them. */
-export async function overview(org: { orgId: number; slug: string }) {
+/** What the rules are applied to, read live: the active members (Clerk), their usage, the account's spend and allowance. */
+async function live(org: { orgId: number; slug: string }) {
   const { team } = await import("./admin.js");
-  const [{ policy, teams, rows }, people, usage, account_spent, { budget, subscription, budget_error }] = await Promise.all([
-    load(org.orgId), team(org.slug), usageByPerson(org.orgId), accountSpent(org.orgId),
+  const [people, usage, account_spent, { budget, subscription, budget_error }] = await Promise.all([
+    team(org.slug), usageByPerson(org.orgId), accountSpent(org.orgId),
     // A failed lookup is not "no allowance": it is flagged, and launches refuse until it works again (fail closed).
     orgBudget(org.orgId).then((b) => ({ ...b, budget_error: false }), () => ({ budget: 0, subscription: null, budget_error: true })),
   ]);
+  return { people, usage, account_spent, budget, subscription, budget_error };
+}
+type Live = Awaited<ReturnType<typeof live>>;
+type Saved = Awaited<ReturnType<typeof load>>;
+
+/** The page's picture of a set of rules (saved, or a draft) against live usage: what allocate() says, with names. */
+function shape({ policy, teams, rows }: Saved, { people, usage, account_spent, budget, subscription, budget_error }: Live) {
   const active = people.members.filter((m) => m.status === "active");
   const a = allocate({ policy, teams, usage, cap: budget, account_spent_usd: account_spent,
     members: active.map((m) => ({ user_id: m.user_id, ...rows.get(m.user_id) })) });
@@ -223,6 +231,91 @@ export async function overview(org: { orgId: number; slug: string }) {
     account: a.account, buffer_usd: a.buffer_usd, set_aside_usd: a.set_aside_usd, over_by_usd: a.over_by_usd, rest: a.rest,
     teams: a.teams, members, allocated_usd: cents(allocated), unallocated_usd: budget > 0 ? cents(budget - allocated) : null,
     spent_usd: members.reduce((s, m) => s + m.spent, 0) };
+}
+
+/** The full picture for /app Billing, Budget rules: policy, teams, every active member's limit, usage and what blocks them. */
+export async function overview(org: { orgId: number; slug: string }) {
+  const [saved, lv] = await Promise.all([load(org.orgId), live(org)]);
+  return shape(saved, lv);
+}
+
+/**
+ * Where the month stands: when it resets (UTC, like the budget), and the spend it is on pace for (live spend so far,
+ * per elapsed day, times the days in the month). Before the 3rd there is too little to go on, so no pace (null).
+ */
+export function pace(spent_usd: number, now = new Date()) {
+  const start = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1), end = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1);
+  const elapsed = (now.getTime() - start) / 864e5, days = (end - start) / 864e5;
+  return { period_end: new Date(end).toISOString(), projected_usd: now.getUTCDate() < 3 ? null : cents((spent_usd / elapsed) * days) };
+}
+
+/** Fewer finished sessions than this this month, and the average spend per session is too noisy to estimate with. */
+const AVG_MIN_SESSIONS = 20;
+
+/**
+ * The "This month" figures, live: what is running now (spend and runs), spend no person's limit covers (runs launched
+ * with a connector key), and the average spend per finished session (for "≈ n sessions" beside the run dollar cap).
+ */
+async function monthFigures(orgId: number) {
+  const [r] = await (await getDb()).query<{ in_flight: number; unattributed: number; finished: number; avg_usd: number | null; running: number }>(
+    `WITH s AS (SELECT a.status, sim.created_by,
+                       GREATEST(a.cost_usd, coalesce((SELECT sum(g.cost_usd) FROM gateway_usage g WHERE g.session_id = a.id), 0)) AS usd
+                  FROM agent_sessions a LEFT JOIN simulations sim ON sim.id = a.simulation_id
+                 WHERE a.org_id = $1 AND a.queued_at >= ${MONTH})
+     SELECT coalesce(sum(usd) FILTER (WHERE status IN ('queued', 'running')), 0) AS in_flight,
+            coalesce(sum(usd) FILTER (WHERE created_by IS NULL), 0) AS unattributed,
+            count(*) FILTER (WHERE status IN ('completed', 'failed', 'timeout')) AS finished,
+            avg(usd) FILTER (WHERE status IN ('completed', 'failed', 'timeout')) AS avg_usd,
+            (SELECT count(*) FROM simulations WHERE org_id = $1 AND status IN ('queued', 'running')) AS running
+       FROM s`, [orgId]);
+  const finished = Number(r?.finished ?? 0);
+  return { in_flight_usd: cents(Number(r?.in_flight ?? 0)), running_count: Number(r?.running ?? 0), unattributed_spent_usd: cents(Number(r?.unattributed ?? 0)),
+    finished_sessions: finished, avg_session_usd: finished >= AVG_MIN_SESSIONS && r?.avg_usd != null ? cents(Number(r.avg_usd)) : null };
+}
+
+/** The live inputs plus the month's figures, for the page and its preview. */
+async function pageLive(org: { orgId: number; slug: string }) {
+  const [lv, figures] = await Promise.all([live(org), monthFigures(org.orgId)]);
+  return { ...lv, figures };
+}
+type PageLive = Awaited<ReturnType<typeof pageLive>>;
+
+/**
+ * The preview reruns allocate() on every edit, so what it is applied to (people from Clerk, usage, the allowance from
+ * Stripe) is read once and kept for 30 seconds per account; only the draft changes between keystrokes. GET /limits
+ * always reads fresh and refreshes this.
+ */
+const PREVIEW_TTL_MS = 30_000;
+const previewCache = new Map<number, { at: number; v: Promise<PageLive> }>();
+function remember(orgId: number, v: Promise<PageLive>) {
+  previewCache.set(orgId, { at: Date.now(), v });
+  v.catch(() => previewCache.delete(orgId));
+  return v;
+}
+function cachedLive(org: { orgId: number; slug: string }) {
+  const hit = previewCache.get(org.orgId);
+  return hit && Date.now() - hit.at < PREVIEW_TTL_MS ? hit.v : remember(org.orgId, pageLive(org));
+}
+
+/** The rules' version, for If-Match on PUT /limits/plan: the newest history entry, since every change appends one. */
+async function versionOf(q: Queryable, orgId: number) {
+  const [r] = await q.query<{ v: number | null }>("SELECT max(id) AS v FROM usage_rule_changes WHERE org_id = $1", [orgId]);
+  return String(r?.v ?? 0);
+}
+
+/** The account-wide figures beside a picture of the rules (GET /limits and the preview both send them). */
+function tiles(o: ReturnType<typeof shape>, { figures, budget_error }: PageLive) {
+  const { period_end, projected_usd } = pace(o.account.spent_usd);
+  return { spent_live_usd: o.account.spent_usd, in_flight_usd: figures.in_flight_usd, running_count: figures.running_count, projected_usd,
+    left_usd: budget_error ? null : leftOf(o.budget_usd, o.account.spent_usd), period_end, avg_session_usd: figures.avg_session_usd,
+    unattributed_spent_usd: figures.unattributed_spent_usd, server_max_sessions: settingNumber("OCTILLION_MAX_SESSIONS_PER_RUN"), max_run_usd: o.policy.max_run_usd };
+}
+
+/** GET /limits for an admin: the overview, the month's figures, and the version to send back with a plan. */
+export async function page(org: { orgId: number; slug: string }) {
+  const [saved, lv, version] = await Promise.all([load(org.orgId), remember(org.orgId, pageLive(org)), getDb().then((db) => versionOf(db, org.orgId))]);
+  const o = shape(saved, lv);
+  return { ...o, ...tiles(o, lv), version };
 }
 
 /** The end of every refusal: who can change it, and (for money) when the month starts over. */
@@ -320,9 +413,14 @@ const diff = <T>(label: string, a: T, b: T, word: (v: T) => string) => (a === b 
  */
 async function logChange(q: Queryable, orgId: number, actor: Actor | null, parts: string[], before: unknown, after: unknown) {
   if (!parts.length) return;
+  // Every change takes the account's rules lock before its entry, so a plan's version check can't miss one being made.
+  await lockRules(q, orgId);
   await q.query("INSERT INTO usage_rule_changes (org_id, actor, actor_user, summary, before, after) VALUES ($1, $2, $3, $4, $5, $6)",
     [orgId, actor?.label ?? null, actor?.user ?? null, parts.join("; "), before == null ? null : JSON.stringify(before), after == null ? null : JSON.stringify(after)]);
 }
+
+/** The account's rules lock, held to the end of the transaction (PUT /limits/plan takes it before its version check). */
+const lockRules = (q: Queryable, orgId: number) => q.query("SELECT pg_advisory_xact_lock(7270011, $1)", [orgId]);
 
 /** People's names by user id (Clerk), so history shows a person's current name; past members fall back to their email. */
 async function namesOf(slug: string) {
@@ -376,38 +474,70 @@ const count = (v: unknown, field: string, max = 10000) => {
 const RUNS = "Runs at once";
 const sessions = (v: unknown) => count(v, "Agent sessions per run", settingNumber("OCTILLION_MAX_SESSIONS_PER_RUN"));
 
-export async function setPolicy(orgId: number, actor: Actor, p: Partial<Record<keyof Policy, unknown>>) {
-  const cur = (await load(orgId)).policy;
+type PolicyFields = Omit<Policy, "updated_at" | "updated_by">;
+const $cap = (v: number) => `$${v.toFixed(2)}`;
+
+/**
+ * The policy after a change: only the fields sent change, each checked. `cap` is the account's allowance, for the
+ * checks against it (the buffer and the run dollar cap can't be more); null or 0 (unknown, or none yet) skips them.
+ */
+function parsePolicy(cur: PolicyFields, p: Partial<Record<keyof Policy, unknown>>, cap: number | null): PolicyFields {
   const mode = (p.mode === undefined ? cur.mode : String(p.mode)) as Mode;
   if (!["pool", "even", "custom"].includes(mode)) throw new LimitError("mode must be pool, even or custom");
-  const next = {
+  const next: PolicyFields = {
     mode, reserve_usd: p.reserve_usd === undefined ? cur.reserve_usd : money(p.reserve_usd, "reserve_usd") ?? 0,
     default_cap_usd: p.default_cap_usd === undefined ? cur.default_cap_usd : money(p.default_cap_usd, "default_cap_usd"),
     new_members_can_run: p.new_members_can_run === undefined ? cur.new_members_can_run : Boolean(p.new_members_can_run),
     max_concurrent_runs: p.max_concurrent_runs === undefined ? cur.max_concurrent_runs : count(p.max_concurrent_runs, RUNS),
     max_sessions_per_run: p.max_sessions_per_run === undefined ? cur.max_sessions_per_run : sessions(p.max_sessions_per_run),
+    max_run_usd: p.max_run_usd === undefined ? cur.max_run_usd : money(p.max_run_usd, "Most a simulation can spend"),
   };
   // Own limits apply in every mode, so custom with no default would just be the shared pool under another name.
   if (next.mode === "custom" && next.default_cap_usd == null)
     throw new LimitError("Custom caps need a default monthly cap for everyone. Enter an amount, or share the budget freely instead.");
+  // Empty is "no limit"; $0 would stop every adaptive run after its first batch, which "can launch" says better.
+  if (next.max_run_usd != null && next.max_run_usd < 0.01) throw new LimitError("Most a simulation can spend must be at least $0.01, or empty for no limit.");
+  if (cap != null && cap > 0) {
+    if (p.reserve_usd !== undefined && next.reserve_usd > cap) throw new LimitError(`Can't hold back more than your ${$cap(cap)} allowance.`);
+    if (p.max_run_usd !== undefined && next.max_run_usd != null && next.max_run_usd > cap) throw new LimitError(`A simulation can't spend more than your ${$cap(cap)} allowance.`);
+  }
+  return next;
+}
+
+/** The history line's parts for a policy change: "Buffer $0 → $50", one per field that changed. */
+function policyParts(cur: PolicyFields, next: PolicyFields) {
   const yesNo = (v: boolean) => (v ? "yes" : "no");
-  const parts = [
+  return [
     ...diff("How budgets are shared:", cur.mode, next.mode, (m) => MODE_WORDS[m]),
     ...diff("Buffer", cur.reserve_usd, next.reserve_usd, (v) => usdWord(v)),
     ...diff("Default cap", cur.default_cap_usd, next.default_cap_usd, (v) => usdWord(v)),
     ...diff("New members can launch:", cur.new_members_can_run, next.new_members_can_run, yesNo),
     ...diff("Runs at once", cur.max_concurrent_runs, next.max_concurrent_runs, (v) => countWord(v)),
     ...diff("Sessions per run", cur.max_sessions_per_run, next.max_sessions_per_run, (v) => countWord(v, "server's limit")),
+    ...diff("Most a run can spend", cur.max_run_usd, next.max_run_usd, (v) => usdWord(v, "no limit")),
   ];
-  const { updated_at: _a, updated_by: _b, ...before } = cur;
+}
+
+const policyOnly = ({ updated_at: _a, updated_by: _b, ...p }: Policy): PolicyFields => p;
+
+async function writePolicy(q: Queryable, orgId: number, actor: Actor, next: PolicyFields) {
+  await q.query(
+    `INSERT INTO usage_policies (org_id, mode, reserve_usd, default_cap_usd, new_members_can_run, max_concurrent_runs, max_sessions_per_run, max_run_usd, updated_at, updated_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), $9)
+     ON CONFLICT (org_id) DO UPDATE SET mode = $2, reserve_usd = $3, default_cap_usd = $4, new_members_can_run = $5,
+       max_concurrent_runs = $6, max_sessions_per_run = $7, max_run_usd = $8, updated_at = now(), updated_by = $9`,
+    [orgId, next.mode, next.reserve_usd, next.default_cap_usd, next.new_members_can_run, next.max_concurrent_runs, next.max_sessions_per_run, next.max_run_usd, actor.label]);
+}
+
+/** The allowance for checks against it; a failed lookup skips them (null) rather than refusing an unrelated save. */
+const capFor = (orgId: number) => orgBudget(orgId).then((b) => b.budget, () => null);
+
+export async function setPolicy(orgId: number, actor: Actor, p: Partial<Record<keyof Policy, unknown>>) {
+  const [saved, cap] = await Promise.all([load(orgId), p.reserve_usd !== undefined || p.max_run_usd !== undefined ? capFor(orgId) : null]);
+  const before = policyOnly(saved.policy), next = parsePolicy(before, p, cap);
   await (await getDb()).transaction(async (tx) => {
-    await tx.query(
-      `INSERT INTO usage_policies (org_id, mode, reserve_usd, default_cap_usd, new_members_can_run, max_concurrent_runs, max_sessions_per_run, updated_at, updated_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, now(), $8)
-       ON CONFLICT (org_id) DO UPDATE SET mode = $2, reserve_usd = $3, default_cap_usd = $4, new_members_can_run = $5,
-         max_concurrent_runs = $6, max_sessions_per_run = $7, updated_at = now(), updated_by = $8`,
-      [orgId, next.mode, next.reserve_usd, next.default_cap_usd, next.new_members_can_run, next.max_concurrent_runs, next.max_sessions_per_run, actor.label]);
-    await logChange(tx, orgId, actor, parts, { policy: before }, { policy: next });
+    await writePolicy(tx, orgId, actor, next);
+    await logChange(tx, orgId, actor, policyParts(before, next), { policy: before }, { policy: next });
   });
 }
 
@@ -507,5 +637,134 @@ export async function setMember(org: { orgId: number; slug: string }, actor: Act
       [org.orgId, userId, next.team_id, next.cap_usd, next.adjust_usd, next.can_run, next.max_concurrent_runs]);
     // One entry per save, so the person's changes read as one sentence: "Alice R.: own limit none → $150, can launch: account setting → no".
     await logChange(tx, org.orgId, actor, parts.length ? [`${person.name || person.email || userId}: ${parts.join(", ")}`] : [], { user_id: userId, ...before }, { user_id: userId, ...next });
+  });
+}
+
+// ---------- the whole tab at once: a draft previewed, then saved as one plan ----------
+
+/** What Budget rules sends: the policy fields changed, team budgets (null removes one), people reset to the defaults. */
+export interface Draft { policy?: Partial<Record<keyof Policy, unknown>>; team_budgets?: unknown; member_resets?: unknown; clear_inactive?: unknown }
+const DEFAULTS = { cap_usd: null, adjust_usd: 0, can_run: null, max_concurrent_runs: null };
+const isDefault = (r: MemberRow) => r.cap_usd == null && !r.adjust_usd && r.can_run == null && r.max_concurrent_runs == null;
+
+/**
+ * The saved rules with a draft applied, checked field by field (a bad field is a 422, never over-allocation), and what
+ * it changes in words for the history. Inactive values: an adjustment only applies with an equal share, so under any
+ * other way of sharing it is listed, and cleared when asked (clear_inactive). A reset keeps the person's team.
+ */
+function applyDraft(saved: Saved, d: Draft, cap: number | null, names: Map<string, string | null>) {
+  const bad = (e: unknown): never => { throw e instanceof LimitError && e.status === 400 ? new LimitError(e.message, 422) : e; };
+  if (d.team_budgets !== undefined && !Array.isArray(d.team_budgets)) throw new LimitError("team_budgets must be a list", 422);
+  if (d.member_resets !== undefined && !Array.isArray(d.member_resets)) throw new LimitError("member_resets must be a list", 422);
+  const before = policyOnly(saved.policy);
+  let policy: PolicyFields;
+  try { policy = parsePolicy(before, d.policy ?? {}, cap); } catch (e) { bad(e); }
+  const parts = policyParts(before, policy!);
+  const teams = saved.teams.map((t) => ({ ...t }));
+  for (const tb of (d.team_budgets ?? []) as { id?: unknown; budget_usd?: unknown }[]) {
+    const t = teams.find((x) => x.id === Number(tb?.id));
+    if (!t) throw new LimitError("No such team", 422);
+    let v: number | null = null;
+    try { v = money(tb.budget_usd, `${t.name} budget`); } catch (e) { bad(e); }
+    parts.push(...diff(`${t.name} budget`, t.budget_usd, v, (x) => usdWord(x)));
+    t.budget_usd = v;
+  }
+  const rows = new Map([...saved.rows].map(([k, r]) => [k, { ...r }]));
+  const who = (id: string) => names.get(id) || id;
+  const resets: string[] = [];
+  for (const id of new Set(((d.member_resets ?? []) as unknown[]).map(String))) {
+    const r = rows.get(id);
+    if (!r || isDefault(r)) continue;
+    rows.set(id, { ...r, ...DEFAULTS });
+    resets.push(id);
+    parts.push(`${who(id)}: reset to the defaults`);
+  }
+  const inactive = policy!.mode === "even" ? [] : [...rows.values()].filter((r) => r.adjust_usd).map((r) => ({ user_id: r.user_id, field: "adjust_usd" as const, value: r.adjust_usd }));
+  const cleared = d.clear_inactive ? inactive.map((x) => x.user_id) : [];
+  for (const id of cleared) {
+    parts.push(`${who(id)}: adjustment ${usdWord(rows.get(id)!.adjust_usd)} cleared (it only applies with an equal share)`);
+    rows.set(id, { ...rows.get(id)!, adjust_usd: 0 });
+  }
+  return { next: { policy: { ...policy!, updated_at: saved.policy.updated_at, updated_by: saved.policy.updated_by }, teams, rows }, parts, inactive, resets, cleared };
+}
+
+type Shape = ReturnType<typeof shape>;
+type Warning = { code: "over_allocated" | "rest_zero" | "empty_budgeted_team" | "set_amount_exceeds_budget" | "no_personal_limits"; message: string; team_id?: number | null };
+
+/** Plain-English warnings about a draft; none of them stops a save. */
+function warningsOf(o: Shape): Warning[] {
+  const $ = (v: number) => usdWord(v);
+  const out: Warning[] = [];
+  if (o.over_by_usd > 0)
+    out.push({ code: "over_allocated", message: `Team budgets and the buffer are ${$(o.over_by_usd)} more than your ${$(o.budget_usd)} allowance. Lower a team budget or the buffer.` });
+  if (o.budget_usd > 0 && o.rest.budget_usd === 0 && o.rest.members > 0)
+    out.push({ code: "rest_zero", message: `Nothing is left for the ${o.rest.members} ${o.rest.members === 1 ? "person" : "people"} outside a team budget, so they can't launch.`, team_id: null });
+  for (const t of o.teams)
+    if (t.budget_usd != null && !t.members) out.push({ code: "empty_budgeted_team", message: `No one is in ${t.name}, so this ${$(t.budget_usd)} sits unused.`, team_id: t.id });
+  if (o.policy.mode === "custom" && o.policy.default_cap_usd != null) {
+    const each = o.policy.default_cap_usd;
+    for (const pot of [null, ...o.teams.filter((t) => t.budget_usd != null).map((t) => t.id)]) {
+      const n = o.members.filter((m) => m.pot === pot && m.limit_source === "default" && m.can_run).length;
+      const budget = pot == null ? o.rest.budget_usd : o.teams.find((t) => t.id === pot)!.budget_usd!;
+      const name = pot == null ? "Everyone else" : o.teams.find((t) => t.id === pot)!.name;
+      if (n > 1 && n * each > budget)
+        out.push({ code: "set_amount_exceeds_budget", team_id: pot,
+          message: `${n} × ${$(each)} = ${$(cents(n * each))} is more than ${name}'s ${$(budget)}, so the budget runs out first.` });
+    }
+  }
+  if (o.policy.mode === "pool" && o.members.filter((m) => m.can_run && m.cap_usd == null).length > 1)
+    out.push({ code: "no_personal_limits", message: "Nobody has a personal limit, so one person can use a whole budget." });
+  return out;
+}
+
+/**
+ * POST /limits/preview: what a draft would do, without saving it. The overview shape for the draft, plus each person
+ * whose limit or standing changes (blocked right away first), what is over the allowance, the adjustments the draft
+ * makes inactive, how many people lose launch access, and warnings. Live usage is cached for 30 seconds (cachedLive).
+ */
+export async function preview(org: { orgId: number; slug: string }, d: Draft) {
+  const [saved, lv] = await Promise.all([load(org.orgId), cachedLive(org)]);
+  const names = new Map(lv.people.members.map((m) => [m.user_id, m.name || m.email || null]));
+  const { next, parts, inactive } = applyDraft(saved, d, lv.budget_error ? null : lv.budget, names);
+  const before = shape(saved, lv), after = shape(next, lv);
+  const was = new Map(before.members.map((m) => [m.user_id, m]));
+  const changes = after.members.flatMap((a) => {
+    const b = was.get(a.user_id)!;
+    const blocked_now = a.blocked != null && b.blocked == null;
+    if (a.limit_usd === b.limit_usd && !blocked_now && a.blocked === b.blocked && a.limited_by === b.limited_by) return [];
+    return [{ user_id: a.user_id, name: a.name || a.email, before: b.limit_usd, after: a.limit_usd, spent: a.spent, blocked_now, blocked: a.blocked, limited_by: a.limited_by }];
+  }).sort((x, y) => Number(y.blocked_now) - Number(x.blocked_now));
+  return { ...after, ...tiles(after, lv), summary: parts, changes, over_by_usd: after.over_by_usd, inactive,
+    launch_access_stops: after.members.filter((a) => !a.can_run && was.get(a.user_id)!.can_run).length, warnings: warningsOf(after) };
+}
+
+/**
+ * PUT /limits/plan: save the whole draft in one transaction, and one history entry for it. `version` is the If-Match
+ * the page got from GET /limits; if the rules changed since (any save appends history), nothing is written (409).
+ * Never refused for over-allocation: the page warns and asks first. Returns the new version.
+ */
+export async function plan(org: { orgId: number; slug: string }, actor: Actor, d: Draft, version: string | undefined) {
+  const want = version?.replace(/^W\//, "").replace(/"/g, "").trim();
+  if (!want) throw new LimitError("Send If-Match with the version of the rules you edited (from GET /limits).", 428);
+  const [cap, names] = await Promise.all([capFor(org.orgId), namesOf(org.slug)]);
+  const db = await getDb();
+  return db.transaction(async (tx) => {
+    await lockRules(tx, org.orgId);
+    if ((await versionOf(tx, org.orgId)) !== want) throw new LimitError("Someone changed these rules while you were editing.", 409);
+    const saved = await load(org.orgId, tx);
+    const { next, parts, resets, cleared } = applyDraft(saved, d, cap, names);
+    const policy = policyOnly(next.policy);
+    if (d.policy && Object.keys(d.policy).length) await writePolicy(tx, org.orgId, actor, policy);
+    for (const t of next.teams)
+      if (t.budget_usd !== saved.teams.find((x) => x.id === t.id)!.budget_usd)
+        await tx.query("UPDATE usage_teams SET budget_usd = $3 WHERE org_id = $1 AND id = $2", [org.orgId, t.id, t.budget_usd]);
+    if (resets.length)
+      await tx.query("UPDATE usage_members SET cap_usd = NULL, adjust_usd = 0, can_run = NULL, max_concurrent_runs = NULL WHERE org_id = $1 AND user_id = ANY($2)", [org.orgId, resets]);
+    if (cleared.length) await tx.query("UPDATE usage_members SET adjust_usd = 0 WHERE org_id = $1 AND user_id = ANY($2)", [org.orgId, cleared]);
+    const people = (ids: string[]) => ids.map((id) => ({ user_id: id, ...saved.rows.get(id) }));
+    await logChange(tx, org.orgId, actor, parts,
+      { policy: policyOnly(saved.policy), teams: saved.teams, members: people([...resets, ...cleared]) },
+      { policy, teams: next.teams, members: [...new Set([...resets, ...cleared])].map((id) => ({ user_id: id, ...next.rows.get(id) })) });
+    return versionOf(tx, org.orgId);
   });
 }

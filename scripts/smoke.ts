@@ -1256,6 +1256,16 @@ try {
     console.log(`✓ budget rules allocate(): ${cases}-case matrix (mode x teams x own limits x can launch x $0 allowance), check order, limited by, pots, buffer, rounding`);
   }
 
+  // ---------- budget rules: the month's pace and reset (src/limits.ts pace()), UTC ----------
+  {
+    const { pace } = await import("../src/limits.js");
+    assert.deepEqual(pace(50, new Date("2026-10-02T23:00:00Z")), { period_end: "2026-11-01T00:00:00.000Z", projected_usd: null }, "before the 3rd: too early to tell");
+    assert.equal(pace(100, new Date("2026-10-11T00:00:00Z")).projected_usd, 310, "$100 in 10 days of a 31-day month");
+    assert.deepEqual(pace(140, new Date("2026-02-15T00:00:00Z")), { period_end: "2026-03-01T00:00:00.000Z", projected_usd: 280 }, "February: 28 days");
+    assert.equal(pace(0, new Date("2026-12-20T12:00:00Z")).period_end, "2027-01-01T00:00:00.000Z", "December resets on January 1");
+    console.log("✓ budget rules pace: projected month spend from live spend per elapsed UTC day, too early before the 3rd, reset date");
+  }
+
   // ---------- Compute record tables (src/compute-records.ts): sessions, orchestrators, unmatched sandboxes, runnability ----------
   {
     const { readdirSync } = await import("node:fs");
@@ -1969,6 +1979,92 @@ try {
       await appCall(ownerC, "PUT", "/limits/policy", { new_members_can_run: true });
       await appCall(ownerC, "PUT", `/limits/members/${accepted.user.id}`, { can_run: null, max_concurrent_runs: null, cap_usd: null });
       await appCall(ownerC, "PUT", `/limits/members/${acc2.user.id}`, { can_run: true, team_id: null });
+      // ---------- the whole tab at once: GET figures, POST /limits/preview (no writes), PUT /limits/plan (If-Match, one transaction) ----------
+      await appCall(ownerC, "PUT", "/limits/policy", { mode: "pool", reserve_usd: 0, max_concurrent_runs: null, max_sessions_per_run: null });
+      await appCall(ownerC, "PUT", `/limits/teams/${devrel.id}`, { budget_usd: 200 });
+      await appCall(ownerC, "PUT", `/limits/members/${acc2.user.id}`, { adjust_usd: -50, team_id: null });
+      await appCall(ownerC, "PUT", `/limits/members/${accepted.user.id}`, { cap_usd: 40 });
+      const pg0 = await json(appCall(ownerC, "GET", "/limits"));
+      assert.ok(/^\d+$/.test(pg0.version) && pg0.server_max_sessions >= 1 && /^\d{4}-\d{2}-01T00:00:00\.000Z$/.test(pg0.period_end), "GET: version, Octillion's session maximum, the reset");
+      assert.ok(pg0.spent_live_usd === pg0.account.spent_usd && typeof pg0.in_flight_usd === "number" && typeof pg0.running_count === "number" &&
+        typeof pg0.unattributed_spent_usd === "number" && pg0.max_run_usd === null && (pg0.avg_session_usd === null || pg0.avg_session_usd > 0), "GET: the This month figures");
+      assert.ok(pg0.left_usd === Math.max(0, Math.round((budget - pg0.spent_live_usd) * 100) / 100) && (pg0.projected_usd === null || pg0.projected_usd >= 0));
+      const devLim = await json(appCall(devC, "GET", "/limits"));
+      assert.ok(devLim.version === undefined && devLim.period_end === pg0.period_end && devLim.policy.max_run_usd === null, "members get the reset, not the version");
+      assert.equal((await appCall(devC, "POST", "/limits/preview", {})).status, 403, "members cannot preview");
+      assert.equal((await appCall(devC, "PUT", "/limits/plan", {}, { "if-match": pg0.version })).status, 403, "members cannot save a plan");
+      // The preview: the draft's picture, what changes for whom (blocked right away first), and warnings. Nothing is saved.
+      let pv = await json(appCall(ownerC, "POST", "/limits/preview", { policy: { reserve_usd: budget } }));
+      assert.ok(pv.policy.reserve_usd === budget && pv.buffer_usd === budget && pv.account.blocked === "buffer", "the draft's policy, through allocate()");
+      assert.ok(pv.changes.length === 2 && pv.changes.every((c: any) => c.blocked_now && c.blocked) && pv.summary[0] === `Buffer $0 → $${budget}`, JSON.stringify(pv.changes));
+      assert.ok(pv.spent_live_usd === pg0.spent_live_usd && pv.period_end === pg0.period_end, "the same figures as GET");
+      assert.equal((await json(appCall(ownerC, "GET", "/limits"))).policy.reserve_usd, 0, "a preview writes nothing");
+      pv = await json(appCall(ownerC, "POST", "/limits/preview", { team_budgets: [{ id: devrel.id, budget_usd: budget + 50 }] }));
+      const codes = pv.warnings.map((w: any) => w.code);
+      assert.ok(pv.over_by_usd === 50 && codes.includes("over_allocated") && codes.includes("rest_zero") && codes.includes("empty_budgeted_team"), JSON.stringify(pv.warnings));
+      assert.ok(pv.warnings.find((w: any) => w.code === "empty_budgeted_team").message === `No one is in DevRel, so this $${budget + 50} sits unused.`);
+      assert.ok(pv.changes.some((c: any) => c.user_id === acc2.user.id && c.blocked_now && c.blocked === "rest_pot"), "everyone else gets $0: blocked right away");
+      assert.ok(pv.inactive.length === 1 && pv.inactive[0].user_id === acc2.user.id && pv.inactive[0].field === "adjust_usd" && pv.inactive[0].value === -50, "an adjustment is inactive outside an equal share");
+      pv = await json(appCall(ownerC, "POST", "/limits/preview", { policy: { mode: "even" } }));
+      assert.ok(!pv.inactive.length && pv.members.find((m: any) => m.user_id === accepted.user.id).limit_usd === 40 && !pv.warnings.some((w: any) => w.code === "no_personal_limits"), "even: the adjustment applies; own limits still apply");
+      pv = await json(appCall(ownerC, "POST", "/limits/preview", { policy: { new_members_can_run: false }, member_resets: [accepted.user.id] }));
+      assert.ok(pv.launch_access_stops === 1 && pv.members.find((m: any) => m.user_id === accepted.user.id).cap_usd === null, "a reset is part of the draft; launch access stops counted (not for someone allowed individually)");
+      pv = await json(appCall(ownerC, "POST", "/limits/preview", { policy: { mode: "custom", default_cap_usd: budget }, member_resets: [accepted.user.id] }));
+      assert.ok(pv.warnings.some((w: any) => w.code === "set_amount_exceeds_budget"), "a set amount above a budget is a warning");
+      for (const [draft, why] of [[{ policy: { max_concurrent_runs: 0 } }, "0 runs at once"], [{ team_budgets: [{ id: 999999, budget_usd: 1 }] }, "an unknown team"],
+        [{ policy: { mode: "custom", default_cap_usd: null } }, "custom with no default"], [{ policy: { reserve_usd: budget + 1 } }, "a buffer above the allowance"],
+        [{ team_budgets: "x" }, "team_budgets not a list"], [{ policy: { max_run_usd: 0 } }, "a $0 run cap"]] as const)
+        assert.equal((await appCall(ownerC, "POST", "/limits/preview", draft)).status, 422, `preview: ${why} is a field error`);
+      // The plan: If-Match required and checked; everything in one transaction with one history entry.
+      const draft = { policy: { reserve_usd: 10, max_run_usd: 5 }, team_budgets: [{ id: devrel.id, budget_usd: 150 }], member_resets: [accepted.user.id], clear_inactive: true };
+      assert.equal((await appCall(ownerC, "PUT", "/limits/plan", draft)).status, 428, "no If-Match: refused");
+      assert.equal((await appCall(ownerC, "PUT", "/limits/plan", draft, { "if-match": String(Number(pg0.version) - 1) })).status, 409, "a stale version: refused");
+      const bad = await appCall(ownerC, "PUT", "/limits/plan", { ...draft, policy: { reserve_usd: -1 } }, { "if-match": `"${pg0.version}"` });
+      assert.equal(bad.status, 422, "a field error: refused");
+      assert.equal((await json(appCall(ownerC, "GET", "/limits"))).version, pg0.version, "a refused plan writes nothing");
+      const saved = await appCall(ownerC, "PUT", "/limits/plan", draft, { "if-match": `"${pg0.version}"` });
+      assert.equal(saved.status, 204, await saved.text());
+      const pg1 = await json(appCall(ownerC, "GET", "/limits"));
+      assert.ok(saved.headers.get("etag") === `"${pg1.version}"` && pg1.version !== pg0.version, "the new version comes back");
+      assert.ok(pg1.policy.reserve_usd === 10 && pg1.policy.max_run_usd === 5 && pg1.max_run_usd === 5 && pg1.teams.find((t: any) => t.id === devrel.id).budget_usd === 150, "policy and team budgets saved");
+      const meP = pg1.members.find((m: any) => m.user_id === accepted.user.id), devP = pg1.members.find((m: any) => m.user_id === acc2.user.id);
+      assert.ok(meP.cap_usd === null && devP.adjust_usd === 0 && devP.team_id === null, "the reset and the cleared adjustment saved; the team kept");
+      const planEntry = (await json(appCall(ownerC, "GET", "/limits/history"))).entries[0];
+      assert.match(planEntry.summary, /^Buffer \$0 → \$10; Most a run can spend no limit → \$5; DevRel budget \$200 → \$150; .+: reset to the defaults; .+: adjustment -\$50 cleared \(it only applies with an equal share\)$/);
+      assert.equal(pg1.last_change.summary, planEntry.summary, "one entry for the whole plan");
+      assert.equal((await appCall(ownerC, "PUT", "/limits/plan", draft, { "if-match": pg0.version })).status, 409, "the old version no longer saves");
+      // Any other change moves the version too, so a plan can't overwrite it unseen.
+      await appCall(ownerC, "PUT", `/limits/teams/${devrel.id}`, { budget_usd: 160 });
+      assert.equal((await appCall(ownerC, "PUT", "/limits/plan", { policy: { reserve_usd: 0 } }, { "if-match": pg1.version })).status, 409, "a change from Teams: the plan is stale");
+      // Over the allowance is never refused (the page asks first).
+      const pg2 = await json(appCall(ownerC, "GET", "/limits"));
+      assert.equal((await appCall(ownerC, "PUT", "/limits/plan", { team_budgets: [{ id: devrel.id, budget_usd: budget + 100 }] }, { "if-match": pg2.version })).status, 204, "over-allocation saves");
+      assert.equal((await json(appCall(ownerC, "GET", "/limits"))).over_by_usd, 110);
+      // The run dollar cap: checked like any field, and adaptive runs stop adding sessions once a run has spent it.
+      assert.equal((await appCall(ownerC, "PUT", "/limits/policy", { max_run_usd: 0 })).status, 400, "a $0 run cap is refused");
+      assert.equal((await appCall(ownerC, "PUT", "/limits/policy", { max_run_usd: budget + 1 })).status, 400, "no more than the allowance");
+      const rb = await appCall(ownerC, "PUT", "/limits/policy", { reserve_usd: budget + 1 });
+      assert.ok(rb.status === 400 && /Can't hold back more than your \$[\d.]+ allowance\./.test((await rb.json()).error), "the buffer can't be more than the allowance");
+      await appCall(ownerC, "PUT", `/limits/teams/${devrel.id}`, { budget_usd: 200 });
+      await appCall(ownerC, "PUT", "/limits/policy", { reserve_usd: 0, max_run_usd: 1 });
+      const capRun = await run(ownerT, { samples: 1, max_samples: 6, name: "limits-run-cap" });
+      assert.ok(capRun.id && !capRun.error, `an adaptive run starts (${capRun.error})`);
+      const capSessions = await db.query<{ id: string }>("SELECT id FROM agent_sessions WHERE simulation_id = $1 ORDER BY id", [capRun.id]);
+      let flipC = false;
+      for (const x of capSessions) await db.query("UPDATE agent_sessions SET status = 'completed', ended_at = now(), scored_at = now(), cost_usd = 0, verdict = $2 WHERE id = $1", [x.id, (flipC = !flipC) ? "recommended" : "none"]);
+      await db.query("INSERT INTO gateway_usage (token_hash, provider, session_id, requests, cost_usd) VALUES ('smoke-lim-runcap', 'anthropic', $1, 1, 1)", [capSessions[0]!.id]);
+      assert.equal(await extendAdaptive(capRun.id!), 0, "the run has spent its $1: no more sessions");
+      const [capSim] = await db.query<any>("SELECT sampling FROM simulations WHERE id = $1", [capRun.id]);
+      assert.ok(Object.values(capSim.sampling as Record<string, any>).every((x) => x.status === "stopped: run spend limit"), JSON.stringify(capSim.sampling));
+      await appCall(ownerC, "PUT", "/limits/policy", { max_run_usd: 100 });
+      assert.ok((await extendAdaptive(capRun.id!)) > 0, "under the run's cap it samples more");
+      await db.query("UPDATE simulations SET status = 'cancelled' WHERE id = $1", [capRun.id]);
+      await db.query("UPDATE agent_sessions SET status = 'cancelled' WHERE simulation_id = $1 AND status IN ('queued', 'running')", [capRun.id]);
+      await db.query("DELETE FROM gateway_usage WHERE token_hash = 'smoke-lim-runcap'");
+      assert.ok((await json(appCall(ownerC, "GET", "/limits/history"))).entries.some((e: any) => e.summary === "Most a run can spend $1 → $100"), "the run cap is in the history");
+      await appCall(ownerC, "PUT", "/limits/policy", { max_run_usd: null });
+      console.log("✓ budget rules preview and plan: GET figures (version, reset, This month tiles, server's session maximum), preview of a draft (changes, blocked right away, over by, inactive adjustments, launch access, warnings, 422s, no writes), plan in one transaction with If-Match (428, 409 when stale), one history entry, over-allocation saves");
+      console.log("✓ budget rules run dollar cap: max_run_usd checked (at least $0.01, at most the allowance), adaptive runs stop adding sessions once the run's live spend reaches it");
       console.log("✓ usage limits: even split with reserve and adjustments, team budgets, rollout, sessions per launch, runs at once, custom caps");
       console.log("✓ budget rules meaning changes: own limits in every mode, buffer and team budgets set aside in every mode (rest_pot, buffer), migrated once");
       console.log("✓ budget rules history: one sentence per change from every limits endpoint and each migration (System), unchanged saves skipped, newest first, paged, last change on GET /limits");

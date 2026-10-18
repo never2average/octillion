@@ -399,10 +399,15 @@ export function appRouter() {
   // Everyone sees their own allowance; only admins see and change everyone's.
   api.get("/limits", async (_req, res) => {
     const s = S(res), org = { orgId: s.org, slug: s.slug };
-    const [o, last_change] = await Promise.all([limits.overview(org), s.role === "admin" ? limits.lastChange(org) : null]);
-    if (s.role === "admin") return void res.json({ ...o, last_change, can_manage: true, me: s.user });
-    res.json({ policy: { mode: o.policy.mode, max_concurrent_runs: o.policy.max_concurrent_runs, max_sessions_per_run: o.policy.max_sessions_per_run },
-               budget_usd: o.budget_usd, budget_error: o.budget_error, admins: o.admins, clerk: o.clerk, can_manage: false, me: s.user,
+    if (s.role === "admin") {
+      // `version` goes back as If-Match on PUT /limits/plan, so a save can't overwrite someone else's change unseen. It is
+      // in the body, not an ETag: spend changes under the same version, and a 304 would show stale figures.
+      const [o, last_change] = await Promise.all([limits.page(org), limits.lastChange(org)]);
+      return void res.json({ ...o, last_change, can_manage: true, me: s.user });
+    }
+    const o = await limits.overview(org);
+    res.json({ policy: { mode: o.policy.mode, max_concurrent_runs: o.policy.max_concurrent_runs, max_sessions_per_run: o.policy.max_sessions_per_run, max_run_usd: o.policy.max_run_usd },
+               budget_usd: o.budget_usd, budget_error: o.budget_error, admins: o.admins, clerk: o.clerk, can_manage: false, me: s.user, period_end: limits.pace(0).period_end,
                members: o.members.filter((m) => m.user_id === s.user), teams: o.teams.filter((t) => o.members.some((m) => m.user_id === s.user && m.team_id === t.id)) });
   });
   // Every change below also appends a plain-sentence entry to the account's history (GET /limits/history).
@@ -413,6 +418,14 @@ export function appRouter() {
     const before = req.query.before == null || req.query.before === "" ? undefined : Number(req.query.before);
     if (before !== undefined && !(Number.isInteger(before) && before > 0)) throw new AppError("before must be the id of a history entry");
     res.json(await limits.history({ orgId: S(res).org, slug: S(res).slug }, before));
+  });
+  // The whole tab at once: preview a draft (no writes), then save it as one plan (one transaction, one history entry).
+  api.post("/limits/preview", async (req, res) => { limitsAdmin(res); res.json(await limits.preview({ orgId: S(res).org, slug: S(res).slug }, req.body ?? {})); });
+  api.put("/limits/plan", async (req, res) => {
+    limitsAdmin(res);
+    const version = await limits.plan({ orgId: S(res).org, slug: S(res).slug }, by(res), req.body ?? {}, req.get("if-match"));
+    res.setHeader("ETag", `"${version}"`);
+    res.status(204).end();
   });
   api.put("/limits/policy", async (req, res) => { limitsAdmin(res); await limits.setPolicy(S(res).org, by(res), req.body ?? {}); res.status(204).end(); });
   api.post("/limits/teams", async (req, res) => { limitsAdmin(res); res.status(201).json(await limits.saveTeam(S(res).org, by(res), { ...req.body, id: undefined })); });
