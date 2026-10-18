@@ -59,14 +59,23 @@ export function AdminConfiguration() {
   const save = useAdminAction((v: Record<string, string | null>) => adminApi<Compute>('PUT', '/compute/settings', { values: v }), { success: 'Setting saved' });
   const groupName = (id: string) => data?.groups.find((g) => g.id === id)?.label ?? id;
   const rows = (data?.settings ?? []).filter((x) => ['models', 'runs', 'research'].includes(x.group));
+  const changed = rows.filter((x) => x.source === 'set');
+  const [askReset, setAskReset] = useState(false);
+  // Back to the environment's value where one is set, else the default (saving null clears the admin's value).
+  const backTo = (x: Setting) => (x.env != null ? `the environment (${x.env})` : `the default (${x.default})`);
   const cols: RecordCol<Setting>[] = [
     { key: 'setting', label: 'Setting', keep: true, type: 'text', value: (x) => x.label,
       render: (x) => <span className='flex min-w-0 flex-col gap-1'><span className='leading-none font-medium'>{x.label}</span><span className='text-muted-foreground truncate text-xs' title={x.help}>{x.help}</span></span> },
     { key: 'group', label: 'Group', type: 'select', value: (x) => groupName(x.group), render: (x) => groupName(x.group) },
-    { key: 'value', label: 'Value', className: 'w-72', keep: true, render: (x) => <span onClick={(e) => e.stopPropagation()}><InlineValue key={String(x.value)} s={x} disabled={save.isPending} onSave={(v) => save.mutate({ [x.key]: v })} /></span> },
+    { key: 'value', label: 'Value', className: 'w-80', keep: true, render: (x) => (
+      <span className='flex items-center gap-1' onClick={(e) => e.stopPropagation()}>
+        <InlineValue key={String(x.value)} s={x} disabled={save.isPending} onSave={(v) => save.mutate({ [x.key]: v })} />
+        {x.source === 'set' && <Button variant='ghost' size='xs' className='text-muted-foreground hover:text-foreground' disabled={save.isPending}
+          title={`Back to ${backTo(x)}`} onClick={() => save.mutate({ [x.key]: null })}>Reset</Button>}
+      </span>
+    ) },
     { key: 'source', label: 'From', type: 'select', value: (x) => (x.source === 'set' ? 'Set here' : x.source === 'env' ? 'Environment' : 'Default'),
       render: (x) => (x.source === 'set' ? <span>Set here{x.updated_at && <span className='text-muted-foreground'> · <When d={x.updated_at} /></span>}</span> : <span className='text-muted-foreground'>{x.source === 'env' ? 'Environment' : 'Default'}</span>) },
-    { key: 'default', label: 'Default', type: 'text', value: (x) => String(x.default), render: (x) => <Mono>{String(x.default)}</Mono> },
     { key: 'key', label: 'Variable', type: 'text', value: (x) => x.key, render: (x) => <Mono>{x.key}</Mono> }
   ];
   return (
@@ -76,7 +85,23 @@ export function AdminConfiguration() {
         searchText={(x) => `${x.label} ${x.key} ${x.help} ${groupName(x.group)}`} searchPlaceholder='Search settings'
         defaultSort={[{ key: 'group', dir: 'asc' }]} groupable
         actions={(x) => x.source === 'set' ? [{ label: `Reset to ${x.env != null ? 'environment' : 'default'}`, icon: <Icons.close />, onSelect: () => save.mutate({ [x.key]: null }) }] : []}
+        primary={<Button variant='outline' disabled={!changed.length || save.isPending} onClick={() => setAskReset(true)}
+          title={changed.length ? `${changed.length} setting${changed.length === 1 ? '' : 's'} changed here` : 'Every setting is at its default'}><Icons.refresh /> Reset to defaults</Button>}
         exportName='agent-configuration' empty='No settings.' />
+      <AlertDialog open={askReset} onOpenChange={setAskReset}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Reset {changed.length} setting{changed.length === 1 ? '' : 's'} to defaults?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {changed.map((x) => x.label).join(', ')} go back to their defaults (or the environment's value where one is set). Every server picks this up within 30 s.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={() => { setAskReset(false); save.mutate(Object.fromEntries(changed.map((x) => [x.key, null]))); }}>Reset to defaults</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </PageContainer>
   );
 }
@@ -512,20 +537,17 @@ function RunTick({ s }: { s: Summary }) {
   );
 }
 
-/** "Last autoscaler tick 12 s ago · runtime VM · data as of 14:03:21": amber past 3 ticks, red past 10 minutes. */
+/** "Ticked 12 s ago": amber past 3 ticks, red past 10 minutes; the runtime, the leader and the data's time on hover. */
 function Freshness({ s }: { s: Summary }) {
   useNow();
   const age = ageOf(s.tick.at);
   const tone = age == null || age > 600 ? 'red' : age > 3 * s.tick.tick_seconds ? 'amber' : null;
   const runtime = s.runtime === 'vercel' ? 'Vercel' : 'VM';
-  const text = age == null ? 'The autoscaler has not ticked yet'
-    : tone === 'red' && s.runtime === 'vercel' ? `No autoscaler tick for ${Math.round(age / 60)} min. On Vercel, ticks only happen when something happens; queued work may wait for the next 5-minute cron.`
-    : `Last autoscaler tick ${dur(age)} ago`;
-  return (
-    <span id='tick' className={cn('text-muted-foreground max-w-xl text-xs', tone && LEVEL[tone].text)} title={s.tick.at ? `Last tick ${new Date(s.tick.at).toLocaleString()}${s.tick.holder ? ` by ${s.tick.holder}` : ''}` : undefined}>
-      {text} · runtime {runtime} · data as of {new Date(s.at).toLocaleTimeString()}
-    </span>
-  );
+  const text = age == null ? 'Not ticked yet' : `Ticked ${dur(age)} ago`;
+  const title = [s.tick.at && `Last autoscaler tick ${new Date(s.tick.at).toLocaleString()}${s.tick.holder ? ` by ${s.tick.holder}` : ''}`,
+    tone === 'red' && s.runtime === 'vercel' && 'On Vercel, ticks only happen when something happens; queued work may wait for the next 5-minute cron.',
+    `Runtime ${runtime} · data as of ${new Date(s.at).toLocaleTimeString()}`].filter(Boolean).join('\n');
+  return <span id='tick' className={cn('text-muted-foreground text-xs whitespace-nowrap tabular-nums', tone && LEVEL[tone].text)} title={title}>{text}</span>;
 }
 
 /** The worst true rule, on the tabs row: a coloured dot and its line (a link to the records behind it); the rest on hover. */

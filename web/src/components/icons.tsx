@@ -99,7 +99,9 @@ import {
   IconBook2,
   IconGauge,
   IconHeartRateMonitor,
-  IconPlugConnected
+  IconPlugConnected,
+  IconRefresh,
+  IconPlayerPlay,
 } from '@tabler/icons-react';
 
 export type Icon = React.ComponentType<IconProps>;
@@ -114,6 +116,8 @@ export const Icons = {
   circleCheck: IconCircleCheck,
   close: IconX,
   clock: IconClock,
+  refresh: IconRefresh,
+  play: IconPlayerPlay,
   code: IconCode,
   dots: IconDots,
   ellipsis: IconDotsVertical,
