@@ -10,7 +10,7 @@
  *   CLERK_PUBLISHABLE_KEY       pk_... (or NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY): names the Frontend API, the OAuth server
  *   CLERK_JWT_KEY               optional PEM public key: verify session tokens without calling Clerk (else JWKS)
  *   CLERK_AUTHORIZED_PARTIES    origins allowed in a session token's azp (default: PUBLIC_URL's origin)
- *   CLERK_API_URL, CLERK_FRONTEND_API_URL  overrides (tests and previews point them at src/mock-providers.ts)
+ *   CLERK_API_URL, CLERK_FRONTEND_API_URL  overrides for the smoke test only (it points them at its local mock, scripts/lib/mock-providers.ts)
  *
  * Suspending a person: Clerk memberships have no "deactivated" state, so suspension is the membership's
  * public_metadata.suspended = true, which Octillion enforces on /mcp and /api/app; removing a member deletes the

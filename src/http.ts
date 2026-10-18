@@ -110,28 +110,6 @@ export function createApp() {
     res.status(201).json({ ok: true });
   });
 
-  // ---------- fake Clerk + Stripe for previews and API tests (src/mock-providers.ts), state in Postgres ----------
-  // Only with OCTILLION_MOCK_PROVIDERS=1; point CLERK_API_URL, CLERK_FRONTEND_API_URL and STRIPE_API_URL at PUBLIC_URL/mock.
-  if (process.env.OCTILLION_MOCK_PROVIDERS === "1") {
-    let mock: Promise<express.Express> | null = null;
-    const persistence = {
-      async load() {
-        const db = await getDb();
-        await db.exec("CREATE TABLE IF NOT EXISTS mock_provider_state (id INT PRIMARY KEY, state TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now())");
-        return (await db.query<{ state: string }>("SELECT state FROM mock_provider_state WHERE id = 1"))[0]?.state ?? null;
-      },
-      async save(state: string) {
-        await (await getDb()).query(
-          "INSERT INTO mock_provider_state (id, state) VALUES (1, $1) ON CONFLICT (id) DO UPDATE SET state = $1, updated_at = now()", [state]);
-      },
-    };
-    app.use("/mock", (req, res, next) => {
-      mock ??= import("./mock-providers.js").then(async (m) => (await m.createMockApp(() => `${PUBLIC_URL}/mock`, persistence)).app);
-      mock.then((a) => a(req, res, next), next);
-    });
-    console.error("  MOCK PROVIDERS at /mock: fake Clerk Backend API and Stripe (previews only)");
-  }
-
   // ---------- customer page: sign-in, setup check, usage, team, billing (src/app.ts, web/app/app) ----------
   app.use(appRouter());
 

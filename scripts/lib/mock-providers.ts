@@ -1,9 +1,6 @@
-// A stand-in for the Clerk Backend API and Stripe endpoints Octillion calls (src/clerk.ts, src/billing.ts), for the
-// smoke test and API previews without real accounts. Not a simulator of either product: only the fields Octillion
-// reads, with the same shapes. In memory (startMockProviders), or mounted at /mock inside the server with its state in
-// Postgres (OCTILLION_MOCK_PROVIDERS=1, for serverless previews where memory does not survive requests). Clerk's
-// sign-in UI cannot be faked here: browsers sign in against a real Clerk development instance.
-//   npm run mock:providers            listens on 127.0.0.1:4455 and prints the env to point Octillion at it
+// Fake Clerk Backend API + Stripe for the smoke test only: scripts/smoke.ts starts it in memory on 127.0.0.1 and points
+// CLERK_API_URL / STRIPE_API_URL at it. Never mounted by the server; production always talks to the real services.
+// Not a simulator of either product: only the fields Octillion reads, with the same shapes.
 // Test hooks: POST /_mock/clerk/users {email, first_name?, verified?, platform_admin?}, POST /_mock/invitations/:id/accept
 // {first_name?}, POST /_mock/clerk/memberships {org_id, user_id, role?}, POST /_mock/session {user_id, org_id?, org_role?,
 // azp?, expired?, v1?} -> a Clerk session token, POST /_mock/oauth {user_id, jwt?, revoked?, expired?} -> an OAuth

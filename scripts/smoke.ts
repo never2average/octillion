@@ -1003,7 +1003,7 @@ try {
   for (const gone of ["/app/login-key", "/admin/login"]) assert.equal((await fetch(`${base}${gone}`, { method: "POST" })).status, 404, `${gone} is gone: Clerk signs people in`);
 
   // ---------- onboarding console with Clerk (people, sign-in) and Stripe (billing), against the mock ----------
-  const { startMockProviders } = await import("../src/mock-providers.js");
+  const { startMockProviders } = await import("./lib/mock-providers.js");
   const mock = await startMockProviders();
   const { pem } = await (await fetch(`${mock.url}/_mock/public-key`)).json();
   const providerEnv = { CLERK_SECRET_KEY: "sk_test_mock", CLERK_API_URL: mock.url, CLERK_FRONTEND_API_URL: mock.url, CLERK_JWT_KEY: pem,
