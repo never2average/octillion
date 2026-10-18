@@ -37,9 +37,12 @@ export async function researchRequest(id: number) {
 
 async function run(id: number) {
   const db = await getDb();
-  const [q] = await db.query<{ email: string; company: string; product_url: string | null; message: string | null; name: string | null; role: string | null }>(
-    "SELECT email, company, product_url, message, name, role FROM access_requests WHERE id = $1", [id]);
+  const [q] = await db.query<{ email: string; company: string; product_url: string | null; message: string | null; name: string | null; role: string | null; depth: string | null }>(
+    "SELECT email, company, product_url, message, name, role, research->>'depth' AS depth FROM access_requests WHERE id = $1", [id]);
   if (!q) return;
+  // A finished deep brief is never replaced by a quick pass: a re-run only queues a fresh deep job, and the current
+  // brief stays up until that one is accepted.
+  if (q.depth === "harness") { await queueDeepResearch(id); return; }
   await db.query("UPDATE access_requests SET research_status = 'running', research_error = NULL WHERE id = $1", [id]);
   try {
     const brief = await research(q);

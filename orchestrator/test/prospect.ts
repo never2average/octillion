@@ -167,6 +167,12 @@ async function main() {
   check("the request carries the harness brief", q?.research?.depth === "harness" && q.research.fit === "strong" && /webhook delivery API/.test(q.research.summary) && q.research.questions.length === 2,
     JSON.stringify({ depth: q?.research?.depth, fit: q?.research?.fit }));
   check("brain went through the gateway with the vault key", llmKeyOk && llmRequests > 0, `${llmRequests} LLM requests`);
+  // A re-run keeps the deep brief up and only queues a fresh deep job.
+  const before = q?.deep?.id;
+  await adm(`/requests/${q.id}/research`, { method: "POST" });
+  const after = (await adm("/requests")).requests?.find((x: any) => x.id === q.id);
+  check("a re-run keeps the deep brief and queues a fresh deep job", after?.research?.depth === "harness" && after.research.summary === q.research.summary && after?.deep?.id !== before && ["queued", "running"].includes(after?.deep?.status),
+    JSON.stringify({ depth: after?.research?.depth, deep: after?.deep?.status }));
 }
 
 let failed = false;

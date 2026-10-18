@@ -98,12 +98,17 @@ export function AdminRequests() {
   const decline = useAdminAction((q: Req) => post(`/requests/${q.id}/decline`), { success: 'Declined' });
   const reopen = useAdminAction((q: Req) => post(`/requests/${q.id}/reopen`), { success: 'Back in pending' });
   const rows = useMemo(() => data?.requests ?? [], [data]);
+  // With a finished deep brief, a re-run only queues a fresh deep job and the current brief stays up meanwhile.
   const runResearch = (q: Req) => {
-    toast.info(`Researching ${q.company}…`);
-    void qc.setQueryData<{ requests: Req[] }>(['admin', '/requests'], (d) => d && { requests: d.requests.map((x) => (x.id === q.id ? { ...x, research_status: 'running' } : x)) });
-    post(`/requests/${q.id}/research`).then(() => toast.success(`Quick research ready for ${q.company}; deep research is queued on the research harness`)).catch((e) => toast.error((e as Error).message))
+    const deepOnly = q.research?.depth === 'harness';
+    toast.info(deepOnly ? `Queuing deep research for ${q.company}…` : `Researching ${q.company}…`);
+    if (!deepOnly) void qc.setQueryData<{ requests: Req[] }>(['admin', '/requests'], (d) => d && { requests: d.requests.map((x) => (x.id === q.id ? { ...x, research_status: 'running' } : x)) });
+    post(`/requests/${q.id}/research`)
+      .then(() => toast.success(deepOnly ? `Deep research queued for ${q.company}; the current brief stays until it is done` : `Quick research ready for ${q.company}; deep research is queued on the research harness`))
+      .catch((e) => toast.error((e as Error).message))
       .finally(() => void qc.invalidateQueries({ queryKey: ['admin', '/requests'] }));
   };
+  const researchBusy = (q: Req) => q.research_status === 'running' || q.deep?.status === 'queued' || q.deep?.status === 'running';
   const matches = useMemo(() => new Map(rows.map((q) => [q.id, matchOrg(q, orgList?.orgs)?.name ?? null])), [rows, orgList]);
 
   const askDecline = (q: Req) => setConfirm({
@@ -131,7 +136,7 @@ export function AdminRequests() {
     return [
       ...(q.status === 'pending' ? [{ label: 'Approve…', icon: <Icons.check />, onSelect: () => setApproving(q) }] : []),
       ...statusActions(q),
-      { label: q.research ? 'Re-run research' : 'Research the company', icon: <Icons.sparkles />, disabled: q.research_status === 'running', separator: true, onSelect: () => runResearch(q) },
+      { label: q.research ? 'Re-run research' : 'Research the company', icon: <Icons.sparkles />, disabled: researchBusy(q), separator: true, onSelect: () => runResearch(q) },
       copyEmail(q),
       ...(url ? [{ label: 'Open product site', icon: <Icons.externalLink />, onSelect: () => window.open(url, '_blank', 'noopener,noreferrer') }] : [])
     ];
@@ -339,7 +344,7 @@ function RequestPeek({ q, match, onResearch }: { q: Req; match: string | null; o
       <section>
         <div className='mb-2 flex items-center justify-between gap-3'>
           <span className='text-muted-foreground text-xs font-medium leading-none'>AI research</span>
-          <Button size='xs' variant='ghost' disabled={q.research_status === 'running'} onClick={onResearch}>
+          <Button size='xs' variant='ghost' disabled={q.research_status === 'running' || q.deep?.status === 'queued' || q.deep?.status === 'running'} onClick={onResearch}>
             {q.research_status === 'running' ? <><Icons.spinner className='animate-spin' /> Researching</> : <><Icons.sparkles /> {q.research ? 'Re-run' : 'Research'}</>}
           </Button>
         </div>
