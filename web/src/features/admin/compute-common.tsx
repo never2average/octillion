@@ -2,6 +2,8 @@
 // Formatting and URL state shared by the Compute page's sections (compute.tsx, compute-sessions.tsx,
 // compute-orchestrators.tsx): durations, money, "est." labels, a ticking clock for relative times, and the query
 // string that deep-links a section, its filters and an open record (?section=sessions&status=queued&session=ses_…).
+// Jobs and Sessions live on Health (/admin/health, as tabs); the other sections on Compute. A link or action that
+// names a section on the other page goes there.
 import { useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
@@ -48,8 +50,14 @@ export function PeekSection({ title, children, action }: { title: ReactNode; chi
 }
 
 const GOTO = 'compute:goto';
-/** The section an in-page link names (`/admin/compute?section=sessions&…`), or null. */
-export const sectionOf = (href: string) => (href.startsWith('/admin/compute?') ? new URLSearchParams(href.split('?')[1]).get('section') : null);
+/** The sections shown on Health rather than Compute. */
+export const HEALTH_SECTIONS = ['jobs', 'sessions'];
+/** The page a section lives on. */
+export const pageOf = (section: string) => (HEALTH_SECTIONS.includes(section) ? '/admin/health' : '/admin/compute');
+/** A link to a section and its filters, on whichever page holds it. */
+export const sectionHref = (section: string, q: Record<string, string> = {}) => `${pageOf(section)}?${new URLSearchParams({ section, ...q })}`;
+/** The section a link names on the page `pathname` (`/admin/compute?section=orchestrators&…`), or null. */
+export const sectionOf = (href: string, pathname: string) => (href.startsWith(`${pathname}?`) ? new URLSearchParams(href.split('?')[1]).get('section') : null);
 /** Asks a section to scroll into view: on every in-page link or action that names it, not only the first. */
 export function goToSection(section: string | null | undefined) {
   if (section) window.dispatchEvent(new CustomEvent(GOTO, { detail: section }));
@@ -64,6 +72,12 @@ export function useComputeParams() {
   const s = params.toString();
   const p = useMemo(() => new URLSearchParams(s), [s]);
   const write = (patch: Record<string, string | null | undefined>) => {
+    // A section on the other page: go there with only what the patch names.
+    if (patch.section && pageOf(patch.section) !== pathname) {
+      const q = Object.fromEntries(Object.entries(patch).filter((e): e is [string, string] => !!e[1]));
+      router.push(sectionHref(patch.section, q));
+      return;
+    }
     const next = new URLSearchParams(s);
     for (const [k, v] of Object.entries(patch)) { if (v) next.set(k, v); else next.delete(k); }
     const qs = next.toString();
@@ -98,7 +112,7 @@ export function useScrollTo(section: string, ready: boolean) {
  * of the page and scrolls to that section instead, every time it is clicked. Any other link behaves as usual.
  */
 export function SectionLink({ href, onClick, ...rest }: Omit<ComponentProps<typeof Link>, 'href'> & { href: string }) {
-  const section = sectionOf(href);
+  const section = sectionOf(href, usePathname());
   return <Link href={href} scroll={section ? false : undefined} onClick={(e) => { onClick?.(e); goToSection(section); }} {...rest} />;
 }
 

@@ -205,10 +205,10 @@ export function computeVerdict(f: VerdictFacts): Verdict[] {
   const oldS = f.queue.oldest_session_age_s ?? 0, oldR = f.queue.oldest_research_age_s ?? 0;
   if (oldS > 15 * 60 || oldR > 20 * 60)
     add("amber", "queue_old", oldS > 15 * 60 ? `The oldest queued session has waited ${mins(oldS)} min.` : `The oldest queued research has waited ${mins(oldR)} min.`,
-      "/admin/compute?section=sessions&status=queued&sort=queued_at");
+      "/admin/health?section=sessions&status=queued&sort=queued_at");
   if (f.queue.unclaimable > 0)
     add("amber", "unclaimable", `${plural(f.queue.unclaimable, "session")} can never run: ${f.queue.unclaimable === 1 ? "its" : "their"} agent is not in the scheduled population.`,
-      "/admin/compute?section=sessions&class=unclaimable");
+      "/admin/health?section=sessions&class=unclaimable");
   const plan = /(\S+) waits for boat plan capacity \((\d+) free\)/.exec(note);
   if (plan) add("amber", "plan_capacity", `${plan[1]} waits for boat capacity: ${plan[2]} free, other deployments use ${f.others}.`, "#limits");
   if (f.per_job && f.job_orch_live >= f.job_orch_cap && queued > 0)

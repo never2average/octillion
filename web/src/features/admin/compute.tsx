@@ -1,8 +1,8 @@
 'use client';
 // Operations pages over src/settings.ts and the default population: Agent configuration (models, run sizes, research
 // limits), Harness mix (the coding-agent mix and admin-added harnesses) and Compute (/admin/compute: the on-call
-// console over GET /compute/summary, src/compute.ts, with the capacity settings in its Limits table, and its Sessions
-// and Orchestrators tables in compute-sessions.tsx / compute-orchestrators.tsx, its Activity chart and Autoscaler
+// console over GET /compute/summary, src/compute.ts, with the capacity settings in its Limits table, its Orchestrators
+// table in compute-orchestrators.tsx (Jobs and Sessions are tabs on Health), its Activity chart and Autoscaler
 // decisions in compute-decisions.tsx). Each setting
 // shows the value in force and where it comes from: set here, the server's environment, or the built-in default.
 // Saving writes platform_settings (every server picks it up within 30s) and an audit log line. Model keys are the key
@@ -29,9 +29,7 @@ import { post, useAdmin, useAdminAction } from './lib';
 import { ErrorBox, FormRow, LoadingCards, Mono, Notice, Section, When } from './ui';
 import { ActionsMenu, Field, RecordView, type RecordCol } from '@/components/layout/record-view';
 import { ageOf, dur, EST, money, SectionLink, useComputeParams, useNow } from './compute-common';
-import { ComputeSessions } from './compute-sessions';
 import { ComputeOrchestrators } from './compute-orchestrators';
-import { ComputeJobs } from './compute-jobs';
 import { ComputeFailures } from './compute-failures';
 import { ComputeActivity, ComputeDecisions } from './compute-decisions';
 
@@ -431,8 +429,6 @@ export function AdminCompute() {
     <Suspense fallback={<Skeleton className='h-72 rounded-lg' />}>
       <PeekWatch onChange={setPeek} />
       <ComputeActivity />
-      <ComputeJobs />
-      <ComputeSessions />
       <ComputeOrchestrators verdict={data?.verdict ?? []} />
       <ComputeFailures />
       <ComputeDecisions runtime={data?.runtime ?? null} />
@@ -575,17 +571,17 @@ function Tiles({ s }: { s: Summary }) {
   const f = s.failures_24h, sp = s.spend_today;
   const tiles: Tile[] = [
     { label: 'Queued', value: queued, hint: queued ? `oldest ${dur(oldest)} · ${s.queue.jobs_waiting} job${s.queue.jobs_waiting === 1 ? '' : 's'}` : 'nothing waiting',
-      href: '/admin/compute?section=sessions&status=queued', warn: s.verdict.some((v) => v.code === 'queue_old') },
+      href: '/admin/health?section=sessions&status=queued', warn: s.verdict.some((v) => v.code === 'queue_old') },
     { label: 'Running', value: s.running.sessions + s.running.research, hint: `on ${live} orchestrator${live === 1 ? '' : 's'} · ${s.running.pods_used} of ${s.running.pods_reserved} pods`,
-      href: '/admin/compute?section=sessions&status=running', title: s.running.research ? `${s.running.sessions} sessions and ${s.running.research} research jobs` : undefined },
+      href: '/admin/health?section=sessions&status=running', title: s.running.research ? `${s.running.sessions} sessions and ${s.running.research} research jobs` : undefined },
     { label: 'Queue wait p50 / p95 (1 h)', value: s.wait_1h.n ? `${dur(s.wait_1h.p50_s)} / ${dur(s.wait_1h.p95_s)}` : '—', hint: `queued → started, n=${s.wait_1h.n}`,
-      href: '/admin/compute?section=sessions&sort=wait' },
+      href: '/admin/health?section=sessions&sort=wait' },
     { label: 'Orchestrators', value: live, hint: `${o.running} running · ${o.booting} booting · ${o.draining} draining`, href: '/admin/compute?section=orchestrators' },
     { label: 'Failures (24 h)', value: f.sessions + f.launches, hint: `${f.sessions} session${f.sessions === 1 ? '' : 's'} · ${f.launches} launch${f.launches === 1 ? '' : 'es'}${f.top ? ` · top: ${f.top.label}` : ''}`,
       href: '/admin/compute?section=failures', warn: f.rate > 0.1, title: f.ended ? `${Math.round(f.rate * 100)}% of the ${f.ended} sessions that ended in 24 h failed` : undefined },
     { label: 'Spend today (UTC)', value: money(sp.total_usd), title: `Sandbox: ${EST}`,
       hint: `${money(sp.session_model_usd)} model (finished sessions) · ${money(sp.orchestrator_model_usd)} orchestrators · ${money(sp.sandbox_est_usd)} sandbox est.`,
-      href: '/admin/compute?section=jobs&jsort=spend&jsince=24h' }
+      href: '/admin/health?section=jobs&jsort=spend&jsince=24h' }
   ];
   return (
     // Below xl every tile draws its own bottom line, so the list adds only the top one (and the bottom one at xl).

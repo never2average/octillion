@@ -29,6 +29,8 @@ import { downloadCsv, downloadJson, type CsvValue } from '@/lib/csv';
 import { num, usd } from '@/lib/octillion-format';
 import { cn } from '@/lib/utils';
 import { ErrorBox, LoadingCards, Mono, Section, StatusBadge, Trend, When } from './ui';
+import { ComputeJobs } from './compute-jobs';
+import { ComputeSessions } from './compute-sessions';
 
 type ErrorKind = 'tool' | 'session' | 'onboarding';
 interface ErrorRow { at: string; account: string; slug: string; [k: string]: string | number | null }
@@ -352,7 +354,41 @@ export function AdminAnalytics({ view = 'analytics' }: { view?: 'analytics' | 'h
   return <Suspense fallback={<PageContainer><LoadingCards count={4} /></PageContainer>}><Report view={view} /></Suspense>;
 }
 
+/** Health's tabs: errors (this report), and the Jobs and Sessions record tables (?section=jobs|sessions). */
+const HEALTH_TABS = [['errors', 'Errors'], ['jobs', 'Jobs'], ['sessions', 'Sessions']] as const;
+
+function HealthTabs({ tab }: { tab: string }) {
+  const router = useRouter();
+  return (
+    <nav className='flex shrink-0 gap-6 border-b text-sm' aria-label='Health'>
+      {HEALTH_TABS.map(([id, label]) => (
+        <button key={id} type='button' onClick={() => id !== tab && router.replace(id === 'errors' ? '/admin/health' : `/admin/health?section=${id}`, { scroll: false })}
+          className={cn('-mb-px border-b-2 pb-2 font-medium', id === tab ? 'border-foreground text-foreground' : 'text-muted-foreground hover:text-foreground border-transparent')}>
+          {label}
+        </button>
+      ))}
+    </nav>
+  );
+}
+
 function Report({ view }: { view: 'analytics' | 'health' }) {
+  const section = useSearchParams().get('section');
+  const tab = view === 'health' && (section === 'jobs' || section === 'sessions') ? section : 'errors';
+  if (tab !== 'errors') {
+    return (
+      <PageContainer>
+        <div className='flex min-w-0 flex-col gap-4'>
+          <HealthTabs tab={tab} />
+          {/* the tab names the table: no repeated heading above it */}
+          <div className='[&_section>div:first-child_h2]:hidden'>{tab === 'jobs' ? <ComputeJobs /> : <ComputeSessions />}</div>
+        </div>
+      </PageContainer>
+    );
+  }
+  return <ErrorsReport view={view} />;
+}
+
+function ErrorsReport({ view }: { view: 'analytics' | 'health' }) {
   const p = useReportParams();
   const [q, setQ] = useState('');
   const { data: a, error, isLoading } = useReport<Analytics>(`/analytics?${p.base}`);
@@ -363,6 +399,7 @@ function Report({ view }: { view: 'analytics' | 'health' }) {
   return (
     <PageContainer>
       <div className='flex h-[calc(100svh-5.5rem)] min-h-[24rem] min-w-0 flex-col gap-3'>
+        {view === 'health' && <HealthTabs tab='errors' />}
         <div className='flex flex-wrap items-center gap-2'>
           <div className='relative min-w-48 flex-1'>
             <Icons.search className='text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2' />
