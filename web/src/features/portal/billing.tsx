@@ -1,13 +1,13 @@
 'use client';
-// /app Billing, three sections and nothing twice: this month (plan, spend against the cap, the daily spend), the people
-// (one table: who is in the account, their role and access, team, spend against their allowance; invite, roles, limits
-// and suspension live in each row's ⋯ menu) and, for admins, the budget rules (how the cap is shared, rollout and
-// throughput, teams). Plans and cards are Stripe's; people are Clerk's; this page joins them.
+// /app Billing: this month (plan, spend against the cap, daily spend) above three tabs. People: one searchable table of
+// who is in the account, their role, access, team and spend against their allowance (invite, roles, limits and
+// suspension in each row's ⋯ menu). Teams: a searchable table of team budgets. Budget rules (admins): how the cap is
+// shared and the limits, beside where the cap goes. Plans and cards are Stripe's; people are Clerk's.
 import { useState } from 'react';
 import { toast } from 'sonner';
 import PageContainer from '@/components/layout/page-container';
-import { ActionsMenu, type RowAction } from '@/components/layout/record-view';
-import { PagedTable } from '@/components/layout/table-pager';
+import { ActionsMenu, RecordView, type RecordCol, type RowAction } from '@/components/layout/record-view';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -65,10 +65,19 @@ export function BillingPage() {
   return (
     <PageContainer pageTitle='Billing'>
       {error ? <ErrorState error={error} /> : !b ? <LoadingCards count={3} /> : (
-        <div className='flex w-full flex-col gap-12'>
+        <div className='flex w-full flex-col gap-10'>
           <ThisMonth b={b} u={u ?? undefined} l={l ?? undefined} />
-          <People t={t ?? undefined} l={l ?? undefined} reload={reload} />
-          {l?.can_manage && <Rules l={l} reload={reloadLimits} />}
+          {/* People, Teams and Budget rules as tabs: the two tables get the full width and height they need. */}
+          <Tabs defaultValue='people' className='gap-4'>
+            <TabsList variant='line' className='gap-6 p-0'>
+              <TabsTrigger value='people' className='flex-none px-0'>People{t && <span className='text-muted-foreground ml-1.5 font-normal tabular-nums'>{t.members.length + t.invitations.length}</span>}</TabsTrigger>
+              <TabsTrigger value='teams' className='flex-none px-0'>Teams{l && <span className='text-muted-foreground ml-1.5 font-normal tabular-nums'>{l.teams.length}</span>}</TabsTrigger>
+              {l?.can_manage && <TabsTrigger value='rules' className='flex-none px-0'>Budget rules</TabsTrigger>}
+            </TabsList>
+            <TabsContent value='people'><People t={t ?? undefined} l={l ?? undefined} reload={reload} /></TabsContent>
+            <TabsContent value='teams'>{l ? <Teams l={l} reload={reload} /> : <LoadingCards count={1} />}</TabsContent>
+            {l?.can_manage && <TabsContent value='rules'><Rules l={l} reload={reloadLimits} /></TabsContent>}
+          </Tabs>
         </div>
       )}
     </PageContainer>
@@ -190,61 +199,47 @@ function People({ t, l, reload }: { t: Team | undefined; l: Limits | undefined; 
       ])
     ];
   };
+  const statusOf = (r: PersonRow) => (r.kind === 'invite' ? (r.x.state === 'expired' ? 'Invitation expired' : 'Invited') : r.m.status === 'active' ? 'Active' : 'Suspended');
+  const cols: RecordCol<PersonRow>[] = [
+    { key: 'person', label: 'Person', keep: true, type: 'text', value: (r) => (r.kind === 'invite' ? r.x.email : r.m.name || r.m.email || ''),
+      render: (r) => r.kind === 'invite' ? <span className='font-medium'>{r.x.email}</span> : (<>
+        <span className='font-medium'>{r.m.name || r.m.email}</span>
+        {r.m.user_id === t.me && <span className='text-muted-foreground ml-2 text-xs'>you</span>}
+        {r.m.name && <span className='text-muted-foreground ml-2 text-xs'>{r.m.email}</span>}
+      </>) },
+    { key: 'role', label: 'Role', className: 'w-24', type: 'select', value: (r) => ((r.kind === 'invite' ? r.x.role : r.m.role) === 'admin' ? 'Admin' : 'Member'),
+      render: (r) => { const admin = (r.kind === 'invite' ? r.x.role : r.m.role) === 'admin'; return <span className={admin ? '' : 'text-muted-foreground'}>{admin ? 'Admin' : 'Member'}</span>; } },
+    { key: 'status', label: 'Status', className: 'w-36', type: 'select', value: statusOf,
+      render: (r) => <Badge variant={statusOf(r) === 'Active' ? 'secondary' : statusOf(r) === 'Invited' ? 'outline' : 'destructive'}>{statusOf(r)}</Badge> },
+    { key: 'team', label: 'Team', className: 'w-36', type: 'select', value: (r) => (r.kind === 'member' ? teamName(r.lim?.team_id) ?? 'No team' : 'No team'),
+      render: (r) => <span className='text-muted-foreground'>{r.kind === 'member' ? teamName(r.lim?.team_id) ?? '—' : '—'}</span> },
+    { key: 'spend', label: 'Spend this month', className: 'w-56', type: 'number', value: (r) => (r.kind === 'member' ? r.lim?.spent ?? 0 : 0),
+      render: (r) => r.kind === 'invite' || !r.lim ? <span className='text-muted-foreground'>—</span> : r.lim.allowance_usd == null
+        ? <span className='text-xs tabular-nums'>{usd(r.lim.spent)} <span className='text-muted-foreground'>· shared budget</span></span>
+        : <Allowance spent={r.lim.spent} cap={r.lim.allowance_usd} /> },
+    { key: 'tokens', label: 'Tokens', className: 'w-28', type: 'number', value: (r) => (r.kind === 'member' && r.lim ? Number(r.lim.tokens_in) + Number(r.lim.tokens_out) : 0),
+      render: (r) => <span className='text-xs tabular-nums'>{r.kind === 'member' && r.lim ? num(Number(r.lim.tokens_in) + Number(r.lim.tokens_out)) : '—'}</span> },
+    { key: 'runs', label: 'Runs at once', className: 'w-32', render: (r) => r.kind === 'invite' || !r.lim ? <span className='text-muted-foreground'>—</span> : (
+      <span className='text-xs tabular-nums'>
+        {r.lim.max_concurrent_runs ?? l?.policy.max_concurrent_runs ?? <span className='text-muted-foreground'>any</span>}
+        {r.lim.max_concurrent_runs == null && l?.policy.max_concurrent_runs != null && <span className='text-muted-foreground'> default</span>}
+        {r.lim.running > 0 && <span className='text-primary ml-1.5'>· {r.lim.running} now</span>}
+      </span>) },
+    { key: 'can_run', label: 'Can run', className: 'w-24', type: 'select', value: (r) => (r.kind === 'member' && r.lim ? (r.lim.can_run ? 'Yes' : 'No') : '—'),
+      render: (r) => <span className={r.kind === 'member' && r.lim?.can_run ? '' : 'text-muted-foreground'}>{r.kind === 'member' && r.lim ? (r.lim.can_run ? 'Yes' : 'No') : '—'}</span> },
+    { key: 'joined', label: 'Joined', className: 'w-28', type: 'date', value: (r) => (r.kind === 'invite' ? r.x.created_at : r.m.created_at),
+      render: (r) => <span className='text-muted-foreground text-xs'>{r.kind === 'invite' ? <>sent <When d={r.x.created_at} /></> : <When d={r.m.created_at} />}</span> }
+  ];
   return (
-    <Block id='team' title='People' action={manage ? <Button size='sm' onClick={() => setInviting(true)}><Icons.add /> Invite</Button> : undefined}>
+    <div className='flex flex-col gap-3'>
       {t.error && <Alert variant='destructive'><AlertDescription>{t.error}</AlertDescription></Alert>}
-      <div className='overflow-x-auto border-y'>
-        <PagedTable items={rows} noun='people'>{(page) => (
-          <Table className='min-w-[1040px]'>
-            <TableHeader><TableRow>
-              <TableHead>Person</TableHead><TableHead className='w-24'>Role</TableHead><TableHead className='w-28'>Status</TableHead>
-              <TableHead className='w-32'>Team</TableHead><TableHead className='w-56'>Spend this month</TableHead><TableHead className='w-28'>Tokens</TableHead>
-              <TableHead className='w-28'>Runs at once</TableHead><TableHead className='w-20'>Can run</TableHead><TableHead className='w-24'>Joined</TableHead>
-              {manage && <TableHead className='w-10'><span className='sr-only'>Actions</span></TableHead>}
-            </TableRow></TableHeader>
-            <TableBody>
-              {page.map((r) => r.kind === 'invite' ? (
-                <TableRow key={r.key}>
-                  <TableCell className='font-medium'>{r.x.email}</TableCell>
-                  <TableCell className='text-muted-foreground'>{r.x.role === 'admin' ? 'Admin' : 'Member'}</TableCell>
-                  <TableCell><Badge variant={r.x.state === 'expired' ? 'destructive' : 'outline'}>{r.x.state === 'expired' ? 'Expired' : 'Invited'}</Badge></TableCell>
-                  <TableCell className='text-muted-foreground'>—</TableCell>
-                  <TableCell className='text-muted-foreground text-xs'>—</TableCell>
-                  <TableCell className='text-muted-foreground'>—</TableCell>
-                  <TableCell className='text-muted-foreground'>—</TableCell>
-                  <TableCell className='text-muted-foreground'>—</TableCell>
-                  <TableCell className='text-muted-foreground text-xs'>sent <When d={r.x.created_at} /></TableCell>
-                  {manage && <TableCell><ActionsMenu items={actions(r)} /></TableCell>}
-                </TableRow>
-              ) : (
-                <TableRow key={r.key}>
-                  <TableCell>
-                    <span className='font-medium'>{r.m.name || r.m.email}</span>
-                    {r.m.user_id === t.me && <span className='text-muted-foreground ml-2 text-xs'>you</span>}
-                    {r.m.name && <span className='text-muted-foreground ml-2 text-xs'>{r.m.email}</span>}
-                  </TableCell>
-                  <TableCell className={r.m.role === 'admin' ? '' : 'text-muted-foreground'}>{r.m.role === 'admin' ? 'Admin' : 'Member'}</TableCell>
-                  <TableCell><Badge variant={r.m.status === 'active' ? 'secondary' : 'destructive'}>{r.m.status === 'active' ? 'Active' : 'Suspended'}</Badge></TableCell>
-                  <TableCell className='text-muted-foreground'>{teamName(r.lim?.team_id) ?? '—'}</TableCell>
-                  <TableCell>{!r.lim ? <span className='text-muted-foreground'>—</span> : r.lim.allowance_usd == null
-                    ? <span className='text-xs tabular-nums'>{usd(r.lim.spent)} <span className='text-muted-foreground'>· shared budget</span></span>
-                    : <Allowance spent={r.lim.spent} cap={r.lim.allowance_usd} />}
-                  </TableCell>
-                  <TableCell className='text-xs tabular-nums'>{r.lim ? num(Number(r.lim.tokens_in) + Number(r.lim.tokens_out)) : '—'}</TableCell>
-                  <TableCell className='text-xs tabular-nums'>
-                    {r.lim ? (r.lim.max_concurrent_runs ?? l?.policy.max_concurrent_runs ?? <span className='text-muted-foreground'>any</span>) : '—'}
-                    {r.lim && r.lim.max_concurrent_runs == null && l?.policy.max_concurrent_runs != null && <span className='text-muted-foreground'> default</span>}
-                    {r.lim && r.lim.running > 0 && <span className='text-primary ml-1.5'>· {r.lim.running} now</span>}
-                  </TableCell>
-                  <TableCell className={r.lim?.can_run ? '' : 'text-muted-foreground'}>{r.lim ? (r.lim.can_run ? 'Yes' : 'No') : '—'}</TableCell>
-                  <TableCell className='text-muted-foreground text-xs'><When d={r.m.created_at} /></TableCell>
-                  {manage && <TableCell><ActionsMenu items={actions(r)} /></TableCell>}
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        )}</PagedTable>
-      </div>
+      <RecordView id='billing-people' rows={rows} rowKey={(r) => r.key} cols={cols} noun='people'
+        searchText={(r) => (r.kind === 'invite' ? r.x.email : `${r.m.name ?? ''} ${r.m.email ?? ''} ${teamName(r.lim?.team_id) ?? ''}`)}
+        searchPlaceholder='Search people by name, email or team'
+        views={[{ id: 'all', label: 'Everyone' }, { id: 'active', label: 'Active', match: (r) => statusOf(r) === 'Active' }, { id: 'invited', label: 'Invited', match: (r) => r.kind === 'invite' },
+          { id: 'suspended', label: 'Suspended', match: (r) => statusOf(r) === 'Suspended' }]}
+        primary={manage ? <Button onClick={() => setInviting(true)}><Icons.add /> Invite</Button> : undefined}
+        actions={manage ? actions : undefined} exportName='people' empty='Nobody here yet.' />
       <p className='text-muted-foreground text-xs leading-none'>
         {manage ? 'Suspending someone cuts off their AI client and this portal within a minute; they stay in the account and can be restored.' : 'Ask an account admin to change roles, access or limits.'}
       </p>
@@ -262,7 +257,7 @@ function People({ t, l, reload }: { t: Team | undefined; l: Limits | undefined; 
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </Block>
+    </div>
   );
 }
 
@@ -360,8 +355,11 @@ function Rules({ l, reload }: { l: Limits; reload: () => void }) {
         {dirty && <span className='text-muted-foreground text-xs leading-none'>Unsaved changes · <button type='button' className='hover:text-foreground underline-offset-4 hover:underline' onClick={() => setF(init())}>Reset</button></span>}
         <Button size='sm' onClick={save} disabled={busy || !dirty}>{busy ? 'Saving…' : 'Save rules'}</Button>
       </div>}>
-      <Allocation l={l} />
-      <div role='radiogroup' aria-label='How the cap is shared' className='grid gap-3 sm:grid-cols-3'>
+      <div className='grid gap-x-12 gap-y-8 xl:grid-cols-[minmax(0,1fr)_26rem] xl:items-start'>
+      <div className='flex flex-col gap-8'>
+      <div className='flex flex-col gap-3'>
+      <p className='text-sm leading-none font-medium'>How the monthly cap is shared</p>
+      <div role='radiogroup' aria-label='How the cap is shared' className='grid gap-3 lg:grid-cols-3'>
         {MODES.map((m) => (
           <button key={m.id} type='button' role='radio' aria-checked={f.mode === m.id} onClick={() => setF({ ...f, mode: m.id })}
             className={cn('flex flex-col gap-2 rounded-lg border p-4 text-left transition-colors', f.mode === m.id ? 'border-primary bg-primary/10' : 'hover:bg-muted/50')}>
@@ -373,7 +371,10 @@ function Rules({ l, reload }: { l: Limits; reload: () => void }) {
           </button>
         ))}
       </div>
-      <div className='grid gap-x-8 gap-y-4 sm:grid-cols-2 lg:grid-cols-4'>
+      </div>
+      <div className='flex flex-col gap-3'>
+      <p className='text-sm leading-none font-medium'>Limits</p>
+      <div className='grid gap-x-8 gap-y-5 sm:grid-cols-2'>
         {f.mode === 'even' && <NumberField label='Shared reserve' unit='$' value={f.reserve} onChange={(v) => setF({ ...f, reserve: v })} hint='Kept out of the even split.' />}
         {f.mode === 'custom' && <NumberField label='Default monthly cap' unit='$' value={f.defaultCap} onChange={(v) => setF({ ...f, defaultCap: v })} placeholder='no cap' hint='For people without their own.' />}
         <NumberField label='Runs at once, per person' value={f.conc} onChange={(v) => setF({ ...f, conc: v })} placeholder='no limit' hint='Simulations running together.' />
@@ -383,7 +384,11 @@ function Rules({ l, reload }: { l: Limits; reload: () => void }) {
           <span className='flex h-9 items-center gap-2'><Switch checked={f.newRun} onCheckedChange={(v) => setF({ ...f, newRun: Boolean(v) })} /><span className='text-muted-foreground text-xs'>{f.newRun ? 'Yes, from day one' : 'Only once allowed'}</span></span>
         </label>
       </div>
-      <Teams l={l} reload={reload} />
+      </div>
+      </div>
+      {/* Where the cap goes, beside the rules on wide screens so a change and its effect are seen together. */}
+      <div className='xl:sticky xl:top-20 rounded-lg border p-5'><Allocation l={l} /></div>
+      </div>
     </Block>
   );
 }
@@ -433,58 +438,49 @@ function Allocation({ l }: { l: Limits }) {
   );
 }
 
+/** Teams as one full table: budget used against the team cap, runs at once, people. Add, edit and delete (admins). */
 function Teams({ l, reload }: { l: Limits; reload: () => void }) {
-  const [add, setAdd] = useState({ name: '', budget: '' });
-  const [edit, setEdit] = useState<{ id: number; name: string; budget: string; conc: string } | null>(null);
-  const create = (e: React.FormEvent) => {
-    e.preventDefault();
-    appApi('POST', '/limits/teams', { name: add.name, budget_usd: orNull(add.budget) }).then(() => { setAdd({ name: '', budget: '' }); toast.success('Team added'); reload(); }).catch(fail);
-  };
-  const saveEdit = (e: React.FormEvent) => {
+  const [edit, setEdit] = useState<{ id: number | null; name: string; budget: string; conc: string } | null>(null);
+  const manage = l.can_manage;
+  const save = (e: React.FormEvent) => {
     e.preventDefault(); if (!edit) return;
-    appApi('PUT', `/limits/teams/${edit.id}`, { name: edit.name, budget_usd: orNull(edit.budget), max_concurrent_runs: orNull(edit.conc) }).then(() => { setEdit(null); toast.success('Team saved'); reload(); }).catch(fail);
+    const body = { name: edit.name, budget_usd: orNull(edit.budget), max_concurrent_runs: orNull(edit.conc) };
+    (edit.id == null ? appApi('POST', '/limits/teams', body) : appApi('PUT', `/limits/teams/${edit.id}`, body))
+      .then(() => { setEdit(null); toast.success(edit.id == null ? 'Team added' : 'Team saved'); reload(); }).catch(fail);
   };
   const remove = (x: LimitTeam) => { if (window.confirm(`Delete team ${x.name}? Its people go back to the shared budget.`)) appApi('DELETE', `/limits/teams/${x.id}`).then(() => { toast.success('Team deleted'); reload(); }).catch(fail); };
+  const cols: RecordCol<LimitTeam>[] = [
+    { key: 'team', label: 'Team', keep: true, type: 'text', value: (x) => x.name, render: (x) => <span className='font-medium'>{x.name}</span> },
+    { key: 'budget', label: 'Budget used this month', className: 'w-72', type: 'number', value: (x) => x.spent,
+      render: (x) => (x.budget_usd == null ? <span className='text-xs tabular-nums'>{usd(x.spent)} <span className='text-muted-foreground'>· no team cap</span></span> : <Allowance spent={x.spent} cap={x.budget_usd} />) },
+    { key: 'cap', label: 'Monthly cap', className: 'w-32', type: 'number', value: (x) => x.budget_usd ?? undefined, render: (x) => <span className='tabular-nums'>{x.budget_usd == null ? <span className='text-muted-foreground'>none</span> : usd(x.budget_usd)}</span> },
+    { key: 'conc', label: 'Runs at once, per person', className: 'w-48', type: 'number', value: (x) => x.max_concurrent_runs ?? undefined,
+      render: (x) => <span className='text-xs tabular-nums'>{x.max_concurrent_runs ?? <span className='text-muted-foreground'>account default</span>}</span> },
+    { key: 'people', label: 'People', className: 'w-28', type: 'number', value: (x) => x.members, render: (x) => <span className='text-xs'>{x.members ? `${x.members} ${x.members === 1 ? 'person' : 'people'}` : <span className='text-muted-foreground'>nobody yet</span>}</span> }
+  ];
   return (
-    <div className='flex flex-col gap-3'>
-      <div className='overflow-x-auto border-y'>
-        <Table>
-          <TableHeader><TableRow><TableHead>Team</TableHead><TableHead className='w-64'>Budget used</TableHead><TableHead className='w-32'>Runs at once</TableHead><TableHead className='w-24'>People</TableHead><TableHead className='w-10'><span className='sr-only'>Actions</span></TableHead></TableRow></TableHeader>
-          <TableBody>
-            {!l.teams.length && <TableRow><TableCell colSpan={5} className='text-muted-foreground py-6 text-center'>No teams: everyone shares the account cap.</TableCell></TableRow>}
-            {l.teams.map((x) => (
-              <TableRow key={x.id}>
-                <TableCell className='font-medium'>{x.name}</TableCell>
-                <TableCell>{x.budget_usd == null ? <span className='text-xs tabular-nums'>{usd(x.spent)} <span className='text-muted-foreground'>· no team cap</span></span> : <Allowance spent={x.spent} cap={x.budget_usd} />}</TableCell>
-                <TableCell className='text-xs tabular-nums'>{x.max_concurrent_runs ?? <span className='text-muted-foreground'>account default</span>}</TableCell>
-                <TableCell className='text-xs'>{x.members ? `${x.members} ${x.members === 1 ? 'person' : 'people'}` : <span className='text-muted-foreground'>nobody yet</span>}</TableCell>
-                <TableCell><ActionsMenu items={[
-                  { label: 'Edit team', icon: <Icons.edit />, onSelect: () => setEdit({ id: x.id, name: x.name, budget: str(x.budget_usd), conc: str(x.max_concurrent_runs) }) },
-                  { label: 'Delete team', icon: <Icons.trash />, destructive: true, onSelect: () => remove(x) }
-                ]} /></TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
-      <form onSubmit={create} className='flex flex-wrap gap-2'>
-        <Input placeholder='New team name' required value={add.name} onChange={(e) => setAdd({ ...add, name: e.target.value })} aria-label='Team name' className='max-w-xs' />
-        <Input type='number' min={0} step={1} placeholder='Monthly budget $ (optional)' value={add.budget} onChange={(e) => setAdd({ ...add, budget: e.target.value })} aria-label='Monthly budget' className='max-w-56' />
-        <Button type='submit' variant='outline'><Icons.add /> Add team</Button>
-      </form>
+    <>
+      <RecordView id='billing-teams' rows={l.teams} rowKey={(x) => String(x.id)} cols={cols} noun='teams'
+        searchText={(x) => x.name} searchPlaceholder='Search teams'
+        primary={manage ? <Button onClick={() => setEdit({ id: null, name: '', budget: '', conc: '' })}><Icons.add /> Add team</Button> : undefined}
+        actions={manage ? (x) => [
+          { label: 'Edit team', icon: <Icons.edit />, onSelect: () => setEdit({ id: x.id, name: x.name, budget: str(x.budget_usd), conc: str(x.max_concurrent_runs) }) },
+          { label: 'Delete team', icon: <Icons.trash />, destructive: true, separator: true, onSelect: () => remove(x) }
+        ] : undefined}
+        exportName='teams' empty='No teams: everyone shares the account cap. Put people in teams from their row on People (Edit limits).' />
       <Dialog open={edit !== null} onOpenChange={(o) => { if (!o) setEdit(null); }}>
         <DialogContent className='sm:max-w-md'>
           {edit && (
-            <form onSubmit={saveEdit} className='grid gap-4'>
-              <DialogHeader><DialogTitle>Edit team</DialogTitle><DialogDescription>A team budget caps the team&apos;s combined spend; in Split evenly it is shared among its people.</DialogDescription></DialogHeader>
-              <label className='grid gap-1.5 text-sm'>Name<Input required value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} /></label>
+            <form onSubmit={save} className='grid gap-4'>
+              <DialogHeader><DialogTitle>{edit.id == null ? 'Add a team' : 'Edit team'}</DialogTitle><DialogDescription>A team budget caps the team&apos;s combined spend; in Split evenly it is shared among its people.</DialogDescription></DialogHeader>
+              <label className='grid gap-1.5 text-sm'>Name<Input required autoFocus value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} /></label>
               <label className='grid gap-1.5 text-sm'>Monthly budget ($)<Input type='number' min={0} step={1} value={edit.budget} onChange={(e) => setEdit({ ...edit, budget: e.target.value })} placeholder='no cap' /></label>
-              <label className='grid gap-1.5 text-sm'>Running at once, per person<Input type='number' min={0} step={1} value={edit.conc} onChange={(e) => setEdit({ ...edit, conc: e.target.value })} placeholder='account default' /></label>
-              <DialogFooter><Button type='button' variant='outline' onClick={() => setEdit(null)}>Cancel</Button><Button type='submit'>Save team</Button></DialogFooter>
+              <label className='grid gap-1.5 text-sm'>Runs at once, per person<Input type='number' min={0} step={1} value={edit.conc} onChange={(e) => setEdit({ ...edit, conc: e.target.value })} placeholder='account default' /></label>
+              <DialogFooter><Button type='button' variant='outline' onClick={() => setEdit(null)}>Cancel</Button><Button type='submit'>{edit.id == null ? 'Add team' : 'Save team'}</Button></DialogFooter>
             </form>
           )}
         </DialogContent>
       </Dialog>
-    </div>
+    </>
   );
 }
