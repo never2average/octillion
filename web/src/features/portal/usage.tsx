@@ -75,7 +75,7 @@ export function UsagePage() {
               { label: 'Active people', value: u.active_people },
               { label: 'Simulations', value: num(u.runs.simulations), hint: useCases.length ? 'all use cases' : undefined },
               { label: 'Agent sessions done', value: `${num(u.runs.completed)} / ${num(u.runs.sessions)}` },
-              { label: u.spend.filtered ? 'Their model spend this month' : 'Model spend this month', value: usd(u.spend.month_usd), hint: u.spend.filtered ? 'runs they launched' : Number(u.spend.budget_usd) ? `of ${usd(u.spend.budget_usd)}` : 'no monthly cap' }
+              { label: u.spend.filtered ? 'Their model spend this month' : 'Model spend this month', value: usd(u.spend.month_usd), hint: u.spend.filtered ? 'runs they launched' : Number(u.spend.budget_usd) ? `of ${usd(u.spend.budget_usd)}` : 'no prepaid allowance yet' }
             ]} />
             {!u.spend.filtered && Number(u.spend.budget_usd) > 0 && <SpendMeter spent={Number(u.spend.month_usd)} budget={Number(u.spend.budget_usd)} className='max-w-md' />}
           </div>
