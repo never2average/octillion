@@ -3,7 +3,7 @@
 // who is in the account, their role, access, team and spend against their allowance (invite, roles, limits and
 // suspension in each row's ⋯ menu). Teams: a searchable table of team budgets. Budget rules (admins): how the cap is
 // shared and the limits, beside where the cap goes. Plans and cards are Stripe's; people are Clerk's.
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import PageContainer from '@/components/layout/page-container';
 import { ActionsMenu, RecordView, type RecordCol, type RowAction } from '@/components/layout/record-view';
@@ -15,6 +15,7 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { Switch } from '@/components/ui/switch';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Icons } from '@/components/icons';
@@ -40,7 +41,8 @@ interface Policy { mode: Mode; reserve_usd: number; default_cap_usd: number | nu
 interface LimitTeam { id: number; name: string; budget_usd: number | null; max_concurrent_runs: number | null; members: number; spent: number }
 interface LimitMember { user_id: string; team_id: number | null; can_run: boolean; adjust_usd: number; cap_usd: number | null; max_concurrent_runs: number | null; allowance_usd: number | null; spent: number; running: number; tokens_in: number; tokens_out: number }
 interface Limits { policy: Policy; budget_usd: number; teams: LimitTeam[]; members: LimitMember[]; can_manage: boolean; me: string | null; clerk?: boolean;
-  allocated_usd?: number; unallocated_usd?: number | null; spent_usd?: number }
+  allocated_usd?: number; unallocated_usd?: number | null; spent_usd?: number; last_change?: { by_name: string; at: string; summary: string | null } | null }
+interface Change { id: number; at: string; by_name: string; summary: string }
 
 const STATUS: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = { active: 'default', trialing: 'secondary', past_due: 'destructive', unpaid: 'destructive', canceled: 'outline' };
 const orNull = (v: string) => (v.trim() === '' ? null : Number(v));
@@ -357,6 +359,7 @@ function Rules({ l, reload }: { l: Limits; reload: () => void }) {
   return (
     <Block id='limits' title='' action={
       <div className='flex items-center gap-3'>
+        <LastChanged l={l} />
         {dirty && <span className='text-muted-foreground text-xs leading-none'>Unsaved changes · <button type='button' className='hover:text-foreground underline-offset-4 hover:underline' onClick={() => setF(init())}>Reset</button></span>}
         <Button size='sm' onClick={save} disabled={busy || !dirty}>{busy ? 'Saving…' : 'Save rules'}</Button>
       </div>}>
@@ -395,6 +398,59 @@ function Rules({ l, reload }: { l: Limits; reload: () => void }) {
       <div className='xl:sticky xl:top-20 rounded-lg border p-5'><Allocation l={l} /></div>
       </div>
     </Block>
+  );
+}
+
+/** "Oct 12, 14:03 UTC": history times are UTC, like the month the budget runs on. */
+const utcTime = (iso: string) => new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' }) + ' UTC';
+
+/** "Last changed by {name}, {when} · History"; History opens the account's change log, one sentence per save. */
+function LastChanged({ l }: { l: Limits }) {
+  const [open, setOpen] = useState(false);
+  const c = l.last_change;
+  return (
+    <>
+      <span className='text-muted-foreground text-xs leading-none'>
+        {c ? <>Last changed by {c.by_name}, {utcTime(c.at)} · <button type='button' className='hover:text-foreground underline underline-offset-4' onClick={() => setOpen(true)}>History</button></>
+          : "Using Octillion's default rules"}
+      </span>
+      {open && <History onClose={() => setOpen(false)} />}
+    </>
+  );
+}
+
+function History({ onClose }: { onClose: () => void }) {
+  const [entries, setEntries] = useState<Change[] | null>(null);
+  const [next, setNext] = useState<number | null>(null);
+  const [busy, setBusy] = useState(false);
+  const page = (before?: number) => {
+    setBusy(true);
+    appApi<{ entries: Change[]; next_before: number | null }>('GET', `/limits/history${before ? `?before=${before}` : ''}`)
+      .then((r) => { setEntries((e) => [...(before ? e ?? [] : []), ...r.entries]); setNext(r.next_before); }).catch(fail).finally(() => setBusy(false));
+  };
+  useEffect(() => page(), []);
+  return (
+    <Sheet open onOpenChange={(o) => !o && onClose()}>
+      <SheetContent side='right' className='gap-0 data-[side=right]:w-full data-[side=right]:sm:max-w-lg'>
+        <SheetHeader className='border-b'>
+          <SheetTitle>Budget rules history</SheetTitle>
+          <SheetDescription>Every change to budgets, teams and people's limits, newest first. Times are UTC.</SheetDescription>
+        </SheetHeader>
+        <div className='min-h-0 flex-1 overflow-y-auto px-4 py-2'>
+          {!entries ? <p className='text-muted-foreground py-4 text-sm'>Loading…</p>
+            : !entries.length ? <p className='text-muted-foreground py-4 text-sm'>No changes yet.</p>
+            : <ol className='divide-y'>
+                {entries.map((e) => (
+                  <li key={e.id} className='flex flex-col gap-1 py-3 text-sm'>
+                    <span className='text-muted-foreground text-xs'>{utcTime(e.at)} · {e.by_name}</span>
+                    <span>{e.summary}</span>
+                  </li>
+                ))}
+              </ol>}
+          {next && <Button variant='outline' size='sm' className='my-3' disabled={busy} onClick={() => page(next)}>{busy ? 'Loading…' : 'Show older'}</Button>}
+        </div>
+      </SheetContent>
+    </Sheet>
   );
 }
 

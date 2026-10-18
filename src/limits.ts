@@ -17,7 +17,7 @@
  */
 import type { Org } from "./auth.js";
 import { orgBudget } from "./billing.js";
-import { getDb } from "./db.js";
+import { getDb, type Queryable } from "./db.js";
 import { settingNumber } from "./settings.js";
 
 /** Why a launch was refused, for /app to show beside the message; validation errors carry no code. */
@@ -301,6 +301,62 @@ export async function launcherOverLimit(orgId: number, slug: string, userId: str
   return blocked != null && blocked !== "launch_access";
 }
 
+// ---------- change history: one plain sentence per save, shown on Budget rules ----------
+
+/** Who made a change: the session's label (stored as updated_by, "customer:<email>") and their user id, for their name. */
+export interface Actor { label: string; user: string | null }
+
+const MODE_WORDS: Record<Mode, string> = { pool: "Shared pool", even: "Split evenly", custom: "Custom caps" };
+/** Money for a history line: whole dollars without cents ("$50", "$12.50"); empty is `none`. */
+const usdWord = (v: number | null, none = "none") =>
+  v == null ? none : `${v < 0 ? "-" : ""}$${Number.isInteger(Math.abs(v)) ? Math.abs(v) : Math.abs(v).toFixed(2)}`;
+const countWord = (v: number | null, none = "no limit") => (v == null ? none : String(v));
+/** "Buffer $0 → $50" when the value changed; nothing when it didn't. */
+const diff = <T>(label: string, a: T, b: T, word: (v: T) => string) => (a === b ? [] : [`${label} ${word(a)} → ${word(b)}`]);
+
+/**
+ * Append one history entry in the same transaction as the change. Nothing is written when nothing changed (a save
+ * that sends the same values). A null actor is Octillion itself (a migration), shown as "System".
+ */
+async function logChange(q: Queryable, orgId: number, actor: Actor | null, parts: string[], before: unknown, after: unknown) {
+  if (!parts.length) return;
+  await q.query("INSERT INTO usage_rule_changes (org_id, actor, actor_user, summary, before, after) VALUES ($1, $2, $3, $4, $5, $6)",
+    [orgId, actor?.label ?? null, actor?.user ?? null, parts.join("; "), before == null ? null : JSON.stringify(before), after == null ? null : JSON.stringify(after)]);
+}
+
+/** People's names by user id (Clerk), so history shows a person's current name; past members fall back to their email. */
+async function namesOf(slug: string) {
+  const { team } = await import("./admin.js");
+  const t = await team(slug).catch(() => ({ members: [] as { user_id: string; name: string | null; email: string | null }[] }));
+  return new Map(t.members.map((m) => [m.user_id, m.name || m.email || null]));
+}
+const byName = (names: Map<string, string | null>, actor: string | null, user: string | null) =>
+  actor == null && user == null ? "System" : (user && names.get(user)) || actor?.replace(/^customer:/, "") || "Someone";
+
+export interface Change { id: number; at: Date; by_name: string; summary: string }
+
+/** The account's history, newest first, 50 at a time; `before` is the id of the oldest entry already shown. */
+export async function history(org: { orgId: number; slug: string }, before?: number): Promise<{ entries: Change[]; next_before: number | null }> {
+  const PAGE = 50;
+  const db = await getDb();
+  const rows = await db.query<{ id: number; at: Date; actor: string | null; actor_user: string | null; summary: string }>(
+    `SELECT id, at, actor, actor_user, summary FROM usage_rule_changes WHERE org_id = $1 ${before != null ? "AND id < $3" : ""} ORDER BY id DESC LIMIT $2`,
+    before != null ? [org.orgId, PAGE, before] : [org.orgId, PAGE]);
+  const names = rows.length ? await namesOf(org.slug) : new Map<string, string | null>();
+  const entries = rows.map((r) => ({ id: Number(r.id), at: r.at, by_name: byName(names, r.actor, r.actor_user), summary: r.summary }));
+  return { entries, next_before: entries.length === PAGE ? entries.at(-1)!.id : null };
+}
+
+/** The header's "Last changed by": the newest entry, else who last saved the policy (before history existed); null: never. */
+export async function lastChange(org: { orgId: number; slug: string }): Promise<{ by_name: string; at: Date; summary: string | null } | null> {
+  const { entries: [e] } = await history(org);
+  if (e) return { by_name: e.by_name, at: e.at, summary: e.summary };
+  const [p] = await (await getDb()).query<{ updated_at: Date | null; updated_by: string | null }>(
+    "SELECT updated_at, updated_by FROM usage_policies WHERE org_id = $1", [org.orgId]);
+  if (!p?.updated_at) return null;
+  return { by_name: byName(new Map(), p.updated_by, null), at: p.updated_at, summary: null };
+}
+
 // ---------- changes from /app (account admins) ----------
 
 const money = (v: unknown, field: string, allowNegative = false) => {
@@ -320,9 +376,9 @@ const count = (v: unknown, field: string, max = 10000) => {
 const RUNS = "Runs at once";
 const sessions = (v: unknown) => count(v, "Agent sessions per run", settingNumber("OCTILLION_MAX_SESSIONS_PER_RUN"));
 
-export async function setPolicy(orgId: number, actor: string, p: Partial<Record<keyof Policy, unknown>>) {
+export async function setPolicy(orgId: number, actor: Actor, p: Partial<Record<keyof Policy, unknown>>) {
   const cur = (await load(orgId)).policy;
-  const mode = p.mode === undefined ? cur.mode : String(p.mode);
+  const mode = (p.mode === undefined ? cur.mode : String(p.mode)) as Mode;
   if (!["pool", "even", "custom"].includes(mode)) throw new LimitError("mode must be pool, even or custom");
   const next = {
     mode, reserve_usd: p.reserve_usd === undefined ? cur.reserve_usd : money(p.reserve_usd, "reserve_usd") ?? 0,
@@ -334,19 +390,35 @@ export async function setPolicy(orgId: number, actor: string, p: Partial<Record<
   // Own limits apply in every mode, so custom with no default would just be the shared pool under another name.
   if (next.mode === "custom" && next.default_cap_usd == null)
     throw new LimitError("Custom caps need a default monthly cap for everyone. Enter an amount, or share the budget freely instead.");
-  await (await getDb()).query(
-    `INSERT INTO usage_policies (org_id, mode, reserve_usd, default_cap_usd, new_members_can_run, max_concurrent_runs, max_sessions_per_run, updated_at, updated_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, now(), $8)
-     ON CONFLICT (org_id) DO UPDATE SET mode = $2, reserve_usd = $3, default_cap_usd = $4, new_members_can_run = $5,
-       max_concurrent_runs = $6, max_sessions_per_run = $7, updated_at = now(), updated_by = $8`,
-    [orgId, next.mode, next.reserve_usd, next.default_cap_usd, next.new_members_can_run, next.max_concurrent_runs, next.max_sessions_per_run, actor]);
+  const yesNo = (v: boolean) => (v ? "yes" : "no");
+  const parts = [
+    ...diff("How budgets are shared:", cur.mode, next.mode, (m) => MODE_WORDS[m]),
+    ...diff("Buffer", cur.reserve_usd, next.reserve_usd, (v) => usdWord(v)),
+    ...diff("Default cap", cur.default_cap_usd, next.default_cap_usd, (v) => usdWord(v)),
+    ...diff("New members can launch:", cur.new_members_can_run, next.new_members_can_run, yesNo),
+    ...diff("Runs at once", cur.max_concurrent_runs, next.max_concurrent_runs, (v) => countWord(v)),
+    ...diff("Sessions per run", cur.max_sessions_per_run, next.max_sessions_per_run, (v) => countWord(v, "server's limit")),
+  ];
+  const { updated_at: _a, updated_by: _b, ...before } = cur;
+  await (await getDb()).transaction(async (tx) => {
+    await tx.query(
+      `INSERT INTO usage_policies (org_id, mode, reserve_usd, default_cap_usd, new_members_can_run, max_concurrent_runs, max_sessions_per_run, updated_at, updated_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, now(), $8)
+       ON CONFLICT (org_id) DO UPDATE SET mode = $2, reserve_usd = $3, default_cap_usd = $4, new_members_can_run = $5,
+         max_concurrent_runs = $6, max_sessions_per_run = $7, updated_at = now(), updated_by = $8`,
+      [orgId, next.mode, next.reserve_usd, next.default_cap_usd, next.new_members_can_run, next.max_concurrent_runs, next.max_sessions_per_run, actor.label]);
+    await logChange(tx, orgId, actor, parts, { policy: before }, { policy: next });
+  });
 }
+
+const teamWords = (t: { budget_usd: number | null; max_concurrent_runs: number | null }) =>
+  [`budget ${usdWord(t.budget_usd)}`, ...(t.max_concurrent_runs != null ? [`runs at once ${t.max_concurrent_runs}`] : [])].join(", ");
 
 /**
  * Add a team, or change one. A change is partial: only the fields sent change (a rename no longer clears the team's
  * budget or runs at once); send null to clear one.
  */
-export async function saveTeam(orgId: number, t: { id?: unknown; name?: unknown; budget_usd?: unknown; max_concurrent_runs?: unknown }) {
+export async function saveTeam(orgId: number, actor: Actor, t: { id?: unknown; name?: unknown; budget_usd?: unknown; max_concurrent_runs?: unknown }) {
   const has = (k: keyof typeof t) => t[k] !== undefined;
   const name = String(t.name ?? "").trim().slice(0, 60);
   if ((!t.id || has("name")) && !name) throw new LimitError("A team needs a name");
@@ -358,34 +430,58 @@ export async function saveTeam(orgId: number, t: { id?: unknown; name?: unknown;
       if (has("name")) set("name", name);
       if (has("budget_usd")) set("budget_usd", money(t.budget_usd, "Team budget"));
       if (has("max_concurrent_runs")) set("max_concurrent_runs", count(t.max_concurrent_runs, RUNS));
-      const r = sets.length
-        ? await db.query(`UPDATE usage_teams SET ${sets.join(", ")} WHERE org_id = $1 AND id = $2 RETURNING id`, vals)
-        : await db.query("SELECT id FROM usage_teams WHERE org_id = $1 AND id = $2", vals);
-      if (!r.length) throw new LimitError("No such team", 404);
+      await db.transaction(async (tx) => {
+        const cols = "id, name, budget_usd, max_concurrent_runs";
+        const read = (sql: string, params: unknown[]) => tx.query<Team>(sql, params).then((r) => r.map((x) => ({ ...x, id: Number(x.id), budget_usd: num(x.budget_usd), max_concurrent_runs: num(x.max_concurrent_runs) })));
+        const [before] = await read(`SELECT ${cols} FROM usage_teams WHERE org_id = $1 AND id = $2 FOR UPDATE`, vals.slice(0, 2));
+        if (!before) throw new LimitError("No such team", 404);
+        if (!sets.length) return;
+        const [after] = await read(`UPDATE usage_teams SET ${sets.join(", ")} WHERE org_id = $1 AND id = $2 RETURNING ${cols}`, vals);
+        await logChange(tx, orgId, actor, [
+          ...(before.name !== after!.name ? [`Renamed team ${before.name} to ${after!.name}`] : []),
+          ...diff(`${after!.name} budget`, before.budget_usd, after!.budget_usd, (v) => usdWord(v)),
+          ...diff(`${after!.name} runs at once`, before.max_concurrent_runs, after!.max_concurrent_runs, (v) => countWord(v, "account setting")),
+        ], { team: before }, { team: after });
+      });
       return { id: Number(t.id) };
     }
-    const vals = [orgId, name, money(t.budget_usd, "Team budget"), count(t.max_concurrent_runs, RUNS)];
-    const [r] = await db.query<{ id: number }>("INSERT INTO usage_teams (org_id, name, budget_usd, max_concurrent_runs) VALUES ($1, $2, $3, $4) RETURNING id", vals);
-    return { id: Number(r.id) };
+    const vals = [orgId, name, money(t.budget_usd, "Team budget"), count(t.max_concurrent_runs, RUNS)] as const;
+    return await db.transaction(async (tx) => {
+      const [r] = await tx.query<{ id: number }>("INSERT INTO usage_teams (org_id, name, budget_usd, max_concurrent_runs) VALUES ($1, $2, $3, $4) RETURNING id", [...vals]);
+      const after = { id: Number(r!.id), name, budget_usd: vals[2], max_concurrent_runs: vals[3] };
+      await logChange(tx, orgId, actor, [`Added team ${name} (${teamWords(after)})`], null, { team: after });
+      return { id: after.id };
+    });
   } catch (e) {
     if (/unique|duplicate/i.test((e as Error).message)) throw new LimitError(`There is already a team called ${name}`, 409);
     throw e;
   }
 }
 
-export async function deleteTeam(orgId: number, id: number) {
-  const r = await (await getDb()).query("DELETE FROM usage_teams WHERE org_id = $1 AND id = $2 RETURNING id", [orgId, id]);
-  if (!r.length) throw new LimitError("No such team", 404);
+/** Remove a team; its people move to Everyone else (their own settings stay). */
+export async function deleteTeam(orgId: number, actor: Actor, id: number) {
+  await (await getDb()).transaction(async (tx) => {
+    const [t] = await tx.query<Team & { people: number }>(
+      `SELECT id, name, budget_usd, max_concurrent_runs, (SELECT count(*) FROM usage_members m WHERE m.org_id = $1 AND m.team_id = $2) AS people
+         FROM usage_teams WHERE org_id = $1 AND id = $2`, [orgId, id]);
+    if (!t) throw new LimitError("No such team", 404);
+    await tx.query("DELETE FROM usage_teams WHERE org_id = $1 AND id = $2", [orgId, id]);
+    const team = { id: Number(t.id), name: t.name, budget_usd: num(t.budget_usd), max_concurrent_runs: num(t.max_concurrent_runs) }, people = Number(t.people);
+    await logChange(tx, orgId, actor, [`Removed team ${t.name} (${teamWords(team)}${people ? `; ${people} ${people === 1 ? "person" : "people"} moved to Everyone else` : ""})`],
+      { team, people }, null);
+  });
 }
 
 /** One person's settings; only the fields sent change. The person must be an active member of the account. */
-export async function setMember(org: { orgId: number; slug: string }, userId: string, m: Record<string, unknown>) {
+export async function setMember(org: { orgId: number; slug: string }, actor: Actor, userId: string, m: Record<string, unknown>) {
   const { team } = await import("./admin.js");
-  if (!(await team(org.slug)).members.some((x) => x.user_id === userId && x.status === "active")) throw new LimitError("Not an active member of this account", 404);
+  const person = (await team(org.slug)).members.find((x) => x.user_id === userId && x.status === "active");
+  if (!person) throw new LimitError("Not an active member of this account", 404);
   const db = await getDb();
   if (m.team_id != null && m.team_id !== "" && !(await db.query("SELECT 1 FROM usage_teams WHERE org_id = $1 AND id = $2", [org.orgId, Number(m.team_id)])).length)
     throw new LimitError("No such team", 404);
-  const cur = (await load(org.orgId)).rows.get(userId);
+  const { rows, teams } = await load(org.orgId);
+  const cur = rows.get(userId);
   const pick = <T>(k: string, parse: () => T, fallback: T) => (k in m ? parse() : fallback);
   const next = {
     team_id: pick("team_id", () => (m.team_id == null || m.team_id === "" ? null : Number(m.team_id)), cur?.team_id ?? null),
@@ -394,8 +490,22 @@ export async function setMember(org: { orgId: number; slug: string }, userId: st
     can_run: pick("can_run", () => (m.can_run == null ? null : Boolean(m.can_run)), cur?.can_run ?? null),
     max_concurrent_runs: pick("max_concurrent_runs", () => count(m.max_concurrent_runs, RUNS), cur?.max_concurrent_runs ?? null),
   };
-  await db.query(
-    `INSERT INTO usage_members (org_id, user_id, team_id, cap_usd, adjust_usd, can_run, max_concurrent_runs) VALUES ($1, $2, $3, $4, $5, $6, $7)
-     ON CONFLICT (org_id, user_id) DO UPDATE SET team_id = $3, cap_usd = $4, adjust_usd = $5, can_run = $6, max_concurrent_runs = $7`,
-    [org.orgId, userId, next.team_id, next.cap_usd, next.adjust_usd, next.can_run, next.max_concurrent_runs]);
+  const before = { team_id: cur?.team_id ?? null, cap_usd: cur?.cap_usd ?? null, adjust_usd: cur?.adjust_usd ?? 0, can_run: cur?.can_run ?? null,
+    max_concurrent_runs: cur?.max_concurrent_runs ?? null };
+  const teamName = (id: number | null) => (id == null ? "Everyone else" : teams.find((t) => t.id === id)?.name ?? "a removed team");
+  const parts = [
+    ...diff("team", before.team_id, next.team_id, teamName),
+    ...diff("own limit", before.cap_usd, next.cap_usd, (v) => usdWord(v)),
+    ...diff("adjustment", before.adjust_usd, next.adjust_usd, (v) => usdWord(v)),
+    ...diff("can launch:", before.can_run, next.can_run, (v) => (v == null ? "account setting" : v ? "yes" : "no")),
+    ...diff("runs at once", before.max_concurrent_runs, next.max_concurrent_runs, (v) => countWord(v, "team or account setting")),
+  ];
+  await db.transaction(async (tx) => {
+    await tx.query(
+      `INSERT INTO usage_members (org_id, user_id, team_id, cap_usd, adjust_usd, can_run, max_concurrent_runs) VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (org_id, user_id) DO UPDATE SET team_id = $3, cap_usd = $4, adjust_usd = $5, can_run = $6, max_concurrent_runs = $7`,
+      [org.orgId, userId, next.team_id, next.cap_usd, next.adjust_usd, next.can_run, next.max_concurrent_runs]);
+    // One entry per save, so the person's changes read as one sentence: "Alice R.: own limit none → $150, can launch: account setting → no".
+    await logChange(tx, org.orgId, actor, parts.length ? [`${person.name || person.email || userId}: ${parts.join(", ")}`] : [], { user_id: userId, ...before }, { user_id: userId, ...next });
+  });
 }

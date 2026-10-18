@@ -1757,6 +1757,7 @@ try {
       assert.equal(lim0.policy.mode, "pool");
       assert.equal(lim0.members.length, 2);
       assert.ok(lim0.members.every((m: any) => m.allowance_usd === null && m.can_run), "pool: no personal caps");
+      assert.equal(lim0.last_change, null, "never saved: no last change (the page reads \"Using Octillion's default rules\")");
       assert.equal((await appCall(devC, "PUT", "/limits/policy", { mode: "even" })).status, 403, "members cannot change limits");
       const devView = await json(appCall(devC, "GET", "/limits"));
       assert.ok(!devView.can_manage && devView.members.length === 1 && devView.members[0].user_id === acc2.user.id, "members see only themselves");
@@ -1917,11 +1918,60 @@ try {
       const pm = await policyRow();
       assert.ok(pm.mode === "pool" && Number(pm.reserve_usd) === 0 && Number(await capOf(accepted.user.id)) === 5, "custom with no default: pool, own limits kept");
       assert.equal((await db.query<any>("SELECT count(*) AS n FROM usage_rule_migrations"))[0].n, 2);
+      // History: every limits endpoint and every one-time migration appends one plain sentence, newest first, 50 a page.
+      assert.equal((await appCall(devC, "GET", "/limits/history")).status, 403, "members cannot read the history");
+      assert.equal((await appCall(ownerC, "GET", "/limits/history?before=x")).status, 400);
+      const allHistory = async () => {
+        const out: any[] = [];
+        for (let before: number | null = null, n = 0; n < 20; n++) {
+          const pg: any = await json(appCall(ownerC, "GET", `/limits/history${before ? `?before=${before}` : ""}`));
+          out.push(...pg.entries);
+          if (!pg.next_before) break;
+          before = pg.next_before;
+        }
+        return out;
+      };
+      let hist = await allHistory();
+      const said = (re: RegExp) => hist.find((e) => re.test(e.summary));
+      assert.ok(hist.every((e, i) => i === 0 || e.id < hist[i - 1].id), "newest first");
+      const firstSave = said(/^How budgets are shared: Shared pool → Split evenly; Buffer \$0 → \$100$/);
+      assert.ok(firstSave && firstSave.by_name !== "System" && firstSave.by_name !== "Someone", `a policy save, by its admin: ${JSON.stringify(hist.at(-1))}`);
+      assert.ok(said(/: adjustment \$0 → -\$50$/), "a person's change names them");
+      assert.ok(said(/^Added team DevRel \(budget \$200\)$/) && said(/^Renamed team DevRel to DevRel 2$/) && said(/^DevRel budget \$200 → \$900$/), "team changes");
+      assert.ok(said(/^DevRel 2 runs at once account setting → 3$/) && said(/: team Everyone else → DevRel$/));
+      assert.ok(said(/^Runs at once no limit → 1; Sessions per run 1 → server's limit$/), "run limits");
+      const sys = hist.filter((e) => e.by_name === "System").map((e) => e.summary);
+      assert.ok(sys.some((x) => /^Limits of 0 runs at once/.test(x)) && sys.some((x) => /^Cleared unused personal limits/.test(x)) &&
+        sys.some((x) => /^Cleared the unused buffer/.test(x)) && sys.some((x) => /^How budgets are shared: Custom caps with no default cap → Shared pool/.test(x)),
+        `the migrations are logged as System: ${JSON.stringify(sys)}`);
+      assert.ok(!hist.some((e) => /can't be 0|must be/.test(e.summary)), "refused saves are not logged");
+      // Saving the same values logs nothing; a removed team says what it had.
+      const n0 = hist.length;
+      await appCall(ownerC, "PUT", "/limits/policy", { reserve_usd: Number((await policyRow()).reserve_usd) });
+      const temp = await json(appCall(ownerC, "POST", "/limits/teams", { name: "Temp" }));
+      await appCall(ownerC, "PUT", `/limits/members/${acc2.user.id}`, { team_id: temp.id });
+      assert.equal((await appCall(ownerC, "DELETE", `/limits/teams/${temp.id}`)).status, 204);
+      assert.equal((await appCall(ownerC, "DELETE", `/limits/teams/${temp.id}`)).status, 404);
+      hist = await allHistory();
+      assert.deepEqual(hist.slice(0, 3).map((e) => e.summary).map((x) => x.replace(/^.*?: team/, "*: team")),
+        ["Removed team Temp (budget none; 1 person moved to Everyone else)", "*: team Everyone else → Temp", "Added team Temp (budget none)"]);
+      assert.equal(hist.length, n0 + 3, "an unchanged save adds nothing");
+      const latest = (await json(appCall(ownerC, "GET", "/limits"))).last_change;
+      assert.ok(latest.summary === hist[0].summary && latest.by_name === hist[0].by_name && /^\d{4}-/.test(latest.at), "GET /limits: the newest entry");
+      // Paging: 50 a page, older pages by the id of the oldest entry shown.
+      await db.query("INSERT INTO usage_rule_changes (org_id, summary) SELECT $1, 'filler ' || g FROM generate_series(1, 60) g", [rowW.id]);
+      const p1 = await json(appCall(ownerC, "GET", "/limits/history"));
+      assert.ok(p1.entries.length === 50 && p1.next_before === p1.entries[49].id && p1.entries[0].summary === "filler 60");
+      const p2 = await json(appCall(ownerC, "GET", `/limits/history?before=${p1.next_before}`));
+      assert.ok(p2.entries[0].summary === "filler 10" && p2.entries.every((e: any) => e.id < p1.next_before));
+      assert.equal((await allHistory()).length, hist.length + 60);
+      await db.query("DELETE FROM usage_rule_changes WHERE org_id = $1 AND summary LIKE 'filler %'", [rowW.id]);
       await appCall(ownerC, "PUT", "/limits/policy", { new_members_can_run: true });
       await appCall(ownerC, "PUT", `/limits/members/${accepted.user.id}`, { can_run: null, max_concurrent_runs: null, cap_usd: null });
       await appCall(ownerC, "PUT", `/limits/members/${acc2.user.id}`, { can_run: true, team_id: null });
       console.log("✓ usage limits: even split with reserve and adjustments, team budgets, rollout, sessions per launch, runs at once, custom caps");
       console.log("✓ budget rules meaning changes: own limits in every mode, buffer and team budgets set aside in every mode (rest_pot, buffer), migrated once");
+      console.log("✓ budget rules history: one sentence per change from every limits endpoint and each migration (System), unchanged saves skipped, newest first, paged, last change on GET /limits");
       console.log("✓ budget rules fixes: live spend per person, sessions per run on adaptive top-ups, 0 refused (and migrated), partial team PUT, structured refusals, fail closed on a failed allowance lookup");
     }
 

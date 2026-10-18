@@ -398,20 +398,29 @@ export function appRouter() {
   // Usage limits (src/limits.ts): admins split the budget across teams and people, roll out running, cap throughput.
   // Everyone sees their own allowance; only admins see and change everyone's.
   api.get("/limits", async (_req, res) => {
-    const s = S(res), o = await limits.overview({ orgId: s.org, slug: s.slug });
-    if (s.role === "admin") return void res.json({ ...o, can_manage: true, me: s.user });
+    const s = S(res), org = { orgId: s.org, slug: s.slug };
+    const [o, last_change] = await Promise.all([limits.overview(org), s.role === "admin" ? limits.lastChange(org) : null]);
+    if (s.role === "admin") return void res.json({ ...o, last_change, can_manage: true, me: s.user });
     res.json({ policy: { mode: o.policy.mode, max_concurrent_runs: o.policy.max_concurrent_runs, max_sessions_per_run: o.policy.max_sessions_per_run },
                budget_usd: o.budget_usd, budget_error: o.budget_error, admins: o.admins, clerk: o.clerk, can_manage: false, me: s.user,
                members: o.members.filter((m) => m.user_id === s.user), teams: o.teams.filter((t) => o.members.some((m) => m.user_id === s.user && m.team_id === t.id)) });
   });
+  // Every change below also appends a plain-sentence entry to the account's history (GET /limits/history).
   const limitsAdmin = (res: Response) => adminOnly(res);
-  api.put("/limits/policy", async (req, res) => { limitsAdmin(res); await limits.setPolicy(S(res).org, actor(res), req.body ?? {}); res.status(204).end(); });
-  api.post("/limits/teams", async (req, res) => { limitsAdmin(res); res.status(201).json(await limits.saveTeam(S(res).org, { ...req.body, id: undefined })); });
-  api.put("/limits/teams/:id", async (req, res) => { limitsAdmin(res); res.json(await limits.saveTeam(S(res).org, { ...req.body, id: Number(req.params.id) })); });
-  api.delete("/limits/teams/:id", async (req, res) => { limitsAdmin(res); await limits.deleteTeam(S(res).org, Number(req.params.id)); res.status(204).end(); });
+  const by = (res: Response): limits.Actor => ({ label: actor(res), user: S(res).user });
+  api.get("/limits/history", async (req, res) => {
+    limitsAdmin(res);
+    const before = req.query.before == null || req.query.before === "" ? undefined : Number(req.query.before);
+    if (before !== undefined && !(Number.isInteger(before) && before > 0)) throw new AppError("before must be the id of a history entry");
+    res.json(await limits.history({ orgId: S(res).org, slug: S(res).slug }, before));
+  });
+  api.put("/limits/policy", async (req, res) => { limitsAdmin(res); await limits.setPolicy(S(res).org, by(res), req.body ?? {}); res.status(204).end(); });
+  api.post("/limits/teams", async (req, res) => { limitsAdmin(res); res.status(201).json(await limits.saveTeam(S(res).org, by(res), { ...req.body, id: undefined })); });
+  api.put("/limits/teams/:id", async (req, res) => { limitsAdmin(res); res.json(await limits.saveTeam(S(res).org, by(res), { ...req.body, id: Number(req.params.id) })); });
+  api.delete("/limits/teams/:id", async (req, res) => { limitsAdmin(res); await limits.deleteTeam(S(res).org, by(res), Number(req.params.id)); res.status(204).end(); });
   api.put("/limits/members/:userId", async (req, res) => {
     limitsAdmin(res);
-    await limits.setMember({ orgId: S(res).org, slug: S(res).slug }, String(req.params.userId), req.body ?? {});
+    await limits.setMember({ orgId: S(res).org, slug: S(res).slug }, by(res), String(req.params.userId), req.body ?? {});
     res.status(204).end();
   });
 
