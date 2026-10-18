@@ -46,7 +46,7 @@ const isObj = (x: unknown): x is Record<string, unknown> => !!x && typeof x === 
 
 export function RecordView<T>({
   rows, rowKey, cols, searchText, searchPlaceholder = 'Search', filters, primary, detail, detailTitle, actions, empty, noun = 'items', loading, initialSize,
-  id, views, defaultSort, groupable, bulk, exportName, primaryMenu, properties, detailActions, compact, openKey, onOpenChange
+  id, views, defaultSort, groupable, bulk, exportName, primaryMenu, properties, detailActions, compact, openKey, onOpenChange, summary
 }: {
   rows: readonly T[];
   rowKey: (row: T) => string;
@@ -85,6 +85,8 @@ export function RecordView<T>({
   /** Controls which record is open (a deep link; a page that pauses refresh while one is); omitted, the view keeps it. */
   openKey?: string | null;
   onOpenChange?: (key: string | null) => void;
+  /** Headline numbers between the toolbar and the table (a StatStrip or two). */
+  summary?: ReactNode;
 }) {
   const ns = (s: string) => (id ? `rv:${id}:${s}` : null);
   const [q, setQ] = useState('');
@@ -261,6 +263,7 @@ export function RecordView<T>({
         )}
         {primaryNode}
       </div>
+      {summary && <div className='flex shrink-0 flex-col'>{summary}</div>}
 
       {selRows.length > 0 ? (
         <div className='flex min-h-8 shrink-0 flex-wrap items-center gap-1 text-sm leading-none'>

@@ -16,6 +16,7 @@ import { cn } from '@/lib/utils';
 import { useAdmin } from './lib';
 import { copyText, ErrorBox, Mono, Notice, StatusBadge, When, type Tone } from './ui';
 import { Chip, cents, dur, EST, jobSessions, PeekSection, since, useComputeParams, useNow, nextPinned, useScrollTo } from './compute-common';
+import { JobsStats } from './compute-stats';
 import { MiniTable } from './compute-sessions';
 
 type Kind = 'simulation' | 'research' | 'prospect';
@@ -158,7 +159,7 @@ export function ComputeJobs() {
           <Button variant='outline' size='xs' onClick={() => void refetch()}>Retry</Button>
         </div>
       )}
-      <RecordView id='compute-jobs' rows={rows} loading={isLoading && !data} rowKey={(j) => j.id} cols={cols} noun='jobs' initialSize={25}
+      <RecordView id='compute-jobs' summary={<JobsStats rows={rows} />} rows={rows} loading={isLoading && !data} rowKey={(j) => j.id} cols={cols} noun='jobs' initialSize={25}
         searchText={(j) => `${j.id} ${j.name ?? ''} ${j.org?.name ?? ''} ${j.org?.slug ?? ''} ${j.company ?? ''} ${j.product?.name ?? ''} ${j.state} ${KIND_LABEL[j.kind]} ${j.why_waiting ?? ''} ${j.orchestrator?.orchestrator_id ?? ''}`}
         searchPlaceholder='Search jobs, accounts, products' filters={filters} exportName='compute-jobs'
         openKey={open} onOpenChange={(k) => url.write({ job: k })}

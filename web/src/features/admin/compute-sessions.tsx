@@ -20,6 +20,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { post, useAdmin, useAdminAction } from './lib';
 import { copyText, ErrorBox, Mono, Notice, StatusBadge, When, type Tone } from './ui';
 import { AMBER, Chip, cents, dur, EST, jobSessions, PeekSection, SectionLink, since, useComputeParams, useNow, nextPinned, useScrollTo } from './compute-common';
+import { SessionsStats } from './compute-stats';
 
 export interface SessionRow {
   id: string; simulation_id: string; org: { slug: string; name: string }; agent_id: string | null; harness: string; model: string; status: string;
@@ -147,7 +148,7 @@ export function ComputeSessions() {
           <Button variant='outline' size='xs' onClick={() => void refetch()}>Retry</Button>
         </div>
       )}
-      <RecordView id='compute-sessions' rows={rows} loading={isLoading && !shown} rowKey={(s) => s.id} cols={cols} noun='sessions' initialSize={50}
+      <RecordView id='compute-sessions' summary={<SessionsStats />} rows={rows} loading={isLoading && !shown} rowKey={(s) => s.id} cols={cols} noun='sessions' initialSize={50}
         searchText={(s) => `${s.id} ${s.simulation_id} ${s.org.name} ${s.org.slug} ${s.agent_id ?? ''} ${s.harness} ${s.model} ${s.status} ${outcomeOf(s)} ${s.error_message ?? ''} ${s.worker_id ?? ''} ${s.sandbox_id ?? ''}`}
         searchPlaceholder='Search sessions, jobs, agents, errors' filters={filters} exportName='compute-sessions'
         openKey={open} onOpenChange={(k) => url.write({ session: k })}
