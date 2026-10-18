@@ -566,27 +566,20 @@ function VerdictLine({ verdict }: { verdict: Verdict[] }) {
 }
 
 type Card = { label: ReactNode; value: ReactNode; hint?: ReactNode };
-/** Two rows of four headline numbers, as on Health › Errors. */
-function Cards({ a, b }: { a: Card[]; b: Card[] }) {
-  return <><StatStrip items={a} /><StatStrip className='border-t-0' items={b} /></>;
+/** One row of the tab's four headline numbers, as on Health. */
+function Cards({ items }: { items: Card[] }) {
+  return <StatStrip items={items} />;
 }
 const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`;
 
 function OrchCards({ s }: { s: Summary }) {
   useNow();
   const o = s.running.orchestrators, l = s.limits, sp = s.spend_today;
-  return <Cards
-    a={[
+  return <Cards items={[
       { label: 'Orchestrators live', value: o.booting + o.running + o.draining },
       { label: 'Worker pods used / reserved', value: `${s.running.pods_used} / ${s.running.pods_reserved}` },
-      { label: 'boat sandboxes in use', value: l.active_now != null && l.plan != null ? `${l.active_now} / ${l.plan}` : '—' },
-      { label: 'Room for more', value: l.available ?? '—' }
-    ]}
-    b={[
       { label: 'Failed launches, 24 h', value: s.failures_24h.launches },
-      { label: 'Queued work', value: s.queue.sessions + s.queue.research },
-      { label: 'Orchestrator model, today', value: money(sp.orchestrator_model_usd) },
-      { label: 'Sandboxes, today', value: money(sp.sandbox_est_usd) }
+      { label: 'Room for more', value: l.available ?? '—' }
     ]} />;
 }
 
@@ -594,33 +587,19 @@ function FailureCards({ f, hours }: { f: Failures | undefined; hours: number }) 
   const sum = (xs: { count: number }[] | undefined) => (xs ?? []).reduce((t, x) => t + x.count, 0);
   const sessions = sum(f?.sessions), top = f?.sessions.slice().sort((x, y) => y.count - x.count)[0];
   const w = hours === 24 ? '24 h' : '7 d';
-  return <Cards
-    a={[
+  return <Cards items={[
       { label: `Session failures, ${w}`, value: f ? sessions : '—' },
-      { label: `Failed launches, ${w}`, value: f ? sum(f.launches) : '—' },
-      { label: `Unexpected reaps, ${w}`, value: f ? sum(f.reaps.filter((r) => !r.routine)) : '—' },
-      { label: `Unattended deletes, ${w}`, value: f ? sum(f.unattended) : '—' }
-    ]}
-    b={[
       { label: 'Top session failure', value: top ? <span className='text-base'>{top.label} · {top.count}</span> : 'None' },
-      { label: 'Failure classes seen', value: f ? f.sessions.length : '—' },
-      { label: `Sessions ended, ${w}`, value: f ? f.ended : '—' },
-      { label: `Routine reaps, ${w}`, value: f ? sum(f.reaps.filter((r) => r.routine)) : '—' }
+      { label: `Failed launches, ${w}`, value: f ? sum(f.launches) : '—' },
+      { label: `Unexpected reaps, ${w}`, value: f ? sum(f.reaps.filter((r) => !r.routine)) : '—' }
     ]} />;
 }
 
 function DecisionCards({ s, rows }: { s: Summary | undefined; rows: Tick[] }) {
   useNow();
   const age = ageOf(s?.tick.at);
-  return <Cards
-    a={[
+  return <Cards items={[
       { label: 'Last tick', value: age == null ? '—' : `${dur(age)} ago` },
-      { label: 'Autoscaler', value: s ? (s.tick.enabled ? 'On' : 'Off') : '—' },
-      { label: 'Free sandboxes', value: s?.tick.free ?? '—' },
-      { label: 'Event ticks', value: s ? (s.tick.kick_configured ? 'On' : 'Off') : '—' }
-    ]}
-    b={[
-      { label: 'Decisions shown', value: rows.length },
       { label: 'Orchestrators launched', value: rows.reduce((t, r) => t + r.launched.length, 0) },
       { label: 'Orchestrators reaped', value: rows.reduce((t, r) => t + r.reaped.length, 0) },
       { label: 'Ticks with an error', value: rows.filter((r) => r.error).length }
@@ -741,20 +720,11 @@ function Limits({ s, onEditing }: { s: Summary; onEditing: (key: string, on: boo
       ) : <span className='text-muted-foreground text-xs'>{r.fixed ?? '—'}</span>
     ) }
   ];
-  const cards = <Cards
-    a={[
+  const cards = <Cards items={[
       { label: 'boat sandboxes in use', value: l.active_now != null && l.plan != null ? `${l.active_now} / ${l.plan}` : '—' },
       { label: 'Room for more', value: l.available ?? '—' },
       { label: 'Sessions a day, at most', value: l.sessions_per_day_ceiling ?? '—' },
       { label: 'Binding limit', value: binding ? binding.label : 'None' }
-    ]}
-    b={[
-      { label: 'Our starts this hour', value: l.starts ? `${l.our_starts.hour} / ${l.starts.per_hour}` : l.our_starts.hour },
-      l.per_job_mode
-        ? { label: 'Job orchestrators', value: `${l.job_orch_live} / ${l.job_orch_cap}` }
-        : { label: 'Shared orchestrators', value: `${l.shared_orch_live} / ${l.shared_orch_cap}` },
-      { label: 'Pods per orchestrator', value: `${l.pods_max_reserved} / ${l.pods_cap}` },
-      { label: 'Other deployments', value: l.others }
     ]} />;
   return (
     <RecordView id='compute-limits' rows={rows} rowKey={(r) => r.key} cols={cols} noun='limits' initialSize={25} compact summary={cards}
@@ -803,18 +773,11 @@ function Environment({ s, onTest, testing }: { s: Summary; onTest: () => void; t
     { key: 'source', label: 'Source', type: 'select', value: (r) => r.sourceText, render: (r) => <span className='text-xs'>{r.source}</span> },
     { key: 'meaning', label: 'Meaning', className: 'min-w-80', type: 'text', value: (r) => r.meaningText, render: (r) => <span className='text-muted-foreground text-xs whitespace-normal'>{r.meaning}</span> }
   ];
-  const cards = <Cards
-    a={[
+  const cards = <Cards items={[
       { label: 'boat.dev', value: p.ok ? 'Connected' : 'Not connected' },
       { label: 'boat key', value: p.has_key ? <Mono>{p.key_hint}</Mono> : 'None' },
-      { label: 'Namespace', value: <Mono>{p.namespace}</Mono> },
-      { label: 'API', value: <span className='text-base'><Mono>{p.api.replace(/^https?:\/\//, '')}</Mono></span> }
-    ]}
-    b={[
       { label: 'Runtime', value: s.runtime === 'vercel' ? 'Vercel' : 'VM' },
-      { label: 'Autoscaler', value: s.tick.enabled ? 'On' : 'Off' },
-      { label: 'Event ticks', value: s.tick.kick_configured ? 'Configured' : 'Not configured' },
-      { label: 'Settings shown', value: rows.length }
+      { label: 'Autoscaler', value: s.tick.enabled ? 'On' : 'Off' }
     ]} />;
   return (
     <RecordView id='compute-environment' rows={rows} rowKey={(r) => r.name} cols={cols} noun='settings' initialSize={50} compact summary={cards}
