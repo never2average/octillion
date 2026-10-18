@@ -2,7 +2,7 @@
 // One account in the accounts page's side peek: its problems with a fix, a short summary and four tabs, without leaving
 // the list. Its actions (the row ⋯ menu and the peek header) share one controller, so every dialog and result is
 // rendered once by the page.
-import { useEffect, useState, type ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { ActionsMenu, Field, type RowAction } from '@/components/layout/record-view';
@@ -13,7 +13,6 @@ import { Input } from '@/components/ui/input';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { Icons } from '@/components/icons';
 import { adminApi } from '@/lib/api-client';
@@ -356,8 +355,8 @@ export function AccountPeek({ org, ctl }: { org: Org; ctl: AccountCtl }) {
   const path = orgPath(org.slug);
   const { data: d, error } = useAdmin<OrgDetail>(path);
   const confirm = useConfirm();
-  const [tab, setTab] = useState('people');
-  useEffect(() => setTab('people'), [org.slug]);
+  // "View" on a problem scrolls to its section (there are no tabs to switch).
+  const setTab = (section: string) => document.getElementById(`peek-${section}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
   const member = (m: OrgDetail['members'][number]): RowAction[] => {
     const who = m.email || m.user_id;
@@ -438,15 +437,10 @@ export function AccountPeek({ org, ctl }: { org: Org; ctl: AccountCtl }) {
       {!d ? (!error &&
         <div className='grid gap-3'><Skeleton className='h-8' /><Skeleton className='h-40' /></div>
       ) : (
-        <Tabs value={tab} onValueChange={(v) => setTab(String(v))}>
-          <TabsList variant='line' className='gap-4 p-0'>
-            <TabsTrigger value='people' className='flex-none px-0'>People</TabsTrigger>
-            <TabsTrigger value='usage' className='flex-none px-0'>Usage</TabsTrigger>
-            <TabsTrigger value='billing' className='flex-none px-0'>Billing</TabsTrigger>
-            <TabsTrigger value='onboarding' className='flex-none px-0'>Onboarding</TabsTrigger>
-          </TabsList>
+        // One scroll, no tabs: people, then usage, then billing and milestones; empty lists stay out of the way.
+        <div className='grid gap-8'>
 
-          <TabsContent value='people' className='mt-5 grid gap-6'>
+          <section id='peek-people' className='grid scroll-mt-4 gap-6'>
             {org.clerk_org_id && (<>
               <List title='Members' rows={d.members} empty='Nobody has joined yet.' actions={member} cols={[
                 ['Person', (m) => <>{m.email || m.user_id}{m.name && <span className='text-muted-foreground ml-2'>{m.name}</span>}</>],
@@ -469,9 +463,9 @@ export function AccountPeek({ org, ctl }: { org: Org; ctl: AccountCtl }) {
                 ['Created', (k) => <When d={k.created_at} />]
               ]} />
             )}
-          </TabsContent>
+          </section>
 
-          <TabsContent value='usage' className='mt-5 grid gap-6'>
+          <section id='peek-usage' className='grid scroll-mt-4 gap-6'>
             <List title='Tools' rows={d.tools} empty='No tool calls yet.' cols={[
               ['Tool', (t) => t.name],
               ['Calls', (t) => count(t.calls), 'text-right tabular-nums'],
@@ -506,13 +500,11 @@ export function AccountPeek({ org, ctl }: { org: Org; ctl: AccountCtl }) {
               ['Sessions', (x) => `${x.completed} / ${x.sessions}`, 'text-right tabular-nums'],
               ['Started', (x) => <When d={x.created_at} />]
             ]} />
-          </TabsContent>
+          </section>
 
-          <TabsContent value='billing' className='mt-5 grid gap-6'>
-            {!d.integrations.stripe ? (
-              <p className='text-muted-foreground text-sm leading-none'>Stripe is off · default budget {dollars(org.budget_usd)}/month</p>
-            ) : (<>
-              <List title='Invoices' rows={d.invoices} empty='No invoices yet.' cols={[
+          <section id='peek-billing' className='grid scroll-mt-4 gap-6'>
+            {d.integrations.stripe && (<>
+              <List title='Invoices' rows={d.invoices} hideEmpty cols={[
                 ['Invoice', (x) => x.number || x.id],
                 ['Status', (x) => word(x.status === 'paid' ? 'ok' : x.status === 'open' ? 'warn' : x.status === 'uncollectible' ? 'bad' : 'neutral', x.status)],
                 ['Total', (x) => money(x.total, x.currency), 'text-right tabular-nums'],
@@ -525,15 +517,16 @@ export function AccountPeek({ org, ctl }: { org: Org; ctl: AccountCtl }) {
                 </p>
               )}
             </>)}
-          </TabsContent>
+          </section>
 
-          <TabsContent value='onboarding' className='mt-5 grid gap-6'>
+          <section id='peek-onboarding' className='grid scroll-mt-4 gap-2'>
+            <p className='text-sm leading-none font-medium'>Milestones</p>
             <dl>
               {stages.filter((k) => org.reached?.[k]).map((k) => <Field key={k} label={STAGE_LABELS[k] ?? k}><When d={org.reached[k]} /></Field>)}
               {org.stage !== 'reported' && <Field label='Next'><span className='text-muted-foreground'>{org.next_step}</span></Field>}
             </dl>
-          </TabsContent>
-        </Tabs>
+          </section>
+        </div>
       )}
 
       <p className='text-muted-foreground text-xs leading-none'>

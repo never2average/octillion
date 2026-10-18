@@ -1,8 +1,16 @@
 /* Import individual theme files */
 @import './themes/supabase.css';
 
+/* No rubber-band bounce: the root scroller is html, so it needs it too (body alone does nothing in Chrome/Safari).
+   Inner scroll areas (tables, side panels, lists) keep their scroll to themselves instead of dragging the page. */
+html,
 body {
-  @apply overscroll-none;
+  overscroll-behavior: none;
+}
+.overflow-auto,
+.overflow-y-auto,
+.overflow-x-auto {
+  overscroll-behavior: contain;
 }
 
 :root {
