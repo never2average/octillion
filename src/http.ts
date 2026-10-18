@@ -9,6 +9,8 @@ import * as prospect from "./prospect.js";
 import * as telemetry from "./telemetry.js";
 import { appRouter } from "./app.js";
 import { adminActor, adminAuthRouter, requirePlatformAdmin } from "./admin-auth.js";
+import * as roles from "./admin-roles.js";
+const { need } = roles;
 import { fileURLToPath } from "node:url";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -340,18 +342,18 @@ export function createApp() {
   });
   admin.use(express.json({ limit: "64kb" }));
   admin.get("/keyvault/providers", async (_req, res) => void res.json({ providers: await kv.listProviders() }));
-  admin.put("/keyvault/providers/:slug", async (req, res) => void res.json(await kv.upsertProvider({ ...req.body, slug: String(req.params.slug) })));
+  admin.put("/keyvault/providers/:slug", need("keys"), async (req, res) => void res.json(await kv.upsertProvider({ ...req.body, slug: String(req.params.slug) })));
   admin.get("/keyvault/credentials", async (_req, res) => void res.json({ credentials: await kv.listCredentials() }));
-  admin.post("/keyvault/credentials", async (req, res) => {
+  admin.post("/keyvault/credentials", need("keys"), async (req, res) => {
     const { provider, secret, label, priority } = req.body ?? {};
     if (typeof provider !== "string" || typeof secret !== "string") return void res.status(400).json({ error: "provider and secret are required" });
     res.status(201).json(await kv.setCredential(provider, secret, { label, priority }));
   });
-  admin.patch("/keyvault/credentials/:id", async (req, res) => {
+  admin.patch("/keyvault/credentials/:id", need("keys"), async (req, res) => {
     await kv.setCredentialEnabled(Number(req.params.id), Boolean(req.body?.enabled));
     res.status(204).end();
   });
-  admin.delete("/keyvault/credentials/:id", async (req, res) => {
+  admin.delete("/keyvault/credentials/:id", need("keys"), async (req, res) => {
     await kv.deleteCredential(Number(req.params.id));
     res.status(204).end();
   });
@@ -368,20 +370,20 @@ export function createApp() {
   // Developer populations: the coding-agent mix per population (shares, pauses, sandbox unit).
   admin.get("/populations", async (_req, res) => void res.json({ populations: await populations.listPopulations() }));
   admin.get("/populations/:slug", async (req, res) => void res.json(await populations.getPopulation(String(req.params.slug))));
-  admin.post("/populations", async (req, res) => {
+  admin.post("/populations", need("harnesses"), async (req, res) => {
     const { slug, name, from, description } = req.body ?? {};
     if (typeof slug !== "string" || typeof name !== "string") return void res.status(400).json({ error: "slug and name are required" });
     res.status(201).json(await populations.createPopulation(slug, name, { from, description }));
   });
-  admin.patch("/populations/:slug", async (req, res) => void res.json(await populations.updatePopulation(String(req.params.slug), req.body ?? {})));
-  admin.put("/populations/:slug/agents/:agent", async (req, res) => {
+  admin.patch("/populations/:slug", need("harnesses"), async (req, res) => void res.json(await populations.updatePopulation(String(req.params.slug), req.body ?? {})));
+  admin.put("/populations/:slug/agents/:agent", need("harnesses"), async (req, res) => {
     const slug = String(req.params.slug), agent = decodeURIComponent(String(req.params.agent));
     const { market_share, paused, paused_reason, notes } = req.body ?? {};
     if (market_share !== undefined) await populations.setShare(slug, agent, Number(market_share), notes);
     if (paused !== undefined) await populations.setPaused(slug, agent, Boolean(paused), paused_reason);
     res.json(await populations.getPopulation(slug));
   });
-  admin.post("/populations/:slug/default", async (req, res) => void res.json(await populations.setDefaultPopulation(String(req.params.slug))));
+  admin.post("/populations/:slug/default", need("harnesses"), async (req, res) => void res.json(await populations.setDefaultPopulation(String(req.params.slug))));
   admin.get("/autoscaler", async (_req, res) => void res.json(await autoscalerStatus()));
   // Onboarding console (web/app/admin, src/admin.ts): requests, accounts, people (Clerk), billing (Stripe), legacy keys.
   // X-Admin-Actor names the person in the log lines; the token is shared, so it is a label, not an identity.
@@ -391,35 +393,35 @@ export function createApp() {
   const done = (res: Response, _?: unknown) => void res.status(204).end();
   ob.get("/overview", async (req, res) => void res.json(await onboarding.overview(req.query)));
   ob.get("/requests", async (req, res) => void res.json({ requests: await onboarding.listRequests(req.query.status ? String(req.query.status) : undefined) }));
-  ob.post("/requests/:id/approve", async (req, res) => void res.status(201).json(await onboarding.approveRequest(adminActor(req, res), Number(req.params.id), req.body ?? {})));
-  ob.post("/requests/:id/decline", async (req, res) => done(res, await onboarding.declineRequest(adminActor(req, res), Number(req.params.id))));
+  ob.post("/requests/:id/approve", need("requests"), async (req, res) => void res.status(201).json(await onboarding.approveRequest(adminActor(req, res), Number(req.params.id), req.body ?? {})));
+  ob.post("/requests/:id/decline", need("requests"), async (req, res) => done(res, await onboarding.declineRequest(adminActor(req, res), Number(req.params.id))));
   // Research the company: the quick pass now (it also queues the deep pass on the research harness).
-  ob.post("/requests/:id/research", async (req, res) => {
+  ob.post("/requests/:id/research", need("requests"), async (req, res) => {
     const id = Number(req.params.id);
     await onboarding.requestExists(id);
     await prospect.researchRequest(id);
     res.json({ ok: true, deep: await prospect.queueDeepResearch(id, { manual: true }) });
   });
-  ob.post("/requests/:id/reopen", async (req, res) => done(res, await onboarding.reopenRequest(adminActor(req, res), Number(req.params.id))));
+  ob.post("/requests/:id/reopen", need("requests"), async (req, res) => done(res, await onboarding.reopenRequest(adminActor(req, res), Number(req.params.id))));
   ob.get("/orgs", async (_req, res) => void res.json(await onboarding.listOrgs()));
-  ob.post("/orgs", async (req, res) => void res.status(201).json(await onboarding.createAccount(adminActor(req, res), req.body ?? {})));
+  ob.post("/orgs", need("requests"), async (req, res) => void res.status(201).json(await onboarding.createAccount(adminActor(req, res), req.body ?? {})));
   ob.get("/orgs/:slug", async (req, res) => void res.json(await onboarding.orgDetail(slug(req))));
-  ob.patch("/orgs/:slug", async (req, res) => void res.json(await onboarding.renameOrg(adminActor(req, res), slug(req), req.body?.name)));
-  ob.post("/orgs/:slug/invitations", async (req, res) => void res.status(201).json(await onboarding.invite(adminActor(req, res), slug(req), req.body?.email, req.body?.role)));
-  ob.post("/orgs/:slug/invitations/:id/resend", async (req, res) => void res.status(201).json(await onboarding.resendInvitation(adminActor(req, res), slug(req), String(req.params.id))));
-  ob.post("/orgs/:slug/invitations/:id/revoke", async (req, res) => done(res, await onboarding.revokeInvitation(adminActor(req, res), slug(req), String(req.params.id))));
-  ob.post("/orgs/:slug/members/:id/deactivate", async (req, res) => done(res, await onboarding.setMemberActive(adminActor(req, res), slug(req), String(req.params.id), false)));
-  ob.post("/orgs/:slug/members/:id/reactivate", async (req, res) => done(res, await onboarding.setMemberActive(adminActor(req, res), slug(req), String(req.params.id), true)));
-  ob.post("/orgs/:slug/members/:id/role", async (req, res) => done(res, await onboarding.setMemberRole(adminActor(req, res), slug(req), String(req.params.id), req.body?.role)));
-  ob.post("/orgs/:slug/clerk", async (req, res) => void res.json(await onboarding.linkClerk(adminActor(req, res), slug(req))));
-  ob.post("/orgs/:slug/billing/customer", async (req, res) => void res.json({ customer: await onboarding.ensureCustomer(adminActor(req, res), slug(req)) }));
-  ob.post("/orgs/:slug/prepaid", async (req, res) => void res.json(await onboarding.setPrepaidAllowed(adminActor(req, res), slug(req), req.body?.allowed)));
-  ob.post("/orgs/:slug/allowance", async (req, res) => void res.json(await onboarding.setAllowance(adminActor(req, res), slug(req), req.body?.usd ?? null)));
-  ob.post("/orgs/:slug/billing/checkout", async (req, res) => void res.json(await onboarding.checkoutLink(adminActor(req, res), slug(req), req.body?.price_id)));
-  ob.post("/orgs/:slug/billing/portal", async (req, res) => void res.json(await onboarding.portalLink(adminActor(req, res), slug(req))));
-  ob.post("/orgs/:slug/keys", async (req, res) => void res.status(201).json(await onboarding.issueKey(adminActor(req, res), slug(req), req.body?.label)));
-  ob.post("/orgs/:slug/keys/:id/revoke", async (req, res) => done(res, await onboarding.revokeKey(adminActor(req, res), slug(req), Number(req.params.id))));
-  ob.post("/orgs/:slug/keys/:id/rotate", async (req, res) => void res.status(201).json(await onboarding.rotateKey(adminActor(req, res), slug(req), Number(req.params.id))));
+  ob.patch("/orgs/:slug", need("accounts"), async (req, res) => void res.json(await onboarding.renameOrg(adminActor(req, res), slug(req), req.body?.name)));
+  ob.post("/orgs/:slug/invitations", need("invite"), async (req, res) => void res.status(201).json(await onboarding.invite(adminActor(req, res), slug(req), req.body?.email, req.body?.role)));
+  ob.post("/orgs/:slug/invitations/:id/resend", need("invite"), async (req, res) => void res.status(201).json(await onboarding.resendInvitation(adminActor(req, res), slug(req), String(req.params.id))));
+  ob.post("/orgs/:slug/invitations/:id/revoke", need("invite"), async (req, res) => done(res, await onboarding.revokeInvitation(adminActor(req, res), slug(req), String(req.params.id))));
+  ob.post("/orgs/:slug/members/:id/deactivate", need("accounts"), async (req, res) => done(res, await onboarding.setMemberActive(adminActor(req, res), slug(req), String(req.params.id), false)));
+  ob.post("/orgs/:slug/members/:id/reactivate", need("accounts"), async (req, res) => done(res, await onboarding.setMemberActive(adminActor(req, res), slug(req), String(req.params.id), true)));
+  ob.post("/orgs/:slug/members/:id/role", need("accounts"), async (req, res) => done(res, await onboarding.setMemberRole(adminActor(req, res), slug(req), String(req.params.id), req.body?.role)));
+  ob.post("/orgs/:slug/clerk", need("accounts"), async (req, res) => void res.json(await onboarding.linkClerk(adminActor(req, res), slug(req))));
+  ob.post("/orgs/:slug/billing/customer", need("accounts"), async (req, res) => void res.json({ customer: await onboarding.ensureCustomer(adminActor(req, res), slug(req)) }));
+  ob.post("/orgs/:slug/prepaid", need("accounts"), async (req, res) => void res.json(await onboarding.setPrepaidAllowed(adminActor(req, res), slug(req), req.body?.allowed)));
+  ob.post("/orgs/:slug/allowance", need("accounts"), async (req, res) => void res.json(await onboarding.setAllowance(adminActor(req, res), slug(req), req.body?.usd ?? null)));
+  ob.post("/orgs/:slug/billing/checkout", need("accounts"), async (req, res) => void res.json(await onboarding.checkoutLink(adminActor(req, res), slug(req), req.body?.price_id)));
+  ob.post("/orgs/:slug/billing/portal", need("accounts"), async (req, res) => void res.json(await onboarding.portalLink(adminActor(req, res), slug(req))));
+  ob.post("/orgs/:slug/keys", need("accounts"), async (req, res) => void res.status(201).json(await onboarding.issueKey(adminActor(req, res), slug(req), req.body?.label)));
+  ob.post("/orgs/:slug/keys/:id/revoke", need("delete"), async (req, res) => done(res, await onboarding.revokeKey(adminActor(req, res), slug(req), Number(req.params.id))));
+  ob.post("/orgs/:slug/keys/:id/rotate", need("delete"), async (req, res) => void res.status(201).json(await onboarding.rotateKey(adminActor(req, res), slug(req), Number(req.params.id))));
   // Platform analytics and health across every account (src/insights.ts).
   ob.get("/analytics", async (req, res) => void res.json(await platformAnalytics(req.query)));
   // Every failure in the period, paged: ?kind=tool|session|onboarding&offset&limit, plus the /analytics filters.
@@ -427,28 +429,28 @@ export function createApp() {
   // Customer journeys (src/playbooks.ts): the use-case pipelines on /app Setup. Admins write them, promote the ones
   // customers see, and order them; adoption = accounts that started / finished each.
   ob.get("/playbooks", async (_req, res) => void res.json({ playbooks: await playbooks.templatesWithAdoption(), tools: TOOL_NAMES }));
-  ob.post("/playbooks", async (req, res) => void res.status(201).json({ id: await playbooks.createTemplate(adminActor(req, res), req.body ?? {}, TOOL_NAMES) }));
-  ob.put("/playbooks/:id", async (req, res) => { await playbooks.updateTemplate(adminActor(req, res), String(req.params.id), req.body ?? {}, TOOL_NAMES); res.status(204).end(); });
-  ob.post("/playbooks/:id/promote", async (req, res) => { await playbooks.setPromoted(adminActor(req, res), String(req.params.id), req.body?.promoted !== false); res.status(204).end(); });
-  ob.post("/playbooks/reorder", async (req, res) => { await playbooks.reorder(adminActor(req, res), req.body?.ids); res.status(204).end(); });
-  ob.delete("/playbooks/:id", async (req, res) => { await playbooks.deleteTemplate(String(req.params.id)); res.status(204).end(); });
+  ob.post("/playbooks", need("library"), async (req, res) => void res.status(201).json({ id: await playbooks.createTemplate(adminActor(req, res), req.body ?? {}, TOOL_NAMES) }));
+  ob.put("/playbooks/:id", need("library"), async (req, res) => { await playbooks.updateTemplate(adminActor(req, res), String(req.params.id), req.body ?? {}, TOOL_NAMES); res.status(204).end(); });
+  ob.post("/playbooks/:id/promote", need("library"), async (req, res) => { await playbooks.setPromoted(adminActor(req, res), String(req.params.id), req.body?.promoted !== false); res.status(204).end(); });
+  ob.post("/playbooks/reorder", need("library"), async (req, res) => { await playbooks.reorder(adminActor(req, res), req.body?.ids); res.status(204).end(); });
+  ob.delete("/playbooks/:id", need("delete"), async (req, res) => { await playbooks.deleteTemplate(String(req.params.id)); res.status(204).end(); });
   // Journeys: what PostHog Workflows queued for the in-chat channel, and nudges sent by hand.
   ob.get("/journeys", async (_req, res) => void res.json(await journeys.adminView()));
-  ob.post("/journeys/nudges", async (req, res) => void res.status(201).json(await journeys.sendFromAdmin(adminActor(req, res), req.body ?? {})));
-  ob.delete("/journeys/nudges/:id", async (req, res) => { await journeys.adminDelete(adminActor(req, res), Number(req.params.id)); res.status(204).end(); });
+  ob.post("/journeys/nudges", need("journeys"), async (req, res) => void res.status(201).json(await journeys.sendFromAdmin(adminActor(req, res), req.body ?? {})));
+  ob.delete("/journeys/nudges/:id", need("journeys"), async (req, res) => { await journeys.adminDelete(adminActor(req, res), Number(req.params.id)); res.status(204).end(); });
   // Shared libraries (src/library.ts): personas and the task library. Edits stamp edited_at, which the vault sync respects.
   ob.get("/personas", async (_req, res) => void res.json(await library.listPersonas()));
-  ob.post("/personas", async (req, res) => void res.status(201).json(await library.createPersona(adminActor(req, res), req.body ?? {})));
-  ob.post("/personas/active", async (req, res) => void res.json(await library.setPersonasActive(adminActor(req, res), req.body?.slugs, req.body?.active)));
-  ob.patch("/personas/:slug", async (req, res) => void res.json(await library.updatePersona(adminActor(req, res), slug(req), req.body ?? {})));
+  ob.post("/personas", need("library"), async (req, res) => void res.status(201).json(await library.createPersona(adminActor(req, res), req.body ?? {})));
+  ob.post("/personas/active", need("library"), async (req, res) => void res.json(await library.setPersonasActive(adminActor(req, res), req.body?.slugs, req.body?.active)));
+  ob.patch("/personas/:slug", need("library"), async (req, res) => void res.json(await library.updatePersona(adminActor(req, res), slug(req), req.body ?? {})));
   ob.get("/tasks", async (req, res) => void res.json(await library.listTasks(req.query)));
-  ob.post("/tasks", async (req, res) => void res.status(201).json(await library.createTask(adminActor(req, res), req.body ?? {})));
-  ob.post("/tasks/active", async (req, res) => void res.json(await library.setTasksActive(adminActor(req, res), req.body?.ids, req.body?.active)));
-  ob.post("/tasks/harnesses", async (req, res) => void res.json(await library.setTasksHarnesses(adminActor(req, res), req.body?.ids, req.body?.harnesses)));
-  ob.patch("/tasks/:id", async (req, res) => void res.json(await library.updateTask(adminActor(req, res), Number(req.params.id), req.body ?? {})));
+  ob.post("/tasks", need("library"), async (req, res) => void res.status(201).json(await library.createTask(adminActor(req, res), req.body ?? {})));
+  ob.post("/tasks/active", need("library"), async (req, res) => void res.json(await library.setTasksActive(adminActor(req, res), req.body?.ids, req.body?.active)));
+  ob.post("/tasks/harnesses", need("library"), async (req, res) => void res.json(await library.setTasksHarnesses(adminActor(req, res), req.body?.ids, req.body?.harnesses)));
+  ob.patch("/tasks/:id", need("library"), async (req, res) => void res.json(await library.updateTask(adminActor(req, res), Number(req.params.id), req.body ?? {})));
   // Global compute settings (src/settings.ts) and the default population's agent mix.
   ob.get("/compute", async (_req, res) => void res.json(await library.compute()));
-  ob.put("/compute/settings", async (req, res) => void res.json(await library.saveSettings(adminActor(req, res), req.body?.values)));
+  ob.put("/compute/settings", need("compute"), async (req, res) => void res.json(await library.saveSettings(adminActor(req, res), req.body?.values)));
   // The Compute page (src/compute.ts): verdict, tick freshness, tiles, limits, environment. Read only; ?fresh=1 asks boat again.
   ob.get("/compute/summary", async (req, res) => void res.json(await computeSummary({ fresh: req.query.fresh === "1" })));
   // Its record tables (src/compute-records.ts): sessions and orchestrators with their peeks, and which agents can run. Read only.
@@ -467,24 +469,45 @@ export function createApp() {
   ob.get("/compute/trends", async (_req, res) => void res.json(await (await import("./compute-trends.js")).computeTrends()));
   // The page's only two actions (src/compute-actions.ts), both in the admin audit log: run one autoscaler tick now, and
   // cancel a queued or running session (its orchestrator stops the sandbox at the next heartbeat).
-  ob.post("/compute/tick", async (req, res) => void res.json(await actions.runTick(adminActor(req, res))));
-  ob.post("/compute/sessions/:id/cancel", async (req, res) => void res.json(await actions.cancelSession(adminActor(req, res), String(req.params.id))));
+  ob.post("/compute/tick", need("compute"), async (req, res) => void res.json(await actions.runTick(adminActor(req, res))));
+  ob.post("/compute/sessions/:id/cancel", need("compute"), async (req, res) => void res.json(await actions.cancelSession(adminActor(req, res), String(req.params.id))));
   // Admin-added harnesses (src/harnesses.ts): variants of a registry.json CLI; a new one joins the mix at weight 0, off.
   ob.get("/compute/harnesses", async (_req, res) => void res.json(await library.listHarnesses()));
-  ob.post("/compute/harnesses", async (req, res) => void res.status(201).json(await library.addHarness(adminActor(req, res), req.body ?? {})));
-  ob.patch("/compute/harnesses/:id", async (req, res) => void res.json(await library.editHarness(adminActor(req, res), decodeURIComponent(String(req.params.id)), req.body ?? {})));
-  ob.delete("/compute/harnesses/:id", async (req, res) => void res.json(await library.deleteHarness(adminActor(req, res), decodeURIComponent(String(req.params.id)))));
-  ob.put("/compute/agents/:agent", async (req, res) => void res.json(await library.setAgent(adminActor(req, res), decodeURIComponent(String(req.params.agent)), req.body ?? {})));
+  ob.post("/compute/harnesses", need("harnesses"), async (req, res) => void res.status(201).json(await library.addHarness(adminActor(req, res), req.body ?? {})));
+  ob.patch("/compute/harnesses/:id", need("harnesses"), async (req, res) => void res.json(await library.editHarness(adminActor(req, res), decodeURIComponent(String(req.params.id)), req.body ?? {})));
+  ob.delete("/compute/harnesses/:id", need("delete"), async (req, res) => void res.json(await library.deleteHarness(adminActor(req, res), decodeURIComponent(String(req.params.id)))));
+  ob.put("/compute/agents/:agent", need("harnesses"), async (req, res) => void res.json(await library.setAgent(adminActor(req, res), decodeURIComponent(String(req.params.agent)), req.body ?? {})));
   // Model keys on /admin/compute: the key vault (src/keyvault.ts). A secret is posted once; only its hint comes back.
   ob.get("/compute/keys", async (_req, res) => void res.json(await library.modelKeys()));
   ob.get("/compute/sandbox", async (_req, res) => void res.json(await library.sandboxProvider()));
-  ob.post("/compute/keys", async (req, res) => void res.status(201).json(await library.addModelKey(adminActor(req, res), req.body ?? {})));
-  ob.post("/compute/keys/:id/enabled", async (req, res) => done(res, await library.setModelKeyEnabled(adminActor(req, res), Number(req.params.id), req.body?.enabled)));
-  ob.delete("/compute/keys/:id", async (req, res) => done(res, await library.deleteModelKey(adminActor(req, res), Number(req.params.id))));
-  ob.post("/compute/providers/:slug/enabled", async (req, res) => done(res, await library.setProviderEnabled(adminActor(req, res), slug(req), req.body?.enabled)));
+  ob.post("/compute/keys", need("keys"), async (req, res) => void res.status(201).json(await library.addModelKey(adminActor(req, res), req.body ?? {})));
+  ob.post("/compute/keys/:id/enabled", need("keys"), async (req, res) => done(res, await library.setModelKeyEnabled(adminActor(req, res), Number(req.params.id), req.body?.enabled)));
+  ob.delete("/compute/keys/:id", need("keys"), async (req, res) => done(res, await library.deleteModelKey(adminActor(req, res), Number(req.params.id))));
+  ob.post("/compute/providers/:slug/enabled", need("keys"), async (req, res) => done(res, await library.setProviderEnabled(adminActor(req, res), slug(req), req.body?.enabled)));
+  // Admins and their roles (src/admin-roles.ts; Clerk user metadata): everyone reads, owners change.
+  const changer = (req: Request, res: Response): roles.Changer => ({ actor: adminActor(req, res), userId: (res.locals.adminUserId as string | undefined) ?? null });
+  ob.get("/admins", async (_req, res) => void res.json({ admins: await roles.listAdmins(), roles: roles.PLATFORM_ROLES.map((r) => ({ id: r, label: roles.ROLE_LABELS[r], help: roles.ROLE_HELP[r] })),
+    me: (res.locals.adminUserId as string | undefined) ?? null }));
+  ob.post("/admins", need("admins"), async (req, res) => {
+    const r = await roles.addAdmin(changer(req, res), req.body?.email, req.body?.role);
+    onboarding.log(adminActor(req, res), "admin.add", null, { email: req.body?.email, role: req.body?.role, created: r.created });
+    res.status(201).json(r);
+  });
+  ob.post("/admins/:id/role", need("admins"), async (req, res) => {
+    const a = await roles.setAdminRole(changer(req, res), String(req.params.id), req.body?.role);
+    onboarding.log(adminActor(req, res), "admin.role", null, { user: req.params.id, role: a.role });
+    res.json({ admin: a });
+  });
+  ob.delete("/admins/:id", need("admins"), async (req, res) => {
+    await roles.removeAdmin(changer(req, res), String(req.params.id));
+    onboarding.log(adminActor(req, res), "admin.remove", null, { user: req.params.id });
+    res.status(204).end();
+  });
+  roles.assertGuarded(admin, "/api/admin");
+  roles.assertGuarded(ob, "/api/admin/onboarding");
   // Clerk / Stripe failures are the admin's to see (a bad key, a rate limit), not a generic 500.
   ob.use((err: Error & { status?: number }, _req: Request, res: Response, next: NextFunction) => {
-    if (!(err instanceof onboarding.AdminError || err instanceof journeys.JourneyError || err instanceof playbooks.PlaybookError || err instanceof SettingError || err instanceof ClerkError || err instanceof StripeError)) return next(err);
+    if (!(err instanceof onboarding.AdminError || err instanceof roles.AdminRoleError || err instanceof journeys.JourneyError || err instanceof playbooks.PlaybookError || err instanceof SettingError || err instanceof ClerkError || err instanceof StripeError)) return next(err);
     res.status(err.status ?? 400).json({ error: err.message });
   });
   admin.use("/onboarding", ob);

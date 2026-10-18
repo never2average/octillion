@@ -20,6 +20,7 @@ import { post, useAdmin, useAdminAction, type InviteResult, type OrgList, type O
 import { useResult } from './result-dialog';
 import { ActionsMenu, Field, RecordView, type RecordCol, type RecordViewDef, type RowAction } from '@/components/layout/record-view';
 import { copyText, ErrorBox, StatusBadge, When } from './ui';
+import { Gate, useAdminRole } from './role';
 
 interface Req {
   id: number;
@@ -91,6 +92,7 @@ const VIEWS: RecordViewDef<Req>[] = [
 ];
 
 export function AdminRequests() {
+  const { lock } = useAdminRole();
   const [polling, setPolling] = useState(false);
   const { data, error, isLoading } = useAdmin<{ requests: Req[] }>('/requests', { refetchInterval: polling ? 5000 : undefined });
   const running = (data?.requests ?? []).some((q) => q.research_status === 'running' || q.deep?.status === 'running' || q.deep?.status === 'queued');
@@ -136,13 +138,13 @@ export function AdminRequests() {
   const statusActions = (q: Req): RowAction[] => [
     ...(q.status === 'pending' ? [{ label: 'Decline', icon: <Icons.close />, destructive: true, onSelect: () => askDecline(q) }] : []),
     ...(q.status === 'declined' ? [{ label: 'Reopen', icon: <Icons.arrowRight />, onSelect: () => reopen.mutate(q) }] : [])
-  ];
+  ].map((a) => lock(a, 'requests'));
   const actions = (q: Req): RowAction[] => {
     const url = link(q);
     return [
-      ...(q.status === 'pending' ? [{ label: 'Approve…', icon: <Icons.check />, onSelect: () => setApproving(q) }] : []),
+      ...(q.status === 'pending' ? [lock({ label: 'Approve…', icon: <Icons.check />, onSelect: () => setApproving(q) }, 'requests')] : []),
       ...statusActions(q),
-      { label: q.research ? 'Re-run research' : 'Research the company', icon: <Icons.sparkles />, disabled: researchBusy(q), separator: true, onSelect: () => runResearch(q) },
+      lock({ label: q.research ? 'Re-run research' : 'Research the company', icon: <Icons.sparkles />, disabled: researchBusy(q), separator: true, onSelect: () => runResearch(q) }, 'requests'),
       copyEmail(q),
       ...(url ? [{ label: 'Open product site', icon: <Icons.externalLink />, onSelect: () => window.open(url, '_blank', 'noopener,noreferrer') }] : [])
     ];
@@ -150,13 +152,13 @@ export function AdminRequests() {
   const bulk = (sel: Req[], clear: () => void): RowAction[] => {
     const pending = sel.filter((q) => q.status === 'pending'), declined = sel.filter((q) => q.status === 'declined');
     return [
-      { label: `Decline ${pending.length} pending`, icon: <Icons.close />, destructive: true, disabled: !pending.length, onSelect: () => setConfirm({
+      ...[{ label: `Decline ${pending.length} pending`, icon: <Icons.close />, destructive: true, disabled: !pending.length, onSelect: () => setConfirm({
         title: `Decline ${plural(pending.length)}?`, body: 'Nothing is sent to them; you can reopen them later.', label: 'Decline', run: () => void runEach(pending, 'decline', clear)
       }) },
       { label: `Reopen ${declined.length} declined`, icon: <Icons.arrowRight />, disabled: !declined.length, onSelect: () => setConfirm({
         title: `Reopen ${plural(declined.length)}?`, body: 'They go back to pending.', label: 'Reopen', run: () => void runEach(declined, 'reopen', clear)
       }) },
-      { label: `Research ${sel.length} compan${sel.length === 1 ? 'y' : 'ies'}`, icon: <Icons.sparkles />, onSelect: () => { sel.forEach(runResearch); clear(); } },
+      { label: `Research ${sel.length} compan${sel.length === 1 ? 'y' : 'ies'}`, icon: <Icons.sparkles />, onSelect: () => { sel.forEach(runResearch); clear(); } }].map((a) => lock(a, 'requests')),
       { label: 'Copy emails', icon: <IconCopy />, onSelect: () => copyText(emails(sel), `${sel.length} emails copied`) }
     ];
   };
@@ -198,7 +200,7 @@ export function AdminRequests() {
         } }]}
         empty='No pending requests.'
         detailActions={(q) => (<>
-          {q.status === 'pending' && <Button size='sm' onClick={() => setApproving(q)}><Icons.check /> Approve</Button>}
+          {q.status === 'pending' && <Gate need='requests'><Button size='sm' onClick={() => setApproving(q)}><Icons.check /> Approve</Button></Gate>}
           <ActionsMenu items={[...statusActions(q), copyEmail(q)]} />
         </>)}
         detail={(q) => <RequestPeek q={q} match={matches.get(q.id) ?? null} onResearch={() => runResearch(q)} />}
@@ -358,9 +360,9 @@ function RequestPeek({ q, match, onResearch }: { q: Req; match: string | null; o
       <section>
         <div className='mb-2 flex items-center justify-between gap-3'>
           <span className='text-muted-foreground text-xs font-medium leading-none'>AI research</span>
-          <Button size='xs' variant='ghost' disabled={q.research_status === 'running' || q.deep?.status === 'queued' || q.deep?.status === 'running'} onClick={onResearch}>
+          <Gate need='requests'><Button size='xs' variant='ghost' disabled={q.research_status === 'running' || q.deep?.status === 'queued' || q.deep?.status === 'running'} onClick={onResearch}>
             {q.research_status === 'running' ? <><Icons.spinner className='animate-spin' /> Researching</> : <><Icons.sparkles /> {q.research ? 'Re-run' : 'Research'}</>}
-          </Button>
+          </Button></Gate>
         </div>
         {q.research_status === 'failed' && <p className='text-destructive mb-3 leading-snug'>Research failed: {q.research_error}</p>}
         <DeepStatus q={q} />

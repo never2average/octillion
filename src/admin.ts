@@ -19,17 +19,22 @@ import * as billing from "./billing.js";
 import { clientCatalog } from "./connect-catalog.js";
 import { getDb } from "./db.js";
 import * as clerk from "./clerk.js";
+import { currentAdminRole } from "./admin-roles.js";
 
 export class AdminError extends Error {
   constructor(message: string, public status = 400) { super(message); }
 }
 
 const publicUrl = () => (process.env.PUBLIC_URL ?? `http://127.0.0.1:${process.env.PORT ?? 3333}`).replace(/\/$/, "");
-/** One stderr line per admin change, and the same as a PostHog event (without emails) for the onboarding funnel. */
+/**
+ * One stderr line per admin change, and the same as a PostHog event (without emails) for the onboarding funnel. A
+ * platform admin's role (src/admin-roles.ts) goes with it.
+ */
 export function log(actor: string, action: string, slug: string | null, detail: Record<string, unknown> = {}) {
-  console.error(`admin ${actor} ${action}${slug ? ` org=${slug}` : ""} ${JSON.stringify(detail)}`);
+  const role = currentAdminRole();
+  console.error(`admin ${actor} ${action}${slug ? ` org=${slug}` : ""} ${JSON.stringify(detail)}${role ? ` role=${role}` : ""}`);
   const { email: _email, ...safe } = detail;
-  capture({ distinctId: `admin:${actor}`, orgSlug: slug }, `admin_${action.replace(/\./g, "_")}`, safe);
+  capture({ distinctId: `admin:${actor}`, orgSlug: slug }, `admin_${action.replace(/\./g, "_")}`, role ? { ...safe, actor_role: role } : safe);
 }
 
 export function integrations() {

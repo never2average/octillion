@@ -12,6 +12,7 @@ import { Icons } from '@/components/icons';
 import { adminApi } from '@/lib/api-client';
 import { cn } from '@/lib/utils';
 import { post, useAdminAction } from './lib';
+import { Gate } from './role';
 
 export interface Stage { id?: string; title: string; why: string; prompt: string; tools: string[]; expect: string; manual?: boolean }
 export interface Playbook {
@@ -94,7 +95,7 @@ export function Editor({ draft: initial, tools, onClose }: { draft: Draft; tools
           <SheetDescription className='sr-only'>Stages a customer follows in their AI client; a stage is done when one of its tools runs, or when the customer marks it.</SheetDescription>
           <span className='text-muted-foreground ml-auto hidden text-xs sm:inline'>⌘↵ to save</span>
           <Button variant='ghost' size='sm' onClick={close}>Cancel</Button>
-          <Button size='sm' onClick={submit} disabled={save.isPending}>{save.isPending ? 'Saving…' : d.isNew ? 'Create journey' : 'Save'}</Button>
+          <Gate need='library'><Button size='sm' onClick={submit} disabled={save.isPending}>{save.isPending ? 'Saving…' : d.isNew ? 'Create journey' : 'Save'}</Button></Gate>
         </div>
 
         <div className='min-h-0 flex-1 overflow-y-auto px-6 py-6'>

@@ -18,6 +18,7 @@ import { Dock } from '@/features/portal/memory';
 import { post, useAdmin, useAdminAction } from './lib';
 import { blank, Editor, toDraft, type Draft, type Playbook } from './playbooks';
 import { copyText, CopyField, ErrorBox, Mono, StatusBadge, When, type Tone } from './ui';
+import { Gate, useAdminRole } from './role';
 
 interface Step { step: string; when: string; channels: string[]; message: string; prompt?: string; link?: string; body: string }
 interface Recipe { id: string; name: string; goal: string; trigger: string; steps: Step[] }
@@ -120,6 +121,7 @@ const cols: RecordCol<Row>[] = [
 ];
 
 export function AdminJourneys() {
+  const { lock } = useAdminRole();
   const { data: pb, error, isLoading } = useAdmin<{ playbooks: Playbook[]; tools: string[] }>('/playbooks');
   const { data: nj } = useAdmin<Nudges>('/journeys');
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -143,27 +145,27 @@ export function AdminJourneys() {
   const delJourney = (p: Playbook) => setAsk({ title: `Delete ${p.name}?`, description: 'Customers stop seeing it at once. This cannot be undone.', label: 'Delete', run: () => remove.mutate(p.id) });
   const delTip = (t: Tip) => setAsk({ title: 'Remove this tip?', description: `It stops showing to ${t.org_name}.`, label: 'Remove', run: () => removeTip.mutate(t.id) });
   const actions = (r: Row): RowAction[] => r.kind === 'journey' ? [
-    { label: r.p.promoted ? 'Hide from customers' : 'Promote to customers', icon: r.p.promoted ? <Icons.eyeOff /> : <Icons.check />, onSelect: () => promote.mutate({ id: r.p.id, on: !r.p.promoted }) },
-    { label: 'Edit', icon: <Icons.edit />, onSelect: () => setDraft(toDraft(r.p)) },
-    { label: 'Send a tip for this journey', icon: <Icons.send />, onSelect: () => setTipping({ journey: r.p.id }) },
-    { label: 'Delete', icon: <Icons.trash />, destructive: true, separator: true, onSelect: () => delJourney(r.p) }
+    lock({ label: r.p.promoted ? 'Hide from customers' : 'Promote to customers', icon: r.p.promoted ? <Icons.eyeOff /> : <Icons.check />, onSelect: () => promote.mutate({ id: r.p.id, on: !r.p.promoted }) }, 'library'),
+    lock({ label: 'Edit', icon: <Icons.edit />, onSelect: () => setDraft(toDraft(r.p)) }, 'library'),
+    lock({ label: 'Send a tip for this journey', icon: <Icons.send />, onSelect: () => setTipping({ journey: r.p.id }) }, 'journeys'),
+    lock({ label: 'Delete', icon: <Icons.trash />, destructive: true, separator: true, onSelect: () => delJourney(r.p) }, 'delete')
   ] : [
-    { label: 'Duplicate as new tip', icon: <Icons.add />, onSelect: () => setTipping(duplicate(r.t, nj?.recent ?? [])) },
-    { label: 'Remove tip', icon: <Icons.trash />, destructive: true, separator: true, onSelect: () => delTip(r.t) }
+    lock({ label: 'Duplicate as new tip', icon: <Icons.add />, onSelect: () => setTipping(duplicate(r.t, nj?.recent ?? [])) }, 'journeys'),
+    lock({ label: 'Remove tip', icon: <Icons.trash />, destructive: true, separator: true, onSelect: () => delTip(r.t) }, 'journeys')
   ];
   const bulk = (sel: Row[], clear: () => void): RowAction[] => {
     const js = sel.filter(isJ), ts = sel.filter(isT);
     const toPromote = js.filter((r) => !r.p.promoted), toHide = js.filter((r) => r.p.promoted);
     const go = (v: Parameters<typeof many.mutate>[0]) => many.mutate(v, { onSuccess: clear });
     const out: RowAction[] = [];
-    if (toPromote.length) out.push({ label: `Promote ${toPromote.length}`, icon: <Icons.check />, onSelect: () => go({ rows: toPromote, done: 'promoted', run: (r) => post(`/playbooks/${(r as J).p.id}/promote`, { promoted: true }) }) });
-    if (toHide.length) out.push({ label: `Hide ${toHide.length}`, icon: <Icons.eyeOff />, onSelect: () => go({ rows: toHide, done: 'hidden', run: (r) => post(`/playbooks/${(r as J).p.id}/promote`, { promoted: false }) }) });
-    if (js.length) out.push({ label: `Delete ${js.length} journey${js.length === 1 ? '' : 's'}`, icon: <Icons.trash />, destructive: true, onSelect: () => setAsk({
+    if (toPromote.length) out.push(lock({ label: `Promote ${toPromote.length}`, icon: <Icons.check />, onSelect: () => go({ rows: toPromote, done: 'promoted', run: (r) => post(`/playbooks/${(r as J).p.id}/promote`, { promoted: true }) }) }, 'library'));
+    if (toHide.length) out.push(lock({ label: `Hide ${toHide.length}`, icon: <Icons.eyeOff />, onSelect: () => go({ rows: toHide, done: 'hidden', run: (r) => post(`/playbooks/${(r as J).p.id}/promote`, { promoted: false }) }) }, 'library'));
+    if (js.length) out.push(lock({ label: `Delete ${js.length} journey${js.length === 1 ? '' : 's'}`, icon: <Icons.trash />, destructive: true, onSelect: () => setAsk({
       title: `Delete ${js.length} journey${js.length === 1 ? '' : 's'}?`, description: js.map((r) => r.p.name).join(', ') + '. Customers stop seeing them at once.', label: 'Delete',
-      run: () => go({ rows: js, done: 'deleted', run: (r) => adminApi('DELETE', `/playbooks/${(r as J).p.id}`) }) }) });
-    if (ts.length) out.push({ label: `Remove ${ts.length} tip${ts.length === 1 ? '' : 's'}`, icon: <Icons.trash />, destructive: true, onSelect: () => setAsk({
+      run: () => go({ rows: js, done: 'deleted', run: (r) => adminApi('DELETE', `/playbooks/${(r as J).p.id}`) }) }) }, 'delete'));
+    if (ts.length) out.push(lock({ label: `Remove ${ts.length} tip${ts.length === 1 ? '' : 's'}`, icon: <Icons.trash />, destructive: true, onSelect: () => setAsk({
       title: `Remove ${ts.length} tip${ts.length === 1 ? '' : 's'}?`, description: 'They stop showing in chat and on /app.', label: 'Remove',
-      run: () => go({ rows: ts, done: 'removed', run: (r) => adminApi('DELETE', `/journeys/nudges/${(r as T).t.id}`) }) }) });
+      run: () => go({ rows: ts, done: 'removed', run: (r) => adminApi('DELETE', `/journeys/nudges/${(r as T).t.id}`) }) }) }, 'journeys'));
     return out;
   };
 
@@ -175,16 +177,16 @@ export function AdminJourneys() {
         rows={rows} rowKey={(r) => r.key} cols={cols} actions={actions} bulk={bulk} loading={isLoading}
         searchText={(r) => r.kind === 'journey' ? `journey ${r.p.name} ${r.p.id} ${r.p.outcome} ${r.p.who}` : `tip ${r.t.message} ${r.t.org_name} ${r.t.org_slug} ${r.t.email ?? ''} ${r.t.journey} ${r.t.step}`}
         searchPlaceholder='Search journeys and tips'
-        primary={<Button onClick={() => setDraft(blank())}><Icons.add /> New journey</Button>}
+        primary={<Gate need='library'><Button onClick={() => setDraft(blank())}><Icons.add /> New journey</Button></Gate>}
         primaryMenu={[
-          { label: 'Send a tip', icon: <Icons.send />, onSelect: () => setTipping({}) },
+          lock({ label: 'Send a tip', icon: <Icons.send />, onSelect: () => setTipping({}) }, 'journeys'),
           { label: 'PostHog setup', icon: <Icons.settings />, onSelect: () => setSetup(true) }
         ]}
         empty='No journeys or tips yet.'
         detailTitle={(r) => r.kind === 'journey' ? r.p.name : r.t.message}
         // Journeys keep Edit inline (and only there); a tip's actions all sit in ⋯.
         detailActions={(r) => r.kind === 'journey' ? (<>
-          <Button size='sm' variant='outline' onClick={() => setDraft(toDraft(r.p))}><Icons.edit /> Edit</Button>
+          <Gate need='library'><Button size='sm' variant='outline' onClick={() => setDraft(toDraft(r.p))}><Icons.edit /> Edit</Button></Gate>
           <ActionsMenu items={actions(r).filter((a) => a.label !== 'Edit')} />
         </>) : <ActionsMenu items={actions(r)} />}
         detail={(r) => r.kind === 'journey' ? <JourneyBody p={r.p} nj={nj} /> : <TipBody t={r.t} steps={nj?.steps ?? []} />}
@@ -372,7 +374,7 @@ export function TipDock({ initial = {}, onClose }: { initial?: Partial<NudgeInpu
           <Input aria-label='Days it stays' type='number' min={1} max={30} title='Days before it expires (1–30)' value={f.ttl_days} onChange={(e) => setF({ ...f, ttl_days: e.target.value })} />
         </div>
         <div className='flex items-center gap-2 border-t pt-3'>
-          <Button type='submit' disabled={send.isPending || !account || !f.message.trim()}>Queue tip</Button>
+          <Gate need='journeys'><Button type='submit' disabled={send.isPending || !account || !f.message.trim()}>Queue tip</Button></Gate>
           <span className='text-muted-foreground ml-auto text-xs tabular-nums'>{f.message.length}/280 · expires in {Number(f.ttl_days) || 7} d</span>
         </div>
       </form>

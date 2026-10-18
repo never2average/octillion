@@ -2150,6 +2150,96 @@ try {
       console.log("✓ platform admins: Clerk session + allowlist (address, domain, verified email) or public_metadata, CSRF header on cookie writes");
     }
 
+    // ---------- platform admin roles (src/admin-roles.ts): viewer < support < operator < owner, in Clerk user metadata ----------
+    {
+      const user = (email: string, extra: Record<string, unknown> = {}) => mockPost("/_mock/clerk/users", { email, ...extra });
+      const as = (sess: string, method: string, path: string, body?: unknown, root = "/api/admin/onboarding") =>
+        fetch(`${base}${root}${path}`, { method, headers: { "content-type": "application/json", authorization: `Bearer ${sess}` }, body: body ? JSON.stringify(body) : undefined });
+      const people: Record<string, { id: string; sess: string }> = {};
+      for (const role of ["viewer", "support", "operator", "owner"]) {
+        const u = await user(`${role}+${stamp}@roles.octillion.test`, { platform_role: role });
+        people[role] = { id: u.id, sess: await clerkSession(u.id) };
+      }
+      const sv = await (await fetch(`${base}/admin/session`, { headers: { authorization: `Bearer ${people.viewer.sess}` } })).json();
+      assert.equal(sv.role, "viewer");
+      assert.equal(sv.is_platform_admin, true, "is_platform_admin = any role");
+      assert.deepEqual(sv.permissions, ["read"]);
+      const so = await (await fetch(`${base}/admin/session`, { headers: { authorization: `Bearer ${people.owner.sess}` } })).json();
+      assert.ok(so.permissions.includes("keys") && so.permissions.includes("admins") && so.permissions.includes("delete"));
+      // Allowed = past the guard (a 404 or 400 for a made-up id or an empty body still proves it); refused = 403 naming the role.
+      const routes: [string, string, unknown, string, string?][] = [
+        ["GET", "/overview", undefined, "viewer"],
+        ["GET", "/admins", undefined, "viewer"],
+        ["GET", "/compute/keys", undefined, "viewer"],
+        ["POST", "/requests/999999/decline", {}, "support"],
+        ["POST", `/orgs/${slugA}/invitations`, { email: "not-an-email" }, "support"],
+        ["POST", "/journeys/nudges", {}, "support"],
+        ["PUT", "/compute/settings", { values: {} }, "operator"],
+        ["POST", "/compute/sessions/nope/cancel", {}, "operator"],
+        ["POST", "/personas/active", {}, "operator"],
+        ["POST", `/orgs/${slugA}/allowance`, { usd: "x" }, "operator"],
+        ["PUT", "/populations/nope/agents/x", {}, "operator", "/api/admin"],
+        ["POST", "/compute/keys", {}, "owner"],
+        ["DELETE", "/compute/harnesses/nope", undefined, "owner"],
+        ["POST", "/admins", {}, "owner"],
+        ["PATCH", "/keyvault/credentials/999999", { enabled: false }, "owner", "/api/admin"],
+      ];
+      const order = ["viewer", "support", "operator", "owner"];
+      for (const [method, path, body, needs, root] of routes)
+        for (const role of order) {
+          const r = await as(people[role].sess, method, path, body, root);
+          if (order.indexOf(role) >= order.indexOf(needs)) assert.notEqual(r.status, 403, `${role} may ${method} ${path} (${r.status})`);
+          else {
+            assert.equal(r.status, 403, `${role} may not ${method} ${path}`);
+            const j = await r.json();
+            assert.deepEqual(j, { error: `This needs the ${needs[0].toUpperCase()}${needs.slice(1)} role. Ask an Owner on the Admins page.`, code: "forbidden", needs }, `${method} ${path}`);
+          }
+        }
+      // The admin log line carries the actor's role.
+      const lines: string[] = [], err = console.error;
+      console.error = (...a: unknown[]) => { lines.push(a.map(String).join(" ")); };
+      try {
+        await ar({ email: `roles+${stamp}@decline.dev`, company: `Decline ${stamp}`, product_url: "https://decline.dev" });
+        const q = (await json(adm("GET", "/requests?status=pending"))).requests.find((x: any) => x.email === `roles+${stamp}@decline.dev`);
+        assert.equal((await as(people.support.sess, "POST", `/requests/${q.id}/decline`)).status, 204, "support declines a request");
+      } finally { console.error = err; }
+      assert.ok(lines.some((l) => l.startsWith(`admin support+${stamp}@roles.octillion.test request.decline `) && l.endsWith(" role=support")), "log() records the role");
+
+      // The Admins page: env admins are owners from "environment" and can't be edited; add by email (new or existing Clerk user).
+      process.env.OCTILLION_PLATFORM_ADMINS = `envboss+${stamp}@octillion.test`;
+      let list = (await json(as(people.viewer.sess, "GET", "/admins"))).admins;
+      assert.ok(list.some((a: any) => a.email === `envboss+${stamp}@octillion.test` && a.source === "environment" && a.role === "owner" && !a.editable), "an env entry is listed");
+      assert.ok(list.some((a: any) => a.id === people.support.id && a.role === "support" && a.editable));
+      const envU = await user(`envboss+${stamp}@octillion.test`);
+      assert.equal((await as(people.owner.sess, "POST", `/admins/${envU.id}/role`, { role: "viewer" })).status, 409, "env admins are changed in the environment");
+      const added = await json(as(people.owner.sess, "POST", "/admins", { email: `New.Admin+${stamp}@octillion.test`, role: "support" }));
+      assert.equal(added.created, true, "a new address becomes a Clerk user");
+      const made = [...mock.state.users.values()].find((u: any) => u.email_addresses[0].email_address === `new.admin+${stamp}@octillion.test`);
+      assert.equal(made.public_metadata.platform_role, "support", "the role is Clerk metadata");
+      assert.equal(made.public_metadata.platform_role_by, `owner+${stamp}@roles.octillion.test`, "added by");
+      assert.equal((await as(await clerkSession(made.id), "GET", "/overview")).status, 200, "they are an admin on first sign-in");
+      const again = await json(as(people.owner.sess, "POST", "/admins", { email: `loner+${stamp}@nowhere.dev`, role: "viewer" }));
+      assert.equal(again.created, false, "an existing Clerk user just gets the role");
+      assert.equal(again.admin.role, "viewer");
+      assert.equal((await json(as(people.owner.sess, "POST", `/admins/${loner.id}/role`, { role: "operator" }))).admin.role, "operator");
+      assert.equal((await as(people.owner.sess, "POST", `/admins/${loner.id}/role`, { role: "god" })).status, 400);
+      assert.equal((await as(people.owner.sess, "DELETE", `/admins/${loner.id}`)).status, 204);
+      assert.equal(mock.state.users.get(loner.id).public_metadata.platform_role, undefined, "removing clears the role");
+      assert.equal((await as(await clerkSession(loner.id), "GET", "/overview")).status, 403, "a removed admin is out");
+      // Last owner: with no env owners, demote every Clerk owner but one (with the token, an owner), then the guard holds.
+      delete process.env.OCTILLION_PLATFORM_ADMINS;
+      list = (await json(adm("GET", "/admins"))).admins;
+      for (const a of list.filter((x: any) => x.role === "owner" && x.id !== people.owner.id)) assert.equal((await adm("POST", `/admins/${a.id}/role`, { role: "operator" })).status, 200);
+      const self = await as(people.owner.sess, "POST", `/admins/${people.owner.id}/role`, { role: "operator" });
+      assert.equal(self.status, 409, "the last owner can't demote themselves");
+      assert.match((await self.json()).error, /You are the last owner/);
+      assert.equal((await adm("DELETE", `/admins/${people.owner.id}`)).status, 409, "nor be removed");
+      assert.equal((await as(people.owner.sess, "POST", `/admins/${people.operator.id}/role`, { role: "owner" })).status, 200);
+      assert.equal((await as(people.owner.sess, "POST", `/admins/${people.owner.id}/role`, { role: "operator" })).status, 200, "with a second owner, they can");
+      assert.equal((await as(people.owner.sess, "POST", "/admins", { email: "x@y.dev", role: "viewer" })).status, 403, "and are an operator at once");
+      console.log("✓ platform admin roles: each role's allowed and refused routes, 403 naming the role, role in the log, Admins page (env, add, change, remove), last-owner guard");
+    }
+
     // ---------- usage limits: budget split, teams, rollout, throughput (set by account admins on /app) ----------
     {
       const { saveProduct, saveScenarios } = await import("../src/queries.js");

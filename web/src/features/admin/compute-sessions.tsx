@@ -19,6 +19,7 @@ import { counted } from '@/lib/octillion-format';
 import { cn } from '@/lib/utils';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { post, useAdmin, useAdminAction } from './lib';
+import { Gate, useAdminRole } from './role';
 import { copyText, ErrorBox, Mono, Notice, StatusBadge, When, type Tone } from './ui';
 import { AMBER, Chip, cents, dur, EST, jobSessions, PeekSection, SectionLink, since, useComputeParams, useNow, nextPinned, useScrollTo } from './compute-common';
 import { SessionsStats } from './compute-stats';
@@ -63,6 +64,7 @@ const firstLine = (t: string | null) => (t ?? '').split('\n')[0];
 
 /** The Sessions section: filters in the URL, a peek per session (?session=<id>). */
 export function ComputeSessions() {
+  const { lock } = useAdminRole();
   const url = useComputeParams();
   const router = useRouter();
   useNow(15_000);
@@ -147,7 +149,7 @@ export function ComputeSessions() {
         searchPlaceholder='Search sessions, jobs, agents, errors' filters={filters} exportName='compute-sessions'
         openKey={open} onOpenChange={(k) => url.write({ session: k })}
         actions={(s) => [
-          ...(OPEN.includes(s.status) ? [{ label: 'Cancel session', icon: <Icons.close />, onSelect: () => setCancelling(s) }] : []),
+          ...(OPEN.includes(s.status) ? [lock({ label: 'Cancel session', icon: <Icons.close />, onSelect: () => setCancelling(s) }, 'compute')] : []),
           { label: 'Copy id', icon: <Icons.page />, onSelect: () => copyText(s.id, 'Session id copied') },
           { label: "Show this job's sessions", icon: <Icons.search />, onSelect: () => url.write(jobSessions(s.simulation_id)) },
           { label: 'Open account', icon: <Icons.externalLink />, onSelect: () => router.push(`/admin/accounts/${encodeURIComponent(s.org.slug)}`) }
@@ -283,7 +285,7 @@ function SessionPeek({ id, onJob, onCancel, cancelling }: { id: string; onJob: (
           <Button variant='outline' size='sm' onClick={onJob}><Icons.search /> This job&apos;s sessions</Button>
           {data.orchestrator && <SectionLink href={`/admin/compute?section=orchestrators&state=all&orch=${data.orchestrator.id}`} className={buttonVariants({ variant: 'outline', size: 'sm' })}><Icons.route /> Orchestrator</SectionLink>}
           <Button variant='ghost' size='sm' onClick={() => copyText(s.id, 'Session id copied')}>Copy id</Button>
-          {OPEN.includes(s.status) && <Button variant='outline' size='sm' className='text-destructive ml-auto' disabled={cancelling} onClick={() => onCancel(s)}><Icons.close /> Cancel session</Button>}
+          {OPEN.includes(s.status) && <Gate need='compute'><Button variant='outline' size='sm' className='text-destructive ml-auto' disabled={cancelling} onClick={() => onCancel(s)}><Icons.close /> Cancel session</Button></Gate>}
         </div>
       </PeekSection>
     </div>

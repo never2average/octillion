@@ -1,7 +1,7 @@
 // Fake Clerk Backend API + Stripe for the smoke test only: scripts/smoke.ts starts it in memory on 127.0.0.1 and points
 // CLERK_API_URL / STRIPE_API_URL at it. Never mounted by the server; production always talks to the real services.
 // Not a simulator of either product: only the fields Octillion reads, with the same shapes.
-// Test hooks: POST /_mock/clerk/users {email, first_name?, verified?, platform_admin?}, POST /_mock/invitations/:id/accept
+// Test hooks: POST /_mock/clerk/users {email, first_name?, verified?, platform_admin?, platform_role?}, POST /_mock/invitations/:id/accept
 // {first_name?}, POST /_mock/clerk/memberships {org_id, user_id, role?}, POST /_mock/session {user_id, org_id?, org_role?,
 // azp?, expired?, v1?} -> a Clerk session token, POST /_mock/oauth {user_id, jwt?, revoked?, expired?} -> an OAuth
 // access token, GET /_mock/public-key -> {pem} for CLERK_JWT_KEY, POST /_mock/subscriptions {customer, price, status?}.
@@ -77,11 +77,12 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     return { object: "organization_membership", id: m.id, role: m.role, public_metadata: m.public_metadata ?? {}, created_at: m.created_at,
       organization: s.orgs.get(m.organization_id), public_user_data: { user_id: m.user_id, identifier: e?.email_address ?? null, first_name: u?.first_name ?? null, last_name: u?.last_name ?? null } };
   };
-  const newUser = (email: string, opts: { first_name?: string | null; verified?: boolean; platform_admin?: boolean } = {}) => {
+  const newUser = (email: string, opts: { first_name?: string | null; verified?: boolean; platform_admin?: boolean; platform_role?: string } = {}) => {
     const eid = id("idn");
     const u = { object: "user", id: id("user"), first_name: opts.first_name ?? null, last_name: null, primary_email_address_id: eid,
       email_addresses: [{ id: eid, email_address: email.toLowerCase(), verification: { status: opts.verified === false ? "unverified" : "verified" } }],
-      public_metadata: opts.platform_admin ? { platform_admin: true } : {}, created_at: ms() };
+      public_metadata: { ...(opts.platform_admin ? { platform_admin: true } : {}), ...(opts.platform_role ? { platform_role: opts.platform_role } : {}) },
+      last_sign_in_at: null, created_at: ms() };
     s.users.set(u.id, u);
     return u;
   };
@@ -153,6 +154,27 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
   c.delete("/v1/organizations/:id/memberships/:user", (req, res) => {
     const m = mem(req); if (!m) return clerkErr(res, 404, "Membership not found", "resource_not_found");
     s.memberships.delete(`${req.params.id}:${req.params.user}`); res.json(membershipJson(m));
+  });
+  c.get("/v1/users", (req, res) => {
+    const emails = ([] as unknown[]).concat(req.query.email_address ?? []).map((e) => String(e).toLowerCase());
+    const all = [...s.users.values()].filter((u) => !emails.length || u.email_addresses.some((e: any) => emails.includes(e.email_address)));
+    const offset = Number(req.query.offset ?? 0), limit = Number(req.query.limit ?? 10);
+    res.json(all.slice(offset, offset + limit).map(userJson));
+  });
+  c.post("/v1/users", (req, res) => {
+    const email = String(req.body?.email_address?.[0] ?? "");
+    if (!email) return clerkErr(res, 422, "email_address is required");
+    if (userByEmail(email)) return clerkErr(res, 422, "That email address is taken. Please try another.", "form_identifier_exists");
+    const u = newUser(email, { verified: true });
+    u.public_metadata = req.body?.public_metadata ?? {};
+    res.json(userJson(u));
+  });
+  c.patch("/v1/users/:id/metadata", (req, res) => {
+    const u = s.users.get(req.params.id); if (!u) return clerkErr(res, 404, "User not found", "resource_not_found");
+    // Like Clerk: a deep merge where null removes the key.
+    const md = { ...u.public_metadata, ...(req.body?.public_metadata ?? {}) };
+    for (const [k, v] of Object.entries(md)) if (v === null) delete md[k];
+    u.public_metadata = md; res.json(userJson(u));
   });
   c.get("/v1/users/:id", (req, res) => { const u = s.users.get(req.params.id); u ? res.json(userJson(u)) : clerkErr(res, 404, "User not found", "resource_not_found"); });
   c.get("/v1/users/:id/organization_memberships", (req, res) =>

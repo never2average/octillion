@@ -13,6 +13,7 @@ import { Icons } from '@/components/icons';
 import { adminApi } from '@/lib/api-client';
 import { List } from './account-peek';
 import { post, useAdmin, useAdminAction } from './lib';
+import { Gate, useAdminRole } from './role';
 import { Chips, ErrorBox, FormRow, Mono, StatusBadge, When } from './ui';
 
 export interface Persona {
@@ -47,6 +48,7 @@ const toDraft = (p: Persona, copy = false): Draft => ({
 const blank = (): Draft => ({ name: '', summary: '', role: '', experience_years: '', company_size: '', stack: '', constraints: '', tone: '', instructions: '' });
 
 export function AdminPersonas() {
+  const { lock } = useAdminRole();
   const { data, error, isLoading } = useAdmin<{ personas: Persona[] }>('/personas');
   const [draft, setDraft] = useState<{ d: Draft; from?: Persona } | null>(null);
   const setActive = useAdminAction((v: { slugs: string[]; active: boolean }) => post<{ updated: number }>('/personas/active', v),
@@ -77,14 +79,14 @@ export function AdminPersonas() {
     { label: 'Duplicate', icon: <Icons.add />, onSelect: () => setDraft({ d: toDraft(p, true) }) },
     { label: p.active ? 'Deactivate' : 'Activate', icon: p.active ? <Icons.eyeOff /> : <Icons.check />, separator: true,
       onSelect: () => setActive.mutate({ slugs: [p.slug], active: !p.active }) }
-  ];
+  ].map((a) => lock(a, 'library'));
   const bulk = (sel: Persona[], clear: () => void): RowAction[] => {
     const on = sel.filter((p) => !p.active), off = sel.filter((p) => p.active);
     const go = (list: Persona[], active: boolean) => setActive.mutate({ slugs: list.map((p) => p.slug), active }, { onSuccess: clear });
     return [
       ...(on.length ? [{ label: `Activate ${on.length}`, icon: <Icons.check />, onSelect: () => go(on, true) }] : []),
       ...(off.length ? [{ label: `Deactivate ${off.length}`, icon: <Icons.eyeOff />, onSelect: () => go(off, false) }] : [])
-    ];
+    ].map((a) => lock(a, 'library'));
   };
 
   return (
@@ -96,11 +98,11 @@ export function AdminPersonas() {
         defaultSort={[{ key: 'name', dir: 'asc' }]}
         searchText={(p) => `${p.name} ${p.summary} ${p.slug} ${p.attributes.role ?? ''} ${(p.attributes.stack ?? []).join(' ')}`}
         searchPlaceholder='Search personas by name, summary or stack'
-        primary={<Button onClick={() => setDraft({ d: blank() })}><Icons.add /> New persona</Button>}
+        primary={<Gate need='library'><Button onClick={() => setDraft({ d: blank() })}><Icons.add /> New persona</Button></Gate>}
         empty='No personas yet. Run the vault sync or add one.'
         detailTitle={(p) => p.name}
         detailActions={(p) => (<>
-          <Button size='sm' variant='outline' onClick={() => setDraft({ d: toDraft(p), from: p })}><Icons.edit /> Edit</Button>
+          <Gate need='library'><Button size='sm' variant='outline' onClick={() => setDraft({ d: toDraft(p), from: p })}><Icons.edit /> Edit</Button></Gate>
           <ActionsMenu items={actions(p).filter((a) => a.label !== 'Edit')} />
         </>)}
         detail={(p) => <PersonaBody p={p} />}
@@ -198,7 +200,7 @@ function PersonaEditor({ draft, from, onClose }: { draft: Draft; from?: Persona;
           {err && <p className='text-destructive text-sm'>{err}</p>}
           <DialogFooter>
             <Button type='button' variant='outline' onClick={onClose}>Cancel</Button>
-            <Button type='submit' disabled={save.isPending || !d.name.trim()}>{isNew ? 'Add persona' : 'Save'}</Button>
+            <Gate need='library'><Button type='submit' disabled={save.isPending || !d.name.trim()}>{isNew ? 'Add persona' : 'Save'}</Button></Gate>
           </DialogFooter>
         </form>
       </DialogContent>

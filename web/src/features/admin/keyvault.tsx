@@ -16,6 +16,7 @@ import { Icons } from '@/components/icons';
 import { adminApi } from '@/lib/api-client';
 import { cn } from '@/lib/utils';
 import { post, useAdmin, useAdminAction } from './lib';
+import { Gate, useAdminRole } from './role';
 import { ErrorBox, FormRow, Mono, Notice, When } from './ui';
 
 // ---------- key vault ----------
@@ -39,6 +40,7 @@ const typeOf = (slug: string) => TYPE[slug] ?? 'Other';
 
 /** Every key Octillion uses, one row per provider; keys are added, disabled and deleted from the row's ⋯ menu. */
 export function AdminKeyVault() {
+  const { lock } = useAdminRole();
   const { data, error, isLoading } = useAdmin<{ unlocked: boolean; providers: Provider[]; credentials: Credential[]; env_keys?: EnvKey[] }>('/compute/keys');
   const envOf = (p: Provider) => (data?.env_keys ?? []).filter((k) => k.provider === p.slug);
   const [adding, setAdding] = useState<string | null>(null);
@@ -66,7 +68,7 @@ export function AdminKeyVault() {
     } },
     { key: 'last', label: 'Last used', type: 'date', value: (p) => p.last_used_at ?? undefined, render: (p) => (p.last_used_at ? <When d={p.last_used_at} /> : <span className='text-muted-foreground'>never</span>) },
     { key: 'on', label: 'On', className: 'w-12 text-right', keep: true,
-      render: (p) => <span onClick={(e) => e.stopPropagation()}><Switch aria-label={`${p.slug} on`} checked={p.enabled} disabled={provOn.isPending} onCheckedChange={(c) => provOn.mutate({ slug: p.slug, enabled: c })} /></span> }
+      render: (p) => <span onClick={(e) => e.stopPropagation()}><Gate need='keys'><Switch aria-label={`${p.slug} on`} checked={p.enabled} disabled={provOn.isPending} onCheckedChange={(c) => provOn.mutate({ slug: p.slug, enabled: c })} /></Gate></span> }
   ];
   return (
     <PageContainer>
@@ -77,15 +79,15 @@ export function AdminKeyVault() {
         searchPlaceholder='Search providers and keys · encrypted at rest; agents get scoped gateway tokens, never these keys'
         views={[{ id: 'all', label: 'All' }, ...TYPES.slice(0, 4).map((t) => ({ id: t, label: t, match: (p: Provider) => typeOf(p.slug) === t }))]}
         defaultSort={[{ key: 'type', dir: 'asc' }]}
-        primary={<Button onClick={() => setAdding(data?.providers[0]?.slug ?? null)} disabled={data?.unlocked === false}><Icons.add /> Add a key</Button>}
-        primaryMenu={[{ label: 'Import keys…', icon: <Icons.upload />, disabled: data?.unlocked === false, onSelect: () => setImporting(true) }]}
+        primary={<Gate need='keys'><Button onClick={() => setAdding(data?.providers[0]?.slug ?? null)} disabled={data?.unlocked === false}><Icons.add /> Add a key</Button></Gate>}
+        primaryMenu={[lock({ label: 'Import keys…', icon: <Icons.upload />, disabled: data?.unlocked === false, onSelect: () => setImporting(true) }, 'keys')]}
         actions={(p) => [
           { label: 'Add a key…', icon: <Icons.add />, disabled: data?.unlocked === false, onSelect: () => setAdding(p.slug) },
           ...keysOf(p).flatMap((c, i) => [
             { label: `${c.enabled ? 'Disable' : 'Enable'} ${c.label} (${c.hint})`, icon: c.enabled ? <Icons.eyeOff /> : <Icons.check />, separator: i === 0, onSelect: () => keyOn.mutate({ id: c.id, enabled: !c.enabled }) },
             { label: `Delete ${c.label}…`, icon: <Icons.trash />, destructive: true, onSelect: () => setDel(c) }
           ])
-        ]}
+        ].map((a) => lock(a, 'keys'))}
         exportName='key-vault-providers' empty='No providers.' />
       {importing && <ImportKeys providers={data?.providers ?? []} onClose={() => setImporting(false)} />}
       {adding && <AddKey providers={data?.providers ?? []} initial={adding} onClose={() => setAdding(null)} />}
@@ -139,7 +141,7 @@ function AddKey({ providers, initial, onClose }: { providers: Provider[]; initia
           {err && <p className='text-destructive text-sm'>{err}</p>}
           <DialogFooter>
             <Button type='button' variant='outline' onClick={onClose}>Cancel</Button>
-            <Button type='submit' disabled={add.isPending || !f.secret.trim()}>Save key</Button>
+            <Gate need='keys'><Button type='submit' disabled={add.isPending || !f.secret.trim()}>Save key</Button></Gate>
           </DialogFooter>
         </form>
       </DialogContent>
@@ -242,7 +244,7 @@ function ImportKeys({ providers, onClose }: { providers: Provider[]; onClose: ()
         <DialogFooter>
           <Button variant='outline' disabled={busy} onClick={onClose}>{done ? 'Close' : 'Cancel'}</Button>
           {rows && !done && <Button variant='ghost' onClick={() => setRows(null)}>Back</Button>}
-          {rows && !done && <Button disabled={busy || !rows.length} onClick={() => void save()}>{busy ? 'Saving…' : `Import ${rows.length} key${rows.length === 1 ? '' : 's'}`}</Button>}
+          {rows && !done && <Gate need='keys'><Button disabled={busy || !rows.length} onClick={() => void save()}>{busy ? 'Saving…' : `Import ${rows.length} key${rows.length === 1 ? '' : 's'}`}</Button></Gate>}
         </DialogFooter>
       </DialogContent>
     </Dialog>

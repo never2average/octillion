@@ -269,7 +269,7 @@ export function RecordView<T>({
         <div className='flex min-h-8 shrink-0 flex-wrap items-center gap-1 text-sm leading-none'>
           <span className='mr-2 font-medium tabular-nums'>{selRows.length} selected</span>
           {bulkItems.map((a, i) => (
-            <Button key={i} variant='ghost' size='sm' disabled={a.disabled} onClick={a.onSelect} className={cn(a.destructive && 'text-destructive hover:text-destructive')}>{a.icon}{a.label}</Button>
+            <Button key={i} variant='ghost' size='sm' disabled={a.disabled} title={a.hint} onClick={a.onSelect} className={cn(a.destructive && 'text-destructive hover:text-destructive')}>{a.icon}{a.label}</Button>
           ))}
           {exportName && <Button variant='ghost' size='sm' onClick={() => exportRows(selRows, '-selected')}><Icons.download /> Export selected</Button>}
           <Button variant='ghost' size='sm' className='text-muted-foreground ml-auto' onClick={clearSel}>Clear</Button>
@@ -388,7 +388,8 @@ export function RecordView<T>({
 function MenuItem({ a, sep }: { a: RowAction; sep: boolean }) {
   return (<>
     {a.separator && sep && <DropdownMenuSeparator />}
-    <DropdownMenuItem disabled={a.disabled} onClick={a.onSelect} className={cn(a.destructive && 'text-destructive focus:text-destructive')}>{a.icon}{a.label}</DropdownMenuItem>
+    <DropdownMenuItem disabled={a.disabled} onClick={a.onSelect} className={cn(a.destructive && 'text-destructive focus:text-destructive')}>{a.icon}{a.label}
+      {a.hint && <span className='text-muted-foreground ml-auto pl-3 text-xs'>{a.hint}</span>}</DropdownMenuItem>
   </>);
 }
 

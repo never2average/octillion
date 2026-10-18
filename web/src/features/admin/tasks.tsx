@@ -23,6 +23,7 @@ import { counted } from '@/lib/octillion-format';
 import { cn } from '@/lib/utils';
 import { List } from './account-peek';
 import { post, useAdmin, useAdminAction } from './lib';
+import { Gate, useAdminRole } from './role';
 import { Chips, ErrorBox, FormRow, Mono, StatusBadge, When } from './ui';
 
 export interface Task {
@@ -53,6 +54,7 @@ const harnessWords = (hs: string[] | undefined, opts: FilterOption[]) =>
 const EMPTY_F = { language: '', category: '', active: '', has_repo: '', harness: '' };
 
 export function AdminTasks() {
+  const { lock } = useAdminRole();
   const [q, setQ] = useState('');
   const [f, setF] = useState(EMPTY_F);
   const [bulkHarness, setBulkHarness] = useState(false);
@@ -104,7 +106,7 @@ export function AdminTasks() {
     { label: 'Set harnesses…', icon: <Icons.adjustments />, onSelect: () => { setSel(new Map([[t.id, t]])); setBulkHarness(true); } },
     { label: t.active ? 'Deactivate' : 'Activate', icon: t.active ? <Icons.eyeOff /> : <Icons.check />, separator: true,
       onSelect: () => setActive.mutate({ ids: [t.id], active: !t.active }) }
-  ];
+  ].map((a) => lock(a, 'library'));
   const selRows = [...sel.values()];
   const toOn = selRows.filter((t) => !t.active), toOff = selRows.filter((t) => t.active);
   const bulkGo = (list: Task[], active: boolean) => setActive.mutate({ ids: list.map((t) => t.id), active }, { onSuccess: () => setSel(new Map()) });
@@ -141,15 +143,15 @@ export function AdminTasks() {
             {opt('harness', '', 'Any harness preference')}{opt('harness', 'any', 'Whole mix (no preference)')}{opt('harness', 'set', 'Limited to some harnesses')}
             {opts.map((o) => opt('harness', o.value, `Runs on ${o.label}`))}
           </NativeSelect>
-          <Button onClick={() => setDraft(blank())}><Icons.add /> New task</Button>
+          <Gate need='library'><Button onClick={() => setDraft(blank())}><Icons.add /> New task</Button></Gate>
         </div>
 
         {selRows.length > 0 ? (
           <div className='flex min-h-8 shrink-0 flex-wrap items-center gap-1 text-sm leading-none'>
             <span className='mr-2 font-medium tabular-nums'>{selRows.length} selected</span>
-            {toOn.length > 0 && <Button variant='ghost' size='sm' onClick={() => bulkGo(toOn, true)}><Icons.check /> Activate {toOn.length}</Button>}
-            {toOff.length > 0 && <Button variant='ghost' size='sm' onClick={() => bulkGo(toOff, false)}><Icons.eyeOff /> Deactivate {toOff.length}</Button>}
-            <Button variant='ghost' size='sm' onClick={() => setBulkHarness(true)}><Icons.adjustments /> Set harnesses</Button>
+            {toOn.length > 0 && <Gate need='library'><Button variant='ghost' size='sm' onClick={() => bulkGo(toOn, true)}><Icons.check /> Activate {toOn.length}</Button></Gate>}
+            {toOff.length > 0 && <Gate need='library'><Button variant='ghost' size='sm' onClick={() => bulkGo(toOff, false)}><Icons.eyeOff /> Deactivate {toOff.length}</Button></Gate>}
+            <Gate need='library'><Button variant='ghost' size='sm' onClick={() => setBulkHarness(true)}><Icons.adjustments /> Set harnesses</Button></Gate>
             <Button variant='ghost' size='sm' className='text-muted-foreground ml-auto' onClick={() => setSel(new Map())}>Clear</Button>
           </div>
         ) : narrowed && (
@@ -222,7 +224,7 @@ export function AdminTasks() {
               <div className='flex items-center gap-2 border-b px-5 py-3'>
                 <Button variant='ghost' size='icon-sm' className='lg:hidden' aria-label='Back to the list' onClick={() => setOpen(null)}><Icons.chevronLeft /></Button>
                 <div className='min-w-0 flex-1 truncate leading-none font-semibold'>{current.title}</div>
-                <Button size='sm' variant='outline' onClick={() => setDraft(toDraft(current))}><Icons.edit /> Edit</Button>
+                <Gate need='library'><Button size='sm' variant='outline' onClick={() => setDraft(toDraft(current))}><Icons.edit /> Edit</Button></Gate>
                 <ActionsMenu items={actions(current).filter((a) => a.label !== 'Edit')} />
                 <Button variant='ghost' size='icon-sm' aria-label='Close' onClick={() => setOpen(null)}><Icons.close /></Button>
               </div>
@@ -322,7 +324,7 @@ function TaskEditor({ draft, languages, categories, harnesses, onClose }: { draf
           {err && <p className='text-destructive text-sm'>{err}</p>}
           <DialogFooter>
             <Button type='button' variant='outline' onClick={onClose}>Cancel</Button>
-            <Button type='submit' disabled={save.isPending || !d.title.trim() || !d.prompt.trim()}>{isNew ? 'Add task' : 'Save'}</Button>
+            <Gate need='library'><Button type='submit' disabled={save.isPending || !d.title.trim() || !d.prompt.trim()}>{isNew ? 'Add task' : 'Save'}</Button></Gate>
           </DialogFooter>
         </form>
       </DialogContent>
@@ -347,7 +349,7 @@ function HarnessDialog({ tasks, opts, onClose }: { tasks: Task[]; opts: FilterOp
         <MultiSelectFilter options={opts} value={v} onChange={setV} noun='harnesses' className='max-w-none w-full' />
         <DialogFooter>
           <Button variant='outline' onClick={() => onClose(false)}>Cancel</Button>
-          <Button disabled={save.isPending} onClick={() => save.mutate(undefined, { onSuccess: () => onClose(true) })}>{v.length ? 'Save' : 'Use the whole mix'}</Button>
+          <Gate need='library'><Button disabled={save.isPending} onClick={() => save.mutate(undefined, { onSuccess: () => onClose(true) })}>{v.length ? 'Save' : 'Use the whole mix'}</Button></Gate>
         </DialogFooter>
       </DialogContent>
     </Dialog>

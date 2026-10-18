@@ -22,6 +22,7 @@ import { cn } from '@/lib/utils';
 import { Dock } from '@/features/portal/memory';
 import { post, STAGE_LABELS, useAdmin, type InviteResult, type OrgRow } from './lib';
 import { copyText, ErrorBox, Mono, When, type Tone } from './ui';
+import { Gate, useAdminRole, type AdminPermission } from './role';
 
 /** A row of GET /orgs: lib.ts's OrgRow plus the fields shapeOrg (src/admin.ts) also returns. */
 export type Org = OrgRow & {
@@ -66,6 +67,7 @@ export type AccountCtl = ReturnType<typeof useAccountActions>;
 /** Dialog state, on-demand detail and plain writes for account actions; render `dialogs` once on the page. */
 export function useAccountActions(show: (r: InviteResult, title: string) => void, clerkOn: boolean) {
   const qc = useQueryClient();
+  const { lock } = useAdminRole();
   const [dlg, setDlg] = useState<{ kind: Kind; orgs: Org[] } | null>(null);
   // Shares the peek's cache entry, so a row action after opening the peek costs nothing.
   const detailOf = (o: Org) => qc.fetchQuery({ queryKey: ['admin', orgPath(o.slug)], queryFn: () => adminApi<OrgDetail>('GET', orgPath(o.slug)), staleTime: 15_000 });
@@ -84,7 +86,7 @@ export function useAccountActions(show: (r: InviteResult, title: string) => void
   const close = () => setDlg(null);
   return {
     open: (kind: Kind, ...orgs: Org[]) => setDlg({ kind, orgs }),
-    detailOf, cached, run, show, clerkOn,
+    detailOf, cached, run, show, clerkOn, lock,
     dialogs: dlg && <AccountDialog key={dlg.kind + dlg.orgs.map((o) => o.slug).join()} kind={dlg.kind} orgs={dlg.orgs} run={run} show={show} close={close} />
   };
 }
@@ -111,12 +113,13 @@ function actionsOf(o: Org, ctl: AccountCtl) {
 export function accountActions(o: Org, ctl: AccountCtl, d: OrgDetail | undefined = ctl.cached(o)): RowAction[] {
   const x = actionsOf(o, ctl);
   const ext = (url: string) => () => window.open(url, '_blank', 'noopener');
-  const issue: RowAction = { label: 'Issue key…', icon: <Icons.lock />, onSelect: x.key };
+  const { lock } = ctl;
+  const issue: RowAction = lock({ label: 'Issue key…', icon: <Icons.lock />, onSelect: x.key }, 'accounts');
   const people: RowAction[] = o.clerk_org_id
-    ? [{ label: 'Invite person…', icon: <Icons.send />, onSelect: x.invite }, issue]
-    : [issue, ...(ctl.clerkOn ? [{ label: 'Link to Clerk', icon: <Icons.shield />, onSelect: x.linkClerk }] : [])];
+    ? [lock({ label: 'Invite person…', icon: <Icons.send />, onSelect: x.invite }, 'invite'), issue]
+    : [issue, ...(ctl.clerkOn ? [lock({ label: 'Link to Clerk', icon: <Icons.shield />, onSelect: x.linkClerk }, 'accounts')] : [])];
   const groups: RowAction[][] = [
-    [...people, { label: 'Send a tip…', icon: <Icons.chat />, onSelect: x.tip }],
+    [...people, lock({ label: 'Send a tip…', icon: <Icons.chat />, onSelect: x.tip }, 'journeys')],
     [
       { label: 'Copy connector URL', icon: <Icons.plug />, onSelect: x.connector },
       { label: 'Copy welcome email', icon: <Icons.post />, onSelect: x.welcome }
@@ -128,8 +131,8 @@ export function accountActions(o: Org, ctl: AccountCtl, d: OrgDetail | undefined
       { label: o.allowance_usd != null ? 'Change monthly allowance…' : 'Set monthly allowance…', icon: <Icons.billing />, onSelect: x.allowance },
       { label: 'Copy billing portal link', icon: <Icons.billing />, onSelect: x.portal },
       ...(o.prepaid_allowed ? [{ label: 'Copy checkout link…', icon: <Icons.creditCard />, onSelect: () => ctl.open('checkout', o) }] : [])
-    ],
-    [{ label: 'Rename…', icon: <Icons.edit />, onSelect: () => ctl.open('rename', o) }],
+    ].map((a) => lock(a, 'accounts')),
+    [lock({ label: 'Rename…', icon: <Icons.edit />, onSelect: () => ctl.open('rename', o) }, 'accounts')],
     [
       ...(d?.clerk_dashboard ? [{ label: 'Clerk dashboard', icon: <Icons.externalLink />, onSelect: ext(d.clerk_dashboard) }] : []),
       ...(d?.stripe_dashboard ? [{ label: 'Stripe dashboard', icon: <Icons.externalLink />, onSelect: ext(d.stripe_dashboard) }] : [])
@@ -254,7 +257,7 @@ export function TipDock({ orgs, onClose }: { orgs: Org[]; onClose: () => void })
         <Input aria-label='Prompt' maxLength={300} placeholder='Prompt to try (optional)' value={f.prompt} onChange={(e) => setF({ ...f, prompt: e.target.value })} />
         <Input aria-label='Link' type='url' placeholder='Link (optional)' value={f.link} onChange={(e) => setF({ ...f, link: e.target.value })} />
         <div className='flex items-center gap-2 border-t pt-3'>
-          <Button type='submit' disabled={busy || !f.message.trim()}>Queue tip</Button>
+          <Gate need='journeys'><Button type='submit' disabled={busy || !f.message.trim()}>Queue tip</Button></Gate>
           <span className='text-muted-foreground ml-auto text-xs tabular-nums'>{f.message.length}/280</span>
         </div>
       </form>
@@ -337,13 +340,13 @@ const CopyText = ({ value, ok }: { value: string; ok: string }) => (
 );
 
 /** The one-click fix for an attention message (src/admin.ts shapeOrg), or null when there is none. */
-function fixFor(a: string, o: Org, d: OrgDetail | undefined, ctl: AccountCtl, view: (tab: string) => void): { label: string; onSelect: () => void } | null {
+function fixFor(a: string, o: Org, d: OrgDetail | undefined, ctl: AccountCtl, view: (tab: string) => void): { label: string; onSelect: () => void; need?: AdminPermission } | null {
   const x = actionsOf(o, ctl);
   if (a.startsWith('Nobody can get in')) {
-    if (ctl.clerkOn && !o.clerk_org_id) return { label: 'Link to Clerk', onSelect: x.linkClerk };
-    return o.clerk_org_id ? { label: 'Invite…', onSelect: x.invite } : { label: 'Issue key…', onSelect: x.key };
+    if (ctl.clerkOn && !o.clerk_org_id) return { label: 'Link to Clerk', onSelect: x.linkClerk, need: 'accounts' };
+    return o.clerk_org_id ? { label: 'Invite…', onSelect: x.invite, need: 'invite' } : { label: 'Issue key…', onSelect: x.key, need: 'accounts' };
   }
-  if (a.startsWith('Created ') && a.includes('nobody invited')) return { label: 'Invite…', onSelect: x.invite };
+  if (a.startsWith('Created ') && a.includes('nobody invited')) return { label: 'Invite…', onSelect: x.invite, need: 'invite' };
   if (a.startsWith('Invitation expired for ')) {
     // The message lists the emails exactly ("Invitation expired for a@x, b@x: resend it"); members are already left out.
     const emails = new Set(a.slice('Invitation expired for '.length).replace(/: resend it$/, '').split(', '));
@@ -351,11 +354,11 @@ function fixFor(a: string, o: Org, d: OrgDetail | undefined, ctl: AccountCtl, vi
     const expired = d?.invitations.filter((i) => i.state === 'expired' && emails.has(i.email) && !joined.has(i.email)) ?? [];
     if (!expired.length) return null;
     const p = orgPath(o.slug);
-    return { label: 'Resend', onSelect: () => void ctl.run(() => Promise.all(expired.map((i) => post(`${p}/invitations/${encodeURIComponent(i.id)}/resend`))), 'Invitation resent') };
+    return { label: 'Resend', onSelect: () => void ctl.run(() => Promise.all(expired.map((i) => post(`${p}/invitations/${encodeURIComponent(i.id)}/resend`))), 'Invitation resent'), need: 'invite' };
   }
   if ((a.startsWith('Joined ') && a.includes('never connected')) || a.startsWith('Connected but never called')) return { label: 'Copy welcome email', onSelect: x.welcome };
-  if (['Using tools but has not onboarded', 'Product onboarded, no simulation', 'Simulation ran, report never opened'].some((m) => a.startsWith(m))) return { label: 'Send a tip…', onSelect: x.tip };
-  if (a.startsWith('Stripe subscription is') || a.startsWith('Subscription cancels')) return { label: 'Copy portal link', onSelect: x.portal };
+  if (['Using tools but has not onboarded', 'Product onboarded, no simulation', 'Simulation ran, report never opened'].some((m) => a.startsWith(m))) return { label: 'Send a tip…', onSelect: x.tip, need: 'journeys' };
+  if (a.startsWith('Stripe subscription is') || a.startsWith('Subscription cancels')) return { label: 'Copy portal link', onSelect: x.portal, need: 'accounts' };
   if (a.startsWith('Product onboarding failed') || a.includes('tool errors')) return { label: 'View', onSelect: () => view('usage') };
   return null;
 }
@@ -383,25 +386,25 @@ export function AccountPeek({ org, ctl }: { org: Org; ctl: AccountCtl }) {
   const member = (m: OrgDetail['members'][number]): RowAction[] => {
     const who = m.email || m.user_id;
     const act = (a: string, ok: string, body?: unknown) => () => void ctl.run(() => post(`${path}/members/${encodeURIComponent(m.id)}/${a}`, body), ok);
-    return [
+    return ([
       m.role === 'admin' ? { label: 'Make member', onSelect: act('role', 'Role changed', { role: 'member' }) } : { label: 'Make admin', onSelect: act('role', 'Role changed', { role: 'admin' }) },
       ...(m.status === 'active' ? [{ label: 'Suspend…', destructive: true, separator: true, onSelect: () => confirm.ask({ title: `Suspend ${who}?`, description: 'They can no longer use Octillion in this account until you restore access; tokens already issued expire within minutes.', label: 'Suspend', destructive: true, run: act('deactivate', 'Suspended') }) }] : []),
       ...(m.status === 'inactive' ? [{ label: 'Restore', separator: true, onSelect: act('reactivate', 'Restored') }] : [])
-    ];
+    ] as RowAction[]).map((a) => ctl.lock(a, 'accounts'));
   };
   const invitation = (x: OrgDetail['invitations'][number]): RowAction[] => {
     const act = (a: string, ok: string) => () => void ctl.run(() => post(`${path}/invitations/${encodeURIComponent(x.id)}/${a}`), ok);
-    return [
+    return ([
       ...(x.state === 'pending' || x.state === 'expired' ? [{ label: 'Resend', onSelect: act('resend', 'Invitation resent') }] : []),
       ...(x.state === 'pending' ? [{ label: 'Revoke…', destructive: true, separator: true, onSelect: () => confirm.ask({ title: `Revoke the invitation for ${x.email}?`, description: 'The link in their email stops working.', label: 'Revoke', destructive: true, run: act('revoke', 'Invitation revoked') }) }] : [])
-    ];
+    ] as RowAction[]).map((a) => ctl.lock(a, 'invite'));
   };
-  const key = (k: OrgDetail['keys'][number]): RowAction[] => k.revoked_at ? [] : [
+  const key = (k: OrgDetail['keys'][number]): RowAction[] => k.revoked_at ? [] : ([
     { label: 'Rotate…', onSelect: () => confirm.ask({ title: 'Rotate this key?', description: 'The current link stops working now and a new one is shown once.', label: 'Rotate',
       run: () => void ctl.run(() => post<InviteResult>(`${path}/keys/${k.id}/rotate`)).then((r) => r && ctl.show(r, `Rotated key for ${r.org.name}`)) }) },
     { label: 'Revoke…', destructive: true, separator: true, onSelect: () => confirm.ask({ title: `Revoke the key for ${k.label}?`, description: 'Their connector stops working immediately.', label: 'Revoke', destructive: true,
       run: () => void ctl.run(() => post(`${path}/keys/${k.id}/revoke`), 'Key revoked') }) }
-  ];
+  ] as RowAction[]).map((a) => ctl.lock(a, 'delete'));
 
   const s = org.subscription;
   const stripeOn = d ? !!d.integrations.stripe : undefined;
@@ -423,7 +426,10 @@ export function AccountPeek({ org, ctl }: { org: Org; ctl: AccountCtl }) {
               <div key={a} className='flex items-center gap-3 border-b py-3 text-sm leading-none last:border-b-0'>
                 <Icons.warning className='size-3.5 shrink-0 text-amber-700 dark:text-amber-400' />
                 <span className='min-w-0 flex-1 truncate text-amber-700 dark:text-amber-400' title={a}>{a}</span>
-                {fix && <Button variant='ghost' size='xs' className='text-muted-foreground hover:text-foreground -my-1.5' onClick={fix.onSelect}>{fix.label}</Button>}
+                {fix && (() => {
+                  const b = <Button variant='ghost' size='xs' className='text-muted-foreground hover:text-foreground -my-1.5' onClick={fix.onSelect}>{fix.label}</Button>;
+                  return fix.need ? <Gate need={fix.need}>{b}</Gate> : b;
+                })()}
               </div>
             );
           })}

@@ -40,7 +40,8 @@ export interface RecordCol<T> {
 }
 
 /** One entry in a ⋯ menu; `separator` draws a line before it. */
-export interface RowAction { label: string; icon?: ReactNode; onSelect: () => void; destructive?: boolean; disabled?: boolean; separator?: boolean }
+/** `hint`: a short note shown next to a disabled action (say, the role it needs). */
+export interface RowAction { label: string; icon?: ReactNode; onSelect: () => void; destructive?: boolean; disabled?: boolean; separator?: boolean; hint?: string }
 
 export type Op =
   | 'contains' | 'not_contains' | 'is' | 'is_not' | 'empty' | 'not_empty'

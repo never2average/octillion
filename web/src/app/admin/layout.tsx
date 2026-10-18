@@ -4,14 +4,15 @@ import { serverApi } from '@/lib/server-api';
 import { auth } from '@clerk/nextjs/server';
 import { SignOutButton } from '@clerk/nextjs';
 import Link from 'next/link';
+import { AdminRoleProvider, type AdminSession } from '@/features/admin/role';
 import type { Metadata } from 'next';
 
 export const metadata: Metadata = { title: { default: 'Admin', template: '%s | Octillion Admin' } };
 
-/** Octillion staff only: the API server decides who is a platform admin (OCTILLION_PLATFORM_ADMINS, Clerk metadata). */
+/** Octillion staff only: the API server decides who is a platform admin and their role (src/admin-roles.ts). */
 export default async function AdminLayout({ children }: { children: React.ReactNode }) {
   await auth.protect();
-  const s = await serverApi<{ email: string | null; is_platform_admin: boolean }>('/admin/session');
+  const s = await serverApi<{ email: string | null; is_platform_admin: boolean } & AdminSession>('/admin/session');
   if (!s.body?.is_platform_admin) {
     return (
       <main className='flex min-h-screen items-center justify-center p-6'>
@@ -26,5 +27,6 @@ export default async function AdminLayout({ children }: { children: React.ReactN
       </main>
     );
   }
-  return <AreaShell area='admin' groups={adminNav}>{children}</AreaShell>;
+  const role = { role: s.body.role, permissions: s.body.permissions ?? [], needs: s.body.needs ?? {} };
+  return <AdminRoleProvider session={role}><AreaShell area='admin' groups={adminNav}>{children}</AreaShell></AdminRoleProvider>;
 }

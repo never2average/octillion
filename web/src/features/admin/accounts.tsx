@@ -15,6 +15,7 @@ import { useResult } from './result-dialog';
 import { RecordView, type RecordCol, type RecordViewDef } from '@/components/layout/record-view';
 import { AccountPeek, AccountPeekActions, accountActions, dollars, useAccountActions, type Org } from './account-peek';
 import { copyText, StageDots, StatusBadge, SubBadge, When } from './ui';
+import { Gate } from './role';
 
 interface Orgs { orgs: Org[]; stages: { id: string; label: string; next: string }[]; stripe_error?: string }
 
@@ -112,11 +113,11 @@ export function AdminAccounts() {
         searchPlaceholder='Search accounts by name, slug, email or plan'
         filters={error ? <StatusBadge tone='bad' title={error.message}>Load failed</StatusBadge>
           : data?.stripe_error ? <StatusBadge tone='warn' title={data.stripe_error}>Stripe error</StatusBadge> : undefined}
-        primary={<Button onClick={() => setCreating(true)}><Icons.add className='size-4' /> New account</Button>}
+        primary={<Gate need='requests'><Button onClick={() => setCreating(true)}><Icons.add className='size-4' /> New account</Button></Gate>}
         primaryMenu={[{ label: 'Copy contact emails (current view)', icon: <Icons.teams />, onSelect: () => copyContacts(tabRows()) }]}
         bulk={(list) => [
           { label: 'Copy contact emails', icon: <Icons.teams />, onSelect: () => copyContacts(list) },
-          { label: `Send a tip to ${list.length}`, icon: <Icons.chat />, onSelect: () => ctl.open('tip', ...list) }
+          ctl.lock({ label: `Send a tip to ${list.length}`, icon: <Icons.chat />, onSelect: () => ctl.open('tip', ...list) }, 'journeys')
         ]}
         actions={(o) => accountActions(o, ctl)}
         empty='No accounts yet. Approve an access request or create one.'

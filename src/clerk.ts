@@ -66,7 +66,8 @@ export interface ClerkMembership { id: string; role: string; public_metadata: Re
   public_user_data?: { user_id: string; identifier?: string; first_name?: string | null; last_name?: string | null };
   organization?: ClerkOrg }
 export interface ClerkUser { id: string; first_name: string | null; last_name: string | null; primary_email_address_id: string | null;
-  email_addresses: { id: string; email_address: string; verification?: { status?: string } | null }[]; public_metadata: Record<string, unknown> }
+  email_addresses: { id: string; email_address: string; verification?: { status?: string } | null }[]; public_metadata: Record<string, unknown>;
+  last_sign_in_at?: number | null; created_at?: number }
 
 /** "org:admin" -> "admin"; anything that is not admin is a member. */
 export const roleOf = (role: string | null | undefined): "admin" | "member" => (String(role ?? "").replace(/^org:/, "") === "admin" ? "admin" : "member");
@@ -131,6 +132,18 @@ export const users = {
     const hit = userCache.get(id);
     if (!fresh && hit && Date.now() - hit.at < 60_000) return hit.user;
     const user = await call<ClerkUser>("GET", `/users/${encodeURIComponent(id)}`);
+    userCache.set(id, { at: Date.now(), user });
+    return user;
+  },
+  /** Every user (paged); Clerk has no search on metadata, so callers filter. */
+  list: () => all<ClerkUser>("/users", { order_by: "-created_at" }),
+  byEmail: async (email: string) => (await call<ClerkUser[]>("GET", `/users?${new URLSearchParams({ email_address: email.toLowerCase() })}`))[0] ?? null,
+  /** A user who signs in later with that address (Google, a magic link): no password needed. */
+  create: (email: string, publicMetadata: Record<string, unknown>) =>
+    call<ClerkUser>("POST", "/users", { email_address: [email], public_metadata: publicMetadata, skip_password_requirement: true }),
+  /** Merges into public_metadata (null removes a key). */
+  setMetadata: async (id: string, publicMetadata: Record<string, unknown>) => {
+    const user = await call<ClerkUser>("PATCH", `/users/${encodeURIComponent(id)}/metadata`, { public_metadata: publicMetadata });
     userCache.set(id, { at: Date.now(), user });
     return user;
   },
@@ -231,17 +244,13 @@ export const mcpAudience = () => process.env.CLERK_MCP_AUDIENCE || `${publicUrl(
 
 /**
  * OCTILLION_PLATFORM_ADMINS: comma-separated addresses or *@domain entries (anything after a colon is ignored, so old
- * password entries still name their admin). Clerk must have verified the address; or the Clerk user carries
- * public_metadata.platform_admin = true.
+ * password entries still name their admin). Clerk must have verified the address. Roles: src/admin-roles.ts.
  */
 export function isPlatformAdminEmail(email: string | null): boolean {
   if (!email) return false;
   const e = email.toLowerCase();
-  const entries = (process.env.OCTILLION_PLATFORM_ADMINS ?? "").split(",").map((x) => x.trim().split(":")[0].toLowerCase()).filter(Boolean);
+  const entries = platformAdminEntries();
   return entries.includes(e) || entries.includes(`*@${e.split("@")[1]}`);
 }
-export async function platformAdminFor(userId: string): Promise<{ email: string | null; isAdmin: boolean }> {
-  const u = await users.get(userId);
-  const { email, verified } = primaryEmail(u);
-  return { email, isAdmin: u.public_metadata?.platform_admin === true || (verified && isPlatformAdminEmail(email)) };
-}
+/** An address OCTILLION_PLATFORM_ADMINS names (exact entries only, for listing; domain entries match anyone there). */
+export const platformAdminEntries = () => (process.env.OCTILLION_PLATFORM_ADMINS ?? "").split(",").map((x) => x.trim().split(":")[0].toLowerCase()).filter(Boolean);

@@ -28,6 +28,7 @@ import { adminApi } from '@/lib/api-client';
 import { counted } from '@/lib/octillion-format';
 import { cn } from '@/lib/utils';
 import { post, useAdmin, useAdminAction } from './lib';
+import { Gate, useAdminRole } from './role';
 import { ErrorBox, FormRow, LoadingCards, Mono, Notice, Section, When } from './ui';
 import { ActionsMenu, Field, RecordView, type RecordCol } from '@/components/layout/record-view';
 import { ageOf, dur, EST, money, SectionLink, UrlTabs, useComputeParams, useNow } from './compute-common';
@@ -55,6 +56,7 @@ const pct = (x: number) => `${(x * 100).toFixed(x > 0 && x < 0.01 ? 1 : 0)}%`;
 
 /** Agent configuration: one row per setting (models, run sizes, research limits), edited in place. */
 export function AdminConfiguration() {
+  const { lock } = useAdminRole();
   const { data, error, isLoading } = useAdmin<Compute>('/compute');
   const save = useAdminAction((v: Record<string, string | null>) => adminApi<Compute>('PUT', '/compute/settings', { values: v }), { success: 'Setting saved' });
   const groupName = (id: string) => data?.groups.find((g) => g.id === id)?.label ?? id;
@@ -69,9 +71,9 @@ export function AdminConfiguration() {
     { key: 'group', label: 'Group', type: 'select', value: (x) => groupName(x.group), render: (x) => groupName(x.group) },
     { key: 'value', label: 'Value', className: 'w-80', keep: true, render: (x) => (
       <span className='flex items-center gap-1' onClick={(e) => e.stopPropagation()}>
-        <InlineValue key={String(x.value)} s={x} disabled={save.isPending} onSave={(v) => save.mutate({ [x.key]: v })} />
-        {x.source === 'set' && <Button variant='ghost' size='xs' className='text-muted-foreground hover:text-foreground' disabled={save.isPending}
-          title={`Back to ${backTo(x)}`} onClick={() => save.mutate({ [x.key]: null })}>Reset</Button>}
+        <Gate need='compute'><InlineValue key={String(x.value)} s={x} disabled={save.isPending} onSave={(v) => save.mutate({ [x.key]: v })} /></Gate>
+        {x.source === 'set' && <Gate need='compute'><Button variant='ghost' size='xs' className='text-muted-foreground hover:text-foreground' disabled={save.isPending}
+          title={`Back to ${backTo(x)}`} onClick={() => save.mutate({ [x.key]: null })}>Reset</Button></Gate>}
       </span>
     ) },
     { key: 'source', label: 'From', type: 'select', value: (x) => (x.source === 'set' ? 'Set here' : x.source === 'env' ? 'Environment' : 'Default'),
@@ -84,9 +86,9 @@ export function AdminConfiguration() {
       <RecordView id='agent-configuration' rows={rows} loading={isLoading} rowKey={(x) => x.key} cols={cols} noun='settings'
         searchText={(x) => `${x.label} ${x.key} ${x.help} ${groupName(x.group)}`} searchPlaceholder='Search settings'
         defaultSort={[{ key: 'group', dir: 'asc' }]} groupable
-        actions={(x) => x.source === 'set' ? [{ label: `Reset to ${x.env != null ? 'environment' : 'default'}`, icon: <Icons.close />, onSelect: () => save.mutate({ [x.key]: null }) }] : []}
-        primary={<Button variant='outline' disabled={!changed.length || save.isPending} onClick={() => setAskReset(true)}
-          title={changed.length ? `${changed.length} setting${changed.length === 1 ? '' : 's'} changed here` : 'Every setting is at its default'}><Icons.refresh /> Reset to defaults</Button>}
+        actions={(x) => x.source === 'set' ? [lock({ label: `Reset to ${x.env != null ? 'environment' : 'default'}`, icon: <Icons.close />, onSelect: () => save.mutate({ [x.key]: null }) }, 'compute')] : []}
+        primary={<Gate need='compute'><Button variant='outline' disabled={!changed.length || save.isPending} onClick={() => setAskReset(true)}
+          title={changed.length ? `${changed.length} setting${changed.length === 1 ? '' : 's'} changed here` : 'Every setting is at its default'}><Icons.refresh /> Reset to defaults</Button></Gate>}
         exportName='agent-configuration' empty='No settings.' />
       <AlertDialog open={askReset} onOpenChange={setAskReset}>
         <AlertDialogContent>
@@ -131,6 +133,7 @@ export function AdminKeyVault() {
  * of runs and sandboxes, and an on/off switch. Weights save as you leave the field; changes apply to new runs.
  */
 export function AdminAgentMix() {
+  const { lock } = useAdminRole();
   const { data, error, isLoading } = useAdmin<Compute>('/compute');
   const set = useAdminAction((v: { id: string; market_share?: number; paused?: boolean }) =>
     adminApi('PUT', `/compute/agents/${encodeURIComponent(v.id)}`, { market_share: v.market_share, paused: v.paused }), { success: 'Harness mix saved' });
@@ -152,12 +155,12 @@ export function AdminAgentMix() {
     { key: 'cli', label: 'CLI', type: 'select', value: (a) => a.harness, render: (a) => <Mono>{a.harness}</Mono> },
     { key: 'model', label: 'Model', type: 'select', value: (a) => a.model ?? '', render: (a) => (a.model ? <Mono>{a.model.replace(/^.*\//, '')}</Mono> : <span className='text-muted-foreground'>its own</span>) },
     { key: 'weight', label: 'Weight', className: 'w-28 text-right', type: 'number', value: (a) => a.weight,
-      render: (a) => <span onClick={(e) => e.stopPropagation()}><WeightInput key={a.weight} value={a.weight} disabled={set.isPending} onSave={(w) => set.mutate({ id: a.id, market_share: w })} label={`Weight of ${a.label}`} /></span> },
+      render: (a) => <span onClick={(e) => e.stopPropagation()}><Gate need='harnesses'><WeightInput key={a.weight} value={a.weight} disabled={set.isPending} onSave={(w) => set.mutate({ id: a.id, market_share: w })} label={`Weight of ${a.label}`} /></Gate></span> },
     { key: 'share', label: 'Share', className: 'text-right', type: 'number', value: (a) => a.share, render: (a) => <span className='tabular-nums'>{a.share ? pct(a.share) : '—'}</span> },
     { key: 'sandboxes', label: 'Sandboxes', className: 'text-right', type: 'number', value: (a) => a.sandboxes, render: (a) => <span className='tabular-nums'>{a.sandboxes || '—'}</span> },
     { key: 'status', label: 'Status', type: 'select', value: (a) => a.status, render: (a) => <span title={a.paused_reason ?? undefined} className={a.status === 'On' ? undefined : 'text-muted-foreground'}>{a.status}</span> },
     { key: 'on', label: 'On', className: 'w-12 text-right', keep: true,
-      render: (a) => <span onClick={(e) => e.stopPropagation()}><Switch aria-label={`${a.label} on`} checked={a.status === 'On'} disabled={!a.runnable || set.isPending} onCheckedChange={(c) => set.mutate({ id: a.id, paused: !c })} /></span> }
+      render: (a) => <span onClick={(e) => e.stopPropagation()}><Gate need='harnesses'><Switch aria-label={`${a.label} on`} checked={a.status === 'On'} disabled={!a.runnable || set.isPending} onCheckedChange={(c) => set.mutate({ id: a.id, paused: !c })} /></Gate></span> }
   ];
   return (
     <PageContainer>
@@ -170,7 +173,7 @@ export function AdminAgentMix() {
         cols={cols}
         noun='harnesses'
         searchText={(a) => `${a.label} ${a.id} ${a.model ?? ''} ${a.harness}${a.origin === 'admin' ? ' added' : ''}`}
-        primary={<Button onClick={() => setForm({ edit: null })} disabled={!added.data}><Icons.add /> Add harness</Button>}
+        primary={<Gate need='harnesses'><Button onClick={() => setForm({ edit: null })} disabled={!added.data}><Icons.add /> Add harness</Button></Gate>}
         searchPlaceholder={pop ? `Search ${pop.agents.length} harnesses (${pop.agents.filter((a) => a.status === 'On').length} on)` : 'Search harnesses'}
         views={[
           { id: 'all', label: 'All harnesses' },
@@ -180,16 +183,16 @@ export function AdminAgentMix() {
         initialSize={50}
         defaultSort={[{ key: 'weight', dir: 'desc' }]}
         actions={(a) => [
-          { label: a.status === 'On' ? 'Turn off' : 'Turn on', icon: a.status === 'On' ? <Icons.eyeOff /> : <Icons.check />, disabled: !a.runnable, onSelect: () => set.mutate({ id: a.id, paused: a.status === 'On' }) },
+          lock({ label: a.status === 'On' ? 'Turn off' : 'Turn on', icon: a.status === 'On' ? <Icons.eyeOff /> : <Icons.check />, disabled: !a.runnable, onSelect: () => set.mutate({ id: a.id, paused: a.status === 'On' }) }, 'harnesses'),
           ...(a.origin === 'admin' ? [
-            { label: 'Edit…', icon: <Icons.edit />, separator: true, disabled: !addedRow(a.id), onSelect: () => setForm({ edit: addedRow(a.id) }) },
-            { label: 'Delete…', icon: <Icons.trash />, destructive: true, onSelect: () => setDel(a) }
+            lock({ label: 'Edit…', icon: <Icons.edit />, separator: true, disabled: !addedRow(a.id), onSelect: () => setForm({ edit: addedRow(a.id) }) }, 'harnesses'),
+            lock({ label: 'Delete…', icon: <Icons.trash />, destructive: true, onSelect: () => setDel(a) }, 'delete')
           ] : [])
         ]}
         bulk={(rows, clear) => [
           { label: 'Turn on', icon: <Icons.check />, onSelect: () => { rows.filter((a) => a.runnable).forEach((a) => set.mutate({ id: a.id, paused: false })); clear(); } },
           { label: 'Turn off', icon: <Icons.eyeOff />, onSelect: () => { rows.forEach((a) => set.mutate({ id: a.id, paused: true })); clear(); } }
-        ]}
+        ].map((x) => lock(x, 'harnesses'))}
         exportName='harness-mix'
         empty='No agents.'
       />
@@ -253,7 +256,7 @@ function HarnessDialog({ bases, edit, onClose }: { bases: HarnessBase[]; edit: A
           {err && <p className='text-destructive text-sm'>{err}</p>}
           <DialogFooter>
             <Button type='button' variant='outline' onClick={onClose}>Cancel</Button>
-            <Button type='submit' disabled={save.isPending || !f.model.trim() || !label.trim()}>{edit ? 'Save' : 'Add harness'}</Button>
+            <Gate need='harnesses'><Button type='submit' disabled={save.isPending || !f.model.trim() || !label.trim()}>{edit ? 'Save' : 'Add harness'}</Button></Gate>
           </DialogFooter>
         </form>
       </DialogContent>
@@ -292,6 +295,7 @@ const TYPE_ORDER = ['Inference', 'Sandbox', 'Search', 'Coding agent', 'Other'];
  * once and never shown again, only its hint.
  */
 function ModelKeys() {
+  const { lock } = useAdminRole();
   const { data, error } = useAdmin<{ unlocked: boolean; providers: Provider[]; credentials: Credential[] }>('/compute/keys');
   const [adding, setAdding] = useState<string | null>(null);
   const [f, setF] = useState({ label: '', secret: '' });
@@ -330,7 +334,7 @@ function ModelKeys() {
             { label: `${c.enabled ? 'Disable' : 'Enable'} ${c.label} (${c.hint})`, icon: c.enabled ? <Icons.eyeOff /> : <Icons.check />, separator: i === 0, onSelect: () => keyOn.mutate({ id: c.id, enabled: !c.enabled }) },
             { label: `Delete ${c.label}…`, icon: <Icons.trash />, destructive: true, onSelect: () => setDel(c) }
           ])
-        ]}
+        ].map((a) => lock(a, 'keys'))}
         cols={[
           ['Provider', (p) => <Mono>{p.slug}</Mono>],
           ['Type', (p) => typeOf(p.slug)],
@@ -341,7 +345,7 @@ function ModelKeys() {
               : <span className='text-amber-700 dark:text-amber-400'>no key</span>;
           }],
           ['Last used', (p) => (p.last_used_at ? <When d={p.last_used_at} /> : <span className='text-muted-foreground'>never</span>)],
-          ['On', (p) => <Switch aria-label={`${p.slug} on`} checked={p.enabled} disabled={provOn.isPending} onCheckedChange={(c) => provOn.mutate({ slug: p.slug, enabled: c })} />, 'w-12 text-right']
+          ['On', (p) => <Gate need='keys'><Switch aria-label={`${p.slug} on`} checked={p.enabled} disabled={provOn.isPending} onCheckedChange={(c) => provOn.mutate({ slug: p.slug, enabled: c })} /></Gate>, 'w-12 text-right']
         ]} />
       <Dialog open={!!adding} onOpenChange={(o) => !o && close()}>
         <DialogContent className='sm:max-w-md'>
@@ -361,7 +365,7 @@ function ModelKeys() {
             {err && <p className='text-destructive text-sm'>{err}</p>}
             <DialogFooter>
               <Button type='button' variant='outline' onClick={close}>Cancel</Button>
-              <Button type='submit' disabled={add.isPending || !f.secret.trim()}>Save key</Button>
+              <Gate need='keys'><Button type='submit' disabled={add.isPending || !f.secret.trim()}>Save key</Button></Gate>
             </DialogFooter>
           </form>
         </DialogContent>
@@ -515,10 +519,10 @@ function RunTick({ s }: { s: Summary }) {
   const run = () => tick.mutate(undefined, { onSuccess: (r) => (r.error ? toast.error(r.message) : r.leader ? toast.success(r.message) : toast.info(r.message)) });
   return (
     <>
-      <Button variant='outline' size='sm' disabled={tick.isPending || blocked} onClick={() => setAsking(true)}
+      <Gate need='compute'><Button variant='outline' size='sm' disabled={tick.isPending || blocked} onClick={() => setAsking(true)}
         title={blocked ? 'This deployment cannot trigger the autoscaler: PUBLIC_URL is not HTTPS or the worker token is unset' : 'Run one autoscaler tick now instead of waiting for the next one'}>
         {tick.isPending ? <Icons.spinner className='animate-spin' /> : <Icons.play />} Run a tick
-      </Button>
+      </Button></Gate>
       <AlertDialog open={asking} onOpenChange={setAsking}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -709,12 +713,12 @@ function Limits({ s, onEditing }: { s: Summary; onEditing: (key: string, on: boo
     { key: 'change', label: 'Change', className: 'w-64', render: (r) => (
       r.setting ? (
         <span className='flex items-center gap-1' onClick={(e) => e.stopPropagation()}>
-          <LimitInput key={`${String(r.setting.value)}:${rejected}`} s={r.setting} disabled={save.isPending} onDirty={(on) => onEditing(r.setting!.key, on)}
-            onSave={(v) => save.mutate({ [r.setting!.key]: v }, { onError: () => setRejected((k) => k + 1), onSettled: () => onEditing(r.setting!.key, false) })} />
+          <Gate need='compute'><LimitInput key={`${String(r.setting.value)}:${rejected}`} s={r.setting} disabled={save.isPending} onDirty={(on) => onEditing(r.setting!.key, on)}
+            onSave={(v) => save.mutate({ [r.setting!.key]: v }, { onError: () => setRejected((k) => k + 1), onSettled: () => onEditing(r.setting!.key, false) })} /></Gate>
           {r.setting.source === 'set' && (
-            <Button variant='ghost' size='xs' className='text-muted-foreground hover:text-foreground' disabled={save.isPending}
+            <Gate need='compute'><Button variant='ghost' size='xs' className='text-muted-foreground hover:text-foreground' disabled={save.isPending}
               title={`Back to ${r.setting.env != null ? `the environment (${r.setting.env})` : `the default (${r.setting.default})`}`}
-              onClick={() => save.mutate({ [r.setting!.key]: null })}>Reset</Button>
+              onClick={() => save.mutate({ [r.setting!.key]: null })}>Reset</Button></Gate>
           )}
         </span>
       ) : <span className='text-muted-foreground text-xs'>{r.fixed ?? '—'}</span>

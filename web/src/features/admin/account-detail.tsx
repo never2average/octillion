@@ -13,6 +13,7 @@ import { money, usd } from '@/lib/octillion-format';
 import { cn } from '@/lib/utils';
 import { adminApi } from '@/lib/api-client';
 import { post, STAGE_LABELS, useAdmin, useAdminAction, type InviteResult, type OrgList } from './lib';
+import { Gate } from './role';
 import { useResult } from './result-dialog';
 import { StatStrip } from '@/components/layout/section';
 import { ConfirmButton, copyText, DataList, ErrorBox, Mono, Notice, Section, StatusBadge, SubBadge, When, type Tone } from './ui';
@@ -130,9 +131,9 @@ function Rename({ path, name }: { path: string; name: string }) {
       }}
     >
       <Input value={v} onChange={(e) => setV(e.target.value)} className='h-8 w-44 sm:w-56' aria-label='Account name' />
-      <Button variant='outline' type='submit' disabled={rename.isPending || v.trim() === name || !v.trim()}>
+      <Gate need='accounts'><Button variant='outline' type='submit' disabled={rename.isPending || v.trim() === name || !v.trim()}>
         Rename
-      </Button>
+      </Button></Gate>
     </form>
   );
 }
@@ -165,9 +166,9 @@ function People({ d, path, onResult }: { d: Detail; path: string; onResult: (r: 
               This account predates Clerk: people connect with key links. Move it to Clerk to invite people by email and let them sign in.
             </p>
             <div>
-              <Button disabled={link.isPending} onClick={() => link.mutate()}>
+              <Gate need='accounts'><Button disabled={link.isPending} onClick={() => link.mutate()}>
                 Move to Clerk
-              </Button>
+              </Button></Gate>
             </div>
           </div>
         ) : (
@@ -220,7 +221,7 @@ function People({ d, path, onResult }: { d: Detail; path: string; onResult: (r: 
             {
               label: 'Role',
               render: (m: any) => (
-                <NativeSelect
+                <Gate need='accounts'><NativeSelect
                   size='sm'
                   value={m.role || 'member'}
                   disabled={setMemberRole.isPending}
@@ -229,7 +230,7 @@ function People({ d, path, onResult }: { d: Detail; path: string; onResult: (r: 
                 >
                   <NativeSelectOption value='member'>Member</NativeSelectOption>
                   <NativeSelectOption value='admin'>Admin</NativeSelectOption>
-                </NativeSelect>
+                </NativeSelect></Gate>
               )
             },
             {
@@ -243,18 +244,18 @@ function People({ d, path, onResult }: { d: Detail; path: string; onResult: (r: 
               className: 'text-right',
               render: (m: any) =>
                 m.status === 'active' ? (
-                  <ConfirmButton
+                  <Gate need='accounts'><ConfirmButton
                     label='Suspend'
                     variant='destructive'
                     title={`Suspend ${m.email || m.user_id}?`}
                     description='They can no longer use Octillion in this account until you restore access.'
                     confirmLabel='Suspend'
                     onConfirm={() => member.mutate({ id: m.id, action: 'deactivate' })}
-                  />
+                  /></Gate>
                 ) : m.status === 'inactive' ? (
-                  <Button variant='outline' size='sm' onClick={() => member.mutate({ id: m.id, action: 'reactivate' })}>
+                  <Gate need='accounts'><Button variant='outline' size='sm' onClick={() => member.mutate({ id: m.id, action: 'reactivate' })}>
                     Restore
-                  </Button>
+                  </Button></Gate>
                 ) : null
             }
           ]}
@@ -265,9 +266,9 @@ function People({ d, path, onResult }: { d: Detail; path: string; onResult: (r: 
             <NativeSelectOption value='member'>Member</NativeSelectOption>
             <NativeSelectOption value='admin'>Admin</NativeSelectOption>
           </NativeSelect>
-          <Button type='submit' disabled={invite.isPending}>
+          <Gate need='invite'><Button type='submit' disabled={invite.isPending}>
             <Icons.send className='size-3.5' /> Invite
-          </Button>
+          </Button></Gate>
         </form>
       </Section>
       {invitations.length > 0 && (
@@ -288,19 +289,19 @@ function People({ d, path, onResult }: { d: Detail; path: string; onResult: (r: 
                 render: (x: any) => (
                   <div className='flex justify-end gap-2'>
                     {(x.state === 'pending' || x.state === 'expired') && (
-                      <Button variant='outline' size='sm' onClick={() => inv.mutate({ id: x.id, action: 'resend' })}>
+                      <Gate need='invite'><Button variant='outline' size='sm' onClick={() => inv.mutate({ id: x.id, action: 'resend' })}>
                         Resend
-                      </Button>
+                      </Button></Gate>
                     )}
                     {x.state === 'pending' && (
-                      <ConfirmButton
+                      <Gate need='invite'><ConfirmButton
                         label='Revoke'
                         variant='destructive'
                         title={`Revoke the invitation for ${x.email}?`}
                         description='The link in their email stops working.'
                         confirmLabel='Revoke'
                         onConfirm={() => inv.mutate({ id: x.id, action: 'revoke' })}
-                      />
+                      /></Gate>
                     )}
                   </div>
                 )
@@ -364,18 +365,18 @@ function Billing({ d, path }: { d: Detail; path: string }) {
                   </NativeSelectOption>
                 ))}
               </NativeSelect>
-              <Button variant='outline' disabled={checkout.isPending} onClick={() => checkout.mutate(undefined, { onSuccess: (r) => copyText(r.url, 'Checkout link copied') })}>
+              <Gate need='accounts'><Button variant='outline' disabled={checkout.isPending} onClick={() => checkout.mutate(undefined, { onSuccess: (r) => copyText(r.url, 'Checkout link copied') })}>
                 Copy checkout link
-              </Button>
+              </Button></Gate>
             </>
           ) : (
             <span className='text-muted-foreground text-sm'>
               No plans: add Stripe prices with a lookup_key starting <Mono>octillion_</Mono>.
             </span>
           )}
-          <Button variant='outline' disabled={portal.isPending} onClick={() => portal.mutate(undefined, { onSuccess: (r) => window.open(r.url, '_blank', 'noopener') })}>
+          <Gate need='accounts'><Button variant='outline' disabled={portal.isPending} onClick={() => portal.mutate(undefined, { onSuccess: (r) => window.open(r.url, '_blank', 'noopener') })}>
             Open billing portal
-          </Button>
+          </Button></Gate>
         </div>
       </Section>
       <Section title='Invoices'>
@@ -511,21 +512,21 @@ function Keys({ d, path, onResult }: { d: Detail; path: string; onResult: (r: In
                 </StatusBadge>
               ) : (
                 <div className='flex justify-end gap-2'>
-                  <ConfirmButton
+                  <Gate need='delete'><ConfirmButton
                     label='Rotate'
                     title='Rotate this key?'
                     description='The current link stops working now and a new one is shown once.'
                     confirmLabel='Rotate'
                     onConfirm={() => rotate.mutate(k.id, { onSuccess: (r) => onResult(r, `Rotated key for ${r.org.name}`) })}
-                  />
-                  <ConfirmButton
+                  /></Gate>
+                  <Gate need='delete'><ConfirmButton
                     label='Revoke'
                     variant='destructive'
                     title={`Revoke the key for ${k.label}?`}
                     description='Their connector stops working immediately.'
                     confirmLabel='Revoke'
                     onConfirm={() => revoke.mutate(k.id)}
-                  />
+                  /></Gate>
                 </div>
               )
           }
@@ -544,9 +545,9 @@ function Keys({ d, path, onResult }: { d: Detail; path: string; onResult: (r: In
         }}
       >
         <Input placeholder='Email or a label' className='w-full sm:w-72' value={label} onChange={(e) => setLabel(e.target.value)} aria-label='Key label' />
-        <Button variant='outline' type='submit' disabled={issue.isPending}>
+        <Gate need='accounts'><Button variant='outline' type='submit' disabled={issue.isPending}>
           Issue key
-        </Button>
+        </Button></Gate>
       </form>
     </Section>
   );
