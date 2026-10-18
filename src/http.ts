@@ -111,6 +111,8 @@ export function createApp() {
   });
 
   // ---------- customer page: sign-in, setup check, usage, team, billing (src/app.ts, web/app/app) ----------
+  // The customer portal can start work too (approvals, re-runs): tick after any write there (Vercel only).
+  app.use("/api/app", (req, _res, next) => { if (req.method !== "GET") _res.on("finish", () => serverlessTick()); next(); });
   app.use(appRouter());
 
   // ---------- journey webhook: PostHog Workflows queues in-chat nudges (src/journeys.ts) ----------
@@ -158,6 +160,8 @@ export function createApp() {
     res.on("finish", () => {
       const msgs = Array.isArray(req.body) ? req.body : req.body ? [req.body] : [];
       const rpc = msgs.map((m: any) => (m?.method === "tools/call" ? `tools/call:${m?.params?.name}` : m?.method)).filter(Boolean).join(",");
+      // On Vercel nothing ticks the autoscaler: a tool call may have queued work (onboarding, a simulation, an approval).
+      if (rpc.includes("tools/call")) serverlessTick();
       console.error(`mcp ${req.method} ${res.statusCode} org=${res.locals.org ?? "-"} rpc=${rpc || "-"} ${Date.now() - t0}ms ua="${String(req.get("user-agent") ?? "").slice(0, 80)}"`);
     });
     next();
