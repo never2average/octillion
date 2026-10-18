@@ -277,12 +277,31 @@ export async function deleteHarness(actor: string, id: string) {
 
 const vaultError = (e: unknown) => (e instanceof AdminError ? e : new AdminError((e as Error).message));
 
+/**
+ * Keys set as server environment variables (Vercel). They are not in the vault: the API reads them directly, so they
+ * serve what runs inside the API (web search, the research quick pass) but agents only get vault keys through the
+ * gateway. Hints only; `serves` says which.
+ */
+const ENV_KEYS: { provider: string; name: string; serves: string }[] = [
+  { provider: "exa", name: "EXA_API_KEY", serves: "all web search (API and agents)" },
+  { provider: "cloudflare", name: "CLOUDFLARE_API_TOKEN", serves: "research quick pass only; agents need a vault key" },
+  { provider: "openai", name: "OPENAI_API_KEY", serves: "research quick pass only; agents need a vault key" },
+  { provider: "anthropic", name: "ANTHROPIC_API_KEY", serves: "research quick pass only; agents need a vault key" },
+  { provider: "anthropic", name: "VERTEX_SERVICE_ACCOUNT_JSON", serves: "research quick pass only; agents need a vault key (label vertex)" },
+  { provider: "libraries_io", name: "LIBRARIES_IO_API_KEY", serves: "all package search (API and agents)" },
+];
+const envHint = (v: string) => (v.trim().startsWith("{") ? "service-account JSON" : v.length > 12 ? `${v.slice(0, 4)}…${v.slice(-4)}` : "set");
+function envKeys() {
+  return ENV_KEYS.filter((k) => process.env[k.name]).map((k) => ({ ...k, hint: envHint(process.env[k.name]!) }));
+}
+
 /** Providers (with how many keys they hold and when one was last used) and every credential, hints only. */
 export async function modelKeys() {
   const [providers, creds] = await Promise.all([kv.listProviders(), kv.listCredentials() as Promise<any[]>]);
   const credentials = creds.map(({ key_id: _k, ...c }) => ({ ...c, uses: Number(c.uses) }));
   return {
     unlocked: kv.vaultUnlocked(),
+    env_keys: envKeys(),
     providers: providers.map((p) => {
       const mine = credentials.filter((c) => c.provider === p.slug);
       const last = mine.map((c) => c.last_used_at).filter(Boolean).sort((a, b) => +new Date(b) - +new Date(a))[0] ?? null;
