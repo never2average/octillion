@@ -236,10 +236,13 @@ export function RecordView<T>({
   const [fitH, setFitH] = useState<number | null>(null);
   useLayoutEffect(() => {
     if (!compact) return;
-    const fit = () => { const el = fitRef.current; if (el) setFitH(Math.max(256, window.innerHeight - (el.getBoundingClientRect().top + window.scrollY) - 24)); };
+    const fit = () => { const el = fitRef.current; if (el && el.offsetParent !== null) setFitH(Math.max(256, window.innerHeight - (el.getBoundingClientRect().top + window.scrollY) - 24)); };
     fit();
     window.addEventListener('resize', fit);
-    return () => window.removeEventListener('resize', fit);
+    // A table in a tab that starts hidden measures as if at the top: measure again once it is shown.
+    const io = new IntersectionObserver((e) => { if (e.some((x) => x.isIntersecting)) fit(); });
+    if (fitRef.current) io.observe(fitRef.current);
+    return () => { window.removeEventListener('resize', fit); io.disconnect(); };
   }, [compact]);
 
   return (
