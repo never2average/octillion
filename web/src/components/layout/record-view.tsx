@@ -46,7 +46,7 @@ const isObj = (x: unknown): x is Record<string, unknown> => !!x && typeof x === 
 
 export function RecordView<T>({
   rows, rowKey, cols, searchText, searchPlaceholder = 'Search', filters, primary, detail, detailTitle, actions, empty, noun = 'items', loading, initialSize,
-  id, views, defaultSort, groupable, bulk, exportName, primaryMenu, properties, detailActions
+  id, views, defaultSort, groupable, bulk, exportName, primaryMenu, properties, detailActions, compact
 }: {
   rows: readonly T[];
   rowKey: (row: T) => string;
@@ -80,6 +80,8 @@ export function RecordView<T>({
   /** The peek lists every column as a property above detail(). */
   properties?: boolean;
   detailActions?: (row: T, close: () => void) => ReactNode;
+  /** Inside a page with other content (a tab under a summary): as tall as its rows, at most most of the screen. */
+  compact?: boolean;
 }) {
   const ns = (s: string) => (id ? `rv:${id}:${s}` : null);
   const [q, setQ] = useState('');
@@ -226,7 +228,7 @@ export function RecordView<T>({
 
   return (
     // Fills the page below the header (header 3.5–4rem plus the page's padding): the table frame never scrolls or shrinks.
-    <div className='flex h-[calc(100svh-5.5rem)] min-h-[24rem] min-w-0 flex-col gap-3'>
+    <div className={cn('flex min-w-0 flex-col gap-3', compact ? 'max-h-[calc(100svh-10rem)] min-h-[14rem]' : 'h-[calc(100svh-5.5rem)] min-h-[24rem]')}>
       <div className='flex flex-wrap items-center gap-2'>
         <div className='relative min-w-48 flex-1'>
           <Icons.search className='text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2' />

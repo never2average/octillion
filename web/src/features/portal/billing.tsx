@@ -65,7 +65,7 @@ export function BillingPage() {
   return (
     <PageContainer pageTitle='Billing'>
       {error ? <ErrorState error={error} /> : !b ? <LoadingCards count={3} /> : (
-        <div className='flex w-full flex-col gap-10'>
+        <div className='flex w-full flex-col gap-6'>
           <ThisMonth b={b} u={u ?? undefined} l={l ?? undefined} />
           {/* People, Teams and Budget rules as tabs: the two tables get the full width and height they need. */}
           <Tabs defaultValue='people' className='gap-4'>
@@ -156,10 +156,11 @@ function Daily({ u }: { u: Usage }) {
   const days = Array.from({ length: u.period.days }, (_, i) => new Date(start + i * 86_400_000).toISOString().slice(0, 10));
   const max = Math.max(0.01, ...u.daily.map((d) => d.usd));
   return (
-    <div className='flex h-16 items-end gap-0.5' role='img' aria-label='Model spend per day this month'>
+    // Short when nothing has been spent yet: a flat strip, not an empty 4rem box.
+    <div className={cn('flex items-end gap-0.5', u.daily.some((d) => d.usd > 0) ? 'h-12' : 'h-1.5')} role='img' aria-label='Model spend per day this month'>
       {days.map((d) => {
         const v = by.get(d) ?? 0;
-        return <div key={d} title={`${d}: ${usd(v)}`} className={cn('flex-1 rounded-t-sm', d > today ? 'bg-muted/40' : v ? 'bg-primary/80' : 'bg-muted')} style={{ height: `${d > today ? 6 : Math.max(6, (v / max) * 100)}%` }} />;
+        return <div key={d} title={`${d}: ${usd(v)}`} className={cn('flex-1 rounded-t-sm', d > today ? 'bg-muted/40' : v ? 'bg-primary/80' : 'bg-muted')} style={{ height: u.daily.some((x) => x.usd > 0) ? `${d > today ? 6 : Math.max(6, (v / max) * 100)}%` : '100%' }} />;
       })}
     </div>
   );
@@ -233,7 +234,7 @@ function People({ t, l, reload }: { t: Team | undefined; l: Limits | undefined; 
   return (
     <div className='flex flex-col gap-3'>
       {t.error && <Alert variant='destructive'><AlertDescription>{t.error}</AlertDescription></Alert>}
-      <RecordView id='billing-people' rows={rows} rowKey={(r) => r.key} cols={cols} noun='people'
+      <RecordView compact id='billing-people' rows={rows} rowKey={(r) => r.key} cols={cols} noun='people'
         searchText={(r) => (r.kind === 'invite' ? r.x.email : `${r.m.name ?? ''} ${r.m.email ?? ''} ${teamName(r.lim?.team_id) ?? ''}`)}
         searchPlaceholder='Search people by name, email or team'
         views={[{ id: 'all', label: 'Everyone' }, { id: 'active', label: 'Active', match: (r) => statusOf(r) === 'Active' }, { id: 'invited', label: 'Invited', match: (r) => r.kind === 'invite' },
@@ -460,7 +461,7 @@ function Teams({ l, reload }: { l: Limits; reload: () => void }) {
   ];
   return (
     <>
-      <RecordView id='billing-teams' rows={l.teams} rowKey={(x) => String(x.id)} cols={cols} noun='teams'
+      <RecordView compact id='billing-teams' rows={l.teams} rowKey={(x) => String(x.id)} cols={cols} noun='teams'
         searchText={(x) => x.name} searchPlaceholder='Search teams'
         primary={manage ? <Button onClick={() => setEdit({ id: null, name: '', budget: '', conc: '' })}><Icons.add /> Add team</Button> : undefined}
         actions={manage ? (x) => [
