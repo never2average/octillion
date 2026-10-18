@@ -8,7 +8,7 @@ import { Icons } from '@/components/icons';
  * Signed in, but no account picked: choose one of your Octillion accounts, or ask for an invitation. Accounts are
  * created by Octillion (invite-only), so there is no "create organization" here.
  */
-export function NoOrganization() {
+export function NoOrganization({ platformAdmin = false }: { platformAdmin?: boolean }) {
   const { user } = useUser();
   const router = useRouter();
   const { isLoaded, setActive, userMemberships, userInvitations } = useOrganizationList({ userMemberships: true, userInvitations: true });
@@ -43,6 +43,7 @@ export function NoOrganization() {
           ))}
         </ul>
       )}
+      {platformAdmin && <Button onClick={() => router.push('/admin')}><Icons.arrowRight /> Open admin panel</Button>}
       <SignOutButton redirectUrl='/auth/sign-in'><button className='text-muted-foreground text-sm underline'>Sign out</button></SignOutButton>
     </main>
   );

@@ -1,7 +1,6 @@
 import { AreaShell } from '@/components/layout/area-shell';
 import { portalNav } from '@/config/nav-config';
 import { auth } from '@clerk/nextjs/server';
-import { redirect } from 'next/navigation';
 import type { Metadata } from 'next';
 import { serverApi } from '@/lib/server-api';
 import { NoOrganization } from '@/features/portal/no-organization';
@@ -12,10 +11,9 @@ export const metadata: Metadata = { title: { default: 'Account', template: '%s |
 export default async function PortalLayout({ children }: { children: React.ReactNode }) {
   const { orgId } = await auth.protect();
   if (!orgId) {
-    // Octillion staff with no customer account of their own belong in the admin panel, not on "No Octillion account yet".
+    // Octillion staff with no customer account of their own get a way into the admin panel from here.
     const s = await serverApi<{ is_platform_admin: boolean }>('/admin/session').catch(() => null);
-    if (s?.body?.is_platform_admin) redirect('/admin');
-    return <NoOrganization />;
+    return <NoOrganization platformAdmin={!!s?.body?.is_platform_admin} />;
   }
   return <AreaShell area='portal' groups={portalNav}>{children}</AreaShell>;
 }
