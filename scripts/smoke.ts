@@ -1177,6 +1177,85 @@ try {
     console.log("✓ compute summary: verdict rules, binding limit, boat listing classified and cached (timeout, stale fallback)");
   }
 
+  // ---------- budget rules: allocate() (src/limits.ts), pure; the page, launches and adaptive runs all use it ----------
+  {
+    const { allocate } = await import("../src/limits.js");
+    type In = Parameters<typeof allocate>[0];
+    const pol = (p: Partial<In["policy"]> = {}): In["policy"] =>
+      ({ mode: "pool", reserve_usd: 100, default_cap_usd: 40, new_members_can_run: true, max_concurrent_runs: null, ...p });
+    const use = (spent: Record<string, number> = {}) => new Map(Object.entries(spent).map(([k, v]) => [k, { spent: v, in_flight_usd: 0, tokens_in: 0, tokens_out: 0, running: 0 }]));
+    const team = (id: number, budget_usd: number | null, max_concurrent_runs: number | null = null) => ({ id, name: `T${id}`, budget_usd, max_concurrent_runs });
+    const cents = (v: number) => Math.round(v * 100) / 100;
+    // The matrix: mode x teams (none, a $200 team, a $0 team) x in the team or not x own limit x can launch x allowance.
+    // "a" varies; "b" (everyone else) and "c" (in the team, when there is one) can launch and have no settings.
+    let cases = 0;
+    for (const mode of ["pool", "even", "custom"] as const)
+      for (const tb of [null, 200, 0] as const)
+        for (const inTeam of tb == null ? [false] : [false, true])
+          for (const own of [null, 50] as const)
+            for (const canRun of [true, false])
+              for (const cap of [1000, 0]) {
+                const teams = tb == null ? [] : [team(1, tb)];
+                const members = [{ user_id: "a", team_id: inTeam ? 1 : null, cap_usd: own, can_run: canRun }, { user_id: "b" }, ...(tb == null ? [] : [{ user_id: "c", team_id: 1 }])];
+                const r = allocate({ policy: pol({ mode }), teams, members, usage: use(), cap, account_spent_usd: 0 });
+                const a = r.members.find((m) => m.user_id === "a")!, other = r.members.find((m) => m.user_id === (inTeam ? "c" : "b"))!;
+                const label = JSON.stringify({ mode, tb, inTeam, own, canRun, cap });
+                const R = Math.max(0, cap - 100 - (tb ?? 0)), pot = inTeam ? tb! : R;
+                assert.equal(r.rest.budget_usd, R, `everyone else gets cap - buffer - team budgets in every mode ${label}`);
+                assert.equal(r.set_aside_usd, 100 + (tb ?? 0), label);
+                assert.equal(a.pot, inTeam ? 1 : null, label);
+                assert.equal(a.can_run, canRun, label);
+                if (cap === 0) {
+                  assert.ok(r.members.every((m) => m.limit_usd === 0 && m.blocked === "no_allowance"), `$0 allowance: every limit is $0 ${label}`);
+                  cases++; continue;
+                }
+                // The person's limit: their own in every mode; else pool none, custom the default, even an equal share.
+                const evenShare = canRun && own == null ? pot / 2 : null;
+                const want = own != null ? own : mode === "pool" ? null : mode === "custom" ? 40 : evenShare == null ? 0 : cents(evenShare);
+                assert.equal(a.limit_usd, want, `limit ${label}`);
+                assert.equal(a.limit_source, own != null ? "own" : mode === "even" ? "share" : mode === "custom" ? "default" : "pool", label);
+                // Equal shares count only people who can launch, after own limits come out of the pot.
+                if (mode === "even") assert.equal(other.limit_usd, cents(evenShare != null ? pot / 2 : Math.max(0, pot - (own ?? 0))), `the other share ${label}`);
+                // What blocks a launch with no spend yet: can't launch, a $0 limit, then a $0 pot.
+                const blocked = !canRun ? "launch_access" : want === 0 ? "person_limit" : pot === 0 ? (inTeam ? "team_budget" : "rest_pot") : null;
+                assert.equal(a.blocked, blocked, `blocked ${label}`);
+                cases++;
+              }
+    assert.ok(cases >= 120, `${cases} cases`);
+
+    // Spend: the first check that fails names the reason, in order; limited_by is the first at 90%; left is the tightest.
+    const base: In = { policy: pol({ mode: "even" }), teams: [team(1, 200, 3), team(2, null)], cap: 1000, account_spent_usd: 0,
+      members: [{ user_id: "a", team_id: 1 }, { user_id: "b", team_id: 1, adjust_usd: -150 }, { user_id: "c" }, { user_id: "d", team_id: 2, max_concurrent_runs: 1 }], usage: use() };
+    let r = allocate(base);
+    const of = (x: typeof r, id: string) => x.members.find((m) => m.user_id === id)!;
+    assert.ok(of(r, "a").limit_usd === 100 && of(r, "b").limit_usd === 0, "an adjustment never takes a share below $0");
+    assert.ok(of(r, "c").limit_usd === 350 && of(r, "d").limit_usd === 350 && of(r, "d").pot === null, "a team without a budget shares with everyone else");
+    assert.ok(of(r, "a").effective_max_concurrent === 3 && of(r, "a").concurrent_source === "team" && of(r, "d").concurrent_source === "you" && of(r, "c").concurrent_source === "account");
+    r = allocate({ ...base, usage: use({ a: 91 }) });
+    assert.ok(of(r, "a").blocked === null && of(r, "a").limited_by === "person_limit" && of(r, "a").left_usd === 9, "near their limit");
+    r = allocate({ ...base, usage: use({ a: 100 }) });
+    assert.ok(of(r, "a").blocked === "person_limit" && of(r, "a").left_usd === 0);
+    r = allocate({ ...base, policy: pol({ mode: "pool" }), usage: use({ a: 120, b: 80 }) });
+    assert.ok(of(r, "a").blocked === "team_budget" && r.teams[0]!.left_usd === 0 && of(r, "c").blocked === null, "a team at its budget stops only its people");
+    r = allocate({ ...base, policy: pol({ mode: "pool" }), usage: use({ c: 500, d: 200 }), account_spent_usd: 700 });
+    assert.ok(of(r, "c").blocked === "rest_pot" && of(r, "a").blocked === null && r.rest.left_usd === 0, "everyone else's pot is real in pool mode");
+    r = allocate({ ...base, policy: pol({ mode: "pool" }), usage: use({ c: 10 }), account_spent_usd: 900 });
+    assert.ok(r.members.every((m) => m.blocked === "buffer") && r.account.blocked === "buffer" && r.account.launchable_usd === 900, "nobody launches into the buffer (connector spend counts)");
+    r = allocate({ ...base, policy: pol({ mode: "pool" }), account_spent_usd: 1000 });
+    assert.ok(r.members.every((m) => m.blocked === "account_cap"), "the account's allowance comes first");
+    r = allocate({ ...base, policy: pol({ mode: "pool", reserve_usd: 0 }), teams: [], usage: use({ c: 1000 }), account_spent_usd: 999 });
+    assert.ok(of(r, "c").blocked === null && of(r, "c").limited_by === "account_cap", "no teams: no separate everyone-else check");
+    r = allocate({ ...base, policy: pol({ mode: "even", reserve_usd: 0 }), teams: [], members: [{ user_id: "a" }, { user_id: "b" }, { user_id: "c" }] });
+    assert.equal(of(r, "a").limit_usd, 333.33, "shares round to cents");
+    r = allocate({ ...base, policy: pol({ mode: "pool" }), teams: [team(1, 950)] });
+    assert.ok(r.over_by_usd === 50 && r.rest.budget_usd === 0 && of(r, "c").blocked === "rest_pot", "over-allocated: reported, never clipped; everyone else gets $0");
+    r = allocate({ ...base, policy: pol({ mode: "pool", new_members_can_run: false }), members: [{ user_id: "a", can_run: true }, { user_id: "b" }] });
+    assert.ok(of(r, "a").can_run && of(r, "a").own_can_run === true && !of(r, "b").can_run && of(r, "b").own_can_run === null && of(r, "b").blocked === "launch_access");
+    r = allocate({ ...base, members: [{ user_id: "a", team_id: 99 }] });
+    assert.ok(of(r, "a").team_id === null && of(r, "a").pot === null, "a deleted team is no team");
+    console.log(`✓ budget rules allocate(): ${cases}-case matrix (mode x teams x own limits x can launch x $0 allowance), check order, limited by, pots, buffer, rounding`);
+  }
+
   // ---------- Compute record tables (src/compute-records.ts): sessions, orchestrators, unmatched sandboxes, runnability ----------
   {
     const { readdirSync } = await import("node:fs");
@@ -1735,15 +1814,39 @@ try {
       assert.equal((await refusal(ownerOrg))?.info.code, "runs_at_once");
       await db.query("UPDATE simulations SET status = 'cancelled' WHERE id = $1", [first.id]);
       await db.query("UPDATE agent_sessions SET status = 'cancelled' WHERE simulation_id = $1", [first.id]);
-      // Custom caps: a person at their cap cannot launch.
-      await appCall(ownerC, "PUT", "/limits/policy", { mode: "custom", max_concurrent_runs: null });
+      // Custom caps: a person at their cap cannot launch. Custom needs a default (own limits apply in every mode anyway).
+      const noDefault = await appCall(ownerC, "PUT", "/limits/policy", { mode: "custom", max_concurrent_runs: null, default_cap_usd: null });
+      assert.ok(noDefault.status === 400 && /need a default monthly cap/.test((await noDefault.json()).error), "custom without a default is refused");
+      await appCall(ownerC, "PUT", "/limits/policy", { mode: "custom", max_concurrent_runs: null, default_cap_usd: 500 });
       await appCall(ownerC, "PUT", `/limits/members/${accepted.user.id}`, { cap_usd: 0 });
       assert.match((await run(ownerT, { samples: 1 })).error ?? "", /You've used your \$0\.00 for [A-Z][a-z]+ \(\$[\d.]+ spent\)\. Ask .+ or wait until [A-Z][a-z]+ 1\./);
       const capped = await refusal(ownerOrg);
       assert.ok(capped?.info.code === "person_limit" && capped.info.limit_usd === 0 && capped.info.left_usd === 0 && capped.info.set_by === "you");
       lim = await json(appCall(ownerC, "GET", "/limits"));
       assert.equal(lim.members.find((m: any) => m.user_id === accepted.user.id).allowance_usd, 0);
+      // An own limit applies in every mode, pool included.
       await appCall(ownerC, "PUT", "/limits/policy", { mode: "pool" });
+      assert.equal((await refusal(ownerOrg))?.info.code, "person_limit", "own limit in pool mode");
+      await appCall(ownerC, "PUT", `/limits/members/${accepted.user.id}`, { cap_usd: null });
+      // The buffer and team budgets are set aside in every mode: everyone else's pot is real, and nobody launches into the buffer.
+      await appCall(ownerC, "PUT", `/limits/teams/${devrel.id}`, { budget_usd: 900 });
+      lim = await json(appCall(ownerC, "GET", "/limits"));
+      assert.ok(lim.rest.budget_usd === 0 && lim.over_by_usd === 0 && lim.set_aside_usd === 1000, JSON.stringify({ rest: lim.rest, over: lim.over_by_usd }));
+      const restOut = await refusal(ownerOrg);
+      assert.ok(restOut?.info.code === "rest_pot" && /The shared \$0\.00 for people outside a team budget is used up for [A-Z][a-z]+\. Ask /.test(restOut.message), String(restOut?.message));
+      assert.match((await run(ownerT, { samples: 1 })).error ?? "", /people outside a team budget is used up/);
+      assert.equal(await launcherOverLimit(rowW.id, slugW, accepted.user.id), true, "adaptive runs stop when everyone else's pot is used up");
+      await appCall(ownerC, "PUT", `/limits/teams/${devrel.id}`, { budget_usd: 200 });
+      await appCall(ownerC, "PUT", "/limits/policy", { reserve_usd: 1000 });
+      const held = await refusal(ownerOrg);
+      assert.ok(held?.info.code === "rest_pot" || held?.info.code === "buffer", String(held?.message));
+      await appCall(ownerC, "PUT", `/limits/teams/${devrel.id}`, { budget_usd: null });
+      const buf = await refusal(ownerOrg);
+      assert.ok(buf?.info.code === "buffer" && buf.info.limit_usd === 0 && /available for launches \(\$0\.00 of \$1000\.00\)\. The rest is held back/.test(buf.message), String(buf?.message));
+      assert.equal(await launcherOverLimit(rowW.id, slugW, accepted.user.id), true, "adaptive runs stop at the buffer");
+      await appCall(ownerC, "PUT", `/limits/teams/${devrel.id}`, { budget_usd: 200 });
+      await appCall(ownerC, "PUT", "/limits/policy", { reserve_usd: 0 });
+      assert.equal(await refusal(ownerOrg), null, "within every limit again");
 
       // Live spend: a running session counts what the gateway has metered so far, for the person and their team.
       const live = await run(ownerT, { samples: 1, max_samples: 6, name: "limits-live" });
@@ -1795,10 +1898,30 @@ try {
       const mig = new Map((await db.query<any>("SELECT user_id, can_run, max_concurrent_runs FROM usage_members WHERE org_id = $1", [rowW.id])).map((m) => [m.user_id, m]));
       assert.equal(mig.get(acc2.user.id).can_run, false, "someone the 0 applied to can't launch");
       assert.ok(mig.get(accepted.user.id).can_run === true && Number(mig.get(accepted.user.id).max_concurrent_runs) === 2, "someone with their own count keeps launching");
+      // Meaning changes A and B are migrated once: own limits that were never applied (outside custom) and buffers
+      // outside even mode are cleared, and custom with no default becomes pool. Afterwards they mean something, so stay.
+      const rerun = async () => db.migrate(await (await import("node:fs/promises")).readFile("sql/schema.sql", "utf8"));
+      const policyRow = async () => (await db.query<any>("SELECT mode, reserve_usd FROM usage_policies WHERE org_id = $1", [rowW.id]))[0];
+      const capOf = async (uid: string) => (await db.query<any>("SELECT cap_usd FROM usage_members WHERE org_id = $1 AND user_id = $2", [rowW.id, uid]))[0]?.cap_usd;
+      await db.query("UPDATE usage_policies SET mode = 'pool', reserve_usd = 50 WHERE org_id = $1", [rowW.id]);
+      await db.query("UPDATE usage_members SET cap_usd = 5 WHERE org_id = $1 AND user_id = $2", [rowW.id, accepted.user.id]);
+      await rerun();
+      assert.ok(Number((await policyRow()).reserve_usd) === 50 && Number(await capOf(accepted.user.id)) === 5, "already migrated: nothing is cleared again");
+      await db.query("DELETE FROM usage_rule_migrations");
+      await rerun();
+      assert.ok(Number((await policyRow()).reserve_usd) === 0 && (await capOf(accepted.user.id)) === null, "pool: the unused own limit and buffer are cleared");
+      await db.query("UPDATE usage_policies SET mode = 'custom', default_cap_usd = NULL, reserve_usd = 20 WHERE org_id = $1", [rowW.id]);
+      await db.query("UPDATE usage_members SET cap_usd = 5 WHERE org_id = $1 AND user_id = $2", [rowW.id, accepted.user.id]);
+      await db.query("DELETE FROM usage_rule_migrations");
+      await rerun();
+      const pm = await policyRow();
+      assert.ok(pm.mode === "pool" && Number(pm.reserve_usd) === 0 && Number(await capOf(accepted.user.id)) === 5, "custom with no default: pool, own limits kept");
+      assert.equal((await db.query<any>("SELECT count(*) AS n FROM usage_rule_migrations"))[0].n, 2);
       await appCall(ownerC, "PUT", "/limits/policy", { new_members_can_run: true });
       await appCall(ownerC, "PUT", `/limits/members/${accepted.user.id}`, { can_run: null, max_concurrent_runs: null, cap_usd: null });
       await appCall(ownerC, "PUT", `/limits/members/${acc2.user.id}`, { can_run: true, team_id: null });
       console.log("✓ usage limits: even split with reserve and adjustments, team budgets, rollout, sessions per launch, runs at once, custom caps");
+      console.log("✓ budget rules meaning changes: own limits in every mode, buffer and team budgets set aside in every mode (rest_pot, buffer), migrated once");
       console.log("✓ budget rules fixes: live spend per person, sessions per run on adaptive top-ups, 0 refused (and migrated), partial team PUT, structured refusals, fail closed on a failed allowance lookup");
     }
 

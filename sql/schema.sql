@@ -575,8 +575,8 @@ CREATE INDEX IF NOT EXISTS simulations_created_by_idx ON simulations (org_id, cr
 CREATE TABLE IF NOT EXISTS usage_policies (
   org_id                INT PRIMARY KEY REFERENCES organizations(id) ON DELETE CASCADE,
   mode                  TEXT NOT NULL DEFAULT 'pool' CHECK (mode IN ('pool', 'even', 'custom')),
-  reserve_usd           NUMERIC NOT NULL DEFAULT 0,     -- kept out of an even split, as a shared buffer
-  default_cap_usd       NUMERIC,                         -- custom mode: for people without their own cap
+  reserve_usd           NUMERIC NOT NULL DEFAULT 0,     -- the buffer: set aside in every mode, nobody can launch into it
+  default_cap_usd       NUMERIC,                         -- custom mode (required there): for people without their own limit
   new_members_can_run   BOOLEAN NOT NULL DEFAULT true,   -- rollout: may people launch simulations unless set per person
   max_concurrent_runs   INT,                             -- per person, unless set per team or person
   max_sessions_per_run  INT,                             -- per launch, under the server's own limit
@@ -587,7 +587,7 @@ CREATE TABLE IF NOT EXISTS usage_teams (
   id                    SERIAL PRIMARY KEY,
   org_id                INT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
   name                  TEXT NOT NULL,
-  budget_usd            NUMERIC,                         -- the team's monthly share; a hard cap on its combined spend
+  budget_usd            NUMERIC,                         -- set aside for the team in every mode; a hard cap on its combined spend
   max_concurrent_runs   INT,
   created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (org_id, name)
@@ -596,7 +596,7 @@ CREATE TABLE IF NOT EXISTS usage_members (
   org_id                INT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
   user_id               TEXT NOT NULL,                   -- WorkOS user
   team_id               INT REFERENCES usage_teams(id) ON DELETE SET NULL,
-  cap_usd               NUMERIC,                         -- custom mode: this person's monthly cap
+  cap_usd               NUMERIC,                         -- this person's own monthly limit, in every mode
   adjust_usd            NUMERIC NOT NULL DEFAULT 0,      -- even mode: plus or minus the even share
   can_run               BOOLEAN,                         -- null: the account's default
   max_concurrent_runs   INT,
@@ -623,6 +623,22 @@ UPDATE usage_members  SET max_concurrent_runs = NULL WHERE max_concurrent_runs =
 UPDATE usage_teams    SET max_concurrent_runs = NULL WHERE max_concurrent_runs = 0;
 UPDATE usage_policies SET max_concurrent_runs = NULL WHERE max_concurrent_runs = 0;
 UPDATE usage_policies SET max_sessions_per_run = NULL WHERE max_sessions_per_run = 0;
+-- One-time changes to what the budget rules mean (docs/budget-rules-spec.md, section 7), each applied once and recorded
+-- here, since what they clear means something afterwards. A fresh database records them with nothing to change.
+CREATE TABLE IF NOT EXISTS usage_rule_migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now());
+-- A: a person's own limit (cap_usd) now applies in every mode. Outside custom mode it was never applied, so it is
+-- cleared (no change in effect). Custom with no default cap is the shared pool with own limits, so it becomes pool.
+UPDATE usage_members m SET cap_usd = NULL
+ WHERE cap_usd IS NOT NULL AND NOT EXISTS (SELECT 1 FROM usage_rule_migrations WHERE name = 'own_limit_every_mode')
+   AND NOT EXISTS (SELECT 1 FROM usage_policies p WHERE p.org_id = m.org_id AND p.mode = 'custom');
+UPDATE usage_policies SET mode = 'pool'
+ WHERE mode = 'custom' AND default_cap_usd IS NULL AND NOT EXISTS (SELECT 1 FROM usage_rule_migrations WHERE name = 'own_limit_every_mode');
+-- B: the buffer and team budgets are set aside in every mode (on for every account; no opt-in). The buffer was only
+-- applied in even mode, so elsewhere it is cleared (no change in effect). Team budgets keep their amounts and now also
+-- take their share out of what everyone else can spend.
+UPDATE usage_policies SET reserve_usd = 0
+ WHERE mode <> 'even' AND reserve_usd <> 0 AND NOT EXISTS (SELECT 1 FROM usage_rule_migrations WHERE name = 'set_aside_every_mode');
+INSERT INTO usage_rule_migrations (name) VALUES ('own_limit_every_mode'), ('set_aside_every_mode') ON CONFLICT (name) DO NOTHING;
 
 -- Context for the AI client (src/context.ts, /app Context): the company's, set by its admins, and each person's own.
 CREATE TABLE IF NOT EXISTS account_context (

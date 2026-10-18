@@ -294,7 +294,7 @@ function InviteDialog({ onClose, onSent }: { onClose: () => void; onSent: () => 
   );
 }
 
-/** One person's limits: team, whether they may launch simulations, their cap or adjustment (per the sharing mode), concurrency. */
+/** One person's limits: team, whether they may launch simulations, their own limit (any mode), their adjustment (even mode), concurrency. */
 function LimitsDialog({ m, lim, l, mode, onClose, onSaved }: { m: Member; lim: LimitMember; l: Limits; mode: Mode; onClose: () => void; onSaved: () => void }) {
   const init = { team: lim.team_id == null ? '' : String(lim.team_id), run: lim.can_run, cap: str(lim.cap_usd), adjust: lim.adjust_usd ? String(lim.adjust_usd) : '', conc: str(lim.max_concurrent_runs) };
   const [f, setF] = useState(init);
@@ -305,7 +305,7 @@ function LimitsDialog({ m, lim, l, mode, onClose, onSaved }: { m: Member; lim: L
     if (f.team !== init.team) body.team_id = f.team === '' ? null : Number(f.team);
     if (f.run !== init.run) body.can_run = f.run;
     if (f.conc !== init.conc) body.max_concurrent_runs = orNull(f.conc);
-    if (mode === 'custom' && f.cap !== init.cap) body.cap_usd = orNull(f.cap);
+    if (f.cap !== init.cap) body.cap_usd = orNull(f.cap);
     if (mode === 'even' && f.adjust !== init.adjust) body.adjust_usd = orNull(f.adjust) ?? 0;
     if (!Object.keys(body).length) return onClose();
     appApi('PUT', `/limits/members/${encodeURIComponent(m.user_id)}`, body)
@@ -322,7 +322,7 @@ function LimitsDialog({ m, lim, l, mode, onClose, onSaved }: { m: Member; lim: L
               {l.teams.map((x) => <NativeSelectOption key={x.id} value={String(x.id)}>{x.name}</NativeSelectOption>)}
             </NativeSelect>
           </label>
-          {mode === 'custom' && <label className='grid gap-1.5 text-sm'>Monthly cap ($)<Input type='number' min={0} step={1} value={f.cap} onChange={(e) => setF({ ...f, cap: e.target.value })} placeholder={l.policy.default_cap_usd == null ? 'no cap' : `default ${l.policy.default_cap_usd}`} /></label>}
+          <label className='grid gap-1.5 text-sm'>Own monthly limit ($)<Input type='number' min={0} step={1} value={f.cap} onChange={(e) => setF({ ...f, cap: e.target.value })} placeholder={mode === 'custom' && l.policy.default_cap_usd != null ? `default ${l.policy.default_cap_usd}` : mode === 'even' ? 'equal share' : 'no own limit'} /></label>
           {mode === 'even' && <label className='grid gap-1.5 text-sm'>Adjust their even share (± $)<Input type='number' step={1} value={f.adjust} onChange={(e) => setF({ ...f, adjust: e.target.value })} placeholder='0' /></label>}
           <label className='grid gap-1.5 text-sm'>Simulations running at once<Input type='number' min={1} step={1} value={f.conc} onChange={(e) => setF({ ...f, conc: e.target.value })} placeholder={l.policy.max_concurrent_runs == null ? 'no limit' : `default ${l.policy.max_concurrent_runs}`} /></label>
           <label className='flex items-center gap-2 text-sm leading-none'><Checkbox checked={f.run} onCheckedChange={(v) => setF({ ...f, run: Boolean(v) })} /> Can launch simulations</label>
@@ -336,9 +336,9 @@ function LimitsDialog({ m, lim, l, mode, onClose, onSaved }: { m: Member; lim: L
 // ---------- budget rules (admins): how the cap is shared, rollout and throughput, teams ----------
 
 const MODES: { id: Mode; title: string; body: string }[] = [
-  { id: 'pool', title: 'Shared pool', body: 'Everyone draws from the account cap, and their team budget if it has one, until it runs out.' },
-  { id: 'even', title: 'Split evenly', body: 'Each person gets an equal share of what is left after the reserve and team budgets; adjust anyone from their ⋯ menu.' },
-  { id: 'custom', title: 'Custom caps', body: 'Each person has their own monthly cap, set from their ⋯ menu; people without one get the default.' }
+  { id: 'pool', title: 'Shared pool', body: 'Everyone draws from their budget (their team\'s, or what is left for everyone else) until it runs out.' },
+  { id: 'even', title: 'Split evenly', body: 'Each budget is split equally between the people in it who can launch; adjust anyone from their ⋯ menu.' },
+  { id: 'custom', title: 'Custom caps', body: 'Everyone can spend up to the default cap; give someone their own from their ⋯ menu.' }
 ];
 const SEG = ['bg-sky-500', 'bg-violet-500', 'bg-amber-500', 'bg-rose-500', 'bg-teal-500', 'bg-fuchsia-500'];
 
@@ -380,7 +380,7 @@ function Rules({ l, reload }: { l: Limits; reload: () => void }) {
       <div className='flex flex-col gap-3'>
       <p className='text-sm leading-none font-medium'>Limits</p>
       <div className='grid gap-x-8 gap-y-5 sm:grid-cols-2'>
-        {f.mode === 'even' && <NumberField label='Shared reserve' unit='$' value={f.reserve} onChange={(v) => setF({ ...f, reserve: v })} hint='Kept out of the even split.' />}
+        <NumberField label='Buffer' unit='$' value={f.reserve} onChange={(v) => setF({ ...f, reserve: v })} hint='Held back for runs that go over. Nobody can launch into it.' />
         {f.mode === 'custom' && <NumberField label='Default monthly cap' unit='$' value={f.defaultCap} onChange={(v) => setF({ ...f, defaultCap: v })} placeholder='no cap' hint='For people without their own.' />}
         <NumberField label='Runs at once, per person' value={f.conc} onChange={(v) => setF({ ...f, conc: v })} placeholder='no limit' hint='Simulations running together.' min={1} />
         <NumberField label='Agent sessions per launch' value={f.sess} onChange={(v) => setF({ ...f, sess: v })} placeholder="server's limit" hint='The size of one run.' min={1} />
@@ -417,7 +417,7 @@ function Allocation({ l }: { l: Limits }) {
   if (!cap) return <p className='text-muted-foreground text-sm'>No monthly cap on this plan; limits apply per person and team only.</p>;
   const p = l.policy;
   const parts: { label: string; usd: number; cls: string }[] = [];
-  if (p.mode === 'even' && p.reserve_usd) parts.push({ label: 'Shared reserve', usd: Number(p.reserve_usd), cls: 'bg-muted-foreground/60' });
+  if (p.reserve_usd) parts.push({ label: 'Buffer', usd: Number(p.reserve_usd), cls: 'bg-muted-foreground/60' });
   l.teams.filter((x) => x.budget_usd).forEach((x, i) => parts.push({ label: `Team ${x.name}`, usd: Number(x.budget_usd), cls: SEG[i % SEG.length] }));
   if (p.mode !== 'pool') {
     const teamless = l.members.filter((m) => m.team_id == null || !l.teams.find((x) => x.id === m.team_id)?.budget_usd);

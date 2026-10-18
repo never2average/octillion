@@ -8,12 +8,12 @@
  * (Octillion is the one enforcing spend on its own gateway, so the policy has to live here). Limits apply to people
  * signed in with Clerk; connector keys draw from the account's pool.
  *
- * Allowance per person, per calendar month (UTC):
- *  - pool:   no per-person cap; everyone draws from the account (and their team's) budget;
- *  - even:   the budget, less a reserve, split evenly: a person in a team with a budget gets team budget / team size,
- *            everyone else (budget - reserve - team budgets) / the rest; plus or minus their own adjustment;
- *  - custom: each person's own cap, else the default cap, else no cap.
- * A team budget is also a hard cap on the team's combined spend in every mode.
+ * Per calendar month (UTC), in every mode: the buffer (reserve_usd) and each team's budget are set aside; everyone
+ * outside a budgeted team shares the rest; a person's own limit (cap_usd) applies. Inside each budget, people:
+ *  - pool:   share it freely (no personal limit beyond their own);
+ *  - even:   get an equal share of it, less own limits, split between those who can launch, plus their adjustment;
+ *  - custom: can each spend up to the default cap.
+ * allocate() below is the one place this is worked out; the page, checkRun and adaptive runs all use it.
  */
 import type { Org } from "./auth.js";
 import { orgBudget } from "./billing.js";
@@ -21,7 +21,8 @@ import { getDb } from "./db.js";
 import { settingNumber } from "./settings.js";
 
 /** Why a launch was refused, for /app to show beside the message; validation errors carry no code. */
-export type LimitCode = "no_allowance" | "account_cap" | "budget_error" | "launch_access" | "person_limit" | "team_budget" | "runs_at_once" | "run_sessions";
+export type LimitCode = "no_allowance" | "account_cap" | "budget_error" | "launch_access" | "person_limit" | "team_budget" | "rest_pot" | "buffer" |
+  "runs_at_once" | "run_sessions";
 export interface LimitInfo { code?: LimitCode; limit_usd?: number | null; left_usd?: number | null; set_by?: "you" | "team" | "account"; admins?: { name: string }[] }
 
 export class LimitError extends Error {
@@ -90,50 +91,138 @@ export async function sessionsLimit(orgId: number): Promise<number> {
   return p?.n == null ? server : Math.min(server, Number(p.n));
 }
 
-/** The full picture for /app Limits: policy, teams, every active member's allowance and usage. */
+export interface Usage { spent: number; in_flight_usd: number; tokens_in: number; tokens_out: number; running: number }
+const NO_USAGE: Usage = { spent: 0, in_flight_usd: 0, tokens_in: 0, tokens_out: 0, running: 0 };
+type Member = Omit<MemberRow, "user_id">;
+const NO_ROW: Member = { team_id: null, cap_usd: null, adjust_usd: 0, can_run: null, max_concurrent_runs: null };
+
+/** What allocate() works from: a policy (saved, or a draft), the teams, the account's active members and their own
+ *  settings (no row: all defaults), live usage per person, the account's allowance and its live spend (connector keys included). */
+export interface AllocInput {
+  policy: Pick<Policy, "mode" | "reserve_usd" | "default_cap_usd" | "new_members_can_run" | "max_concurrent_runs">;
+  teams: Team[];
+  members: ({ user_id: string } & Partial<Member>)[];
+  usage: Map<string, Usage>;
+  cap: number;
+  account_spent_usd: number;
+}
+
+const cents = (v: number) => Math.round(v * 100) / 100;
+const leftOf = (limit: number, spent: number) => Math.max(0, cents(limit - spent));
+
+/**
+ * Who gets what, and who is blocked: one pure function, so the page, launches and adaptive runs can't disagree.
+ *
+ * Pots: the buffer (reserve_usd, which nobody can launch into), each team with a budget (a $0 budget is a real $0), and
+ * everyone else, who share R = cap - buffer - team budgets (never below 0). These are set aside in every mode.
+ * A person's limit: their own (cap_usd) in every mode; else per mode: pool, none (they draw on their pot); custom, the
+ * default cap; even, what is left of their pot after own limits, split between the people in it who can launch and
+ * have no own limit, plus their adjustment. With a $0 allowance every limit is $0.
+ * A launch is checked in this order, and the first that fails is the reason (`blocked`): the account's allowance,
+ * launch access, the person's limit, their pot (team budget or Everyone else), the buffer (the account's spend has
+ * reached cap - buffer). `limited_by` is the first of those at 90% or more of its limit.
+ */
+export function allocate({ policy, teams, members, usage, cap, account_spent_usd }: AllocInput) {
+  const zero = cap <= 0;
+  const budgeted = new Map(teams.filter((t) => t.budget_usd != null).map((t) => [t.id, t]));
+  const buffer_usd = cents(policy.reserve_usd);
+  const team_budgets_usd = cents([...budgeted.values()].reduce((s, t) => s + (t.budget_usd ?? 0), 0));
+  const rest_usd = Math.max(0, cents(cap - buffer_usd - team_budgets_usd));
+  const launchable_usd = Math.max(0, cents(cap - buffer_usd));
+  const people = members.map((m) => {
+    const r: Member = { ...NO_ROW, ...Object.fromEntries(Object.entries(m).filter(([, v]) => v !== undefined)) };
+    const team_id = r.team_id != null && teams.some((t) => t.id === r.team_id) ? r.team_id : null;
+    return { user_id: m.user_id, ...r, team_id, pot: team_id != null && budgeted.has(team_id) ? team_id : null,
+      own_can_run: r.can_run, can_run: r.can_run ?? policy.new_members_can_run, u: usage.get(m.user_id) ?? NO_USAGE };
+  });
+  const potBudget = (pot: number | null) => (pot == null ? rest_usd : budgeted.get(pot)!.budget_usd ?? 0);
+  const potSpent = (pot: number | null) => people.filter((p) => p.pot === pot).reduce((s, p) => s + p.u.spent, 0);
+  // Even split, per pot: the pot less its people's own limits, between those who can launch and have none.
+  const shareOf = (pot: number | null) => {
+    const inPot = people.filter((p) => p.pot === pot);
+    const splitters = inPot.filter((p) => p.can_run && p.cap_usd == null).length;
+    const own = inPot.reduce((s, p) => s + (p.cap_usd ?? 0), 0);
+    return splitters ? Math.max(0, potBudget(pot) - own) / splitters : 0;
+  };
+
+  const account = {
+    cap_usd: cap, spent_usd: cents(account_spent_usd), launchable_usd, left_usd: leftOf(launchable_usd, account_spent_usd),
+    blocked: (zero ? "no_allowance" : account_spent_usd >= cap ? "account_cap" : account_spent_usd >= launchable_usd ? "buffer" : null) as LimitCode | null,
+  };
+  const out = people.map((p) => {
+    const limit_source: "own" | "share" | "default" | "pool" = p.cap_usd != null ? "own" : policy.mode === "even" ? "share" : policy.mode === "custom" ? "default" : "pool";
+    let limit: number | null =
+      limit_source === "own" ? p.cap_usd
+      : limit_source === "default" ? policy.default_cap_usd
+      : limit_source === "share" ? (p.can_run ? Math.max(0, shareOf(p.pot) + p.adjust_usd) : 0)
+      : null;
+    if (zero) limit = 0;
+    if (limit != null) limit = cents(limit);
+    const pot = potBudget(p.pot), spent = p.u.spent;
+    // Each check: [code, limit, spent against it]; can't launch and no allowance always fail.
+    const checks: [LimitCode, number | null, number][] = [
+      ["no_allowance", zero ? 0 : null, 0],
+      ["account_cap", zero ? null : cap, account_spent_usd],
+      ["launch_access", p.can_run ? null : 0, 0],
+      ["person_limit", limit, spent],
+      // Everyone else's pot only counts once a team has a budget; until then it is the buffer check below.
+      [p.pot == null ? "rest_pot" : "team_budget", p.pot == null && !budgeted.size ? null : pot, potSpent(p.pot)],
+      ["buffer", zero || buffer_usd <= 0 ? null : launchable_usd, account_spent_usd],
+    ];
+    const blocked = checks.find(([, l, s]) => l != null && s >= l)?.[0] ?? null;
+    const limited_by = blocked ?? checks.find(([, l, s]) => l != null && l > 0 && s >= 0.9 * l)?.[0] ?? null;
+    const left = Math.min(...checks.slice(1).filter(([c, l]) => l != null && c !== "launch_access").map(([, l, s]) => leftOf(l!, s)));
+    const team = teams.find((t) => t.id === p.team_id);
+    const effective_max_concurrent = p.max_concurrent_runs ?? team?.max_concurrent_runs ?? policy.max_concurrent_runs;
+    const concurrent_source: "you" | "team" | "account" = p.max_concurrent_runs != null ? "you" : team?.max_concurrent_runs != null ? "team" : "account";
+    return { user_id: p.user_id, team_id: p.team_id, pot: p.pot, can_run: p.can_run, own_can_run: p.own_can_run,
+      cap_usd: p.cap_usd, adjust_usd: p.adjust_usd, max_concurrent_runs: p.max_concurrent_runs, effective_max_concurrent, concurrent_source,
+      limit_usd: limit, limit_source, ...p.u, left_usd: blocked ? 0 : left, blocked, limited_by };
+  });
+  const teamsOut = teams.map((t) => {
+    const ms = out.filter((x) => x.team_id === t.id), spent = ms.reduce((s, x) => s + x.spent, 0);
+    return { ...t, members: ms.length, spent, left_usd: t.budget_usd == null ? null : leftOf(t.budget_usd, spent) };
+  });
+  const restSpent = potSpent(null);
+  return {
+    account, buffer_usd, team_budgets_usd, set_aside_usd: cents(buffer_usd + team_budgets_usd),
+    over_by_usd: Math.max(0, cents(buffer_usd + team_budgets_usd - cap)),
+    rest: { budget_usd: rest_usd, members: out.filter((x) => x.pot == null).length, spent: restSpent, left_usd: leftOf(rest_usd, restSpent) },
+    teams: teamsOut, members: out,
+  };
+}
+export type Allocation = ReturnType<typeof allocate>;
+
+/** The account's live spend this month, connector keys included (the same figure as Billing's header). */
+async function accountSpent(orgId: number) {
+  const { orgMonthSpendUsd } = await import("./queries.js");
+  return orgMonthSpendUsd(orgId);
+}
+
+/** The full picture for /app Billing, Budget rules: policy, teams, every active member's limit, usage and what blocks them. */
 export async function overview(org: { orgId: number; slug: string }) {
   const { team } = await import("./admin.js");
-  const [{ policy, teams, rows }, people, usage, { budget, subscription, budget_error }] = await Promise.all([
-    load(org.orgId), team(org.slug), usageByPerson(org.orgId),
+  const [{ policy, teams, rows }, people, usage, account_spent, { budget, subscription, budget_error }] = await Promise.all([
+    load(org.orgId), team(org.slug), usageByPerson(org.orgId), accountSpent(org.orgId),
     // A failed lookup is not "no allowance": it is flagged, and launches refuse until it works again (fail closed).
     orgBudget(org.orgId).then((b) => ({ ...b, budget_error: false }), () => ({ budget: 0, subscription: null, budget_error: true })),
   ]);
-  const members = people.members.filter((m) => m.status === "active");
-  const teamOf = (uid: string) => rows.get(uid)?.team_id ?? null;
-  const budgetedTeams = teams.filter((t) => t.budget_usd != null);
-  const teamBudgets = budgetedTeams.reduce((s, t) => s + (t.budget_usd ?? 0), 0);
-  const restPool = Math.max(0, budget - policy.reserve_usd - teamBudgets);
-  const inBudgetedTeam = (uid: string) => budgetedTeams.some((t) => t.id === teamOf(uid));
-  const restCount = members.filter((m) => !inBudgetedTeam(m.user_id)).length;
-
-  const allowanceOf = (uid: string): number | null => {
-    const r = rows.get(uid);
-    if (policy.mode === "custom") return r?.cap_usd ?? policy.default_cap_usd ?? null;
-    if (policy.mode === "even") {
-      const t = budgetedTeams.find((x) => x.id === teamOf(uid));
-      const size = t ? members.filter((m) => teamOf(m.user_id) === t.id).length : restCount;
-      const share = t ? (t.budget_usd ?? 0) / Math.max(1, size) : budget > 0 ? restPool / Math.max(1, size) : null;
-      return share == null ? null : Math.max(0, Math.round((share + (r?.adjust_usd ?? 0)) * 100) / 100);
-    }
-    return null;
-  };
-  const shaped = members.map((m) => {
-    const r = rows.get(m.user_id), u = usage.get(m.user_id) ?? { spent: 0, in_flight_usd: 0, tokens_in: 0, tokens_out: 0, running: 0 };
-    const allowance = allowanceOf(m.user_id);
-    return { user_id: m.user_id, email: m.email, name: m.name, role: m.role, team_id: teamOf(m.user_id),
-      can_run: r?.can_run ?? policy.new_members_can_run, own_can_run: r?.can_run ?? null, adjust_usd: r?.adjust_usd ?? 0, cap_usd: r?.cap_usd ?? null,
-      max_concurrent_runs: r?.max_concurrent_runs ?? null, allowance_usd: allowance, ...u,
-      remaining_usd: allowance == null ? null : Math.max(0, Math.round((allowance - u.spent) * 100) / 100) };
+  const active = people.members.filter((m) => m.status === "active");
+  const a = allocate({ policy, teams, usage, cap: budget, account_spent_usd: account_spent,
+    members: active.map((m) => ({ user_id: m.user_id, ...rows.get(m.user_id) })) });
+  const byId = new Map(a.members.map((x) => [x.user_id, x]));
+  const members = active.map((m) => {
+    const x = byId.get(m.user_id)!;
+    // allowance_usd and remaining_usd are the old names, for the current tab.
+    return { email: m.email, name: m.name, role: m.role, ...x,
+      allowance_usd: x.limit_usd, remaining_usd: x.limit_usd == null ? null : leftOf(x.limit_usd, x.spent) };
   });
-  const teamsShaped = teams.map((t) => {
-    const ms = shaped.filter((m) => m.team_id === t.id);
-    return { ...t, members: ms.length, spent: ms.reduce((s, m) => s + m.spent, 0) };
-  });
-  const allocated = policy.mode === "pool" ? teamBudgets : shaped.reduce((s, m) => s + (m.allowance_usd ?? 0), 0);
+  const allocated = a.set_aside_usd + (policy.mode === "pool" ? 0 : members.filter((m) => m.pot == null).reduce((s, m) => s + (m.limit_usd ?? 0), 0));
   const admins = members.filter((m) => m.role === "admin").map((m) => ({ name: m.name || m.email || "an admin" }));
-  return { policy, budget_usd: budget, budget_error, plan: subscription?.plan ?? null, clerk: people.clerk, teams: teamsShaped, members: shaped, admins,
-    allocated_usd: Math.round(allocated * 100) / 100, unallocated_usd: budget > 0 ? Math.round((budget - allocated) * 100) / 100 : null,
-    spent_usd: shaped.reduce((s, m) => s + m.spent, 0) };
+  return { policy, budget_usd: budget, budget_error, plan: subscription?.plan ?? null, clerk: people.clerk, admins,
+    account: a.account, buffer_usd: a.buffer_usd, set_aside_usd: a.set_aside_usd, over_by_usd: a.over_by_usd, rest: a.rest,
+    teams: a.teams, members, allocated_usd: cents(allocated), unallocated_usd: budget > 0 ? cents(budget - allocated) : null,
+    spent_usd: members.reduce((s, m) => s + m.spent, 0) };
 }
 
 /** The end of every refusal: who can change it, and (for money) when the month starts over. */
@@ -143,12 +232,43 @@ export function askAdmins(admins: { name: string }[], untilReset: boolean) {
   return `Ask ${who} to change Budget rules on the Billing page${untilReset ? `, or wait until ${monthWords().reset}` : ""}.`;
 }
 
+/** The refusal for a money or access check that allocate() says fails, worded for the person launching. */
+function refusal(o: Awaited<ReturnType<typeof overview>>, code: LimitCode, me?: Awaited<ReturnType<typeof overview>>["members"][number]): LimitError {
+  const { month, reset } = monthWords();
+  const info = (set_by: LimitInfo["set_by"], limit_usd: number | null = null, spent = 0) =>
+    ({ code, set_by, admins: o.admins, limit_usd, left_usd: limit_usd == null ? null : leftOf(limit_usd, spent) });
+  const $ = (v: number) => `$${v.toFixed(2)}`;
+  const acc = o.account, t = o.teams.find((x) => x.id === me?.pot);
+  switch (code) {
+    case "no_allowance":
+      return new LimitError("Your account has no prepaid allowance this month, so simulations can't run. Contact Octillion.", 403, info("account", 0));
+    case "account_cap":
+      return new LimitError(`Your account has used its ${$(acc.cap_usd)} for ${month} (${$(acc.spent_usd)} spent). ` +
+        `Results so far stay available; reply to your Octillion contact to raise the allowance, or wait until ${reset}.`, 403, info("account", acc.cap_usd, acc.spent_usd));
+    case "launch_access":
+      return new LimitError(`You haven't been allowed to launch simulations yet. Reports and transcripts stay available. ${askAdmins(o.admins, false)}`, 403,
+        info(me?.own_can_run != null ? "you" : "account"));
+    case "person_limit":
+      return new LimitError(`You've used your ${$(me!.limit_usd!)} for ${month} (${$(me!.spent)} spent). ${askAdmins(o.admins, true)}`, 403,
+        info(me!.cap_usd != null ? "you" : "account", me!.limit_usd, me!.spent));
+    case "team_budget":
+      return new LimitError(`The ${t!.name} team has used its ${$(t!.budget_usd!)} for ${month}. ${askAdmins(o.admins, true)}`, 403, info("team", t!.budget_usd, t!.spent));
+    case "rest_pot":
+      return new LimitError(`The shared ${$(o.rest.budget_usd)} for people outside a team budget is used up for ${month}. ${askAdmins(o.admins, true)}`, 403,
+        info("account", o.rest.budget_usd, o.rest.spent));
+    default: // buffer
+      return new LimitError(`Your account has reached the part of its allowance available for launches (${$(acc.launchable_usd)} of ${$(acc.cap_usd)}). ` +
+        `The rest is held back for runs that go over. ${askAdmins(o.admins, true)}`, 403, info("account", acc.launchable_usd, acc.spent_usd));
+  }
+}
+
 /**
- * Before a simulation starts: may this person run, within their allowance, their team's budget and their concurrency
- * limit? Returns the most sessions this run may have (null = the server default) and the admins to name if a later
- * check refuses. Connector-key callers are not limited here. A refusal is a LimitError with a code (launch_access, person_limit, team_budget, runs_at_once), what the limit
- * is and what is left, who set it, and the admins to ask. When the account's allowance could not be looked up, nothing
- * starts (budget_error): a lookup failure must not read as "no limit".
+ * Before a simulation starts: may this person run, within their limit, their pot (team budget or Everyone else), the
+ * buffer and their runs at once? Returns the most sessions this run may have (null = the server default) and the admins
+ * to name if a later check refuses. Connector-key callers are not limited here. A refusal is a LimitError with a code,
+ * what the limit is and what is left, who set it, and the admins to ask. When the account's allowance could not be
+ * looked up, nothing starts (budget_error): a lookup failure must not read as "no limit". Someone not among the active
+ * members (say Clerk is unavailable) still meets the account's checks, the buffer among them.
  */
 export async function checkRun(org: Org): Promise<{ maxSessions: number | null; admins: { name: string }[] }> {
   if (!org.userId) return { maxSessions: null, admins: [] };
@@ -156,31 +276,20 @@ export async function checkRun(org: Org): Promise<{ maxSessions: number | null; 
   if (o.budget_error)
     throw new LimitError("We couldn't check your account's allowance. Try again in a minute.", 503, { code: "budget_error", admins: o.admins });
   const me = o.members.find((m) => m.user_id === org.userId);
+  const blocked = me ? me.blocked : o.account.blocked;
+  if (blocked) throw refusal(o, blocked, me);
   if (!me) return { maxSessions: o.policy.max_sessions_per_run, admins: o.admins };
-  const { month } = monthWords();
-  const info = (code: LimitCode, set_by: LimitInfo["set_by"], limit_usd: number | null = null, spent = 0) =>
-    ({ code, set_by, admins: o.admins, limit_usd, left_usd: limit_usd == null ? null : Math.max(0, Math.round((limit_usd - spent) * 100) / 100) });
-  if (!me.can_run)
-    throw new LimitError(`You haven't been allowed to launch simulations yet. Reports and transcripts stay available. ${askAdmins(o.admins, false)}`, 403,
-      info("launch_access", me.own_can_run != null ? "you" : "account"));
-  if (me.allowance_usd != null && me.spent >= me.allowance_usd)
-    throw new LimitError(`You've used your $${me.allowance_usd.toFixed(2)} for ${month} ($${me.spent.toFixed(2)} spent). ${askAdmins(o.admins, true)}`, 403,
-      info("person_limit", me.cap_usd != null ? "you" : "account", me.allowance_usd, me.spent));
-  const t = o.teams.find((x) => x.id === me.team_id);
-  if (t?.budget_usd != null && t.spent >= t.budget_usd)
-    throw new LimitError(`The ${t.name} team has used its $${t.budget_usd.toFixed(2)} for ${month}. ${askAdmins(o.admins, true)}`, 403,
-      info("team_budget", "team", t.budget_usd, t.spent));
-  const maxRuns = me.max_concurrent_runs ?? t?.max_concurrent_runs ?? o.policy.max_concurrent_runs;
-  const runsSetBy = me.max_concurrent_runs != null ? "you" : t?.max_concurrent_runs != null ? "team" : "account";
+  const maxRuns = me.effective_max_concurrent, runsSetBy = me.concurrent_source;
   if (maxRuns != null && me.running >= maxRuns)
     throw new LimitError(`You have ${me.running} simulation${me.running === 1 ? "" : "s"} running; you can have ${maxRuns} at once ` +
       `(set for ${runsSetBy === "you" ? "you" : runsSetBy === "team" ? "your team" : "the account"}). Wait for one to finish. ${askAdmins(o.admins, false)}`, 429,
-      info("runs_at_once", runsSetBy));
+      { code: "runs_at_once", set_by: runsSetBy, admins: o.admins, limit_usd: null, left_usd: null });
   return { maxSessions: o.policy.max_sessions_per_run, admins: o.admins };
 }
 
 /**
- * While an adaptive run samples more: has its launcher (or their team) run out? Then the run stops early. Fails closed:
+ * While an adaptive run samples more: has its launcher run out (their limit, their pot, the buffer or the account)?
+ * Then the run stops early. Launch access is not rechecked: it governs starting runs, not finishing them. Fails closed:
  * when the allowance or the limits can't be read, the run stops adding sessions (the ones running still finish).
  */
 export async function launcherOverLimit(orgId: number, slug: string, userId: string | null): Promise<boolean> {
@@ -188,9 +297,8 @@ export async function launcherOverLimit(orgId: number, slug: string, userId: str
   const o = await overview({ orgId, slug }).catch(() => null);
   if (!o || o.budget_error) return true;
   const me = o.members.find((m) => m.user_id === userId);
-  if (!me) return false;
-  const t = o.teams.find((x) => x.id === me.team_id);
-  return (me.allowance_usd != null && me.spent >= me.allowance_usd) || (t?.budget_usd != null && t.spent >= t.budget_usd);
+  const blocked = me ? me.blocked : o.account.blocked;
+  return blocked != null && blocked !== "launch_access";
 }
 
 // ---------- changes from /app (account admins) ----------
@@ -223,6 +331,9 @@ export async function setPolicy(orgId: number, actor: string, p: Partial<Record<
     max_concurrent_runs: p.max_concurrent_runs === undefined ? cur.max_concurrent_runs : count(p.max_concurrent_runs, RUNS),
     max_sessions_per_run: p.max_sessions_per_run === undefined ? cur.max_sessions_per_run : sessions(p.max_sessions_per_run),
   };
+  // Own limits apply in every mode, so custom with no default would just be the shared pool under another name.
+  if (next.mode === "custom" && next.default_cap_usd == null)
+    throw new LimitError("Custom caps need a default monthly cap for everyone. Enter an amount, or share the budget freely instead.");
   await (await getDb()).query(
     `INSERT INTO usage_policies (org_id, mode, reserve_usd, default_cap_usd, new_members_can_run, max_concurrent_runs, max_sessions_per_run, updated_at, updated_by)
      VALUES ($1, $2, $3, $4, $5, $6, $7, now(), $8)
