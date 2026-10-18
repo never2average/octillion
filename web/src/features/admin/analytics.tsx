@@ -48,6 +48,8 @@ interface Analytics {
     change: { active_accounts: number | null; active_people: number | null; calls: number | null };
   };
   daily: { day: string; accounts: number; people: number; calls: number; errors: number; p95_ms?: number | null }[];
+  /** The Health figures day by day (sparklines). */
+  ops_daily?: OpsDay[];
   new_daily?: { day: string; n: number }[];
   tools: { name: string; accounts: number; people: number; calls: number; error_pct: number; p50_ms: number | null; p95_ms: number | null }[];
   clients: { client: string; accounts: number; people: number; connections: number }[];
@@ -68,6 +70,21 @@ const callsConfig = { calls: { label: 'Tool calls', color: 'var(--chart-1)' }, e
 const activeConfig = { accounts: { label: 'Accounts', color: 'var(--chart-2)' }, people: { label: 'People', color: 'var(--chart-4)' } } satisfies ChartConfig;
 
 /** Every day of the period, zero-filled, oldest first. */
+interface OpsDay {
+  day: string; sims: number; sims_completed: number; sessions: number; sessions_failed: number; model_cost_usd: number;
+  onboardings: number; onboardings_failed: number; gateway_errors: number; gateway_requests: number; queued: number;
+}
+/** ops_daily on every day of the range (missing days are 0), with the rates worked out per day. */
+function fillOps(a: Analytics) {
+  const by = new Map((a.ops_daily ?? []).map((r) => [r.day, r]));
+  const rate = (x: number, of: number) => (of ? (x / of) * 100 : 0);
+  return fillDays(a.daily, a.days, a.range?.from).map(({ day }) => {
+    const r = by.get(day);
+    return { sims_completed: r?.sims_completed ?? 0, sessions_failed_pct: rate(r?.sessions_failed ?? 0, r?.sessions ?? 0), queued: r?.queued ?? 0,
+      onboardings_failed: r?.onboardings_failed ?? 0, gateway_error_pct: rate(r?.gateway_errors ?? 0, r?.gateway_requests ?? 0), model_cost_usd: r?.model_cost_usd ?? 0 };
+  });
+}
+
 function fillDays(rows: Analytics['daily'], days: number, from?: string, created: Analytics['new_daily'] = []) {
   const by = new Map(rows.map((r) => [r.day, r])), born = new Map(created.map((r) => [r.day, r.n]));
   const start = from ? Date.parse(`${from}T00:00:00Z`) : Date.now() - (days - 1) * 86_400_000;
@@ -612,6 +629,8 @@ function HealthBody({ a, base, match, kind }: { a: Analytics; base: string; matc
   const total = fresh?.total ?? 0;
   const pager: Paged<ErrorRow> = { rows, page, pages: Math.max(1, Math.ceil(total / size)), size, total, setPage, setSize };
   const series = useMemo(() => fillDays(a.daily, a.days, a.range?.from), [a]);
+  const ops = useMemo(() => fillOps(a), [a]);
+  const opsSpark = (k: keyof ReturnType<typeof fillOps>[number]) => ops.map((d) => d[k]);
   const cols = [{ label: 'When', render: (r: ErrorRow) => <When d={r.at} /> }, { label: 'Account', render: (r: ErrorRow) => <span className='leading-none'>{r.account}</span> },
     ...ERROR_TABLE[kind], { label: 'Error', render: (r: ErrorRow) => <span className='line-clamp-2 text-sm whitespace-normal' title={String(r.error ?? '')}>{r.error ?? '—'}</span>, className: 'min-w-64' }];
   return (
@@ -620,14 +639,14 @@ function HealthBody({ a, base, match, kind }: { a: Analytics; base: string; matc
         <StatStrip items={[
           { label: 'Tool error rate', value: `${a.totals.error_pct}%`, hint: `p50 ${ms(a.totals.p50_ms)}`, spark: series.map((d) => d.error_pct) },
           { label: 'Tool latency, p95', value: ms(a.totals.p95_ms), spark: series.map((d) => d.p95) },
-          { label: 'Simulations completed', value: `${num(a.ops.sims_completed)} / ${num(a.ops.sims)}`, hint: `${num(a.ops.sims_open)} open now` },
-          { label: 'Agent sessions failed', value: pct(a.ops.sessions_failed, a.ops.sessions), hint: `${num(a.ops.sessions_failed)} of ${num(a.ops.sessions)}` }
+          { label: 'Simulations completed', value: `${num(a.ops.sims_completed)} / ${num(a.ops.sims)}`, hint: `${num(a.ops.sims_open)} open now`, spark: opsSpark('sims_completed') },
+          { label: 'Agent sessions failed', value: pct(a.ops.sessions_failed, a.ops.sessions), hint: `${num(a.ops.sessions_failed)} of ${num(a.ops.sessions)}`, spark: opsSpark('sessions_failed_pct') }
         ]} />
         <StatStrip className='border-t-0' items={[
-          { label: 'Sessions queued now', value: num(a.ops.sessions_queued) },
-          { label: 'Onboarding research failed', value: `${num(a.ops.onboardings_failed)} / ${num(a.ops.onboardings)}` },
-          { label: 'Gateway error rate', value: pct(a.ops.gateway_errors, a.ops.gateway_requests), hint: `${num(a.ops.gateway_errors)} of ${num(a.ops.gateway_requests)} requests` },
-          { label: 'Model cost', value: usd(a.ops.model_cost_usd), hint: `in the last ${a.days} days` }
+          { label: 'Sessions queued now', value: num(a.ops.sessions_queued), hint: 'line: the most queued each day', spark: opsSpark('queued') },
+          { label: 'Onboarding research failed', value: `${num(a.ops.onboardings_failed)} / ${num(a.ops.onboardings)}`, spark: opsSpark('onboardings_failed') },
+          { label: 'Gateway error rate', value: pct(a.ops.gateway_errors, a.ops.gateway_requests), hint: `${num(a.ops.gateway_errors)} of ${num(a.ops.gateway_requests)} requests`, spark: opsSpark('gateway_error_pct') },
+          { label: 'Model cost', value: usd(a.ops.model_cost_usd), hint: `in the last ${a.days} days`, spark: opsSpark('model_cost_usd') }
         ]} />
       </div>
       <div className={cn('flex min-h-0 flex-1 flex-col gap-2', isFetching && 'opacity-70')}>

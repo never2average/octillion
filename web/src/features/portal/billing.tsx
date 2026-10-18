@@ -1,5 +1,5 @@
 'use client';
-// /app Billing: this month (plan, spend against the cap, daily spend; for a member, their own budget and the rules in
+// /app Billing: this month (plan, spend against the cap; for a member, their own budget and the rules in
 // plain words; for an admin, a banner from 80% of the allowance or when the pace runs out) above three tabs. People: one
 // searchable table of who is in the account, their role, access, team, limit, what is left and what limits them (invite,
 // roles, limits and suspension in each row's ⋯ menu; "own settings only" narrows it to the exceptions). Teams: a
@@ -75,7 +75,7 @@ const str = (v: number | null | undefined) => (v == null ? '' : String(v));
 function Block({ id, title, action, children }: { id?: string; title: string; action?: React.ReactNode; children: React.ReactNode }) {
   return (
     <section id={id} className='flex scroll-mt-20 flex-col gap-4'>
-      <div className='flex items-center justify-between gap-2'>{title ? <h2 className='text-base leading-none font-semibold'>{title}</h2> : <span />}{action}</div>
+      {(title || action) && <div className='flex items-center justify-between gap-2'>{title ? <h2 className='text-base leading-none font-semibold'>{title}</h2> : <span />}{action}</div>}
       {children}
     </section>
   );
@@ -97,7 +97,7 @@ export function BillingPage() {
   const [editUser, setEditUser] = useState<string | null>(null);
   const onTab = (to: 'people' | 'teams', filter?: PeopleFilter) => { setTab(to); if (filter) setPeopleFilter(filter); };
   return (
-    <PageContainer pageTitle='Billing'>
+    <PageContainer>
       {error ? <ErrorState error={error} /> : !b ? <LoadingCards count={3} /> : (
         <div className='flex w-full flex-col gap-6'>
           <ThisMonth b={b} u={u ?? undefined} l={l ?? undefined} />
@@ -121,7 +121,7 @@ export function BillingPage() {
   );
 }
 
-// ---------- this month: plan, spend against the cap, daily spend ----------
+// ---------- this month: plan, spend against the cap ----------
 
 function ThisMonth({ b, u, l }: { b: Billing; u: Usage | undefined; l: Limits | undefined }) {
   const [busy, setBusy] = useState<string | null>(null);
@@ -136,7 +136,7 @@ function ThisMonth({ b, u, l }: { b: Billing; u: Usage | undefined; l: Limits | 
   const pct = (v: number) => (cap ? Math.min(100, (v / cap) * 100) : 0);
   const over = !!u && cap > 0 && u.projected_usd > cap;
   return (
-    <Block title='This month' action={b.enabled && b.can_manage && b.customer
+    <Block title='' action={b.enabled && b.can_manage && b.customer
       ? <Button variant='outline' size='sm' disabled={busy !== null} onClick={() => go('/billing/portal')}>{busy ? <Icons.spinner className='animate-spin' /> : <Icons.creditCard />} Manage billing</Button> : undefined}>
       {s && ['past_due', 'unpaid'].includes(s.status) && <Alert variant='destructive'><Icons.warning /><AlertDescription>The last payment failed. Update the card to keep running simulations.</AlertDescription></Alert>}
       {l?.can_manage && l.alert && <UsageBanner a={l.alert} />}
@@ -166,7 +166,6 @@ function ThisMonth({ b, u, l }: { b: Billing; u: Usage | undefined; l: Limits | 
           <span>Day {Math.ceil(u.period.elapsed_days)} of {u.period.days}</span>
         </p>
       )}
-      {u && <Daily u={u} />}
       {/* No plan and no allowance: runs are off. Plans are invite-only while inference costs are high. */}
       {cap <= 0 && !(b.enabled && b.plans.length > 0) && (
         <Alert><Icons.lock /><AlertDescription>
@@ -233,22 +232,6 @@ function YourBudget({ m, l, you }: { m: LimitMember; l: Limits; you: You }) {
       </div>
       <p className='text-muted-foreground text-xs leading-none'>{details.join(' · ')}</p>
       {you.summary.length > 0 && <p className='max-w-3xl text-sm leading-relaxed'>{you.summary.join(' ')}</p>}
-    </div>
-  );
-}
-
-function Daily({ u }: { u: Usage }) {
-  const by = new Map(u.daily.map((d) => [d.day, d.usd]));
-  const start = Date.parse(u.period.start), today = new Date().toISOString().slice(0, 10);
-  const days = Array.from({ length: u.period.days }, (_, i) => new Date(start + i * 86_400_000).toISOString().slice(0, 10));
-  const max = Math.max(0.01, ...u.daily.map((d) => d.usd));
-  return (
-    // Short when nothing has been spent yet: a flat strip, not an empty 4rem box.
-    <div className={cn('flex items-end gap-0.5', u.daily.some((d) => d.usd > 0) ? 'h-12' : 'h-1.5')} role='img' aria-label='Model spend per day this month'>
-      {days.map((d) => {
-        const v = by.get(d) ?? 0;
-        return <div key={d} title={`${d}: ${usd(v)}`} className={cn('flex-1 rounded-t-sm', d > today ? 'bg-muted/40' : v ? 'bg-primary/80' : 'bg-muted')} style={{ height: u.daily.some((x) => x.usd > 0) ? `${d > today ? 6 : Math.max(6, (v / max) * 100)}%` : '100%' }} />;
-      })}
     </div>
   );
 }

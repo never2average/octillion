@@ -464,6 +464,7 @@ export function createApp() {
   // The autoscaler's history (src/autoscaler-ticks.ts): its decisions log and the Activity chart. Read only.
   ob.get("/compute/ticks", async (req, res) => void res.json(await ticks.listTicks(req.query as Record<string, unknown>)));
   ob.get("/compute/activity", async (req, res) => void res.json(await ticks.computeActivity(req.query as Record<string, unknown>)));
+  ob.get("/compute/trends", async (_req, res) => void res.json(await (await import("./compute-trends.js")).computeTrends()));
   // The page's only two actions (src/compute-actions.ts), both in the admin audit log: run one autoscaler tick now, and
   // cancel a queued or running session (its orchestrator stops the sandbox at the next heartbeat).
   ob.post("/compute/tick", async (req, res) => void res.json(await actions.runTick(adminActor(req, res))));

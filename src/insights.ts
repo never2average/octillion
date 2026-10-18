@@ -175,7 +175,7 @@ export async function platformAnalytics(q: AnalyticsQuery) {
   const calls = "method = 'tools/call'";
   const person = "coalesce(user_id, 'org:' || org_id)";
 
-  const [totals, prev, daily, tools, clients, accounts, retention, ops, errors, newAccounts, errorsTotal, newDaily] = await Promise.all([
+  const [totals, prev, daily, tools, clients, accounts, retention, ops, errors, newAccounts, errorsTotal, newDaily, opsDaily] = await Promise.all([
     db.query<Record<string, number>>(
       `SELECT count(DISTINCT org_id) FILTER (WHERE ${calls}) AS active_accounts, count(DISTINCT ${person}) FILTER (WHERE ${calls}) AS active_people,
               count(*) FILTER (WHERE ${calls}) AS calls, count(*) FILTER (WHERE ${calls} AND NOT ok) AS errors,
@@ -235,6 +235,26 @@ export async function platformAnalytics(q: AnalyticsQuery) {
     db.query<{ n: number }>(`SELECT count(*) AS n FROM mcp_events WHERE NOT ok AND ${inW("at")}${EV()}`),
     // accounts created per day, for the New accounts sparkline
     db.query<{ day: string; n: number }>(`SELECT to_char(date_trunc('day', created_at), 'YYYY-MM-DD') AS day, count(*) AS n FROM organizations WHERE ${inW("created_at")}${O ? ` AND id = ANY(${O})` : ""} GROUP BY 1 ORDER BY 1`),
+    // The Health figures day by day, for their sparklines (same filters as ops). Queued is the autoscaler's daily peak.
+    db.query<Record<string, unknown>>(
+      `WITH days AS (
+         SELECT to_char(date_trunc('day', created_at), 'YYYY-MM-DD') AS day, count(*) AS sims, count(*) FILTER (WHERE status = 'completed') AS sims_completed,
+                0 AS sessions, 0 AS sessions_failed, 0 AS model_cost_usd, 0 AS onboardings, 0 AS onboardings_failed, 0 AS gateway_errors, 0 AS gateway_requests, 0 AS queued
+           FROM simulations WHERE ${inW("created_at")}${ORG("", "sim")} GROUP BY 1
+         UNION ALL
+         SELECT to_char(date_trunc('day', queued_at), 'YYYY-MM-DD'), 0, 0, count(*), count(*) FILTER (WHERE status IN ('failed', 'timeout')), coalesce(sum(cost_usd), 0), 0, 0, 0, 0, 0
+           FROM agent_sessions WHERE ${inW("queued_at")}${ORG("", "session")} GROUP BY 1
+         UNION ALL
+         SELECT to_char(date_trunc('day', created_at), 'YYYY-MM-DD'), 0, 0, 0, 0, 0, count(*), count(*) FILTER (WHERE status = 'failed'), 0, 0, 0
+           FROM product_research WHERE kind = 'product' AND ${inW("created_at")}${ORG("", "research")} GROUP BY 1
+         UNION ALL
+         SELECT to_char(date_trunc('day', g.last_at), 'YYYY-MM-DD'), 0, 0, 0, 0, 0, 0, 0, sum(g.errors), sum(g.requests), 0 FROM ${GW} GROUP BY 1
+         UNION ALL
+         SELECT to_char(date_trunc('day', at), 'YYYY-MM-DD'), 0, 0, 0, 0, 0, 0, 0, 0, 0, max(queued) FROM autoscaler_ticks WHERE ${inW("at")} GROUP BY 1)
+       SELECT day, sum(sims) AS sims, sum(sims_completed) AS sims_completed, sum(sessions) AS sessions, sum(sessions_failed) AS sessions_failed,
+              sum(model_cost_usd) AS model_cost_usd, sum(onboardings) AS onboardings, sum(onboardings_failed) AS onboardings_failed,
+              sum(gateway_errors) AS gateway_errors, sum(gateway_requests) AS gateway_requests, max(queued) AS queued
+         FROM days GROUP BY day ORDER BY day`),
   ]);
 
   const t = totals[0] ?? {}, p = prev[0] ?? {};
@@ -257,6 +277,7 @@ export async function platformAnalytics(q: AnalyticsQuery) {
       change: { active_accounts: change(t.active_accounts, p.active_accounts), active_people: change(t.active_people, p.active_people), calls: change(t.calls, p.calls) },
     },
     daily, new_daily: newDaily.map((r) => ({ day: r.day, n: Number(r.n) })), tools, clients,
+    ops_daily: opsDaily.map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, k === "day" ? v : Number(v ?? 0)]))),
     accounts: accounts.map(({ total: _t, ...a }: any) => ({ ...a, calls: Number(a.calls), prev_calls: Number(a.prev_calls),
       trend: change(a.calls, a.prev_calls), at_risk: Number(a.prev_calls) >= 5 && Number(a.calls) <= Number(a.prev_calls) / 2 })),
     retention: [...cohorts.values()].map((c) => ({ ...c, weeks: Array.from({ length: 8 }, (_, i) => c.weeks[i] ?? null) })),

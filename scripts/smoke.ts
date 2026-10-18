@@ -1673,6 +1673,10 @@ try {
     assert.ok(act.first_at && act.last_at);
     assert.equal((await json(adm("GET", "/compute/activity?minutes=1440"))).bucket_s, 300);
     assert.equal((await json(adm("GET", "/compute/activity"))).minutes, 120);
+    // Health sparklines: 24 hourly points for every Jobs and Sessions card.
+    const tr = await json(adm("GET", "/compute/trends"));
+    for (const k of ["queued", "running", "orchestrators", "unclaimable", "ended", "failed", "spend", "wait_p50", "launches_failed", "jobs", "jobs_failed", "top_failure"])
+      assert.equal(tr.series[k]?.length, 24, `trend ${k} has 24 hours`);
     assert.equal((await adm("GET", "/compute/activity?minutes=7")).status, 400);
 
     // Pruning: ticks past 14 days and compute events past 90 go; newer stay. The cron runs it after its tick.
@@ -2792,6 +2796,7 @@ try {
       assert.equal((await fetch(`${base}/api/admin/onboarding/analytics`)).status, 401);
       const an = await json(adm("GET", "/analytics?days=30"));
       assert.equal(an.days, 30);
+      assert.ok(Array.isArray(an.ops_daily) && an.ops_daily.some((d: any) => d.sessions > 0 || d.sims > 0), "Health figures day by day, for their sparklines");
       assert.ok(an.totals.active_accounts >= 2 && an.totals.calls > 0 && an.totals.p95_ms != null, "totals across accounts");
       assert.ok(an.tools.some((t: any) => t.name === "list_products" && t.accounts >= 2), "tool adoption counts accounts");
       assert.ok(an.daily.length >= 1 && an.retention.length >= 1 && an.retention[0].weeks.length === 8 && an.retention[0].weeks[0] === 100, "retention: week 0 is everyone");
