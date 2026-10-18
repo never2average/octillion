@@ -32,20 +32,12 @@ export function JobsStats({ rows }: { rows: readonly JobRow[] }) {
   const failed = rows.filter((j) => j.failures.count > 0 || j.failed_launches > 0).length;
   const spend = rows.reduce((t, j) => t + j.spend.session_model_usd + j.spend.orchestrator_model_usd, 0);
   return (
-    <>
-      <StatStrip items={[
-        { label: 'Jobs shown', spark: t('jobs'), value: n(rows.length), hint: `${by('finished')} finished · ${by('failed')} failed` },
-        { label: 'Waiting', spark: t('queued'), value: n(by('waiting') + by('queued')), hint: s ? `${s.queue.jobs_waiting} waiting for an orchestrator now` : undefined },
-        { label: 'Running', spark: t('running'), value: n(by('running') + by('booting')), hint: `${by('booting')} booting · ${by('draining')} draining` },
-        { label: 'Orchestrators live', spark: t('orchestrators'), value: n(o ? o.booting + o.running + o.draining : null), hint: o ? `${o.running} running · ${o.booting} booting · ${o.draining} draining` : undefined }
-      ]} />
-      <StatStrip className='border-t-0' items={[
-        { label: 'Pods running / reserved', spark: t('running'), value: s ? `${s.running.pods_used} / ${s.running.pods_reserved}` : '—' },
-        { label: 'Jobs with failures', spark: t('jobs_failed'), value: n(failed), hint: rows.length ? `${pct(failed / rows.length)} of the jobs shown` : undefined },
-        { label: 'Failed launches, 24 h', spark: t('launches_failed'), value: n(s?.failures_24h.launches), hint: 'orchestrators that did not start' },
-        { label: 'Model spend, jobs shown', spark: t('spend'), value: cents(spend), hint: 'metered through the gateway' }
-      ]} />
-    </>
+    <StatStrip items={[
+      { label: 'Waiting', spark: t('queued'), value: n(by('waiting') + by('queued')) },
+      { label: 'Running', spark: t('running'), value: n(by('running') + by('booting')) },
+      { label: 'Jobs with failures', spark: t('jobs_failed'), value: n(failed) },
+      { label: 'Model spend', spark: t('spend'), value: cents(spend) }
+    ]} />
   );
 }
 
@@ -55,19 +47,11 @@ export function SessionsStats() {
   const oldest = ageOf(s?.queue.oldest_session_at);
   const f = s?.failures_24h;
   return (
-    <>
-      <StatStrip items={[
-        { label: 'Queued now', spark: t('queued'), value: n(s?.queue.sessions), hint: oldest != null ? `oldest waiting ${dur(oldest)}` : 'nothing waiting' },
-        { label: 'Running now', spark: t('running'), value: n(s?.running.sessions), hint: s?.running.research ? `and ${s.running.research} research jobs` : undefined },
-        { label: 'Wait to start, p50 (1 h)', spark: t('wait_p50'), value: s?.wait_1h.p50_s != null ? dur(s.wait_1h.p50_s) : '—', hint: s?.wait_1h.p95_s != null ? `p95 ${dur(s.wait_1h.p95_s)} · ${s.wait_1h.n} started` : undefined },
-        { label: 'Unclaimable', spark: t('unclaimable'), value: n(s?.queue.unclaimable), hint: 'queued for an agent no orchestrator runs' }
-      ]} />
-      <StatStrip className='border-t-0' items={[
-        { label: 'Ended, 24 h', spark: t('ended'), value: n(f?.ended) },
-        { label: 'Failed, 24 h', spark: t('failed'), value: n(f?.sessions), hint: f?.ended ? `${pct(f.rate)} of the sessions that ended` : undefined },
-        { label: 'Top failure, 24 h', spark: t('top_failure'), value: f?.top ? n(f.top.count) : '—', hint: f?.top?.label ?? 'no failures' },
-        { label: 'Model spend today', spark: t('spend'), value: s ? cents(s.spend_today.session_model_usd) : '—', hint: 'finished sessions, UTC day' }
-      ]} />
-    </>
+    <StatStrip items={[
+      { label: 'Queued now', spark: t('queued'), value: n(s?.queue.sessions) },
+      { label: 'Running now', spark: t('running'), value: n(s?.running.sessions) },
+      { label: 'Failed, 24 h', spark: t('failed'), value: n(f?.sessions) },
+      { label: 'Wait to start, p50', spark: t('wait_p50'), value: s?.wait_1h.p50_s != null ? dur(s.wait_1h.p50_s) : '—' }
+    ]} />
   );
 }

@@ -454,10 +454,10 @@ function AnalyticsBody({ a, match }: { a: Analytics; match: (r: object) => boole
   return (
     <div className='flex w-full flex-col gap-10 pb-4'>
       <StatStrip items={[
-        { label: 'Active accounts', value: num(a.totals.active_accounts), hint: <><Trend pct={a.totals.change.active_accounts} /> vs previous {a.days} days</>, spark: series.map((d) => d.accounts) },
-        { label: 'Active people', value: num(a.totals.active_people), hint: <><Trend pct={a.totals.change.active_people} /> vs previous {a.days} days</>, spark: series.map((d) => d.people) },
-        { label: 'Tool calls', value: num(a.totals.calls), hint: <><Trend pct={a.totals.change.calls} /> vs previous {a.days} days</>, spark: series.map((d) => d.calls) },
-        { label: 'New accounts', value: num(a.totals.new_accounts), hint: `in the last ${a.days} days`, spark: series.map((d) => d.created) }
+        { label: 'Active accounts', value: num(a.totals.active_accounts), spark: series.map((d) => d.accounts) },
+        { label: 'Active people', value: num(a.totals.active_people), spark: series.map((d) => d.people) },
+        { label: 'Tool calls', value: num(a.totals.calls), spark: series.map((d) => d.calls) },
+        { label: 'New accounts', value: num(a.totals.new_accounts), spark: series.map((d) => d.created) }
       ]} />
 
       <div className='grid gap-8 lg:grid-cols-2 lg:gap-12'>
@@ -637,16 +637,10 @@ function HealthBody({ a, base, match, kind }: { a: Analytics; base: string; matc
     <div className='flex h-full min-h-[32rem] flex-col gap-6'>
       <div className='flex shrink-0 flex-col gap-4'>
         <StatStrip items={[
-          { label: 'Tool error rate', value: `${a.totals.error_pct}%`, hint: `p50 ${ms(a.totals.p50_ms)}`, spark: series.map((d) => d.error_pct) },
+          { label: 'Tool error rate', value: `${a.totals.error_pct}%`, spark: series.map((d) => d.error_pct) },
           { label: 'Tool latency, p95', value: ms(a.totals.p95_ms), spark: series.map((d) => d.p95) },
-          { label: 'Simulations completed', value: `${num(a.ops.sims_completed)} / ${num(a.ops.sims)}`, hint: `${num(a.ops.sims_open)} open now`, spark: opsSpark('sims_completed') },
-          { label: 'Agent sessions failed', value: pct(a.ops.sessions_failed, a.ops.sessions), hint: `${num(a.ops.sessions_failed)} of ${num(a.ops.sessions)}`, spark: opsSpark('sessions_failed_pct') }
-        ]} />
-        <StatStrip className='border-t-0' items={[
-          { label: 'Sessions queued now', value: num(a.ops.sessions_queued), hint: 'line: the most queued each day', spark: opsSpark('queued') },
-          { label: 'Onboarding research failed', value: `${num(a.ops.onboardings_failed)} / ${num(a.ops.onboardings)}`, spark: opsSpark('onboardings_failed') },
-          { label: 'Gateway error rate', value: pct(a.ops.gateway_errors, a.ops.gateway_requests), hint: `${num(a.ops.gateway_errors)} of ${num(a.ops.gateway_requests)} requests`, spark: opsSpark('gateway_error_pct') },
-          { label: 'Model cost', value: usd(a.ops.model_cost_usd), hint: `in the last ${a.days} days`, spark: opsSpark('model_cost_usd') }
+          { label: 'Agent sessions failed', value: pct(a.ops.sessions_failed, a.ops.sessions), spark: opsSpark('sessions_failed_pct') },
+          { label: 'Gateway error rate', value: pct(a.ops.gateway_errors, a.ops.gateway_requests), spark: opsSpark('gateway_error_pct') }
         ]} />
       </div>
       <div className={cn('flex min-h-0 flex-1 flex-col gap-2', isFetching && 'opacity-70')}>
