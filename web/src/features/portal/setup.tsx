@@ -18,6 +18,7 @@ import { Icons } from '@/components/icons';
 import { appApi } from '@/lib/api-client';
 import { cn } from '@/lib/utils';
 import { CopyButton, ErrorState, LoadingCards, When, copy, fail, useOrgLoad } from './shared';
+import { Allowed } from './role';
 
 interface Step { id: string; label: string; done: boolean; at: string | null; help: string; optional?: boolean; prompt?: string | null }
 interface Setup {
@@ -26,6 +27,8 @@ interface Setup {
   errors: { at: string; name: string | null; error: string | null; hint: string | null }[];
   connect: { connector_url: string; secret: boolean; clients: Client[] };
   live: { at: string; client: string | null } | null;
+  /** Set for a viewer: shown where a launch prompt would be. */
+  viewer_note?: string | null;
 }
 interface Client {
   id: string; client: string; group: 'chat' | 'agent' | 'editor'; method: 'ui' | 'cli' | 'config' | 'link'; steps: string;
@@ -53,7 +56,7 @@ export function SetupPage() {
             {selected === 'setup' || !journey ? (<>
               <Timeline s={s} next={next} />
               {s.errors.length > 0 && <Problems errors={s.errors} />}
-            </>) : <JourneyView key={journey.id} j={journey} onChanged={reloadJourneys} />}
+            </>) : <JourneyView key={journey.id} j={journey} onChanged={reloadJourneys} note={s.viewer_note ?? null} />}
             <TipsSection />
           </div>
           {/* Two floating panels at a fixed width, pinned while the main column (which takes the rest) scrolls: the connection string and the journey picker. */}
@@ -263,7 +266,7 @@ function JourneyPicker({ setup, journeys, selected, onSelect }: { setup: { done:
 }
 
 /** A use case as a pipeline: what it gets you, a worked example, and each stage's prompt, tool and expected result. */
-function JourneyView({ j, onChanged }: { j: Journey; onChanged: () => void }) {
+function JourneyView({ j, onChanged, note }: { j: Journey; onChanged: () => void; note: string | null }) {
   const [busy, setBusy] = useState<string | null>(null);
   // Stages with no tool are marked by hand, for the whole account (and counted in journey analytics).
   const toggle = (id: string, done: boolean) => {
@@ -300,9 +303,10 @@ function JourneyView({ j, onChanged }: { j: Journey; onChanged: () => void }) {
                 </div>
                 <p className='text-muted-foreground text-sm'>{x.why}</p>
                 {!ok && (x.manual
-                  ? <div className='flex flex-wrap items-center gap-2'><span className='text-sm'>{x.prompt}</span><Button size='sm' variant='outline' disabled={busy === x.id} onClick={() => toggle(x.id, true)}>Mark done</Button></div>
+                  ? <div className='flex flex-wrap items-center gap-2'><span className='text-sm'>{x.prompt}</span><Allowed need='edit'><Button size='sm' variant='outline' disabled={busy === x.id} onClick={() => toggle(x.id, true)}>Mark done</Button></Allowed></div>
+                  : note && x.tools.some((t) => t === 'run_simulation' || t === 'onboard_product') ? <p className='text-muted-foreground text-sm'>{note}</p>
                   : <CodeLine text={x.prompt} label='Prompt' />)}
-                {x.manual && ok && <Button size='sm' variant='ghost' className='text-muted-foreground' disabled={busy === x.id} onClick={() => toggle(x.id, false)}>Undo</Button>}
+                {x.manual && ok && <Allowed need='edit'><Button size='sm' variant='ghost' className='text-muted-foreground' disabled={busy === x.id} onClick={() => toggle(x.id, false)}>Undo</Button></Allowed>}
                 <p className='text-xs'><span className='font-medium'>You’ll see:</span> <span className='text-muted-foreground'>{x.expect}</span></p>
               </div>
             </li>

@@ -19,6 +19,7 @@ import { cn } from '@/lib/utils';
 import { Dock, KINDS, TYPE_STYLE, type Kind, type MemoryItem, type MemoryScope } from './memory';
 import { Field, RecordView, type RecordCol } from '@/components/layout/record-view';
 import { ErrorState, LoadingCards, When, fail, useOrgLoad } from './shared';
+import { Allowed, useAccountRole } from './role';
 
 interface Ctx { person: unknown | null; products: { slug: string; name: string }[] }
 interface UserRow { user_id: string; email: string | null; name: string | null; active: boolean; me: boolean; memories?: number }
@@ -43,6 +44,7 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
   const [subject, setSubject] = useState<string>('');
   const [items, setItems] = useState<MemoryItem[] | null>(null);
   const [editing, setEditing] = useState<{ item?: MemoryItem } | null>(null);
+  const { can, why } = useAccountRole();
 
   useEffect(() => {
     if (section !== 'users') return;
@@ -95,13 +97,13 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
   );
   const primary = !noSubject && (<>
     <ButtonGroup>
-      <Button onClick={() => setEditing({})}><Icons.add /> Add memory</Button>
+      <Allowed need='edit'><Button onClick={() => setEditing({})}><Icons.add /> Add memory</Button></Allowed>
       <DropdownMenu>
         <DropdownMenuTrigger render={<Button size='icon' aria-label='More memory actions' className='border-primary-foreground/20 border-l' />}>
           <Icons.chevronDown />
         </DropdownMenuTrigger>
         <DropdownMenuContent align='end' className='w-44'>
-          <DropdownMenuItem onClick={() => file.current?.click()}><Icons.upload /> Import CSV or JSON</DropdownMenuItem>
+          <DropdownMenuItem disabled={!can('edit')} title={why('edit')} onClick={() => file.current?.click()}><Icons.upload /> Import CSV or JSON</DropdownMenuItem>
           <DropdownMenuItem disabled={!items?.length} onClick={() => items && exportCsv(items, label, section === 'products')}><Icons.download /> Export CSV</DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
@@ -113,7 +115,7 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
       <RecordView<MemoryItem>
         key={subject}
         rows={items ?? []} rowKey={(m) => String(m.id)} cols={cols} loading={items === null && !noSubject} noun='memories'
-        actions={(m) => m.can_delete ? [
+        actions={(m) => m.can_delete && can('edit') ? [
           { label: 'Edit', icon: <Icons.edit />, onSelect: () => setEditing({ item: m }) },
           { label: 'Remove', icon: <Icons.trash />, destructive: true, onSelect: () => void remove(m) }
         ] : []}

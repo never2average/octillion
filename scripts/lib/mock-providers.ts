@@ -2,7 +2,7 @@
 // CLERK_API_URL / STRIPE_API_URL at it. Never mounted by the server; production always talks to the real services.
 // Not a simulator of either product: only the fields Octillion reads, with the same shapes.
 // Test hooks: POST /_mock/clerk/users {email, first_name?, verified?, platform_admin?, platform_role?}, POST /_mock/invitations/:id/accept
-// {first_name?}, POST /_mock/clerk/memberships {org_id, user_id, role?}, POST /_mock/session {user_id, org_id?, org_role?,
+// {first_name?}, POST /_mock/clerk/memberships {org_id, user_id, role?, public_metadata?}, POST /_mock/session {user_id, org_id?, org_role?,
 // azp?, expired?, v1?} -> a Clerk session token, POST /_mock/oauth {user_id, jwt?, revoked?, expired?} -> an OAuth
 // access token, GET /_mock/public-key -> {pem} for CLERK_JWT_KEY, POST /_mock/subscriptions {customer, price, status?}.
 import express from "express";
@@ -128,7 +128,7 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     for (const x of s.invitations.values())
       if (x.email_address === email && x.organization_id === orgId && x.status === "pending") Object.assign(x, { status: "revoked", updated_at: ms() });
     const inv = { object: "organization_invitation", id: id("orginv"), email_address: email, role: req.body?.role ?? "org:member", status: "pending",
-      organization_id: orgId, created_at: ms(), updated_at: ms(), expires_at: ms() + 30 * 86_400_000 };
+      public_metadata: req.body?.public_metadata ?? {}, organization_id: orgId, created_at: ms(), updated_at: ms(), expires_at: ms() + 30 * 86_400_000 };
     s.invitations.set(inv.id, inv); res.json(inv);
   });
   c.get("/v1/organizations/:id/invitations", (req, res) =>
@@ -221,13 +221,16 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     const inv = s.invitations.get(req.params.id); if (!inv) return void res.status(404).end();
     const user = userByEmail(inv.email_address) ?? newUser(inv.email_address, { first_name: req.body?.first_name ?? null });
     const m = addMembership(inv.organization_id, user.id, inv.role);
+    m.public_metadata = { ...(inv.public_metadata ?? {}) }; // like Clerk: the invitation's metadata moves to the membership
     Object.assign(inv, { status: "accepted", updated_at: ms() });
     res.json({ user, membership: membershipJson(m) });
   });
   app.post("/_mock/clerk/memberships", (req, res) => {
-    const { org_id, user_id, role } = req.body ?? {};
+    const { org_id, user_id, role, public_metadata } = req.body ?? {};
     if (!s.orgs.has(org_id) || !s.users.has(user_id)) return void res.status(404).end();
-    res.json(membershipJson(addMembership(org_id, user_id, role ?? "org:member")));
+    const m = addMembership(org_id, user_id, role ?? "org:member");
+    if (public_metadata) m.public_metadata = public_metadata;
+    res.json(membershipJson(m));
   });
   /** A Clerk session token (v2 claims by default: `o: {id, rol, slg}`; v1: org_id/org_role). */
   app.post("/_mock/session", async (req, res) => {

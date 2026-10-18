@@ -25,15 +25,19 @@ import * as journeys from "./journeys.js";
 import * as limits from "./limits.js";
 import * as clerk from "./clerk.js";
 import { clerkSession } from "./session.js";
+import * as roles from "./account-roles.js";
 
 const publicUrl = () => (process.env.PUBLIC_URL ?? `http://127.0.0.1:${process.env.PORT ?? 3333}`).replace(/\/$/, "");
 
-/** Who is signed in, and for which account: a Clerk user acting in one Clerk organization. */
-export interface Session { org: number; slug: string; user: string | null; email: string | null; role: "admin" | "member"; clerkOrgId: string | null }
+/**
+ * Who is signed in, and for which account: a Clerk user acting in one Clerk organization. `role` is Clerk's (admin or
+ * member); `accountRole` is what they may do (src/account-roles.ts).
+ */
+export interface Session { org: number; slug: string; user: string | null; email: string | null; role: "admin" | "member"; accountRole: roles.AccountRole; clerkOrgId: string | null }
 
 const identified = new Set<string>();
 
-class AppError extends Error { constructor(message: string, public status = 400) { super(message); } }
+class AppError extends Error { constructor(message: string, public status = 400, public info: Record<string, unknown> = {}) { super(message); } }
 
 // ---------- what "set up" and "using it fully" mean ----------
 
@@ -54,8 +58,8 @@ export const TOOL_GROUPS = [
 
 /** Plain-language fixes for errors people hit, matched on the tool's error text. */
 const HINTS: [RegExp, string][] = [
-  [/budget/i, "The account reached its monthly model budget. Results stay available; an admin can change the plan on the Billing tab."],
-  [/no active Octillion plan/i, "The account has no active plan. An admin can choose one on the Billing tab."],
+  [/budget/i, "The account reached its monthly model budget. Results stay available; an owner or billing manager can change the plan on the Billing tab."],
+  [/no active Octillion plan/i, "The account has no active plan. An owner or billing manager can choose one on the Billing tab."],
   [/no (product|products)/i, "Onboard a product first: \"Onboard my product: <name>, <website>, <docs link>.\""],
   [/research failed|403|fetch/i, "Octillion could not read your website or docs. Check that they are public, or paste a short description instead."],
 ];
@@ -111,7 +115,11 @@ async function setup(s: Session, since?: string) {
   const STEP_PROMPTS: Record<string, string> = {
     connected: "Is Octillion connected? Tell me what it can do.", tools: "Which Octillion tools can you use?", dashboard: "Show my Octillion dashboard.",
   };
-  const prompted = steps.map((st) => ({ ...st, prompt: STEP_PROMPTS[st.id] ?? st.help.match(/Type:\s*"(.+?)"/)?.[1] ?? null }));
+  // A viewer can't launch: where the onboarding and simulation prompts would be, a short note instead.
+  const viewer = !roles.canAccount(s.accountRole, "launch");
+  const VIEWER_NOTE = "Viewers read reports and usage; a Member runs this. Ask an account owner if you need to.";
+  const prompted = steps.map((st) => viewer && (st.id === "onboarded" || st.id === "simulated")
+    ? { ...st, help: VIEWER_NOTE, prompt: null } : { ...st, prompt: STEP_PROMPTS[st.id] ?? st.help.match(/Type:\s*"(.+?)"/)?.[1] ?? null });
   const groups = TOOL_GROUPS.map((g) => ({ id: g.id, label: g.label, prompt: g.prompt, used: g.tools.filter((t) => used.has(t)).length, total: g.tools.length }));
   let live = null;
   if (since) {
@@ -125,7 +133,7 @@ async function setup(s: Session, since?: string) {
     clients, calls: Number(m.calls), groups, coverage: groups.filter((g) => g.used > 0).length / groups.length,
     next: groups.find((g) => g.used === 0) ?? null,
     errors: errors.map((e) => ({ ...e, hint: HINTS.find(([re]) => re.test(e.error ?? ""))?.[1] ?? null })),
-    connect: await withUsageShares(admin.connectInfo()), live,
+    connect: await withUsageShares(admin.connectInfo()), live, viewer_note: viewer ? VIEWER_NOTE : null,
   };
 }
 
@@ -225,7 +233,8 @@ async function billingUsage(s: Session) {
   const byPerson = await db.query<{ user_id: string | null; usd: number; runs: number }>(
     `WITH ${sc} SELECT r.created_by AS user_id, sum(sc.usd)::float AS usd, count(DISTINCT r.id)::int AS runs
        FROM sc JOIN simulations r ON r.id = sc.simulation_id GROUP BY 1 ORDER BY 2 DESC LIMIT 8`, [s.org]);
-  const people = s.role === "admin" ? (await admin.team(s.slug)).members : [];
+  const all = roles.canAccount(s.accountRole, "billing");
+  const people = all ? (await admin.team(s.slug)).members : [];
   const now = new Date(), start = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1), end = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1);
   const spent = daily.reduce((a, d) => a + Number(d.usd), 0);
   const elapsed = Math.max(1 / 24, (now.getTime() - start) / 86_400_000), days = (end - start) / 86_400_000;
@@ -237,8 +246,8 @@ async function billingUsage(s: Session) {
     sessions: { finished: m?.finished ?? 0, running: m?.running ?? 0 },
     meter: { enabled: Boolean(process.env.STRIPE_SPEND_METER && billing.stripeEnabled()), event: process.env.STRIPE_SPEND_METER ?? null },
     daily, by_agent: byAgent,
-    // Members see only their own line; admins see everyone, by email.
-    by_person: byPerson.filter((p) => s.role === "admin" || p.user_id === s.user).map((p) => {
+    // Members see only their own line; owners and billing managers see everyone, by email.
+    by_person: byPerson.filter((p) => all || p.user_id === s.user).map((p) => {
       const who = people.find((x) => x.user_id === p.user_id);
       return { ...p, label: p.user_id == null ? "Connector key" : p.user_id === s.user ? "You" : who?.email ?? who?.name ?? "Former member" };
     }),
@@ -268,10 +277,11 @@ export function appRouter() {
     const org = await orgForClerk(m.organization!.id);
     if (!org) return void res.status(403).json({ error: "This organization is not an Octillion account. Octillion is invite-only for now: ask your Octillion contact for an invitation.", code: "no_account" });
     const user = await clerk.users.get(c.userId);
-    const s: Session = { org: org.orgId, slug: org.slug, user: c.userId, email: clerk.primaryEmail(user).email, role: clerk.roleOf(m.role), clerkOrgId: m.organization!.id };
+    const s: Session = { org: org.orgId, slug: org.slug, user: c.userId, email: clerk.primaryEmail(user).email, role: clerk.roleOf(m.role),
+      accountRole: roles.accountRoleOf(m), clerkOrgId: m.organization!.id };
     if (!identified.has(c.userId)) {
       identified.add(c.userId);
-      identifyPerson(c.userId, { email: s.email ?? undefined, name: clerk.displayName(user) ?? undefined, account: org.slug, account_name: org.name, role: s.role });
+      identifyPerson(c.userId, { email: s.email ?? undefined, name: clerk.displayName(user) ?? undefined, account: org.slug, account_name: org.name, role: s.accountRole });
       capture({ distinctId: c.userId, orgSlug: org.slug }, "app_signed_in", { method: "clerk" });
     }
     res.locals.session = s;
@@ -279,7 +289,14 @@ export function appRouter() {
     next();
   });
   const S = (res: Response) => res.locals.session as Session;
-  const adminOnly = (res: Response) => { if (S(res).role !== "admin") throw new AppError("Only an account admin can do this", 403); };
+  /** Refuse unless the person's role has the permission: 403 in plain words, with a code and the role it needs. */
+  const need = (res: Response, p: roles.AccountPermission) => {
+    if (roles.canAccount(S(res).accountRole, p)) return;
+    const r = roles.accountRefusal(p);
+    throw new AppError(r.message, 403, { code: r.code, needs: r.needs });
+  };
+  const can = (res: Response, p: roles.AccountPermission) => roles.canAccount(S(res).accountRole, p);
+  const perms = (res: Response) => roles.accountPermissionsOf(S(res).accountRole);
   const actor = (res: Response) => `customer:${S(res).email ?? S(res).slug}`;
 
   api.get("/me", async (_req, res) => {
@@ -287,7 +304,10 @@ export function appRouter() {
     const f = await admin.accountFacts(s.slug);
     const ms = res.locals.memberships as clerk.ClerkMembership[];
     res.json({ email: s.email, user_id: s.user, role: s.role, org_role: `org:${s.role}`, account: { name: f.name, slug: f.slug, clerk_org_id: s.clerkOrgId },
-               via: "clerk", organizations: ms.map((m) => ({ clerk_org_id: m.organization!.id, name: m.organization!.name, role: clerk.roleOf(m.role), suspended: clerk.isSuspended(m) })),
+               account_role: s.accountRole, role_label: roles.ACCOUNT_ROLE_LABELS[s.accountRole], permissions: perms(res), needs: roles.ACCOUNT_PERMISSIONS,
+               roles: [...roles.ACCOUNT_ROLES].reverse().map((r) => ({ id: r, label: roles.ACCOUNT_ROLE_LABELS[r], help: roles.ACCOUNT_ROLE_HELP[r] })),
+               via: "clerk", organizations: ms.map((m) => ({ clerk_org_id: m.organization!.id, name: m.organization!.name, role: clerk.roleOf(m.role),
+                 account_role: roles.accountRoleOf(m), suspended: clerk.isSuspended(m) })),
                integrations: { clerk: true, stripe: billing.stripeEnabled() } });
   });
   api.get("/setup", async (req, res) => void res.json(await setup(S(res), typeof req.query.since === "string" ? req.query.since : undefined)));
@@ -314,16 +334,19 @@ export function appRouter() {
   });
   // The account's own use cases (Add use case on /app/adoption): anyone adds; whoever added it or an admin removes.
   api.post("/journeys", async (req, res) => {
+    need(res, "edit");
     const id = await playbooks.createUseCase({ orgId: S(res).org, slug: S(res).slug }, actor(res), req.body ?? {}, TOOL_NAMES);
     capture({ distinctId: S(res).user ?? `org:${S(res).slug}`, orgSlug: S(res).slug }, "use_case_added", { journey: id });
     res.status(201).json({ id });
   });
   api.delete("/journeys/:id", async (req, res) => {
-    await playbooks.deleteUseCase(S(res).org, String(req.params.id), actor(res), S(res).role === "admin");
+    need(res, "edit");
+    await playbooks.deleteUseCase(S(res).org, String(req.params.id), actor(res), can(res, "manage"));
     res.status(204).end();
   });
   // Import use cases from a file: up to 100, names the account already has are skipped.
   api.post("/journeys/import", express.json({ limit: "1mb" }), async (req, res) => {
+    need(res, "edit");
     const r = await playbooks.importUseCases({ orgId: S(res).org, slug: S(res).slug }, actor(res), req.body?.items, TOOL_NAMES);
     capture({ distinctId: S(res).user ?? `org:${S(res).slug}`, orgSlug: S(res).slug }, "use_cases_imported", { imported: r.imported, skipped: r.skipped });
     res.json(r);
@@ -362,6 +385,7 @@ export function appRouter() {
   });
   // Help requests: ask the team, pick one up, close it (asker or helper), hand it back (helper) or withdraw it (asker).
   api.post("/adoption/help", async (req, res) => {
+    need(res, "edit");
     const s = S(res);
     if (!s.user) throw new AppError("Sign in as a person to ask for help");
     const id = await playbooks.askForHelp(s.org, String(req.body?.journey_id ?? ""), s.user, req.body?.note);
@@ -371,6 +395,7 @@ export function appRouter() {
   api.post("/adoption/help/:id/:action", async (req, res) => {
     const s = S(res), id = Number(req.params.id), action = String(req.params.action);
     if (!s.user) throw new AppError("Sign in as a person to help");
+    need(res, "edit");
     if (action === "pick") await playbooks.pickUpHelp(s.org, id, s.user);
     else if (action === "done" || action === "release" || action === "cancel") await playbooks.updateHelp(s.org, id, s.user, action);
     else throw new AppError("action must be pick, done, release or cancel", 404);
@@ -383,48 +408,48 @@ export function appRouter() {
   });
   // Stages with no tool (shipping a docs change) are marked by the person; recorded for everyone in the account.
   api.post("/journeys/:id/stages/:stage", async (req, res) => {
+    need(res, "edit");
     await markStage({ orgId: S(res).org, slug: S(res).slug }, S(res).user, String(req.params.id), String(req.params.stage), req.body?.done !== false);
     res.status(204).end();
   });
   api.get("/usage", async (req, res) => void res.json(await usage(S(res), req.query)));
-  api.get("/team", async (_req, res) => void res.json({ ...(await admin.team(S(res).slug, true)), me: S(res).user, can_manage: S(res).role === "admin" }));
+  api.get("/team", async (_req, res) => void res.json({ ...(await admin.team(S(res).slug, true)), me: S(res).user, can_manage: can(res, "team"), permissions: perms(res) }));
   api.post("/team/invitations", async (req, res) => {
-    adminOnly(res);
-    const role = req.body?.role === "admin" ? "admin" : "member";
-    const r = await admin.invite(actor(res), S(res).slug, req.body?.email, role);
+    need(res, "team");
+    const r = await admin.invite(actor(res), S(res).slug, req.body?.email, req.body?.role ?? "member");
     res.status(201).json({ invitation: r.invitation, key: r.key, connector_url: r.connector_url });
   });
-  api.post("/team/invitations/:id/resend", async (req, res) => { adminOnly(res); await admin.resendInvitation(actor(res), S(res).slug, String(req.params.id)); res.status(204).end(); });
-  api.post("/team/invitations/:id/revoke", async (req, res) => { adminOnly(res); await admin.revokeInvitation(actor(res), S(res).slug, String(req.params.id)); res.status(204).end(); });
+  api.post("/team/invitations/:id/resend", async (req, res) => { need(res, "team"); await admin.resendInvitation(actor(res), S(res).slug, String(req.params.id)); res.status(204).end(); });
+  api.post("/team/invitations/:id/revoke", async (req, res) => { need(res, "team"); await admin.revokeInvitation(actor(res), S(res).slug, String(req.params.id)); res.status(204).end(); });
   for (const [verb, on] of [["deactivate", false], ["reactivate", true]] as const)
     api.post(`/team/members/:id/${verb}`, async (req, res) => {
-      adminOnly(res);
+      need(res, "team");
       const t = await admin.team(S(res).slug, true);
       if (t.members.find((m) => m.id === req.params.id)?.user_id === S(res).user) throw new AppError("You cannot remove yourself");
       await admin.setMemberActive(actor(res), S(res).slug, String(req.params.id), on);
       res.status(204).end();
     });
   api.post("/team/members/:id/role", async (req, res) => {
-    adminOnly(res);
-    if (String(req.params.id) === S(res).user) throw new AppError("Ask another admin to change your own role");
+    need(res, "team");
+    if (String(req.params.id) === S(res).user) throw new AppError("Ask another owner to change your own role");
     await admin.setMemberRole(actor(res), S(res).slug, String(req.params.id), req.body?.role);
     res.status(204).end();
   });
-  // Usage limits (src/limits.ts): admins split the budget across teams and people, roll out running, cap throughput.
-  // Everyone sees their own allowance; only admins see and change everyone's.
+  // Usage limits (src/limits.ts): owners and billing managers split the budget across teams and people, roll out
+  // running, cap throughput. Everyone sees their own allowance; only they see and change everyone's.
   api.get("/limits", async (_req, res) => {
     const s = S(res), org = { orgId: s.org, slug: s.slug };
-    if (s.role === "admin") {
+    if (can(res, "budget")) {
       // `version` goes back as If-Match on PUT /limits/plan, so a save can't overwrite someone else's change unseen. It is
       // in the body, not an ETag: spend changes under the same version, and a 304 would show stale figures.
       const [o, last_change] = await Promise.all([limits.page(org), limits.lastChange(org)]);
-      return void res.json({ ...o, last_change, can_manage: true, me: s.user });
+      return void res.json({ ...o, last_change, can_manage: true, me: s.user, permissions: perms(res) });
     }
     // A member: their own row and team, and "Your budget" (what is left, the budget they draw on, the rules in plain words).
-    res.json(await limits.memberPage(org, s.user));
+    res.json({ ...(await limits.memberPage(org, s.user)), permissions: perms(res) });
   });
   // Every change below also appends a plain-sentence entry to the account's history (GET /limits/history).
-  const limitsAdmin = (res: Response) => adminOnly(res);
+  const limitsAdmin = (res: Response) => need(res, "budget");
   const by = (res: Response): limits.Actor => ({ label: actor(res), user: S(res).user });
   api.get("/limits/history", async (req, res) => {
     limitsAdmin(res);
@@ -450,29 +475,30 @@ export function appRouter() {
     res.status(204).end();
   });
 
-  // Context (src/context.ts): the company's (admins edit), the person's own, and product profiles (admins edit).
+  // Context (src/context.ts): the company's (owners edit), the person's own, and product profiles (owners edit).
   // Product reads and writes raise plain errors for user mistakes (an unknown product, a bad field): show them as 400s.
   const q = <T>(p: Promise<T>) => p.catch((e: Error) => { throw new AppError(e.message, /no product|not found|unknown/i.test(e.message) ? 404 : 400); });
-  const orgOf = async (res: Response) => ({ orgId: S(res).org, slug: S(res).slug, name: (await admin.accountFacts(S(res).slug)).name, userId: S(res).user ?? undefined });
+  const orgOf = async (res: Response) => ({ orgId: S(res).org, slug: S(res).slug, name: (await admin.accountFacts(S(res).slug)).name, userId: S(res).user ?? undefined, role: S(res).accountRole });
   api.get("/context", async (_req, res) => {
     const s = S(res), org = await orgOf(res);
     res.json({ company: await context.getCompany(s.org), person: s.user ? await context.getPerson(s.org, s.user) : null,
                products: ((await listProducts(org)) as any).products.map((p: any) => ({ slug: p.slug, name: p.name })), styles: context.ANSWER_STYLES,
-               can_manage: s.role === "admin", preview: await context.contextForAI(org) });
+               can_manage: can(res, "manage"), permissions: perms(res), preview: await context.contextForAI(org) });
   });
-  api.put("/context/company", async (req, res) => { adminOnly(res); res.json(await context.saveCompany(S(res).org, actor(res), req.body ?? {})); });
+  api.put("/context/company", async (req, res) => { need(res, "manage"); res.json(await context.saveCompany(S(res).org, actor(res), req.body ?? {})); });
   api.put("/context/me", async (req, res) => {
+    need(res, "edit");
     res.json(await context.savePerson(S(res).org, S(res).user!, req.body ?? {}));
   });
-  // Memory: anyone on the account adds company and product memory and their own; admins add to anyone's and delete
-  // any item, everyone else deletes what they added.
+  // Memory: anyone who may edit adds company and product memory and their own; owners add to anyone's and delete any
+  // item, everyone else deletes what they added. Viewers only read.
   const memorySubject = async (res: Response, scope: string, subject: unknown) => {
     const s = S(res);
     if (scope !== "user") return String(subject ?? "");
     const id = String(subject || s.user || "");
     if (!id) throw new AppError("Sign in as a person to keep personal memory");
     if (id !== s.user) {
-      adminOnly(res);
+      need(res, "manage");
       if (!(await admin.team(s.slug)).members.some((m) => m.user_id === id)) throw new AppError("Not a member of this account", 404);
     }
     return id;
@@ -480,18 +506,20 @@ export function appRouter() {
   api.get("/context/memories", async (req, res) => {
     const scope = String(req.query.scope ?? "") as context.MemoryScope;
     if (!context.MEMORY_SCOPES.includes(scope)) throw new AppError("scope must be company, user or product");
-    const me = actor(res), admin_ = S(res).role === "admin";
+    const me = actor(res), admin_ = can(res, "manage"), edit = can(res, "edit");
     const memories = await context.listMemories(S(res).org, scope, scope === "product" && !req.query.subject ? "" : await memorySubject(res, scope, req.query.subject));
     // Items saved from chat (save_to_memory) are by "ai:<user id>": shown as the AI client, editable by that person.
     const mineAi = `ai:${S(res).user ?? ""}`;
     res.json({ memories: memories.map((m) => ({ ...m, created_by: m.created_by?.startsWith("ai:") ? "AI client" : m.created_by?.replace(/^customer:/, "") ?? null,
-      can_delete: admin_ || m.created_by === me || (!!S(res).user && m.created_by === mineAi) })), kinds: context.MEMORY_KINDS });
+      can_delete: admin_ || (edit && (m.created_by === me || (!!S(res).user && m.created_by === mineAi))) })), kinds: context.MEMORY_KINDS, permissions: perms(res) });
   });
   api.post("/context/memories", async (req, res) => {
+    need(res, "edit");
     const scope = String(req.body?.scope ?? "");
     res.status(201).json(await context.addMemory(S(res).org, actor(res), req.body ?? {}, await memorySubject(res, scope, req.body?.subject)));
   });
   api.post("/context/memories/import", express.json({ limit: "2mb" }), async (req, res) => {
+    need(res, "edit");
     const scope = String(req.body?.scope ?? "") as context.MemoryScope;
     if (!context.MEMORY_SCOPES.includes(scope)) throw new AppError("scope must be company, user or product");
     res.json(await context.importMemories(S(res).org, actor(res), scope, await memorySubject(res, scope, req.body?.subject), req.body?.items));
@@ -499,50 +527,53 @@ export function appRouter() {
   api.put("/context/memories/:id", async (req, res) => {
     const m = await context.getMemory(S(res).org, Number(req.params.id));
     if (!m) throw new AppError("Not found", 404);
-    if (m.created_by !== actor(res) && !(S(res).user && m.created_by === `ai:${S(res).user}`)) adminOnly(res);
+    need(res, "edit");
+    if (m.created_by !== actor(res) && !(S(res).user && m.created_by === `ai:${S(res).user}`)) need(res, "manage");
     res.json(await context.updateMemory(S(res).org, m.id, req.body ?? {}));
   });
   api.delete("/context/memories/:id", async (req, res) => {
     const m = await context.getMemory(S(res).org, Number(req.params.id));
     if (!m) throw new AppError("Not found", 404);
-    if (m.created_by !== actor(res) && !(S(res).user && m.created_by === `ai:${S(res).user}`)) adminOnly(res);
+    need(res, "edit");
+    if (m.created_by !== actor(res) && !(S(res).user && m.created_by === `ai:${S(res).user}`)) need(res, "manage");
     await context.deleteMemory(S(res).org, m.id);
     res.status(204).end();
   });
-  // Users: admins see and edit everyone's context; members only their own.
+  // Users: owners see and edit everyone's context; everyone else only their own.
   api.get("/context/users", async (_req, res) => {
     const s = S(res);
     const t = await admin.team(s.slug);
-    const members = t.members.filter((m) => s.role === "admin" || m.user_id === s.user)
-      .map((m) => ({ user_id: m.user_id, email: m.email, name: m.name, role: m.role, active: m.status === "active" }));
-    if (s.user && !members.some((m) => m.user_id === s.user)) members.unshift({ user_id: s.user, email: null, name: null, role: s.role === "admin" ? "admin" : "member", active: true });
+    const members = t.members.filter((m) => can(res, "manage") || m.user_id === s.user)
+      .map((m) => ({ user_id: m.user_id, email: m.email, name: m.name, role: m.role, account_role: m.account_role, active: m.status === "active" }));
+    if (s.user && !members.some((m) => m.user_id === s.user)) members.unshift({ user_id: s.user, email: null, name: null, role: s.role, account_role: s.accountRole, active: true });
     const [ctx, counts] = await Promise.all([context.getPeople(s.org, members.map((m) => m.user_id)), context.memoryCounts(s.org, "user")]);
-    res.json({ users: members.map((m) => ({ ...m, me: m.user_id === s.user, context: ctx[m.user_id], memories: counts[m.user_id] ?? 0 })), can_manage: s.role === "admin" });
+    res.json({ users: members.map((m) => ({ ...m, me: m.user_id === s.user, context: ctx[m.user_id], memories: counts[m.user_id] ?? 0 })), can_manage: can(res, "manage"), permissions: perms(res) });
   });
   api.put("/context/users/:userId", async (req, res) => {
     const s = S(res), id = String(req.params.userId);
+    need(res, "edit");
     if (id !== s.user) {
-      adminOnly(res);
+      need(res, "manage");
       if (!(await admin.team(s.slug)).members.some((m) => m.user_id === id)) throw new AppError("Not a member of this account", 404);
     }
     res.json(await context.savePerson(s.org, id, req.body ?? {}));
   });
   api.get("/context/products/:slug", async (req, res) => void res.json(await q(getProduct(await orgOf(res), String(req.params.slug)))));
   api.post("/context/products", async (req, res) => {
-    adminOnly(res);
+    need(res, "manage");
     const name = String(req.body?.name ?? "").trim();
     if (!name) throw new AppError("A product needs a name");
     res.status(201).json(await q(saveProduct(await orgOf(res), { name, description: req.body?.description || undefined, website_url: req.body?.website_url || undefined, docs_url: req.body?.docs_url || undefined })));
   });
   api.put("/context/products/:slug", async (req, res) => {
-    adminOnly(res);
+    need(res, "manage");
     const b = req.body ?? {}, org = await orgOf(res);
     await q(getProduct(org, String(req.params.slug))); // an unknown slug is a 404 here, not a new product
     res.json(await q(saveProduct(org, { product: String(req.params.slug), name: b.name, description: b.description, category: b.category,
       website_url: b.website_url, docs_url: b.docs_url, aliases: b.aliases, packages: b.packages, domains: b.domains, competitors: b.competitors })));
   });
   api.put("/context/products/:slug/scenarios/:id", async (req, res) => {
-    adminOnly(res);
+    need(res, "manage");
     await q(saveScenarios(await orgOf(res), String(req.params.slug), [{ id: Number(req.params.id), active: Boolean(req.body?.active) } as any]));
     res.status(204).end();
   });
@@ -551,14 +582,14 @@ export function appRouter() {
   api.get("/nudges", async (_req, res) => void res.json(await journeys.nudgesForApp(S(res).org, S(res).user)));
   api.post("/nudges/:id/dismiss", async (req, res) => { await journeys.dismiss(S(res).org, S(res).slug, S(res).user, Number(req.params.id)); res.status(204).end(); });
   api.post("/nudges/mute", async (req, res) => { await journeys.setMuted(S(res).org, S(res).slug, S(res).user, req.body?.muted !== false); res.status(204).end(); });
-  api.get("/billing", async (_req, res) => void res.json({ ...(await billingView(S(res))), can_manage: S(res).role === "admin" }));
+  api.get("/billing", async (_req, res) => void res.json({ ...(await billingView(S(res))), can_manage: can(res, "billing"), permissions: perms(res) }));
   api.get("/billing/usage", async (_req, res) => void res.json(await billingUsage(S(res))));
-  api.post("/billing/portal", async (_req, res) => { adminOnly(res); res.json(await admin.portalLink(actor(res), S(res).slug, `${publicUrl()}/app#billing`)); });
-  api.post("/billing/checkout", async (req, res) => { adminOnly(res); res.json(await admin.checkoutLink(actor(res), S(res).slug, req.body?.price_id, `${publicUrl()}/app#billing`, { requireAllowed: true })); });
+  api.post("/billing/portal", async (_req, res) => { need(res, "billing"); res.json(await admin.portalLink(actor(res), S(res).slug, `${publicUrl()}/app#billing`)); });
+  api.post("/billing/checkout", async (req, res) => { need(res, "billing"); res.json(await admin.checkoutLink(actor(res), S(res).slug, req.body?.price_id, `${publicUrl()}/app#billing`, { requireAllowed: true })); });
   api.use((err: Error & { status?: number }, _req: Request, res: Response, next: NextFunction) => {
     if (!(err instanceof AppError || err instanceof PlaybookError || err instanceof context.ContextError || err instanceof limits.LimitError || err instanceof journeys.JourneyError || err instanceof admin.AdminError || err instanceof clerk.ClerkError || err instanceof billing.StripeError)) return next(err);
     // A Budget rules refusal also says which rule (code), the limit and what's left, who set it and the admins to ask.
-    res.status(err.status ?? 400).json({ error: err.message, ...(err instanceof limits.LimitError ? err.info : {}) });
+    res.status(err.status ?? 400).json({ error: err.message, ...(err instanceof limits.LimitError || err instanceof AppError ? err.info : {}) });
   });
   r.use("/api/app", api);
   return r;

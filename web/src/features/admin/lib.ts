@@ -32,6 +32,12 @@ export function useAdminAction<V = void, R = any>(run: (v: V) => Promise<R>, opt
 
 export const post = <R = any>(path: string, body?: unknown) => adminApi<R>('POST', path, body);
 
+/** A customer account's roles (src/account-roles.ts), for the account pages' role pickers. */
+export const ACCOUNT_ROLES = [{ id: 'owner', label: 'Owner' }, { id: 'billing', label: 'Billing manager' }, { id: 'member', label: 'Member' }, { id: 'viewer', label: 'Viewer' }] as const;
+/** A member's or invitation's account role (older servers sent only Clerk's admin / member). */
+export const accountRoleOf = (x: { role?: string | null; account_role?: string | null }) => x.account_role ?? (x.role === 'admin' ? 'owner' : 'member');
+export const accountRoleLabel = (x: { role?: string | null; account_role?: string | null }) => ACCOUNT_ROLES.find((r) => r.id === accountRoleOf(x))?.label ?? 'Member';
+
 export const STAGE_LABELS: Record<string, string> = {
   created: 'Account created',
   invited: 'Invited',

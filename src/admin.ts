@@ -20,6 +20,7 @@ import { clientCatalog } from "./connect-catalog.js";
 import { getDb } from "./db.js";
 import * as clerk from "./clerk.js";
 import { currentAdminRole } from "./admin-roles.js";
+import { accountRoleOf, clerkRoleFor, parseAccountRole, ACCOUNT_ROLE_LABELS, type AccountRole } from "./account-roles.js";
 
 export class AdminError extends Error {
   constructor(message: string, public status = 400) { super(message); }
@@ -105,18 +106,21 @@ const ORG_FACTS = `
 
 // ---------- people, from Clerk ----------
 
-/** A member, keyed by Clerk user id (Clerk's membership endpoints are). Suspended = public_metadata.suspended. */
-export interface Member { id: string; user_id: string; status: "active" | "inactive"; role: "admin" | "member"; created_at: string | null; email: string | null; name: string | null }
-export interface Invite { id: string; email: string; state: clerk.ClerkInvitation["status"]; role: "admin" | "member"; created_at: string | null; expires_at: string | null }
+/**
+ * A member, keyed by Clerk user id (Clerk's membership endpoints are). Suspended = public_metadata.suspended. `role` is
+ * Clerk's (admin or member); `account_role` is the Octillion role (src/account-roles.ts).
+ */
+export interface Member { id: string; user_id: string; status: "active" | "inactive"; role: "admin" | "member"; account_role: AccountRole; created_at: string | null; email: string | null; name: string | null }
+export interface Invite { id: string; email: string; state: clerk.ClerkInvitation["status"]; role: "admin" | "member"; account_role: AccountRole; created_at: string | null; expires_at: string | null }
 interface People { members: Member[]; invitations: Invite[]; error?: string }
 
 const toMember = (m: clerk.ClerkMembership): Member => ({
   id: m.public_user_data?.user_id ?? m.id, user_id: m.public_user_data?.user_id ?? "", status: clerk.isSuspended(m) ? "inactive" : "active",
-  role: clerk.roleOf(m.role), created_at: clerk.iso(m.created_at), email: m.public_user_data?.identifier?.toLowerCase() ?? null,
+  role: clerk.roleOf(m.role), account_role: accountRoleOf(m), created_at: clerk.iso(m.created_at), email: m.public_user_data?.identifier?.toLowerCase() ?? null,
   name: clerk.displayName(m.public_user_data ?? {}),
 });
 const toInvite = (x: clerk.ClerkInvitation): Invite => ({
-  id: x.id, email: x.email_address.toLowerCase(), state: x.status, role: clerk.roleOf(x.role), created_at: clerk.iso(x.created_at), expires_at: clerk.iso(x.expires_at),
+  id: x.id, email: x.email_address.toLowerCase(), state: x.status, role: clerk.roleOf(x.role), account_role: accountRoleOf(x), created_at: clerk.iso(x.created_at), expires_at: clerk.iso(x.expires_at),
 });
 
 const peopleCache = new Map<string, { at: number; people: People }>();
@@ -363,14 +367,15 @@ async function newAccount(actor: string, nameIn: string, slugIn: string | undefi
 }
 
 /** Invite a person: a Clerk invitation (Clerk emails it), or without Clerk a legacy key labelled with their email. */
-async function invitePerson(actor: string, slug: string, email: string, role?: "admin" | "member") {
+async function invitePerson(actor: string, slug: string, email: string, role: AccountRole = "member") {
   const f = await factsBySlug(slug);
   if (clerk.clerkEnabled()) {
     const clerkOrgId = f.clerk_org_id ?? (await linkClerk(actor, slug)).clerk_org_id!;
-    const inv = toInvite(await clerk.invitations.send(clerkOrgId, email, role ?? "member"));
+    const c = clerkRoleFor(role);
+    const inv = toInvite(await clerk.invitations.send(clerkOrgId, email, c.role, c.metadata));
     forget(clerkOrgId);
-    log(actor, "invite.send", slug, { email, invitation: inv.id });
-    return { invitation: { id: inv.id, email: inv.email, state: inv.state, role: inv.role, expires_at: inv.expires_at }, key: undefined as string | undefined };
+    log(actor, "invite.send", slug, { email, invitation: inv.id, role });
+    return { invitation: { id: inv.id, email: inv.email, state: inv.state, role: inv.role, account_role: inv.account_role, expires_at: inv.expires_at }, key: undefined as string | undefined };
   }
   const key = await createApiKey(f.id, email);
   log(actor, "key.create", slug, { label: email, key_prefix: key.slice(0, 10) });
@@ -395,7 +400,7 @@ export async function approveRequest(actor: string, id: number, opts: { name?: s
     slug = made.slug; key = made.key; created = true;
   }
   // Whoever asked for a new account administers it (invites colleagues, manages billing in /app).
-  if (!key) ({ key, invitation } = await invitePerson(actor, slug, r.email, created ? "admin" : undefined));
+  if (!key) ({ key, invitation } = await invitePerson(actor, slug, r.email, created ? "owner" : undefined));
   await (await getDb()).query("UPDATE access_requests SET status = 'approved', org_id = (SELECT id FROM organizations WHERE slug = $2), decided_at = now() WHERE id = $1", [id, slug]);
   log(actor, "request.approve", slug, { request_id: id, email: r.email, new_org: created });
   return result(slug, r.email, { key, invitation, created });
@@ -421,14 +426,15 @@ export async function createAccount(actor: string, input: { name?: string; slug?
   const email = input.email ? cleanEmail(input.email) : null;
   const made = await newAccount(actor, String(input.name ?? ""), input.slug, email);
   let key = made.key, invitation: unknown = null;
-  if (email && !key) ({ key, invitation } = await invitePerson(actor, made.slug, email, "admin"));
+  if (email && !key) ({ key, invitation } = await invitePerson(actor, made.slug, email, "owner"));
   return result(made.slug, email, { key, invitation, created: true });
 }
 
 export async function invite(actor: string, slug: string, emailIn: unknown, role?: unknown) {
   const email = cleanEmail(emailIn);
-  if (role !== undefined && role !== "admin" && role !== "member") throw new AdminError("role must be admin or member");
-  const { key, invitation } = await invitePerson(actor, slug, email, role as "admin" | "member" | undefined);
+  const r = role === undefined ? "member" : parseAccountRole(role);
+  if (!r) throw new AdminError(ROLE_CHOICES);
+  const { key, invitation } = await invitePerson(actor, slug, email, r);
   return result(slug, email, { key, invitation });
 }
 
@@ -439,7 +445,7 @@ export async function resendInvitation(actor: string, slug: string, invitationId
   if (!inv) throw new AdminError("No such invitation in this account", 404);
   if (inv.state === "accepted") throw new AdminError("Already accepted", 409);
   if (inv.state === "pending") await clerk.invitations.revoke(f.clerk_org_id!, inv.id);
-  return invite(actor, slug, inv.email, inv.role);
+  return invite(actor, slug, inv.email, inv.account_role);
 }
 
 export async function revokeInvitation(actor: string, slug: string, invitationId: string) {
@@ -459,22 +465,39 @@ export async function revokeInvitation(actor: string, slug: string, invitationId
  */
 export async function setMemberActive(actor: string, slug: string, memberId: string, active: boolean) {
   const f = await factsBySlug(slug);
-  const m = (await peopleOf(f.clerk_org_id, true))?.members.find((x) => x.id === memberId);
+  const people = await peopleOf(f.clerk_org_id, true);
+  const m = people?.members.find((x) => x.id === memberId);
   if (!m) throw new AdminError("No such member in this account", 404);
+  if (!active) lastOwnerGuard(people!.members, m, "suspend");
   await clerk.memberships.setSuspended(f.clerk_org_id!, m.user_id, !active);
   forget(f.clerk_org_id);
   log(actor, active ? "member.reactivate" : "member.deactivate", slug, { user: m.user_id, email: m.email });
 }
 
-/** Change a member's role in the Clerk organization (admin or member). */
+const ROLE_CHOICES = "role must be owner, billing, member or viewer";
+/** An account always keeps one active owner: the last one can't be demoted or suspended. */
+function lastOwnerGuard(members: Member[], m: Member, what: "demote" | "suspend") {
+  if (m.account_role !== "owner" || m.status !== "active") return;
+  if (members.some((x) => x.id !== m.id && x.account_role === "owner" && x.status === "active")) return;
+  throw new AdminError(`${m.email ?? "This person"} is the account's last owner. Make someone else an owner before you ${what === "demote" ? "change their role" : "suspend them"}.`, 409);
+}
+
+/**
+ * Change a member's account role (owner, billing, member, viewer; admin means owner). Owner is Clerk's org:admin and
+ * the rest org:member, with the role in the membership's public_metadata.octillion_role.
+ */
 export async function setMemberRole(actor: string, slug: string, memberId: string, roleIn: unknown) {
-  if (roleIn !== "admin" && roleIn !== "member") throw new AdminError("role must be admin or member");
+  const role = parseAccountRole(roleIn);
+  if (!role) throw new AdminError(ROLE_CHOICES);
   const f = await factsBySlug(slug);
-  const m = (await peopleOf(f.clerk_org_id, true))?.members.find((x) => x.id === memberId);
+  const people = await peopleOf(f.clerk_org_id, true);
+  const m = people?.members.find((x) => x.id === memberId);
   if (!m) throw new AdminError("No such member in this account", 404);
-  await clerk.memberships.setRole(f.clerk_org_id!, m.user_id, roleIn);
+  if (role !== "owner") lastOwnerGuard(people!.members, m, "demote");
+  const c = clerkRoleFor(role);
+  await clerk.memberships.setRole(f.clerk_org_id!, m.user_id, c.role, c.metadata);
   forget(f.clerk_org_id);
-  log(actor, "member.role", slug, { user: m.user_id, role: roleIn });
+  log(actor, "member.role", slug, { user: m.user_id, role, label: ACCOUNT_ROLE_LABELS[role] });
 }
 
 /** Give a legacy account (API keys only) a Clerk organization so people can be invited and sign in. */

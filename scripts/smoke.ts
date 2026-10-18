@@ -2050,7 +2050,7 @@ try {
     assert.equal((await adm("POST", `/orgs/${slugW}/members/${acc2.user.id}/role`, { role: "admin" })).status, 204);
     assert.equal(mock.state.memberships.get(`${rowW.clerk_org_id}:${acc2.user.id}`).role, "org:admin", "role changes reach Clerk");
     assert.equal((await adm("POST", `/orgs/${slugW}/members/${acc2.user.id}/role`, { role: "member" })).status, 204);
-    assert.equal((await adm("POST", `/orgs/${slugW}/members/${acc2.user.id}/role`, { role: "owner" })).status, 400);
+    assert.equal((await adm("POST", `/orgs/${slugW}/members/${acc2.user.id}/role`, { role: "boss" })).status, 400);
 
     // The customer portal with Clerk sessions: the owner (admin) and the second person (member).
     const ownerC = await clerkSession(accepted.user.id, rowW.clerk_org_id, "admin");
@@ -2119,6 +2119,125 @@ try {
     assert.equal((await gone.json()).code, "suspended");
     assert.equal((await appCall(ownerC, "POST", `/team/members/${acc2.user.id}/reactivate`)).status, 204);
     console.log("✓ customer portal with Clerk sessions: bearer or __session cookie, v1/v2 claims, azp, fallback org, roles from Clerk, setup, team, suspension");
+
+    // ---------- customer account roles (src/account-roles.ts): owner, billing manager, member, viewer, in Clerk ----------
+    {
+      const { accountRoleOf } = await import("../src/account-roles.js");
+      assert.equal(accountRoleOf({ role: "org:admin", public_metadata: { octillion_role: "viewer" } }), "owner", "Clerk's org:admin is always owner");
+      assert.equal(accountRoleOf({ role: "org:member", public_metadata: { octillion_role: "owner" } }), "member", "org:member is never owner");
+      assert.equal(accountRoleOf({ role: "org:member", public_metadata: null }), "member");
+      const memOf = (uid: string) => mock.state.memberships.get(`${rowW.clerk_org_id}:${uid}`);
+      const join = async (who: string, role: string) => {
+        const r = await json(appCall(ownerC, "POST", "/team/invitations", { email: `${who}+${stamp}@acme-smoke.dev`, role }));
+        assert.equal(mock.state.invitations.get(r.invitation.id).public_metadata.octillion_role, role, "the invitation carries the role");
+        assert.equal(r.invitation.account_role, role);
+        const a = await mockPost(`/_mock/invitations/${r.invitation.id}/accept`);
+        return { id: a.user.id as string, sess: await clerkSession(a.user.id, rowW.clerk_org_id) };
+      };
+      const bill = await join("bill", "billing"), view = await join("view", "viewer");
+      assert.equal(memOf(bill.id).role, "org:member", "a billing manager is org:member in Clerk");
+      assert.equal((await appCall(ownerC, "POST", "/team/invitations", { email: `x+${stamp}@acme-smoke.dev`, role: "god" })).status, 400);
+      const meB = await json(appCall(bill.sess, "GET", "/me"));
+      assert.equal(meB.account_role, "billing");
+      assert.equal(meB.role_label, "Billing manager");
+      assert.deepEqual(meB.permissions, ["read", "launch", "edit", "billing", "budget"]);
+      assert.equal(meB.roles.length, 4, "the four roles with a line each, for the Team page");
+      assert.deepEqual((await json(appCall(view.sess, "GET", "/me"))).permissions, ["read"]);
+      assert.equal((await json(appCall(ownerC, "GET", "/me"))).account_role, "owner", "org:admin with no metadata is owner");
+      const team = await json(appCall(ownerC, "GET", "/team"));
+      assert.equal(team.members.find((m: any) => m.user_id === view.id).account_role, "viewer");
+      assert.ok(team.can_manage && team.permissions.includes("team"));
+      // Each role's allowed (not 403) and refused (403 with the code and the role it needs) actions on /app.
+      const cases: [string, string, unknown, Record<string, string | null>][] = [
+        // [method, path, body, role -> refusal code (null = allowed)]
+        ["GET", "/usage", undefined, { viewer: null, member: null, billing: null, owner: null }],
+        ["GET", "/adoption", undefined, { viewer: null, member: null, billing: null, owner: null }],
+        ["GET", "/context", undefined, { viewer: null, member: null, billing: null, owner: null }],
+        ["PUT", "/context/me", { role: "dev" }, { viewer: "viewer_role", member: null, billing: null, owner: null }],
+        ["POST", "/context/memories", { scope: "company", kind: "fact", body: `Roles smoke ${stamp}` }, { viewer: "viewer_role", member: null, billing: null, owner: null }],
+        ["POST", "/journeys", {}, { viewer: "viewer_role", member: null, billing: null, owner: null }],
+        ["PUT", "/context/company", {}, { viewer: "forbidden", member: "forbidden", billing: "forbidden", owner: null }],
+        ["POST", "/context/products", {}, { viewer: "forbidden", member: "forbidden", billing: "forbidden", owner: null }],
+        ["POST", "/billing/portal", undefined, { viewer: "forbidden", member: "forbidden", billing: null, owner: null }],
+        ["POST", "/limits/preview", {}, { viewer: "forbidden", member: "forbidden", billing: null, owner: null }],
+        ["GET", "/limits/history", undefined, { viewer: "forbidden", member: "forbidden", billing: null, owner: null }],
+        ["POST", "/team/invitations", { email: "not-an-email" }, { viewer: "forbidden", member: "forbidden", billing: "forbidden", owner: null }],
+        ["POST", `/team/members/${acc2.user.id}/role`, { role: "nope" }, { viewer: "forbidden", member: "forbidden", billing: "forbidden", owner: null }],
+      ];
+      const sess: Record<string, string> = { viewer: view.sess, member: devC, billing: bill.sess, owner: ownerC };
+      const NEEDS: Record<string, string> = { "/context/me": "member", "/context/memories": "member", "/journeys": "member", "/context/company": "owner", "/context/products": "owner",
+        "/billing/portal": "billing", "/limits/preview": "billing", "/limits/history": "billing", "/team/invitations": "owner" };
+      for (const [method, path, body, by] of cases)
+        for (const [role, code] of Object.entries(by)) {
+          const r = await appCall(sess[role], method, path, body);
+          if (code == null) { assert.notEqual(r.status, 403, `${role} may ${method} ${path} (${r.status})`); continue; }
+          assert.equal(r.status, 403, `${role} may not ${method} ${path}`);
+          const j = await r.json();
+          assert.equal(j.code, code, `${role} ${method} ${path}: ${JSON.stringify(j)}`);
+          if (NEEDS[path]) assert.equal(j.needs, NEEDS[path]);
+          assert.match(j.error, code === "viewer_role" ? /^Viewers can read/ : /^This needs the (Owner|Billing manager) role\. Ask an account owner/);
+        }
+      assert.equal((await json(appCall(bill.sess, "GET", "/billing"))).can_manage, true, "a billing manager manages billing");
+      assert.equal((await json(appCall(bill.sess, "GET", "/limits"))).can_manage, true, "and Budget rules");
+      assert.equal((await json(appCall(bill.sess, "GET", "/team"))).can_manage, false, "but not the team");
+      assert.equal((await json(appCall(view.sess, "GET", "/context"))).can_manage, false);
+      assert.ok((await json(appCall(ownerC, "GET", "/limits"))).admins.some((a: any) => a.name.startsWith(`bill+${stamp}`)), "billing managers are among the people to ask");
+      // Setup: where the launch prompts would be, a viewer gets a note.
+      const setupV = await json(appCall(view.sess, "GET", "/setup"));
+      assert.match(setupV.viewer_note, /Viewers read reports/);
+      assert.equal(setupV.steps.find((x: any) => x.id === "simulated").prompt, null);
+      assert.equal((await json(appCall(devC, "GET", "/setup"))).viewer_note, null);
+      // The connector: a viewer reads but can't launch or write; checkRun refuses them with code viewer_role.
+      const tool = async (uid: string, name: string, args: Record<string, unknown> = {}) => {
+        const c = new Client({ name: "smoke-roles", version: "1.0.0" });
+        await c.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${await token({ user_id: uid })}` } } }));
+        try { return await c.callTool({ name, arguments: args }); } finally { await c.close(); }
+      };
+      const text = (r: any) => String(r.content?.[0]?.text ?? "");
+      assert.ok(!(await tool(view.id, "list_products")).isError, "a viewer reads through the connector");
+      for (const [name, args] of [["run_simulation", {}], ["onboard_product", { prompt: "A queue library for Node developers who need jobs.", website_url: "https://x.dev" }],
+        ["save_to_memory", { scope: "company", body: "x" }], ["save_product", { name: "Nope" }]] as const) {
+        const r = await tool(view.id, name, args as Record<string, unknown>);
+        assert.ok(r.isError && /^Viewers can/.test(text(r)), `a viewer can't ${name}: ${text(r)}`);
+      }
+      const memoryM = await tool(acc2.user.id, "save_to_memory", { scope: "company", kind: "fact", body: `Member memory ${stamp}` });
+      assert.ok(!memoryM.isError, `a member still writes through the connector: ${text(memoryM)}`);
+      const { checkRun: checkRunV, LimitError: LE } = await import("../src/limits.js");
+      const orgV = { orgId: rowW.id, slug: slugW, name: `Acme Smoke ${stamp}`, userId: view.id };
+      for (const o of [orgV, { ...orgV, role: "viewer" as const }]) {
+        const e = await checkRunV(o).then(() => null, (x) => x);
+        assert.ok(e instanceof LE && e.info.code === "viewer_role" && e.status === 403, `checkRun refuses a viewer: ${e}`);
+      }
+      // Role changes round-trip through Clerk: owner = org:admin, the rest org:member with the role in the metadata.
+      const setRole = (uid: string, role: string, by = ownerC) => appCall(by, "POST", `/team/members/${uid}/role`, { role });
+      assert.equal((await setRole(view.id, "billing")).status, 204);
+      assert.deepEqual([memOf(view.id).role, memOf(view.id).public_metadata.octillion_role], ["org:member", "billing"]);
+      assert.equal((await json(appCall(view.sess, "GET", "/me"))).account_role, "billing", "the change applies at once");
+      assert.equal((await setRole(view.id, "owner")).status, 204);
+      assert.deepEqual([memOf(view.id).role, memOf(view.id).public_metadata.octillion_role], ["org:admin", "owner"], "owner is Clerk's admin");
+      assert.equal((await json(appCall(view.sess, "GET", "/me"))).role, "admin");
+      assert.equal((await setRole(view.id, "viewer")).status, 204);
+      assert.deepEqual([memOf(view.id).role, memOf(view.id).public_metadata.octillion_role], ["org:member", "viewer"]);
+      assert.equal(memOf(view.id).public_metadata.suspended, undefined, "the role change leaves other metadata alone");
+      assert.ok((await tool(view.id, "run_simulation", {})).isError, "the connector sees the new role at once");
+      // Last owner: the account's only owner can't be demoted or suspended (from /admin either); with a second owner they can.
+      const demote = await adm("POST", `/orgs/${slugW}/members/${accepted.user.id}/role`, { role: "member" });
+      assert.equal(demote.status, 409, "the last owner can't be demoted");
+      assert.match((await demote.json()).error, /last owner/);
+      assert.equal((await adm("POST", `/orgs/${slugW}/members/${accepted.user.id}/deactivate`)).status, 409, "nor suspended");
+      assert.equal((await setRole(bill.id, "owner")).status, 204);
+      assert.equal((await setRole(accepted.user.id, "billing", bill.sess)).status, 204, "with a second owner, they can be");
+      assert.equal((await json(appCall(ownerC, "GET", "/team"))).can_manage, false, "and lose the team");
+      assert.equal((await setRole(accepted.user.id, "owner", bill.sess)).status, 204);
+      // The extra people leave and their memory goes, so the tests below see the account as it was.
+      for (const m of (await json(appCall(ownerC, "GET", "/context/memories?scope=company"))).memories)
+        if (m.body.includes(stamp)) assert.equal((await appCall(ownerC, "DELETE", `/context/memories/${m.id}`)).status, 204);
+      for (const uid of [bill.id, view.id]) {
+        if (uid === bill.id) assert.equal((await setRole(uid, "member")).status, 204);
+        assert.equal((await appCall(ownerC, "POST", `/team/members/${uid}/deactivate`)).status, 204);
+      }
+      console.log("✓ customer account roles: each role's allowed and refused actions over /app and MCP, checkRun viewer_role, role round-trips through Clerk, last-owner guard");
+    }
 
     // ---------- platform admins: Clerk session + allowlist (address, domain, verified email) or public_metadata ----------
     {

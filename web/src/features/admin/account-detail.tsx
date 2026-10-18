@@ -12,7 +12,7 @@ import { Icons } from '@/components/icons';
 import { money, usd } from '@/lib/octillion-format';
 import { cn } from '@/lib/utils';
 import { adminApi } from '@/lib/api-client';
-import { post, STAGE_LABELS, useAdmin, useAdminAction, type InviteResult, type OrgList } from './lib';
+import { ACCOUNT_ROLES, accountRoleLabel, accountRoleOf, post, STAGE_LABELS, useAdmin, useAdminAction, type InviteResult, type OrgList } from './lib';
 import { Gate } from './role';
 import { useResult } from './result-dialog';
 import { StatStrip } from '@/components/layout/section';
@@ -223,13 +223,12 @@ function People({ d, path, onResult }: { d: Detail; path: string; onResult: (r: 
               render: (m: any) => (
                 <Gate need='accounts'><NativeSelect
                   size='sm'
-                  value={m.role || 'member'}
+                  value={accountRoleOf(m)}
                   disabled={setMemberRole.isPending}
                   onChange={(e) => setMemberRole.mutate({ id: m.id, role: e.target.value })}
                   aria-label={`Role for ${m.email || m.user_id}`}
                 >
-                  <NativeSelectOption value='member'>Member</NativeSelectOption>
-                  <NativeSelectOption value='admin'>Admin</NativeSelectOption>
+                  {ACCOUNT_ROLES.map((r) => <NativeSelectOption key={r.id} value={r.id}>{r.label}</NativeSelectOption>)}
                 </NativeSelect></Gate>
               )
             },
@@ -263,8 +262,7 @@ function People({ d, path, onResult }: { d: Detail; path: string; onResult: (r: 
         <form onSubmit={submitInvite} className='mt-4 flex flex-wrap gap-2'>
           <Input type='email' required placeholder='colleague@company.com' className='w-full sm:w-72' value={email} onChange={(e) => setEmail(e.target.value)} aria-label='Email to invite' />
           <NativeSelect value={role} onChange={(e) => setRole(e.target.value)} aria-label='Role'>
-            <NativeSelectOption value='member'>Member</NativeSelectOption>
-            <NativeSelectOption value='admin'>Admin</NativeSelectOption>
+            {ACCOUNT_ROLES.map((r) => <NativeSelectOption key={r.id} value={r.id}>{r.label}</NativeSelectOption>)}
           </NativeSelect>
           <Gate need='invite'><Button type='submit' disabled={invite.isPending}>
             <Icons.send className='size-3.5' /> Invite
@@ -278,7 +276,7 @@ function People({ d, path, onResult }: { d: Detail; path: string; onResult: (r: 
             empty=''
             cols={[
               { label: 'Email', render: (x: any) => x.email },
-              { label: 'Role', render: (x: any) => x.role || 'member' },
+              { label: 'Role', render: (x: any) => accountRoleLabel(x) },
               { label: 'State', render: (x: any) => <StatusBadge tone={inviteTone(x.state)}>{x.state}</StatusBadge> },
               { label: 'Sent', render: (x: any) => <When d={x.created_at} /> },
               { label: 'Expires', render: (x: any) => (x.state === 'pending' && x.expires_at ? <When d={x.expires_at} /> : <span className='text-muted-foreground'>—</span>) },

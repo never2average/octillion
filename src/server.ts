@@ -1,4 +1,5 @@
 import * as priv from "./private.js";
+import { accountRefusal, canAccount, type AccountPermission } from "./account-roles.js";
 import { readFileSync } from "node:fs";
 import { chatLine, nudgeForChat } from "./journeys.js";
 import { span } from "./telemetry.js";
@@ -266,9 +267,21 @@ export function runTool(org: Org, name: ToolName, args: Record<string, unknown>)
   });
 }
 
+/**
+ * Tools that launch or change something, and the account permission each needs (src/account-roles.ts): a viewer's
+ * connector reads reports, sessions and memory but these refuse. Launches also go through checkRun / checkLaunchRole.
+ */
+export const TOOL_NEEDS: Partial<Record<ToolName, AccountPermission>> = {
+  onboard_product: "launch", run_simulation: "launch",
+  save_product: "edit", save_scenarios: "edit", cancel_simulation: "edit", save_personas: "edit", import_tasks: "edit", register_harness: "edit",
+  save_harness_mix: "edit", review_draft_tasks: "edit", save_to_memory: "edit",
+};
+
 async function runToolInner(org: Org, name: ToolName, args: Record<string, unknown>): Promise<CallToolResult> {
   const t0 = performance.now();
   try {
+    const needs = TOOL_NEEDS[name];
+    if (needs && org.role && !canAccount(org.role, needs)) throw new Error(accountRefusal(needs).message);
     const data = await (handlersFor(org)[name] as (a: unknown) => Promise<Data>)(args ?? {});
     recordMcpEvent(org, { method: "tools/call", name, ms: performance.now() - t0 });
     const structured = fitPayload(JSON.parse(JSON.stringify(data))); // Dates -> ISO strings

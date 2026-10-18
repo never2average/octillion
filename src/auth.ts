@@ -1,6 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { getDb } from "./db.js";
 import { clerkEnabled, isSuspended, memberships, onMembershipChange, organizations, verifyOAuthToken } from "./clerk.js";
+import { accountRoleOf, type AccountRole } from "./account-roles.js";
 
 /** The tenant a request acts for. Every query in queries.ts is scoped by orgId. */
 export interface Org {
@@ -9,6 +10,8 @@ export interface Org {
   name: string;
   /** The Clerk user, when the request came with a Clerk token (absent for legacy API keys). */
   userId?: string;
+  /** Their account role (src/account-roles.ts), from the Clerk membership; absent for legacy API keys (no limits). */
+  role?: AccountRole;
 }
 
 const KEY_PREFIX = "oct_";
@@ -91,7 +94,7 @@ export async function resolveUserToken(token: string): Promise<Org | null> {
     .sort((a, b) => a.created_at - b.created_at);
   if (!ms.length) return null;
   const found = await orgForClerk(ms[0].organization!.id);
-  const org = found ? { ...found, userId: claims.userId } : null;
+  const org = found ? { ...found, userId: claims.userId, role: accountRoleOf(ms[0]) } : null;
   if (org) tokenOrgs.set(claims.userId, { org, at: Date.now() });
   return org;
 }

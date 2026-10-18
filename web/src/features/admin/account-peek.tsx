@@ -20,7 +20,7 @@ import { money, usd } from '@/lib/octillion-format';
 import { TablePager, usePaged } from '@/components/layout/table-pager';
 import { cn } from '@/lib/utils';
 import { Dock } from '@/features/portal/memory';
-import { post, STAGE_LABELS, useAdmin, type InviteResult, type OrgRow } from './lib';
+import { ACCOUNT_ROLES, accountRoleLabel, accountRoleOf, post, STAGE_LABELS, useAdmin, type InviteResult, type OrgRow } from './lib';
 import { copyText, ErrorBox, Mono, When, type Tone } from './ui';
 import { Gate, useAdminRole, type AdminPermission } from './role';
 
@@ -166,8 +166,7 @@ function AccountDialog({ kind, orgs, run, show, close }: { kind: Kind; orgs: Org
       body: (<div className='grid gap-3 sm:grid-cols-[1fr_8rem]'>
         <Input type='email' required autoFocus placeholder='colleague@company.com' aria-label='Email' value={a} onChange={(e) => setA(e.target.value)} />
         <NativeSelect aria-label='Role' value={role} onChange={(e) => setRole(e.target.value)} className='w-full'>
-          <NativeSelectOption value='member'>Member</NativeSelectOption>
-          <NativeSelectOption value='admin'>Admin</NativeSelectOption>
+          {ACCOUNT_ROLES.map((r) => <NativeSelectOption key={r.id} value={r.id}>{r.label}</NativeSelectOption>)}
         </NativeSelect>
       </div>),
       act: async () => { const r = await run(() => post<InviteResult>(`${p}/invitations`, { email: a.trim(), role })); if (r) { close(); show(r, `Invited to ${r.org.name}`); } }
@@ -387,7 +386,7 @@ export function AccountPeek({ org, ctl }: { org: Org; ctl: AccountCtl }) {
     const who = m.email || m.user_id;
     const act = (a: string, ok: string, body?: unknown) => () => void ctl.run(() => post(`${path}/members/${encodeURIComponent(m.id)}/${a}`, body), ok);
     return ([
-      m.role === 'admin' ? { label: 'Make member', onSelect: act('role', 'Role changed', { role: 'member' }) } : { label: 'Make admin', onSelect: act('role', 'Role changed', { role: 'admin' }) },
+      ...ACCOUNT_ROLES.filter((r) => r.id !== accountRoleOf(m)).map((r) => ({ label: `Make ${r.label.toLowerCase()}`, onSelect: act('role', 'Role changed', { role: r.id }) })),
       ...(m.status === 'active' ? [{ label: 'Suspend…', destructive: true, separator: true, onSelect: () => confirm.ask({ title: `Suspend ${who}?`, description: 'They can no longer use Octillion in this account until you restore access; tokens already issued expire within minutes.', label: 'Suspend', destructive: true, run: act('deactivate', 'Suspended') }) }] : []),
       ...(m.status === 'inactive' ? [{ label: 'Restore', separator: true, onSelect: act('reactivate', 'Restored') }] : [])
     ] as RowAction[]).map((a) => ctl.lock(a, 'accounts'));
@@ -485,13 +484,13 @@ export function AccountPeek({ org, ctl }: { org: Org; ctl: AccountCtl }) {
             {org.clerk_org_id && (<>
               <List title='Members' rows={d.members} empty='Nobody has joined yet.' actions={member} cols={[
                 ['Person', (m) => <>{m.email || m.user_id}{m.name && <span className='text-muted-foreground ml-2'>{m.name}</span>}</>],
-                ['Role', (m) => m.role || 'member'],
+                ['Role', (m) => accountRoleLabel(m)],
                 ['Status', (m) => (m.status === 'inactive' ? word('bad', 'suspended') : word(m.status === 'active' || m.status === 'pending' ? 'ok' : 'info', m.status))],
                 ['Joined', (m) => <When d={m.created_at} />]
               ]} />
               <List title='Invitations' rows={d.invitations} actions={invitation} cols={[
                 ['Email', (x) => x.email],
-                ['Role', (x) => x.role || 'member'],
+                ['Role', (x) => accountRoleLabel(x)],
                 ['State', (x) => word(x.state === 'expired' ? 'warn' : x.state === 'pending' ? 'ok' : 'info', x.state)],
                 ['Expires', (x) => (x.state === 'pending' && x.expires_at ? <When d={x.expires_at} /> : dash)]
               ]} />

@@ -24,8 +24,11 @@ import { downloadCsv, downloadJson, parseCsv, today } from '@/lib/csv';
 import { cn } from '@/lib/utils';
 import { Dock } from './memory';
 import { CopyButton, ErrorState, When, copy, fail, useOrgLoad } from './shared';
+import { Allowed, useAccountRole } from './role';
 
-interface Setup { clients: { client: string; last: string }[]; groups: { id: string; label: string; prompt: string; used: number; total: number }[] }
+interface Setup { clients: { client: string; last: string }[]; groups: { id: string; label: string; prompt: string; used: number; total: number }[]; viewer_note?: string | null }
+/** Tool groups and stages that launch work: a viewer gets the note instead of their prompt. */
+const LAUNCH_GROUPS = ['onboard', 'run'], LAUNCH_TOOLS = ['run_simulation', 'onboard_product'];
 interface Stage { id: string; title: string; why: string; prompt: string; tools: string[]; expect: string; manual?: boolean; done: boolean; at: string | null }
 interface Journey { id: string; name: string; outcome: string; who: string; time: string; stages: Stage[]; done: number; total: number; own?: boolean; added_by?: string | null }
 interface Person { user_id: string; label: string; email: string | null; done: number; total: number; calls: number; errors: number; last_error: string | null; stuck: string | null; at: string | null; finished: boolean }
@@ -56,6 +59,8 @@ export function AdoptionPage() {
   const router = useRouter();
   const me = ad?.me ?? null;
   const file = useRef<HTMLInputElement>(null);
+  const { can, why, lock } = useAccountRole();
+  const note = s?.viewer_note ?? null;
 
   const removeUseCase = (j: Journey) => {
     if (!window.confirm(`Remove ${j.name}?`)) return;
@@ -130,17 +135,19 @@ export function AdoptionPage() {
   // Actions on a use-case row, by who you are to it: the stuck person asks; teammates pick up, offer or email.
   const useCaseActions = (r: Extract<Row, { type: 'use case' }>): RowAction[] => {
     const h = r.help, mine = !!r.who && r.who.user_id === me, a: RowAction[] = [];
-    if (h && h.status === 'open' && !mine) a.push({ label: `Pick up and help ${h.requester_label}`, icon: <Icons.check />, onSelect: () => pickUp(h, r.j, r.who) });
+    // Help requests and removing a use case need 'edit'; emails and opening Setup stay open to everyone.
+    const w = (...xs: RowAction[]) => a.push(...xs.map((x) => lock(x, 'edit')));
+    if (h && h.status === 'open' && !mine) w({ label: `Pick up and help ${h.requester_label}`, icon: <Icons.check />, onSelect: () => pickUp(h, r.j, r.who) });
     if (h && h.status === 'picked' && h.helper === me) {
       const link = helpLink(h, r.j, r.who);
       if (link) a.push({ label: `Email ${h.requester_label}`, icon: <Icons.send />, onSelect: () => { window.location.href = link; } });
-      a.push({ label: 'Mark helped', icon: <Icons.check />, onSelect: () => helpAct(h, 'done', 'Marked helped') },
+      w({ label: 'Mark helped', icon: <Icons.check />, onSelect: () => helpAct(h, 'done', 'Marked helped') },
         { label: 'Hand it back', icon: <Icons.arrowRight />, onSelect: () => helpAct(h, 'release', 'Handed back to the team') });
     }
-    if (mine && !r.who!.finished && !h) a.push({ label: 'Ask the team for help', icon: <Icons.help />, onSelect: () => setAsking(r.j) });
+    if (mine && !r.who!.finished && !h) w({ label: 'Ask the team for help', icon: <Icons.help />, onSelect: () => setAsking(r.j) });
     if (mine && h) {
-      if (h.status === 'picked') a.push({ label: 'Mark helped', icon: <Icons.check />, onSelect: () => helpAct(h, 'done', 'Marked helped') });
-      a.push({ label: 'Withdraw help request', icon: <Icons.close />, onSelect: () => helpAct(h, 'cancel', 'Help request withdrawn') });
+      if (h.status === 'picked') w({ label: 'Mark helped', icon: <Icons.check />, onSelect: () => helpAct(h, 'done', 'Marked helped') });
+      w({ label: 'Withdraw help request', icon: <Icons.close />, onSelect: () => helpAct(h, 'cancel', 'Help request withdrawn') });
     }
     const offer = offerLink(r, me);
     if (offer && !h) a.push({ label: `Offer help to ${r.who!.label}`, icon: <Icons.send />, onSelect: () => { window.location.href = offer; } });
@@ -148,17 +155,17 @@ export function AdoptionPage() {
     if (ask && !h) a.push({ label: `Email ${r.uc!.helper_label} for help`, icon: <Icons.send />, onSelect: () => { window.location.href = ask; } });
     a.push({ label: r.who ? 'Open in Setup & training' : 'Start in Setup & training', icon: <Icons.arrowRight />, separator: a.length > 0,
       onSelect: () => router.push(`/app?journey=${encodeURIComponent(r.j.id)}`) });
-    if (r.j.own) a.push({ label: 'Remove use case', icon: <Icons.trash />, destructive: true, separator: true, onSelect: () => removeUseCase(r.j) });
+    if (r.j.own) w({ label: 'Remove use case', icon: <Icons.trash />, destructive: true, separator: true, onSelect: () => removeUseCase(r.j) });
     return a;
   };
 
   const primary = (<>
     <ButtonGroup>
-      <Button onClick={() => setAdding(true)}><Icons.add /> Add use case</Button>
+      <Allowed need='edit'><Button onClick={() => setAdding(true)}><Icons.add /> Add use case</Button></Allowed>
       <DropdownMenu>
         <DropdownMenuTrigger render={<Button size='icon' aria-label='Import or export use cases' className='border-primary-foreground/20 border-l' />}><Icons.chevronDown /></DropdownMenuTrigger>
         <DropdownMenuContent align='end' className='w-52'>
-          <DropdownMenuItem onClick={() => file.current?.click()}><Icons.upload /> Import JSON or CSV</DropdownMenuItem>
+          <DropdownMenuItem disabled={!can('edit')} title={why('edit')} onClick={() => file.current?.click()}><Icons.upload /> Import JSON or CSV</DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem disabled={!jr?.journeys.length} onClick={exportJson}><Icons.download /> Export JSON</DropdownMenuItem>
           <DropdownMenuItem disabled={!jr?.journeys.length} onClick={exportCsv}><Icons.download /> Export CSV</DropdownMenuItem>
@@ -183,14 +190,14 @@ export function AdoptionPage() {
         primary={primary}
         empty={narrowed ? 'Nobody you picked worked on a use case in this period.' : 'Nothing to show yet.'}
         detailTitle={(r) => r.name}
-        actions={(r) => r.type === 'use case' ? useCaseActions(r) : r.type === 'workflow' ? [{ label: 'Copy prompt', icon: <Icons.page />, onSelect: () => copy(r.g.prompt) }]
+        actions={(r) => r.type === 'use case' ? useCaseActions(r) : r.type === 'workflow' ? (note && LAUNCH_GROUPS.includes(r.g.id) ? [] : [{ label: 'Copy prompt', icon: <Icons.page />, onSelect: () => copy(r.g.prompt) }])
           : [{ label: 'Remove from my clients', icon: <Icons.trash />, destructive: true, onSelect: () => void appApi('DELETE', `/clients/${encodeURIComponent(r.name)}`).then(() => { toast.success(`${r.name} removed`); reloadSetup(); }, fail) }]}
         detail={(r) => r.type === 'use case' ? (
           <div className='flex flex-col gap-6'>
             <HelpPanel r={r} me={me} onPick={(h) => pickUp(h, r.j, r.who)} onAct={helpAct} onAsk={() => setAsking(r.j)} />
-            <UseCase j={r.j} onChanged={reload} />
+            <UseCase j={r.j} onChanged={reload} note={note} />
           </div>
-        ) : r.type === 'workflow' ? <Workflow g={r.g} /> : <Client name={r.name} at={r.at} />}
+        ) : r.type === 'workflow' ? <Workflow g={r.g} note={note && LAUNCH_GROUPS.includes(r.g.id) ? note : null} /> : <Client name={r.name} at={r.at} />}
       />
       {adding && <UseCaseEditor onClose={() => setAdding(false)} onSaved={() => { setAdding(false); reload(); }} />}
       {asking && <AskDialog j={asking} stuck={ad?.use_cases.find((u) => u.id === asking.id)?.people.find((p) => p.user_id === me)?.stuck ?? null}
@@ -276,7 +283,7 @@ function HelpCell({ r, me, onPick }: { r: Row; me: string | null; onPick: (h: He
     return (
       <span className='flex items-center gap-2 text-xs leading-none'>
         <span className='text-amber-600 dark:text-amber-400'>Help wanted</span>
-        <Button size='xs' onClick={(e) => { e.stopPropagation(); onPick(h); }}>Pick up</Button>
+        <Allowed need='edit'><Button size='xs' onClick={(e) => { e.stopPropagation(); onPick(h); }}>Pick up</Button></Allowed>
       </span>
     );
   }
@@ -295,7 +302,7 @@ function HelpPanel({ r, me, onPick, onAct, onAsk }: {
     if (mine && !r.who!.finished) return (
       <div className='flex items-center justify-between gap-3 border-b pb-4 text-sm leading-none'>
         <span className='text-muted-foreground'>Stuck{r.who!.stuck ? ` at "${r.who!.stuck}"` : ''}? Ask the team.</span>
-        <Button size='sm' variant='outline' onClick={onAsk}><Icons.help /> Ask for help</Button>
+        <Allowed need='edit'><Button size='sm' variant='outline' onClick={onAsk}><Icons.help /> Ask for help</Button></Allowed>
       </div>
     );
     const offer = offerLink(r, me);
@@ -318,10 +325,10 @@ function HelpPanel({ r, me, onPick, onAct, onAsk }: {
           <span className='text-muted-foreground'> · <When d={h.status === 'picked' && h.picked_at ? h.picked_at : h.created_at} /></span>
         </span>
         <span className='flex shrink-0 items-center gap-1.5'>
-          {h.status === 'open' && !mine && <Button size='sm' onClick={() => onPick(h)}><Icons.check /> Pick up and help</Button>}
+          {h.status === 'open' && !mine && <Allowed need='edit'><Button size='sm' onClick={() => onPick(h)}><Icons.check /> Pick up and help</Button></Allowed>}
           {h.status === 'picked' && h.helper === me && link && <Button size='sm' variant='outline' render={<a href={link} />}><Icons.send /> Email</Button>}
-          {h.status === 'picked' && (h.helper === me || mine) && <Button size='sm' variant='outline' onClick={() => onAct(h, 'done', 'Marked helped')}>Mark helped</Button>}
-          {h.status === 'open' && mine && <Button size='sm' variant='ghost' onClick={() => onAct(h, 'cancel', 'Help request withdrawn')}>Withdraw</Button>}
+          {h.status === 'picked' && (h.helper === me || mine) && <Allowed need='edit'><Button size='sm' variant='outline' onClick={() => onAct(h, 'done', 'Marked helped')}>Mark helped</Button></Allowed>}
+          {h.status === 'open' && mine && <Allowed need='edit'><Button size='sm' variant='ghost' onClick={() => onAct(h, 'cancel', 'Help request withdrawn')}>Withdraw</Button></Allowed>}
         </span>
       </div>
       {h.note && <p className='text-muted-foreground border-l-2 pl-3 text-sm leading-relaxed whitespace-pre-wrap'>{h.note}</p>}
@@ -365,7 +372,7 @@ function Progress({ done, total, check }: { done: number; total: number; check?:
   );
 }
 
-function UseCase({ j, onChanged }: { j: Journey; onChanged: () => void }) {
+function UseCase({ j, onChanged, note }: { j: Journey; onChanged: () => void; note: string | null }) {
   const [busy, setBusy] = useState<string | null>(null);
   const mark = (st: Stage) => {
     setBusy(st.id);
@@ -390,14 +397,15 @@ function UseCase({ j, onChanged }: { j: Journey; onChanged: () => void }) {
             <div className='min-w-0 flex-1 space-y-1.5'>
               <p className='text-sm font-medium'>{st.title}</p>
               {st.why && <p className='text-muted-foreground text-xs'>{st.why}</p>}
-              <div className='flex items-center gap-2'>
-                <code className='bg-muted min-w-0 flex-1 truncate rounded px-2 py-1 text-xs' title={st.prompt}>{st.prompt}</code>
-                <CopyButton text={st.prompt} />
-              </div>
+              {note && st.tools.some((t) => LAUNCH_TOOLS.includes(t)) ? <p className='text-muted-foreground text-xs'>{note}</p> : (
+                <div className='flex items-center gap-2'>
+                  <code className='bg-muted min-w-0 flex-1 truncate rounded px-2 py-1 text-xs' title={st.prompt}>{st.prompt}</code>
+                  <CopyButton text={st.prompt} />
+                </div>)}
               <p className='text-muted-foreground text-xs'>
                 {st.manual ? 'Marked by hand.' : `Done when your AI client runs ${st.tools.join(' or ')}.`}{st.done && st.at && <> Done <When d={st.at} />.</>}
               </p>
-              {st.manual && <Button size='sm' variant={st.done ? 'outline' : 'default'} disabled={busy === st.id} onClick={() => mark(st)}>{st.done ? 'Mark not done' : 'Mark done'}</Button>}
+              {st.manual && <Allowed need='edit'><Button size='sm' variant={st.done ? 'outline' : 'default'} disabled={busy === st.id} onClick={() => mark(st)}>{st.done ? 'Mark not done' : 'Mark done'}</Button></Allowed>}
             </div>
           </li>
         ))}
@@ -406,7 +414,7 @@ function UseCase({ j, onChanged }: { j: Journey; onChanged: () => void }) {
   );
 }
 
-function Workflow({ g }: { g: Setup['groups'][number] }) {
+function Workflow({ g, note }: { g: Setup['groups'][number]; note: string | null }) {
   return (
     <div className='flex flex-col gap-5'>
       <dl>
@@ -415,11 +423,13 @@ function Workflow({ g }: { g: Setup['groups'][number] }) {
       </dl>
       <div className='space-y-2'>
         <p className='text-sm font-medium'>{g.used ? 'Do it again' : 'Try it'}</p>
-        <div className='flex items-center gap-2'>
-          <code className='bg-muted min-w-0 flex-1 rounded px-2 py-1.5 text-xs whitespace-pre-wrap'>{g.prompt}</code>
-          <CopyButton text={g.prompt} />
-        </div>
-        <p className='text-muted-foreground text-xs'>Paste it into your AI client with Octillion connected.</p>
+        {note ? <p className='text-muted-foreground text-sm'>{note}</p> : (<>
+          <div className='flex items-center gap-2'>
+            <code className='bg-muted min-w-0 flex-1 rounded px-2 py-1.5 text-xs whitespace-pre-wrap'>{g.prompt}</code>
+            <CopyButton text={g.prompt} />
+          </div>
+          <p className='text-muted-foreground text-xs'>Paste it into your AI client with Octillion connected.</p>
+        </>)}
       </div>
     </div>
   );

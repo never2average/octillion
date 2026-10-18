@@ -25,6 +25,8 @@ import { ApiError, appApi } from '@/lib/api-client';
 import { money, num, usd } from '@/lib/octillion-format';
 import { cn } from '@/lib/utils';
 import { ErrorState, LoadingCards, When, fail, useOrgLoad } from './shared';
+import { ACCOUNT_ROLE_LABEL, Allowed, useAccountRole, type AccountRole, type AccountRoleInfo } from './role';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 
 interface Sub { status: string; plan: string | null; renews_at: string | null; cancel_at_period_end: boolean; trial_end: string | null }
 interface Plan { price_id: string; name: string; amount: number | null; currency: string; interval: string | null; monthly_budget_usd: number | null }
@@ -35,8 +37,8 @@ interface Usage {
   sessions: { finished: number; running: number }; meter: { enabled: boolean };
   daily: { day: string; usd: number; sessions: number }[];
 }
-interface Member { id: string; user_id: string; status: string; role: string; created_at: string; email: string | null; name: string | null }
-interface Invite { id: string; email: string; state: string; role?: string; created_at: string }
+interface Member { id: string; user_id: string; status: string; role: string; account_role?: AccountRole; created_at: string; email: string | null; name: string | null }
+interface Invite { id: string; email: string; state: string; role?: string; account_role?: AccountRole; created_at: string }
 interface Team { clerk: boolean; error: string | null; members: Member[]; invitations: Invite[]; me: string | null; can_manage: boolean }
 type Mode = 'pool' | 'even' | 'custom';
 interface Policy { mode: Mode; reserve_usd: number; default_cap_usd: number | null; new_members_can_run: boolean; max_concurrent_runs: number | null; max_sessions_per_run: number | null; max_run_usd: number | null }
@@ -259,8 +261,10 @@ function People({ t, l, reload, openUser, onOpened, filter = 'all', setFilter }:
   const [inviting, setInviting] = useState(false);
   const [editing, setEditing] = useState<{ m: Member; lim: LimitMember } | null>(null);
   const [suspend, setSuspend] = useState<Member | null>(null);
+  const { lock, roles } = useAccountRole();
   if (!t) return <LoadingCards count={1} />;
-  const manage = t.can_manage, mode = l?.policy.mode ?? 'pool';
+  // The team (invite, roles, suspension) is the owners'; Edit limits is Budget rules (owners and billing managers).
+  const manage = t.can_manage, budget = !!l?.can_manage, mode = l?.policy.mode ?? 'pool';
   // "Edit on People →" from Budget rules opens that person's Edit limits; closing it clears the request.
   const asked = openUser ? { m: t.members.find((x) => x.user_id === openUser), lim: l?.members.find((x) => x.user_id === openUser) } : null;
   const dialog = editing ?? (asked?.m && asked.lim ? { m: asked.m, lim: asked.lim } : null);
@@ -271,23 +275,24 @@ function People({ t, l, reload, openUser, onOpened, filter = 'all', setFilter }:
   ];
   // "Own settings only" (?filter=exceptions, or See all on Budget rules): the people who don't follow the defaults.
   const own = (r: PersonRow) => r.kind === 'member' && !!r.lim && !!l && exceptionWords(r.lim, l.policy).length > 0;
-  const exceptions = manage && l?.can_manage ? all.filter(own).length : 0;
-  const filtered = filter === 'exceptions' && manage && l?.can_manage;
+  const exceptions = budget ? all.filter(own).length : 0;
+  const filtered = filter === 'exceptions' && budget;
   const rows = filtered ? all.filter(own) : all;
   const teamName = (id: number | null | undefined) => (id == null ? null : l?.teams.find((x) => x.id === id)?.name ?? null);
   const actions = (r: PersonRow): RowAction[] => {
-    if (!manage) return [];
+    if (!manage && !budget) return [];
     if (r.kind === 'invite') return [
-      { label: 'Resend invitation', icon: <Icons.send />, onSelect: () => act(appApi('POST', `/team/invitations/${encodeURIComponent(r.x.id)}/resend`), `Invitation resent to ${r.x.email}`) },
-      ...(r.x.state === 'pending' ? [{ label: 'Cancel invitation', icon: <Icons.close />, destructive: true, onSelect: () => act(appApi('POST', `/team/invitations/${encodeURIComponent(r.x.id)}/revoke`), 'Invitation cancelled') }] : [])
+      lock({ label: 'Resend invitation', icon: <Icons.send />, onSelect: () => act(appApi('POST', `/team/invitations/${encodeURIComponent(r.x.id)}/resend`), `Invitation resent to ${r.x.email}`) }, 'team'),
+      ...(r.x.state === 'pending' ? [lock({ label: 'Cancel invitation', icon: <Icons.close />, destructive: true, onSelect: () => act(appApi('POST', `/team/invitations/${encodeURIComponent(r.x.id)}/revoke`), 'Invitation cancelled') }, 'team')] : [])
     ];
-    const { m, lim } = r, self = m.user_id === t.me, active = m.status === 'active';
+    const { m, lim } = r, self = m.user_id === t.me, active = m.status === 'active', now = roleOf(m);
     return [
-      ...(lim ? [{ label: 'Edit limits', icon: <Icons.gauge />, onSelect: () => setEditing({ m, lim }) }] : []),
+      ...(lim ? [lock({ label: 'Edit limits', icon: <Icons.gauge />, onSelect: () => setEditing({ m, lim }) }, 'budget')] : []),
       ...(self ? [] : [
-        { label: m.role === 'admin' ? 'Make member' : 'Make admin', icon: <Icons.teams />, onSelect: () => act(appApi('POST', `/team/members/${encodeURIComponent(m.id)}/role`, { role: m.role === 'admin' ? 'member' : 'admin' }), `${m.email} is now ${m.role === 'admin' ? 'a member' : 'an admin'}`) },
-        active ? { label: 'Suspend access', icon: <Icons.close />, destructive: true, separator: true, onSelect: () => setSuspend(m) }
-          : { label: 'Restore access', icon: <Icons.check />, separator: true, onSelect: () => act(appApi('POST', `/team/members/${encodeURIComponent(m.id)}/reactivate`), `Access restored for ${m.email}`) }
+        ...roles.filter((x) => x.id !== now).map((x, i) => lock({ label: `Make ${x.label.toLowerCase()}`, icon: <Icons.teams />, separator: i === 0 && !!lim,
+          onSelect: () => act(appApi('POST', `/team/members/${encodeURIComponent(m.id)}/role`, { role: x.id }), `${m.email} is now ${/^[aeiou]/i.test(x.label) ? 'an' : 'a'} ${x.label.toLowerCase()}`) }, 'team')),
+        lock(active ? { label: 'Suspend access', icon: <Icons.close />, destructive: true, separator: true, onSelect: () => setSuspend(m) }
+          : { label: 'Restore access', icon: <Icons.check />, separator: true, onSelect: () => act(appApi('POST', `/team/members/${encodeURIComponent(m.id)}/reactivate`), `Access restored for ${m.email}`) }, 'team')
       ])
     ];
   };
@@ -299,8 +304,8 @@ function People({ t, l, reload, openUser, onOpened, filter = 'all', setFilter }:
         {r.m.user_id === t.me && <span className='text-muted-foreground ml-2 text-xs'>you</span>}
         {r.m.name && <span className='text-muted-foreground ml-2 text-xs'>{r.m.email}</span>}
       </>) },
-    { key: 'role', label: 'Role', className: 'w-24', type: 'select', value: (r) => ((r.kind === 'invite' ? r.x.role : r.m.role) === 'admin' ? 'Admin' : 'Member'),
-      render: (r) => { const admin = (r.kind === 'invite' ? r.x.role : r.m.role) === 'admin'; return <span className={admin ? '' : 'text-muted-foreground'}>{admin ? 'Admin' : 'Member'}</span>; } },
+    { key: 'role', label: 'Role', className: 'w-36', type: 'select', value: (r) => ACCOUNT_ROLE_LABEL[roleOf(r.kind === 'invite' ? r.x : r.m)],
+      render: (r) => { const x = roleOf(r.kind === 'invite' ? r.x : r.m); return <span className={x === 'owner' ? '' : 'text-muted-foreground'} title={roles.find((y) => y.id === x)?.help}>{ACCOUNT_ROLE_LABEL[x]}</span>; } },
     { key: 'status', label: 'Status', className: 'w-36', type: 'select', value: statusOf,
       render: (r) => <Badge variant={statusOf(r) === 'Active' ? 'secondary' : statusOf(r) === 'Invited' ? 'outline' : 'destructive'}>{statusOf(r)}</Badge> },
     { key: 'team', label: 'Team', className: 'w-36', type: 'select', value: (r) => (r.kind === 'member' ? teamName(r.lim?.team_id) ?? 'No team' : 'No team'),
@@ -337,16 +342,16 @@ function People({ t, l, reload, openUser, onOpened, filter = 'all', setFilter }:
       <RecordView compact id='billing-people' rows={rows} rowKey={(r) => r.key} cols={cols} noun='people'
         searchText={(r) => (r.kind === 'invite' ? r.x.email : `${r.m.name ?? ''} ${r.m.email ?? ''} ${teamName(r.lim?.team_id) ?? ''}`)}
         searchPlaceholder='Search people by name, email or team'
-        filters={manage && l?.can_manage ? (
+        filters={budget ? (
           <Button variant={filtered ? 'secondary' : 'outline'} size='sm' aria-pressed={!!filtered} onClick={() => setFilter?.(filtered ? 'all' : 'exceptions')}
             title='People with their own limit, adjustment, launch access or runs at once'>
             Own settings only<span className='text-muted-foreground ml-1 tabular-nums'>{exceptions}</span>
           </Button>) : undefined}
         views={[{ id: 'all', label: 'Everyone' }, { id: 'active', label: 'Active', match: (r) => statusOf(r) === 'Active' }, { id: 'invited', label: 'Invited', match: (r) => r.kind === 'invite' },
           { id: 'suspended', label: 'Suspended', match: (r) => statusOf(r) === 'Suspended' }]}
-        primary={manage ? <Button onClick={() => setInviting(true)}><Icons.add /> Invite</Button> : undefined}
-        actions={manage ? actions : undefined} exportName='people' empty={filtered ? 'Nobody has their own settings.' : 'Nobody here yet.'} />
-      {inviting && <InviteDialog onClose={() => setInviting(false)} onSent={reload} />}
+        primary={<span className='flex items-center gap-1'><RolesHelp roles={roles} /><Allowed need='team'><Button onClick={() => setInviting(true)}><Icons.add /> Invite</Button></Allowed></span>}
+        actions={manage || budget ? actions : undefined} exportName='people' empty={filtered ? 'Nobody has their own settings.' : 'Nobody here yet.'} />
+      {inviting && <InviteDialog roles={roles} onClose={() => setInviting(false)} onSent={reload} />}
       {dialog && l && <LimitsDialog m={dialog.m} lim={dialog.lim} l={l} mode={mode} onClose={() => { setEditing(null); onOpened?.(); }} onSaved={reload} />}
       <Dialog open={!!suspend} onOpenChange={(o) => !o && setSuspend(null)}>
         <DialogContent>
@@ -374,7 +379,26 @@ function Allowance({ spent, cap }: { spent: number; cap: number }) {
   );
 }
 
-function InviteDialog({ onClose, onSent }: { onClose: () => void; onSent: () => void }) {
+/** A person's or invitation's account role (older servers sent only Clerk's admin / member). */
+const roleOf = (x: { role?: string; account_role?: AccountRole }): AccountRole => x.account_role ?? (x.role === 'admin' ? 'owner' : 'member');
+
+/** What each role can do, one line each, next to Invite. */
+function RolesHelp({ roles }: { roles: AccountRoleInfo[] }) {
+  if (!roles.length) return null;
+  return (
+    <Popover>
+      <PopoverTrigger render={<Button variant='ghost' size='sm' className='text-muted-foreground' />}>Roles</PopoverTrigger>
+      <PopoverContent align='end' className='w-80'><RoleLines roles={roles} /></PopoverContent>
+    </Popover>
+  );
+}
+const RoleLines = ({ roles, on }: { roles: AccountRoleInfo[]; on?: string }) => (
+  <dl className='grid gap-2 text-sm'>
+    {roles.map((r) => <div key={r.id} className={cn(on && on !== r.id && 'text-muted-foreground')}><dt className='font-medium'>{r.label}</dt><dd className='text-muted-foreground text-xs'>{r.help}</dd></div>)}
+  </dl>
+);
+
+function InviteDialog({ roles, onClose, onSent }: { roles: AccountRoleInfo[]; onClose: () => void; onSent: () => void }) {
   const [email, setEmail] = useState(''), [role, setRole] = useState('member'), [busy, setBusy] = useState(false);
   const send = (e: React.FormEvent) => {
     e.preventDefault(); setBusy(true);
@@ -385,13 +409,14 @@ function InviteDialog({ onClose, onSent }: { onClose: () => void; onSent: () => 
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className='sm:max-w-md'>
         <form onSubmit={send} className='grid gap-4'>
-          <DialogHeader><DialogTitle>Invite someone</DialogTitle><DialogDescription>They get an email and join this account when they accept. Admins also manage people, limits and billing.</DialogDescription></DialogHeader>
+          <DialogHeader><DialogTitle>Invite someone</DialogTitle><DialogDescription>They get an email and join this account with the role you pick when they accept.</DialogDescription></DialogHeader>
           <div className='flex gap-2'>
             <Input autoFocus type='email' required placeholder='name@company.com' value={email} onChange={(e) => setEmail(e.target.value)} aria-label='Email' />
-            <NativeSelect value={role} onChange={(e) => setRole(e.target.value)} aria-label='Role' className='w-32'>
-              <NativeSelectOption value='member'>Member</NativeSelectOption><NativeSelectOption value='admin'>Admin</NativeSelectOption>
+            <NativeSelect value={role} onChange={(e) => setRole(e.target.value)} aria-label='Role' className='w-40'>
+              {(roles.length ? roles : [{ id: 'member', label: 'Member', help: '' }]).map((r) => <NativeSelectOption key={r.id} value={r.id}>{r.label}</NativeSelectOption>)}
             </NativeSelect>
           </div>
+          <RoleLines roles={roles} on={role} />
           <DialogFooter><Button type='button' variant='outline' onClick={onClose}>Cancel</Button><Button type='submit' disabled={busy || !email.trim()}>Send invitation</Button></DialogFooter>
         </form>
       </DialogContent>

@@ -2,6 +2,7 @@ import { urlKey, webSearchEnabled } from "./websearch.js";
 import { registryLinks } from "./registry-meta.js";
 import { isIP } from "node:net";
 import { getDb } from "./db.js";
+import { checkLaunchRole } from "./limits.js";
 import { companyHintForResearch } from "./context.js";
 import { completeProspect, prospectIssues } from "./prospect.js";
 import { capture, orgEvent } from "./telemetry.js";
@@ -160,6 +161,7 @@ export async function onboardProduct(org: Org, input: OnboardInput) {
   for (const k of ["website_url", "docs_url"] as const)
     if (input[k] !== undefined && !httpUrl(input[k])) throw new Error(`${k} must be a public http(s) URL with a host name (not an IP address)`);
   if (!input.website_url && !input.docs_url) throw new Error("Give at least a website_url or a docs_url so the orchestrator can research the product.");
+  await checkLaunchRole(org); // viewers read; they don't onboard
   // Research runs on Octillion's models: only accounts with a prepaid plan or an allowance may start it.
   if ((await orgBudget(org.orgId).catch(() => ({ budget: 0 }))).budget <= 0) throw new Error(NO_PLAN(org.name));
   // A registry page (PyPI, npm, crates.io) rarely holds the docs: add the package's own links from its metadata.

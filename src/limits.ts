@@ -19,9 +19,10 @@ import type { Org } from "./auth.js";
 import { orgBudget } from "./billing.js";
 import { getDb, type Queryable } from "./db.js";
 import { settingNumber } from "./settings.js";
+import { accountRefusal, canAccount, type AccountRole } from "./account-roles.js";
 
 /** Why a launch was refused, for /app to show beside the message; validation errors carry no code. */
-export type LimitCode = "no_allowance" | "account_cap" | "budget_error" | "launch_access" | "person_limit" | "team_budget" | "rest_pot" | "buffer" |
+export type LimitCode = "viewer_role" | "no_allowance" | "account_cap" | "budget_error" | "launch_access" | "person_limit" | "team_budget" | "rest_pot" | "buffer" |
   "runs_at_once" | "run_sessions";
 export interface LimitInfo { code?: LimitCode; limit_usd?: number | null; left_usd?: number | null; set_by?: "you" | "team" | "account"; admins?: { name: string }[] }
 
@@ -232,8 +233,9 @@ function shape({ policy, teams, rows }: Saved, { people, usage, account_spent, b
   const a = allocate({ policy, teams, usage, cap: budget, account_spent_usd: account_spent,
     members: active.map((m) => ({ user_id: m.user_id, ...rows.get(m.user_id) })) });
   const byId = new Map(a.members.map((x) => [x.user_id, x]));
-  const members = active.map((m) => ({ email: m.email, name: m.name, role: m.role, ...byId.get(m.user_id)! }));
-  const admins = members.filter((m) => m.role === "admin").map((m) => ({ name: m.name || m.email || "an admin" }));
+  const members = active.map((m) => ({ email: m.email, name: m.name, role: m.role, account_role: m.account_role, ...byId.get(m.user_id)! }));
+  // Who to ask: the people who may change Budget rules (owners and billing managers, src/account-roles.ts).
+  const admins = members.filter((m) => canAccount(m.account_role, "budget")).map((m) => ({ name: m.name || m.email || "an admin" }));
   return { policy, budget_usd: budget, budget_error, plan: subscription?.plan ?? null, clerk: people.clerk, admins,
     account: a.account, buffer_usd: a.buffer_usd, set_aside_usd: a.set_aside_usd, over_by_usd: a.over_by_usd, rest: a.rest,
     teams: a.teams, members };
@@ -471,9 +473,21 @@ export function runsAtOnceError(running: number, maxRuns: number, setBy: "you" |
     { code: "runs_at_once", set_by: setBy ?? undefined, admins, limit_usd: null, left_usd: null });
 }
 
+/** A viewer may not launch runs or onboard (src/account-roles.ts): the refusal, code viewer_role. */
+export function viewerRefusal(admins: { name: string }[] = []) {
+  return new LimitError(accountRefusal("launch").message, 403, { code: "viewer_role", admins });
+}
+/** Before onboarding or a launch: refuse a viewer. The role comes with the connector's Org, else from the team. */
+export async function checkLaunchRole(org: Org) {
+  if (!org.userId) return;
+  const role: AccountRole | undefined = org.role ?? (await (await import("./admin.js")).team(org.slug)).members.find((m) => m.user_id === org.userId)?.account_role;
+  if (role && !canAccount(role, "launch")) throw viewerRefusal();
+}
+
 export async function checkRun(org: Org): Promise<RunCheck> {
   if (!org.userId) return { maxSessions: null, admins: [], left_usd: null, limit_usd: null, max_runs: null, runs_set_by: null };
   const o = await overview(org);
+  if (!canAccount(org.role ?? o.members.find((m) => m.user_id === org.userId)?.account_role ?? "member", "launch")) throw viewerRefusal(o.admins);
   if (o.budget_error)
     throw new LimitError("We couldn't check your account's allowance. Try again in a minute.", 503, { code: "budget_error", admins: o.admins });
   const me = o.members.find((m) => m.user_id === org.userId);

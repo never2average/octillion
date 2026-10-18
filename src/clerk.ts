@@ -61,7 +61,7 @@ async function all<T>(path: string, params: Record<string, string | string[] | u
 
 export interface ClerkOrg { id: string; name: string; slug: string | null; public_metadata: Record<string, unknown>; created_at: number }
 export interface ClerkInvitation { id: string; email_address: string; role: string; status: "pending" | "accepted" | "revoked" | "expired";
-  created_at: number; updated_at?: number; expires_at?: number | null }
+  created_at: number; updated_at?: number; expires_at?: number | null; public_metadata?: Record<string, unknown> | null }
 export interface ClerkMembership { id: string; role: string; public_metadata: Record<string, unknown> | null; created_at: number;
   public_user_data?: { user_id: string; identifier?: string; first_name?: string | null; last_name?: string | null };
   organization?: ClerkOrg }
@@ -87,10 +87,11 @@ export const organizations = {
 };
 
 export const invitations = {
-  /** Clerk emails the invitation; accepting it signs the person up (or in) and adds the membership. */
-  send: (orgId: string, email: string, role: "admin" | "member" = "member") =>
+  /** Clerk emails the invitation; accepting it signs the person up (or in) and adds the membership, which gets the
+   *  invitation's public_metadata (the account role, src/account-roles.ts). */
+  send: (orgId: string, email: string, role: "admin" | "member" = "member", publicMetadata: Record<string, unknown> = {}) =>
     call<ClerkInvitation>("POST", `/organizations/${encodeURIComponent(orgId)}/invitations`, {
-      email_address: email, role: roleKey(role), redirect_url: `${publicUrl()}/app/`,
+      email_address: email, role: roleKey(role), public_metadata: publicMetadata, redirect_url: `${publicUrl()}/app/`,
     }),
   list: (orgId: string) => all<ClerkInvitation>(`/organizations/${encodeURIComponent(orgId)}/invitations`),
   revoke: (orgId: string, invitationId: string) =>
@@ -117,8 +118,12 @@ export const memberships = {
     userMemberships.set(userId, { at: Date.now(), list });
     return list;
   },
-  setRole: async (orgId: string, userId: string, role: "admin" | "member") => changed(userId,
-    await call<ClerkMembership>("PATCH", `/organizations/${encodeURIComponent(orgId)}/memberships/${encodeURIComponent(userId)}`, { role: roleKey(role) })),
+  /** Clerk's role, and with `metadata` the membership's public_metadata too (merged: suspended stays). */
+  setRole: async (orgId: string, userId: string, role: "admin" | "member", metadata?: Record<string, unknown>) => {
+    const m = await call<ClerkMembership>("PATCH", `/organizations/${encodeURIComponent(orgId)}/memberships/${encodeURIComponent(userId)}`, { role: roleKey(role) });
+    return changed(userId, metadata ? await call<ClerkMembership>("PATCH", `/organizations/${encodeURIComponent(orgId)}/memberships/${encodeURIComponent(userId)}/metadata`,
+      { public_metadata: metadata }) : m);
+  },
   setSuspended: async (orgId: string, userId: string, suspended: boolean) => changed(userId,
     await call<ClerkMembership>("PATCH", `/organizations/${encodeURIComponent(orgId)}/memberships/${encodeURIComponent(userId)}/metadata`,
       { public_metadata: { suspended } })),
