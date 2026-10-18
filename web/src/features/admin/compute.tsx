@@ -175,15 +175,15 @@ export function AdminAgentMix() {
   const set = useAdminAction((v: { id: string; market_share?: number; paused?: boolean }) =>
     adminApi('PUT', `/compute/agents/${encodeURIComponent(v.id)}`, { market_share: v.market_share, paused: v.paused }), { success: 'Harness mix saved' });
   const pop = data?.population;
+  // Compact: one line per harness, its model beside it, and the numbers that matter. Ids are in the export and on hover.
   const cols: RecordCol<Agent>[] = [
-    { key: 'agent', label: 'Agent', keep: true, type: 'text', value: (a) => a.label,
-      render: (a) => <span className='flex min-w-0 flex-col gap-1'><span className={cn('leading-none', a.status === 'On' && 'font-medium')}>{a.label}</span><Mono>{a.id}</Mono></span> },
-    { key: 'vendor', label: 'Vendor', type: 'select', value: (a) => a.vendor ?? '', render: (a) => a.vendor ?? NA },
-    { key: 'harness', label: 'Harness', type: 'select', value: (a) => a.harness, render: (a) => <Mono>{a.harness}</Mono> },
-    { key: 'model', label: 'Model', type: 'text', value: (a) => a.model, render: (a) => <Mono>{a.model}</Mono> },
-    { key: 'weight', label: 'Weight', className: 'w-32 text-right', type: 'number', value: (a) => a.weight,
+    { key: 'harness', label: 'Harness', keep: true, type: 'text', value: (a) => a.label,
+      render: (a) => <span title={a.id} className={cn('block truncate leading-none', a.status === 'On' && 'font-medium')}>{a.label}</span> },
+    { key: 'cli', label: 'CLI', type: 'select', value: (a) => a.harness, render: (a) => <Mono>{a.harness}</Mono> },
+    { key: 'model', label: 'Model', type: 'select', value: (a) => a.model, render: (a) => <Mono>{a.model.replace(/^.*\//, '')}</Mono> },
+    { key: 'weight', label: 'Weight', className: 'w-28 text-right', type: 'number', value: (a) => a.weight,
       render: (a) => <span onClick={(e) => e.stopPropagation()}><WeightInput key={a.weight} value={a.weight} disabled={set.isPending} onSave={(w) => set.mutate({ id: a.id, market_share: w })} label={`Weight of ${a.label}`} /></span> },
-    { key: 'share', label: 'Share of runs', className: 'text-right', type: 'number', value: (a) => a.share, render: (a) => <span className='tabular-nums'>{a.share ? pct(a.share) : '—'}</span> },
+    { key: 'share', label: 'Share', className: 'text-right', type: 'number', value: (a) => a.share, render: (a) => <span className='tabular-nums'>{a.share ? pct(a.share) : '—'}</span> },
     { key: 'sandboxes', label: 'Sandboxes', className: 'text-right', type: 'number', value: (a) => a.sandboxes, render: (a) => <span className='tabular-nums'>{a.sandboxes || '—'}</span> },
     { key: 'status', label: 'Status', type: 'select', value: (a) => a.status, render: (a) => <span title={a.paused_reason ?? undefined} className={a.status === 'On' ? undefined : 'text-muted-foreground'}>{a.status}</span> },
     { key: 'on', label: 'On', className: 'w-12 text-right', keep: true,
@@ -198,14 +198,15 @@ export function AdminAgentMix() {
         loading={isLoading}
         rowKey={(a) => a.id}
         cols={cols}
-        noun='agents'
-        searchText={(a) => `${a.label} ${a.id} ${a.vendor ?? ''} ${a.model} ${a.harness}`}
-        searchPlaceholder={pop ? `Search ${pop.agents.length} agents · ${pop.name}: ${pop.agents.filter((a) => a.status === 'On').length} on, ${pop.sandbox_unit} sandboxes per unit` : 'Search agents'}
+        noun='harnesses'
+        searchText={(a) => `${a.label} ${a.id} ${a.model} ${a.harness}`}
+        searchPlaceholder={pop ? `Search ${pop.agents.length} harnesses (${pop.agents.filter((a) => a.status === 'On').length} on)` : 'Search harnesses'}
         views={[
-          { id: 'mix', label: 'In the mix', match: (a) => a.in_mix || a.weight > 0 },
+          { id: 'all', label: 'All harnesses' },
           { id: 'on', label: 'On', match: (a) => a.status === 'On' },
-          { id: 'all', label: 'All agents' }
+          { id: 'off', label: 'Off', match: (a) => a.status !== 'On' }
         ]}
+        initialSize={50}
         defaultSort={[{ key: 'weight', dir: 'desc' }]}
         actions={(a) => [
           { label: a.status === 'On' ? 'Turn off' : 'Turn on', icon: a.status === 'On' ? <Icons.eyeOff /> : <Icons.check />, disabled: !a.runnable, onSelect: () => set.mutate({ id: a.id, paused: a.status === 'On' }) }
