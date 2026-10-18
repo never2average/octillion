@@ -36,7 +36,6 @@ export function MultiSelectFilter({ options, value, onChange, noun, icon, classN
                 <Checkbox checked={value.includes(o.value)} onCheckedChange={(c) => onChange(c ? [...value, o.value] : value.filter((v) => v !== o.value))} />
                 <span className='min-w-0 flex-1 truncate'>{o.label}</span>
                 {o.hint && <span className='text-muted-foreground shrink-0 text-xs'>{o.hint}</span>}
-                {o.count != null && <span className='text-muted-foreground shrink-0 text-xs tabular-nums'>{o.count.toLocaleString()}</span>}
               </label>
             </li>
           ))}

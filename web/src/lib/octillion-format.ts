@@ -3,7 +3,8 @@ export const money = (cents: number | null | undefined, currency?: string) =>
   cents == null ? '' : (cents / 100).toLocaleString(undefined, { style: 'currency', currency: (currency || 'usd').toUpperCase(), maximumFractionDigits: 0 });
 export const num = (n: unknown) => Number(n || 0).toLocaleString();
 /** A filter option's text with how many records it matches: "Active · 12" (the label alone while the count is unknown). */
-export const counted = (label: string, n: number | null | undefined) => (n == null ? label : `${label} · ${num(n)}`);
+// Dropdown options read as their label only: item counts are off app-wide (callers still pass the count).
+export const counted = (label: string, _n?: number | null) => label;
 
 /** "3h ago"; pair with title={new Date(d).toLocaleString()} for the exact time. */
 export function relative(d: string | Date | null | undefined) {
