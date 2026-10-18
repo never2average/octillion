@@ -2,15 +2,15 @@
 @import './themes/supabase.css';
 
 /* No rubber-band bounce: the root scroller is html, so it needs it too (body alone does nothing in Chrome/Safari).
-   Inner scroll areas (tables, side panels, lists) keep their scroll to themselves instead of dragging the page. */
+   Inner vertical scroll areas (side panels, fixed-height lists) keep their scroll to themselves. */
 html,
 body {
   overscroll-behavior: none;
 }
-.overflow-auto,
-.overflow-y-auto,
-.overflow-x-auto {
-  overscroll-behavior: contain;
+/* Only real vertical scroll areas keep their scroll; a table that merely scrolls sideways (overflow-x-auto, which also
+   makes it a vertical scroll container) must let the wheel scroll the page. */
+.overflow-y-auto {
+  overscroll-behavior-y: contain;
 }
 
 :root {
