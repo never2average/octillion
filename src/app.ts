@@ -243,7 +243,7 @@ export function appRouter() {
   const api = express.Router();
   // Small bodies everywhere except a memory import (up to 1,000 items), which parses its own up to 2 MB.
   const small = express.json({ limit: "16kb" });
-  api.use((req, res, next) => (req.path === "/context/memories/import" ? next() : small(req, res, next)));
+  api.use((req, res, next) => (req.path === "/context/memories/import" || req.path === "/journeys/import" ? next() : small(req, res, next)));
   api.use((_req, res, next) => { res.set("Cache-Control", "no-store"); next(); });
   api.use(async (req, res, next) => {
     if (!clerk.clerkEnabled()) return void res.status(503).json({ error: "Sign-in is not configured (CLERK_SECRET_KEY)" });
@@ -299,14 +299,43 @@ export function appRouter() {
     await playbooks.deleteUseCase(S(res).org, String(req.params.id), actor(res), S(res).role === "admin");
     res.status(204).end();
   });
-  // Adoption person by person: who uses each use case, how far they got, where they are stuck, who can help.
-  api.get("/adoption", async (_req, res) => {
+  // Import use cases from a file: up to 100, names the account already has are skipped.
+  api.post("/journeys/import", express.json({ limit: "1mb" }), async (req, res) => {
+    const r = await playbooks.importUseCases({ orgId: S(res).org, slug: S(res).slug }, actor(res), req.body?.items, TOOL_NAMES);
+    capture({ distinctId: S(res).user ?? `org:${S(res).slug}`, orgSlug: S(res).slug }, "use_cases_imported", { imported: r.imported, skipped: r.skipped });
+    res.json(r);
+  });
+  // Adoption person by person: who uses each use case, how far they got, where they are stuck, who can help, and the
+  // open help requests. from/to (YYYY-MM-DD) pick who was active; user=a,b narrows to those people.
+  api.get("/adoption", async (req, res) => {
     const s = S(res);
-    const [rows, t] = await Promise.all([playbooks.adoptionByPerson(s.org), admin.team(s.slug)]);
+    const range = req.query.from || req.query.to ? reportRange(req.query) : null;
+    const users = String(req.query.user ?? "").split(",").map((x) => x.trim()).filter(Boolean).slice(0, 200);
+    const [rows, t, help] = await Promise.all([playbooks.adoptionByPerson(s.org, { start: range?.start, end: range?.end, users }), admin.team(s.slug), playbooks.helpRequests(s.org)]);
     const who = new Map(t.members.map((m) => [m.user_id, m.email ?? m.name ?? null]));
     const label = (id: string | null) => (id ? (id === s.user ? "You" : who.get(id) ?? "Former member") : null);
     res.json({ me: s.user, use_cases: rows.map((r) => ({ ...r, helper_label: label(r.helper), helper_email: r.helper ? who.get(r.helper) ?? null : null,
-      people: r.people.map((x) => ({ ...x, label: label(x.user_id), email: who.get(x.user_id) ?? null })) })) });
+      people: r.people.map((x) => ({ ...x, label: label(x.user_id), email: who.get(x.user_id) ?? null })) })),
+      help: help.map((h) => ({ ...h, requester_label: label(h.requester), requester_email: who.get(h.requester) ?? null,
+        helper_label: label(h.helper), helper_email: h.helper ? who.get(h.helper) ?? null : null })),
+      members: t.members.filter((m) => m.user_id).map((m) => ({ user_id: m.user_id, label: label(m.user_id) })) });
+  });
+  // Help requests: ask the team, pick one up, close it (asker or helper), hand it back (helper) or withdraw it (asker).
+  api.post("/adoption/help", async (req, res) => {
+    const s = S(res);
+    if (!s.user) throw new AppError("Sign in as a person to ask for help");
+    const id = await playbooks.askForHelp(s.org, String(req.body?.journey_id ?? ""), s.user, req.body?.note);
+    capture({ distinctId: s.user, orgSlug: s.slug }, "help_requested", { journey: String(req.body?.journey_id ?? "") });
+    res.status(201).json({ id });
+  });
+  api.post("/adoption/help/:id/:action", async (req, res) => {
+    const s = S(res), id = Number(req.params.id), action = String(req.params.action);
+    if (!s.user) throw new AppError("Sign in as a person to help");
+    if (action === "pick") await playbooks.pickUpHelp(s.org, id, s.user);
+    else if (action === "done" || action === "release" || action === "cancel") await playbooks.updateHelp(s.org, id, s.user, action);
+    else throw new AppError("action must be pick, done, release or cancel", 404);
+    capture({ distinctId: s.user, orgSlug: s.slug }, `help_${action === "pick" ? "picked_up" : action}`, { request: id });
+    res.status(204).end();
   });
   api.post("/journeys/:id/view", async (req, res) => {
     capture({ distinctId: S(res).user ?? `org:${S(res).slug}`, orgSlug: S(res).slug }, "journey_viewed", { journey: String(req.params.id) });

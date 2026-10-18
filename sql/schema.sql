@@ -605,6 +605,21 @@ CREATE INDEX IF NOT EXISTS context_memories_scope ON context_memories (org_id, s
 -- NULL: a global template managed on /admin.
 ALTER TABLE journey_templates ADD COLUMN IF NOT EXISTS org_id INT REFERENCES organizations(id) ON DELETE CASCADE;
 
+-- Help requests on /app/adoption (src/playbooks.ts): someone stuck on a use case asks; a teammate picks it up.
+CREATE TABLE IF NOT EXISTS adoption_help (
+  id          BIGSERIAL PRIMARY KEY,
+  org_id      INT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  journey_id  TEXT NOT NULL,
+  requester   TEXT NOT NULL,                     -- Clerk user id
+  helper      TEXT,
+  note        TEXT NOT NULL DEFAULT '',
+  status      TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'picked', 'done')),
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  picked_at   TIMESTAMPTZ,
+  closed_at   TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS adoption_help_org ON adoption_help (org_id, status, created_at DESC);
+
 -- Platform a task targets (src/platform.ts): split results by web / mobile / backend ... Backfilled from the starter
 -- template, else the language, else the tags and prompt; the rules mirror platformOf() in src/platform.ts.
 ALTER TABLE scenarios ADD COLUMN IF NOT EXISTS platform TEXT CHECK (platform IN ('web', 'mobile', 'backend', 'desktop', 'cli', 'data', 'other'));

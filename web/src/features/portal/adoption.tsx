@@ -1,19 +1,26 @@
 'use client';
 // /app Adoption, a Notion-style database, person by person: each use case (journeys from Octillion plus the account's
-// own) with everyone who has worked on it, how far they got and how much they used it, what went wrong, and which
-// teammate to ask (whoever finished it); then the team's workflow parts and the AI clients you connected. Click a row
-// to open it beside the table: stages with their prompts, what is done, and mark-done for steps without a tool.
-import { useCallback, useState } from 'react';
+// own) with everyone who has worked on it, how far they got and how much they used it, what went wrong, and who can
+// help. Stuck people ask the team; a teammate picks the request up, gets where they are stuck, and closes it when done.
+// Filters: a date range (who was active in it) and people. Use cases import and export as JSON or CSV. Click a row to
+// open it beside the table: help, then stages with their prompts, what is done, and mark-done for steps without a tool.
+import { useCallback, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 import PageContainer from '@/components/layout/page-container';
-import { Field, RecordView, type RecordCol } from '@/components/layout/record-view';
+import { DateRangePicker, PRESETS, rangeQuery, type DateRange } from '@/components/layout/date-range-picker';
+import { MultiSelectFilter } from '@/components/layout/multi-select-filter';
+import { Field, RecordView, type RecordCol, type RowAction } from '@/components/layout/record-view';
 import { Button } from '@/components/ui/button';
+import { ButtonGroup } from '@/components/ui/button-group';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Icons } from '@/components/icons';
 import { appApi } from '@/lib/api-client';
+import { downloadCsv, downloadJson, parseCsv, today } from '@/lib/csv';
 import { cn } from '@/lib/utils';
 import { Dock } from './memory';
 import { CopyButton, ErrorState, When, copy, fail, useOrgLoad } from './shared';
@@ -23,45 +30,81 @@ interface Stage { id: string; title: string; why: string; prompt: string; tools:
 interface Journey { id: string; name: string; outcome: string; who: string; time: string; stages: Stage[]; done: number; total: number; own?: boolean; added_by?: string | null }
 interface Person { user_id: string; label: string; email: string | null; done: number; total: number; calls: number; errors: number; last_error: string | null; stuck: string | null; at: string | null; finished: boolean }
 interface UseCaseUse { id: string; name: string; outcome: string; total: number; people: Person[]; helper: string | null; helper_label: string | null; helper_email: string | null }
+interface Help {
+  id: number; journey_id: string; requester: string; helper: string | null; note: string; status: 'open' | 'picked' | 'done'; created_at: string; picked_at: string | null;
+  requester_label: string | null; requester_email: string | null; helper_label: string | null; helper_email: string | null;
+}
+interface Adoption { me: string | null; use_cases: UseCaseUse[]; help: Help[]; members: { user_id: string; label: string | null }[] }
 type Row =
   | { key: string; type: 'workflow'; name: string; detail: string; done: number; total: number; g: Setup['groups'][number] }
-  | { key: string; type: 'use case'; name: string; detail: string; done: number; total: number; j: Journey; who: Person | null; uc: UseCaseUse | null }
+  | { key: string; type: 'use case'; name: string; detail: string; done: number; total: number; j: Journey; who: Person | null; uc: UseCaseUse | null; help: Help | null }
   | { key: string; type: 'client'; name: string; detail: string; done: number; total: number; at: string };
 
+const last90 = () => PRESETS.find((p) => p.id === '90d')!.range();
 
 export function AdoptionPage() {
+  const [range, setRange] = useState<DateRange>(last90);
+  const [users, setUsers] = useState<string[]>([]);
+  const q = `${rangeQuery(range)}${users.length ? `&user=${users.map(encodeURIComponent).join(',')}` : ''}`;
   const { data: s, error } = useOrgLoad(() => appApi<Setup>('GET', '/setup'));
   const { data: jr, reload: reloadJourneys } = useOrgLoad(() => appApi<{ journeys: Journey[] }>('GET', '/journeys'));
-  const { data: ad, reload: reloadAdoption } = useOrgLoad(() => appApi<{ use_cases: UseCaseUse[] }>('GET', '/adoption'));
+  const { data: ad, reload: reloadAdoption } = useOrgLoad(() => appApi<Adoption>('GET', `/adoption?${q}`), [q]);
   const reload = () => { reloadJourneys(); reloadAdoption(); };
   const [adding, setAdding] = useState(false);
+  const [asking, setAsking] = useState<Journey | null>(null);
   const router = useRouter();
+  const me = ad?.me ?? null;
+  const file = useRef<HTMLInputElement>(null);
+
   const removeUseCase = (j: Journey) => {
     if (!window.confirm(`Remove ${j.name}?`)) return;
     appApi('DELETE', `/journeys/${encodeURIComponent(j.id)}`).then(() => { toast.success('Use case removed'); reload(); }).catch(fail);
   };
+  const helpAct = (h: Help, action: 'pick' | 'done' | 'release' | 'cancel', ok: string, then?: () => void) =>
+    appApi('POST', `/adoption/help/${h.id}/${action}`).then(() => { toast.success(ok); reloadAdoption(); then?.(); }).catch(fail);
+  // Pick up a request, then start helping straight away: an email to the asker with where they are stuck.
+  const pickUp = (h: Help, j: Journey, who: Person | null) => helpAct(h, 'pick', `You picked up ${h.requester_label ?? 'the request'}`, () => {
+    const link = helpLink(h, j, who); if (link) window.location.href = link;
+  });
+
+  const exportJson = () => jr && downloadJson(`octillion-use-cases-${today()}.json`, { use_cases: jr.journeys.map(portable) });
+  const exportCsv = () => jr && downloadCsv(`octillion-use-cases-${today()}.csv`, ['use_case', 'outcome', 'step', 'title', 'prompt'],
+    jr.journeys.flatMap((j) => j.stages.map((st, i) => [j.name, j.outcome, i + 1, st.title, st.prompt])));
+  const importFile = async (f: File) => {
+    let items: Portable[];
+    try { items = parseUseCases(f.name, await f.text()); } catch (e) { fail(e); return; }
+    if (!items.length) { toast.error('No use cases found in that file'); return; }
+    appApi<{ imported: number; skipped: number; errors: string[] }>('POST', '/journeys/import', { items })
+      .then((r) => { toast.success(`Imported ${r.imported} use case${r.imported === 1 ? '' : 's'}${r.skipped ? `, skipped ${r.skipped} (already here or incomplete)` : ''}`); if (r.errors[0]) toast.error(r.errors[0]); reload(); })
+      .catch(fail);
+  };
+
+  const narrowed = users.length > 0;
   const rows: Row[] = !s ? [] : [
-    // One row per person who worked on a use case; a use case nobody touched gets one row of its own.
+    // One row per person who worked on a use case in the range; a use case nobody touched gets one row of its own
+    // (hidden while filtering by people).
     ...(jr?.journeys ?? []).flatMap((j): Row[] => {
       const uc = ad?.use_cases.find((x) => x.id === j.id) ?? null;
       const base = { type: 'use case' as const, name: j.name, detail: j.outcome, j, uc };
-      return uc?.people.length
-        ? uc.people.map((p) => ({ ...base, key: `j-${j.id}-${p.user_id}`, done: p.done, total: p.total, who: p }))
-        : [{ ...base, key: `j-${j.id}`, done: 0, total: j.total, who: null }];
+      const helpFor = (user: string) => ad?.help.find((h) => h.journey_id === j.id && h.requester === user && h.status !== 'done') ?? null;
+      if (uc?.people.length) return uc.people.map((p) => ({ ...base, key: `j-${j.id}-${p.user_id}`, done: p.done, total: p.total, who: p, help: helpFor(p.user_id) }));
+      return narrowed ? [] : [{ ...base, key: `j-${j.id}`, done: 0, total: j.total, who: null, help: null }];
     }),
-    ...s.groups.map((g) => ({ key: `w-${g.id}`, type: 'workflow' as const, name: g.label, detail: g.used ? `${g.used} of ${g.total} tools used` : 'Not tried yet', done: g.used, total: g.total, g })),
-    ...s.clients.map((c) => ({ key: `c-${c.client}`, type: 'client' as const, name: c.client, detail: 'Connected', done: 1, total: 1, at: c.last }))
+    ...(narrowed ? [] : s.groups.map((g) => ({ key: `w-${g.id}`, type: 'workflow' as const, name: g.label, detail: g.used ? `${g.used} of ${g.total} tools used` : 'Not tried yet', done: g.used, total: g.total, g }))),
+    ...(narrowed ? [] : s.clients.filter((c) => c.last.slice(0, 10) >= range.from && c.last.slice(0, 10) <= range.to)
+      .map((c) => ({ key: `c-${c.client}`, type: 'client' as const, name: c.client, detail: 'Connected', done: 1, total: 1, at: c.last })))
   ];
-  // Who a row is about: the person on a use case (nobody yet: "Not started"), the team for workflow parts (counted
-  // team-wide), you for clients (the list is yours).
-  const userOf = (r: Row) => r.type === 'use case' ? (r.who?.label ?? 'Not started') : r.type === 'workflow' ? 'Team' : 'You';
+  // Who a row is about: the person on a use case (nobody in the range: "Nobody yet"), the team for workflow parts
+  // (counted team-wide), you for clients (the list is yours).
+  const userOf = (r: Row) => r.type === 'use case' ? (r.who?.label ?? 'Nobody yet') : r.type === 'workflow' ? 'Team' : 'You';
+  const helpState = (r: Row) => helpStatus(r, me);
   const cols: RecordCol<Row>[] = [
-    { key: 'item', label: 'Use case', className: 'min-w-72', keep: true, render: (r) => (<>
+    { key: 'item', label: 'Use case', className: 'min-w-72', keep: true, title: true, type: 'text', value: (r) => r.name, render: (r) => (<>
       <p className='text-sm leading-none font-medium'>{r.name}</p>
       <p className='text-muted-foreground mt-1.5 line-clamp-1 text-xs leading-none'>{r.detail}</p>
     </>) },
-    { key: 'user', label: 'User', className: 'w-40', keep: true, render: (r) => <span className={cn('block max-w-40 truncate text-sm', r.type === 'use case' && r.who ? '' : 'text-muted-foreground')}>{userOf(r)}</span> },
-    { key: 'usage', label: 'Usage', className: 'w-44', render: (r) => (
+    { key: 'user', label: 'User', className: 'w-40', keep: true, type: 'select', value: userOf, render: (r) => <span className={cn('block max-w-40 truncate text-sm', r.type === 'use case' && r.who ? '' : 'text-muted-foreground')}>{userOf(r)}</span> },
+    { key: 'usage', label: 'Usage', className: 'w-44', type: 'number', value: (r) => r.done / Math.max(1, r.total), render: (r) => (
       <div className='space-y-1.5'>
         <Progress done={r.done} total={r.total} check={r.type === 'client'} />
         {r.type === 'use case' && r.who && <p className='text-muted-foreground text-xs leading-none'>{r.who.calls} call{r.who.calls === 1 ? '' : 's'}{r.who.finished ? ' · outcome reached' : ''}</p>}
@@ -71,32 +114,127 @@ export function AdoptionPage() {
       : r.who.errors ? <span className='text-destructive block max-w-52 truncate text-xs leading-none' title={r.who.last_error ?? undefined}>{r.who.errors} failed · {r.who.last_error ?? 'tool error'}</span>
       : r.who.finished ? <span className='text-primary text-xs leading-none'>None · done</span>
       : <span className='text-muted-foreground block max-w-52 truncate text-xs leading-none'>Next: {r.who.stuck}</span> },
-    { key: 'help', label: 'Help', className: 'w-44', render: (r) => <HelpCell r={r} /> },
-    { key: 'last', label: 'Last', className: 'hidden w-24 sm:table-cell', render: (r) => <span className='text-muted-foreground text-xs'>{r.type === 'client' ? <When d={r.at} /> : r.type === 'use case' && r.who?.at ? <When d={r.who.at} /> : '—'}</span> }
+    { key: 'help', label: 'Help', className: 'w-48', type: 'select', value: (r) => helpState(r).label,
+      render: (r) => <HelpCell r={r} me={me} onPick={(h) => r.type === 'use case' && pickUp(h, r.j, r.who)} /> },
+    { key: 'last', label: 'Last', className: 'hidden w-24 sm:table-cell', type: 'date', value: (r) => r.type === 'client' ? r.at : r.type === 'use case' ? r.who?.at ?? null : null,
+      render: (r) => <span className='text-muted-foreground text-xs'>{r.type === 'client' ? <When d={r.at} /> : r.type === 'use case' && r.who?.at ? <When d={r.who.at} /> : '—'}</span> }
   ];
+
+  // Actions on a use-case row, by who you are to it: the stuck person asks; teammates pick up, offer or email.
+  const useCaseActions = (r: Extract<Row, { type: 'use case' }>): RowAction[] => {
+    const h = r.help, mine = !!r.who && r.who.user_id === me, a: RowAction[] = [];
+    if (h && h.status === 'open' && !mine) a.push({ label: `Pick up and help ${h.requester_label}`, icon: <Icons.check />, onSelect: () => pickUp(h, r.j, r.who) });
+    if (h && h.status === 'picked' && h.helper === me) {
+      const link = helpLink(h, r.j, r.who);
+      if (link) a.push({ label: `Email ${h.requester_label}`, icon: <Icons.send />, onSelect: () => { window.location.href = link; } });
+      a.push({ label: 'Mark helped', icon: <Icons.check />, onSelect: () => helpAct(h, 'done', 'Marked helped') },
+        { label: 'Hand it back', icon: <Icons.arrowRight />, onSelect: () => helpAct(h, 'release', 'Handed back to the team') });
+    }
+    if (mine && !r.who!.finished && !h) a.push({ label: 'Ask the team for help', icon: <Icons.help />, onSelect: () => setAsking(r.j) });
+    if (mine && h) {
+      if (h.status === 'picked') a.push({ label: 'Mark helped', icon: <Icons.check />, onSelect: () => helpAct(h, 'done', 'Marked helped') });
+      a.push({ label: 'Withdraw help request', icon: <Icons.close />, onSelect: () => helpAct(h, 'cancel', 'Help request withdrawn') });
+    }
+    const offer = offerLink(r, me);
+    if (offer && !h) a.push({ label: `Offer help to ${r.who!.label}`, icon: <Icons.send />, onSelect: () => { window.location.href = offer; } });
+    const ask = askLink(r);
+    if (ask && !h) a.push({ label: `Email ${r.uc!.helper_label} for help`, icon: <Icons.send />, onSelect: () => { window.location.href = ask; } });
+    a.push({ label: r.who ? 'Open in Setup & training' : 'Start in Setup & training', icon: <Icons.arrowRight />, separator: a.length > 0,
+      onSelect: () => router.push(`/app?journey=${encodeURIComponent(r.j.id)}`) });
+    if (r.j.own) a.push({ label: 'Remove use case', icon: <Icons.trash />, destructive: true, separator: true, onSelect: () => removeUseCase(r.j) });
+    return a;
+  };
+
+  const primary = (<>
+    <ButtonGroup>
+      <Button onClick={() => setAdding(true)}><Icons.add /> Add use case</Button>
+      <DropdownMenu>
+        <DropdownMenuTrigger render={<Button size='icon' aria-label='Import or export use cases' className='border-primary-foreground/20 border-l' />}><Icons.chevronDown /></DropdownMenuTrigger>
+        <DropdownMenuContent align='end' className='w-52'>
+          <DropdownMenuItem onClick={() => file.current?.click()}><Icons.upload /> Import JSON or CSV</DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem disabled={!jr?.journeys.length} onClick={exportJson}><Icons.download /> Export JSON</DropdownMenuItem>
+          <DropdownMenuItem disabled={!jr?.journeys.length} onClick={exportCsv}><Icons.download /> Export CSV</DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </ButtonGroup>
+    <input ref={file} type='file' accept='.json,.csv,application/json,text/csv' className='hidden' onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) void importFile(f); }} />
+  </>);
+  const peopleOpts = useMemo(() => (ad?.members ?? []).map((m) => ({ value: m.user_id, label: m.label ?? 'Unnamed' })), [ad?.members]);
+
   if (error) return <PageContainer><ErrorState error={error} /></PageContainer>;
   return (
     <PageContainer>
       <RecordView<Row>
-        rows={rows} rowKey={(r) => r.key} cols={cols} loading={!s} noun='items'
-        searchText={(r) => `${r.type} ${r.name} ${r.detail} ${userOf(r)}`}
+        id='portal-adoption' rows={rows} rowKey={(r) => r.key} cols={cols} loading={!s || !ad} noun='items'
+        searchText={(r) => `${r.type} ${r.name} ${r.detail} ${userOf(r)} ${helpState(r).label}`}
         searchPlaceholder='Search adoption: use cases, people, issues'
-        primary={<Button onClick={() => setAdding(true)}><Icons.add /> Add use case</Button>}
-        empty='Nothing to show yet.'
+        filters={<>
+          <MultiSelectFilter noun='people' icon={<Icons.teams />} options={peopleOpts} value={users} onChange={setUsers} />
+          <DateRangePicker value={range} onChange={setRange} />
+        </>}
+        primary={primary}
+        empty={narrowed ? 'Nobody you picked worked on a use case in this period.' : 'Nothing to show yet.'}
         detailTitle={(r) => r.name}
-        actions={(r) => r.type === 'use case' ? [
-          { label: 'Open in Setup & training', icon: <Icons.arrowRight />, onSelect: () => router.push(`/app?journey=${encodeURIComponent(r.j.id)}`) },
-          ...(askLink(r) ? [{ label: `Ask ${r.uc!.helper_label} for help`, icon: <Icons.send />, onSelect: () => { window.location.href = askLink(r)!; } }] : []),
-          ...(r.j.own ? [{ label: 'Remove use case', icon: <Icons.trash />, destructive: true, onSelect: () => removeUseCase(r.j) }] : [])
-        ] : r.type === 'workflow' ? [{ label: 'Copy prompt', icon: <Icons.page />, onSelect: () => copy(r.g.prompt) }] : []}
-        detail={(r) => r.type === 'use case' ? <UseCase j={r.j} onChanged={reload} />
-          : r.type === 'workflow' ? <Workflow g={r.g} /> : <Client name={r.name} at={r.at} />}
+        actions={(r) => r.type === 'use case' ? useCaseActions(r) : r.type === 'workflow' ? [{ label: 'Copy prompt', icon: <Icons.page />, onSelect: () => copy(r.g.prompt) }] : []}
+        detail={(r) => r.type === 'use case' ? (
+          <div className='flex flex-col gap-6'>
+            <HelpPanel r={r} me={me} onPick={(h) => pickUp(h, r.j, r.who)} onAct={helpAct} onAsk={() => setAsking(r.j)} />
+            <UseCase j={r.j} onChanged={reload} />
+          </div>
+        ) : r.type === 'workflow' ? <Workflow g={r.g} /> : <Client name={r.name} at={r.at} />}
       />
       {adding && <UseCaseEditor onClose={() => setAdding(false)} onSaved={() => { setAdding(false); reload(); }} />}
+      {asking && <AskDialog j={asking} stuck={ad?.use_cases.find((u) => u.id === asking.id)?.people.find((p) => p.user_id === me)?.stuck ?? null}
+        onClose={() => setAsking(null)} onSent={() => { setAsking(null); reloadAdoption(); }} />}
     </PageContainer>
   );
 }
 
+// ---------- import / export ----------
+
+interface Portable { name: string; outcome: string; stages: { title: string; prompt: string }[] }
+const portable = (j: Journey): Portable => ({ name: j.name, outcome: j.outcome, stages: j.stages.map((st) => ({ title: st.title, prompt: st.prompt })) });
+
+/** A use-case file: our JSON export ({ use_cases: [...] } or a bare list), or CSV with use_case, outcome, title, prompt
+ *  columns, one row per step (rows with the same use_case join up in order). */
+function parseUseCases(name: string, text: string): Portable[] {
+  const t = text.replace(/^\uFEFF/, '').trim();
+  if (name.toLowerCase().endsWith('.json') || t.startsWith('[') || t.startsWith('{')) {
+    const data = JSON.parse(t);
+    const list = Array.isArray(data) ? data : Array.isArray(data?.use_cases) ? data.use_cases : null;
+    if (!list) throw new Error('JSON must be a list of use cases, e.g. [{ "name": "…", "outcome": "…", "stages": [{ "title": "…", "prompt": "…" }] }]');
+    return list.map((x: any) => ({ name: String(x?.name ?? ''), outcome: String(x?.outcome ?? ''),
+      stages: (Array.isArray(x?.stages) ? x.stages : []).map((st: any) => ({ title: String(st?.title ?? ''), prompt: String(st?.prompt ?? '') })) }));
+  }
+  const [head, ...rest] = parseCsv(t);
+  if (!head) return [];
+  const cols = head.map((h) => h.trim().toLowerCase());
+  const at = (k: string[]) => cols.findIndex((c) => k.includes(c));
+  const nameAt = at(['use_case', 'use case', 'name']), outAt = at(['outcome']), titleAt = at(['title', 'step_title']), promptAt = at(['prompt']);
+  if (nameAt < 0 || promptAt < 0) throw new Error('CSV needs use_case and prompt columns (outcome and title are optional)');
+  const by = new Map<string, Portable>();
+  for (const r of rest) {
+    const n = (r[nameAt] ?? '').trim(); if (!n) continue;
+    const u = by.get(n) ?? by.set(n, { name: n, outcome: '', stages: [] }).get(n)!;
+    if (!u.outcome && outAt >= 0) u.outcome = (r[outAt] ?? '').trim();
+    if ((r[promptAt] ?? '').trim()) u.stages.push({ title: titleAt >= 0 ? (r[titleAt] ?? '').trim() : '', prompt: r[promptAt].trim() });
+  }
+  return [...by.values()];
+}
+
+// ---------- helping each other ----------
+
+/** Where a use-case row stands on help, as a short label (also the Help column's filter value). */
+function helpStatus(r: Row, me: string | null): { label: string; tone: 'want' | 'busy' | 'muted' | 'link' } {
+  if (r.type !== 'use case') return { label: '—', tone: 'muted' };
+  const h = r.help, mine = r.who?.user_id === me;
+  if (h?.status === 'open') return mine ? { label: 'Asked the team', tone: 'busy' } : { label: 'Help wanted', tone: 'want' };
+  if (h?.status === 'picked') return { label: h.helper === me ? 'You are helping' : `${h.helper_label ?? 'Someone'} is helping`, tone: 'busy' };
+  if (askLink(r)) return { label: 'Ask a teammate', tone: 'link' };
+  if (r.who?.finished) return { label: (r.uc?.people ?? []).some((p) => !p.finished) ? 'Can help others' : 'Finished', tone: 'muted' };
+  return { label: r.who ? 'Nobody ahead yet' : 'Be the first', tone: 'muted' };
+}
 
 /** A mailto that asks the teammate who finished (or got furthest on) a use case for help with it. */
 function askLink(r: Row) {
@@ -105,16 +243,109 @@ function askLink(r: Row) {
   return `mailto:${r.uc.helper_email}?subject=${encodeURIComponent(`Help with "${r.j.name}" in Octillion`)}&body=${encodeURIComponent(`Hi, you got through "${r.j.name}" in Octillion.${stuck} Could you show me how you did it?`)}`;
 }
 
-/** Nudges people to help each other: ask whoever finished it; the person who finished is the one others can ask. */
-function HelpCell({ r }: { r: Row }) {
-  if (r.type !== 'use case') return <span className='text-muted-foreground'>—</span>;
-  const uc = r.uc, link = askLink(r);
-  if (link) return <a href={link} onClick={(e) => e.stopPropagation()} className='text-primary block max-w-44 truncate text-xs leading-none hover:underline'>Ask {uc!.helper_label}{uc!.people.find((p) => p.user_id === uc!.helper)?.finished ? ' (finished it)' : ' (furthest along)'}</a>;
-  if (r.who?.finished) {
-    const waiting = (uc?.people ?? []).filter((p) => !p.finished).length;
-    return <span className='text-muted-foreground text-xs leading-none'>{waiting ? `Can help ${waiting} teammate${waiting === 1 ? '' : 's'}` : 'Finished'}</span>;
+/** You finished this use case and the row is a teammate who has not: offer to walk them through it. */
+function offerLink(r: Extract<Row, { type: 'use case' }>, me: string | null) {
+  if (!me || !r.who || r.who.finished || r.who.user_id === me || !r.who.email) return null;
+  if (!r.uc?.people.some((p) => p.user_id === me && p.finished)) return null;
+  const stage = r.j.stages.find((st) => st.title === r.who!.stuck);
+  return `mailto:${r.who.email}?subject=${encodeURIComponent(`Want a hand with "${r.j.name}"?`)}&body=${encodeURIComponent(`Hi, I got through "${r.j.name}" in Octillion and saw you're at "${r.who.stuck ?? 'the start'}".${stage ? `\n\nThe prompt for that step:\n${stage.prompt}` : ''}\n\nHappy to walk you through it.`)}`;
+}
+
+/** After picking up a request: an email to the asker with their note, where they are stuck and that step's prompt. */
+function helpLink(h: Help, j: Journey, who: Person | null) {
+  if (!h.requester_email) return null;
+  const stuck = who?.stuck ?? null, stage = j.stages.find((st) => st.title === stuck);
+  const body = [`Hi, I picked up your request for help with "${j.name}" in Octillion.`, h.note && `You wrote: "${h.note}"`,
+    stuck && `You're at "${stuck}".${stage ? ` The prompt for that step:\n${stage.prompt}` : ''}`, 'When works for a quick call or chat?'].filter(Boolean).join('\n\n');
+  return `mailto:${h.requester_email}?subject=${encodeURIComponent(`Helping with "${j.name}"`)}&body=${encodeURIComponent(body)}`;
+}
+
+/** The Help column: an open request from someone else is a Pick up button; everything else is a short status. */
+function HelpCell({ r, me, onPick }: { r: Row; me: string | null; onPick: (h: Help) => void }) {
+  const st = helpStatus(r, me);
+  if (r.type === 'use case' && r.help?.status === 'open' && r.who?.user_id !== me) {
+    const h = r.help;
+    return (
+      <span className='flex items-center gap-2 text-xs leading-none'>
+        <span className='text-amber-600 dark:text-amber-400'>Help wanted</span>
+        <Button size='xs' onClick={(e) => { e.stopPropagation(); onPick(h); }}>Pick up</Button>
+      </span>
+    );
   }
-  return <span className='text-muted-foreground text-xs leading-none'>{r.who ? 'Nobody ahead yet' : 'Be the first to try it'}</span>;
+  const link = r.type === 'use case' && st.tone === 'link' ? askLink(r) : null;
+  if (link && r.type === 'use case') return <a href={link} onClick={(e) => e.stopPropagation()} className='text-primary block max-w-48 truncate text-xs leading-none hover:underline'>Ask {r.uc!.helper_label}</a>;
+  return <span className={cn('block max-w-48 truncate text-xs leading-none', st.tone === 'busy' ? 'text-primary' : 'text-muted-foreground')}>{st.label}</span>;
+}
+
+/** Top of an open use case: the help request, if any, with what you can do about it. */
+function HelpPanel({ r, me, onPick, onAct, onAsk }: {
+  r: Extract<Row, { type: 'use case' }>; me: string | null; onPick: (h: Help) => void;
+  onAct: (h: Help, action: 'pick' | 'done' | 'release' | 'cancel', ok: string) => void; onAsk: () => void;
+}) {
+  const h = r.help, mine = !!r.who && r.who.user_id === me;
+  if (!h) {
+    if (mine && !r.who!.finished) return (
+      <div className='flex items-center justify-between gap-3 border-b pb-4 text-sm leading-none'>
+        <span className='text-muted-foreground'>Stuck{r.who!.stuck ? ` at "${r.who!.stuck}"` : ''}? Ask the team.</span>
+        <Button size='sm' variant='outline' onClick={onAsk}><Icons.help /> Ask for help</Button>
+      </div>
+    );
+    const offer = offerLink(r, me);
+    if (offer) return (
+      <div className='flex items-center justify-between gap-3 border-b pb-4 text-sm leading-none'>
+        <span className='text-muted-foreground'>You finished this; {r.who!.label} is at &ldquo;{r.who!.stuck}&rdquo;.</span>
+        <Button size='sm' variant='outline' render={<a href={offer} />}><Icons.send /> Offer help</Button>
+      </div>
+    );
+    return null;
+  }
+  const link = helpLink(h, r.j, r.who);
+  return (
+    <div className='flex flex-col gap-3 border-b pb-4'>
+      <div className='flex items-center justify-between gap-3 text-sm leading-none'>
+        <span>
+          <span className={h.status === 'open' ? 'text-amber-600 dark:text-amber-400' : 'text-primary'}>
+            {h.status === 'open' ? (mine ? 'You asked the team for help' : `${h.requester_label} asked for help`) : h.helper === me ? `You are helping ${h.requester_label}` : `${h.helper_label} is helping ${mine ? 'you' : h.requester_label}`}
+          </span>
+          <span className='text-muted-foreground'> · <When d={h.status === 'picked' && h.picked_at ? h.picked_at : h.created_at} /></span>
+        </span>
+        <span className='flex shrink-0 items-center gap-1.5'>
+          {h.status === 'open' && !mine && <Button size='sm' onClick={() => onPick(h)}><Icons.check /> Pick up and help</Button>}
+          {h.status === 'picked' && h.helper === me && link && <Button size='sm' variant='outline' render={<a href={link} />}><Icons.send /> Email</Button>}
+          {h.status === 'picked' && (h.helper === me || mine) && <Button size='sm' variant='outline' onClick={() => onAct(h, 'done', 'Marked helped')}>Mark helped</Button>}
+          {h.status === 'open' && mine && <Button size='sm' variant='ghost' onClick={() => onAct(h, 'cancel', 'Help request withdrawn')}>Withdraw</Button>}
+        </span>
+      </div>
+      {h.note && <p className='text-muted-foreground border-l-2 pl-3 text-sm leading-relaxed whitespace-pre-wrap'>{h.note}</p>}
+    </div>
+  );
+}
+
+/** Ask the team: an optional note on what is in the way; teammates see it on the row and can pick it up. */
+function AskDialog({ j, stuck, onClose, onSent }: { j: Journey; stuck: string | null; onClose: () => void; onSent: () => void }) {
+  const [note, setNote] = useState(''), [busy, setBusy] = useState(false);
+  const send = (e: React.FormEvent) => {
+    e.preventDefault(); setBusy(true);
+    appApi('POST', '/adoption/help', { journey_id: j.id, note: note.trim() })
+      .then(() => { toast.success('Asked the team. Teammates can pick it up on Adoption.'); onSent(); }).catch(fail).finally(() => setBusy(false));
+  };
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <form onSubmit={send} className='flex flex-col gap-4'>
+          <DialogHeader>
+            <DialogTitle>Ask the team about {j.name}</DialogTitle>
+            <DialogDescription>{stuck ? `You're at "${stuck}". ` : ''}Your teammates see the request on Adoption and one of them picks it up.</DialogDescription>
+          </DialogHeader>
+          <Textarea autoFocus rows={3} maxLength={500} value={note} onChange={(e) => setNote(e.target.value)} placeholder='What is in the way? (optional)' aria-label='Note' className='resize-none' />
+          <DialogFooter>
+            <Button type='button' variant='outline' onClick={onClose}>Cancel</Button>
+            <Button type='submit' disabled={busy}>Ask the team</Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
 }
 
 function Progress({ done, total, check }: { done: number; total: number; check?: boolean }) {

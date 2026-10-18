@@ -501,8 +501,12 @@ export interface PersonProgress {
  * previous one), on that person's own tool calls; plus their calls and failures on the use case's tools, where they
  * are stuck, and who can help (whoever finished it, else got furthest).
  */
-export async function adoptionByPerson(orgId: number) {
+export async function adoptionByPerson(orgId: number, opts: { start?: Date; end?: Date; users?: string[] } = {}) {
   const db = await getDb();
+  // Progress counts all time (a stage done last quarter is still done); the range picks who shows up (anyone active in
+  // it) and what their calls and errors count. users narrows to those people.
+  const inRange = (at: Date) => (!opts.start || new Date(at) >= opts.start) && (!opts.end || new Date(at) < opts.end);
+  const only = opts.users?.length ? new Set(opts.users) : null;
   const journeys = await playbooksFor(orgId);
   const events = await db.query<{ user_id: string; name: string; ok: boolean; error: string | null; at: Date }>(
     "SELECT user_id, name, ok, error, at FROM mcp_events WHERE org_id = $1 AND method = 'tools/call' AND user_id IS NOT NULL ORDER BY at", [orgId]);
@@ -513,10 +517,14 @@ export async function adoptionByPerson(orgId: number) {
   return journeys.map((j) => {
     const tools = new Set(j.stages.flatMap((s) => s.tools));
     const people: PersonProgress[] = [];
-    for (const [user, evs] of byUser) {
-      const mine = evs.filter((e) => tools.has(e.name));
+    const users = new Set([...byUser.keys(), ...marked.filter((m) => m.journey_id === j.id && m.user_id).map((m) => m.user_id!)]);
+    for (const user of users) {
+      if (only && !only.has(user)) continue;
+      const mine = (byUser.get(user) ?? []).filter((e) => tools.has(e.name));
       const marks = marked.filter((m) => m.journey_id === j.id && m.user_id === user);
       if (!mine.length && !marks.length) continue; // never touched this use case
+      const recent = mine.filter((e) => inRange(e.at));
+      if (!recent.length && !marks.some((m) => inRange(m.done_at))) continue; // nothing in the range
       let since = 0, done = 0, stuck: string | null = null, lastMs = 0;
       for (const st of j.stages) {
         const at = st.manual ? marks.find((m) => m.stage_id === st.id)?.done_at ?? null
@@ -524,13 +532,92 @@ export async function adoptionByPerson(orgId: number) {
         if (at) { done++; since = Math.max(since, new Date(at).getTime()); lastMs = Math.max(lastMs, new Date(at).getTime()); }
         else stuck ??= st.title;
       }
-      const failed = mine.filter((e) => !e.ok);
+      const failed = recent.filter((e) => !e.ok);
       const lastAt = mine.reduce((m, e) => Math.max(m, new Date(e.at).getTime()), lastMs);
-      people.push({ user_id: user, done, total: j.stages.length, calls: mine.length, errors: failed.length, last_error: failed.at(-1)?.error ?? null,
+      people.push({ user_id: user, done, total: j.stages.length, calls: recent.length, errors: failed.length, last_error: failed.at(-1)?.error ?? null,
         stuck: done < j.stages.length ? stuck : null, at: lastAt ? new Date(lastAt).toISOString() : null, finished: done === j.stages.length });
     }
     people.sort((a, b) => b.done - a.done || b.calls - a.calls);
     const helper = people.find((x) => x.finished) ?? people.find((x) => x.done > 0) ?? null;
     return { id: j.id, name: j.name, outcome: j.outcome, own: j.own, added_by: j.added_by, total: j.stages.length, people, helper: helper?.user_id ?? null };
   });
+}
+
+// ---------- import ----------
+
+/** Import use cases from a file (our export, or any list of { name, outcome, stages: [{ title, prompt }] }). A name the
+ *  account already has (its own or Octillion's) is skipped, so importing the same file twice adds nothing. */
+export async function importUseCases(org: { orgId: number; slug: string }, actor: string, items: unknown, toolNames: readonly string[]) {
+  if (!Array.isArray(items)) throw new PlaybookError("items must be a list of use cases");
+  if (items.length > 100) throw new PlaybookError("Import at most 100 use cases at a time");
+  const taken = new Set((await playbooksFor(org.orgId)).map((j) => j.name.trim().toLowerCase()));
+  let imported = 0, skipped = 0;
+  const errors: string[] = [];
+  for (const it of items as Record<string, any>[]) {
+    const name = String(it?.name ?? "").trim();
+    if (!name || taken.has(name.toLowerCase())) { skipped++; continue; }
+    try {
+      await createUseCase(org, actor, { name, outcome: it.outcome, stages: it.stages }, toolNames);
+      taken.add(name.toLowerCase()); imported++;
+    } catch (e) { skipped++; if (errors.length < 5) errors.push(`${name}: ${(e as Error).message}`); }
+  }
+  return { imported, skipped, errors };
+}
+
+// ---------- help requests ----------
+// Someone stuck on a use case asks the team; a teammate picks it up (and gets the asker's email and where they are
+// stuck), then either of them marks it done. One live request per person per use case.
+
+export interface HelpRequest { id: number; journey_id: string; requester: string; helper: string | null; note: string; status: "open" | "picked" | "done"; created_at: string; picked_at: string | null }
+
+export async function helpRequests(orgId: number): Promise<HelpRequest[]> {
+  const db = await getDb();
+  return db.query<HelpRequest>(
+    `SELECT id::int AS id, journey_id, requester, helper, note, status, created_at, picked_at FROM adoption_help
+      WHERE org_id = $1 AND (status <> 'done' OR closed_at > now() - interval '14 days') ORDER BY created_at DESC LIMIT 500`, [orgId]);
+}
+
+export async function askForHelp(orgId: number, journeyId: string, requester: string, note: unknown) {
+  const db = await getDb();
+  if (!(await playbooksFor(orgId)).some((j) => j.id === journeyId)) throw new PlaybookError("No such use case", 404);
+  const [live] = await db.query<{ id: number }>(
+    "SELECT id::int AS id FROM adoption_help WHERE org_id = $1 AND journey_id = $2 AND requester = $3 AND status <> 'done'", [orgId, journeyId, requester]);
+  if (live) return live.id;
+  const [r] = await db.query<{ id: number }>(
+    "INSERT INTO adoption_help (org_id, journey_id, requester, note) VALUES ($1, $2, $3, $4) RETURNING id::int AS id",
+    [orgId, journeyId, requester, String(note ?? "").trim().slice(0, 500)]);
+  return r.id;
+}
+
+async function helpRow(orgId: number, id: number) {
+  const db = await getDb();
+  const [r] = await db.query<HelpRequest>("SELECT id::int AS id, journey_id, requester, helper, status FROM adoption_help WHERE org_id = $1 AND id = $2", [orgId, id]);
+  if (!r) throw new PlaybookError("No such help request", 404);
+  return r;
+}
+
+/** Pick up someone else's open request. */
+export async function pickUpHelp(orgId: number, id: number, helper: string) {
+  const r = await helpRow(orgId, id);
+  if (r.requester === helper) throw new PlaybookError("That is your own request");
+  if (r.status !== "open") throw new PlaybookError(r.status === "picked" ? "Someone already picked this up" : "This request is closed", 409);
+  const db = await getDb();
+  await db.query("UPDATE adoption_help SET helper = $3, status = 'picked', picked_at = now() WHERE org_id = $1 AND id = $2 AND status = 'open'", [orgId, id, helper]);
+  return r;
+}
+
+/** done: the asker or the helper closes it. release: the helper hands it back. cancel: the asker withdraws it. */
+export async function updateHelp(orgId: number, id: number, actor: string, action: "done" | "release" | "cancel") {
+  const r = await helpRow(orgId, id);
+  const db = await getDb();
+  if (action === "cancel") {
+    if (r.requester !== actor) throw new PlaybookError("Only whoever asked can withdraw it", 403);
+    await db.query("DELETE FROM adoption_help WHERE org_id = $1 AND id = $2", [orgId, id]);
+  } else if (action === "release") {
+    if (r.helper !== actor) throw new PlaybookError("Only the helper can hand it back", 403);
+    await db.query("UPDATE adoption_help SET helper = NULL, status = 'open', picked_at = NULL WHERE org_id = $1 AND id = $2", [orgId, id]);
+  } else {
+    if (r.requester !== actor && r.helper !== actor) throw new PlaybookError("Only the asker or the helper can close it", 403);
+    await db.query("UPDATE adoption_help SET status = 'done', closed_at = now() WHERE org_id = $1 AND id = $2", [orgId, id]);
+  }
 }

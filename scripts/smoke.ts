@@ -1436,6 +1436,32 @@ try {
       assert.equal((await appCall(ownerC, "DELETE", "/journeys/release-watch")).status, 404, "global templates are not deletable from /app");
       assert.equal((await appCall(ownerC, "DELETE", `/journeys/${uc.id}`)).status, 204, "an account admin removes it");
       assert.ok(!(await portalIds()).includes(uc.id));
+      // Import: a file of use cases; names the account already has are skipped, so a second import adds nothing.
+      const ucFile = { items: [{ name: "Docs freshness", outcome: "Know if agents read stale docs", stages: [{ title: "Check", prompt: "Show my visibility report." }] },
+        { name: "Get your APO baseline", outcome: "dup", stages: [{ prompt: "x" }] }, { name: "", stages: [] }] };
+      const im = await json(appCall(ownerC, "POST", "/journeys/import", ucFile));
+      assert.deepEqual([im.imported, im.skipped], [1, 2], "new names imported, existing and empty skipped");
+      assert.equal((await json(appCall(ownerC, "POST", "/journeys/import", ucFile))).imported, 0, "importing twice adds nothing");
+      const docs = (await json(appCall(ownerC, "GET", "/journeys"))).journeys.find((j: any) => j.name === "Docs freshness");
+      // Help requests: the stuck person asks, a teammate picks it up, either closes it; nobody picks up their own.
+      const hq = await json(appCall(devC, "POST", "/adoption/help", { journey_id: docs.id, note: "Where is the report?" }));
+      assert.equal((await json(appCall(devC, "POST", "/adoption/help", { journey_id: docs.id }))).id, hq.id, "one live request per person per use case");
+      assert.equal((await appCall(devC, "POST", `/adoption/help/${hq.id}/pick`)).status, 400, "not your own");
+      let hs = (await json(appCall(ownerC, "GET", "/adoption"))).help.find((h: any) => h.id === hq.id);
+      assert.ok(hs && hs.status === "open" && hs.note === "Where is the report?" && hs.requester_label, "teammates see the open request");
+      assert.equal((await appCall(ownerC, "POST", `/adoption/help/${hq.id}/pick`)).status, 204);
+      assert.equal((await appCall(ownerC, "POST", `/adoption/help/${hq.id}/pick`)).status, 409, "picked up once");
+      hs = (await json(appCall(devC, "GET", "/adoption"))).help.find((h: any) => h.id === hq.id);
+      assert.ok(hs.status === "picked" && hs.helper_label, "the asker sees who is helping");
+      assert.equal((await appCall(ownerC, "POST", `/adoption/help/${hq.id}/cancel`)).status, 403, "only the asker withdraws");
+      assert.equal((await appCall(devC, "POST", `/adoption/help/${hq.id}/done`)).status, 204, "the asker closes it");
+      // Filters: nobody was active in 2001; user= keeps only those people.
+      assert.ok((await json(appCall(ownerC, "GET", "/adoption?from=2001-01-01&to=2001-01-31"))).use_cases.every((u: any) => !u.people.length), "nobody active in 2001");
+      const allAd = await json(appCall(ownerC, "GET", "/adoption"));
+      const someone = allAd.use_cases.flatMap((u: any) => u.people)[0]?.user_id;
+      if (someone) assert.ok((await json(appCall(ownerC, "GET", `/adoption?user=${encodeURIComponent(someone)}`))).use_cases.every((u: any) => u.people.every((x: any) => x.user_id === someone)), "user= narrows to that person");
+      assert.ok(allAd.members.length >= 1, "people to filter by");
+      assert.equal((await appCall(ownerC, "DELETE", `/journeys/${docs.id}`)).status, 204);
       // Journey analytics: progress recorded per account, a funnel on /admin, and journey_* events to PostHog once each.
       {
         const http = await import("node:http");

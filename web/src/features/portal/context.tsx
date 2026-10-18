@@ -13,6 +13,7 @@ import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select'
 import { Textarea } from '@/components/ui/textarea';
 import { Icons } from '@/components/icons';
 import { appApi } from '@/lib/api-client';
+import { csvCell, parseCsv } from '@/lib/csv';
 import { cn } from '@/lib/utils';
 import { Dock, KINDS, TYPE_STYLE, type Kind, type MemoryItem, type MemoryScope } from './memory';
 import { Field, RecordView, type RecordCol } from '@/components/layout/record-view';
@@ -138,8 +139,6 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
 
 // ---------- export / import ----------
 
-const csvCell = (v: string) => (/[",\n\r]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
-
 /** Download the list as CSV: (product,) kind, memory, added_by, added_at (the same columns import reads back). */
 function exportCsv(items: MemoryItem[], label: string, withProduct = false) {
   const lines = [[...(withProduct ? ['product'] : []), 'kind', 'memory', 'added_by', 'added_at'].join(','),
@@ -150,22 +149,6 @@ function exportCsv(items: MemoryItem[], label: string, withProduct = false) {
   a.download = `octillion-memory-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'export'}-${new Date().toISOString().slice(0, 10)}.csv`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-}
-
-/** RFC 4180-ish CSV: quoted fields, doubled quotes, newlines inside quotes. */
-function parseCsv(text: string): string[][] {
-  const rows: string[][] = []; let row: string[] = [], cell = '', quoted = false;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (quoted) {
-      if (ch === '"' && text[i + 1] === '"') { cell += '"'; i++; } else if (ch === '"') quoted = false; else cell += ch;
-    } else if (ch === '"') quoted = true;
-    else if (ch === ',') { row.push(cell); cell = ''; }
-    else if (ch === '\n' || ch === '\r') { if (ch === '\r' && text[i + 1] === '\n') i++; row.push(cell); rows.push(row); row = []; cell = ''; }
-    else cell += ch;
-  }
-  if (cell || row.length) { row.push(cell); rows.push(row); }
-  return rows.filter((r) => r.some((c) => c.trim()));
 }
 
 /** A memory file: our CSV export (or any CSV with a memory/body column), or JSON: a list of { kind, body } or strings. */
