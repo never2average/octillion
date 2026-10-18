@@ -35,10 +35,10 @@ interface Compute { groups: { id: string; label: string }[]; settings: Setting[]
 
 const pct = (x: number) => `${(x * 100).toFixed(x > 0 && x < 0.01 ? 1 : 0)}%`;
 
-/** Compute: capacity settings and the default coding-agent mix. */
-export const AdminCompute = () => <SettingsPage groups={['capacity']} mix sandbox />;
-/** Configuration: models, run sizes and research limits. */
-export const AdminConfiguration = () => <SettingsPage groups={['models', 'runs', 'research']} />;
+/** Compute: the sandbox provider and capacity settings. */
+export const AdminCompute = () => <SettingsPage groups={['capacity']} sandbox />;
+/** Configuration: models, run sizes, research limits and the default coding-agent mix. */
+export const AdminConfiguration = () => <SettingsPage groups={['models', 'runs', 'research']} mix />;
 /** Key vault: provider keys for agents, orchestrators and research. */
 export function AdminKeyVault() {
   return <PageContainer><div className='flex w-full flex-col gap-10 pb-10'><ModelKeys /></div></PageContainer>;
