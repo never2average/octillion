@@ -321,6 +321,14 @@ CREATE TABLE IF NOT EXISTS gateway_usage (
 -- Priced per request at record time (long-context tiers apply per request, not to a session's summed input).
 ALTER TABLE gateway_usage ADD COLUMN IF NOT EXISTS cost_usd NUMERIC(12, 6) NOT NULL DEFAULT 0;
 
+-- The Compute page's tables (src/compute-records.ts, src/compute.ts): sessions by status and when they ended, by agent,
+-- by start (wait times, our boat starts), and gateway spend per orchestrator and per session.
+CREATE INDEX IF NOT EXISTS agent_sessions_status_ended_idx ON agent_sessions (status, ended_at DESC);
+CREATE INDEX IF NOT EXISTS agent_sessions_agent_status_idx ON agent_sessions (agent_id, status);
+CREATE INDEX IF NOT EXISTS agent_sessions_started_idx      ON agent_sessions (started_at DESC) WHERE started_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS gateway_usage_orch_idx          ON gateway_usage (orchestrator_id) WHERE orchestrator_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS gateway_usage_session_idx       ON gateway_usage (session_id) WHERE session_id IS NOT NULL;
+
 -- Developer populations: the coding-agent (harness x model) mix a simulation should represent, e.g. the global
 -- developer population or an enterprise subset. Agent definitions (images, adapters) stay in harnesses/registry.json;
 -- the mix lives here. The default population is seeded from the registry's cited weights on first boot.

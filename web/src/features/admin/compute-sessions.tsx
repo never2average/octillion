@@ -1,0 +1,314 @@
+'use client';
+// Compute › Sessions (GET /compute/sessions, src/compute-records.ts): every agent session across accounts, with why
+// it failed (src/error-classes.ts) and a peek with its timing, run, infrastructure, spend, the fix for its failure
+// class and the last transcript events. Status, range, failure class, job and "heartbeat older than 5 min" are asked
+// of the server (and kept in the URL, so Health and the verdict deep-link here); the rest filter the rows shown.
+// Read only: cancelling a session comes with the page's actions.
+import { useMemo, useState, type ReactNode } from 'react';
+import Link from 'next/link';
+import { useRouter } from 'next/navigation';
+import { MultiSelectFilter } from '@/components/layout/multi-select-filter';
+import { Field, RecordView, type RecordCol } from '@/components/layout/record-view';
+import { Button, buttonVariants } from '@/components/ui/button';
+import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
+import { Skeleton } from '@/components/ui/skeleton';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Icons } from '@/components/icons';
+import { cn } from '@/lib/utils';
+import { useAdmin } from './lib';
+import { copyText, ErrorBox, Mono, Notice, Section, StatusBadge, When, type Tone } from './ui';
+import { AMBER, Chip, cents, dur, EST, PeekSection, since, useComputeParams, useNow, nextPinned, useScrollTo } from './compute-common';
+
+export interface SessionRow {
+  id: string; simulation_id: string; org: { slug: string; name: string }; agent_id: string | null; harness: string; model: string; status: string;
+  attempt: number; infra_retries: number; queued_at: string; started_at: string | null; heartbeat_at: string | null; ended_at: string | null;
+  completed_reason: string | null; error_class: string | null; error_label: string | null; error_message: string | null;
+  worker_id: string | null; sandbox_id: string | null; cost_usd: number; sandbox_est_usd: number | null;
+}
+export interface Runnable { agent_id: string; harness: string; has_setup_script: boolean; missing_env: string[]; runnable: boolean; reason: string }
+interface SessionDetail {
+  session: SessionRow & { tokens_in: number; tokens_out: number };
+  metadata: Record<string, unknown>;
+  gateway: { provider: string; requests: number; errors: number; input_tokens: number; output_tokens: number; cost_usd: number; last_at: string | null }[];
+  hint: { text: string; href: string } | null;
+  runnable: Runnable | null;
+  transcript: { seq: number; ts: string; type: string; text: string }[];
+  orchestrator: { id: number; orchestrator_id: string | null } | null;
+}
+
+const DEFAULT_STATUS = ['queued', 'running', 'failed', 'timeout'];
+const STATUS_OPTS = ['queued', 'running', 'completed', 'failed', 'timeout', 'cancelled'].map((v) => ({ value: v, label: v[0].toUpperCase() + v.slice(1) }));
+const STATUS_TONE: Record<string, Tone> = { queued: 'info', running: 'ok', completed: 'neutral', failed: 'bad', timeout: 'warn', cancelled: 'neutral' };
+const CLASSES: { key: string; label: string }[] = [
+  { key: 'unclaimable', label: 'Agent not scheduled' }, { key: 'credentials', label: 'Missing provider key' }, { key: 'harness_install', label: 'Harness install failed' },
+  { key: 'gateway_token', label: 'Gateway token expired' }, { key: 'boat_permission', label: 'boat key not allowed' }, { key: 'boat_capacity', label: 'boat rate limit or capacity' },
+  { key: 'sandbox_boot', label: 'Sandbox not ready' }, { key: 'sandbox_prepare', label: 'Sandbox setup failed' }, { key: 'heartbeat', label: 'Lost heartbeat' },
+  { key: 'time_cap', label: 'Hit time limit' }, { key: 'shutdown', label: 'Worker shut down' }, { key: 'agent', label: 'Agent stopped' }, { key: 'other', label: 'Other' }
+];
+const SORT_LABEL: Record<string, string> = { recent: 'Latest activity', queued_at: 'Waiting longest', wait: 'Longest wait', ended_at: 'Ended last' };
+/** Rows asked for at once; the table pages them 50 at a time. */
+const LIMIT = 500;
+const HEARTBEAT_AMBER_S = 5 * 60;
+
+const waitOf = (s: SessionRow) => since(s.queued_at, s.started_at);
+const runOf = (s: SessionRow) => (s.started_at ? since(s.started_at, s.ended_at) : null);
+const outcomeOf = (s: SessionRow) => s.error_label ?? s.completed_reason?.replace(/_/g, ' ') ?? '';
+const firstLine = (t: string | null) => (t ?? '').split('\n')[0];
+
+/** The Sessions section: filters in the URL, a peek per session (?session=<id>). */
+export function ComputeSessions() {
+  const url = useComputeParams();
+  const router = useRouter();
+  useNow(15_000);
+  const status = url.has('status') ? (url.get('status') ?? '').split(',').filter(Boolean) : DEFAULT_STATUS;
+  const range = url.get('since') ?? '24h', cls = url.get('class'), job = url.get('job_id'), stale = url.get('stale') === '1';
+  const sort = url.get('sort') ?? 'recent';
+  const open = url.get('session');
+  const qs = new URLSearchParams({ limit: String(LIMIT), since: range, sort, ...(status.length ? { status: status.join(',') } : {}),
+    ...(cls ? { class: cls } : {}), ...(job ? { job_id: job } : {}), ...(stale ? { stale_heartbeat: '1' } : {}) });
+  const [pinned, setPinned] = useState<string | null>(null);
+  if (pinned) qs.set('include', pinned);
+  // Refresh every 30 s, paused while a record is open (and, as every query, while the tab is hidden).
+  const { data: shown, error, isLoading, refetch } = useAdmin<{ total: number; rows: SessionRow[] }>(`/compute/sessions?${qs}`, { refetchInterval: open ? undefined : 30_000, keep: true });
+  const rows = useMemo(() => shown?.rows ?? [], [shown]);
+  const pin = nextPinned(open, shown?.rows.map((r) => r.id), pinned);
+  if (pin !== pinned) setPinned(pin);
+  useScrollTo('sessions', !!shown);
+
+  const cols: RecordCol<SessionRow>[] = [
+    { key: 'id', label: 'Session', title: true, keep: true, type: 'text', value: (s) => s.id, render: (s) => <Mono>{s.id}</Mono> },
+    { key: 'job', label: 'Job', type: 'text', value: (s) => s.simulation_id,
+      render: (s) => <span className='flex min-w-0 flex-col gap-1'><Mono>{s.simulation_id}</Mono><span className='text-muted-foreground truncate text-xs'>{s.org.name}</span></span> },
+    { key: 'agent', label: 'Agent · harness', type: 'select', value: (s) => s.agent_id ?? '',
+      render: (s) => <span className='flex min-w-0 flex-col gap-1'><span className='truncate'>{s.agent_id ?? '—'}</span><span className='text-muted-foreground text-xs'>{s.harness}</span></span> },
+    { key: 'model', label: 'Model', type: 'select', value: (s) => s.model, hidden: true, render: (s) => <Mono>{s.model.replace(/^.*\//, '')}</Mono> },
+    { key: 'status', label: 'Status', keep: true, type: 'select', value: (s) => s.status, options: STATUS_OPTS,
+      render: (s) => (
+        <span className='flex flex-wrap items-center gap-1.5'>
+          <StatusBadge tone={STATUS_TONE[s.status]}>{s.status}</StatusBadge>
+          {s.attempt > 1 && <span className='text-muted-foreground text-xs' title='Repeat number within the run'>attempt {s.attempt}</span>}
+          {s.infra_retries > 0 && <Chip tone='warn' title={`Queued again ${s.infra_retries}× after an infrastructure failure`}>infra retry</Chip>}
+        </span>
+      ) },
+    { key: 'wait', label: 'Wait', className: 'text-right', type: 'number', value: (s) => waitOf(s),
+      render: (s) => <span className='tabular-nums' title={`Queued ${new Date(s.queued_at).toLocaleString()}`}>{dur(waitOf(s))}</span> },
+    { key: 'run', label: 'Run time', className: 'text-right', type: 'number', value: (s) => runOf(s), render: (s) => <RunTime s={s} /> },
+    { key: 'outcome', label: 'Outcome', type: 'select', value: outcomeOf,
+      render: (s) => s.error_label ? <StatusBadge tone={s.error_class === 'unclaimable' ? 'warn' : 'bad'}>{s.error_label}</StatusBadge>
+        : s.completed_reason ? <span>{s.completed_reason.replace(/_/g, ' ')}</span> : <span className='text-muted-foreground'>—</span> },
+    { key: 'error', label: 'Error', className: 'max-w-80', type: 'text', value: (s) => s.error_message ?? '',
+      render: (s) => s.error_message ? <span className='text-muted-foreground line-clamp-1 text-xs' title={s.error_message}>{firstLine(s.error_message)}</span> : null },
+    { key: 'where', label: 'Orchestrator / sandbox', hidden: true, type: 'text', value: (s) => `${s.worker_id ?? ''} ${s.sandbox_id ?? ''}`,
+      render: (s) => <span className='flex flex-col gap-1'><Mono>{s.worker_id ?? '—'}</Mono>{s.sandbox_id && <Mono>{s.sandbox_id}</Mono>}</span> },
+    { key: 'cost', label: 'Cost', className: 'text-right', type: 'number', value: (s) => s.cost_usd + (s.sandbox_est_usd ?? 0),
+      render: (s) => (
+        <span className='flex flex-col items-end gap-1 tabular-nums'>
+          <span>{cents(s.cost_usd)}</span>
+          {s.sandbox_est_usd != null && <span className='text-muted-foreground text-xs' title={EST}>+ {cents(s.sandbox_est_usd)} est.</span>}
+        </span>
+      ) }
+  ];
+
+  const set = (patch: Record<string, string | null>) => url.write({ ...patch, session: null });
+  const filters = (
+    <>
+      <MultiSelectFilter noun='statuses' options={STATUS_OPTS} value={status} onChange={(v) => set({ status: v.length ? v.join(',') : '' })} />
+      <NativeSelect aria-label='Range' value={range} onChange={(e) => set({ since: e.target.value === '24h' ? null : e.target.value })}>
+        <NativeSelectOption value='1h'>Last hour</NativeSelectOption>
+        <NativeSelectOption value='24h'>Last 24 h</NativeSelectOption>
+        <NativeSelectOption value='7d'>Last 7 days</NativeSelectOption>
+      </NativeSelect>
+      <NativeSelect aria-label='Failure class' value={cls ?? ''} onChange={(e) => set({ class: e.target.value || null })}>
+        <NativeSelectOption value=''>Any failure class</NativeSelectOption>
+        {CLASSES.map((c) => <NativeSelectOption key={c.key} value={c.key}>{c.label}</NativeSelectOption>)}
+      </NativeSelect>
+      <NativeSelect aria-label='Order' value={sort} onChange={(e) => set({ sort: e.target.value === 'recent' ? null : e.target.value })}>
+        {Object.entries(SORT_LABEL).map(([k, v]) => <NativeSelectOption key={k} value={k}>{v}</NativeSelectOption>)}
+      </NativeSelect>
+      <Button variant={stale ? 'default' : 'outline'} onClick={() => set({ stale: stale ? null : '1' })} title='Running sessions with no heartbeat for 5 minutes'>
+        <Icons.clock /> Heartbeat &gt; 5 min
+      </Button>
+      {job && <Button variant='outline' onClick={() => set({ job_id: null })} title='Show every job'><Mono>{job}</Mono><Icons.close /></Button>}
+    </>
+  );
+
+  return (
+    <Section title={<span id='compute-sessions'>Sessions</span>}
+      description={shown && shown.total > rows.length ? `The ${rows.length} most relevant of ${shown.total} matching sessions; narrow the filters to see others.` : 'Agent sessions across every account: waiting, running and how each one ended.'}>
+      {error && !shown && (
+        <div role='alert' className='border-destructive/30 bg-destructive/5 text-destructive flex items-center gap-3 rounded-lg border px-4 py-3 text-sm'>
+          <span className='min-w-0 flex-1'>Could not load sessions: {error.message}</span>
+          <Button variant='outline' size='xs' onClick={() => void refetch()}>Retry</Button>
+        </div>
+      )}
+      <RecordView id='compute-sessions' rows={rows} loading={isLoading && !shown} rowKey={(s) => s.id} cols={cols} noun='sessions' initialSize={50}
+        searchText={(s) => `${s.id} ${s.simulation_id} ${s.org.name} ${s.org.slug} ${s.agent_id ?? ''} ${s.harness} ${s.model} ${s.status} ${outcomeOf(s)} ${s.error_message ?? ''} ${s.worker_id ?? ''} ${s.sandbox_id ?? ''}`}
+        searchPlaceholder='Search sessions, jobs, agents, errors' filters={filters} exportName='compute-sessions'
+        openKey={open} onOpenChange={(k) => url.write({ session: k })}
+        actions={(s) => [
+          { label: 'Copy id', icon: <Icons.page />, onSelect: () => copyText(s.id, 'Session id copied') },
+          { label: "Show this job's sessions", icon: <Icons.search />, onSelect: () => set({ job_id: s.simulation_id }) },
+          { label: 'Open account', icon: <Icons.externalLink />, onSelect: () => router.push(`/admin/accounts/${encodeURIComponent(s.org.slug)}`) }
+        ]}
+        detailTitle={(s) => <span className='flex items-center gap-2'><Mono>{s.id}</Mono><StatusBadge tone={STATUS_TONE[s.status]}>{s.status}</StatusBadge></span>}
+        detail={(s) => <SessionPeek id={s.id} onJob={() => set({ job_id: s.simulation_id })} />}
+        empty='No sessions match these filters.' />
+    </Section>
+  );
+}
+
+/** Run time: ended − started; while running, the elapsed time and the heartbeat's age (amber past 5 min). */
+function RunTime({ s }: { s: SessionRow }) {
+  const run = runOf(s);
+  if (run == null) return <span className='text-muted-foreground'>—</span>;
+  if (s.status !== 'running') return <span className='tabular-nums'>{dur(run)}</span>;
+  const hb = since(s.heartbeat_at ?? s.started_at);
+  return (
+    <span className='flex flex-col items-end gap-1 tabular-nums'>
+      <span>{dur(run)}</span>
+      <span className={cn('text-xs', hb != null && hb > HEARTBEAT_AMBER_S ? AMBER : 'text-muted-foreground')} title='Time since the last heartbeat'>♥ {dur(hb)} ago</span>
+    </span>
+  );
+}
+
+const META_LABEL: Record<string, string> = {
+  harness_runs: 'Harness runs', simulated_user_turns: 'Simulated developer turns', developer_nudges: 'Nudges to finish', done_reason: 'Done because',
+  changed_files: 'Changed files', exit_code: 'Exit code', exit_signal: 'Exit signal'
+};
+
+/** One session's peek: status and the full error, timing, run, infrastructure, spend, runnability, the last events, links. */
+function SessionPeek({ id, onJob }: { id: string; onJob: () => void }) {
+  const { data, error, isLoading } = useAdmin<SessionDetail>(`/compute/sessions/${encodeURIComponent(id)}`);
+  if (isLoading) return <div className='grid gap-3'><Skeleton className='h-16' /><Skeleton className='h-40' /></div>;
+  if (!data) return <ErrorBox error={error} />;
+  const s = data.session, m = data.metadata;
+  const v = (k: string): ReactNode => (m[k] == null || m[k] === '' ? <span className='text-muted-foreground'>—</span> : String(m[k]));
+  const wall = typeof m.wall_ms === 'number' ? dur(m.wall_ms / 1000) : null;
+  return (
+    <div className='grid gap-6'>
+      <PeekSection title='Status'>
+        <p className='text-sm'>{statusSentence(s)}</p>
+        {s.error_message && <pre className='bg-muted/50 max-h-48 overflow-auto rounded-md p-3 font-mono text-xs whitespace-pre-wrap'>{s.error_message}</pre>}
+        {typeof m.infra_error === 'string' && m.infra_error !== s.error_message && (
+          <p className='text-muted-foreground text-xs'>Last infrastructure error (it was queued again): <Mono>{m.infra_error}</Mono></p>
+        )}
+        {data.hint && <Notice><Link href={data.hint.href} className='hover:underline'>{data.hint.text}</Link></Notice>}
+      </PeekSection>
+
+      <PeekSection title='Timing'>
+        <dl>
+          <Field label='Queued'><When d={s.queued_at} /></Field>
+          <Field label='Started'>{s.started_at ? <><When d={s.started_at} /> <span className='text-muted-foreground'>· waited {dur(waitOf(s))}</span></> : <span className='text-muted-foreground'>not yet · waiting {dur(waitOf(s))}</span>}</Field>
+          <Field label='Last heartbeat'><When d={s.heartbeat_at} /></Field>
+          <Field label='Ended'>{s.ended_at ? <><When d={s.ended_at} /> <span className='text-muted-foreground'>· ran {dur(runOf(s))}</span></> : <span className='text-muted-foreground'>—</span>}</Field>
+          {wall && <Field label='Wall time (orchestrator)'>{wall}</Field>}
+        </dl>
+      </PeekSection>
+
+      <PeekSection title='Run'>
+        <dl>
+          <Field label='Agent'>{s.agent_id ?? '—'} <span className='text-muted-foreground'>· {s.harness} · <Mono>{s.model}</Mono></span></Field>
+          <Field label='Agent turns'>{m.agent_turns != null ? <>{String(m.agent_turns)}{m.max_agent_turns != null && <span className='text-muted-foreground'> of {String(m.max_agent_turns)}</span>}</> : <span className='text-muted-foreground'>—</span>}</Field>
+          {Object.entries(META_LABEL).map(([k, label]) => <Field key={k} label={label}>{v(k)}</Field>)}
+          <Field label='Outcome'>{s.completed_reason?.replace(/_/g, ' ') ?? <span className='text-muted-foreground'>—</span>}</Field>
+        </dl>
+      </PeekSection>
+
+      <PeekSection title='Infrastructure'>
+        <dl>
+          <Field label='Infra retries'>{s.infra_retries}</Field>
+          <Field label='Orchestrator'>{data.orchestrator
+            ? <Link href={`/admin/compute?section=orchestrators&state=all&orch=${data.orchestrator.id}`} className='hover:underline'><Mono>{data.orchestrator.orchestrator_id ?? `row ${data.orchestrator.id}`}</Mono></Link>
+            : <Mono>{s.worker_id ?? '—'}</Mono>}</Field>
+          <Field label='boat sandbox'>{s.sandbox_id ? <><Mono>{s.sandbox_id}</Mono> <span className='text-muted-foreground'>· {String(m.boat_sandbox_type ?? 'default')}</span></> : <span className='text-muted-foreground'>—</span>}</Field>
+          <Field label='Sandbox time'>{typeof m.boat_sandbox_seconds === 'number' ? dur(m.boat_sandbox_seconds) : <span className='text-muted-foreground'>—</span>}</Field>
+        </dl>
+      </PeekSection>
+
+      <PeekSection title='Spend'>
+        <dl>
+          <Field label='Tokens in / out'><span className='tabular-nums'>{s.tokens_in.toLocaleString()} / {s.tokens_out.toLocaleString()}</span></Field>
+          <Field label='Model'>{cents(s.cost_usd)}</Field>
+          <Field label='Sandbox'><span title={EST}>{s.sandbox_est_usd != null ? `${cents(s.sandbox_est_usd)} est.` : '—'}</span></Field>
+        </dl>
+        {data.gateway.length > 0 && (
+          <div className='grid gap-1'>
+            <p className='text-muted-foreground text-xs'>Gateway calls (detail only: already counted in the model cost above).</p>
+            <MiniTable head={['Provider', 'Requests', 'Errors', 'Tokens in / out', 'Cost']} rows={data.gateway.map((g) => [
+              <Mono key='p'>{g.provider}</Mono>, g.requests, g.errors ? <span key='e' className='text-destructive'>{g.errors}</span> : 0,
+              `${g.input_tokens.toLocaleString()} / ${g.output_tokens.toLocaleString()}`, cents(g.cost_usd)])} />
+          </div>
+        )}
+      </PeekSection>
+
+      {data.runnable && (
+        <PeekSection title='Can this agent run?'>
+          <RunnableLine r={data.runnable} />
+        </PeekSection>
+      )}
+
+      <PeekSection title={`Transcript (last ${data.transcript.length} events)`}>
+        {data.transcript.length ? (
+          <ol className='grid gap-1.5'>
+            {data.transcript.map((e) => (
+              <li key={e.seq} className='grid grid-cols-[3rem_6rem_1fr] gap-2 text-xs'>
+                <span className='text-muted-foreground tabular-nums'>#{e.seq}</span>
+                <span className='text-muted-foreground truncate' title={new Date(e.ts).toLocaleString()}>{e.type}</span>
+                <span className='min-w-0 break-words whitespace-pre-wrap'>{e.text}</span>
+              </li>
+            ))}
+          </ol>
+        ) : <p className='text-muted-foreground text-sm'>No transcript events.</p>}
+      </PeekSection>
+
+      <PeekSection title='Links'>
+        <div className='flex flex-wrap gap-2'>
+          <Link href={`/admin/accounts/${encodeURIComponent(s.org.slug)}`} className={buttonVariants({ variant: 'outline', size: 'sm' })}><Icons.account /> {s.org.name}</Link>
+          <Button variant='outline' size='sm' onClick={onJob}><Icons.search /> This job&apos;s sessions</Button>
+          {data.orchestrator && <Link href={`/admin/compute?section=orchestrators&state=all&orch=${data.orchestrator.id}`} className={buttonVariants({ variant: 'outline', size: 'sm' })}><Icons.route /> Orchestrator</Link>}
+          <Button variant='ghost' size='sm' onClick={() => copyText(s.id, 'Session id copied')}>Copy id</Button>
+        </div>
+      </PeekSection>
+    </div>
+  );
+}
+
+function statusSentence(s: SessionRow): string {
+  const agent = s.agent_id ?? s.harness;
+  switch (s.status) {
+    case 'queued': return `Waiting ${dur(waitOf(s))} for an orchestrator to claim it${s.error_class === 'unclaimable' ? ', but its agent is not scheduled, so none will' : ''}.`;
+    case 'running': return `Running ${agent} for ${dur(runOf(s))}; last heartbeat ${dur(since(s.heartbeat_at ?? s.started_at))} ago.`;
+    case 'completed': return `Finished after ${dur(runOf(s))}${s.completed_reason ? ` (${s.completed_reason.replace(/_/g, ' ')})` : ''}.`;
+    case 'cancelled': return 'Cancelled.';
+    default: return `${s.status === 'timeout' ? 'Timed out' : 'Failed'} after ${dur(runOf(s))}${s.error_label ? `: ${s.error_label}` : ''}.`;
+  }
+}
+
+/** Whether an agent can run, and why not: missing vault keys (with the fix), or no setup script. */
+export function RunnableLine({ r }: { r: Runnable }) {
+  return (
+    <p className='text-sm'>
+      <span className={cn('font-medium', r.runnable ? (r.has_setup_script ? 'text-emerald-700 dark:text-emerald-400' : AMBER) : 'text-destructive')}>
+        {r.runnable ? (r.has_setup_script ? 'Can run.' : 'May run.') : 'Cannot run.'}
+      </span>{' '}
+      {r.reason}
+      {!r.runnable && <> <Link href='/admin/keys' className='hover:underline'>Open Key vault</Link></>}
+    </p>
+  );
+}
+
+/** A compact table inside a peek. */
+export function MiniTable({ head, rows }: { head: string[]; rows: ReactNode[][] }) {
+  return (
+    <div className='overflow-x-auto border-y'>
+      <Table>
+        <TableHeader>
+          <TableRow className='hover:bg-transparent'>{head.map((h) => <TableHead key={h} className='text-muted-foreground h-7 px-2 text-xs font-normal'>{h}</TableHead>)}</TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((r, i) => <TableRow key={i} className='hover:bg-transparent'>{r.map((c, j) => <TableCell key={j} className='px-2 py-1.5 text-xs'>{c}</TableCell>)}</TableRow>)}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}

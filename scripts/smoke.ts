@@ -1177,6 +1177,123 @@ try {
     console.log("✓ compute summary: verdict rules, binding limit, boat listing classified and cached (timeout, stale fallback)");
   }
 
+  // ---------- Compute record tables (src/compute-records.ts): sessions, orchestrators, unmatched sandboxes, runnability ----------
+  {
+    const { readdirSync } = await import("node:fs");
+    const { BOAT_SETUP_HARNESSES } = await import("../src/harness-setup.js");
+    const { unmatchedSandboxes, sessionHint } = await import("../src/compute-records.js");
+    const { classifySandboxNames, resetComputeCaches } = await import("../src/compute.js");
+    // The constant is what the directory holds (Vercel does not ship orchestrator/images, so the server cannot read it).
+    const scripts = readdirSync(new URL("../orchestrator/images/boat-setup/", import.meta.url)).filter((f) => f.endsWith(".sh") && f !== "_common.sh").map((f) => f.slice(0, -3)).sort();
+    assert.deepEqual([...BOAT_SETUP_HARNESSES].sort(), scripts, "BOAT_SETUP_HARNESSES matches orchestrator/images/boat-setup/*.sh");
+
+    // Unmatched on boat: a worker whose orchestrator is gone, an orchestrator-named sandbox with no row, the image
+    // builder and another deployment's sandbox; our live orchestrator, its worker, snapshot images and archived ones are not.
+    const sbs = classifySandboxNames([
+      { id: "bx_a", name: "octi-orch-a", state: "running", archiveAfter: new Date(Date.now() + 3_600_000).toISOString() },
+      { id: "bx_w1", name: "octi-w-orch-a-codex", state: "running" }, { id: "bx_w2", name: "octi-w-orch-gone-codex", state: "running", createdAt: new Date().toISOString() },
+      { id: "bx_x", name: "octi-orch-x", state: "running" }, { id: "bx_i", name: "octi-img-build", state: "running" }, { id: "bx_m", name: "octi-orch-img-abc", state: "ready" },
+      { id: "bx_o", name: "octv-orch-b", state: "running" }, { id: "bx_old", name: "octi-w-orch-gone-pi", state: "archived" },
+    ], "octi", ["orch-a"]);
+    const um = unmatchedSandboxes(sbs, [{ sandbox_id: "bx_a", orchestrator_id: "orch-a" }]);
+    assert.deepEqual(um.map((u) => [u.sandbox_id, u.kind, u.parent_orchestrator_id]), [
+      ["bx_w2", "worker_no_parent", "orch-gone"], ["bx_x", "orch_no_row", null], ["bx_i", "image_builder", null], ["bx_o", "other_prefix", null]]);
+    // Fix hints: the missing env var is read out of the broker's error, old and new.
+    const ses = { error_class: "credentials", agent_id: "qwen-code/qwen3", harness: "qwen-code" };
+    assert.deepEqual(sessionHint(ses, 'credentials: POST /api/worker/sessions/x/credentials -> 424: {"error":"No vault provider supplies DASHSCOPE_API_KEY","code":"missing_credential","env":"DASHSCOPE_API_KEY"}'),
+      { text: "Missing key DASHSCOPE_API_KEY. Add it in Key vault.", href: "/admin/keys" });
+    assert.equal(sessionHint(ses, "credentials -> 503")!.text, "A provider key is missing. Add it in Key vault.");
+    assert.equal(sessionHint({ ...ses, error_class: "unclaimable" }, "")!.href, "/admin/agents", "Harness mix");
+    assert.equal(sessionHint({ ...ses, error_class: "time_cap" }, "")!.href, "/admin/configuration", "Agent configuration");
+    assert.equal(sessionHint({ ...ses, error_class: "heartbeat" }, ""), null);
+
+    // The endpoints over real rows: a running orchestrator with a fleet check-in, a failed launch and an ended one, and
+    // sessions copied from one the earlier tests created (a failure with a missing key, a stuck heartbeat, a finished one).
+    resetComputeCaches();
+    const [live] = await db.query<{ id: number }>(`INSERT INTO orchestrator_sandboxes (sandbox_id, orchestrator_id, state, created_at, ready_at, job_id, pods, timings, code_hash)
+      VALUES ('smoke-cr-live', 'orch-smoke-cr', 'running', now() - interval '20 minutes', now() - interval '19 minutes', 'sim_smoke_cr', 8, '{"created": 900, "ready": 5000, "code": 7000, "configured": 7500, "preflight": 7900, "started": 8200}', 'abc123') RETURNING id`);
+    await db.query(`INSERT INTO orchestrators (id, capacity, meta, last_seen) VALUES ('orch-smoke-cr', 8, '{"worker_id": "host-smoke-cr", "running": {"codex/gpt": 2, "pi/x": 0}}', now() - interval '3 minutes')
+      ON CONFLICT (id) DO UPDATE SET meta = excluded.meta, last_seen = excluded.last_seen`);
+    const [failedLaunch] = await db.query<{ id: number }>(`INSERT INTO orchestrator_sandboxes (sandbox_id, state, created_at, deleted_at, error, launch_step, launch_error)
+      VALUES ('smoke-cr-fail', 'deleted', now() - interval '10 minutes', now() - interval '6 minutes', 'ready (240s): sandbox bx not ready after 240s', 'ready', 'sandbox bx not ready after 240s') RETURNING id`);
+    await db.query(`INSERT INTO orchestrator_sandboxes (sandbox_id, orchestrator_id, state, created_at, ready_at, deleted_at, error, reap_reason)
+      VALUES ('smoke-cr-ended', 'orch-smoke-cr-old', 'deleted', now() - interval '3 hours', now() - interval '3 hours', now() - interval '1 hour', 'drained (idle 10 min)', 'drained (idle 10 min)')`);
+    await db.query("INSERT INTO compute_events (kind, sandbox_id, step, reason) VALUES ('launch_failed', 'smoke-cr-fail', 'ready', 'sandbox bx not ready after 240s')");
+    const copy = (id: string, set: string) => db.query(`/* tenant: smoke fixture */ INSERT INTO agent_sessions (id, simulation_id, org_id, product_id, scenario_id, model, harness, agent_id, status, queued_at, started_at, heartbeat_at, ended_at, error_message, worker_id, sandbox_id, cost_usd, metadata, completed_reason)
+      SELECT $1, simulation_id, org_id, product_id, scenario_id, model, harness, agent_id, ${set} FROM agent_sessions ORDER BY queued_at LIMIT 1`, [id]);
+    await copy("ses_smoke_cr_key", `'failed', now() - interval '30 minutes', now() - interval '29 minutes', now() - interval '28 minutes', now() - interval '28 minutes',
+      'credentials: POST /api/worker/sessions/x/credentials -> 424: {"error":"No vault provider supplies DASHSCOPE_API_KEY","code":"missing_credential","env":"DASHSCOPE_API_KEY"}', 'host-smoke-cr', 'bx_smoke_w', 0.0123,
+      '{"boat_est_cost_usd": 0.002, "wall_ms": 60000, "agent_turns": 3, "max_agent_turns": 40, "environment": {"SECRET": "never shown"}}'::jsonb, NULL`);
+    await copy("ses_smoke_cr_stuck", "'running', now() - interval '15 minutes', now() - interval '14 minutes', now() - interval '9 minutes', NULL, NULL, 'host-smoke-cr', NULL, 0, '{}'::jsonb, NULL");
+    await copy("ses_smoke_cr_old", "'completed', now() - interval '3 days', now() - interval '3 days', now() - interval '3 days', now() - interval '3 days', NULL, NULL, NULL, 0.5, '{}'::jsonb, 'done'");
+    await db.query("INSERT INTO transcript_events (session_id, seq, ts, type, text, raw) VALUES ('ses_smoke_cr_key', 1, now(), 'assistant', $1, '{}')", ["x".repeat(400)]);
+    await db.query("INSERT INTO gateway_usage (token_hash, provider, session_id, requests, input_tokens, cost_usd) VALUES ('smoke-cr-tok', 'openai', 'ses_smoke_cr_key', 3, 1000, 0.01)");
+    await db.query("INSERT INTO gateway_usage (token_hash, provider, orchestrator_id, requests, cost_usd) VALUES ('smoke-cr-orch', 'anthropic', 'orch-smoke-cr', 5, 0.25)");
+
+    assert.equal((await fetch(`${base}/api/admin/onboarding/compute/sessions`)).status, 401, "the record tables need the admin token");
+    const ids = (r: any) => r.rows.map((x: any) => x.id);
+    // Scoped to the copied sessions' job: earlier tests left other sessions in it and elsewhere.
+    const [{ simulation_id: sim }] = await db.query<any>("/* tenant: smoke fixture */ SELECT simulation_id FROM agent_sessions WHERE id = 'ses_smoke_cr_key'");
+    const def = await json(adm("GET", `/compute/sessions?limit=500&job_id=${sim}`));
+    assert.ok(ids(def).includes("ses_smoke_cr_key") && ids(def).includes("ses_smoke_cr_stuck") && !ids(def).includes("ses_smoke_cr_old"), "default: last 24 h, every status");
+    const keyRow = def.rows.find((x: any) => x.id === "ses_smoke_cr_key");
+    assert.deepEqual([keyRow.error_class, keyRow.error_label, keyRow.sandbox_est_usd, keyRow.cost_usd], ["credentials", "Missing provider key", 0.002, 0.0123]);
+    assert.ok(keyRow.org.slug && typeof keyRow.queued_at === "string");
+    const byClass = await json(adm("GET", `/compute/sessions?status=failed,timeout&class=credentials&since=1h&job_id=${sim}`));
+    assert.ok(ids(byClass).includes("ses_smoke_cr_key") && byClass.rows.every((x: any) => x.error_class === "credentials") && byClass.total === byClass.rows.length, "the class filter, by the shared classifier");
+    const stale = await json(adm("GET", `/compute/sessions?stale_heartbeat=1&job_id=${sim}`));
+    assert.ok(ids(stale).includes("ses_smoke_cr_stuck") && stale.rows.every((x: any) => x.status === "running"), "heartbeat older than 5 min");
+    assert.ok(ids(await json(adm("GET", `/compute/sessions?since=7d&status=completed&job_id=${sim}`))).includes("ses_smoke_cr_old"));
+    const inc = await json(adm("GET", `/compute/sessions?status=queued&job_id=${sim}&include=ses_smoke_cr_old`));
+    assert.equal(inc.rows[0].id, "ses_smoke_cr_old", "include: a deep-linked session whatever the filters, first");
+    assert.equal((await adm("GET", "/compute/sessions?since=2y")).status, 400);
+    const peek = await json(adm("GET", "/compute/sessions/ses_smoke_cr_key"));
+    assert.deepEqual(peek.hint, { text: "Missing key DASHSCOPE_API_KEY. Add it in Key vault.", href: "/admin/keys" });
+    assert.ok(peek.metadata.wall_ms === 60000 && peek.metadata.agent_turns === 3 && !("environment" in peek.metadata), "whitelisted metadata only");
+    assert.ok(peek.gateway.length === 1 && peek.gateway[0].requests === 3 && peek.transcript.length === 1 && peek.transcript[0].text.length === 300);
+    assert.equal(peek.orchestrator?.id, live.id, "the orchestrator whose worker claimed it");
+    assert.ok(peek.runnable === null || typeof peek.runnable.runnable === "boolean");
+    assert.equal((await adm("GET", "/compute/sessions/ses_nope")).status, 404);
+
+    const orchIds = (r: any) => r.rows.map((x: any) => x.sandbox_id);
+    const liveList = await json(adm("GET", "/compute/orchestrators"));
+    assert.ok(orchIds(liveList).includes("smoke-cr-live") && !orchIds(liveList).includes("smoke-cr-fail"), "Live by default");
+    assert.ok(liveList.boat.ok === false && liveList.limits.heartbeat_stale_s === 90, "no boat key: boat columns empty, the page still renders");
+    const o = liveList.rows.find((x: any) => x.sandbox_id === "smoke-cr-live");
+    assert.deepEqual([o.running_by_agent, o.running, o.pods, o.boot_ms, o.job_id, o.spend.orchestrator_model_usd], [{ "codex/gpt": 2 }, 2, 8, 60_000, "sim_smoke_cr", 0.25]);
+    assert.ok(o.spend.sandbox_est_usd > 0 && o.ttl_left_s === null && o.end_class === null);
+    assert.ok(orchIds(await json(adm("GET", "/compute/orchestrators?state=stale"))).includes("smoke-cr-live"), "running with a 3-minute-old check-in is stale");
+    const fl = await json(adm("GET", "/compute/orchestrators?state=failed_launch"));
+    assert.ok(fl.rows.some((x: any) => x.sandbox_id === "smoke-cr-fail" && x.launch_step === "ready" && x.launch_error === "sandbox bx not ready after 240s"));
+    const ended = (await json(adm("GET", "/compute/orchestrators?state=ended"))).rows.find((x: any) => x.sandbox_id === "smoke-cr-ended");
+    assert.deepEqual([ended.reap_reason, ended.end_class.key, ended.end_class.routine], ["drained (idle 10 min)", "reap:idle_drain", true]);
+    assert.equal((await json(adm("GET", `/compute/orchestrators?state=booting&include=${failedLaunch.id}`))).rows[0].id, failedLaunch.id);
+    assert.deepEqual((await json(adm("GET", "/compute/orchestrators?state=unmatched"))).rows, [], "no boat listing: nothing unmatched");
+    assert.equal((await adm("GET", "/compute/orchestrators?state=bogus")).status, 400);
+    const op = await json(adm("GET", `/compute/orchestrators/${live.id}`));
+    assert.ok(op.row.sandbox_id === "smoke-cr-live" && op.timings.started === 8200 && op.logs_command === "npm run boat-orchestrators -- logs smoke-cr-live");
+    assert.deepEqual(op.sessions.map((x: any) => x.id).sort(), ["ses_smoke_cr_key", "ses_smoke_cr_stuck"], "recent sessions: claimed by its worker id");
+    assert.ok(op.gateway.length === 1 && op.gateway[0].cost_usd === 0.25 && Array.isArray(op.workers) && Array.isArray(op.tokens));
+    assert.equal((await json(adm("GET", `/compute/orchestrators/${failedLaunch.id}`))).events[0].kind, "launch_failed");
+    assert.equal((await adm("GET", "/compute/orchestrators/999999")).status, 404);
+
+    const run = await json(adm("GET", "/compute/agents/runnable"));
+    assert.ok(Array.isArray(run.rows));
+    for (const r of run.rows) {
+      assert.equal(r.has_setup_script, BOAT_SETUP_HARNESSES.includes(r.harness));
+      assert.equal(r.runnable, r.missing_env.length === 0);
+      if (r.runnable && !r.has_setup_script) assert.match(r.reason, /^No setup script/);
+    }
+
+    await db.query("/* tenant: smoke fixture */ DELETE FROM gateway_usage WHERE token_hash LIKE 'smoke-cr-%'");
+    await db.query("/* tenant: smoke fixture */ DELETE FROM agent_sessions WHERE id LIKE 'ses_smoke_cr_%'");
+    await db.query("DELETE FROM orchestrator_sandboxes WHERE sandbox_id LIKE 'smoke-cr-%'");
+    await db.query("DELETE FROM orchestrators WHERE id = 'orch-smoke-cr'");
+    await db.query("DELETE FROM compute_events WHERE sandbox_id LIKE 'smoke-cr-%'");
+    resetComputeCaches();
+    console.log("✓ compute records: sessions (filters, class, include, peek with hint), orchestrators (chips, peek), unmatched on boat, runnability, BOAT_SETUP_HARNESSES");
+  }
+
   // ---------- global compute settings (/admin/compute): set here > environment > default ----------
   {
     const { config } = await import("../src/queries.js");

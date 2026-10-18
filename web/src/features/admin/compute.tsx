@@ -1,11 +1,12 @@
 'use client';
 // Operations pages over src/settings.ts and the default population: Agent configuration (models, run sizes, research
 // limits), Harness mix (the coding-agent mix and admin-added harnesses) and Compute (/admin/compute: the on-call
-// console over GET /compute/summary, src/compute.ts, with the capacity settings in its Limits table). Each setting
+// console over GET /compute/summary, src/compute.ts, with the capacity settings in its Limits table, and its Sessions
+// and Orchestrators tables in compute-sessions.tsx / compute-orchestrators.tsx). Each setting
 // shows the value in force and where it comes from: set here, the server's environment, or the built-in default.
 // Saving writes platform_settings (every server picks it up within 30s) and an audit log line. Model keys are the key
 // vault's credentials: a key is typed once and never shown again, only its hint.
-import { useEffect, useState, type ReactNode } from 'react';
+import { Suspense, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import { useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
@@ -26,6 +27,9 @@ import { cn } from '@/lib/utils';
 import { post, useAdmin, useAdminAction } from './lib';
 import { ErrorBox, FormRow, LoadingCards, Mono, Notice, Section, When } from './ui';
 import { ActionsMenu, Field, RecordView, type RecordCol } from '@/components/layout/record-view';
+import { ageOf, dur, EST, money, useNow } from './compute-common';
+import { ComputeSessions } from './compute-sessions';
+import { ComputeOrchestrators } from './compute-orchestrators';
 
 interface Setting {
   key: string; group: string; label: string; help: string; kind: 'text' | 'int' | 'number' | 'choice'; default: string | number;
@@ -374,23 +378,11 @@ interface Summary {
 }
 
 const SUMMARY = '/compute/summary';
-const EST = 'Estimate from the boat price table (BOAT_PRICE_PER_HOUR), not boat\'s billing meter.';
-const money = (x: number) => `$${x.toFixed(2)}`;
-/** "45 s", "2.1 min", "3 h". */
-const dur = (s: number | null | undefined) => (s == null ? '—' : s < 60 ? `${Math.round(s)} s` : s < 3600 ? `${(s / 60).toFixed(1)} min` : `${(s / 3600).toFixed(1)} h`);
-const ageOf = (d: string | null | undefined) => (d ? Math.max(0, (Date.now() - new Date(d).getTime()) / 1000) : null);
 const LEVEL: Record<Level, { border: string; text: string }> = {
   red: { border: 'border-l-destructive', text: 'text-destructive' },
   amber: { border: 'border-l-amber-500', text: 'text-amber-700 dark:text-amber-400' },
   green: { border: 'border-l-emerald-500', text: 'text-emerald-700 dark:text-emerald-400' }
 };
-
-/** Re-renders every `ms` so relative times ("12 s ago") stay current between fetches. */
-function useNow(ms = 5_000) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => { const t = setInterval(() => setNow(Date.now()), ms); return () => clearInterval(t); }, [ms]);
-  return now;
-}
 
 /**
  * Compute: is compute healthy, is work flowing, what is stuck, and why. A verdict worked out on the server, how fresh
@@ -409,7 +401,10 @@ export function AdminCompute() {
   // Refresh asks boat again (past its 30 s listing cache): the same call as "Test connection".
   const refresh = async () => {
     setRefreshing(true);
-    try { qc.setQueryData(['admin', SUMMARY], await adminApi<Summary>('GET', `${SUMMARY}?fresh=1`)); }
+    try {
+      qc.setQueryData(['admin', SUMMARY], await adminApi<Summary>('GET', `${SUMMARY}?fresh=1`));
+      void qc.invalidateQueries({ predicate: (q) => q.queryKey[0] === 'admin' && /^\/compute\/(sessions|orchestrators)/.test(String(q.queryKey[1])) });
+    }
     catch (e) { toast.error((e as Error).message); }
     finally { setRefreshing(false); }
   };
@@ -419,6 +414,14 @@ export function AdminCompute() {
     if (dirty[key] !== on) setDirty(next);
     if (!Object.values(next).some(Boolean)) setResumed(false);
   };
+  // The record tables load and fail on their own, so they show even when the summary did not load. They read their
+  // filters and open record from the URL (useSearchParams needs a Suspense boundary).
+  const tables = (
+    <Suspense fallback={<Skeleton className='h-72 rounded-lg' />}>
+      <ComputeSessions />
+      <ComputeOrchestrators verdict={data?.verdict ?? []} />
+    </Suspense>
+  );
   return (
     <PageContainer pageTitle='Compute' pageDescription='Orchestrators and agent sandboxes on boat.dev: what is running, what is waiting, and why.'
       pageHeaderAction={
@@ -435,6 +438,7 @@ export function AdminCompute() {
           <Button variant='outline' size='xs' onClick={() => void refetch()}>Retry</Button>
         </div>
       )}
+      {error && !data && <div className='flex w-full flex-col gap-10 pb-10'>{tables}</div>}
       {isLoading && <div className='grid gap-6'><Skeleton className='h-11 rounded-lg' /><LoadingCards count={6} /><Skeleton className='h-72 rounded-lg' /></div>}
       {data && (
         <div className='flex w-full flex-col gap-10 pb-10'>
@@ -443,6 +447,7 @@ export function AdminCompute() {
             <Tiles s={data} />
           </div>
           <Limits s={data} onEditing={setEdit} />
+          {tables}
           <Environment s={data} onTest={() => void refresh()} testing={refreshing} />
         </div>
       )}

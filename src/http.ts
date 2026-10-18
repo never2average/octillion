@@ -34,6 +34,7 @@ import * as populations from "./populations.js";
 import * as onboarding from "./admin.js";
 import * as library from "./library.js";
 import { computeSummary } from "./compute.js";
+import * as records from "./compute-records.js";
 import { freshSettings, SettingError } from "./settings.js";
 import { freshPlatformHarnesses } from "./harnesses.js";
 
@@ -442,6 +443,12 @@ export function createApp() {
   ob.put("/compute/settings", async (req, res) => void res.json(await library.saveSettings(adminActor(req, res), req.body?.values)));
   // The Compute page (src/compute.ts): verdict, tick freshness, tiles, limits, environment. Read only; ?fresh=1 asks boat again.
   ob.get("/compute/summary", async (req, res) => void res.json(await computeSummary({ fresh: req.query.fresh === "1" })));
+  // Its record tables (src/compute-records.ts): sessions and orchestrators with their peeks, and which agents can run. Read only.
+  ob.get("/compute/sessions", async (req, res) => void res.json(await records.listSessions(req.query as Record<string, unknown>)));
+  ob.get("/compute/sessions/:id", async (req, res) => void res.json(await records.sessionDetail(String(req.params.id))));
+  ob.get("/compute/orchestrators", async (req, res) => void res.json(await records.listOrchestrators(req.query as Record<string, unknown>)));
+  ob.get("/compute/orchestrators/:id", async (req, res) => void res.json(await records.orchestratorDetail(Number(req.params.id))));
+  ob.get("/compute/agents/runnable", async (_req, res) => void res.json(await records.agentRunnability()));
   // Admin-added harnesses (src/harnesses.ts): variants of a registry.json CLI; a new one joins the mix at weight 0, off.
   ob.get("/compute/harnesses", async (_req, res) => void res.json(await library.listHarnesses()));
   ob.post("/compute/harnesses", async (req, res) => void res.status(201).json(await library.addHarness(adminActor(req, res), req.body ?? {})));
