@@ -435,6 +435,13 @@ INSERT INTO model_prices (model, input_per_mtok, cached_input_per_mtok, output_p
   ('@cf/deepseek-ai/deepseek-v4-pro-0813', 1.32, 0.044, 3.96, 'Cloudflare Workers AI pricing, 2026-10-10'),
   ('@cf/openai/gpt-oss-120b',              0.35, 0.35,  0.75, 'Cloudflare Workers AI pricing, 2026-10-10 (no cached rate listed)')
 ON CONFLICT (model) DO NOTHING;
+-- The rest of the registry's gateway models (2026-10-18). Cursor, Copilot and Amp (auto/default) bill on their own
+-- subscriptions and never pass the gateway, so they have no row.
+INSERT INTO model_prices (model, input_per_mtok, cached_input_per_mtok, output_per_mtok, source) VALUES
+  ('gpt-6-sol',        2.00, 0.20, 10.00, 'OpenAI GPT-6 Sol standard tier, 2026-10-18'),
+  ('gemini-4-argon',   4.00, 0.20, 20.00, 'Google Gemini 4 Argon list price after the $2/$10 launch promo (ends 2026-11-30), 2026-10-18'),
+  ('qwen3-coder-plus', 1.00, 1.00,  5.00, 'Alibaba Model Studio base tier, no cached rate published, 2026-10-18')
+ON CONFLICT (model) DO NOTHING;
 
 -- Per-organization MCP activity (src/analytics.ts): connector methods and tool calls with outcome and latency.
 -- Tool arguments and results are never stored.
