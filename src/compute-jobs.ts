@@ -221,7 +221,8 @@ const ORDER: Record<JobState, number> = { waiting: 0, queued: 1, booting: 2, run
  * Jobs that are active, or finished within `since` (1h by default), waiting first, then running, then finished.
  * Filters: `state` (a JobState, "active" or "all"), `kind` (simulation, research, prospect), `q` (job id, account,
  * product or company), `has_failures=1`, `sort=spend`. `include` adds one job whatever the filters (a deep link).
- * At most 2,000 candidate jobs are read; state is worked out per job, so the filters run after.
+ * At most 2,000 candidate jobs are read; state is worked out per job, so the filters run after. `facets` counts the
+ * jobs each state, kind and failures choice would match under the other filters (the `include` row aside).
  */
 export async function listJobs(q: Record<string, unknown>) {
   const db = await getDb();
@@ -235,16 +236,30 @@ export async function listJobs(q: Record<string, unknown>) {
   const include = str(q.include);
   const hours = RANGES[since];
   const recent = (t: string) => `(${t}.status IN ('queued', 'running') OR coalesce(${t}.finished_at, ${t}.created_at) > now() - make_interval(hours => $1) OR ${t}.id = $2)`;
+  // Every kind is read (the kind filter runs after, with the others) so the Kind facet can count each one.
   const [sims, rsh] = await Promise.all([
-    kind && kind !== "simulation" ? [] : db.query<JobDb>(`${SIM_SQL} WHERE ${recent("s")} ORDER BY s.created_at DESC LIMIT 2000`, [hours, include]),
-    kind === "simulation" ? [] : db.query<JobDb>(`${RSH_SQL} WHERE ${recent("r")}${kind ? ` AND r.kind = '${kind === "prospect" ? "prospect" : "product"}'` : ""} ORDER BY r.created_at DESC LIMIT 2000`, [hours, include]),
+    db.query<JobDb>(`${SIM_SQL} WHERE ${recent("s")} ORDER BY s.created_at DESC LIMIT 2000`, [hours, include]),
+    db.query<JobDb>(`${RSH_SQL} WHERE ${recent("r")} ORDER BY r.created_at DESC LIMIT 2000`, [hours, include]),
   ]);
   const needle = str(q.q)?.toLowerCase();
   let rows = (await buildRows([...sims, ...rsh])).map(publicRow);
-  const keep = (r: JobRow) =>
-    (state === "all" || (state === "active" ? !["finished", "failed"].includes(r.state) : r.state === state))
-    && (!needle || [r.id, r.name, r.org?.name, r.org?.slug, r.product?.name, r.company].some((x) => x?.toLowerCase().includes(needle)))
-    && (q.has_failures !== "1" || r.failures.count > 0 || r.failed_launches > 0);
+  const okState = (r: JobRow, s: string) => s === "all" || (s === "active" ? !["finished", "failed"].includes(r.state) : r.state === s);
+  const okFail = (r: JobRow) => r.failures.count > 0 || r.failed_launches > 0;
+  const okText = (r: JobRow) => !needle || [r.id, r.name, r.org?.name, r.org?.slug, r.product?.name, r.company].some((x) => x?.toLowerCase().includes(needle));
+  const keep = (r: JobRow, skip?: "state" | "kind" | "fail") => okText(r)
+    && (skip === "state" || okState(r, state)) && (skip === "kind" || !kind || r.kind === kind) && (skip === "fail" || q.has_failures !== "1" || okFail(r));
+  // The deep-linked row is read whatever its age; it counts only when it is in the range like the rest.
+  const inWindow = (r: JobRow) => r.id !== include || ["queued", "running"].includes(r.status) || Date.parse(r.finished_at ?? r.created_at ?? "") > Date.now() - hours * 3_600_000;
+  const count = (skip: "state" | "kind" | "fail", by: (r: JobRow) => string[]) => {
+    const out: Record<string, number> = {};
+    for (const r of rows) if (inWindow(r) && keep(r, skip)) for (const k of ["", ...by(r)]) out[k] = (out[k] ?? 0) + 1;
+    return out;
+  };
+  const facets = {
+    state: count("state", (r) => ["all", r.state, ...(okState(r, "active") ? ["active"] : [])]),
+    kind: count("kind", (r) => [r.kind]),
+    has_failures: count("fail", (r) => (okFail(r) ? ["1"] : [])),
+  };
   rows = rows.filter((r) => keep(r) || r.id === include);
   const at = (d: string | null) => (d ? Date.parse(d) : Infinity);
   rows.sort(q.sort === "spend"
@@ -253,7 +268,7 @@ export async function listJobs(q: Record<string, unknown>) {
       || (ORDER[a.state] >= ORDER.failed ? at(b.finished_at ?? b.created_at) - at(a.finished_at ?? a.created_at)
         : at(a.waiting_since ?? a.running_since ?? a.created_at) - at(b.waiting_since ?? b.running_since ?? b.created_at)));
   if (include) rows.sort((a, b) => Number(b.id === include) - Number(a.id === include));
-  return { total: rows.length, rows: rows.slice(offset, offset + limit) };
+  return { total: rows.length, facets, rows: rows.slice(offset, offset + limit) };
 }
 
 /**

@@ -12,6 +12,7 @@ import { Button, buttonVariants } from '@/components/ui/button';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Icons } from '@/components/icons';
+import { counted } from '@/lib/octillion-format';
 import { cn } from '@/lib/utils';
 import { useAdmin } from './lib';
 import { copyText, ErrorBox, Mono, Notice, StatusBadge, When, type Tone } from './ui';
@@ -71,13 +72,15 @@ export function ComputeJobs() {
   const [pinned, setPinned] = useState<string | null>(null);
   if (pinned) qs.set('include', pinned);
   // Refresh every 30 s, paused while a record is open (and, as every query, while the tab is hidden).
-  const { data, error, isLoading, refetch } = useAdmin<{ total: number; rows: JobRow[] }>(`/compute/jobs?${qs}`, { refetchInterval: open ? undefined : 30_000, keep: true });
+  const { data, error, isLoading, refetch } = useAdmin<{ total: number; facets?: Record<'state' | 'kind' | 'has_failures', Record<string, number>>; rows: JobRow[] }>(`/compute/jobs?${qs}`, { refetchInterval: open ? undefined : 30_000, keep: true });
   const rows = useMemo(() => data?.rows ?? [], [data]);
   const pin = nextPinned(open, data?.rows.map((r) => r.id), pinned);
   if (pin !== pinned) setPinned(pin);
   useScrollTo('jobs', !!data);
 
   const set = (patch: Record<string, string | null>) => url.write({ ...patch, job: null });
+  // Jobs each choice matches under the other filters (the server's facets); "" is the dropdown's "every".
+  const fc = (k: 'state' | 'kind' | 'has_failures', v: string) => (data?.facets ? data.facets[k][v] ?? 0 : undefined);
   const showSessions = (id: string) => url.write({ ...jobSessions(id), job: null });
   // Opens the orchestrator's peek in its table (the job peek closes; its "Back to job" link returns here).
   const showOrch = (orch: number, job: string) => url.write({ section: 'orchestrators', orch: String(orch), back: job, job: null });
@@ -128,11 +131,11 @@ export function ComputeJobs() {
   const filters = (
     <>
       <NativeSelect aria-label='State' value={state} onChange={(e) => set({ jstate: e.target.value === 'all' ? null : e.target.value })}>
-        {STATES.map((c) => <NativeSelectOption key={c.id} value={c.id}>{c.id === 'all' ? 'Every state' : c.label}</NativeSelectOption>)}
+        {STATES.map((c) => <NativeSelectOption key={c.id} value={c.id}>{counted(c.id === 'all' ? 'Every state' : c.label, fc('state', c.id))}</NativeSelectOption>)}
       </NativeSelect>
       <NativeSelect aria-label='Kind' value={kind ?? ''} onChange={(e) => set({ jkind: e.target.value || null })}>
-        <NativeSelectOption value=''>Every kind</NativeSelectOption>
-        {(Object.keys(KIND_LABEL) as Kind[]).map((k) => <NativeSelectOption key={k} value={k}>{KIND_LABEL[k]}</NativeSelectOption>)}
+        <NativeSelectOption value=''>{counted('Every kind', fc('kind', ''))}</NativeSelectOption>
+        {(Object.keys(KIND_LABEL) as Kind[]).map((k) => <NativeSelectOption key={k} value={k}>{counted(KIND_LABEL[k], fc('kind', k))}</NativeSelectOption>)}
       </NativeSelect>
       <NativeSelect aria-label='Finished within' value={range} onChange={(e) => set({ jsince: e.target.value === '1h' ? null : e.target.value })}>
         <NativeSelectOption value='1h'>Finished in the last hour</NativeSelectOption>
@@ -141,8 +144,8 @@ export function ComputeJobs() {
       </NativeSelect>
       <NativeSelect aria-label='Failures' value={failures ? '1' : ''} onChange={(e) => set({ jfail: e.target.value || null })}
         title='Jobs with failed sessions or failed orchestrator launches'>
-        <NativeSelectOption value=''>With or without failures</NativeSelectOption>
-        <NativeSelectOption value='1'>Has failures</NativeSelectOption>
+        <NativeSelectOption value=''>{counted('With or without failures', fc('has_failures', ''))}</NativeSelectOption>
+        <NativeSelectOption value='1'>{counted('Has failures', fc('has_failures', '1'))}</NativeSelectOption>
       </NativeSelect>
       <NativeSelect aria-label='Order' value={sort ?? ''} onChange={(e) => set({ jsort: e.target.value || null })}>
         <NativeSelectOption value=''>Most urgent first</NativeSelectOption>

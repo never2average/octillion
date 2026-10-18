@@ -147,7 +147,7 @@ async function usage(s: Session, q: { from?: unknown; to?: unknown; days?: unkno
   const sim = users.length ? " AND created_by = ANY($4)" : "";
   const p = users.length ? [s.org, range.start, range.end, users] : [s.org, range.start, range.end];
   const month = "date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'";
-  const [daily, tools, people, runs, spentBy] = await Promise.all([
+  const [daily, tools, people, runs, spentBy, byTool] = await Promise.all([
     db.query<{ day: string; calls: number; errors: number }>(
       `SELECT to_char(date_trunc('day', at), 'YYYY-MM-DD') AS day, count(*) AS calls, count(*) FILTER (WHERE NOT ok) AS errors
          FROM mcp_events WHERE org_id = $1 AND method = 'tools/call' AND at >= $2 AND at < $3${ev} GROUP BY 1 ORDER BY 1`, p),
@@ -167,14 +167,19 @@ async function usage(s: Session, q: { from?: unknown; to?: unknown; days?: unkno
       `SELECT coalesce(sum(GREATEST(s.cost_usd, coalesce((SELECT sum(g.cost_usd) FROM gateway_usage g WHERE g.session_id = s.id), 0))), 0)::float AS usd
          FROM agent_sessions s JOIN simulations r ON r.id = s.simulation_id
         WHERE s.org_id = $1 AND r.created_by = ANY($2) AND s.queued_at >= ${month}`, [s.org, users]) : Promise.resolve(null),
+    // Tool calls by tool for the people picked but any use case: each use case's count in the Use cases filter.
+    db.query<{ name: string; calls: number }>(
+      `SELECT name, count(*) AS calls FROM mcp_events WHERE org_id = $1 AND method = 'tools/call' AND at >= $2 AND at < $3${users.length ? " AND user_id = ANY($4)" : ""} GROUP BY name`, p),
   ]);
+  const toolCalls = new Map(byTool.map((x) => [x.name, Number(x.calls)]));
   const t = await admin.team(s.slug);
   const callsOf = new Map(people.map((x) => [x.user_id, Number(x.calls)]));
   const known = new Set(t.members.map((m) => m.user_id));
   const [{ budget }, spent] = await Promise.all([orgBudget(s.org).catch(() => ({ budget: 0 })), orgMonthSpendUsd(s.org)]);
   return {
     days, range: { from: range.from, to: range.to }, daily, tools, runs: runs[0], filters: { user: users, use_case: useCases },
-    use_cases: templates.map((t) => ({ id: t.id, name: t.name, own: Boolean((t as { own?: boolean }).own) })),
+    use_cases: templates.map((t) => ({ id: t.id, name: t.name, own: Boolean((t as { own?: boolean }).own),
+      calls: [...new Set(t.stages.flatMap((st) => st.tools))].reduce((n, x) => n + (toolCalls.get(x) ?? 0), 0) })),
     people: [
       ...t.members.map((m) => ({ user_id: m.user_id, email: m.email ?? m.name ?? "Unnamed member", me: m.user_id === s.user, calls: callsOf.get(m.user_id) ?? 0 })),
       ...people.filter((x) => !known.has(x.user_id)).map((x) => ({ user_id: x.user_id, email: "Former member", me: false, calls: Number(x.calls) })),
@@ -341,7 +346,8 @@ export function appRouter() {
       people: r.people.map((x) => ({ ...x, label: label(x.user_id), email: who.get(x.user_id) ?? null })) })),
       help: help.map((h) => ({ ...h, requester_label: label(h.requester), requester_email: who.get(h.requester) ?? null,
         helper_label: label(h.helper), helper_email: h.helper ? who.get(h.helper) ?? null : null })),
-      members: t.members.filter((m) => m.user_id).map((m) => ({ user_id: m.user_id, label: label(m.user_id) })),
+      members: t.members.filter((m) => m.user_id).map((m) => ({ user_id: m.user_id, label: label(m.user_id),
+        calls: calls.reduce((n, c) => n + (c.user_id === m.user_id ? Number(c.calls) : 0), 0) })),
       workflow: TOOL_GROUPS.map((g) => {
         const byUser = new Map<string | null, { used: Set<string>; calls: number; last: Date | null }>();
         for (const c of calls) {
@@ -510,8 +516,8 @@ export function appRouter() {
     const members = t.members.filter((m) => s.role === "admin" || m.user_id === s.user)
       .map((m) => ({ user_id: m.user_id, email: m.email, name: m.name, role: m.role, active: m.status === "active" }));
     if (s.user && !members.some((m) => m.user_id === s.user)) members.unshift({ user_id: s.user, email: null, name: null, role: s.role === "admin" ? "admin" : "member", active: true });
-    const ctx = await context.getPeople(s.org, members.map((m) => m.user_id));
-    res.json({ users: members.map((m) => ({ ...m, me: m.user_id === s.user, context: ctx[m.user_id] })), can_manage: s.role === "admin" });
+    const [ctx, counts] = await Promise.all([context.getPeople(s.org, members.map((m) => m.user_id)), context.memoryCounts(s.org, "user")]);
+    res.json({ users: members.map((m) => ({ ...m, me: m.user_id === s.user, context: ctx[m.user_id], memories: counts[m.user_id] ?? 0 })), can_manage: s.role === "admin" });
   });
   api.put("/context/users/:userId", async (req, res) => {
     const s = S(res), id = String(req.params.userId);

@@ -26,7 +26,7 @@ import { StatStrip } from '@/components/layout/section';
 import { Icons } from '@/components/icons';
 import { adminApi } from '@/lib/api-client';
 import { downloadCsv, downloadJson, type CsvValue } from '@/lib/csv';
-import { num, usd } from '@/lib/octillion-format';
+import { counted, num, usd } from '@/lib/octillion-format';
 import { cn } from '@/lib/utils';
 import { ErrorBox, LoadingCards, Mono, Section, StatusBadge, Trend, When } from './ui';
 import { ComputeJobs } from './compute-jobs';
@@ -35,7 +35,9 @@ import { ComputeSessions } from './compute-sessions';
 
 type ErrorKind = 'tool' | 'session' | 'onboarding';
 interface ErrorRow { at: string; account: string; slug: string; [k: string]: string | number | null }
-interface Facets { users?: { id: string; email: string | null; name: string | null; account: string }[]; accounts: { slug: string; name: string }[]; products: string[]; tools: string[]; clients: string[]; plans: string[]; sub_statuses: string[]; stages: { id: string; label: string }[] }
+interface Facets { users?: { id: string; email: string | null; name: string | null; account: string }[]; accounts: { slug: string; name: string }[]; products: string[]; tools: string[]; clients: string[]; plans: string[]; sub_statuses: string[]; stages: { id: string; label: string }[];
+  /** Records per value: tool calls (account, user, tool), connections (client), accounts (product, plan, billing, stage). */
+  counts?: Record<string, Record<string, number>> }
 
 interface Analytics {
   range?: { from: string; to: string; days: number };
@@ -125,21 +127,24 @@ function useReport<T>(path: string | null) {
   return useQuery<T>({ queryKey: ['admin', path], queryFn: () => adminApi<T>('GET', path!), enabled: path != null, staleTime: 15_000, placeholderData: keepPreviousData });
 }
 
-type Option = { value: string; label: string };
+type Option = { value: string; label: string; count?: number };
 function facetOptions(f: Facets | undefined): Record<ListKey, Option[]> {
   const plain = (xs: string[] | undefined) => (xs ?? []).map((x) => ({ value: x, label: x }));
-  return {
+  const lists: Record<ListKey, Option[]> = {
     // people Clerk no longer knows (removed, or seeded demo activity) show as unknown with the end of their id
     user: (f?.users ?? []).map((u) => ({ value: u.id, label: `${u.email ?? u.name ?? `Unknown user …${u.id.slice(-6)}`} · ${u.account}` })),
     account: (f?.accounts ?? []).map((a) => ({ value: a.slug, label: a.name })), product: plain(f?.products), tool: plain(f?.tools), client: plain(f?.clients),
     plan: plain(f?.plans), sub_status: (f?.sub_statuses ?? []).map((x) => ({ value: x, label: x.replace('_', ' ') })), stage: (f?.stages ?? []).map((s) => ({ value: s.id, label: s.label }))
   };
+  // Each value's count from the server (0 when it has none), once the report has loaded.
+  const c = f?.counts;
+  return c ? Object.fromEntries(Object.entries(lists).map(([k, xs]) => [k, xs.map((o) => ({ ...o, count: c[k]?.[o.value] ?? 0 }))])) as Record<ListKey, Option[]> : lists;
 }
 
 /** One checkbox list in the Filters popover; gets its own search once it is long. Selected values not offered (e.g. from a shared URL) still show. */
 function FacetList({ label, options, value, onChange }: { label: string; options: Option[]; value: string[]; onChange: (v: string[]) => void }) {
   const [q, setQ] = useState('');
-  const all = [...options, ...value.filter((v) => !options.some((o) => o.value === v)).map((v) => ({ value: v, label: v }))];
+  const all: Option[] = [...options, ...value.filter((v) => !options.some((o) => o.value === v)).map((v) => ({ value: v, label: v }))];
   const shown = all.filter((o) => !q || o.label.toLowerCase().includes(q.toLowerCase()));
   return (
     <div className='flex flex-col gap-1.5'>
@@ -156,7 +161,8 @@ function FacetList({ label, options, value, onChange }: { label: string; options
             <li key={o.value}>
               <label className='hover:bg-muted flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm leading-none'>
                 <Checkbox checked={on} onCheckedChange={(c) => onChange(c ? [...value, o.value] : value.filter((v) => v !== o.value))} />
-                <span className='truncate'>{o.label}</span>
+                <span className='min-w-0 flex-1 truncate'>{o.label}</span>
+                {o.count != null && <span className='text-muted-foreground shrink-0 text-xs tabular-nums'>{num(o.count)}</span>}
               </label>
             </li>
           );
@@ -196,6 +202,7 @@ function UsersPicker({ p, facets }: { p: ReturnType<typeof useReportParams>; fac
                   <Checkbox checked={on} onCheckedChange={(c) => p.setList('user', c ? [...value, o.value] : value.filter((v) => v !== o.value))} />
                   <span className='min-w-0 flex-1 truncate'>{who}</span>
                   <span className='text-muted-foreground max-w-24 shrink-0 truncate text-xs'>{account}</span>
+                  {o.count != null && <span className='text-muted-foreground shrink-0 text-xs tabular-nums' title='Tool calls in this period'>{num(o.count)}</span>}
                 </label>
               </li>
             );
@@ -400,7 +407,7 @@ function ErrorsReport({ view }: { view: 'analytics' | 'health' }) {
           </div>
           {view === 'health' && (
             <NativeSelect aria-label='Errors from' value={kind} onChange={(e) => setKind(e.target.value as ErrorKind)}>
-              {KINDS.map((k) => <NativeSelectOption key={k.id} value={k.id}>{k.label}{a ? ` · ${num(errorCounts(a)[k.id])}` : ''}</NativeSelectOption>)}
+              {KINDS.map((k) => <NativeSelectOption key={k.id} value={k.id}>{counted(k.label, a && errorCounts(a)[k.id])}</NativeSelectOption>)}
             </NativeSelect>
           )}
           <DateRangePicker value={p.range} onChange={p.setRange} />

@@ -81,6 +81,13 @@ export async function listMemories(orgId: number, scope: MemoryScope, subject: s
     all ? [orgId, scope, limit] : [orgId, scope, subject, limit]);
 }
 
+/** How many memory items each subject of a scope has (the Context page's person picker shows it). */
+export async function memoryCounts(orgId: number, scope: MemoryScope): Promise<Record<string, number>> {
+  const rows = await (await getDb()).query<{ subject: string; n: unknown }>(
+    "SELECT subject, count(*) AS n FROM context_memories WHERE org_id = $1 AND scope = $2 GROUP BY subject", [orgId, scope]);
+  return Object.fromEntries(rows.map((r) => [r.subject, Number(r.n) || 0]));
+}
+
 /**
  * Product memory needs no onboarded product: an onboarded product (by slug or name) is stored by its slug, any other
  * name as written, so memory can start before onboarding and joins up when the product is onboarded under that name.

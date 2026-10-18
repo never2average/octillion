@@ -25,6 +25,7 @@ import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select'
 import { Switch } from '@/components/ui/switch';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { adminApi } from '@/lib/api-client';
+import { counted } from '@/lib/octillion-format';
 import { cn } from '@/lib/utils';
 import { post, useAdmin, useAdminAction } from './lib';
 import { ErrorBox, FormRow, LoadingCards, Mono, Notice, Section, When } from './ui';
@@ -291,8 +292,8 @@ function ModelKeys() {
   return (
     <Section title='Key vault' description='Every key Octillion uses, encrypted at rest: inference providers, the sandbox provider, search and coding-agent subscriptions. Agents and orchestrators get scoped gateway tokens, never these keys.'
       action={<NativeSelect aria-label='Type' value={type} onChange={(e) => setType(e.target.value)}>
-        <NativeSelectOption value=''>All types</NativeSelectOption>
-        {TYPE_ORDER.map((t) => <NativeSelectOption key={t} value={t}>{t}</NativeSelectOption>)}
+        <NativeSelectOption value=''>{counted('All types', data?.providers.length)}</NativeSelectOption>
+        {TYPE_ORDER.map((t) => <NativeSelectOption key={t} value={t}>{counted(t, data && data.providers.filter((p) => typeOf(p.slug) === t).length)}</NativeSelectOption>)}
       </NativeSelect>}>
       <ErrorBox error={error} />
       {data && !data.unlocked && <Notice>The key vault is locked: set <Mono>OCTILLION_VAULT_KEY</Mono> on the server to add keys.</Notice>}

@@ -114,17 +114,22 @@ export async function parseFilters(q: AnalyticsQuery, range: ReturnType<typeof r
 
 const memo = <T>(f: () => Promise<T>) => { let p: Promise<T> | null = null; return () => (p ??= f()); };
 
-/** What the filter lists offer, for the period but not narrowed by the filters themselves. */
+/**
+ * What the filter lists offer, for the period but not narrowed by the filters themselves. `counts` says how many
+ * records each value has: tool calls in the period for an account, person and tool; connections (handshakes) for a
+ * client; accounts for a product name, plan, billing status and stage.
+ */
 async function facets(range: ReturnType<typeof reportRange>, orgsOnce: () => Promise<Orgs>) {
   const db = await getDb();
   const { F, T } = range.sql;
   const [accounts, products, tools, clients, people] = await Promise.all([
-    db.query<{ slug: string; name: string }>(`SELECT slug, name FROM organizations ORDER BY lower(name)`),
-    db.query<{ name: string }>(`SELECT DISTINCT name FROM products ORDER BY 1`),
-    db.query<{ name: string }>(`SELECT DISTINCT name FROM mcp_events WHERE method = 'tools/call' AND name IS NOT NULL AND at >= ${F} AND at < ${T} ORDER BY 1`),
-    db.query<{ client: string }>(`SELECT DISTINCT split_part(client, ' ', 1) AS client FROM mcp_events WHERE method = 'initialize' AND client IS NOT NULL AND at >= ${F} AND at < ${T} ORDER BY 1`),
-    db.query<{ user_id: string; account: string }>(
-      `SELECT e.user_id, min(o.name) AS account FROM mcp_events e JOIN organizations o ON o.id = e.org_id
+    db.query<{ slug: string; name: string; calls: unknown }>(`SELECT o.slug, o.name, coalesce(c.n, 0) AS calls FROM organizations o LEFT JOIN
+      (SELECT org_id, count(*) AS n FROM mcp_events WHERE method = 'tools/call' AND at >= ${F} AND at < ${T} GROUP BY org_id) c ON c.org_id = o.id ORDER BY lower(o.name)`),
+    db.query<{ name: string; n: unknown }>(`SELECT name, count(DISTINCT org_id) AS n FROM products GROUP BY name ORDER BY 1`),
+    db.query<{ name: string; n: unknown }>(`SELECT name, count(*) AS n FROM mcp_events WHERE method = 'tools/call' AND name IS NOT NULL AND at >= ${F} AND at < ${T} GROUP BY name ORDER BY 1`),
+    db.query<{ client: string; n: unknown }>(`SELECT split_part(client, ' ', 1) AS client, count(*) AS n FROM mcp_events WHERE method = 'initialize' AND client IS NOT NULL AND at >= ${F} AND at < ${T} GROUP BY 1 ORDER BY 1`),
+    db.query<{ user_id: string; account: string; calls: unknown }>(
+      `SELECT e.user_id, min(o.name) AS account, count(*) FILTER (WHERE e.method = 'tools/call') AS calls FROM mcp_events e JOIN organizations o ON o.id = e.org_id
         WHERE e.user_id IS NOT NULL AND e.at >= ${F} AND e.at < ${T} GROUP BY e.user_id ORDER BY count(*) DESC LIMIT 300`),
   ]);
   // Emails from Clerk (cached a minute per user); without Clerk, or on a lookup error, the id stands in.
@@ -133,15 +138,24 @@ async function facets(range: ReturnType<typeof reportRange>, orgsOnce: () => Pro
     if (clerk.clerkEnabled()) try { const cu = await clerk.users.get(u.user_id); email = clerk.primaryEmail(cu).email; name = clerk.displayName(cu); } catch { /* keep the id */ }
     return { id: u.user_id, email, name, account: u.account };
   }));
+  const tally = (xs: string[]) => { const m: Record<string, number> = {}; for (const x of xs) m[x] = (m[x] ?? 0) + 1; return m; };
+  const num = <R,>(xs: R[], k: (r: R) => string, v: (r: R) => unknown) => Object.fromEntries(xs.map((r) => [k(r), Number(v(r) ?? 0) || 0]));
+  const counts: Record<string, Record<string, number>> = {
+    account: num(accounts, (a) => a.slug, (a) => a.calls), user: num(people, (u) => u.user_id, (u) => u.calls), product: num(products, (p) => p.name, (p) => p.n),
+    tool: num(tools, (t) => t.name, (t) => t.n), client: num(clients.filter((c) => c.client), (c) => c.client, (c) => c.n), plan: {}, sub_status: {}, stage: {},
+  };
   let plans: string[] = [], subStatuses = ["active", "trialing", "past_due", "canceled", "none"], stages: { id: string; label: string }[] = [];
   try {
     const { orgs, stages: st } = await orgsOnce();
     plans = [...new Set(orgs.map((o) => o.subscription?.plan ?? "none"))].sort();
     subStatuses = [...new Set([...subStatuses, ...orgs.map((o) => o.subscription?.status ?? "none")])];
     stages = st.map((s) => ({ id: s.id, label: s.label }));
+    counts.plan = tally(orgs.map((o) => o.subscription?.plan ?? "none"));
+    counts.sub_status = tally(orgs.map((o) => o.subscription?.status ?? "none"));
+    counts.stage = tally(orgs.map((o) => o.stage));
   } catch { /* Stripe or WorkOS down: the lists stay empty, the report still loads */ }
-  return { accounts, users, products: products.map((p) => p.name), tools: tools.map((t) => t.name), clients: clients.map((c) => c.client).filter(Boolean),
-    plans, sub_statuses: subStatuses, stages };
+  return { accounts: accounts.map(({ slug, name }) => ({ slug, name })), users, products: products.map((p) => p.name), tools: tools.map((t) => t.name),
+    clients: clients.map((c) => c.client).filter(Boolean), plans, sub_statuses: subStatuses, stages, counts };
 }
 
 /**

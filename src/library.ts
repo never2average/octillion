@@ -121,36 +121,60 @@ const harnessList = (v: unknown) => {
   return [...new Set(want)];
 };
 
-/** One page of the task library: ?q (every word must appear), language, category, active, has_repo, limit, offset. */
+/**
+ * One page of the task library: ?q (every word must appear), language, category, active, has_repo, limit, offset.
+ * `facets` counts the tasks each filter value would match under the other filters ("" is the filter's "all").
+ */
 export async function listTasks(q: Record<string, unknown> = {}) {
-  const where: string[] = [], params: unknown[] = [];
-  const add = (sql: string, v: unknown) => { params.push(v); where.push(sql.replace("$?", `$${params.length}`)); };
+  // Each condition keeps the filter it belongs to, so a facet can drop its own and count under the rest.
+  const conds: { k: string; sql: string; v?: unknown }[] = [];
+  const add = (k: string, sql: string, v?: unknown) => conds.push({ k, sql, v });
   for (const w of str(q.q, 200).split(/\s+/).filter(Boolean).slice(0, 8))
-    add("concat_ws(' ', title, prompt, array_to_string(tags, ' '), repo_url, category, language, slug) ILIKE $?", `%${w.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
-  if (str(q.language, 60)) add("language = $?", str(q.language, 60));
-  if (str(q.category, 60)) add("category = $?", str(q.category, 60));
-  if (q.active === "true" || q.active === "false") add("active = $?", q.active === "true");
-  if (q.has_repo === "true") where.push("coalesce(repo_url, '') <> ''");
-  if (q.has_repo === "false") where.push("coalesce(repo_url, '') = ''");
-  if (q.source === "vault" || q.source === "admin") add("source = $?", q.source);
-  if (q.edited === "true") where.push("edited_at IS NOT NULL");
-  if (q.harness === "any") where.push("cardinality(harnesses) = 0");
-  else if (q.harness === "set") where.push("cardinality(harnesses) > 0");
-  else if (str(q.harness, 120)) add("$? = ANY(harnesses)", str(q.harness, 120));
+    add("q", "concat_ws(' ', title, prompt, array_to_string(tags, ' '), repo_url, category, language, slug) ILIKE $?", `%${w.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
+  if (str(q.language, 60)) add("language", "language = $?", str(q.language, 60));
+  if (str(q.category, 60)) add("category", "category = $?", str(q.category, 60));
+  if (q.active === "true" || q.active === "false") add("active", "active = $?", q.active === "true");
+  if (q.has_repo === "true") add("has_repo", "coalesce(repo_url, '') <> ''");
+  if (q.has_repo === "false") add("has_repo", "coalesce(repo_url, '') = ''");
+  if (q.source === "vault" || q.source === "admin") add("source", "source = $?", q.source);
+  if (q.edited === "true") add("edited", "edited_at IS NOT NULL");
+  if (q.harness === "any") add("harness", "cardinality(harnesses) = 0");
+  else if (q.harness === "set") add("harness", "cardinality(harnesses) > 0");
+  else if (str(q.harness, 120)) add("harness", "$? = ANY(harnesses)", str(q.harness, 120));
+  const whereOf = (skip?: string) => {
+    const params: unknown[] = [];
+    const parts = conds.filter((c) => c.k !== skip).map((c) => (c.v === undefined ? c.sql : (params.push(c.v), c.sql.replace("$?", `$${params.length}`))));
+    return { w: parts.length ? `WHERE ${parts.join(" AND ")}` : "", params };
+  };
   const limit = Math.max(1, Math.min(200, Math.trunc(Number(q.limit ?? 50)) || 50));
   const offset = Math.max(0, Math.trunc(Number(q.offset ?? 0)) || 0);
-  const w = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const { w, params } = whereOf();
   const db = await getDb();
-  const [rows, [{ n }], languages, categories, [all]] = await Promise.all([
+  const by = (col: string) => { const x = whereOf(col); return db.query<{ value: string | null; n: number }>(`SELECT ${col} AS value, count(*) AS n FROM library_tasks ${x.w} GROUP BY 1`, x.params); };
+  const flags = (k: string, yes: string, no: string) => { const x = whereOf(k); return db.query<Record<string, number>>(
+    `SELECT count(*) AS n_all, count(*) FILTER (WHERE ${yes}) AS n_yes, count(*) FILTER (WHERE ${no}) AS n_no FROM library_tasks ${x.w}`, x.params); };
+  const hx = whereOf("harness");
+  const [rows, [{ n }], languages, categories, [all], fLang, fCat, [fActive], [fRepo], [fHarness], fEach] = await Promise.all([
     db.query(`SELECT ${TASK_COLS} FROM library_tasks ${w} ORDER BY title, id LIMIT ${limit} OFFSET ${offset}`, params),
     db.query<{ n: number }>(`SELECT count(*) AS n FROM library_tasks ${w}`, params),
     db.query<{ value: string; n: number }>("SELECT language AS value, count(*) AS n FROM library_tasks WHERE language IS NOT NULL GROUP BY language ORDER BY count(*) DESC, language"),
     db.query<{ value: string; n: number }>("SELECT category AS value, count(*) AS n FROM library_tasks WHERE category IS NOT NULL GROUP BY category ORDER BY count(*) DESC, category"),
     db.query<{ total: number; active: number }>("SELECT count(*) AS total, count(*) FILTER (WHERE active) AS active FROM library_tasks"),
+    by("language"), by("category"),
+    flags("active", "active", "NOT active"),
+    flags("has_repo", "coalesce(repo_url, '') <> ''", "coalesce(repo_url, '') = ''"),
+    flags("harness", "cardinality(harnesses) = 0", "cardinality(harnesses) > 0"),
+    db.query<{ value: string; n: number }>(`SELECT h AS value, count(*) AS n FROM library_tasks CROSS JOIN LATERAL unnest(harnesses) AS h ${hx.w} GROUP BY 1`, hx.params),
   ]);
+  const counts = (xs: { value: string | null; n: number }[]) => ({ "": xs.reduce((t, r) => t + Number(r.n), 0),
+    ...Object.fromEntries(xs.filter((r) => r.value != null).map((r) => [r.value, Number(r.n)])) });
+  const pair = (r: Record<string, number> | undefined) => ({ "": Number(r?.n_all ?? 0), true: Number(r?.n_yes ?? 0), false: Number(r?.n_no ?? 0) });
   return { tasks: rows, total: Number(n), limit, offset, all: Number(all?.total ?? 0), active: Number(all?.active ?? 0),
            languages: languages.map((r) => ({ value: r.value, n: Number(r.n) })), categories: categories.map((r) => ({ value: r.value, n: Number(r.n) })),
-           harnesses: harnessOptions() };
+           harnesses: harnessOptions(),
+           facets: { language: counts(fLang), category: counts(fCat), active: pair(fActive), has_repo: pair(fRepo),
+             harness: { "": Number(fHarness?.n_all ?? 0), any: Number(fHarness?.n_yes ?? 0), set: Number(fHarness?.n_no ?? 0),
+               ...Object.fromEntries(fEach.map((r) => [r.value, Number(r.n)])) } as Record<string, number> } };
 }
 
 async function taskById(id: number) {

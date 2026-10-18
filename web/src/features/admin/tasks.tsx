@@ -19,6 +19,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Icons } from '@/components/icons';
 import { useDebounce } from '@/hooks/use-debounce';
 import { adminApi } from '@/lib/api-client';
+import { counted } from '@/lib/octillion-format';
 import { cn } from '@/lib/utils';
 import { List } from './account-peek';
 import { post, useAdmin, useAdminAction } from './lib';
@@ -30,7 +31,9 @@ export interface Task {
   synced_at: string; edited_at: string | null; edited_by: string | null; attributes: Record<string, unknown>; harnesses: string[];
 }
 interface Facet { value: string; n: number }
-interface TaskPage { tasks: Task[]; total: number; limit: number; offset: number; all: number; active: number; languages: Facet[]; categories: Facet[]; harnesses: FilterOption[] }
+interface TaskPage { tasks: Task[]; total: number; limit: number; offset: number; all: number; active: number; languages: Facet[]; categories: Facet[]; harnesses: FilterOption[];
+  /** Tasks each filter value matches under the other filters; "" is the filter's "all". */
+  facets?: Record<'language' | 'category' | 'active' | 'has_repo' | 'harness', Record<string, number>> }
 interface Draft { id?: number; title: string; prompt: string; language: string; category: string; tags: string; repo_url: string; harnesses: string[] }
 
 const NA = <span className='text-muted-foreground'>—</span>;
@@ -107,7 +110,10 @@ export function AdminTasks() {
   const bulkGo = (list: Task[], active: boolean) => setActive.mutate({ ids: list.map((t) => t.id), active }, { onSuccess: () => setSel(new Map()) });
   const toggle = (list: Task[], on: boolean) => setSel((s) => { const n = new Map(s); list.forEach((t) => (on ? n.set(t.id, t) : n.delete(t.id))); return n; });
   const allOnPage = rows.length > 0 && rows.every((t) => sel.has(t.id)), someOnPage = rows.some((t) => sel.has(t.id));
-  const facet = (list: Facet[] | undefined) => (list ?? []).map((x) => <NativeSelectOption key={x.value} value={x.value}>{x.value} ({x.n})</NativeSelectOption>);
+  // Each option with the tasks it matches under the other filters (until the first load: none shown).
+  const fc = (k: keyof NonNullable<TaskPage['facets']>, v: string) => (data?.facets ? data.facets[k][v] ?? 0 : undefined);
+  const opt = (k: keyof NonNullable<TaskPage['facets']>, v: string, label: string) => <NativeSelectOption key={v} value={v}>{counted(label, fc(k, v))}</NativeSelectOption>;
+  const facet = (k: 'language' | 'category', list: Facet[] | undefined) => (list ?? []).map((x) => opt(k, x.value, x.value));
   const narrow = !!current;
 
   return (
@@ -120,26 +126,20 @@ export function AdminTasks() {
             <Input type='search' value={q} onChange={(e) => setQ(e.target.value)} placeholder='Search tasks by title, prompt, tag or repository' aria-label='Search tasks' className='h-9 pl-8' />
           </div>
           <NativeSelect aria-label='Language' value={f.language} onChange={(e) => setF({ ...f, language: e.target.value })}>
-            <NativeSelectOption value=''>All languages</NativeSelectOption>{facet(data?.languages)}
+            {opt('language', '', 'All languages')}{facet('language', data?.languages)}
           </NativeSelect>
           <NativeSelect aria-label='Category' value={f.category} onChange={(e) => setF({ ...f, category: e.target.value })}>
-            <NativeSelectOption value=''>All categories</NativeSelectOption>{facet(data?.categories)}
+            {opt('category', '', 'All categories')}{facet('category', data?.categories)}
           </NativeSelect>
           <NativeSelect aria-label='Status' value={f.active} onChange={(e) => setF({ ...f, active: e.target.value })}>
-            <NativeSelectOption value=''>Active and inactive</NativeSelectOption>
-            <NativeSelectOption value='true'>Active</NativeSelectOption>
-            <NativeSelectOption value='false'>Inactive</NativeSelectOption>
+            {opt('active', '', 'Active and inactive')}{opt('active', 'true', 'Active')}{opt('active', 'false', 'Inactive')}
           </NativeSelect>
           <NativeSelect aria-label='Repository' value={f.has_repo} onChange={(e) => setF({ ...f, has_repo: e.target.value })}>
-            <NativeSelectOption value=''>With or without a repo</NativeSelectOption>
-            <NativeSelectOption value='true'>Has a repo</NativeSelectOption>
-            <NativeSelectOption value='false'>No repo (starter template)</NativeSelectOption>
+            {opt('has_repo', '', 'With or without a repo')}{opt('has_repo', 'true', 'Has a repo')}{opt('has_repo', 'false', 'No repo (starter template)')}
           </NativeSelect>
           <NativeSelect aria-label='Harness' value={f.harness} onChange={(e) => setF({ ...f, harness: e.target.value })}>
-            <NativeSelectOption value=''>Any harness preference</NativeSelectOption>
-            <NativeSelectOption value='any'>Whole mix (no preference)</NativeSelectOption>
-            <NativeSelectOption value='set'>Limited to some harnesses</NativeSelectOption>
-            {opts.map((o) => <NativeSelectOption key={o.value} value={o.value}>Runs on {o.label}</NativeSelectOption>)}
+            {opt('harness', '', 'Any harness preference')}{opt('harness', 'any', 'Whole mix (no preference)')}{opt('harness', 'set', 'Limited to some harnesses')}
+            {opts.map((o) => opt('harness', o.value, `Runs on ${o.label}`))}
           </NativeSelect>
           <Button onClick={() => setDraft(blank())}><Icons.add /> New task</Button>
         </div>

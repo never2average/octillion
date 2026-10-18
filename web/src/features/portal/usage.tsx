@@ -23,7 +23,7 @@ interface Usage {
   runs: { simulations: number; sessions: number; completed: number };
   people: { user_id: string; email: string; me: boolean; calls: number }[];
   active_people: number;
-  use_cases?: { id: string; name: string; own: boolean }[];
+  use_cases?: { id: string; name: string; own: boolean; calls?: number }[];
   spend: { month_usd: number; budget_usd: number; filtered?: boolean };
 }
 
@@ -36,11 +36,11 @@ export function UsagePage() {
   const userQ = (users.length ? `&user=${encodeURIComponent(users.join(','))}` : '') + (useCases.length ? `&use_case=${encodeURIComponent(useCases.join(','))}` : '');
   const { data: u, error } = useOrgLoad(() => appApi<Usage>('GET', `/usage?${rangeQuery(range)}${userQ}`), [range.from, range.to, userQ]);
   const [ucOpts, setUcOpts] = useState<FilterOption[]>([]);
-  useEffect(() => { if (u?.use_cases) setUcOpts(u.use_cases.map((x) => ({ value: x.id, label: x.name, hint: x.own ? 'yours' : undefined }))); }, [u?.use_cases]);
+  useEffect(() => { if (u?.use_cases) setUcOpts(u.use_cases.map((x) => ({ value: x.id, label: x.name, hint: x.own ? 'yours' : undefined, count: x.calls }))); }, [u?.use_cases]);
   // keep the people list from the last load, so the picker does not empty while a new selection loads
   const [peopleOpts, setPeopleOpts] = useState<FilterOption[]>([]);
   useEffect(() => {
-    if (u?.people) setPeopleOpts(u.people.map((p) => ({ value: p.user_id, label: p.me ? `${p.email} (you)` : p.email, hint: p.calls ? `${num(p.calls)} calls` : undefined })));
+    if (u?.people) setPeopleOpts(u.people.map((p) => ({ value: p.user_id, label: p.me ? `${p.email} (you)` : p.email, count: p.calls })));
   }, [u?.people]);
   const days = u?.days ?? 30;
   // Every day of the period, zero-filled, so the charts have a continuous axis.

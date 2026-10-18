@@ -13,6 +13,7 @@ import { MultiSelectFilter } from '@/components/layout/multi-select-filter';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Icons } from '@/components/icons';
+import { counted } from '@/lib/octillion-format';
 import { cn } from '@/lib/utils';
 import { useAdmin } from './lib';
 import { copyText, Mono, Section, When } from './ui';
@@ -205,7 +206,7 @@ export function ComputeDecisions({ runtime, stats }: { runtime: 'vm' | 'vercel' 
   const samples = url.get('dsamples') === '1';
   const open = url.get('tick');
   const qs = new URLSearchParams({ limit: String(LIMIT), acted: samples ? '0' : '1', ...(has.length ? { has: has.join(',') } : {}) });
-  const { data, error, isLoading, refetch } = useAdmin<{ total: number; rows: Tick[] }>(`/compute/ticks?${qs}`, { refetchInterval: open ? undefined : 30_000, keep: true });
+  const { data, error, isLoading, refetch } = useAdmin<{ total: number; facets?: { has: Record<string, number>; samples: Record<string, number> }; rows: Tick[] }>(`/compute/ticks?${qs}`, { refetchInterval: open ? undefined : 30_000, keep: true });
   const rows = useMemo(() => data?.rows ?? [], [data]);
   useScrollTo('decisions', !!data);
   const set = (patch: Record<string, string | null>) => url.write({ ...patch, tick: null });
@@ -227,10 +228,10 @@ export function ComputeDecisions({ runtime, stats }: { runtime: 'vm' | 'vercel' 
 
   const filters = (
     <>
-      <MultiSelectFilter noun='decisions' options={HAS.map((h) => ({ value: h.id, label: h.label }))} value={has} onChange={(v) => set({ has: v.length ? v.join(',') : null })} />
+      <MultiSelectFilter noun='decisions' options={HAS.map((h) => ({ value: h.id, label: h.label, count: data?.facets?.has[h.id] }))} value={has} onChange={(v) => set({ has: v.length ? v.join(',') : null })} />
       <NativeSelect aria-label='Minute samples' value={samples ? '1' : ''} onChange={(e) => set({ dsamples: e.target.value || null })} title='The once-a-minute rows where nothing changed'>
-        <NativeSelectOption value=''>Ticks that acted</NativeSelectOption>
-        <NativeSelectOption value='1'>Include minute samples</NativeSelectOption>
+        <NativeSelectOption value=''>{counted('Ticks that acted', data?.facets?.samples[''])}</NativeSelectOption>
+        <NativeSelectOption value='1'>{counted('Include minute samples', data?.facets?.samples['1'])}</NativeSelectOption>
       </NativeSelect>
     </>
   );

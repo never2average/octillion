@@ -34,7 +34,7 @@ interface Help {
   id: number; journey_id: string; requester: string; helper: string | null; note: string; status: 'open' | 'picked' | 'done'; created_at: string; picked_at: string | null;
   requester_label: string | null; requester_email: string | null; helper_label: string | null; helper_email: string | null;
 }
-interface Adoption { me: string | null; use_cases: UseCaseUse[]; help: Help[]; members: { user_id: string; label: string | null }[];
+interface Adoption { me: string | null; use_cases: UseCaseUse[]; help: Help[]; members: { user_id: string; label: string | null; calls?: number }[];
   workflow?: { id: string; people: { user_id: string | null; label: string | null; used: number; total: number; calls: number }[] }[] }
 type Row =
   | { key: string; type: 'workflow'; name: string; detail: string; done: number; total: number; g: Setup['groups'][number]; person: string | null }
@@ -167,7 +167,7 @@ export function AdoptionPage() {
     </ButtonGroup>
     <input ref={file} type='file' accept='.json,.csv,application/json,text/csv' className='hidden' onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) void importFile(f); }} />
   </>);
-  const peopleOpts = useMemo(() => (ad?.members ?? []).map((m) => ({ value: m.user_id, label: m.label ?? 'Unnamed' })), [ad?.members]);
+  const peopleOpts = useMemo(() => (ad?.members ?? []).map((m) => ({ value: m.user_id, label: m.label ?? 'Unnamed', count: m.calls })), [ad?.members]);
 
   if (error) return <PageContainer><ErrorState error={error} /></PageContainer>;
   return (

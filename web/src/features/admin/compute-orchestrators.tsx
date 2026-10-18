@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Icons } from '@/components/icons';
+import { counted } from '@/lib/octillion-format';
 import { cn } from '@/lib/utils';
 import { useAdmin } from './lib';
 import { copyText, ErrorBox, Mono, Notice, Section, StatusBadge, When, type Tone } from './ui';
@@ -75,7 +76,7 @@ export function ComputeOrchestrators({ verdict, summary }: { verdict: Verdict[];
   const qs = new URLSearchParams({ state, limit: String(LIMIT), ...(job && !unmatched ? { job_id: job } : {}), ...(reason && !unmatched ? { reason } : {}) });
   const [pinned, setPinned] = useState<string | null>(null);
   if (pinned) qs.set('include', pinned);
-  const { data, error, isLoading, refetch } = useAdmin<{ total: number; boat: Boat; limits: Limits; rows: (OrchRow | Unmatched)[] }>(
+  const { data, error, isLoading, refetch } = useAdmin<{ total: number; boat: Boat; limits: Limits; facets?: Record<string, number>; rows: (OrchRow | Unmatched)[] }>(
     `/compute/orchestrators?${qs}`, { refetchInterval: open ? undefined : 30_000, keep: true });
   // `keep` shows the last chip's rows while the next loads: only use rows of the shape this chip asks for.
   const fits = !!data && (data.rows.length === 0 || ('kind' in data.rows[0]) === unmatched);
@@ -97,7 +98,7 @@ export function ComputeOrchestrators({ verdict, summary }: { verdict: Verdict[];
   const filters = (
     <>
       <NativeSelect aria-label='Orchestrator state' value={state} onChange={(e) => setState(e.target.value)}>
-        {CHIPS.map((c) => <NativeSelectOption key={c.id} value={c.id}>{c.label}</NativeSelectOption>)}
+        {CHIPS.map((c) => <NativeSelectOption key={c.id} value={c.id}>{counted(c.label, data?.facets ? data.facets[c.id] ?? 0 : undefined)}</NativeSelectOption>)}
       </NativeSelect>
       {job && !unmatched && <Button variant='outline' onClick={() => url.write({ ojob: null })} title='Show every job'><Mono>{job}</Mono><Icons.close /></Button>}
       {reason && !unmatched && <Button variant='outline' onClick={() => url.write({ oreason: null })} title='Show every reason'>{reason.replace(/^(launch|reap):/, '$1: ').replace(/_/g, ' ')}<Icons.close /></Button>}

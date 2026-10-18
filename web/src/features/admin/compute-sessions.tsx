@@ -15,6 +15,7 @@ import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select'
 import { Skeleton } from '@/components/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Icons } from '@/components/icons';
+import { counted } from '@/lib/octillion-format';
 import { cn } from '@/lib/utils';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { post, useAdmin, useAdminAction } from './lib';
@@ -74,7 +75,7 @@ export function ComputeSessions() {
   const [pinned, setPinned] = useState<string | null>(null);
   if (pinned) qs.set('include', pinned);
   // Refresh every 30 s, paused while a record is open (and, as every query, while the tab is hidden).
-  const { data: shown, error, isLoading, refetch } = useAdmin<{ total: number; rows: SessionRow[] }>(`/compute/sessions?${qs}`, { refetchInterval: open ? undefined : 30_000, keep: true });
+  const { data: shown, error, isLoading, refetch } = useAdmin<{ total: number; facets?: Record<'status' | 'class' | 'stale', Record<string, number>>; rows: SessionRow[] }>(`/compute/sessions?${qs}`, { refetchInterval: open ? undefined : 30_000, keep: true });
   const rows = useMemo(() => shown?.rows ?? [], [shown]);
   const pin = nextPinned(open, shown?.rows.map((r) => r.id), pinned);
   if (pin !== pinned) setPinned(pin);
@@ -117,24 +118,26 @@ export function ComputeSessions() {
   ];
 
   const set = (patch: Record<string, string | null>) => url.write({ ...patch, session: null });
+  // Sessions each choice matches under the other filters (the server's facets); "" is the dropdown's "any".
+  const fc = (k: 'status' | 'class' | 'stale', v: string) => (shown?.facets ? shown.facets[k][v] ?? 0 : undefined);
   const filters = (
     <>
-      <MultiSelectFilter noun='statuses' options={STATUS_OPTS} value={status} onChange={(v) => set({ status: v.length ? v.join(',') : '' })} />
+      <MultiSelectFilter noun='statuses' options={STATUS_OPTS.map((o) => ({ ...o, count: fc('status', o.value) }))} value={status} onChange={(v) => set({ status: v.length ? v.join(',') : '' })} />
       <NativeSelect aria-label='Range' value={range} onChange={(e) => set({ since: e.target.value === '24h' ? null : e.target.value })}>
         <NativeSelectOption value='1h'>Last hour</NativeSelectOption>
         <NativeSelectOption value='24h'>Last 24 h</NativeSelectOption>
         <NativeSelectOption value='7d'>Last 7 days</NativeSelectOption>
       </NativeSelect>
       <NativeSelect aria-label='Failure class' value={cls ?? ''} onChange={(e) => set({ class: e.target.value || null })}>
-        <NativeSelectOption value=''>Any failure class</NativeSelectOption>
-        {CLASSES.map((c) => <NativeSelectOption key={c.key} value={c.key}>{c.label}</NativeSelectOption>)}
+        <NativeSelectOption value=''>{counted('Any failure class', fc('class', ''))}</NativeSelectOption>
+        {CLASSES.map((c) => <NativeSelectOption key={c.key} value={c.key}>{counted(c.label, fc('class', c.key))}</NativeSelectOption>)}
       </NativeSelect>
       <NativeSelect aria-label='Order' value={sort} onChange={(e) => set({ sort: e.target.value === 'recent' ? null : e.target.value })}>
         {Object.entries(SORT_LABEL).map(([k, v]) => <NativeSelectOption key={k} value={k}>{v}</NativeSelectOption>)}
       </NativeSelect>
       <NativeSelect aria-label='Heartbeat' value={stale ? '1' : ''} onChange={(e) => set({ stale: e.target.value || null })} title='Running sessions with no heartbeat for 5 minutes'>
-        <NativeSelectOption value=''>Any heartbeat</NativeSelectOption>
-        <NativeSelectOption value='1'>No heartbeat for 5 min</NativeSelectOption>
+        <NativeSelectOption value=''>{counted('Any heartbeat', fc('stale', ''))}</NativeSelectOption>
+        <NativeSelectOption value='1'>{counted('No heartbeat for 5 min', fc('stale', '1'))}</NativeSelectOption>
       </NativeSelect>
       {job && <Button variant='outline' onClick={() => set({ job_id: null })} title='Show every job'><Mono>{job}</Mono><Icons.close /></Button>}
     </>

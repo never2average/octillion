@@ -14,13 +14,14 @@ import { Textarea } from '@/components/ui/textarea';
 import { Icons } from '@/components/icons';
 import { appApi } from '@/lib/api-client';
 import { csvCell, parseCsv } from '@/lib/csv';
+import { counted } from '@/lib/octillion-format';
 import { cn } from '@/lib/utils';
 import { Dock, KINDS, TYPE_STYLE, type Kind, type MemoryItem, type MemoryScope } from './memory';
 import { Field, RecordView, type RecordCol } from '@/components/layout/record-view';
 import { ErrorState, LoadingCards, When, fail, useOrgLoad } from './shared';
 
 interface Ctx { person: unknown | null; products: { slug: string; name: string }[] }
-interface UserRow { user_id: string; email: string | null; name: string | null; active: boolean; me: boolean }
+interface UserRow { user_id: string; email: string | null; name: string | null; active: boolean; me: boolean; memories?: number }
 
 export type ContextSection = 'company' | 'users' | 'products';
 
@@ -87,7 +88,9 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
   ];
   const picker = section === 'users' && users && users.length > 1 && (
     <NativeSelect aria-label='User' value={subject} onChange={(e) => setSubject(e.target.value)} className='w-56'>
-      {users.map((u) => <NativeSelectOption key={u.user_id} value={u.user_id}>{`${u.name || u.email || 'Unnamed user'}${u.me ? ' (you)' : ''}${u.active ? '' : ' · suspended'}`}</NativeSelectOption>)}
+      {/* Each person's memory items; the one shown counts its loaded rows, so adds and deletes show at once. */}
+      {users.map((u) => <NativeSelectOption key={u.user_id} value={u.user_id}>{counted(`${u.name || u.email || 'Unnamed user'}${u.me ? ' (you)' : ''}${u.active ? '' : ' · suspended'}`,
+        u.user_id === subject && items ? items.length : u.memories)}</NativeSelectOption>)}
     </NativeSelect>
   );
   const primary = !noSubject && (<>

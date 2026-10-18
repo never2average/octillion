@@ -1059,6 +1059,7 @@ try {
     assert.ok(rename && found.total >= 1 && found.languages.length > 0 && found.categories.length > 0, "tasks searched on the server, with facets");
     const page = await json(adm("GET", "/tasks?limit=2&offset=2"));
     assert.ok(page.tasks.length === 2 && page.total >= 7 && page.offset === 2, "tasks paged on the server");
+    assert.ok(page.facets.active[""] === page.total && page.facets.active.true + page.facets.active.false === page.total, "task facets count every task");
     assert.ok((await json(adm("GET", `/tasks?language=${encodeURIComponent(rename.language)}`))).tasks.every((t: any) => t.language === rename.language), "language filter");
     const te = await json(adm("PATCH", `/tasks/${rename.id}`, { title: "Rename files in bulk (edited)", tags: ["scripts", "files"] }));
     assert.ok(te.title === "Rename files in bulk (edited)" && te.tags.join() === "scripts,files" && te.prompt === rename.prompt && te.edited_at, "task edited");
@@ -1423,6 +1424,11 @@ try {
     assert.ok(ids(byClass).includes("ses_smoke_cr_key") && byClass.rows.every((x: any) => x.error_class === "credentials") && byClass.total === byClass.rows.length, "the class filter, by the shared classifier");
     const stale = await json(adm("GET", `/compute/sessions?stale_heartbeat=1&job_id=${sim}`));
     assert.ok(ids(stale).includes("ses_smoke_cr_stuck") && stale.rows.every((x: any) => x.status === "running"), "heartbeat older than 5 min");
+    // Facets: each choice's count under the other filters, matching what that choice lists.
+    assert.equal(def.facets.stale["1"], stale.total, "heartbeat facet = the stale list");
+    assert.equal(def.facets.status.running, (await json(adm("GET", `/compute/sessions?status=running&job_id=${sim}`))).total, "status facet = the status list");
+    assert.equal(def.facets.class.credentials, (await json(adm("GET", `/compute/sessions?class=credentials&job_id=${sim}`))).total, "class facet = the class list");
+    assert.equal((byClass.facets.status.failed ?? 0) + (byClass.facets.status.timeout ?? 0), byClass.total, "status facet under a class filter");
     assert.ok(ids(await json(adm("GET", `/compute/sessions?since=7d&status=completed&job_id=${sim}`))).includes("ses_smoke_cr_old"));
     const inc = await json(adm("GET", `/compute/sessions?status=queued&job_id=${sim}&include=ses_smoke_cr_old`));
     assert.equal(inc.rows[0].id, "ses_smoke_cr_old", "include: a deep-linked session whatever the filters, first");
@@ -1449,6 +1455,7 @@ try {
     assert.deepEqual([ended.reap_reason, ended.end_class.key, ended.end_class.routine], ["drained (idle 10 min)", "reap:idle_drain", true]);
     assert.equal((await json(adm("GET", `/compute/orchestrators?state=booting&include=${failedLaunch.id}`))).rows[0].id, failedLaunch.id);
     assert.deepEqual((await json(adm("GET", "/compute/orchestrators?state=unmatched"))).rows, [], "no boat listing: nothing unmatched");
+    { const all = await json(adm("GET", "/compute/orchestrators?state=all")); assert.ok(all.facets.all === all.total && all.facets.failed_launch === fl.total && all.facets.unmatched === 0, "orchestrator state facets"); }
     assert.equal((await adm("GET", "/compute/orchestrators?state=bogus")).status, 400);
     const op = await json(adm("GET", `/compute/orchestrators/${live.id}`));
     assert.ok(op.row.sandbox_id === "smoke-cr-live" && op.timings.started === 8200 && op.logs_command === "npm run boat-orchestrators -- logs smoke-cr-live");
@@ -1562,6 +1569,8 @@ try {
     assert.deepEqual((await json(adm("GET", "/compute/jobs?state=waiting&kind=research&limit=500"))).rows.map((x: any) => x.state).filter((s: string) => s !== "waiting"), []);
     assert.ok(!(await json(adm("GET", "/compute/jobs?kind=simulation&limit=500"))).rows.some((x: any) => x.id === "rsh_smoke_cj"));
     assert.ok((await json(adm("GET", "/compute/jobs?has_failures=1&limit=500"))).rows.some((x: any) => x.id === "sim_smoke_cj"));
+    assert.ok(list.facets.state.running >= 1 && list.facets.kind.research >= 1 && list.facets.state.all === list.total && list.facets.kind[""] === list.total, "job facets");
+    assert.equal(list.facets.has_failures["1"], (await json(adm("GET", "/compute/jobs?has_failures=1&limit=500"))).total, "failures facet = the failures list");
     assert.deepEqual((await json(adm("GET", "/compute/jobs?q=smoke%20jobs"))).rows.map((x: any) => x.id), ["sim_smoke_cj"], "search by job name");
     assert.equal((await json(adm("GET", "/compute/jobs?state=finished&include=sim_smoke_cj"))).rows[0].id, "sim_smoke_cj", "include: a deep link whatever the filters");
     assert.equal((await adm("GET", "/compute/jobs?state=bogus")).status, 400);
@@ -1642,6 +1651,7 @@ try {
     assert.equal((await fetch(`${base}/api/admin/onboarding/compute/ticks`)).status, 401, "ticks need the admin token");
     const acted = await json(adm("GET", "/compute/ticks"));
     assert.deepEqual([acted.total, acted.rows[0].error], [2, "boat.dev 500"], "acting ticks only, newest first");
+    assert.deepEqual([acted.facets.samples[""], acted.facets.samples["1"], acted.facets.has.error], [2, 3, 1], "tick facets: acted, with samples, has error");
     const l = acted.rows[1].launched[0], r = acted.rows[1].reaped[0];
     assert.deepEqual([l.row, l.orchestrator_id, l.job_id, l.pods, l.state], [Number(orch.id), "orch-smoke-at", "sim_smoke_at", 3, "running"], "a launch is linked to its orchestrator row");
     assert.deepEqual([r.row, r.orchestrator_id, r.reason], [Number(gone.id), "orch-smoke-old", "drained (idle exit)"], "a reap is linked to its row");
@@ -2084,6 +2094,7 @@ try {
     assert.equal((await appCall(ownerC, "POST", `/team/members/${meMember.id}/role`, { role: "member" })).status, 400, "cannot demote yourself");
     assert.equal((await appCall(ownerC, "POST", "/team/invitations", { email: `third+${stamp}@acme-smoke.dev`, role: "member" })).status, 201, "admins invite from /app");
     const usageO = await json(appCall(ownerC, "GET", "/usage"));
+    assert.ok((usageO.use_cases ?? []).every((u: any) => typeof u.calls === "number"), "each use case with its tool calls");
     assert.ok(usageO.people.some((p: any) => p.email === `dev+${stamp}@acme-smoke.dev`), "usage per person, by email");
     // The people filter: everyone on the team is offered; picking someone narrows calls, tools, runs and spend to them.
     const devP = usageO.people.find((p: any) => p.email === `dev+${stamp}@acme-smoke.dev`);
@@ -2541,6 +2552,7 @@ try {
       assert.equal((await appCall(devC, "PUT", `/context/users/${accepted.user.id}`, { title: "x" })).status, 403, "members cannot edit someone else's");
       const ownerUsers = await json(appCall(ownerC, "GET", "/context/users"));
       assert.ok(ownerUsers.users.some((u: any) => u.user_id === acc2.user.id && u.context.answer_style === "executive"), "admins see everyone's");
+      assert.ok(ownerUsers.users.every((u: any) => typeof u.memories === "number"), "each person with their memory count");
       assert.equal((await appCall(ownerC, "PUT", "/context/users/user_not_here", { title: "x" })).status, 404, "only members of the account");
       assert.equal((await json(appCall(ownerC, "PUT", `/context/users/${acc2.user.id}`, { title: "Head of DevRel", focus_product: slugP, answer_style: "executive", interests: "why we lose to BullMQ", notes: "set by an admin" }))).notes, "set by an admin");
       // Memory: anyone adds company/product memory and their own; only admins reach someone else's; delete own or as admin.
@@ -2643,6 +2655,7 @@ try {
       assert.equal(jg.find((j: any) => j.id === "fix-loss").stages.at(-1).tools[0], "save_to_memory");
       // Adoption person by person: progress from each person's own tool calls, and the teammate who can help.
       const ad = await json(appCall(ownerC, "GET", "/adoption"));
+      assert.ok(ad.members.every((m: any) => typeof m.calls === "number"), "the people filter gets each member's tool calls");
       assert.equal(ad.use_cases.length, jg.length, "every use case, with its people");
       for (const uc of ad.use_cases) {
         assert.ok(uc.people.every((x: any) => x.done >= 0 && x.done <= uc.total && x.calls >= x.errors && x.label));
@@ -2803,6 +2816,7 @@ try {
       const none = await json(adm("GET", "/analytics?tool=__none__"));
       assert.equal(none.totals.calls, 0, "a tool filter applies to totals");
       assert.ok(Array.isArray(none.facets.tools) && none.facets.tools.includes("list_products"), "facets ignore the filters");
+      assert.ok(none.facets.counts.tool.list_products > 0 && Object.values(none.facets.counts.plan as Record<string, number>).every((n) => n > 0), "facet counts: tool calls per tool, accounts per plan");
       assert.deepEqual(none.filters.tool, ["__none__"], "filters are echoed back");
       const one = await json(adm("GET", "/analytics?limit=1"));
       assert.ok(one.accounts.length <= 1 && one.accounts_total >= one.accounts.length && typeof one.errors_total === "number", "accounts limit and totals");

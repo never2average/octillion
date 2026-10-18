@@ -96,13 +96,19 @@ export async function listTicks(q: Record<string, unknown>) {
   const bad = has.find((h) => !(HAS as readonly string[]).includes(h));
   if (bad) throw badRequest(`has must be a comma list of ${HAS.join(", ")}`);
   const where: string[] = [], params: unknown[] = [];
-  if (str(q.acted) !== "0") where.push("acted");
-  if (has.includes("error")) where.push("error IS NOT NULL");
-  if (has.includes("launch")) where.push("jsonb_array_length(launched) > 0");
-  if (has.includes("reap")) where.push("jsonb_array_length(reaped) > 0");
+  const HAS_SQL: Record<(typeof HAS)[number], string> = { error: "error IS NOT NULL", launch: "jsonb_array_length(launched) > 0", reap: "jsonb_array_length(reaped) > 0" };
+  const acted = str(q.acted) !== "0";
+  if (acted) where.push("acted");
+  for (const h of HAS) if (has.includes(h)) where.push(HAS_SQL[h]);
   const text = str(q.q);
   if (text) { params.push(`%${text.replace(/[\\%_]/g, (c) => `\\${c}`)}%`); where.push(`(note ILIKE $${params.length} OR error ILIKE $${params.length})`); }
   const from = `FROM autoscaler_ticks${where.length ? ` WHERE ${where.join(" AND ")}` : ""}`;
+  // Facets: ticks each "has" choice would leave (with the ones picked, all must hold) and each minute-samples choice.
+  const picked = has.map((h) => HAS_SQL[h as (typeof HAS)[number]]), all = (xs: string[]) => (xs.length ? xs.join(" AND ") : "true");
+  const [f] = await db.query<Record<string, unknown>>(`SELECT ${HAS.map((h) => `count(*) FILTER (WHERE ${all([...(acted ? ["acted"] : []), ...picked, HAS_SQL[h]])}) AS has_${h}`).join(", ")},
+      count(*) FILTER (WHERE ${all(["acted", ...picked])}) AS acted, count(*) FILTER (WHERE ${all(picked)}) AS every
+      FROM autoscaler_ticks${text ? " WHERE (note ILIKE $1 OR error ILIKE $1)" : ""}`, params);
+  const facets = { has: Object.fromEntries(HAS.map((h) => [h, n(f?.[`has_${h}`])])), samples: { "": n(f?.acted), "1": n(f?.every) } };
   const [{ total }] = await db.query<{ total: unknown }>(`SELECT count(*) AS total ${from}`, params);
   const rows = await db.query<TickDb>(`SELECT * ${from} ORDER BY at DESC, id DESC LIMIT ${limit} OFFSET ${offset}`, params);
 
@@ -115,7 +121,7 @@ export async function listTicks(q: Record<string, unknown>) {
     "SELECT id, orchestrator_id, sandbox_id, job_id FROM orchestrator_sandboxes WHERE sandbox_id = ANY($1::text[])", [reapedIds]) : []).map((o) => [o.sandbox_id, o]));
 
   return {
-    total: n(total),
+    total: n(total), facets,
     rows: rows.map((r) => ({
       id: n(r.id), at: iso(r.at)!, holder: r.holder, acted: r.acted,
       queued: r.queued, running: r.running, research: r.research, unclaimable: r.unclaimable, orchestrators: r.orchestrators,

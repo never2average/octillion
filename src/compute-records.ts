@@ -106,7 +106,6 @@ export async function listSessions(q: Record<string, unknown>) {
   const where: string[] = [], params: unknown[] = [];
   const p = (v: unknown) => { params.push(v); return `$${params.length}`; };
   const status = list(q.status).filter((s) => STATUSES.includes(s));
-  if (status.length) where.push(`s.status = ANY(${p(status)})`);
   const agents = list(q.agent);
   if (agents.length) where.push(`s.agent_id = ANY(${p(agents)})`);
   for (const [k, col] of [["harness", "s.harness"], ["model", "s.model"], ["reason", "s.completed_reason"], ["job_id", "s.simulation_id"]] as const) {
@@ -116,26 +115,70 @@ export async function listSessions(q: Record<string, unknown>) {
   const since = str(q.since) ?? "24h";
   if (!(since in RANGES)) throw badRequest("since must be 1h, 24h or 7d");
   where.push(`(s.status IN ('queued', 'running') OR coalesce(s.ended_at, s.started_at, s.queued_at) > now() - make_interval(hours => ${p(RANGES[since])}))`);
-  if (q.stale_heartbeat === "1") where.push("s.status = 'running' AND coalesce(s.heartbeat_at, s.started_at) < now() - interval '5 minutes'");
+  // Status and heartbeat stay apart from the rest (and their params last) so the facets can count each under the others.
+  const base = where.join(" AND "), nBase = params.length;
+  const statusCond = status.length ? `s.status = ANY(${p(status)})` : null, stale = q.stale_heartbeat === "1";
+  const cond = [base, statusCond, stale ? STALE : null].filter(Boolean).join(" AND ");
   const sort = SORTS[str(q.sort) ?? "recent"];
   if (!sort) throw badRequest("sort must be recent, queued_at, wait or ended_at");
   const include = str(q.include);
-  const cond = where.join(" AND ");
   const incP = include ? p(include) : null;
   const match = incP ? `((${cond}) OR s.id = ${incP})` : cond;
   const cls = str(q.class) as SessionErrorKey | null;
   const scheduled = await scheduledIds();
-  const from = `/* tenant: internal: admin Compute page, sessions across all orgs (admin only) */
-    FROM agent_sessions s JOIN organizations o ON o.id = s.org_id WHERE ${match}`;
+  const from = `${SESSION_FROM} WHERE ${match}`;
+  const facets = await sessionFacets({ base, params: params.slice(0, nBase), status, stale, cls, scheduled });
 
   if (cls) {
     const rows = (await db.query<SessionDb>(`SELECT ${SESSION_COLS} ${from} ORDER BY ${sort} LIMIT 5000`, params))
       .map((r) => sessionRow(r, scheduled)).filter((r) => r.error_class === cls || r.id === include);
-    return { total: rows.length, rows: rows.slice(offset, offset + limit) };
+    return { total: rows.length, facets, rows: rows.slice(offset, offset + limit) };
   }
   const [{ total }] = await db.query<{ total: unknown }>(`SELECT count(*) AS total ${from}`, params);
   const rows = await db.query<SessionDb>(`SELECT ${SESSION_COLS} ${from} ORDER BY ${incP ? `(s.id = ${incP}) DESC, ` : ""}${sort} LIMIT ${limit} OFFSET ${offset}`, params);
-  return { total: n(total), rows: rows.map((r) => sessionRow(r, scheduled)) };
+  return { total: n(total), facets, rows: rows.map((r) => sessionRow(r, scheduled)) };
+}
+
+const SESSION_FROM = `/* tenant: internal: admin Compute page, sessions across all orgs (admin only) */
+    FROM agent_sessions s JOIN organizations o ON o.id = s.org_id`;
+/** A running session with no heartbeat for 5 minutes (the Heartbeat filter). */
+const STALE = "(s.status = 'running' AND coalesce(s.heartbeat_at, s.started_at) < now() - interval '5 minutes')";
+
+/**
+ * Sessions each status, failure class and heartbeat choice matches under the other filters ("" is the dropdown's
+ * "any"; the `include` row aside). `base` holds every filter but those three. Status and heartbeat count in SQL;
+ * failure classes are worked out per row, so up to 5,000 sessions that can have one (queued, failed, timed out, or
+ * ended with a reason) are read and classified, and with a class filter the status and heartbeat counts come from them.
+ */
+async function sessionFacets(f: { base: string; params: unknown[]; status: string[]; stale: boolean; cls: SessionErrorKey | null; scheduled: Set<string> | null }) {
+  const db = await getDb();
+  const bump = (out: Record<string, number>, k: string) => { out[k] = (out[k] ?? 0) + 1; };
+  const statusOk = (s: string) => !f.status.length || f.status.includes(s);
+  const sp = `$${f.params.length + 1}`, withStatus = f.status.length ? [...f.params, f.status] : f.params;
+  const [classed, [hb], byStatus] = await Promise.all([
+    db.query<SessionDb & { stale: boolean }>(
+      `SELECT s.id, s.status, s.agent_id, s.completed_reason, s.error_message, s.metadata->>'infra_error' AS infra_error, ${STALE} AS stale
+        ${SESSION_FROM} WHERE ${f.base} AND (s.status IN ('queued', 'failed', 'timeout') OR s.completed_reason IS NOT NULL) LIMIT 5000`, f.params),
+    db.query<{ n_any: unknown; n_stale: unknown }>(
+      `SELECT count(*) AS n_any, count(*) FILTER (WHERE ${STALE}) AS n_stale ${SESSION_FROM} WHERE ${f.base}${f.status.length ? ` AND s.status = ANY(${sp})` : ""}`, withStatus),
+    f.cls ? Promise.resolve([]) : db.query<{ status: string; n: unknown }>(
+      `SELECT s.status, count(*) AS n ${SESSION_FROM} WHERE ${f.base}${f.stale ? ` AND ${STALE}` : ""} GROUP BY 1`, f.params),
+  ]);
+  const rows = classed.map((r) => ({ status: r.status, stale: !!r.stale,
+    key: classifySession({ ...r, metadata: { infra_error: r.infra_error } }, { scheduled: f.scheduled ?? undefined })?.key ?? null }));
+  const status: Record<string, number> = {}, cls: Record<string, number> = {}, stale: Record<string, number> = {};
+  for (const r of rows) if (r.key && statusOk(r.status) && (!f.stale || r.stale)) bump(cls, r.key);
+  cls[""] = n(f.stale ? hb?.n_stale : hb?.n_any);
+  if (f.cls) {
+    for (const r of rows) if (r.key === f.cls) {
+      if (!f.stale || r.stale) bump(status, r.status);
+      if (statusOk(r.status)) { bump(stale, ""); if (r.stale) bump(stale, "1"); }
+    }
+  } else {
+    for (const r of byStatus) status[r.status] = n(r.n);
+    Object.assign(stale, { "": n(hb?.n_any), "1": n(hb?.n_stale) });
+  }
+  return { status, class: cls, stale };
 }
 
 /** Metadata keys the session peek shows; everything else (environment, adapter internals) stays out. */
@@ -282,7 +325,7 @@ export async function listOrchestrators(q: Record<string, unknown>) {
   if (state === "unmatched") {
     const live = await db.query<{ sandbox_id: string | null; orchestrator_id: string | null }>("SELECT sandbox_id, orchestrator_id FROM orchestrator_sandboxes WHERE state <> 'deleted'");
     const rows = unmatchedSandboxes(listing.sandboxes, live, now);
-    return { total: rows.length, boat, limits: recordLimits(), rows: rows.slice(offset, offset + limit) };
+    return { total: rows.length, boat, limits: recordLimits(), facets: await orchFacets([], [], null, listing.sandboxes, now), rows: rows.slice(offset, offset + limit) };
   }
   const params: unknown[] = [];
   const where = [stateWhere(state)];
@@ -293,6 +336,7 @@ export async function listOrchestrators(q: Record<string, unknown>) {
   const byClass = reason && /^(launch|reap):/.test(reason) ? reason : null;
   if (reason && !byClass) { params.push(reason); where.push(`(o.launch_step = $${params.length} OR o.reap_reason ILIKE $${params.length} || '%')`); }
   const include = Number(q.include);
+  const facets = await orchFacets(where.slice(1), [...params], byClass, listing.sandboxes, now);
   let match = where.join(" AND ");
   if (Number.isInteger(include) && include > 0) { params.push(include); match = `((${match}) OR o.id = $${params.length})`; }
   const sb = new Map(listing.sandboxes.map((s) => [s.id, s]));
@@ -303,14 +347,38 @@ export async function listOrchestrators(q: Record<string, unknown>) {
       SELECT ${ORCH_COLS} ${ORCH_FROM} WHERE ${match} ORDER BY o.id DESC LIMIT 5000`, params))
       .filter((r) => classifyOrchestrator(r)?.key === byClass || (Number.isInteger(include) && r.id === include));
     if (Number.isInteger(include) && include > 0) all.sort((a, b) => Number(b.id === include) - Number(a.id === include));
-    return { total: all.length, boat, limits: recordLimits(), rows: all.slice(offset, offset + limit).map((r) => orchRow(r, sb, now, current)) };
+    return { total: all.length, boat, limits: recordLimits(), facets, rows: all.slice(offset, offset + limit).map((r) => orchRow(r, sb, now, current)) };
   }
   const [{ total }] = await db.query<{ total: unknown }>(`SELECT count(*) AS total ${ORCH_FROM} WHERE ${match}`, params);
   const rows = await db.query<OrchDb>(
     `/* tenant: internal: admin Compute page, gateway spend summed per orchestrator id */
      SELECT ${ORCH_COLS} ${ORCH_FROM} WHERE ${match}
       ORDER BY ${Number.isInteger(include) && include > 0 ? `(o.id = $${params.length}) DESC, ` : ""}o.id DESC LIMIT ${limit} OFFSET ${offset}`, params);
-  return { total: n(total), boat, limits: recordLimits(), rows: rows.map((r) => orchRow(r, sb, now, current)) };
+  return { total: n(total), boat, limits: recordLimits(), facets, rows: rows.map((r) => orchRow(r, sb, now, current)) };
+}
+
+/**
+ * Orchestrators each state choice matches under the job and reason filters (the `include` row aside); `where` holds
+ * those filters. A reason that is a failure class is matched per row, over at most 5,000 rows as the list does.
+ * Unmatched counts boat's sandboxes that match no live row (the job and reason filters do not apply to it).
+ */
+async function orchFacets(where: string[], params: unknown[], byClass: string | null, sandboxes: ClassifiedSandbox[], now: number) {
+  const db = await getDb();
+  const states = ORCH_STATES.filter((s) => s !== "unmatched");
+  const flags = states.map((s, i) => `(${stateWhere(s)}) AS f${i}`).join(", ");
+  const w = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const out: Record<string, number> = {};
+  if (byClass) {
+    const rows = (await db.query<OrchDb & Record<string, boolean>>(`SELECT o.launch_step, o.launch_error, o.reap_reason, o.error, o.ready_at, ${flags} ${ORCH_FROM} ${w} ORDER BY o.id DESC LIMIT 5000`, params))
+      .filter((r) => classifyOrchestrator(r)?.key === byClass);
+    states.forEach((s, i) => { out[s] = rows.filter((r) => r[`f${i}`]).length; });
+  } else {
+    const [r] = await db.query<Record<string, unknown>>(`SELECT ${states.map((s, i) => `count(*) FILTER (WHERE ${stateWhere(s)}) AS f${i}`).join(", ")} ${ORCH_FROM} ${w}`, params);
+    states.forEach((s, i) => { out[s] = n(r?.[`f${i}`]); });
+  }
+  const live = await db.query<{ sandbox_id: string | null; orchestrator_id: string | null }>("SELECT sandbox_id, orchestrator_id FROM orchestrator_sandboxes WHERE state <> 'deleted'");
+  out.unmatched = unmatchedSandboxes(sandboxes, live, now).length;
+  return out;
 }
 
 /** One orchestrator for its peek: the row, boot timings, its workers now, recent sessions, worker tokens, events, gateway spend. */

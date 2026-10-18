@@ -181,6 +181,9 @@ function RuleEditor<T>({ c, r, rows, set }: { c: RecordCol<T>; r: FilterRule; ro
   const ops = OPS[c.type!];
   const setOp = (op: Op) => set({ ...r, op, value: op === 'within' ? (r.op === 'within' ? r.value : last30()) : r.op === 'within' ? '' : r.value });
   const opts = c.type === 'select' ? colOptions(c, rows) : [];
+  // How many loaded rows have each value, beside it.
+  const counts = new Map<string, number>();
+  if (c.type === 'select') for (const row of rows) { const v = c.value!(row); if (!blank(v)) counts.set(String(v), (counts.get(String(v)) ?? 0) + 1); }
   const picked = Array.isArray(r.value) ? r.value : [];
   return (
     <div className='flex flex-col gap-2'>
@@ -197,7 +200,8 @@ function RuleEditor<T>({ c, r, rows, set }: { c: RecordCol<T>; r: FilterRule; ro
               <label className='hover:bg-muted flex cursor-pointer items-center gap-2 rounded-md px-1.5 py-1.5 text-sm leading-none'>
                 <Checkbox checked={picked.includes(o.value)}
                   onCheckedChange={(on) => set({ ...r, value: on ? [...picked, o.value] : picked.filter((v) => v !== o.value) })} />
-                <span className='truncate'>{o.label}</span>
+                <span className='min-w-0 flex-1 truncate'>{o.label}</span>
+                <span className='text-muted-foreground shrink-0 text-xs tabular-nums'>{(counts.get(o.value) ?? 0).toLocaleString()}</span>
               </label>
             </li>
           )) : <li className='text-muted-foreground px-1.5 py-1.5 text-xs'>No values.</li>}

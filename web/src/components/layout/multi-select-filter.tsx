@@ -1,6 +1,7 @@
 'use client';
 // A dropdown that picks any number of options (people, accounts, …): search, select all / clear, checkboxes. The
-// trigger reads "All <noun>", the one picked, or "N <noun>". Empty selection means no filter.
+// trigger reads "All <noun>", the one picked, or "N <noun>". Empty selection means no filter. An option's `count` (the
+// records it matches) shows right-aligned after its hint.
 import { useState, type ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -8,7 +9,7 @@ import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
 
-export interface FilterOption { value: string; label: string; hint?: string }
+export interface FilterOption { value: string; label: string; hint?: string; count?: number }
 
 export function MultiSelectFilter({ options, value, onChange, noun, icon, className }: {
   options: FilterOption[]; value: string[]; onChange: (v: string[]) => void; noun: string; icon?: ReactNode; className?: string;
@@ -35,6 +36,7 @@ export function MultiSelectFilter({ options, value, onChange, noun, icon, classN
                 <Checkbox checked={value.includes(o.value)} onCheckedChange={(c) => onChange(c ? [...value, o.value] : value.filter((v) => v !== o.value))} />
                 <span className='min-w-0 flex-1 truncate'>{o.label}</span>
                 {o.hint && <span className='text-muted-foreground shrink-0 text-xs'>{o.hint}</span>}
+                {o.count != null && <span className='text-muted-foreground shrink-0 text-xs tabular-nums'>{o.count.toLocaleString()}</span>}
               </label>
             </li>
           ))}
