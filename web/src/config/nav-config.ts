@@ -35,6 +35,7 @@ export const adminNav: NavGroup[] = [
     label: 'Operations',
     items: [
       { title: 'Compute', url: '/admin/compute', icon: 'adjustments', shortcut: ['g', 'c'], items: [] },
+      { title: 'Spend', url: '/admin/spend', icon: 'billing', items: [] },
       { title: 'Harness mix', url: '/admin/agents', icon: 'code', items: [] },
       { title: 'Agent configuration', url: '/admin/configuration', icon: 'settings', items: [] },
       { title: 'Key vault', url: '/admin/keys', icon: 'lock', shortcut: ['g', 'k'], items: [] },

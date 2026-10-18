@@ -159,6 +159,31 @@ export async function orgBudget(orgId: number): Promise<{ budget: number; subscr
   return live && sub!.monthly_budget_usd != null ? { budget: sub!.monthly_budget_usd, subscription: sub, source: "plan" } : { budget: fallback, subscription: sub, source: "default" };
 }
 
+/**
+ * orgBudget for many orgs at once (the admin Spend page): one query and one subscription listing, the same order of
+ * rules. For display only: it never throws (a Stripe outage or OCTILLION_REQUIRE_SUBSCRIPTION gives the fallback).
+ */
+export async function orgBudgets(orgIds: number[]): Promise<Map<number, { budget: number; plan: string | null; source: BudgetSource }>> {
+  const fallback = Number(process.env.OCTILLION_ORG_MONTHLY_BUDGET_USD ?? 0);
+  const out = new Map<number, { budget: number; plan: string | null; source: BudgetSource }>();
+  if (!orgIds.length) return out;
+  const rows = await (await getDb()).query<{ id: number; stripe_customer_id: string | null; budget_override_usd: string | number | null }>(
+    "SELECT id, stripe_customer_id, budget_override_usd FROM organizations WHERE id = ANY($1)", [orgIds]);
+  let subs = new Map<string, SubscriptionSummary>();
+  if (stripeEnabled() && rows.some((o) => o.budget_override_usd == null && o.stripe_customer_id)) {
+    try { subs = await subscriptionsByCustomer(); }
+    catch (err) { console.error("stripe subscription lookup failed:", (err as Error).message); }
+  }
+  for (const o of rows) {
+    const sub = o.stripe_customer_id ? subs.get(o.stripe_customer_id) ?? null : null;
+    const live = sub && ["active", "trialing"].includes(sub.status);
+    out.set(Number(o.id), o.budget_override_usd != null ? { budget: Number(o.budget_override_usd), plan: sub?.plan ?? null, source: "override" }
+      : live && sub!.monthly_budget_usd != null ? { budget: sub!.monthly_budget_usd, plan: sub!.plan, source: "plan" }
+      : { budget: fallback, plan: sub?.plan ?? null, source: "default" });
+  }
+  return out;
+}
+
 /** Report a finished session's model cost to the usage meter (STRIPE_SPEND_METER). Best effort, never throws. */
 export function reportSessionSpend(sessionId: string): void {
   const meter = process.env.STRIPE_SPEND_METER;

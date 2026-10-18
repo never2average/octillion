@@ -1604,6 +1604,76 @@ try {
     console.log("✓ compute jobs: state rules, why waiting (boat capacity, cap, cooldown, unscheduled), spend, filters, peek; failures by reason (launches, reaps, unattended, session classes)");
   }
 
+  // ---------- Spend (src/spend.ts): metered model spend by account, model and day; unattributed orchestrator spend is shared ----------
+  {
+    // March 2020: nothing else in the smoke database lands there, so every figure is exactly the fixtures'.
+    const X = await createOrg("Spend X", `spend-x-${stamp}`), Y = await createOrg("Spend Y", `spend-y-${stamp}`);
+    await db.query("UPDATE organizations SET budget_override_usd = 10 WHERE id = $1", [X.org.orgId]);
+    const fixture = async (o: Org, sim: string, by: string | null) => {
+      const [p] = await db.query<{ id: number }>("INSERT INTO products (org_id, slug, name) VALUES ($1, 'spendp', 'Spend product') RETURNING id", [o.orgId]);
+      const [sc] = await db.query<{ id: number }>("INSERT INTO scenarios (product_id, title, prompt) VALUES ($1, 't', 'p') RETURNING id", [p.id]);
+      await db.query(`INSERT INTO simulations (id, org_id, product_id, name, models, harness, repeats, status, created_by, created_at)
+        VALUES ($1, $2, $3, 'spend', '{m}', 'claude-code', 1, 'completed', $4, '2020-03-02T09:00:00Z')`, [sim, o.orgId, p.id, by]);
+      return (id: string, model: string, queued: string, cost: number) => db.query(`INSERT INTO agent_sessions (id, simulation_id, org_id, product_id, scenario_id, model, harness, status, queued_at, cost_usd)
+        VALUES ($1, $2, $3, $4, $5, $6, 'claude-code', 'completed', $7, $8)`, [id, sim, o.orgId, p.id, sc.id, model, queued, cost]);
+    };
+    const sx = await fixture(X.org, `sim_spend_x_${stamp}`, "user_spend_x"), sy = await fixture(Y.org, `sim_spend_y_${stamp}`, null);
+    await sx(`ses_spend_x1_${stamp}`, "claude-sonnet-5-5", "2020-03-02T10:00:00Z", 1.0);   // recorded cost beats its gateway total
+    await sx(`ses_spend_x2_${stamp}`, "claude-opus-5-5", "2020-03-03T10:00:00Z", 0);       // running: the live gateway total counts
+    await sy(`ses_spend_y1_${stamp}`, "gpt-6.1-sol", "2020-03-03T11:00:00Z", 2.0);
+    await db.query(`INSERT INTO gateway_usage (token_hash, provider, session_id, requests, cost_usd, last_at) VALUES
+      ('smoke-sp-s1', 'anthropic', $1, 3, 0.5, '2020-03-02T10:30:00Z'), ('smoke-sp-s2', 'anthropic', $2, 4, 0.75, '2020-03-03T10:30:00Z')`, [`ses_spend_x1_${stamp}`, `ses_spend_x2_${stamp}`]);
+    // X's job orchestrator spent 0.30 of the day's 0.50 orchestrator spend: the other 0.20 is shared.
+    await db.query(`INSERT INTO orchestrator_sandboxes (sandbox_id, orchestrator_id, state, created_at, job_id) VALUES ('smoke-sp-o1', 'orch-smoke-sp', 'deleted', '2020-03-03T09:00:00Z', $1)`, [`sim_spend_x_${stamp}`]);
+    await db.query("INSERT INTO gateway_usage (token_hash, provider, orchestrator_id, requests, cost_usd, last_at) VALUES ('smoke-sp-o1', 'anthropic', 'orch-smoke-sp', 6, 0.3, '2020-03-03T12:00:00Z')");
+    await db.query(`INSERT INTO gateway_model_usage (day, provider, model, consumer, requests, errors, input_tokens, cached_input_tokens, output_tokens, cost_usd, priced) VALUES
+      ('2020-03-03', 'anthropic', 'claude-opus-5-5', 'orchestrator', 10, 1, 5000, 1000, 800, 0.5, true),
+      ('2020-03-02', 'anthropic', 'claude-sonnet-5-5', 'session', 5, 0, 1000, 0, 200, 1.75, true),
+      ('2020-03-03', 'openai', 'mystery-model', 'session', 3, 0, 300, 0, 30, 0, false)`);
+    const near = (x: number, y: number, what: string) => assert.ok(Math.abs(x - y) < 1e-6, `${what}: ${x} != ${y}`);
+    const sp = await json(adm("GET", "/spend?from=2020-03-01&to=2020-03-31"));
+    assert.equal(sp.range.days.length, 31);
+    near(sp.totals.session_usd, 3.75, "session spend: GREATEST(cost, gateway) per session");
+    near(sp.totals.orchestrator_usd, 0.5, "orchestrator spend: gateway_model_usage");
+    near(sp.totals.total_usd, 4.25, "total");
+    near(sp.totals.shared_usd, 0.2, "unattributed orchestrator spend");
+    const acc = (slug: string) => sp.accounts.find((x: any) => x.key === slug);
+    const ax = acc(X.org.slug), ay = acc(Y.org.slug), sh = acc("shared");
+    assert.ok(ax && ay && sh && sh.name === "Octillion (shared)" && sh.shared && sh.allowance === null);
+    assert.deepEqual([ax.sessions, ax.top_model, ay.sessions, ay.top_model, sh.top_model], [2, "claude-sonnet-5-5", 1, "gpt-6.1-sol", "claude-opus-5-5"]);
+    near(ax.session_usd, 1.75, "X sessions"); near(ax.orchestrator_usd, 0.3, "X's job orchestrator"); near(ay.spent_usd, 2, "Y"); near(sh.spent_usd, 0.2, "shared");
+    near(sp.accounts.reduce((t: number, x: any) => t + x.spent_usd, 0), sp.totals.total_usd, "accounts add up to the total");
+    assert.deepEqual([ax.allowance.budget_usd, ax.allowance.source, ax.month_usd, ax.month_pct], [10, "override", 0, 0], "allowance against this month's spend");
+    near(ax.daily_session[1] + ax.daily_session[2], 1.75, "X by day"); assert.equal(ax.daily_session.length, 31);
+    const d2 = sp.days.find((d: any) => d.day === "2020-03-02"), d3 = sp.days.find((d: any) => d.day === "2020-03-03");
+    near(d2.total_usd, 1, "Mar 2"); near(d3.total_usd, 3.25, "Mar 3"); near(d3.orchestrator_usd, 0.5, "Mar 3 orchestrators");
+    assert.deepEqual([d3.sessions, d3.top_account.key, d3.top_model], [2, Y.org.slug, "claude-opus-5-5"]);
+    near(d3.by_account.shared.orchestrator_usd, 0.2, "the day's shared part");
+    near(sp.days.reduce((t: number, d: any) => t + d.total_usd, 0), sp.totals.total_usd, "days add up to the total");
+    assert.equal(sp.models.length, 3);
+    const unpriced = sp.models.find((m: any) => m.model === "mystery-model");
+    assert.deepEqual([unpriced.priced, unpriced.unpriced_requests, sp.totals.unpriced_requests], [false, 3, 3], "unpriced rows are flagged");
+    near(sp.models.filter((m: any) => m.consumer === "orchestrator").reduce((t: number, m: any) => t + m.cost_usd, 0), sp.totals.orchestrator_usd, "orchestrator models add up");
+    const opus = sp.models.find((m: any) => m.consumer === "orchestrator");
+    assert.deepEqual([opus.requests, opus.errors, opus.input_tokens, opus.cached_input_tokens, opus.output_tokens], [10, 1, 5000, 1000, 800]);
+    const px = await json(adm("GET", `/spend/accounts/${X.org.slug}?from=2020-03-01&to=2020-03-31`));
+    const lx = px.by_person.find((p: any) => p.user_id === "user_spend_x");
+    near(lx.session_usd, 1.75, "X's launcher, sessions"); near(lx.orchestrator_usd, 0.3, "X's launcher, orchestrator");
+    assert.deepEqual(px.by_model.map((m: any) => m.model), ["claude-sonnet-5-5", "claude-opus-5-5"]);
+    assert.equal((await json(adm("GET", `/spend/accounts/${Y.org.slug}?from=2020-03-01&to=2020-03-31`))).by_person[0].label, "Connector key");
+    assert.equal((await json(adm("GET", "/spend/accounts/shared?from=2020-03-01&to=2020-03-31"))).by_model[0].model, "claude-opus-5-5");
+    const now = new Date(), month = `${now.toISOString().slice(0, 8)}01`;
+    assert.equal((await json(adm("GET", "/spend"))).range.from, month, "default: this month to date");
+    assert.equal((await adm("GET", "/spend?from=2020-02-30")).status, 400);
+    assert.equal((await adm("GET", "/spend?from=2020-03-05&to=2020-03-01")).status, 400);
+    assert.equal((await adm("GET", "/spend/accounts/nope-nope")).status, 404);
+    await db.query("DELETE FROM gateway_usage WHERE token_hash LIKE 'smoke-sp-%'");
+    await db.query("DELETE FROM gateway_model_usage WHERE day >= '2020-03-01' AND day < '2020-04-01'");
+    await db.query("DELETE FROM orchestrator_sandboxes WHERE sandbox_id LIKE 'smoke-sp-%'");
+    await db.query("DELETE FROM organizations WHERE id = ANY($1)", [[X.org.orgId, Y.org.orgId]]);
+    console.log("✓ spend: session spend (cost vs live gateway), orchestrator spend attributed by job with the rest shared, accounts, models (unpriced), days add up; launcher peek");
+  }
+
   // ---------- autoscaler history (src/autoscaler-ticks.ts): acting ticks and minute samples, decisions, activity, pruning ----------
   {
     const { tickWrite, recordTick, bucketActivity, pruneComputeHistory, SAMPLE_MS } = await import("../src/autoscaler-ticks.js");
@@ -2290,6 +2360,8 @@ try {
         ["GET", "/overview", undefined, "viewer"],
         ["GET", "/admins", undefined, "viewer"],
         ["GET", "/compute/keys", undefined, "viewer"],
+        ["GET", "/spend", undefined, "viewer"],
+        ["GET", "/spend/accounts/shared", undefined, "viewer"],
         ["POST", "/requests/999999/decline", {}, "support"],
         ["POST", `/orgs/${slugA}/invitations`, { email: "not-an-email" }, "support"],
         ["POST", "/journeys/nudges", {}, "support"],
