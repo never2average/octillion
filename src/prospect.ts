@@ -37,8 +37,8 @@ export async function researchRequest(id: number) {
 
 async function run(id: number) {
   const db = await getDb();
-  const [q] = await db.query<{ email: string; company: string; product_url: string | null; message: string | null; name: string | null; role: string | null; depth: string | null; docs_url: string | null; competitors: string | null; goal: string | null }>(
-    "SELECT email, company, product_url, message, name, role, docs_url, competitors, goal, research->>'depth' AS depth FROM access_requests WHERE id = $1", [id]);
+  const [q] = await db.query<{ email: string; company: string; product_url: string | null; message: string | null; name: string | null; role: string | null; depth: string | null; docs_url: string | null; competitors: string | null; goal: string | null; subindustry: string | null }>(
+    "SELECT email, company, product_url, message, name, role, docs_url, competitors, goal, subindustry, research->>'depth' AS depth FROM access_requests WHERE id = $1", [id]);
   if (!q) return;
   // A finished deep brief is never replaced by a quick pass: a re-run only queues a fresh deep job, and the current
   // brief stays up until that one is accepted.
@@ -53,7 +53,7 @@ async function run(id: number) {
   }
 }
 
-async function research(q: { email: string; company: string; product_url: string | null; message: string | null; name: string | null; role: string | null; docs_url?: string | null; competitors?: string | null; goal?: string | null }): Promise<ProspectBrief> {
+async function research(q: { email: string; company: string; product_url: string | null; message: string | null; name: string | null; role: string | null; docs_url?: string | null; competitors?: string | null; goal?: string | null; subindustry?: string | null }): Promise<ProspectBrief> {
   const emailDomain = q.email.split("@")[1]?.toLowerCase() ?? "";
   const flags: string[] = [];
   if (FREE_MAIL.test(emailDomain)) flags.push(`Personal email address (${emailDomain})`);
@@ -78,7 +78,7 @@ async function research(q: { email: string; company: string; product_url: string
   const sources = [...(site ? [{ url: site.url, title: site.title }] : []), ...about, ...similar].map((h) => ({ url: h.url, title: h.title })).slice(0, 16);
 
   const evidence = {
-    request: { company: q.company, email_domain: emailDomain, website: q.product_url, docs: q.docs_url ?? null, name: q.name, role: q.role, goal: q.goal ?? null,
+    request: { company: q.company, email_domain: emailDomain, website: q.product_url, docs: q.docs_url ?? null, name: q.name, role: q.role, goal: q.goal ?? null, category_they_chose: q.subindustry ?? null,
       competitors_they_named: asData(q.competitors ?? "", 500), message: asData(q.message ?? "", 1500) },
     website: site, web_results: about, similar_sites: similar.map((h) => ({ url: h.url, title: h.title, text: h.text?.slice(0, 300) })), packages,
     notes: searching ? [] : ["Web search is not configured; only the website and package registries were checked."],
@@ -270,7 +270,7 @@ export async function queueDeepResearch(requestId: number, opts: { manual?: bool
   const db = await getDb();
   const [live] = await db.query<{ id: string }>("SELECT id FROM product_research WHERE kind = 'prospect' AND request_id = $1 AND status IN ('queued', 'running')", [requestId]);
   if (live) { kick(); return live.id; }
-  const [q] = await db.query<any>("SELECT email, company, product_url, message, name, role, team_size, agents, docs_url, competitors, goal, timeline, research FROM access_requests WHERE id = $1", [requestId]);
+  const [q] = await db.query<any>("SELECT email, company, product_url, message, name, role, team_size, agents, docs_url, competitors, goal, timeline, subindustry, research FROM access_requests WHERE id = $1", [requestId]);
   if (!q) return null;
   if (!opts.manual) {
     // Automatic deep research only for a company we can find: a website, or a work email domain. Others wait for an admin.
@@ -282,7 +282,7 @@ export async function queueDeepResearch(requestId: number, opts: { manual?: bool
   const quick = q.research as ProspectBrief | null;
   const input = { company: q.company, email_domain: String(q.email).split("@")[1] ?? "", website_url: q.product_url ?? quick?.site?.url ?? null,
     name: q.name, role: q.role, team_size: q.team_size, agents: q.agents ?? [], message: q.message ?? "",
-    docs_url: q.docs_url ?? null, competitors: q.competitors ?? "", goal: q.goal ?? null, timeline: q.timeline ?? null,
+    docs_url: q.docs_url ?? null, competitors: q.competitors ?? "", goal: q.goal ?? null, timeline: q.timeline ?? null, subindustry: q.subindustry ?? null,
     quick: quick ? { summary: quick.summary, flags: quick.flags, competitors: quick.competitors, packages: quick.packages, sources: quick.sources } : null };
   await db.query("INSERT INTO product_research (id, kind, request_id, input) VALUES ($1, 'prospect', $2, $3)", [id, requestId, JSON.stringify(input)]);
   kick();

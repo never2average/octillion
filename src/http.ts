@@ -84,7 +84,7 @@ export function createApp() {
     const email = s(req.body?.email, 200), company = s(req.body?.company, 200);
     const productUrl = s(req.body?.product_url, 500), message = s(req.body?.message, 4000);
     const name = s(req.body?.name, 120), role = s(req.body?.role, 120), teamSize = s(req.body?.team_size, 20);
-    const docsUrl = s(req.body?.docs_url, 500), competitors = s(req.body?.competitors, 500), goal = s(req.body?.goal, 40), timeline = s(req.body?.timeline, 40), heardFrom = s(req.body?.heard_from, 120);
+    const docsUrl = s(req.body?.docs_url, 500), competitors = s(req.body?.competitors, 500), goal = s(req.body?.goal, 40), timeline = s(req.body?.timeline, 40), heardFrom = s(req.body?.heard_from, 120), subindustry = s(req.body?.subindustry, 80);
     const agents = (Array.isArray(req.body?.agents) ? req.body.agents : []).map((x: unknown) => s(x, 40)).filter(Boolean).slice(0, 12);
     const src = req.body?.source && typeof req.body.source === "object" ? req.body.source : {};
     const source = Object.fromEntries([...["referrer", "landing", "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"].map((k) => [k, s(src[k], 300)]),
@@ -92,10 +92,10 @@ export function createApp() {
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return void res.status(400).json({ error: "Please enter a valid email." });
     if (!company) return void res.status(400).json({ error: "Please tell us your company." });
     const [row] = await (await getDb()).query<{ id: number }>(
-      `INSERT INTO access_requests (email, company, product_url, message, name, role, team_size, agents, source, docs_url, competitors, goal, timeline, heard_from)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING id`,
+      `INSERT INTO access_requests (email, company, product_url, message, name, role, team_size, agents, source, docs_url, competitors, goal, timeline, heard_from, subindustry)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING id`,
       [email, company, productUrl || null, message || null, name || null, role || null, teamSize || null, agents, Object.keys(source).length ? JSON.stringify(source) : null,
-       docsUrl || null, competitors || null, goal || null, timeline || null, heardFrom || null],
+       docsUrl || null, competitors || null, goal || null, timeline || null, heardFrom || null, subindustry || null],
     );
     // Background research on the company for whoever reviews the request (src/prospect.ts); kept alive on Vercel.
     telemetry.keepAlive(prospect.researchRequest(row.id));

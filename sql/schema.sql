@@ -474,6 +474,7 @@ ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS competitors TEXT;          
 ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS goal TEXT;                 -- baseline, competitor, docs, monitor, other
 ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS timeline TEXT;             -- now, month, quarter, exploring
 ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS heard_from TEXT;
+ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS subindustry TEXT;          -- the kind of developer tool they sell
 ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS source JSONB;                -- referrer, utm_*, landing page, country
 ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS research JSONB;
 ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS research_status TEXT CHECK (research_status IN ('running', 'done', 'failed'));

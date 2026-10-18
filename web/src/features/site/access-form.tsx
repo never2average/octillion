@@ -13,7 +13,8 @@ const AGENTS = ['Claude Code', 'Codex', 'Cursor', 'GitHub Copilot', 'Gemini CLI'
 const TEAM = ['1-10', '11-50', '51-200', '201-1000', '1000+'];
 const GOALS = [['baseline', 'See where agents pick us today'], ['competitor', 'Find out why agents pick a competitor'], ['docs', 'Fix our docs and SDKs for agents'],
   ['monitor', 'Track agent preference every release'], ['other', 'Something else']] as const;
-const TIMELINES = [['now', 'This week'], ['month', 'This month'], ['quarter', 'This quarter'], ['exploring', 'Just exploring']] as const;
+const SUBINDUSTRIES = ['Database', 'Auth & identity', 'Payments & billing', 'Email & messaging', 'Queues & background jobs', 'Observability & logging', 'Hosting & deployment',
+  'AI & LLM infrastructure', 'Search', 'Storage & CDN', 'Analytics', 'Feature flags & experimentation', 'CMS & content', 'Testing & CI', 'Security', 'Other'];
 const HEARD = ['Search', 'X / Twitter', 'LinkedIn', 'Hacker News', 'A friend or colleague', 'An AI assistant', 'Other'];
 /** Where the visitor came from: the referrer, utm_* tags and the page they landed on (first page of the visit). */
 function visitSource() {
@@ -26,7 +27,7 @@ function visitSource() {
 
 /** Landing-page access request: POST /api/access-requests (the API server, through the web app's proxy). */
 export function AccessForm() {
-  const [v, setV] = useState({ email: '', company: '', product_url: '', message: '', name: '', role: '', team_size: '', docs_url: '', competitors: '', goal: '', timeline: '', heard_from: '' });
+  const [v, setV] = useState({ email: '', company: '', product_url: '', message: '', name: '', role: '', team_size: '', competitors: '', goal: '', heard_from: '', subindustry: '' });
   const [agents, setAgents] = useState<string[]>([]);
   const [more, setMore] = useState(false);
   const [errs, setErrs] = useState<Record<string, string>>({});
@@ -42,11 +43,6 @@ export function AccessForm() {
     if (!v.email.trim()) e.email = 'Enter your email.';
     else if (!EMAIL.test(v.email.trim())) e.email = 'Enter a valid email address.';
     if (!v.company.trim()) e.company = 'Enter your company name.';
-    if (v.docs_url.trim()) {
-      let ok = false;
-      try { ok = /\./.test(new URL(normalizeUrl(v.docs_url.trim())).hostname); } catch { /* invalid */ }
-      if (!ok) { e.docs_url = 'Enter a valid URL, e.g. https://docs.yourproduct.dev'; setMore(true); }
-    }
     if (v.product_url.trim()) {
       let ok = false;
       try { ok = /\./.test(new URL(normalizeUrl(v.product_url.trim())).hostname); } catch { /* invalid */ }
@@ -68,7 +64,7 @@ export function AccessForm() {
         method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         body: JSON.stringify({ email: v.email.trim(), company: v.company.trim(), product_url: normalizeUrl(v.product_url.trim()), message: v.message.trim(),
           name: v.name.trim(), role: v.role.trim(), team_size: v.team_size, agents, source: visitSource(),
-          docs_url: normalizeUrl(v.docs_url.trim()), competitors: v.competitors.trim(), goal: v.goal, timeline: v.timeline, heard_from: v.heard_from })
+          competitors: v.competitors.trim(), goal: v.goal, heard_from: v.heard_from, subindustry: v.subindustry })
       });
       const data = await res.json().catch(() => null);
       if (res.ok) return setStatus('done');
@@ -93,7 +89,7 @@ export function AccessForm() {
     );
   }
 
-  const field = (k: 'email' | 'company' | 'product_url' | 'name' | 'role' | 'docs_url' | 'competitors', label: string, props: React.ComponentProps<'input'>) => (
+  const field = (k: 'email' | 'company' | 'product_url' | 'name' | 'role' | 'competitors', label: string, props: React.ComponentProps<'input'>) => (
     <div className='space-y-1.5'>
       <Label htmlFor={`f-${k}`}>{label}</Label>
       <Input id={`f-${k}`} name={k} value={v[k]} onChange={set(k)} aria-invalid={Boolean(errs[k]) || undefined} aria-describedby={`e-${k}`} {...props} />
@@ -112,7 +108,7 @@ export function AccessForm() {
 
           <details className='group border-y py-3 [&_summary::-webkit-details-marker]:hidden' open={more} onToggle={(e) => setMore((e.target as HTMLDetailsElement).open)}>
             <summary className='text-muted-foreground hover:text-foreground flex cursor-pointer list-none items-center justify-between text-sm'>
-              <span>Add details <span className='text-muted-foreground/70'>(optional, helps us prepare your baseline)</span></span>
+              <span>Add details</span>
               <IconChevronDown className='size-4 transition-transform group-open:rotate-180' />
             </summary>
             <div className='space-y-2 pt-4'>
@@ -128,8 +124,14 @@ export function AccessForm() {
                 </div>
               </div>
               <div className='grid'>
-                {field('docs_url', 'Docs URL', { type: 'url', inputMode: 'url', placeholder: 'https://docs.yourproduct.dev', maxLength: 500 })}
-                {field('competitors', 'Main competitors', { placeholder: 'Who agents pick instead of you', maxLength: 500 })}
+                <div className='space-y-1.5 pb-5'>
+                  <Label htmlFor='f-subindustry'>Sub-industry</Label>
+                  <NativeSelect id='f-subindustry' name='subindustry' value={v.subindustry} onChange={(e) => setV({ ...v, subindustry: e.target.value })} className='w-full'>
+                    <NativeSelectOption value=''>Choose</NativeSelectOption>
+                    {SUBINDUSTRIES.map((x) => <NativeSelectOption key={x} value={x}>{x}</NativeSelectOption>)}
+                  </NativeSelect>
+                </div>
+                {field('competitors', 'Main competitors', { maxLength: 500 })}
               </div>
               <div className='grid'>
                 <div className='space-y-1.5 pb-5'>
@@ -137,13 +139,6 @@ export function AccessForm() {
                   <NativeSelect id='f-goal' name='goal' value={v.goal} onChange={(e) => setV({ ...v, goal: e.target.value })} className='w-full'>
                     <NativeSelectOption value=''>Choose</NativeSelectOption>
                     {GOALS.map(([k, l]) => <NativeSelectOption key={k} value={k}>{l}</NativeSelectOption>)}
-                  </NativeSelect>
-                </div>
-                <div className='space-y-1.5 pb-5'>
-                  <Label htmlFor='f-timeline'>When</Label>
-                  <NativeSelect id='f-timeline' name='timeline' value={v.timeline} onChange={(e) => setV({ ...v, timeline: e.target.value })} className='w-full'>
-                    <NativeSelectOption value=''>Choose</NativeSelectOption>
-                    {TIMELINES.map(([k, l]) => <NativeSelectOption key={k} value={k}>{l}</NativeSelectOption>)}
                   </NativeSelect>
                 </div>
               </div>
@@ -169,7 +164,7 @@ export function AccessForm() {
               <div className='space-y-1.5'>
                 <Label htmlFor='f-message'>Anything else we should know?</Label>
                 <Textarea id='f-message' name='message' rows={3} maxLength={4000} value={v.message} onChange={set('message')}
-                  placeholder='Scenarios you care about, models your users run, anything we should know…' />
+                  />
               </div>
             </div>
           </details>

@@ -42,6 +42,7 @@ interface Req {
   goal: string | null;
   timeline: string | null;
   heard_from: string | null;
+  subindustry: string | null;
   research: Brief | null;
   research_status: 'running' | 'done' | 'failed' | null;
   research_error: string | null;
@@ -339,6 +340,7 @@ function RequestPeek({ q, match, onResearch }: { q: Req; match: string | null; o
           <Field label='Company'>{q.company}{q.team_size && <span className='text-muted-foreground'> · {q.team_size} people</span>}</Field>
           <Field label='Product'>{url ? <a className='text-primary hover:underline' href={url} target='_blank' rel='noopener noreferrer'>{host(q)}</a> : <span className='text-muted-foreground'>Not given</span>}</Field>
           {q.docs_url && <Field label='Docs'><a className='text-primary hover:underline' href={q.docs_url} target='_blank' rel='noopener noreferrer'>{hostOf(q.docs_url)}</a></Field>}
+          {q.subindustry && <Field label='Sub-industry'>{q.subindustry}</Field>}
           {q.competitors && <Field label='Competitors'>{q.competitors}</Field>}
           {q.goal && <Field label='Wants first'>{GOAL_LABEL[q.goal] ?? q.goal}{q.timeline && <span className='text-muted-foreground'> · {TIMELINE_LABEL[q.timeline] ?? q.timeline}</span>}</Field>}
           <Field label='Agents'>{q.agents?.length ? q.agents.join(', ') : <span className='text-muted-foreground'>Not given</span>}</Field>
