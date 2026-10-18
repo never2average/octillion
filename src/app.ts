@@ -107,6 +107,11 @@ async function setup(s: Session, since?: string) {
     { id: "simulated", label: "Run a simulation (team)", done: Boolean(facts.first_sim_at), at: facts.first_sim_at, help: "Coding agents work your tasks in sandboxes and Octillion records which tools they pick. Type: \"Run a simulation.\" It takes 20 to 60 minutes." },
     { id: "reported", label: "Read the visibility report (team)", done: Boolean(facts.first_report_at), at: facts.first_report_at, help: "The report shows how often agents pick you, where you lose and the transcript evidence for why. Type: \"Show my visibility report.\"" },
   ];
+  // Every step has a prompt to paste into the AI client: the one its help names (Type: "…"), or one that checks the step.
+  const STEP_PROMPTS: Record<string, string> = {
+    connected: "Is Octillion connected? Tell me what it can do.", tools: "Which Octillion tools can you use?", dashboard: "Show my Octillion dashboard.",
+  };
+  const prompted = steps.map((st) => ({ ...st, prompt: STEP_PROMPTS[st.id] ?? st.help.match(/Type:\s*"(.+?)"/)?.[1] ?? null }));
   const groups = TOOL_GROUPS.map((g) => ({ id: g.id, label: g.label, prompt: g.prompt, used: g.tools.filter((t) => used.has(t)).length, total: g.tools.length }));
   let live = null;
   if (since) {
@@ -116,7 +121,7 @@ async function setup(s: Session, since?: string) {
     live = r ?? null;
   }
   return {
-    steps, done: steps.filter((x) => x.done && !("optional" in x && x.optional)).length, total: steps.filter((x) => !("optional" in x && x.optional)).length,
+    steps: prompted, done: steps.filter((x) => x.done && !("optional" in x && x.optional)).length, total: steps.filter((x) => !("optional" in x && x.optional)).length,
     clients, calls: Number(m.calls), groups, coverage: groups.filter((g) => g.used > 0).length / groups.length,
     next: groups.find((g) => g.used === 0) ?? null,
     errors: errors.map((e) => ({ ...e, hint: HINTS.find(([re]) => re.test(e.error ?? ""))?.[1] ?? null })),

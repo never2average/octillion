@@ -19,7 +19,7 @@ import { appApi } from '@/lib/api-client';
 import { cn } from '@/lib/utils';
 import { CopyButton, ErrorState, LoadingCards, When, copy, fail, useOrgLoad } from './shared';
 
-interface Step { id: string; label: string; done: boolean; at: string | null; help: string; optional?: boolean }
+interface Step { id: string; label: string; done: boolean; at: string | null; help: string; optional?: boolean; prompt?: string | null }
 interface Setup {
   steps: Step[]; done: number; total: number; clients: { client: string; last: string }[]; calls: number;
   groups: { id: string; label: string; prompt: string; used: number; total: number }[];
@@ -42,7 +42,8 @@ export function SetupPage() {
   const { data: s, error, reload } = useOrgLoad(() => appApi<Setup>('GET', '/setup'));
   const { data: jr, reload: reloadJourneys } = useOrgLoad(() => appApi<{ journeys: Journey[] }>('GET', '/journeys'));
   const [selected, setSelected] = useQueryState('journey', { defaultValue: 'setup' });
-  const next = s?.steps.find((x) => !x.done && !x.optional);
+  // The earliest step not done yet, optional ones included: the timeline highlights it.
+  const next = s?.steps.find((x) => !x.done);
   const journey = jr?.journeys.find((x) => x.id === selected) ?? null;
   return (
     <PageContainer>
@@ -294,7 +295,6 @@ function JourneyView({ j, onChanged }: { j: Journey; onChanged: () => void }) {
               <div className='min-w-0 flex-1 space-y-2'>
                 <div className='flex flex-wrap items-center gap-2'>
                   <span className='font-medium'>{x.title}</span>
-                  {now && <Badge variant='secondary'>next</Badge>}
                   {x.tools.map((t) => <code key={t} className='text-muted-foreground bg-muted rounded px-1.5 py-0.5 font-mono text-[11px]'>{t}</code>)}
                   {x.done && x.at && <span className='text-muted-foreground text-xs'>done <When d={x.at} /></span>}
                 </div>
@@ -316,25 +316,20 @@ function JourneyView({ j, onChanged }: { j: Journey; onChanged: () => void }) {
 
 /** Setup as a vertical timeline: every step explained, what is done (and when), what is next, what is optional. */
 /**
- * A step's description, selectable, with its prompt (`Type: "…"`) pulled out into a box you can copy in one click and
- * paste into your AI client. A copy button for the whole description sits beside it on hover.
+ * A step's description (selectable) and, while the step is open, its prompt in a box with one Copy button, to paste
+ * into your AI client. A done step shows only its description.
  */
-function StepHelp({ help, done }: { help: string; done: boolean }) {
+function StepHelp({ help, done, prompt }: { help: string; done: boolean; prompt: string | null }) {
   const m = help.match(/\s*Type:\s*"(.+?)"\.?\s*(.*)$/);
-  const text = m ? help.slice(0, m.index).trim() : help, prompt = m?.[1] ?? null, after = m?.[2]?.trim() ?? '';
+  const text = m ? help.slice(0, m.index).trim() : help, after = m?.[2]?.trim() ?? '';
+  const p = prompt ?? m?.[1] ?? null;
   return (
-    <div className='group/help mt-1 flex flex-col gap-2'>
-      <p className={cn('text-sm select-text', done ? 'text-muted-foreground/70' : 'text-muted-foreground')}>
-        {text}{after && <> {after}</>}
-        <button type='button' aria-label='Copy description' title='Copy description' onClick={() => copy(help)}
-          className='text-muted-foreground hover:text-foreground ml-1.5 inline-flex align-middle opacity-0 transition-opacity group-hover/help:opacity-100 focus-visible:opacity-100'>
-          <Icons.page className='size-3.5' />
-        </button>
-      </p>
-      {prompt && (
+    <div className='mt-1 flex flex-col gap-2'>
+      <p className={cn('text-sm select-text', done ? 'text-muted-foreground/70' : 'text-muted-foreground')}>{text}{after && <> {after}</>}</p>
+      {!done && p && (
         <div className='bg-muted/50 flex items-center gap-2 rounded-md border px-3 py-2'>
-          <code className='min-w-0 flex-1 font-mono text-xs break-words select-all'>{prompt}</code>
-          <CopyButton text={prompt} label='Copy prompt' />
+          <code className='min-w-0 flex-1 font-mono text-xs break-words select-all'>{p}</code>
+          <CopyButton text={p} label='Copy prompt' />
         </div>
       )}
     </div>
@@ -361,9 +356,8 @@ function Timeline({ s, next }: { s: Setup; next: Step | undefined }) {
               <div className={cn('min-w-0 flex-1 pt-1', cur && 'bg-primary/5 -mt-1 rounded-lg px-4 py-3')}>
                 <div className='flex flex-wrap items-center gap-2'>
                   <span className={cn('font-medium', x.done && 'text-muted-foreground')}>{x.label.replace(' (team)', '')}</span>
-                  {cur && <Badge>up next</Badge>}
                 </div>
-                <StepHelp help={x.help} done={x.done} />
+                <StepHelp help={x.help} done={x.done} prompt={x.prompt ?? null} />
               </div>
             </li>
           );
