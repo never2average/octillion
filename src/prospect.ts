@@ -1,6 +1,7 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { getDb } from "./db.js";
+import { orchestratorBrain } from "./gateway.js";
 import { getProvider, useCredential, VERTEX_LABEL } from "./keyvault.js";
 import { toVertex, vertexAccessToken } from "./vertex.js";
 import { findSimilar, packageSearch, webSearch, webSearchEnabled, type SearchHit } from "./websearch.js";
@@ -8,8 +9,8 @@ import { asData } from "../orchestrator/core/text-guard.js";
 
 /**
  * Background research on the company behind an access request, run once when the request comes in (and again from
- * /admin on demand): their website, web search and look-alike sites (Exa), their packages on npm and PyPI, then Claude
- * reads that evidence and writes a short brief for whoever reviews the request: what they sell, whether it is a
+ * /admin on demand): their website, web search and look-alike sites (Exa), their packages on npm and PyPI, then Claude (or the
+ * orchestrator's model) reads that evidence and writes a short brief for whoever reviews the request: what they sell, whether it is a
  * developer tool Octillion fits, competitors, starter tasks, questions for the call and red flags. Without a model the
  * brief is the raw evidence. Everything fetched is data, never instructions (asData), and only public hosts are fetched.
  */
@@ -80,7 +81,7 @@ async function research(q: { email: string; company: string; product_url: string
   };
   const brief = await claudeBrief(evidence).catch((e) => { flags.push(`AI summary unavailable: ${(e as Error).message}`); return null; });
   if (!brief) return base;
-  return { ...base, ...brief, flags: [...flags, ...(brief.flags ?? [])].slice(0, 10), packages, site: base.site, sources, model: MODEL() };
+  return { ...base, ...brief, flags: [...flags, ...(brief.flags ?? [])].slice(0, 10), packages, site: base.site, sources };
 }
 
 const named = (pkg: string, company: string) => {
@@ -135,7 +136,31 @@ Reply with one JSON object and nothing else:
  "competitors": [{"name": "...", "url": "..."}], "starter_tasks": ["3 realistic coding prompts a developer might give an agent where this kind of tool could be chosen, never naming the product"],
  "questions": ["2-4 questions to ask them on a first call"], "flags": ["anything that looks off: mismatched domains, no product, not a developer tool"]}`;
 
-async function claudeBrief(evidence: unknown): Promise<Partial<ProspectBrief> | null> {
+/** The brief from Claude, else from the orchestrator's own model (OpenAI) when the vault has no Anthropic key. */
+async function claudeBrief(evidence: unknown): Promise<(Partial<ProspectBrief> & { model: string }) | null> {
+  try { return { ...parseBrief(await anthropicText(evidence)), model: MODEL() }; }
+  catch (e) {
+    const brain = orchestratorBrain();
+    if (brain.provider !== "openai") throw e;
+    try { return { ...parseBrief(await openaiText(evidence, brain.model)), model: brain.model }; }
+    catch (e2) { throw new Error(`${(e as Error).message}; ${(e2 as Error).message}`); }
+  }
+}
+
+async function openaiText(evidence: unknown, model: string) {
+  const p = await getProvider("openai");
+  if (!p?.enabled || !p.upstream_url) throw new Error("no OpenAI provider in the vault");
+  const cred = await useCredential("openai", { excludeLabel: VERTEX_LABEL });
+  const base = p.upstream_url.replace(/\/$/, "").replace(/\/v1$/, "");
+  const r = await fetch(`${base}/v1/chat/completions`, { method: "POST", signal: AbortSignal.timeout(90_000),
+    headers: { "content-type": "application/json", [p.auth_header]: `${p.auth_prefix}${cred.secret}` },
+    body: JSON.stringify({ model, response_format: { type: "json_object" }, messages: [{ role: "system", content: SYSTEM }, { role: "user", content: `Evidence:\n${JSON.stringify(evidence)}` }] }) });
+  if (!r.ok) throw new Error(`OpenAI answered ${r.status}`);
+  const out = await r.json() as { choices?: { message?: { content?: string } }[] };
+  return out.choices?.[0]?.message?.content ?? "";
+}
+
+async function anthropicText(evidence: unknown): Promise<string> {
   const p = await getProvider("anthropic");
   if (!p?.enabled) throw new Error("no Anthropic provider in the vault");
   const payload = { model: MODEL(), max_tokens: 1500, system: SYSTEM, messages: [{ role: "user", content: `Evidence:\n${JSON.stringify(evidence)}` }] };
@@ -155,7 +180,10 @@ async function claudeBrief(evidence: unknown): Promise<Partial<ProspectBrief> | 
   const r = await fetch(url, { ...init, signal: AbortSignal.timeout(60_000) });
   if (!r.ok) throw new Error(`model answered ${r.status}`);
   const out = await r.json() as { content?: { type: string; text?: string }[] };
-  const text = (out.content ?? []).filter((c) => c.type === "text").map((c) => c.text).join("");
+  return (out.content ?? []).filter((c) => c.type === "text").map((c) => c.text).join("");
+}
+
+function parseBrief(text: string): Partial<ProspectBrief> {
   const json = text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1);
   const b = JSON.parse(json) as Record<string, any>;
   const strs = (v: unknown, n: number, max = 300) => (Array.isArray(v) ? v : []).map((x) => asData(x, max)).filter(Boolean).slice(0, n);
