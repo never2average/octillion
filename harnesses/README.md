@@ -24,7 +24,7 @@ As of **2026-10-10**. Next review: **2027-01-10**.
 | cline/sonnet | 0.0109 | 1.0% | proxy (Cline CLI) | SO 2025 (Cline+Roo 2.2%) |
 | kilo/sonnet | 0.0054 | 0.5% | proxy (Kilo CLI) | SO 2025 bucket, npm |
 | amp/default | 0.0044 | 0.4% | yes | npm 20k/wk (long tail) |
-| droid/default (gpt-6-sol) | 0.0044 | 0.4% | yes | long tail |
+| droid/default (gpt-6.1-sol) | 0.0044 | 0.4% | yes | long tail |
 | qwen-code/default | 0.0033 | 0.3% | yes | npm 80k/wk (long tail) |
 | **not runnable** (Junie 2.5, Windsurf/Devin 1.5, Kiro 1.0, Jules 0.8, Roo 0.5, Augment, Warp, Aider, Trae 0.4 each, Zed 0.3, Continue 0.2) | 0 | **8.4%** | no | `unrepresented_share` |
 
