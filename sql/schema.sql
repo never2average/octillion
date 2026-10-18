@@ -205,6 +205,40 @@ ALTER TABLE orchestrator_sandboxes ADD COLUMN IF NOT EXISTS retiring_since TIMES
 -- and the worker sandboxes reserved for it on the boat plan. NULL job_id: a shared orchestrator (per-job mode off).
 ALTER TABLE orchestrator_sandboxes ADD COLUMN IF NOT EXISTS job_id TEXT;
 ALTER TABLE orchestrator_sandboxes ADD COLUMN IF NOT EXISTS pods INT;
+-- Why an orchestrator ended, split out of the mixed `error` column (still written as before, for old readers):
+-- the launch step that failed and its error, or the reason the autoscaler reaped it (src/error-classes.ts reads them).
+ALTER TABLE orchestrator_sandboxes ADD COLUMN IF NOT EXISTS launch_step TEXT;
+ALTER TABLE orchestrator_sandboxes ADD COLUMN IF NOT EXISTS launch_error TEXT;
+ALTER TABLE orchestrator_sandboxes ADD COLUMN IF NOT EXISTS reap_reason TEXT;
+-- Backfill rows written before the split. A launch failure reads "<step> (<n>s): <error>" and never got ready; any
+-- other error was a reap reason. Both only touch rows not split yet, so a rerun at boot does nothing.
+UPDATE orchestrator_sandboxes SET
+  launch_step  = substring(error from '^(create|name|ready|code upload|configure|preflight|start) \(\d+s\):'),
+  launch_error = substring(error from '^(?:create|name|ready|code upload|configure|preflight|start) \(\d+s\): ?(.*)$')
+WHERE ready_at IS NULL AND launch_step IS NULL AND reap_reason IS NULL
+  AND error ~ '^(create|name|ready|code upload|configure|preflight|start) \(\d+s\):';
+UPDATE orchestrator_sandboxes SET reap_reason = error
+WHERE error IS NOT NULL AND launch_step IS NULL AND reap_reason IS NULL;
+CREATE INDEX IF NOT EXISTS orchestrator_sandboxes_job_idx ON orchestrator_sandboxes (job_id, created_at DESC) WHERE job_id IS NOT NULL;
+
+-- Compute history the orchestrator rows do not keep (src/compute-events.ts): failed launches, reaps, and the sandboxes
+-- the autoscaler deletes that have no row of their own (workers of a reaped orchestrator, orphans, stale image
+-- builders), tick errors and admin cancels. Kept 90 days.
+CREATE TABLE IF NOT EXISTS compute_events (
+  id               BIGSERIAL PRIMARY KEY,
+  at               TIMESTAMPTZ NOT NULL DEFAULT now(),
+  kind             TEXT NOT NULL CHECK (kind IN ('launch_failed', 'reaped', 'worker_deleted', 'orphan_deleted', 'image_builder_deleted', 'tick_error', 'admin_cancel')),
+  sandbox_id       TEXT,
+  orchestrator_id  TEXT,
+  job_id           TEXT,
+  session_id       TEXT,
+  step             TEXT,
+  reason           TEXT,
+  actor            TEXT,
+  trace_id         TEXT
+);
+CREATE INDEX IF NOT EXISTS compute_events_at_idx ON compute_events (at DESC);
+CREATE INDEX IF NOT EXISTS compute_events_sandbox_idx ON compute_events (sandbox_id);
 
 -- Single-leader lease for the autoscaler across server replicas; `state` holds the leader's last tick for status.
 CREATE TABLE IF NOT EXISTS autoscaler_lease (

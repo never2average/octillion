@@ -18,6 +18,7 @@ Object.assign(process.env, {
   PGLITE_DIR: path.join(tmp, "pglite"), OCTILLION_VAULT_KEY: randomBytes(32).toString("base64"), OCTILLION_WORKER_TOKEN: `wt_${randomBytes(8).toString("hex")}`,
   PUBLIC_URL: "https://octi.example", BOAT_API_URL: `http://127.0.0.1:${BOAT_PORT}/api/v1`, OCTILLION_POD_CAPACITY: "3", OCTILLION_MAX_ORCHESTRATORS: "2",
   OCTILLION_AUTOSCALE_TICK_SECONDS: "15", OCTILLION_ORCH_IDLE_MINUTES: "10", BOAT_STARTS_PER_MINUTE: "100", OCTILLION_ORCH_SNAPSHOT: "off", OCTILLION_JOB_POD_CAPACITY: "4", OCTILLION_MAX_JOB_ORCHESTRATORS: "4", OCTILLION_ORCH_LAUNCHES_PER_TICK: "4",
+  OCTILLION_ORG_MONTHLY_BUDGET_USD: "1000", // accounts without a plan get $0 (prepaid, invite-only)
 });
 delete process.env.DATABASE_URL; delete process.env.CLICKHOUSE_URL;
 

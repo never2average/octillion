@@ -20,6 +20,7 @@ Object.assign(process.env, {
   PUBLIC_URL: "https://octi.example", BOAT_API_URL: `http://127.0.0.1:${BOAT_PORT}/api/v1`, OCTILLION_POD_CAPACITY: "3", OCTILLION_MAX_ORCHESTRATORS: "2",
   OCTILLION_AUTOSCALE_TICK_SECONDS: "15", OCTILLION_ORCH_IDLE_MINUTES: "10", BOAT_STARTS_PER_MINUTE: "100", OCTILLION_ORCH_SNAPSHOT: "on",
   OCTILLION_ORCH_PER_JOB: "off", // the shared fleet; one orchestrator per job is orchestrator/test/per-job.ts
+  OCTILLION_ORG_MONTHLY_BUDGET_USD: "1000", // accounts without a plan get $0 (prepaid, invite-only)
 });
 delete process.env.DATABASE_URL; delete process.env.CLICKHOUSE_URL;
 
@@ -31,7 +32,7 @@ const check = (name: string, ok: boolean, detail = "") => { results.push({ name,
 interface Sb { id: string; name: string; state: string; from?: string; createdAt: string; files: Map<string, string> }
 const sbs = new Map<string, Sb>();
 const snaps = new Map<string, { status: string; at: number }>();
-let creates = 0, fromImageCreates = 0, deletes = 0;
+let creates = 0, fromImageCreates = 0, deletes = 0, failPreflight = false;
 const workerTokenInFiles: string[] = [];
 const json = (res: http.ServerResponse, s: number, b: unknown) => { res.writeHead(s, { "content-type": "application/json" }); res.end(JSON.stringify(b)); };
 const boat = http.createServer((req, res) => {
@@ -69,7 +70,7 @@ const boat = http.createServer((req, res) => {
     if (req.method === "PUT" && rest === "/files") { sb.files.set(b.path, b.content); if (String(b.content).includes(process.env.OCTILLION_WORKER_TOKEN!)) workerTokenInFiles.push(`${sb.name || sb.id}:${b.path}`); return json(res, 200, { ok: true }); }
     if (req.method === "POST" && rest === "/commands") {
       const cmd = String(b.command);
-      const stdout = /in-sandbox\.ts preflight/.test(cmd) ? '{"ok":true,"reason":"reachable"}'
+      const stdout = /in-sandbox\.ts preflight/.test(cmd) ? (failPreflight ? '{"ok":false,"reason":"API unreachable"}' : '{"ok":true,"reason":"reachable"}')
         : /test -x .*tsx/.test(cmd) ? (sb.from ? "yes" : "no") : /systemctl (enable|is-active)/.test(cmd) ? "active" : "";
       return json(res, 200, { ok: true, exitCode: 0, stdout, stderr: "" });
     }
@@ -174,6 +175,27 @@ try {
   check("orphan orchestrator sandbox (no row) deleted", !sbs.has(orphan) && /orphan/.test(reasons[orphan] ?? ""), reasons[orphan] ?? "");
   check("workers of a reaped orchestrator deleted (exact prefix only)", !sbs.has(staleWorker) && sbs.has(otherWorker), reasons[staleWorker] ?? "");
   sbs.delete(otherWorker);
+  // The reap reason has its own column, and every delete is in compute_events (workers and orphans have no row).
+  const ended = Object.fromEntries((await db.query<any>("SELECT sandbox_id, reap_reason, launch_step FROM orchestrator_sandboxes WHERE sandbox_id = ANY($1)", [[stale, stuck]])).map((r) => [r.sandbox_id, r]));
+  check("reap reason recorded apart from launch errors", /^stale/.test(ended[stale]?.reap_reason ?? "") && /^stuck booting/.test(ended[stuck]?.reap_reason ?? "") && !ended[stale]?.launch_step, JSON.stringify(ended));
+  const evs = Object.fromEntries((await db.query<any>("SELECT kind, sandbox_id, orchestrator_id FROM compute_events WHERE sandbox_id = ANY($1)", [[stale, stuck, orphan, staleWorker]])).map((e) => [e.sandbox_id, e]));
+  check("compute events: reaped, worker deleted with its orchestrator, orphan deleted",
+    evs[stale]?.kind === "reaped" && evs[stuck]?.kind === "reaped" && evs[staleWorker]?.kind === "worker_deleted" && evs[staleWorker]?.orchestrator_id === "orch-stale1" && evs[orphan]?.kind === "orphan_deleted",
+    JSON.stringify(evs));
+
+  // A failed launch records its step and error apart (and as before in `error`), and a launch_failed event.
+  failPreflight = true;
+  await queue(1);
+  const before = Number((await db.query<any>("SELECT max(id) AS id FROM orchestrator_sandboxes"))[0]?.id ?? 0);
+  await a1.tick(); await a1.settle();
+  failPreflight = false;
+  const [bad] = await db.query<any>("SELECT * FROM orchestrator_sandboxes WHERE id > $1 ORDER BY id LIMIT 1", [before]);
+  const [badEv] = await db.query<any>("SELECT * FROM compute_events WHERE kind = 'launch_failed' AND sandbox_id = $1", [bad?.sandbox_id ?? ""]);
+  check("failed launch: step and error in their own columns, and a launch_failed event",
+    bad?.state === "deleted" && bad.launch_step === "preflight" && /^preflight failed: API unreachable/.test(bad.launch_error ?? "") && /^preflight \(\d+s\): preflight failed/.test(bad.error ?? "") && !bad.reap_reason &&
+    badEv?.step === "preflight" && badEv.orchestrator_id === bad.orchestrator_id && !sbs.has(bad.sandbox_id),
+    JSON.stringify({ bad: bad && { state: bad.state, step: bad.launch_step, err: bad.launch_error, error: bad.error }, ev: badEv?.step }));
+  await db.query("UPDATE agent_sessions SET status = 'cancelled' WHERE status IN ('queued', 'running')");
 
   // recycle on deploy: an orchestrator launched before this server process runs old code. It gets no pods, is not
   // deleted while a session of its is running, and is retired right after (no idle-timeout wait).

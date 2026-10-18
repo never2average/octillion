@@ -9,6 +9,7 @@ import { JOB_POD_CAPACITY, jobState, orchestratorBusy, setCurrentCodeHash, stale
 import { BOAT } from "../orchestrator/core/config.js";
 import { freshSettings, setting, settingNumber } from "./settings.js";
 import { freshPlatformHarnesses } from "./harnesses.js";
+import { launchFailure, recordComputeEvent } from "./compute-events.js";
 import * as lib from "../orchestrator/deploy/boat-lib.js";
 
 /**
@@ -67,6 +68,8 @@ export interface Row {
   id: number; sandbox_id: string | null; orchestrator_id: string | null; state: "booting" | "running" | "draining" | "deleted";
   created_at: Date; ready_at: Date | null; last_seen: Date | null; error: string | null; from_image: string | null;
   code_hash: string | null; retiring_since: Date | null; job_id: string | null; pods: number | null;
+  /** Why it ended: the launch step that failed and its error, or the reap reason (`error` holds either, as before). */
+  launch_step?: string | null; launch_error?: string | null; reap_reason?: string | null;
 }
 
 /** Pure: how many orchestrators the demand needs (before caps). */
@@ -214,7 +217,8 @@ export class Autoscaler {
       const reaped: { sandbox_id: string; reason: string }[] = [];
       const reap = async (row: Row, reason: string, deleteIt = true) => {
         if (row.sandbox_id && deleteIt) await lib.deleteSandbox(row.sandbox_id).catch((e) => this.log(`delete ${row.sandbox_id}: ${(e as Error).message}`));
-        await db.query("UPDATE orchestrator_sandboxes SET state = 'deleted', deleted_at = now(), error = coalesce(error, $2) WHERE id = $1", [row.id, reason]);
+        await db.query("UPDATE orchestrator_sandboxes SET state = 'deleted', deleted_at = now(), error = coalesce(error, $2), reap_reason = coalesce(reap_reason, $2) WHERE id = $1", [row.id, reason]);
+        await recordComputeEvent({ kind: "reaped", sandbox_id: row.sandbox_id, orchestrator_id: row.orchestrator_id, job_id: row.job_id, reason });
         await revokeSandboxWorkerTokens(row.id);
         if (row.orchestrator_id) {
           await db.query("DELETE FROM orchestrators WHERE id = $1", [row.orchestrator_id]);
@@ -223,6 +227,7 @@ export class Autoscaler {
           for (const w of listing.filter((s) => lib.isLive(s) && s.name?.startsWith(wp))) {
             await lib.deleteSandbox(w.id).catch(() => {});
             reaped.push({ sandbox_id: w.id, reason: `worker of reaped ${row.orchestrator_id}` });
+            await recordComputeEvent({ kind: "worker_deleted", sandbox_id: w.id, orchestrator_id: row.orchestrator_id, job_id: row.job_id, reason: `worker of reaped ${row.orchestrator_id} (${reason})` });
           }
         }
         reaped.push({ sandbox_id: row.sandbox_id ?? "(none)", reason });
@@ -284,7 +289,10 @@ export class Autoscaler {
         const isStaleBuilder = sb.name === lib.IMAGE_BUILDER_NAME && !this.imageBuild && sb.createdAt && now - Date.parse(sb.createdAt) > 30 * min;
         if (isOrch || isStaleBuilder) {
           await lib.deleteSandbox(sb.id).catch(() => {});
-          reaped.push({ sandbox_id: sb.id, reason: isOrch ? "orphan orchestrator sandbox (no row)" : "stale image builder" });
+          const reason = isOrch ? "orphan orchestrator sandbox (no row)" : "stale image builder";
+          reaped.push({ sandbox_id: sb.id, reason });
+          await recordComputeEvent({ kind: isOrch ? "orphan_deleted" : "image_builder_deleted", sandbox_id: sb.id,
+                                     orchestrator_id: isOrch ? lib.orchIdOf(sb.id) : null, reason: `${reason}: ${sb.name}` });
           this.log(`deleted orphan ${sb.id} (${sb.name})`);
         }
       }
@@ -323,6 +331,7 @@ export class Autoscaler {
     } catch (e) {
       st.error = (e as Error).message;
       this.log(`tick error: ${st.error}`);
+      await recordComputeEvent({ kind: "tick_error", reason: st.error });
     }
     this.last = st;
     await db.query("UPDATE autoscaler_lease SET state = $2 WHERE name = 'autoscaler' AND holder = $1", [this.holder, JSON.stringify(st)]).catch(() => {});
@@ -407,9 +416,13 @@ export class Autoscaler {
         [id, r.fromImage ? image : null, JSON.stringify(r.timings)]);
       this.log(`launched ${r.sandboxId} (${r.orchId}) in ${Math.round((r.timings.started ?? 0) / 1000)}s${r.fromImage ? " from image" : " (code upload + npm ci)"}`);
     }).catch(async (e) => {
-      await db.query("UPDATE orchestrator_sandboxes SET state = 'deleted', deleted_at = now(), error = $2 WHERE id = $1", [id, String((e as Error).message).slice(0, 500)]);
+      const f = launchFailure(e);
+      const [r] = await db.query<{ sandbox_id: string | null; orchestrator_id: string | null }>(
+        `UPDATE orchestrator_sandboxes SET state = 'deleted', deleted_at = now(), error = $2, launch_step = $3, launch_error = $4
+          WHERE id = $1 RETURNING sandbox_id, orchestrator_id`, [id, f.message.slice(0, 500), f.step, f.error.slice(0, 500)]);
+      await recordComputeEvent({ kind: "launch_failed", sandbox_id: r?.sandbox_id, orchestrator_id: r?.orchestrator_id, job_id: job?.id, step: f.step, reason: f.error });
       await revokeSandboxWorkerTokens(id);
-      this.log(`launch failed: ${(e as Error).message}`);
+      this.log(`launch failed: ${f.message}`);
     }).finally(() => { this.inflight.delete(id); });
     this.inflight.set(id, p);
     return job ? `row ${id} (${job.id}, ${job.pods} pods)` : `row ${id}`;
@@ -469,7 +482,7 @@ export async function capacityStatus(): Promise<{ autoscale: "on" | "off"; booti
 export async function autoscalerStatus() {
   const db = await getDb();
   const [lease] = await db.query<{ holder: string; expires_at: Date; state: TickState }>("SELECT holder, expires_at, state FROM autoscaler_lease WHERE name = 'autoscaler'");
-  const rows = await db.query("SELECT id, sandbox_id, orchestrator_id, job_id, pods, state, created_at, ready_at, last_seen, error, from_image, timings FROM orchestrator_sandboxes ORDER BY id DESC LIMIT 50");
+  const rows = await db.query("SELECT id, sandbox_id, orchestrator_id, job_id, pods, state, created_at, ready_at, last_seen, error, launch_step, launch_error, reap_reason, from_image, timings FROM orchestrator_sandboxes ORDER BY id DESC LIMIT 50");
   return { enabled: AUTOSCALE.enabled(), knobs: {
       per_job: AUTOSCALE.perJob(), job_pod_capacity: AUTOSCALE.jobPodCapacity(), max_job_orchestrators: AUTOSCALE.maxJobOrchestrators(),
       pod_capacity: AUTOSCALE.podCapacity(), max_orchestrators: AUTOSCALE.maxOrchestrators(), idle_minutes: AUTOSCALE.idleMinutes(),

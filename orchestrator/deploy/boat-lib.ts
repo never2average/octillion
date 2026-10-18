@@ -314,16 +314,27 @@ export async function buildImage(ctx: Pick<LaunchContext, "root" | "log">): Prom
 
 export interface LaunchResult { sandboxId: string; orchId: string; fromImage: boolean; timings: Record<string, number>; preflight: { ok: boolean; reason: string } }
 
+/** What `launchOrchestrator` throws: the message says "<step> (<n>s): <error>"; the parts are also kept apart. */
+export interface LaunchError extends Error { launchStep: string; launchError: string }
+const launchError = (e: unknown, step: string, t0: number): LaunchError => {
+  const err = e instanceof Error ? e : new Error(String(e));
+  const raw = err.message;
+  // Say which step failed and how long in (a bare boat error does not).
+  return Object.assign(err, { message: `${step} (${Math.round((Date.now() - t0) / 1000)}s): ${raw}`, launchStep: step, launchError: raw });
+};
+
 /**
  * Create one orchestrator sandbox and start it. `onCreated` fires right after the create (so callers can record the
- * sandbox id before anything else can fail). Throws after deleting the sandbox if anything fails.
+ * sandbox id before anything else can fail). Throws a LaunchError, after deleting the sandbox, if anything fails.
  */
 export async function launchOrchestrator(ctx: LaunchContext, opts: { image?: string | null; ttlSeconds?: number; onCreated?: (sandboxId: string, orchId: string) => Promise<void> | void; requirePreflight?: boolean } = {}): Promise<LaunchResult> {
   const t0 = Date.now();
   const timings: Record<string, number> = {};
   let step = "create";
   const mark = (k: string) => { timings[k] = Date.now() - t0; };
-  const c = await boatCreate({ type: "small", ttlSeconds: opts.ttlSeconds ?? MAX_TTL_SECONDS, noEnv: true, snapshots: false, ...(opts.image ? { from: opts.image } : {}) });
+  let c: any;
+  try { c = await boatCreate({ type: "small", ttlSeconds: opts.ttlSeconds ?? MAX_TTL_SECONDS, noEnv: true, snapshots: false, ...(opts.image ? { from: opts.image } : {}) }); }
+  catch (e) { throw launchError(e, step, t0); }
   const id: string = c.sandbox.id;
   const orchId = orchIdOf(id);
   mark("created");
@@ -353,8 +364,7 @@ export async function launchOrchestrator(ctx: LaunchContext, opts: { image?: str
     return { sandboxId: id, orchId, fromImage, timings, preflight: pf };
   } catch (e) {
     await deleteSandbox(id).catch(() => {});
-    // Say which step failed and how long in (a bare boat error does not).
-    throw Object.assign(e as Error, { message: `${step} (${Math.round((Date.now() - t0) / 1000)}s): ${(e as Error).message}` });
+    throw launchError(e, step, t0);
   }
 }
 

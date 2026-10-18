@@ -67,7 +67,7 @@ export function classifySession(row: SessionLike, opts: { scheduled?: ReadonlySe
 }
 
 /** Launch steps, as `lib.launchOrchestrator` prefixes its errors ("ready (240s): ..."). */
-const LAUNCH_ERROR = /^(create|name|ready|code upload|configure|preflight|start) \(\d+s\): ?([\s\S]*)$/;
+export const LAUNCH_ERROR = /^(create|name|ready|code upload|configure|preflight|start) \(\d+s\): ?([\s\S]*)$/;
 
 export type ReapKind =
   | "stale" | "stuck_booting" | "ttl" | "idle_drain" | "job_drain" | "retired" | "job_ended" | "sandbox_gone" | "never_created" | "other";

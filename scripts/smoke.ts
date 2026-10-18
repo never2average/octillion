@@ -900,6 +900,50 @@ try {
   console.log("✓ infrastructure failures are retried once with a clean transcript; config errors (and missing keys) fail at once");
   await import("./error-classes-test.js"); // the error-class unit tests run as part of smoke
 
+  // ---------- why orchestrators ended: launch step / launch error / reap reason, and compute_events ----------
+  {
+    const { classifyOrchestrator } = await import("../src/error-classes.js");
+    const { launchFailure, recordComputeEvent } = await import("../src/compute-events.js");
+    const { readFile } = await import("node:fs/promises");
+    // Rows written before the split carry everything in `error`; the backfill in sql/schema.sql splits them.
+    const legacy = [
+      ["smoke-os-1", null, "ready (240s): sandbox bx_1 not ready after 240s"],
+      ["smoke-os-2", "now()", "stale: no fleet check-in for 5 min"],
+      ["smoke-os-3", null, "stuck booting > 10 min"], // never got ready, but a reap, not a launch step
+      ["smoke-os-4", null, "code upload (12s): code deploy failed: tar: short read"],
+    ];
+    for (const [sb, ready, error] of legacy)
+      await db.query(`INSERT INTO orchestrator_sandboxes (sandbox_id, state, deleted_at, ready_at, error) VALUES ($1, 'deleted', now(), ${ready ?? "NULL"}, $2)`, [sb, error]);
+    const schema = await readFile(new URL("../sql/schema.sql", import.meta.url), "utf8");
+    const backfill = schema.match(/UPDATE orchestrator_sandboxes SET[\s\S]*?;/g) ?? [];
+    assert.equal(backfill.length, 2, "the two backfill statements are in the schema");
+    for (const sql of [...backfill, ...backfill]) await db.query(sql); // twice: a rerun at boot changes nothing
+    const split = Object.fromEntries((await db.query<any>(
+      "SELECT sandbox_id, launch_step, launch_error, reap_reason, error, ready_at FROM orchestrator_sandboxes WHERE sandbox_id LIKE 'smoke-os-%'")).map((r) => [r.sandbox_id, r]));
+    assert.equal(split["smoke-os-1"].launch_step, "ready");
+    assert.equal(split["smoke-os-1"].launch_error, "sandbox bx_1 not ready after 240s");
+    assert.equal(split["smoke-os-1"].reap_reason, null);
+    assert.equal(split["smoke-os-4"].launch_step, "code upload");
+    assert.equal(split["smoke-os-2"].reap_reason, "stale: no fleet check-in for 5 min");
+    assert.equal(split["smoke-os-2"].launch_step, null);
+    assert.equal(split["smoke-os-3"].reap_reason, "stuck booting > 10 min");
+    assert.equal(classifyOrchestrator(split["smoke-os-1"])?.key, "launch:ready");
+    assert.equal(classifyOrchestrator(split["smoke-os-3"])?.key, "reap:stuck_booting");
+    assert.equal(classifyOrchestrator(split["smoke-os-2"])?.routine, false, "a stale reap is a failure");
+    // What the autoscaler reads from a thrown launch error: the tagged parts, else the message prefix, else "unknown".
+    const tagged = Object.assign(new Error("preflight (3s): preflight failed: API unreachable"), { launchStep: "preflight", launchError: "preflight failed: API unreachable" });
+    assert.deepEqual(launchFailure(tagged), { step: "preflight", error: "preflight failed: API unreachable", message: tagged.message });
+    assert.equal(launchFailure(new Error("configure (8s): configure failed: exit 1")).step, "configure");
+    assert.deepEqual(launchFailure(new Error("connection refused")), { step: "unknown", error: "connection refused", message: "connection refused" });
+    await recordComputeEvent({ kind: "worker_deleted", sandbox_id: "smoke-os-w1", orchestrator_id: "orch-smoke", reason: "worker of reaped orch-smoke (stale)" });
+    await recordComputeEvent({ kind: "not_a_kind" as any, sandbox_id: "smoke-os-w2" }); // refused by the CHECK, logged, never thrown
+    const evs = await db.query<any>("SELECT kind, orchestrator_id, reason FROM compute_events WHERE sandbox_id LIKE 'smoke-os-w%'");
+    assert.deepEqual(evs.map((e) => [e.kind, e.orchestrator_id]), [["worker_deleted", "orch-smoke"]]);
+    await db.query("DELETE FROM orchestrator_sandboxes WHERE sandbox_id LIKE 'smoke-os-%'");
+    await db.query("DELETE FROM compute_events WHERE sandbox_id LIKE 'smoke-os-%'");
+    console.log("✓ orchestrator end reasons split into launch step / launch error / reap reason (old rows backfilled); compute events recorded");
+  }
+
   await call(A, "cancel_simulation", { simulation_id: runA.simulation.id });
   await call(B, "cancel_simulation", { simulation_id: runB.simulation.id });
 
