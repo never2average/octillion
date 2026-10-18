@@ -452,7 +452,7 @@ function AnalyticsBody({ a, match }: { a: Analytics; match: (r: object) => boole
   const tools = a.tools.filter(match), accounts = a.accounts.filter(match);
   const maxClient = Math.max(...a.clients.map((c) => c.accounts), 1);
   return (
-    <div className='flex w-full flex-col gap-4 pb-4'>
+    <div className='flex w-full flex-col gap-6 pb-4'>
       <StatStrip items={[
         { label: 'Active accounts', value: num(a.totals.active_accounts), spark: series.map((d) => d.accounts) },
         { label: 'Active people', value: num(a.totals.active_people), spark: series.map((d) => d.people) },
@@ -460,8 +460,9 @@ function AnalyticsBody({ a, match }: { a: Analytics; match: (r: object) => boole
         { label: 'New accounts', value: num(a.totals.new_accounts), spark: series.map((d) => d.created) }
       ]} />
 
-      <div className='grid gap-4 lg:grid-cols-2'>
-        <Box title='Tool calls per day' description='Errors in red.'>
+      <div className='border-t border-l'>
+        <div className='grid lg:grid-cols-2'>
+          <Box title='Tool calls per day' description='Errors in red.'>
           {a.totals.calls ? (
             <ChartContainer config={callsConfig} className='aspect-auto h-[240px] w-full'>
               <AreaChart data={series} margin={{ left: 0, right: 8, top: 8 }}>
@@ -482,7 +483,7 @@ function AnalyticsBody({ a, match }: { a: Analytics; match: (r: object) => boole
             </ChartContainer>
           ) : <p className='text-muted-foreground py-16 text-center text-sm'>No tool calls in this period.</p>}
         </Box>
-        <Box title='Active accounts and people per day'>
+          <Box title='Active accounts and people per day'>
           {a.totals.calls ? (
             <ChartContainer config={activeConfig} className='aspect-auto h-[240px] w-full'>
               <BarChart data={series} margin={{ left: 0, right: 8, top: 8 }}>
@@ -497,9 +498,71 @@ function AnalyticsBody({ a, match }: { a: Analytics; match: (r: object) => boole
             </ChartContainer>
           ) : <p className='text-muted-foreground py-16 text-center text-sm'>No activity in this period.</p>}
         </Box>
-      </div>
-
-      <Box title='Weekly retention' description='Accounts by the week of their first tool call, and the share active in each week after.'>
+        </div>
+        <div className='grid lg:grid-cols-2'>
+          <Box title='Calls by tool' description='The ten most called.'>
+          <RankBars data={top(tools, (t) => Number(t.calls)).map((t) => ({ name: t.name, value: Number(t.calls) }))} color='var(--chart-1)' format={num} mono empty='No tool calls in this period.' />
+        </Box>
+          <Box title='Accounts reached' description='How many accounts use each tool.'>
+          <RankBars data={top(tools, (t) => Number(t.accounts)).map((t) => ({ name: t.name, value: Number(t.accounts) }))} color='var(--chart-2)' format={num} mono empty='No tool calls in this period.' />
+        </Box>
+        </div>
+        <div className='grid lg:grid-cols-2'>
+          <Box title='Error rate by tool' description='Share of calls that failed.'>
+          <RankBars data={top(tools.filter((t) => Number(t.error_pct) > 0), (t) => Number(t.error_pct)).map((t) => ({ name: t.name, value: Number(t.error_pct) }))} color='var(--destructive)' format={(v) => `${v}%`} mono empty='No tool errors in this period.' />
+        </Box>
+          <Box title='Clients' description='AI clients that connected.'>
+        {a.clients.length ? (
+          <ul className='grid gap-3'>
+            {a.clients.map((c) => (
+              <li key={c.client} className='grid gap-1.5'>
+                <div className='flex items-center justify-between gap-2 text-sm leading-none'>
+                  <Mono>{c.client}</Mono>
+                  <span className='text-muted-foreground text-xs'>{c.accounts} accounts · {c.people} people · {num(c.connections)} connections</span>
+                </div>
+                <div className='bg-muted h-2 overflow-hidden rounded-full'>
+                  <div className='h-full rounded-full' style={{ width: `${(c.accounts / maxClient) * 100}%`, background: 'var(--chart-3)' }} />
+                </div>
+              </li>
+            ))}
+          </ul>
+        ) : <p className='text-muted-foreground py-6 text-center text-sm'>No connections in this period.</p>}
+      </Box>
+        </div>
+        <Box title='Tool adoption' className='min-w-0'>
+        <PagedTable items={tools} noun='tools' initialSize={10} empty={a.tools.length ? 'No tool matches.' : 'No tool calls in this period.'}>
+          {(rows) => (
+            <Table className='min-w-[560px]'>
+              <TableHeader><TableRow>{['Tool', 'Accounts', 'People', 'Calls', 'Errors', 'p50 / p95'].map((h) => <TableHead key={h}>{h}</TableHead>)}</TableRow></TableHeader>
+              <TableBody>
+                {rows.map((t) => (
+                  <TableRow key={t.name}>
+                    <TableCell><Mono>{t.name}</Mono></TableCell>
+                    <TableCell className='tabular-nums'>{t.accounts}</TableCell>
+                    <TableCell className='tabular-nums'>{t.people}</TableCell>
+                    <TableCell className='tabular-nums'>{num(t.calls)}</TableCell>
+                    <TableCell>{Number(t.error_pct) ? <StatusBadge tone={Number(t.error_pct) >= 5 ? 'bad' : 'warn'}>{t.error_pct}%</StatusBadge> : '0%'}</TableCell>
+                    <TableCell className='text-xs whitespace-nowrap'>{ms(t.p50_ms)} / {ms(t.p95_ms)}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </PagedTable>
+      </Box>
+        <div className='grid lg:grid-cols-2'>
+          <Box title='Calls by account' description='The ten busiest.'>
+          <RankBars data={top(accounts, (r) => Number(r.calls)).map((r) => ({ name: r.name, value: Number(r.calls) }))} color='var(--chart-1)' format={num} empty='No account activity.' />
+        </Box>
+          <Box title='Errors by account' description='Failed tool calls.'>
+          <RankBars data={top(accounts.filter((r) => Number(r.errors) > 0), (r) => Number(r.errors)).map((r) => ({ name: r.name, value: Number(r.errors) }))} color='var(--destructive)' format={num} empty='No errors in this period.' />
+        </Box>
+        </div>
+        <div className='grid lg:grid-cols-2'>
+          <Box title='Trend vs previous period' description='Accounts by how their calls changed.'>
+          <RankBars data={trendBuckets(accounts)} color='var(--chart-4)' format={num} empty='No account activity.' />
+        </Box>
+          <Box title='Weekly retention' description='Accounts by the week of their first tool call, and the share active in each week after.'>
         {a.retention.length ? (
           <div className='-mx-4 overflow-x-auto px-4'>
             <table className='w-full min-w-[640px] border-separate border-spacing-1 text-sm'>
@@ -529,69 +592,8 @@ function AnalyticsBody({ a, match }: { a: Analytics; match: (r: object) => boole
           </div>
         ) : <p className='text-muted-foreground py-6 text-center text-sm'>No cohorts in the last 8 weeks.</p>}
       </Box>
-
-      <div className='grid gap-4 lg:grid-cols-3'>
-        <Box title='Calls by tool' description='The ten most called.'>
-          <RankBars data={top(tools, (t) => Number(t.calls)).map((t) => ({ name: t.name, value: Number(t.calls) }))} color='var(--chart-1)' format={num} mono empty='No tool calls in this period.' />
-        </Box>
-        <Box title='Accounts reached' description='How many accounts use each tool.'>
-          <RankBars data={top(tools, (t) => Number(t.accounts)).map((t) => ({ name: t.name, value: Number(t.accounts) }))} color='var(--chart-2)' format={num} mono empty='No tool calls in this period.' />
-        </Box>
-        <Box title='Error rate by tool' description='Share of calls that failed.'>
-          <RankBars data={top(tools.filter((t) => Number(t.error_pct) > 0), (t) => Number(t.error_pct)).map((t) => ({ name: t.name, value: Number(t.error_pct) }))} color='var(--destructive)' format={(v) => `${v}%`} mono empty='No tool errors in this period.' />
-        </Box>
-      </div>
-      <Box title='Tool adoption' className='min-w-0'>
-        <PagedTable items={tools} noun='tools' initialSize={10} empty={a.tools.length ? 'No tool matches.' : 'No tool calls in this period.'}>
-          {(rows) => (
-            <Table className='min-w-[560px]'>
-              <TableHeader><TableRow>{['Tool', 'Accounts', 'People', 'Calls', 'Errors', 'p50 / p95'].map((h) => <TableHead key={h}>{h}</TableHead>)}</TableRow></TableHeader>
-              <TableBody>
-                {rows.map((t) => (
-                  <TableRow key={t.name}>
-                    <TableCell><Mono>{t.name}</Mono></TableCell>
-                    <TableCell className='tabular-nums'>{t.accounts}</TableCell>
-                    <TableCell className='tabular-nums'>{t.people}</TableCell>
-                    <TableCell className='tabular-nums'>{num(t.calls)}</TableCell>
-                    <TableCell>{Number(t.error_pct) ? <StatusBadge tone={Number(t.error_pct) >= 5 ? 'bad' : 'warn'}>{t.error_pct}%</StatusBadge> : '0%'}</TableCell>
-                    <TableCell className='text-xs whitespace-nowrap'>{ms(t.p50_ms)} / {ms(t.p95_ms)}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
-        </PagedTable>
-      </Box>
-      <Box title='Clients' description='AI clients that connected.'>
-        {a.clients.length ? (
-          <ul className='grid gap-3'>
-            {a.clients.map((c) => (
-              <li key={c.client} className='grid gap-1.5'>
-                <div className='flex items-center justify-between gap-2 text-sm leading-none'>
-                  <Mono>{c.client}</Mono>
-                  <span className='text-muted-foreground text-xs'>{c.accounts} accounts · {c.people} people · {num(c.connections)} connections</span>
-                </div>
-                <div className='bg-muted h-2 overflow-hidden rounded-full'>
-                  <div className='h-full rounded-full' style={{ width: `${(c.accounts / maxClient) * 100}%`, background: 'var(--chart-3)' }} />
-                </div>
-              </li>
-            ))}
-          </ul>
-        ) : <p className='text-muted-foreground py-6 text-center text-sm'>No connections in this period.</p>}
-      </Box>
-
-      <div className='grid gap-4 lg:grid-cols-3'>
-        <Box title='Calls by account' description='The ten busiest.'>
-          <RankBars data={top(accounts, (r) => Number(r.calls)).map((r) => ({ name: r.name, value: Number(r.calls) }))} color='var(--chart-1)' format={num} empty='No account activity.' />
-        </Box>
-        <Box title='Trend vs previous period' description='Accounts by how their calls changed.'>
-          <RankBars data={trendBuckets(accounts)} color='var(--chart-4)' format={num} empty='No account activity.' />
-        </Box>
-        <Box title='Errors by account' description='Failed tool calls.'>
-          <RankBars data={top(accounts.filter((r) => Number(r.errors) > 0), (r) => Number(r.errors)).map((r) => ({ name: r.name, value: Number(r.errors) }))} color='var(--destructive)' format={num} empty='No errors in this period.' />
-        </Box>
-      </div>
-      <Box title='Accounts'
+        </div>
+        <Box title='Accounts'
         description={<>Activity per account; &quot;at risk&quot; means calls halved vs the previous period.{a.accounts_total > a.accounts.length && ` Showing the ${a.accounts.length} busiest of ${num(a.accounts_total)}; the export has all.`}</>}>
         <PagedTable items={accounts} noun='accounts' empty={a.accounts.length ? 'No account or product matches.' : 'No account activity.'}>
           {(rows) => (
@@ -615,14 +617,15 @@ function AnalyticsBody({ a, match }: { a: Analytics; match: (r: object) => boole
           )}
         </PagedTable>
       </Box>
+      </div>
     </div>
   );
 }
 
-/** A bordered panel around one visualization: title, a one-line description, then the chart or table. */
+/** One cell of the Analytics grid: title, a one-line description, then the chart or table. Cells share hairlines (the grid draws the top and left ones). */
 function Box({ title, description, action, className, children }: { title: ReactNode; description?: ReactNode; action?: ReactNode; className?: string; children: ReactNode }) {
   return (
-    <section className={cn('bg-card flex min-w-0 flex-col gap-3 rounded-xl border p-4', className)}>
+    <section className={cn('flex min-w-0 flex-col gap-3 border-r border-b p-4', className)}>
       <div className='flex flex-wrap items-start justify-between gap-2'>
         <div className='min-w-0'>
           <h2 className='text-sm font-semibold'>{title}</h2>
