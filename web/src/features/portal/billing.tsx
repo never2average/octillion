@@ -241,9 +241,6 @@ function People({ t, l, reload }: { t: Team | undefined; l: Limits | undefined; 
           { id: 'suspended', label: 'Suspended', match: (r) => statusOf(r) === 'Suspended' }]}
         primary={manage ? <Button onClick={() => setInviting(true)}><Icons.add /> Invite</Button> : undefined}
         actions={manage ? actions : undefined} exportName='people' empty='Nobody here yet.' />
-      <p className='text-muted-foreground text-xs leading-none'>
-        {manage ? 'Suspending someone cuts off their AI client and this portal within a minute; they stay in the account and can be restored.' : 'Ask an account admin to change roles, access or limits.'}
-      </p>
       {inviting && <InviteDialog onClose={() => setInviting(false)} onSent={reload} />}
       {editing && l && <LimitsDialog m={editing.m} lim={editing.lim} l={l} mode={mode} onClose={() => setEditing(null)} onSaved={reload} />}
       <Dialog open={!!suspend} onOpenChange={(o) => !o && setSuspend(null)}>
