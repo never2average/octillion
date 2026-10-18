@@ -95,10 +95,10 @@ export async function resolveUserToken(token: string): Promise<Org | null> {
 }
 
 /** The Octillion organization joined to a Clerk organization, created (and linked by slug metadata) on first sight. */
-const selfServe = () => (process.env.OCTILLION_SELF_SERVE_ACCOUNTS ?? "on").toLowerCase() !== "off";
+const selfServe = () => (process.env.OCTILLION_SELF_SERVE_ACCOUNTS ?? "off").toLowerCase() === "on";
 
 /** The Octillion account for a Clerk organization: linked by id, or by the octillion_slug Octillion wrote when it
- *  created the organization; else a new account (unless OCTILLION_SELF_SERVE_ACCOUNTS=off). */
+ *  created the organization; a new account only in self-serve mode. */
 export async function orgForClerk(clerkOrgId: string): Promise<Org | null> {
   const db = await getDb();
   const find = async () => (await db.query<{ id: number; slug: string; name: string }>(
@@ -112,8 +112,8 @@ export async function orgForClerk(clerkOrgId: string): Promise<Org | null> {
       ? (await db.query<{ id: number }>("SELECT id FROM organizations WHERE slug = $1 AND clerk_org_id IS NULL", [known]))[0]
       : undefined;
     if (bySlug) await db.query("UPDATE organizations SET clerk_org_id = $2 WHERE id = $1", [bySlug.id, clerkOrgId]);
-    // Anyone may create an organization; it becomes an Octillion account with a $0 allowance (plans are invite-only).
-    // OCTILLION_SELF_SERVE_ACCOUNTS=off makes accounts admin-created only.
+    // Accounts are invite-only: a Clerk organization someone made for themselves is not an Octillion account unless
+    // self-serve is switched on (OCTILLION_SELF_SERVE_ACCOUNTS=on).
     else if (!selfServe()) return null;
     else {
       let slug = slugify(c.name);
