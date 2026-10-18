@@ -11,6 +11,7 @@ import { freshSettings, setting, settingNumber } from "./settings.js";
 import { freshPlatformHarnesses } from "./harnesses.js";
 import { launchFailure, recordComputeEvent } from "./compute-events.js";
 import { pruneComputeHistory, recordTick } from "./autoscaler-ticks.js";
+import { keepAlive } from "./telemetry.js";
 import * as lib from "../orchestrator/deploy/boat-lib.js";
 
 /**
@@ -204,7 +205,14 @@ export class Autoscaler {
     return Math.max(0, Math.min(AUTOSCALE.maxOrchestrators(), b.maxOrchestrators));
   }
 
-  async tick(): Promise<TickState> {
+  /** One tick. A tick asked for while one runs (the loop and "Run a tick now" in the same process) shares that tick
+   * rather than starting a second one beside it, which could launch the same job's orchestrator twice. */
+  tick(): Promise<TickState> {
+    return (this.ticking ??= this.tickOnce().finally(() => { this.ticking = null; }));
+  }
+  private ticking: Promise<TickState> | null = null;
+
+  private async tickOnce(): Promise<TickState> {
     await freshSettings(); // caps and launch tuning come from global settings
     await freshPlatformHarnesses(); // demand and pod plans count admin-added harnesses (registry())
     const st: TickState = { at: new Date().toISOString(), enabled: AUTOSCALE.enabled(), leader: false, holder: this.holder };
@@ -472,6 +480,29 @@ export async function kickAutoscaler(opts: { force?: boolean } = {}): Promise<Ti
     if (wait > 0 && wait < 120_000) { await new Promise((r) => setTimeout(r, wait)); st = await singleton.tick(); }
   }
   await singleton.settle();
+  return st;
+}
+
+/**
+ * "Run a tick now" on /admin/compute (src/compute-actions.ts): one tick at once, past the kick's 10-second debounce. A
+ * VM ticks with its loop's own autoscaler; Vercel needs what a kick needs (an HTTPS PUBLIC_URL and the worker token),
+ * and waits out another instance's lease as a kick does. The answer comes back once the tick has decided; its launches
+ * finish in the background (kept alive on Vercel). Throws 409 when this deployment cannot tick.
+ */
+export async function runTickNow(): Promise<TickState> {
+  if (!AUTOSCALE.enabled()) throw Object.assign(new Error("Autoscaling is off on this deployment (OCTILLION_AUTOSCALE=off), so there is nothing to tick."), { status: 409 });
+  const vercel = !!process.env.VERCEL;
+  if (vercel && !kickConfigured()) throw Object.assign(new Error("This deployment cannot trigger the autoscaler: PUBLIC_URL is not HTTPS or the worker token is unset."), { status: 409 });
+  lastKick = Date.now();
+  singleton ??= new Autoscaler();
+  let st = await singleton.tick();
+  if (vercel && !st.leader && st.enabled) {
+    const db = await getDb();
+    const [l] = await db.query<{ expires_at: Date }>("SELECT expires_at FROM autoscaler_lease WHERE name = 'autoscaler'");
+    const wait = l ? new Date(l.expires_at).getTime() - Date.now() + 1000 : 0;
+    if (wait > 0 && wait < 60_000) { await new Promise((r) => setTimeout(r, wait)); st = await singleton.tick(); }
+  }
+  keepAlive(singleton.settle());
   return st;
 }
 

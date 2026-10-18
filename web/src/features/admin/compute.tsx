@@ -391,7 +391,8 @@ const LEVEL: Record<Level, { border: string; text: string }> = {
 /**
  * Compute: is compute healthy, is work flowing, what is stuck, and why. A verdict worked out on the server, how fresh
  * the autoscaler's last tick is, the headline numbers, which limit binds (the capacity settings are edited on the row
- * of the limit they change) and the environment it runs with. Read only apart from those settings. Refreshes every
+ * of the limit they change) and the environment it runs with. Read only apart from those settings, "Run a tick now" and
+ * cancelling a session (both behind a confirm, both in the admin log). Refreshes every
  * 15 s while the tab is visible; paused while a setting has an unsaved edit.
  */
 export function AdminCompute() {
@@ -437,6 +438,7 @@ export function AdminCompute() {
           {data && <Freshness s={data} />}
           {paused && <Button variant='outline' size='xs' onClick={() => setResumed(true)} title='Refresh is paused while a setting has an unsaved edit'><Icons.clock /> Paused · Resume</Button>}
           <Button variant='outline' size='sm' disabled={refreshing} onClick={() => void refresh()}>{refreshing ? <Icons.spinner className='animate-spin' /> : <Icons.chartLine />} Refresh</Button>
+          {data && <RunTick s={data} />}
           {data?.links.newrelic && <ActionsMenu label='More' items={[{ label: 'Open in New Relic', icon: <Icons.externalLink />, onSelect: () => window.open(data.links.newrelic!, '_blank', 'noopener') }]} />}
         </div>
       }>
@@ -460,6 +462,40 @@ export function AdminCompute() {
         </div>
       )}
     </PageContainer>
+  );
+}
+
+interface TickResult { leader: boolean; launched: number; reaped: number; note: string | null; error: string | null; message: string }
+
+/** "Run a tick now" (POST /compute/tick, audited): one autoscaler tick at once, behind a confirm. Hidden when
+ * autoscaling is off; disabled on a Vercel deployment that cannot trigger the autoscaler. */
+function RunTick({ s }: { s: Summary }) {
+  const [asking, setAsking] = useState(false);
+  const tick = useAdminAction(() => post<TickResult>('/compute/tick'));
+  if (!s.tick.enabled) return null;
+  const blocked = s.runtime === 'vercel' && !s.tick.kick_configured;
+  const run = () => tick.mutate(undefined, { onSuccess: (r) => (r.error ? toast.error(r.message) : r.leader ? toast.success(r.message) : toast.info(r.message)) });
+  return (
+    <>
+      <Button variant='outline' size='sm' disabled={tick.isPending || blocked} onClick={() => setAsking(true)}
+        title={blocked ? 'This deployment cannot trigger the autoscaler: PUBLIC_URL is not HTTPS or the worker token is unset' : 'Run one autoscaler tick now instead of waiting for the next one'}>
+        {tick.isPending ? <Icons.spinner className='animate-spin' /> : <Icons.clock />} Run a tick now
+      </Button>
+      <AlertDialog open={asking} onOpenChange={setAsking}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Run an autoscaler tick now?</AlertDialogTitle>
+            <AlertDialogDescription>
+              It does what the next scheduled tick would: it may start orchestrators for queued work and stop idle or broken ones. Your name goes in the admin log.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={() => { setAsking(false); run(); }}>Run a tick</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   );
 }
 

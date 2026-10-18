@@ -36,6 +36,7 @@ import * as library from "./library.js";
 import { computeSummary } from "./compute.js";
 import * as records from "./compute-records.js";
 import * as jobs from "./compute-jobs.js";
+import * as actions from "./compute-actions.js";
 import * as ticks from "./autoscaler-ticks.js";
 import { pruneComputeHistory } from "./autoscaler-ticks.js";
 import { freshSettings, SettingError } from "./settings.js";
@@ -462,6 +463,10 @@ export function createApp() {
   // The autoscaler's history (src/autoscaler-ticks.ts): its decisions log and the Activity chart. Read only.
   ob.get("/compute/ticks", async (req, res) => void res.json(await ticks.listTicks(req.query as Record<string, unknown>)));
   ob.get("/compute/activity", async (req, res) => void res.json(await ticks.computeActivity(req.query as Record<string, unknown>)));
+  // The page's only two actions (src/compute-actions.ts), both in the admin audit log: run one autoscaler tick now, and
+  // cancel a queued or running session (its orchestrator stops the sandbox at the next heartbeat).
+  ob.post("/compute/tick", async (req, res) => void res.json(await actions.runTick(adminActor(req, res))));
+  ob.post("/compute/sessions/:id/cancel", async (req, res) => void res.json(await actions.cancelSession(adminActor(req, res), String(req.params.id))));
   // Admin-added harnesses (src/harnesses.ts): variants of a registry.json CLI; a new one joins the mix at weight 0, off.
   ob.get("/compute/harnesses", async (_req, res) => void res.json(await library.listHarnesses()));
   ob.post("/compute/harnesses", async (req, res) => void res.status(201).json(await library.addHarness(adminActor(req, res), req.body ?? {})));

@@ -3,7 +3,8 @@
 // it failed (src/error-classes.ts) and a peek with its timing, run, infrastructure, spend, the fix for its failure
 // class and the last transcript events. Status, range, failure class, job and "heartbeat older than 5 min" are asked
 // of the server (and kept in the URL, so Health and the verdict deep-link here); the rest filter the rows shown.
-// Read only: cancelling a session comes with the page's actions.
+// Read only apart from Cancel (a row action and a peek button, behind a confirm): POST /compute/sessions/:id/cancel,
+// in the admin log. A running session's sandbox stops when its orchestrator next heartbeats.
 import { useMemo, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
@@ -15,7 +16,8 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Icons } from '@/components/icons';
 import { cn } from '@/lib/utils';
-import { useAdmin } from './lib';
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
+import { post, useAdmin, useAdminAction } from './lib';
 import { copyText, ErrorBox, Mono, Notice, Section, StatusBadge, When, type Tone } from './ui';
 import { AMBER, Chip, cents, dur, EST, PeekSection, since, useComputeParams, useNow, nextPinned, useScrollTo } from './compute-common';
 
@@ -37,6 +39,8 @@ interface SessionDetail {
 }
 
 const DEFAULT_STATUS = ['queued', 'running', 'failed', 'timeout'];
+/** Statuses a session can be cancelled from. */
+const OPEN = ['queued', 'running'];
 const STATUS_OPTS = ['queued', 'running', 'completed', 'failed', 'timeout', 'cancelled'].map((v) => ({ value: v, label: v[0].toUpperCase() + v.slice(1) }));
 const STATUS_TONE: Record<string, Tone> = { queued: 'info', running: 'ok', completed: 'neutral', failed: 'bad', timeout: 'warn', cancelled: 'neutral' };
 const CLASSES: { key: string; label: string }[] = [
@@ -74,6 +78,8 @@ export function ComputeSessions() {
   const pin = nextPinned(open, shown?.rows.map((r) => r.id), pinned);
   if (pin !== pinned) setPinned(pin);
   useScrollTo('sessions', !!shown);
+  const [cancelling, setCancelling] = useState<SessionRow | null>(null);
+  const cancel = useAdminAction((id: string) => post<{ message: string }>(`/compute/sessions/${encodeURIComponent(id)}/cancel`), { success: (r) => r.message });
 
   const cols: RecordCol<SessionRow>[] = [
     { key: 'id', label: 'Session', title: true, keep: true, type: 'text', value: (s) => s.id, render: (s) => <Mono>{s.id}</Mono> },
@@ -146,13 +152,28 @@ export function ComputeSessions() {
         searchPlaceholder='Search sessions, jobs, agents, errors' filters={filters} exportName='compute-sessions'
         openKey={open} onOpenChange={(k) => url.write({ session: k })}
         actions={(s) => [
+          ...(OPEN.includes(s.status) ? [{ label: 'Cancel session', icon: <Icons.close />, onSelect: () => setCancelling(s) }] : []),
           { label: 'Copy id', icon: <Icons.page />, onSelect: () => copyText(s.id, 'Session id copied') },
           { label: "Show this job's sessions", icon: <Icons.search />, onSelect: () => set({ job_id: s.simulation_id }) },
           { label: 'Open account', icon: <Icons.externalLink />, onSelect: () => router.push(`/admin/accounts/${encodeURIComponent(s.org.slug)}`) }
         ]}
         detailTitle={(s) => <span className='flex items-center gap-2'><Mono>{s.id}</Mono><StatusBadge tone={STATUS_TONE[s.status]}>{s.status}</StatusBadge></span>}
-        detail={(s) => <SessionPeek id={s.id} onJob={() => set({ job_id: s.simulation_id })} />}
+        detail={(s) => <SessionPeek id={s.id} onJob={() => set({ job_id: s.simulation_id })} onCancel={(x) => setCancelling(x)} cancelling={cancel.isPending} />}
         empty='No sessions match these filters.' />
+      <AlertDialog open={!!cancelling} onOpenChange={(o) => !o && setCancelling(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Cancel session {cancelling?.id}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Stops this session. A running sandbox is killed when its orchestrator next heartbeats. The rest of the job carries on. Your name goes in the admin log.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep it</AlertDialogCancel>
+            <AlertDialogAction variant='destructive' onClick={() => { if (cancelling) cancel.mutate(cancelling.id); setCancelling(null); }}>Cancel session</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Section>
   );
 }
@@ -177,7 +198,7 @@ const META_LABEL: Record<string, string> = {
 };
 
 /** One session's peek: status and the full error, timing, run, infrastructure, spend, runnability, the last events, links. */
-function SessionPeek({ id, onJob }: { id: string; onJob: () => void }) {
+function SessionPeek({ id, onJob, onCancel, cancelling }: { id: string; onJob: () => void; onCancel: (s: SessionRow) => void; cancelling: boolean }) {
   const { data, error, isLoading } = useAdmin<SessionDetail>(`/compute/sessions/${encodeURIComponent(id)}`);
   if (isLoading) return <div className='grid gap-3'><Skeleton className='h-16' /><Skeleton className='h-40' /></div>;
   if (!data) return <ErrorBox error={error} />;
@@ -187,7 +208,7 @@ function SessionPeek({ id, onJob }: { id: string; onJob: () => void }) {
   return (
     <div className='grid gap-6'>
       <PeekSection title='Status'>
-        <p className='text-sm'>{statusSentence(s)}</p>
+        <p className='text-sm'>{statusSentence(s, m)}</p>
         {s.error_message && <pre className='bg-muted/50 max-h-48 overflow-auto rounded-md p-3 font-mono text-xs whitespace-pre-wrap'>{s.error_message}</pre>}
         {typeof m.infra_error === 'string' && m.infra_error !== s.error_message && (
           <p className='text-muted-foreground text-xs'>Last infrastructure error (it was queued again): <Mono>{m.infra_error}</Mono></p>
@@ -267,19 +288,22 @@ function SessionPeek({ id, onJob }: { id: string; onJob: () => void }) {
           <Button variant='outline' size='sm' onClick={onJob}><Icons.search /> This job&apos;s sessions</Button>
           {data.orchestrator && <Link href={`/admin/compute?section=orchestrators&state=all&orch=${data.orchestrator.id}`} className={buttonVariants({ variant: 'outline', size: 'sm' })}><Icons.route /> Orchestrator</Link>}
           <Button variant='ghost' size='sm' onClick={() => copyText(s.id, 'Session id copied')}>Copy id</Button>
+          {OPEN.includes(s.status) && <Button variant='outline' size='sm' className='text-destructive ml-auto' disabled={cancelling} onClick={() => onCancel(s)}><Icons.close /> Cancel session</Button>}
         </div>
       </PeekSection>
     </div>
   );
 }
 
-function statusSentence(s: SessionRow): string {
+function statusSentence(s: SessionRow, m: Record<string, unknown> = {}): string {
   const agent = s.agent_id ?? s.harness;
   switch (s.status) {
     case 'queued': return `Waiting ${dur(waitOf(s))} for an orchestrator to claim it${s.error_class === 'unclaimable' ? ', but its agent is not scheduled, so none will' : ''}.`;
     case 'running': return `Running ${agent} for ${dur(runOf(s))}; last heartbeat ${dur(since(s.heartbeat_at ?? s.started_at))} ago.`;
     case 'completed': return `Finished after ${dur(runOf(s))}${s.completed_reason ? ` (${s.completed_reason.replace(/_/g, ' ')})` : ''}.`;
-    case 'cancelled': return 'Cancelled.';
+    case 'cancelled': return typeof m.cancelled_by === 'string'
+      ? `Cancelled by ${m.cancelled_by} on the Compute page${typeof m.cancelled_at === 'string' ? ` at ${new Date(m.cancelled_at).toLocaleString()}` : ''}${m.cancelled_from === 'running' ? ', while it was running' : ''}.`
+      : 'Cancelled.';
     default: return `${s.status === 'timeout' ? 'Timed out' : 'Failed'} after ${dur(runOf(s))}${s.error_label ? `: ${s.error_label}` : ''}.`;
   }
 }

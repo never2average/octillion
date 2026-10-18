@@ -1503,6 +1503,77 @@ try {
     console.log("✓ autoscaler history: leader-only acting ticks and minute samples, decisions (filters, linked launches and reaps), activity buckets and gaps, pruning (cron)");
   }
 
+  // ---------- Compute actions (src/compute-actions.ts): Run a tick now and Cancel session, both audited ----------
+  {
+    const { tickMessage } = await import("../src/compute-actions.js");
+    const { Autoscaler, stopAutoscaler } = await import("../src/autoscaler.js");
+    const audit: string[] = [];
+    const realError = console.error;
+    console.error = (...a: unknown[]) => { const line = a.map(String).join(" "); if (line.startsWith("admin ")) audit.push(line); else realError(...a); };
+    try {
+      assert.equal(tickMessage({ leader: true, launched: ["row 7 (sim_x, 4 pods)"], reaped: [], note: "rsh_y waits for boat plan capacity (0 free)" }),
+        "Tick ran: launched 1, reaped 0. rsh_y waits for boat plan capacity (0 free)");
+      assert.equal(tickMessage({ leader: true, error: "boat 401" }), "The tick failed: boat 401");
+      assert.match(tickMessage({ leader: false }), /Another server holds the autoscaler lease/);
+
+      // Run a tick now: refused when autoscaling is off; with another server holding the lease it ticks as a follower.
+      const [lease] = await db.query<any>("SELECT holder, expires_at, state FROM autoscaler_lease WHERE name = 'autoscaler'");
+      const prevAuto = process.env.OCTILLION_AUTOSCALE;
+      process.env.OCTILLION_AUTOSCALE = "off";
+      const off = await adm("POST", "/compute/tick");
+      assert.equal(off.status, 409);
+      assert.match((await off.json()).error, /Autoscaling is off/);
+      if (prevAuto == null) delete process.env.OCTILLION_AUTOSCALE; else process.env.OCTILLION_AUTOSCALE = prevAuto;
+      await db.query(`INSERT INTO autoscaler_lease (name, holder, expires_at, state) VALUES ('autoscaler', 'smoke-other', now() + interval '1 hour', '{}')
+        ON CONFLICT (name) DO UPDATE SET holder = excluded.holder, expires_at = excluded.expires_at`);
+      const t = await json(adm("POST", "/compute/tick"));
+      assert.deepEqual([t.leader, t.launched, t.reaped, t.error], [false, 0, 0, null], "a follower changes nothing");
+      assert.match(t.message, /Another server holds the autoscaler lease/);
+      assert.ok(audit.some((l) => l.startsWith("admin smoke compute.tick ") && l.includes('"leader":false')), "the tick is in the admin log");
+      // Two ticks asked for at once in one process share one tick.
+      const a = new Autoscaler({ log: () => {} });
+      const [x, y] = await Promise.all([a.tick(), a.tick()]);
+      assert.ok(x === y, "a tick asked for while one runs joins it");
+      await stopAutoscaler();
+      if (lease) await db.query("UPDATE autoscaler_lease SET holder = $1, expires_at = $2, state = $3 WHERE name = 'autoscaler'", [lease.holder, lease.expires_at, JSON.stringify(lease.state)]);
+      else await db.query("DELETE FROM autoscaler_lease WHERE name = 'autoscaler'");
+
+      // Cancel session: a running and a queued session of one run; the run finishes once neither is open.
+      await db.query(`/* tenant: smoke fixture */ INSERT INTO simulations (id, org_id, product_id, name, models, harness, repeats, status, started_at)
+        SELECT 'sim_smoke_ca', org_id, product_id, 'smoke cancel', '{m}', 'claude-code', 1, 'running', now() - interval '5 minutes' FROM agent_sessions ORDER BY queued_at LIMIT 1`);
+      const copy = (id: string, set: string) => db.query(`/* tenant: smoke fixture */ INSERT INTO agent_sessions (id, simulation_id, org_id, product_id, scenario_id, model, harness, agent_id, status, queued_at, started_at, heartbeat_at, worker_id)
+        SELECT $1, 'sim_smoke_ca', org_id, product_id, scenario_id, model, harness, agent_id, ${set} FROM agent_sessions ORDER BY queued_at LIMIT 1`, [id]);
+      await copy("ses_smoke_ca_r", "'running', now() - interval '4 minutes', now() - interval '3 minutes', now(), 'host-smoke-ca'");
+      await copy("ses_smoke_ca_q", "'queued', now() - interval '4 minutes', NULL, NULL, NULL");
+      await db.query("INSERT INTO gateway_tokens (token_hash, kind, session_id, providers, expires_at) VALUES ('smoke-ca-tok', 'session', 'ses_smoke_ca_r', '{anthropic}', now() + interval '1 hour')");
+      assert.equal((await worker("/sessions/ses_smoke_ca_r/heartbeat", {})).status, 204, "running: heartbeats are taken");
+
+      assert.equal((await fetch(`${base}/api/admin/onboarding/compute/sessions/ses_smoke_ca_r/cancel`, { method: "POST" })).status, 401, "cancel needs the admin token");
+      const c = await json(adm("POST", "/compute/sessions/ses_smoke_ca_r/cancel"));
+      assert.deepEqual([c.status, c.was], ["cancelled", "running"]);
+      assert.match(c.message, /next heartbeats/);
+      const [r] = await db.query<any>("/* tenant: smoke fixture */ SELECT status, ended_at, metadata FROM agent_sessions WHERE id = 'ses_smoke_ca_r'");
+      assert.ok(r.status === "cancelled" && r.ended_at && r.metadata.cancelled_by === "smoke" && r.metadata.cancelled_from === "running");
+      assert.ok((await db.query<any>("SELECT revoked_at FROM gateway_tokens WHERE token_hash = 'smoke-ca-tok'"))[0].revoked_at, "its gateway token is revoked");
+      assert.equal((await worker("/sessions/ses_smoke_ca_r/heartbeat", {})).status, 409, "its next heartbeat is refused, so the orchestrator kills the sandbox");
+      assert.equal((await json(adm("GET", "/compute/sessions/ses_smoke_ca_r"))).metadata.cancelled_by, "smoke", "the peek says who cancelled it");
+      assert.ok(audit.some((l) => l.startsWith("admin smoke compute.session.cancel ") && l.includes('"session_id":"ses_smoke_ca_r"') && l.includes('"was":"running"')), "the cancel is in the admin log");
+      assert.equal((await db.query<any>("SELECT status FROM simulations WHERE id = 'sim_smoke_ca'"))[0].status, "running", "the queued session keeps the run open");
+
+      const again = await adm("POST", "/compute/sessions/ses_smoke_ca_r/cancel");
+      assert.equal(again.status, 409, "an ended session cannot be cancelled again");
+      assert.match((await again.json()).error, /already ended \(cancelled\)/);
+      assert.equal((await adm("POST", "/compute/sessions/ses_nope/cancel")).status, 404);
+      assert.equal((await json(adm("POST", "/compute/sessions/ses_smoke_ca_q/cancel"))).was, "queued");
+      const [sim] = await db.query<any>("SELECT status, finished_at FROM simulations WHERE id = 'sim_smoke_ca'");
+      assert.ok(sim.status === "completed" && sim.finished_at, "the last open session cancelled: the run finishes");
+    } finally {
+      console.error = realError;
+      await db.query("/* tenant: smoke fixture */ DELETE FROM simulations WHERE id = 'sim_smoke_ca'");
+    }
+    console.log("✓ compute actions: Run a tick now (off: 409; follower: no change; one tick at a time), Cancel session (running and queued, token revoked, heartbeat refused, run finished, 409/404), both in the admin log");
+  }
+
   // ---------- global compute settings (/admin/compute): set here > environment > default ----------
   {
     const { config } = await import("../src/queries.js");

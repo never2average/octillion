@@ -281,7 +281,7 @@ export async function scoreSession(sessionId: string) {
   return score;
 }
 
-async function finishSimulationIfDone(simulationId: string) {
+export async function finishSimulationIfDone(simulationId: string) {
   // Adaptive runs: when a batch is done, tasks whose result is not settled yet get more sessions; only a run that
   // queues nothing more is finished.
   if (await extendAdaptive(simulationId)) return;
