@@ -281,6 +281,14 @@ export function appRouter() {
                integrations: { clerk: true, stripe: billing.stripeEnabled() } });
   });
   api.get("/setup", async (req, res) => void res.json(await setup(S(res), typeof req.query.since === "string" ? req.query.since : undefined)));
+  // Forget an AI client in your own list (a test script, an old machine): its connections stop counting as a client.
+  api.delete("/clients/:client", async (req, res) => {
+    const s = S(res);
+    const r = await (await getDb()).query(
+      `UPDATE mcp_events SET client = NULL WHERE org_id = $1 AND ${s.user ? "user_id = $3" : "user_id IS NULL"} AND client = $2 RETURNING id`,
+      s.user ? [s.org, String(req.params.client), s.user] : [s.org, String(req.params.client)]);
+    res.json({ removed: r.length });
+  });
   api.post("/setup/test", async (_req, res) => {
     capture({ distinctId: S(res).user ?? `org:${S(res).slug}`, orgSlug: S(res).slug }, "app_connection_test_started");
     res.json({ since: new Date().toISOString() });

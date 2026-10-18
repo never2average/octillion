@@ -47,7 +47,7 @@ export function AdoptionPage() {
   const [range, setRange] = useState<DateRange>(last90);
   const [users, setUsers] = useState<string[]>([]);
   const q = `${rangeQuery(range)}${users.length ? `&user=${users.map(encodeURIComponent).join(',')}` : ''}`;
-  const { data: s, error } = useOrgLoad(() => appApi<Setup>('GET', '/setup'));
+  const { data: s, error, reload: reloadSetup } = useOrgLoad(() => appApi<Setup>('GET', '/setup'));
   const { data: jr, reload: reloadJourneys } = useOrgLoad(() => appApi<{ journeys: Journey[] }>('GET', '/journeys'));
   const { data: ad, reload: reloadAdoption } = useOrgLoad(() => appApi<Adoption>('GET', `/adoption?${q}`), [q]);
   const reload = () => { reloadJourneys(); reloadAdoption(); };
@@ -183,7 +183,8 @@ export function AdoptionPage() {
         primary={primary}
         empty={narrowed ? 'Nobody you picked worked on a use case in this period.' : 'Nothing to show yet.'}
         detailTitle={(r) => r.name}
-        actions={(r) => r.type === 'use case' ? useCaseActions(r) : r.type === 'workflow' ? [{ label: 'Copy prompt', icon: <Icons.page />, onSelect: () => copy(r.g.prompt) }] : []}
+        actions={(r) => r.type === 'use case' ? useCaseActions(r) : r.type === 'workflow' ? [{ label: 'Copy prompt', icon: <Icons.page />, onSelect: () => copy(r.g.prompt) }]
+          : [{ label: 'Remove from my clients', icon: <Icons.trash />, destructive: true, onSelect: () => void appApi('DELETE', `/clients/${encodeURIComponent(r.name)}`).then(() => { toast.success(`${r.name} removed`); reloadSetup(); }, fail) }]}
         detail={(r) => r.type === 'use case' ? (
           <div className='flex flex-col gap-6'>
             <HelpPanel r={r} me={me} onPick={(h) => pickUp(h, r.j, r.who)} onAct={helpAct} onAsk={() => setAsking(r.j)} />
