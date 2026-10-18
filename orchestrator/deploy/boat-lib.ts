@@ -10,7 +10,7 @@
  * active ~8s after the create call. Optional named snapshot image "octi-orch-img-<code hash>" (code + node_modules):
  * ~22s (lazy disk hydration) and a ~170s build per code change, so it is opt-in (OCTILLION_ORCH_SNAPSHOT=on).
  */
-import { spawnSync } from "node:child_process";
+import { gzipSync } from "node:zlib";
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
@@ -147,10 +147,36 @@ export function codeHash(root = REPO_ROOT): string {
   return h.digest("hex").slice(0, 16);
 }
 
+/** A gzipped ustar archive of the code, built in-process: serverless hosts (Vercel) have no `tar` binary. File modes
+ *  are kept (the setup scripts are executable); owners, times and order are fixed so the bytes depend on content only. */
 export function tarball(root = REPO_ROOT): Buffer {
-  const r = spawnSync("tar", ["-czf", "-", ...codeFiles(root)], { cwd: root, maxBuffer: 64 << 20 });
-  if (r.status !== 0) throw new Error(`tar failed: ${r.stderr}`);
-  return r.stdout;
+  const blocks: Buffer[] = [];
+  for (const f of codeFiles(root)) {
+    const data = readFileSync(path.join(root, f));
+    const mode = statSync(path.join(root, f)).mode & 0o777;
+    blocks.push(tarHeader(f, data.length, mode), data, Buffer.alloc((512 - (data.length % 512)) % 512));
+  }
+  blocks.push(Buffer.alloc(1024));
+  return gzipSync(Buffer.concat(blocks));
+}
+
+function tarHeader(name: string, size: number, mode: number): Buffer {
+  const h = Buffer.alloc(512);
+  // Names over 100 bytes go into the ustar prefix field, split at a slash.
+  let prefix = "", base = name;
+  if (Buffer.byteLength(name) > 100) {
+    const cut = name.lastIndexOf("/", 155);
+    if (cut <= 0 || Buffer.byteLength(name.slice(cut + 1)) > 100) throw new Error(`path too long for tar: ${name}`);
+    prefix = name.slice(0, cut); base = name.slice(cut + 1);
+  }
+  const put = (v: string, off: number, len: number) => h.write(v, off, len, "utf8");
+  const oct = (n: number, len: number) => n.toString(8).padStart(len - 1, "0") + "\0";
+  put(base, 0, 100); put(oct(mode, 8), 100, 8); put(oct(0, 8), 108, 8); put(oct(0, 8), 116, 8);
+  put(oct(size, 12), 124, 12); put(oct(0, 12), 136, 12); put("        ", 148, 8); put("0", 156, 1);
+  put("ustar\0", 257, 6); put("00", 263, 2); put(prefix, 345, 155);
+  let sum = 0; for (const b of h) sum += b;
+  put(sum.toString(8).padStart(6, "0") + "\0 ", 148, 8);
+  return h;
 }
 
 export async function uploadCode(id: string, root = REPO_ROOT): Promise<number> {
