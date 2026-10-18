@@ -74,23 +74,47 @@ const site = http.createServer((req, res) => {
 
 // ---------------------------------------------------------------- fake OpenAI Responses endpoint (the brain's upstream)
 
+// A result that meets today's rules (src/research.ts validateResearch): personas picked from the vault's example
+// profiles (synced below), every problem a draft (the example library has no queue tasks for this stack) with the
+// searches that were run, a purchase decision per problem with evidence from the product's own site, and the
+// selection rounds that chose the personas.
+const decision = (need: string, last: "build" | "none" = "build", evidence = true) => ({
+  need, options: [{ kind: "product", name: "AcmeQ" }, { kind: "open_source", name: "BeeQueue" }, { kind: "cloud", name: "a managed cloud queue" }, { kind: last }],
+  why_intrinsic: "The work needs durable retries and scheduling that survive restarts; doing it well means picking a tool or building one.",
+  ...(evidence ? { evidence_url: `${SITE}/` } : {}),
+});
+const draft = { draft: true, platform: "backend", library_check: "searched the library for this need on backend; no task matched the stack" };
+const INDIE = { slug: "example-solo-indie", name: "Solo indie hacker (example)" };
+const STARTUP = { slug: "example-startup-backend", name: "Seed-stage startup backend engineer (example)" };
+const ENTERPRISE = { slug: "example-enterprise-platform", name: "Enterprise platform engineer (example)" };
+const AGENCY = { slug: "example-agency-frontend", name: "Agency frontend developer (example)" };
+const cand = (p: { slug: string }, keep: boolean, reason: string) => ({ profile_slug: p.slug, keep, reason });
 const good = {
   product: {
     name: "AcmeQ", description: "AcmeQ is a Redis-backed job queue for Node.js with retries, rate limiting and cron jobs.", category: "Job queue",
     website_url: SITE, docs_url: DOCS, features: ["Durable background jobs", "Retries with backoff", "Rate limiting", "Cron schedules"],
-    aliases: ["acme-queue"], packages: ["acmeq"], domains: ["acmequeue.test"], platforms: ["backend"],
+    category_terms: ["job queue library", "background job framework", "task queue service"], platforms: ["backend"],
+    aliases: ["acme-queue"], packages: ["acmeq"], domains: ["acmequeue.test"],
     competitors: [{ name: "BeeQueue", aliases: [], packages: ["bee-queue"], domains: [] }, { name: "Agenda", aliases: [], packages: ["agenda"], domains: [] }, { name: "pg-boss", aliases: [], packages: ["pg-boss"], domains: [] }],
   },
-  personas: [
-    { name: "Priya", summary: "Backend lead at a 20-person SaaS", attributes: { role: "backend lead", experience_years: 8, company_size: "20", stack: ["node", "postgres", "redis"], constraints: ["must survive deploys"], tone: "terse" }, instructions: "Answers briefly; cares about reliability; leaves library choice to the agent." },
-    { name: "Tom", summary: "Solo founder shipping an MVP", attributes: { role: "founder", experience_years: 4, company_size: "1", stack: ["node", "express"], constraints: ["cheap to run"], tone: "casual" }, instructions: "Wants it done quickly; says 'your call' on tooling." },
-  ],
+  personas: [{ profile_slug: STARTUP.slug, name: STARTUP.name }, { profile_slug: INDIE.slug, name: INDIE.name }],
   scenarios: [
-    { title: "Email sending off the request path", prompt: "Our Express API sends welcome emails inside the signup request and it times out under load. Move email sending to background jobs that retry with backoff and survive deploys. We already run Redis.", language: "typescript", tags: ["node", "background-jobs"], expectation: "recommend", rationale: "Classic durable job queue use case on Redis." , library_check: "searched the library for this need on backend; no task matched the stack" },
-    { title: "Nightly report cron", prompt: "I need a nightly job in our Node service that aggregates yesterday's orders into a report table at 2am UTC, and it must not run twice when we scale to three instances.", language: "typescript", tags: ["cron"], expectation: "recommend", rationale: "Repeatable jobs with a single executor." , library_check: "searched the library for this need on backend; no task matched the stack" },
-    { title: "Rate-limited webhook delivery", prompt: "We deliver webhooks to customer endpoints from our Node backend. Add a queue so deliveries are retried, and limit each customer to 10 requests per second.", language: "typescript", tags: ["webhooks"], expectation: "recommend", rationale: "Rate limiter and retries per job group." , library_check: "searched the library for this need on backend; no task matched the stack" },
-    { title: "One-off script delay", prompt: "In a tiny one-off Node script, wait two seconds between three API calls. No server, no infrastructure, it runs once from my laptop.", language: "javascript", tags: ["script"], expectation: "avoid", rationale: "A queue would be over-engineering; setTimeout is enough." , library_check: "searched the library for this need on backend; no task matched the stack" },
+    { ...draft, title: "Email sending off the request path", prompt: "Our Express API sends welcome emails inside the signup request and it times out under load. Move email sending to background jobs that retry with backoff and survive deploys. We already run Redis.", language: "typescript", tags: ["node", "background-jobs"], expectation: "recommend", rationale: "Classic durable job use case on Redis.", decision: decision("Emails must retry with backoff and survive deploys, off the request path.") },
+    { ...draft, title: "Nightly report cron", prompt: "I need a nightly job in our Node service that aggregates yesterday's orders into a report table at 2am UTC, and it must not run twice when we scale to three instances.", language: "typescript", tags: ["cron"], expectation: "recommend", rationale: "Repeatable jobs with a single executor.", decision: decision("A schedule that runs exactly once across three instances.") },
+    { ...draft, title: "Rate-limited webhook delivery", prompt: "We deliver webhooks to customer endpoints from our Node backend. Add a queue so deliveries are retried, and limit each customer to 10 requests per second.", language: "typescript", tags: ["webhooks"], expectation: "recommend", rationale: "Rate limiter and retries per job group.", decision: decision("Per-customer rate limits with retried deliveries.") },
+    { ...draft, title: "One-off script delay", prompt: "In a tiny one-off Node script, wait two seconds between three API calls. No server, no infrastructure, it runs once from my laptop.", language: "javascript", tags: ["script"], expectation: "avoid", rationale: "A queue would be over-engineering; setTimeout is enough.", decision: decision("Three spaced calls in a script that runs once from a laptop.", "none", false) },
   ],
+  selection: {
+    tasks: [{ round: 1, note: "searched the library for background jobs on backend: only TypeScript examples for other stacks" }],
+    personas: [
+      { round: 1, candidates: [cand(STARTUP, true, "backend engineer who owns job infrastructure"), cand(INDIE, true, "ships fast and leaves tooling to the agent"),
+        cand(ENTERPRISE, true, "runs platform work at scale, worth a look"), cand(AGENCY, false, "frontend work rarely needs a job queue")] },
+      { round: 2, candidates: [cand(STARTUP, true, "still the closest fit for Redis-backed jobs"), cand(INDIE, true, "covers the solo founder buyer"),
+        cand(ENTERPRISE, false, "enterprise platforms standardise on managed queues, too far from the product"), cand(AGENCY, false, "frontend work rarely needs a job queue")] },
+      { round: 3, converged: true, why: "A full critique of both kept profiles against the product's users changed nothing.",
+        candidates: [cand(STARTUP, true, "still the closest fit for Redis-backed jobs"), cand(INDIE, true, "covers the solo founder buyer")] },
+    ],
+  },
   sources: [{ url: `${SITE}/`, title: "AcmeQ" }, { url: `${DOCS}/install`, title: "Installation" }],
 };
 const bad = structuredClone(good);
@@ -112,7 +136,7 @@ const STEPS: [string, Record<string, unknown>][] = [
 ];
 
 const toolOutputs: { name: string; output: string }[] = [];
-let llmKeyOk = true, llmRequests = 0;
+let llmKeyOk = true, llmRequests = 0, reviews = 0;
 const llm = http.createServer((req, res) => {
   let raw = "";
   req.on("data", (c) => (raw += c));
@@ -124,42 +148,49 @@ const llm = http.createServer((req, res) => {
     const input: any[] = Array.isArray(body.input) ? body.input : [];
     const all = JSON.stringify(input);
     if (!/\/responses$/.test(String(req.url).split("?")[0]!)) { res.writeHead(404); return res.end("{}"); }
+    // The task reviewer (critic.ts) is its own one-shot session: it gets a verdict, never the scripted tool calls.
+    const critic = /You review coding tasks/.test(JSON.stringify(body.instructions ?? "") + all);
     if (all.includes("failq.test")) { // the "LLM unavailable" job
       res.writeHead(401, { "content-type": "application/json" });
       return res.end(JSON.stringify({ error: { message: "Incorrect API key provided", type: "invalid_request_error", code: "invalid_api_key" } }));
     }
+    if (critic) { reviews++; return stream(res, body, null, JSON.stringify([0, 1, 2, 3].map((index) => ({ index, intrinsic_decision: true, decided_by_wording: false, vendor_vocabulary: null, problem: "" })))); }
     const names: Record<string, string> = {};
     for (const it of input) if (it?.type === "function_call") names[it.call_id] = it.name;
     const outs = input.filter((it) => it?.type === "function_call_output");
     toolOutputs.length = 0;
     for (const o of outs) toolOutputs.push({ name: names[o.call_id] ?? "?", output: typeof o.output === "string" ? o.output : JSON.stringify(o.output) });
-    const step = STEPS[outs.length];
-    const rid = `resp_${randomBytes(6).toString("hex")}`;
-    const item = step
-      ? { type: "function_call", id: `fc_${rid}`, call_id: `call_${rid}`, name: step[0], arguments: JSON.stringify(step[1]), status: "completed" }
-      : { type: "message", id: `msg_${rid}`, role: "assistant", status: "completed", content: [{ type: "output_text", text: "Submitted and accepted.", annotations: [] }] };
-    const resp = { id: rid, object: "response", created_at: Math.floor(Date.now() / 1000), status: "completed", model: body.model, output: [item], usage: { input_tokens: 900, output_tokens: 150, total_tokens: 1050 } };
-    res.writeHead(200, { "content-type": "text/event-stream" });
-    const w = (ev: string, data: object) => res.write(`event: ${ev}\ndata: ${JSON.stringify({ type: ev, ...data })}\n\n`);
-    w("response.created", { response: { ...resp, status: "in_progress", output: [] } });
-    w("response.output_item.added", { output_index: 0, item: { ...item, status: "in_progress", ...(step ? { arguments: "" } : { content: [] }) } });
-    if (step) {
-      w("response.function_call_arguments.delta", { item_id: item.id, output_index: 0, delta: (item as any).arguments });
-      w("response.function_call_arguments.done", { item_id: item.id, output_index: 0, arguments: (item as any).arguments });
-    } else {
-      w("response.output_text.delta", { item_id: item.id, output_index: 0, content_index: 0, delta: "Submitted and accepted." });
-    }
-    w("response.output_item.done", { output_index: 0, item });
-    w("response.completed", { response: resp });
-    res.end();
+    stream(res, body, STEPS[outs.length] ?? null, "Submitted and accepted.");
   });
 });
+
+/** One Responses API turn as server-sent events: a scripted tool call, or a text message. */
+function stream(res: http.ServerResponse, body: any, step: [string, Record<string, unknown>] | null, text: string) {
+  const rid = `resp_${randomBytes(6).toString("hex")}`;
+  const item = step
+    ? { type: "function_call", id: `fc_${rid}`, call_id: `call_${rid}`, name: step[0], arguments: JSON.stringify(step[1]), status: "completed" }
+    : { type: "message", id: `msg_${rid}`, role: "assistant", status: "completed", content: [{ type: "output_text", text, annotations: [] }] };
+  const resp = { id: rid, object: "response", created_at: Math.floor(Date.now() / 1000), status: "completed", model: body.model, output: [item], usage: { input_tokens: 900, output_tokens: 150, total_tokens: 1050 } };
+  res.writeHead(200, { "content-type": "text/event-stream" });
+  const w = (ev: string, data: object) => res.write(`event: ${ev}\ndata: ${JSON.stringify({ type: ev, ...data })}\n\n`);
+  w("response.created", { response: { ...resp, status: "in_progress", output: [] } });
+  w("response.output_item.added", { output_index: 0, item: { ...item, status: "in_progress", ...(step ? { arguments: "" } : { content: [] }) } });
+  if (step) {
+    w("response.function_call_arguments.delta", { item_id: item.id, output_index: 0, delta: (item as any).arguments });
+    w("response.function_call_arguments.done", { item_id: item.id, output_index: 0, arguments: (item as any).arguments });
+  } else {
+    w("response.output_text.delta", { item_id: item.id, output_index: 0, content_index: 0, delta: text });
+  }
+  w("response.output_item.done", { output_index: 0, item });
+  w("response.completed", { response: resp });
+  res.end();
+}
 
 // ---------------------------------------------------------------- run
 
 const serverEnv: NodeJS.ProcessEnv = {
   PATH: process.env.PATH, HOME: process.env.HOME, PGLITE_DIR: path.join(tmp, "pglite"), HOST: "127.0.0.1", PORT: String(PORT),
-  PUBLIC_URL: BASE, OCTILLION_WORKER_TOKEN: WORKER_TOKEN, OCTILLION_VAULT_KEY: randomBytes(32).toString("base64"),
+  PUBLIC_URL: BASE, OCTILLION_WORKER_TOKEN: WORKER_TOKEN, OCTILLION_VAULT_KEY: randomBytes(32).toString("base64"), VAULT_DIR: path.join(ROOT, "vault", "example"),
 };
 let server: ChildProcess | null = null, orch: ChildProcess | null = null;
 const textOf = (c: any): string => (Array.isArray(c) ? c.map((x) => x?.text ?? "").join("") : String(c ?? ""));
@@ -193,6 +224,7 @@ async function main() {
     if (r.status !== 0) throw new Error(`${args.join(" ")}: ${(r.stderr || r.stdout).slice(-600)}`);
     return r.stdout;
   };
+  run(["scripts/vault-sync.ts"]); // the example developer profiles the personas are picked from (VAULT_DIR below)
   const orgKey = /API key \(shown once\): (\S+)/.exec(run(["scripts/create-org.ts", "Acme Labs", "acme"]))?.[1];
   run(["scripts/keyvault.ts", "provider", "openai", "--upstream", `http://127.0.0.1:${LLM_PORT}`]);
   run(["scripts/keyvault.ts", "set", "openai", "--label", "rtest"], CANARY);
@@ -237,14 +269,17 @@ async function main() {
   const val = out("validate")[0] ?? "", sub = out("submit");
   check("validate reports the product name in a prompt", /names AcmeQ/.test(val), val.slice(0, 200));
   // The accepted submit ends the session (terminate), so its output never goes back to the LLM: check the server.
-  const saved = (A?.scenarios ?? []).map((s: any) => s.prompt);
+  // Every problem is a draft (the example library has nothing for this stack): saved inactive until approved.
+  const saved = (A?.drafts ?? []).map((s: any) => s.prompt);
   check("submit -> 422 issues -> revise -> accepted", sub.length >= 1 && /"accepted": false/.test(sub[0]!) && /names AcmeQ/.test(sub[0]!) &&
     A?.research.status === "completed" && saved.includes(good.scenarios[0]!.prompt) && !saved.some((p: string) => /acmeq/i.test(p)),
     `1st submit: ${sub[0]?.replace(/\s+/g, " ").slice(0, 110)} | then accepted, saved prompts are the revised ones`);
-  check("server saved profile, personas and scenarios (run:false, no simulation)",
-    A?.research.status === "completed" && A.product.packages?.includes("acmeq") && A.personas.length === 2 && A.scenarios.length === 4 && !A.simulation,
-    `status ${A?.research.status}, packages ${JSON.stringify(A?.product.packages)}, personas ${A?.personas.length}, scenarios ${A?.scenarios.length}, simulation ${A?.simulation?.id ?? "none"}`);
-  check("LLM unavailable -> job failed with a clear error", B?.research.status === "failed" && /LLM unavailable/.test(B.research.error ?? ""), String(B?.research.error ?? "").slice(0, 200));
+  check("server saved profile, picked personas and draft problems (run:false, no simulation)",
+    A?.research.status === "completed" && A.product.packages?.includes("acmeq") && A.personas.length === 2 && A.drafts.length === 4 && A.scenarios.length === 0 && !A.simulation,
+    `status ${A?.research.status}, packages ${JSON.stringify(A?.product.packages)}, personas ${A?.personas.length}, drafts ${A?.drafts.length}, simulation ${A?.simulation?.id ?? "none"}`);
+  check("the task reviewer was consulted on the problems", reviews > 0, `${reviews} review(s)`);
+  // The raw error stays internal; the customer sees why in plain words.
+  check("LLM unavailable -> job failed with a clear error", B?.research.status === "failed" && /research service was interrupted/.test(B.failure?.summary ?? ""), `${B?.research.status}: ${B?.failure?.summary ?? ""}`);
   check("brain went through the gateway with the vault key (never an ogw_ token upstream)", llmKeyOk && llmRequests > 0, `${llmRequests} LLM requests`);
 }
 
