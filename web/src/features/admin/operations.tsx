@@ -1,11 +1,11 @@
 'use client';
-// Operations pages as full-page tables: the Key vault (one row per provider) and Compute (capacity settings, with the
-// sandbox provider's live status a click away). Harness mix and Agent configuration live in compute.tsx.
+// Operations pages as full-page tables: the Key vault (one row per provider). Compute, Harness mix and Agent
+// configuration live in compute.tsx.
 import { useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import PageContainer from '@/components/layout/page-container';
-import { Field, RecordView, type RecordCol } from '@/components/layout/record-view';
+import { RecordView, type RecordCol } from '@/components/layout/record-view';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
@@ -233,86 +233,5 @@ function ImportKeys({ providers, onClose }: { providers: Provider[]; onClose: ()
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  );
-}
-
-// ---------- compute ----------
-
-interface Setting {
-  key: string; group: string; label: string; help: string; kind: 'text' | 'int' | 'number' | 'choice'; default: string | number;
-  options?: string[]; min?: number; max?: number; value: string | number; source: 'set' | 'env' | 'default'; env: string | null; updated_at: string | null;
-}
-interface Sandbox {
-  provider: string; api: string; namespace: string; ok: boolean; error: string | null;
-  keys: { id: number; label: string; hint: string; enabled: boolean; last_used_at: string | null }[];
-  limits: { activeSandboxes: number; startsPerMinute: number; startsPerHour: number; startsPerDay: number; activeNow: number } | null;
-  running: { total: number; ours: number; orchestrators: number; others: number } | null;
-  orchestrators: Record<string, number>;
-}
-
-/** Compute: the capacity settings as a full-page table; the sandbox provider's live status in the toolbar and a dialog. */
-export function AdminCompute() {
-  const { data, error, isLoading } = useAdmin<{ settings: Setting[] }>('/compute');
-  const sb = useAdmin<Sandbox>('/compute/sandbox');
-  const [showSandbox, setShowSandbox] = useState(false);
-  const save = useAdminAction((v: Record<string, string | null>) => adminApi('PUT', '/compute/settings', { values: v }), { success: 'Setting saved' });
-  const rows = (data?.settings ?? []).filter((x) => x.group === 'capacity');
-  const cols: RecordCol<Setting>[] = [
-    { key: 'setting', label: 'Setting', keep: true, type: 'text', value: (x) => x.label,
-      render: (x) => <span className='flex min-w-0 flex-col gap-1'><span className='leading-none font-medium'>{x.label}</span><span className='text-muted-foreground truncate text-xs' title={x.help}>{x.help}</span></span> },
-    { key: 'value', label: 'Value', className: 'w-56', keep: true, render: (x) => <span onClick={(e) => e.stopPropagation()}><Value key={String(x.value)} s={x} disabled={save.isPending} onSave={(v) => save.mutate({ [x.key]: v })} /></span> },
-    { key: 'source', label: 'From', type: 'select', value: (x) => (x.source === 'set' ? 'Set here' : x.source === 'env' ? 'Environment' : 'Default'),
-      render: (x) => (x.source === 'set' ? <span>Set here{x.updated_at && <span className='text-muted-foreground'> · <When d={x.updated_at} /></span>}</span> : <span className='text-muted-foreground'>{x.source === 'env' ? 'Environment' : 'Default'}</span>) },
-    { key: 'default', label: 'Default', type: 'text', value: (x) => String(x.default), render: (x) => <Mono>{String(x.default)}</Mono> },
-    { key: 'key', label: 'Variable', type: 'text', value: (x) => x.key, render: (x) => <Mono>{x.key}</Mono> }
-  ];
-  const s = sb.data;
-  return (
-    <PageContainer>
-      <ErrorBox error={error} />
-      <RecordView id='compute' rows={rows} loading={isLoading} rowKey={(x) => x.key} cols={cols} noun='settings'
-        searchText={(x) => `${x.label} ${x.key} ${x.help}`}
-        searchPlaceholder={s ? `Search capacity settings · ${s.provider} ${s.ok ? 'connected' : 'not connected'}${s.running && s.limits ? `, ${s.running.total} of ${s.limits.activeSandboxes} sandboxes running` : ''}` : 'Search capacity settings'}
-        primary={<Button variant='outline' onClick={() => setShowSandbox(true)}><span className={cn('size-2 rounded-full', !s ? 'bg-muted-foreground' : s.ok ? 'bg-emerald-500' : 'bg-destructive')} /> Sandbox provider</Button>}
-        actions={(x) => (x.source === 'set' ? [{ label: `Reset to ${x.env != null ? 'environment' : 'default'}`, icon: <Icons.close />, onSelect: () => save.mutate({ [x.key]: null }) }] : [])}
-        exportName='compute' empty='No capacity settings.' />
-      <Dialog open={showSandbox} onOpenChange={setShowSandbox}>
-        <DialogContent className='sm:max-w-2xl'>
-          <DialogHeader>
-            <DialogTitle>Sandbox provider</DialogTitle>
-            <DialogDescription>Where orchestrators and agent sandboxes run. Its key lives in Key vault (provider boat).</DialogDescription>
-          </DialogHeader>
-          <ErrorBox error={sb.error} />
-          {s && (<>
-            {!s.ok && <Notice>boat.dev did not answer: {s.error}</Notice>}
-            <dl>
-              <Field label='Provider'>{s.provider} <span className='text-muted-foreground'>· {s.ok ? 'connected' : 'not connected'}</span></Field>
-              <Field label='Key'>{s.keys.find((k) => k.enabled) ? <><Mono>{s.keys.find((k) => k.enabled)!.hint}</Mono> <span className='text-muted-foreground'>· {s.keys.find((k) => k.enabled)!.label}</span></> : <span className='text-amber-700 dark:text-amber-400'>No boat key: add one in Key vault</span>}</Field>
-              <Field label='API'><Mono>{s.api}</Mono></Field>
-              <Field label='Namespace'><Mono>{s.namespace}</Mono> <span className='text-muted-foreground'>· this deployment only touches sandboxes named {s.namespace}-…</span></Field>
-              {s.limits && <Field label='Plan'>{s.limits.activeSandboxes} at once · {s.limits.startsPerDay} starts a day ({s.limits.startsPerHour}/hour, {s.limits.startsPerMinute}/minute)</Field>}
-              {s.running && <Field label='Running now'>{s.running.total} <span className='text-muted-foreground'>· ours {s.running.ours} ({s.running.orchestrators} orchestrators) · other deployments {s.running.others}</span></Field>}
-              <Field label='Orchestrators'>{Object.keys(s.orchestrators).length ? Object.entries(s.orchestrators).map(([k, n]) => `${n} ${k}`).join(' · ') : <span className='text-muted-foreground'>none running</span>}</Field>
-            </dl>
-          </>)}
-          <DialogFooter>
-            <Button variant='outline' disabled={sb.isFetching} onClick={() => void sb.refetch()}>{sb.isFetching ? <Icons.spinner className='animate-spin' /> : <Icons.plug />} Test connection</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </PageContainer>
-  );
-}
-
-function Value({ s, onSave, disabled }: { s: Setting; onSave: (v: string) => void; disabled?: boolean }) {
-  const [v, setV] = useState(String(s.value));
-  const commit = (x: string) => { if (x.trim() !== '' && x !== String(s.value)) onSave(x); };
-  return s.kind === 'choice' ? (
-    <NativeSelect aria-label={s.label} value={v} disabled={disabled} onChange={(e) => { setV(e.target.value); commit(e.target.value); }} className='w-40'>
-      {s.options!.map((o) => <NativeSelectOption key={o} value={o}>{o}</NativeSelectOption>)}
-    </NativeSelect>
-  ) : (
-    <Input aria-label={s.label} value={v} disabled={disabled} onChange={(e) => setV(e.target.value)} onBlur={() => commit(v)} onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
-      className='h-8 w-28 tabular-nums' type='number' min={s.min} max={s.max} step={s.kind === 'number' ? 'any' : 1} />
   );
 }

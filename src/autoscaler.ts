@@ -128,6 +128,8 @@ export interface TickState {
   active?: number; launched?: string[]; reaped?: { sandbox_id: string; reason: string }[]; image?: string | null; note?: string; error?: string;
   /** Per-job mode: the jobs wanting an orchestrator and whether one serves them. */
   jobs?: { id: string; kind: string; sessions: number; served: boolean }[];
+  /** Per-job mode: boat plan sandboxes left after this tick's launches (plan - other deployments - ours reserved). */
+  free?: number;
 }
 
 export class Autoscaler {
@@ -390,7 +392,7 @@ export class Autoscaler {
       active++;
     }
     st.jobs = jobs.map((j) => ({ id: j.id, kind: j.kind, sessions: j.sessions, served: served.has(j.id) }));
-    st.active = active; st.cap = AUTOSCALE.maxJobOrchestrators(); st.desired = jobs.length;
+    st.active = active; st.cap = AUTOSCALE.maxJobOrchestrators(); st.desired = jobs.length; st.free = free;
     if (notes.length) st.note = notes.join("; ");
   }
 
@@ -437,8 +439,11 @@ let singleton: Autoscaler | null = null;
  * upload + start) so the function is not frozen mid-launch. At most one kick per instance every 10 seconds.
  */
 let lastKick = 0;
+/** Can this deployment kick the autoscaler at all: on, an HTTPS URL orchestrators reach, and a worker token. A null
+ * from kickAutoscaler means this is false, or the kick was debounced. */
+export const kickConfigured = (): boolean => AUTOSCALE.enabled() && /^https:\/\//.test(AUTOSCALE.publicUrl()) && !!env.OCTILLION_WORKER_TOKEN;
 export async function kickAutoscaler(opts: { force?: boolean } = {}): Promise<TickState | null> {
-  if (!AUTOSCALE.enabled() || !/^https:\/\//.test(AUTOSCALE.publicUrl()) || !env.OCTILLION_WORKER_TOKEN) return null;
+  if (!kickConfigured()) return null;
   if (!opts.force && Date.now() - lastKick < 10_000) return null;
   lastKick = Date.now();
   singleton ??= new Autoscaler();

@@ -327,13 +327,16 @@ const launchError = (e: unknown, step: string, t0: number): LaunchError => {
  * Create one orchestrator sandbox and start it. `onCreated` fires right after the create (so callers can record the
  * sandbox id before anything else can fail). Throws a LaunchError, after deleting the sandbox, if anything fails.
  */
+/** Orchestrators always run on boat's small machine (BOAT_PRICE_PER_HOUR.small): the Compute page's sandbox estimate. */
+export const ORCH_SANDBOX_TYPE = "small";
+
 export async function launchOrchestrator(ctx: LaunchContext, opts: { image?: string | null; ttlSeconds?: number; onCreated?: (sandboxId: string, orchId: string) => Promise<void> | void; requirePreflight?: boolean } = {}): Promise<LaunchResult> {
   const t0 = Date.now();
   const timings: Record<string, number> = {};
   let step = "create";
   const mark = (k: string) => { timings[k] = Date.now() - t0; };
   let c: any;
-  try { c = await boatCreate({ type: "small", ttlSeconds: opts.ttlSeconds ?? MAX_TTL_SECONDS, noEnv: true, snapshots: false, ...(opts.image ? { from: opts.image } : {}) }); }
+  try { c = await boatCreate({ type: ORCH_SANDBOX_TYPE, ttlSeconds: opts.ttlSeconds ?? MAX_TTL_SECONDS, noEnv: true, snapshots: false, ...(opts.image ? { from: opts.image } : {}) }); }
   catch (e) { throw launchError(e, step, t0); }
   const id: string = c.sandbox.id;
   const orchId = orchIdOf(id);

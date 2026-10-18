@@ -29,7 +29,7 @@ const MAX_TOKENS = () => Number(process.env.OCTILLION_GATEWAY_MAX_TOKENS ?? 30_0
 const MAX_COST_USD = () => Number(process.env.OCTILLION_GATEWAY_MAX_COST_USD ?? 10);
 
 /** Requires-env fallback for sessions whose agent is not in the registry. */
-const HARNESS_ENV: Record<string, string[]> = { "claude-code": ["ANTHROPIC_API_KEY"], codex: ["CODEX_API_KEY", "OPENAI_API_KEY"] };
+export const HARNESS_ENV: Record<string, string[]> = { "claude-code": ["ANTHROPIC_API_KEY"], codex: ["CODEX_API_KEY", "OPENAI_API_KEY"] };
 
 /** Conventional env names for gateway providers (adapters may map providers to their own variables instead). */
 const GATEWAY_ENV: Record<string, (base: string, token: string) => Record<string, string>> = {

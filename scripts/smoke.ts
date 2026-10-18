@@ -1083,6 +1083,100 @@ try {
     console.log("✓ persona and task libraries: list, search, page, edit, deactivate; the vault sync keeps admin edits");
   }
 
+  // ---------- Compute page summary (src/compute.ts): verdict, limits, boat listing cache ----------
+  {
+    const { computeVerdict, bindingLimit, classifySandboxNames, cachedFetch, resetComputeCaches } = await import("../src/compute.js");
+    const { kickConfigured } = await import("../src/autoscaler.js");
+    // The verdict rules, worst first; none true is one green line.
+    const facts = {
+      enabled: true, runtime: "vm" as const, kick_configured: false, has_boat_key: true, boat_error: null,
+      tick: { age_s: 12, error: null, note: null }, queue: { sessions: 0, research: 0, oldest_session_age_s: null, oldest_research_age_s: null, unclaimable: 0 },
+      running: { sessions: 3, orchestrators: 1 }, others: 0, free: 50, per_job: true, job_orch_live: 1, job_orch_cap: 12, not_checking_in: 0,
+      launch_failures_1h: { count: 0, step: null, message: null }, missing_keys: [], leaked_workers: 0, orphan_deletes_24h: 0, namespace: "octi", idle_orchestrators: 0,
+    };
+    const ok = computeVerdict(facts);
+    assert.deepEqual(ok.map((v) => v.code), ["ok"]);
+    assert.equal(ok[0]!.text, "Compute is healthy. 3 sessions running on 1 orchestrator, queue 0.");
+    assert.deepEqual(computeVerdict({ ...facts, runtime: "vercel" }).map((v) => v.code), ["kick_unconfigured"], "Vercel needs the kick; a VM ticks on its own");
+    const bad = computeVerdict({ ...facts, enabled: true, has_boat_key: false, boat_error: "ignored without a key",
+      tick: { age_s: 47 * 60, error: null, note: "sim_x waits for boat plan capacity (3 free); cooldown: sim_y's orchestrator idled out with its sessions still queued" },
+      queue: { sessions: 4, research: 0, oldest_session_age_s: 20 * 60, oldest_research_age_s: null, unclaimable: 2 }, others: 7, job_orch_live: 12,
+      missing_keys: [{ agent_id: "codex/gpt", missing_env: ["CODEX_API_KEY"] }, { agent_id: "claude-code/sonnet", missing_env: [] }], leaked_workers: 1 });
+    assert.deepEqual(bad.map((v) => v.code), ["no_boat_key", "tick_stale", "queue_old", "unclaimable", "plan_capacity", "at_cap", "cooldown", "missing_keys", "leaked_workers"]);
+    assert.equal(bad.find((v) => v.code === "tick_stale")!.text, "4 sessions are queued but nothing has ticked for 47 min.");
+    assert.equal(bad.find((v) => v.code === "plan_capacity")!.text, "sim_x waits for boat capacity: 3 free, other deployments use 7.");
+    assert.equal(bad.find((v) => v.code === "missing_keys")!.text, "codex/gpt cannot run: no vault key for CODEX_API_KEY.");
+    assert.ok(bad.every((v) => v.level !== "green") && bad[0]!.level === "red" && bad.at(-1)!.level === "amber");
+    assert.deepEqual(computeVerdict({ ...facts, enabled: false }).map((v) => v.code), ["autoscale_off"]);
+    assert.deepEqual(computeVerdict({ ...facts, boat_error: "fetch failed" }).map((v) => v.code), ["boat_down"]);
+    assert.deepEqual(computeVerdict({ ...facts, launch_failures_1h: { count: 1, step: "ready", message: "x" } }).map((v) => v.code), ["ok"], "one failed launch is not a pattern");
+    // Which limit binds: the tick's note first, then boat's budget, then the caps while work waits.
+    const lim = { note: null, budget_reason: undefined, queued: 5, per_job: true, job_orch_live: 2, job_orch_cap: 12, pods_max_reserved: 10, pods_cap: 40 };
+    assert.equal(bindingLimit(lim), null);
+    assert.equal(bindingLimit({ ...lim, note: "at OCTILLION_MAX_JOB_ORCHESTRATORS (12)" }), "job_orch");
+    assert.equal(bindingLimit({ ...lim, note: "rsh_1 waits for boat plan capacity (0 free)" }), "plan");
+    assert.equal(bindingLimit({ ...lim, budget_reason: "2 orchestrators x (1 + 40) = 82 sandboxes > 50 available" }), "plan");
+    assert.equal(bindingLimit({ ...lim, job_orch_live: 12 }), "job_orch");
+    assert.equal(bindingLimit({ ...lim, job_orch_live: 12, queued: 0 }), null, "a full cap with nothing queued binds nothing");
+    assert.equal(bindingLimit({ ...lim, pods_max_reserved: 40 }), "pods");
+    // boat's sandboxes sorted by name: ours (orchestrators, workers with their parent, the image builder) and others'.
+    const sbs = classifySandboxNames([
+      { id: "bx_a", name: "octi-orch-a", state: "running" }, { id: "bx_w1", name: "octi-w-orch-a-claude-code-sonnet", state: "running" },
+      { id: "bx_w2", name: "octi-w-orch-zz-codex", state: "running" }, { id: "bx_w3", name: "octi-w-my-orch-1-codex", state: "running" },
+      { id: "bx_i", name: "octi-img-build", state: "running" }, { id: "bx_m", name: "octi-orch-img-abc", state: "ready" },
+      { id: "bx_o", name: "octv-orch-b", state: "running" }, { id: "bx_n", state: "archived" },
+    ], "octi", ["orch-a", "my-orch-1"]);
+    assert.deepEqual(sbs.map((s) => [s.kind, s.parent_orchestrator_id, s.prefix]), [
+      ["orchestrator", null, null], ["worker", "orch-a", null], ["worker", "orch-zz", null], ["worker", "my-orch-1", null],
+      ["image_builder", null, null], ["image", null, null], ["other", null, "octv"], ["other", null, "(unnamed)"]]);
+    assert.equal(sbs.at(-1)!.live, false);
+    // The cache: one call per TTL, a failure serves the last good value marked stale, a hung call times out.
+    {
+      let calls = 0, mode: "ok" | "fail" | "hang" = "ok";
+      const get = cachedFetch(async () => { calls++; if (mode === "fail") throw new Error("boat 500"); if (mode === "hang") await new Promise(() => {}); return calls; },
+        { ttlMs: 60_000, timeoutMs: 50 });
+      const a = await get(), b = await get();
+      assert.ok(a.ok && !a.stale && a.value === 1 && b.value === 1 && calls === 1, "a fresh value is reused within the TTL");
+      mode = "fail";
+      const c = await get(true);
+      assert.ok(c.ok && c.stale && c.value === 1 && c.error === "boat 500", "a failure falls back to the last good value, marked stale");
+      assert.equal((await get()).stale, true, "and the failure is remembered for the TTL (boat is not asked again)");
+      assert.equal(calls, 2);
+      mode = "hang";
+      const d = await get(true);
+      assert.ok(d.stale && /did not answer within/.test(d.error ?? ""), "a hung call times out");
+      get.reset();
+      const e = await get(true);
+      assert.ok(!e.ok && e.value === null && /did not answer/.test(e.error ?? ""), "with no good value, only the error");
+      mode = "ok";
+      assert.ok((await get(true)).ok);
+    }
+    assert.equal(kickConfigured(), /^https:\/\//.test(process.env.OCTILLION_INTERNAL_URL || process.env.PUBLIC_URL || "") && !!process.env.OCTILLION_WORKER_TOKEN);
+
+    // The endpoint over real rows: a stuck boot, two failed launches in the hour and an orphan delete each raise their rule.
+    resetComputeCaches();
+    await db.query("INSERT INTO orchestrator_sandboxes (sandbox_id, orchestrator_id, state, created_at) VALUES ('smoke-cs-boot', 'orch-smoke-cs', 'booting', now() - interval '30 minutes')");
+    for (const k of [1, 2])
+      await db.query(`INSERT INTO orchestrator_sandboxes (sandbox_id, state, created_at, deleted_at, error, launch_step, launch_error)
+                      VALUES ($1, 'deleted', now() - interval '10 minutes', now(), $2, 'ready', $3)`, [`smoke-cs-f${k}`, `ready (240s): bx not ready after 240s #${k}`, `bx not ready after 240s #${k}`]);
+    await db.query("INSERT INTO compute_events (kind, sandbox_id, reason) VALUES ('orphan_deleted', 'smoke-cs-orphan', 'orphan orchestrator sandbox (no row): octi-orch-x')");
+    assert.equal((await fetch(`${base}/api/admin/onboarding/compute/summary`)).status, 401, "the summary needs the admin token");
+    const sum = await json(adm("GET", "/compute/summary?fresh=1"));
+    const codes = sum.verdict.map((v: any) => v.code);
+    for (const c of ["no_boat_key", "not_checking_in", "launch_failures", "namespace_collision"]) assert.ok(codes.includes(c), `verdict has ${c}: ${codes}`);
+    assert.ok(!codes.includes("boat_down") && !codes.includes("ok"), "no key: boat is not asked, so not 'down'");
+    assert.match(sum.verdict.find((v: any) => v.code === "launch_failures").text, /^2 orchestrator launches failed in the last hour \(latest: ready: bx not ready after 240s #\d\)\.$/);
+    assert.ok(sum.running.orchestrators.booting >= 1 && sum.failures_24h.launches >= 2 && sum.limits.our_starts.day >= 3, "orchestrators, launch failures and our starts counted");
+    assert.ok(sum.limits.ok === false && sum.limits.plan === null && sum.provider.has_key === false, "boat-derived limits are empty without a key");
+    assert.ok(["vm", "vercel"].includes(sum.runtime) && sum.tick.tick_seconds > 0 && typeof sum.spend_today.total_usd === "number" && sum.wait_1h.n >= 0);
+    assert.ok(sum.settings.some((x: any) => x.key === "OCTILLION_MAX_JOB_ORCHESTRATORS") && sum.knobs.some((k: any) => k.name === "OCTILLION_AUTOSCALE"), "settings and knobs ride along");
+    assert.equal(sum.knobs.find((k: any) => k.name === "Kick configured").value, kickConfigured() ? "yes" : "no");
+    await db.query("DELETE FROM orchestrator_sandboxes WHERE sandbox_id LIKE 'smoke-cs-%'");
+    await db.query("DELETE FROM compute_events WHERE sandbox_id LIKE 'smoke-cs-%'");
+    resetComputeCaches();
+    console.log("✓ compute summary: verdict rules, binding limit, boat listing classified and cached (timeout, stale fallback)");
+  }
+
   // ---------- global compute settings (/admin/compute): set here > environment > default ----------
   {
     const { config } = await import("../src/queries.js");

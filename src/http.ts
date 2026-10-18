@@ -33,6 +33,7 @@ import * as kv from "./keyvault.js";
 import * as populations from "./populations.js";
 import * as onboarding from "./admin.js";
 import * as library from "./library.js";
+import { computeSummary } from "./compute.js";
 import { freshSettings, SettingError } from "./settings.js";
 import { freshPlatformHarnesses } from "./harnesses.js";
 
@@ -439,6 +440,8 @@ export function createApp() {
   // Global compute settings (src/settings.ts) and the default population's agent mix.
   ob.get("/compute", async (_req, res) => void res.json(await library.compute()));
   ob.put("/compute/settings", async (req, res) => void res.json(await library.saveSettings(adminActor(req, res), req.body?.values)));
+  // The Compute page (src/compute.ts): verdict, tick freshness, tiles, limits, environment. Read only; ?fresh=1 asks boat again.
+  ob.get("/compute/summary", async (req, res) => void res.json(await computeSummary({ fresh: req.query.fresh === "1" })));
   // Admin-added harnesses (src/harnesses.ts): variants of a registry.json CLI; a new one joins the mix at weight 0, off.
   ob.get("/compute/harnesses", async (_req, res) => void res.json(await library.listHarnesses()));
   ob.post("/compute/harnesses", async (req, res) => void res.status(201).json(await library.addHarness(adminActor(req, res), req.body ?? {})));
