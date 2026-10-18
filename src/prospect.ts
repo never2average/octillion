@@ -139,14 +139,36 @@ Reply with one JSON object and nothing else:
  "questions": ["2-4 questions to ask them on a first call"], "flags": ["anything that looks off: mismatched domains, no product, not a developer tool"]}`;
 
 /** The brief from Claude, else from the orchestrator's own model (OpenAI) when the vault has no Anthropic key. */
+/** The brief from the first model that answers: Claude (vault, ANTHROPIC_API_KEY or Vertex AI), then the orchestrator's
+ *  OpenAI model, then Cloudflare Workers AI. Each failure is kept so the flag says why none answered. */
 async function claudeBrief(evidence: unknown): Promise<(Partial<ProspectBrief> & { model: string }) | null> {
-  try { return { ...parseBrief(await anthropicText(evidence)), model: MODEL() }; }
-  catch (e) {
-    const brain = orchestratorBrain();
-    if (brain.provider !== "openai") throw e;
-    try { return { ...parseBrief(await openaiText(evidence, brain.model)), model: brain.model }; }
-    catch (e2) { throw new Error(`${(e as Error).message}; ${(e2 as Error).message}`); }
+  const brain = orchestratorBrain();
+  const tries: [string, () => Promise<string>][] = [
+    [MODEL(), () => anthropicText(evidence)],
+    ...(brain.provider === "openai" ? [[brain.model, () => openaiText(evidence, brain.model)] as [string, () => Promise<string>]] : []),
+    [cloudflareModel(), () => cloudflareText(evidence)],
+  ];
+  const errors: string[] = [];
+  for (const [model, ask] of tries) {
+    try { return { ...parseBrief(await ask()), model }; }
+    catch (e) { errors.push((e as Error).message); }
   }
+  throw new Error(errors.join("; "));
+}
+
+const cloudflareModel = () => process.env.CLOUDFLARE_AI_MODEL ?? "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+
+/** Cloudflare Workers AI (OpenAI-compatible endpoint), from CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN. */
+async function cloudflareText(evidence: unknown) {
+  const account = process.env.CLOUDFLARE_ACCOUNT_ID ?? process.env.CF_ACCOUNT_ID, token = process.env.CLOUDFLARE_API_TOKEN ?? process.env.CF_API_TOKEN;
+  if (!account || !token) throw new Error("no Cloudflare Workers AI key (CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN)");
+  const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(account)}/ai/v1/chat/completions`, {
+    method: "POST", signal: AbortSignal.timeout(90_000), headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify({ model: cloudflareModel(), max_tokens: 1500, messages: [{ role: "system", content: SYSTEM }, { role: "user", content: `Evidence:\n${JSON.stringify(evidence)}` }] }),
+  });
+  if (!r.ok) throw new Error(`Cloudflare answered ${r.status}`);
+  const out = await r.json() as { choices?: { message?: { content?: string } }[] };
+  return out.choices?.[0]?.message?.content ?? "";
 }
 
 async function openaiText(evidence: unknown, model: string) {
@@ -171,7 +193,14 @@ async function anthropicText(evidence: unknown): Promise<string> {
   const direct = { "content-type": "application/json", "anthropic-version": "2023-06-01" };
   // No vault provider: a plain ANTHROPIC_API_KEY in the environment works too.
   if (!p?.enabled && process.env.ANTHROPIC_API_KEY) return anthropicCall("https://api.anthropic.com/v1/messages", { ...direct, "x-api-key": process.env.ANTHROPIC_API_KEY });
-  if (!p?.enabled) throw new Error("no Anthropic provider in the vault (or ANTHROPIC_API_KEY)");
+  // Or Claude on Vertex AI from a service-account key in the environment (project from VERTEX_PROJECT_ID or the key).
+  const sa = process.env.VERTEX_SERVICE_ACCOUNT_JSON ?? process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+  if (!p?.enabled && sa) {
+    const cfg = { project_id: process.env.VERTEX_PROJECT_ID ?? (() => { try { return JSON.parse(sa).project_id; } catch { return undefined; } })(), region: process.env.VERTEX_REGION ?? "global" };
+    const auth = { "content-type": "application/json", authorization: `Bearer ${await vertexAccessToken(-1, sa)}` };
+    return anthropicCall("", auth, (payload) => toVertex(cfg, "/v1/messages", Buffer.from(JSON.stringify(payload))));
+  }
+  if (!p?.enabled) throw new Error("no Anthropic provider in the vault (or ANTHROPIC_API_KEY, or VERTEX_SERVICE_ACCOUNT_JSON)");
   if (p.backend === "vertex") {
     const credProvider = (p.backend_config as { credential_provider?: string })?.credential_provider ?? "anthropic";
     const cred = await useCredential(credProvider, { label: VERTEX_LABEL });
