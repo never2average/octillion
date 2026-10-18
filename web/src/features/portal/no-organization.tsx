@@ -1,48 +1,18 @@
 'use client';
-import { SignOutButton, useOrganizationList, useUser } from '@clerk/nextjs';
-import { useRouter } from 'next/navigation';
-import { Button } from '@/components/ui/button';
-import { Icons } from '@/components/icons';
+import { OrganizationList, SignOutButton, useUser } from '@clerk/nextjs';
 
-/**
- * Signed in, but no account picked: choose one of your Octillion accounts, or ask for an invitation. Accounts are
- * created by Octillion (invite-only), so there is no "create organization" here.
- */
+/** Signed in, but no account picked: choose one of your Octillion accounts, or ask your admin for an invitation. */
 export function NoOrganization() {
   const { user } = useUser();
-  const router = useRouter();
-  const { isLoaded, setActive, userMemberships, userInvitations } = useOrganizationList({ userMemberships: true, userInvitations: true });
-  const email = user?.primaryEmailAddress?.emailAddress ?? 'you';
-  const memberships = userMemberships.data ?? [], invitations = userInvitations.data ?? [];
-  const open = (id: string) => void setActive?.({ organization: id }).then(() => router.push('/app'));
   return (
     <main className='flex min-h-screen flex-col items-center justify-center gap-6 p-6'>
       <div className='max-w-md text-center'>
-        <h1 className='text-2xl font-semibold'>{memberships.length ? 'Choose your account' : 'No Octillion account yet'}</h1>
+        <h1 className='text-2xl font-semibold'>Choose your account</h1>
         <p className='text-muted-foreground mt-2'>
-          {memberships.length
-            ? 'Pick the Octillion account to open.'
-            : `Octillion is invite-only for now. Ask your account admin, or your Octillion contact, to invite ${email}.`}
+          Pick the Octillion account to open. Not listed? Ask your account admin to invite {user?.primaryEmailAddress?.emailAddress ?? 'you'}.
         </p>
       </div>
-      {!isLoaded ? <Icons.spinner className='text-muted-foreground size-5 animate-spin' /> : (
-        <ul className='flex w-full max-w-sm flex-col gap-2'>
-          {memberships.map((m) => (
-            <li key={m.id}>
-              <Button variant='outline' className='w-full justify-between' onClick={() => open(m.organization.id)}>
-                {m.organization.name}<Icons.arrowRight />
-              </Button>
-            </li>
-          ))}
-          {invitations.map((i) => (
-            <li key={i.id}>
-              <Button className='w-full justify-between' onClick={() => void i.accept().then(() => open(i.publicOrganizationData.id))}>
-                Join {i.publicOrganizationData.name}<Icons.arrowRight />
-              </Button>
-            </li>
-          ))}
-        </ul>
-      )}
+      <OrganizationList hidePersonal afterSelectOrganizationUrl='/app' afterCreateOrganizationUrl='/app' skipInvitationScreen={false} />
       <SignOutButton redirectUrl='/auth/sign-in'><button className='text-muted-foreground text-sm underline'>Sign out</button></SignOutButton>
     </main>
   );

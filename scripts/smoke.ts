@@ -19,8 +19,6 @@ process.env.OCTILLION_ADMIN_TOKEN ??= "smoke-admin-token";
 process.env.OCTILLION_REGISTRY = "scripts/fixtures/registry.json"; // fixed weights, independent of the live registry
 // Accounts without a plan get $0 by default (prepaid, invite-only); the smoke run gives every test account an allowance.
 process.env.OCTILLION_ORG_MONTHLY_BUDGET_USD ??= "1000";
-// Most of the run signs people into Clerk organizations created on the fly; self-serve stays on for them (checked off below).
-process.env.OCTILLION_SELF_SERVE_ACCOUNTS ??= "on";
 const WORKER_TOKEN = process.env.OCTILLION_WORKER_TOKEN;
 // Stand-ins for Exa and the npm registry search (src/websearch.ts): research search runs on the server.
 const searchStub = (await import("node:http")).createServer((req, res) => {
