@@ -23,7 +23,7 @@ import { appendEvents, claimJobs, completeSession, heartbeat } from "./worker.js
 import { fleetCheckin, fleetLeave, fleetStatus } from "./fleet.js";
 import { autoscalerStatus, kickAutoscaler, startAutoscaler, stopAutoscaler } from "./autoscaler.js";
 /** On Vercel, orchestrator traffic drives the autoscaler (no ticking loop there); elsewhere the loop does. */
-const serverlessTick = () => { if (process.env.VERCEL) telemetry.keepAlive(kickAutoscaler().catch((e) => console.error("autoscaler kick:", (e as Error).message))); };
+const serverlessTick = (force = false) => { if (process.env.VERCEL) telemetry.keepAlive(kickAutoscaler({ force }).catch((e) => console.error("autoscaler kick:", (e as Error).message))); };
 import { startArchiver, stopArchiver } from "./archive.js";
 import { storageEnabled } from "./storage.js";
 import { brokerOrchestratorCredentials, brokerSessionCredentials, gatewayHandler } from "./gateway.js";
@@ -267,7 +267,7 @@ export function createApp() {
     if (!(await canActAsOrchestrator(authOf(res), String(req.params.id)))) return forbidden(res);
     await fleetLeave(String(req.params.id));
     res.status(204).end();
-    serverlessTick(); // the next tick deletes the sandbox it leaves behind
+    serverlessTick(true); // the next tick deletes the sandbox it leaves behind: never skipped
   });
   // The global plan (every orchestrator, every job) is for the fleet only.
   worker.get("/fleet", async (_req, res) => (jobOnly(res) ? forbidden(res) : void res.json(await fleetStatus())));

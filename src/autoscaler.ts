@@ -418,12 +418,20 @@ let singleton: Autoscaler | null = null;
  * upload + start) so the function is not frozen mid-launch. At most one kick per instance every 10 seconds.
  */
 let lastKick = 0;
-export async function kickAutoscaler(): Promise<TickState | null> {
+export async function kickAutoscaler(opts: { force?: boolean } = {}): Promise<TickState | null> {
   if (!AUTOSCALE.enabled() || !/^https:\/\//.test(AUTOSCALE.publicUrl()) || !env.OCTILLION_WORKER_TOKEN) return null;
-  if (Date.now() - lastKick < 10_000) return null;
+  if (!opts.force && Date.now() - lastKick < 10_000) return null;
   lastKick = Date.now();
   singleton ??= new Autoscaler();
-  const st = await singleton.tick();
+  let st = await singleton.tick();
+  // Another instance holds the lease (it ticked moments ago): wait for it to lapse, then tick here, so work that only
+  // this event announces (an orchestrator that just left) is not left for the daily cron.
+  if (!st.leader && st.enabled) {
+    const db = await getDb();
+    const [l] = await db.query<{ expires_at: Date }>("SELECT expires_at FROM autoscaler_lease WHERE name = 'autoscaler'");
+    const wait = l ? new Date(l.expires_at).getTime() - Date.now() + 1000 : 0;
+    if (wait > 0 && wait < 120_000) { await new Promise((r) => setTimeout(r, wait)); st = await singleton.tick(); }
+  }
   await singleton.settle();
   return st;
 }
