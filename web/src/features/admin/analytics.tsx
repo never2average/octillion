@@ -452,7 +452,7 @@ function AnalyticsBody({ a, match }: { a: Analytics; match: (r: object) => boole
   const tools = a.tools.filter(match), accounts = a.accounts.filter(match);
   const maxClient = Math.max(...a.clients.map((c) => c.accounts), 1);
   return (
-    <div className='flex w-full flex-col gap-10 pb-4'>
+    <div className='flex w-full flex-col gap-4 pb-4'>
       <StatStrip items={[
         { label: 'Active accounts', value: num(a.totals.active_accounts), spark: series.map((d) => d.accounts) },
         { label: 'Active people', value: num(a.totals.active_people), spark: series.map((d) => d.people) },
@@ -460,8 +460,8 @@ function AnalyticsBody({ a, match }: { a: Analytics; match: (r: object) => boole
         { label: 'New accounts', value: num(a.totals.new_accounts), spark: series.map((d) => d.created) }
       ]} />
 
-      <div className='grid gap-8 lg:grid-cols-2 lg:gap-12'>
-        <Section title='Tool calls per day' description='Errors in red.'>
+      <div className='grid gap-4 lg:grid-cols-2'>
+        <Box title='Tool calls per day' description='Errors in red.'>
           {a.totals.calls ? (
             <ChartContainer config={callsConfig} className='aspect-auto h-[240px] w-full'>
               <AreaChart data={series} margin={{ left: 0, right: 8, top: 8 }}>
@@ -481,8 +481,8 @@ function AnalyticsBody({ a, match }: { a: Analytics; match: (r: object) => boole
               </AreaChart>
             </ChartContainer>
           ) : <p className='text-muted-foreground py-16 text-center text-sm'>No tool calls in this period.</p>}
-        </Section>
-        <Section title='Active accounts and people per day'>
+        </Box>
+        <Box title='Active accounts and people per day'>
           {a.totals.calls ? (
             <ChartContainer config={activeConfig} className='aspect-auto h-[240px] w-full'>
               <BarChart data={series} margin={{ left: 0, right: 8, top: 8 }}>
@@ -496,10 +496,10 @@ function AnalyticsBody({ a, match }: { a: Analytics; match: (r: object) => boole
               </BarChart>
             </ChartContainer>
           ) : <p className='text-muted-foreground py-16 text-center text-sm'>No activity in this period.</p>}
-        </Section>
+        </Box>
       </div>
 
-      <Section title='Weekly retention' description='Accounts by the week of their first tool call, and the share active in each week after.'>
+      <Box title='Weekly retention' description='Accounts by the week of their first tool call, and the share active in each week after.'>
         {a.retention.length ? (
           <div className='-mx-4 overflow-x-auto px-4'>
             <table className='w-full min-w-[640px] border-separate border-spacing-1 text-sm'>
@@ -528,9 +528,20 @@ function AnalyticsBody({ a, match }: { a: Analytics; match: (r: object) => boole
             </table>
           </div>
         ) : <p className='text-muted-foreground py-6 text-center text-sm'>No cohorts in the last 8 weeks.</p>}
-      </Section>
+      </Box>
 
-      <Section title='Tool adoption' className='min-w-0'>
+      <div className='grid gap-4 lg:grid-cols-3'>
+        <Box title='Calls by tool' description='The ten most called.'>
+          <RankBars data={top(tools, (t) => Number(t.calls)).map((t) => ({ name: t.name, value: Number(t.calls) }))} color='var(--chart-1)' format={num} mono empty='No tool calls in this period.' />
+        </Box>
+        <Box title='Accounts reached' description='How many accounts use each tool.'>
+          <RankBars data={top(tools, (t) => Number(t.accounts)).map((t) => ({ name: t.name, value: Number(t.accounts) }))} color='var(--chart-2)' format={num} mono empty='No tool calls in this period.' />
+        </Box>
+        <Box title='Error rate by tool' description='Share of calls that failed.'>
+          <RankBars data={top(tools.filter((t) => Number(t.error_pct) > 0), (t) => Number(t.error_pct)).map((t) => ({ name: t.name, value: Number(t.error_pct) }))} color='var(--destructive)' format={(v) => `${v}%`} mono empty='No tool errors in this period.' />
+        </Box>
+      </div>
+      <Box title='Tool adoption' className='min-w-0'>
         <PagedTable items={tools} noun='tools' initialSize={10} empty={a.tools.length ? 'No tool matches.' : 'No tool calls in this period.'}>
           {(rows) => (
             <Table className='min-w-[560px]'>
@@ -550,8 +561,8 @@ function AnalyticsBody({ a, match }: { a: Analytics; match: (r: object) => boole
             </Table>
           )}
         </PagedTable>
-      </Section>
-      <Section title='Clients' description='AI clients that connected.'>
+      </Box>
+      <Box title='Clients' description='AI clients that connected.'>
         {a.clients.length ? (
           <ul className='grid gap-3'>
             {a.clients.map((c) => (
@@ -567,9 +578,20 @@ function AnalyticsBody({ a, match }: { a: Analytics; match: (r: object) => boole
             ))}
           </ul>
         ) : <p className='text-muted-foreground py-6 text-center text-sm'>No connections in this period.</p>}
-      </Section>
+      </Box>
 
-      <Section title='Accounts'
+      <div className='grid gap-4 lg:grid-cols-3'>
+        <Box title='Calls by account' description='The ten busiest.'>
+          <RankBars data={top(accounts, (r) => Number(r.calls)).map((r) => ({ name: r.name, value: Number(r.calls) }))} color='var(--chart-1)' format={num} empty='No account activity.' />
+        </Box>
+        <Box title='Trend vs previous period' description='Accounts by how their calls changed.'>
+          <RankBars data={trendBuckets(accounts)} color='var(--chart-4)' format={num} empty='No account activity.' />
+        </Box>
+        <Box title='Errors by account' description='Failed tool calls.'>
+          <RankBars data={top(accounts.filter((r) => Number(r.errors) > 0), (r) => Number(r.errors)).map((r) => ({ name: r.name, value: Number(r.errors) }))} color='var(--destructive)' format={num} empty='No errors in this period.' />
+        </Box>
+      </div>
+      <Box title='Accounts'
         description={<>Activity per account; &quot;at risk&quot; means calls halved vs the previous period.{a.accounts_total > a.accounts.length && ` Showing the ${a.accounts.length} busiest of ${num(a.accounts_total)}; the export has all.`}</>}>
         <PagedTable items={accounts} noun='accounts' empty={a.accounts.length ? 'No account or product matches.' : 'No account activity.'}>
           {(rows) => (
@@ -592,8 +614,58 @@ function AnalyticsBody({ a, match }: { a: Analytics; match: (r: object) => boole
             </Table>
           )}
         </PagedTable>
-      </Section>
+      </Box>
     </div>
+  );
+}
+
+/** A bordered panel around one visualization: title, a one-line description, then the chart or table. */
+function Box({ title, description, action, className, children }: { title: ReactNode; description?: ReactNode; action?: ReactNode; className?: string; children: ReactNode }) {
+  return (
+    <section className={cn('bg-card flex min-w-0 flex-col gap-3 rounded-xl border p-4', className)}>
+      <div className='flex flex-wrap items-start justify-between gap-2'>
+        <div className='min-w-0'>
+          <h2 className='text-sm font-semibold'>{title}</h2>
+          {description && <p className='text-muted-foreground mt-0.5 text-xs'>{description}</p>}
+        </div>
+        {action}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+/** The ten largest by `by`, largest first. */
+const top = <T,>(xs: readonly T[], by: (x: T) => number, n = 10) => [...xs].sort((x, y) => by(y) - by(x)).slice(0, n).filter((x) => by(x) > 0);
+
+/** Accounts by how their calls moved against the previous period of the same length. */
+function trendBuckets(rows: readonly { trend: number | null; at_risk: boolean }[]) {
+  const b = { Growing: 0, Steady: 0, Declining: 0, 'At risk': 0, New: 0 };
+  for (const r of rows) {
+    if (r.at_risk) b['At risk']++;
+    else if (r.trend == null) b.New++;
+    else if (r.trend > 10) b.Growing++;
+    else if (r.trend < -10) b.Declining++;
+    else b.Steady++;
+  }
+  return Object.entries(b).map(([name, value]) => ({ name, value }));
+}
+
+/** A horizontal bar chart (rows in the order given): one bar per row, its name on the left and its value at the end. */
+function RankBars({ data, color, format, empty, mono }: {
+  data: { name: string; value: number }[]; color: string; format: (v: number) => string; empty: string; mono?: boolean;
+}) {
+  if (!data.length || data.every((d) => !d.value)) return <p className='text-muted-foreground py-10 text-center text-sm'>{empty}</p>;
+  return (
+    <ChartContainer config={{ value: { label: 'Value', color } }} className='aspect-auto w-full' style={{ height: Math.max(120, data.length * 28 + 8) }}>
+      <BarChart data={data} layout='vertical' margin={{ left: 0, right: 40, top: 0, bottom: 0 }}>
+        <XAxis type='number' hide />
+        <YAxis type='category' dataKey='name' width={128} tickLine={false} axisLine={false}
+          tick={{ fontSize: 11, fontFamily: mono ? 'var(--font-mono)' : undefined }} tickFormatter={(v: string) => (v.length > 20 ? `${v.slice(0, 19)}…` : v)} />
+        <ChartTooltip cursor={false} content={<ChartTooltipContent hideLabel={false} formatter={(v) => format(Number(v))} />} />
+        <Bar dataKey='value' fill={color} radius={3} barSize={16} label={{ position: 'right', fontSize: 11, fill: 'var(--muted-foreground)', formatter: (v: unknown) => format(Number(v)) }} />
+      </BarChart>
+    </ChartContainer>
   );
 }
 
