@@ -5,11 +5,12 @@
  */
 
 /** The admin page that fixes a class of failure. */
-export type FixPage = "key_vault" | "harness_mix" | "agent_configuration";
+export type FixPage = "key_vault" | "harness_mix" | "environment";
 export const FIX_LINKS: Record<FixPage, { label: string; href: string }> = {
   key_vault: { label: "Key vault", href: "/admin/keys" },
   harness_mix: { label: "Harness mix", href: "/admin/agents" },
-  agent_configuration: { label: "Agent configuration", href: "/admin/configuration" },
+  // Session time and turn caps are environment knobs (MAX_SESSION_MINUTES, GIVE_UP_RUNS…), shown read only there.
+  environment: { label: "the deployment environment (see Compute › Environment)", href: "/admin/compute#environment" },
 };
 
 export type SessionErrorKey =
@@ -40,7 +41,7 @@ const SESSION_RULES: { key: SessionErrorKey; label: string; fix: FixPage | null;
   { key: "sandbox_boot", label: "Sandbox not ready", fix: null, re: /not ready after \d+s/ },
   { key: "sandbox_prepare", label: "Sandbox setup failed", fix: null, re: /sandbox prepare failed|egress lockdown failed/ },
   { key: "heartbeat", label: "Lost heartbeat", fix: null, re: /No heartbeat for/ },
-  { key: "time_cap", label: "Hit time limit", fix: "agent_configuration", re: /Exceeded MAX_SESSION_MINUTES/ },
+  { key: "time_cap", label: "Hit time limit", fix: "environment", re: /Exceeded MAX_SESSION_MINUTES/ },
   { key: "shutdown", label: "Worker shut down", fix: null, re: /Worker shut down/ },
 ];
 const AGENT_STOPPED = new Set(["agent_gave_up", "turn_cap", "time_cap", "error"]);
@@ -61,8 +62,8 @@ export function classifySession(row: SessionLike, opts: { scheduled?: ReadonlySe
   // A requeued session keeps its last infrastructure error in metadata; it is waiting, not failed.
   if (!["failed", "timeout"].includes(row.status) && !stopped) return null;
   for (const r of SESSION_RULES) if (r.re.test(text)) return cls(r.key, r.label, r.fix);
-  if (row.status === "timeout") return cls("time_cap", "Hit time limit", "agent_configuration");
-  if (stopped) return cls("agent", "Agent stopped", "agent_configuration");
+  if (row.status === "timeout") return cls("time_cap", "Hit time limit", "environment");
+  if (stopped) return cls("agent", "Agent stopped", "environment");
   return cls("other", "Other", null);
 }
 

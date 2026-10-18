@@ -15,7 +15,7 @@ import { Icons } from '@/components/icons';
 import { cn } from '@/lib/utils';
 import { useAdmin } from './lib';
 import { copyText, ErrorBox, Mono, Notice, Section, StatusBadge, When, type Tone } from './ui';
-import { Chip, cents, dur, EST, PeekSection, since, useComputeParams, useNow, nextPinned, useScrollTo } from './compute-common';
+import { Chip, cents, dur, EST, jobSessions, PeekSection, since, useComputeParams, useNow, nextPinned, useScrollTo } from './compute-common';
 import { MiniTable } from './compute-sessions';
 
 type Kind = 'simulation' | 'research' | 'prospect';
@@ -77,7 +77,7 @@ export function ComputeJobs() {
   useScrollTo('jobs', !!data);
 
   const set = (patch: Record<string, string | null>) => url.write({ ...patch, job: null });
-  const showSessions = (id: string) => url.write({ section: 'sessions', job_id: id, job: null });
+  const showSessions = (id: string) => url.write({ ...jobSessions(id), job: null });
   // Opens the orchestrator's peek in its table (the job peek closes; its "Back to job" link returns here).
   const showOrch = (orch: number, job: string) => url.write({ section: 'orchestrators', orch: String(orch), back: job, job: null });
 

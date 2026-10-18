@@ -245,17 +245,38 @@ export type Binding = "plan" | "job_orch" | "pods" | null;
 
 /**
  * Which ceiling binds. The latest tick's note wins: it names the cap that actually held a job back. Otherwise the
- * boat budget (computeBudget's reason), then the job-orchestrator cap, then pods per orchestrator, each only while
+ * boat plan (shared fleet: computeBudget's reason; per job: nothing free while work waits), then the job-orchestrator cap, then pods per orchestrator, each only while
  * work is queued (a full cap with nothing waiting holds nothing back).
  */
-export function bindingLimit(x: { note: string | null; budget_reason: string | undefined; queued: number; per_job: boolean;
+export function bindingLimit(x: { note: string | null; budget_reason: string | undefined; queued: number; per_job: boolean; free: number | null;
   job_orch_live: number; job_orch_cap: number; pods_max_reserved: number; pods_cap: number }): Binding {
   if (x.note && /at OCTILLION_MAX_JOB_ORCHESTRATORS/.test(x.note)) return "job_orch";
   if (x.note && /waits for boat plan capacity/.test(x.note)) return "plan";
-  if (x.budget_reason) return "plan";
+  // Shared fleet: the whole fleet at full pods does not fit the plan. Per job: each orchestrator reserves only its own
+  // pods, so the plan binds only when work waits and not one more sandbox is free.
+  if (!x.per_job && x.budget_reason) return "plan";
+  if (x.per_job && x.queued > 0 && x.free != null && x.free < 1) return "plan";
   if (x.queued > 0 && x.per_job && x.job_orch_live >= x.job_orch_cap) return "job_orch";
   if (x.queued > 0 && x.pods_max_reserved >= x.pods_cap) return "pods";
   return null;
+}
+
+/**
+ * What is active on the boat account and whose, all from the one sandbox listing (30 s), never mixed with the plan
+ * limits' activeNow (cached 5 min): a launch or reap since then would show up as other deployments. Ours is every
+ * sandbox named with our namespace: orchestrators, workers, the image builder and images. Without a listing, boat's
+ * activeNow less what our rows say we hold (`oursHeld`: live orchestrators plus their running workers).
+ */
+export function sandboxUsage(sb: { ok: boolean; sandboxes: ClassifiedSandbox[] }, limitsActiveNow: number | null, oursHeld: number) {
+  const live = sb.sandboxes.filter((s) => s.live);
+  const count = (...kinds: SandboxKind[]) => live.filter((s) => kinds.includes(s.kind)).length;
+  const others = live.filter((s) => s.kind === "other");
+  return {
+    active_now: sb.ok ? live.length : limitsActiveNow,
+    ours_orch: count("orchestrator"), ours_workers: count("worker"), ours_images: count("image_builder", "image"),
+    others: sb.ok ? others.length : limitsActiveNow != null ? Math.max(0, limitsActiveNow - oursHeld) : 0,
+    other_prefixes: [...new Set(others.map((s) => s.prefix!))].sort(),
+  };
 }
 
 // ---------------------------------------------------------------- environment knobs
@@ -356,6 +377,8 @@ async function buildSummary(fresh: boolean) {
   const podsOf = (r: (typeof live)[number]) => r.pods ?? (r.job_id ? 0 : AUTOSCALE.podCapacity());
   const podsReserved = live.reduce((a, r) => a + podsOf(r), 0);
   const jobLive = live.filter((r) => r.job_id);
+  // What OCTILLION_MAX_JOB_ORCHESTRATORS counts, as the autoscaler does: booting and running, not draining.
+  const jobActive = jobLive.filter((r) => r.state === "booting" || r.state === "running");
   const heartbeatAge = (r: (typeof live)[number]) => {
     const t = r.fleet_seen ?? r.last_seen ?? r.ready_at;
     return t ? (now - new Date(t).getTime()) / 1000 : null;
@@ -414,24 +437,22 @@ async function buildSummary(fresh: boolean) {
     : { ok: false, stale: false, error: "No boat key in the vault", at: null, sandboxes: [] };
   const lim = key ? await limits(fresh) : { ok: false, stale: false, error: "No boat key in the vault", at: null, value: null };
   const liveSb = sb.sandboxes.filter((s) => s.live);
-  const oursOrch = liveSb.filter((s) => s.kind === "orchestrator").length;
-  const oursWorkers = liveSb.filter((s) => s.kind === "worker").length;
   const liveOrchIds = new Set(live.map((r) => r.orchestrator_id).filter(Boolean));
   const leaked = liveSb.filter((s) => s.kind === "worker" && !(s.parent_orchestrator_id && liveOrchIds.has(s.parent_orchestrator_id))).length;
   const L = lim.value;
-  const others = L ? Math.max(0, L.activeNow - oursOrch - oursWorkers) : liveSb.filter((s) => s.kind === "other").length;
-  const otherPrefixes = [...new Set(liveSb.filter((s) => s.kind === "other").map((s) => s.prefix!))].sort();
+  const use = sandboxUsage(sb, L?.activeNow ?? null, live.length + podsUsed);
+  const { active_now: activeNow, ours_orch: oursOrch, ours_workers: oursWorkers, others, other_prefixes: otherPrefixes } = use;
 
   const jobCap = AUTOSCALE.maxJobOrchestrators(), podsCap = AUTOSCALE.jobPodCapacity();
   const podCapacity = perJob ? podsCap : AUTOSCALE.podCapacity();
-  const budget = L ? lib.computeBudget(L, live.length, podCapacity, oursOrch + oursWorkers) : null;
+  const budget = L ? lib.computeBudget(L, live.length, podCapacity, L.activeNow - others) /* its other-active is `others` */ : null;
   // free: what the last per-job tick left, else the same formula (plan - other deployments - ours reserved) here.
   const free = typeof tick?.free === "number" ? tick.free : L ? L.activeSandboxes - others - live.reduce((a, r) => a + 1 + podsOf(r), 0) : null;
   const perOrchestrator = 1 + podCapacity;
   const queuedAll = n(ses?.queued) + n(rsh?.queued);
   const podsMax = jobLive.reduce((a, r) => Math.max(a, r.pods ?? 0), 0);
-  const binding = bindingLimit({ note: tick?.note ?? null, budget_reason: budget?.reason, queued: queuedAll, per_job: perJob,
-    job_orch_live: jobLive.length, job_orch_cap: jobCap, pods_max_reserved: podsMax, pods_cap: podsCap });
+  const binding = bindingLimit({ note: tick?.note ?? null, budget_reason: budget?.reason, queued: queuedAll, per_job: perJob, free,
+    job_orch_live: jobActive.length, job_orch_cap: jobCap, pods_max_reserved: podsMax, pods_cap: podsCap });
 
   const oldestSession = iso(ses?.oldest_queued), oldestResearch = iso(rsh?.oldest);
   const ageOf = (d: string | null) => (d ? Math.max(0, (now - Date.parse(d)) / 1000) : null);
@@ -441,7 +462,7 @@ async function buildSummary(fresh: boolean) {
     queue: { sessions: n(ses?.queued), research: n(rsh?.queued), oldest_session_age_s: ageOf(oldestSession), oldest_research_age_s: ageOf(oldestResearch),
              unclaimable: demand?.unclaimable_sessions ?? 0 },
     running: { sessions: n(ses?.running), orchestrators: live.length },
-    others, free, per_job: perJob, job_orch_live: jobLive.length, job_orch_cap: jobCap, not_checking_in: notCheckingIn,
+    others, free, per_job: perJob, job_orch_live: jobActive.length, job_orch_cap: jobCap, not_checking_in: notCheckingIn,
     launch_failures_1h: { count: n(orch?.failed_1h), step: lastFail?.launch_step ?? null, message: lastFail?.launch_error?.slice(0, 160) ?? null },
     missing_keys: missingKeys, leaked_workers: leaked, orphan_deletes_24h: n(orphans?.n), namespace: lib.BOAT_NAMESPACE, idle_orchestrators: idle,
   };
@@ -465,10 +486,10 @@ async function buildSummary(fresh: boolean) {
     spend_today: { ...spend, total_usd: usd(spend.session_model_usd + spend.orchestrator_model_usd + spend.sandbox_est_usd) },
     limits: {
       ok: !!L && sb.ok, error: lim.error ?? sb.error, stale: lim.stale || sb.stale,
-      plan: L?.activeSandboxes ?? null, active_now: L?.activeNow ?? null, ours_orch: oursOrch, ours_workers: oursWorkers, others, other_prefixes: otherPrefixes,
+      plan: L?.activeSandboxes ?? null, active_now: activeNow, ours_orch: oursOrch, ours_workers: oursWorkers, ours_images: use.ours_images, others, other_prefixes: otherPrefixes,
       our_starts: { minute: n(orch?.starts_minute) + n(ses?.starts_minute), hour: n(orch?.starts_hour) + n(ses?.starts_hour), day: n(orch?.starts_day) + n(ses?.starts_day) },
       starts: L ? { per_minute: L.startsPerMinute, per_hour: L.startsPerHour, per_day: L.startsPerDay } : null,
-      job_orch_live: jobLive.length, job_orch_cap: jobCap, shared_orch_live: live.length - jobLive.length, shared_orch_cap: AUTOSCALE.maxOrchestrators(), per_job_mode: perJob,
+      job_orch_live: jobActive.length, job_orch_draining: jobLive.length - jobActive.length, job_orch_cap: jobCap, shared_orch_live: live.length - jobLive.length, shared_orch_cap: AUTOSCALE.maxOrchestrators(), per_job_mode: perJob,
       pods_max_reserved: podsMax, pods_avg_running: jobLive.length ? Math.round(jobLive.reduce((a, r) => a + runningOf(r), 0) / jobLive.length) : 0, pods_cap: podsCap,
       available: free == null ? null : Math.max(0, Math.floor(free / perOrchestrator)), per_orchestrator: perOrchestrator,
       sessions_per_day_ceiling: budget?.sessionsPerDayCeiling ?? null, reason: budget?.reason ?? null, binding, note: tick?.note ?? null,

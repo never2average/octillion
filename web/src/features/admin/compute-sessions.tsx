@@ -19,7 +19,7 @@ import { cn } from '@/lib/utils';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { post, useAdmin, useAdminAction } from './lib';
 import { copyText, ErrorBox, Mono, Notice, Section, StatusBadge, When, type Tone } from './ui';
-import { AMBER, Chip, cents, dur, EST, PeekSection, since, useComputeParams, useNow, nextPinned, useScrollTo } from './compute-common';
+import { AMBER, Chip, cents, dur, EST, jobSessions, PeekSection, SectionLink, since, useComputeParams, useNow, nextPinned, useScrollTo } from './compute-common';
 
 export interface SessionRow {
   id: string; simulation_id: string; org: { slug: string; name: string }; agent_id: string | null; harness: string; model: string; status: string;
@@ -154,11 +154,11 @@ export function ComputeSessions() {
         actions={(s) => [
           ...(OPEN.includes(s.status) ? [{ label: 'Cancel session', icon: <Icons.close />, onSelect: () => setCancelling(s) }] : []),
           { label: 'Copy id', icon: <Icons.page />, onSelect: () => copyText(s.id, 'Session id copied') },
-          { label: "Show this job's sessions", icon: <Icons.search />, onSelect: () => set({ job_id: s.simulation_id }) },
+          { label: "Show this job's sessions", icon: <Icons.search />, onSelect: () => url.write(jobSessions(s.simulation_id)) },
           { label: 'Open account', icon: <Icons.externalLink />, onSelect: () => router.push(`/admin/accounts/${encodeURIComponent(s.org.slug)}`) }
         ]}
         detailTitle={(s) => <span className='flex items-center gap-2'><Mono>{s.id}</Mono><StatusBadge tone={STATUS_TONE[s.status]}>{s.status}</StatusBadge></span>}
-        detail={(s) => <SessionPeek id={s.id} onJob={() => set({ job_id: s.simulation_id })} onCancel={(x) => setCancelling(x)} cancelling={cancel.isPending} />}
+        detail={(s) => <SessionPeek id={s.id} onJob={() => url.write(jobSessions(s.simulation_id))} onCancel={(x) => setCancelling(x)} cancelling={cancel.isPending} />}
         empty='No sessions match these filters.' />
       <AlertDialog open={!!cancelling} onOpenChange={(o) => !o && setCancelling(null)}>
         <AlertDialogContent>
@@ -213,7 +213,7 @@ function SessionPeek({ id, onJob, onCancel, cancelling }: { id: string; onJob: (
         {typeof m.infra_error === 'string' && m.infra_error !== s.error_message && (
           <p className='text-muted-foreground text-xs'>Last infrastructure error (it was queued again): <Mono>{m.infra_error}</Mono></p>
         )}
-        {data.hint && <Notice><Link href={data.hint.href} className='hover:underline'>{data.hint.text}</Link></Notice>}
+        {data.hint && <Notice><SectionLink href={data.hint.href} className='hover:underline'>{data.hint.text}</SectionLink></Notice>}
       </PeekSection>
 
       <PeekSection title='Timing'>
@@ -239,7 +239,7 @@ function SessionPeek({ id, onJob, onCancel, cancelling }: { id: string; onJob: (
         <dl>
           <Field label='Infra retries'>{s.infra_retries}</Field>
           <Field label='Orchestrator'>{data.orchestrator
-            ? <Link href={`/admin/compute?section=orchestrators&state=all&orch=${data.orchestrator.id}`} className='hover:underline'><Mono>{data.orchestrator.orchestrator_id ?? `row ${data.orchestrator.id}`}</Mono></Link>
+            ? <SectionLink href={`/admin/compute?section=orchestrators&state=all&orch=${data.orchestrator.id}`} className='hover:underline'><Mono>{data.orchestrator.orchestrator_id ?? `row ${data.orchestrator.id}`}</Mono></SectionLink>
             : <Mono>{s.worker_id ?? '—'}</Mono>}</Field>
           <Field label='boat sandbox'>{s.sandbox_id ? <><Mono>{s.sandbox_id}</Mono> <span className='text-muted-foreground'>· {String(m.boat_sandbox_type ?? 'default')}</span></> : <span className='text-muted-foreground'>—</span>}</Field>
           <Field label='Sandbox time'>{typeof m.boat_sandbox_seconds === 'number' ? dur(m.boat_sandbox_seconds) : <span className='text-muted-foreground'>—</span>}</Field>
@@ -286,7 +286,7 @@ function SessionPeek({ id, onJob, onCancel, cancelling }: { id: string; onJob: (
         <div className='flex flex-wrap gap-2'>
           <Link href={`/admin/accounts/${encodeURIComponent(s.org.slug)}`} className={buttonVariants({ variant: 'outline', size: 'sm' })}><Icons.account /> {s.org.name}</Link>
           <Button variant='outline' size='sm' onClick={onJob}><Icons.search /> This job&apos;s sessions</Button>
-          {data.orchestrator && <Link href={`/admin/compute?section=orchestrators&state=all&orch=${data.orchestrator.id}`} className={buttonVariants({ variant: 'outline', size: 'sm' })}><Icons.route /> Orchestrator</Link>}
+          {data.orchestrator && <SectionLink href={`/admin/compute?section=orchestrators&state=all&orch=${data.orchestrator.id}`} className={buttonVariants({ variant: 'outline', size: 'sm' })}><Icons.route /> Orchestrator</SectionLink>}
           <Button variant='ghost' size='sm' onClick={() => copyText(s.id, 'Session id copied')}>Copy id</Button>
           {OPEN.includes(s.status) && <Button variant='outline' size='sm' className='text-destructive ml-auto' disabled={cancelling} onClick={() => onCancel(s)}><Icons.close /> Cancel session</Button>}
         </div>

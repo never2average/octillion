@@ -12,7 +12,7 @@ import { Icons } from '@/components/icons';
 import { cn } from '@/lib/utils';
 import { useAdmin } from './lib';
 import { copyText, ErrorBox, Mono, Notice, Section, StatusBadge, When, type Tone } from './ui';
-import { AMBER, Chip, cents, dur, EST, PeekSection, since, useComputeParams, useNow, nextPinned, useScrollTo } from './compute-common';
+import { AMBER, Chip, cents, dur, EST, jobSessions, PeekSection, since, useComputeParams, useNow, nextPinned, useScrollTo } from './compute-common';
 import { MiniTable } from './compute-sessions';
 
 interface Limits { boot_minutes: number; stale_minutes: number; heartbeat_stale_s: number }
@@ -67,7 +67,8 @@ const lateOf = (o: OrchRow, l: Limits) => (o.state === 'booting' && (since(o.cre
 export function ComputeOrchestrators({ verdict }: { verdict: Verdict[] }) {
   const url = useComputeParams();
   useNow(15_000);
-  const state = url.get('state') ?? 'live', job = url.get('job_id'), reason = url.get('oreason');
+  // Its own job filter (ojob): Sessions' job_id narrows Sessions only.
+  const state = url.get('state') ?? 'live', job = url.get('ojob'), reason = url.get('oreason');
   const open = url.get('orch');
   const unmatched = state === 'unmatched';
   const qs = new URLSearchParams({ state, limit: String(LIMIT), ...(job && !unmatched ? { job_id: job } : {}), ...(reason && !unmatched ? { reason } : {}) });
@@ -85,7 +86,9 @@ export function ComputeOrchestrators({ verdict }: { verdict: Verdict[] }) {
   const setState = (id: string) => url.write({ state: id === 'live' ? null : id, orch: null, oreason: null });
 
   const off = verdict.find((v) => v.code === 'autoscale_off' || v.code === 'kick_unconfigured');
-  const empty = state === 'live' ? (off ? off.text : 'No orchestrators running. One launches when a job queues work.')
+  const filtered = !unmatched && !!(job || reason);
+  const empty = filtered ? 'No orchestrators match these filters.'
+    : state === 'live' ? (off ? off.text : 'No orchestrators running. One launches when a job queues work.')
     : unmatched ? (data?.boat.ok === false ? `boat.dev did not answer: ${data.boat.error}` : 'Every sandbox on boat matches a live orchestrator of ours.')
     : 'No orchestrators in this state.';
 
@@ -96,7 +99,7 @@ export function ComputeOrchestrators({ verdict }: { verdict: Verdict[] }) {
         {CHIPS.map((c) => (
           <Button key={c.id} role='tab' aria-selected={state === c.id} size='xs' variant={state === c.id ? 'default' : 'outline'} onClick={() => setState(c.id)}>{c.label}</Button>
         ))}
-        {job && !unmatched && <Button size='xs' variant='outline' onClick={() => url.write({ job_id: null })} title='Show every job'><Mono>{job}</Mono><Icons.close /></Button>}
+        {job && !unmatched && <Button size='xs' variant='outline' onClick={() => url.write({ ojob: null })} title='Show every job'><Mono>{job}</Mono><Icons.close /></Button>}
         {reason && !unmatched && <Button size='xs' variant='outline' onClick={() => url.write({ oreason: null })} title='Show every reason'>{reason.replace(/^(launch|reap):/, '$1: ').replace(/_/g, ' ')}<Icons.close /></Button>}
         {data && (!data.boat.ok || data.boat.stale) && (
           <span className={cn('ml-auto text-xs', AMBER)} title={data.boat.error ?? undefined}>
@@ -113,7 +116,7 @@ export function ComputeOrchestrators({ verdict }: { verdict: Verdict[] }) {
       {unmatched
         ? <UnmatchedTable rows={rows as Unmatched[]} loading={isLoading || !fits} empty={empty} />
         : <OrchTable rows={rows as OrchRow[]} loading={(isLoading && !data) || !fits} limits={limits} boat={data?.boat ?? null} empty={empty}
-            open={open} onOpen={(k) => url.write({ orch: k, ...(k ? {} : { back: null }) })} onJob={(j) => url.write({ section: 'sessions', job_id: j, orch: null })} />}
+            open={open} onOpen={(k) => url.write({ orch: k, ...(k ? {} : { back: null }) })} onJob={(j) => url.write({ ...jobSessions(j), orch: null })} />}
     </Section>
   );
 }

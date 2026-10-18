@@ -1085,7 +1085,7 @@ try {
 
   // ---------- Compute page summary (src/compute.ts): verdict, limits, boat listing cache ----------
   {
-    const { computeVerdict, bindingLimit, classifySandboxNames, cachedFetch, resetComputeCaches } = await import("../src/compute.js");
+    const { computeVerdict, bindingLimit, classifySandboxNames, cachedFetch, resetComputeCaches, sandboxUsage } = await import("../src/compute.js");
     const { kickConfigured } = await import("../src/autoscaler.js");
     // The verdict rules, worst first; none true is one green line.
     const facts = {
@@ -1111,11 +1111,15 @@ try {
     assert.deepEqual(computeVerdict({ ...facts, boat_error: "fetch failed" }).map((v) => v.code), ["boat_down"]);
     assert.deepEqual(computeVerdict({ ...facts, launch_failures_1h: { count: 1, step: "ready", message: "x" } }).map((v) => v.code), ["ok"], "one failed launch is not a pattern");
     // Which limit binds: the tick's note first, then boat's budget, then the caps while work waits.
-    const lim = { note: null, budget_reason: undefined, queued: 5, per_job: true, job_orch_live: 2, job_orch_cap: 12, pods_max_reserved: 10, pods_cap: 40 };
+    const lim = { note: null, budget_reason: undefined, queued: 5, per_job: true, free: 30, job_orch_live: 2, job_orch_cap: 12, pods_max_reserved: 10, pods_cap: 40 };
     assert.equal(bindingLimit(lim), null);
     assert.equal(bindingLimit({ ...lim, note: "at OCTILLION_MAX_JOB_ORCHESTRATORS (12)" }), "job_orch");
     assert.equal(bindingLimit({ ...lim, note: "rsh_1 waits for boat plan capacity (0 free)" }), "plan");
-    assert.equal(bindingLimit({ ...lim, budget_reason: "2 orchestrators x (1 + 40) = 82 sandboxes > 50 available" }), "plan");
+    const over = "2 orchestrators x (1 + 40) = 82 sandboxes > 50 available";
+    assert.equal(bindingLimit({ ...lim, per_job: false, budget_reason: over }), "plan", "shared fleet: the whole fleet at full pods does not fit");
+    assert.equal(bindingLimit({ ...lim, budget_reason: over }), null, "per job: each orchestrator reserves only its own pods, so a full-pods budget says nothing");
+    assert.equal(bindingLimit({ ...lim, free: 0 }), "plan", "per job: nothing free while work waits");
+    assert.equal(bindingLimit({ ...lim, free: 0, queued: 0 }), null);
     assert.equal(bindingLimit({ ...lim, job_orch_live: 12 }), "job_orch");
     assert.equal(bindingLimit({ ...lim, job_orch_live: 12, queued: 0 }), null, "a full cap with nothing queued binds nothing");
     assert.equal(bindingLimit({ ...lim, pods_max_reserved: 40 }), "pods");
@@ -1130,6 +1134,12 @@ try {
       ["orchestrator", null, null], ["worker", "orch-a", null], ["worker", "orch-zz", null], ["worker", "my-orch-1", null],
       ["image_builder", null, null], ["image", null, null], ["other", null, "octv"], ["other", null, "(unnamed)"]]);
     assert.equal(sbs.at(-1)!.live, false);
+    // Usage from the one listing: the image builder and images are ours, not other deployments'; boat's (older)
+    // activeNow is not used while the listing answers.
+    assert.deepEqual(sandboxUsage({ ok: true, sandboxes: sbs }, 99, 0),
+      { active_now: 7, ours_orch: 1, ours_workers: 3, ours_images: 2, others: 1, other_prefixes: ["octv"] });
+    assert.deepEqual(sandboxUsage({ ok: false, sandboxes: [] }, 30, 12), { active_now: 30, ours_orch: 0, ours_workers: 0, ours_images: 0, others: 18, other_prefixes: [] },
+      "no listing: boat's activeNow less what our rows hold");
     // The cache: one call per TTL, a failure serves the last good value marked stale, a hung call times out.
     {
       let calls = 0, mode: "ok" | "fail" | "hang" = "ok";
@@ -1160,6 +1170,8 @@ try {
       await db.query(`INSERT INTO orchestrator_sandboxes (sandbox_id, state, created_at, deleted_at, error, launch_step, launch_error)
                       VALUES ($1, 'deleted', now() - interval '10 minutes', now(), $2, 'ready', $3)`, [`smoke-cs-f${k}`, `ready (240s): bx not ready after 240s #${k}`, `bx not ready after 240s #${k}`]);
     await db.query("INSERT INTO compute_events (kind, sandbox_id, reason) VALUES ('orphan_deleted', 'smoke-cs-orphan', 'orphan orchestrator sandbox (no row): octi-orch-x')");
+    // A draining job orchestrator is not counted against OCTILLION_MAX_JOB_ORCHESTRATORS (the autoscaler does not count it).
+    await db.query("INSERT INTO orchestrator_sandboxes (sandbox_id, orchestrator_id, state, job_id, pods, created_at) VALUES ('smoke-cs-drain', 'orch-smoke-cs-d', 'draining', 'sim_smoke_cs_d', 4, now() - interval '20 minutes')");
     assert.equal((await fetch(`${base}/api/admin/onboarding/compute/summary`)).status, 401, "the summary needs the admin token");
     const sum = await json(adm("GET", "/compute/summary?fresh=1"));
     const codes = sum.verdict.map((v: any) => v.code);
@@ -1168,6 +1180,8 @@ try {
     assert.match(sum.verdict.find((v: any) => v.code === "launch_failures").text, /^2 orchestrator launches failed in the last hour \(latest: ready: bx not ready after 240s #\d\)\.$/);
     assert.ok(sum.running.orchestrators.booting >= 1 && sum.failures_24h.launches >= 2 && sum.limits.our_starts.day >= 3, "orchestrators, launch failures and our starts counted");
     assert.ok(sum.limits.ok === false && sum.limits.plan === null && sum.provider.has_key === false, "boat-derived limits are empty without a key");
+    const [jobRows] = await db.query<any>("SELECT count(*) FILTER (WHERE state IN ('booting', 'running')) AS active FROM orchestrator_sandboxes WHERE job_id IS NOT NULL");
+    assert.ok(sum.limits.job_orch_draining >= 1 && sum.limits.job_orch_live === Number(jobRows.active), `draining is shown apart, not counted: ${sum.limits.job_orch_live}/${sum.limits.job_orch_draining}`);
     assert.ok(["vm", "vercel"].includes(sum.runtime) && sum.tick.tick_seconds > 0 && typeof sum.spend_today.total_usd === "number" && sum.wait_1h.n >= 0);
     assert.ok(sum.settings.some((x: any) => x.key === "OCTILLION_MAX_JOB_ORCHESTRATORS") && sum.knobs.some((k: any) => k.name === "OCTILLION_AUTOSCALE"), "settings and knobs ride along");
     assert.equal(sum.knobs.find((k: any) => k.name === "Kick configured").value, kickConfigured() ? "yes" : "no");
@@ -1204,7 +1218,7 @@ try {
       { text: "Missing key DASHSCOPE_API_KEY. Add it in Key vault.", href: "/admin/keys" });
     assert.equal(sessionHint(ses, "credentials -> 503")!.text, "A provider key is missing. Add it in Key vault.");
     assert.equal(sessionHint({ ...ses, error_class: "unclaimable" }, "")!.href, "/admin/agents", "Harness mix");
-    assert.equal(sessionHint({ ...ses, error_class: "time_cap" }, "")!.href, "/admin/configuration", "Agent configuration");
+    assert.equal(sessionHint({ ...ses, error_class: "time_cap" }, "")!.href, "/admin/compute#environment", "a time cap is an environment knob, not an Agent configuration setting");
     assert.equal(sessionHint({ ...ses, error_class: "heartbeat" }, ""), null);
 
     // The endpoints over real rows: a running orchestrator with a fleet check-in, a failed launch and an ended one, and
@@ -1547,6 +1561,8 @@ try {
       await copy("ses_smoke_ca_q", "'queued', now() - interval '4 minutes', NULL, NULL, NULL");
       await db.query("INSERT INTO gateway_tokens (token_hash, kind, session_id, providers, expires_at) VALUES ('smoke-ca-tok', 'session', 'ses_smoke_ca_r', '{anthropic}', now() + interval '1 hour')");
       assert.equal((await worker("/sessions/ses_smoke_ca_r/heartbeat", {})).status, 204, "running: heartbeats are taken");
+      // What it spent through the gateway so far: a cancelled session never reports /complete, so the cancel folds it in.
+      await db.query("INSERT INTO gateway_usage (token_hash, provider, session_id, requests, input_tokens, output_tokens, cost_usd) VALUES ('smoke-ca-tok', 'anthropic', 'ses_smoke_ca_r', 4, 5000, 700, 3.4)");
 
       assert.equal((await fetch(`${base}/api/admin/onboarding/compute/sessions/ses_smoke_ca_r/cancel`, { method: "POST" })).status, 401, "cancel needs the admin token");
       const c = await json(adm("POST", "/compute/sessions/ses_smoke_ca_r/cancel"));
@@ -1554,6 +1570,13 @@ try {
       assert.match(c.message, /next heartbeats/);
       const [r] = await db.query<any>("/* tenant: smoke fixture */ SELECT status, ended_at, metadata FROM agent_sessions WHERE id = 'ses_smoke_ca_r'");
       assert.ok(r.status === "cancelled" && r.ended_at && r.metadata.cancelled_by === "smoke" && r.metadata.cancelled_from === "running");
+      const [spent] = await db.query<any>("/* tenant: smoke fixture */ SELECT cost_usd, tokens_in, tokens_out FROM agent_sessions WHERE id = 'ses_smoke_ca_r'");
+      assert.deepEqual([Number(spent.cost_usd), Number(spent.tokens_in), Number(spent.tokens_out)], [3.4, 5000, 700], "the gateway-metered spend is the cancelled session's cost");
+      const [ev] = await db.query<any>("SELECT actor, job_id, reason FROM compute_events WHERE kind = 'admin_cancel' AND session_id = 'ses_smoke_ca_r'");
+      assert.deepEqual([ev?.actor, ev?.job_id, ev?.reason], ["smoke", "sim_smoke_ca", "cancelled while running"], "the cancel is in compute_events with who did it");
+      // A /complete that arrives after the cancel (the guarded UPDATE also covers one that read "running" first) does not undo it.
+      await (await import("../src/worker.js")).completeSession("ses_smoke_ca_r", { status: "completed" });
+      assert.equal((await db.query<any>("/* tenant: smoke fixture */ SELECT status FROM agent_sessions WHERE id = 'ses_smoke_ca_r'"))[0].status, "cancelled", "a cancelled session stays cancelled");
       assert.ok((await db.query<any>("SELECT revoked_at FROM gateway_tokens WHERE token_hash = 'smoke-ca-tok'"))[0].revoked_at, "its gateway token is revoked");
       assert.equal((await worker("/sessions/ses_smoke_ca_r/heartbeat", {})).status, 409, "its next heartbeat is refused, so the orchestrator kills the sandbox");
       assert.equal((await json(adm("GET", "/compute/sessions/ses_smoke_ca_r"))).metadata.cancelled_by, "smoke", "the peek says who cancelled it");
@@ -1564,14 +1587,20 @@ try {
       assert.equal(again.status, 409, "an ended session cannot be cancelled again");
       assert.match((await again.json()).error, /already ended \(cancelled\)/);
       assert.equal((await adm("POST", "/compute/sessions/ses_nope/cancel")).status, 404);
+      // An adaptive run whose scenario is far from settled: cancelling its last open session must not sample more.
+      await db.query("UPDATE simulations SET mode = 'representative', max_samples = 6 WHERE id = 'sim_smoke_ca'");
       assert.equal((await json(adm("POST", "/compute/sessions/ses_smoke_ca_q/cancel"))).was, "queued");
       const [sim] = await db.query<any>("SELECT status, finished_at FROM simulations WHERE id = 'sim_smoke_ca'");
       assert.ok(sim.status === "completed" && sim.finished_at, "the last open session cancelled: the run finishes");
+      assert.equal(Number((await db.query<any>("/* tenant: smoke fixture */ SELECT count(*) AS n FROM agent_sessions WHERE simulation_id = 'sim_smoke_ca'"))[0].n), 2,
+        "a cancel never extends an adaptive run with new sessions");
     } finally {
       console.error = realError;
+      await db.query("DELETE FROM gateway_usage WHERE token_hash = 'smoke-ca-tok'");
+      await db.query("DELETE FROM compute_events WHERE session_id IN ('ses_smoke_ca_r', 'ses_smoke_ca_q')");
       await db.query("/* tenant: smoke fixture */ DELETE FROM simulations WHERE id = 'sim_smoke_ca'");
     }
-    console.log("✓ compute actions: Run a tick now (off: 409; follower: no change; one tick at a time), Cancel session (running and queued, token revoked, heartbeat refused, run finished, 409/404), both in the admin log");
+    console.log("✓ compute actions: Run a tick now (off: 409; follower: no change; one tick at a time), Cancel session (running and queued, token revoked, heartbeat refused, gateway spend folded in, a late /complete does not undo it, run finished without extending, 409/404), both in the admin log and compute_events");
   }
 
   // ---------- global compute settings (/admin/compute): set here > environment > default ----------

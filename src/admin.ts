@@ -564,8 +564,8 @@ export async function issueKey(actor: string, slug: string, label?: string) {
 async function keyOf(slug: string, keyId: number) {
   intId(keyId);
   const f = await factsBySlug(slug);
-  const [k] = await (await getDb()).query<{ id: number; label: string; key_prefix: string; revoked_at: Date | null }>(
-    "SELECT id, label, key_prefix, revoked_at FROM api_keys WHERE id = $1 AND org_id = $2", [keyId, f.id]);
+  const [k] = await (await getDb()).query<{ id: number; label: string; key_prefix: string; revoked_at: Date | null; user_id: string | null }>(
+    "SELECT id, label, key_prefix, revoked_at, user_id FROM api_keys WHERE id = $1 AND org_id = $2", [keyId, f.id]);
   if (!k) throw new AdminError(`No key ${keyId} in ${slug}`, 404);
   return { f, k };
 }
@@ -577,12 +577,12 @@ export async function revokeKey(actor: string, slug: string, keyId: number) {
   log(actor, "key.revoke", slug, { label: k.label, key_prefix: k.key_prefix });
 }
 
-/** Revoke a key and issue its replacement under the same label (a leaked link). */
+/** Revoke a key and issue its replacement under the same label and for the same person (a leaked link). */
 export async function rotateKey(actor: string, slug: string, keyId: number) {
   const { f, k } = await keyOf(slug, keyId);
   if (!k.revoked_at) await (await getDb()).query("UPDATE api_keys SET revoked_at = now() WHERE id = $1", [k.id]);
-  const key = await createApiKey(f.id, k.label);
-  log(actor, "key.rotate", slug, { label: k.label, old_prefix: k.key_prefix, key_prefix: key.slice(0, 10) });
+  const key = await createApiKey(f.id, k.label, k.user_id);
+  log(actor, "key.rotate", slug, { label: k.label, user_id: k.user_id, old_prefix: k.key_prefix, key_prefix: key.slice(0, 10) });
   return result(slug, k.label.includes("@") ? k.label : null, { key });
 }
 

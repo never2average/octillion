@@ -7,7 +7,7 @@
 // shows the value in force and where it comes from: set here, the server's environment, or the built-in default.
 // Saving writes platform_settings (every server picks it up within 30s) and an audit log line. Model keys are the key
 // vault's credentials: a key is typed once and never shown again, only its hint.
-import { Suspense, useState, type ReactNode } from 'react';
+import { Suspense, useEffect, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import { useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
@@ -28,7 +28,7 @@ import { cn } from '@/lib/utils';
 import { post, useAdmin, useAdminAction } from './lib';
 import { ErrorBox, FormRow, LoadingCards, Mono, Notice, Section, When } from './ui';
 import { ActionsMenu, Field, RecordView, type RecordCol } from '@/components/layout/record-view';
-import { ageOf, dur, EST, money, useNow } from './compute-common';
+import { ageOf, dur, EST, money, SectionLink, useComputeParams, useNow } from './compute-common';
 import { ComputeSessions } from './compute-sessions';
 import { ComputeOrchestrators } from './compute-orchestrators';
 import { ComputeJobs } from './compute-jobs';
@@ -370,9 +370,9 @@ interface Summary {
   failures_24h: { sessions: number; launches: number; ended: number; rate: number; top: { key: string; label: string; count: number } | null };
   spend_today: { session_model_usd: number; orchestrator_model_usd: number; sandbox_est_usd: number; total_usd: number };
   limits: {
-    ok: boolean; error: string | null; stale: boolean; plan: number | null; active_now: number | null; ours_orch: number; ours_workers: number; others: number; other_prefixes: string[];
+    ok: boolean; error: string | null; stale: boolean; plan: number | null; active_now: number | null; ours_orch: number; ours_workers: number; ours_images: number; others: number; other_prefixes: string[];
     our_starts: { minute: number; hour: number; day: number }; starts: { per_minute: number; per_hour: number; per_day: number } | null;
-    job_orch_live: number; job_orch_cap: number; shared_orch_live: number; shared_orch_cap: number; per_job_mode: boolean;
+    job_orch_live: number; job_orch_draining: number; job_orch_cap: number; shared_orch_live: number; shared_orch_cap: number; per_job_mode: boolean;
     pods_max_reserved: number; pods_avg_running: number; pods_cap: number; available: number | null; per_orchestrator: number;
     sessions_per_day_ceiling: number | null; reason: string | null; binding: 'plan' | 'job_orch' | 'pods' | null; note: string | null; sandbox_prices: Record<string, number>;
   };
@@ -393,14 +393,16 @@ const LEVEL: Record<Level, { border: string; text: string }> = {
  * the autoscaler's last tick is, the headline numbers, which limit binds (the capacity settings are edited on the row
  * of the limit they change) and the environment it runs with. Read only apart from those settings, "Run a tick now" and
  * cancelling a session (both behind a confirm, both in the admin log). Refreshes every
- * 15 s while the tab is visible; paused while a setting has an unsaved edit.
+ * 15 s while the tab is visible; paused (with a Paused · Resume chip) while a setting has an unsaved edit or a record
+ * peek is open.
  */
 export function AdminCompute() {
   const qc = useQueryClient();
   const [dirty, setDirty] = useState<Record<string, boolean>>({});
   const [resumed, setResumed] = useState(false);
+  const [peeking, setPeeking] = useState(false);
   const editing = Object.values(dirty).some(Boolean);
-  const paused = editing && !resumed;
+  const paused = (editing || peeking) && !resumed;
   const { data, error, isLoading, refetch } = useAdmin<Summary>(SUMMARY, { refetchInterval: paused ? undefined : 15_000 });
   const [refreshing, setRefreshing] = useState(false);
   // Refresh asks boat again (past its 30 s listing cache): the same call as "Test connection".
@@ -413,16 +415,21 @@ export function AdminCompute() {
     catch (e) { toast.error((e as Error).message); }
     finally { setRefreshing(false); }
   };
-  // "Resume" lasts until the edits are saved or dropped; the next edit pauses again.
+  // "Resume" lasts until the edits are saved or dropped and the peek is closed; the next edit or peek pauses again.
   const setEdit = (key: string, on: boolean) => {
     const next = { ...dirty, [key]: on };
     if (dirty[key] !== on) setDirty(next);
-    if (!Object.values(next).some(Boolean)) setResumed(false);
+    if (!Object.values(next).some(Boolean) && !peeking) setResumed(false);
+  };
+  const setPeek = (on: boolean) => {
+    setPeeking(on);
+    if (!on && !editing) setResumed(false);
   };
   // The record tables load and fail on their own, so they show even when the summary did not load. They read their
   // filters and open record from the URL (useSearchParams needs a Suspense boundary).
   const tables = (
     <Suspense fallback={<Skeleton className='h-72 rounded-lg' />}>
+      <PeekWatch onChange={setPeek} />
       <ComputeActivity />
       <ComputeJobs />
       <ComputeSessions />
@@ -436,7 +443,7 @@ export function AdminCompute() {
       pageHeaderAction={
         <div className='flex flex-wrap items-center gap-2'>
           {data && <Freshness s={data} />}
-          {paused && <Button variant='outline' size='xs' onClick={() => setResumed(true)} title='Refresh is paused while a setting has an unsaved edit'><Icons.clock /> Paused · Resume</Button>}
+          {paused && <Button variant='outline' size='xs' onClick={() => setResumed(true)} title={editing ? 'Refresh is paused while a setting has an unsaved edit' : 'Refresh is paused while a record is open'}><Icons.clock /> Paused · Resume</Button>}
           <Button variant='outline' size='sm' disabled={refreshing} onClick={() => void refresh()}>{refreshing ? <Icons.spinner className='animate-spin' /> : <Icons.chartLine />} Refresh</Button>
           {data && <RunTick s={data} />}
           {data?.links.newrelic && <ActionsMenu label='More' items={[{ label: 'Open in New Relic', icon: <Icons.externalLink />, onSelect: () => window.open(data.links.newrelic!, '_blank', 'noopener') }]} />}
@@ -463,6 +470,14 @@ export function AdminCompute() {
       )}
     </PageContainer>
   );
+}
+
+/** Tells the page whether a record peek is open (?session, ?orch, ?job or ?tick), so the summary stops refreshing. */
+function PeekWatch({ onChange }: { onChange: (open: boolean) => void }) {
+  const url = useComputeParams();
+  const open = ['session', 'orch', 'job', 'tick'].some((k) => url.has(k));
+  useEffect(() => { onChange(open); }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+  return null;
 }
 
 interface TickResult { leader: boolean; launched: number; reaped: number; note: string | null; error: string | null; message: string }
@@ -522,7 +537,7 @@ function VerdictBanner({ verdict }: { verdict: Verdict[] }) {
   if (!first) return null;
   const line = (v: Verdict) => (
     <span className='min-w-0'>
-      {v.href ? <Link href={v.href} className='hover:underline'>{v.text}</Link> : v.text}
+      {v.href ? <SectionLink href={v.href} className='hover:underline'>{v.text}</SectionLink> : v.text}
     </span>
   );
   return (
@@ -570,17 +585,18 @@ function Tiles({ s }: { s: Summary }) {
       href: '/admin/compute?section=failures', warn: f.rate > 0.1, title: f.ended ? `${Math.round(f.rate * 100)}% of the ${f.ended} sessions that ended in 24 h failed` : undefined },
     { label: 'Spend today (UTC)', value: money(sp.total_usd), title: `Sandbox: ${EST}`,
       hint: `${money(sp.session_model_usd)} model (finished sessions) · ${money(sp.orchestrator_model_usd)} orchestrators · ${money(sp.sandbox_est_usd)} sandbox est.`,
-      href: '/admin/compute?section=jobs&jsort=spend' }
+      href: '/admin/compute?section=jobs&jsort=spend&jsince=24h' }
   ];
   return (
-    <dl className='grid grid-cols-2 border-y md:grid-cols-3 xl:grid-cols-6'>
+    // Below xl every tile draws its own bottom line, so the list adds only the top one (and the bottom one at xl).
+    <dl className='grid grid-cols-2 border-t md:grid-cols-3 xl:grid-cols-6 xl:border-b'>
       {tiles.map((t) => (
-        <Link key={t.label} href={t.href} title={t.title}
+        <SectionLink key={t.label} href={t.href} title={t.title}
           className='hover:bg-muted/40 min-w-0 border-b px-4 py-3 transition-colors max-md:odd:pl-0 max-md:even:border-l md:border-l md:[&:nth-child(3n+1)]:border-l-0 md:[&:nth-child(3n+1)]:pl-0 xl:border-b-0 xl:[&:nth-child(3n+1)]:border-l xl:[&:nth-child(3n+1)]:pl-4 xl:first:border-l-0 xl:first:pl-0'>
           <dt className='text-muted-foreground text-xs font-medium'>{t.label}</dt>
           <dd className={cn('mt-1 text-2xl font-semibold tabular-nums tracking-tight', t.warn && 'text-amber-700 dark:text-amber-400')}>{t.value}</dd>
           <dd className='text-muted-foreground mt-0.5 truncate text-xs' title={typeof t.hint === 'string' ? t.hint : undefined}>{t.hint}</dd>
-        </Link>
+        </SectionLink>
       ))}
     </dl>
   );
@@ -628,17 +644,20 @@ function SourceOf({ s }: { s: Setting }) {
 function Limits({ s, onEditing }: { s: Summary; onEditing: (key: string, on: boolean) => void }) {
   const save = useAdminAction((v: Record<string, string | null>) => adminApi('PUT', '/compute/settings', { values: v }), { success: 'Setting saved' });
   const l = s.limits;
+  // A rejected save (say, over the setting's max) puts the field back to the saved value: its key changes.
+  const [rejected, setRejected] = useState(0);
   const set = (k: string) => s.settings.find((x) => x.key === k);
   const boatDown = l.plan == null ? `boat.dev did not answer: ${l.error ?? 'no answer'}` : null;
   const startsNote = 'boat does not report used starts; other deployments\' starts are not counted.';
-  const free = l.plan == null || l.active_now == null ? 0 : Math.max(0, l.plan - l.ours_orch - l.ours_workers - l.others);
+  const free = l.plan == null || l.active_now == null ? 0 : Math.max(0, l.plan - l.ours_orch - l.ours_workers - l.ours_images - l.others);
   const size = set('BOAT_SANDBOX_SIZE');
   const rows: LimitRow[] = [
     { key: 'plan', label: 'boat sandboxes at once', used: l.active_now, limit: l.plan, unavailable: boatDown,
-      sub: l.plan != null && <>ours {l.ours_orch} orchestrators · {l.ours_workers} workers · other deployments {l.others} · free {free}</>,
+      sub: l.plan != null && <>ours {l.ours_orch} orchestrators · {l.ours_workers} workers{l.ours_images > 0 && <> · image builder {l.ours_images}</>} · other deployments {l.others} · free {free}</>,
       parts: [
         { label: 'Our orchestrators', n: l.ours_orch, className: 'bg-primary' },
         { label: 'Our workers', n: l.ours_workers, className: 'bg-primary/55' },
+        { label: 'Our image builder and images', n: l.ours_images, className: 'bg-primary/30' },
         { label: 'Other deployments', n: l.others, className: 'bg-amber-500/70' }
       ],
       status: statusOf(l.active_now, l.plan, l.binding === 'plan'), source: <span className='text-muted-foreground'>boat plan</span>, fixed: 'Set by your boat plan' },
@@ -649,6 +668,7 @@ function Limits({ s, onEditing }: { s: Summary; onEditing: (key: string, on: boo
     }),
     ...(l.per_job_mode ? [
       { key: 'job_orch', label: 'Job orchestrators', used: l.job_orch_live, limit: l.job_orch_cap, setting: set('OCTILLION_MAX_JOB_ORCHESTRATORS'),
+        sub: l.job_orch_draining > 0 && <>booting or running · {l.job_orch_draining} draining, not counted</>,
         status: statusOf(l.job_orch_live, l.job_orch_cap, l.binding === 'job_orch'), source: null },
       { key: 'pods', label: 'Worker pods per job orchestrator', used: l.pods_max_reserved, limit: l.pods_cap, setting: set('OCTILLION_JOB_POD_CAPACITY'),
         sub: <>most reserved by one · avg running {l.pods_avg_running}</>, status: statusOf(l.pods_max_reserved, l.pods_cap, l.binding === 'pods'), source: null }
@@ -693,8 +713,8 @@ function Limits({ s, onEditing }: { s: Summary; onEditing: (key: string, on: boo
                 <TableCell className='w-64 px-3 py-1.5 align-top'>
                   {r.setting ? (
                     <span className='flex items-center gap-1'>
-                      <LimitInput key={String(r.setting.value)} s={r.setting} disabled={save.isPending} onDirty={(on) => onEditing(r.setting!.key, on)}
-                        onSave={(v) => save.mutate({ [r.setting!.key]: v }, { onSettled: () => onEditing(r.setting!.key, false) })} />
+                      <LimitInput key={`${String(r.setting.value)}:${rejected}`} s={r.setting} disabled={save.isPending} onDirty={(on) => onEditing(r.setting!.key, on)}
+                        onSave={(v) => save.mutate({ [r.setting!.key]: v }, { onError: () => setRejected((k) => k + 1), onSettled: () => onEditing(r.setting!.key, false) })} />
                       {r.setting.source === 'set' && (
                         <Button variant='ghost' size='xs' className='text-muted-foreground hover:text-foreground' disabled={save.isPending}
                           title={`Back to ${r.setting.env != null ? `the environment (${r.setting.env})` : `the default (${r.setting.default})`}`}

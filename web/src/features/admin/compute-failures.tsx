@@ -32,7 +32,7 @@ export function ComputeFailures() {
   const span = hours === 24 ? 'the last 24 hours' : 'the last 7 days';
   // Ended (24 h) holds a day of orchestrators; a week needs All.
   const orchState = hours === 24 ? 'ended' : 'all';
-  const showOrch = (reason: string) => url.write({ section: 'orchestrators', state: orchState, oreason: reason, orch: null, back: null });
+  const showOrch = (reason: string) => url.write({ section: 'orchestrators', state: orchState, oreason: reason, ojob: null, orch: null, back: null });
   const showSessions = (cls: string) => url.write({ section: 'sessions', class: cls, status: cls === 'unclaimable' ? 'queued' : 'failed,timeout', since: hours === 168 ? '7d' : null, session: null });
 
   const failing: Line[] = data ? [

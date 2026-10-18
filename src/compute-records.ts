@@ -183,8 +183,8 @@ export function sessionHint(s: { error_class: string | null; agent_id: string | 
     case "boat_permission": return { text: "The boat key may not create sandboxes. Replace it in Key vault.", href: FIX_LINKS.key_vault.href };
     case "unclaimable": return { text: `${s.agent_id ?? "This agent"} is not in the scheduled population, so no orchestrator claims it. Turn it on in Harness mix.`, href: FIX_LINKS.harness_mix.href };
     case "harness_install": return { text: `The ${s.harness} CLI could not be installed in the sandbox. Check its pin in Harness mix.`, href: FIX_LINKS.harness_mix.href };
-    case "time_cap": return { text: "It ran past the session time limit. Change the limit in Agent configuration.", href: FIX_LINKS.agent_configuration.href };
-    case "agent": return { text: "The agent stopped on its own (gave up, or hit a turn or time cap). Limits are in Agent configuration.", href: FIX_LINKS.agent_configuration.href };
+    case "time_cap": return { text: "It ran past the session time limit (MAX_SESSION_MINUTES). It is set in the deployment environment, shown in Compute › Environment.", href: FIX_LINKS.environment.href };
+    case "agent": return { text: "The agent stopped on its own (gave up, or hit a turn or time cap). Those caps are set in the deployment environment, shown in Compute › Environment.", href: FIX_LINKS.environment.href };
     default: return null;
   }
 }

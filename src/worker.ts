@@ -218,16 +218,19 @@ export async function completeSession(sessionId: string, input: CompleteInput = 
   const s = await sessionRef(sessionId);
   const db = await getDb();
   if (s.status === "running" && (await retryInfraFailure(s, input))) return null;
+  // Only an open session is finished here, re-checked in the UPDATE itself: an admin cancel that lands between the
+  // read above and this write keeps the session cancelled (and its spend is reported once, by the cancel).
+  let finished = false;
   if (!FINAL.includes(s.status)) {
-    await db.query(
+    finished = (await db.query(
       `/* tenant: session checked against the job token in http.ts, or internal stale sweep */ UPDATE agent_sessions SET status = $2, ended_at = now(), error_message = $3, sandbox_id = coalesce($4, sandbox_id),
               tokens_in = coalesce($5, tokens_in), tokens_out = coalesce($6, tokens_out), cost_usd = coalesce($7, cost_usd),
               metadata = metadata || $8::jsonb, completed_reason = coalesce($9, completed_reason)
-        WHERE id = $1`,
+        WHERE id = $1 AND status IN ('queued', 'running') RETURNING id`,
       [sessionId, input.status ?? "completed", input.error_message ?? null, input.sandbox_id ?? null, input.tokens_in ?? null,
        input.tokens_out ?? null, input.cost_usd ?? null, JSON.stringify(input.metadata ?? {}),
        (COMPLETED_REASONS as readonly string[]).includes(input.completed_reason ?? "") ? input.completed_reason : null],
-    );
+    )).length > 0;
   }
   // The session's gateway token dies with it; tokens and cost the gateway metered are authoritative when larger
   // than what the worker parsed from the CLI's own output (Codex, for one, reports no cost at all).
@@ -239,7 +242,7 @@ export async function completeSession(sessionId: string, input: CompleteInput = 
               cost_usd = greatest(cost_usd, $4) WHERE id = $1`,
       [sessionId, metered.input_tokens, metered.output_tokens, metered.cost_usd]);
   const score = await scoreSession(sessionId);
-  if (!FINAL.includes(s.status)) reportSessionSpend(sessionId); // usage-based billing; once per session (Stripe dedupes by id too)
+  if (finished) reportSessionSpend(sessionId); // usage-based billing; once per session (Stripe dedupes by id too)
   await finishSimulationIfDone(s.simulation_id);
   return score;
 }
@@ -281,10 +284,11 @@ export async function scoreSession(sessionId: string) {
   return score;
 }
 
-export async function finishSimulationIfDone(simulationId: string) {
+export async function finishSimulationIfDone(simulationId: string, opts: { extend?: boolean } = {}) {
   // Adaptive runs: when a batch is done, tasks whose result is not settled yet get more sessions; only a run that
-  // queues nothing more is finished.
-  if (await extendAdaptive(simulationId)) return;
+  // queues nothing more is finished. `extend: false` (an admin cancelling a session) never queues more: stopping work
+  // must not start new paid work.
+  if (opts.extend !== false && (await extendAdaptive(simulationId))) return;
   const db = await getDb();
   const [done] = await db.query<{ org_id: number; status: string; first: boolean }>(
     `/* tenant: internal: the finished session's own simulation */ UPDATE simulations SET status = CASE WHEN status = 'cancelled' THEN 'cancelled' ELSE 'completed' END,

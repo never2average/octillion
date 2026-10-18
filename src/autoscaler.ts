@@ -62,7 +62,9 @@ export const AUTOSCALE = {
 };
 
 export interface Demand {
-  sessions: number; queued_sessions: number; research: number; unclaimable_sessions: number;
+  sessions: number; queued_sessions: number; research: number;
+  /** Queued sessions whose agent is not in the scheduled population: no orchestrator will ever claim them. */
+  unclaimable_sessions: number;
   /** Claimable sessions queued after `freshSince` (only when computeDemand was given one). */
   fresh_queued_sessions?: number;
 }
@@ -89,7 +91,7 @@ export async function computeDemand(freshSince?: Date): Promise<Demand> {
   const [s] = await db.query<{ sessions: number; queued: number; unclaimable: number; fresh: number }>(
     `/* tenant: internal: autoscaler demand counts across all orgs, counts only */ SELECT count(*) FILTER (WHERE ${claimable}) AS sessions,
             count(*) FILTER (WHERE status = 'queued' AND ${claimable}) AS queued,
-            count(*) FILTER (WHERE NOT ${claimable}) AS unclaimable,
+            count(*) FILTER (WHERE status = 'queued' AND NOT ${claimable}) AS unclaimable,
             count(*) FILTER (WHERE status = 'queued' AND ${claimable} AND $2::timestamptz IS NOT NULL AND queued_at > $2) AS fresh
        FROM agent_sessions WHERE status IN ('queued', 'running')`, [agents, freshSince ?? null]);
   const [r] = await db.query<{ n: number }>("/* tenant: internal: autoscaler demand counts across all orgs, counts only */ SELECT count(*) AS n FROM product_research WHERE status IN ('queued', 'running')");

@@ -2,7 +2,8 @@
 // Formatting and URL state shared by the Compute page's sections (compute.tsx, compute-sessions.tsx,
 // compute-orchestrators.tsx): durations, money, "est." labels, a ticking clock for relative times, and the query
 // string that deep-links a section, its filters and an open record (?section=sessions&status=queued&session=ses_…).
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from 'react';
+import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { cn } from '@/lib/utils';
 
@@ -46,9 +47,17 @@ export function PeekSection({ title, children, action }: { title: ReactNode; chi
   );
 }
 
+const GOTO = 'compute:goto';
+/** The section an in-page link names (`/admin/compute?section=sessions&…`), or null. */
+export const sectionOf = (href: string) => (href.startsWith('/admin/compute?') ? new URLSearchParams(href.split('?')[1]).get('section') : null);
+/** Asks a section to scroll into view: on every in-page link or action that names it, not only the first. */
+export function goToSection(section: string | null | undefined) {
+  if (section) window.dispatchEvent(new CustomEvent(GOTO, { detail: section }));
+}
+
 /**
  * The Compute page's query string: read, and written in place (replace, so Back leaves the page rather than undoing
- * a filter). Needs a Suspense boundary above it (useSearchParams).
+ * a filter). A write that names a section also scrolls to it. Needs a Suspense boundary above it (useSearchParams).
  */
 export function useComputeParams() {
   const params = useSearchParams(), router = useRouter(), pathname = usePathname();
@@ -59,21 +68,45 @@ export function useComputeParams() {
     for (const [k, v] of Object.entries(patch)) { if (v) next.set(k, v); else next.delete(k); }
     const qs = next.toString();
     router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+    goToSection(patch.section);
   };
   return { get: (k: string) => p.get(k), has: (k: string) => p.has(k), write };
 }
 
-/** Scrolls to the section once when the URL names it (?section=sessions), after its first data arrives. */
+/**
+ * Scrolls to the section when the page opens with the URL naming it (?section=sessions), once its first data arrives,
+ * and again each time an in-page link or action asks for it (goToSection).
+ */
 export function useScrollTo(section: string, ready: boolean) {
   const { get } = useComputeParams();
-  const done = useRef(false);
-  const wanted = get('section') === section;
+  const pending = useRef(get('section') === section);
+  const [asked, setAsked] = useState(0);
   useEffect(() => {
-    if (done.current || !ready || !wanted) return;
-    done.current = true;
+    const on = (e: Event) => { if ((e as CustomEvent<string>).detail === section) { pending.current = true; setAsked((k) => k + 1); } };
+    window.addEventListener(GOTO, on);
+    return () => window.removeEventListener(GOTO, on);
+  }, [section]);
+  useEffect(() => {
+    if (!pending.current || !ready) return;
+    pending.current = false;
     document.getElementById(`compute-${section}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  }, [ready, wanted, section]);
+  }, [ready, asked, section]);
 }
+
+/**
+ * A link that may point into this page (a tile, a verdict line, a hint): one naming a section does not jump to the top
+ * of the page and scrolls to that section instead, every time it is clicked. Any other link behaves as usual.
+ */
+export function SectionLink({ href, onClick, ...rest }: Omit<ComponentProps<typeof Link>, 'href'> & { href: string }) {
+  const section = sectionOf(href);
+  return <Link href={href} scroll={section ? false : undefined} onClick={(e) => { onClick?.(e); goToSection(section); }} {...rest} />;
+}
+
+/** Every session status: "Show sessions" for a job lists all of them, whatever the Sessions filters were. */
+const ALL_STATUSES = 'queued,running,completed,failed,timeout,cancelled';
+/** The URL patch that opens Sessions on one job: every status, the widest range, no other filter. */
+export const jobSessions = (job: string) =>
+  ({ section: 'sessions', job_id: job, status: ALL_STATUSES, since: '7d', class: null, stale: null, session: null });
 
 /**
  * Keeps a deep-linked record in a list whatever its filters: once the open id is missing from the loaded rows, the
