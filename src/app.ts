@@ -312,14 +312,30 @@ export function appRouter() {
     const s = S(res);
     const range = req.query.from || req.query.to ? reportRange(req.query) : null;
     const users = String(req.query.user ?? "").split(",").map((x) => x.trim()).filter(Boolean).slice(0, 200);
-    const [rows, t, help] = await Promise.all([playbooks.adoptionByPerson(s.org, { start: range?.start, end: range?.end, users }), admin.team(s.slug), playbooks.helpRequests(s.org)]);
+    const [rows, t, help, calls] = await Promise.all([playbooks.adoptionByPerson(s.org, { start: range?.start, end: range?.end, users }), admin.team(s.slug), playbooks.helpRequests(s.org),
+      // Who used each workflow part: tool calls by person (null = a connector key, not a signed-in person).
+      (await getDb()).query<{ user_id: string | null; name: string; calls: number; last: Date }>(
+        `SELECT user_id, name, count(*)::int AS calls, max(at) AS last FROM mcp_events
+          WHERE org_id = $1 AND method = 'tools/call' AND name IS NOT NULL AND ($2::timestamptz IS NULL OR at >= $2) AND ($3::timestamptz IS NULL OR at < $3)
+          GROUP BY user_id, name`, [s.org, range?.start ?? null, range?.end ?? null])]);
     const who = new Map(t.members.map((m) => [m.user_id, m.email ?? m.name ?? null]));
     const label = (id: string | null) => (id ? (id === s.user ? "You" : who.get(id) ?? "Former member") : null);
     res.json({ me: s.user, use_cases: rows.map((r) => ({ ...r, helper_label: label(r.helper), helper_email: r.helper ? who.get(r.helper) ?? null : null,
       people: r.people.map((x) => ({ ...x, label: label(x.user_id), email: who.get(x.user_id) ?? null })) })),
       help: help.map((h) => ({ ...h, requester_label: label(h.requester), requester_email: who.get(h.requester) ?? null,
         helper_label: label(h.helper), helper_email: h.helper ? who.get(h.helper) ?? null : null })),
-      members: t.members.filter((m) => m.user_id).map((m) => ({ user_id: m.user_id, label: label(m.user_id) })) });
+      members: t.members.filter((m) => m.user_id).map((m) => ({ user_id: m.user_id, label: label(m.user_id) })),
+      workflow: TOOL_GROUPS.map((g) => {
+        const byUser = new Map<string | null, { used: Set<string>; calls: number; last: Date | null }>();
+        for (const c of calls) {
+          if (!(g.tools as readonly string[]).includes(c.name) || (users.length && (!c.user_id || !users.includes(c.user_id)))) continue;
+          const u = byUser.get(c.user_id) ?? { used: new Set<string>(), calls: 0, last: null };
+          u.used.add(c.name); u.calls += Number(c.calls); u.last = !u.last || c.last > u.last ? c.last : u.last;
+          byUser.set(c.user_id, u);
+        }
+        return { id: g.id, people: [...byUser].map(([id, u]) => ({ user_id: id, label: id ? label(id) : "Connector key", email: id ? who.get(id) ?? null : null,
+          used: u.used.size, total: g.tools.length, calls: u.calls, last: u.last })).sort((a, b) => b.used - a.used || b.calls - a.calls) };
+      }) });
   });
   // Help requests: ask the team, pick one up, close it (asker or helper), hand it back (helper) or withdraw it (asker).
   api.post("/adoption/help", async (req, res) => {

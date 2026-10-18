@@ -34,9 +34,10 @@ interface Help {
   id: number; journey_id: string; requester: string; helper: string | null; note: string; status: 'open' | 'picked' | 'done'; created_at: string; picked_at: string | null;
   requester_label: string | null; requester_email: string | null; helper_label: string | null; helper_email: string | null;
 }
-interface Adoption { me: string | null; use_cases: UseCaseUse[]; help: Help[]; members: { user_id: string; label: string | null }[] }
+interface Adoption { me: string | null; use_cases: UseCaseUse[]; help: Help[]; members: { user_id: string; label: string | null }[];
+  workflow?: { id: string; people: { user_id: string | null; label: string | null; used: number; total: number; calls: number }[] }[] }
 type Row =
-  | { key: string; type: 'workflow'; name: string; detail: string; done: number; total: number; g: Setup['groups'][number] }
+  | { key: string; type: 'workflow'; name: string; detail: string; done: number; total: number; g: Setup['groups'][number]; person: string | null }
   | { key: string; type: 'use case'; name: string; detail: string; done: number; total: number; j: Journey; who: Person | null; uc: UseCaseUse | null; help: Help | null }
   | { key: string; type: 'client'; name: string; detail: string; done: number; total: number; at: string };
 
@@ -90,20 +91,26 @@ export function AdoptionPage() {
       if (uc?.people.length) return uc.people.map((p) => ({ ...base, key: `j-${j.id}-${p.user_id}`, done: p.done, total: p.total, who: p, help: helpFor(p.user_id) }));
       return narrowed ? [] : [{ ...base, key: `j-${j.id}`, done: 0, total: j.total, who: null, help: null }];
     }),
-    ...(narrowed ? [] : s.groups.map((g) => ({ key: `w-${g.id}`, type: 'workflow' as const, name: g.label, detail: g.used ? `${g.used} of ${g.total} tools used` : 'Not tried yet', done: g.used, total: g.total, g }))),
+    // Workflow parts person by person (from the tool calls each made); a part nobody used is one "Nobody yet" row.
+    ...s.groups.flatMap((g): Row[] => {
+      const people = ad?.workflow?.find((w) => w.id === g.id)?.people ?? [];
+      if (people.length) return people.map((p) => ({ key: `w-${g.id}-${p.user_id ?? 'key'}`, type: 'workflow' as const, name: g.label,
+        detail: `${p.used} of ${p.total} tools used · ${p.calls} call${p.calls === 1 ? '' : 's'}`, done: p.used, total: p.total, g, person: p.label }));
+      return narrowed ? [] : [{ key: `w-${g.id}`, type: 'workflow' as const, name: g.label, detail: 'Not tried yet', done: 0, total: g.total, g, person: null }];
+    }),
     ...(narrowed ? [] : s.clients.filter((c) => c.last.slice(0, 10) >= range.from && c.last.slice(0, 10) <= range.to)
       .map((c) => ({ key: `c-${c.client}`, type: 'client' as const, name: c.client, detail: 'Connected', done: 1, total: 1, at: c.last })))
   ];
-  // Who a row is about: the person on a use case (nobody in the range: "Nobody yet"), the team for workflow parts
-  // (counted team-wide), you for clients (the list is yours).
-  const userOf = (r: Row) => r.type === 'use case' ? (r.who?.label ?? 'Nobody yet') : r.type === 'workflow' ? 'Team' : 'You';
+  // Who a row is about: the person on a use case or workflow part (nobody in the range: "Nobody yet"; calls made with a
+  // connector key rather than a signed-in person: "Connector key"), you for clients (the list is yours).
+  const userOf = (r: Row) => r.type === 'use case' ? (r.who?.label ?? 'Nobody yet') : r.type === 'workflow' ? (r.person ?? 'Nobody yet') : 'You';
   const helpState = (r: Row) => helpStatus(r, me);
   const cols: RecordCol<Row>[] = [
     { key: 'item', label: 'Use case', className: 'min-w-72', keep: true, title: true, type: 'text', value: (r) => r.name, render: (r) => (<>
       <p className='text-sm leading-none font-medium'>{r.name}</p>
       <p className='text-muted-foreground mt-1.5 line-clamp-1 text-xs leading-none'>{r.detail}</p>
     </>) },
-    { key: 'user', label: 'User', className: 'w-40', keep: true, type: 'select', value: userOf, render: (r) => <span className={cn('block max-w-40 truncate text-sm', r.type === 'use case' && r.who ? '' : 'text-muted-foreground')}>{userOf(r)}</span> },
+    { key: 'user', label: 'User', className: 'w-40', keep: true, type: 'select', value: userOf, render: (r) => <span className={cn('block max-w-40 truncate text-sm', (r.type === 'use case' && r.who) || (r.type === 'workflow' && r.person) ? '' : 'text-muted-foreground')}>{userOf(r)}</span> },
     { key: 'usage', label: 'Usage', className: 'w-44', type: 'number', value: (r) => r.done / Math.max(1, r.total), render: (r) => (
       <div className='space-y-1.5'>
         <Progress done={r.done} total={r.total} check={r.type === 'client'} />
