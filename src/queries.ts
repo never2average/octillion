@@ -3,7 +3,7 @@ import { PLATFORMS, isPlatform, platformOf, type Platform } from "./platform.js"
 import { getDb, type Queryable } from "./db.js";
 import { settingNumber } from "./settings.js";
 import { orgBudget } from "./billing.js";
-import { checkRun, launcherOverLimit } from "./limits.js";
+import { LimitError, askAdmins, checkRun, launcherOverLimit, monthWords, sessionsLimit } from "./limits.js";
 import { randomId, type Org } from "./auth.js";
 import { transcripts, type SearchParams } from "./transcripts.js";
 import type { Tool } from "./scoring.js";
@@ -335,13 +335,15 @@ export const NO_PLAN = (name?: string | null) => `${name ?? "This organization"}
 export async function runSimulation(org: Org, input: RunInput) {
   // No plan, no runs: checked before anything else so the reason is the first thing the customer hears.
   const { budget } = await orgBudget(org.orgId); // admin allowance, else the prepaid plan's cap, else 0
-  if (budget <= 0) throw new Error(NO_PLAN(org.name));
+  if (budget <= 0) throw new LimitError(NO_PLAN(org.name), 403, { code: "no_allowance", limit_usd: 0, left_usd: 0, set_by: "account" });
   const p = await resolveProduct(org, input.product);
   const db = await getDb();
   const spent = await orgMonthSpendUsd(org.orgId);
+  // The account's allowance is set by Octillion, not its admins: the way out is the Octillion contact, or the new month.
   if (spent >= budget)
-    throw new Error(`${org.name ?? "This organization"} has used its $${budget} allowance for this month ($${spent.toFixed(2)} spent). ` +
-      "Results so far stay available; reply to your Octillion contact to raise the limit.");
+    throw new LimitError(`Your account has used its $${budget.toFixed(2)} for ${monthWords().month} ($${spent.toFixed(2)} spent). ` +
+      `Results so far stay available; reply to your Octillion contact to raise the allowance, or wait until ${monthWords().reset}.`, 403,
+      { code: "account_cap", limit_usd: budget, left_usd: 0, set_by: "account" });
   // The account's own limits for this person (src/limits.ts): rollout, allowance, team budget, concurrency, run size.
   const personal = await checkRun(org);
   const maxSessions = Math.min(config.maxSessionsPerRun(), personal.maxSessions ?? Infinity);
@@ -427,7 +429,10 @@ export async function runSimulation(org: Org, input: RunInput) {
     plan = slots.flatMap((slot, si) => cells[si]!.map((a, i) => ({ ...slot, agent: drawVariant(a), attempt: i + 1 })));
   }
   if (plan.length > maxSessions)
-    throw new Error(`That is ${plan.length} agent sessions (${scenarios.length} scenarios x ${profileIds.length} profiles x ${explicit ? "agents x repeats" : `${samples} samples`}); the limit per run is ${maxSessions}${maxSessions < config.maxSessionsPerRun() ? " (set by your account admin)" : ""}. Use fewer scenarios, profiles, agents, repeats or samples.`);
+    throw new LimitError(`This simulation needs ${plan.length} agent sessions (${scenarios.length} scenarios x ${profileIds.length} profiles x ${explicit ? "agents x repeats" : `${samples} samples`}); ` +
+      `the limit per run is ${maxSessions}. Use fewer scenarios, profiles, agents, repeats or samples.` +
+      (maxSessions < config.maxSessionsPerRun() ? ` ${askAdmins(personal.admins, false)}` : ""), 400,
+      { code: "run_sessions", set_by: maxSessions < config.maxSessionsPerRun() ? "account" : undefined });
 
   const used = [...new Map(plan.map((x) => [x.agent.id, x.agent])).values()];
   const id = randomId("sim_");
@@ -464,9 +469,13 @@ export async function extendAdaptive(simulationId: string): Promise<number> {
        FROM simulations sim JOIN organizations o ON o.id = sim.org_id LEFT JOIN developer_populations dp ON dp.id = sim.population_id
       WHERE sim.id = $1`, [simulationId]);
   if (!pre || pre.mode !== "representative" || !pre.max_samples) return 0;
-  const budget = await orgBudget(pre.org_id).then((b) => b.budget, () => Infinity); // lookup failed: let the run finish
+  // Fails closed: if the allowance can't be looked up, stop adding sessions (the ones running still finish).
+  const budget = await orgBudget(pre.org_id).then((b) => b.budget, () => null);
   // The account's budget, or the launcher's own allowance or team budget (src/limits.ts), stops sampling early.
-  const overBudget = budget <= 0 || (await orgMonthSpendUsd(pre.org_id)) >= budget || (await launcherOverLimit(pre.org_id, pre.org_slug, pre.created_by));
+  const overBudget = budget == null || budget <= 0 || (await orgMonthSpendUsd(pre.org_id)) >= budget || (await launcherOverLimit(pre.org_id, pre.org_slug, pre.created_by));
+  const stopped = budget == null ? "stopped: couldn't check the allowance" : "stopped: monthly budget";
+  // Sessions per run applies to the whole run, top-ups included: the server's limit, or the account's if lower.
+  const maxSessions = await sessionsLimit(pre.org_id);
   const pop = await getPopulation(pre.slug ?? undefined);
   return db.transaction(async (tx) => {
     const [sim] = await tx.query<{ id: string; org_id: number; product_id: number; mode: string; status: string; max_samples: number | null;
@@ -480,7 +489,7 @@ export async function extendAdaptive(simulationId: string): Promise<number> {
               count(*) FILTER (WHERE s.verdict IS NOT NULL AND ${HIT}) AS hits
          FROM agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id
         WHERE s.simulation_id = $1 GROUP BY s.scenario_id ORDER BY s.scenario_id`, [simulationId]);
-    let room = config.maxSessionsPerRun() - rows.reduce((t, r) => t + Number(r.attempts), 0);
+    let room = maxSessions - rows.reduce((t, r) => t + Number(r.attempts), 0);
     const decisions: Record<string, unknown> = {};
     const more: { scenarioId: number; from: number; count: number }[] = [];
     for (const r of rows) {
@@ -492,7 +501,7 @@ export async function extendAdaptive(simulationId: string): Promise<number> {
       room -= want;
       decisions[String(r.scenario_id)] = {
         attempts, scored: n, hits, margin: Math.round(margin * 100) / 100,
-        status: settled ? "settled" : attempts >= sim.max_samples ? "cap reached" : overBudget ? "stopped: monthly budget" : want ? "sampling more" : "stopped: run limit",
+        status: settled ? "settled" : attempts >= sim.max_samples ? "cap reached" : overBudget ? stopped : want ? "sampling more" : "stopped: run limit",
       };
       if (want) more.push({ scenarioId: Number(r.scenario_id), from: attempts, count: want });
     }

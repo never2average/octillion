@@ -1699,26 +1699,107 @@ try {
       assert.equal((await appCall(ownerC, "PUT", "/limits/members/user_nobody", { cap_usd: 5 })).status, 404, "only members of the account");
       // Rollout: turn running off for one person.
       await appCall(ownerC, "PUT", `/limits/members/${acc2.user.id}`, { can_run: false });
-      assert.match((await run(devT, { samples: 1 })).error ?? "", /not switched on for you/, "rollout blocks launching");
+      assert.match((await run(devT, { samples: 1 })).error ?? "", /haven't been allowed to launch simulations yet\. .*Ask .+ to change Budget rules on the Billing page\.$/, "rollout blocks launching");
+      // Refusals are structured (code, limit, who set it, admins to ask), and /app gets those fields beside the message.
+      const { checkRun, launcherOverLimit, LimitError } = await import("../src/limits.js");
+      const devOrg = { ...orgW, userId: acc2.user.id }, ownerOrg = { ...orgW, userId: accepted.user.id };
+      const refusal = async (o: typeof devOrg) => checkRun(o).then(() => null, (e) => { assert.ok(e instanceof LimitError, String(e)); return e as InstanceType<typeof LimitError>; });
+      const denied = await refusal(devOrg);
+      assert.equal(denied?.info.code, "launch_access");
+      assert.equal(denied?.info.set_by, "you", "set on the person");
+      assert.ok(denied?.info.admins?.length, "names the admins to ask");
+      // Counts are 1 or more, or empty: 0 used to block every launch silently.
+      assert.equal((await appCall(ownerC, "PUT", "/limits/policy", { max_concurrent_runs: 0 })).status, 400, "0 runs at once is refused");
+      const zero = await appCall(ownerC, "PUT", "/limits/policy", { max_sessions_per_run: 0 });
+      assert.ok(zero.status === 400 && /can't be 0/.test((await zero.json()).error), "0 sessions per run is refused, saying why");
+      assert.equal((await appCall(ownerC, "PUT", "/limits/policy", { max_sessions_per_run: 1e6 })).status, 400, "no more sessions than the server's limit");
+      assert.equal((await appCall(ownerC, "PUT", `/limits/members/${acc2.user.id}`, { max_concurrent_runs: 0 })).status, 400);
+      assert.equal((await appCall(ownerC, "PUT", `/limits/teams/${devrel.id}`, { max_concurrent_runs: 0 })).status, 400);
+      // A team change is partial: renaming keeps its budget; null clears a field.
+      assert.equal((await appCall(ownerC, "PUT", `/limits/teams/${devrel.id}`, { name: "DevRel 2" })).status, 200);
+      let dr = (await json(appCall(ownerC, "GET", "/limits"))).teams.find((x: any) => x.id === devrel.id);
+      assert.ok(dr.name === "DevRel 2" && dr.budget_usd === 200, "a rename keeps the team's budget");
+      await appCall(ownerC, "PUT", `/limits/teams/${devrel.id}`, { max_concurrent_runs: 3 });
+      dr = (await json(appCall(ownerC, "GET", "/limits"))).teams.find((x: any) => x.id === devrel.id);
+      assert.ok(dr.name === "DevRel 2" && dr.budget_usd === 200 && dr.max_concurrent_runs === 3, "runs at once alone changes only that");
+      await appCall(ownerC, "PUT", `/limits/teams/${devrel.id}`, { name: "DevRel", max_concurrent_runs: null });
+      assert.equal((await appCall(ownerC, "PUT", `/limits/teams/${devrel.id}`, { name: " " })).status, 400, "a team still needs a name");
       // Throughput: sessions per launch, and runs at once.
       await appCall(ownerC, "PUT", "/limits/policy", { max_sessions_per_run: 1 });
-      assert.match((await run(ownerT, { samples: 1 })).error ?? "", /limit per run is 1 \(set by your account admin\)/);
+      assert.match((await run(ownerT, { samples: 1 })).error ?? "", /needs \d+ agent sessions .*the limit per run is 1\. .*Ask .+ to change Budget rules/);
       await appCall(ownerC, "PUT", "/limits/policy", { max_sessions_per_run: null, max_concurrent_runs: 1 });
       const first = await run(ownerT, { samples: 1, name: "limits-1" });
       assert.ok(first.id && !first.error, `a run within limits starts (${first.error})`);
       assert.equal((await db.query<{ created_by: string }>("SELECT created_by FROM simulations WHERE id = $1", [first.id]))[0].created_by, accepted.user.id, "runs record who launched them");
-      assert.match((await run(ownerT, { samples: 1 })).error ?? "", /already have 1 simulation running/, "runs at once");
+      assert.match((await run(ownerT, { samples: 1 })).error ?? "", /You have 1 simulation running; you can have 1 at once \(set for the account\)\. Wait for one to finish\./, "runs at once");
+      assert.equal((await refusal(ownerOrg))?.info.code, "runs_at_once");
       await db.query("UPDATE simulations SET status = 'cancelled' WHERE id = $1", [first.id]);
       await db.query("UPDATE agent_sessions SET status = 'cancelled' WHERE simulation_id = $1", [first.id]);
       // Custom caps: a person at their cap cannot launch.
       await appCall(ownerC, "PUT", "/limits/policy", { mode: "custom", max_concurrent_runs: null });
       await appCall(ownerC, "PUT", `/limits/members/${accepted.user.id}`, { cap_usd: 0 });
-      assert.match((await run(ownerT, { samples: 1 })).error ?? "", /used your \$0\.00 model allowance/);
+      assert.match((await run(ownerT, { samples: 1 })).error ?? "", /You've used your \$0\.00 for [A-Z][a-z]+ \(\$[\d.]+ spent\)\. Ask .+ or wait until [A-Z][a-z]+ 1\./);
+      const capped = await refusal(ownerOrg);
+      assert.ok(capped?.info.code === "person_limit" && capped.info.limit_usd === 0 && capped.info.left_usd === 0 && capped.info.set_by === "you");
       lim = await json(appCall(ownerC, "GET", "/limits"));
       assert.equal(lim.members.find((m: any) => m.user_id === accepted.user.id).allowance_usd, 0);
       await appCall(ownerC, "PUT", "/limits/policy", { mode: "pool" });
+
+      // Live spend: a running session counts what the gateway has metered so far, for the person and their team.
+      const live = await run(ownerT, { samples: 1, max_samples: 6, name: "limits-live" });
+      assert.ok(live.id && !live.error, `an adaptive run starts (${live.error})`);
+      const liveSessions = await db.query<{ id: string }>("SELECT id FROM agent_sessions WHERE simulation_id = $1 ORDER BY id", [live.id]);
+      await db.query("UPDATE agent_sessions SET status = 'running', cost_usd = 0 WHERE id = $1", [liveSessions[0]!.id]);
+      await db.query("INSERT INTO gateway_usage (token_hash, provider, session_id, requests, cost_usd) VALUES ('smoke-lim-live', 'anthropic', $1, 2, 2.5)", [liveSessions[0]!.id]);
+      let meLive = (await json(appCall(ownerC, "GET", "/limits"))).members.find((m: any) => m.user_id === accepted.user.id);
+      assert.ok(meLive.spent >= 2.5 && meLive.in_flight_usd >= 2.5, `live gateway spend counts while the session runs (${meLive.spent}, ${meLive.in_flight_usd})`);
+      // Sessions per run applies to adaptive top-ups too: at the account's limit, the run stops adding sessions.
+      await appCall(ownerC, "PUT", "/limits/policy", { max_sessions_per_run: liveSessions.length });
+      let flipL = false;
+      for (const x of liveSessions) await db.query("UPDATE agent_sessions SET status = 'completed', ended_at = now(), scored_at = now(), verdict = $2 WHERE id = $1", [x.id, (flipL = !flipL) ? "recommended" : "none"]);
+      meLive = (await json(appCall(ownerC, "GET", "/limits"))).members.find((m: any) => m.user_id === accepted.user.id);
+      assert.ok(meLive.spent >= 2.5 && meLive.in_flight_usd === 0, "finished: the metered spend stays, nothing in flight");
+      const { extendAdaptive } = await import("../src/queries.js");
+      assert.equal(await extendAdaptive(live.id!), 0, "no top-up past the account's sessions per run");
+      const [liveSim] = await db.query<any>("SELECT sampling FROM simulations WHERE id = $1", [live.id]);
+      assert.ok(Object.values(liveSim.sampling as Record<string, any>).every((x) => x.status === "stopped: run limit"), JSON.stringify(liveSim.sampling));
+      await appCall(ownerC, "PUT", "/limits/policy", { max_sessions_per_run: null });
+
+      // The allowance lookup failing is not "no limit": launches refuse and adaptive runs stop (fail closed).
+      const [wOrg] = await db.query<{ stripe_customer_id: string | null; budget_override_usd: string | null }>("SELECT stripe_customer_id, budget_override_usd FROM organizations WHERE id = $1", [rowW.id]);
+      await db.query("UPDATE organizations SET stripe_customer_id = 'cus_smoke_none', budget_override_usd = NULL WHERE id = $1", [rowW.id]);
+      process.env.OCTILLION_REQUIRE_SUBSCRIPTION = "1";
+      try {
+        assert.equal((await json(appCall(ownerC, "GET", "/limits"))).budget_error, true, "GET /limits flags the failed lookup");
+        const failed = await refusal(ownerOrg);
+        assert.ok(failed?.info.code === "budget_error" && failed.status === 503 && /couldn't check your account's allowance/.test(failed.message));
+        assert.equal(await launcherOverLimit(rowW.id, slugW, accepted.user.id), true, "adaptive runs stop when the allowance can't be read");
+        assert.equal(await extendAdaptive(live.id!), 0);
+        const [stopped] = await db.query<any>("SELECT sampling FROM simulations WHERE id = $1", [live.id]);
+        assert.ok(Object.values(stopped.sampling as Record<string, any>).every((x) => x.status === "stopped: couldn't check the allowance"), JSON.stringify(stopped.sampling));
+      } finally {
+        delete process.env.OCTILLION_REQUIRE_SUBSCRIPTION;
+        await db.query("UPDATE organizations SET stripe_customer_id = $2, budget_override_usd = $3 WHERE id = $1", [rowW.id, wOrg!.stripe_customer_id, wOrg!.budget_override_usd]);
+      }
+      assert.equal((await json(appCall(ownerC, "GET", "/limits"))).budget_error, false);
+      await db.query("UPDATE simulations SET status = 'cancelled' WHERE id = $1", [live.id]);
+      await db.query("DELETE FROM gateway_usage WHERE token_hash = 'smoke-lim-live'");
+
+      // Existing zeros (from before 0 was refused) are migrated on boot: whoever a 0 applied to can't launch, the count clears.
+      await db.query("UPDATE usage_policies SET max_concurrent_runs = 0 WHERE org_id = $1", [rowW.id]);
+      await db.query("UPDATE usage_members SET can_run = NULL, max_concurrent_runs = NULL, team_id = NULL WHERE org_id = $1 AND user_id = $2", [rowW.id, acc2.user.id]);
+      await db.query("UPDATE usage_members SET can_run = NULL, max_concurrent_runs = 2 WHERE org_id = $1 AND user_id = $2", [rowW.id, accepted.user.id]);
+      await db.migrate(await (await import("node:fs/promises")).readFile("sql/schema.sql", "utf8"));
+      const [pol0] = await db.query<any>("SELECT max_concurrent_runs, new_members_can_run FROM usage_policies WHERE org_id = $1", [rowW.id]);
+      assert.ok(pol0.max_concurrent_runs === null && pol0.new_members_can_run === false, "the account's 0 becomes 'only people I've allowed'");
+      const mig = new Map((await db.query<any>("SELECT user_id, can_run, max_concurrent_runs FROM usage_members WHERE org_id = $1", [rowW.id])).map((m) => [m.user_id, m]));
+      assert.equal(mig.get(acc2.user.id).can_run, false, "someone the 0 applied to can't launch");
+      assert.ok(mig.get(accepted.user.id).can_run === true && Number(mig.get(accepted.user.id).max_concurrent_runs) === 2, "someone with their own count keeps launching");
+      await appCall(ownerC, "PUT", "/limits/policy", { new_members_can_run: true });
+      await appCall(ownerC, "PUT", `/limits/members/${accepted.user.id}`, { can_run: null, max_concurrent_runs: null, cap_usd: null });
       await appCall(ownerC, "PUT", `/limits/members/${acc2.user.id}`, { can_run: true, team_id: null });
       console.log("✓ usage limits: even split with reserve and adjustments, team budgets, rollout, sessions per launch, runs at once, custom caps");
+      console.log("✓ budget rules fixes: live spend per person, sessions per run on adaptive top-ups, 0 refused (and migrated), partial team PUT, structured refusals, fail closed on a failed allowance lookup");
     }
 
     // ---------- context: company (admins), person (self), product (admins); reaches the AI client and research ----------

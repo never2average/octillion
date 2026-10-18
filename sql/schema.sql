@@ -602,6 +602,27 @@ CREATE TABLE IF NOT EXISTS usage_members (
   max_concurrent_runs   INT,
   PRIMARY KEY (org_id, user_id)
 );
+-- Runs at once and sessions per run no longer accept 0 (it blocked every launch without saying so; "can launch" is the
+-- way to stop launches). Existing zeros keep their effect: whoever a 0 applied to can't launch, and the count is
+-- cleared. All the can_run changes are made before any count is cleared. Runs on every boot; a no-op once no 0 is left.
+UPDATE usage_members m SET can_run = false                                            -- a person's own 0
+ WHERE m.max_concurrent_runs = 0;
+UPDATE usage_members m SET can_run = false                                            -- their team's 0, no own count
+ WHERE m.max_concurrent_runs IS NULL AND can_run IS DISTINCT FROM false
+   AND EXISTS (SELECT 1 FROM usage_teams t WHERE t.id = m.team_id AND t.max_concurrent_runs = 0);
+UPDATE usage_members m SET can_run = false                                            -- the account's 0
+ WHERE can_run IS DISTINCT FROM false AND EXISTS (SELECT 1 FROM usage_policies p WHERE p.org_id = m.org_id AND (p.max_sessions_per_run = 0
+   OR (p.max_concurrent_runs = 0 AND m.max_concurrent_runs IS NULL
+       AND NOT EXISTS (SELECT 1 FROM usage_teams t WHERE t.id = m.team_id AND t.max_concurrent_runs IS NOT NULL))));
+UPDATE usage_members m SET can_run = true                                             -- the account's 0 didn't reach them:
+ WHERE can_run IS NULL AND EXISTS (SELECT 1 FROM usage_policies p WHERE p.org_id = m.org_id    -- keep them launching
+   AND p.new_members_can_run AND p.max_concurrent_runs = 0 AND p.max_sessions_per_run IS DISTINCT FROM 0);
+UPDATE usage_policies SET new_members_can_run = false                                 -- and for everyone without a row
+ WHERE max_sessions_per_run = 0 OR max_concurrent_runs = 0;
+UPDATE usage_members  SET max_concurrent_runs = NULL WHERE max_concurrent_runs = 0;
+UPDATE usage_teams    SET max_concurrent_runs = NULL WHERE max_concurrent_runs = 0;
+UPDATE usage_policies SET max_concurrent_runs = NULL WHERE max_concurrent_runs = 0;
+UPDATE usage_policies SET max_sessions_per_run = NULL WHERE max_sessions_per_run = 0;
 
 -- Context for the AI client (src/context.ts, /app Context): the company's, set by its admins, and each person's own.
 CREATE TABLE IF NOT EXISTS account_context (

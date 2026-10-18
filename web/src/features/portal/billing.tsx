@@ -296,13 +296,20 @@ function InviteDialog({ onClose, onSent }: { onClose: () => void; onSent: () => 
 
 /** One person's limits: team, whether they may launch simulations, their cap or adjustment (per the sharing mode), concurrency. */
 function LimitsDialog({ m, lim, l, mode, onClose, onSaved }: { m: Member; lim: LimitMember; l: Limits; mode: Mode; onClose: () => void; onSaved: () => void }) {
-  const [f, setF] = useState({ team: lim.team_id == null ? '' : String(lim.team_id), run: lim.can_run, cap: str(lim.cap_usd), adjust: lim.adjust_usd ? String(lim.adjust_usd) : '', conc: str(lim.max_concurrent_runs) });
+  const init = { team: lim.team_id == null ? '' : String(lim.team_id), run: lim.can_run, cap: str(lim.cap_usd), adjust: lim.adjust_usd ? String(lim.adjust_usd) : '', conc: str(lim.max_concurrent_runs) };
+  const [f, setF] = useState(init);
+  // Only what was changed is sent, so opening and saving never pins a default (say, "can launch") onto the person.
   const save = (e: React.FormEvent) => {
     e.preventDefault();
-    appApi('PUT', `/limits/members/${encodeURIComponent(m.user_id)}`, {
-      team_id: f.team === '' ? null : Number(f.team), can_run: f.run, max_concurrent_runs: orNull(f.conc),
-      ...(mode === 'custom' ? { cap_usd: orNull(f.cap) } : {}), ...(mode === 'even' ? { adjust_usd: orNull(f.adjust) ?? 0 } : {})
-    }).then(() => { toast.success('Limits saved'); onSaved(); onClose(); }).catch(fail);
+    const body: Record<string, unknown> = {};
+    if (f.team !== init.team) body.team_id = f.team === '' ? null : Number(f.team);
+    if (f.run !== init.run) body.can_run = f.run;
+    if (f.conc !== init.conc) body.max_concurrent_runs = orNull(f.conc);
+    if (mode === 'custom' && f.cap !== init.cap) body.cap_usd = orNull(f.cap);
+    if (mode === 'even' && f.adjust !== init.adjust) body.adjust_usd = orNull(f.adjust) ?? 0;
+    if (!Object.keys(body).length) return onClose();
+    appApi('PUT', `/limits/members/${encodeURIComponent(m.user_id)}`, body)
+      .then(() => { toast.success('Limits saved'); onSaved(); onClose(); }).catch(fail);
   };
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
@@ -317,7 +324,7 @@ function LimitsDialog({ m, lim, l, mode, onClose, onSaved }: { m: Member; lim: L
           </label>
           {mode === 'custom' && <label className='grid gap-1.5 text-sm'>Monthly cap ($)<Input type='number' min={0} step={1} value={f.cap} onChange={(e) => setF({ ...f, cap: e.target.value })} placeholder={l.policy.default_cap_usd == null ? 'no cap' : `default ${l.policy.default_cap_usd}`} /></label>}
           {mode === 'even' && <label className='grid gap-1.5 text-sm'>Adjust their even share (± $)<Input type='number' step={1} value={f.adjust} onChange={(e) => setF({ ...f, adjust: e.target.value })} placeholder='0' /></label>}
-          <label className='grid gap-1.5 text-sm'>Simulations running at once<Input type='number' min={0} step={1} value={f.conc} onChange={(e) => setF({ ...f, conc: e.target.value })} placeholder={l.policy.max_concurrent_runs == null ? 'no limit' : `default ${l.policy.max_concurrent_runs}`} /></label>
+          <label className='grid gap-1.5 text-sm'>Simulations running at once<Input type='number' min={1} step={1} value={f.conc} onChange={(e) => setF({ ...f, conc: e.target.value })} placeholder={l.policy.max_concurrent_runs == null ? 'no limit' : `default ${l.policy.max_concurrent_runs}`} /></label>
           <label className='flex items-center gap-2 text-sm leading-none'><Checkbox checked={f.run} onCheckedChange={(v) => setF({ ...f, run: Boolean(v) })} /> Can launch simulations</label>
           <DialogFooter><Button type='button' variant='outline' onClick={onClose}>Cancel</Button><Button type='submit'>Save limits</Button></DialogFooter>
         </form>
@@ -375,7 +382,7 @@ function Rules({ l, reload }: { l: Limits; reload: () => void }) {
       <div className='grid gap-x-8 gap-y-5 sm:grid-cols-2'>
         {f.mode === 'even' && <NumberField label='Shared reserve' unit='$' value={f.reserve} onChange={(v) => setF({ ...f, reserve: v })} hint='Kept out of the even split.' />}
         {f.mode === 'custom' && <NumberField label='Default monthly cap' unit='$' value={f.defaultCap} onChange={(v) => setF({ ...f, defaultCap: v })} placeholder='no cap' hint='For people without their own.' />}
-        <NumberField label='Runs at once, per person' value={f.conc} onChange={(v) => setF({ ...f, conc: v })} placeholder='no limit' hint='Simulations running together.' />
+        <NumberField label='Runs at once, per person' value={f.conc} onChange={(v) => setF({ ...f, conc: v })} placeholder='no limit' hint='Simulations running together.' min={1} />
         <NumberField label='Agent sessions per launch' value={f.sess} onChange={(v) => setF({ ...f, sess: v })} placeholder="server's limit" hint='The size of one run.' min={1} />
         <label className='flex flex-col gap-2 text-sm leading-none'>
           New members can launch
@@ -473,7 +480,7 @@ function Teams({ l, reload }: { l: Limits; reload: () => void }) {
               <DialogHeader><DialogTitle>{edit.id == null ? 'Add a team' : 'Edit team'}</DialogTitle><DialogDescription>A team budget caps the team&apos;s combined spend; in Split evenly it is shared among its people.</DialogDescription></DialogHeader>
               <label className='grid gap-1.5 text-sm'>Name<Input required autoFocus value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} /></label>
               <label className='grid gap-1.5 text-sm'>Monthly budget ($)<Input type='number' min={0} step={1} value={edit.budget} onChange={(e) => setEdit({ ...edit, budget: e.target.value })} placeholder='no cap' /></label>
-              <label className='grid gap-1.5 text-sm'>Runs at once, per person<Input type='number' min={0} step={1} value={edit.conc} onChange={(e) => setEdit({ ...edit, conc: e.target.value })} placeholder='account default' /></label>
+              <label className='grid gap-1.5 text-sm'>Runs at once, per person<Input type='number' min={1} step={1} value={edit.conc} onChange={(e) => setEdit({ ...edit, conc: e.target.value })} placeholder='account default' /></label>
               <DialogFooter><Button type='button' variant='outline' onClick={() => setEdit(null)}>Cancel</Button><Button type='submit'>{edit.id == null ? 'Add team' : 'Save team'}</Button></DialogFooter>
             </form>
           )}
