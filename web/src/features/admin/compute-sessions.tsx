@@ -89,7 +89,6 @@ export function ComputeSessions() {
       render: (s) => <span className='flex min-w-0 flex-col gap-1'><Mono>{s.simulation_id}</Mono><span className='text-muted-foreground truncate text-xs'>{s.org.name}</span></span> },
     { key: 'agent', label: 'Agent · harness', type: 'select', value: (s) => s.agent_id ?? '',
       render: (s) => <span className='flex min-w-0 flex-col gap-1'><span className='truncate'>{s.agent_id ?? '—'}</span><span className='text-muted-foreground text-xs'>{s.harness}</span></span> },
-    { key: 'model', label: 'Model', type: 'select', value: (s) => s.model, hidden: true, render: (s) => <Mono>{s.model.replace(/^.*\//, '')}</Mono> },
     { key: 'status', label: 'Status', keep: true, type: 'select', value: (s) => s.status, options: STATUS_OPTS,
       render: (s) => (
         <span className='flex flex-wrap items-center gap-1.5'>
@@ -106,15 +105,7 @@ export function ComputeSessions() {
         : s.completed_reason ? <span>{s.completed_reason.replace(/_/g, ' ')}</span> : <span className='text-muted-foreground'>—</span> },
     { key: 'error', label: 'Error', className: 'max-w-80', type: 'text', value: (s) => s.error_message ?? '',
       render: (s) => s.error_message ? <span className='text-muted-foreground line-clamp-1 text-xs' title={s.error_message}>{firstLine(s.error_message)}</span> : null },
-    { key: 'where', label: 'Orchestrator / sandbox', hidden: true, type: 'text', value: (s) => `${s.worker_id ?? ''} ${s.sandbox_id ?? ''}`,
-      render: (s) => <span className='flex flex-col gap-1'><Mono>{s.worker_id ?? '—'}</Mono>{s.sandbox_id && <Mono>{s.sandbox_id}</Mono>}</span> },
-    { key: 'cost', label: 'Cost', className: 'text-right', type: 'number', value: (s) => s.cost_usd + (s.sandbox_est_usd ?? 0),
-      render: (s) => (
-        <span className='flex flex-col items-end gap-1 tabular-nums'>
-          <span>{cents(s.cost_usd)}</span>
-          {s.sandbox_est_usd != null && <span className='text-muted-foreground text-xs' title={EST}>+ {cents(s.sandbox_est_usd)} est.</span>}
-        </span>
-      ) }
+    { key: 'cost', label: 'Model cost', className: 'text-right', type: 'number', value: (s) => s.cost_usd, render: (s) => <span className='tabular-nums'>{cents(s.cost_usd)}</span> }
   ];
 
   const set = (patch: Record<string, string | null>) => url.write({ ...patch, session: null });

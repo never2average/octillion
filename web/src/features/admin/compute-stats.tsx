@@ -30,7 +30,7 @@ export function JobsStats({ rows }: { rows: readonly JobRow[] }) {
   const by = (st: string) => rows.filter((j) => j.state === st).length;
   const o = s?.running.orchestrators;
   const failed = rows.filter((j) => j.failures.count > 0 || j.failed_launches > 0).length;
-  const spend = rows.reduce((t, j) => t + j.spend.total_usd, 0), est = rows.reduce((t, j) => t + j.spend.sandbox_est_usd, 0);
+  const spend = rows.reduce((t, j) => t + j.spend.session_model_usd + j.spend.orchestrator_model_usd, 0);
   return (
     <>
       <StatStrip items={[
@@ -43,7 +43,7 @@ export function JobsStats({ rows }: { rows: readonly JobRow[] }) {
         { label: 'Pods running / reserved', spark: t('running'), value: s ? `${s.running.pods_used} / ${s.running.pods_reserved}` : '—' },
         { label: 'Jobs with failures', spark: t('jobs_failed'), value: n(failed), hint: rows.length ? `${pct(failed / rows.length)} of the jobs shown` : undefined },
         { label: 'Failed launches, 24 h', spark: t('launches_failed'), value: n(s?.failures_24h.launches), hint: 'orchestrators that did not start' },
-        { label: 'Spend, jobs shown', spark: t('spend'), value: cents(spend), hint: est > 0 ? `incl. ${cents(est)} sandbox est.` : undefined }
+        { label: 'Model spend, jobs shown', spark: t('spend'), value: cents(spend), hint: 'metered through the gateway' }
       ]} />
     </>
   );
@@ -66,7 +66,7 @@ export function SessionsStats() {
         { label: 'Ended, 24 h', spark: t('ended'), value: n(f?.ended) },
         { label: 'Failed, 24 h', spark: t('failed'), value: n(f?.sessions), hint: f?.ended ? `${pct(f.rate)} of the sessions that ended` : undefined },
         { label: 'Top failure, 24 h', spark: t('top_failure'), value: f?.top ? n(f.top.count) : '—', hint: f?.top?.label ?? 'no failures' },
-        { label: 'Spend today', spark: t('spend'), value: s ? cents(s.spend_today.total_usd) : '—', hint: s?.spend_today.sandbox_est_usd ? `incl. ${cents(s.spend_today.sandbox_est_usd)} sandbox est.` : undefined }
+        { label: 'Model spend today', spark: t('spend'), value: s ? cents(s.spend_today.session_model_usd) : '—', hint: 'finished sessions, UTC day' }
       ]} />
     </>
   );

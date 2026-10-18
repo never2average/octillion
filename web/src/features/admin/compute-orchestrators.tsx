@@ -156,19 +156,9 @@ function OrchTable({ rows, loading, limits, boat, empty, open, onOpen, onJob, fi
         {o.from_image && <Chip title={o.from_image}>image</Chip>}{o.boot_ms == null ? <span className='text-muted-foreground'>—</span> : dur(o.boot_ms / 1000)}
       </span>
     ) },
-    { key: 'ttl', label: 'TTL left', className: 'text-right', type: 'number', value: (o) => o.ttl_left_s, hidden: true,
-      render: (o) => (o.state === 'deleted' ? <span className='text-muted-foreground'>n/a</span> : boatNA(<span className='tabular-nums'>{dur(o.ttl_left_s)}</span>)) },
-    { key: 'code', label: 'Code', type: 'text', value: (o) => o.code_hash ?? '', hidden: true, render: (o) => (
-      <span className='flex items-center gap-1.5'>{o.code_hash ? <Mono>{o.code_hash.slice(0, 8)}</Mono> : <span className='text-muted-foreground'>—</span>}
-        {o.retiring_since && <Chip tone='warn' title={`Retiring since ${new Date(o.retiring_since).toLocaleString()}: it runs older code and takes no new work`}>retiring</Chip>}
-        {o.code_hash && !o.current_code && !o.retiring_since && o.state !== 'deleted' && <Chip title='Not the code this server launches'>older</Chip>}</span>
-    ) },
     { key: 'ended', label: 'Ended because', className: 'max-w-72', type: 'text', value: (o) => o.end_class?.label ?? '', render: (o) => <EndedBecause o={o} /> },
-    { key: 'spend', label: 'Spend', className: 'text-right', type: 'number', value: (o) => o.spend.sandbox_est_usd + o.spend.orchestrator_model_usd, render: (o) => (
-      <span className='flex flex-col items-end gap-1 tabular-nums'>
-        <span title={EST}>{cents(o.spend.sandbox_est_usd)} est.</span>
-        <span className='text-muted-foreground text-xs' title='Orchestrator model spend through the gateway (its lifetime)'>+ {cents(o.spend.orchestrator_model_usd)} model</span>
-      </span>
+    { key: 'spend', label: 'Model spend', className: 'text-right', type: 'number', value: (o) => o.spend.orchestrator_model_usd, render: (o) => (
+      <span className='tabular-nums' title='Orchestrator model spend through the gateway (its lifetime)'>{cents(o.spend.orchestrator_model_usd)}</span>
     ) }
   ];
   return (

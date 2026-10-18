@@ -223,7 +223,6 @@ export function ComputeDecisions({ runtime, stats }: { runtime: 'vm' | 'vercel' 
     ) },
     { key: 'note', label: 'Note', className: 'max-w-80', type: 'text', value: (t) => t.note ?? '', render: (t) => (t.note ? <span className='line-clamp-2 text-xs' title={t.note}>{t.note}</span> : null) },
     { key: 'error', label: 'Error', className: 'max-w-80', type: 'text', value: (t) => t.error ?? '', render: (t) => (t.error ? <span className='text-destructive line-clamp-2 text-xs' title={t.error}>{t.error}</span> : null) },
-    { key: 'holder', label: 'Leader', type: 'text', value: (t) => t.holder ?? '', render: (t) => <span className='text-muted-foreground font-mono text-xs'>{t.holder ?? '—'}</span> }
   ];
 
   const filters = (

@@ -106,8 +106,6 @@ export function ComputeJobs() {
         </span>
       ) : <span className='text-muted-foreground'>—</span>
     ) },
-    { key: 'pods', label: 'Pods: running / reserved', className: 'text-right', type: 'number', value: (j) => j.pods.running,
-      render: (j) => (j.pods.reserved || j.pods.running ? <span className='tabular-nums'>{j.pods.running} <span className='text-muted-foreground'>/ {j.pods.reserved}</span></span> : <span className='text-muted-foreground'>—</span>) },
     { key: 'clock', label: 'Waiting since / running for', className: 'text-right', type: 'number', value: clockOf, render: (j) => {
       const c = clockOf(j);
       if (c == null) return j.finished_at ? <span className='text-muted-foreground text-xs'>ended {dur(since(j.finished_at))} ago</span> : <span className='text-muted-foreground'>—</span>;
@@ -120,11 +118,9 @@ export function ComputeJobs() {
           {j.failures.top_label && <Chip tone='bad' title='Most common failure class'>{j.failures.top_label}</Chip>}</span>
       ) : <span className='text-muted-foreground'>0</span>
     ) },
-    { key: 'spend', label: 'Spend', className: 'text-right', type: 'number', value: (j) => j.spend.total_usd, render: (j) => (
-      <span className='flex flex-col items-end gap-1 tabular-nums' title={j.kind === 'simulation' ? undefined : RESEARCH_SPEND}>
-        <span>{cents(j.spend.total_usd)}</span>
-        {j.spend.sandbox_est_usd > 0 && <span className='text-muted-foreground text-xs' title={EST}>incl. {cents(j.spend.sandbox_est_usd)} est.</span>}
-      </span>
+    // Metered model spend only (sessions and orchestrators through the gateway), not the sandbox price-table estimate.
+    { key: 'spend', label: 'Model spend', className: 'text-right', type: 'number', value: (j) => j.spend.session_model_usd + j.spend.orchestrator_model_usd, render: (j) => (
+      <span className='tabular-nums' title={j.kind === 'simulation' ? undefined : RESEARCH_SPEND}>{cents(j.spend.session_model_usd + j.spend.orchestrator_model_usd)}</span>
     ) }
   ];
 
