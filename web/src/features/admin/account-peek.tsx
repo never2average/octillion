@@ -17,6 +17,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Icons } from '@/components/icons';
 import { adminApi } from '@/lib/api-client';
 import { money, usd } from '@/lib/octillion-format';
+import { TablePager, usePaged } from '@/components/layout/table-pager';
 import { cn } from '@/lib/utils';
 import { Dock } from '@/features/portal/memory';
 import { post, STAGE_LABELS, useAdmin, type InviteResult, type OrgRow } from './lib';
@@ -270,33 +271,38 @@ function useConfirm() {
 }
 
 /** Flat list: muted header, no borders between columns; one muted line, or nothing, when empty. */
-function List<T>({ title, rows, cols, empty, actions, hideEmpty, rowClassName }: {
-  title: string; rows: T[]; cols: [string, (r: T) => ReactNode, string?][]; empty?: string; actions?: (r: T) => RowAction[]; hideEmpty?: boolean; rowClassName?: (r: T) => string | undefined;
+/** A section of the panel: an outlined table, paged (10 a page) with the item count, empty ones keep their outline. */
+function List<T>({ title, rows, cols, empty, actions, rowClassName }: {
+  title: string; rows: T[]; cols: [string, (r: T) => ReactNode, string?][]; empty?: string; actions?: (r: T) => RowAction[]; rowClassName?: (r: T) => string | undefined;
 }) {
-  if (!rows.length && hideEmpty) return null;
+  const p = usePaged(rows, 10);
   return (
     <div className='grid gap-2'>
-      <p className='text-sm leading-none font-medium'>{title}{rows.length > 1 && <span className='text-muted-foreground ml-1.5 font-normal'>{rows.length}</span>}</p>
-      {!rows.length ? <p className='text-muted-foreground text-sm leading-none'>{empty}</p> : (
-        <div className='overflow-x-auto'>
-          <Table>
-            <TableHeader>
-              <TableRow className='hover:bg-transparent'>
-                {cols.map(([l, , c], i) => <TableHead key={i} className={cn('text-muted-foreground h-8 border-r-0 px-3 text-xs font-normal first:pl-0 last:pr-0', c)}>{l}</TableHead>)}
-                {actions && <TableHead className='h-8 w-8 border-r-0 pr-0'><span className='sr-only'>Actions</span></TableHead>}
+      <p className='text-sm leading-none font-medium'>{title}</p>
+      <div className='overflow-x-auto border-y'>
+        <Table>
+          <TableHeader>
+            <TableRow className='hover:bg-transparent'>
+              {cols.map(([l, , c], i) => <TableHead key={i} className={cn('text-muted-foreground h-8 px-3 text-xs font-normal', c)}>{l}</TableHead>)}
+              {actions && <TableHead className='h-8 w-8'><span className='sr-only'>Actions</span></TableHead>}
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {p.rows.map((r, i) => (
+              <TableRow key={i} className={rowClassName?.(r)}>
+                {cols.map(([, f, c], j) => <TableCell key={j} className={cn('px-3 py-2.5 text-sm leading-none', c)}>{f(r)}</TableCell>)}
+                {actions && <TableCell className='w-8 py-1 text-right'><ActionsMenu items={actions(r)} /></TableCell>}
               </TableRow>
-            </TableHeader>
-            <TableBody>
-              {rows.map((r, i) => (
-                <TableRow key={i} className={rowClassName?.(r)}>
-                  {cols.map(([, f, c], j) => <TableCell key={j} className={cn('border-r-0 px-3 py-2.5 text-sm leading-none first:pl-0 last:pr-0', c)}>{f(r)}</TableCell>)}
-                  {actions && <TableCell className='w-8 border-r-0 py-1 pr-0 text-right'><ActionsMenu items={actions(r)} /></TableCell>}
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
-      )}
+            ))}
+            {!rows.length && (
+              <TableRow className='hover:bg-transparent'>
+                <TableCell colSpan={cols.length + (actions ? 1 : 0)} className='text-muted-foreground py-6 text-center text-sm'>{empty ?? 'Nothing yet.'}</TableCell>
+              </TableRow>
+            )}
+          </TableBody>
+        </Table>
+      </div>
+      <TablePager p={p} noun={title.toLowerCase()} className='py-0' />
     </div>
   );
 }
@@ -409,6 +415,9 @@ export function AccountPeek({ org, ctl }: { org: Org; ctl: AccountCtl }) {
       )}
 
       <dl>
+        <Field label='Customer'>
+          {org.stripe_customer_id ? <CopyText value={org.stripe_customer_id} ok='Customer id copied' /> : <span className='text-muted-foreground'>{stripeOn ? 'No Stripe customer yet' : 'Stripe off'}</span>}
+        </Field>
         <Field label='Stage'>
           <span className='block truncate' title={`${org.stage_label} · next: ${org.next_step}`}>{org.stage_label}<span className='text-muted-foreground'> · next: {org.next_step}</span></span>
         </Field>
@@ -431,6 +440,8 @@ export function AccountPeek({ org, ctl }: { org: Org; ctl: AccountCtl }) {
             <CopyText value={org.contact} ok='Email copied' />
           </Field>
         )}
+        <Field label='Slug'><CopyText value={org.slug} ok='Slug copied' /></Field>
+        <Field label='Created'><When d={org.created_at} />{req && <span className='text-muted-foreground'> · requested <When d={req.created_at} /> by {req.email}</span>}</Field>
       </dl>
 
       <ErrorBox error={error} />
@@ -448,7 +459,7 @@ export function AccountPeek({ org, ctl }: { org: Org; ctl: AccountCtl }) {
                 ['Status', (m) => (m.status === 'inactive' ? word('bad', 'suspended') : word(m.status === 'active' || m.status === 'pending' ? 'ok' : 'info', m.status))],
                 ['Joined', (m) => <When d={m.created_at} />]
               ]} />
-              <List title='Invitations' rows={d.invitations} hideEmpty actions={invitation} cols={[
+              <List title='Invitations' rows={d.invitations} actions={invitation} cols={[
                 ['Email', (x) => x.email],
                 ['Role', (x) => x.role || 'member'],
                 ['State', (x) => word(x.state === 'expired' ? 'warn' : x.state === 'pending' ? 'ok' : 'info', x.state)],
@@ -473,12 +484,12 @@ export function AccountPeek({ org, ctl }: { org: Org; ctl: AccountCtl }) {
               ['Avg', (t) => (t.avg_ms != null ? `${t.avg_ms} ms` : dash), 'text-right tabular-nums'],
               ['Last', (t) => <When d={t.last} />]
             ]} />
-            <List title='Recent errors' rows={d.errors} hideEmpty cols={[
+            <List title='Recent errors' rows={d.errors} cols={[
               ['When', (e) => <When d={e.at} />],
               ['Call', (e) => e.name || e.method],
               ['Error', (e) => e.error, 'whitespace-normal leading-snug']
             ]} />
-            <List title='Clients' rows={d.clients} hideEmpty cols={[
+            <List title='Clients' rows={d.clients} cols={[
               ['Client', (c) => c.client],
               ['Calls', (c) => count(c.n), 'text-right tabular-nums'],
               ['Last', (c) => <When d={c.last} />]
@@ -488,7 +499,7 @@ export function AccountPeek({ org, ctl }: { org: Org; ctl: AccountCtl }) {
               ['Website', (x) => (x.website_url ? <a href={x.website_url} target='_blank' rel='noopener noreferrer' className='text-muted-foreground hover:text-foreground'>{host(x.website_url)}</a> : dash)],
               ['Added', (x) => <When d={x.created_at} />]
             ]} />
-            <List title='Onboarding research' rows={d.research} hideEmpty cols={[
+            <List title='Onboarding research' rows={d.research} cols={[
               ['Product', (r) => r.product],
               ['Status', (r) => <>{word(runTone(r.status), r.status)}{r.stage && r.status === 'running' && <span className='text-muted-foreground ml-1.5'>{r.stage}</span>}</>],
               ['Started', (r) => <When d={r.created_at} />],
@@ -504,34 +515,25 @@ export function AccountPeek({ org, ctl }: { org: Org; ctl: AccountCtl }) {
 
           <section id='peek-billing' className='grid scroll-mt-4 gap-6'>
             {d.integrations.stripe && (<>
-              <List title='Invoices' rows={d.invoices} hideEmpty cols={[
+              <List title='Invoices' rows={d.invoices} cols={[
                 ['Invoice', (x) => x.number || x.id],
                 ['Status', (x) => word(x.status === 'paid' ? 'ok' : x.status === 'open' ? 'warn' : x.status === 'uncollectible' ? 'bad' : 'neutral', x.status)],
                 ['Total', (x) => money(x.total, x.currency), 'text-right tabular-nums'],
                 ['Date', (x) => <When d={typeof x.created === 'number' ? new Date(x.created * 1000) : x.created} />],
                 ['', (x) => (x.url ? <a href={x.url} target='_blank' rel='noopener noreferrer' aria-label='Open invoice' className='text-muted-foreground hover:text-foreground'><Icons.externalLink className='size-3.5' /></a> : null), 'w-8 text-right']
               ]} />
-              {org.stripe_customer_id && (
-                <p className='text-muted-foreground text-xs leading-none'>
-                  Customer <CopyText value={org.stripe_customer_id} ok='Customer id copied' />
-                </p>
-              )}
             </>)}
           </section>
 
-          <section id='peek-onboarding' className='grid scroll-mt-4 gap-2'>
-            <p className='text-sm leading-none font-medium'>Milestones</p>
-            <dl>
-              {stages.filter((k) => org.reached?.[k]).map((k) => <Field key={k} label={STAGE_LABELS[k] ?? k}><When d={org.reached[k]} /></Field>)}
-              {org.stage !== 'reported' && <Field label='Next'><span className='text-muted-foreground'>{org.next_step}</span></Field>}
-            </dl>
+          <section id='peek-onboarding' className='grid scroll-mt-4 gap-6'>
+            <List title='Milestones' empty='No milestone reached yet.' rows={stages.filter((k) => org.reached?.[k]).map((k) => ({ k, at: org.reached[k] }))} cols={[
+              ['Milestone', (m) => STAGE_LABELS[m.k] ?? m.k],
+              ['Reached', (m) => <When d={m.at} />]
+            ]} />
           </section>
         </div>
       )}
 
-      <p className='text-muted-foreground text-xs leading-none'>
-        {org.slug} · created <When d={org.created_at} />{req && <> · requested <When d={req.created_at} /> by {req.email}</>}
-      </p>
       {confirm.dialog}
     </div>
   );
