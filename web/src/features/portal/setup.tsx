@@ -315,6 +315,32 @@ function JourneyView({ j, onChanged }: { j: Journey; onChanged: () => void }) {
 }
 
 /** Setup as a vertical timeline: every step explained, what is done (and when), what is next, what is optional. */
+/**
+ * A step's description, selectable, with its prompt (`Type: "…"`) pulled out into a box you can copy in one click and
+ * paste into your AI client. A copy button for the whole description sits beside it on hover.
+ */
+function StepHelp({ help, done }: { help: string; done: boolean }) {
+  const m = help.match(/\s*Type:\s*"(.+?)"\.?\s*(.*)$/);
+  const text = m ? help.slice(0, m.index).trim() : help, prompt = m?.[1] ?? null, after = m?.[2]?.trim() ?? '';
+  return (
+    <div className='group/help mt-1 flex flex-col gap-2'>
+      <p className={cn('text-sm select-text', done ? 'text-muted-foreground/70' : 'text-muted-foreground')}>
+        {text}{after && <> {after}</>}
+        <button type='button' aria-label='Copy description' title='Copy description' onClick={() => copy(help)}
+          className='text-muted-foreground hover:text-foreground ml-1.5 inline-flex align-middle opacity-0 transition-opacity group-hover/help:opacity-100 focus-visible:opacity-100'>
+          <Icons.page className='size-3.5' />
+        </button>
+      </p>
+      {prompt && (
+        <div className='bg-muted/50 flex items-center gap-2 rounded-md border px-3 py-2'>
+          <code className='min-w-0 flex-1 font-mono text-xs break-words select-all'>{prompt}</code>
+          <CopyButton text={prompt} label='Copy prompt' />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Timeline({ s, next }: { s: Setup; next: Step | undefined }) {
   const pct = Math.round((s.done / Math.max(1, s.total)) * 100);
   return (
@@ -337,7 +363,7 @@ function Timeline({ s, next }: { s: Setup; next: Step | undefined }) {
                   <span className={cn('font-medium', x.done && 'text-muted-foreground')}>{x.label.replace(' (team)', '')}</span>
                   {cur && <Badge>up next</Badge>}
                 </div>
-                <p className={cn('mt-1 text-sm', x.done ? 'text-muted-foreground/70' : 'text-muted-foreground')}>{x.help}</p>
+                <StepHelp help={x.help} done={x.done} />
               </div>
             </li>
           );
