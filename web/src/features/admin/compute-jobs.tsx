@@ -14,7 +14,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Icons } from '@/components/icons';
 import { cn } from '@/lib/utils';
 import { useAdmin } from './lib';
-import { copyText, ErrorBox, Mono, Notice, Section, StatusBadge, When, type Tone } from './ui';
+import { copyText, ErrorBox, Mono, Notice, StatusBadge, When, type Tone } from './ui';
 import { Chip, cents, dur, EST, jobSessions, PeekSection, since, useComputeParams, useNow, nextPinned, useScrollTo } from './compute-common';
 import { MiniTable } from './compute-sessions';
 
@@ -126,6 +126,9 @@ export function ComputeJobs() {
 
   const filters = (
     <>
+      <NativeSelect aria-label='State' value={state} onChange={(e) => set({ jstate: e.target.value === 'all' ? null : e.target.value })}>
+        {STATES.map((c) => <NativeSelectOption key={c.id} value={c.id}>{c.id === 'all' ? 'Every state' : c.label}</NativeSelectOption>)}
+      </NativeSelect>
       <NativeSelect aria-label='Kind' value={kind ?? ''} onChange={(e) => set({ jkind: e.target.value || null })}>
         <NativeSelectOption value=''>Every kind</NativeSelectOption>
         {(Object.keys(KIND_LABEL) as Kind[]).map((k) => <NativeSelectOption key={k} value={k}>{KIND_LABEL[k]}</NativeSelectOption>)}
@@ -135,22 +138,20 @@ export function ComputeJobs() {
         <NativeSelectOption value='24h'>Finished in 24 h</NativeSelectOption>
         <NativeSelectOption value='7d'>Finished in 7 days</NativeSelectOption>
       </NativeSelect>
-      <Button variant={failures ? 'default' : 'outline'} onClick={() => set({ jfail: failures ? null : '1' })} title='Jobs with failed sessions or failed orchestrator launches'>
-        <Icons.warning /> Has failures
-      </Button>
-      <Button variant={sort === 'spend' ? 'default' : 'outline'} onClick={() => set({ jsort: sort === 'spend' ? null : 'spend' })} title='Most spend first'>
-        $ Spend first
-      </Button>
+      <NativeSelect aria-label='Failures' value={failures ? '1' : ''} onChange={(e) => set({ jfail: e.target.value || null })}
+        title='Jobs with failed sessions or failed orchestrator launches'>
+        <NativeSelectOption value=''>With or without failures</NativeSelectOption>
+        <NativeSelectOption value='1'>Has failures</NativeSelectOption>
+      </NativeSelect>
+      <NativeSelect aria-label='Order' value={sort ?? ''} onChange={(e) => set({ jsort: e.target.value || null })}>
+        <NativeSelectOption value=''>Most urgent first</NativeSelectOption>
+        <NativeSelectOption value='spend'>Most spend first</NativeSelectOption>
+      </NativeSelect>
     </>
   );
 
   return (
-    <Section title={<span id='compute-jobs'>Jobs</span>} description='Simulations and research jobs that are active or finished recently: what each one waits for, runs on and costs.'>
-      <div className='flex flex-wrap items-center gap-1.5' role='tablist' aria-label='Job state'>
-        {STATES.map((c) => (
-          <Button key={c.id} role='tab' aria-selected={state === c.id} size='xs' variant={state === c.id ? 'default' : 'outline'} onClick={() => set({ jstate: c.id === 'all' ? null : c.id })}>{c.label}</Button>
-        ))}
-      </div>
+    <div id='compute-jobs-anchor' className='flex min-w-0 flex-col gap-3'>
       {error && !data && (
         <div role='alert' className='border-destructive/30 bg-destructive/5 text-destructive flex items-center gap-3 rounded-lg border px-4 py-3 text-sm'>
           <span className='min-w-0 flex-1'>Could not load jobs: {error.message}</span>
@@ -169,8 +170,8 @@ export function ComputeJobs() {
         ]}
         detailTitle={(j) => <span className='flex items-center gap-2'><Mono>{j.id}</Mono><StatusBadge tone={STATE_TONE[j.state]}>{j.state}</StatusBadge></span>}
         detail={(j) => <JobPeek id={j.id} onSessions={() => showSessions(j.id)} onOrch={(o) => showOrch(o, j.id)} />}
-        empty={state === 'all' && !kind && !failures ? `No jobs active or finished in the last ${range === '1h' ? 'hour' : range === '24h' ? '24 hours' : '7 days'}.` : 'No jobs match these filters.'} />
-    </Section>
+        empty={state === 'all' && !kind && !failures ? `No jobs active or finished in the last ${range === '1h' ? 'hour' : range === '24h' ? '24 hours' : '7 days'}.` : 'No jobs match these filters.'} compact />
+    </div>
   );
 }
 

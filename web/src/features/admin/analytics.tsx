@@ -377,10 +377,9 @@ function Report({ view }: { view: 'analytics' | 'health' }) {
   if (tab !== 'errors') {
     return (
       <PageContainer>
-        <div className='flex min-w-0 flex-col gap-4'>
+        <div className='flex min-w-0 flex-col gap-3'>
           <HealthTabs tab={tab} />
-          {/* the tab names the table: no repeated heading above it */}
-          <div className='[&_section>div:first-child_h2]:hidden'>{tab === 'jobs' ? <ComputeJobs /> : <ComputeSessions />}</div>
+          {tab === 'jobs' ? <ComputeJobs /> : <ComputeSessions />}
         </div>
       </PageContainer>
     );

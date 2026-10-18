@@ -103,7 +103,7 @@ export function useScrollTo(section: string, ready: boolean) {
   useEffect(() => {
     if (!pending.current || !ready) return;
     pending.current = false;
-    document.getElementById(`compute-${section}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    (document.getElementById(`compute-${section}-anchor`) ?? document.getElementById(`compute-${section}`))?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, [ready, asked, section]);
 }
 

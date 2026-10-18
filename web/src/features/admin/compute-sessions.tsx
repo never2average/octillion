@@ -18,7 +18,7 @@ import { Icons } from '@/components/icons';
 import { cn } from '@/lib/utils';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { post, useAdmin, useAdminAction } from './lib';
-import { copyText, ErrorBox, Mono, Notice, Section, StatusBadge, When, type Tone } from './ui';
+import { copyText, ErrorBox, Mono, Notice, StatusBadge, When, type Tone } from './ui';
 import { AMBER, Chip, cents, dur, EST, jobSessions, PeekSection, SectionLink, since, useComputeParams, useNow, nextPinned, useScrollTo } from './compute-common';
 
 export interface SessionRow {
@@ -131,16 +131,16 @@ export function ComputeSessions() {
       <NativeSelect aria-label='Order' value={sort} onChange={(e) => set({ sort: e.target.value === 'recent' ? null : e.target.value })}>
         {Object.entries(SORT_LABEL).map(([k, v]) => <NativeSelectOption key={k} value={k}>{v}</NativeSelectOption>)}
       </NativeSelect>
-      <Button variant={stale ? 'default' : 'outline'} onClick={() => set({ stale: stale ? null : '1' })} title='Running sessions with no heartbeat for 5 minutes'>
-        <Icons.clock /> Heartbeat &gt; 5 min
-      </Button>
+      <NativeSelect aria-label='Heartbeat' value={stale ? '1' : ''} onChange={(e) => set({ stale: e.target.value || null })} title='Running sessions with no heartbeat for 5 minutes'>
+        <NativeSelectOption value=''>Any heartbeat</NativeSelectOption>
+        <NativeSelectOption value='1'>No heartbeat for 5 min</NativeSelectOption>
+      </NativeSelect>
       {job && <Button variant='outline' onClick={() => set({ job_id: null })} title='Show every job'><Mono>{job}</Mono><Icons.close /></Button>}
     </>
   );
 
   return (
-    <Section title={<span id='compute-sessions'>Sessions</span>}
-      description={shown && shown.total > rows.length ? `The ${rows.length} most relevant of ${shown.total} matching sessions; narrow the filters to see others.` : 'Agent sessions across every account: waiting, running and how each one ended.'}>
+    <div id='compute-sessions-anchor' className='flex min-w-0 flex-col gap-3'>
       {error && !shown && (
         <div role='alert' className='border-destructive/30 bg-destructive/5 text-destructive flex items-center gap-3 rounded-lg border px-4 py-3 text-sm'>
           <span className='min-w-0 flex-1'>Could not load sessions: {error.message}</span>
@@ -159,7 +159,7 @@ export function ComputeSessions() {
         ]}
         detailTitle={(s) => <span className='flex items-center gap-2'><Mono>{s.id}</Mono><StatusBadge tone={STATUS_TONE[s.status]}>{s.status}</StatusBadge></span>}
         detail={(s) => <SessionPeek id={s.id} onJob={() => url.write(jobSessions(s.simulation_id))} onCancel={(x) => setCancelling(x)} cancelling={cancel.isPending} />}
-        empty='No sessions match these filters.' />
+        empty={shown && shown.total > rows.length ? `No match among the ${rows.length} most relevant of ${shown.total} sessions; narrow the filters.` : 'No sessions match these filters.'} compact />
       <AlertDialog open={!!cancelling} onOpenChange={(o) => !o && setCancelling(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -174,7 +174,7 @@ export function ComputeSessions() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </Section>
+    </div>
   );
 }
 
