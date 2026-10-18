@@ -464,6 +464,16 @@ ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAUL
   CHECK (status IN ('pending', 'approved', 'declined'));
 ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS org_id INT REFERENCES organizations(id) ON DELETE SET NULL;
 ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS decided_at TIMESTAMPTZ;
+-- More of what the person told us, where they came from, and the AI's background research on the company (src/prospect.ts).
+ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS name TEXT;
+ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS role TEXT;
+ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS team_size TEXT;
+ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS agents TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS source JSONB;                -- referrer, utm_*, landing page, country
+ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS research JSONB;
+ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS research_status TEXT CHECK (research_status IN ('running', 'done', 'failed'));
+ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS research_error TEXT;
+ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS researched_at TIMESTAMPTZ;
 ALTER TABLE mcp_events ADD COLUMN IF NOT EXISTS user_id TEXT;           -- the WorkOS user when signed in (null for API keys)
 CREATE INDEX IF NOT EXISTS mcp_events_user_idx ON mcp_events (org_id, user_id, at DESC);
 

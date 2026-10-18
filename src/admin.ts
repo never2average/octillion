@@ -301,7 +301,8 @@ export async function orgDetail(slug: string) {
 export async function listRequests(status?: string) {
   if (status && !["pending", "approved", "declined"].includes(status)) throw new AdminError("status must be pending, approved or declined");
   return (await getDb()).query(
-    `SELECT q.id, q.email, q.company, q.product_url, q.message, q.created_at, q.status, q.decided_at, o.slug AS org_slug, o.name AS org_name
+    `SELECT q.id, q.email, q.company, q.product_url, q.message, q.created_at, q.status, q.decided_at, o.slug AS org_slug, o.name AS org_name,
+            q.name, q.role, q.team_size, q.agents, q.source, q.research, q.research_status, q.research_error, q.researched_at
        FROM access_requests q LEFT JOIN organizations o ON o.id = q.org_id
       WHERE $1::text IS NULL OR q.status = $1
       ORDER BY q.status = 'pending' DESC, q.created_at DESC LIMIT 500`, [status ?? null]);
@@ -311,6 +312,7 @@ const intId = (v: number) => {
   if (!Number.isSafeInteger(v) || v <= 0) throw new AdminError("Invalid id");
   return v;
 };
+export const requestExists = async (id: number) => void (await requestById(id));
 async function requestById(id: number) {
   intId(id);
   const [r] = await (await getDb()).query<{ id: number; email: string; company: string; status: string }>(
