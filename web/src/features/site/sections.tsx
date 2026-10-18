@@ -9,13 +9,15 @@ import { AccountButton } from './account-cta';
 import { AgentLogo } from './agent-logos';
 
 /** Section wrapper: anchor target, eyebrow, title and an optional one-line lead. */
-export function Section({ id, eyebrow, title, lead, children, className }: {
+export function Section({ id, eyebrow, title, lead, children, className, center }: {
   id?: string; eyebrow?: string; title: React.ReactNode; lead?: React.ReactNode; children?: React.ReactNode; className?: string;
+  /** Centre the heading block (the FAQ). */
+  center?: boolean;
 }) {
   return (
     <section id={id} className={cn('scroll-mt-20 border-t py-16 sm:py-24', className)}>
       <div className='mx-auto max-w-6xl px-4 sm:px-6'>
-        <div className='max-w-2xl'>
+        <div className={cn('max-w-2xl', center && 'mx-auto text-center')}>
           {eyebrow && <p className='text-primary font-mono text-xs tracking-wider uppercase'>{eyebrow}</p>}
           <h2 className='mt-2 text-3xl font-semibold tracking-tight text-balance sm:text-4xl'>{title}</h2>
           {lead && <p className='text-muted-foreground mt-3 text-lg text-pretty'>{lead}</p>}
