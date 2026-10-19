@@ -29,7 +29,6 @@ import { clerkSession } from "./session.js";
 import * as roles from "./account-roles.js";
 import * as priv from "./private.js";
 import { recordPageAction } from "./analytics.js";
-import { browseTaskLibrary } from "./queries.js";
 
 const publicUrl = () => (process.env.PUBLIC_URL ?? `http://127.0.0.1:${process.env.PORT ?? 3333}`).replace(/\/$/, "");
 
@@ -54,7 +53,7 @@ export const TOOL_GROUPS = [
   { id: "report", label: "Read the visibility report", tools: ["get_visibility_report"], prompt: "Show my visibility report." },
   { id: "evidence", label: "Check the evidence", tools: ["get_agent_session", "get_session_transcript", "search_transcripts"],
     prompt: "Why did agents pick <competitor> on <task>? Show me the transcript." },
-  { id: "tune", label: "See who is tested", tools: ["list_agents", "list_developer_profiles", "browse_task_library"],
+  { id: "tune", label: "See who is tested", tools: ["list_agents", "list_developer_profiles", "list_personas"],
     prompt: "Which coding agents and developer personas do you test with?" },
   { id: "memory", label: "Build team memory", tools: ["save_to_memory", "search_memory"],
     prompt: "Remember: we lead with <your angle> against <competitor>." },
@@ -619,9 +618,10 @@ export function appRouter() {
   };
   api.get("/personas", async (_req, res) => {
     const org = await orgOf(res);
-    const [own, shared] = await Promise.all([qp(priv.listPersonas(org)), priv.sharedPersonas()]);
+    // Only the account's own (Octillion's shared library personas are its IP and never listed; picked copies by name).
+    const own = await qp(priv.listPersonas(org));
     await recordPageAction(org, "list_personas", { every: 3_600_000 });
-    res.json({ personas: own.personas, shared, permissions: perms(res) });
+    res.json({ personas: own.personas, permissions: perms(res) });
   });
   // New persona, edits by slug and Import: the save_personas shape ({ personas: [...] }, 1-20 at a time).
   api.post("/personas", express.json({ limit: "256kb" }), async (req, res) => {
@@ -673,19 +673,7 @@ export function appRouter() {
     await recordPageAction(org, r.set ? "import_tasks" : "save_scenarios");
     res.json(r);
   });
-  // The shared task library, to pick from (browse_task_library), and a pick into a product (save_scenarios {library_task_id}).
-  api.get("/tasks/library", async (req, res) => {
-    const s = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim().slice(0, 200) : undefined);
-    res.json(await qp(browseTaskLibrary({ query: s(req.query.q), platform: s(req.query.platform), language: s(req.query.language), category: s(req.query.category), limit: 100 })));
-  });
-  api.post("/tasks/library", async (req, res) => {
-    need(res, "edit");
-    const org = await orgOf(res), ids = (Array.isArray(req.body?.library_task_ids) ? req.body.library_task_ids : [req.body?.library_task_id]).map(Number);
-    if (!ids.length || ids.length > 50 || ids.some((x: number) => !Number.isInteger(x))) throw new AppError("Pick 1-50 library tasks");
-    await qp(saveScenarios(org, req.body?.product ? String(req.body.product) : undefined, ids.map((library_task_id: number) => ({ library_task_id }))));
-    await recordPageAction(org, "save_scenarios");
-    res.status(201).json({ added: ids.length });
-  });
+  // No library routes: Octillion's curated tasks reach a product only through onboarding research, never by browsing.
 
   // Journey tips (src/journeys.ts): everything waiting for this person, dismiss one, or turn tips off.
   api.get("/nudges", async (_req, res) => void res.json(await journeys.nudgesForApp(S(res).org, S(res).user)));

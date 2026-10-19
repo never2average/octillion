@@ -1,18 +1,15 @@
 'use client';
-// /app/personas: the developers this account targets. Its own personas (private: save_personas in the AI client, or
-// New persona and Import here; src/private.ts) and, read-only and marked Shared, the library personas every account can
-// pick. Members add and edit, viewers read, owners also delete. A save here counts for the "Bring your own developer
-// personas" journey the same as the tool.
+// /app/personas: the developers this account targets, and only the account's own (private: save_personas in the AI
+// client, or New persona and Import here; src/private.ts). The ones onboarding picked from Octillion's curated library
+// show by name only, marked Curated by Octillion: the library itself is never listed. Members add and edit, viewers
+// read, owners also delete. A save here counts for the "Bring your own developer personas" journey the same as the tool.
 import { useMemo, useState, type ReactNode } from 'react';
 import { toast } from 'sonner';
 import PageContainer from '@/components/layout/page-container';
 import { ActionsMenu, Field, RecordView, type RecordCol, type RowAction } from '@/components/layout/record-view';
 import { Button } from '@/components/ui/button';
-import { ButtonGroup } from '@/components/ui/button-group';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
-import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Textarea } from '@/components/ui/textarea';
 import { Icons } from '@/components/icons';
 import { appApi } from '@/lib/api-client';
@@ -23,12 +20,13 @@ import { Allowed, useAccountRole } from './role';
 import { companySize } from '@/lib/octillion-format';
 
 type Attributes = { role?: string | null; experience_years?: number | null; company_size?: string | null; stack?: string[]; constraints?: string[]; tone?: string | null; [k: string]: unknown };
-interface ApiPersona { slug: string; name: string; summary: string; instructions?: string; attributes: Attributes; environment: { editor?: string; tools?: string[] } | null; source?: string; active?: boolean }
-export interface Persona extends ApiPersona { shared: boolean; active: boolean; origin: 'Yours' | 'Written by research' | 'Shared' }
+interface ApiPersona { slug: string; name: string; summary: string | null; instructions?: string | null; attributes: Attributes; environment: { editor?: string; tools?: string[] } | null; source?: string; active?: boolean; curated?: boolean }
+export interface Persona extends ApiPersona { curated: boolean; active: boolean; origin: 'Yours' | 'Written by research' | typeof CURATED }
 /** What save_personas takes (POST /personas). */
 export interface PersonaInput { slug?: string; name: string; summary?: string; instructions?: string; attributes?: Record<string, unknown>; environment?: unknown; active?: boolean }
 interface Draft { slug?: string; name: string; summary: string; role: string; experience_years: string; company_size: string; stack: string; constraints: string; tone: string; instructions: string }
 
+const CURATED = 'Curated by Octillion';
 const NA = <span className='text-muted-foreground'>—</span>;
 const META = 'text-muted-foreground flex flex-wrap items-center gap-x-2 gap-y-1 text-xs leading-none';
 const Dot = () => <span className='text-muted-foreground/60'>·</span>;
@@ -38,7 +36,7 @@ const SHOWN = new Set(['role', 'experience_years', 'company_size', 'stack', 'con
 const text = (v: unknown) => (v == null || v === '' ? null : typeof v === 'object' ? JSON.stringify(v) : String(v));
 const years = (p: Persona) => (typeof p.attributes.experience_years === 'number' ? p.attributes.experience_years : null);
 const list = (v: unknown) => (Array.isArray(v) ? v.map(String) : []);
-const editable = (p: Persona) => !p.shared && p.source === 'custom';
+const editable = (p: Persona) => !p.curated && p.source === 'custom';
 const runPrompt = (p: Persona) => `Run a simulation for my product with the developer persona ${p.slug} (${p.name}).`;
 
 const toDraft = (p: Persona, copyOf = false): Draft => ({
@@ -49,16 +47,15 @@ const toDraft = (p: Persona, copyOf = false): Draft => ({
 const blank = (): Draft => ({ name: '', summary: '', role: '', experience_years: '', company_size: '', stack: '', constraints: '', tone: '', instructions: '' });
 
 export function PersonasPage() {
-  const { data, error, reload } = useOrgLoad(() => appApi<{ personas: ApiPersona[]; shared: ApiPersona[] }>('GET', '/personas'));
-  const { can, why, lock } = useAccountRole();
-  const [origin, setOrigin] = useState<'' | 'own' | 'shared'>('');
+  const { data, error, reload } = useOrgLoad(() => appApi<{ personas: ApiPersona[] }>('GET', '/personas'));
+  const { lock } = useAccountRole();
   const [draft, setDraft] = useState<{ d: Draft; from?: Persona } | null>(null);
   const [importing, setImporting] = useState(false);
 
-  const rows = useMemo<Persona[]>(() => [
-    ...(data?.personas ?? []).map((p) => ({ ...p, shared: false, active: p.active !== false, origin: (p.source === 'custom' ? 'Yours' : 'Written by research') as Persona['origin'] })),
-    ...(data?.shared ?? []).map((p) => ({ ...p, shared: true, active: true, source: 'shared', origin: 'Shared' as const }))
-  ].filter((p) => (origin === 'own' ? !p.shared : origin === 'shared' ? p.shared : true)), [data, origin]);
+  const rows = useMemo<Persona[]>(() => (data?.personas ?? []).map((p) => ({
+    ...p, attributes: p.attributes ?? {}, curated: !!p.curated, active: p.active !== false,
+    origin: (p.curated ? CURATED : p.source === 'custom' ? 'Yours' : 'Written by research') as Persona['origin']
+  })), [data]);
 
   const setActive = (p: Persona, active: boolean) => appApi('PATCH', `/personas/${encodeURIComponent(p.slug)}`, { active })
     .then(() => { toast.success(active ? 'Persona turned on' : 'Persona turned off'); return reload(); }).catch(fail);
@@ -70,7 +67,7 @@ export function PersonasPage() {
   const cols: RecordCol<Persona>[] = [
     { key: 'name', label: 'Persona', className: 'min-w-56', title: true, keep: true, peek: false, type: 'text', value: (p) => p.name, render: (p) => (
       <span className='flex flex-col gap-1.5'>
-        <span className='flex items-center gap-2 leading-none font-medium'>{p.name}{p.shared && <StatusBadge tone='info'>Shared</StatusBadge>}</span>
+        <span className='flex items-center gap-2 leading-none font-medium'>{p.name}{p.curated && <StatusBadge tone='info'>{CURATED}</StatusBadge>}</span>
         {p.summary && <span className='text-muted-foreground line-clamp-1 text-xs leading-snug'>{p.summary}</span>}
       </span>
     ) },
@@ -80,7 +77,7 @@ export function PersonasPage() {
     { key: 'company_size', label: 'Company size', className: 'w-40', type: 'select', value: (p) => companySize(p.attributes.company_size), render: (p) => companySize(p.attributes.company_size) },
     { key: 'stack', label: 'Stack', className: 'min-w-48', type: 'text', value: (p) => list(p.attributes.stack).join(', '), render: (p) => <Chips items={list(p.attributes.stack)} max={3} oneLine /> },
     { key: 'origin', label: 'Origin', className: 'w-40', type: 'select', value: (p) => p.origin,
-      options: [{ value: 'Yours' }, { value: 'Written by research' }, { value: 'Shared' }], render: (p) => <span className='text-muted-foreground text-sm'>{p.origin}</span> },
+      options: [{ value: 'Yours' }, { value: 'Written by research' }, { value: CURATED }], render: (p) => <span className='text-muted-foreground text-sm'>{p.origin}</span> },
     { key: 'slug', label: 'Id', hidden: true, type: 'text', value: (p) => p.slug, render: (p) => <Mono>{p.slug}</Mono> },
     { key: 'active', label: 'Status', name: 'Active', className: 'w-24', keep: true, type: 'boolean', value: (p) => p.active,
       render: (p) => <StatusBadge tone={p.active ? 'ok' : 'neutral'}>{p.active ? 'on' : 'off'}</StatusBadge> }
@@ -88,7 +85,7 @@ export function PersonasPage() {
 
   const actions = (p: Persona): RowAction[] => [
     ...(editable(p) ? [lock({ label: 'Edit', icon: <Icons.edit />, onSelect: () => setDraft({ d: toDraft(p), from: p }) }, 'edit')] : []),
-    lock({ label: p.shared ? 'Make a copy of my own' : 'Duplicate', icon: <Icons.add />, onSelect: () => setDraft({ d: toDraft(p, true) }) }, 'edit'),
+    ...(p.curated ? [] : [lock({ label: 'Duplicate', icon: <Icons.add />, onSelect: () => setDraft({ d: toDraft(p, true) }) }, 'edit')]),
     { label: 'Copy id', icon: <Icons.page />, onSelect: () => copy(p.slug) },
     ...(editable(p) ? [
       lock({ label: p.active ? 'Turn off' : 'Turn on', icon: p.active ? <Icons.eyeOff /> : <Icons.check />, separator: true, onSelect: () => void setActive(p, !p.active) }, 'edit'),
@@ -96,19 +93,9 @@ export function PersonasPage() {
     ] : [])
   ];
 
-  const primary = (
-    <ButtonGroup>
-      <Allowed need='edit'><Button onClick={() => setDraft({ d: blank() })}><Icons.add /> New persona</Button></Allowed>
-      <DropdownMenu>
-        <DropdownMenuTrigger render={<Button size='icon' aria-label='More persona actions' className='border-primary-foreground/20 border-l' />}>
-          <Icons.chevronDown />
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align='end' className='w-44'>
-          <DropdownMenuItem disabled={!can('edit')} title={why('edit')} onClick={() => setImporting(true)}><Icons.upload /> Import</DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </ButtonGroup>
-  );
+  // One button plus RecordView's own ▾ menu (Import, then the export items).
+  const primary = <Allowed need='edit'><Button onClick={() => setDraft({ d: blank() })}><Icons.add /> New persona</Button></Allowed>;
+  const primaryMenu: RowAction[] = [lock({ label: 'Import', icon: <Icons.upload />, onSelect: () => setImporting(true) }, 'edit')];
 
   return (
     <PageContainer>
@@ -117,17 +104,10 @@ export function PersonasPage() {
           id='app-personas' noun='personas' exportName='personas'
           rows={rows} rowKey={(p) => p.slug} cols={cols} actions={actions} loading={!data}
           defaultSort={[{ key: 'origin', dir: 'asc' }, { key: 'name', dir: 'asc' }]}
-          searchText={(p) => `${p.name} ${p.summary} ${p.slug} ${p.attributes.role ?? ''} ${list(p.attributes.stack).join(' ')} ${p.origin}`}
+          searchText={(p) => `${p.name} ${p.summary ?? ''} ${p.slug} ${p.attributes.role ?? ''} ${list(p.attributes.stack).join(' ')} ${p.origin}`}
           searchPlaceholder='Search personas by name, summary or stack'
-          filters={(
-            <NativeSelect aria-label='Origin' value={origin} onChange={(e) => setOrigin(e.target.value as typeof origin)}>
-              <NativeSelectOption value=''>Yours and shared</NativeSelectOption>
-              <NativeSelectOption value='own'>Yours</NativeSelectOption>
-              <NativeSelectOption value='shared'>Shared</NativeSelectOption>
-            </NativeSelect>
-          )}
-          primary={primary}
-          empty={origin === 'shared' ? 'No shared personas.' : 'No personas of your own yet. Add one, import a list, or ask your AI client to save them.'}
+          primary={primary} primaryMenu={primaryMenu}
+          empty='No personas yet. Onboarding picks Octillion-curated personas for your product; add your own, import a list, or ask your AI client to save them.'
           detailTitle={(p) => p.name}
           detailActions={(p) => (<>
             {editable(p) && <Allowed need='edit'><Button size='sm' variant='outline' onClick={() => setDraft({ d: toDraft(p), from: p })}><Icons.edit /> Edit</Button></Allowed>}
@@ -142,16 +122,26 @@ export function PersonasPage() {
   );
 }
 
-/** The persona peek: a meta line, its properties, summary, constraints, instructions (yours only), and how to use it. */
+/** The persona peek: a meta line, its properties, summary, constraints, instructions, and how to use it. A curated one: its name and how to use it. */
 function PersonaBody({ p }: { p: Persona }) {
   const a = p.attributes;
+  if (p.curated) return (
+    <div className='flex flex-col gap-8'>
+      <div className={META}>
+        <span className={p.active ? 'text-foreground font-medium' : ''}>{p.active ? 'On' : 'Off'}</span><Dot />
+        <StatusBadge tone='info'>{CURATED}</StatusBadge><Dot /><Mono>{p.slug}</Mono>
+      </div>
+      <p className='text-muted-foreground text-sm'>Onboarding picked this developer persona from Octillion&apos;s curated library for your product. Its details stay with Octillion.</p>
+      <RunIt p={p} />
+    </div>
+  );
   const other = Object.entries(a).filter(([k, v]) => !SHOWN.has(k) && text(v) != null).map(([k, v]) => ({ k, v: text(v)! }));
   const constraints = list(a.constraints);
   return (
     <div className='flex flex-col gap-8'>
       <div className={META}>
         <span className={p.active ? 'text-foreground font-medium' : ''}>{p.active ? 'On' : 'Off'}</span><Dot />
-        {p.shared ? <StatusBadge tone='info'>Shared</StatusBadge> : <span>{p.origin === 'Yours' ? 'Private to your account' : 'Written by research for your account'}</span>}<Dot />
+        <span>{p.origin === 'Yours' ? 'Private to your account' : 'Written by research for your account'}</span><Dot />
         <Mono>{p.slug}</Mono>
       </div>
       <dl>
@@ -168,15 +158,21 @@ function PersonaBody({ p }: { p: Persona }) {
       {constraints.length > 0 && (
         <section><Label>Constraints</Label><ul className='list-disc space-y-1 pl-5 text-sm'>{constraints.map((c, i) => <li key={i}>{c}</li>)}</ul></section>
       )}
-      {!p.shared && <section><Label>Instructions</Label>{p.instructions ? <Prose>{p.instructions}</Prose> : <p className='text-muted-foreground text-sm leading-none'>None.</p>}</section>}
-      <section>
-        <Label>Use it in a run</Label>
-        <div className='bg-muted/50 flex items-center gap-2 rounded-md border px-3 py-2'>
-          <code className='min-w-0 flex-1 font-mono text-xs break-words select-all'>{runPrompt(p)}</code>
-          <CopyButton text={runPrompt(p)} label='Copy prompt' />
-        </div>
-      </section>
+      <section><Label>Instructions</Label>{p.instructions ? <Prose>{p.instructions}</Prose> : <p className='text-muted-foreground text-sm leading-none'>None.</p>}</section>
+      <RunIt p={p} />
     </div>
+  );
+}
+
+function RunIt({ p }: { p: Persona }) {
+  return (
+    <section>
+      <Label>Use it in a run</Label>
+      <div className='bg-muted/50 flex items-center gap-2 rounded-md border px-3 py-2'>
+        <code className='min-w-0 flex-1 font-mono text-xs break-words select-all'>{runPrompt(p)}</code>
+        <CopyButton text={runPrompt(p)} label='Copy prompt' />
+      </div>
+    </section>
   );
 }
 
@@ -203,7 +199,7 @@ function PersonaEditor({ draft, from, onClose, onSaved }: { draft: Draft; from?:
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     setErr(''); setBusy(true);
-    const body = toInput(d, from && !from.shared ? from.attributes : {});
+    const body = toInput(d, from && !from.curated ? from.attributes : {});
     (isNew ? appApi('POST', '/personas', { personas: [body] }) : appApi('PATCH', `/personas/${encodeURIComponent(d.slug!)}`, body))
       .then(() => { toast.success(isNew ? 'Persona added' : 'Persona saved'); onSaved(); })
       .catch((x: Error) => setErr(x.message)).finally(() => setBusy(false));

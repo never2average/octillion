@@ -14,7 +14,7 @@ import { z } from "zod";
 import { randomBytes } from "node:crypto";
 import { getDb } from "./db.js";
 import type { Org } from "./auth.js";
-import { resolveProduct, checkTemplate, checkPlatform, WORKSPACE_TEMPLATES } from "./queries.js";
+import { resolveProduct, checkTemplate, checkPlatform, WORKSPACE_TEMPLATES, forCustomer, personaForCustomer } from "./queries.js";
 import { PLATFORMS } from "./platform.js";
 import { platformOf } from "./platform.js";
 import { environmentIssues, type PersonaEnvironment } from "../orchestrator/core/environment.js";
@@ -35,7 +35,7 @@ export const personaInputSchema = z.object({
   instructions: z.string().max(1500).optional().describe("How this developer answers a coding agent's questions"),
   attributes: z.record(z.string(), z.unknown()).optional().describe("role, experience_years, company_size, stack[], constraints[], tone"),
   environment: z.object({ editor: z.string(), tools: z.array(z.string()).optional() }).passthrough().optional()
-    .describe("Editor and CLI tools they have installed (see list_developer_profiles for examples)"),
+    .describe("Editor and CLI tools they have installed, e.g. [\"git\", \"docker\", \"gh\"]"),
   active: z.boolean().optional(),
 });
 export const personasInputSchema = z.array(personaInputSchema).min(1).max(20);
@@ -110,14 +110,17 @@ export async function savePersonas(org: Org, items: PersonaInput[]) {
   return listPersonas(org, saved);
 }
 
-/** The organization's own personas: brought (custom) and picked or written for it by research. Never another org's. */
+/**
+ * The organization's own personas: brought (custom) and picked or written for it by research. Never another org's.
+ * A persona research copied from Octillion's shared library (source 'picked') is shown by name only (personaForCustomer).
+ */
 export async function listPersonas(org: Org, highlight: string[] = []) {
   const personas = await (await getDb()).query<any>(
     `SELECT slug, name, summary, attributes, instructions, environment, source, active, product_id
        FROM developer_profiles WHERE org_id = $1 ORDER BY source, name`, [org.orgId]);
   await openRows(org.orgId, personas, ["summary", "instructions"]);
   for (const p of personas) p.attributes = await openJson(org.orgId, p.attributes);
-  return { view: "personas" as const, personas, saved: highlight };
+  return { view: "personas" as const, personas: personas.map(personaForCustomer), saved: highlight };
 }
 
 /** Turn one of the organization's own personas on or off (Turn off on /app/personas), without rewriting it. */
@@ -135,12 +138,6 @@ export async function deletePersona(org: Org, slug: string) {
     "DELETE FROM developer_profiles WHERE slug = $1 AND org_id = $2 AND source = 'custom' RETURNING slug", [slug, org.orgId]);
   if (!row) throw new Error(`No persona ${slug}. See list_personas.`);
   return { deleted: row.slug };
-}
-
-/** The shared library personas any account can pick (read-only for customers; instructions stay internal). */
-export async function sharedPersonas() {
-  return (await getDb()).query<{ slug: string; name: string; summary: string; attributes: Record<string, unknown>; environment: unknown }>(
-    "SELECT slug, name, summary, attributes, environment FROM developer_profiles WHERE org_id IS NULL AND active ORDER BY name LIMIT 500");
 }
 
 // ---------- task sets ----------
@@ -221,8 +218,9 @@ export async function taskSetScenarioIds(org: Org, productId: number, ref: strin
 }
 
 /**
- * For /app/tasks: every task of the organization's task sets, and the shared library tasks it picked into a product,
- * with prompts opened (they are stored sealed), plus the runs that used each set.
+ * For /app/tasks: every task of the organization's task sets, with prompts opened (they are stored sealed), and the
+ * Octillion-curated tasks onboarding picked into its products, by title and status only (forCustomer), plus the runs
+ * that used each set.
  */
 export async function taskSetDetails(org: Org) {
   const db = await getDb();
@@ -236,12 +234,13 @@ export async function taskSetDetails(org: Org) {
     if (t.task_set) { t.prompt = await openText(org.orgId, t.prompt); t.provenance = t.provenance ? await openText(org.orgId, t.provenance) : null; }
     else t.provenance = null; // a library pick: its rationale is research's, not a provenance
   }
+  const shown = tasks.map((t) => forCustomer(t));
   const runs = await db.query<{ task_set: string; id: string; name: string; status: string; created_at: Date }>(
     `SELECT DISTINCT ON (ts.public_id, sim.id) ts.public_id AS task_set, sim.id, sim.name, sim.status, sim.created_at
        FROM agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id JOIN org_task_sets ts ON ts.id = sc.task_set_id AND ts.org_id = $1
        JOIN simulations sim ON sim.id = s.simulation_id AND sim.org_id = $1
       WHERE s.org_id = $1 ORDER BY ts.public_id, sim.id`, [org.orgId]);
-  return { tasks, runs };
+  return { tasks: shown, runs };
 }
 
 /**
@@ -255,7 +254,7 @@ export async function updateTask(org: Org, id: number, patch: Partial<TaskInput>
        LEFT JOIN org_task_sets ts ON ts.id = sc.task_set_id AND ts.org_id = $1 WHERE sc.id = $2`, [org.orgId, id]);
   if (!row || (!row.set_id && row.library_task_id == null)) throw new Error(`No task ${id}. See list_task_sets.`);
   const fields = Object.keys(patch).filter((k) => k !== "active" && (patch as Record<string, unknown>)[k] !== undefined);
-  if (!row.set_id && fields.length) throw new Error("A task from the shared library can only be turned on or off here");
+  if (!row.set_id && fields.length) throw new Error("A task curated by Octillion can only be turned on or off");
   if (patch.active != null && typeof patch.active !== "boolean") throw new Error("active must be true or false");
   if (fields.length) {
     await ensureOrgKey(org.orgId);

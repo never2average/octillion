@@ -6,8 +6,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import PageContainer from '@/components/layout/page-container';
 import { Button } from '@/components/ui/button';
-import { ButtonGroup } from '@/components/ui/button-group';
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Textarea } from '@/components/ui/textarea';
@@ -17,7 +15,7 @@ import { csvCell, parseCsv } from '@/lib/csv';
 import { counted } from '@/lib/octillion-format';
 import { cn } from '@/lib/utils';
 import { Dock, KINDS, TYPE_STYLE, type Kind, type MemoryItem, type MemoryScope } from './memory';
-import { Field, RecordView, type RecordCol } from '@/components/layout/record-view';
+import { Field, RecordView, type RecordCol, type RowAction } from '@/components/layout/record-view';
 import { ErrorState, LoadingCards, When, fail, useOrgLoad } from './shared';
 import { Allowed, useAccountRole } from './role';
 
@@ -44,7 +42,7 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
   const [subject, setSubject] = useState<string>('');
   const [items, setItems] = useState<MemoryItem[] | null>(null);
   const [editing, setEditing] = useState<{ item?: MemoryItem } | null>(null);
-  const { can, why } = useAccountRole();
+  const { can, lock } = useAccountRole();
 
   useEffect(() => {
     if (section !== 'users') return;
@@ -95,21 +93,12 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
         u.user_id === subject && items ? items.length : u.memories)}</NativeSelectOption>)}
     </NativeSelect>
   );
-  const primary = !noSubject && (<>
-    <ButtonGroup>
-      <Allowed need='edit'><Button onClick={() => setEditing({})}><Icons.add /> Add memory</Button></Allowed>
-      <DropdownMenu>
-        <DropdownMenuTrigger render={<Button size='icon' aria-label='More memory actions' className='border-primary-foreground/20 border-l' />}>
-          <Icons.chevronDown />
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align='end' className='w-44'>
-          <DropdownMenuItem disabled={!can('edit')} title={why('edit')} onClick={() => file.current?.click()}><Icons.upload /> Import CSV or JSON</DropdownMenuItem>
-          <DropdownMenuItem disabled={!items?.length} onClick={() => items && exportCsv(items, label, section === 'products')}><Icons.download /> Export CSV</DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </ButtonGroup>
-    <input ref={file} type='file' accept='.csv,.json,text/csv,application/json' className='hidden' onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) void importFile(f); }} />
-  </>);
+  // One button plus RecordView's ▾ menu holding Import and Export.
+  const primary = !noSubject && <Allowed need='edit'><Button onClick={() => setEditing({})}><Icons.add /> Add memory</Button></Allowed>;
+  const primaryMenu: RowAction[] | undefined = noSubject ? undefined : [
+    lock({ label: 'Import CSV or JSON', icon: <Icons.upload />, onSelect: () => file.current?.click() }, 'edit'),
+    { label: 'Export CSV', icon: <Icons.download />, disabled: !items?.length, onSelect: () => { if (items) exportCsv(items, label, section === 'products'); } }
+  ];
   return (
     <>
       <RecordView<MemoryItem>
@@ -122,7 +111,7 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
         searchText={(m) => `${m.kind} ${m.body} ${m.created_by ?? ''} ${m.subject_name ?? ''}`}
         searchPlaceholder={`Search ${label ? `${label === 'You' ? 'your' : `${label}'s`} ` : ''}memory`}
         filters={picker || undefined}
-        primary={primary || undefined}
+        primary={primary || undefined} primaryMenu={primaryMenu}
         empty={noSubject ? 'Nobody to show.' : 'Nothing remembered yet. Add the first memory, or import a CSV or JSON file.'}
         detailTitle={(m) => `${m.kind[0].toUpperCase()}${m.kind.slice(1)}${m.subject_name && section === 'products' ? ` · ${m.subject_name}` : ''}`}
         detail={(m) => (
@@ -137,6 +126,7 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
           </div>
         )}
       />
+      <input ref={file} type='file' accept='.csv,.json,text/csv,application/json' className='hidden' onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) void importFile(f); }} />
       {editing && <MemoryEditor key={editing.item?.id ?? 'new'} item={editing.item} label={label} products={section === 'products' ? productNames : undefined} onClose={() => setEditing(null)} onSave={save} />}
     </>
   );

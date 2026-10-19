@@ -314,6 +314,11 @@ export function createApp() {
       res.status(err.status && err.status >= 400 && err.status < 600 ? err.status : 502).json({ error: err.message });
     }
   });
+  // The shared libraries are Octillion's IP: research (the fleet, or a research job's own token) reads them, a run's job token does not.
+  worker.use("/library", (_req, res, next) => {
+    const job = jobOnly(res);
+    return !job || job.jobId.startsWith("rsh_") ? next() : forbidden(res);
+  });
   worker.get("/library/profiles", async (req, res) => {
     const q = req.query as Record<string, string | undefined>;
     res.json(await research.libraryProfiles({ query: q.query, limit: q.limit ? Number(q.limit) : undefined }));

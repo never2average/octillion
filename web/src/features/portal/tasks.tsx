@@ -1,22 +1,19 @@
 'use client';
 // /app/tasks: the programming tasks this account brings, as task sets per product (org_task_sets; import_tasks in the
-// AI client, or New task set, Add task and Import here; src/private.ts), plus the shared library tasks it picked into a
-// product (save_scenarios {library_task_id}), marked Shared. Members create, edit and turn tasks off; viewers read.
+// AI client, or New task set, Add task and Import here; src/private.ts), plus the tasks onboarding picked into a
+// product from Octillion's curated library, by title and status only (marked Curated by Octillion: the prompt and the
+// library itself stay Octillion's). Members create, edit and turn tasks off; viewers read.
 // A save here counts for the "Bring your own programming tasks" journey the same as the tool.
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import { toast } from 'sonner';
 import PageContainer from '@/components/layout/page-container';
 import { ActionsMenu, Field, RecordView, type RecordCol, type RowAction } from '@/components/layout/record-view';
 import { Button } from '@/components/ui/button';
-import { ButtonGroup } from '@/components/ui/button-group';
-import { Checkbox } from '@/components/ui/checkbox';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Textarea } from '@/components/ui/textarea';
 import { Icons } from '@/components/icons';
-import { useDebounce } from '@/hooks/use-debounce';
 import { appApi } from '@/lib/api-client';
 import { parseCsv } from '@/lib/csv';
 import { Chips, Mono, StatusBadge } from '@/features/admin/ui';
@@ -28,8 +25,8 @@ interface Product { slug: string; name: string }
 interface TaskSet { id: string; name: string; description: string | null; product: string; created_at: string; active_tasks: number }
 interface Run { task_set: string; id: string; name: string; status: string; created_at: string }
 export interface Task {
-  id: number; title: string; prompt: string; repo_url: string | null; language: string | null; tags: string[] | null; platform: string | null;
-  template: string | null; expectation: 'recommend' | 'avoid'; active: boolean; source: string; provenance: string | null; library_task_id: number | null;
+  id: number; title: string; prompt: string | null; repo_url: string | null; language: string | null; tags: string[] | null; platform: string | null;
+  template: string | null; expectation: 'recommend' | 'avoid'; active: boolean; source: string; provenance: string | null; curated: boolean;
   task_set: string | null; product: string; product_name: string; created_at: string;
 }
 interface Data { task_sets: TaskSet[]; tasks: Task[]; runs: Run[]; products: Product[] }
@@ -43,9 +40,10 @@ const PROMPT = 'block font-mono text-xs leading-relaxed whitespace-pre-wrap bord
 const Dot = () => <span className='text-muted-foreground/60'>·</span>;
 const Label = ({ children }: { children: ReactNode }) => <div className='text-muted-foreground mb-2 text-xs font-medium leading-none'>{children}</div>;
 const repoName = (u: string) => { try { const x = new URL(u); return `${x.host}${x.pathname.replace(/\/$/, '')}`; } catch { return u.replace(/^https?:\/\//, ''); } };
-const SHARED = '__shared';
+const CURATED_SET = '__curated';
+const CURATED = 'Curated by Octillion';
 const blankDraft = (): Draft => ({ title: '', prompt: '', language: '', platform: '', repo_url: '', tags: '' });
-const toDraft = (t: Task): Draft => ({ title: t.title, prompt: t.prompt, language: t.language ?? '', platform: t.platform ?? '', repo_url: t.repo_url ?? '', tags: (t.tags ?? []).join(', ') });
+const toDraft = (t: Task): Draft => ({ title: t.title, prompt: t.prompt ?? '', language: t.language ?? '', platform: t.platform ?? '', repo_url: t.repo_url ?? '', tags: (t.tags ?? []).join(', ') });
 /** A draft as import_tasks input: blanks left out, so the server picks the platform and starter workspace. */
 const toInput = (d: Draft): TaskInput => ({
   prompt: d.prompt.trim(), ...(d.title.trim() ? { title: d.title.trim() } : {}), ...(d.language.trim() ? { language: d.language.trim() } : {}),
@@ -55,18 +53,18 @@ const toInput = (d: Draft): TaskInput => ({
 
 export function TasksPage() {
   const { data, error, reload } = useOrgLoad(() => appApi<Data>('GET', '/tasks'));
-  const { can, why, lock } = useAccountRole();
+  const { lock } = useAccountRole();
   const [product, setProduct] = useState('');
   const [set, setSet] = useState('');
-  const [dialog, setDialog] = useState<null | { kind: 'set' } | { kind: 'add'; set: TaskSet } | { kind: 'edit'; task: Task } | { kind: 'import' } | { kind: 'library' }>(null);
+  const [dialog, setDialog] = useState<null | { kind: 'set' } | { kind: 'add'; set: TaskSet } | { kind: 'edit'; task: Task } | { kind: 'import' }>(null);
 
   const sets = useMemo(() => new Map((data?.task_sets ?? []).map((s) => [s.id, s])), [data]);
   const runsOf = (id: string | null) => (data?.runs ?? []).filter((r) => r.task_set === id);
   const products = data?.products ?? [];
   const setsShown = (data?.task_sets ?? []).filter((s) => !product || s.product === product);
   const rows = useMemo(() => (data?.tasks ?? []).filter((t) => (!product || t.product === product)
-    && (!set || (set === SHARED ? !t.task_set : t.task_set === set))), [data, product, set]);
-  const setName = (t: Task) => (t.task_set ? sets.get(t.task_set)?.name ?? '—' : 'Shared library');
+    && (!set || (set === CURATED_SET ? !t.task_set : t.task_set === set))), [data, product, set]);
+  const setName = (t: Task) => (t.task_set ? sets.get(t.task_set)?.name ?? '—' : CURATED);
 
   const setActive = (t: Task, active: boolean) => appApi('PATCH', `/tasks/${t.id}`, { active })
     .then(() => { toast.success(active ? 'Task turned on' : 'Task turned off'); return reload(); }).catch(fail);
@@ -74,8 +72,8 @@ export function TasksPage() {
   const cols: RecordCol<Task>[] = [
     { key: 'title', label: 'Task', className: 'min-w-72', title: true, keep: true, peek: false, type: 'text', value: (t) => t.title, render: (t) => (
       <span className='flex min-w-0 flex-col gap-1.5'>
-        <span className='flex items-center gap-2 leading-none font-medium'><span className='truncate' title={t.title}>{t.title}</span>{!t.task_set && <StatusBadge tone='info'>Shared</StatusBadge>}</span>
-        <span className='text-muted-foreground line-clamp-1 text-xs leading-snug'>{t.prompt}</span>
+        <span className='flex items-center gap-2 leading-none font-medium'><span className='truncate' title={t.title}>{t.title}</span>{t.curated && <StatusBadge tone='info'>{CURATED}</StatusBadge>}</span>
+        <span className='text-muted-foreground line-clamp-1 text-xs leading-snug'>{t.curated ? CURATED : t.prompt}</span>
       </span>
     ) },
     { key: 'set', label: 'Task set', className: 'w-48', type: 'select', value: setName, render: (t) => <span className='text-sm'>{setName(t)}</span> },
@@ -97,20 +95,10 @@ export function TasksPage() {
   ];
 
   const noProducts = !!data && !products.length;
-  const primary = (
-    <ButtonGroup>
-      <Allowed need='edit'><Button disabled={noProducts} onClick={() => setDialog({ kind: 'set' })}><Icons.add /> New task set</Button></Allowed>
-      <DropdownMenu>
-        <DropdownMenuTrigger render={<Button size='icon' aria-label='More task actions' disabled={noProducts} className='border-primary-foreground/20 border-l' />}>
-          <Icons.chevronDown />
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align='end' className='w-56'>
-          <DropdownMenuItem disabled={!can('edit')} title={why('edit')} onClick={() => setDialog({ kind: 'import' })}><Icons.upload /> Import</DropdownMenuItem>
-          <DropdownMenuItem disabled={!can('edit')} title={why('edit')} onClick={() => setDialog({ kind: 'library' })}><Icons.kanban /> Pick from the shared library</DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </ButtonGroup>
-  );
+  // One button plus RecordView's own ▾ menu (Import, then the export items).
+  const primary = <Allowed need='edit'><Button disabled={noProducts} onClick={() => setDialog({ kind: 'set' })}><Icons.add /> New task set</Button></Allowed>;
+  const importItem = lock({ label: 'Import', icon: <Icons.upload />, onSelect: () => setDialog({ kind: 'import' }) }, 'edit');
+  const primaryMenu: RowAction[] = [noProducts ? { ...importItem, disabled: true } : importItem];
   const filters = (<>
     {products.length > 1 && (
       <NativeSelect aria-label='Product' value={product} onChange={(e) => { setProduct(e.target.value); setSet(''); }}>
@@ -121,7 +109,7 @@ export function TasksPage() {
     <NativeSelect aria-label='Task set' value={set} onChange={(e) => setSet(e.target.value)}>
       <NativeSelectOption value=''>All task sets</NativeSelectOption>
       {setsShown.map((s) => <NativeSelectOption key={s.id} value={s.id}>{s.name}{products.length > 1 && !product ? ` (${products.find((p) => p.slug === s.product)?.name ?? s.product})` : ''}</NativeSelectOption>)}
-      <NativeSelectOption value={SHARED}>Picked from the shared library</NativeSelectOption>
+      {(data?.tasks ?? []).some((t) => !t.task_set) && <NativeSelectOption value={CURATED_SET}>{CURATED}</NativeSelectOption>}
     </NativeSelect>
   </>);
 
@@ -132,11 +120,11 @@ export function TasksPage() {
           id='app-tasks' noun='tasks' exportName='tasks'
           rows={rows} rowKey={(t) => String(t.id)} cols={cols} actions={actions} loading={!data}
           defaultSort={[{ key: 'set', dir: 'asc' }, { key: 'title', dir: 'asc' }]}
-          searchText={(t) => `${t.title} ${t.prompt} ${setName(t)} ${t.product_name} ${t.language ?? ''} ${(t.tags ?? []).join(' ')}`}
+          searchText={(t) => `${t.title} ${t.prompt ?? ''} ${setName(t)} ${t.product_name} ${t.language ?? ''} ${(t.tags ?? []).join(' ')}`}
           searchPlaceholder='Search tasks by title, prompt, set or tag'
-          filters={filters} primary={primary}
+          filters={filters} primary={primary} primaryMenu={primaryMenu}
           empty={noProducts ? 'Add a product first: an owner adds it under Context, Products, or onboard it from your AI client.'
-            : 'No tasks of your own yet. Create a task set, import one, or pick tasks from the shared library.'}
+            : 'No tasks yet. Onboarding picks Octillion-curated tasks for your product; create a task set or import your own.'}
           detailTitle={(t) => t.title}
           detailActions={(t) => (<>
             {t.task_set && <Allowed need='edit'><Button size='sm' variant='outline' onClick={() => setDialog({ kind: 'edit', task: t })}><Icons.edit /> Edit</Button></Allowed>}
@@ -149,24 +137,51 @@ export function TasksPage() {
       {data && dialog?.kind === 'add' && <TaskDialog products={products} sets={data.task_sets} product={dialog.set.product} fixed={dialog.set} onClose={() => setDialog(null)} onSaved={() => { setDialog(null); void reload(); }} />}
       {dialog?.kind === 'edit' && <TaskDialog products={products} sets={data?.task_sets ?? []} task={dialog.task} onClose={() => setDialog(null)} onSaved={() => { setDialog(null); void reload(); }} />}
       {data && dialog?.kind === 'import' && <ImportDialog products={products} sets={data.task_sets} product={product || products[0]?.slug} onClose={() => setDialog(null)} onDone={() => { setDialog(null); void reload(); }} />}
-      {data && dialog?.kind === 'library' && <LibraryDialog products={products} product={product || products[0]?.slug} onClose={() => setDialog(null)} onDone={() => { setDialog(null); void reload(); }} />}
     </PageContainer>
   );
 }
 
-/** The task peek: a meta line, properties, the prompt in full, where it came from, and its set with the runs that used it. */
+/**
+ * The task peek: a meta line, properties, the prompt in full, where it came from, and its set with the runs that used
+ * it. A curated task: its title, product and status, with Curated by Octillion in place of the prompt.
+ */
 function TaskBody({ t, set, runs }: { t: Task; set: TaskSet | null; runs: Run[] }) {
   const prompt = set ? `Run a simulation for ${t.product_name} on the task set ${set.name}.` : `Run a simulation for ${t.product_name} on the task "${t.title}".`;
-  return (
+  const runIt = (
+    <section>
+      <Label>Run it</Label>
+      <div className='bg-muted/50 flex items-center gap-2 rounded-md border px-3 py-2'>
+        <code className='min-w-0 flex-1 font-mono text-xs break-words select-all'>{prompt}</code>
+        <CopyButton text={prompt} label='Copy prompt' />
+      </div>
+    </section>
+  );
+  if (t.curated) return (
     <div className='flex flex-col gap-8'>
       <div className={META}>
         <span className={t.active ? 'text-foreground font-medium' : ''}>{t.active ? 'On' : 'Off'}</span><Dot />
-        {set ? <span>Private to your account</span> : <StatusBadge tone='info'>Shared</StatusBadge>}<Dot />
+        <StatusBadge tone='info'>{CURATED}</StatusBadge><Dot />
         <Mono>#{t.id}</Mono><Dot />
         <span>Added <When d={t.created_at} /></span>
       </div>
       <dl>
-        <Field label='Task set'>{set ? set.name : <span>Picked from the shared library{t.library_task_id != null && <span className='text-muted-foreground'> (library task #{t.library_task_id})</span>}</span>}</Field>
+        <Field label='Product'>{t.product_name}</Field>
+        {t.platform && <Field label='Platform'>{t.platform}</Field>}
+      </dl>
+      <section><Label>Prompt</Label><p className='text-muted-foreground text-sm'>{CURATED}. Onboarding picked this task for {t.product_name}; its prompt stays with Octillion.</p></section>
+      {runIt}
+    </div>
+  );
+  return (
+    <div className='flex flex-col gap-8'>
+      <div className={META}>
+        <span className={t.active ? 'text-foreground font-medium' : ''}>{t.active ? 'On' : 'Off'}</span><Dot />
+        <span>Private to your account</span><Dot />
+        <Mono>#{t.id}</Mono><Dot />
+        <span>Added <When d={t.created_at} /></span>
+      </div>
+      <dl>
+        <Field label='Task set'>{set ? set.name : NA}</Field>
         <Field label='Product'>{t.product_name}</Field>
         <Field label='Language'>{t.language ?? NA}</Field>
         <Field label='Platform'>{t.platform ?? NA}</Field>
@@ -196,13 +211,7 @@ function TaskBody({ t, set, runs }: { t: Task; set: TaskSet | null; runs: Run[] 
           ) : <p className='text-muted-foreground text-sm leading-none'>No runs yet.</p>}
         </section>
       )}
-      <section>
-        <Label>Run it</Label>
-        <div className='bg-muted/50 flex items-center gap-2 rounded-md border px-3 py-2'>
-          <code className='min-w-0 flex-1 font-mono text-xs break-words select-all'>{prompt}</code>
-          <CopyButton text={prompt} label='Copy prompt' />
-        </div>
-      </section>
+      {runIt}
     </div>
   );
 }
@@ -364,81 +373,6 @@ function ImportDialog({ products, sets, product: initialProduct, onClose, onDone
         <DialogFooter>
           <Button type='button' variant='outline' onClick={onClose}>Cancel</Button>
           <Allowed need='edit'><Button disabled={busy || !parsed.tasks.length || !product || !setNameShown.trim()} onClick={go}>Import</Button></Allowed>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-// ---------- the shared library ----------
-
-interface LibraryTask { id: number; title: string; prompt: string; language: string | null; category: string | null; platform: string | null; tags: string[] }
-
-/** Search the shared task library and add picks to a product (save_scenarios {library_task_id}). */
-function LibraryDialog({ products, product: initialProduct, onClose, onDone }: { products: Product[]; product?: string; onClose: () => void; onDone: () => void }) {
-  const [product, setProduct] = useState(initialProduct ?? '');
-  const [q, setQ] = useState('');
-  const [platform, setPlatform] = useState('');
-  const [found, setFound] = useState<LibraryTask[] | null>(null);
-  const [picked, setPicked] = useState<Set<number>>(() => new Set());
-  const [busy, setBusy] = useState(false);
-  const query = useDebounce(q.trim(), 300);
-  useEffect(() => {
-    let live = true;
-    setFound(null);
-    const params = new URLSearchParams({ ...(query ? { q: query } : {}), ...(platform ? { platform } : {}) });
-    appApi<{ tasks: LibraryTask[] }>('GET', `/tasks/library?${params}`).then((r) => { if (live) setFound(r.tasks); }).catch(fail);
-    return () => { live = false; };
-  }, [query, platform]);
-  const toggle = (id: number, on: boolean) => setPicked((s) => { const n = new Set(s); if (on) n.add(id); else n.delete(id); return n; });
-  const go = () => {
-    setBusy(true);
-    appApi<{ added: number }>('POST', '/tasks/library', { product, library_task_ids: [...picked] })
-      .then((r) => { toast.success(`Added ${r.added} task${r.added === 1 ? '' : 's'} from the shared library`); onDone(); })
-      .catch(fail).finally(() => setBusy(false));
-  };
-  return (
-    <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className='flex max-h-[90vh] flex-col sm:max-w-2xl'>
-        <DialogHeader>
-          <DialogTitle>Pick from the shared library</DialogTitle>
-          <DialogDescription>Curated real-world tasks every account can use. Picked tasks run for the product you choose.</DialogDescription>
-        </DialogHeader>
-        <div className='flex flex-wrap gap-2'>
-          {products.length > 1 && (
-            <NativeSelect aria-label='Product' value={product} onChange={(e) => setProduct(e.target.value)}>
-              {products.map((p) => <NativeSelectOption key={p.slug} value={p.slug}>{p.name}</NativeSelectOption>)}
-            </NativeSelect>
-          )}
-          <Input type='search' value={q} onChange={(e) => setQ(e.target.value)} placeholder='Search by title, prompt or tag' aria-label='Search the library' className='min-w-48 flex-1' />
-          <NativeSelect aria-label='Platform' value={platform} onChange={(e) => setPlatform(e.target.value)}>
-            <NativeSelectOption value=''>All platforms</NativeSelectOption>
-            {PLATFORMS.map((p) => <NativeSelectOption key={p} value={p}>{p}</NativeSelectOption>)}
-          </NativeSelect>
-        </div>
-        <div className='min-h-0 flex-1 overflow-y-auto border-y'>
-          {found === null ? <p className='text-muted-foreground py-8 text-center text-sm'>Loading…</p>
-            : !found.length ? <p className='text-muted-foreground py-8 text-center text-sm'>Nothing matches.</p>
-              : (
-                <ul className='divide-y'>
-                  {found.map((t) => (
-                    <li key={t.id}>
-                      <label className='flex cursor-pointer items-start gap-3 py-3'>
-                        <Checkbox checked={picked.has(t.id)} onCheckedChange={(on) => toggle(t.id, !!on)} aria-label={`Pick ${t.title}`} className='mt-0.5' />
-                        <span className='flex min-w-0 flex-col gap-1'>
-                          <span className='text-sm leading-none font-medium'>{t.title}</span>
-                          <span className='text-muted-foreground line-clamp-2 text-xs'>{t.prompt}</span>
-                          <span className='text-muted-foreground text-xs'>{[t.platform, t.language, t.category].filter(Boolean).join(' · ')}</span>
-                        </span>
-                      </label>
-                    </li>
-                  ))}
-                </ul>
-              )}
-        </div>
-        <DialogFooter>
-          <Button type='button' variant='outline' onClick={onClose}>Cancel</Button>
-          <Allowed need='edit'><Button disabled={busy || !picked.size || !product} onClick={go}>{picked.size ? `Add ${picked.size} to the product` : 'Add to the product'}</Button></Allowed>
         </DialogFooter>
       </DialogContent>
     </Dialog>

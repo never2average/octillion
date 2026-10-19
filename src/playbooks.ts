@@ -152,7 +152,7 @@ export const PLAYBOOKS: Playbook[] = [
     who: "Product teams shipping a feature or SDK.",
     example: { title: "Resend receiving email", result: "A capability agents didn't associate with Resend at all: the task to add before and after launching inbound." },
     stages: [
-      { id: "tasks", title: "Add tasks for the capability", tools: ["save_scenarios", "browse_task_library"],
+      { id: "tasks", title: "Add tasks for the capability", tools: ["save_scenarios"],
         why: "Tasks phrased the way a developer would ask, without naming you or the feature.",
         prompt: "Add a task for {product}: <what a developer would ask an agent to build that needs the new capability>.",
         expect: "The task saved, with warnings if it names your product or a competitor." },
@@ -209,9 +209,9 @@ export const PLAYBOOKS: Playbook[] = [
     example: { title: "A mobile-first API company", result: "Three personas from their ICP (a Flutter lead at a 50-person startup, an enterprise Android team, an indie iOS developer): the enterprise persona's runs picked the incumbent twice as often." },
     stages: [
       { id: "describe", title: "Describe your developers", tools: ["list_developer_profiles", "list_personas"],
-        why: "Start from who you target: role, experience, company size, stack and constraints. The shared personas show the shape.",
-        prompt: "Show me the developer personas I can use, then help me describe ours: <role>, <stack>, <company size>, <what they care about>.",
-        expect: "The shared personas and your own, and a draft of yours to check.",
+        why: "Start from who you target: role, experience, company size, stack and constraints. Onboarding already picked Octillion-curated personas for your product; yours sit next to them.",
+        prompt: "Show me our developer personas, then help me describe the developers we target: <role>, <stack>, <company size>, <what they care about>.",
+        expect: "Your account's personas (the curated ones by name) and a draft of yours to check.",
         link: { href: "/app/personas", label: "Developer personas" } },
       { id: "save", title: "Save your personas", tools: ["save_personas"],
         why: "Saved personas are private to your account; the simulated developer answers coding agents the way they would.",

@@ -345,14 +345,17 @@ function People({ t, l, reload, openUser, onOpened, filter = 'all', setFilter }:
       <RecordView compact id='billing-people' rows={rows} rowKey={(r) => r.key} cols={cols} noun='people'
         searchText={(r) => (r.kind === 'invite' ? r.x.email : `${r.m.name ?? ''} ${r.m.email ?? ''} ${teamName(r.lim?.team_id) ?? ''}`)}
         searchPlaceholder='Search people by name, email or team'
-        filters={budget ? (
-          <Button variant={filtered ? 'secondary' : 'outline'} size='sm' aria-pressed={!!filtered} onClick={() => setFilter?.(filtered ? 'all' : 'exceptions')}
-            title='People with their own limit, adjustment, launch access or runs at once'>
-            Own settings only<span className='text-muted-foreground ml-1 tabular-nums'>{exceptions}</span>
-          </Button>) : undefined}
+        filters={<>
+          {budget && (
+            <Button variant={filtered ? 'secondary' : 'outline'} size='sm' aria-pressed={!!filtered} onClick={() => setFilter?.(filtered ? 'all' : 'exceptions')}
+              title='People with their own limit, adjustment, launch access or runs at once'>
+              Own settings only<span className='text-muted-foreground ml-1 tabular-nums'>{exceptions}</span>
+            </Button>)}
+          <RolesHelp roles={roles} />
+        </>}
         views={[{ id: 'all', label: 'Everyone' }, { id: 'active', label: 'Active', match: (r) => statusOf(r) === 'Active' }, { id: 'invited', label: 'Invited', match: (r) => r.kind === 'invite' },
           { id: 'suspended', label: 'Suspended', match: (r) => statusOf(r) === 'Suspended' }]}
-        primary={<span className='flex items-center gap-1'><RolesHelp roles={roles} /><Allowed need='team'><Button onClick={() => setInviting(true)}><Icons.add /> Invite</Button></Allowed></span>}
+        primary={<Allowed need='team'><Button onClick={() => setInviting(true)}><Icons.add /> Invite</Button></Allowed>}
         actions={manage || budget ? actions : undefined} exportName='people' empty={filtered ? 'Nobody has their own settings.' : 'Nobody here yet.'} />
       {inviting && <InviteDialog roles={roles} onClose={() => setInviting(false)} onSent={reload} />}
       {dialog && l && <LimitsDialog m={dialog.m} lim={dialog.lim} l={l} mode={mode} onClose={() => { setEditing(null); onOpened?.(); }} onSaved={reload} />}

@@ -13,9 +13,7 @@ import { DateRangePicker, PRESETS, rangeQuery, type DateRange } from '@/componen
 import { MultiSelectFilter } from '@/components/layout/multi-select-filter';
 import { Field, RecordView, type RecordCol, type RowAction } from '@/components/layout/record-view';
 import { Button } from '@/components/ui/button';
-import { ButtonGroup } from '@/components/ui/button-group';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Icons } from '@/components/icons';
@@ -59,7 +57,7 @@ export function AdoptionPage() {
   const router = useRouter();
   const me = ad?.me ?? null;
   const file = useRef<HTMLInputElement>(null);
-  const { can, why, lock } = useAccountRole();
+  const { lock } = useAccountRole();
   const note = s?.viewer_note ?? null;
 
   const removeUseCase = (j: Journey) => {
@@ -159,21 +157,13 @@ export function AdoptionPage() {
     return a;
   };
 
-  const primary = (<>
-    <ButtonGroup>
-      <Allowed need='edit'><Button onClick={() => setAdding(true)}><Icons.add /> Add use case</Button></Allowed>
-      <DropdownMenu>
-        <DropdownMenuTrigger render={<Button size='icon' aria-label='Import or export use cases' className='border-primary-foreground/20 border-l' />}><Icons.chevronDown /></DropdownMenuTrigger>
-        <DropdownMenuContent align='end' className='w-52'>
-          <DropdownMenuItem disabled={!can('edit')} title={why('edit')} onClick={() => file.current?.click()}><Icons.upload /> Import JSON or CSV</DropdownMenuItem>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem disabled={!jr?.journeys.length} onClick={exportJson}><Icons.download /> Export JSON</DropdownMenuItem>
-          <DropdownMenuItem disabled={!jr?.journeys.length} onClick={exportCsv}><Icons.download /> Export CSV</DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </ButtonGroup>
-    <input ref={file} type='file' accept='.json,.csv,application/json,text/csv' className='hidden' onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) void importFile(f); }} />
-  </>);
+  // One button plus RecordView's ▾ menu holding Import and the exports.
+  const primary = <Allowed need='edit'><Button onClick={() => setAdding(true)}><Icons.add /> Add use case</Button></Allowed>;
+  const primaryMenu: RowAction[] = [
+    lock({ label: 'Import JSON or CSV', icon: <Icons.upload />, onSelect: () => file.current?.click() }, 'edit'),
+    { label: 'Export JSON', icon: <Icons.download />, separator: true, disabled: !jr?.journeys.length, onSelect: exportJson },
+    { label: 'Export CSV', icon: <Icons.download />, disabled: !jr?.journeys.length, onSelect: exportCsv }
+  ];
   const peopleOpts = useMemo(() => (ad?.members ?? []).map((m) => ({ value: m.user_id, label: m.label ?? 'Unnamed', count: m.calls })), [ad?.members]);
 
   if (error) return <PageContainer><ErrorState error={error} /></PageContainer>;
@@ -187,7 +177,7 @@ export function AdoptionPage() {
           <MultiSelectFilter noun='people' icon={<Icons.teams />} options={peopleOpts} value={users} onChange={setUsers} />
           <DateRangePicker value={range} onChange={setRange} />
         </>}
-        primary={primary}
+        primary={primary} primaryMenu={primaryMenu}
         empty={narrowed ? 'Nobody you picked worked on a use case in this period.' : 'Nothing to show yet.'}
         detailTitle={(r) => r.name}
         actions={(r) => r.type === 'use case' ? useCaseActions(r) : r.type === 'workflow' ? (note && LAUNCH_GROUPS.includes(r.g.id) ? [] : [{ label: 'Copy prompt', icon: <Icons.page />, onSelect: () => copy(r.g.prompt) }])
@@ -199,6 +189,7 @@ export function AdoptionPage() {
           </div>
         ) : r.type === 'workflow' ? <Workflow g={r.g} note={note && LAUNCH_GROUPS.includes(r.g.id) ? note : null} /> : <Client name={r.name} at={r.at} />}
       />
+      <input ref={file} type='file' accept='.json,.csv,application/json,text/csv' className='hidden' onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) void importFile(f); }} />
       {adding && <UseCaseEditor onClose={() => setAdding(false)} onSaved={() => { setAdding(false); reload(); }} />}
       {asking && <AskDialog j={asking} stuck={ad?.use_cases.find((u) => u.id === asking.id)?.people.find((p) => p.user_id === me)?.stuck ?? null}
         onClose={() => setAsking(null)} onSent={() => { setAsking(null); reloadAdoption(); }} />}

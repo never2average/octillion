@@ -53,7 +53,6 @@ export function handlersFor(org: Org) {
     search_transcripts: (a: Parameters<typeof q.searchTranscripts>[1]) => q.searchTranscripts(org, a),
     list_developer_profiles: (a: { query?: string; product?: string }) => q.listProfiles(org, a),
     list_agents: (a: { population?: string }) => q.listAgents(org, a),
-    browse_task_library: (a: { query?: string; category?: string; language?: string; platform?: string; limit?: number }) => q.browseTaskLibrary(a),
     save_harness_mix: (a: { name: string; description?: string; agents: { agent_id: string; share: number }[] }) => priv.saveHarnessMix(org, a),
     list_harness_mixes: (_a: Record<string, never>) => priv.listHarnessMixes(org),
     review_draft_tasks: (a: { product?: string; approve?: number[]; reject?: number[] }) => research.reviewDraftTasks(org, a),
@@ -81,7 +80,7 @@ function summarize(d: Data): string {
         : `${d.org.name} has no products yet. Start with onboard_product: a short description plus the website and docs links, and Octillion researches the rest (or use save_product to enter the details by hand).`;
     case "product": {
       const p = d.product;
-      return `${p.name} [${p.slug}]: ${p.description || "(no description)"} Category: ${p.category || "n/a"}. Aliases: ${p.aliases.join(", ") || "none"}. Packages: ${p.packages.join(", ") || "none"}. Competitors: ${p.competitors.map((c) => c.name).join(", ") || "none"}. ${d.scenarios.length} scenarios (${d.scenarios.filter((s: any) => s.active).length} active)${d.scenarios.length ? `: ${d.scenarios.map((s: any) => `#${s.id} ${s.title} (${s.library_task_id ? `library task #${s.library_task_id}` : `not from the library: ${s.source}`}, ${s.platform ?? "?"}, ${s.expectation}, hit ${pct(s.hit_rate)} of ${s.sessions})`).join("; ")}` : ""}. Worker agents: ${d.agents.map((a: any) => `${a.id} (${pct(a.weight)})`).join(", ")}.${d.warnings.length ? ` Warnings: ${d.warnings.join(" ")}` : ""}`;
+      return `${p.name} [${p.slug}]: ${p.description || "(no description)"} Category: ${p.category || "n/a"}. Aliases: ${p.aliases.join(", ") || "none"}. Packages: ${p.packages.join(", ") || "none"}. Competitors: ${p.competitors.map((c) => c.name).join(", ") || "none"}. ${d.scenarios.length} scenarios (${d.scenarios.filter((s: any) => s.active).length} active)${d.scenarios.length ? `: ${d.scenarios.map((s: any) => `#${s.id} ${s.title} (${s.curated ? q.CURATED.toLowerCase() : `yours: ${s.source}`}, ${s.platform ?? "?"}, ${s.expectation}, hit ${pct(s.hit_rate)} of ${s.sessions})`).join("; ")}` : ""}. Worker agents: ${d.agents.map((a: any) => `${a.id} (${pct(a.weight)})`).join(", ")}.${d.warnings.length ? ` Warnings: ${d.warnings.join(" ")}` : ""}`;
     }
     case "simulations":
       return d.simulations.length
@@ -116,16 +115,16 @@ function summarize(d: Data): string {
         return `${head} ${d.failure.summary} What to do next: ${d.failure.next.map((x: string, i: number) => `(${i + 1}) ${x}`).join(" ")} Tell the user plainly; do not show internal error text.`;
       if (r.status === "queued" && d.capacity) return `${head} Capacity: ${d.capacity.message} Check again with get_onboarding.`;
       if (r.status !== "completed") return `${head} The orchestrator is researching the website and docs, then writes the product profile, target developer personas and programming problems. Check again with get_onboarding.`;
-      return `${head} Profile: ${p.category || "n/a"}; aliases ${p.aliases.join(", ") || "none"}; packages ${p.packages.join(", ") || "none"}; competitors ${p.competitors.map((c: any) => c.name).join(", ") || "none"}. Personas: ${d.personas.map((x: any) => x.name).join("; ")}. Problems (${d.scenarios.length}): ${d.scenarios.map((s: any) => `#${s.id} ${s.title} [${s.source}${s.expectation === "avoid" ? ", avoid" : ""}]`).join("; ")}.${d.drafts?.length ? ` Draft tasks waiting for the user's approval (research wrote them because the library had nothing fitting; they run only once approved with review_draft_tasks): ${d.drafts.map((s: any) => `#${s.id} ${s.title}`).join("; ")}.` : ""}${d.simulation ? ` Simulation ${d.simulation.id}: ${d.simulation.status}, ${d.simulation.finished}/${d.simulation.sessions} sessions done; see get_simulation / get_visibility_report.` : d.next_step ? ` Next step, offer it to the user now: ${d.next_step.message} If they agree, call ${d.next_step.tool} ${JSON.stringify(d.next_step.args)}.` : r.status === "completed" && d.drafts?.length ? " No task is active yet: ask the user to review the draft tasks (review_draft_tasks), then run_simulation." : ""}`;
+      return `${head} Profile: ${p.category || "n/a"}; aliases ${p.aliases.join(", ") || "none"}; packages ${p.packages.join(", ") || "none"}; competitors ${p.competitors.map((c: any) => c.name).join(", ") || "none"}. Personas: ${d.personas.map((x: any) => x.name).join("; ")}. Problems (${d.scenarios.length}): ${d.scenarios.map((s: any) => `#${s.id} ${s.title} [${s.source}${s.expectation === "avoid" ? ", avoid" : ""}]`).join("; ")}.${d.drafts?.length ? ` Draft tasks waiting for the user's approval (research wrote them because Octillion's curated tasks had nothing fitting; they run only once approved with review_draft_tasks): ${d.drafts.map((s: any) => `#${s.id} ${s.title}`).join("; ")}.` : ""}${d.simulation ? ` Simulation ${d.simulation.id}: ${d.simulation.status}, ${d.simulation.finished}/${d.simulation.sessions} sessions done; see get_simulation / get_visibility_report.` : d.next_step ? ` Next step, offer it to the user now: ${d.next_step.message} If they agree, call ${d.next_step.tool} ${JSON.stringify(d.next_step.args)}.` : r.status === "completed" && d.drafts?.length ? " No task is active yet: ask the user to review the draft tasks (review_draft_tasks), then run_simulation." : ""}`;
     }
     case "profiles":
       return d.profiles.length
-        ? `${d.profiles.length} developer profiles${d.query ? ` matching "${d.query}"` : ""}: ${d.profiles.map((p: any) => `${p.slug} (${p.name}: ${p.summary})`).join("; ")}. Pass slugs as run_simulation profiles.`
-        : "No developer profiles synced from the vault yet.";
+        ? `${d.profiles.length} developer profile(s) of this organization${d.query ? ` matching "${d.query}"` : ""}: ${d.profiles.map((p: any) => `${p.slug} (${p.name}${p.curated ? `, ${q.CURATED.toLowerCase()}` : p.summary ? `: ${p.summary}` : ""})`).join("; ")}. Pass slugs as run_simulation profiles.`
+        : `No developer profiles${d.query ? ` match "${d.query}"` : " yet"}. Onboarding (onboard_product) picks Octillion-curated personas for each product; add your own with save_personas.`;
     case "personas":
       return d.personas.length
-        ? `${d.personas.length} private persona(s) of this organization: ${d.personas.map((p: any) => `${p.slug} (${p.name}, ${p.source}${p.active ? "" : ", inactive"})`).join("; ")}. Pass slugs as run_simulation profiles. Only this organization can see or use them.`
-        : "No private personas yet. Add your own with save_personas, or pick shared ones with list_developer_profiles.";
+        ? `${d.personas.length} persona(s) of this organization: ${d.personas.map((p: any) => `${p.slug} (${p.name}, ${p.curated ? q.CURATED.toLowerCase() : p.source}${p.active ? "" : ", inactive"})`).join("; ")}. Pass slugs as run_simulation profiles. Only this organization can see or use them.`
+        : "No personas yet. Onboarding (onboard_product) picks Octillion-curated personas for each product; add your own with save_personas.";
     case "task_sets":
       return d.task_sets.length
         ? `${d.task_sets.length} private task set(s): ${d.task_sets.map((t: any) => `${t.name} [${t.id}] for ${t.product}: ${t.active_tasks} active task(s)`).join("; ")}. Run one with run_simulation {task_set}.`
@@ -138,10 +137,6 @@ function summarize(d: Data): string {
       return d.harnesses.length
         ? `${d.harnesses.length} private harness(es): ${d.harnesses.map((h: any) => `${h.name} ${h.version} [${h.id}]: ${h.status}${h.status_reason ? ` (${h.status_reason})` : ""}`).join("; ")}. A harness runs only once it is approved after an isolated build and scan.`
         : "No private harnesses yet. Submit a declarative spec with register_harness.";
-    case "library":
-      return d.tasks.length
-        ? `${d.tasks.length} library tasks: ${d.tasks.map((t: any) => `#${t.id} ${t.title} [${t.platform ?? "?"}, ${t.category ?? "uncategorized"}${t.language ? `, ${t.language}` : ""}]`).join("; ")}. Categories: ${d.categories.map((c: any) => `${c.category ?? "uncategorized"} (${c.tasks})`).join(", ")}. Platforms: ${(d.platforms ?? []).map((c: any) => `${c.platform ?? "?"} (${c.tasks})`).join(", ")}. Add one to a product with save_scenarios {library_task_id}.`
-        : "No matching tasks in the library.";
     case "memory": {
       const line = (m: any) => `#${m.id} [${m.scope === "product" ? m.subject_name : m.scope === "user" ? "you" : "company"}, ${m.kind}] ${m.body}`;
       const whose = d.saved?.scope === "user" ? "your" : d.saved?.scope === "company" ? "the company's" : `${d.saved?.subject_name}'s`;
@@ -176,11 +171,11 @@ export function reportMarkdown(d: Extract<Data, { view: "report" }>): string {
   if (d.by_platform?.length) out.push("## Results by platform", `| Platform | Tasks | Sessions (should win) | ${cell(name)} | Competitor | No vendor | Mentioned ${cell(name)} | 95% range | Control correct |`, "|---|---|---|---|---|---|---|---|---|",
     ...d.by_platform.map((x: any) => `| ${x.platform} | ${x.tasks} | ${x.sessions} | ${x.product} | ${x.competitor} | ${x.no_vendor} | ${x.product_mentioned} | ${range(x.hit_ci)} | ${x.control.sessions ? `${x.control.correct} of ${x.control.sessions}` : "–"} |`));
 
-  out.push("## Results by task", `| Task | Library task | Platform | Should ${cell(name)} win? | Scored | ${cell(name)} | Competitor | No vendor | Mentioned ${cell(name)} | 95% range |`, "|---|---|---|---|---|---|---|---|---|---|",
+  out.push("## Results by task", `| Task | Source | Platform | Should ${cell(name)} win? | Scored | ${cell(name)} | Competitor | No vendor | Mentioned ${cell(name)} | 95% range |`, "|---|---|---|---|---|---|---|---|---|---|",
     ...d.by_scenario.map((s: any) => {
       const o = s.outcomes ?? { product: s.hits, competitor: 0, no_vendor: 0 };
       const winners = (s.winners ?? []).map((w: any) => `${w.tool} ${w.sessions}`).join(", ");
-      return `| ${cell(s.title)} | ${s.library_task_id ? `#${s.library_task_id}` : `none (${s.source ?? "custom"})`} | ${s.platform ?? "–"} | ${s.expectation === "recommend" ? "yes" : "no (control)"} | ${s.sessions} | ${o.product} | ${winners || o.competitor} | ${o.no_vendor} | ${s.product_mentioned ?? "–"} | ${range(s.hit_ci)} |`;
+      return `| ${cell(s.title)} | ${s.curated ? q.CURATED : `yours (${s.source ?? "custom"})`} | ${s.platform ?? "–"} | ${s.expectation === "recommend" ? "yes" : "no (control)"} | ${s.sessions} | ${o.product} | ${winners || o.competitor} | ${o.no_vendor} | ${s.product_mentioned ?? "–"} | ${range(s.hit_ci)} |`;
     }));
   const shortlists = d.by_scenario.filter((s: any) => s.expectation === "recommend" && s.alternatives?.length);
   if (shortlists.length) out.push("", "Named instead of " + name + " (sessions that did not choose it):", ...shortlists.map((s: any) => `- ${s.title}: ${s.alternatives.slice(0, 5).map((a: any) => `${a.tool} ${a.sessions}`).join(", ")}`));
@@ -329,7 +324,6 @@ export const TOOL_STATUS: Record<ToolName, [string, string]> = {
   search_transcripts: ["Searching transcripts…", "Search complete"],
   list_developer_profiles: ["Loading developer profiles…", "Developer profiles loaded"],
   list_agents: ["Loading agent mix…", "Agent mix loaded"],
-  browse_task_library: ["Browsing task library…", "Task library loaded"],
   save_personas: ["Saving private personas…", "Private personas saved"],
   list_personas: ["Loading private personas…", "Private personas loaded"],
   import_tasks: ["Importing private tasks…", "Private tasks imported"],
@@ -361,8 +355,10 @@ export function createServer(org: Org, context = ""): McpServer {
         "(product context: names, packages, competitors) -> save_scenarios (realistic coding tasks phrased neutrally, never " +
         "naming the product) -> run_simulation (sandboxed sub-agents work each scenario on each model) -> " +
         "get_visibility_report / get_simulation for results -> get_agent_session and get_session_transcript for evidence. " +
-        "browse_task_library offers curated real-world tasks to turn into scenarios; list_developer_profiles lists the developer " +
-        "personas the orchestrator role-plays when a sub-agent asks questions (pass them to run_simulation as profiles). " +
+        "Onboarding picks Octillion-curated tasks and developer personas for the product; they are shown by title and name only " +
+        "(their content is Octillion's and is never listed). list_personas lists the account's own personas, the developers the " +
+        "orchestrator role-plays when a sub-agent asks questions (pass them to run_simulation as profiles); save_personas and " +
+        "import_tasks add the account's own. " +
         "Memory: when the user states a lasting fact, decision or preference about their company, product or themselves (or says 'remember'), " +
         "save it with save_to_memory; before answering questions about past decisions or how the team works, check search_memory." + context,
     },
@@ -410,7 +406,7 @@ export function createServer(org: Org, context = ""): McpServer {
 
   registerAppTool(server, "onboard_product", {
     title: "Onboard a product",
-    description: "Start here. Describe a developer tool with a short prompt plus its website and docs links. The orchestrator reads them, builds a detailed product profile (package names, domains, competitors), target developer personas and realistic programming problems where the product could be the right answer (found in the curated task library or newly written, never naming the product), then stops: research uses a single orchestrator sandbox. Takes a few minutes; follow progress with get_onboarding, review the competitors and problems, then launch the run with run_simulation (or pass run: true to chain it).",
+    description: "Start here. Describe a developer tool with a short prompt plus its website and docs links. The orchestrator reads them, builds a detailed product profile (package names, domains, competitors), target developer personas and realistic programming problems where the product could be the right answer (chosen from Octillion's curated tasks or newly written, never naming the product), then stops: research uses a single orchestrator sandbox. Takes a few minutes; follow progress with get_onboarding, review the competitors and problems, then launch the run with run_simulation (or pass run: true to chain it).",
     inputSchema: {
       prompt: z.string().describe("What the product is and who it is for, in a sentence or a paragraph"),
       website_url: z.string().optional().describe("Product website, e.g. https://bullmq.io"),
@@ -464,12 +460,11 @@ export function createServer(org: Org, context = ""): McpServer {
 
   registerAppTool(server, "save_scenarios", {
     title: "Add or edit scenarios",
-    description: "Add scenarios (omit id) or edit existing ones (pass id). A scenario is a realistic coding task handed verbatim to a sandboxed coding agent, e.g. 'Add a Postgres database to this Next.js app and persist the todos'. Phrase it the way a developer would and never name the product. expectation 'recommend' (default) means the product should be picked; 'avoid' means it should not. Set active=false to retire one.",
+    description: "Add scenarios (omit id) or edit existing ones (pass id). Tasks curated by Octillion (picked during onboarding) can only be turned on or off. A scenario is a realistic coding task handed verbatim to a sandboxed coding agent, e.g. 'Add a Postgres database to this Next.js app and persist the todos'. Phrase it the way a developer would and never name the product. expectation 'recommend' (default) means the product should be picked; 'avoid' means it should not. Set active=false to retire one.",
     inputSchema: {
       product,
       scenarios: z.array(z.object({
         id: z.number().int().optional(),
-        library_task_id: z.number().int().optional().describe("Start from a curated task (browse_task_library); its prompt, title, repo and language are copied unless given"),
         title: z.string().optional(),
         prompt: z.string().optional().describe("The task given to the agent"),
         repo_url: z.string().optional().describe("Optional starter git repo cloned into the sandbox"),
@@ -498,7 +493,7 @@ export function createServer(org: Org, context = ""): McpServer {
       samples: z.number().int().min(1).max(100).optional().describe(`Representative mode: first batch of sessions per scenario (default ${q.config.defaultSamples()}). Given alone it makes a fixed-size run with no adaptive sampling`),
       max_samples: z.number().int().min(1).max(100).optional().describe(`Representative mode: adaptive sampling cap per scenario (default ${q.config.maxSamples()}). Each scenario is sampled until its result is stable or it reaches this many sessions`),
       population: z.string().optional().describe("Developer population whose coding-agent mix to sample (list_agents); default population if omitted"),
-      profiles: z.array(z.string()).optional().describe("Developer profile slugs (list_developer_profiles); every scenario runs once per profile. Omit for a generic developer"),
+      profiles: z.array(z.string()).optional().describe("Developer persona slugs of this organization (list_personas); every scenario runs once per profile. Omit for a generic developer"),
       repeats: z.number().int().min(1).max(10).optional().describe("Explicit mode: runs per scenario and agent (default 3)"),
       name: z.string().optional(),
     },
@@ -577,7 +572,7 @@ export function createServer(org: Org, context = ""): McpServer {
 
   registerAppTool(server, "list_developer_profiles", {
     title: "Developer profiles",
-    description: "Curated developer personas (role, experience, company size, stack, constraints) from the vault. During a run the orchestrator role-plays the chosen profile whenever the coding agent asks a question.",
+    description: "This organization's developer personas, the ones it can pass to run_simulation as profiles: its own, and the Octillion-curated ones onboarding picked for its products (by name only). During a run the orchestrator role-plays the chosen profile whenever the coding agent asks a question.",
     inputSchema: { query: z.string().optional().describe("Filter, e.g. 'enterprise' or 'Python'") },
     annotations: read, _meta: meta("list_developer_profiles"),
   }, run("list_developer_profiles"));
@@ -598,7 +593,7 @@ export function createServer(org: Org, context = ""): McpServer {
   }, run("save_personas"));
   registerAppTool(server, "list_personas", {
     title: "Private personas",
-    description: "Your organization's own personas: the ones you saved and the ones research picked for your products.",
+    description: "Your organization's own personas: the ones you saved, and the Octillion-curated ones research picked for your products (shown by name only).",
     inputSchema: {}, annotations: read, _meta: meta("list_personas"),
   }, run("list_personas"));
   registerAppTool(server, "import_tasks", {
@@ -631,7 +626,7 @@ export function createServer(org: Org, context = ""): McpServer {
   }, run("register_harness"));
   registerAppTool(server, "review_draft_tasks", {
     title: "Review draft tasks",
-    description: "Approve or reject the draft tasks onboarding research proposed for needs Octillion's task library does not cover (listed by get_onboarding). Only approved drafts run.",
+    description: "Approve or reject the draft tasks onboarding research proposed for needs Octillion's curated tasks do not cover (listed by get_onboarding). Only approved drafts run.",
     inputSchema: {
       product,
       approve: z.array(z.number().int()).optional().describe("Draft task ids to approve (they become active tasks)"),
@@ -659,19 +654,6 @@ export function createServer(org: Org, context = ""): McpServer {
     description: "Your organization's private harnesses and their review status.",
     inputSchema: {}, annotations: read, _meta: meta("list_harnesses"),
   }, run("list_harnesses"));
-
-  registerAppTool(server, "browse_task_library", {
-    title: "Task library",
-    description: "Browse the curated library of real-world developer tasks. Turn one into a scenario with save_scenarios {library_task_id}.",
-    inputSchema: {
-      query: z.string().optional(),
-      category: z.string().optional(),
-      language: z.string().optional(),
-      platform: z.enum(["web", "mobile", "backend", "desktop", "cli", "data", "other"]).optional().describe("Only tasks on this platform, e.g. mobile for Flutter / React Native / iOS / Android work"),
-      limit: z.number().int().min(1).max(200).optional(),
-    },
-    annotations: read, _meta: meta("browse_task_library"),
-  }, run("browse_task_library"));
 
   const scope = z.enum(["company", "me", "product"]);
   registerAppTool(server, "save_to_memory", {

@@ -7,7 +7,7 @@ import { companyHintForResearch } from "./context.js";
 import { completeProspect, prospectIssues } from "./prospect.js";
 import { capture, orgEvent } from "./telemetry.js";
 import { randomId, type Org } from "./auth.js";
-import { NO_PLAN, WORKSPACE_TEMPLATES, config, getProduct, resolveProduct, runSimulation, saveProduct, browseTaskLibrary } from "./queries.js";
+import { NO_PLAN, WORKSPACE_TEMPLATES, config, getProduct, resolveProduct, runSimulation, saveProduct, browseTaskLibrary, personaForCustomer } from "./queries.js";
 import { sessionsLimit } from "./limits.js";
 import { orgBudget } from "./billing.js";
 import { PLATFORMS, isPlatform, platformOf } from "./platform.js";
@@ -197,9 +197,10 @@ export async function getOnboarding(org: Org, input: { research_id?: string; pro
                           [org.orgId, (await resolveProduct(org, input.product)).id]);
   if (!job) throw new Error(input.research_id ? `No onboarding ${input.research_id}` : "This product has not been onboarded yet; use onboard_product.");
   const product = await getProduct(org, String(job.product_id));
-  const personas = await db.query(
-    `SELECT slug, name, summary, attributes FROM developer_profiles WHERE org_id = $1 AND product_id = $2 AND active ORDER BY id`,
-    [org.orgId, job.product_id]);
+  // Personas research picked from Octillion's shared library are named only (personaForCustomer).
+  const personas = (await db.query<any>(
+    `SELECT slug, name, summary, attributes, source FROM developer_profiles WHERE org_id = $1 AND product_id = $2 AND active ORDER BY id`,
+    [org.orgId, job.product_id])).map(personaForCustomer);
   const [sim] = job.simulation_id
     ? await db.query<any>(
         `/* tenant: simulation of a research row already read with org_id = the caller's org */ SELECT sim.id, sim.status, count(s.id) AS sessions, count(*) FILTER (WHERE s.status IN ('completed','failed','timeout','cancelled')) AS finished

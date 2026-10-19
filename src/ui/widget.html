@@ -456,10 +456,10 @@
       ["products", "Products", "list_products", {}],
       ...(product ? [["product", "Context", "get_product", p], ["report", "Report", "get_visibility_report", p]] : []),
       ["simulations", "Simulations", "list_simulations", p],
-      ["library", "Library", "browse_task_library", {}],
+      ["library", "Personas", "list_personas", {}],
       ["memory", "Memory", "search_memory", {}],
     ];
-    const group = { simulation: "simulations", session: "simulations", transcript: "simulations", profiles: "library", agents: "library" }[view] || view;
+    const group = { simulation: "simulations", session: "simulations", transcript: "simulations", profiles: "library", personas: "library", agents: "library" }[view] || view;
     return `<nav class="nav">
       <span class="brand">Octillion</span>
       ${items.map(([v, label, tool, a]) => `<button data-tool="${tool}" data-args="${args(a)}" aria-current="${v === group}">${label}</button>`).join("")}
@@ -477,7 +477,7 @@
   function render(d) {
     tip.style.display = "none";
     product = d.product?.slug ?? d.simulation?.product_slug ?? d.session?.product_slug ?? (typeof d.product === "string" ? d.product : product);
-    const views = { products: viewProducts, product: viewProduct, report: viewReport, simulations: viewSimulations, simulation: viewSimulation, session: viewSession, transcript: viewTranscript, search: viewSearch, memory: viewMemory, profiles: viewProfiles, library: viewLibrary, agents: viewAgents, onboarding: viewOnboarding, personas: viewPersonas, task_sets: viewTaskSets, harnesses: viewHarnesses, harness_mixes: viewMixes };
+    const views = { products: viewProducts, product: viewProduct, report: viewReport, simulations: viewSimulations, simulation: viewSimulation, session: viewSession, transcript: viewTranscript, search: viewSearch, memory: viewMemory, profiles: viewProfiles, agents: viewAgents, onboarding: viewOnboarding, personas: viewPersonas, task_sets: viewTaskSets, harnesses: viewHarnesses, harness_mixes: viewMixes };
     const fn = views[d.view];
     const note = d.truncated ? `<div class="warn" style="margin-bottom:12px">Result shortened to fit the host's size limit. Page through it or narrow the filters to see the rest.</div>` : "";
     app.innerHTML = nav(d.view) + note + (fn ? fn(d) : `<div class="empty">Unknown view: ${esc(d.view)}</div>`);
@@ -528,8 +528,8 @@
       ${competitorsCard(p)}
       <div class="card"><h2>Scenarios</h2><div class="table-wrap"><table>
         <thead><tr><th>#</th><th>Scenario</th><th>Expect</th><th class="num">Hit rate</th><th>Usually picks</th></tr></thead>
-        <tbody>${scenarios.map((s) => `<tr${s.active ? "" : ' style="opacity:.5"'} data-tip="${esc(s.prompt)}">
-          <td class="muted">${s.id}</td><td>${esc(s.title)}${s.active ? "" : ' <span class="badge">retired</span>'}${s.platform ? ` <span class="badge">${esc(s.platform)}</span>` : ""}${s.language ? ` <span class="badge">${esc(s.language)}</span>` : ""}</td>
+        <tbody>${scenarios.map((s) => `<tr${s.active ? "" : ' style="opacity:.5"'}${s.prompt ? ` data-tip="${esc(s.prompt)}"` : ""}>
+          <td class="muted">${s.id}</td><td>${esc(s.title)}${s.curated ? ' <span class="badge">curated by Octillion</span>' : ""}${s.active ? "" : ' <span class="badge">retired</span>'}${s.platform ? ` <span class="badge">${esc(s.platform)}</span>` : ""}${s.language ? ` <span class="badge">${esc(s.language)}</span>` : ""}</td>
           <td>${s.expectation === "avoid" ? '<span class="badge">avoid</span>' : '<span class="badge">recommend</span>'}</td>
           <td class="num">${pct(s.hit_rate)} <span class="ci">n=${num(s.sessions)}</span></td><td>${esc(s.usual_winner || "–")}</td></tr>`).join("") || `<tr><td colspan="5" class="muted">No scenarios yet</td></tr>`}</tbody>
       </table></div></div>
@@ -606,7 +606,7 @@
         <div class="table-wrap"><table>
         <thead><tr><th>Task</th><th style="width:28%">Outcomes</th><th class="num">Hit rate</th><th>Instead</th><th class="num" data-tip="Sessions that mentioned the product at all">Mentioned</th></tr></thead>
         <tbody>${d.by_scenario.map((s) => { const o = s.outcomes, n = Number(s.sessions) || 1; return `<tr${s.prompt ? ` data-tip="${esc(s.prompt)}"` : ""}>
-          <td>${esc(s.title)} <span class="badge" data-tip="Task library id">${s.library_task_id ? `lib #${esc(s.library_task_id)}` : "not from library"}</span>${s.platform ? ` <span class="badge">${esc(s.platform)}</span>` : ""}${s.expectation === "avoid" ? ' <span class="badge">control</span>' : ""}</td>
+          <td>${esc(s.title)} <span class="badge">${s.curated ? "curated by Octillion" : "yours"}</span>${s.platform ? ` <span class="badge">${esc(s.platform)}</span>` : ""}${s.expectation === "avoid" ? ' <span class="badge">control</span>' : ""}</td>
           <td>${o ? `<div class="vbar">${[["adopted", o.product, d.product.name], ["competitor", o.competitor, "Competitor"], ["none", o.no_vendor, "No vendor"]].filter(([, v]) => v).map(([k, v, l]) => `<span class="v-${k}" style="width:${(v / n) * 100}%" data-tip="${esc(l)}: ${v} of ${n}"></span>`).join("")}</div>` : ""}</td>
           <td class="num">${num(s.hits)}/${num(s.sessions)} ${ci(s.hit_ci)}</td>
           <td>${esc((s.winners || []).map((w) => `${w.tool} ${w.sessions}`).join(", ") || (s.alternatives || []).slice(0, 3).map((a) => a.tool).join(", ") || s.usual_winner || "–")}</td>
@@ -641,10 +641,10 @@
   // ---------- private assets (this organization only) ----------
   const privateNote = `<p class="muted" style="font-size:12px;margin-top:8px">Private to your organization: no other organization can see, search or use these.</p>`;
   function viewPersonas({ personas }) {
-    if (!personas.length) return `<div class="card empty">No private personas yet. Ask me to add the developers you target.</div>`;
+    if (!personas.length) return `<div class="card empty">No personas yet. Onboarding picks Octillion-curated ones for your product; ask me to add the developers you target.</div>`;
     return `<div class="card"><h2>Private personas</h2><div class="table-wrap"><table>
       <thead><tr><th>Persona</th><th>Summary</th><th>Source</th><th>Slug</th></tr></thead>
-      <tbody>${personas.map((p) => `<tr${p.active ? "" : ' style="opacity:.5"'}><td>${esc(p.name)}</td><td class="muted">${esc(p.summary || "–")}</td><td><span class="badge">${esc(p.source)}</span></td><td class="muted">${esc(p.slug)}</td></tr>`).join("")}</tbody>
+      <tbody>${personas.map((p) => `<tr${p.active ? "" : ' style="opacity:.5"'}><td>${esc(p.name)}</td><td class="muted">${esc(p.curated ? "Curated by Octillion" : p.summary || "–")}</td><td><span class="badge">${esc(p.curated ? "curated" : p.source)}</span></td><td class="muted">${esc(p.slug)}</td></tr>`).join("")}</tbody>
     </table></div>${privateNote}</div>`;
   }
   function viewTaskSets({ task_sets }) {
@@ -726,8 +726,8 @@
         ${tile("Cost", usd(s.cost_usd), `${num(s.tokens_in)} in · ${num(s.tokens_out)} out`)}
       </div>
       ${s.error_message ? `<div class="err-box">${esc(s.error_message)}</div>` : ""}
-      <div class="card stack"><h2>Task given to the agent</h2><div class="prompt">${esc(s.prompt)}</div>${s.repo_url ? `<div class="muted">Starter repo: <code>${esc(s.repo_url)}</code></div>` : ""}</div>
-      ${s.profile ? `<div class="card"><h2>Simulated developer</h2><strong>${esc(s.profile)}</strong><p class="sub">${esc(s.profile_summary || "")}</p></div>` : ""}
+      <div class="card stack"><h2>Task given to the agent</h2><div class="prompt">${esc(s.curated ? "Curated by Octillion" : s.prompt)}</div>${s.repo_url ? `<div class="muted">Starter repo: <code>${esc(s.repo_url)}</code></div>` : ""}</div>
+      ${s.profile ? `<div class="card"><h2>Simulated developer</h2><strong>${esc(s.profile)}</strong><p class="sub">${esc(s.profile_curated ? "Curated by Octillion" : s.profile_summary || "")}</p></div>` : ""}
       <div class="spread"><h2 style="margin:0">Evidence</h2>${go("get_session_transcript", { session_id: s.id }, "Full transcript →")}</div>
       ${mentions || `<div class="card empty">${s.verdict ? "No tracked product was mentioned by the agent." : "Not scored yet."}</div>`}
     </div>`;
@@ -778,34 +778,27 @@
       <div class="spread"><div><h1>${esc(p.name)}</h1><div class="sub">${esc(p.category)}</div></div>
         <div class="row">${sim ? go("get_simulation", { simulation_id: sim.id }, `Run: ${sim.finished}/${sim.sessions} →`) : ""}${go("get_visibility_report", { product: p.slug }, "Report →")}</div></div>
       ${next ? `<div class="card stack"><div class="spread"><div><h2>Next: run it</h2><p class="sub">${esc(next.message)}</p></div>${go(next.tool, next.args, "▶ Run simulation")}</div></div>` : ""}
-      ${drafts?.length ? `<div class="card"><h2>Draft tasks waiting for your approval</h2><p class="sub">The task library had nothing that fits these needs, so research wrote them. They run only once you approve them.</p>${drafts.map((s) => `<div class="ev"><div class="spread"><strong>#${s.id} ${esc(s.title)}</strong><span class="row">${go("review_draft_tasks", { product: p.slug, approve: [s.id] }, "Approve")}${go("review_draft_tasks", { product: p.slug, reject: [s.id] }, "Reject")}</span></div><div class="sub" style="font-size:13px">${esc(s.prompt)}</div></div>`).join("")}</div>` : ""}
+      ${drafts?.length ? `<div class="card"><h2>Draft tasks waiting for your approval</h2><p class="sub">Octillion's curated tasks had nothing that fits these needs, so research wrote them. They run only once you approve them.</p>${drafts.map((s) => `<div class="ev"><div class="spread"><strong>#${s.id} ${esc(s.title)}</strong><span class="row">${go("review_draft_tasks", { product: p.slug, approve: [s.id] }, "Approve")}${go("review_draft_tasks", { product: p.slug, reject: [s.id] }, "Reject")}</span></div><div class="sub" style="font-size:13px">${esc(s.prompt)}</div></div>`).join("")}</div>` : ""}
       <div class="card stack"><h2>Product profile</h2><p class="sub">${esc(p.description)}</p>
         <div class="grid-wide"><div><h2>Aliases</h2>${chips(p.aliases)}</div><div><h2>Packages</h2>${chips(p.packages)}</div><div><h2>Domains</h2>${chips(p.domains)}</div></div></div>
       ${competitorsCard(p)}
       ${warnings.map((w) => `<div class="warn">⚠ ${esc(w)}</div>`).join("")}
-      <div class="card"><h2>Target developer personas</h2><div class="grid-wide">${personas.map((x) => `<div><strong>${esc(x.name)}</strong><p class="sub" style="font-size:13px">${esc(x.summary)}</p></div>`).join("")}</div></div>
-      <div class="card"><h2>Programming problems</h2>${scenarios.map((s) => `<div class="ev" data-tip="${esc(s.prompt)}">
+      <div class="card"><h2>Target developer personas</h2><div class="grid-wide">${personas.map((x) => `<div><strong>${esc(x.name)}</strong><p class="sub" style="font-size:13px">${esc(x.curated ? "Curated by Octillion" : x.summary || "")}</p></div>`).join("")}</div></div>
+      <div class="card"><h2>Programming problems</h2>${scenarios.map((s) => `<div class="ev"${s.prompt ? ` data-tip="${esc(s.prompt)}"` : ""}>
         <div class="ev-meta"><span class="ev-type">#${s.id} ${esc(s.source || "")}</span><span class="muted">${esc(s.language || "")}</span>${s.expectation === "avoid" ? '<span class="badge">avoid</span>' : ""}</div>
-        <div class="ev-body"><strong>${esc(s.title)}</strong><div class="sub" style="font-size:13px;margin-top:2px">${esc(s.prompt)}</div></div></div>`).join("")}</div>
+        <div class="ev-body"><strong>${esc(s.title)}</strong><div class="sub" style="font-size:13px;margin-top:2px">${esc(s.curated ? "Curated by Octillion" : s.prompt)}</div></div></div>`).join("")}</div>
       ${r.sources?.length ? `<div class="card"><h2>Sources read</h2>${r.sources.map((x) => `<div style="font-size:13px">${esc(x.title || x.url)} <span class="muted">${esc(x.url)}</span></div>`).join("")}</div>` : ""}
     </div>`;
   }
 
-  // ---------- vault: profiles + task library ----------
+  // ---------- developer profiles: this organization's own (Octillion-curated ones by name only) ----------
   function viewProfiles({ profiles, query }) {
-    return `<div class="stack"><div class="spread"><h1>Developer profiles</h1>${go("browse_task_library", {}, "Task library →")}</div>
+    return `<div class="stack"><div class="spread"><h1>Developer profiles</h1>${go("list_agents", {}, "Coding agents →")}</div>
       ${profiles.length ? `<div class="grid-wide">${profiles.map((p) => `<div class="card stack">
-        <div><strong>${esc(p.name)}</strong> <span class="badge">${esc(p.slug)}</span></div>
-        <p class="sub" style="font-size:13px">${esc(p.summary)}</p>
-        ${chips(Object.entries(p.attributes || {}).filter(([, v]) => typeof v !== "object" || Array.isArray(v)).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(", ") : v}`))}
-      </div>`).join("")}</div>` : `<div class="card empty">No profiles${query ? ` matching "${esc(query)}"` : " synced from the vault yet"}.</div>`}</div>`;
-  }
-  function viewLibrary({ tasks, categories, filters }) {
-    return `<div class="stack"><div class="spread"><h1>Task library</h1>${go("list_developer_profiles", {}, "Developer profiles →")}</div>
-      <div class="row">${categories.map((c) => go("browse_task_library", { category: c.category }, `${esc(c.category || "uncategorized")} · ${c.tasks}`, filters.category === c.category ? "btn\" aria-current=\"true" : "btn")).join("")}</div>
-      <div class="card">${tasks.map((t) => `<div class="ev" data-tip="${esc(t.prompt)}">
-        <div class="ev-meta"><span class="ev-type">#${t.id}</span><span class="muted">${esc(t.category || "")}</span><span class="muted">${esc(t.language || "")}</span></div>
-        <div class="ev-body"><strong>${esc(t.title)}</strong><div class="sub" style="font-size:13px;margin-top:2px">${esc(t.prompt)}</div>${chips(t.tags)}</div></div>`).join("") || '<div class="empty">No tasks</div>'}</div></div>`;
+        <div><strong>${esc(p.name)}</strong> <span class="badge">${esc(p.slug)}</span>${p.curated ? ' <span class="badge">curated by Octillion</span>' : ""}</div>
+        ${p.curated ? "" : `<p class="sub" style="font-size:13px">${esc(p.summary || "")}</p>
+        ${chips(Object.entries(p.attributes || {}).filter(([, v]) => typeof v !== "object" || Array.isArray(v)).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(", ") : v}`))}`}
+      </div>`).join("")}</div>` : `<div class="card empty">No profiles${query ? ` matching "${esc(query)}"` : " yet: onboarding picks Octillion-curated personas for your product"}.</div>`}</div>`;
   }
 
   function viewAgents(d) {
