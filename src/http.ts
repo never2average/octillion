@@ -478,13 +478,8 @@ export function createApp() {
   // Global compute settings (src/settings.ts) and the default population's agent mix.
   ob.get("/compute", async (_req, res) => void res.json(await library.compute()));
   ob.put("/compute/settings", need("compute"), async (req, res) => void res.json(await library.saveSettings(adminActor(req, res), req.body?.values)));
-  // Loss reasons (src/reasons.ts): the queue and today's cap, and "Explain past losses" (queues scored losses with no reason).
+  // Loss reasons (src/reasons.ts): the queue and today's cap. Past losses are queued by every drain, no button.
   ob.get("/compute/reasons", async (_req, res) => void res.json(await reasons.reasonsStatus()));
-  ob.post("/compute/reasons/backfill", need("compute"), async (req, res) => {
-    const r = await reasons.backfillReasons().catch((e) => { throw e instanceof reasons.ReasonsError ? new onboarding.AdminError(e.message, 409) : e; });
-    onboarding.log(adminActor(req, res), "reasons.backfill", null, { added: r.added, left_behind: r.left_behind });
-    res.json(r);
-  });
   // The Compute page (src/compute.ts): verdict, tick freshness, tiles, limits, environment. Read only; ?fresh=1 asks boat again.
   ob.get("/compute/summary", async (req, res) => void res.json(await computeSummary({ fresh: req.query.fresh === "1" })));
   // Its record tables (src/compute-records.ts): sessions and orchestrators with their peeks, and which agents can run. Read only.

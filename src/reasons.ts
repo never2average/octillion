@@ -28,8 +28,8 @@ import { asData } from "../orchestrator/core/text-guard.js";
  *               (fire and forget, CONCURRENCY at a time); the autoscaler loop and the Vercel cron drain too. Never
  *               blocks or fails scoring. A failed call retries with backoff (1, 4, 16 minutes) up to MAX_ATTEMPTS.
  *   limits      REASONS_ENABLED (on/off) and REASONS_DAILY_MAX model calls a UTC day (src/settings.ts).
- *   backfill    "Explain past losses" on /admin/configuration (POST /admin/api/compute/reasons/backfill): queues
- *               scored losses with no current reason, at most what is left of today's cap.
+ *   backfill    automatic: every drain first queues scored losses with no current reason (older sessions, a changed
+ *               winner, failed ones), newest first, at most what is left of today's cap. Nobody has to press anything.
  */
 
 export const REASON_CATEGORIES = [
@@ -208,6 +208,7 @@ async function usedToday(): Promise<number> {
 export async function drainReasons(max = 200): Promise<{ explained: number; failed: number; capped: boolean }> {
   const out = { explained: 0, failed: 0, capped: false };
   const db = await getDb();
+  if (enabled()) await queueUnexplained(max);
   for (let done = 0; done < max;) {
     if (!enabled()) break;
     const left = dailyMax() - (await usedToday());
@@ -291,23 +292,20 @@ export async function reasonsStatus() {
   return { enabled: enabled(), daily_max: dailyMax(), used_today: used, left_today: Math.max(0, dailyMax() - used), ...r };
 }
 
-export class ReasonsError extends Error { status = 409; }
-
 /**
- * "Explain past losses": queue scored losses that have no reason for their current winner (failed ones get a fresh
- * set of attempts), newest first, at most what is left of today's cap. Skipped ones (no agent text) stay skipped.
+ * Queue scored losses that have no reason for their current winner (failed ones get a fresh set of attempts), newest
+ * first, at most `max` and what is left of today's cap. Skipped ones (no agent text) stay skipped. Run by every drain.
  */
-export async function backfillReasons() {
-  if (!enabled()) throw new ReasonsError("Loss reasons are off. Turn on REASONS_ENABLED first.");
+export async function queueUnexplained(max = 200) {
+  if (!enabled()) return { added: 0, left_behind: 0 };
   const before = await reasonsStatus();
-  const n = Math.max(0, before.left_today - before.queued);
+  const n = Math.max(0, Math.min(max, before.left_today - before.queued));
   const rows = n ? await (await getDb()).query<{ id: string }>(
-    `/* tenant: internal: admin backfill across accounts (each reason stays on its own session) */ UPDATE agent_sessions SET reason_status = 'queued', reason_next_at = now(), reason_attempts = 0, reason_error = NULL
+    `/* tenant: internal: automatic backfill across accounts (each reason stays on its own session) */ UPDATE agent_sessions SET reason_status = 'queued', reason_next_at = now(), reason_attempts = 0, reason_error = NULL
       WHERE id IN (SELECT s.id FROM agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id
                     WHERE s.verdict IS NOT NULL AND ${LOST} AND (s.reason IS NULL OR s.reason->>'winner' IS DISTINCT FROM s.winner)
                       AND s.reason_status IS DISTINCT FROM 'queued' AND s.reason_status IS DISTINCT FROM 'skipped'
                     ORDER BY s.queued_at DESC, s.id LIMIT $1)
       RETURNING id`, [n]) : [];
-  if (rows.length) kickReasons();
-  return { added: rows.length, left_behind: Math.max(0, before.missing - rows.length), status: await reasonsStatus() };
+  return { added: rows.length, left_behind: Math.max(0, before.missing - rows.length) };
 }

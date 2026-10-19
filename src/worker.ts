@@ -253,6 +253,18 @@ export async function completeSession(sessionId: string, input: CompleteInput = 
   return score;
 }
 
+/** Recompute a scored session's untracked installs from its stored transcript (after an untrackedInstalls fix). */
+export async function refreshUntracked(sessionId: string) {
+  const db = await getDb();
+  const [row] = await db.query<{ org_id: number; name: string; aliases: string[]; packages: string[]; domains: string[]; competitors: Tool[] }>(
+    `/* tenant: internal: backfill by session id */ SELECT s.org_id, p.name, p.aliases, p.packages, p.domains, p.competitors
+       FROM agent_sessions s JOIN products p ON p.id = s.product_id WHERE s.id = $1 AND s.verdict IS NOT NULL`, [sessionId]);
+  if (!row) return null;
+  const untracked = untrackedInstalls(await allEvents(row.org_id, sessionId), [{ name: row.name, aliases: row.aliases, packages: row.packages, domains: row.domains }, ...row.competitors]);
+  await db.query("/* tenant: internal: backfill by session id */ UPDATE agent_sessions SET untracked = $2 WHERE id = $1", [sessionId, JSON.stringify(untracked)]);
+  return untracked;
+}
+
 export async function scoreSession(sessionId: string) {
   const db = await getDb();
   const [row] = await db.query<{ org_id: number; status: string; name: string; aliases: string[]; packages: string[]; domains: string[]; competitors: Tool[] }>(

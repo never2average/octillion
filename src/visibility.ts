@@ -29,7 +29,7 @@ import { agentLabel, HIT, PICKED, wilson } from "./queries.js";
 
 /** A task the product should win (HIT's recommend branch); anything else is scored as an avoid task, as in HIT. */
 const REC = `sc.expectation = 'recommend'`;
-import { howChosen, type HowChosen, type Mention } from "./scoring.js";
+import { howChosen, plausiblePackage, type HowChosen, type Mention } from "./scoring.js";
 import { reportRange } from "./insights.js";
 import { LOST, REASON_CATEGORIES, reasonLabel, type Reason } from "./reasons.js";
 import { recordPageAction } from "./analytics.js";
@@ -173,7 +173,7 @@ export async function visibilityCharts(orgId: number, range: Range, f: VisFilter
     ...(Array.isArray(x.competitors) ? x.competitors : []).flatMap((c) => [c.name, ...(c.aliases ?? []), ...(c.packages ?? [])])]).map((x) => String(x).toLowerCase()));
   const tracked = tools.map((t) => ({ name: t.tool, mentioned: Number(t.mentioned), chosen: Number(t.chosen), installed: 0, kind: "tracked" as const }));
   for (const t of tracked) known.add(t.name.toLowerCase());
-  const extra = untracked.filter((u) => !known.has(u.name)).map((u) => ({ name: u.name, mentioned: 0, chosen: 0, installed: Number(u.n), kind: "untracked" as const }));
+  const extra = untracked.filter((u) => !known.has(u.name) && plausiblePackage(u.name)).map((u) => ({ name: u.name, mentioned: 0, chosen: 0, installed: Number(u.n), kind: "untracked" as const }));
   const cloud = [...tracked, ...extra].map((x) => ({ ...x, weight: x.mentioned + x.chosen + x.installed }))
     .filter((x) => x.weight > 0).sort((a, b) => b.weight - a.weight || a.name.localeCompare(b.name)).slice(0, 40);
 

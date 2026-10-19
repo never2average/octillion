@@ -2808,11 +2808,9 @@ try {
         assert.deepEqual([before.lost, before.explained, before.not_explained], [5, 0, 5], "5 lost sessions (4 competitor wins, 1 recommend task with nothing picked), none explained yet");
         assert.deepEqual(before.categories.map((c: any) => [c.id, c.label, c.sessions, c.share_pct]), [["not_explained", "Not explained yet", 5, 100]], "not explained yet is shown, not hidden");
 
-        // The backfill (Agent configuration › Explain past losses): newest first, within today's cap of 4.
-        const bf = await json(adm("POST", "/compute/reasons/backfill"));
-        assert.deepEqual([bf.added, bf.left_behind], [4, 1], "4 queued (the cap), 1 left for later");
+        // The backfill is automatic: a drain queues past losses with no reason, newest first, within today's cap of 4.
         await R.reasonsIdle();
-        await R.drainReasons();
+        assert.equal((await R.drainReasons()).explained, 4, "a drain explains past losses on its own, up to the cap");
         const reasonOf = async (i: number) => (await db.query<any>("/* tenant: smoke fixture */ SELECT reason, reason_status, reason_attempts FROM agent_sessions WHERE id = $1", [`ses_vis_${i}_${tag}`]))[0];
         const st = await R.reasonsStatus();
         assert.deepEqual([st.used_today - used0, st.left_today], [4, 0], "four model calls: the cap is used");
@@ -2831,9 +2829,9 @@ try {
         const usage = await db.query<any>("SELECT sum(requests)::int AS n FROM gateway_model_usage WHERE day = current_date AND provider = 'cloudflare' AND consumer = 'orchestrator'");
         assert.ok(Number(usage[0].n) >= 4, "each call's tokens are in the model usage like other server-side calls");
 
-        // Off: the backfill refuses, a drain sends nothing, scoring queues nothing.
+        // Off: nothing is queued, a drain sends nothing, scoring queues nothing.
         await setSettings("smoke", { REASONS_ENABLED: "off", REASONS_DAILY_MAX: used0 + 20 });
-        assert.equal((await adm("POST", "/compute/reasons/backfill")).status, 409, "off: Explain past losses refuses");
+        assert.equal((await R.queueUnexplained()).added, 0, "off: past losses are not queued");
         await db.query("/* tenant: smoke fixture */ UPDATE agent_sessions SET reason_status = 'queued', reason_next_at = now() WHERE id = $1", [`ses_vis_1_${tag}`]);
         assert.equal((await R.drainReasons()).explained, 0, "off: nothing is sent");
         assert.equal(mock.state.aiRequests.length, 4);

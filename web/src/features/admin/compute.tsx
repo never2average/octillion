@@ -89,7 +89,6 @@ export function AdminConfiguration() {
         defaultSort={[{ key: 'group', dir: 'asc' }]} groupable
         actions={(x) => x.source === 'set' ? [lock({ label: `Reset to ${x.env != null ? 'environment' : 'default'}`, icon: <Icons.close />, onSelect: () => save.mutate({ [x.key]: null }) }, 'compute')] : []}
         primary={<span className='flex items-center gap-2'>
-          <ExplainLosses />
           <Gate need='compute'><Button variant='outline' disabled={!changed.length || save.isPending} onClick={() => setAskReset(true)}
             title={changed.length ? `${changed.length} setting${changed.length === 1 ? '' : 's'} changed here` : 'Every setting is at its default'}><Icons.refresh /> Reset to defaults</Button></Gate>
         </span>}
@@ -109,45 +108,6 @@ export function AdminConfiguration() {
         </AlertDialogContent>
       </AlertDialog>
     </PageContainer>
-  );
-}
-
-interface ReasonsStatus { enabled: boolean; daily_max: number; used_today: number; left_today: number; queued: number; done: number; failed: number; skipped: number; missing: number }
-
-/**
- * "Explain past losses" (POST /compute/reasons/backfill, src/reasons.ts): queues the scored sessions agents didn't pick
- * the product in that have no model reason yet, at most what is left of today's REASONS_DAILY_MAX. Operator and up.
- */
-function ExplainLosses() {
-  const { data } = useAdmin<ReasonsStatus>('/compute/reasons', { refetchInterval: 30_000 });
-  const [ask, setAsk] = useState(false);
-  const run = useAdminAction(() => post<{ added: number; left_behind: number; status: ReasonsStatus }>('/compute/reasons/backfill'),
-    { success: (r) => (r.added ? `Queued ${r.added} lost session${r.added === 1 ? '' : 's'} for a reason${r.left_behind ? `; ${r.left_behind} wait for tomorrow's cap` : ''}` : 'Nothing to explain within today\'s cap') });
-  const n = Math.min(data?.missing ?? 0, Math.max(0, (data?.left_today ?? 0) - (data?.queued ?? 0)));
-  return (
-    <>
-      <Gate need='compute'>
-        <Button variant='outline' disabled={!data?.enabled || run.isPending} onClick={() => setAsk(true)}
-          title={!data ? 'Loading' : !data.enabled ? 'Loss reasons are off (Explain lost sessions)' : `${data.missing} lost sessions have no reason · ${data.queued} queued · ${data.used_today} of ${data.daily_max} calls used today`}>
-          <Icons.sparkles /> Explain past losses
-        </Button>
-      </Gate>
-      <AlertDialog open={ask} onOpenChange={setAsk}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Explain past losses?</AlertDialogTitle>
-            <AlertDialogDescription>
-              {data ? <>{data.missing} scored lost session{data.missing === 1 ? ' has' : 's have'} no reason yet. This queues {n === data.missing ? 'all of them' : `the newest ${n}`} for the cheapest model
-                ({data.used_today} of {data.daily_max} calls used today, {data.queued} already queued){n < data.missing ? '; the rest can be queued after the cap resets' : ''}. Each reads only the agent's own messages and actions.</> : 'Loading…'}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction disabled={!n} onClick={() => { setAsk(false); run.mutate(); }}>Queue {n}</AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-    </>
   );
 }
 

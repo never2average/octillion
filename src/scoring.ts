@@ -231,6 +231,15 @@ const MANAGER: [RegExp, string][] = [
   [/^composer\s+require\b/i, "packagist"], [/^dotnet\s+add\s+package\b/i, "nuget"], [/^brew\s+install\b/i, "brew"],
 ];
 // Build and test tooling every project installs: never a choice between vendors.
+// An install command sits where a shell command starts: a line start (after an optional prompt, sudo or a Dockerfile
+// RUN), after && ; || | ( `, or opening a quoted `bash -c "..."`. Anywhere else ("then npm install the analysis and copy rows") it is prose the agent wrote.
+const COMMAND_START = /(?:^|&&|\|\||[;|(`]|\s-l?c\s+["'])\s*(?:[$>#]\s*)?(?:RUN\s+|sudo\s+(?:-\S+\s+)*)?$/;
+// Words that only show up when a "command" is really a sentence: one of them, or a word ending a sentence, drops it.
+const PROSE = new Set(["a", "an", "the", "and", "or", "of", "off", "on", "in", "to", "by", "for", "with", "then", "than", "that", "this",
+  "these", "those", "it", "its", "is", "are", "be", "was", "were", "every", "each", "all", "any", "some", "your", "our", "my", "you",
+  "we", "they", "from", "into", "onto", "as", "at", "if", "so", "but", "not", "no", "can", "will", "should", "must", "may", "when"]);
+/** A stored untracked name that could be a package (not a prose word, a number or the end of a sentence). */
+export const plausiblePackage = (name: string) => name.length > 1 && !PROSE.has(name) && !/^\d+$/.test(name) && !/[.:!?]$/.test(name);
 const TOOLING = new Set(["typescript", "ts-node", "tsx", "nodemon", "eslint", "prettier", "jest", "vitest", "mocha", "chai", "supertest",
   "pytest", "black", "ruff", "mypy", "flake8", "isort", "pip", "setuptools", "wheel", "uv", "dotenv", "python-dotenv", "concurrently", "rimraf"]);
 
@@ -247,11 +256,15 @@ export function untrackedInstalls(events: StoredEvent[], tracked: Tool[]): { nam
     if ((e.raw as { _src?: unknown })._src === "harness" || e.type === "simulated_user") continue;
     for (const seg of segments(e.raw)) {
       if (seg.kind !== "action") continue;
-      for (const m of seg.text.replace(/\\n|\\t/g, "\n").matchAll(INSTALL)) {
+      const text = seg.text.replace(/\\n|\\t/g, "\n");
+      for (const m of text.matchAll(INSTALL)) {
         const cmd = m[0].replace(/["'`},\]\\]+$/g, "").trim();
         const mgr = MANAGER.find(([re]) => re.test(cmd));
         if (!mgr) continue;
+        const at = m.index ?? 0;
+        if (!COMMAND_START.test(text.slice(text.lastIndexOf("\n", at - 1) + 1, at))) continue;
         const words = cmd.replace(mgr[0], "").trim().split(/\s+/).filter(Boolean);
+        if (words.some((w) => PROSE.has(w.toLowerCase()) || /[a-z][.:!?]$/i.test(w))) continue;
         const npx = /^(?:npx|bunx)\b/i.test(cmd);
         for (let i = 0; i < words.length; i++) {
           let w = words[i]!.replace(/^["'`]+|["'`,]+$/g, "");

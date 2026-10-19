@@ -6,7 +6,7 @@
 // estimate; prepaid allowances are spending caps, never revenue. Each tab is one row of four headline numbers with a
 // daily sparkline and one table, grouped by account or by provider (Revenue: by plan). The range (UTC days) and the
 // grouping are page state, so switching tabs keeps them. Read only, except plans: on Revenue by plan an Owner adds a
-// plan in Stripe (New plan: POST /plans) or archives one (row ⋯ › Archive plan: POST /plans/:price_id/archive).
+// plan in Stripe (New plan, on the Revenue tab in either grouping: POST /plans) or archives one (row ⋯ › Archive plan: POST /plans/:price_id/archive).
 import { Suspense, useMemo, useState, type ReactNode } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useIsFetching, useQueryClient } from '@tanstack/react-query';
@@ -329,6 +329,9 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
   const stripeEmpty = data && !data.stripe.configured ? 'Stripe is not configured (STRIPE_SECRET_KEY), so there is no revenue to show.'
     : data?.stripe.error ? `Could not read Stripe: ${data.stripe.error}` : null;
   const mixed = (data?.currencies.length ?? 0) > 1 ? <span className={cn('text-sm', AMBER)}>Invoices in {data!.currencies.join(', ').toUpperCase()}: amounts are summed as they are.</span> : null;
+  // New plan sits on the Revenue tab whichever way it is grouped (it was only under Group by › Plan, easy to miss).
+  const newPlanBtn = data?.stripe.configured ? <Gate need='plans'><Button onClick={() => setNewPlan(true)}><Icons.add /> New plan</Button></Gate> : undefined;
+  const newPlanDialog = newPlan && <NewPlanDialog onClose={() => setNewPlan(false)} />;
   if (group === 'provider') {
     const cols: RecordCol<RevenuePlan>[] = [
       { key: 'plan', label: 'Plan / price', title: true, keep: true, type: 'text', value: (p) => p.name, render: (p) => (
@@ -346,7 +349,7 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
       <RecordView id='finops-revenue-plans' rows={data?.plans ?? []} loading={loading} rowKey={(p) => p.key} cols={cols} noun='plans' initialSize={50} compact summary={cards}
         searchText={(p) => `${p.name} ${p.lookup_key ?? ''} ${p.price_id ?? ''} ${p.accounts.map((a) => a.name).join(' ')}`} searchPlaceholder='Search plans, accounts'
         filters={<>{bar}{mixed}</>} defaultSort={[{ key: 'mrr', dir: 'desc' }]} exportName={exportName('revenue', 'plan', data?.range)}
-        primary={data?.stripe.configured ? <Gate need='plans'><Button onClick={() => setNewPlan(true)}><Icons.add /> New plan</Button></Gate> : undefined}
+        primary={newPlanBtn}
         actions={(p) => (p.live && p.price_id ? [
           { label: 'Copy price ID', icon: <Icons.page />, onSelect: () => copyText(p.price_id!, 'Price ID copied') },
           role.lock({ label: 'Archive plan', icon: <Icons.trash />, destructive: true, separator: true, onSelect: () => setArchiving(p) }, 'plans')
@@ -365,7 +368,7 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
           </div>
         )}
         empty={stripeEmpty ?? 'No plans yet.'} />
-      {newPlan && <NewPlanDialog onClose={() => setNewPlan(false)} />}
+      {newPlanDialog}
       <ArchivePlan plan={archiving} onClose={() => setArchiving(null)} />
     </>);
   }
@@ -398,11 +401,11 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
         : a.renews_at ? <span>Renews {date(a.renews_at)}</span> : NA
     ) }
   ];
-  return (
+  return (<>
     <RecordView id='finops-revenue-accounts' rows={stripeEmpty ? [] : f.rows} loading={loading} rowKey={(a) => a.key} cols={cols} noun='accounts' initialSize={50} compact summary={cards}
       searchText={(a) => `${a.name} ${a.slug ?? ''} ${a.customer ?? ''} ${a.plan ?? ''} ${a.status ?? ''}`} searchPlaceholder='Search accounts, plans'
       filters={<>{bar}{f.controls}{mixed}</>} defaultSort={[{ key: 'collected', dir: 'desc' }]} exportName={exportName('revenue', 'account', data?.range)}
-      actions={accountActions(router)} detailTitle={accountTitle}
+      primary={newPlanBtn} actions={accountActions(router)} detailTitle={accountTitle}
       detail={(a) => (
         <div className='grid gap-6'>
           <PeekSection title='Collected and model spend per day'>
@@ -431,7 +434,8 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
         </div>
       )}
       empty={stripeEmpty ?? (f.filtered ? 'No accounts match.' : 'No revenue or model spend in this range.')} />
-  );
+    {newPlanDialog}
+  </>);
 }
 
 // ---------------------------------------------------------------- Model spend
