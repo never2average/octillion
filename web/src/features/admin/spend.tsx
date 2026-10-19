@@ -503,28 +503,33 @@ function ExperimentsTab({ data, loading, bar }: TabProps<Experiments>) {
       { label: 'Collected from tests', spark: t?.daily_collected, value: t ? cents(t.collected_usd) : '—' }
     ]} />
   );
+  // Eight columns by default: the decision numbers. Checkouts and the interval are a second line in their cells; the
+  // money detail (collected, model spend, margin, churn) and the experiment column are in Properties.
+  const sub = (main: ReactNode, second?: ReactNode, title?: string) => (
+    <span className='flex flex-col items-end gap-0.5 tabular-nums' title={title}>{main}{second != null && <span className='text-muted-foreground text-xs'>{second}</span>}</span>
+  );
   const cols: RecordCol<Variant>[] = [
     { key: 'variant', label: 'Variant', title: true, keep: true, type: 'text', value: (v) => v.name, render: (v) => (
-      <span className='flex min-w-0 flex-col gap-1'>
-        <span className='flex items-center gap-2'><span className='truncate font-medium'>{v.name}</span>{v.control && <StatusBadge>control</StatusBadge>}{!v.live && <StatusBadge tone='neutral' title='Archived or taken out of the experiment: no new accounts see it'>ended</StatusBadge>}</span>
-        <Mono>{v.amount_usd == null ? v.price_id : `$${v.amount_usd.toLocaleString()} / ${v.interval ?? 'one-off'}`}</Mono>
+      <span className='flex min-w-0 max-w-[16rem] flex-col gap-1'>
+        <span className='flex min-w-0 items-center gap-1.5'><span className='truncate font-medium' title={v.name}>{v.name}</span>{v.control && <StatusBadge>control</StatusBadge>}{!v.live && <StatusBadge tone='neutral' title='Archived or taken out of the experiment: no new accounts see it'>ended</StatusBadge>}</span>
+        <span className='text-muted-foreground flex min-w-0 gap-1.5 text-xs'><Mono>{v.experiment}</Mono><span className='shrink-0'>{v.amount_usd == null ? 'usage' : `$${v.amount_usd.toLocaleString()}/${v.interval === 'year' ? 'yr' : 'mo'}`}</span></span>
       </span>) },
-    { key: 'experiment', label: 'Experiment', keep: true, type: 'select', value: (v) => v.experiment, render: (v) => <Mono>{v.experiment}</Mono> },
-    { key: 'traffic', label: 'Traffic', className: 'text-right', type: 'number', value: (v) => share(v), render: (v) => (share(v) == null ? NA : num(`${share(v)}%`, `weight ${v.weight}`)) },
-    { key: 'exposed', label: 'Accounts shown', className: 'text-right', type: 'number', value: (v) => v.exposed, render: (v) => num(v.exposed.toLocaleString(), `${v.new_in_range} first shown in this range`) },
-    { key: 'checkouts', label: 'Checkouts started', className: 'text-right', type: 'number', value: (v) => v.checkouts, render: (v) => num(v.checkouts.toLocaleString(), `${v.completed} completed`) },
-    { key: 'converted', label: 'Subscribed', className: 'text-right', type: 'number', value: (v) => v.converted, render: (v) => num(v.converted.toLocaleString()) },
+    { key: 'experiment', label: 'Experiment', hidden: true, type: 'select', value: (v) => v.experiment, render: (v) => <Mono>{v.experiment}</Mono> },
+    { key: 'traffic', label: 'Traffic', className: 'text-right', type: 'number', value: (v) => share(v), render: (v) => (share(v) == null ? NA : sub(`${share(v)}%`, `weight ${v.weight}`)) },
+    { key: 'exposed', label: 'Shown', className: 'text-right', type: 'number', value: (v) => v.exposed, render: (v) => sub(v.exposed.toLocaleString(), v.new_in_range ? `${v.new_in_range} new` : undefined, 'Accounts shown this variant on Billing (new: first shown in this range)') },
+    { key: 'converted', label: 'Subscribed', className: 'text-right', keep: true, type: 'number', value: (v) => v.converted, render: (v) => sub(v.converted.toLocaleString(), `${v.checkouts} checkout${v.checkouts === 1 ? '' : 's'}`, `${v.checkouts} checkouts started, ${v.completed} completed`) },
     { key: 'conversion', label: 'Conversion', className: 'text-right', keep: true, type: 'number', value: (v) => v.conversion_pct, render: (v) => (v.conversion_pct == null ? NA
-      : num(`${v.conversion_pct}%`, v.ci ? `95% interval ${v.ci[0]}–${v.ci[1]}%` : undefined)) },
-    { key: 'lift', label: 'Lift vs control', className: 'text-right', keep: true, type: 'number', value: (v) => v.lift_pts, render: (v) => (v.control ? <span className='text-muted-foreground'>control</span>
-      : v.lift_pts == null ? NA : <span className={cn('tabular-nums', v.significant && (v.lift_pts > 0 ? 'text-emerald-600 dark:text-emerald-400 font-medium' : 'text-destructive font-medium'))}
-          title={v.lift_ci ? `95% interval ${v.lift_ci[0]} to ${v.lift_ci[1]} points${v.significant ? '' : ': not significant yet'}` : undefined}>{v.lift_pts > 0 ? '+' : ''}{v.lift_pts} pts</span>) },
-    { key: 'per_exposed', label: 'Collected per account shown', className: 'text-right', keep: true, type: 'number', value: (v) => v.collected_per_exposed_usd, render: (v) => (v.collected_per_exposed_usd == null ? NA : num(cents(v.collected_per_exposed_usd))) },
-    { key: 'mrr', label: 'MRR', className: 'text-right', type: 'number', value: (v) => v.mrr_usd, render: (v) => num(cents(v.mrr_usd), `${v.paying} paying, ${v.trialing} in trial`) },
-    { key: 'collected', label: 'Collected in range', className: 'text-right', type: 'number', value: (v) => v.collected_usd, render: (v) => num(cents(v.collected_usd)) },
-    { key: 'spend', label: 'Model spend', className: 'text-right', type: 'number', value: (v) => v.model_spend_usd, render: (v) => num(cents(v.model_spend_usd), 'Metered model spend of the accounts that subscribed, in the range') },
-    { key: 'margin', label: 'Margin', className: 'text-right', type: 'number', value: (v) => v.margin_usd, render: (v) => num(cents(v.margin_usd)) },
-    { key: 'churned', label: 'Churned', className: 'text-right', type: 'number', value: (v) => v.churned, render: (v) => num(v.churned.toLocaleString()) }
+      : sub(`${v.conversion_pct}%`, v.ci ? `${v.ci[0]}–${v.ci[1]}%` : undefined, 'Subscribed / shown, with its 95% interval')) },
+    { key: 'lift', label: 'Lift', className: 'text-right', keep: true, type: 'number', value: (v) => v.lift_pts, render: (v) => (v.control ? <span className='text-muted-foreground'>control</span>
+      : v.lift_pts == null ? NA : sub(<span className={cn(v.significant && (v.lift_pts > 0 ? 'font-medium text-emerald-600 dark:text-emerald-400' : 'text-destructive font-medium'))}>{v.lift_pts > 0 ? '+' : ''}{v.lift_pts} pts</span>,
+          v.significant ? 'significant' : 'not yet', v.lift_ci ? `Conversion vs control, 95% interval ${v.lift_ci[0]} to ${v.lift_ci[1]} points` : undefined)) },
+    { key: 'per_exposed', label: 'Per account', className: 'text-right', type: 'number', value: (v) => v.collected_per_exposed_usd, render: (v) => (v.collected_per_exposed_usd == null ? NA
+      : sub(cents(v.collected_per_exposed_usd), undefined, 'Collected in the range per account shown: the number to compare prices on')) },
+    { key: 'mrr', label: 'MRR', className: 'text-right', type: 'number', value: (v) => v.mrr_usd, render: (v) => sub(cents(v.mrr_usd), `${v.paying} paying${v.trialing ? `, ${v.trialing} trial` : ''}`) },
+    { key: 'collected', label: 'Collected', hidden: true, className: 'text-right', type: 'number', value: (v) => v.collected_usd, render: (v) => num(cents(v.collected_usd)) },
+    { key: 'spend', label: 'Model spend', hidden: true, className: 'text-right', type: 'number', value: (v) => v.model_spend_usd, render: (v) => num(cents(v.model_spend_usd), 'Metered model spend of the accounts that subscribed, in the range') },
+    { key: 'margin', label: 'Margin', hidden: true, className: 'text-right', type: 'number', value: (v) => v.margin_usd, render: (v) => num(cents(v.margin_usd)) },
+    { key: 'churned', label: 'Churned', hidden: true, className: 'text-right', type: 'number', value: (v) => v.churned, render: (v) => num(v.churned.toLocaleString()) }
   ];
   const empty = data && !data.stripe.configured ? 'Stripe is not configured (STRIPE_SECRET_KEY in the server environment on Vercel).'
     : data?.stripe.error ? `Could not read Stripe: ${data.stripe.error}`
@@ -537,6 +542,7 @@ function ExperimentsTab({ data, loading, bar }: TabProps<Experiments>) {
       detailTitle={(v) => `${v.experiment} · ${v.name}`}
       detail={(v) => (
         <div className='grid gap-6'>
+          <p className='text-sm'>{cents(v.collected_usd)} collected in the range, {cents(v.model_spend_usd)} model spend by its subscribers: margin {cents(v.margin_usd)}. {v.churned} churned.</p>
           <PeekSection title='Per day'>
             <DailyBars days={data?.range.days ?? []} format={(x) => String(Math.round(x * 100) / 100)}
               series={[{ key: 'exposed', label: 'First shown', values: v.daily_exposed }, { key: 'converted', label: 'Subscribed', values: v.daily_converted }]} />
