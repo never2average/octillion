@@ -16,7 +16,7 @@ import { counted } from '@/lib/octillion-format';
 import { cn } from '@/lib/utils';
 import { useAdmin } from './lib';
 import { copyText, ErrorBox, Mono, Notice, StatusBadge, When, type Tone } from './ui';
-import { Chip, cents, dur, EST, jobSessions, PeekSection, since, useComputeParams, useNow, nextPinned, useScrollTo } from './compute-common';
+import { Chip, cents, dur, jobSessions, PeekSection, since, useComputeParams, useNow, nextPinned, useScrollTo } from './compute-common';
 import { JobsStats } from './compute-stats';
 import { MiniTable } from './compute-sessions';
 
@@ -283,8 +283,7 @@ function JobPeek({ id, onSessions, onOrch }: { id: string; onSessions: () => voi
         <dl className='grid gap-1 text-sm'>
           <SpendLine label='Session models (finished sessions)' v={j.spend.session_model_usd} />
           <SpendLine label='Orchestrator model (through the gateway)' v={j.spend.orchestrator_model_usd} />
-          <SpendLine label='Sandboxes (est.)' v={j.spend.sandbox_est_usd} title={EST} />
-          <SpendLine label='Total' v={j.spend.total_usd} strong />
+          <SpendLine label='Total' v={j.spend.session_model_usd + j.spend.orchestrator_model_usd} strong />
         </dl>
         {j.kind !== 'simulation' && <Notice tone='info'>{RESEARCH_SPEND}</Notice>}
       </PeekSection>

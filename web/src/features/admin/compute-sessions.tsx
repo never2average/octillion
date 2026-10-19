@@ -21,7 +21,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { post, useAdmin, useAdminAction } from './lib';
 import { Gate, useAdminRole } from './role';
 import { copyText, ErrorBox, Mono, Notice, StatusBadge, When, type Tone } from './ui';
-import { AMBER, Chip, cents, dur, EST, jobSessions, PeekSection, SectionLink, since, useComputeParams, useNow, nextPinned, useScrollTo } from './compute-common';
+import { AMBER, Chip, cents, dur, jobSessions, PeekSection, SectionLink, since, useComputeParams, useNow, nextPinned, useScrollTo } from './compute-common';
 import { SessionsStats } from './compute-stats';
 
 export interface SessionRow {
@@ -247,7 +247,6 @@ function SessionPeek({ id, onJob, onCancel, cancelling }: { id: string; onJob: (
         <dl>
           <Field label='Tokens in / out'><span className='tabular-nums'>{s.tokens_in.toLocaleString()} / {s.tokens_out.toLocaleString()}</span></Field>
           <Field label='Model'>{cents(s.cost_usd)}</Field>
-          <Field label='Sandbox'><span title={EST}>{s.sandbox_est_usd != null ? `${cents(s.sandbox_est_usd)} est.` : '—'}</span></Field>
         </dl>
         {data.gateway.length > 0 && (
           <div className='grid gap-1'>

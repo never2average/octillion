@@ -31,7 +31,7 @@ import { post, useAdmin, useAdminAction } from './lib';
 import { Gate, useAdminRole } from './role';
 import { ErrorBox, FormRow, LoadingCards, Mono, Notice, Section, When } from './ui';
 import { ActionsMenu, Field, RecordView, type RecordCol } from '@/components/layout/record-view';
-import { ageOf, dur, EST, money, SectionLink, UrlTabs, useComputeParams, useNow } from './compute-common';
+import { ageOf, dur, SectionLink, UrlTabs, useComputeParams, useNow } from './compute-common';
 import { StatStrip } from '@/components/layout/section';
 import { ComputeOrchestrators } from './compute-orchestrators';
 import { ComputeFailures, type Failures } from './compute-failures';
@@ -684,8 +684,7 @@ function Limits({ s, onEditing }: { s: Summary; onEditing: (key: string, on: boo
       { key: 'shared', label: 'Shared orchestrators', used: l.shared_orch_live, limit: l.shared_orch_cap, setting: set('OCTILLION_MAX_ORCHESTRATORS'),
         status: statusOf(l.shared_orch_live, l.shared_orch_cap, false), source: null }
     ]),
-    { key: 'size', label: 'Worker sandbox size', used: null, limit: null, setting: size, status: null, source: null,
-      sub: size && <>{money(l.sandbox_prices[String(size.value)] ?? 0)}/h per sandbox (est.)</> }
+    { key: 'size', label: 'Worker sandbox size', used: null, limit: null, setting: size, status: null, source: null }
   ];
   const binding = rows.find((r) => r.status === 'binding');
   const cols: RecordCol<LimitRow>[] = [

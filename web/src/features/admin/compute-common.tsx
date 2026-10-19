@@ -9,7 +9,6 @@ import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { cn } from '@/lib/utils';
 
-export const EST = 'Estimate from the boat price table (BOAT_PRICE_PER_HOUR), not boat\'s billing meter.';
 export const money = (x: number) => `$${x.toFixed(2)}`;
 /** Small amounts keep their cents' fractions ("$0.004"), so a cheap session does not read as free. */
 export const cents = (x: number | null | undefined) => (x == null ? '—' : x > 0 && x < 0.01 ? `$${x.toFixed(3)}` : money(x));

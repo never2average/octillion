@@ -14,7 +14,7 @@ import { counted } from '@/lib/octillion-format';
 import { cn } from '@/lib/utils';
 import { useAdmin } from './lib';
 import { copyText, ErrorBox, Mono, Notice, Section, StatusBadge, When, type Tone } from './ui';
-import { AMBER, Chip, cents, dur, EST, jobSessions, PeekSection, since, useComputeParams, useNow, nextPinned, useScrollTo } from './compute-common';
+import { AMBER, Chip, cents, dur, jobSessions, PeekSection, since, useComputeParams, useNow, nextPinned, useScrollTo } from './compute-common';
 import { MiniTable } from './compute-sessions';
 
 interface Limits { boot_minutes: number; stale_minutes: number; heartbeat_stale_s: number }
@@ -274,7 +274,6 @@ function OrchPeek({ id, onJob }: { id: number; onJob: (job: string) => void }) {
 
       <PeekSection title='Spend'>
         <dl>
-          <Field label='Sandbox'><span title={EST}>{cents(o.spend.sandbox_est_usd)} est.</span> <span className='text-muted-foreground'>· {dur(since(o.created_at, o.deleted_at))} on boat&apos;s small machine</span></Field>
           <Field label='Orchestrator model'>{cents(o.spend.orchestrator_model_usd)}</Field>
         </dl>
         {data.gateway.length > 0 && (

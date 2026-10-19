@@ -459,7 +459,8 @@ function Products({ d }: { d: Detail }) {
               )
             },
             { label: 'Started', render: (r: any) => <When d={r.created_at} /> },
-            { label: 'Detail', render: (r: any) => <span className='text-sm'>{r.error || ''}</span> }
+            // Only errors fill it: shown when a row has one, as in the accounts peek.
+            ...(d.research.some((r: any) => r.error) ? [{ label: 'Detail', render: (r: any) => <span className='text-sm'>{r.error || ''}</span> }] : [])
           ]}
         />
       </Section>

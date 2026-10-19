@@ -1290,7 +1290,8 @@ function Teams({ l, reload }: { l: Limits; reload: () => void }) {
     { key: 'team', label: 'Team', keep: true, type: 'text', value: (x) => x.name, render: (x) => <span className='font-medium'>{x.name}</span> },
     { key: 'budget', label: 'Budget used this month', className: 'w-72', type: 'number', value: (x) => x.spent,
       render: (x) => (x.budget_usd == null ? <span className='text-xs tabular-nums'>{usd(x.spent)} <span className='text-muted-foreground'>· no team cap</span></span> : <Allowance spent={x.spent} cap={x.budget_usd} />) },
-    { key: 'cap', label: 'Monthly cap', className: 'w-32', type: 'number', value: (x) => x.budget_usd ?? undefined, render: (x) => <span className='tabular-nums'>{x.budget_usd == null ? <span className='text-muted-foreground'>none</span> : usd(x.budget_usd)}</span> },
+    // The cap already reads in "Budget used" ("$x of $cap"); kept hidden for sorting, filtering and export.
+    { key: 'cap', label: 'Monthly cap', className: 'w-32', hidden: true, type: 'number', value: (x) => x.budget_usd ?? undefined, render: (x) => <span className='tabular-nums'>{x.budget_usd == null ? <span className='text-muted-foreground'>none</span> : usd(x.budget_usd)}</span> },
     { key: 'left', label: 'Left', className: 'w-28', type: 'number', value: (x) => x.left_usd ?? undefined,
       render: (x) => <span className={cn('text-xs tabular-nums', x.limited_by && 'text-amber-700 dark:text-amber-400')} title={x.limited_by ? 'Limits its people (90% or more used)' : undefined}>
         {x.left_usd == null ? <span className='text-muted-foreground'>—</span> : usd(x.left_usd)}</span> },
@@ -1300,7 +1301,7 @@ function Teams({ l, reload }: { l: Limits; reload: () => void }) {
   ];
   return (
     <>
-      <RecordView compact id='billing-teams' rows={l.teams} rowKey={(x) => String(x.id)} cols={cols} noun='teams'
+      <RecordView compact id='billing-teams-v2' rows={l.teams} rowKey={(x) => String(x.id)} cols={cols} noun='teams'
         searchText={(x) => x.name} searchPlaceholder='Search teams'
         primary={manage ? <Button onClick={() => setEdit({ id: null, name: '', budget: '', conc: '' })}><Icons.add /> Add team</Button> : undefined}
         actions={manage ? (x) => [
