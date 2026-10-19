@@ -681,16 +681,16 @@ async function keyOf(slug: string, keyId: number) {
 }
 
 export async function revokeKey(actor: string, slug: string, keyId: number) {
-  const { k } = await keyOf(slug, keyId);
+  const { f, k } = await keyOf(slug, keyId);
   if (k.revoked_at) throw new AdminError("This key is already revoked", 409);
-  await (await getDb()).query("UPDATE api_keys SET revoked_at = now() WHERE id = $1", [k.id]);
+  await (await getDb()).query("UPDATE api_keys SET revoked_at = now() WHERE id = $1 AND org_id = $2", [k.id, f.id]);
   log(actor, "key.revoke", slug, { label: k.label, key_prefix: k.key_prefix });
 }
 
 /** Revoke a key and issue its replacement under the same label and for the same person (a leaked link). */
 export async function rotateKey(actor: string, slug: string, keyId: number) {
   const { f, k } = await keyOf(slug, keyId);
-  if (!k.revoked_at) await (await getDb()).query("UPDATE api_keys SET revoked_at = now() WHERE id = $1", [k.id]);
+  if (!k.revoked_at) await (await getDb()).query("UPDATE api_keys SET revoked_at = now() WHERE id = $1 AND org_id = $2", [k.id, f.id]);
   const key = await createApiKey(f.id, k.label, k.user_id);
   log(actor, "key.rotate", slug, { label: k.label, user_id: k.user_id, old_prefix: k.key_prefix, key_prefix: key.slice(0, 10) });
   return result(slug, k.label.includes("@") ? k.label : null, { key });

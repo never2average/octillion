@@ -116,7 +116,7 @@ export async function parseFilters(q: AnalyticsQuery, range: ReturnType<typeof r
   const userOf = (a: string) => (U ? ` AND ${a}user_id = ANY(${U})` : "");
   const byUser = (a: string, kind: "" | "sim" | "session" | "research") => !U ? ""
     : kind === "sim" ? ` AND ${a}created_by = ANY(${U})`
-    : kind === "session" ? ` AND ${a}simulation_id IN (SELECT id FROM simulations WHERE created_by = ANY(${U}))`
+    : kind === "session" ? `/* tenant: internal: admin Analytics (onboarding admin routes), every account */ AND ${a}simulation_id IN (SELECT id FROM simulations WHERE created_by = ANY(${U}))`
     : kind === "research" ? ` AND ${a}org_id IN (SELECT DISTINCT org_id FROM mcp_events WHERE user_id = ANY(${U}))` : "";
   const sql = {
     /** On every mcp_events query; `a` is the table alias with its dot ("e."), or "". */
@@ -173,7 +173,7 @@ async function growth(range: ReturnType<typeof reportRange>, { sql, orgIds }: Aw
       `SELECT ${wk("at")} AS week, count(DISTINCT org_id) AS accounts, count(DISTINCT ${person}) AS people, count(*) AS calls
          FROM mcp_events WHERE ${calls} AND at >= ${WP} AND at < ${T}${EV()} GROUP BY 1`),
     db.query<{ day: string; dau: unknown; mau: unknown }>(
-      `WITH a AS (SELECT DISTINCT ${person} AS p, (at AT TIME ZONE 'UTC')::date AS d FROM mcp_events
+      `/* tenant: internal: admin Analytics (onboarding admin routes), every account */ WITH a AS (SELECT DISTINCT ${person} AS p, (at AT TIME ZONE 'UTC')::date AS d FROM mcp_events
                    WHERE ${calls} AND at >= ${F} - interval '29 days' AND at < ${T}${EV()}),
             days AS (SELECT generate_series('${range.from}'::date, '${range.to}'::date, interval '1 day')::date AS day)
        SELECT to_char(days.day, 'YYYY-MM-DD') AS day, count(DISTINCT a.p) FILTER (WHERE a.d = days.day) AS dau, count(DISTINCT a.p) AS mau
@@ -191,7 +191,7 @@ async function growth(range: ReturnType<typeof reportRange>, { sql, orgIds }: Aw
        SELECT ${wk("at")} AS week, coalesce(nullif(fam, ''), 'unknown') AS client, count(*) AS calls
          FROM tagged WHERE is_call AND at >= ${W0} GROUP BY 1, 2`),
     db.query<{ week: string; completed: unknown; other: unknown }>(
-      `SELECT ${wk("created_at")} AS week, count(*) FILTER (WHERE status = 'completed') AS completed, count(*) FILTER (WHERE status IS DISTINCT FROM 'completed') AS other
+      `/* tenant: internal: admin Analytics (onboarding admin routes), every account */ SELECT ${wk("created_at")} AS week, count(*) FILTER (WHERE status = 'completed') AS completed, count(*) FILTER (WHERE status IS DISTINCT FROM 'completed') AS other
          FROM simulations WHERE created_at >= ${W0} AND created_at < ${T}${ORG("", "sim")} GROUP BY 1`),
     orgsOnce().then((x) => x.orgs, () => null),
     newDailyP,
@@ -267,8 +267,8 @@ async function facets(range: ReturnType<typeof reportRange>, orgsOnce: () => Pro
     db.query<{ slug: string; name: string; calls: unknown }>(`SELECT o.slug, o.name, coalesce(c.n, 0) AS calls FROM organizations o LEFT JOIN
       (SELECT org_id, count(*) AS n FROM mcp_events WHERE method = 'tools/call' AND at >= ${F} AND at < ${T} GROUP BY org_id) c ON c.org_id = o.id ORDER BY lower(o.name)`),
     db.query<{ name: string; n: unknown }>(`SELECT name, count(DISTINCT org_id) AS n FROM products GROUP BY name ORDER BY 1`),
-    db.query<{ name: string; n: unknown }>(`SELECT name, count(*) AS n FROM mcp_events WHERE method = 'tools/call' AND name IS NOT NULL AND at >= ${F} AND at < ${T} GROUP BY name ORDER BY 1`),
-    db.query<{ client: string; n: unknown }>(`SELECT split_part(client, ' ', 1) AS client, count(*) AS n FROM mcp_events WHERE method = 'initialize' AND client IS NOT NULL AND at >= ${F} AND at < ${T} GROUP BY 1 ORDER BY 1`),
+    db.query<{ name: string; n: unknown }>(`/* tenant: internal: admin Analytics (onboarding admin routes), every account */ SELECT name, count(*) AS n FROM mcp_events WHERE method = 'tools/call' AND name IS NOT NULL AND at >= ${F} AND at < ${T} GROUP BY name ORDER BY 1`),
+    db.query<{ client: string; n: unknown }>(`/* tenant: internal: admin Analytics (onboarding admin routes), every account */ SELECT split_part(client, ' ', 1) AS client, count(*) AS n FROM mcp_events WHERE method = 'initialize' AND client IS NOT NULL AND at >= ${F} AND at < ${T} GROUP BY 1 ORDER BY 1`),
     db.query<{ user_id: string; account: string; calls: unknown }>(
       `SELECT e.user_id, min(o.name) AS account, count(*) FILTER (WHERE e.method = 'tools/call') AS calls FROM mcp_events e JOIN organizations o ON o.id = e.org_id
         WHERE e.user_id IS NOT NULL AND e.at >= ${F} AND e.at < ${T} GROUP BY e.user_id ORDER BY count(*) DESC LIMIT 300`),
@@ -361,7 +361,7 @@ export async function platformAnalytics(q: AnalyticsQuery) {
         WHERE f.cohort >= date_trunc('week', now()) - interval '7 weeks'
         GROUP BY f.cohort, a.wk ORDER BY f.cohort, week`),
     db.query<Record<string, number>>(
-      `SELECT (SELECT count(*) FROM simulations WHERE ${inW("created_at")}${ORG("", "sim")}) AS sims,
+      `/* tenant: internal: admin Analytics (onboarding admin routes), every account */ SELECT (SELECT count(*) FROM simulations WHERE ${inW("created_at")}${ORG("", "sim")}) AS sims,
               (SELECT count(*) FROM simulations WHERE ${inW("created_at")} AND status = 'completed'${ORG("", "sim")}) AS sims_completed,
               (SELECT count(*) FROM simulations WHERE status IN ('queued', 'running')${ORG("", "sim")}) AS sims_open,
               (SELECT count(*) FROM agent_sessions WHERE ${inW("queued_at")}${ORG("", "session")}) AS sessions,
@@ -377,11 +377,11 @@ export async function platformAnalytics(q: AnalyticsQuery) {
       `SELECT e.at, o.name AS account, o.slug, e.method, e.name, e.client, e.error, e.ms
          FROM mcp_events e JOIN organizations o ON o.id = e.org_id WHERE NOT e.ok AND ${inW("e.at")}${EV("e.")} ORDER BY e.at DESC LIMIT 15`),
     db.query<{ n: number }>(`SELECT count(*) AS n FROM organizations WHERE ${inW("created_at")}${O ? ` AND id = ANY(${O})` : ""}`),
-    db.query<{ n: number }>(`SELECT count(*) AS n FROM mcp_events WHERE NOT ok AND ${inW("at")}${EV()}`),
+    db.query<{ n: number }>(`/* tenant: internal: admin Analytics (onboarding admin routes), every account */ SELECT count(*) AS n FROM mcp_events WHERE NOT ok AND ${inW("at")}${EV()}`),
     newDailyP,
     // The Health figures day by day, for their sparklines (same filters as ops). Queued is the autoscaler's daily peak.
     db.query<Record<string, unknown>>(
-      `WITH days AS (
+      `/* tenant: internal: admin Analytics (onboarding admin routes), every account */ WITH days AS (
          SELECT to_char(date_trunc('day', created_at), 'YYYY-MM-DD') AS day, count(*) AS sims, count(*) FILTER (WHERE status = 'completed') AS sims_completed,
                 0 AS sessions, 0 AS sessions_failed, 0 AS model_cost_usd, 0 AS onboardings, 0 AS onboardings_failed, 0 AS gateway_errors, 0 AS gateway_requests, 0 AS queued
            FROM simulations WHERE ${inW("created_at")}${ORG("", "sim")} GROUP BY 1

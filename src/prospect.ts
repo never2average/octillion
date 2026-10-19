@@ -300,14 +300,14 @@ const DAILY_LIMIT = () => settingNumber("PROSPECT_DAILY_LIMIT"); // global setti
 export async function queueDeepResearch(requestId: number, opts: { manual?: boolean } = {}): Promise<string | null> {
   if (!harnessOn()) return null;
   const db = await getDb();
-  const [live] = await db.query<{ id: string }>("SELECT id FROM product_research WHERE kind = 'prospect' AND request_id = $1 AND status IN ('queued', 'running')", [requestId]);
+  const [live] = await db.query<{ id: string }>("/* tenant: internal: prospect research on an access request, before any account exists */ SELECT id FROM product_research WHERE kind = 'prospect' AND request_id = $1 AND status IN ('queued', 'running')", [requestId]);
   if (live) { kick(); return live.id; }
   const [q] = await db.query<any>("SELECT email, company, product_url, message, name, role, team_size, agents, docs_url, competitors, goal, timeline, subindustry, research FROM access_requests WHERE id = $1", [requestId]);
   if (!q) return null;
   if (!opts.manual) {
     // Automatic deep research only for a company we can find: a website, or a work email domain. Others wait for an admin.
     if (!q.product_url && FREE_MAIL.test(String(q.email).split("@")[1] ?? "")) return null;
-    const [{ n }] = await db.query<{ n: number }>("SELECT count(*) AS n FROM product_research WHERE kind = 'prospect' AND created_at > now() - interval '1 day'");
+    const [{ n }] = await db.query<{ n: number }>("/* tenant: internal: prospect research on an access request, before any account exists */ SELECT count(*) AS n FROM product_research WHERE kind = 'prospect' AND created_at > now() - interval '1 day'");
     if (Number(n) >= DAILY_LIMIT()) return null;
   }
   const id = randomId("rsh_", 9);
@@ -316,7 +316,7 @@ export async function queueDeepResearch(requestId: number, opts: { manual?: bool
     name: q.name, role: q.role, team_size: q.team_size, agents: q.agents ?? [], message: q.message ?? "",
     docs_url: q.docs_url ?? null, competitors: q.competitors ?? "", goal: q.goal ?? null, timeline: q.timeline ?? null, subindustry: q.subindustry ?? null,
     quick: quick ? { summary: quick.summary, flags: quick.flags, competitors: quick.competitors, packages: quick.packages, sources: quick.sources } : null };
-  await db.query("INSERT INTO product_research (id, kind, request_id, input) VALUES ($1, 'prospect', $2, $3)", [id, requestId, JSON.stringify(input)]);
+  await db.query("/* tenant: internal: prospect research on an access request, before any account exists */ INSERT INTO product_research (id, kind, request_id, input) VALUES ($1, 'prospect', $2, $3)", [id, requestId, JSON.stringify(input)]);
   kick();
   return id;
 }
@@ -336,12 +336,12 @@ export function prospectIssues(r: unknown): string[] {
 export async function completeProspect(job: { id: string; request_id: number }, body: { status?: string; error?: string; result?: unknown }) {
   const db = await getDb();
   if (body.status === "failed") {
-    await db.query("UPDATE product_research SET status = 'failed', error = $2, finished_at = now() WHERE id = $1", [job.id, String(body.error ?? "failed").slice(0, 2000)]);
+    await db.query("/* tenant: internal: prospect research on an access request, before any account exists */ UPDATE product_research SET status = 'failed', error = $2, finished_at = now() WHERE id = $1", [job.id, String(body.error ?? "failed").slice(0, 2000)]);
     return { status: "failed" };
   }
   const issues = prospectIssues(body.result);
   if (issues.length) {
-    await db.query("UPDATE product_research SET attempts = attempts + 1, heartbeat_at = now(), stage = 'validating' WHERE id = $1", [job.id]);
+    await db.query("/* tenant: internal: prospect research on an access request, before any account exists */ UPDATE product_research SET attempts = attempts + 1, heartbeat_at = now(), stage = 'validating' WHERE id = $1", [job.id]);
     throw Object.assign(new Error("invalid research result"), { status: 422, issues });
   }
   const r = body.result as Record<string, any>;
@@ -356,6 +356,6 @@ export async function completeProspect(job: { id: string; request_id: number }, 
     model: orchestratorBrain().model, depth: "harness", research_id: job.id,
   } as ProspectBrief & { depth: string; research_id: string };
   await db.query("UPDATE access_requests SET research = $2, research_status = 'done', research_error = NULL, researched_at = now() WHERE id = $1", [job.request_id, JSON.stringify(brief)]);
-  await db.query("UPDATE product_research SET status = 'completed', result = $2, finished_at = now() WHERE id = $1", [job.id, JSON.stringify(brief)]);
+  await db.query("/* tenant: internal: prospect research on an access request, before any account exists */ UPDATE product_research SET status = 'completed', result = $2, finished_at = now() WHERE id = $1", [job.id, JSON.stringify(brief)]);
   return { status: "completed", company: brief.offering || null };
 }

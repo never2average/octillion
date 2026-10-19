@@ -92,18 +92,18 @@ async function setup(s: Session, since?: string) {
   const who = s.user ? "org_id = $1 AND user_id = $2" : "org_id = $1 AND user_id IS NULL";
   const args = s.user ? [s.org, s.user] : [s.org];
   const [m] = await db.query<Record<string, any>>(
-    `SELECT min(at) FILTER (WHERE method = 'initialize') AS connected,
+    `/* tenant: who = org_id = $1, the session's account */ SELECT min(at) FILTER (WHERE method = 'initialize') AS connected,
             min(at) FILTER (WHERE method = 'tools/list') AS tools_listed,
             min(at) FILTER (WHERE method = 'resources/read' AND name LIKE 'ui://octillion/%') AS dashboard,
             min(at) FILTER (WHERE method = 'tools/call' AND ok) AS first_call,
             count(*) FILTER (WHERE method = 'tools/call') AS calls
        FROM mcp_events WHERE ${who}`, args);
   const clients = await db.query<{ client: string; last: Date }>(
-    `SELECT client, max(at) AS last FROM mcp_events WHERE ${who} AND method = 'initialize' AND client IS NOT NULL GROUP BY client ORDER BY max(at) DESC LIMIT 5`, args);
+    `/* tenant: who = org_id = $1, the session's account */ SELECT client, max(at) AS last FROM mcp_events WHERE ${who} AND method = 'initialize' AND client IS NOT NULL GROUP BY client ORDER BY max(at) DESC LIMIT 5`, args);
   const used = new Set((await db.query<{ name: string }>(
     `SELECT DISTINCT name FROM mcp_events WHERE org_id = $1 AND method = 'tools/call' AND ok`, [s.org])).map((r) => r.name));
   const errors = await db.query<{ at: Date; name: string | null; error: string | null }>(
-    `SELECT at, name, error FROM mcp_events WHERE ${who} AND NOT ok ORDER BY at DESC LIMIT 5`, args);
+    `/* tenant: who = org_id = $1, the session's account */ SELECT at, name, error FROM mcp_events WHERE ${who} AND NOT ok ORDER BY at DESC LIMIT 5`, args);
   const facts = await admin.accountFacts(s.slug);
   const textOnly = clients.length > 0 && clients.every((c) => !/claude-ai|claude\.ai|openai|chatgpt/i.test(c.client));
   const steps = [
@@ -132,7 +132,7 @@ async function setup(s: Session, since?: string) {
   let live = null;
   if (since) {
     const [r] = await db.query<{ at: Date; client: string | null }>(
-      `SELECT at, client FROM mcp_events WHERE ${who} AND method IN ('initialize', 'tools/list', 'tools/call') AND at > $${args.length + 1} ORDER BY at DESC LIMIT 1`,
+      `/* tenant: who = org_id = $1, the session's account */ SELECT at, client FROM mcp_events WHERE ${who} AND method IN ('initialize', 'tools/list', 'tools/call') AND at > $${args.length + 1} ORDER BY at DESC LIMIT 1`,
       [...args, new Date(since)]);
     live = r ?? null;
   }
@@ -248,7 +248,7 @@ async function usageCharts(s: Session, range: ReturnType<typeof reportRange>, us
   const sesBy = users.length ? " AND s.simulation_id IN (SELECT id FROM simulations WHERE org_id = $1 AND created_by = ANY($4))" : "";
   const wk = (c: string) => `to_char(date_trunc('week', ${c} AT TIME ZONE 'UTC'), 'YYYY-MM-DD')`;
   const month = "date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'";
-  const cost = "GREATEST(s.cost_usd, coalesce((SELECT sum(g.cost_usd) FROM gateway_usage g WHERE g.session_id = s.id), 0))";
+  const cost = "/* tenant: per session, of agent_sessions rows already filtered by org_id */ GREATEST(s.cost_usd, coalesce((SELECT sum(g.cost_usd) FROM gateway_usage g WHERE g.session_id = s.id), 0))";
   const [clients, sims, harnesses, spendBy, recent] = await Promise.all([
     db.query<{ client: string; calls: unknown }>(
       `WITH ev AS (
@@ -336,7 +336,7 @@ async function billingUsage(s: Session) {
     `WITH ${sc} SELECT coalesce(agent_id, harness || '/' || model) AS agent, sum(usd)::float AS usd, count(*)::int AS sessions
        FROM sc GROUP BY 1 ORDER BY 2 DESC LIMIT 8`, [s.org]);
   const byPerson = await db.query<{ user_id: string | null; usd: number; runs: number }>(
-    `WITH ${sc} SELECT r.created_by AS user_id, sum(sc.usd)::float AS usd, count(DISTINCT r.id)::int AS runs
+    `/* tenant: sc is this account's sessions (org_id = $1) */ WITH ${sc} SELECT r.created_by AS user_id, sum(sc.usd)::float AS usd, count(DISTINCT r.id)::int AS runs
        FROM sc JOIN simulations r ON r.id = sc.simulation_id GROUP BY 1 ORDER BY 2 DESC LIMIT 8`, [s.org]);
   const all = roles.canAccount(s.accountRole, "billing");
   const people = all ? (await admin.team(s.slug)).members : [];

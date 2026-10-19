@@ -18,8 +18,10 @@ const offenders: { file: string; line: number; hash: string; sql: string }[] = [
 const literal = /`([^`]*)`|"((?:[^"\\]|\\.)*)"/g;
 for (const file of files) {
   const src = readFileSync(path.join(ROOT, file), "utf8");
+  // A file-level note constant (const TENANT = "/* tenant: ... */") counts where a query interpolates it.
+  const notes = [...src.matchAll(/const (\w+) = "(\/\*\s*tenant:[^"]*)"/g)];
   for (const m of src.matchAll(literal)) {
-    const sql = (m[1] ?? m[2] ?? "");
+    const sql = notes.reduce((q, [, name, note]) => q.replaceAll(`\${${name}}`, note), m[1] ?? m[2] ?? "");
     if (!/\b(SELECT|UPDATE|DELETE|INSERT)\b/.test(sql) || !/\b(FROM|INTO|UPDATE|JOIN)\b/i.test(sql)) continue;
     const touched = TENANT_TABLES.filter((t) => new RegExp(`\\b(FROM|JOIN|INTO|UPDATE)\\s+${t}\\b`, "i").test(sql));
     if (!touched.length || /\borg_id\b/.test(sql) || /\/\*\s*tenant:/.test(sql)) continue;
