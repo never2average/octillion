@@ -27,6 +27,9 @@ import { cn } from '@/lib/utils';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
+import { ApiError } from '@/lib/api-client';
+import { toast } from 'sonner';
 import { accountHref, post, useAdmin, useAdminAction } from './lib';
 import { Gate, useAdminRole } from './role';
 import { copyText, ErrorBox, FormRow, Mono, StatusBadge, When, type Tone } from './ui';
@@ -123,6 +126,7 @@ interface RevenuePlan {
   accounts: { key: string; slug: string | null; name: string; status: SubStatus; mrr_usd: number }[];
   /** A live Octillion plan (active price, octillion_ lookup key): it can be archived. */
   live?: boolean; monthly_budget_usd?: number | null; experiment?: string | null; weight?: number; trial_days?: number | null;
+  usage?: PlanUsage | null; config?: Record<string, unknown> | null;
 }
 interface Revenue {
   range: { from: string; to: string; days: string[] };
@@ -313,6 +317,7 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
   const [newPlan, setNewPlan] = useState(false);
   const [archiving, setArchiving] = useState<RevenuePlan | null>(null);
   const [experimenting, setExperimenting] = useState<RevenuePlan | null>(null);
+  const [duplicating, setDuplicating] = useState<{ json: string; control?: { price_id: string; experiment: string; weight: number } } | null>(null);
   const all = data?.accounts ?? [];
   const f = useAccountFilter(all, (a) => a.collected_usd > 0 || a.mrr_usd > 0 || a.spend_usd > 0 || a.subscriptions.length > 0 || a.invoices.length > 0, 'revenue or spend');
   const len = data?.range.days.length ?? 0;
@@ -361,6 +366,7 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
         render: (p) => (p.monthly_budget_usd == null ? NA : num(cents(p.monthly_budget_usd), 'The plan’s monthly cap on model spend. Not revenue.')) },
       { key: 'experiment', label: 'Experiment', type: 'select', value: (p) => p.experiment ?? '', render: (p) => (p.experiment
         ? <span className='flex flex-col gap-1'><Mono>{p.experiment}</Mono><span className='text-muted-foreground text-xs'>weight {p.weight ?? 1}</span></span> : NA) },
+      { key: 'usage', label: 'Usage pricing', type: 'text', value: (p) => (p.usage ? usageText(p.usage) : ''), render: (p) => (p.usage ? <span className='text-sm'>{usageText(p.usage)}</span> : NA) },
       { key: 'trial', label: 'Free trial', className: 'text-right', type: 'number', value: (p) => p.trial_days ?? null, render: (p) => (p.trial_days ? num(`${p.trial_days} d`) : NA) }
     ];
     return (<>
@@ -370,6 +376,8 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
         primary={newPlanBtn}
         actions={(p) => (p.live && p.price_id ? [
           { label: 'Copy price ID', icon: <Icons.page />, onSelect: () => copyText(p.price_id!, 'Price ID copied') },
+          ...(p.config ? [{ label: 'Copy as JSON', icon: <Icons.page />, onSelect: () => copyText(JSON.stringify(p.config, null, 2), 'Plan config copied') },
+            role.lock({ label: 'Duplicate as variant', icon: <Icons.add />, onSelect: () => setDuplicating(variantJson(p)) }, 'plans')] : []),
           role.lock({ label: p.experiment ? 'Change experiment' : 'Add to experiment', icon: <Icons.sparkles />, onSelect: () => setExperimenting(p) }, 'plans'),
           role.lock({ label: 'Archive plan', icon: <Icons.trash />, destructive: true, separator: true, onSelect: () => setArchiving(p) }, 'plans')
         ] : [])}
@@ -388,6 +396,7 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
         )}
         empty={stripeEmpty ?? 'No plans yet.'} />
       {newPlanDialog}
+      {duplicating && <NewPlanDialog onClose={() => setDuplicating(null)} experiments={experimentNames} initialJson={duplicating.json} control={duplicating.control} />}
       {experimenting && <PlanExperiment plan={experimenting} experiments={experimentNames} onClose={() => setExperimenting(null)} />}
       <ArchivePlan plan={archiving} onClose={() => setArchiving(null)} />
     </>);
@@ -541,6 +550,91 @@ function ExperimentsTab({ data, loading, bar }: TabProps<Experiments>) {
   );
 }
 
+interface PlanUsage { price_id: string; meter: string; included_usd: number; tiers: { up_to_usd: number | null; markup: number }[] }
+/** "Model spend ×1.3 over $100 included", tiers joined. */
+const usageText = (u: PlanUsage) => `Model spend ${u.tiers.map((t) => `×${t.markup}${t.up_to_usd == null ? '' : ` to $${t.up_to_usd.toLocaleString()}`}`).join(', then ')}${u.included_usd ? `, $${u.included_usd.toLocaleString()} included` : ''}`;
+/** A plan's config as the start of another variant of the same experiment (a new name and lookup key). */
+function variantJson(p: RevenuePlan) {
+  const { lookup_key: _lk, ...c } = (p.config ?? {}) as Record<string, unknown>;
+  const experiment = p.experiment ?? `${String(p.lookup_key ?? p.name).replace(/^octillion_/, '').replace(/_/g, '-')}-test`;
+  return { json: JSON.stringify({ ...c, name: `${p.name} B`.slice(0, 60), experiment, weight: p.weight ?? 1 }, null, 2),
+    // A plan in no experiment yet joins the new one as its control when the variant is made.
+    control: p.experiment || !p.price_id ? undefined : { price_id: p.price_id, experiment, weight: 1 } };
+}
+
+interface DryRun { dry_run: true; config: Record<string, unknown>; meter: { event_name: string; exists: boolean } | null; stripe: { create: string; body: Record<string, any> }[] }
+/** One Stripe object New plan › JSON would make, in a line. */
+function dryLine(o: DryRun['stripe'][number]) {
+  const b = o.body;
+  if (o.create === 'billing.meter') return `Billing meter "${b.event_name}": sum of value (model spend in cents) per stripe_customer_id`;
+  if (o.create === 'product') return `Product "${b.name}"${b.description ? `: ${b.description}` : ''}`;
+  if (b.recurring?.usage_type === 'metered') return `Usage price ${b.lookup_key}: graduated, per cent of model spend — ${(b.tiers as { up_to: number | 'inf'; unit_amount_decimal: string }[])
+    .map((t) => `${t.up_to === 'inf' ? 'above' : `to $${(t.up_to / 100).toLocaleString()}`} ×${t.unit_amount_decimal}`).join(', ')} / ${b.recurring.interval}`;
+  return `Base price ${b.lookup_key}: $${(b.unit_amount / 100).toLocaleString()} / ${b.recurring?.interval}`;
+}
+
+/**
+ * New plan › JSON: the whole plan as one config (src/plan-config.ts), checked by the server (Check: a dry run that
+ * lists what would be made in Stripe, or every problem by path) and then made (Create in Stripe).
+ */
+function PlanJsonDialog({ onClose, modes, initial, control }: { onClose: () => void; modes: ReactNode; initial: string; control?: { price_id: string; experiment: string; weight: number } }) {
+  const [text, setText] = useState(initial);
+  const [problems, setProblems] = useState<string[]>([]);
+  const [preview, setPreview] = useState<DryRun | null>(null);
+  const parsed = useMemo(() => { try { return { ok: true as const, v: JSON.parse(text) as Record<string, unknown> }; } catch (e) { return { ok: false as const, err: (e as Error).message }; } }, [text]);
+  const check = useAdminAction((b: { config: unknown; dry_run: true }) => post<DryRun>('/plans', b));
+  const make = useAdminAction((b: { config: unknown }) => post<{ name: string; experiment: string | null }>('/plans', b),
+    { success: (r) => `Plan ${r.name} created in Stripe${r.experiment ? ` as a variant of ${r.experiment}` : ''}` });
+  const busy = check.isPending || make.isPending;
+  const fail = (e: Error) => { setPreview(null); setProblems(e instanceof ApiError && Array.isArray(e.body.problems) ? (e.body.problems as string[]) : [e.message]); };
+  const run = (dry: boolean) => {
+    if (!parsed.ok) return setProblems([`Not valid JSON: ${parsed.err}`]);
+    const config = { ...parsed.v, ...(parsed.v.experiment === '' ? { experiment: undefined, weight: undefined } : {}) };
+    setProblems([]);
+    if (dry) check.mutate({ config, dry_run: true }, { onSuccess: setPreview, onError: fail });
+    else make.mutate({ config }, {
+      onSuccess: (r) => {
+        // Duplicate as variant: the plan it came from joins the same experiment (as the control, being older).
+        if (control && r.experiment) void post(`/plans/${encodeURIComponent(control.price_id)}/experiment`, { experiment: r.experiment, weight: control.weight }).catch((e: Error) => toast.error(`The original plan did not join ${r.experiment}: ${e.message}`));
+        onClose();
+      },
+      onError: fail
+    });
+  };
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className='sm:max-w-2xl'>
+        <div className='grid gap-4'>
+          <DialogHeader>
+            <div className='flex items-center justify-between gap-3'><DialogTitle>New plan</DialogTitle>{modes}</div>
+            <DialogDescription>
+              {control && <>The plan you duplicated joins this experiment as its control when you create this one. </>}
+              The plan as JSON: a base fee, usage pricing on model spend (a Stripe billing meter; graduated tiers by markup), a free trial, the monthly spend cap,
+              an experiment and metadata. Check shows what will be made in Stripe; nothing is created until you press Create.
+            </DialogDescription>
+          </DialogHeader>
+          <Textarea aria-label='Plan config (JSON)' spellCheck={false} value={text} onChange={(e) => { setText(e.target.value); setPreview(null); }}
+            className='min-h-[320px] font-mono text-xs leading-relaxed' />
+          {!parsed.ok && <p className='text-destructive text-sm'>Not valid JSON: {parsed.err}</p>}
+          {problems.length > 0 && <ul className='text-destructive grid list-disc gap-1 pl-5 text-sm'>{problems.map((p) => <li key={p}>{p}</li>)}</ul>}
+          {preview && (
+            <div className='grid gap-2 rounded-md border p-3 text-sm'>
+              <span className='font-medium'>Will be made in Stripe</span>
+              <ul className='grid list-disc gap-1 pl-5'>{preview.stripe.map((o, i) => <li key={i}>{dryLine(o)}</li>)}</ul>
+              {preview.meter?.exists && <span className='text-muted-foreground'>Uses the existing meter {preview.meter.event_name}.</span>}
+            </div>
+          )}
+          <DialogFooter>
+            <Button type='button' variant='outline' onClick={onClose}>Cancel</Button>
+            <Button type='button' variant='outline' disabled={busy || !parsed.ok} onClick={() => run(true)}>Check</Button>
+            <Button type='button' disabled={busy || !parsed.ok} onClick={() => run(false)}>{make.isPending && <Icons.spinner className='animate-spin' />} Create in Stripe</Button>
+          </DialogFooter>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 /** A plan's experiment (Stripe price metadata): join one, change the weight, or leave (empty name). */
 function PlanExperiment({ plan, experiments, onClose }: { plan: RevenuePlan; experiments: string[]; onClose: () => void }) {
   const [experiment, setExperiment] = useState(plan.experiment ?? '');
@@ -582,7 +676,15 @@ function PlanExperiment({ plan, experiments, onClose }: { plan: RevenuePlan; exp
   );
 }
 
-function NewPlanDialog({ onClose, experiments }: { onClose: () => void; experiments: string[] }) {
+/** A starting point for New plan › JSON: a base fee with metered model spend over an included amount (src/plan-config.ts). */
+const PLAN_TEMPLATE = {
+  name: 'Team', description: 'For teams running weekly simulations', interval: 'month', base_fee_usd: 250, trial_days: 14, monthly_budget_usd: 2000,
+  usage: { meter: 'octillion_model_spend', included_usd: 100, tiers: [{ up_to_usd: 1000, markup: 1.3 }, { up_to_usd: null, markup: 1.15 }] },
+  experiment: '', weight: 1, metadata: {}
+};
+
+function NewPlanDialog({ onClose, experiments, initialJson, control }: { onClose: () => void; experiments: string[]; initialJson?: string; control?: { price_id: string; experiment: string; weight: number } }) {
+  const [mode, setMode] = useState<'form' | 'json'>(initialJson ? 'json' : 'form');
   const [name, setName] = useState('');
   const [amount, setAmount] = useState('');
   const [allowance, setAllowance] = useState('');
@@ -607,12 +709,18 @@ function NewPlanDialog({ onClose, experiments }: { onClose: () => void; experime
       { onSuccess: onClose, onError: (x) => setErr(x.message) });
   };
   const per = interval === 'year' ? 'year' : 'month';
+  const modes = (
+    <ButtonGroup aria-label='How to describe the plan'>
+      {(['form', 'json'] as const).map((m) => <Button key={m} type='button' size='sm' variant={mode === m ? 'default' : 'outline'} aria-pressed={mode === m} onClick={() => setMode(m)}>{m === 'form' ? 'Form' : 'JSON'}</Button>)}
+    </ButtonGroup>
+  );
+  if (mode === 'json') return <PlanJsonDialog onClose={onClose} modes={modes} initial={initialJson ?? JSON.stringify(PLAN_TEMPLATE, null, 2)} control={control} />;
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className='sm:max-w-md'>
         <form onSubmit={submit} className='grid gap-4'>
           <DialogHeader>
-            <DialogTitle>New plan</DialogTitle>
+            <div className='flex items-center justify-between gap-3'><DialogTitle>New plan</DialogTitle>{modes}</div>
             <DialogDescription>A product and recurring price in Stripe. Accounts allowed plans see it on Billing and can check out; put it in an experiment to A/B test it against other plans.</DialogDescription>
           </DialogHeader>
           <FormRow id='np-name' label='Plan name' hint={name.trim() ? `Lookup key: octillion_${name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '')}` : 'Customers see this name at checkout.'}>

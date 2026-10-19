@@ -17,6 +17,7 @@ import { createApiKey, createOrg, slugify } from "./auth.js";
 import { capture } from "./telemetry.js";
 import * as billing from "./billing.js";
 import * as experiments from "./experiments.js";
+import { parsePlanConfig, PlanConfigError } from "./plan-config.js";
 import { clientCatalog } from "./connect-catalog.js";
 import { getDb } from "./db.js";
 import * as clerk from "./clerk.js";
@@ -625,7 +626,7 @@ export async function checkoutLink(actor: string, slug: string, priceId: unknown
   const customer = await ensureCustomer(actor, slug);
   billing.invalidateSubscriptions();
   log(actor, "billing.checkout_link", slug, { price: plan.price_id, ...(meta.octillion_experiment ? { experiment: meta.octillion_experiment } : {}) });
-  return { url: await billing.checkoutUrl(customer, plan.price_id, returnUrl, meta, plan.trial_days) };
+  return { url: await billing.checkoutUrl(customer, plan.price_id, returnUrl, meta, plan.trial_days, plan.usage?.price_id) };
 }
 
 /** A Stripe customer-portal link: plan changes, card, invoices, cancellation. */
@@ -643,26 +644,35 @@ export async function plans() {
   return { configured: true, plans: await billing.listPlans() };
 }
 
-/** A new prepaid plan in Stripe, checked here first: plain errors for a bad name, price, allowance or interval. */
+/**
+ * A new plan in Stripe. Either the New plan form's fields (name, amount_usd, interval, monthly_budget_usd,
+ * lookup_key, experiment, weight, trial_days, description) or a whole JSON plan config ({config}, src/plan-config.ts:
+ * base fee, usage pricing on the model-spend meter, tiers, trial, cap, experiment, metadata). Both are checked by
+ * parsePlanConfig and made by billing.createPlanFromConfig; {dry_run: true} returns what would be made in Stripe.
+ */
 export async function createPlan(actor: string, body: Record<string, unknown>) {
   if (!billing.stripeEnabled()) throw new AdminError("Stripe is not set up on this server", 503);
-  const name = String(body.name ?? "").trim().replace(/\s+/g, " ");
-  if (name.length < 2 || name.length > 60) throw new AdminError("The plan name must be 2 to 60 characters");
-  const amount = Number(body.amount_usd);
-  if (!Number.isFinite(amount) || amount <= 0 || amount > 100_000) throw new AdminError("The price must be more than $0 and at most $100,000");
-  if (Math.abs(amount * 100 - Math.round(amount * 100)) > 1e-6) throw new AdminError("The price can't have fractions of a cent");
-  const interval = body.interval ?? "month";
-  if (interval !== "month" && interval !== "year") throw new AdminError("The interval must be month or year");
-  const budget = body.monthly_budget_usd == null || body.monthly_budget_usd === "" ? amount : Number(body.monthly_budget_usd);
-  if (!Number.isFinite(budget) || budget < 0 || budget > amount * 10) throw new AdminError(`The monthly allowance must be from $0 to $${(amount * 10).toLocaleString("en-US")} (ten times the price)`);
-  const lookup = body.lookup_key == null || body.lookup_key === "" ? undefined : String(body.lookup_key).trim();
-  const { experiment, weight } = experimentOf(body);
-  const trial = body.trial_days == null || body.trial_days === "" ? null : Number(body.trial_days);
-  if (trial != null && (!Number.isInteger(trial) || trial < 1 || trial > 730)) throw new AdminError("The free trial must be a whole number of days, 1 to 730");
-  const description = body.description == null ? null : String(body.description).trim().slice(0, 300) || null;
-  const plan = await billing.createPlan({ name, amount_usd: amount, interval, monthly_budget_usd: budget, lookup_key: lookup, experiment, weight, trial_days: trial, description });
-  log(actor, "billing.plan_create", null, { price: plan.price_id, lookup_key: plan.lookup_key, amount_usd: amount, interval, monthly_budget_usd: budget, experiment, weight, trial_days: trial });
-  return plan;
+  let cfg;
+  try { cfg = parsePlanConfig(body.config != null ? body.config : formConfig(body)); }
+  catch (e) { throw e instanceof PlanConfigError ? Object.assign(new AdminError(e.message, 400), { problems: e.problems }) : e; }
+  const r = await billing.createPlanFromConfig(cfg, body.dry_run === true);
+  if (r.dry_run) return r;
+  log(actor, "billing.plan_create", null, { price: r.price_id, usage_price: r.usage_price_id, lookup_key: r.lookup_key, base_fee_usd: cfg.base_fee_usd, interval: cfg.interval,
+    monthly_budget_usd: cfg.monthly_budget_usd, usage: cfg.usage ? { meter: cfg.usage.meter, included_usd: cfg.usage.included_usd, tiers: cfg.usage.tiers.length } : null,
+    experiment: cfg.experiment, weight: cfg.weight, trial_days: cfg.trial_days });
+  return { ...r, amount: Math.round(cfg.base_fee_usd * 100), interval: cfg.interval, monthly_budget_usd: cfg.monthly_budget_usd, weight: cfg.weight, trial_days: cfg.trial_days, description: cfg.description };
+}
+
+/** The New plan form as a plan config: the price is the base fee; an empty allowance is the price. */
+function formConfig(body: Record<string, unknown>) {
+  const blank = (v: unknown) => v == null || v === "";
+  const n = (v: unknown) => (typeof v === "string" && v.trim() !== "" ? Number(v) : v);
+  if (!(Number(body.amount_usd) > 0)) throw new AdminError("The price must be more than $0 and at most $100,000");
+  const cap = Number(body.monthly_budget_usd), price = Number(body.amount_usd);
+  if (!blank(body.monthly_budget_usd) && Number.isFinite(cap) && cap > price * 10) throw new AdminError(`The monthly allowance must be from $0 to $${(price * 10).toLocaleString("en-US")} (ten times the price)`);
+  return { name: body.name, interval: body.interval ?? "month", base_fee_usd: n(body.amount_usd), ...(blank(body.monthly_budget_usd) ? {} : { monthly_budget_usd: n(body.monthly_budget_usd) }),
+    ...(blank(body.lookup_key) ? {} : { lookup_key: body.lookup_key }), ...(blank(body.description) ? {} : { description: body.description }),
+    ...(blank(body.trial_days) ? {} : { trial_days: n(body.trial_days) }), ...(blank(body.experiment) ? {} : { experiment: body.experiment, ...(blank(body.weight) ? {} : { weight: n(body.weight) }) }) };
 }
 
 const experimentOf = (body: Record<string, unknown>) => {

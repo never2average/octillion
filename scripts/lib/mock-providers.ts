@@ -36,7 +36,7 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
   const jwk = { ...keyJson.pub, kid: "mock-1", alg: "RS256", use: "sig" };
   const s = {
     orgs: new Map<string, any>(), invitations: new Map<string, any>(), memberships: new Map<string, any>(), users: new Map<string, any>(),
-    customers: new Map<string, any>(), subscriptions: new Map<string, any>(), checkouts: [] as any[], meterEvents: [] as any[], invoices: [] as any[], balanceTxns: [] as any[], stripeDown: false,
+    customers: new Map<string, any>(), subscriptions: new Map<string, any>(), checkouts: [] as any[], meters: [] as any[], meterEvents: [] as any[], invoices: [] as any[], balanceTxns: [] as any[], stripeDown: false,
     oauth: new Map<string, any>(), keyed: new Map<string, any>(),
     emails: [] as any[], resendKeys: new Map<string, { id: string; body: string }>(), resendDown: false,
     // Cloudflare Workers AI: every chat request (its body), and how to answer one (status and/or content; unset: 503).
@@ -52,7 +52,7 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
   };
   const app = express();
   const MAPS = ["orgs", "invitations", "memberships", "users", "customers", "subscriptions", "oauth", "keyed"] as const;
-  const dump = () => JSON.stringify({ keys: keyJson, meterEvents: s.meterEvents, invoices: s.invoices, balanceTxns: s.balanceTxns, checkouts: s.checkouts,
+  const dump = () => JSON.stringify({ keys: keyJson, meterEvents: s.meterEvents, invoices: s.invoices, balanceTxns: s.balanceTxns, checkouts: s.checkouts, meters: s.meters,
     ...Object.fromEntries(MAPS.map((k) => [k, [...(s[k] as Map<string, unknown>).entries()]])) });
   const restore = (j: any) => {
     for (const k of MAPS) { const m = s[k] as Map<string, unknown>; m.clear(); for (const [a, b] of j[k] ?? []) m.set(a, b); }
@@ -60,6 +60,7 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     s.invoices.splice(0, s.invoices.length, ...(j.invoices ?? []));
     s.balanceTxns.splice(0, s.balanceTxns.length, ...(j.balanceTxns ?? []));
     s.checkouts.splice(0, s.checkouts.length, ...(j.checkouts ?? []));
+    s.meters.splice(0, s.meters.length, ...(j.meters ?? []));
   };
   if (saved) restore(saved);
   if (persist) app.use(async (_req, res, next) => {
@@ -237,8 +238,13 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     if (!product) return void res.status(400).json({ error: { message: `No such product: '${b.product}'` } });
     if (b.lookup_key && s.prices.some((p) => p.lookup_key === b.lookup_key))
       return void res.status(400).json({ error: { message: `A price (\`${b.lookup_key}\`) already uses that lookup key.` } });
-    const price = { id: id("price"), object: "price", active: true, lookup_key: b.lookup_key ?? null, unit_amount: Number(b.unit_amount), currency: b.currency,
-      recurring: b.recurring ? { interval: b.recurring.interval, interval_count: Number(b.recurring.interval_count ?? 1) } : null, nickname: b.nickname ?? null,
+    if (b.recurring?.usage_type === "metered" && !s.meters.some((m) => m.id === b.recurring.meter))
+      return void res.status(400).json({ error: { message: `No such billing meter: '${b.recurring?.meter}'` } });
+    const price = { id: id("price"), object: "price", active: true, lookup_key: b.lookup_key ?? null, unit_amount: b.unit_amount == null ? null : Number(b.unit_amount), currency: b.currency,
+      recurring: b.recurring ? { interval: b.recurring.interval, interval_count: Number(b.recurring.interval_count ?? 1), usage_type: b.recurring.usage_type ?? "licensed", meter: b.recurring.meter ?? null } : null,
+      billing_scheme: b.billing_scheme ?? "per_unit", tiers_mode: b.tiers_mode ?? null,
+      tiers: b.tiers ? ([] as any[]).concat(Object.values(b.tiers)).map((t: any) => ({ up_to: t.up_to === "inf" ? null : Number(t.up_to), unit_amount: null, unit_amount_decimal: t.unit_amount_decimal ?? null })) : undefined,
+      nickname: b.nickname ?? null,
       metadata: b.metadata ?? {}, created: Math.floor(Date.now() / 1000), product: { id: product.id, name: product.name, description: product.description, metadata: product.metadata } };
     s.prices.push(price);
     const out = { ...price, product: product.id };
@@ -256,10 +262,20 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
   st.post("/v1/checkout/sessions", (req, res) => {
     if (!s.customers.has(req.body.customer)) return void res.status(400).json({ error: { message: "No such customer" } });
     const b = req.body, cs = { id: id("cs"), object: "checkout.session", created: Math.floor(Date.now() / 1000), status: "open", mode: b.mode, customer: b.customer,
-      price: b.line_items?.[0]?.price, metadata: b.metadata ?? {}, subscription_data: b.subscription_data ?? {}, subscription: null as string | null,
+      price: b.line_items?.[0]?.price, line_items: ([] as any[]).concat(Object.values(b.line_items ?? {})), metadata: b.metadata ?? {}, subscription_data: b.subscription_data ?? {}, subscription: null as string | null,
       url: `${getBase()}/checkout/${b.customer}/${b.line_items?.[0]?.price}` };
     s.checkouts.push(cs);
     res.json(cs);
+  });
+  st.get("/v1/billing/meters", (_req, res) => void res.json({ object: "list", data: s.meters, has_more: false }));
+  st.post("/v1/billing/meters", (req, res) => {
+    const k = req.get("idempotency-key");
+    if (k && keyed.has(k)) return void res.json(keyed.get(k));
+    const b = req.body;
+    if (s.meters.some((m) => m.event_name === b.event_name)) return void res.status(400).json({ error: { message: `A meter with event_name ${b.event_name} already exists` } });
+    const m = { id: id("mtr"), object: "billing.meter", status: "active", event_name: b.event_name, display_name: b.display_name, default_aggregation: b.default_aggregation,
+      customer_mapping: b.customer_mapping, value_settings: b.value_settings };
+    s.meters.push(m); if (k) keyed.set(k, m); res.json(m);
   });
   st.get("/v1/checkout/sessions", (_req, res) => void res.json({ object: "list", data: s.checkouts.map(({ subscription_data: _sd, price: _p, ...x }) => x), has_more: false }));
   st.post("/v1/billing_portal/sessions", (req, res) => void res.json({ id: id("bps"), url: `${getBase()}/billing/${req.body.customer}` }));
@@ -353,13 +369,14 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     const cs = s.checkouts.find((x) => x.id === req.params.id);
     if (!cs) return void res.status(404).json({ error: "no such checkout" });
     const t = Math.floor(Date.now() / 1000), price = s.prices.find((p) => p.id === cs.price), trial = Number(cs.subscription_data?.trial_period_days ?? 0);
+    const items = (cs.line_items?.length ? cs.line_items : [{ price: cs.price, quantity: 1 }]).map((li: any) => ({ price: s.prices.find((p) => p.id === li.price), quantity: li.quantity == null ? null : Number(li.quantity) }));
     const status = req.body?.status ?? (trial ? "trialing" : "active");
     const sub = { id: id("sub"), object: "subscription", customer: cs.customer, status, cancel_at_period_end: false, trial_end: trial ? t + trial * 86400 : null,
       start_date: t, created: t, ended_at: null, canceled_at: null, cancel_at: null, current_period_end: t + 30 * 86400,
-      metadata: cs.subscription_data?.metadata ?? {}, items: { data: [{ price, quantity: 1 }] } };
+      metadata: cs.subscription_data?.metadata ?? {}, items: { data: items } };
     s.subscriptions.set(sub.id, sub);
     cs.status = "complete"; cs.subscription = sub.id;
-    if (!trial) invoice({ customer: cs.customer, amount: price?.unit_amount ?? 0, subscription: sub.id });
+    if (!trial && price?.unit_amount) invoice({ customer: cs.customer, amount: price.unit_amount, subscription: sub.id });
     res.json(sub);
   });
   app.post("/_mock/prices", (req, res) => {

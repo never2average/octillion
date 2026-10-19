@@ -555,7 +555,9 @@ export function createApp() {
   // Clerk / Stripe failures are the admin's to see (a bad key, a rate limit), not a generic 500.
   ob.use((err: Error & { status?: number }, _req: Request, res: Response, next: NextFunction) => {
     if (!(err instanceof onboarding.AdminError || err instanceof roles.AdminRoleError || err instanceof journeys.JourneyError || err instanceof playbooks.PlaybookError || err instanceof SettingError || err instanceof ClerkError || err instanceof StripeError)) return next(err);
-    res.status(err.status ?? 400).json({ error: err.message });
+    // A plan config's problems come as a list too (by path), for the JSON editor.
+    const problems = (err as { problems?: string[] }).problems;
+    res.status(err.status ?? 400).json({ error: err.message, ...(problems ? { problems } : {}) });
   });
   admin.use("/onboarding", ob);
   app.use("/api/admin", admin);
