@@ -76,8 +76,10 @@ export const iso = (ms: number | null | undefined) => (ms ? new Date(ms).toISOSt
 export const isSuspended = (m: { public_metadata?: Record<string, unknown> | null }) => m.public_metadata?.suspended === true;
 
 export const organizations = {
-  create: (name: string, slug: string, publicMetadata: Record<string, unknown> = {}) =>
-    call<ClerkOrg>("POST", "/organizations", { name, slug, public_metadata: publicMetadata }),
+  // No slug: accounts are matched by Clerk org id, and the production instance has organization slugs turned off
+  // (sending one is refused). Clerk names a slug itself if slugs are ever turned on. `_slug` is kept for callers.
+  create: (name: string, _slug: string, publicMetadata: Record<string, unknown> = {}) =>
+    call<ClerkOrg>("POST", "/organizations", { name, public_metadata: publicMetadata }),
   get: (id: string) => call<ClerkOrg>("GET", `/organizations/${encodeURIComponent(id)}`),
   rename: (id: string, name: string) => call<ClerkOrg>("PATCH", `/organizations/${encodeURIComponent(id)}`, { name }),
   /** Merges into public_metadata (keys not sent are kept). */
