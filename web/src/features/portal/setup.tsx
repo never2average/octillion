@@ -73,10 +73,10 @@ export function SetupPage() {
 }
 
 /** A floating panel for the pinned right column. */
-function FloatPanel({ title, description, className, children }: { title: string; description?: React.ReactNode; className?: string; children: React.ReactNode }) {
+function FloatPanel({ title, icon, description, className, children }: { title: string; icon?: React.ReactNode; description?: React.ReactNode; className?: string; children: React.ReactNode }) {
   return (
     <section className={cn('bg-card flex min-w-0 flex-col gap-3 rounded-xl border p-4 shadow-xl shadow-black/30', className)}>
-      <div><h2 className='text-sm font-semibold tracking-tight'>{title}</h2>{description && <p className='text-muted-foreground text-xs'>{description}</p>}</div>
+      <div><h2 className='flex items-center gap-2 text-sm font-semibold tracking-tight'>{icon && <span className='text-primary [&_svg]:size-4'>{icon}</span>}{title}</h2>{description && <p className='text-muted-foreground text-xs'>{description}</p>}</div>
       {children}
     </section>
   );
@@ -124,7 +124,7 @@ function ConnectionBox({ s, onConnected }: { s: Setup; onConnected: () => void }
   const [open, setOpen] = useState(!connected);
   const masked = url.replace(/([?&](?:key|token|k)=)[^&]+/i, '$1••••••••').replace(/(oct_[A-Za-z0-9]{4})[A-Za-z0-9_-]+/, '$1••••••••');
   return (
-    <FloatPanel title='Connect your AI client' description={s.connect.secret ? 'Your connection URL contains your key: keep it private.' : 'Octillion runs inside the AI client you already use.'}>
+    <FloatPanel title='Connect your AI client' icon={<Icons.plug />} description={s.connect.secret ? 'Your connection URL contains your key: keep it private.' : 'Octillion runs inside the AI client you already use.'}>
       {connected && (
         <div className='flex items-center gap-2 text-sm'>
           <span aria-hidden className='size-2 shrink-0 rounded-full bg-emerald-500' />
@@ -212,7 +212,7 @@ function setupText(url: string, c: Client) {
 function ClientSteps({ c }: { c: Client }) {
   return (
     <div className='space-y-2 text-sm'>
-      <p>{c.steps}</p>
+      {!c.install_url && !c.command && !c.snippet && <p>{c.steps}</p>}
       {c.install_url && (
         <Button size='sm' render={<a href={c.install_url} />}><Icons.add /> Add to {c.client}</Button>
       )}
@@ -226,7 +226,6 @@ function ClientSteps({ c }: { c: Client }) {
           </div>
         </div>
       )}
-      {!c.verified && <p className='text-muted-foreground text-xs'>Based on {c.client}&apos;s documented MCP settings; if your version differs, use its “add MCP server” option with the URL above.</p>}
     </div>
   );
 }
@@ -255,7 +254,7 @@ function JourneyPicker({ setup, journeys, selected, onSelect }: { setup: { done:
   const shown = needle || all || matches.length <= SEARCH_FROM ? matches
     : [...matches.slice(0, SEARCH_FROM - 1), ...matches.slice(SEARCH_FROM - 1).filter((j) => j.id === selected)];
   return (
-    <FloatPanel title='Journeys' description='Real use cases as step-by-step pipelines. Pick one to replicate it.' >
+    <FloatPanel title='Journeys' icon={<Icons.route />} description='Real use cases as step-by-step pipelines. Pick one to replicate it.' >
       {items.length > SEARCH_FROM && (
         <div className='relative'>
           <Icons.search className='text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2' />
