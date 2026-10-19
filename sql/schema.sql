@@ -1044,10 +1044,9 @@ ALTER TABLE library_tasks      ADD COLUMN IF NOT EXISTS submission_id  TEXT;
 INSERT INTO vault_providers (slug, mode, upstream_url, auth_header, auth_prefix, env_vars) VALUES
   ('resend', 'direct', 'https://api.resend.com', 'authorization', 'Bearer ', '{}')
 ON CONFLICT (slug) DO NOTHING;
--- Stripe (src/billing.ts): its secret key is a vault provider too, server only (no env_vars).
-INSERT INTO vault_providers (slug, mode, upstream_url, auth_header, auth_prefix, env_vars) VALUES
-  ('stripe', 'direct', 'https://api.stripe.com', 'authorization', 'Bearer ', '{}')
-ON CONFLICT (slug) DO NOTHING;
+-- Stripe's key is a server environment variable (STRIPE_SECRET_KEY, src/billing.ts), not a vault provider: drop the
+-- provider row a short-lived build added, while it holds no key.
+DELETE FROM vault_providers WHERE slug = 'stripe' AND NOT EXISTS (SELECT 1 FROM vault_credentials WHERE provider = 'stripe');
 -- Every email Octillion tried to send: one row per message (recipient and purpose), whatever became of it. Never the
 -- address itself (a hash to match on, and the domain), never the body. The idempotency key names the message
 -- ("request:12:received", "budget:7:2026-10:80:<hash>"), so a retry or a second trigger never sends it twice; a

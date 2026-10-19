@@ -19,7 +19,7 @@ import { createServer, runTool, TOOL_NAMES, WIDGET_HTML, type ToolName } from ".
 import { connectorEvents, recordMcpEvent } from "./analytics.js";
 import { bearer, isWorkerToken, resolveKey, resolveUserToken, type Org } from "./auth.js";
 import { clerkEnabled, ClerkError, frontendApi, mcpAudience } from "./clerk.js";
-import { loadStripeKey, StripeError } from "./billing.js";
+import { StripeError } from "./billing.js";
 import { getDb } from "./db.js";
 import { parseJsonl, transcripts, type RawEvent } from "./transcripts.js";
 import { appendEvents, claimJobs, completeSession, heartbeat } from "./worker.js";
@@ -86,7 +86,7 @@ export function createApp() {
   app.use(express.static(PUBLIC_DIR, { extensions: ["html"], maxAge: "5m" }));
   // Global settings (src/settings.ts) and admin-added harnesses (src/harnesses.ts, merged into registry()) are read
   // synchronously from caches: load them, and keep them at most 30s old.
-  app.use((_req, _res, next) => void Promise.all([freshSettings(), freshPlatformHarnesses(), loadStripeKey().catch(() => {})]).then(() => next()));
+  app.use((_req, _res, next) => void Promise.all([freshSettings(), freshPlatformHarnesses()]).then(() => next()));
 
   // 5-minute backstop for the event-driven autoscaler on Vercel (vercel.json crons; Vercel sends CRON_SECRET as a
   // bearer). It also prunes the autoscaler's history (src/autoscaler-ticks.ts), which a VM does from its ticking loop.

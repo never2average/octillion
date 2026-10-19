@@ -25,19 +25,19 @@ interface Provider { slug: string; mode: 'gateway' | 'direct'; backend: string; 
 /** Display names for the vault's provider ids. */
 const NAME: Record<string, string> = {
   anthropic: 'Anthropic', openai: 'OpenAI', google: 'Google Gemini', cloudflare: 'Cloudflare Workers AI', dashscope: 'Alibaba DashScope',
-  vertex: 'Vertex AI (Google Cloud)', boat: 'boat.dev', exa: 'Exa', libraries_io: 'Libraries.io', resend: 'Resend', stripe: 'Stripe', amp: 'Amp', cursor: 'Cursor', factory: 'Factory', github_copilot: 'GitHub Copilot'
+  vertex: 'Vertex AI (Google Cloud)', boat: 'boat.dev', exa: 'Exa', libraries_io: 'Libraries.io', resend: 'Resend', amp: 'Amp', cursor: 'Cursor', factory: 'Factory', github_copilot: 'GitHub Copilot'
 };
 const nameOf = (slug: string) => NAME[slug] ?? slug;
 interface Credential { id: number; provider: string; label: string; hint: string; enabled: boolean; uses: number; last_used_at: string | null; project_id?: string | null; client_email?: string }
 const TYPE: Record<string, string> = {
   anthropic: 'Inference', openai: 'Inference', google: 'Inference', cloudflare: 'Inference', dashscope: 'Inference', vertex: 'Inference',
-  boat: 'Sandbox', exa: 'Search', libraries_io: 'Search', resend: 'Email', stripe: 'Billing',
+  boat: 'Sandbox', exa: 'Search', libraries_io: 'Search', resend: 'Email',
   amp: 'Coding agent', cursor: 'Coding agent', factory: 'Coding agent', github_copilot: 'Coding agent'
 };
-const TYPES = ['Inference', 'Sandbox', 'Search', 'Email', 'Billing', 'Coding agent', 'Other'];
+const TYPES = ['Inference', 'Sandbox', 'Search', 'Email', 'Coding agent', 'Other'];
 const typeOf = (slug: string) => TYPE[slug] ?? 'Other';
 /** Server-only keys (email) are used by the API itself; never by orchestrators or agents. */
-const SERVER_ONLY = new Set(['resend', 'stripe']);
+const SERVER_ONLY = new Set(['resend']);
 const useOf = (p: { slug: string; mode: string }) => (SERVER_ONLY.has(p.slug) ? 'Used by the server only (emails)' : p.mode === 'gateway' ? 'Agents call it through the gateway' : 'Given to orchestrators');
 
 /** Every key Octillion uses, one row per provider; keys are added, disabled and deleted from the row's ⋯ menu. */

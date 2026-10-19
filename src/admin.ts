@@ -40,7 +40,7 @@ export function log(actor: string, action: string, slug: string | null, detail: 
 }
 
 export function integrations() {
-  const key = billing.stripeSecret();
+  const key = process.env.STRIPE_SECRET_KEY ?? "";
   return {
     clerk: clerk.clerkEnabled(), clerk_frontend_api: clerk.frontendApi(), oauth_on_mcp: Boolean(clerk.clerkEnabled() && clerk.frontendApi()),
     stripe: billing.stripeEnabled(), stripe_test_mode: /^(sk|rk)_test_/.test(key), spend_meter: process.env.STRIPE_SPEND_METER || null,

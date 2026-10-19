@@ -18,20 +18,8 @@
  */
 import { createHash } from "node:crypto";
 import { getDb } from "./db.js";
-import { getProvider, useCredential } from "./keyvault.js";
 
-// The secret: the key vault's "stripe" key (Key vault › Stripe, like every other key), or STRIPE_SECRET_KEY where
-// one is set (tests, local runs). The vault key is re-read at most once a minute (loadStripeKey, from the request
-// middleware and before each call), so stripeEnabled() stays synchronous.
-const vault = { key: null as string | null, at: 0 };
-export async function loadStripeKey(force = false): Promise<void> {
-  if (process.env.STRIPE_SECRET_KEY || (!force && Date.now() - vault.at < 60_000)) return;
-  vault.at = Date.now();
-  const p = await getProvider("stripe").catch(() => null);
-  vault.key = p?.enabled ? (await useCredential("stripe").catch(() => null))?.secret ?? null : null;
-}
-export const stripeSecret = () => process.env.STRIPE_SECRET_KEY || vault.key || "";
-export const stripeEnabled = () => Boolean(stripeSecret());
+export const stripeEnabled = () => Boolean(process.env.STRIPE_SECRET_KEY);
 const apiBase = () => (process.env.STRIPE_API_URL ?? "https://api.stripe.com").replace(/\/$/, "");
 
 export class StripeError extends Error {
@@ -50,11 +38,10 @@ function form(body: Record<string, unknown>, prefix = "", out = new URLSearchPar
 }
 
 async function call<T>(method: "GET" | "POST", path: string, body?: Record<string, unknown>, idempotencyKey?: string): Promise<T> {
-  await loadStripeKey();
-  if (!stripeEnabled()) throw new StripeError("Stripe is not configured: add its secret key on Key vault › Stripe", 503);
+  if (!stripeEnabled()) throw new StripeError("Stripe is not configured (STRIPE_SECRET_KEY)", 503);
   const res = await fetch(`${apiBase()}${path}`, {
     method,
-    headers: { authorization: `Bearer ${stripeSecret()}`, ...(body ? { "content-type": "application/x-www-form-urlencoded" } : {}),
+    headers: { authorization: `Bearer ${process.env.STRIPE_SECRET_KEY}`, ...(body ? { "content-type": "application/x-www-form-urlencoded" } : {}),
                ...(idempotencyKey ? { "idempotency-key": idempotencyKey } : {}) },
     body: body ? form(body) : undefined,
     signal: AbortSignal.timeout(15_000),

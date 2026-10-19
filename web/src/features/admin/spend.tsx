@@ -335,12 +335,12 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
       { label: 'Gross margin', spark: dailyMargin, value: ok && collected > 0 ? pct((collected - cost) / collected) : '—' }
     ]} />
   );
-  const stripeEmpty = data && !data.stripe.configured ? 'Stripe is not connected: add its secret key on Key vault › Stripe to see revenue and create plans.'
+  const stripeEmpty = data && !data.stripe.configured ? 'Stripe is not configured (STRIPE_SECRET_KEY in the server environment on Vercel), so there is no revenue to show.'
     : data?.stripe.error ? `Could not read Stripe: ${data.stripe.error}` : null;
   const mixed = (data?.currencies.length ?? 0) > 1 ? <span className={cn('text-sm', AMBER)}>Invoices in {data!.currencies.join(', ').toUpperCase()}: amounts are summed as they are.</span> : null;
   // New plan and Archive plan are on the Plans tab. Without a Stripe key New plan still shows, disabled, saying where the key goes.
   const newPlanBtn = data?.stripe.configured ? <Gate need='plans'><Button onClick={() => setNewPlan(true)}><Icons.add /> New plan</Button></Gate>
-    : <span title='Add the Stripe secret key on Key vault › Stripe first' className='inline-flex cursor-not-allowed'><Button disabled><Icons.add /> New plan</Button></span>;
+    : <span title='Set STRIPE_SECRET_KEY in the server environment (Vercel) first' className='inline-flex cursor-not-allowed'><Button disabled><Icons.add /> New plan</Button></span>;
   const newPlanDialog = newPlan && <NewPlanDialog onClose={() => setNewPlan(false)} />;
   if (group === 'provider') {
     const cols: RecordCol<RevenuePlan>[] = [

@@ -103,7 +103,7 @@ export const orchestratorBrain = () => ({
 const SDK_BASE_SUFFIX: Record<string, string> = { openai: "/v1", dashscope: "/compatible-mode/v1" };
 
 /** Direct-mode providers whose key only the orchestrator uses; never brokered to an agent session. */
-export const ORCHESTRATOR_ONLY_PROVIDERS = new Set(["boat", "vertex", "resend", "stripe"]);
+export const ORCHESTRATOR_ONLY_PROVIDERS = new Set(["boat", "vertex"]);
 /** Real vendor keys in agent sessions are off unless OCTILLION_DIRECT_KEYS=allow (see docs/security.md). */
 export const directKeysAllowed = () => process.env.OCTILLION_DIRECT_KEYS === "allow";
 function directKeyAllowed(provider: string, taskSource: string | null): boolean {
