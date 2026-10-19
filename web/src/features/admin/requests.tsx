@@ -257,16 +257,16 @@ function ApproveDialog({ req, onClose, onDone }: { req: Req; onClose: () => void
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className='sm:max-w-lg'>
-        <form onSubmit={submit} className='grid gap-4'>
+        <form onSubmit={submit} className='grid min-w-0 gap-4 [&>*]:min-w-0'>
           <DialogHeader>
             <DialogTitle>Approve request</DialogTitle>
-            <DialogDescription>
+            <DialogDescription className='break-words'>
               {req.company} · {req.email}
             </DialogDescription>
           </DialogHeader>
           <div role='radiogroup' aria-label='Approve into' className='grid gap-1.5'>
             {([['new', 'A new account', 'They become its admin.'], ['existing', 'An existing account', 'They join as a member.']] as const).map(([v, label, hint]) => (
-              <label key={v} className={cn('flex cursor-pointer items-center gap-3 rounded-md border px-3 py-2.5 text-sm leading-none', m === v ? 'border-primary bg-primary/10' : 'hover:bg-muted')}>
+              <label key={v} className={cn('flex min-w-0 cursor-pointer flex-wrap items-center gap-x-3 gap-y-1 rounded-md border px-3 py-2.5 text-sm leading-none', m === v ? 'border-primary bg-primary/10' : 'hover:bg-muted')}>
                 <input type='radio' name='ap-mode' value={v} checked={m === v} onChange={() => setMode(v)} className='accent-[var(--primary)]' />
                 <span className='font-medium'>{label}</span>
                 <span className='text-muted-foreground text-xs'>{hint}</span>
@@ -288,10 +288,11 @@ function ApproveDialog({ req, onClose, onDone }: { req: Req; onClose: () => void
           ) : (
             <div className='grid gap-1.5'>
               <Label htmlFor='ap-org'>Account</Label>
-              <NativeSelect id='ap-org' className='w-full' value={chosen} onChange={(e) => setOrg(e.target.value)}>
+              {/* Names only: a long internal slug in the option text made the select (and the dialog) as wide as the slug. */}
+              <NativeSelect id='ap-org' className='w-full min-w-0 max-w-full' value={chosen} onChange={(e) => setOrg(e.target.value)}>
                 {(data?.orgs ?? []).map((o) => (
-                  <NativeSelectOption key={o.slug} value={o.slug}>
-                    {o.name} ({o.slug})
+                  <NativeSelectOption key={o.slug} value={o.slug} title={o.slug}>
+                    {o.name}
                   </NativeSelectOption>
                 ))}
               </NativeSelect>
