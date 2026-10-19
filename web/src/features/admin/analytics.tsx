@@ -876,7 +876,7 @@ function HealthBody({ a, base, match, kind }: { a: Analytics; base: string; matc
       </div>
       <div className={cn('flex min-h-0 flex-1 flex-col gap-2', isFetching && 'opacity-70')}>
         <ErrorBox error={error} />
-        <div className='flex min-h-[16rem] flex-1 flex-col border-y'>
+        <div className='flex min-h-[16rem] flex-1 flex-col border'>
           <div className='min-h-0 flex-1 overflow-auto'>
             <Table className='min-w-[760px]'>
               <TableHeader className='bg-background sticky top-0 z-10 shadow-[0_1px_0_var(--border)]'>
