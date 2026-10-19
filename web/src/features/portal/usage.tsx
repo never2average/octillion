@@ -1,5 +1,5 @@
 'use client';
-// /app Usage: Visibility first (src/features/portal/visibility.tsx), then the team's own activity across every AI client, its simulations and what agents picked, and model spend,
+// /app Usage: the team's own activity (Visibility, what agents picked, is its own page: src/features/portal/visibility.tsx) across every AI client, its simulations and what agents picked, and model spend,
 // for everyone or for the people picked in the People filter (server-side). The layout is admin Analytics': one stat
 // strip, then a grid of cells sharing hairlines, two per row at most (components/layout/chart-grid).
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
@@ -14,7 +14,7 @@ import { DateRangePicker, last30, rangeQuery, type DateRange } from '@/component
 import { MultiSelectFilter, type FilterOption } from '@/components/layout/multi-select-filter';
 import { Icons } from '@/components/icons';
 import { ErrorState, LoadingCards, useOrgLoad } from './shared';
-import { SectionHead, VisibilitySection, type Visibility } from './visibility';
+import { VisibilitySection, type Visibility } from './visibility';
 
 interface Week { week: string; partial: boolean }
 interface Usage {
@@ -56,7 +56,8 @@ const tipRow = (label: ReactNode, value: ReactNode) => (
 );
 const Empty = ({ children }: { children: ReactNode }) => <p className='text-muted-foreground py-16 text-center text-sm'>{children}</p>;
 
-export function UsagePage() {
+/** Usage (the team's activity) and Visibility (what agents picked) are two pages over the same /usage data and filters. */
+export function UsagePage({ view = 'usage' }: { view?: 'usage' | 'visibility' }) {
   const [range, setRange] = useState<DateRange>(last30);
   const [users, setUsers] = useState<string[]>([]);
   const [useCases, setUseCases] = useState<string[]>([]);
@@ -72,22 +73,24 @@ export function UsagePage() {
   }, [u?.people]);
   return (
     <PageContainer
-      pageTitle='Usage'
+      pageTitle={view === 'visibility' ? 'Visibility' : 'Usage'}
       pageDescription={users.length ? `${users.length === 1 ? 'One person' : `${users.length} people`} on your team, across every AI client.` : 'Your whole team, across every AI client.'}
       pageHeaderAction={
         <div className='flex flex-wrap items-center gap-2'>
-          <MultiSelectFilter noun='use cases' icon={<Icons.route />} options={ucOpts} value={useCases} onChange={setUseCases} />
+          {view === 'usage' && <MultiSelectFilter noun='use cases' icon={<Icons.route />} options={ucOpts} value={useCases} onChange={setUseCases} />}
           <MultiSelectFilter noun='people' icon={<Icons.teams />} options={peopleOpts} value={users} onChange={setUsers} />
           <DateRangePicker value={range} onChange={setRange} />
         </div>
       }
     >
-      {error ? <ErrorState error={error} /> : !u ? <LoadingCards count={4} /> : <UsageBody u={u} users={users} product={product} onProduct={setProduct} />}
+      {error ? <ErrorState error={error} /> : !u ? <LoadingCards count={4} />
+        : view === 'visibility' ? <div className='flex w-full flex-col pb-4'><VisibilitySection v={u.charts?.visibility} product={product} onProduct={setProduct} /></div>
+        : <UsageBody u={u} users={users} />}
     </PageContainer>
   );
 }
 
-function UsageBody({ u, users, product, onProduct }: { u: Usage; users: string[]; product: number | null; onProduct: (id: number | null) => void }) {
+function UsageBody({ u, users }: { u: Usage; users: string[] }) {
   const days = u.days;
   // Every day of the period, zero-filled, so the charts have a continuous axis.
   const series = useMemo(() => {
@@ -109,8 +112,6 @@ function UsageBody({ u, users, product, onProduct }: { u: Usage; users: string[]
   const pace = c?.allowance_usd && !u.spend.filtered ? c.allowance_usd / monthLen : null;
   return (
     <div className='flex w-full flex-col pb-4'>
-      <VisibilitySection v={c?.visibility} product={product} onProduct={onProduct} />
-      <SectionHead title='Activity' description='Tool calls across every AI client, simulations run and model spend.' />
       <StatStrip className='border-x [&>div:first-child]:pl-4 max-sm:[&>div:nth-child(odd)]:pl-4' items={[
         { label: 'Tool calls', value: num(calls), spark: series.map((d) => d.calls) },
         { label: 'Active people', value: num(u.active_people), spark: u.series?.people ?? series.map((d) => d.people) },
