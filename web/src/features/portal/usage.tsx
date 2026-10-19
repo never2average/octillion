@@ -25,6 +25,8 @@ interface Usage {
   active_people: number;
   use_cases?: { id: string; name: string; own: boolean; calls?: number }[];
   spend: { month_usd: number; budget_usd: number; filtered?: boolean };
+  /** The cards' sparklines: people, simulations and finished sessions per day of the period; model spend per day this month. */
+  series?: { days: string[]; people: number[]; simulations: number[]; completed: number[]; month_days: string[]; spend: number[] };
 }
 
 const callsConfig = { calls: { label: 'Tool calls', color: 'var(--chart-1)' }, errors: { label: 'Errors', color: 'var(--destructive)' } } satisfies ChartConfig;
@@ -71,11 +73,11 @@ export function UsagePage() {
         <div className='flex w-full flex-col gap-8'>
           <div className='flex flex-col gap-3'>
             <StatStrip items={[
-              { label: 'Tool calls', value: num(calls), hint: errs ? `${num(errs)} errors` : 'no errors' },
-              { label: 'Active people', value: u.active_people },
-              { label: 'Simulations', value: num(u.runs.simulations), hint: useCases.length ? 'all use cases' : undefined },
-              { label: 'Agent sessions done', value: `${num(u.runs.completed)} / ${num(u.runs.sessions)}` },
-              { label: u.spend.filtered ? 'Their model spend this month' : 'Model spend this month', value: usd(u.spend.month_usd), hint: u.spend.filtered ? 'runs they launched' : Number(u.spend.budget_usd) ? `of ${usd(u.spend.budget_usd)}` : 'no prepaid allowance yet' }
+              { label: 'Tool calls', value: num(calls), spark: series.map((d) => d.calls), hint: errs ? `${num(errs)} errors` : 'no errors' },
+              { label: 'Active people', value: u.active_people, spark: u.series?.people },
+              { label: 'Simulations', value: num(u.runs.simulations), spark: u.series?.simulations, hint: useCases.length ? 'all use cases' : undefined },
+              { label: 'Agent sessions done', value: `${num(u.runs.completed)} / ${num(u.runs.sessions)}`, spark: u.series?.completed },
+              { label: u.spend.filtered ? 'Their model spend this month' : 'Model spend this month', value: usd(u.spend.month_usd), spark: u.series?.spend, hint: u.spend.filtered ? 'runs they launched' : Number(u.spend.budget_usd) ? `of ${usd(u.spend.budget_usd)}` : 'no prepaid allowance yet' }
             ]} />
             {!u.spend.filtered && Number(u.spend.budget_usd) > 0 && <SpendMeter spent={Number(u.spend.month_usd)} budget={Number(u.spend.budget_usd)} className='max-w-md' />}
           </div>

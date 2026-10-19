@@ -260,6 +260,7 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
   app.post("/_mock/subscriptions", (req, res) => {
     const price = s.prices.find((p) => p.id === req.body.price);
     const sub = { id: id("sub"), object: "subscription", customer: req.body.customer, status: req.body.status ?? "active", cancel_at_period_end: false, trial_end: null,
+      start_date: Math.floor(Date.now() / 1000), created: Math.floor(Date.now() / 1000), ended_at: null,
       current_period_end: Math.floor(Date.now() / 1000) + 30 * 86400, items: { data: [{ price }] } };
     s.subscriptions.set(sub.id, sub);
     s.invoices.push({ id: id("in"), customer: req.body.customer, number: `MOCK-${s.invoices.length + 1}`, status: "paid", total: price?.unit_amount ?? 0, currency: "usd",

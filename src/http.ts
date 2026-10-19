@@ -468,7 +468,7 @@ export function createApp() {
   // The autoscaler's history (src/autoscaler-ticks.ts): its decisions log and the Activity chart. Read only.
   ob.get("/compute/ticks", async (req, res) => void res.json(await ticks.listTicks(req.query as Record<string, unknown>)));
   ob.get("/compute/activity", async (req, res) => void res.json(await ticks.computeActivity(req.query as Record<string, unknown>)));
-  ob.get("/compute/trends", async (_req, res) => void res.json(await (await import("./compute-trends.js")).computeTrends()));
+  ob.get("/compute/trends", async (req, res) => void res.json(await (await import("./compute-trends.js")).computeTrends(req.query)));
   // Spend (src/spend.ts, src/spend-usage.ts): metered model spend by account and provider, compute hours, data and storage, and one account's
   // breakdown. Read only (GETs: any admin role).
   ob.get("/spend", async (req, res) => void res.json(await spend.spendReport(req.query)));

@@ -47,16 +47,18 @@ export function AdminAccountDetail({ slug }: { slug: string }) {
         </div>
       ) : (
         <div className='flex w-full flex-col gap-8'>
+          {/* Sparklines: the last 30 days (spend: this month), day by day. The stage is under Onboarding, the plan on
+              Billing, the people on People. */}
           <StatStrip
             items={[
-              { label: 'Stage', value: <span className='text-lg'>{d.org.stage_label}</span>, hint: `Next: ${d.org.next_step}` },
-              { label: 'Calls in 7 days', value: d.org.calls_7d, hint: d.org.errors_7d ? `${d.org.errors_7d} errors` : 'no errors' },
-              { label: 'Model spend this month', value: usd(d.org.month_spend_usd), hint: d.org.budget_usd ? `of ${usd(d.org.budget_usd)} budget` : 'no cap' },
-              { label: 'Plan', value: <span className='text-lg'><SubBadge sub={d.org.subscription} /></span>, hint: d.org.clerk_org_id ? `${d.org.members} members` : `${d.org.active_keys} legacy keys` }
+              { label: 'Calls in 7 days', value: d.org.calls_7d, spark: d.daily?.calls },
+              { label: 'Errors in 7 days', value: d.org.errors_7d, spark: d.daily?.errors },
+              { label: 'Model spend this month', value: usd(d.org.month_spend_usd), spark: d.daily?.spend, hint: d.org.budget_usd ? `of ${usd(d.org.budget_usd)} budget` : 'no cap' },
+              { label: 'Agent sessions, 30 days', value: d.daily ? d.daily.sessions.reduce((a: number, b: number) => a + b, 0) : '—', spark: d.daily?.sessions }
             ]}
           />
 
-          <Section title='Onboarding' description='When the account reached each step.' action={<Rename path={path} name={d.org.name} />}>
+          <Section title='Onboarding' description={<>Stage: <span className='text-foreground font-medium'>{d.org.stage_label}</span> · next: {d.org.next_step}</>} action={<Rename path={path} name={d.org.name} />}>
             <ol className='grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-8'>
               {Object.keys(d.org.reached).map((k) => (
                 <li

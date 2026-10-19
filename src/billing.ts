@@ -62,6 +62,7 @@ async function all<T extends { id: string }>(path: string): Promise<T[]> {
 
 export interface Plan { price_id: string; lookup_key: string; name: string; amount: number | null; currency: string; interval: string | null; monthly_budget_usd: number | null }
 export interface Subscription { id: string; customer: string; status: string; current_period_end: number | null; cancel_at_period_end: boolean; trial_end: number | null;
+  start_date?: number | null; created?: number | null; ended_at?: number | null;
   items: { data: { price: { id: string; lookup_key: string | null; metadata?: Record<string, string>; product?: string | { metadata?: Record<string, string> } } ; current_period_end?: number }[] } }
 
 const budgetOf = (meta?: Record<string, string>) => (meta?.monthly_budget_usd != null && meta.monthly_budget_usd !== "" ? Number(meta.monthly_budget_usd) : null);
@@ -101,7 +102,9 @@ const shapeSub = (s: Subscription | null, plans: Plan[]) => {
 };
 export type SubscriptionSummary = NonNullable<ReturnType<typeof shapeSub>>;
 
-let subsCache: { at: number; byCustomer: Map<string, SubscriptionSummary> } | null = null;
+/** When a subscription was paid for (ms): from its start, or the end of its trial, to when it ended (null: still on). */
+export interface PaidSpan { customer: string; from: number; to: number | null }
+let subsCache: { at: number; byCustomer: Map<string, SubscriptionSummary>; spans: PaidSpan[] } | null = null;
 /** Every customer's current subscription in one paged list call, cached for a minute. */
 export async function subscriptionsByCustomer(fresh = false): Promise<Map<string, SubscriptionSummary>> {
   if (!fresh && subsCache && Date.now() - subsCache.at < 60_000) return subsCache.byCustomer;
@@ -109,8 +112,16 @@ export async function subscriptionsByCustomer(fresh = false): Promise<Map<string
   const grouped = new Map<string, Subscription[]>();
   for (const s of subs) grouped.set(s.customer, [...(grouped.get(s.customer) ?? []), s]);
   const byCustomer = new Map([...grouped].map(([c, list]) => [c, shapeSub(current(list), plans)!]));
-  subsCache = { at: Date.now(), byCustomer };
+  const spans = subs.filter((s) => !["incomplete", "incomplete_expired"].includes(s.status) && (s.start_date ?? s.created) != null).map((s) => ({
+    customer: s.customer, from: Math.max(s.start_date ?? s.created ?? 0, s.trial_end ?? 0) * 1000, to: s.ended_at ? s.ended_at * 1000 : null }));
+  subsCache = { at: Date.now(), byCustomer, spans };
   return byCustomer;
+}
+/** Every subscription's paid span, from the same cached list call (the Onboarding page's Paying sparkline). */
+export async function paidSpans(): Promise<PaidSpan[]> {
+  if (!stripeEnabled()) return [];
+  await subscriptionsByCustomer();
+  return subsCache?.spans ?? [];
 }
 export const invalidateSubscriptions = () => { subsCache = null; };
 

@@ -12,7 +12,7 @@
  * Without CLERK_SECRET_KEY the console falls back to per-org API keys (src/auth.ts) and hands out secret connector URLs.
  * Legacy keys keep working either way, for existing beta users and clients that can only send a header.
  */
-import { reportRange } from "./insights.js";
+import { daySeries, reportRange, sparkSpans } from "./insights.js";
 import { createApiKey, createOrg, slugify } from "./auth.js";
 import { capture } from "./telemetry.js";
 import * as billing from "./billing.js";
@@ -260,6 +260,22 @@ export async function overview(q: { from?: unknown; to?: unknown } = {}) {
             count(*) FILTER (WHERE status = 'declined') AS declined, min(created_at) FILTER (WHERE status = 'pending') AS oldest_pending
        FROM access_requests`);
   const subs = orgs.map((o) => o.subscription).filter(Boolean) as billing.SubscriptionSummary[];
+  // The cards' sparklines: one point per day of the period (the last 30 days without one), each the figure as it
+  // stood at the end of that day. Pending requests and accounts active in the 7 days to that day come from the
+  // database; accounts and reports from the accounts' own dates; paying from Stripe's subscription start and end.
+  const span = range ?? reportRange({ days: 30 });
+  const perDay = await db.query<{ day: string; pending: unknown; active_7d: unknown }>(
+    `/* tenant: internal: admin Onboarding sparklines, counts across all orgs */
+     WITH d AS (SELECT generate_series($1::timestamptz, $2::timestamptz - interval '1 day', interval '1 day') AS day)
+     SELECT to_char(d.day AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day,
+            (SELECT count(*) FROM access_requests q WHERE q.created_at < d.day + interval '1 day'
+                AND (q.status = 'pending' OR q.decided_at >= d.day + interval '1 day')) AS pending,
+            (SELECT count(DISTINCT e.org_id) FROM mcp_events e WHERE e.method = 'tools/call'
+                AND e.at >= d.day - interval '6 days' AND e.at < d.day + interval '1 day') AS active_7d
+       FROM d ORDER BY d.day`, [span.start, span.end]);
+  const ends = perDay.map((r) => Date.parse(`${r.day}T00:00:00Z`) + DAY);
+  const upTo = (dates: (Date | string | null | undefined)[]) => ends.map((e) => dates.filter((x) => x && new Date(x).getTime() < e).length);
+  const spans = await billing.paidSpans().catch(() => []);
   return {
     public_url: publicUrl(), integrations: integrations(), stripe_error,
     requests: { pending: Number(req.pending), approved: Number(req.approved), declined: Number(req.declined), oldest_pending: req.oldest_pending },
@@ -270,6 +286,12 @@ export async function overview(q: { from?: unknown; to?: unknown } = {}) {
     active_7d: orgs.filter((o) => o.calls_7d > 0).length,
     paying: subs.filter((s) => s.status === "active").length, trialing: subs.filter((s) => s.status === "trialing").length,
     orgs: orgs.length,
+    daily: {
+      days: perDay.map((r) => r.day),
+      pending: perDay.map((r) => Number(r.pending)), active_7d: perDay.map((r) => Number(r.active_7d)),
+      accounts: upTo(orgs.map((o) => o.created_at)), reported: upTo(inCohort.map((o) => o.reached.reported)), // as the funnel counts it
+      paying: ends.map((e) => new Set(spans.filter((x) => x.from < e && (x.to == null || x.to >= e)).map((x) => x.customer)).size),
+    },
   };
 }
 
@@ -277,7 +299,8 @@ export async function orgDetail(slug: string) {
   const org = await orgBySlug(slug, true);
   const db = await getDb();
   const people = await peopleOf(org.clerk_org_id);
-  const [keys, tools, clients, errors, products, research, sims, requests, invoices] = await Promise.all([
+  const sp = sparkSpans();
+  const [keys, tools, clients, errors, products, research, sims, requests, invoices, perDay] = await Promise.all([
     db.query(`SELECT id, label, key_prefix, created_at, last_used_at, revoked_at FROM api_keys WHERE org_id = $1
                ORDER BY revoked_at IS NOT NULL, created_at DESC`, [org.id]),
     db.query(`SELECT name, count(*) AS calls, count(*) FILTER (WHERE NOT ok) AS errors, round(avg(ms)) AS avg_ms, max(at) AS last
@@ -294,6 +317,18 @@ export async function orgDetail(slug: string) {
                 FROM simulations s WHERE s.org_id = $1 ORDER BY s.created_at DESC LIMIT 10`, [org.id]),
     db.query(`SELECT id, email, company, created_at, status FROM access_requests WHERE org_id = $1 ORDER BY created_at`, [org.id]),
     org.stripe_customer_id && billing.stripeEnabled() ? billing.recentInvoices(org.stripe_customer_id).catch(() => []) : Promise.resolve([]),
+    // The cards' sparklines: tool calls, errors and agent sessions per day for 30 days, model spend per day this month
+    // (the same measures as calls_7d, errors_7d and month_spend_usd).
+    db.query<{ k: string; day: string; v: unknown }>(
+      `SELECT 'calls' AS k, to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, count(*) AS v FROM mcp_events
+        WHERE org_id = $1 AND method = 'tools/call' AND at >= $2 GROUP BY 2
+       UNION ALL
+       SELECT 'errors', to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD'), count(*) FROM mcp_events WHERE org_id = $1 AND NOT ok AND at >= $2 GROUP BY 2
+       UNION ALL
+       SELECT 'sessions', to_char(queued_at AT TIME ZONE 'UTC', 'YYYY-MM-DD'), count(*) FROM agent_sessions WHERE org_id = $1 AND queued_at >= $2 GROUP BY 2
+       UNION ALL
+       SELECT 'spend', to_char(a.queued_at AT TIME ZONE 'UTC', 'YYYY-MM-DD'), sum(u.cost_usd) FROM gateway_usage u JOIN agent_sessions a ON a.id = u.session_id
+        WHERE a.org_id = $1 AND a.queued_at >= $3 GROUP BY 2`, [org.id, sp.last30, sp.month]),
   ]);
   const testMode = integrations().stripe_test_mode;
   return {
@@ -307,6 +342,10 @@ export async function orgDetail(slug: string) {
     invoices,
     stripe_dashboard: org.stripe_customer_id ? `https://dashboard.stripe.com/${testMode ? "test/" : ""}customers/${org.stripe_customer_id}` : null,
     keys, tools, clients, errors, products, research, simulations: sims, requests,
+    daily: {
+      days: sp.days30, calls: daySeries(sp.days30, perDay, "calls"), errors: daySeries(sp.days30, perDay, "errors"), sessions: daySeries(sp.days30, perDay, "sessions"),
+      month_days: sp.monthDays, spend: daySeries(sp.monthDays, perDay, "spend", true),
+    },
   };
 }
 

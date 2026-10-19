@@ -1828,8 +1828,15 @@ try {
     assert.equal((await json(adm("GET", "/compute/activity"))).minutes, 120);
     // Health sparklines: 24 hourly points for every Jobs and Sessions card.
     const tr = await json(adm("GET", "/compute/trends"));
-    for (const k of ["queued", "running", "orchestrators", "unclaimable", "ended", "failed", "spend", "wait_p50", "launches_failed", "jobs", "jobs_failed", "top_failure"])
-      assert.equal(tr.series[k]?.length, 24, `trend ${k} has 24 hours`);
+    // Compute's cards too: our sandboxes in use, free, ticks, tick errors, launched, reaped, launches, starts, unexpected reaps, deletes.
+    const TREND_KEYS = ["queued", "running", "orchestrators", "unclaimable", "ended", "failed", "spend", "wait_p50", "launches_failed", "jobs", "jobs_failed", "top_failure",
+      "in_use", "free", "ticks", "tick_errors", "launched", "reaped", "launches", "starts", "reaps", "deletes"];
+    for (const k of TREND_KEYS) assert.equal(tr.series[k]?.length, 24, `trend ${k} has 24 hours`);
+    assert.ok(tr.series.ticks.reduce((a: number, b: number) => a + b, 0) >= 1, "ticks counted per hour");
+    assert.ok(tr.series.launches.reduce((a: number, b: number) => a + b, 0) >= 1, "orchestrator launches counted per hour");
+    const trWeek = await json(adm("GET", "/compute/trends?hours=168"));
+    assert.equal(trWeek.hours, 168);
+    for (const k of TREND_KEYS) assert.equal(trWeek.series[k]?.length, 168, `trend ${k} has 168 hours on the week view`);
     assert.equal((await adm("GET", "/compute/activity?minutes=7")).status, 400);
 
     // Pruning: ticks past 14 days and compute events past 90 go; newer stay. The cron runs it after its tick.
@@ -2101,6 +2108,20 @@ try {
   assert.equal((await adm("POST", `/orgs/${slugA}/billing/portal`)).status, 503, "billing says it is off, not a 500");
   const ov = await json(adm("GET", "/overview"));
   assert.ok(ov.funnel.length === 8 && !ov.integrations.clerk && !ov.integrations.stripe);
+  // Onboarding sparklines: a point per day (30 without a period), the last one today's figure.
+  for (const k of ["pending", "accounts", "active_7d", "paying", "reported"]) assert.equal(ov.daily[k]?.length, 30, `overview ${k} has 30 days`);
+  assert.equal(ov.daily.days.length, 30);
+  assert.equal(ov.daily.accounts.at(-1), ov.orgs, "accounts to date, today");
+  assert.equal(ov.daily.pending.at(-1), ov.requests.pending, "pending at the end of today");
+  assert.ok(ov.daily.active_7d.at(-1) >= ov.active_7d, "active in the 7 days to today");
+  const ovRange = await json(adm("GET", "/overview?from=2026-01-01&to=2026-01-10"));
+  assert.equal(ovRange.daily.days.length, 10, "a day per day of the period");
+  assert.equal(ovRange.daily.days[0], "2026-01-01");
+  // Account sparklines: 30 days of calls, errors and sessions; this month of spend.
+  const d30 = await json(adm("GET", `/orgs/${slugA}`));
+  for (const k of ["calls", "errors", "sessions"]) assert.equal(d30.daily[k]?.length, 30, `account ${k} has 30 days`);
+  assert.equal(d30.daily.spend.length, new Date().getUTCDate(), "spend: a point per day this month");
+  assert.equal(d30.daily.calls.reduce((a: number, b: number) => a + b, 0) >= d30.org.calls_7d, true, "calls per day cover the 7-day figure");
   console.log("✓ onboarding console (legacy keys): approve, funnel from real use, per-person keys, rotate, revoke");
 
   // The customer API needs Clerk: without it, it says so instead of half-working.
@@ -2251,6 +2272,11 @@ try {
     assert.equal((await appCall(ownerC, "POST", `/team/members/${meMember.id}/role`, { role: "member" })).status, 400, "cannot demote yourself");
     assert.equal((await appCall(ownerC, "POST", "/team/invitations", { email: `third+${stamp}@acme-smoke.dev`, role: "member" })).status, 201, "admins invite from /app");
     const usageO = await json(appCall(ownerC, "GET", "/usage"));
+    // Usage sparklines: a point per day of the period for people, simulations and finished sessions; spend this month.
+    for (const k of ["people", "simulations", "completed"]) assert.equal(usageO.series[k]?.length, usageO.days, `usage ${k} has a point per day`);
+    assert.equal(usageO.series.days.length, usageO.days);
+    assert.equal(usageO.series.spend.length, new Date().getUTCDate(), "usage spend: a point per day this month");
+    assert.equal(usageO.series.simulations.reduce((a: number, b: number) => a + b, 0), Number(usageO.runs.simulations), "simulations per day add up to the card");
     assert.ok((usageO.use_cases ?? []).every((u: any) => typeof u.calls === "number"), "each use case with its tool calls");
     assert.ok(usageO.people.some((p: any) => p.email === `dev+${stamp}@acme-smoke.dev`), "usage per person, by email");
     // The people filter: everyone on the team is offered; picking someone narrows calls, tools, runs and spend to them.
@@ -2533,6 +2559,8 @@ try {
       const ownerT = await token({ user_id: accepted.user.id }), devT = await token({ user_id: acc2.user.id });
       const lim0 = await json(appCall(ownerC, "GET", "/limits"));
       assert.equal(lim0.policy.mode, "pool");
+      // Budget rules' This month tiles: a point per day this month for spend, runs launched and runs running.
+      for (const k of ["spent", "runs", "running"]) assert.equal(lim0.month_daily?.[k]?.length, new Date().getUTCDate(), `limits ${k} has a point per day this month`);
       assert.equal(lim0.members.length, 2);
       assert.ok(lim0.members.every((m: any) => m.limit_usd === null && m.can_run), "pool: no personal caps");
       assert.equal(lim0.last_change, null, "never saved: no last change (the page reads \"Using Octillion's default rules\")");

@@ -9,6 +9,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import PageContainer from '@/components/layout/page-container';
+import { StatStrip } from '@/components/layout/section';
 import { ActionsMenu, RecordView, type RecordCol, type RowAction } from '@/components/layout/record-view';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Alert, AlertDescription } from '@/components/ui/alert';
@@ -62,7 +63,9 @@ interface Picture extends Limits { budget_error: boolean; buffer_usd: number; se
   rest: Pot & { budget_usd: number; members: number; spent: number; left_usd: number } }
 /** GET /limits for an admin: the saved picture, plus This month's figures. */
 interface AdminLimits extends Picture { period_end: string; spent_live_usd: number; in_flight_usd: number; running_count: number; projected_usd: number | null; left_usd: number | null;
-  unattributed_spent_usd: number }
+  unattributed_spent_usd: number;
+  /** This month day by day: model spend, simulations launched, simulations running at some point of the day. */
+  month_daily?: { days: string[]; spent: number[]; runs: number[]; running: number[] } }
 interface PreviewChange { user_id: string; name: string | null; before: number | null; after: number | null; spent: number; blocked_now: boolean; blocked: LimitCode | null; limited_by: LimitCode | null }
 interface Warning { code: string; message: string; team_id?: number | null }
 /** POST /limits/preview: the draft's picture, its history line in parts, who it changes for, and what it warns about. */
@@ -751,29 +754,25 @@ function Section({ title, note, children }: { title: string; note?: string; chil
   );
 }
 
-/** Allowance, spent so far (live), running now, on pace for, left. A 2×2 grid with Left across on phones. */
+/**
+ * Runs, spent so far (live), running now, on pace for, left: one row of headline numbers, each with this month day by
+ * day. The allowance itself is the first line of Your policy. On pace for follows the month's running total; Left is
+ * the allowance less that running total.
+ */
 function MonthTiles({ l }: { l: AdminLimits }) {
   const cap = l.budget_usd, none = !l.budget_error && cap <= 0;
   const by = utcDate(Date.parse(l.period_end) - 1, { month: 'short', day: 'numeric' });
-  const pace = l.projected_usd;
-  const tiles: { label: string; value: React.ReactNode; sub?: React.ReactNode; wide?: boolean }[] = [
-    { label: 'Allowance', value: l.budget_error ? '—' : none ? 'None' : usd(cap) },
-    { label: 'Spent so far', value: usd(l.spent_live_usd), sub: 'live' },
-    { label: 'Running now', value: usd(l.in_flight_usd), sub: plural(l.running_count ?? 0, 'run') },
-    { label: 'On pace for', value: pace == null ? <span className='text-muted-foreground text-base'>Too early to tell</span> : usd(pace),
-      sub: pace == null ? undefined : cap > 0 && pace > cap ? <span className='text-destructive'>over by {usd(pace - cap)}</span> : `by ${by}` },
-    { label: 'Left', value: l.budget_error || none ? '—' : usd(l.left_usd ?? 0), wide: true }
-  ];
+  const pace = l.projected_usd, m = l.month_daily;
+  const runningTotal = m?.spent.reduce<number[]>((out, v) => [...out, (out[out.length - 1] ?? 0) + v], []);
   return (
-    <dl className='grid grid-cols-2 gap-x-6 gap-y-5 sm:grid-cols-5'>
-      {tiles.map((t) => (
-        <div key={t.label} className={cn('flex flex-col gap-2', t.wide && 'col-span-2 sm:col-span-1')}>
-          <dt className='text-muted-foreground text-xs leading-none'>{t.label}</dt>
-          <dd className='text-xl leading-none font-semibold tabular-nums'>{t.value}</dd>
-          {t.sub && <dd className='text-muted-foreground text-xs leading-none'>{t.sub}</dd>}
-        </div>
-      ))}
-    </dl>
+    <StatStrip items={[
+      { label: 'Runs this month', value: m ? num(m.runs.reduce((a, b) => a + b, 0)) : '—', spark: m?.runs },
+      { label: 'Spent so far', value: usd(l.spent_live_usd), spark: m?.spent, hint: 'live' },
+      { label: 'Running now', value: usd(l.in_flight_usd), spark: m?.running, hint: plural(l.running_count ?? 0, 'run') },
+      { label: 'On pace for', value: pace == null ? <span className='text-muted-foreground text-base'>Too early to tell</span> : usd(pace), spark: runningTotal,
+        hint: pace == null ? undefined : cap > 0 && pace > cap ? <span className='text-destructive'>over by {usd(pace - cap)}</span> : `by ${by}` },
+      { label: 'Left', value: l.budget_error || none ? '—' : usd(l.left_usd ?? 0), spark: l.budget_error || none ? undefined : runningTotal?.map((v) => Math.max(0, cap - v)) }
+    ]} />
   );
 }
 

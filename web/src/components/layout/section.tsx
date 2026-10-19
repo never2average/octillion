@@ -51,8 +51,8 @@ export function StatStrip({ items, className }: {
   );
 }
 
-/** A tiny trend line for a stat: the range's daily values, scaled to their own max. */
-function Sparkline({ values }: { values: number[] }) {
+/** A tiny trend line for a stat: its history (the range's days, or the last hours), scaled to its own max. */
+export function Sparkline({ values }: { values: number[] }) {
   const w = 96, h = 28, max = Math.max(...values, 0), step = w / (values.length - 1);
   const pts = values.map((v, i) => [i * step, max ? h - 2 - (v / max) * (h - 4) : h - 2] as const);
   const line = pts.map(([x, y], i) => `${i ? 'L' : 'M'}${x.toFixed(1)},${y.toFixed(1)}`).join('');

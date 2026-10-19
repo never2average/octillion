@@ -19,7 +19,7 @@ import { getPopulation } from "./populations.js";
 import * as playbooks from "./playbooks.js";
 import { markStage, playbooksFor, PlaybookError, syncProgress } from "./playbooks.js";
 import { TOOL_NAMES } from "./server.js";
-import { reportRange } from "./insights.js";
+import { dayKeys, daySeries, reportRange, sparkSpans } from "./insights.js";
 import { capture, identifyPerson } from "./telemetry.js";
 import * as journeys from "./journeys.js";
 import * as limits from "./limits.js";
@@ -155,9 +155,10 @@ async function usage(s: Session, q: { from?: unknown; to?: unknown; days?: unkno
   const sim = users.length ? " AND created_by = ANY($4)" : "";
   const p = users.length ? [s.org, range.start, range.end, users] : [s.org, range.start, range.end];
   const month = "date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'";
-  const [daily, tools, people, runs, spentBy, byTool] = await Promise.all([
-    db.query<{ day: string; calls: number; errors: number }>(
-      `SELECT to_char(date_trunc('day', at), 'YYYY-MM-DD') AS day, count(*) AS calls, count(*) FILTER (WHERE NOT ok) AS errors
+  const [daily, tools, people, runs, spentBy, byTool, perDay] = await Promise.all([
+    db.query<{ day: string; calls: number; errors: number; people: number }>(
+      `SELECT to_char(date_trunc('day', at), 'YYYY-MM-DD') AS day, count(*) AS calls, count(*) FILTER (WHERE NOT ok) AS errors,
+              count(DISTINCT user_id) AS people
          FROM mcp_events WHERE org_id = $1 AND method = 'tools/call' AND at >= $2 AND at < $3${ev} GROUP BY 1 ORDER BY 1`, p),
     db.query<{ name: string; calls: number; errors: number; avg_ms: number }>(
       `SELECT name, count(*) AS calls, count(*) FILTER (WHERE NOT ok) AS errors, round(avg(ms)) AS avg_ms
@@ -178,7 +179,22 @@ async function usage(s: Session, q: { from?: unknown; to?: unknown; days?: unkno
     // Tool calls by tool for the people picked but any use case: each use case's count in the Use cases filter.
     db.query<{ name: string; calls: number }>(
       `SELECT name, count(*) AS calls FROM mcp_events WHERE org_id = $1 AND method = 'tools/call' AND at >= $2 AND at < $3${users.length ? " AND user_id = ANY($4)" : ""} GROUP BY name`, p),
+    // The cards' sparklines: simulations and finished agent sessions per day of the period, and model spend per day
+    // this month (each with the same people filter as its card).
+    db.query<{ k: string; day: string; v: unknown }>(
+      `SELECT 'simulations' AS k, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, count(*) AS v
+         FROM simulations WHERE org_id = $1 AND created_at >= $2 AND created_at < $3${sim} GROUP BY 2
+       UNION ALL
+       SELECT 'completed', to_char(queued_at AT TIME ZONE 'UTC', 'YYYY-MM-DD'), count(*) FILTER (WHERE status = 'completed')
+         FROM agent_sessions WHERE org_id = $1 AND queued_at >= $2 AND queued_at < $3
+          ${users.length ? "AND simulation_id IN (SELECT id FROM simulations WHERE org_id = $1 AND created_by = ANY($4))" : ""} GROUP BY 2
+       UNION ALL
+       SELECT 'spend', to_char(s.queued_at AT TIME ZONE 'UTC', 'YYYY-MM-DD'),
+              coalesce(sum(GREATEST(s.cost_usd, coalesce((SELECT sum(g.cost_usd) FROM gateway_usage g WHERE g.session_id = s.id), 0))), 0)::float
+         FROM agent_sessions s WHERE s.org_id = $1 AND s.queued_at >= ${month}
+          ${users.length ? "AND s.simulation_id IN (SELECT id FROM simulations WHERE org_id = $1 AND created_by = ANY($4))" : ""} GROUP BY 2`, p),
   ]);
+  const periodDays = dayKeys(range.start, range.end), monthDays = sparkSpans().monthDays;
   const toolCalls = new Map(byTool.map((x) => [x.name, Number(x.calls)]));
   const t = await admin.team(s.slug);
   const callsOf = new Map(people.map((x) => [x.user_id, Number(x.calls)]));
@@ -194,6 +210,11 @@ async function usage(s: Session, q: { from?: unknown; to?: unknown; days?: unkno
     ],
     active_people: users.length ? users.filter((u) => callsOf.get(u)).length : people.filter((x) => Number(x.calls)).length,
     spend: { month_usd: spentBy ? Number(spentBy[0]?.usd ?? 0) : spent, budget_usd: budget, filtered: Boolean(spentBy) },
+    series: {
+      days: periodDays, people: periodDays.map((d) => Number(daily.find((x) => x.day === d)?.people ?? 0)),
+      simulations: daySeries(periodDays, perDay, "simulations"), completed: daySeries(periodDays, perDay, "completed"),
+      month_days: monthDays, spend: daySeries(monthDays, perDay, "spend", true),
+    },
   };
 }
 

@@ -36,6 +36,24 @@ export function reportRange(q: { from?: unknown; to?: unknown; days?: unknown })
     start: from, end, sql: { F: lit(from), T: lit(end), PF: lit(prevFrom) } };
 }
 
+/** The UTC days from `start` (included) to `end` (excluded), as YYYY-MM-DD: the points of a daily sparkline. */
+export function dayKeys(start: Date, end: Date): string[] {
+  const out: string[] = [];
+  for (let t = Math.floor(start.getTime() / DAY) * DAY; t < end.getTime(); t += DAY) out.push(new Date(t).toISOString().slice(0, 10));
+  return out;
+}
+/** One series per kind `k` from rows of {k, day, v}, zero-filled over `days`. */
+export function daySeries(days: string[], rows: { k: string; day: string; v: unknown }[], k: string, round = false): number[] {
+  const by = new Map(rows.filter((r) => r.k === k).map((r) => [r.day, Number(r.v ?? 0)]));
+  return days.map((d) => (round ? Math.round((by.get(d) ?? 0) * 100) / 100 : by.get(d) ?? 0));
+}
+/** The last 30 UTC days to today, and this UTC month to today: the two spans the cards' sparklines use. */
+export function sparkSpans(now = new Date()) {
+  const today = Math.floor(now.getTime() / DAY) * DAY, end = new Date(today + DAY);
+  const last30 = new Date(today - 29 * DAY), month = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  return { end, last30, month, days30: dayKeys(last30, end), monthDays: dayKeys(month, end) };
+}
+
 // ---------- filters ----------
 // Every filter becomes a literal SQL fragment (validated ints, quoted text), never a bind param, so the many subqueries
 // below share one shape and no query needs its own parameter list.

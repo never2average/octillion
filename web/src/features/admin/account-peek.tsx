@@ -19,6 +19,7 @@ import { adminApi } from '@/lib/api-client';
 import { money, usd } from '@/lib/octillion-format';
 import { TablePager, usePaged } from '@/components/layout/table-pager';
 import { cn } from '@/lib/utils';
+import { Sparkline } from '@/components/layout/section';
 import { Dock } from '@/features/portal/memory';
 import { ACCOUNT_ROLES, accountRoleLabel, accountRoleOf, post, STAGE_LABELS, useAdmin, type InviteResult, type OrgRow } from './lib';
 import { copyText, ErrorBox, Mono, When, type Tone } from './ui';
@@ -33,6 +34,8 @@ export type Org = OrgRow & {
 /** GET /orgs/:slug (src/admin.ts orgDetail). */
 export interface OrgDetail {
   org: Org;
+  /** Tool calls, errors and agent sessions per day for 30 days; model spend per day this month. */
+  daily?: { days: string[]; calls: number[]; errors: number[]; sessions: number[]; month_days: string[]; spend: number[] };
   integrations: { clerk?: boolean; stripe?: boolean; stripe_test_mode?: boolean; default_budget_usd?: number };
   connect: { connector_url: string; secret: boolean; email: { subject: string; body: string } };
   members: { id: string; user_id: string; email: string | null; name?: string | null; role?: string | null; status: string; created_at: string | null }[];
@@ -446,11 +449,11 @@ export function AccountPeek({ org, ctl }: { org: Org; ctl: AccountCtl }) {
           {org.members || org.pending_invites || org.active_keys ? access.filter(Boolean).join(' · ') : <span className='text-muted-foreground'>No one yet</span>}
         </Field>
         <Field label='Usage'>
-          {org.last_seen ? (<>
+          {org.last_seen ? (<span className='flex items-center justify-between gap-3'><span>
             Last seen <When d={org.last_seen} /> · <span className='tabular-nums'>{org.calls_7d}</span> calls 7d
             {org.errors_7d > 0 && <> · <span className='text-destructive tabular-nums'>{org.errors_7d} errors</span></>}
             {running > 0 && <> · {running} running</>}
-          </>) : <span className='text-muted-foreground'>Never connected</span>}
+          </span>{d?.daily && <span title='Tool calls per day, last 30 days' className='-my-2'><Sparkline values={d.daily.calls} /></span>}</span>) : <span className='text-muted-foreground'>Never connected</span>}
         </Field>
         <Field label='Plan'>
           {planLine(s, stripeOn)}
@@ -462,7 +465,10 @@ export function AccountPeek({ org, ctl }: { org: Org; ctl: AccountCtl }) {
             : <span className={amber}>$0: no runs until a plan or an allowance</span>}
         </Field>
         <Field label='Spend'>
-          <span className={cn('tabular-nums', over && amber)}>{dollars(org.month_spend_usd)} of {dollars(org.budget_usd)} this month</span>
+          <span className='flex items-center justify-between gap-3'>
+            <span className={cn('tabular-nums', over && amber)}>{dollars(org.month_spend_usd)} of {dollars(org.budget_usd)} this month</span>
+            {d?.daily && d.daily.spend.length > 1 && <span title='Model spend per day, this month' className='-my-2'><Sparkline values={d.daily.spend} /></span>}
+          </span>
         </Field>
         {org.contact && (
           <Field label='Contact'>

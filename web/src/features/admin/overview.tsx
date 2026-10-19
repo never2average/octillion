@@ -19,6 +19,8 @@ interface Overview {
   paying: number;
   trialing: number;
   orgs: number;
+  /** One point per day of the period: each card's figure as it stood at the end of that day. */
+  daily: { days: string[]; pending: number[]; accounts: number[]; active_7d: number[]; paying: number[]; reported: number[] };
 }
 
 export function AdminOverview() {
@@ -41,12 +43,12 @@ export function AdminOverview() {
           {o.stripe_error && <Notice>Stripe: {o.stripe_error}</Notice>}
           <StatStrip
             items={[
-              { label: 'Pending requests', value: o.requests.pending, href: '/admin/requests',
+              { label: 'Pending requests', value: o.requests.pending, href: '/admin/requests', spark: o.daily.pending,
                 hint: o.requests.oldest_pending ? <>oldest <When d={o.requests.oldest_pending} /></> : 'inbox clear' },
-              { label: 'Accounts', value: o.orgs, hint: `${o.requests.approved} approved, ${o.requests.declined} declined` },
-              { label: 'Active in 7 days', value: o.active_7d, hint: 'called a tool' },
-              { label: 'Paying', value: o.paying, hint: `${o.trialing || 0} trialing` },
-              { label: 'Reached a report', value: reported, hint: o.orgs ? `${Math.round((reported / o.orgs) * 100)}% of accounts` : '' }
+              { label: 'Accounts', value: o.orgs, spark: o.daily.accounts, hint: `${o.requests.approved} approved, ${o.requests.declined} declined` },
+              { label: 'Active in 7 days', value: o.active_7d, spark: o.daily.active_7d, hint: 'called a tool' },
+              { label: 'Paying', value: o.paying, spark: o.daily.paying, hint: `${o.trialing || 0} trialing` },
+              { label: 'Reached a report', value: reported, spark: o.daily.reported, hint: o.orgs ? `${Math.round((reported / o.orgs) * 100)}% of accounts` : '' }
             ]}
           />
 

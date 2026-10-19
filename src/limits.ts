@@ -19,6 +19,7 @@ import type { Org } from "./auth.js";
 import { orgBudget } from "./billing.js";
 import { getDb, type Queryable } from "./db.js";
 import { settingNumber } from "./settings.js";
+import { daySeries, sparkSpans } from "./insights.js";
 import { accountRefusal, canAccount, type AccountRole } from "./account-roles.js";
 
 /** Why a launch was refused, for /app to show beside the message; validation errors carry no code. */
@@ -338,11 +339,32 @@ function tiles(o: ReturnType<typeof shape>, { figures, budget_error }: PageLive)
     alert: budget_error ? null : usageAlert(o.account.spent_usd, o.budget_usd) };
 }
 
-/** GET /limits for an admin: the overview, the month's figures, and the version to send back with a plan. */
+/**
+ * "This month" day by day, for the tiles' sparklines: model spend (by when the session was queued, as the month's
+ * spend counts it), simulations launched, and simulations running at some point of the day.
+ */
+async function monthDaily(orgId: number) {
+  const { monthDays } = sparkSpans();
+  const rows = await (await getDb()).query<{ k: string; day: string; v: unknown }>(
+    `WITH d AS (SELECT generate_series(${MONTH}, now(), interval '1 day') AS day)
+     SELECT 'spent' AS k, to_char(a.queued_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day,
+            sum(GREATEST(a.cost_usd, coalesce((SELECT sum(g.cost_usd) FROM gateway_usage g WHERE g.session_id = a.id), 0)))::float AS v
+       FROM agent_sessions a WHERE a.org_id = $1 AND a.queued_at >= ${MONTH} GROUP BY 2
+     UNION ALL
+     SELECT 'runs', to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD'), count(*) FROM simulations WHERE org_id = $1 AND created_at >= ${MONTH} GROUP BY 2
+     UNION ALL
+     SELECT 'running', to_char(d.day AT TIME ZONE 'UTC', 'YYYY-MM-DD'), count(s.id) FROM d
+       LEFT JOIN simulations s ON s.org_id = $1 AND s.created_at < d.day + interval '1 day'
+        AND (s.finished_at >= d.day OR (s.finished_at IS NULL AND s.status IN ('queued', 'running')))
+      GROUP BY d.day`, [orgId]);
+  return { days: monthDays, spent: daySeries(monthDays, rows, "spent", true), runs: daySeries(monthDays, rows, "runs"), running: daySeries(monthDays, rows, "running") };
+}
+
+/** GET /limits for an admin: the overview, the month's figures day by day, and the version to send back with a plan. */
 export async function page(org: { orgId: number; slug: string }) {
-  const [saved, lv, version] = await Promise.all([load(org.orgId), remember(org.orgId, pageLive(org)), getDb().then((db) => versionOf(db, org.orgId))]);
+  const [saved, lv, version, month_daily] = await Promise.all([load(org.orgId), remember(org.orgId, pageLive(org)), getDb().then((db) => versionOf(db, org.orgId)), monthDaily(org.orgId)]);
   const o = shape(saved, lv);
-  return { ...o, ...tiles(o, lv), version };
+  return { ...o, ...tiles(o, lv), version, month_daily };
 }
 
 const $usd = (v: number) => `$${v.toFixed(2)}`;

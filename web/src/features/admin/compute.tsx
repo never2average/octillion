@@ -456,21 +456,28 @@ function VerdictLine({ verdict }: { verdict: Verdict[] }) {
   );
 }
 
-type Card = { label: ReactNode; value: ReactNode; hint?: ReactNode };
-/** One row of the tab's four headline numbers, as on Health. */
+type Card = { label: ReactNode; value: ReactNode; spark?: number[] };
+/** One row of the tab's four headline numbers, as on Health, each with its last 24 hours (or week) as a sparkline. */
 function Cards({ items }: { items: Card[] }) {
   return <StatStrip items={items} />;
 }
+/** The last 24 hours (or 168), hour by hour (GET /compute/trends, src/compute-trends.ts): every card's sparkline. */
+function useTrend(hours: 24 | 168 = 24) {
+  const t = useAdmin<{ series: Record<string, number[]> }>(`/compute/trends${hours === 168 ? '?hours=168' : ''}`, { refetchInterval: 60_000, keep: true }).data?.series;
+  return (k: string) => t?.[k];
+}
+const total = (xs: number[] | undefined) => (xs ? xs.reduce((a, b) => a + b, 0) : null);
 const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`;
 
 function OrchCards({ s }: { s: Summary }) {
   useNow();
-  const o = s.running.orchestrators, l = s.limits, sp = s.spend_today;
+  const t = useTrend();
+  const o = s.running.orchestrators, l = s.limits;
   return <Cards items={[
-      { label: 'Orchestrators live', value: o.booting + o.running + o.draining },
-      { label: 'Worker pods used / reserved', value: `${s.running.pods_used} / ${s.running.pods_reserved}` },
-      { label: 'Failed launches, 24 h', value: s.failures_24h.launches },
-      { label: 'Room for more', value: l.available ?? '—' }
+      { label: 'Orchestrators live', spark: t('orchestrators'), value: o.booting + o.running + o.draining },
+      { label: 'Worker pods used / reserved', spark: t('running'), value: `${s.running.pods_used} / ${s.running.pods_reserved}` },
+      { label: 'Failed launches, 24 h', spark: t('launches_failed'), value: s.failures_24h.launches },
+      { label: 'Room for more', spark: t('free'), value: l.available ?? '—' }
     ]} />;
 }
 
@@ -478,22 +485,24 @@ function FailureCards({ f, hours }: { f: Failures | undefined; hours: number }) 
   const sum = (xs: { count: number }[] | undefined) => (xs ?? []).reduce((t, x) => t + x.count, 0);
   const sessions = sum(f?.sessions), top = f?.sessions.slice().sort((x, y) => y.count - x.count)[0];
   const w = hours === 24 ? '24 h' : '7 d';
+  const t = useTrend(hours === 168 ? 168 : 24);
   return <Cards items={[
-      { label: `Session failures, ${w}`, value: f ? sessions : '—' },
-      { label: 'Top session failure', value: top ? <span className='text-base'>{top.label} · {top.count}</span> : 'None' },
-      { label: `Failed launches, ${w}`, value: f ? sum(f.launches) : '—' },
-      { label: `Unexpected reaps, ${w}`, value: f ? sum(f.reaps.filter((r) => !r.routine)) : '—' }
+      { label: `Session failures, ${w}`, spark: t('failed'), value: f ? sessions : '—' },
+      { label: 'Top session failure', spark: t('top_failure'), value: top ? <span className='text-base'>{top.label} · {top.count}</span> : 'None' },
+      { label: `Failed launches, ${w}`, spark: t('launches_failed'), value: f ? sum(f.launches) : '—' },
+      { label: `Unexpected reaps, ${w}`, spark: t('reaps'), value: f ? sum(f.reaps.filter((r) => !r.routine)) : '—' }
     ]} />;
 }
 
 function DecisionCards({ s, rows }: { s: Summary | undefined; rows: Tick[] }) {
   useNow();
   const age = ageOf(s?.tick.at);
+  const t = useTrend();
   return <Cards items={[
-      { label: 'Last tick', value: age == null ? '—' : `${dur(age)} ago` },
-      { label: 'Orchestrators launched', value: rows.reduce((t, r) => t + r.launched.length, 0) },
-      { label: 'Orchestrators reaped', value: rows.reduce((t, r) => t + r.reaped.length, 0) },
-      { label: 'Ticks with an error', value: rows.filter((r) => r.error).length }
+      { label: 'Last tick', spark: t('ticks'), value: age == null ? '—' : `${dur(age)} ago` },
+      { label: 'Orchestrators launched', spark: t('launched'), value: rows.reduce((n, r) => n + r.launched.length, 0) },
+      { label: 'Orchestrators reaped', spark: t('reaped'), value: rows.reduce((n, r) => n + r.reaped.length, 0) },
+      { label: 'Ticks with an error', spark: t('tick_errors'), value: rows.filter((r) => r.error).length }
     ]} />;
 }
 
@@ -539,6 +548,7 @@ function SourceOf({ s }: { s: Setting }) {
 function Limits({ s, onEditing }: { s: Summary; onEditing: (key: string, on: boolean) => void }) {
   const save = useAdminAction((v: Record<string, string | null>) => adminApi('PUT', '/compute/settings', { values: v }), { success: 'Setting saved' });
   const l = s.limits;
+  const t = useTrend();
   // A rejected save (say, over the setting's max) puts the field back to the saved value: its key changes.
   const [rejected, setRejected] = useState(0);
   const set = (k: string) => s.settings.find((x) => x.key === k);
@@ -559,6 +569,7 @@ function Limits({ s, onEditing }: { s: Summary; onEditing: (key: string, on: boo
     ...(['minute', 'hour', 'day'] as const).map((w): LimitRow => {
       const limit = l.starts ? l.starts[w === 'minute' ? 'per_minute' : w === 'hour' ? 'per_hour' : 'per_day'] : null;
       return { key: `starts-${w}`, label: `Our starts: per ${w}`, help: startsNote, used: l.our_starts[w], limit, unavailable: limit == null ? boatDown : null,
+        sub: w === 'day' && l.sessions_per_day_ceiling != null && <>sessions a day, at most {l.sessions_per_day_ceiling}{l.reason && <> · {l.reason}</>}</>,
         status: statusOf(l.our_starts[w], limit, false, false), source: <span className='text-muted-foreground'>boat plan · database</span>, noBinding: true };
     }),
     ...(l.per_job_mode ? [
@@ -573,7 +584,6 @@ function Limits({ s, onEditing }: { s: Summary; onEditing: (key: string, on: boo
     ]),
     { key: 'size', label: 'Worker sandbox size', used: null, limit: null, setting: size, status: null, source: null }
   ];
-  const binding = rows.find((r) => r.status === 'binding');
   const cols: RecordCol<LimitRow>[] = [
     { key: 'limit', label: 'Limit', title: true, keep: true, type: 'text', value: (r) => r.label, render: (r) => (
       <span className='flex flex-col gap-1'>
@@ -610,11 +620,14 @@ function Limits({ s, onEditing }: { s: Summary; onEditing: (key: string, on: boo
       ) : <span className='text-muted-foreground text-xs'>{r.fixed ?? '—'}</span>
     ) }
   ];
+  // The fixed facts live in the table: the boat plan and other deployments on its first row, the session-a-day
+  // ceiling under "Our starts: per day", and which limit binds in the Status column.
   const cards = <Cards items={[
-      { label: 'boat sandboxes in use', value: l.active_now != null && l.plan != null ? `${l.active_now} / ${l.plan}` : '—' },
-      { label: 'Room for more', value: l.available ?? '—' },
-      { label: 'Sessions a day, at most', value: l.sessions_per_day_ceiling ?? '—' },
-      { label: 'Binding limit', value: binding ? binding.label : 'None' }
+      { label: 'Our sandboxes in use', spark: t('in_use'), value: l.ok ? l.ours_orch + l.ours_workers + l.ours_images : '—' },
+      { label: 'Room for more', spark: t('free'), value: l.available ?? '—' },
+      { label: 'Starts, last hour', spark: t('starts'), value: l.our_starts.hour },
+      { label: 'Orchestrators of cap', spark: t('orchestrators'),
+        value: l.per_job_mode ? `${l.job_orch_live} / ${l.job_orch_cap}` : `${l.shared_orch_live} / ${l.shared_orch_cap}` }
     ]} />;
   return (
     <RecordView id='compute-limits' rows={rows} rowKey={(r) => r.key} cols={cols} noun='limits' initialSize={25} compact summary={cards}
@@ -650,7 +663,18 @@ const RELATED: { key: string; page: string; href: string }[] = [
 interface EnvRow { name: string; value: string; source: ReactNode; sourceText: string; meaning: ReactNode; meaningText: string }
 function Environment({ s, onTest, testing }: { s: Summary; onTest: () => void; testing: boolean }) {
   const p = s.provider;
+  const t = useTrend();
+  // The boat account's facts are rows here (the runtime and OCTILLION_AUTOSCALE are knobs); the cards are what the
+  // environment did in the last 24 hours.
+  const boatRows: EnvRow[] = [
+    { name: 'boat.dev', value: p.ok ? 'Connected' : 'Not connected', source: <span className='text-xs'>boat API</span>, sourceText: 'boat API',
+      meaningText: p.ok ? `${p.api} answers with this key` : p.error ?? 'No answer', meaning: p.ok ? <>{p.api} answers with this key</> : <span className='text-destructive'>{p.error ?? 'No answer'}</span> },
+    { name: 'boat key', value: p.has_key ? p.key_hint ?? 'set' : 'None', source: <span className='text-xs'>key vault</span>, sourceText: 'key vault',
+      meaningText: p.has_key ? `${p.key_label ?? 'default'} · used ${p.uses} times${p.last_used_at ? `, last ${new Date(p.last_used_at).toLocaleString()}` : ''}` : 'Add a boat key in the key vault',
+      meaning: p.has_key ? <>{p.key_label ?? 'default'} · used {p.uses} times{p.last_used_at && <>, last <When d={p.last_used_at} /></>}</> : <Link href='/admin/keys' className='text-foreground hover:underline'>Add a boat key in the key vault</Link> }
+  ];
   const rows: EnvRow[] = [
+    ...boatRows,
     ...s.knobs.map((k) => ({ name: k.name, value: k.value, source: k.source, sourceText: k.source, meaning: k.meaning, meaningText: k.meaning })),
     ...RELATED.map((r) => ({ ...r, s: s.settings.find((x) => x.key === r.key) })).filter((r) => r.s).map((r) => ({
       name: r.key, value: String(r.s!.value), source: <SourceOf s={r.s!} />, sourceText: r.s!.source, meaningText: `${r.s!.label}. Change it in ${r.page}`,
@@ -664,10 +688,10 @@ function Environment({ s, onTest, testing }: { s: Summary; onTest: () => void; t
     { key: 'meaning', label: 'Meaning', className: 'min-w-80', type: 'text', value: (r) => r.meaningText, render: (r) => <span className='text-muted-foreground text-xs whitespace-normal'>{r.meaning}</span> }
   ];
   const cards = <Cards items={[
-      { label: 'boat.dev', value: p.ok ? 'Connected' : 'Not connected' },
-      { label: 'boat key', value: p.has_key ? <Mono>{p.key_hint}</Mono> : 'None' },
-      { label: 'Runtime', value: s.runtime === 'vercel' ? 'Vercel' : 'VM' },
-      { label: 'Autoscaler', value: s.tick.enabled ? 'On' : 'Off' }
+      { label: 'Autoscaler ticks, 24 h', spark: t('ticks'), value: total(t('ticks')) ?? '—' },
+      { label: 'Ticks with an error, 24 h', spark: t('tick_errors'), value: total(t('tick_errors')) ?? '—' },
+      { label: 'Orchestrators started, 24 h', spark: t('launches'), value: total(t('launches')) ?? '—' },
+      { label: 'Sandboxes deleted, 24 h', spark: t('deletes'), value: total(t('deletes')) ?? '—' }
     ]} />;
   return (
     <RecordView id='compute-environment' rows={rows} rowKey={(r) => r.name} cols={cols} noun='settings' initialSize={50} compact summary={cards}
