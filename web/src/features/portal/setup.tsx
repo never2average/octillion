@@ -45,7 +45,6 @@ export function SetupPage() {
   const { data: jr, reload: reloadJourneys } = useOrgLoad(() => appApi<{ journeys: Journey[] }>('GET', '/journeys'));
   const [selected, setSelected] = useQueryState('journey', { defaultValue: 'setup' });
   // The earliest step not done yet, optional ones included: the timeline highlights it.
-  const next = s?.steps.find((x) => !x.done);
   const journey = jr?.journeys.find((x) => x.id === selected) ?? null;
   return (
     <PageContainer>
@@ -53,7 +52,7 @@ export function SetupPage() {
         <div className='grid w-full gap-x-10 gap-y-6 lg:grid-cols-[minmax(0,1fr)_22rem] lg:items-start xl:grid-cols-[minmax(0,1fr)_24rem]'>
           <div className='order-2 flex min-w-0 flex-col gap-8 lg:order-1'>
             {selected === 'setup' || !journey ? (<>
-              <Timeline s={s} next={next} />
+              <Timeline s={s} />
               {s.errors.length > 0 && <Problems errors={s.errors} />}
             </>) : <JourneyView key={journey.id} j={journey} onChanged={reloadJourneys} note={s.viewer_note ?? null} />}
             <TipsSection />
@@ -302,53 +301,27 @@ function JourneyView({ j, onChanged, note }: { j: Journey; onChanged: () => void
   };
   const isDone = (x: Stage) => x.done;
   const done = j.stages.filter(isDone).length;
-  const current = j.stages.find((x) => !isDone(x));
-  const pct = j.total ? Math.round((done / j.total) * 100) : 0;
-  // Laid out exactly like Get set up (Timeline): progress, a vertical timeline with the earliest open stage highlighted.
   return (
-    <Section title={j.name} description={`${done} of ${j.total} stages done.`}
-      action={<Badge variant={pct === 100 ? 'default' : 'secondary'}>{pct}%</Badge>}>
-      <div className='bg-muted h-1.5 overflow-hidden rounded-full'><div className='bg-primary h-full rounded-full transition-all' style={{ width: `${pct}%` }} /></div>
-      <ol className='mt-3'>
-        {j.stages.map((x, i) => {
-          const ok = isDone(x), cur = current?.id === x.id;
-          const last = i === j.stages.length - 1;
-          const gated = !!note && x.tools.some((t) => t === 'run_simulation' || t === 'onboard_product');
-          return (
-            <li key={x.id} className='relative flex gap-4 pb-7 last:pb-0'>
-              {!last && <span aria-hidden='true' className={cn('absolute top-8 bottom-0 left-[15px] w-px', ok ? 'bg-primary/60' : 'bg-border')} />}
-              <span className={cn('relative z-10 flex size-8 shrink-0 items-center justify-center rounded-full border-2 text-xs font-semibold tabular-nums',
-                ok ? 'border-primary bg-primary text-primary-foreground' : cur ? 'border-primary text-primary bg-background ring-primary/20 ring-4' : 'border-border text-muted-foreground bg-background')}>
-                {ok ? <Icons.check className='size-4' /> : i + 1}
-              </span>
-              <div className={cn('min-w-0 flex-1 pt-1', cur && 'bg-primary/5 -mt-1 rounded-lg px-4 py-3')}>
-                <div className='flex flex-wrap items-center gap-2'>
-                  <span className={cn('font-medium', ok && 'text-muted-foreground')}>{x.title}</span>
-                </div>
-                <div className='mt-1 flex flex-col gap-2'>
-                  <p className={cn('text-sm select-text', ok ? 'text-muted-foreground/70' : 'text-muted-foreground')}>{x.why} You&apos;ll see: {x.expect}</p>
-                  {!ok && (x.manual ? (
-                    <div className='flex flex-wrap items-center gap-2'>
-                      <span className='text-sm'>{x.prompt}</span>
-                      <Allowed need='edit'><Button size='sm' variant='outline' disabled={busy === x.id} onClick={() => toggle(x.id, true)}>Mark done</Button></Allowed>
-                    </div>
-                  ) : gated ? <p className='text-muted-foreground text-sm'>{note}</p> : (
-                    <div className='bg-muted/50 flex items-center gap-2 rounded-md border px-3 py-2'>
-                      <code className='min-w-0 flex-1 font-mono text-xs break-words select-all'>{x.prompt}</code>
-                      <CopyButton text={x.prompt} label='Copy prompt' />
-                    </div>
-                  ))}
-                  {x.manual && ok && <Allowed need='edit'><Button size='sm' variant='ghost' className='text-muted-foreground self-start' disabled={busy === x.id} onClick={() => toggle(x.id, false)}>Undo</Button></Allowed>}
-                </div>
+    <TimelineSection title={j.name} done={done} total={j.total} noun='stages'
+      items={j.stages.map((x) => {
+        const ok = isDone(x);
+        const gated = !!note && x.tools.some((t) => t === 'run_simulation' || t === 'onboard_product');
+        const help = `${x.why} You'll see: ${x.expect}`;
+        return { id: x.id, label: x.title, done: ok, body: (
+          <>
+            <StepHelp help={help} done={ok} prompt={!x.manual && !gated ? x.prompt : null} />
+            {!ok && x.manual && (
+              <div className='mt-2 flex flex-wrap items-center gap-2'>
+                <span className='text-sm'>{x.prompt}</span>
+                <Allowed need='edit'><Button size='sm' variant='outline' disabled={busy === x.id} onClick={() => toggle(x.id, true)}>Mark done</Button></Allowed>
               </div>
-            </li>
-          );
-        })}
-      </ol>
-      <p className='text-muted-foreground border-t pt-3 text-sm'>
-        {done >= j.total ? 'Pipeline complete. Run it again after your next change, or pick another journey.' : <>Worked example: <span className='text-foreground'>{j.example.title}</span>. {j.example.result}</>}
-      </p>
-    </Section>
+            )}
+            {!ok && gated && <p className='text-muted-foreground mt-2 text-sm'>{note}</p>}
+            {x.manual && ok && <Allowed need='edit'><Button size='sm' variant='ghost' className='text-muted-foreground mt-1' disabled={busy === x.id} onClick={() => toggle(x.id, false)}>Undo</Button></Allowed>}
+          </>
+        ) };
+      })}
+      footer={done >= j.total ? 'Pipeline complete. Run it again after your next change, or pick another journey.' : <>Worked example: <span className='text-foreground'>{j.example.title}</span>. {j.example.result}</>} />
   );
 }
 
@@ -374,16 +347,25 @@ function StepHelp({ help, done, prompt }: { help: string; done: boolean; prompt:
   );
 }
 
-function Timeline({ s, next }: { s: Setup; next: Step | undefined }) {
-  const pct = Math.round((s.done / Math.max(1, s.total)) * 100);
+interface TimelineItem { id: string; label: string; done: boolean; body: React.ReactNode }
+
+/**
+ * Get set up and every journey: progress, then a vertical timeline. The earliest open item is highlighted (ring on its
+ * node, tinted body); done items show a check. One component, so every journey looks exactly like Get set up.
+ */
+function TimelineSection({ title, done, total, noun, items, footer }: {
+  title: string; done: number; total: number; noun: string; items: TimelineItem[]; footer: React.ReactNode;
+}) {
+  const pct = Math.round((done / Math.max(1, total)) * 100);
+  const current = items.find((x) => !x.done)?.id;
   return (
-    <Section title='Get set up' description={`${s.done} of ${s.total} steps done.`}
+    <Section title={title} description={`${done} of ${total} ${noun} done.`}
       action={<Badge variant={pct === 100 ? 'default' : 'secondary'}>{pct}%</Badge>}>
       <div className='bg-muted h-1.5 overflow-hidden rounded-full'><div className='bg-primary h-full rounded-full transition-all' style={{ width: `${pct}%` }} /></div>
       <ol className='mt-3'>
-        {s.steps.map((x, i) => {
-          const cur = next?.id === x.id;
-          const last = i === s.steps.length - 1;
+        {items.map((x, i) => {
+          const cur = current === x.id;
+          const last = i === items.length - 1;
           return (
             <li key={x.id} className='relative flex gap-4 pb-7 last:pb-0'>
               {!last && <span aria-hidden='true' className={cn('absolute top-8 bottom-0 left-[15px] w-px', x.done ? 'bg-primary/60' : 'bg-border')} />}
@@ -393,18 +375,24 @@ function Timeline({ s, next }: { s: Setup; next: Step | undefined }) {
               </span>
               <div className={cn('min-w-0 flex-1 pt-1', cur && 'bg-primary/5 -mt-1 rounded-lg px-4 py-3')}>
                 <div className='flex flex-wrap items-center gap-2'>
-                  <span className={cn('font-medium', x.done && 'text-muted-foreground')}>{x.label.replace(' (team)', '')}</span>
+                  <span className={cn('font-medium', x.done && 'text-muted-foreground')}>{x.label}</span>
                 </div>
-                <StepHelp help={x.help} done={x.done} prompt={x.prompt ?? null} />
+                {x.body}
               </div>
             </li>
           );
         })}
       </ol>
-      <p className='text-muted-foreground border-t pt-3 text-sm'>
-        How much of the workflow your team uses is on <a href='/app/adoption' className='text-primary underline-offset-4 hover:underline'>Adoption</a>.
-      </p>
+      <p className='text-muted-foreground border-t pt-3 text-sm'>{footer}</p>
     </Section>
+  );
+}
+
+function Timeline({ s }: { s: Setup }) {
+  return (
+    <TimelineSection title='Get set up' done={s.done} total={s.total} noun='steps'
+      items={s.steps.map((x) => ({ id: x.id, label: x.label.replace(' (team)', ''), done: x.done, body: <StepHelp help={x.help} done={x.done} prompt={x.prompt ?? null} /> }))}
+      footer={<>How much of the workflow your team uses is on <a href='/app/adoption' className='text-primary underline-offset-4 hover:underline'>Adoption</a>.</>} />
   );
 }
 
