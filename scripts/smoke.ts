@@ -4370,6 +4370,60 @@ try {
       console.log("✓ finops revenue: MRR per day (monthly, yearly ÷ 12, trial excluded, canceled mid-range), collected by paid date, paying accounts, gross margin vs metered spend, allowance shown apart, by plan, Stripe down = 200 with an error");
     }
 
+    // Plans made on FinOps (POST /plans, owner only): a Stripe product + price with an octillion_ lookup key; archive = active=false.
+    {
+      const { listPlans, planLookupKey } = await import("../src/billing.js");
+      const name = `Team ${stamp}`, key = planLookupKey(name);
+      assert.equal(key, `octillion_team_${stamp}`);
+      const op = await mockPost("/_mock/clerk/users", { email: `plans-op+${stamp}@roles.octillion.test`, platform_role: "operator" });
+      const opSess = await clerkSession(op.id);
+      const asOp = await fetch(`${base}/api/admin/onboarding/plans`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${opSess}` },
+        body: JSON.stringify({ name, amount_usd: 250, interval: "month" }) });
+      assert.equal(asOp.status, 403, "an operator cannot create plans");
+      assert.equal((await asOp.json()).needs, "owner");
+      for (const bad of [{ name: "x", amount_usd: 250 }, { name, amount_usd: 0 }, { name, amount_usd: 100_001 }, { name, amount_usd: 250, interval: "week" },
+                         { name, amount_usd: 250, monthly_budget_usd: 2501 }, { name, amount_usd: 250, monthly_budget_usd: -1 }])
+        assert.equal((await adm("POST", "/plans", bad)).status, 400, `refused: ${JSON.stringify(bad)}`);
+      const before = (await listPlans()).length; // warms the 5-minute cache: create must clear it
+      // A double-clicked save: the same request twice at once makes one product and one price (idempotency keys).
+      const both = await Promise.all([adm("POST", "/plans", { name, amount_usd: 250, interval: "month" }), adm("POST", "/plans", { name, amount_usd: 250, interval: "month" })]);
+      assert.ok(both.some((r) => r.status === 201) && both.every((r) => r.status === 201 || r.status === 409), `statuses ${both.map((r) => r.status)}`);
+      const made = await (both.find((r) => r.status === 201)!).json();
+      assert.deepEqual([made.lookup_key, made.amount, made.interval, made.monthly_budget_usd], [key, 25_000, "month", 250], "allowance defaults to the price");
+      assert.equal(mock.state.products.filter((p: any) => p.name === name).length, 1, "one product");
+      assert.equal(mock.state.prices.filter((p: any) => p.lookup_key === key).length, 1, "one price");
+      const prod = mock.state.products.find((p: any) => p.name === name);
+      assert.deepEqual(prod.metadata, { monthly_budget_usd: "250", octillion: "plan" });
+      const plans = await listPlans();
+      assert.equal(plans.length, before + 1, "the cache was cleared");
+      const mine = plans.find((p) => p.lookup_key === key)!;
+      assert.deepEqual([mine.price_id, mine.name, mine.amount, mine.currency, mine.interval, mine.monthly_budget_usd], [made.price_id, name, 25_000, "usd", "month", 250]);
+      assert.ok((await json(adm("GET", "/plans"))).plans.some((p: any) => p.price_id === made.price_id), "GET /plans lists it");
+      // Again later (not a retry): the lookup key is taken, a plain 409; nothing new in Stripe.
+      const dup = await adm("POST", "/plans", { name, amount_usd: 300, interval: "month" });
+      assert.equal(dup.status, 409);
+      assert.match((await dup.json()).error, /already exists/);
+      assert.equal(mock.state.prices.filter((p: any) => p.lookup_key === key).length, 1);
+      // The account flows offer it: the account's plan list and a checkout link.
+      assert.ok((await json(adm("GET", `/orgs/${slugW}`))).plans.some((p: any) => p.price_id === made.price_id), "Copy checkout link lists the new plan");
+      assert.match((await json(adm("POST", `/orgs/${slugW}/billing/checkout`, { price_id: made.price_id }))).url, new RegExp(made.price_id));
+      const rvP = await json(adm("GET", "/spend/revenue"));
+      const row = rvP.plans.find((p: any) => p.price_id === made.price_id);
+      assert.deepEqual([row?.live, row?.monthly_budget_usd, row?.subscriptions], [true, 250, 0], "FinOps by plan lists a plan with no subscribers");
+      // A yearly plan with its own allowance and an explicit lookup key.
+      const yr = await json(adm("POST", "/plans", { name: `Team yearly ${stamp}`, amount_usd: 2400, interval: "year", monthly_budget_usd: 300, lookup_key: `octillion_ty_${stamp}` }));
+      assert.deepEqual([yr.lookup_key, yr.interval, yr.monthly_budget_usd], [`octillion_ty_${stamp}`, "year", 300]);
+      // Archive: an operator can't; an owner can; it leaves listPlans and checkout; Stripe keeps the price.
+      assert.equal((await fetch(`${base}/api/admin/onboarding/plans/${made.price_id}/archive`, { method: "POST", headers: { authorization: `Bearer ${opSess}` } })).status, 403);
+      assert.equal((await adm("POST", "/plans/price_unrelated/archive")).status, 400, "only Octillion plans");
+      for (const id of [made.price_id, yr.price_id]) await json(adm("POST", `/plans/${id}/archive`));
+      assert.ok(!(await listPlans()).some((p) => p.price_id === made.price_id || p.price_id === yr.price_id), "archived plans leave listPlans");
+      assert.equal(mock.state.prices.find((p: any) => p.id === made.price_id)?.active, false, "archived, not deleted");
+      assert.equal((await adm("POST", `/orgs/${slugW}/billing/checkout`, { price_id: made.price_id })).status, 400, "no checkout for an archived plan");
+      assert.equal((await adm("POST", "/plans", { name, amount_usd: 250 })).status, 409, "an archived plan still holds its lookup key");
+      console.log("✓ plans: owner creates a Stripe product + price (octillion_ lookup key, allowance), double submit = one, duplicate refused, operator 403, listed in checkout and FinOps, archive");
+    }
+
     // Usage metering: a finished session's cost goes to the Stripe meter once.
     const { reportSessionSpend } = await import("../src/billing.js");
     const [sess] = await db.query<{ id: string }>("SELECT id FROM agent_sessions WHERE org_id = $1 LIMIT 1", [a.org.orgId]);

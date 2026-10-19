@@ -16,6 +16,7 @@
  *                                for usage-based prices (deduplicated by session id).
  *   OCTILLION_REQUIRE_SUBSCRIPTION=1  refuse new simulations for orgs without an active or trialing subscription.
  */
+import { createHash } from "node:crypto";
 import { getDb } from "./db.js";
 
 export const stripeEnabled = () => Boolean(process.env.STRIPE_SECRET_KEY);
@@ -81,6 +82,48 @@ export async function listPlans(): Promise<Plan[]> {
   }));
   plansCache = { at: Date.now(), plans };
   return plans;
+}
+
+export const invalidatePlans = () => { plansCache = null; };
+
+/** A plan's lookup key from its name: octillion_ plus the name in lower case, words joined by underscores. */
+export const planLookupKey = (name: string) =>
+  `octillion_${name.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 60) || "plan"}`;
+
+export interface NewPlan { name: string; amount_usd: number; interval: "month" | "year"; monthly_budget_usd: number; lookup_key?: string }
+
+/**
+ * A new prepaid plan in Stripe: a product (metadata octillion=plan, monthly_budget_usd) and a recurring USD price on it
+ * with lookup_key octillion_<name>. Lookup keys are unique: an existing price with the key (active or archived) refuses,
+ * never transfer_lookup_key. Idempotency keys come from the lookup key and the request, so a retried or double-clicked
+ * save makes one product and one price. The caller validates the numbers (src/admin.ts createPlan).
+ */
+export async function createPlan(p: NewPlan): Promise<Plan> {
+  const lookup_key = p.lookup_key ? (p.lookup_key.startsWith("octillion_") ? p.lookup_key : `octillion_${p.lookup_key}`) : planLookupKey(p.name);
+  if (!/^octillion_[a-z0-9_]{1,190}$/.test(lookup_key)) throw new StripeError("The lookup key may use only lower-case letters, digits and underscores", 400);
+  const cents = Math.round(p.amount_usd * 100), budget = String(p.monthly_budget_usd);
+  const existing = await call<{ data: { id: string; active: boolean }[] }>("GET", `/v1/prices?lookup_keys[]=${encodeURIComponent(lookup_key)}&limit=10`);
+  const live = existing.data.find((x) => x.active);
+  if (live) throw new StripeError(`A plan with the lookup key ${lookup_key} already exists. Pick another name.`, 409);
+  if (existing.data.length) throw new StripeError(`An archived plan still holds the lookup key ${lookup_key}. Pick another name.`, 409);
+  const idem = `plan-${lookup_key}-${createHash("sha256").update(JSON.stringify([p.name, cents, p.interval, budget])).digest("hex").slice(0, 16)}`;
+  const product = await call<{ id: string }>("POST", "/v1/products", { name: p.name, metadata: { monthly_budget_usd: budget, octillion: "plan" } }, `${idem}-product`);
+  const price = await call<{ id: string; currency: string }>("POST", "/v1/prices", {
+    product: product.id, currency: "usd", unit_amount: cents, recurring: { interval: p.interval }, nickname: p.name, lookup_key,
+    metadata: { monthly_budget_usd: budget },
+  }, `${idem}-price`);
+  invalidatePlans();
+  return { price_id: price.id, lookup_key, name: p.name, amount: cents, currency: price.currency ?? "usd", interval: p.interval, monthly_budget_usd: p.monthly_budget_usd };
+}
+
+/** Archive a plan (price active=false): it leaves listPlans and checkout; Stripe keeps it and any subscription on it. Never deleted. */
+export async function archivePlan(priceId: string): Promise<{ price_id: string; lookup_key: string | null }> {
+  if (!/^price_[A-Za-z0-9_]+$/.test(priceId)) throw new StripeError("Unknown plan", 404);
+  const price = await call<{ id: string; lookup_key: string | null; active: boolean }>("GET", `/v1/prices/${priceId}`);
+  if (!price.lookup_key?.startsWith("octillion_")) throw new StripeError("That price is not an Octillion plan", 400);
+  if (price.active) await call("POST", `/v1/prices/${priceId}`, { active: false }, `plan-archive-${priceId}`);
+  invalidatePlans();
+  return { price_id: price.id, lookup_key: price.lookup_key };
 }
 
 export const createCustomer = (o: { name: string; email?: string | null; slug: string; clerkOrgId?: string | null }) =>

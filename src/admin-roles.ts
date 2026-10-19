@@ -5,7 +5,7 @@
  *   viewer    reads every admin page (the key vault shows hints only)
  *   support   + access requests, creating accounts, inviting people, journey tips
  *   operator  + compute, harness mix and harnesses, agent configuration, the library, account edits, simulations
- *   owner     + the key vault, test emails, admins and their roles, and anything destructive
+ *   owner     + the key vault, test emails, admins and their roles, plans in Stripe, and anything destructive
  *
  * The role lives in Clerk (user public_metadata.platform_role), so there is no table. Owner also covers the old ways
  * in: public_metadata.platform_admin = true, an address OCTILLION_PLATFORM_ADMINS lists, and the OCTILLION_ADMIN_TOKEN
@@ -38,6 +38,7 @@ export const PERMISSIONS = {
   email: "owner",          // send a test email (/admin/emails)
   keys: "owner",           // key vault: add, import, rotate, delete keys, provider switches, the sandbox provider's key
   admins: "owner",         // add and remove admins, change their roles
+  plans: "owner",          // create and archive prepaid plans in Stripe (FinOps › Revenue)
   delete: "owner",         // delete harnesses and journeys, revoke or rotate account keys, anything else destructive
 } as const satisfies Record<string, PlatformRole>;
 export type Permission = keyof typeof PERMISSIONS;

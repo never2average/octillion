@@ -626,6 +626,39 @@ export async function portalLink(actor: string, slug: string, returnUrl = `${pub
   return { url: await billing.portalUrl(customer, returnUrl) };
 }
 
+// ---------- plans (Stripe prices with an octillion_ lookup key; FinOps › Revenue › New plan) ----------
+
+export async function plans() {
+  if (!billing.stripeEnabled()) return { configured: false, plans: [] as billing.Plan[] };
+  return { configured: true, plans: await billing.listPlans() };
+}
+
+/** A new prepaid plan in Stripe, checked here first: plain errors for a bad name, price, allowance or interval. */
+export async function createPlan(actor: string, body: Record<string, unknown>) {
+  if (!billing.stripeEnabled()) throw new AdminError("Stripe is not set up on this server", 503);
+  const name = String(body.name ?? "").trim().replace(/\s+/g, " ");
+  if (name.length < 2 || name.length > 60) throw new AdminError("The plan name must be 2 to 60 characters");
+  const amount = Number(body.amount_usd);
+  if (!Number.isFinite(amount) || amount <= 0 || amount > 100_000) throw new AdminError("The price must be more than $0 and at most $100,000");
+  if (Math.abs(amount * 100 - Math.round(amount * 100)) > 1e-6) throw new AdminError("The price can't have fractions of a cent");
+  const interval = body.interval ?? "month";
+  if (interval !== "month" && interval !== "year") throw new AdminError("The interval must be month or year");
+  const budget = body.monthly_budget_usd == null || body.monthly_budget_usd === "" ? amount : Number(body.monthly_budget_usd);
+  if (!Number.isFinite(budget) || budget < 0 || budget > amount * 10) throw new AdminError(`The monthly allowance must be from $0 to $${(amount * 10).toLocaleString("en-US")} (ten times the price)`);
+  const lookup = body.lookup_key == null || body.lookup_key === "" ? undefined : String(body.lookup_key).trim();
+  const plan = await billing.createPlan({ name, amount_usd: amount, interval, monthly_budget_usd: budget, lookup_key: lookup });
+  log(actor, "billing.plan_create", null, { price: plan.price_id, lookup_key: plan.lookup_key, amount_usd: amount, interval, monthly_budget_usd: budget });
+  return plan;
+}
+
+/** Archive a plan in Stripe (never deleted): new checkouts can't use it; current subscribers keep it. */
+export async function archivePlan(actor: string, priceId: string) {
+  if (!billing.stripeEnabled()) throw new AdminError("Stripe is not set up on this server", 503);
+  const r = await billing.archivePlan(priceId);
+  log(actor, "billing.plan_archive", null, { price: r.price_id, lookup_key: r.lookup_key });
+  return r;
+}
+
 // ---------- legacy API keys (beta links, header-only clients) ----------
 
 export async function issueKey(actor: string, slug: string, label?: string) {

@@ -6,7 +6,8 @@
 // azp?, expired?, v1?} -> a Clerk session token, POST /_mock/oauth {user_id, jwt?, revoked?, expired?} -> an OAuth
 // access token, GET /_mock/public-key -> {pem} for CLERK_JWT_KEY, POST /_mock/subscriptions {customer, price, status?, start_date?, trial_end?,
 // ended_at?, canceled_at?, cancel_at_period_end?, current_period_end?, quantity?, invoice? (default true: one paid invoice now)},
-// POST /_mock/prices {id, unit_amount, interval, ...} (an archived price: not listed with active=true),
+// POST /_mock/prices {id, unit_amount, interval, ...} (an archived price: not listed with active=true), POST /v1/products and
+// POST /v1/prices (plans made on FinOps; lookup keys unique) and POST /v1/prices/:id (active=false archives),
 // POST /_mock/invoices {customer, amount, status?, created?, paid_at?, subscription?, number?}, POST /_mock/stripe/outage {down} (customer
 // balance transactions answer 500 while down). Times are Unix seconds.
 // Resend: POST /emails (Bearer re_...; an Idempotency-Key header returns the first email's id again for the same body, 409
@@ -41,6 +42,7 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
         nickname: "Growth", metadata: { monthly_budget_usd: "1500" }, product: { id: "prod_mock_1", name: "Octillion", metadata: {} } },
       { id: "price_unrelated", object: "price", active: true, lookup_key: "other_thing", unit_amount: 100, currency: "usd", recurring: null, nickname: null, metadata: {}, product: { name: "x", metadata: {} } },
     ] as any[],
+    products: [] as any[],
   };
   const app = express();
   const MAPS = ["orgs", "invitations", "memberships", "users", "customers", "subscriptions", "oauth", "keyed"] as const;
@@ -204,7 +206,43 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     const c = { id: id("cus"), object: "customer", name: req.body.name, email: req.body.email ?? null, metadata: req.body.metadata ?? {} };
     s.customers.set(c.id, c); if (k) keyed.set(k, c); res.json(c);
   });
-  st.get("/v1/prices", (req, res) => void res.json({ object: "list", data: s.prices.filter((p) => req.query.active !== "true" || p.active), has_more: false }));
+  st.get("/v1/prices", (req, res) => {
+    const lk = req.query["lookup_keys[]"] ?? req.query.lookup_keys, keys = lk == null ? null : ([] as unknown[]).concat(lk).map(String);
+    res.json({ object: "list", data: s.prices.filter((p) => (req.query.active !== "true" || p.active) && (!keys || keys.includes(p.lookup_key))), has_more: false });
+  });
+  st.get("/v1/prices/:id", (req, res) => {
+    const p = s.prices.find((x) => x.id === req.params.id);
+    if (!p) return void res.status(404).json({ error: { message: `No such price: '${req.params.id}'` } });
+    res.json({ ...p, product: p.product?.id ?? p.product });
+  });
+  // Plans made on FinOps: a product, then a price on it (lookup keys unique, like Stripe), then active=false to archive.
+  st.post("/v1/products", (req, res) => {
+    const k = req.get("idempotency-key");
+    if (k && keyed.has(k)) return void res.json(keyed.get(k));
+    const p = { id: id("prod"), object: "product", active: true, name: req.body.name, metadata: req.body.metadata ?? {} };
+    s.products.push(p); if (k) keyed.set(k, p); res.json(p);
+  });
+  st.get("/v1/products", (_req, res) => void res.json({ object: "list", data: s.products, has_more: false }));
+  st.post("/v1/prices", (req, res) => {
+    const k = req.get("idempotency-key");
+    if (k && keyed.has(k)) return void res.json(keyed.get(k));
+    const b = req.body, product = s.products.find((p) => p.id === b.product);
+    if (!product) return void res.status(400).json({ error: { message: `No such product: '${b.product}'` } });
+    if (b.lookup_key && s.prices.some((p) => p.lookup_key === b.lookup_key))
+      return void res.status(400).json({ error: { message: `A price (\`${b.lookup_key}\`) already uses that lookup key.` } });
+    const price = { id: id("price"), object: "price", active: true, lookup_key: b.lookup_key ?? null, unit_amount: Number(b.unit_amount), currency: b.currency,
+      recurring: b.recurring ? { interval: b.recurring.interval, interval_count: Number(b.recurring.interval_count ?? 1) } : null, nickname: b.nickname ?? null,
+      metadata: b.metadata ?? {}, product: { id: product.id, name: product.name, metadata: product.metadata } };
+    s.prices.push(price);
+    const out = { ...price, product: product.id };
+    if (k) keyed.set(k, out); res.json(out);
+  });
+  st.post("/v1/prices/:id", (req, res) => {
+    const p = s.prices.find((x) => x.id === req.params.id);
+    if (!p) return void res.status(404).json({ error: { message: `No such price: '${req.params.id}'` } });
+    if (req.body.active != null) p.active = String(req.body.active) === "true";
+    res.json({ ...p, product: p.product?.id ?? p.product });
+  });
   st.get("/v1/subscriptions", (req, res) =>
     void res.json({ object: "list", data: [...s.subscriptions.values()].filter((x) => !req.query.customer || x.customer === req.query.customer), has_more: false }));
   st.post("/v1/checkout/sessions", (req, res) => {

@@ -190,6 +190,10 @@ export async function revenueReport(q: { from?: unknown; to?: unknown } = {}, no
   });
 
   const accountOfCustomer = (c: string) => accounts.find((a) => a.customer === c);
+  // Every live plan gets a row, so a plan with no subscribers yet (one just made on FinOps) is listed.
+  for (const pl of plans) if (!planRows.has(pl.price_id)) planRow({ id: pl.price_id, lookup_key: pl.lookup_key, nickname: pl.name, unit_amount: pl.amount,
+    currency: pl.currency, recurring: pl.interval ? { interval: pl.interval, interval_count: 1 } : null });
+  const live = new Map(plans.map((pl) => [pl.price_id, pl]));
   const planList = [...planRows.values()].map((p) => {
     const price = p.price;
     const collected = r2(sum(p.daily_collected));
@@ -210,8 +214,9 @@ export async function revenueReport(q: { from?: unknown; to?: unknown } = {}, no
       subscriptions: p.subs.length, mrr_usd: last >= 0 ? r2(p.daily_mrr[last]) : 0, collected_usd: collected,
       daily_mrr: p.daily_mrr.map(r2), daily_collected: p.daily_collected.map(r2), daily_active: p.daily_active,
       accounts: [...by.values()].sort((a, b) => b.mrr_usd - a.mrr_usd || a.name.localeCompare(b.name)),
+      live: price ? live.has(price.id) : false, monthly_budget_usd: price ? live.get(price.id)?.monthly_budget_usd ?? null : null,
     };
-  }).filter((p) => p.subscriptions > 0 || p.collected_usd > 0).sort((a, b) => b.mrr_usd - a.mrr_usd || b.collected_usd - a.collected_usd || a.name.localeCompare(b.name));
+  }).filter((p) => p.subscriptions > 0 || p.collected_usd > 0 || p.live).sort((a, b) => b.mrr_usd - a.mrr_usd || b.collected_usd - a.collected_usd || a.name.localeCompare(b.name));
 
   const col = (f: (a: (typeof accounts)[number]) => number[]) => R.days.map((_, i) => sum(accounts.map((a) => f(a)[i])));
   const daily_mrr = col((a) => a.daily_mrr).map(r2), daily_collected = col((a) => a.daily_collected).map(r2);

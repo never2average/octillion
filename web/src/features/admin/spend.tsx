@@ -5,7 +5,8 @@
 // timestamps) and Data & storage (GET /spend/storage, sizes and rows). Measured figures only, never the boat price-table
 // estimate; prepaid allowances are spending caps, never revenue. Each tab is one row of four headline numbers with a
 // daily sparkline and one table, grouped by account or by provider (Revenue: by plan). The range (UTC days) and the
-// grouping are page state, so switching tabs keeps them. Read only.
+// grouping are page state, so switching tabs keeps them. Read only, except plans: on Revenue by plan an Owner adds a
+// plan in Stripe (New plan: POST /plans) or archives one (row ⋯ › Archive plan: POST /plans/:price_id/archive).
 import { Suspense, useMemo, useState, type ReactNode } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useIsFetching, useQueryClient } from '@tanstack/react-query';
@@ -22,8 +23,12 @@ import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select'
 import { Skeleton } from '@/components/ui/skeleton';
 import { Icons } from '@/components/icons';
 import { cn } from '@/lib/utils';
-import { accountHref, useAdmin } from './lib';
-import { copyText, ErrorBox, Mono, StatusBadge, When, type Tone } from './ui';
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { accountHref, post, useAdmin, useAdminAction } from './lib';
+import { Gate, useAdminRole } from './role';
+import { copyText, ErrorBox, FormRow, Mono, StatusBadge, When, type Tone } from './ui';
 import { AMBER, Chip, cents, PeekSection, UrlTabs } from './compute-common';
 import { MiniTable } from './compute-sessions';
 
@@ -115,6 +120,8 @@ interface RevenuePlan {
   unit_amount_usd: number | null; currency: string | null; active_subscriptions: number; trialing: number; subscriptions: number; mrr_usd: number; collected_usd: number;
   daily_mrr: number[]; daily_collected: number[]; daily_active: number[];
   accounts: { key: string; slug: string | null; name: string; status: SubStatus; mrr_usd: number }[];
+  /** A live Octillion plan (active price, octillion_ lookup key): it can be archived. */
+  live?: boolean; monthly_budget_usd?: number | null;
 }
 interface Revenue {
   range: { from: string; to: string; days: string[] };
@@ -298,6 +305,9 @@ const marginCell = (usd: number, share: number | null) => (
 
 function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
   const router = useRouter();
+  const role = useAdminRole();
+  const [newPlan, setNewPlan] = useState(false);
+  const [archiving, setArchiving] = useState<RevenuePlan | null>(null);
   const all = data?.accounts ?? [];
   const f = useAccountFilter(all, (a) => a.collected_usd > 0 || a.mrr_usd > 0 || a.spend_usd > 0 || a.subscriptions.length > 0 || a.invoices.length > 0, 'revenue or spend');
   const len = data?.range.days.length ?? 0;
@@ -328,12 +338,19 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
       { key: 'unit', label: 'Unit amount', className: 'text-right', type: 'number', value: (p) => p.unit_amount_usd, render: (p) => (p.unit_amount_usd == null ? NA : num(cents(p.unit_amount_usd))) },
       { key: 'active', label: 'Subscriptions active', className: 'text-right', type: 'number', value: (p) => p.active_subscriptions, render: (p) => num(p.active_subscriptions.toLocaleString(), `${p.subscriptions} in all, ${p.trialing} in trial`) },
       { key: 'mrr', label: 'MRR', className: 'text-right', keep: true, type: 'number', value: (p) => p.mrr_usd, render: (p) => num(cents(p.mrr_usd)) },
-      { key: 'collected', label: 'Collected in range', className: 'text-right', type: 'number', value: (p) => p.collected_usd, render: (p) => num(cents(p.collected_usd)) }
+      { key: 'collected', label: 'Collected in range', className: 'text-right', type: 'number', value: (p) => p.collected_usd, render: (p) => num(cents(p.collected_usd)) },
+      { key: 'allowance', label: 'Monthly allowance', className: 'text-right', type: 'number', value: (p) => p.monthly_budget_usd ?? null,
+        render: (p) => (p.monthly_budget_usd == null ? NA : num(cents(p.monthly_budget_usd), 'The plan’s monthly cap on model spend. Not revenue.')) }
     ];
-    return (
+    return (<>
       <RecordView id='finops-revenue-plans' rows={data?.plans ?? []} loading={loading} rowKey={(p) => p.key} cols={cols} noun='plans' initialSize={50} compact summary={cards}
         searchText={(p) => `${p.name} ${p.lookup_key ?? ''} ${p.price_id ?? ''} ${p.accounts.map((a) => a.name).join(' ')}`} searchPlaceholder='Search plans, accounts'
         filters={<>{bar}{mixed}</>} defaultSort={[{ key: 'mrr', dir: 'desc' }]} exportName={exportName('revenue', 'plan', data?.range)}
+        primary={data?.stripe.configured ? <Gate need='plans'><Button onClick={() => setNewPlan(true)}><Icons.add /> New plan</Button></Gate> : undefined}
+        actions={(p) => (p.live && p.price_id ? [
+          { label: 'Copy price ID', icon: <Icons.page />, onSelect: () => copyText(p.price_id!, 'Price ID copied') },
+          role.lock({ label: 'Archive plan', icon: <Icons.trash />, destructive: true, separator: true, onSelect: () => setArchiving(p) }, 'plans')
+        ] : [])}
         detailTitle={(p) => p.name}
         detail={(p) => (
           <div className='grid gap-6'>
@@ -347,8 +364,10 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
             </PeekSection>
           </div>
         )}
-        empty={stripeEmpty ?? 'No plans with subscriptions or payments.'} />
-    );
+        empty={stripeEmpty ?? 'No plans yet.'} />
+      {newPlan && <NewPlanDialog onClose={() => setNewPlan(false)} />}
+      <ArchivePlan plan={archiving} onClose={() => setArchiving(null)} />
+    </>);
   }
   const cols: RecordCol<RevenueAccount>[] = [
     { key: 'account', label: 'Account', title: true, keep: true, type: 'text', value: (a) => a.name, render: (a) => (
@@ -416,6 +435,79 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
 }
 
 // ---------------------------------------------------------------- Model spend
+
+/** New plan (owner): a product and a recurring price in Stripe, with an octillion_ lookup key so checkout links can offer it. */
+function NewPlanDialog({ onClose }: { onClose: () => void }) {
+  const [name, setName] = useState('');
+  const [amount, setAmount] = useState('');
+  const [allowance, setAllowance] = useState('');
+  const [interval, setIv] = useState<'month' | 'year'>('month');
+  const [err, setErr] = useState('');
+  const make = useAdminAction((b: { name: string; amount_usd: number; monthly_budget_usd: number; interval: 'month' | 'year' }) =>
+    post<{ name: string; lookup_key: string }>('/plans', b), { success: (r) => `Plan ${r.name} created in Stripe` });
+  const price = Number(amount);
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault(); setErr('');
+    if (!(price > 0)) return setErr('Enter a price above $0.');
+    const budget = allowance.trim() === '' ? price : Number(allowance);
+    if (!Number.isFinite(budget) || budget < 0) return setErr('Enter a monthly allowance of $0 or more.');
+    make.mutate({ name: name.trim(), amount_usd: price, monthly_budget_usd: budget, interval }, { onSuccess: onClose, onError: (x) => setErr(x.message) });
+  };
+  const per = interval === 'year' ? 'year' : 'month';
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className='sm:max-w-md'>
+        <form onSubmit={submit} className='grid gap-4'>
+          <DialogHeader>
+            <DialogTitle>New plan</DialogTitle>
+            <DialogDescription>A prepaid plan in Stripe. Accounts allowed a prepaid plan can be sent a checkout link for it.</DialogDescription>
+          </DialogHeader>
+          <FormRow id='np-name' label='Plan name' hint={name.trim() ? `Lookup key: octillion_${name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '')}` : 'Customers see this name at checkout.'}>
+            <Input id='np-name' required autoFocus minLength={2} maxLength={60} value={name} onChange={(e) => setName(e.target.value)} placeholder='Team' />
+          </FormRow>
+          <FormRow id='np-interval' label='Billed every'>
+            <NativeSelect id='np-interval' value={interval} onChange={(e) => setIv(e.target.value as 'month' | 'year')}>
+              <NativeSelectOption value='month'>Month</NativeSelectOption>
+              <NativeSelectOption value='year'>Year</NativeSelectOption>
+            </NativeSelect>
+          </FormRow>
+          <FormRow id='np-amount' label={`Price per ${per} (USD)`}>
+            <Input id='np-amount' required type='number' inputMode='decimal' min='0.01' max='100000' step='0.01' value={amount} onChange={(e) => setAmount(e.target.value)} placeholder='250' />
+          </FormRow>
+          <FormRow id='np-allowance' label='Monthly allowance (USD)' hint={`The most the account can spend on models each month. Leave empty to use the price${price > 0 ? ` ($${price.toLocaleString()})` : ''}.`}>
+            <Input id='np-allowance' type='number' inputMode='decimal' min='0' step='0.01' value={allowance} onChange={(e) => setAllowance(e.target.value)} placeholder={price > 0 ? String(price) : ''} />
+          </FormRow>
+          {err && <p className='text-destructive text-sm'>{err}</p>}
+          <DialogFooter>
+            <Button type='button' variant='outline' onClick={onClose}>Cancel</Button>
+            <Button type='submit' disabled={make.isPending}>{make.isPending && <Icons.spinner className='animate-spin' />} Create plan</Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** Archive a plan (owner): the Stripe price is turned off, never deleted; current subscribers keep it. */
+function ArchivePlan({ plan, onClose }: { plan: RevenuePlan | null; onClose: () => void }) {
+  const archive = useAdminAction((id: string) => post(`/plans/${encodeURIComponent(id)}/archive`), { success: 'Plan archived' });
+  return (
+    <AlertDialog open={!!plan} onOpenChange={(v) => !v && onClose()}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Archive {plan?.name}?</AlertDialogTitle>
+          <AlertDialogDescription>
+            New checkout links can no longer offer it. Accounts already on it keep it until they cancel. Stripe keeps the plan, so nothing is deleted.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction variant='destructive' onClick={() => { if (plan?.price_id) archive.mutate(plan.price_id); onClose(); }}>Archive plan</AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
 
 function SpendTab({ data, loading, bar, group, range }: TabProps<Spend> & { range: DateRange }) {
   const all = data?.accounts ?? [];
