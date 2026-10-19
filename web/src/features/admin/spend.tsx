@@ -1,7 +1,8 @@
 'use client';
 // Operations › FinOps (/admin/finops; /admin/spend redirects here; src/revenue.ts, src/spend.ts and src/spend-usage.ts).
-// Five tabs in ?section=: Revenue (the default; GET /spend/revenue, Stripe subscriptions and invoices against metered model
-// spend, by account), Plans (the same read by Stripe price: New plan, Archive plan), Model spend (GET /spend, metered model cost), Compute hours (GET /spend/compute, sandbox time measured from
+// Six tabs in ?section=: Revenue (the default; GET /spend/revenue, Stripe subscriptions and invoices against metered model
+// spend, by account), Plans (the same read by Stripe price: New plan, Experiment, Archive plan), Experiments (pricing A/B
+// tests: GET /spend/experiments, src/experiments.ts), Model spend (GET /spend, metered model cost), Compute hours (GET /spend/compute, sandbox time measured from
 // timestamps) and Data & storage (GET /spend/storage, sizes and rows). Measured figures only, never the boat price-table
 // estimate; prepaid allowances are spending caps, never revenue. Each tab is one row of four headline numbers with a
 // daily sparkline and one table, grouped by account or by provider (Revenue and Plans: no switch). The range (UTC days) and the
@@ -121,7 +122,7 @@ interface RevenuePlan {
   daily_mrr: number[]; daily_collected: number[]; daily_active: number[];
   accounts: { key: string; slug: string | null; name: string; status: SubStatus; mrr_usd: number }[];
   /** A live Octillion plan (active price, octillion_ lookup key): it can be archived. */
-  live?: boolean; monthly_budget_usd?: number | null;
+  live?: boolean; monthly_budget_usd?: number | null; experiment?: string | null; weight?: number; trial_days?: number | null;
 }
 interface Revenue {
   range: { from: string; to: string; days: string[] };
@@ -137,7 +138,7 @@ interface Revenue {
 // ---------------------------------------------------------------- shared bits
 
 const BASE = '/admin/finops';
-const TABS = [['revenue', 'Revenue'], ['plans', 'Plans'], ['spend', 'Model spend'], ['compute', 'Compute hours'], ['storage', 'Data & storage']] as const;
+const TABS = [['revenue', 'Revenue'], ['plans', 'Plans'], ['experiments', 'Experiments'], ['spend', 'Model spend'], ['compute', 'Compute hours'], ['storage', 'Data & storage']] as const;
 type Tab = (typeof TABS)[number][0];
 /** Older links: the Accounts and Models tabs are Model spend now, Days became Compute hours. */
 const OLD: Record<string, Tab> = { accounts: 'spend', models: 'spend', days: 'compute' };
@@ -180,16 +181,17 @@ function SpendPage() {
   const [group, setGroup] = useState<Group>('account');
   const q = rangeQuery(range);
   const revenue = useAdmin<Revenue>(tab === 'revenue' || tab === 'plans' ? `/spend/revenue?${q}` : null, { keep: true });
+  const exps = useAdmin<Experiments>(tab === 'experiments' ? `/spend/experiments?${q}` : null, { keep: true });
   const spend = useAdmin<Spend>(tab === 'spend' ? `/spend?${q}` : null, { keep: true });
   const compute = useAdmin<Compute>(tab === 'compute' ? `/spend/compute?${q}` : null, { keep: true });
   const storage = useAdmin<Storage>(tab === 'storage' ? `/spend/storage?${q}` : null, { keep: true });
-  const active = tab === 'revenue' || tab === 'plans' ? revenue : tab === 'spend' ? spend : tab === 'compute' ? compute : storage;
+  const active = tab === 'revenue' || tab === 'plans' ? revenue : tab === 'experiments' ? exps : tab === 'spend' ? spend : tab === 'compute' ? compute : storage;
   const qc = useQueryClient();
   const fetching = useIsFetching({ queryKey: ['admin'] }) > 0;
   const bar = (
     <div className='flex flex-wrap items-center gap-2'>
       <DateRangePicker value={range} onChange={setRange} />
-      {tab !== 'revenue' && tab !== 'plans' && <GroupBy value={group} onChange={setGroup} second='Provider' />}
+      {tab !== 'revenue' && tab !== 'plans' && tab !== 'experiments' && <GroupBy value={group} onChange={setGroup} second='Provider' />}
     </div>
   );
   const unpriced = tab === 'spend' ? spend.data?.totals.unpriced_requests ?? 0 : 0;
@@ -211,6 +213,7 @@ function SpendPage() {
           </div>
         )}
         {tab === 'revenue' && <RevenueTab data={revenue.data} loading={!revenue.data && !revenue.error} bar={bar} group='account' />}
+        {tab === 'experiments' && <ExperimentsTab data={exps.data} loading={!exps.data && !exps.error} bar={bar} group='account' />}
         {tab === 'plans' && <RevenueTab data={revenue.data} loading={!revenue.data && !revenue.error} bar={bar} group='provider' />}
         {tab === 'spend' && <SpendTab data={spend.data} loading={!spend.data && !spend.error} bar={bar} group={group} range={range} />}
         {tab === 'compute' && <ComputeTab data={compute.data} loading={!compute.data && !compute.error} bar={bar} group={group} />}
@@ -309,6 +312,7 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
   const role = useAdminRole();
   const [newPlan, setNewPlan] = useState(false);
   const [archiving, setArchiving] = useState<RevenuePlan | null>(null);
+  const [experimenting, setExperimenting] = useState<RevenuePlan | null>(null);
   const all = data?.accounts ?? [];
   const f = useAccountFilter(all, (a) => a.collected_usd > 0 || a.mrr_usd > 0 || a.spend_usd > 0 || a.subscriptions.length > 0 || a.invoices.length > 0, 'revenue or spend');
   const len = data?.range.days.length ?? 0;
@@ -341,7 +345,8 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
   // New plan and Archive plan are on the Plans tab. Without a Stripe key New plan still shows, disabled, saying where the key goes.
   const newPlanBtn = data?.stripe.configured ? <Gate need='plans'><Button onClick={() => setNewPlan(true)}><Icons.add /> New plan</Button></Gate>
     : <span title='Set STRIPE_SECRET_KEY in the server environment (Vercel) first' className='inline-flex cursor-not-allowed'><Button disabled><Icons.add /> New plan</Button></span>;
-  const newPlanDialog = newPlan && <NewPlanDialog onClose={() => setNewPlan(false)} />;
+  const experimentNames = [...new Set((data?.plans ?? []).flatMap((p) => (p.experiment ? [p.experiment] : [])))].sort();
+  const newPlanDialog = newPlan && <NewPlanDialog onClose={() => setNewPlan(false)} experiments={experimentNames} />;
   if (group === 'provider') {
     const cols: RecordCol<RevenuePlan>[] = [
       { key: 'plan', label: 'Plan / price', title: true, keep: true, type: 'text', value: (p) => p.name, render: (p) => (
@@ -353,7 +358,10 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
       { key: 'mrr', label: 'MRR', className: 'text-right', keep: true, type: 'number', value: (p) => p.mrr_usd, render: (p) => num(cents(p.mrr_usd)) },
       { key: 'collected', label: 'Collected in range', className: 'text-right', type: 'number', value: (p) => p.collected_usd, render: (p) => num(cents(p.collected_usd)) },
       { key: 'allowance', label: 'Monthly allowance', className: 'text-right', type: 'number', value: (p) => p.monthly_budget_usd ?? null,
-        render: (p) => (p.monthly_budget_usd == null ? NA : num(cents(p.monthly_budget_usd), 'The plan’s monthly cap on model spend. Not revenue.')) }
+        render: (p) => (p.monthly_budget_usd == null ? NA : num(cents(p.monthly_budget_usd), 'The plan’s monthly cap on model spend. Not revenue.')) },
+      { key: 'experiment', label: 'Experiment', type: 'select', value: (p) => p.experiment ?? '', render: (p) => (p.experiment
+        ? <span className='flex flex-col gap-1'><Mono>{p.experiment}</Mono><span className='text-muted-foreground text-xs'>weight {p.weight ?? 1}</span></span> : NA) },
+      { key: 'trial', label: 'Free trial', className: 'text-right', type: 'number', value: (p) => p.trial_days ?? null, render: (p) => (p.trial_days ? num(`${p.trial_days} d`) : NA) }
     ];
     return (<>
       <RecordView id='finops-revenue-plans' rows={data?.plans ?? []} loading={loading} rowKey={(p) => p.key} cols={cols} noun='plans' initialSize={50} compact summary={cards}
@@ -362,6 +370,7 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
         primary={newPlanBtn}
         actions={(p) => (p.live && p.price_id ? [
           { label: 'Copy price ID', icon: <Icons.page />, onSelect: () => copyText(p.price_id!, 'Price ID copied') },
+          role.lock({ label: p.experiment ? 'Change experiment' : 'Add to experiment', icon: <Icons.sparkles />, onSelect: () => setExperimenting(p) }, 'plans'),
           role.lock({ label: 'Archive plan', icon: <Icons.trash />, destructive: true, separator: true, onSelect: () => setArchiving(p) }, 'plans')
         ] : [])}
         detailTitle={(p) => p.name}
@@ -379,6 +388,7 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
         )}
         empty={stripeEmpty ?? 'No plans yet.'} />
       {newPlanDialog}
+      {experimenting && <PlanExperiment plan={experimenting} experiments={experimentNames} onClose={() => setExperimenting(null)} />}
       <ArchivePlan plan={archiving} onClose={() => setArchiving(null)} />
     </>);
   }
@@ -450,21 +460,151 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
 // ---------------------------------------------------------------- Model spend
 
 /** New plan (owner): a product and a recurring price in Stripe, with an octillion_ lookup key so checkout links can offer it. */
-function NewPlanDialog({ onClose }: { onClose: () => void }) {
+interface Variant {
+  experiment: string; price_id: string; name: string; amount_usd: number | null; interval: string | null; weight: number; live: boolean; control: boolean;
+  exposed: number; new_in_range: number; checkouts: number; completed: number; converted: number; conversion_pct: number | null; ci: [number, number] | null;
+  lift_pts: number | null; lift_ci: [number, number] | null; significant: boolean; paying: number; trialing: number; churned: number; mrr_usd: number;
+  collected_usd: number; collected_per_exposed_usd: number | null; model_spend_usd: number; margin_usd: number;
+  daily_exposed: number[]; daily_converted: number[]; daily_collected: number[];
+}
+interface Experiments {
+  range: { from: string; to: string; days: string[] }; stripe: { configured: boolean; error: string | null };
+  totals: { running: number; experiments: number; accounts: number; checkouts: number; converted: number; collected_usd: number;
+    daily_exposed: number[]; daily_converted: number[]; daily_collected: number[] } | null;
+  experiments: string[]; running: string[]; variants: Variant[];
+}
+
+/**
+ * Experiments (GET /spend/experiments, src/experiments.ts): every variant of every pricing experiment, its control
+ * first. Conversion = accounts that subscribed / accounts shown it, with its 95% interval; lift is against the control
+ * in points, marked when its interval excludes 0. Revenue per account shown is the number to compare prices on.
+ */
+function ExperimentsTab({ data, loading, bar }: TabProps<Experiments>) {
+  const t = data?.totals;
+  const share = (v: Variant) => {
+    const live = data?.variants.filter((x) => x.experiment === v.experiment && x.live) ?? [];
+    const w = live.reduce((n, x) => n + x.weight, 0);
+    return v.live && w > 0 ? Math.round((v.weight / w) * 100) : null;
+  };
+  const cards = (
+    <StatStrip items={[
+      { label: 'Running experiments', value: t ? t.running.toLocaleString() : '—' },
+      { label: 'Accounts in tests', spark: t?.daily_exposed, value: t ? t.accounts.toLocaleString() : '—' },
+      { label: 'Conversions', spark: t?.daily_converted, value: t ? t.converted.toLocaleString() : '—' },
+      { label: 'Collected from tests', spark: t?.daily_collected, value: t ? cents(t.collected_usd) : '—' }
+    ]} />
+  );
+  const cols: RecordCol<Variant>[] = [
+    { key: 'variant', label: 'Variant', title: true, keep: true, type: 'text', value: (v) => v.name, render: (v) => (
+      <span className='flex min-w-0 flex-col gap-1'>
+        <span className='flex items-center gap-2'><span className='truncate font-medium'>{v.name}</span>{v.control && <StatusBadge>control</StatusBadge>}{!v.live && <StatusBadge tone='neutral' title='Archived or taken out of the experiment: no new accounts see it'>ended</StatusBadge>}</span>
+        <Mono>{v.amount_usd == null ? v.price_id : `$${v.amount_usd.toLocaleString()} / ${v.interval ?? 'one-off'}`}</Mono>
+      </span>) },
+    { key: 'experiment', label: 'Experiment', keep: true, type: 'select', value: (v) => v.experiment, render: (v) => <Mono>{v.experiment}</Mono> },
+    { key: 'traffic', label: 'Traffic', className: 'text-right', type: 'number', value: (v) => share(v), render: (v) => (share(v) == null ? NA : num(`${share(v)}%`, `weight ${v.weight}`)) },
+    { key: 'exposed', label: 'Accounts shown', className: 'text-right', type: 'number', value: (v) => v.exposed, render: (v) => num(v.exposed.toLocaleString(), `${v.new_in_range} first shown in this range`) },
+    { key: 'checkouts', label: 'Checkouts started', className: 'text-right', type: 'number', value: (v) => v.checkouts, render: (v) => num(v.checkouts.toLocaleString(), `${v.completed} completed`) },
+    { key: 'converted', label: 'Subscribed', className: 'text-right', type: 'number', value: (v) => v.converted, render: (v) => num(v.converted.toLocaleString()) },
+    { key: 'conversion', label: 'Conversion', className: 'text-right', keep: true, type: 'number', value: (v) => v.conversion_pct, render: (v) => (v.conversion_pct == null ? NA
+      : num(`${v.conversion_pct}%`, v.ci ? `95% interval ${v.ci[0]}–${v.ci[1]}%` : undefined)) },
+    { key: 'lift', label: 'Lift vs control', className: 'text-right', keep: true, type: 'number', value: (v) => v.lift_pts, render: (v) => (v.control ? <span className='text-muted-foreground'>control</span>
+      : v.lift_pts == null ? NA : <span className={cn('tabular-nums', v.significant && (v.lift_pts > 0 ? 'text-emerald-600 dark:text-emerald-400 font-medium' : 'text-destructive font-medium'))}
+          title={v.lift_ci ? `95% interval ${v.lift_ci[0]} to ${v.lift_ci[1]} points${v.significant ? '' : ': not significant yet'}` : undefined}>{v.lift_pts > 0 ? '+' : ''}{v.lift_pts} pts</span>) },
+    { key: 'per_exposed', label: 'Collected per account shown', className: 'text-right', keep: true, type: 'number', value: (v) => v.collected_per_exposed_usd, render: (v) => (v.collected_per_exposed_usd == null ? NA : num(cents(v.collected_per_exposed_usd))) },
+    { key: 'mrr', label: 'MRR', className: 'text-right', type: 'number', value: (v) => v.mrr_usd, render: (v) => num(cents(v.mrr_usd), `${v.paying} paying, ${v.trialing} in trial`) },
+    { key: 'collected', label: 'Collected in range', className: 'text-right', type: 'number', value: (v) => v.collected_usd, render: (v) => num(cents(v.collected_usd)) },
+    { key: 'spend', label: 'Model spend', className: 'text-right', type: 'number', value: (v) => v.model_spend_usd, render: (v) => num(cents(v.model_spend_usd), 'Metered model spend of the accounts that subscribed, in the range') },
+    { key: 'margin', label: 'Margin', className: 'text-right', type: 'number', value: (v) => v.margin_usd, render: (v) => num(cents(v.margin_usd)) },
+    { key: 'churned', label: 'Churned', className: 'text-right', type: 'number', value: (v) => v.churned, render: (v) => num(v.churned.toLocaleString()) }
+  ];
+  const empty = data && !data.stripe.configured ? 'Stripe is not configured (STRIPE_SECRET_KEY in the server environment on Vercel).'
+    : data?.stripe.error ? `Could not read Stripe: ${data.stripe.error}`
+    : 'No experiments yet. On Plans, create two plans with the same experiment name (or ⋯ › Add to experiment on existing ones).';
+  return (
+    <RecordView id='finops-experiments' rows={data?.variants ?? []} loading={loading} rowKey={(v) => `${v.experiment}:${v.price_id}`} cols={cols} noun='variants' initialSize={50} compact summary={cards}
+      searchText={(v) => `${v.name} ${v.experiment} ${v.price_id}`} searchPlaceholder='Search experiments, variants' filters={bar} groupable
+      exportName={exportName('experiments', 'variant', data?.range)}
+      actions={(v) => [{ label: 'Copy price ID', icon: <Icons.page />, onSelect: () => copyText(v.price_id, 'Price ID copied') }]}
+      detailTitle={(v) => `${v.experiment} · ${v.name}`}
+      detail={(v) => (
+        <div className='grid gap-6'>
+          <PeekSection title='Per day'>
+            <DailyBars days={data?.range.days ?? []} format={(x) => String(Math.round(x * 100) / 100)}
+              series={[{ key: 'exposed', label: 'First shown', values: v.daily_exposed }, { key: 'converted', label: 'Subscribed', values: v.daily_converted }]} />
+          </PeekSection>
+          <PeekSection title='Collected per day'>
+            <DailyBars days={data?.range.days ?? []} format={(x) => `$${x < 10 ? x.toFixed(2) : Math.round(x)}`} series={[{ key: 'collected', label: 'Collected', values: v.daily_collected }]} />
+          </PeekSection>
+        </div>
+      )}
+      empty={empty} />
+  );
+}
+
+/** A plan's experiment (Stripe price metadata): join one, change the weight, or leave (empty name). */
+function PlanExperiment({ plan, experiments, onClose }: { plan: RevenuePlan; experiments: string[]; onClose: () => void }) {
+  const [experiment, setExperiment] = useState(plan.experiment ?? '');
+  const [weight, setWeight] = useState(String(plan.weight ?? 1));
+  const [err, setErr] = useState('');
+  const save = useAdminAction((b: { experiment: string; weight: number }) => post<{ experiment: string | null }>(`/plans/${encodeURIComponent(plan.price_id!)}/experiment`, b),
+    { success: (r) => (r.experiment ? `${plan.name} is a variant of ${r.experiment}` : `${plan.name} left its experiment`) });
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault(); setErr('');
+    const w = Number(weight);
+    if (experiment.trim() && !(w > 0)) return setErr('Enter a traffic weight above 0.');
+    save.mutate({ experiment: experiment.trim(), weight: w || 1 }, { onSuccess: onClose, onError: (x) => setErr(x.message) });
+  };
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className='sm:max-w-md'>
+        <form onSubmit={submit} className='grid gap-4'>
+          <DialogHeader>
+            <DialogTitle>{plan.name}: experiment</DialogTitle>
+            <DialogDescription>Plans with the same experiment are A/B tested: each account allowed plans sees one of them, by weight, and keeps it. Leave the name empty to take this plan out; accounts already shown it keep seeing it while it is live.</DialogDescription>
+          </DialogHeader>
+          <FormRow id='pe-exp' label='Experiment'>
+            <Input id='pe-exp' list='pe-exp-list' autoFocus maxLength={40} value={experiment} onChange={(e) => setExperiment(e.target.value)} placeholder='None' />
+            <datalist id='pe-exp-list'>{experiments.map((x) => <option key={x} value={x} />)}</datalist>
+          </FormRow>
+          {experiment.trim() && (
+            <FormRow id='pe-weight' label='Traffic weight' hint='Its share of new accounts, relative to the other variants.'>
+              <Input id='pe-weight' type='number' inputMode='decimal' min='0.01' max='100' step='any' value={weight} onChange={(e) => setWeight(e.target.value)} />
+            </FormRow>
+          )}
+          {err && <p className='text-destructive text-sm'>{err}</p>}
+          <DialogFooter>
+            <Button type='button' variant='outline' onClick={onClose}>Cancel</Button>
+            <Button type='submit' disabled={save.isPending}>{save.isPending && <Icons.spinner className='animate-spin' />} Save</Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function NewPlanDialog({ onClose, experiments }: { onClose: () => void; experiments: string[] }) {
   const [name, setName] = useState('');
   const [amount, setAmount] = useState('');
   const [allowance, setAllowance] = useState('');
   const [interval, setIv] = useState<'month' | 'year'>('month');
+  const [experiment, setExperiment] = useState('');
+  const [weight, setWeight] = useState('1');
+  const [trial, setTrial] = useState('');
+  const [description, setDescription] = useState('');
   const [err, setErr] = useState('');
-  const make = useAdminAction((b: { name: string; amount_usd: number; monthly_budget_usd: number; interval: 'month' | 'year' }) =>
-    post<{ name: string; lookup_key: string }>('/plans', b), { success: (r) => `Plan ${r.name} created in Stripe` });
+  const make = useAdminAction((b: { name: string; amount_usd: number; monthly_budget_usd: number; interval: 'month' | 'year'; experiment: string; weight: number; trial_days: number | null; description: string }) =>
+    post<{ name: string; lookup_key: string; experiment: string | null }>('/plans', b), { success: (r) => `Plan ${r.name} created in Stripe${r.experiment ? ` as a variant of ${r.experiment}` : ''}` });
   const price = Number(amount);
   const submit = (e: React.FormEvent) => {
     e.preventDefault(); setErr('');
     if (!(price > 0)) return setErr('Enter a price above $0.');
     const budget = allowance.trim() === '' ? price : Number(allowance);
     if (!Number.isFinite(budget) || budget < 0) return setErr('Enter a monthly allowance of $0 or more.');
-    make.mutate({ name: name.trim(), amount_usd: price, monthly_budget_usd: budget, interval }, { onSuccess: onClose, onError: (x) => setErr(x.message) });
+    const w = Number(weight), t = trial.trim() === '' ? null : Number(trial);
+    if (experiment.trim() && !(w > 0)) return setErr('Enter a traffic weight above 0.');
+    if (t != null && !(Number.isInteger(t) && t >= 1)) return setErr('Enter the free trial as whole days, or leave it empty.');
+    make.mutate({ name: name.trim(), amount_usd: price, monthly_budget_usd: budget, interval, experiment: experiment.trim(), weight: w || 1, trial_days: t, description: description.trim() },
+      { onSuccess: onClose, onError: (x) => setErr(x.message) });
   };
   const per = interval === 'year' ? 'year' : 'month';
   return (
@@ -473,7 +613,7 @@ function NewPlanDialog({ onClose }: { onClose: () => void }) {
         <form onSubmit={submit} className='grid gap-4'>
           <DialogHeader>
             <DialogTitle>New plan</DialogTitle>
-            <DialogDescription>A prepaid plan in Stripe. Accounts allowed a prepaid plan can be sent a checkout link for it.</DialogDescription>
+            <DialogDescription>A product and recurring price in Stripe. Accounts allowed plans see it on Billing and can check out; put it in an experiment to A/B test it against other plans.</DialogDescription>
           </DialogHeader>
           <FormRow id='np-name' label='Plan name' hint={name.trim() ? `Lookup key: octillion_${name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '')}` : 'Customers see this name at checkout.'}>
             <Input id='np-name' required autoFocus minLength={2} maxLength={60} value={name} onChange={(e) => setName(e.target.value)} placeholder='Team' />
@@ -490,6 +630,21 @@ function NewPlanDialog({ onClose }: { onClose: () => void }) {
           <FormRow id='np-allowance' label='Monthly allowance (USD)' hint={`The most the account can spend on models each month. Leave empty to use the price${price > 0 ? ` ($${price.toLocaleString()})` : ''}.`}>
             <Input id='np-allowance' type='number' inputMode='decimal' min='0' step='0.01' value={allowance} onChange={(e) => setAllowance(e.target.value)} placeholder={price > 0 ? String(price) : ''} />
           </FormRow>
+          <FormRow id='np-trial' label='Free trial (days)' hint='Optional. Checkout starts the subscription with this trial.'>
+            <Input id='np-trial' type='number' inputMode='numeric' min='1' max='730' step='1' value={trial} onChange={(e) => setTrial(e.target.value)} placeholder='None' />
+          </FormRow>
+          <FormRow id='np-desc' label='Description' hint='Optional. Shown at checkout.'>
+            <Input id='np-desc' maxLength={300} value={description} onChange={(e) => setDescription(e.target.value)} placeholder='For teams running weekly simulations' />
+          </FormRow>
+          <FormRow id='np-exp' label='Experiment' hint={experiment.trim() ? 'Each account allowed plans sees one variant of this experiment, by weight; results are on the Experiments tab.' : 'Optional. Plans with the same experiment are A/B tested against each other.'}>
+            <Input id='np-exp' list='np-exp-list' maxLength={40} value={experiment} onChange={(e) => setExperiment(e.target.value)} placeholder='e.g. team-price-oct' />
+            <datalist id='np-exp-list'>{experiments.map((x) => <option key={x} value={x} />)}</datalist>
+          </FormRow>
+          {experiment.trim() && (
+            <FormRow id='np-weight' label='Traffic weight' hint='Its share of accounts, relative to the other variants (1 and 1 is a 50/50 split).'>
+              <Input id='np-weight' type='number' inputMode='decimal' min='0.01' max='100' step='any' value={weight} onChange={(e) => setWeight(e.target.value)} />
+            </FormRow>
+          )}
           {err && <p className='text-destructive text-sm'>{err}</p>}
           <DialogFooter>
             <Button type='button' variant='outline' onClick={onClose}>Cancel</Button>

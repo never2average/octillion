@@ -1047,6 +1047,17 @@ ON CONFLICT (slug) DO NOTHING;
 -- Stripe's key is a server environment variable (STRIPE_SECRET_KEY, src/billing.ts), not a vault provider: drop the
 -- provider row a short-lived build added, while it holds no key.
 DELETE FROM vault_providers WHERE slug = 'stripe' AND NOT EXISTS (SELECT 1 FROM vault_credentials WHERE provider = 'stripe');
+-- Pricing experiments (src/experiments.ts): the first time an account's Billing page showed it a variant of an
+-- experiment. Experiments, variants, checkouts and conversions are Stripe's (price, session and subscription
+-- metadata); only the exposure, which Stripe never sees, is kept here. One row per account and experiment (sticky).
+CREATE TABLE IF NOT EXISTS plan_exposures (
+  org_id        INT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  experiment    TEXT NOT NULL,
+  price_id      TEXT NOT NULL,
+  plan_name     TEXT,
+  first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (org_id, experiment)
+);
 -- Every email Octillion tried to send: one row per message (recipient and purpose), whatever became of it. Never the
 -- address itself (a hash to match on, and the domain), never the body. The idempotency key names the message
 -- ("request:12:received", "budget:7:2026-10:80:<hash>"), so a retry or a second trigger never sends it twice; a

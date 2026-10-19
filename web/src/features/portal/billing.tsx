@@ -27,7 +27,7 @@ import { ACCOUNT_ROLE_LABEL, Allowed, useAccountRole, type AccountRole, type Acc
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 
 interface Sub { status: string; plan: string | null; renews_at: string | null; cancel_at_period_end: boolean; trial_end: string | null }
-interface Plan { price_id: string; name: string; amount: number | null; currency: string; interval: string | null; monthly_budget_usd: number | null }
+interface Plan { price_id: string; name: string; amount: number | null; currency: string; interval: string | null; monthly_budget_usd: number | null; trial_days?: number | null; description?: string | null }
 interface Billing { enabled: boolean; customer: boolean; subscription: Sub | null; budget_usd: number; budget_source?: 'override' | 'plan' | 'default'; prepaid_allowed?: boolean; plans: Plan[]; can_manage: boolean
   contributions?: Contributions }
 /** Credits for personas and tasks Octillion accepted into its library: from Stripe's balance transactions, plus accepted ones Stripe hasn't taken yet. */
@@ -167,7 +167,10 @@ function ThisMonth({ b, u, l }: { b: Billing; u: Usage | undefined; l: Limits | 
           {b.plans.map((p) => (
             <li key={p.price_id} className='flex flex-wrap items-center gap-x-6 gap-y-2 py-3 leading-none'>
               <span className='w-32 font-medium'>{p.name}</span>
-              <span className='text-muted-foreground flex-1 text-sm'>{p.monthly_budget_usd != null ? `Up to ${usd(p.monthly_budget_usd)} of model spend a month` : 'Model spend as you go'}</span>
+              <span className='text-muted-foreground flex-1 text-sm leading-snug'>
+                {p.monthly_budget_usd != null ? `Up to ${usd(p.monthly_budget_usd)} of model spend a month` : 'Model spend as you go'}
+                {p.trial_days ? ` · ${p.trial_days}-day free trial` : ''}{p.description ? <span className='block'>{p.description}</span> : null}
+              </span>
               <span className='tabular-nums'>{money(p.amount, p.currency)}{p.interval && <span className='text-muted-foreground text-sm'> / {p.interval}</span>}</span>
               {b.can_manage && <Button size='sm' disabled={busy !== null} onClick={() => go('/billing/checkout', { price_id: p.price_id }, p.price_id)}>Choose</Button>}
             </li>

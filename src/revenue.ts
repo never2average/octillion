@@ -215,6 +215,7 @@ export async function revenueReport(q: { from?: unknown; to?: unknown } = {}, no
       daily_mrr: p.daily_mrr.map(r2), daily_collected: p.daily_collected.map(r2), daily_active: p.daily_active,
       accounts: [...by.values()].sort((a, b) => b.mrr_usd - a.mrr_usd || a.name.localeCompare(b.name)),
       live: price ? live.has(price.id) : false, monthly_budget_usd: price ? live.get(price.id)?.monthly_budget_usd ?? null : null,
+      experiment: price ? live.get(price.id)?.experiment ?? null : null, weight: price ? live.get(price.id)?.weight ?? 1 : 1, trial_days: price ? live.get(price.id)?.trial_days ?? null : null,
     };
   }).filter((p) => p.subscriptions > 0 || p.collected_usd > 0 || p.live).sort((a, b) => b.mrr_usd - a.mrr_usd || b.collected_usd - a.collected_usd || a.name.localeCompare(b.name));
 

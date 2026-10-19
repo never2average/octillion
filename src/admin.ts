@@ -16,6 +16,7 @@ import { daySeries, reportRange, sparkSpans } from "./insights.js";
 import { createApiKey, createOrg, slugify } from "./auth.js";
 import { capture } from "./telemetry.js";
 import * as billing from "./billing.js";
+import * as experiments from "./experiments.js";
 import { clientCatalog } from "./connect-catalog.js";
 import { getDb } from "./db.js";
 import * as clerk from "./clerk.js";
@@ -604,18 +605,27 @@ export async function setAllowance(actor: string, slug: string, usd: unknown) {
   return { slug, allowance_usd: v };
 }
 
+/**
+ * A checkout link for one plan. From the customer's Billing page (requireAllowed) only a plan the account is offered
+ * (src/experiments.ts offeredPlans: its own variant of each experiment) may be used. The session and subscription are
+ * tagged with the account, and with the experiment and variant when the account was assigned this variant, so the
+ * Experiments tab reads the conversion from Stripe; a link an admin sends for another variant is not counted in it.
+ */
 export async function checkoutLink(actor: string, slug: string, priceId: unknown, returnUrl = `${publicUrl()}/app/billing`, opts: { requireAllowed?: boolean } = {}) {
-  if (opts.requireAllowed) {
-    const [o] = await (await getDb()).query<{ prepaid_allowed: boolean }>("SELECT prepaid_allowed FROM organizations WHERE slug = $1", [slug]);
-    if (!o?.prepaid_allowed) throw new AdminError("Prepaid plans are invite-only: ask your Octillion contact to enable one for this account.", 403);
-  }
+  const db = await getDb();
+  const [o] = await db.query<{ id: number; prepaid_allowed: boolean }>("SELECT id, prepaid_allowed FROM organizations WHERE slug = $1", [slug]);
+  if (!o) throw new AdminError(`No account ${slug}`, 404);
+  if (opts.requireAllowed && !o.prepaid_allowed) throw new AdminError("Prepaid plans are invite-only: ask your Octillion contact to enable one for this account.", 403);
   const plans = await billing.listPlans();
-  const plan = plans.find((p) => p.price_id === priceId);
-  if (!plan) throw new AdminError("Unknown plan: use a price whose lookup_key starts with octillion_");
+  const offered = opts.requireAllowed ? await experiments.offeredPlans(o.id, plans) : plans;
+  const plan = offered.find((p) => p.price_id === priceId);
+  if (!plan) throw new AdminError(opts.requireAllowed && plans.some((p) => p.price_id === priceId) ? "That plan is not offered to this account" : "Unknown plan: use a price whose lookup_key starts with octillion_");
+  const [shown] = plan.experiment ? await db.query<{ price_id: string }>("SELECT price_id FROM plan_exposures WHERE org_id = $1 AND experiment = $2", [o.id, plan.experiment]) : [];
+  const meta = shown?.price_id === plan.price_id ? experiments.checkoutMeta(slug, plan) : { octillion_slug: slug };
   const customer = await ensureCustomer(actor, slug);
   billing.invalidateSubscriptions();
-  log(actor, "billing.checkout_link", slug, { price: plan.price_id });
-  return { url: await billing.checkoutUrl(customer, plan.price_id, returnUrl) };
+  log(actor, "billing.checkout_link", slug, { price: plan.price_id, ...(meta.octillion_experiment ? { experiment: meta.octillion_experiment } : {}) });
+  return { url: await billing.checkoutUrl(customer, plan.price_id, returnUrl, meta, plan.trial_days) };
 }
 
 /** A Stripe customer-portal link: plan changes, card, invoices, cancellation. */
@@ -646,9 +656,31 @@ export async function createPlan(actor: string, body: Record<string, unknown>) {
   const budget = body.monthly_budget_usd == null || body.monthly_budget_usd === "" ? amount : Number(body.monthly_budget_usd);
   if (!Number.isFinite(budget) || budget < 0 || budget > amount * 10) throw new AdminError(`The monthly allowance must be from $0 to $${(amount * 10).toLocaleString("en-US")} (ten times the price)`);
   const lookup = body.lookup_key == null || body.lookup_key === "" ? undefined : String(body.lookup_key).trim();
-  const plan = await billing.createPlan({ name, amount_usd: amount, interval, monthly_budget_usd: budget, lookup_key: lookup });
-  log(actor, "billing.plan_create", null, { price: plan.price_id, lookup_key: plan.lookup_key, amount_usd: amount, interval, monthly_budget_usd: budget });
+  const { experiment, weight } = experimentOf(body);
+  const trial = body.trial_days == null || body.trial_days === "" ? null : Number(body.trial_days);
+  if (trial != null && (!Number.isInteger(trial) || trial < 1 || trial > 730)) throw new AdminError("The free trial must be a whole number of days, 1 to 730");
+  const description = body.description == null ? null : String(body.description).trim().slice(0, 300) || null;
+  const plan = await billing.createPlan({ name, amount_usd: amount, interval, monthly_budget_usd: budget, lookup_key: lookup, experiment, weight, trial_days: trial, description });
+  log(actor, "billing.plan_create", null, { price: plan.price_id, lookup_key: plan.lookup_key, amount_usd: amount, interval, monthly_budget_usd: budget, experiment, weight, trial_days: trial });
   return plan;
+}
+
+const experimentOf = (body: Record<string, unknown>) => {
+  const raw = body.experiment == null ? "" : String(body.experiment).trim();
+  const experiment = raw ? billing.experimentKey(raw) : null;
+  if (raw && !experiment) throw new AdminError("The experiment name needs letters or digits");
+  const weight = body.weight == null || body.weight === "" ? 1 : Number(body.weight);
+  if (!Number.isFinite(weight) || weight <= 0 || weight > 100) throw new AdminError("The traffic weight must be above 0 and at most 100");
+  return { experiment, weight };
+};
+
+/** Put a plan in a pricing experiment, change its weight, or take it out (experiment empty). Stripe price metadata. */
+export async function setPlanExperiment(actor: string, priceId: string, body: Record<string, unknown>) {
+  if (!billing.stripeEnabled()) throw new AdminError("Stripe is not set up on this server", 503);
+  const { experiment, weight } = experimentOf(body);
+  const r = await billing.setPlanExperiment(priceId, experiment, weight);
+  log(actor, "billing.plan_experiment", null, r);
+  return r;
 }
 
 /** Archive a plan in Stripe (never deleted): new checkouts can't use it; current subscribers keep it. */

@@ -7,7 +7,9 @@
 // access token, GET /_mock/public-key -> {pem} for CLERK_JWT_KEY, POST /_mock/subscriptions {customer, price, status?, start_date?, trial_end?,
 // ended_at?, canceled_at?, cancel_at_period_end?, current_period_end?, quantity?, invoice? (default true: one paid invoice now)},
 // POST /_mock/prices {id, unit_amount, interval, ...} (an archived price: not listed with active=true), POST /v1/products and
-// POST /v1/prices (plans made on FinOps; lookup keys unique) and POST /v1/prices/:id (active=false archives),
+// POST /v1/prices (plans made on FinOps; lookup keys unique) and POST /v1/prices/:id (active=false archives; metadata merges,
+// "" removes a key), POST /v1/checkout/sessions (stored, listed by GET /v1/checkout/sessions; POST /_mock/checkout/:id/complete
+// {status?, trial_end?} turns one into a subscription carrying its subscription_data metadata, like a paid checkout),
 // POST /_mock/invoices {customer, amount, status?, created?, paid_at?, subscription?, number?}, POST /_mock/stripe/outage {down} (customer
 // balance transactions answer 500 while down). Times are Unix seconds.
 // Resend: POST /emails (Bearer re_...; an Idempotency-Key header returns the first email's id again for the same body, 409
@@ -34,7 +36,7 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
   const jwk = { ...keyJson.pub, kid: "mock-1", alg: "RS256", use: "sig" };
   const s = {
     orgs: new Map<string, any>(), invitations: new Map<string, any>(), memberships: new Map<string, any>(), users: new Map<string, any>(),
-    customers: new Map<string, any>(), subscriptions: new Map<string, any>(), meterEvents: [] as any[], invoices: [] as any[], balanceTxns: [] as any[], stripeDown: false,
+    customers: new Map<string, any>(), subscriptions: new Map<string, any>(), checkouts: [] as any[], meterEvents: [] as any[], invoices: [] as any[], balanceTxns: [] as any[], stripeDown: false,
     oauth: new Map<string, any>(), keyed: new Map<string, any>(),
     emails: [] as any[], resendKeys: new Map<string, { id: string; body: string }>(), resendDown: false,
     // Cloudflare Workers AI: every chat request (its body), and how to answer one (status and/or content; unset: 503).
@@ -50,13 +52,14 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
   };
   const app = express();
   const MAPS = ["orgs", "invitations", "memberships", "users", "customers", "subscriptions", "oauth", "keyed"] as const;
-  const dump = () => JSON.stringify({ keys: keyJson, meterEvents: s.meterEvents, invoices: s.invoices, balanceTxns: s.balanceTxns,
+  const dump = () => JSON.stringify({ keys: keyJson, meterEvents: s.meterEvents, invoices: s.invoices, balanceTxns: s.balanceTxns, checkouts: s.checkouts,
     ...Object.fromEntries(MAPS.map((k) => [k, [...(s[k] as Map<string, unknown>).entries()]])) });
   const restore = (j: any) => {
     for (const k of MAPS) { const m = s[k] as Map<string, unknown>; m.clear(); for (const [a, b] of j[k] ?? []) m.set(a, b); }
     s.meterEvents.splice(0, s.meterEvents.length, ...(j.meterEvents ?? []));
     s.invoices.splice(0, s.invoices.length, ...(j.invoices ?? []));
     s.balanceTxns.splice(0, s.balanceTxns.length, ...(j.balanceTxns ?? []));
+    s.checkouts.splice(0, s.checkouts.length, ...(j.checkouts ?? []));
   };
   if (saved) restore(saved);
   if (persist) app.use(async (_req, res, next) => {
@@ -223,7 +226,7 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
   st.post("/v1/products", (req, res) => {
     const k = req.get("idempotency-key");
     if (k && keyed.has(k)) return void res.json(keyed.get(k));
-    const p = { id: id("prod"), object: "product", active: true, name: req.body.name, metadata: req.body.metadata ?? {} };
+    const p = { id: id("prod"), object: "product", active: true, name: req.body.name, description: req.body.description ?? null, metadata: req.body.metadata ?? {} };
     s.products.push(p); if (k) keyed.set(k, p); res.json(p);
   });
   st.get("/v1/products", (_req, res) => void res.json({ object: "list", data: s.products, has_more: false }));
@@ -236,7 +239,7 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
       return void res.status(400).json({ error: { message: `A price (\`${b.lookup_key}\`) already uses that lookup key.` } });
     const price = { id: id("price"), object: "price", active: true, lookup_key: b.lookup_key ?? null, unit_amount: Number(b.unit_amount), currency: b.currency,
       recurring: b.recurring ? { interval: b.recurring.interval, interval_count: Number(b.recurring.interval_count ?? 1) } : null, nickname: b.nickname ?? null,
-      metadata: b.metadata ?? {}, product: { id: product.id, name: product.name, metadata: product.metadata } };
+      metadata: b.metadata ?? {}, created: Math.floor(Date.now() / 1000), product: { id: product.id, name: product.name, description: product.description, metadata: product.metadata } };
     s.prices.push(price);
     const out = { ...price, product: product.id };
     if (k) keyed.set(k, out); res.json(out);
@@ -245,14 +248,20 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     const p = s.prices.find((x) => x.id === req.params.id);
     if (!p) return void res.status(404).json({ error: { message: `No such price: '${req.params.id}'` } });
     if (req.body.active != null) p.active = String(req.body.active) === "true";
+    for (const [k, v] of Object.entries(req.body.metadata ?? {})) { if (v === "") delete p.metadata[k]; else p.metadata[k] = String(v); }
     res.json({ ...p, product: p.product?.id ?? p.product });
   });
   st.get("/v1/subscriptions", (req, res) =>
     void res.json({ object: "list", data: [...s.subscriptions.values()].filter((x) => !req.query.customer || x.customer === req.query.customer), has_more: false }));
   st.post("/v1/checkout/sessions", (req, res) => {
     if (!s.customers.has(req.body.customer)) return void res.status(400).json({ error: { message: "No such customer" } });
-    res.json({ id: id("cs"), url: `${getBase()}/checkout/${req.body.customer}/${req.body.line_items?.[0]?.price}` });
+    const b = req.body, cs = { id: id("cs"), object: "checkout.session", created: Math.floor(Date.now() / 1000), status: "open", mode: b.mode, customer: b.customer,
+      price: b.line_items?.[0]?.price, metadata: b.metadata ?? {}, subscription_data: b.subscription_data ?? {}, subscription: null as string | null,
+      url: `${getBase()}/checkout/${b.customer}/${b.line_items?.[0]?.price}` };
+    s.checkouts.push(cs);
+    res.json(cs);
   });
+  st.get("/v1/checkout/sessions", (_req, res) => void res.json({ object: "list", data: s.checkouts.map(({ subscription_data: _sd, price: _p, ...x }) => x), has_more: false }));
   st.post("/v1/billing_portal/sessions", (req, res) => void res.json({ id: id("bps"), url: `${getBase()}/billing/${req.body.customer}` }));
   st.get("/v1/invoices", (req, res) => void res.json({ object: "list", data: s.invoices.filter((i) => !req.query.customer || i.customer === req.query.customer), has_more: false }));
   // Customer balance transactions (credits are negative amounts), with Stripe's idempotency keys.
@@ -335,9 +344,22 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     const start = b.start_date ?? t;
     const sub = { id: id("sub"), object: "subscription", customer: b.customer, status: b.status ?? "active", cancel_at_period_end: Boolean(b.cancel_at_period_end),
       trial_end: b.trial_end ?? null, start_date: start, created: start, ended_at: b.ended_at ?? null, canceled_at: b.canceled_at ?? null, cancel_at: null,
-      current_period_end: b.current_period_end ?? t + 30 * 86400, items: { data: [{ price, quantity: b.quantity ?? 1 }] } };
+      current_period_end: b.current_period_end ?? t + 30 * 86400, metadata: b.metadata ?? {}, items: { data: [{ price, quantity: b.quantity ?? 1 }] } };
     s.subscriptions.set(sub.id, sub);
     if (b.invoice !== false) invoice({ customer: b.customer, amount: price?.unit_amount ?? 0, subscription: sub.id });
+    res.json(sub);
+  });
+  app.post("/_mock/checkout/:id/complete", (req, res) => {
+    const cs = s.checkouts.find((x) => x.id === req.params.id);
+    if (!cs) return void res.status(404).json({ error: "no such checkout" });
+    const t = Math.floor(Date.now() / 1000), price = s.prices.find((p) => p.id === cs.price), trial = Number(cs.subscription_data?.trial_period_days ?? 0);
+    const status = req.body?.status ?? (trial ? "trialing" : "active");
+    const sub = { id: id("sub"), object: "subscription", customer: cs.customer, status, cancel_at_period_end: false, trial_end: trial ? t + trial * 86400 : null,
+      start_date: t, created: t, ended_at: null, canceled_at: null, cancel_at: null, current_period_end: t + 30 * 86400,
+      metadata: cs.subscription_data?.metadata ?? {}, items: { data: [{ price, quantity: 1 }] } };
+    s.subscriptions.set(sub.id, sub);
+    cs.status = "complete"; cs.subscription = sub.id;
+    if (!trial) invoice({ customer: cs.customer, amount: price?.unit_amount ?? 0, subscription: sub.id });
     res.json(sub);
   });
   app.post("/_mock/prices", (req, res) => {

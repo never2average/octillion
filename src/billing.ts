@@ -61,24 +61,36 @@ async function all<T extends { id: string }>(path: string): Promise<T[]> {
   }
 }
 
-export interface Plan { price_id: string; lookup_key: string; name: string; amount: number | null; currency: string; interval: string | null; monthly_budget_usd: number | null }
-export interface Subscription { id: string; customer: string; status: string; current_period_end: number | null; cancel_at_period_end: boolean; trial_end: number | null;
+/**
+ * A plan: a live Stripe price with an octillion_ lookup key. A pricing experiment is Stripe price metadata too:
+ * octillion_experiment (its key; the plans sharing it are its variants) and octillion_weight (the variant's share of
+ * accounts, relative to the others; default 1). octillion_trial_days gives checkout a free trial.
+ */
+export interface Plan { price_id: string; lookup_key: string; name: string; amount: number | null; currency: string; interval: string | null; monthly_budget_usd: number | null;
+  experiment: string | null; weight: number; trial_days: number | null; description: string | null; created: number | null }
+export interface Subscription { id: string; customer: string; status: string; metadata?: Record<string, string>; current_period_end: number | null; cancel_at_period_end: boolean; trial_end: number | null;
   start_date?: number | null; created?: number | null; ended_at?: number | null; canceled_at?: number | null; cancel_at?: number | null;
   items: { data: { quantity?: number | null; current_period_end?: number;
     price: { id: string; lookup_key: string | null; nickname?: string | null; unit_amount?: number | null; currency?: string;
              recurring?: { interval: string; interval_count?: number | null } | null; metadata?: Record<string, string>;
              product?: string | { name?: string; metadata?: Record<string, string> } } }[] } }
 
+const weightOf = (v: unknown) => (Number(v) > 0 ? Number(v) : 1);
+/** An experiment key: lower-case letters, digits, - and _ (it is Stripe metadata and goes in URLs). */
+export const experimentKey = (v: unknown) => String(v ?? "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
 const budgetOf = (meta?: Record<string, string>) => (meta?.monthly_budget_usd != null && meta.monthly_budget_usd !== "" ? Number(meta.monthly_budget_usd) : null);
 
 let plansCache: { at: number; plans: Plan[] } | null = null;
 export async function listPlans(): Promise<Plan[]> {
   if (plansCache && Date.now() - plansCache.at < 5 * 60_000) return plansCache.plans;
-  const prices = await all<{ id: string; lookup_key: string | null; unit_amount: number | null; currency: string; recurring: { interval: string } | null;
-    nickname: string | null; metadata: Record<string, string>; product: { name: string; metadata: Record<string, string> } }>("/v1/prices?active=true&expand[]=data.product");
+  const prices = await all<{ id: string; lookup_key: string | null; unit_amount: number | null; currency: string; recurring: { interval: string } | null; created?: number;
+    nickname: string | null; metadata: Record<string, string>; product: { name: string; description?: string | null; metadata: Record<string, string> } }>("/v1/prices?active=true&expand[]=data.product");
   const plans = prices.filter((p) => p.lookup_key?.startsWith("octillion_")).map((p) => ({
     price_id: p.id, lookup_key: p.lookup_key!, name: p.nickname || p.product?.name || p.lookup_key!, amount: p.unit_amount, currency: p.currency,
     interval: p.recurring?.interval ?? null, monthly_budget_usd: budgetOf(p.metadata) ?? budgetOf(p.product?.metadata),
+    experiment: p.metadata?.octillion_experiment || null, weight: weightOf(p.metadata?.octillion_weight),
+    trial_days: Number(p.metadata?.octillion_trial_days) > 0 ? Number(p.metadata.octillion_trial_days) : null,
+    description: p.product?.description || null, created: p.created ?? null,
   }));
   plansCache = { at: Date.now(), plans };
   return plans;
@@ -90,7 +102,8 @@ export const invalidatePlans = () => { plansCache = null; };
 export const planLookupKey = (name: string) =>
   `octillion_${name.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 60) || "plan"}`;
 
-export interface NewPlan { name: string; amount_usd: number; interval: "month" | "year"; monthly_budget_usd: number; lookup_key?: string }
+export interface NewPlan { name: string; amount_usd: number; interval: "month" | "year"; monthly_budget_usd: number; lookup_key?: string;
+  experiment?: string | null; weight?: number; trial_days?: number | null; description?: string | null }
 
 /**
  * A new prepaid plan in Stripe: a product (metadata octillion=plan, monthly_budget_usd) and a recurring USD price on it
@@ -106,14 +119,28 @@ export async function createPlan(p: NewPlan): Promise<Plan> {
   const live = existing.data.find((x) => x.active);
   if (live) throw new StripeError(`A plan with the lookup key ${lookup_key} already exists. Pick another name.`, 409);
   if (existing.data.length) throw new StripeError(`An archived plan still holds the lookup key ${lookup_key}. Pick another name.`, 409);
-  const idem = `plan-${lookup_key}-${createHash("sha256").update(JSON.stringify([p.name, cents, p.interval, budget])).digest("hex").slice(0, 16)}`;
-  const product = await call<{ id: string }>("POST", "/v1/products", { name: p.name, metadata: { monthly_budget_usd: budget, octillion: "plan" } }, `${idem}-product`);
-  const price = await call<{ id: string; currency: string }>("POST", "/v1/prices", {
+  const experiment = p.experiment ? experimentKey(p.experiment) || null : null, weight = p.weight && p.weight > 0 ? p.weight : 1;
+  const trial = p.trial_days && p.trial_days > 0 ? Math.round(p.trial_days) : null, description = p.description?.trim() || null;
+  const idem = `plan-${lookup_key}-${createHash("sha256").update(JSON.stringify([p.name, cents, p.interval, budget, experiment, weight, trial, description])).digest("hex").slice(0, 16)}`;
+  const product = await call<{ id: string }>("POST", "/v1/products", { name: p.name, description: description ?? undefined, metadata: { monthly_budget_usd: budget, octillion: "plan" } }, `${idem}-product`);
+  const price = await call<{ id: string; currency: string; created?: number }>("POST", "/v1/prices", {
     product: product.id, currency: "usd", unit_amount: cents, recurring: { interval: p.interval }, nickname: p.name, lookup_key,
-    metadata: { monthly_budget_usd: budget },
+    metadata: { monthly_budget_usd: budget, ...(experiment ? { octillion_experiment: experiment, octillion_weight: String(weight) } : {}), ...(trial ? { octillion_trial_days: String(trial) } : {}) },
   }, `${idem}-price`);
   invalidatePlans();
-  return { price_id: price.id, lookup_key, name: p.name, amount: cents, currency: price.currency ?? "usd", interval: p.interval, monthly_budget_usd: p.monthly_budget_usd };
+  return { price_id: price.id, lookup_key, name: p.name, amount: cents, currency: price.currency ?? "usd", interval: p.interval, monthly_budget_usd: p.monthly_budget_usd,
+           experiment, weight, trial_days: trial, description, created: price.created ?? null };
+}
+
+/** Put a plan in a pricing experiment (or take it out: experiment null), with its traffic weight. Stripe price metadata. */
+export async function setPlanExperiment(priceId: string, experiment: string | null, weight = 1): Promise<{ price_id: string; experiment: string | null; weight: number }> {
+  if (!/^price_[A-Za-z0-9_]+$/.test(priceId)) throw new StripeError("Unknown plan", 404);
+  const price = await call<{ id: string; lookup_key: string | null }>("GET", `/v1/prices/${priceId}`);
+  if (!price.lookup_key?.startsWith("octillion_")) throw new StripeError("That price is not an Octillion plan", 400);
+  const key = experiment ? experimentKey(experiment) || null : null, w = weight > 0 ? weight : 1;
+  await call("POST", `/v1/prices/${priceId}`, { metadata: { octillion_experiment: key ?? "", octillion_weight: key ? String(w) : "" } });
+  invalidatePlans();
+  return { price_id: priceId, experiment: key, weight: key ? w : 1 };
 }
 
 /** Archive a plan (price active=false): it leaves listPlans and checkout; Stripe keeps it and any subscription on it. Never deleted. */
@@ -189,13 +216,31 @@ export async function allInvoices(fresh = false): Promise<Invoice[]> {
   return invoices;
 }
 
-export async function checkoutUrl(customer: string, priceId: string, returnUrl: string) {
+/**
+ * A hosted checkout for one plan. `meta` (the account's slug, and the experiment and variant when the plan is in one)
+ * goes on the session and on the subscription it makes, so Stripe itself records which variant converted. A plan
+ * with octillion_trial_days starts with that free trial.
+ */
+export async function checkoutUrl(customer: string, priceId: string, returnUrl: string, meta: Record<string, string> = {}, trialDays?: number | null) {
   const s = await call<{ url: string }>("POST", "/v1/checkout/sessions", {
     mode: "subscription", customer, line_items: [{ price: priceId, quantity: 1 }],
-    success_url: returnUrl, cancel_url: returnUrl, allow_promotion_codes: true,
+    success_url: returnUrl, cancel_url: returnUrl, allow_promotion_codes: true, metadata: meta,
+    subscription_data: { metadata: meta, ...(trialDays ? { trial_period_days: trialDays } : {}) },
   });
+  invalidateCheckouts();
   return s.url;
 }
+
+export interface CheckoutSession { id: string; created: number; status: string | null; customer: string | null; subscription?: string | { id: string } | null; metadata?: Record<string, string> }
+let checkoutsCache: { at: number; sessions: CheckoutSession[] } | null = null;
+/** Every checkout session (paged, at most 5,000), cached a minute: the started side of a pricing experiment. */
+export async function allCheckoutSessions(fresh = false): Promise<CheckoutSession[]> {
+  if (!fresh && checkoutsCache && Date.now() - checkoutsCache.at < 60_000) return checkoutsCache.sessions;
+  const sessions = await all<CheckoutSession>("/v1/checkout/sessions");
+  checkoutsCache = { at: Date.now(), sessions };
+  return sessions;
+}
+export const invalidateCheckouts = () => { checkoutsCache = null; };
 
 /** Stripe's hosted portal: change plan, card, billing email; download invoices; cancel. */
 export async function portalUrl(customer: string, returnUrl: string) {

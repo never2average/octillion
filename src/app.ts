@@ -13,6 +13,7 @@ import * as admin from "./admin.js";
 import { orgForClerk } from "./auth.js";
 import { orgBudget } from "./billing.js";
 import * as billing from "./billing.js";
+import * as experiments from "./experiments.js";
 import { getDb } from "./db.js";
 import { getProduct, HIT, listProducts, orgMonthSpendUsd, saveProduct, saveScenarios } from "./queries.js";
 import * as context from "./context.js";
@@ -309,7 +310,8 @@ async function billingView(s: Session) {
   return {
     enabled: billing.stripeEnabled(), customer: Boolean(f.stripe_customer_id), subscription, budget_usd: budget, budget_source: source,
     prepaid_allowed: Boolean(f.prepaid_allowed), month_spend_usd: await orgMonthSpendUsd(s.org),
-    plans: billing.stripeEnabled() && f.prepaid_allowed ? (await billing.listPlans().catch(() => [])).map((p) => ({ price_id: p.price_id, name: p.name, amount: p.amount, currency: p.currency, interval: p.interval, monthly_budget_usd: p.monthly_budget_usd })) : [],
+    // Plans are invite-only; in a pricing experiment the account sees only its own variant (src/experiments.ts).
+    plans: billing.stripeEnabled() && f.prepaid_allowed ? (await experiments.offeredPlans(s.org, await billing.listPlans()).catch(() => [] as billing.Plan[])).map((p) => ({ price_id: p.price_id, name: p.name, amount: p.amount, currency: p.currency, interval: p.interval, monthly_budget_usd: p.monthly_budget_usd, trial_days: p.trial_days, description: p.description })) : [],
   };
 }
 

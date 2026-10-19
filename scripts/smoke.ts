@@ -4579,6 +4579,73 @@ try {
       console.log("✓ plans: owner creates a Stripe product + price (octillion_ lookup key, allowance), double submit = one, duplicate refused, operator 403, listed in checkout and FinOps, archive");
     }
 
+    // ---------- Pricing experiments (src/experiments.ts): variants in Stripe metadata, sticky weighted assignment, tagged checkout, results ----------
+    {
+      const B = await import("../src/billing.js");
+      const E = await import("../src/experiments.js");
+      const exp = `price-test-${stamp}`.toLowerCase();
+      for (const bad of [{ experiment: exp, weight: 0 }, { experiment: exp, weight: 101 }, { experiment: "!!!" }, { trial_days: 0 }, { trial_days: 1.5 }])
+        assert.equal((await adm("POST", "/plans", { name: `Exp bad ${stamp}`, amount_usd: 10, ...bad })).status, 400, `refused: ${JSON.stringify(bad)}`);
+      const vA = await json(adm("POST", "/plans", { name: `Exp A ${stamp}`, amount_usd: 200, interval: "month", experiment: exp.toUpperCase(), trial_days: 14, description: "Variant A" }));
+      const vB = await json(adm("POST", "/plans", { name: `Exp B ${stamp}`, amount_usd: 300, interval: "month", experiment: exp, weight: 1 }));
+      assert.deepEqual([vA.experiment, vA.weight, vA.trial_days, vB.experiment], [exp, 1, 14, exp], "experiment key normalised; weight, trial kept");
+      const priceA = mock.state.prices.find((p: any) => p.id === vA.price_id);
+      assert.deepEqual([priceA.metadata.octillion_experiment, priceA.metadata.octillion_weight, priceA.metadata.octillion_trial_days], [exp, "1", "14"], "it is Stripe price metadata");
+      B.invalidatePlans();
+      const variantsP = (await B.listPlans()).filter((p) => p.experiment === exp);
+      assert.equal(variantsP.length, 2);
+      const split: Record<string, number> = {};
+      for (let i = 1; i <= 4000; i++) { const x = E.pickVariant(i, exp, variantsP)!; split[x.price_id] = (split[x.price_id] ?? 0) + 1; }
+      assert.ok(Math.abs(split[vA.price_id] - 2000) < 200, `about 50/50 (${split[vA.price_id]} of 4000)`);
+      const heavy = variantsP.map((p) => (p.price_id === vB.price_id ? { ...p, weight: 3 } : p)), split3: Record<string, number> = {};
+      for (let i = 1; i <= 4000; i++) { const x = E.pickVariant(i, exp, heavy)!; split3[x.price_id] = (split3[x.price_id] ?? 0) + 1; }
+      assert.ok(Math.abs(split3[vB.price_id] - 3000) < 200, "weight 3 to 1 is about 75/25");
+
+      // The customer's Billing page: one variant, the same every time, even after the weights change.
+      const shown = async () => (await json(appCall(ownerC, "GET", "/billing"))).plans.filter((p: any) => p.price_id === vA.price_id || p.price_id === vB.price_id);
+      const first = await shown();
+      assert.equal(first.length, 1, "an account sees one variant of an experiment");
+      const mine = first[0].price_id, other = mine === vA.price_id ? vB.price_id : vA.price_id;
+      assert.ok((await json(appCall(ownerC, "GET", "/billing"))).plans.some((p: any) => p.price_id === "price_mock_starter"), "plans in no experiment are still offered");
+      await json(adm("POST", `/plans/${mine}/experiment`, { experiment: exp, weight: 0.01 }));
+      assert.equal((await shown())[0].price_id, mine, "sticky: a weight change does not move an account already shown a variant");
+      assert.equal((await appCall(ownerC, "POST", "/billing/checkout", { price_id: other })).status, 400, "the other variant can't be checked out from the page");
+      // Checkout: the session and the subscription carry the account, experiment and variant; a trial plan starts in trial.
+      await json(appCall(ownerC, "POST", "/billing/checkout", { price_id: mine }));
+      const cs = mock.state.checkouts.at(-1);
+      assert.deepEqual(cs.metadata, { octillion_slug: slugW, octillion_experiment: exp, octillion_variant: mine }, "checkout session metadata");
+      assert.deepEqual(cs.subscription_data.metadata, cs.metadata, "subscription metadata");
+      assert.equal(cs.subscription_data.trial_period_days ? Number(cs.subscription_data.trial_period_days) : null, mine === vA.price_id ? 14 : null, "the plan's free trial");
+      const sub = await mockPost(`/_mock/checkout/${cs.id}/complete`, {});
+      // Two more accounts are shown a variant and do not subscribe.
+      const others: number[] = [];
+      for (const n of [1, 2]) others.push((await db.query<{ id: number }>("INSERT INTO organizations (slug, name) VALUES ($1, $2) RETURNING id", [`exp-${n}-${stamp}`, `Exp ${n} ${stamp}`]))[0].id);
+      B.invalidatePlans();
+      for (const id of others) await E.offeredPlans(id, await B.listPlans());
+      const shownTo = await db.query<{ org_id: number; price_id: string }>("SELECT org_id, price_id FROM plan_exposures WHERE experiment = $1", [exp]);
+      assert.equal(shownTo.length, 3, "one exposure per account and experiment");
+      B.invalidateSubscriptions(); B.invalidateCheckouts();
+      const rep = await json(adm("GET", "/spend/experiments"));
+      const row = (id: string) => rep.variants.find((x: any) => x.experiment === exp && x.price_id === id);
+      const exposedTo = (id: string) => shownTo.filter((x) => x.price_id === id).length;
+      const rm = row(mine), ro = row(other);
+      assert.deepEqual([rm.exposed, rm.checkouts, rm.completed, rm.converted], [exposedTo(mine), 1, 1, 1], "shown, checkout started and completed, subscribed: read back from Stripe");
+      assert.equal(rm.conversion_pct, Math.round((1 / exposedTo(mine)) * 1000) / 10, "conversion = subscribed / shown");
+      assert.ok(rm.ci && rm.ci[0] < rm.conversion_pct && rm.ci[1] >= rm.conversion_pct, "with its Wilson interval");
+      assert.deepEqual([ro.converted, ro.checkouts, ro.exposed], [0, 0, exposedTo(other)]);
+      assert.equal(rep.variants.filter((x: any) => x.experiment === exp && x.control).length, 1, "one control per experiment");
+      if (sub.status === "trialing") assert.deepEqual([rm.trialing, rm.paying, rm.mrr_usd], [1, 0, 0], "in trial: not paying yet");
+      else assert.deepEqual([rm.paying, rm.mrr_usd, rm.collected_usd], [1, 300, 300], "paying: MRR and the paid invoice");
+      assert.ok(rep.running.includes(exp) && rep.totals.accounts >= 3);
+      // Out of the experiment: no longer a variant (results keep it, as ended); operator can't change it.
+      await json(adm("POST", `/plans/${other}/experiment`, { experiment: "" }));
+      B.invalidatePlans();
+      assert.equal((await B.listPlans()).find((p) => p.price_id === other)?.experiment, null);
+      assert.equal(row(other) && (await json(adm("GET", "/spend/experiments"))).variants.find((x: any) => x.price_id === other && x.experiment === exp)?.live, false, "an ended variant stays in the results");
+      for (const id of [vA.price_id, vB.price_id]) await json(adm("POST", `/plans/${id}/archive`));
+      console.log("✓ pricing experiments: variants as Stripe price metadata, ~50/50 and weighted split, one sticky variant per account, tagged checkout + trial, exposure/checkout/conversion/MRR read back, control, leave");
+    }
+
     // Usage metering: a finished session's cost goes to the Stripe meter once.
     const { reportSessionSpend } = await import("../src/billing.js");
     const [sess] = await db.query<{ id: string }>("SELECT id FROM agent_sessions WHERE org_id = $1 LIMIT 1", [a.org.orgId]);

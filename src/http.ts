@@ -440,6 +440,7 @@ export function createApp() {
   // Plans (src/billing.ts): Stripe prices with an octillion_ lookup key. Owners add one (a product and a price) or archive one.
   ob.get("/plans", async (_req, res) => void res.json(await onboarding.plans()));
   ob.post("/plans", need("plans"), async (req, res) => void res.status(201).json(await onboarding.createPlan(adminActor(req, res), req.body ?? {})));
+  ob.post("/plans/:price_id/experiment", need("plans"), async (req, res) => void res.json(await onboarding.setPlanExperiment(adminActor(req, res), String(req.params.price_id), req.body ?? {})));
   ob.post("/plans/:price_id/archive", need("plans"), async (req, res) => void res.json(await onboarding.archivePlan(adminActor(req, res), String(req.params.price_id))));
   ob.post("/orgs/:slug/keys", need("accounts"), async (req, res) => void res.status(201).json(await onboarding.issueKey(adminActor(req, res), slug(req), req.body?.label)));
   ob.post("/orgs/:slug/keys/:id/revoke", need("delete"), async (req, res) => done(res, await onboarding.revokeKey(adminActor(req, res), slug(req), Number(req.params.id))));
@@ -504,6 +505,7 @@ export function createApp() {
   ob.get("/spend/accounts/:key", async (req, res) => void res.json(await spend.accountSpend(String(req.params.key), req.query)));
   // FinOps › Revenue (src/revenue.ts): Stripe subscriptions and invoices against metered model spend; Stripe off or down is a 200 that says so.
   ob.get("/spend/revenue", async (req, res) => void res.json(await (await import("./revenue.js")).revenueReport(req.query)));
+  ob.get("/spend/experiments", async (req, res) => void res.json(await (await import("./experiments.js")).experimentsReport(req.query)));
   // The page's only two actions (src/compute-actions.ts), both in the admin audit log: run one autoscaler tick now, and
   // cancel a queued or running session (its orchestrator stops the sandbox at the next heartbeat).
   ob.post("/compute/tick", need("compute"), async (req, res) => void res.json(await actions.runTick(adminActor(req, res))));
