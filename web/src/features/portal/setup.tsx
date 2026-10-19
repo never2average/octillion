@@ -304,42 +304,50 @@ function JourneyView({ j, onChanged, note }: { j: Journey; onChanged: () => void
   const done = j.stages.filter(isDone).length;
   const current = j.stages.find((x) => !isDone(x));
   const pct = j.total ? Math.round((done / j.total) * 100) : 0;
+  // Laid out exactly like Get set up (Timeline): progress, a vertical timeline with the earliest open stage highlighted.
   return (
-    <Section title={j.name} description={j.outcome} action={<Badge variant={pct === 100 ? 'default' : 'secondary'}>{done} of {j.total} stages</Badge>}>
-      <div className='text-muted-foreground flex flex-wrap gap-x-4 gap-y-1 text-xs'><span>For: {j.who}</span><span>Takes: {j.time}</span></div>
-      <div className='bg-muted h-1.5 overflow-hidden rounded-full'><div className='bg-primary h-full transition-all' style={{ width: `${pct}%` }} /></div>
-      <div className='border-primary/40 bg-primary/5 rounded-r-md border-l-2 px-3 py-2 text-sm'>
-        <div className='text-xs font-medium'>Worked example · {j.example.title}</div>
-        <p className='text-muted-foreground mt-0.5'>{j.example.result}</p>
-      </div>
-      <ol className='divide-y'>
+    <Section title={j.name} description={`${done} of ${j.total} stages done.`}
+      action={<Badge variant={pct === 100 ? 'default' : 'secondary'}>{pct}%</Badge>}>
+      <div className='bg-muted h-1.5 overflow-hidden rounded-full'><div className='bg-primary h-full rounded-full transition-all' style={{ width: `${pct}%` }} /></div>
+      <ol className='mt-3'>
         {j.stages.map((x, i) => {
-          const ok = isDone(x), now = current?.id === x.id;
+          const ok = isDone(x), cur = current?.id === x.id;
+          const last = i === j.stages.length - 1;
+          const gated = !!note && x.tools.some((t) => t === 'run_simulation' || t === 'onboard_product');
           return (
-            <li key={x.id} className='flex gap-3 py-4'>
-              <span className={cn('mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full border-2 text-xs font-semibold',
-                ok ? 'border-primary bg-primary text-primary-foreground' : now ? 'border-primary text-primary' : 'border-muted-foreground/30 text-muted-foreground')}>
-                {ok ? <Icons.check className='size-3.5' /> : i + 1}
+            <li key={x.id} className='relative flex gap-4 pb-7 last:pb-0'>
+              {!last && <span aria-hidden='true' className={cn('absolute top-8 bottom-0 left-[15px] w-px', ok ? 'bg-primary/60' : 'bg-border')} />}
+              <span className={cn('relative z-10 flex size-8 shrink-0 items-center justify-center rounded-full border-2 text-xs font-semibold tabular-nums',
+                ok ? 'border-primary bg-primary text-primary-foreground' : cur ? 'border-primary text-primary bg-background ring-primary/20 ring-4' : 'border-border text-muted-foreground bg-background')}>
+                {ok ? <Icons.check className='size-4' /> : i + 1}
               </span>
-              <div className='min-w-0 flex-1 space-y-2'>
+              <div className={cn('min-w-0 flex-1 pt-1', cur && 'bg-primary/5 -mt-1 rounded-lg px-4 py-3')}>
                 <div className='flex flex-wrap items-center gap-2'>
-                  <span className='font-medium'>{x.title}</span>
-                  {x.tools.map((t) => <code key={t} className='text-muted-foreground bg-muted rounded px-1.5 py-0.5 font-mono text-[11px]'>{t}</code>)}
-                  {x.done && x.at && <span className='text-muted-foreground text-xs'>done <When d={x.at} /></span>}
+                  <span className={cn('font-medium', ok && 'text-muted-foreground')}>{x.title}</span>
                 </div>
-                <p className='text-muted-foreground text-sm'>{x.why}</p>
-                {!ok && (x.manual
-                  ? <div className='flex flex-wrap items-center gap-2'><span className='text-sm'>{x.prompt}</span><Allowed need='edit'><Button size='sm' variant='outline' disabled={busy === x.id} onClick={() => toggle(x.id, true)}>Mark done</Button></Allowed></div>
-                  : note && x.tools.some((t) => t === 'run_simulation' || t === 'onboard_product') ? <p className='text-muted-foreground text-sm'>{note}</p>
-                  : <CodeLine text={x.prompt} label='Prompt' />)}
-                {x.manual && ok && <Allowed need='edit'><Button size='sm' variant='ghost' className='text-muted-foreground' disabled={busy === x.id} onClick={() => toggle(x.id, false)}>Undo</Button></Allowed>}
-                <p className='text-xs'><span className='font-medium'>You’ll see:</span> <span className='text-muted-foreground'>{x.expect}</span></p>
+                <div className='mt-1 flex flex-col gap-2'>
+                  <p className={cn('text-sm select-text', ok ? 'text-muted-foreground/70' : 'text-muted-foreground')}>{x.why} You&apos;ll see: {x.expect}</p>
+                  {!ok && (x.manual ? (
+                    <div className='flex flex-wrap items-center gap-2'>
+                      <span className='text-sm'>{x.prompt}</span>
+                      <Allowed need='edit'><Button size='sm' variant='outline' disabled={busy === x.id} onClick={() => toggle(x.id, true)}>Mark done</Button></Allowed>
+                    </div>
+                  ) : gated ? <p className='text-muted-foreground text-sm'>{note}</p> : (
+                    <div className='bg-muted/50 flex items-center gap-2 rounded-md border px-3 py-2'>
+                      <code className='min-w-0 flex-1 font-mono text-xs break-words select-all'>{x.prompt}</code>
+                      <CopyButton text={x.prompt} label='Copy prompt' />
+                    </div>
+                  ))}
+                  {x.manual && ok && <Allowed need='edit'><Button size='sm' variant='ghost' className='text-muted-foreground self-start' disabled={busy === x.id} onClick={() => toggle(x.id, false)}>Undo</Button></Allowed>}
+                </div>
               </div>
             </li>
           );
         })}
       </ol>
-      {done >= j.total && <p className='text-muted-foreground text-sm'>Pipeline complete. Run it again after your next change, or pick another journey.</p>}
+      <p className='text-muted-foreground border-t pt-3 text-sm'>
+        {done >= j.total ? 'Pipeline complete. Run it again after your next change, or pick another journey.' : <>Worked example: <span className='text-foreground'>{j.example.title}</span>. {j.example.result}</>}
+      </p>
     </Section>
   );
 }
