@@ -127,7 +127,14 @@ export interface ProductInput {
   aliases?: string[]; packages?: string[]; domains?: string[]; competitors?: Tool[];
 }
 
-export async function saveProduct(org: Org, input: ProductInput) {
+/**
+ * Which surface a read serves. The MCP connector (the customer's AI client) sees everything its product holds, library
+ * copies included; the customer portal (/api/app, src/app.ts) passes `redact: true`, and tasks or personas that came from
+ * Octillion's shared library then show by title or name only (forCustomer, personaForCustomer).
+ */
+export interface Surface { redact?: boolean }
+
+export async function saveProduct(org: Org, input: ProductInput, surface: Surface = {}) {
   const db = await getDb();
   const existing = input.product ? await resolveProduct(org, input.product).catch(() => null) : null;
   const clean = (xs?: string[]) => (xs ? [...new Set(xs.map((x) => x.trim()).filter(Boolean))] : undefined);
@@ -148,7 +155,7 @@ export async function saveProduct(org: Org, input: ProductInput) {
        input.docs_url ?? null, clean(input.aliases) ?? null, clean(input.packages) ?? null, clean(input.domains) ?? null,
        competitors ? JSON.stringify(competitors) : null],
     );
-    return getProduct(org, existing.slug);
+    return getProduct(org, existing.slug, surface);
   }
   if (!input.name) throw new Error(input.product ? `No product "${input.product}"; pass name to create it.` : "name is required to create a product");
   const slug = slugify(input.product ?? input.name) || "product";
@@ -158,10 +165,10 @@ export async function saveProduct(org: Org, input: ProductInput) {
     [org.orgId, slug, input.name, input.description ?? "", input.category ?? "", input.website_url ?? null, input.docs_url ?? null,
      clean(input.aliases) ?? [], clean(input.packages) ?? [], clean(input.domains) ?? [], JSON.stringify(competitors ?? [])],
   );
-  return getProduct(org, slug);
+  return getProduct(org, slug, surface);
 }
 
-export async function getProduct(org: Org, ref?: string) {
+export async function getProduct(org: Org, ref?: string, surface: Surface = {}) {
   const p = await resolveProduct(org, ref);
   const db = await getDb();
   const scenarios = await db.query(
@@ -175,7 +182,7 @@ export async function getProduct(org: Org, ref?: string) {
     [p.id],
   );
   await openRows(org.orgId, scenarios as any[], ["prompt", "rationale"]);
-  const warnings = scenarios.filter((sc: any) => sc.active && !sc.library_task_id && namesProduct(sc.prompt, p))
+  const warnings = scenarios.filter((sc: any) => sc.active && (!surface.redact || !sc.library_task_id) && namesProduct(sc.prompt, p))
     .map((sc: any) => `Scenario ${sc.id} ("${sc.title}") names ${p.name} in its prompt, which biases the agent. Rephrase it as a neutral task.`);
   const simulations = await db.query(
     `/* tenant: product from resolveProduct(org) */ SELECT id, name, status, models, repeats, created_at FROM simulations WHERE product_id = $1 ORDER BY created_at DESC LIMIT 5`,
@@ -184,7 +191,7 @@ export async function getProduct(org: Org, ref?: string) {
   return {
     view: "product" as const,
     product: p,
-    scenarios: scenarios.map((s: any) => ({ ...forCustomer(s), hit_rate: rate(s.hits, s.sessions) })),
+    scenarios: scenarios.map((s: any) => ({ ...(surface.redact ? forCustomer(s) : s), hit_rate: rate(s.hits, s.sessions) })),
     simulations,
     warnings,
     models: await config.models(),
@@ -192,13 +199,11 @@ export async function getProduct(org: Org, ref?: string) {
   };
 }
 
-/** Shown in place of the prompt of a task Octillion's curated library supplied. */
-export const CURATED = "Curated by Octillion";
-
 /**
- * The curated task library and shared developer personas are Octillion's IP. A task research picked from the library
- * into a customer's product is theirs to run and to see by title and status, never by its prompt or library metadata
+ * Portal only (Surface.redact): the portal never shows Octillion's curated task library. A task research picked from
+ * the library into a customer's product shows there by title and status, never by its prompt or library metadata
  * (prompt, rationale, repo, language, tags, template, library id); everything else passes through, with `curated`.
+ * Over MCP the same task is returned whole (browse_task_library lists the library itself).
  */
 export function forCustomer<T extends Record<string, any>>(s: T): Omit<T, "library_task_id"> & { curated: boolean } {
   const { library_task_id, ...rest } = s;
@@ -209,7 +214,7 @@ export function forCustomer<T extends Record<string, any>>(s: T): Omit<T, "libra
   return { ...rest, prompt: null, curated } as any;
 }
 
-/** A persona copied from the shared library into the account (source 'picked'): its name only, never its content. */
+/** Portal only (Surface.redact): a persona copied from the shared library into the account (source 'picked') by name only. */
 export function personaForCustomer<T extends Record<string, any>>(p: T): T & { curated: boolean } {
   if (p.source !== "picked") return { ...p, curated: false };
   const out: any = { ...p, curated: true, summary: null, attributes: {} };
@@ -244,7 +249,7 @@ export function checkTemplate(t: string | null | undefined): string | null | und
 }
 
 export interface ScenarioInput {
-  id?: number; title?: string; prompt?: string; repo_url?: string; language?: string; tags?: string[];
+  id?: number; library_task_id?: number; title?: string; prompt?: string; repo_url?: string; language?: string; tags?: string[];
   expectation?: "recommend" | "avoid"; active?: boolean;
   /** Starter workspace when there is no repo_url; omit to let the orchestrator pick from language/tags/prompt. */
   template?: string | null;
@@ -259,10 +264,6 @@ export async function saveScenarios(org: Org, productRef: string | undefined, it
     for (let s of items) {
       let template = checkTemplate(s.template);
       if (s.id !== undefined) {
-        const [cur] = await tx.query<{ library_task_id: number | null }>(
-          "/* tenant: product from resolveProduct(org) */ SELECT library_task_id FROM scenarios WHERE id = $1 AND product_id = $2", [s.id, p.id]);
-        if (cur?.library_task_id != null && (["title", "prompt", "repo_url", "language", "tags", "template", "platform", "expectation"] as const).some((k) => s[k] !== undefined))
-          throw new Error(`Scenario ${s.id} is curated by Octillion: it can only be turned on or off (active)`);
         const [row] = await tx.query(
           `/* tenant: product from resolveProduct(org); scenario id must belong to it */ UPDATE scenarios SET title = coalesce($3, title), prompt = coalesce($4, prompt), repo_url = coalesce($5, repo_url),
                   language = coalesce($6, language), tags = coalesce($7, tags), expectation = coalesce($8, expectation),
@@ -276,15 +277,21 @@ export async function saveScenarios(org: Org, productRef: string | undefined, it
         // A new template moves the task to that template's platform unless one was given.
         if (template && !s.platform) await tx.query("/* tenant: scenario id just verified against product_id from resolveProduct(org) above */ UPDATE scenarios SET platform = $2 WHERE id = $1", [s.id, platformOf({ template })]);
       } else {
-        // Curated library tasks reach a product only through onboarding research (src/research.ts), never by id from here.
-        if ((s as { library_task_id?: unknown }).library_task_id !== undefined)
-          throw new Error("library_task_id is not accepted: Octillion's curated tasks are picked for your product during onboarding (onboard_product)");
-        if (!s.prompt?.trim()) throw new Error("New scenarios need a prompt (the task given to the agent)");
+        if (s.library_task_id !== undefined) {
+          // An active library task only (an inactive or admin-hidden one is not public).
+          const [t] = await tx.query<any>("SELECT * FROM library_tasks WHERE id = $1 AND active", [s.library_task_id]);
+          if (!t) throw new Error(`No library task ${s.library_task_id}; see browse_task_library`);
+          s = { ...s, title: s.title ?? t.title, prompt: s.prompt ?? t.prompt, repo_url: s.repo_url ?? t.repo_url ?? undefined,
+                language: s.language ?? t.language ?? undefined, tags: s.tags ?? t.tags, platform: s.platform ?? t.platform ?? undefined };
+          // Curated tasks carry the starter workspace they were written for.
+          if (template == null && (WORKSPACE_TEMPLATES as readonly string[]).includes(t.attributes?.template)) template = t.attributes.template;
+        }
+        if (!s.prompt?.trim()) throw new Error("New scenarios need a prompt (the task given to the agent) or a library_task_id");
         await tx.query(
-          `/* tenant: product from resolveProduct(org) */ INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, template, platform)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+          `/* tenant: product from resolveProduct(org) */ INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, library_task_id, template, platform)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
           [p.id, s.title?.trim() || s.prompt.trim().slice(0, 80), s.prompt.trim(), s.repo_url ?? null, s.language ?? null,
-           s.tags ?? [], s.expectation ?? "recommend", s.active ?? true, template ?? null,
+           s.tags ?? [], s.expectation ?? "recommend", s.active ?? true, s.library_task_id ?? null, template ?? null,
            checkPlatform(s.platform) ?? platformOf({ template, language: s.language, tags: s.tags, prompt: s.prompt })],
         );
       }
@@ -325,7 +332,7 @@ export async function getStarted(org: Org) {
   } else if (!d.products.some((p: any) => Number(p.scenarios) > 0)) {
     stage = "onboarding";
     say = "How is my onboarding going?";
-    next = `${first.name} is set up but has no tasks yet. Call get_onboarding to see whether research is still running (it picks Octillion-curated tasks for the product); if it finished without tasks, add your own with save_scenarios or import_tasks.`;
+    next = `${first.name} is set up but has no tasks yet. Call get_onboarding to see whether research is still running; if it finished without tasks, add some with save_scenarios (browse_task_library has curated ones).`;
   } else if (running) {
     stage = "running";
     say = "How is my simulation doing?";
@@ -411,7 +418,7 @@ export async function runSimulation(org: Org, input: RunInput) {
     profiles = await db.query<{ id: number; slug: string }>(
       "SELECT id, slug FROM developer_profiles WHERE active AND slug = ANY($1) AND (org_id IS NULL OR org_id = $2) ORDER BY id", [wanted, org.orgId]);
     const missing = wanted.filter((w) => !profiles.some((p: any) => p.slug === w));
-    if (missing.length) throw new Error(`Unknown developer profile(s): ${missing.join(", ")}. See list_personas.`);
+    if (missing.length) throw new Error(`Unknown developer profile(s): ${missing.join(", ")}. See list_developer_profiles.`);
   }
   const profileIds: (number | null)[] = profiles.length ? profiles.map((p) => p.id) : [null];
   // A run on the org's own tasks or personas is private: only an orchestrator launched for this run may claim it.
@@ -741,7 +748,7 @@ export async function getReport(org: Org, input: { product?: string; days?: numb
     params,
   );
   const byProfile = await db.query<any>(
-    `SELECT CASE WHEN dp.org_id IS NULL THEN NULL ELSE dp.slug END AS slug, dp.name, count(*) AS sessions, count(*) FILTER (WHERE ${HIT}) AS hits, avg(s.user_turns)::float AS avg_user_turns
+    `SELECT dp.slug, dp.name, count(*) AS sessions, count(*) FILTER (WHERE ${HIT}) AS hits, avg(s.user_turns)::float AS avg_user_turns
        FROM ${from.replace(" WHERE ", " JOIN developer_profiles dp ON dp.id = s.profile_id WHERE ")}
       GROUP BY dp.id ORDER BY dp.name`,
     params,
@@ -763,7 +770,7 @@ export async function getReport(org: Org, input: { product?: string; days?: numb
   const weightSum = agentRows.reduce((s, a) => s + (a.hit_rate == null ? 0 : a.weight), 0);
   const weighted = weightSum ? agentRows.reduce((s, a) => s + (a.hit_rate ?? 0) * a.weight, 0) / weightSum : null;
   const byScenario = await db.query<any>(
-    `SELECT sc.id, sc.title, sc.expectation, sc.platform, (sc.library_task_id IS NOT NULL OR sc.source = 'library') AS curated, sc.source, count(*) AS sessions, count(*) FILTER (WHERE ${HIT}) AS hits,
+    `SELECT sc.id, sc.title, sc.expectation, sc.platform, sc.library_task_id, sc.source, count(*) AS sessions, count(*) FILTER (WHERE ${HIT}) AS hits,
             mode() WITHIN GROUP (ORDER BY s.winner) FILTER (WHERE s.winner IS NOT NULL) AS usual_winner
        FROM ${from} GROUP BY sc.id ORDER BY count(*) FILTER (WHERE ${HIT})::float / count(*), sc.id`,
     params,
@@ -789,7 +796,7 @@ export async function getReport(org: Org, input: { product?: string; days?: numb
       WHERE ${base} AND s.status NOT IN ('queued', 'running', 'cancelled')`,
     params,
   );
-  const promptRows = await openRows(org.orgId, await db.query<any>("/* tenant: product from resolveProduct(org) */ SELECT id, prompt FROM scenarios WHERE product_id = $1 AND library_task_id IS NULL AND source <> 'library'", [p.id]), ["prompt"]);
+  const promptRows = await openRows(org.orgId, await db.query<any>("/* tenant: product from resolveProduct(org) */ SELECT id, prompt FROM scenarios WHERE product_id = $1", [p.id]), ["prompt"]);
   const prompts = new Map(promptRows.map((r: any) => [Number(r.id), String(r.prompt ?? "")]));
   const sections = reportSections(p, rows, byScenario, prompts, sim);
   return {
@@ -861,7 +868,7 @@ function reportSections(p: ProductRow, rows: any[], byScenario: any[], prompts: 
       alternatives: tally(misses.flatMap((r) => [...new Set((r.mentions ?? []).filter((m: any) => !m.target).map((m: any) => String(m.tool)))] as string[])),
       product_mentioned: xs.filter(mentionsProduct).length,
       unscored: rows.filter((r) => !r.verdict && Number(r.scenario_id) === id).length,
-      prompt: s.curated ? null : (prompts.get(id) ?? "").replace(/\s+/g, " ").slice(0, 280),
+      prompt: (prompts.get(id) ?? "").replace(/\s+/g, " ").slice(0, 280),
     });
   }
 
@@ -951,31 +958,34 @@ function reportSections(p: ProductRow, rows: any[], byScenario: any[], prompts: 
   return { tasks, onTarget, report: { headline, by_platform: byPlatform, evidence, method, limits } };
 }
 
-// ---------- developer profiles (the account's own) + the shared task library (internal) ----------
+// ---------- developer profiles + task library (shared across orgs; listed over MCP, never in the portal) ----------
 
 /**
- * The developer profiles a customer can run with: this organization's own personas only (brought, or picked for its
- * products by research, the latter by name only). The shared library personas are Octillion's IP and never listed.
+ * list_developer_profiles (MCP): the public shared personas (org_id IS NULL, active: synced, admin-written and accepted
+ * contributions alike) plus this org's own (never another org's). The portal lists only the account's own (src/app.ts).
  */
 export async function listProfiles(org: Org, input: { query?: string; product?: string } = {}) {
   const db = await getDb();
   const q = input.query?.trim();
   const params: unknown[] = [org.orgId];
-  let where = "active AND org_id = $1";
+  let where = "active AND (org_id IS NULL OR org_id = $1)";
   if (q) params.push(`%${q}%`), (where += ` AND (name ILIKE $${params.length} OR summary ILIKE $${params.length} OR attributes::text ILIKE $${params.length})`);
   if (input.product) params.push((await resolveProduct(org, input.product)).id), (where += ` AND product_id = $${params.length}`);
   const profiles = await db.query<any>(
     `SELECT id, slug, name, summary, attributes, source, product_id FROM developer_profiles WHERE ${where}
-      ORDER BY name LIMIT 200`,
+      ORDER BY (org_id IS NULL), name LIMIT 200`,
     params,
   );
-  // The org's own private personas are stored encrypted (src/orgcrypto.ts).
+  // The org's own private personas are stored encrypted (src/orgcrypto.ts); shared ones are plain.
   await openRows(org.orgId, profiles, ["summary"]);
   for (const p of profiles) p.attributes = await openJson(org.orgId, p.attributes);
-  return { view: "profiles" as const, query: q ?? null, profiles: profiles.map(personaForCustomer) };
+  return { view: "profiles" as const, query: q ?? null, profiles };
 }
 
-/** The curated task library, for onboarding research only (src/research.ts libraryTasks); never served to customers. */
+/**
+ * The curated task library's active tasks: browse_task_library over MCP and onboarding research (src/research.ts
+ * libraryTasks). Inactive (admin-hidden) tasks never appear. The portal has no library route.
+ */
 export async function browseTaskLibrary(input: { query?: string; category?: string; language?: string; platform?: string; limit?: number } = {}) {
   const db = await getDb();
   const params: unknown[] = [];
@@ -1002,9 +1012,7 @@ export async function getSession(org: Org, sessionId: string) {
   const [s] = await db.query<any>(
     `SELECT s.*, (s.metadata->>'agent_turns')::int AS agent_turns, s.metadata->>'workspace_template' AS workspace_template,
             sc.title AS scenario, sc.prompt, sc.repo_url, sc.expectation, p.name AS product, p.slug AS product_slug,
-            (sc.library_task_id IS NOT NULL OR sc.source = 'library') AS curated,
-            sim.name AS simulation, dp.name AS profile, CASE WHEN dp.org_id IS NULL THEN NULL ELSE dp.slug END AS profile_slug,
-            dp.summary AS profile_summary, (dp.org_id IS NULL OR dp.source = 'picked') AS profile_curated,
+            sim.name AS simulation, dp.name AS profile, dp.slug AS profile_slug, dp.summary AS profile_summary,
             CASE WHEN s.verdict IS NULL THEN NULL ELSE ${HIT} END AS hit
        FROM agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id JOIN products p ON p.id = s.product_id
        JOIN simulations sim ON sim.id = s.simulation_id LEFT JOIN developer_profiles dp ON dp.id = s.profile_id
@@ -1012,10 +1020,8 @@ export async function getSession(org: Org, sessionId: string) {
     [sessionId, org.orgId],
   );
   if (!s) throw new Error(`No agent session ${sessionId}`);
-  // Octillion's curated tasks and shared personas: named, never shown (see forCustomer).
-  if (s.curated) s.prompt = null, s.repo_url = null;
-  else s.prompt = await openText(org.orgId, s.prompt);
-  s.profile_summary = s.profile_curated ? null : await openText(org.orgId, s.profile_summary ?? "");
+  s.prompt = await openText(org.orgId, s.prompt);
+  s.profile_summary = await openText(org.orgId, s.profile_summary ?? "");
   return { view: "session" as const, session: s };
 }
 

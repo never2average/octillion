@@ -31,6 +31,9 @@ import * as priv from "./private.js";
 import * as contributions from "./contributions.js";
 import { recordPageAction } from "./analytics.js";
 
+/** The portal surface: library content redacted (src/queries.ts Surface). MCP tool handlers (src/server.ts) never pass it. */
+const PORTAL = { redact: true } as const;
+
 const publicUrl = () => (process.env.PUBLIC_URL ?? `http://127.0.0.1:${process.env.PORT ?? 3333}`).replace(/\/$/, "");
 
 /**
@@ -54,7 +57,7 @@ export const TOOL_GROUPS = [
   { id: "report", label: "Read the visibility report", tools: ["get_visibility_report"], prompt: "Show my visibility report." },
   { id: "evidence", label: "Check the evidence", tools: ["get_agent_session", "get_session_transcript", "search_transcripts"],
     prompt: "Why did agents pick <competitor> on <task>? Show me the transcript." },
-  { id: "tune", label: "See who is tested", tools: ["list_agents", "list_developer_profiles", "list_personas"],
+  { id: "tune", label: "See who is tested", tools: ["list_agents", "list_developer_profiles", "browse_task_library"],
     prompt: "Which coding agents and developer personas do you test with?" },
   { id: "memory", label: "Build team memory", tools: ["save_to_memory", "search_memory"],
     prompt: "Remember: we lead with <your angle> against <competitor>." },
@@ -677,19 +680,21 @@ export function appRouter() {
     }
     res.json(await context.savePerson(s.org, id, req.body ?? {}));
   });
-  api.get("/context/products/:slug", async (req, res) => void res.json(await q(getProduct(await orgOf(res), String(req.params.slug)))));
+  // Portal reads and writes of a product pass PORTAL: tasks onboarding picked from Octillion's library show by title only
+  // (the MCP tools return them whole). Every /api/app route that returns a product, persona list or task does the same.
+  api.get("/context/products/:slug", async (req, res) => void res.json(await q(getProduct(await orgOf(res), String(req.params.slug), PORTAL))));
   api.post("/context/products", async (req, res) => {
     need(res, "manage");
     const name = String(req.body?.name ?? "").trim();
     if (!name) throw new AppError("A product needs a name");
-    res.status(201).json(await q(saveProduct(await orgOf(res), { name, description: req.body?.description || undefined, website_url: req.body?.website_url || undefined, docs_url: req.body?.docs_url || undefined })));
+    res.status(201).json(await q(saveProduct(await orgOf(res), { name, description: req.body?.description || undefined, website_url: req.body?.website_url || undefined, docs_url: req.body?.docs_url || undefined }, PORTAL)));
   });
   api.put("/context/products/:slug", async (req, res) => {
     need(res, "manage");
     const b = req.body ?? {}, org = await orgOf(res);
-    await q(getProduct(org, String(req.params.slug))); // an unknown slug is a 404 here, not a new product
+    await q(getProduct(org, String(req.params.slug), PORTAL)); // an unknown slug is a 404 here, not a new product
     res.json(await q(saveProduct(org, { product: String(req.params.slug), name: b.name, description: b.description, category: b.category,
-      website_url: b.website_url, docs_url: b.docs_url, aliases: b.aliases, packages: b.packages, domains: b.domains, competitors: b.competitors })));
+      website_url: b.website_url, docs_url: b.docs_url, aliases: b.aliases, packages: b.packages, domains: b.domains, competitors: b.competitors }, PORTAL)));
   });
   api.put("/context/products/:slug/scenarios/:id", async (req, res) => {
     need(res, "manage");
@@ -713,8 +718,8 @@ export function appRouter() {
   };
   api.get("/personas", async (_req, res) => {
     const org = await orgOf(res);
-    // Only the account's own (Octillion's shared library personas are its IP and never listed; picked copies by name).
-    const own = await qp(priv.listPersonas(org));
+    // Only the account's own (the portal never lists Octillion's shared personas; onboarding's picked copies by name).
+    const own = await qp(priv.listPersonas(org, [], PORTAL));
     await recordPageAction(org, "list_personas", { every: 3_600_000 });
     res.json({ personas: own.personas, permissions: perms(res), publish: { credit_usd: (await contributions.discountUsd()).persona } });
   });
@@ -722,7 +727,7 @@ export function appRouter() {
   api.post("/personas", express.json({ limit: "256kb" }), async (req, res) => {
     need(res, "edit");
     const org = await orgOf(res);
-    const r = await qp(priv.savePersonas(org, checked(priv.personasInputSchema, req.body?.personas, "personas") as priv.PersonaInput[]));
+    const r = await qp(priv.savePersonas(org, checked(priv.personasInputSchema, req.body?.personas, "personas") as priv.PersonaInput[], PORTAL));
     await recordPageAction(org, "save_personas");
     res.status(201).json(r);
   });
@@ -731,8 +736,8 @@ export function appRouter() {
     const org = await orgOf(res), slug = String(req.params.slug), b = req.body ?? {};
     const keys = Object.keys(b);
     const r = keys.length === 1 && keys[0] === "active"
-      ? await qp(priv.setPersonaActive(org, slug, Boolean(b.active)))
-      : await qp(priv.savePersonas(org, [checked(priv.personaInputSchema, { ...b, slug }, "persona") as priv.PersonaInput]));
+      ? await qp(priv.setPersonaActive(org, slug, Boolean(b.active), PORTAL))
+      : await qp(priv.savePersonas(org, [checked(priv.personaInputSchema, { ...b, slug }, "persona") as priv.PersonaInput], PORTAL));
     await recordPageAction(org, "save_personas");
     res.json(r);
   });
@@ -769,7 +774,8 @@ export function appRouter() {
     await recordPageAction(org, r.set ? "import_tasks" : "save_scenarios");
     res.json(r);
   });
-  // No library routes: Octillion's curated tasks reach a product only through onboarding research, never by browsing.
+  // No library routes in the portal: it never browses or picks from Octillion's task library (the AI client can, over MCP:
+  // browse_task_library and save_scenarios {library_task_id}).
 
   // Publish to Octillion's library (src/contributions.ts): the account's own personas and tasks only, Member or above.
   // Octillion reviews each request; an accepted one earns a credit on the next invoice. Withdraw while it waits.

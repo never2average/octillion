@@ -229,9 +229,11 @@ try {
   // ---------- tools + UI resource ----------
   const { tools } = await A.listTools();
   console.log("tools:", tools.map((t) => t.name).join(", "));
-  assert.equal(tools.length, 29); // 17 core + 2 memory + 10 private-asset tools incl. publish_to_library (browse_task_library is gone: the library is Octillion's IP)
-  for (const gone of ["browse_task_library"]) assert.ok(!tools.some((t) => t.name === gone), `${gone} is not a customer tool`);
-  assert.ok(!tools.some((t) => /browse_task_library|library_task_id/.test(JSON.stringify([t.description, t.inputSchema]))), "no tool tells the model to browse or cite the library");
+  assert.equal(tools.length, 30); // 18 core (incl. browse_task_library) + 2 memory + 10 private-asset tools incl. publish_to_library
+  // Over MCP the public library is the customer's to browse and pick from (the portal is where it stays hidden).
+  assert.ok(tools.some((t) => t.name === "browse_task_library" && t.annotations?.readOnlyHint), "browse_task_library is a read-only customer tool");
+  const saveScenariosTool = tools.find((t) => t.name === "save_scenarios");
+  assert.ok(JSON.stringify(saveScenariosTool?.inputSchema).includes("library_task_id"), "save_scenarios takes library_task_id");
   assert.equal(tools[0].name, "get_started", "the welcome tool is listed first (the tool list is the first screen in IDE hosts)");
   const fresh = await call(A, "get_started");
   assert.equal(fresh.welcome.stage, "onboard");
@@ -328,15 +330,31 @@ try {
   process.env.VAULT_DIR ??= "vault/example";
   const synced = await (await import("../src/vault.js")).syncVault();
   assert.ok(synced.profiles >= 3 && synced.tasks >= 3);
-  // The shared personas and the task library are Octillion's IP: synced, but never listed, searched or picked by a customer.
+  // Over MCP the public library is listed: active shared personas (full summary and attributes) next to the account's
+  // own, and the active library tasks with their prompts; a library task is copied into a product by id.
   const profiles = await call(A, "list_developer_profiles", { query: "enterprise" });
-  assert.ok(!profiles.profiles.some((p: any) => p.slug === "example-enterprise-platform"), "shared personas are not listed to customers");
-  assert.equal((await call(A, "list_developer_profiles", {})).profiles.length, 0, "only the account's own personas (none yet)");
-  await fails(B, "browse_task_library", { category: "background-jobs" }, /not found|Tool browse_task_library/i);
-  const [libTask] = await db.query<any>("SELECT id, title, prompt FROM library_tasks WHERE slug = 'example-bg-email'");
-  assert.ok(libTask, "library task synced");
-  await fails(A, "save_scenarios", { scenarios: [{ library_task_id: libTask.id, active: false }] }, /library_task_id is not accepted|need a prompt/);
-  assert.ok(!(await call(A, "get_product", {})).scenarios.some((s: any) => s.title === libTask.title), "nothing was picked by id");
+  const enterprise = profiles.profiles.find((p: any) => p.slug === "example-enterprise-platform");
+  assert.ok(enterprise && enterprise.summary && Object.keys(enterprise.attributes ?? {}).length, "shared personas are listed over MCP with their summary and attributes");
+  const sharedActive = await db.query<any>("SELECT slug FROM developer_profiles WHERE org_id IS NULL AND active");
+  const allProfiles = (await call(A, "list_developer_profiles", {})).profiles;
+  assert.ok(sharedActive.every((x: any) => allProfiles.some((p: any) => p.slug === x.slug)), "every active shared persona is listed");
+  const library = await call(B, "browse_task_library", { category: "background-jobs" });
+  const libTask = library.tasks.find((t: any) => t.slug === "example-bg-email");
+  assert.ok(libTask && libTask.prompt && libTask.id && "repo_url" in libTask && Array.isArray(libTask.tags) && libTask.platform, "browse_task_library returns active library tasks with prompts");
+  assert.ok(library.tasks.every((t: any) => t.category === "background-jobs"), "category filter");
+  const fromLib = await call(A, "save_scenarios", { scenarios: [{ library_task_id: libTask.id, active: false }] });
+  assert.ok(fromLib.scenarios.some((s: any) => s.prompt === libTask.prompt && s.library_task_id === libTask.id && !s.active), "save_scenarios {library_task_id} copies the task into the product");
+  // Inactive (admin-hidden) library rows are not public: never browsed, listed or picked.
+  const [hiddenTask] = await db.query<any>("SELECT id, slug FROM library_tasks WHERE active AND slug <> 'example-bg-email' ORDER BY id LIMIT 1");
+  const [hiddenPersona] = await db.query<any>("SELECT slug FROM developer_profiles WHERE org_id IS NULL AND active AND slug NOT IN ('example-solo-indie', 'example-enterprise-platform', 'example-startup-backend') ORDER BY slug LIMIT 1");
+  await db.query("UPDATE library_tasks SET active = false WHERE id = $1", [hiddenTask.id]);
+  if (hiddenPersona) await db.query("UPDATE developer_profiles SET active = false WHERE slug = $1", [hiddenPersona.slug]);
+  assert.ok(!(await call(A, "browse_task_library", { limit: 200 })).tasks.some((t: any) => t.id === hiddenTask.id), "an inactive library task is never browsed");
+  assert.ok(!(await call(A, "browse_task_library", { query: hiddenTask.slug, limit: 200 })).tasks.some((t: any) => t.id === hiddenTask.id), "nor found by search");
+  await fails(A, "save_scenarios", { scenarios: [{ library_task_id: hiddenTask.id }] }, /No library task/);
+  if (hiddenPersona) assert.ok(!(await call(A, "list_developer_profiles", {})).profiles.some((p: any) => p.slug === hiddenPersona.slug), "an inactive shared persona is never listed");
+  await db.query("UPDATE library_tasks SET active = true WHERE id = $1", [hiddenTask.id]);
+  if (hiddenPersona) await db.query("UPDATE developer_profiles SET active = true WHERE slug = $1", [hiddenPersona.slug]);
   await fails(A, "run_simulation", { profiles: ["nobody"] }, /Unknown developer profile/);
 
   const agentsView = await call(A, "list_agents");
@@ -410,6 +428,7 @@ try {
     const seenByB = JSON.stringify([
       (await call(B, "list_personas")).personas, (await call(B, "list_task_sets")).task_sets, (await call(B, "list_harnesses")).harnesses,
       (await call(B, "list_developer_profiles", {})).profiles, (await call(B, "list_developer_profiles", { query: CANARY })).profiles,
+      (await call(B, "browse_task_library", { query: CANARY })).tasks,
     ]);
     assert.ok(!seenByB.includes(CANARY) && !seenByB.includes(personaSlug), "org B never sees org A's private assets");
     const research = await import("../src/research.js");
@@ -465,10 +484,11 @@ try {
   assert.equal(jobs.length, 4, "claimed all four sessions");
   assert.ok(jobs.every((j) => j.prompt && !/relayq/i.test(JSON.stringify(j))), "jobs carry the task, not the customer");
   assert.ok(jobs.every((j) => j.profile?.slug === "example-solo-indie" && j.profile.instructions && j.max_user_turns > 0), "jobs carry the developer profile");
-  // The run uses the shared persona server side; the customer sees it named, never its text or slug.
+  // Over MCP a run result names the shared persona with its slug and summary (it is public over MCP).
   const asCustomer = (await call(A, "get_agent_session", { session_id: jobs[0].session_id })).session;
-  assert.ok(asCustomer.profile === jobs[0].profile.name && asCustomer.profile_summary === null && asCustomer.profile_slug === null && asCustomer.profile_curated,
-    "a shared persona in a run result: its display name only");
+  const [soloIndie] = await db.query<any>("SELECT summary FROM developer_profiles WHERE slug = 'example-solo-indie'");
+  assert.ok(asCustomer.profile === jobs[0].profile.name && asCustomer.profile_slug === "example-solo-indie" && asCustomer.profile_summary === soloIndie.summary && asCustomer.prompt,
+    "a shared persona in a run result over MCP: name, slug and summary; the task with its prompt");
   assert.ok(jobs.every((j) => j.agent_id === "claude-code/sonnet" && j.agent?.image?.boat_snapshot), "jobs carry the worker agent and its image");
   // ---------- key vault + inference gateway ----------
   const kv = await import("../src/keyvault.js");
@@ -742,7 +762,8 @@ try {
   assert.ok(report.by_platform.length >= 1 && report.by_scenario.every((x: any) => x.platform), "every task has a platform; results split by platform");
   const onePlatform = report.by_platform[0].platform;
   assert.ok((await call(A, "get_visibility_report", { days: 7, platform: onePlatform })).by_scenario.every((x: any) => x.platform === onePlatform), "platform filter");
-  assert.ok((await (await import("../src/research.js")).libraryTasks({ platform: "web" })).tasks.every((x: any) => x.platform === "web"), "library filter by platform (research only)");
+  assert.ok((await call(A, "browse_task_library", { platform: "web" })).tasks.every((x: any) => x.platform === "web"), "library filter by platform");
+  assert.ok((await (await import("../src/research.js")).libraryTasks({ platform: "web" })).tasks.every((x: any) => x.platform === "web"), "and for research");
   assert.equal((await call(A, "list_simulations")).simulations.length, 5); // includes the cancelled private task-set and harness-mix runs
   assert.equal((await call(A, "list_products")).products[0].sessions_30d, 4);
 
@@ -863,11 +884,11 @@ try {
     assert.equal(done.product.name, "QuickQueue");
     assert.deepEqual(done.product.packages, ["@quickqueue/sdk"]);
     assert.equal(done.personas.length, 2);
-    assert.ok(done.personas.every((x: any) => x.curated && x.summary === null && !Object.keys(x.attributes ?? {}).length && /\(example\)$/.test(x.name)), "picked personas are shown to the customer by name only");
+    assert.ok(done.personas.every((x: any) => x.attributes?.from_profile && x.summary && /\(example\)$/.test(x.name)), "over MCP, picked personas are returned whole (copied from the profile data)");
     assert.equal((await db.query<any>("SELECT count(*) AS n FROM developer_profiles WHERE org_id = $1 AND source = 'picked' AND active AND attributes->>'from_profile' IS NOT NULL AND instructions <> ''", [a.org.orgId]))[0].n, 2,
       "server side, the picked personas are full copies of the profile data (the run role-plays them)");
     assert.equal(done.scenarios.length, 3);
-    assert.ok(done.scenarios.every((x: any) => x.source === "library" && x.curated && x.prompt === null && !("library_task_id" in x)), "every active research problem is a curated task, shown by title only");
+    assert.ok(done.scenarios.every((x: any) => x.source === "library" && x.library_task_id && x.prompt), "every active research problem is a cited library task, with its prompt over MCP");
     const pickedRows = await db.query<any>("/* tenant: smoke */ SELECT sc.library_task_id, sc.prompt FROM scenarios sc JOIN products p ON p.id = sc.product_id WHERE p.org_id = $1 AND p.slug = $2 AND sc.active", [a.org.orgId, done.product.slug]);
     assert.ok(pickedRows.length === 3 && pickedRows.every((x: any) => x.library_task_id && x.prompt), "onboarding still picks library tasks into the product server side, prompts and all");
     assert.equal(done.drafts.length, 1, "a draft for a library gap waits for approval, inactive");
@@ -879,10 +900,8 @@ try {
     assert.ok(approved.scenarios.some((x: any) => x.id === done.drafts[0].id) && !approved.drafts.length, "an approved draft becomes an active task");
     await fails(A, "review_draft_tasks", { product: done.product.slug, reject: [done.scenarios[0].id] }, /Not draft tasks/);
     await fails(B, "review_draft_tasks", { approve: [done.drafts[0].id] }, /Not draft tasks|No products/);
-    const ownProfiles = (await call(A, "list_developer_profiles", {})).profiles;
-    assert.ok(ownProfiles.some((x: any) => x.source === "picked" && x.curated && x.name === "Seed-stage startup backend engineer (example)" && x.summary === null), "org sees its picked personas, by name");
-    assert.ok(!JSON.stringify(ownProfiles).includes("from_profile"), "not which shared profile they came from");
-    assert.ok(!(await call(B, "list_developer_profiles", {})).profiles.some((x: any) => x.curated), "other orgs do not");
+    assert.ok((await call(A, "list_developer_profiles", {})).profiles.some((x: any) => x.attributes?.from_profile === "example-startup-backend" && x.source === "picked"), "org sees its personas");
+    assert.ok(!(await call(B, "list_developer_profiles", {})).profiles.some((x: any) => x.attributes?.from_profile), "other orgs do not");
     await call(A, "cancel_simulation", { simulation_id: accepted.simulation_id });
     console.log("✓ onboarding: research claim, progress, library search, blindness validation, apply, personas scoped, auto-run");
   }
@@ -1085,7 +1104,8 @@ try {
     const researchOffers = async (slug: string) => (await (await import("../src/research.js")).libraryProfiles({ limit: 40 })).profiles.some((p: any) => p.slug === slug);
     assert.ok(!(await researchOffers("example-agency-frontend")), "a deactivated persona is not offered to research");
     assert.ok(await researchOffers(made.slug), "an admin-written persona is offered to research");
-    assert.ok(!(await call(A, "list_developer_profiles", {})).profiles.some((p: any) => p.slug === made.slug), "but never listed to a customer");
+    assert.ok(!(await call(A, "list_developer_profiles", {})).profiles.some((p: any) => p.slug === "example-agency-frontend"), "a deactivated persona is not listed over MCP");
+    assert.ok((await call(A, "list_developer_profiles", {})).profiles.some((p: any) => p.slug === made.slug), "an admin-written (active) persona is listed over MCP");
 
     const found = await json(adm("GET", "/tasks?q=rename%20script&limit=5"));
     const rename = found.tasks.find((t: any) => t.slug === "example-rename-script");
@@ -3515,6 +3535,14 @@ try {
           && !Object.keys(pagePersona.attributes).length, "a picked persona shows by name only");
         const ownProduct = await json(appCall(devC, "GET", `/context/products/${slugP}`));
         assert.ok(ownProduct.scenarios.some((x: any) => x.id === pickRow.id && x.prompt === null && x.curated), "the product page names it without its prompt");
+        // Writes from the portal answer redacted too (the persona list a PATCH returns).
+        const patched = await json(appCall(devC, "PATCH", `/personas/${slug}`, { active: true }));
+        assert.ok(patched.personas.some((p: any) => p.slug === pickedSlug && p.summary === null && p.curated), "a portal write's answer shows the picked persona by name only");
+        // The split is by surface, not by data: the same account over MCP gets the same rows whole.
+        const mcpProduct = (await mcpAs(acc2.user.id, "get_product", { product: slugP })).data;
+        assert.ok(mcpProduct.scenarios.some((x: any) => x.id === pickRow.id && x.prompt === lib.prompt && x.library_task_id === lib.id), "over MCP, get_product returns the same pick with its prompt and library id");
+        const mcpPersonas = (await mcpAs(acc2.user.id, "list_personas", {})).data;
+        assert.ok(mcpPersonas.personas.some((p: any) => p.slug === pickedSlug && p.summary === shared.summary), "over MCP, list_personas returns the picked persona whole");
         assert.equal((await appCall(devC, "PATCH", `/tasks/${pick.id}`, { title: "Mine now" })).status, 400, "a curated task can only be turned on or off");
         assert.equal((await appCall(devC, "PATCH", `/tasks/${pick.id}`, { active: false })).status, 200);
         // Every page the portal reads: no library prompt, no shared persona's text, no library title outside the product.
@@ -4240,38 +4268,54 @@ try {
     assert.ok((await db.query<any>("SELECT name FROM developer_profiles WHERE slug = $1", [persona]))[0].name.includes(MARK), "org A's persona untouched");
     console.log(`✓ isolation sweep: ${toolNames.length} tools x ${argSets.length} argument sets as org B (${calls} calls): nothing of org A's returned or changed`);
 
-    // Octillion's IP sweep: every read-only tool, as org A (an API key) with its own identifiers, returns no library task
-    // (prompt, or a title that is not one of A's own scenarios) and no shared persona's text or slug.
-    const ownPromptsA = new Set((await db.query<any>("/* tenant: smoke */ SELECT sc.prompt FROM scenarios sc JOIN products p ON p.id = sc.product_id WHERE p.org_id = $1 AND sc.library_task_id IS NULL", [a.org.orgId])).map((x: any) => x.prompt));
-    const libAll = (await db.query<any>("SELECT title, prompt FROM library_tasks")).filter((t: any) => !ownPromptsA.has(t.prompt)); // the account's own identical text is its own
-    const sharedAll = await db.query<any>("SELECT slug, summary, instructions FROM developer_profiles WHERE org_id IS NULL");
-    const ownTitles = new Set((await db.query<any>("/* tenant: smoke */ SELECT sc.title FROM scenarios sc JOIN products p ON p.id = sc.product_id WHERE p.org_id = $1", [a.org.orgId])).map((x: any) => x.title));
-    const curatedA = await db.query<any>("/* tenant: smoke */ SELECT sc.id, sc.title FROM scenarios sc JOIN products p ON p.id = sc.product_id WHERE p.org_id = $1 AND sc.library_task_id IS NOT NULL", [a.org.orgId]);
-    assert.ok(curatedA.length >= 3, "org A has tasks onboarding picked from the library");
+    // Public library sweep (the opposite of the portal's): over MCP, as org A (an API key), the public library is listed
+    // whole (every active task with its prompt, every active shared persona with its summary), library copies in A's
+    // products come back with their prompts and library ids, and inactive (admin-hidden) rows never appear in any
+    // read-only tool's result, whatever the arguments.
+    const HIDDEN = `HIDDEN_${(await import("node:crypto")).randomBytes(6).toString("hex")}`;
+    const [hiddenT] = await db.query<any>(
+      "INSERT INTO library_tasks (slug, title, prompt, category, platform, source, active) VALUES ($1, $2, $3, 'background-jobs', 'backend', 'admin', false) RETURNING id, slug",
+      [`hidden-task-${HIDDEN.toLowerCase()}`, `Hidden task ${HIDDEN}`, `Hidden prompt ${HIDDEN}: add a retry queue to the mailer in this service.`]);
+    const [hiddenP] = await db.query<any>(
+      "INSERT INTO developer_profiles (slug, name, summary, instructions, source, active) VALUES ($1, $2, $3, $4, 'admin', false) RETURNING id, slug",
+      [`hidden-persona-${HIDDEN.toLowerCase()}`, `Hidden persona ${HIDDEN}`, `Hidden summary ${HIDDEN} of a developer nobody may list.`, `Hidden instructions ${HIDDEN}.`]);
+    const activeTasks = await db.query<any>("SELECT id, prompt FROM library_tasks WHERE active");
+    const browsed = (await call(A, "browse_task_library", { limit: 200 })).tasks;
+    assert.deepEqual(browsed.map((t: any) => t.id).sort((x: number, y: number) => x - y), activeTasks.map((t: any) => t.id).sort((x: number, y: number) => x - y), "browse_task_library lists every active library task, and only those");
+    assert.ok(browsed.every((t: any) => t.prompt === activeTasks.find((x: any) => x.id === t.id).prompt), "each with its prompt");
+    const activeShared = await db.query<any>("SELECT slug, summary FROM developer_profiles WHERE org_id IS NULL AND active");
+    const listedA = (await call(A, "list_developer_profiles", {})).profiles;
+    assert.ok(activeShared.every((x: any) => listedA.some((p: any) => p.slug === x.slug && p.summary === x.summary)), "list_developer_profiles lists every active shared persona with its summary");
+    assert.ok(listedA.some((p: any) => p.source === "custom") && listedA.some((p: any) => p.source === "picked"), "next to the account's own (brought and picked)");
     const productsA = (await db.query<any>("SELECT slug FROM products WHERE org_id = $1", [a.org.orgId])).map((x: any) => x.slug);
+    const curatedA = await db.query<any>("/* tenant: smoke */ SELECT sc.id, sc.title, sc.prompt, sc.library_task_id FROM scenarios sc JOIN products p ON p.id = sc.product_id WHERE p.org_id = $1 AND sc.library_task_id IS NOT NULL", [a.org.orgId]);
+    assert.ok(curatedA.length >= 3, "org A has tasks picked from the library");
+    const shownA = (await Promise.all(productsA.map(async (product: string) => (await call(A, "get_product", { product })).scenarios))).flat();
+    assert.ok(curatedA.every((c: any) => shownA.some((x: any) => x.id === c.id && x.prompt === c.prompt && x.library_task_id === c.library_task_id && !("curated" in x))),
+      "get_product returns library copies with their prompt and library id (no portal redaction over MCP)");
     const sessCurated = (await db.query<any>("SELECT id FROM agent_sessions WHERE org_id = $1 AND scenario_id = ANY($2) LIMIT 1", [a.org.orgId, curatedA.map((x: any) => x.id)]))[0]?.id;
+    if (sessCurated) assert.ok((await call(A, "get_agent_session", { session_id: sessCurated })).session.prompt, "a session on a library copy shows the task's prompt");
     const sessShared = (await db.query<any>("SELECT s.id FROM agent_sessions s JOIN developer_profiles dp ON dp.id = s.profile_id WHERE s.org_id = $1 AND dp.org_id IS NULL LIMIT 1", [a.org.orgId]))[0]?.id;
     const readTools = (await A.listTools()).tools.filter((t) => t.annotations?.readOnlyHint).map((t) => t.name);
+    assert.ok(readTools.includes("browse_task_library") && readTools.includes("list_developer_profiles"));
     const ipArgs: Record<string, unknown>[] = [{}, ...productsA.map((product: string) => ({ product })), ...simsA.map((x: any) => ({ simulation_id: x.id })),
       ...simsA.map((x: any) => ({ simulation: x.id })), ...[sessA, sessCurated, sessShared].filter(Boolean).map((session_id) => ({ session_id })), { research_id: rshA },
-      { query: "e" }, { query: "task" }];
+      { query: "e" }, { query: HIDDEN }, { query: hiddenT.slug }, { category: "background-jobs", limit: 200 }, { platform: "backend", limit: 200 }];
     let ipCalls = 0;
     for (const tool of readTools) for (const args of ipArgs) {
       const r = await A.callTool({ name: tool, arguments: args }).catch((e: Error) => ({ content: [{ type: "text", text: e.message }] }));
       ipCalls++;
-      const text = JSON.stringify((r as any).structuredContent ?? null) + JSON.stringify((r as any).content ?? null);
-      const leaked = [
-        ...libAll.filter((t: any) => t.prompt && text.includes(JSON.stringify(t.prompt.slice(0, 80)).slice(1, -1))).map((t: any) => `prompt of "${t.title}"`),
-        ...libAll.filter((t: any) => !ownTitles.has(t.title) && text.includes(JSON.stringify(t.title).slice(1, -1))).map((t: any) => `title "${t.title}"`),
-        ...sharedAll.flatMap((p: any) => [p.summary, p.instructions].filter((x: string) => x && x.length > 20 && text.includes(JSON.stringify(x.slice(0, 60)).slice(1, -1))).map(() => `text of ${p.slug}`)),
-        ...sharedAll.filter((p: any) => new RegExp(`(?<![\\w-])${p.slug}(?![\\w-])`).test(text)).map((p: any) => `slug ${p.slug}`),
-      ];
-      assert.deepEqual(leaked, [], `${tool} ${JSON.stringify(args)} returned Octillion's library: ${leaked.join(", ")}`);
+      // What came back, minus the strings A itself passed in (search tools echo the query).
+      let text = JSON.stringify((r as any).structuredContent ?? null) + JSON.stringify((r as any).content ?? null);
+      for (const v of Object.values(args)) if (typeof v === "string") text = text.split(v).join("");
+      const leaked = [HIDDEN, hiddenT.slug, hiddenP.slug].filter((x) => text.includes(x));
+      assert.deepEqual(leaked, [], `${tool} ${JSON.stringify(args)} returned an inactive library row: ${leaked.join(", ")}`);
     }
-    const shownA = (await call(A, "get_product", { product: productsA.find((x: string) => x !== "relayq") ?? productsA[0] })).scenarios;
-    assert.ok(curatedA.every((c: any) => !shownA.some((x: any) => x.id === c.id) || shownA.some((x: any) => x.id === c.id && x.title === c.title && x.prompt === null && x.curated)),
-      "the product's curated tasks are named by title, prompt withheld");
-    console.log(`✓ IP sweep: ${readTools.length} read-only tools x ${ipArgs.length} argument sets as org A (${ipCalls} calls): no library task or shared persona beyond the product's own titles`);
+    await fails(A, "save_scenarios", { product: "relayq", scenarios: [{ library_task_id: hiddenT.id }] }, /No library task/);
+    await fails(A, "run_simulation", { product: "relayq", profiles: [hiddenP.slug] }, /Unknown developer profile/);
+    await db.query("DELETE FROM library_tasks WHERE id = $1", [hiddenT.id]);
+    await db.query("DELETE FROM developer_profiles WHERE id = $1", [hiddenP.id]);
+    console.log(`✓ public library over MCP: every active task (with prompts) and shared persona listed, library copies whole; ${readTools.length} read-only tools x ${ipArgs.length} argument sets (${ipCalls} calls) never return an inactive row`);
   }
 
   // ---------- organization deletion (docs/security.md, phase 0c) ----------

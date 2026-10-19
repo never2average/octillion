@@ -477,7 +477,7 @@
   function render(d) {
     tip.style.display = "none";
     product = d.product?.slug ?? d.simulation?.product_slug ?? d.session?.product_slug ?? (typeof d.product === "string" ? d.product : product);
-    const views = { products: viewProducts, product: viewProduct, report: viewReport, simulations: viewSimulations, simulation: viewSimulation, session: viewSession, transcript: viewTranscript, search: viewSearch, memory: viewMemory, profiles: viewProfiles, agents: viewAgents, onboarding: viewOnboarding, personas: viewPersonas, task_sets: viewTaskSets, harnesses: viewHarnesses, harness_mixes: viewMixes, library_submission: viewSubmission };
+    const views = { products: viewProducts, product: viewProduct, report: viewReport, simulations: viewSimulations, simulation: viewSimulation, session: viewSession, transcript: viewTranscript, search: viewSearch, memory: viewMemory, profiles: viewProfiles, agents: viewAgents, onboarding: viewOnboarding, personas: viewPersonas, task_sets: viewTaskSets, harnesses: viewHarnesses, harness_mixes: viewMixes, library_submission: viewSubmission, library: viewLibraryNote };
     const fn = views[d.view];
     const note = d.truncated ? `<div class="warn" style="margin-bottom:12px">Result shortened to fit the host's size limit. Page through it or narrow the filters to see the rest.</div>` : "";
     app.innerHTML = nav(d.view) + note + (fn ? fn(d) : `<div class="empty">Unknown view: ${esc(d.view)}</div>`);
@@ -797,14 +797,18 @@
     </div>`;
   }
 
-  // ---------- developer profiles: this organization's own (Octillion-curated ones by name only) ----------
+  // ---------- developer profiles: the shared personas and this organization's own ----------
   function viewProfiles({ profiles, query }) {
     return `<div class="stack"><div class="spread"><h1>Developer profiles</h1>${go("list_agents", {}, "Coding agents →")}</div>
       ${profiles.length ? `<div class="grid-wide">${profiles.map((p) => `<div class="card stack">
         <div><strong>${esc(p.name)}</strong> <span class="badge">${esc(p.slug)}</span>${p.curated ? ' <span class="badge">curated by Octillion</span>' : ""}</div>
         ${p.curated ? "" : `<p class="sub" style="font-size:13px">${esc(p.summary || "")}</p>
         ${chips(Object.entries(p.attributes || {}).filter(([, v]) => typeof v !== "object" || Array.isArray(v)).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(", ") : v}`))}`}
-      </div>`).join("")}</div>` : `<div class="card empty">No profiles${query ? ` matching "${esc(query)}"` : " yet: onboarding picks Octillion-curated personas for your product"}.</div>`}</div>`;
+      </div>`).join("")}</div>` : `<div class="card empty">No profiles${query ? ` matching "${esc(query)}"` : " yet"}.</div>`}</div>`;
+  }
+  // browse_task_library: the dashboard has no Library tab and lists no library tasks; the model reads them from the result.
+  function viewLibraryNote({ tasks }) {
+    return `<div class="card empty">${tasks.length ? `${num(tasks.length)} task(s) from Octillion's library are in the chat. Ask me to add one to your product.` : "No matching tasks in the library."}</div>`;
   }
 
   function viewAgents(d) {

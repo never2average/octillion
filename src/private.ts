@@ -14,7 +14,7 @@ import { z } from "zod";
 import { randomBytes } from "node:crypto";
 import { getDb } from "./db.js";
 import type { Org } from "./auth.js";
-import { resolveProduct, checkTemplate, checkPlatform, WORKSPACE_TEMPLATES, forCustomer, personaForCustomer } from "./queries.js";
+import { resolveProduct, checkTemplate, checkPlatform, WORKSPACE_TEMPLATES, forCustomer, personaForCustomer, type Surface } from "./queries.js";
 import { PLATFORMS } from "./platform.js";
 import { platformOf } from "./platform.js";
 import { environmentIssues, type PersonaEnvironment } from "../orchestrator/core/environment.js";
@@ -36,7 +36,7 @@ export const personaInputSchema = z.object({
   instructions: z.string().max(1500).optional().describe("How this developer answers a coding agent's questions"),
   attributes: z.record(z.string(), z.unknown()).optional().describe("role, experience_years, company_size, stack[], constraints[], tone"),
   environment: z.object({ editor: z.string(), tools: z.array(z.string()).optional() }).passthrough().optional()
-    .describe("Editor and CLI tools they have installed, e.g. [\"git\", \"docker\", \"gh\"]"),
+    .describe("Editor and CLI tools they have installed (see list_developer_profiles for examples)"),
   active: z.boolean().optional(),
 });
 export const personasInputSchema = z.array(personaInputSchema).min(1).max(20);
@@ -70,7 +70,7 @@ export interface PersonaInput {
   attributes?: Record<string, unknown>; environment?: PersonaEnvironment | null; active?: boolean;
 }
 
-export async function savePersonas(org: Org, items: PersonaInput[]) {
+export async function savePersonas(org: Org, items: PersonaInput[], surface: Surface = {}) {
   if (!Array.isArray(items) || !items.length || items.length > 20) throw new Error("Send 1-20 personas");
   const db = await getDb();
   await ensureOrgKey(org.orgId); // before the transaction: sealing inside it then needs no query
@@ -108,14 +108,15 @@ export async function savePersonas(org: Org, items: PersonaInput[]) {
       }
     }
   });
-  return listPersonas(org, saved);
+  return listPersonas(org, saved, surface);
 }
 
 /**
  * The organization's own personas: brought (custom) and picked or written for it by research. Never another org's.
- * A persona research copied from Octillion's shared library (source 'picked') is shown by name only (personaForCustomer).
+ * Over MCP (list_personas) each is returned whole; the portal (surface.redact, src/app.ts) shows a persona research
+ * copied from Octillion's shared library (source 'picked') by name only (personaForCustomer).
  */
-export async function listPersonas(org: Org, highlight: string[] = []) {
+export async function listPersonas(org: Org, highlight: string[] = [], surface: Surface = {}) {
   const personas = await (await getDb()).query<any>(
     `SELECT slug, name, summary, attributes, instructions, environment, source, active, product_id
        FROM developer_profiles WHERE org_id = $1 ORDER BY source, name`, [org.orgId]);
@@ -123,17 +124,17 @@ export async function listPersonas(org: Org, highlight: string[] = []) {
   for (const p of personas) p.attributes = await openJson(org.orgId, p.attributes);
   // Its publication to Octillion's library (src/contributions.ts): only the account's own (custom) personas can be published.
   const pubs = await publicationsFor(org.orgId, "persona");
-  return { view: "personas" as const, saved: highlight, personas: personas.map(personaForCustomer).map((p) => ({
+  return { view: "personas" as const, saved: highlight, personas: personas.map((p) => (surface.redact ? personaForCustomer(p) : p)).map((p) => ({
     ...p, publishable: p.source === "custom", publication: p.source === "custom" ? pubs.get(p.slug) ?? null : null })) };
 }
 
 /** Turn one of the organization's own personas on or off (Turn off on /app/personas), without rewriting it. */
-export async function setPersonaActive(org: Org, slug: string, active: boolean) {
+export async function setPersonaActive(org: Org, slug: string, active: boolean, surface: Surface = {}) {
   const [row] = await (await getDb()).query<{ slug: string }>(
     "UPDATE developer_profiles SET active = $3, synced_at = now() WHERE slug = $1 AND org_id = $2 AND source = 'custom' RETURNING slug",
     [slug, org.orgId, active]);
   if (!row) throw new Error(`No persona ${slug}. See list_personas.`);
-  return listPersonas(org, [row.slug]);
+  return listPersonas(org, [row.slug], surface);
 }
 
 /** Delete one of the organization's own personas. Past sessions keep their transcript; their persona link is cleared. */
@@ -225,7 +226,7 @@ export async function taskSetScenarioIds(org: Org, productId: number, ref: strin
 }
 
 /**
- * For /app/tasks: every task of the organization's task sets, with prompts opened (they are stored sealed), and the
+ * Portal only (GET /api/app/tasks): every task of the organization's task sets, with prompts opened (they are stored sealed), and the
  * Octillion-curated tasks onboarding picked into its products, by title and status only (forCustomer), plus the runs
  * that used each set.
  */
