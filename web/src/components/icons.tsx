@@ -36,6 +36,7 @@ import {
   IconEdit,
   IconExternalLink,
   IconEyeOff,
+  IconEye,
   IconFile,
   IconFileText,
   IconFileTypePdf,
@@ -225,6 +226,7 @@ export const Icons = {
   trendingDown: IconTrendingDown,
   trendingUp: IconTrendingUp,
   eyeOff: IconEyeOff,
+  eye: IconEye,
   adjustments: IconAdjustmentsHorizontal,
 
   // Text formatting

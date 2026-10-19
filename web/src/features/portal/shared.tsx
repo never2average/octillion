@@ -29,10 +29,13 @@ export function copy(text: string) {
   else window.prompt('Copy:', text);
 }
 
-export function CopyButton({ text, label = 'Copy' }: { text: string; label?: string }) {
+/** Copies `text`; reads "Copied" with a check for two seconds after. */
+export function CopyButton({ text, label = 'Copy', className, variant = 'outline' }: { text: string; label?: string; className?: string; variant?: 'outline' | 'default' | 'ghost' }) {
+  const [done, setDone] = useState(false);
+  useEffect(() => { if (!done) return; const t = setTimeout(() => setDone(false), 2000); return () => clearTimeout(t); }, [done]);
   return (
-    <Button type='button' variant='outline' size='sm' onClick={() => copy(text)}>
-      <Icons.page className='size-3.5' /> {label}
+    <Button type='button' variant={variant} size='sm' className={className} onClick={() => { copy(text); setDone(true); }}>
+      {done ? <Icons.check className='size-3.5' /> : <Icons.page className='size-3.5' />} {done ? 'Copied' : label}
     </Button>
   );
 }

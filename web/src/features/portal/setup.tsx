@@ -8,7 +8,6 @@ import { toast } from 'sonner';
 import PageContainer from '@/components/layout/page-container';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Section } from '@/components/layout/section';
 import { Input } from '@/components/ui/input';
@@ -118,53 +117,81 @@ function ConnectionBox({ s, onConnected }: { s: Setup; onConnected: () => void }
     }).catch(fail);
   };
   const groups: [Client['group'], string][] = [['chat', 'Chat apps'], ['agent', 'Coding agents'], ['editor', 'Editors']];
+  const url = s.connect.connector_url;
+  const [show, setShow] = useState(!s.connect.secret);
+  // Already connected (a client reached us before, or the test just passed): a short status line, the steps folded away.
+  const connected = live?.kind === 'ok' || s.clients.length > 0;
+  const [open, setOpen] = useState(!connected);
+  const masked = url.replace(/([?&](?:key|token|k)=)[^&]+/i, '$1••••••••').replace(/(oct_[A-Za-z0-9]{4})[A-Za-z0-9_-]+/, '$1••••••••');
   return (
-    <FloatPanel title='Connection string' description={s.connect.secret ? 'Contains your key: keep it private.' : undefined}>
-      <div className='space-y-2.5'>
-        <div className='relative'>
-          <Input readOnly value={s.connect.connector_url} className='bg-background pr-10 font-mono text-xs' aria-label='Connection string' onFocus={(e) => e.currentTarget.select()} />
-          <Button type='button' variant='ghost' size='icon-sm' className='absolute top-1/2 right-1 -translate-y-1/2' aria-label={`Copy the URL and how to add it in ${c?.client ?? 'your client'}`}
-            title={`Copy the URL and how to add it in ${c?.client ?? 'your client'}`} onClick={() => copy(c ? setupText(s.connect.connector_url, c) : s.connect.connector_url)}>
-            <Icons.page className='size-4' />
-          </Button>
+    <FloatPanel title='Connect your AI client' description={s.connect.secret ? 'Your connection URL contains your key: keep it private.' : 'Octillion runs inside the AI client you already use.'}>
+      {connected && (
+        <div className='flex items-center gap-2 text-sm'>
+          <span aria-hidden className='size-2 shrink-0 rounded-full bg-emerald-500' />
+          <span className='min-w-0 flex-1 truncate'>
+            Connected{s.clients[0] ? <> from <span className='font-medium'>{s.clients[0].client.split(' ')[0]}</span></> : ''}
+            {s.clients[0]?.last && <span className='text-muted-foreground'> · <When d={s.clients[0].last} /></span>}
+          </span>
+          <Button variant='ghost' size='xs' onClick={() => setOpen(!open)}>{open ? 'Hide steps' : 'Add another client'}</Button>
         </div>
-        <div className='flex gap-2'>
-          <NativeSelect id='client-pick' aria-label='Your AI client' value={c?.id} onChange={(e) => choose(e.target.value)} className='bg-background min-w-0 flex-1'>
-            {groups.map(([g, label]) => (
-              <NativeSelectOptGroup key={g} label={label}>
-                {clients.filter((x) => x.group === g).map((x) => (
-                  <NativeSelectOption key={x.id} value={x.id}>{x.client}</NativeSelectOption>
-                ))}
-              </NativeSelectOptGroup>
-            ))}
-          </NativeSelect>
-          <Button variant='outline' onClick={test} disabled={live?.kind === 'wait'} title='Test my connection'>
-            {live?.kind === 'wait' ? <Icons.spinner className='animate-spin' /> : <Icons.plug />} Test
-          </Button>
-        </div>
-        {c && (
-          <Dialog>
-            <DialogTrigger render={<button type='button' className='text-muted-foreground hover:text-foreground flex items-center gap-1 text-xs font-medium' />}>
-              <Icons.help className='size-3.5' /> How to add it in {c.client}
-            </DialogTrigger>
-            <DialogContent className='sm:max-w-lg'>
-              <DialogHeader>
-                <DialogTitle>Add Octillion to {c.client}</DialogTitle>
-                <DialogDescription>Then press Test to check it reaches us.</DialogDescription>
-              </DialogHeader>
-              <div className='min-w-0'><ClientSteps c={c} /></div>
-            </DialogContent>
-          </Dialog>
-        )}
-        {live && (
-          <Alert variant={live.kind === 'bad' ? 'destructive' : 'default'} role='status' aria-live='polite'
-            className={cn(live.kind === 'ok' && 'border-emerald-500/40 text-emerald-700 dark:text-emerald-400')}>
-            {live.kind === 'ok' ? <Icons.circleCheck /> : live.kind === 'wait' ? <Icons.clock /> : <Icons.warning />}
-            <AlertDescription className={cn(live.kind === 'ok' && 'text-emerald-700 dark:text-emerald-400')}>{live.text}</AlertDescription>
-          </Alert>
-        )}
-      </div>
+      )}
+      {open && (
+        <ol className='flex flex-col gap-4'>
+          <NumberedStep n={1} title='Pick your client'>
+            <NativeSelect id='client-pick' aria-label='Your AI client' value={c?.id} onChange={(e) => choose(e.target.value)} className='bg-background w-full'>
+              {groups.map(([g, label]) => (
+                <NativeSelectOptGroup key={g} label={label}>
+                  {clients.filter((x) => x.group === g).map((x) => <NativeSelectOption key={x.id} value={x.id}>{x.client}</NativeSelectOption>)}
+                </NativeSelectOptGroup>
+              ))}
+            </NativeSelect>
+          </NumberedStep>
+          <NumberedStep n={2} title={c ? `Add Octillion to ${c.client}` : 'Add Octillion'}>
+            <div className='flex flex-col gap-2'>
+              <div className='bg-background flex items-center gap-1 rounded-md border py-1 pr-1 pl-2.5'>
+                <code className='min-w-0 flex-1 truncate font-mono text-xs select-all' title={show ? url : undefined}>{show ? url : masked}</code>
+                {s.connect.secret && (
+                  <Button variant='ghost' size='icon-sm' onClick={() => setShow(!show)} aria-label={show ? 'Hide the URL' : 'Show the URL'} title={show ? 'Hide' : 'Show'}>
+                    {show ? <Icons.eyeOff className='size-4' /> : <Icons.eye className='size-4' />}
+                  </Button>
+                )}
+                <CopyButton text={url} label='Copy URL' variant='ghost' />
+              </div>
+              {c && <ClientSteps c={c} />}
+              {c && (
+                <button type='button' className='text-muted-foreground hover:text-foreground self-start text-xs underline-offset-2 hover:underline'
+                  onClick={() => { copy(setupText(url, c)); }}>Copy all of this to send to a teammate</button>
+              )}
+            </div>
+          </NumberedStep>
+          <NumberedStep n={3} title='Check it works'>
+            <Button className='w-full' variant={connected ? 'outline' : 'default'} onClick={test} disabled={live?.kind === 'wait'}>
+              {live?.kind === 'wait' ? <Icons.spinner className='animate-spin' /> : <Icons.plug />} {live?.kind === 'wait' ? 'Waiting for your client…' : 'Test my connection'}
+            </Button>
+            {live && (
+              <Alert variant={live.kind === 'bad' ? 'destructive' : 'default'} role='status' aria-live='polite'
+                className={cn('mt-2', live.kind === 'ok' && 'border-emerald-500/40 text-emerald-700 dark:text-emerald-400')}>
+                {live.kind === 'ok' ? <Icons.circleCheck /> : live.kind === 'wait' ? <Icons.clock /> : <Icons.warning />}
+                <AlertDescription className={cn(live.kind === 'ok' && 'text-emerald-700 dark:text-emerald-400')}>{live.text}</AlertDescription>
+              </Alert>
+            )}
+          </NumberedStep>
+        </ol>
+      )}
     </FloatPanel>
+  );
+}
+
+/** A numbered step in the connection panel. */
+function NumberedStep({ n, title, children }: { n: number; title: string; children: React.ReactNode }) {
+  return (
+    <li className='flex gap-3'>
+      <span className='border-border text-muted-foreground flex size-5 shrink-0 items-center justify-center rounded-full border text-[11px] font-semibold tabular-nums'>{n}</span>
+      <div className='min-w-0 flex-1 space-y-2'>
+        <div className='text-sm leading-5 font-medium'>{title}</div>
+        {children}
+      </div>
+    </li>
   );
 }
 
@@ -194,8 +221,8 @@ function ClientSteps({ c }: { c: Client }) {
         <div className='space-y-1'>
           {c.file && <div className='text-muted-foreground text-xs'>{c.command || c.install_url ? 'Or add to ' : 'In '}<code className='font-mono'>{c.file}</code></div>}
           <div className='relative'>
-            <pre className='bg-background overflow-x-auto rounded-md border p-2.5 pr-10 font-mono text-xs whitespace-pre-wrap break-all'>{c.snippet}</pre>
-            <Button variant='ghost' size='icon-sm' className='absolute top-1 right-1' onClick={() => copy(c.snippet!)} aria-label='Copy snippet'><Icons.page /></Button>
+            <pre className='bg-background overflow-x-auto rounded-md border p-2.5 pr-20 font-mono text-xs whitespace-pre-wrap break-all'>{c.snippet}</pre>
+            <div className='absolute top-1 right-1'><CopyButton text={c.snippet} variant='ghost' /></div>
           </div>
         </div>
       )}
