@@ -3046,7 +3046,7 @@ try {
       console.log("✓ context: company (admins), person (self), product editing, in the AI client's instructions and in research");
       // Journeys on Setup: use-case pipelines, prompts filled in with the account's product, stages done in order.
       const jg = (await json(appCall(ownerC, "GET", "/journeys"))).journeys;
-      assert.deepEqual(jg.map((j: any) => j.id), ["baseline", "fix-loss", "head-to-head", "agent-audit", "new-capability", "release-watch", "team-memory"]);
+      assert.deepEqual(jg.map((j: any) => j.id), ["baseline", "fix-loss", "head-to-head", "agent-audit", "new-capability", "release-watch", "team-memory", "byo-personas", "byo-tasks"]);
       // Memory in journeys: its own journey, and the losing-task pipeline ends by remembering the fix.
       const memJ = jg.find((j: any) => j.id === "team-memory");
       assert.deepEqual(memJ.stages.map((x: any) => x.tools), [["save_to_memory"], ["search_memory"], []]);
@@ -3091,7 +3091,7 @@ try {
       console.log("✓ journeys as use-case pipelines; connection catalog for every client, ordered by usage share");
       // Admins manage the journeys; the portal shows the promoted ones in order.
       const pb = await json(adm("GET", "/playbooks"));
-      assert.equal(pb.playbooks.length, 7, "built-in templates seeded once");
+      assert.equal(pb.playbooks.length, 9, "built-in templates seeded once");
       assert.ok(pb.tools.includes("run_simulation") && pb.playbooks.every((p: any) => p.adoption), "tool list and adoption for the editor");
       const custom = { name: "Docs launch check", outcome: "See whether agents find the new docs", who: "Docs team", time: "an hour",
         example: { title: "Example", result: "Agents found the new quickstart." },
@@ -3182,6 +3182,185 @@ try {
         await appCall(ownerC, "POST", "/journeys/fix-loss/stages/ship", { done: false });
         delete process.env.POSTHOG_API_KEY; delete process.env.POSTHOG_HOST; ph.close();
         console.log("✓ journey analytics: progress per account, manual stages, funnel on /admin, journey_* events once each");
+      }
+
+      // ---------- Developer personas and Programming tasks on /app (src/private.ts through src/app.ts) ----------
+      {
+        const BYO = `BYO_${(await import("node:crypto")).randomBytes(5).toString("hex")}`;
+        const inv = await json(appCall(ownerC, "POST", "/team/invitations", { email: `byo-view+${stamp}@acme-smoke.dev`, role: "viewer" }));
+        const viewer = await mockPost(`/_mock/invitations/${inv.invitation.id}/accept`);
+        const viewC = await clerkSession(viewer.user.id, rowW.clerk_org_id);
+        const mcpAs = async (uid: string, name: string, args: Record<string, unknown>) => {
+          const c = new Client({ name: "smoke-byo", version: "1.0.0" });
+          await c.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${await token({ user_id: uid })}` } } }));
+          try { const r: any = await c.callTool({ name, arguments: args }); return { isError: Boolean(r.isError), text: String(r.content?.[0]?.text ?? ""), data: r.structuredContent }; } finally { await c.close(); }
+        };
+        const errOf = async (r: Response) => { const j = await r.json(); return { status: r.status, error: String(j.error ?? ""), code: j.code }; };
+        const stage = async (journey: string, id: string) => (await json(appCall(ownerC, "GET", "/journeys"))).journeys.find((j: any) => j.id === journey).stages.find((x: any) => x.id === id);
+        const forget = (names: string[]) => db.query("DELETE FROM mcp_events WHERE org_id = $1 AND name = ANY($2)", [rowW.id, names]);
+        const waitFor = async (sql: string, args: unknown[]) => { for (let i = 0; i < 50; i++) { if ((await db.query(sql, args)).length) return; await new Promise((r) => setTimeout(r, 100)); } assert.fail(`timed out: ${sql}`); };
+        await forget(["save_personas", "list_personas", "list_developer_profiles", "import_tasks", "list_task_sets"]);
+
+        // The two journeys are built in, with a prompt and a page link on the stages a page can do.
+        const jAll = (await json(appCall(ownerC, "GET", "/journeys"))).journeys;
+        const jp = jAll.find((j: any) => j.id === "byo-personas"), jt = jAll.find((j: any) => j.id === "byo-tasks");
+        assert.deepEqual(jp.stages.map((x: any) => [x.id, x.tools]), [["describe", ["list_developer_profiles", "list_personas"]], ["save", ["save_personas"]], ["run", ["run_simulation"]]]);
+        assert.deepEqual(jt.stages.map((x: any) => [x.id, x.tools]), [["product", ["list_products", "get_product", "list_task_sets"]], ["import", ["import_tasks"]], ["run", ["run_simulation"]], ["report", ["get_visibility_report"]]]);
+        assert.ok([...jp.stages, ...jt.stages].every((x: any) => x.prompt && !x.prompt.includes("{product}") && x.expect), "every stage has a filled-in prompt");
+        assert.equal(jp.stages[1].link.href, "/app/personas");
+        assert.equal(jt.stages[1].link.href, "/app/tasks");
+        assert.equal(jp.stages[1].done, false, "nothing saved yet");
+
+        // Personas, by role: a viewer reads but can't write; a member adds and edits; only an owner deletes.
+        const pv = await json(appCall(viewC, "GET", "/personas"));
+        assert.ok(Array.isArray(pv.personas) && Array.isArray(pv.shared), "a viewer reads the page");
+        assert.ok(pv.shared.every((p: any) => !("instructions" in p)), "shared personas' instructions stay internal");
+        const newPersona = { name: `Flutter lead ${BYO}`, summary: `Ships offline-first field apps ${BYO}`, instructions: "Answers briefly.", attributes: { role: "Mobile lead", stack: ["Dart", "Flutter"] } };
+        let e = await errOf(await appCall(viewC, "POST", "/personas", { personas: [newPersona] }));
+        assert.deepEqual([e.status, e.code], [403, "viewer_role"], "a viewer can't add personas");
+        const made = await json(appCall(devC, "POST", "/personas", { personas: [newPersona] }));
+        const slug = made.saved[0];
+        assert.match(slug, /^per_/);
+        const rawP = (await db.query<any>("SELECT summary, org_id, source FROM developer_profiles WHERE slug = $1", [slug]))[0];
+        assert.ok(rawP.org_id === rowW.id && rawP.source === "custom" && rawP.summary.startsWith("enc:v1:"), "stored as the account's own, encrypted, like save_personas");
+        assert.equal((await stage("byo-personas", "save")).done, true, "a page save completes the save stage");
+        assert.equal((await stage("byo-personas", "describe")).done, true, "opening the page counts as looking at the personas");
+        assert.ok((await db.query("SELECT 1 FROM mcp_events WHERE org_id = $1 AND method = 'page/action' AND name = 'save_personas' AND client = 'portal'", [rowW.id])).length, "recorded as the tool's page action");
+        assert.ok(!(await json(appCall(ownerC, "GET", "/usage"))).tools.some((t: any) => t.name === "save_personas"), "Usage keeps counting tool calls only");
+        e = await errOf(await appCall(viewC, "PATCH", `/personas/${slug}`, { active: false }));
+        assert.deepEqual([e.status, e.code], [403, "viewer_role"]);
+        const edited = await json(appCall(devC, "PATCH", `/personas/${slug}`, { name: `Flutter lead ${BYO} v2`, summary: "Edited", attributes: { role: "Staff mobile" } }));
+        assert.equal(edited.personas.find((p: any) => p.slug === slug).name, `Flutter lead ${BYO} v2`, "a member edits");
+        assert.equal((await json(appCall(devC, "PATCH", `/personas/${slug}`, { active: false }))).personas.find((p: any) => p.slug === slug).active, false, "and turns it off");
+        assert.equal((await json(appCall(devC, "PATCH", `/personas/${slug}`, { active: true }))).personas.find((p: any) => p.slug === slug).active, true);
+        const sharedSlug = pv.shared[0]?.slug;
+        if (sharedSlug) assert.equal((await appCall(devC, "PATCH", `/personas/${sharedSlug}`, { active: false })).status, 404, "shared personas are read-only");
+        e = await errOf(await appCall(devC, "DELETE", `/personas/${slug}`));
+        assert.deepEqual([e.status, e.code], [403, "forbidden"], "a member can't delete");
+        // Import: the same shape and checks as save_personas, errors word for word.
+        const pageErr = async (body: unknown) => (await errOf(await appCall(devC, "POST", "/personas", body))).error;
+        const toolErr = async (args: Record<string, unknown>) => (await mcpAs(acc2.user.id, "save_personas", args)).text;
+        for (const personas of [[{ name: "  " }], [{ name: "x", attributes: { blob: "y".repeat(1600) } }], [{ name: "x", environment: { editor: "notepad" } }]]) {
+          const [pe, te] = [await pageErr({ personas }), await toolErr({ personas })];
+          assert.ok(pe && pe === te, `the page refuses like the tool: ${pe} / ${te}`);
+        }
+        assert.match(await pageErr({ personas: Array.from({ length: 21 }, (_, i) => ({ name: `P${i}` })) }), /personas/, "more than 20 at once is refused");
+        assert.ok((await mcpAs(acc2.user.id, "save_personas", { personas: Array.from({ length: 21 }, (_, i) => ({ name: `P${i}` })) })).isError, "as by the tool");
+        const imported = await json(appCall(devC, "POST", "/personas", { personas: [{ name: `Platform engineer ${BYO}` }, { name: `Indie iOS ${BYO}`, summary: "Solo" }] }));
+        assert.equal(imported.saved.length, 2, "an import saves each");
+
+        // Programming tasks: a set per product, by role.
+        const tv = await json(appCall(viewC, "GET", "/tasks"));
+        assert.ok(tv.products.some((p: any) => p.slug === slugP) && Array.isArray(tv.task_sets) && Array.isArray(tv.tasks), "a viewer reads the page");
+        const set1 = { product: slugP, task_set: `Case studies ${BYO}`, tasks: [{ title: `Offline sync ${BYO}`, prompt: `Our Flutter field app must keep working offline and sync when back online. ${BYO}` }] };
+        e = await errOf(await appCall(viewC, "POST", "/tasks", set1));
+        assert.deepEqual([e.status, e.code], [403, "viewer_role"], "a viewer can't create task sets");
+        assert.equal((await stage("byo-tasks", "import")).done, false);
+        const created = await json(appCall(devC, "POST", "/tasks", set1));
+        const ts = created.task_sets.find((s: any) => s.name === set1.task_set);
+        assert.ok(ts && ts.active_tasks === 1 && ts.tasks[0].platform === "mobile", "a member creates a set; the task gets a platform");
+        assert.equal((await stage("byo-tasks", "import")).done, true, "a page import completes the import stage");
+        assert.equal((await stage("byo-tasks", "product")).done, true);
+        const added = await json(appCall(devC, "POST", "/tasks", { product: slugP, task_set: set1.task_set, tasks: [{ prompt: `Add password reset emails to this Express service, 10k a month. ${BYO}`, repo_url: "https://github.com/acme/api" }] }));
+        assert.equal(added.task_sets.find((s: any) => s.id === ts.id).active_tasks, 2, "the same name adds to the set");
+        const page = await json(appCall(devC, "GET", "/tasks"));
+        const mine = page.tasks.filter((t: any) => t.task_set === ts.id);
+        assert.ok(mine.length === 2 && mine[0].prompt.includes(BYO), "tasks come back with their prompts opened");
+        assert.ok((await db.query<any>("SELECT prompt FROM scenarios WHERE id = $1", [mine[0].id]))[0].prompt.startsWith("enc:v1:"), "and stored encrypted");
+        e = await errOf(await appCall(viewC, "PATCH", `/tasks/${mine[0].id}`, { active: false }));
+        assert.deepEqual([e.status, e.code], [403, "viewer_role"]);
+        await json(appCall(devC, "PATCH", `/tasks/${mine[0].id}`, { title: `Offline sync v2 ${BYO}`, platform: "", repo_url: null, tags: ["sync"] }));
+        await json(appCall(devC, "PATCH", `/tasks/${mine[1].id}`, { active: false }));
+        const after = (await json(appCall(devC, "GET", "/tasks"))).tasks;
+        const t0 = after.find((t: any) => t.id === mine[0].id), t1 = after.find((t: any) => t.id === mine[1].id);
+        assert.ok(t0.title === `Offline sync v2 ${BYO}` && t0.tags[0] === "sync" && t0.prompt.includes(BYO), "a member edits a task");
+        assert.equal(t1.active, false, "and turns one off");
+        assert.ok((await db.query<any>("SELECT prompt FROM scenarios WHERE id = $1", [t0.id]))[0].prompt.startsWith("enc:v1:"), "an edited prompt stays encrypted");
+        assert.match((await errOf(await appCall(devC, "PATCH", `/tasks/${t0.id}`, { prompt: "too short" }))).error, /prompt/, "edits are checked like imports");
+        assert.match((await errOf(await appCall(devC, "PATCH", `/tasks/${t0.id}`, { repo_url: "ftp://x" }))).error, /^task\.repo_url must be an https URL/);
+        // Import errors match import_tasks word for word (the checks past the input schema), and both refuse what it refuses.
+        for (const body of [{ task_set: "  ", tasks: [{ prompt: "A long enough prompt for a coding agent to work on." }] },
+                            { task_set: "x", tasks: [{ prompt: "A long enough prompt for a coding agent to work on.", repo_url: "http://x" }] },
+                            { task_set: "x", tasks: [{ prompt: "A long enough prompt for a coding agent to work on.", template: "flutter", platform: "web", tags: ["x".repeat(41)] }] }]) {
+          const pe = (await errOf(await appCall(devC, "POST", "/tasks", { product: slugP, ...body }))).error;
+          const te = (await mcpAs(acc2.user.id, "import_tasks", { product: slugP, ...body })).text;
+          assert.ok(pe && pe === te, `the page refuses like import_tasks: ${pe} / ${te}`);
+        }
+        const shortP = (await errOf(await appCall(devC, "POST", "/tasks", { product: slugP, task_set: "x", tasks: [{ prompt: "short" }] })));
+        const shortT = await mcpAs(acc2.user.id, "import_tasks", { product: slugP, task_set: "x", tasks: [{ prompt: "short" }] });
+        assert.ok(shortP.status === 400 && /tasks\[0\]\.prompt/.test(shortP.error) && shortT.isError && /prompt/.test(shortT.text), "a short prompt: both refuse");
+        // Shared library picks: the save_scenarios {library_task_id} path.
+        const [lib] = await db.query<{ id: number }>("SELECT id FROM library_tasks WHERE active ORDER BY id LIMIT 1");
+        if (lib) {
+          assert.ok((await json(appCall(viewC, "GET", "/tasks/library"))).tasks.length > 0, "the library is browsable");
+          assert.equal((await appCall(viewC, "POST", "/tasks/library", { product: slugP, library_task_id: lib.id })).status, 403);
+          assert.equal((await appCall(devC, "POST", "/tasks/library", { product: slugP, library_task_id: lib.id })).status, 201);
+          const pick = (await json(appCall(devC, "GET", "/tasks"))).tasks.find((t: any) => t.library_task_id === lib.id && !t.task_set);
+          assert.ok(pick && pick.product === slugP, "a library pick shows, marked as from the library");
+          assert.equal((await appCall(devC, "PATCH", `/tasks/${pick.id}`, { title: "Mine now" })).status, 400, "a library pick can only be turned on or off");
+          assert.equal((await appCall(devC, "PATCH", `/tasks/${pick.id}`, { active: false })).status, 200);
+        }
+        // Runs that used a set: a session on one of its tasks.
+        const [simRow] = await db.query<{ id: string }>("SELECT id FROM simulations WHERE org_id = $1 LIMIT 1", [rowW.id]);
+        if (simRow) {
+          await db.query(`INSERT INTO agent_sessions (id, org_id, simulation_id, product_id, scenario_id, harness, model, status)
+                          SELECT $1, $2, $3, product_id, id, 'claude-code', 'smoke', 'cancelled' FROM scenarios WHERE id = $4`, [`ses_byo_${BYO}`, rowW.id, simRow.id, t0.id]);
+          assert.ok((await json(appCall(devC, "GET", "/tasks"))).runs.some((r: any) => r.task_set === ts.id && r.id === simRow.id), "the runs that used each set");
+          await db.query("DELETE FROM agent_sessions WHERE id = $1", [`ses_byo_${BYO}`]);
+        }
+
+        // Tenant isolation: another account (its own Clerk organization) sees none of this and can change none of it.
+        const orgB = await (await fetch(`${mock.url}/v1/organizations`, { method: "POST", headers: { authorization: "Bearer sk_test_mock", "content-type": "application/json" }, body: JSON.stringify({ name: `Other ${BYO}` }) })).json();
+        const userB = await mockPost("/_mock/clerk/users", { email: `b+${stamp}@other-${BYO.toLowerCase()}.dev` });
+        await mockPost("/_mock/clerk/memberships", { org_id: orgB.id, user_id: userB.id, role: "org:admin" });
+        const bC = await clerkSession(userB.id, orgB.id, "admin");
+        assert.equal((await appCall(bC, "GET", "/me")).status, 200);
+        assert.equal((await appCall(bC, "POST", "/context/products", { name: "Other product" })).status, 201);
+        const seenB = JSON.stringify([await json(appCall(bC, "GET", "/personas")), await json(appCall(bC, "GET", "/tasks"))]);
+        assert.ok(!seenB.includes(BYO.replace("BYO_", "")) && !seenB.includes(slug), "org B sees none of org A's personas or tasks");
+        const unknownP = await errOf(await appCall(bC, "PATCH", "/personas/per_doesnotexist", { active: false }));
+        const otherP = await errOf(await appCall(bC, "PATCH", `/personas/${slug}`, { active: false }));
+        assert.equal(otherP.status, 404);
+        assert.equal(otherP.error.replace(slug, "S"), unknownP.error.replace("per_doesnotexist", "S"), "the same answer whether or not it exists elsewhere");
+        assert.equal((await appCall(bC, "PATCH", `/personas/${slug}`, { name: "hijack" })).status, 404);
+        assert.equal((await appCall(bC, "DELETE", `/personas/${slug}`)).status, 404, "B can't delete A's persona");
+        assert.equal((await appCall(bC, "PATCH", `/tasks/${t0.id}`, { active: false })).status, 404, "or change A's tasks");
+        assert.equal((await appCall(bC, "PATCH", `/tasks/${t0.id}`, { title: "hijack" })).status, 404);
+        assert.equal((await appCall(bC, "POST", "/tasks", { ...set1, task_set: "hijack" })).status, 404, "or add to A's product");
+        const still = (await db.query<any>("SELECT title, active FROM scenarios WHERE id = $1", [t0.id]))[0];
+        assert.ok(still.title === `Offline sync v2 ${BYO}` && still.active, "A's task is untouched");
+        assert.equal((await db.query<any>("SELECT active FROM developer_profiles WHERE slug = $1", [slug]))[0].active, true, "and A's persona");
+
+        // An owner deletes; then the same stages complete from the MCP tools alone.
+        assert.equal((await appCall(ownerC, "DELETE", `/personas/${slug}`)).status, 204, "an owner deletes");
+        assert.ok(!(await json(appCall(ownerC, "GET", "/personas"))).personas.some((p: any) => p.slug === slug));
+        assert.equal((await appCall(ownerC, "DELETE", `/personas/${slug}`)).status, 404);
+        await forget(["save_personas", "list_personas", "list_developer_profiles", "import_tasks", "list_task_sets"]);
+        assert.equal((await stage("byo-personas", "save")).done, false, "with the page's actions forgotten, the stage is open again");
+        assert.ok(!(await mcpAs(acc2.user.id, "list_developer_profiles", {})).isError);
+        const viaTool = await mcpAs(acc2.user.id, "save_personas", { personas: [{ name: `Via tool ${BYO}` }] });
+        assert.ok(!viaTool.isError, viaTool.text);
+        await waitFor("SELECT 1 FROM mcp_events WHERE org_id = $1 AND method = 'tools/call' AND name = 'save_personas' AND ok", [rowW.id]);
+        assert.equal((await stage("byo-personas", "describe")).done, true, "the describe stage from list_developer_profiles");
+        assert.equal((await stage("byo-personas", "save")).done, true, "the save stage from save_personas");
+        assert.equal((await stage("byo-tasks", "import")).done, false);
+        assert.ok(!(await mcpAs(acc2.user.id, "import_tasks", { product: slugP, task_set: `Via tool ${BYO}`, tasks: [{ prompt: `Add retries to the webhook sender in this service. ${BYO}` }] })).isError);
+        await waitFor("SELECT 1 FROM mcp_events WHERE org_id = $1 AND method = 'tools/call' AND name = 'import_tasks' AND ok", [rowW.id]);
+        assert.equal((await stage("byo-tasks", "import")).done, true, "the import stage from import_tasks");
+        // Run and report: the run_simulation and get_visibility_report calls after the import complete the rest.
+        for (const name of ["run_simulation", "get_visibility_report"])
+          await db.query("INSERT INTO mcp_events (org_id, method, name, client, ok, user_id, at) VALUES ($1, 'tools/call', $2, 'smoke-byo', true, $3, now() + interval '1 second')", [rowW.id, name, acc2.user.id]);
+        const jt2 = (await json(appCall(ownerC, "GET", "/journeys"))).journeys.find((j: any) => j.id === "byo-tasks");
+        assert.equal(jt2.done, jt2.total, "Bring your own programming tasks: every stage done");
+        assert.equal((await stage("byo-personas", "run")).done, true, "and the personas journey's run stage");
+        await db.query("DELETE FROM mcp_events WHERE org_id = $1 AND client = 'smoke-byo'", [rowW.id]);
+
+        // Tidy up: the extra account, the viewer, and this block's tasks (later counts stay as they were).
+        await db.query("UPDATE scenarios SET active = false WHERE product_id IN (SELECT id FROM products WHERE org_id = $1) AND (task_set_id IS NOT NULL OR library_task_id IS NOT NULL)", [rowW.id]);
+        const [rowB] = await db.query<{ slug: string }>("SELECT slug FROM organizations WHERE clerk_org_id = $1", [orgB.id]);
+        await db.query("DELETE FROM organizations WHERE slug = $1", [rowB.slug]);
+        assert.equal((await appCall(ownerC, "POST", `/team/members/${viewer.user.id}/deactivate`)).status, 204);
+        console.log("✓ Developer personas and Programming tasks on /app: roles, encrypted like the tools, same validation errors, tenant isolation, journeys from pages and tools");
       }
     }
 

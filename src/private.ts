@@ -9,11 +9,13 @@
  *  - harnesses: org_harnesses, a declarative spec plus a review status; nothing runs until a harness is approved and
  *    built in isolation (phase 2).
  */
-import { ensureOrgKey, openJson, openRows, seal, sealJson } from "./orgcrypto.js";
+import { ensureOrgKey, open as openText, openJson, openRows, seal, sealJson } from "./orgcrypto.js";
+import { z } from "zod";
 import { randomBytes } from "node:crypto";
 import { getDb } from "./db.js";
 import type { Org } from "./auth.js";
-import { resolveProduct, checkTemplate, checkPlatform } from "./queries.js";
+import { resolveProduct, checkTemplate, checkPlatform, WORKSPACE_TEMPLATES } from "./queries.js";
+import { PLATFORMS } from "./platform.js";
 import { platformOf } from "./platform.js";
 import { environmentIssues, type PersonaEnvironment } from "../orchestrator/core/environment.js";
 
@@ -24,6 +26,41 @@ export const cleanText = (s: unknown, max: number, what: string): string => {
   if (t.length > max) throw new Error(`${what} is too long (${t.length} characters; at most ${max})`);
   return t;
 };
+
+// ---------- input shapes: the MCP tools (src/server.ts) and the /app pages (src/app.ts) check the same ones ----------
+
+export const personaInputSchema = z.object({
+  slug: z.string().optional().describe("Update this persona (from list_personas); omit to add a new one"),
+  name: z.string().max(80), summary: z.string().max(600).optional(),
+  instructions: z.string().max(1500).optional().describe("How this developer answers a coding agent's questions"),
+  attributes: z.record(z.string(), z.unknown()).optional().describe("role, experience_years, company_size, stack[], constraints[], tone"),
+  environment: z.object({ editor: z.string(), tools: z.array(z.string()).optional() }).passthrough().optional()
+    .describe("Editor and CLI tools they have installed (see list_developer_profiles for examples)"),
+  active: z.boolean().optional(),
+});
+export const personasInputSchema = z.array(personaInputSchema).min(1).max(20);
+
+export const taskInputSchema = z.object({
+  title: z.string().max(160).optional(), prompt: z.string().min(20).max(6000).describe("The task as a developer would give it to a coding agent"),
+  language: z.string().optional(), tags: z.array(z.string()).optional(),
+  platform: z.enum(PLATFORMS).optional(),
+  template: z.enum([...WORKSPACE_TEMPLATES, "auto"]).optional(),
+  repo_url: z.string().optional(), expectation: z.enum(["recommend", "avoid"]).optional(),
+  provenance: z.string().max(500).optional().describe("Where the task comes from, e.g. the case study"),
+});
+export const importTasksInputShape = {
+  task_set: z.string().max(120).describe("Name of the set, e.g. '2025 case studies'"),
+  description: z.string().max(2000).optional(),
+  tasks: z.array(taskInputSchema).min(1).max(200),
+};
+
+/** A zod failure in plain words: `tasks[0].prompt: Too small: expected string to have >=20 characters`. */
+export function inputIssues(e: z.ZodError, root = ""): string {
+  return e.issues.map((i) => {
+    const path = i.path.reduce<string>((a, k) => (typeof k === "number" ? `${a}[${k}]` : a ? `${a}.${String(k)}` : String(k)), root);
+    return path ? `${path}: ${i.message}` : i.message;
+  }).join("; ");
+}
 
 // ---------- personas ----------
 
@@ -83,11 +120,51 @@ export async function listPersonas(org: Org, highlight: string[] = []) {
   return { view: "personas" as const, personas, saved: highlight };
 }
 
+/** Turn one of the organization's own personas on or off (Turn off on /app/personas), without rewriting it. */
+export async function setPersonaActive(org: Org, slug: string, active: boolean) {
+  const [row] = await (await getDb()).query<{ slug: string }>(
+    "UPDATE developer_profiles SET active = $3, synced_at = now() WHERE slug = $1 AND org_id = $2 AND source = 'custom' RETURNING slug",
+    [slug, org.orgId, active]);
+  if (!row) throw new Error(`No persona ${slug}. See list_personas.`);
+  return listPersonas(org, [row.slug]);
+}
+
+/** Delete one of the organization's own personas. Past sessions keep their transcript; their persona link is cleared. */
+export async function deletePersona(org: Org, slug: string) {
+  const [row] = await (await getDb()).query<{ slug: string }>(
+    "DELETE FROM developer_profiles WHERE slug = $1 AND org_id = $2 AND source = 'custom' RETURNING slug", [slug, org.orgId]);
+  if (!row) throw new Error(`No persona ${slug}. See list_personas.`);
+  return { deleted: row.slug };
+}
+
+/** The shared library personas any account can pick (read-only for customers; instructions stay internal). */
+export async function sharedPersonas() {
+  return (await getDb()).query<{ slug: string; name: string; summary: string; attributes: Record<string, unknown>; environment: unknown }>(
+    "SELECT slug, name, summary, attributes, environment FROM developer_profiles WHERE org_id IS NULL AND active ORDER BY name LIMIT 500");
+}
+
 // ---------- task sets ----------
 
 export interface TaskInput {
   title?: string; prompt: string; language?: string; tags?: string[]; platform?: string; template?: string | null;
   repo_url?: string; expectation?: "recommend" | "avoid"; provenance?: string;
+}
+
+const REPO_URL = /^https:\/\/[A-Za-z0-9.-]+\.[A-Za-z]{2,}\/\S+$/;
+
+/** One task checked and normalised (`at` names it in errors: tasks[3], or task for an edit). Import and edit share it. */
+function cleanTask(t: TaskInput, at: string) {
+  const prompt = cleanText(t.prompt, 6000, `${at}.prompt`);
+  if (prompt.length < 20) throw new Error(`${at}.prompt must be at least 20 characters`);
+  if (t.repo_url != null && !REPO_URL.test(t.repo_url)) throw new Error(`${at}.repo_url must be an https URL of a public git host`);
+  const template = checkTemplate(t.template);
+  const platform = checkPlatform(t.platform) ?? platformOf({ template, language: t.language, tags: t.tags, prompt });
+  return {
+    prompt, title: cleanText(t.title, 160, `${at}.title`) || prompt.slice(0, 80), repo_url: t.repo_url ?? null,
+    language: t.language ? cleanText(t.language, 40, `${at}.language`) || null : null, tags: (t.tags ?? []).slice(0, 20).map((x) => cleanText(x, 40, "tag")).filter(Boolean),
+    expectation: t.expectation === "avoid" ? "avoid" as const : "recommend" as const,
+    provenance: t.provenance ? cleanText(t.provenance, 500, `${at}.provenance`) || null : null, template: template ?? null, platform,
+  };
 }
 
 export async function importTasks(org: Org, input: { product?: string; task_set: string; description?: string; tasks: TaskInput[] }) {
@@ -106,20 +183,12 @@ export async function importTasks(org: Org, input: { product?: string; task_set:
       [rid("tset"), org.orgId, p.id, setName, input.description ? cleanText(input.description, 2000, "description") : null]);
     setId = set!.id;
     for (const [i, t] of input.tasks.entries()) {
-      const prompt = cleanText(t.prompt, 6000, `tasks[${i}].prompt`);
-      if (prompt.length < 20) throw new Error(`tasks[${i}].prompt must be at least 20 characters`);
-      if (t.repo_url != null && !/^https:\/\/[A-Za-z0-9.-]+\.[A-Za-z]{2,}\/\S+$/.test(t.repo_url))
-        throw new Error(`tasks[${i}].repo_url must be an https URL of a public git host`);
-      const template = checkTemplate(t.template);
-      const platform = checkPlatform(t.platform) ?? platformOf({ template, language: t.language, tags: t.tags, prompt });
-      const provenance = t.provenance ? cleanText(t.provenance, 500, `tasks[${i}].provenance`) : null;
+      const c = cleanTask(t, `tasks[${i}]`);
       await tx.query(
         `/* tenant: product resolved within the caller's org (resolveProduct) */ INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, source, rationale, template, platform, task_set_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7, true, 'custom', $8, $9, $10, $11)`,
-        [p.id, cleanText(t.title, 160, `tasks[${i}].title`) || prompt.slice(0, 80), await seal(org.orgId, prompt), t.repo_url ?? null,
-         t.language ? cleanText(t.language, 40, `tasks[${i}].language`) : null, (t.tags ?? []).slice(0, 20).map((x) => cleanText(x, 40, "tag")),
-         t.expectation === "avoid" ? "avoid" : "recommend", provenance ? await seal(org.orgId, provenance) : null,
-         template ?? null, platform, setId]);
+        [p.id, c.title, await seal(org.orgId, c.prompt), c.repo_url, c.language, c.tags, c.expectation,
+         c.provenance ? await seal(org.orgId, c.provenance) : null, c.template, c.platform, setId]);
     }
   });
   return listTaskSets(org, p.slug);
@@ -149,6 +218,62 @@ export async function taskSetScenarioIds(org: Org, productId: number, ref: strin
     [org.orgId, productId, ref]);
   if (!rows.length) throw new Error(`No task set ${ref} with active tasks. See list_task_sets.`);
   return rows.map((r) => r.id);
+}
+
+/**
+ * For /app/tasks: every task of the organization's task sets, and the shared library tasks it picked into a product,
+ * with prompts opened (they are stored sealed), plus the runs that used each set.
+ */
+export async function taskSetDetails(org: Org) {
+  const db = await getDb();
+  const tasks = await db.query<any>(
+    `SELECT sc.id, sc.title, sc.prompt, sc.repo_url, sc.language, sc.tags, sc.platform, sc.template, sc.expectation, sc.active, sc.source,
+            sc.rationale AS provenance, sc.library_task_id, sc.created_at, ts.public_id AS task_set, p.slug AS product, p.name AS product_name
+       FROM scenarios sc JOIN products p ON p.id = sc.product_id AND p.org_id = $1
+       LEFT JOIN org_task_sets ts ON ts.id = sc.task_set_id AND ts.org_id = $1
+      WHERE ts.id IS NOT NULL OR sc.library_task_id IS NOT NULL ORDER BY sc.id`, [org.orgId]);
+  for (const t of tasks) {
+    if (t.task_set) { t.prompt = await openText(org.orgId, t.prompt); t.provenance = t.provenance ? await openText(org.orgId, t.provenance) : null; }
+    else t.provenance = null; // a library pick: its rationale is research's, not a provenance
+  }
+  const runs = await db.query<{ task_set: string; id: string; name: string; status: string; created_at: Date }>(
+    `SELECT DISTINCT ON (ts.public_id, sim.id) ts.public_id AS task_set, sim.id, sim.name, sim.status, sim.created_at
+       FROM agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id JOIN org_task_sets ts ON ts.id = sc.task_set_id AND ts.org_id = $1
+       JOIN simulations sim ON sim.id = s.simulation_id AND sim.org_id = $1
+      WHERE s.org_id = $1 ORDER BY ts.public_id, sim.id`, [org.orgId]);
+  return { tasks, runs };
+}
+
+/**
+ * Edit one task of the organization's task sets (or turn it on or off), checked like import_tasks. A shared library
+ * task picked into a product can only be turned on or off here.
+ */
+export async function updateTask(org: Org, id: number, patch: Partial<TaskInput> & { active?: boolean }) {
+  const db = await getDb();
+  const [row] = await db.query<any>(
+    `SELECT sc.*, ts.id AS set_id FROM scenarios sc JOIN products p ON p.id = sc.product_id AND p.org_id = $1
+       LEFT JOIN org_task_sets ts ON ts.id = sc.task_set_id AND ts.org_id = $1 WHERE sc.id = $2`, [org.orgId, id]);
+  if (!row || (!row.set_id && row.library_task_id == null)) throw new Error(`No task ${id}. See list_task_sets.`);
+  const fields = Object.keys(patch).filter((k) => k !== "active" && (patch as Record<string, unknown>)[k] !== undefined);
+  if (!row.set_id && fields.length) throw new Error("A task from the shared library can only be turned on or off here");
+  if (patch.active != null && typeof patch.active !== "boolean") throw new Error("active must be true or false");
+  if (fields.length) {
+    await ensureOrgKey(org.orgId);
+    const cur: TaskInput = {
+      title: row.title, prompt: await openText(org.orgId, row.prompt), repo_url: row.repo_url ?? undefined, language: row.language ?? undefined,
+      tags: row.tags ?? [], platform: row.platform ?? undefined, template: row.template, expectation: row.expectation,
+      provenance: row.rationale ? await openText(org.orgId, row.rationale) : undefined,
+    };
+    const c = cleanTask({ ...cur, ...Object.fromEntries(fields.map((k) => [k, (patch as Record<string, unknown>)[k]])) } as TaskInput, "task");
+    await db.query(
+      `/* tenant: scenario verified against the caller's org above */ UPDATE scenarios SET title = $2, prompt = $3, repo_url = $4, language = $5, tags = $6,
+              expectation = $7, rationale = $8, template = $9, platform = $10, updated_at = now() WHERE id = $1`,
+      [id, c.title, await seal(org.orgId, c.prompt), c.repo_url, c.language, c.tags, c.expectation,
+       c.provenance ? await seal(org.orgId, c.provenance) : null, c.template, c.platform]);
+  }
+  if (patch.active != null)
+    await db.query("/* tenant: scenario verified against the caller's org above */ UPDATE scenarios SET active = $2, updated_at = now() WHERE id = $1", [id, patch.active]);
+  return { id, set: Boolean(row.set_id) };
 }
 
 // ---------- harness mixes (private populations) ----------

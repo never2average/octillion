@@ -8,6 +8,7 @@
  * people from Clerk and the plan from Stripe, through src/admin.ts.
  */
 import express, { type NextFunction, type Request, type Response } from "express";
+import { z } from "zod";
 import * as admin from "./admin.js";
 import { orgForClerk } from "./auth.js";
 import { orgBudget } from "./billing.js";
@@ -26,6 +27,9 @@ import * as limits from "./limits.js";
 import * as clerk from "./clerk.js";
 import { clerkSession } from "./session.js";
 import * as roles from "./account-roles.js";
+import * as priv from "./private.js";
+import { recordPageAction } from "./analytics.js";
+import { browseTaskLibrary } from "./queries.js";
 
 const publicUrl = () => (process.env.PUBLIC_URL ?? `http://127.0.0.1:${process.env.PORT ?? 3333}`).replace(/\/$/, "");
 
@@ -282,9 +286,9 @@ export function appRouter() {
 
   // The API behind the portal pages. Sign-in and sign-out happen in the UI, with Clerk.
   const api = express.Router();
-  // Small bodies everywhere except a memory import (up to 1,000 items), which parses its own up to 2 MB.
+  // Small bodies everywhere except imports (memory, use cases, personas, tasks), which parse their own.
   const small = express.json({ limit: "16kb" });
-  api.use((req, res, next) => (req.path === "/context/memories/import" || req.path === "/journeys/import" ? next() : small(req, res, next)));
+  api.use((req, res, next) => (req.path === "/context/memories/import" || req.path === "/journeys/import" || (req.method === "POST" && (req.path === "/personas" || req.path === "/tasks")) ? next() : small(req, res, next)));
   api.use((_req, res, next) => { res.set("Cache-Control", "no-store"); next(); });
   api.use(async (req, res, next) => {
     if (!clerk.clerkEnabled()) return void res.status(503).json({ error: "Sign-in is not configured (CLERK_SECRET_KEY)" });
@@ -597,6 +601,90 @@ export function appRouter() {
     need(res, "manage");
     await q(saveScenarios(await orgOf(res), String(req.params.slug), [{ id: Number(req.params.id), active: Boolean(req.body?.active) } as any]));
     res.status(204).end();
+  });
+
+  // ---------- Developer personas and Programming tasks: the account's own (src/private.ts) ----------
+  // The same functions and input checks as the MCP tools save_personas, import_tasks and save_scenarios; each write
+  // is recorded as that tool's page action, so journey stages complete from the page as from the AI client.
+  // Like q(), but a database error (SQLSTATE) gets a generic message, as on the connector: its text can echo other rows.
+  const qp = <T>(p: Promise<T>) => p.catch((e: Error & { code?: unknown }) => {
+    if (e instanceof AppError) throw e;
+    if (typeof e.code === "string" && /^[0-9A-Z]{5}$/.test(e.code)) throw new AppError(`The request could not be completed (database error ${e.code}). Check the values and try again.`);
+    throw new AppError(e.message, /^No (persona|task|product)s? |not found|unknown/i.test(e.message) ? 404 : 400);
+  });
+  const checked = <T>(schema: { safeParse: (v: unknown) => { success: true; data: T } | { success: false; error: any } }, v: unknown, root: string): T => {
+    const r = schema.safeParse(v);
+    if (!r.success) throw new AppError(priv.inputIssues(r.error, root));
+    return r.data;
+  };
+  api.get("/personas", async (_req, res) => {
+    const org = await orgOf(res);
+    const [own, shared] = await Promise.all([qp(priv.listPersonas(org)), priv.sharedPersonas()]);
+    await recordPageAction(org, "list_personas", { every: 3_600_000 });
+    res.json({ personas: own.personas, shared, permissions: perms(res) });
+  });
+  // New persona, edits by slug and Import: the save_personas shape ({ personas: [...] }, 1-20 at a time).
+  api.post("/personas", express.json({ limit: "256kb" }), async (req, res) => {
+    need(res, "edit");
+    const org = await orgOf(res);
+    const r = await qp(priv.savePersonas(org, checked(priv.personasInputSchema, req.body?.personas, "personas") as priv.PersonaInput[]));
+    await recordPageAction(org, "save_personas");
+    res.status(201).json(r);
+  });
+  api.patch("/personas/:slug", async (req, res) => {
+    need(res, "edit");
+    const org = await orgOf(res), slug = String(req.params.slug), b = req.body ?? {};
+    const keys = Object.keys(b);
+    const r = keys.length === 1 && keys[0] === "active"
+      ? await qp(priv.setPersonaActive(org, slug, Boolean(b.active)))
+      : await qp(priv.savePersonas(org, [checked(priv.personaInputSchema, { ...b, slug }, "persona") as priv.PersonaInput]));
+    await recordPageAction(org, "save_personas");
+    res.json(r);
+  });
+  api.delete("/personas/:slug", async (req, res) => {
+    need(res, "manage");
+    await qp(priv.deletePersona(await orgOf(res), String(req.params.slug)));
+    res.status(204).end();
+  });
+
+  api.get("/tasks", async (_req, res) => {
+    const org = await orgOf(res);
+    const [sets, detail, products] = await Promise.all([qp(priv.listTaskSets(org)), priv.taskSetDetails(org), listProducts(org)]);
+    await recordPageAction(org, "list_task_sets", { every: 3_600_000 });
+    res.json({ task_sets: sets.task_sets, tasks: detail.tasks, runs: detail.runs,
+      products: ((products as any).products as any[]).map((p) => ({ slug: p.slug, name: p.name })), permissions: perms(res) });
+  });
+  // Create a task set, add tasks to one (same name) and Import: the import_tasks shape.
+  api.post("/tasks", express.json({ limit: "1mb" }), async (req, res) => {
+    need(res, "edit");
+    const org = await orgOf(res), b = req.body ?? {};
+    const input = checked(z.object(priv.importTasksInputShape), { task_set: b.task_set, description: b.description || undefined, tasks: b.tasks }, "");
+    const r = await qp(priv.importTasks(org, { product: b.product ? String(b.product) : undefined, ...input } as Parameters<typeof priv.importTasks>[1]));
+    await recordPageAction(org, "import_tasks");
+    res.status(201).json(r);
+  });
+  // An edit may clear the repo (null) or set the platform back to automatic ("").
+  const taskPatch = priv.taskInputSchema.partial().extend({ repo_url: z.string().nullable().optional(), platform: z.union([priv.taskInputSchema.shape.platform.unwrap(), z.literal("")]).optional(), active: z.boolean().optional() });
+  api.patch("/tasks/:id", async (req, res) => {
+    need(res, "edit");
+    const org = await orgOf(res), id = Number(req.params.id);
+    if (!Number.isInteger(id)) throw new AppError("No such task", 404);
+    const r = await qp(priv.updateTask(org, id, checked(taskPatch, req.body ?? {}, "task") as Parameters<typeof priv.updateTask>[2]));
+    await recordPageAction(org, r.set ? "import_tasks" : "save_scenarios");
+    res.json(r);
+  });
+  // The shared task library, to pick from (browse_task_library), and a pick into a product (save_scenarios {library_task_id}).
+  api.get("/tasks/library", async (req, res) => {
+    const s = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim().slice(0, 200) : undefined);
+    res.json(await qp(browseTaskLibrary({ query: s(req.query.q), platform: s(req.query.platform), language: s(req.query.language), category: s(req.query.category), limit: 100 })));
+  });
+  api.post("/tasks/library", async (req, res) => {
+    need(res, "edit");
+    const org = await orgOf(res), ids = (Array.isArray(req.body?.library_task_ids) ? req.body.library_task_ids : [req.body?.library_task_id]).map(Number);
+    if (!ids.length || ids.length > 50 || ids.some((x: number) => !Number.isInteger(x))) throw new AppError("Pick 1-50 library tasks");
+    await qp(saveScenarios(org, req.body?.product ? String(req.body.product) : undefined, ids.map((library_task_id: number) => ({ library_task_id }))));
+    await recordPageAction(org, "save_scenarios");
+    res.status(201).json({ added: ids.length });
   });
 
   // Journey tips (src/journeys.ts): everything waiting for this person, dismiss one, or turn tips off.

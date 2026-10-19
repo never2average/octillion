@@ -60,3 +60,23 @@ export function connectorEvents(body: unknown, userAgent: string | undefined): M
       };
     });
 }
+
+/**
+ * The /app pages' equivalent of a tool call (Developer personas, Programming tasks): recorded as method 'page/action'
+ * under the tool's name, so journey stages (src/playbooks.ts) complete from a page action exactly as from the MCP tool.
+ * Usage and tool adoption keep counting tools/call only. `every` (ms) skips a repeat by the same person within it
+ * (opening a page). Awaited, so the next journey load sees it.
+ */
+export async function recordPageAction(org: Org, name: string, opts: { every?: number } = {}): Promise<void> {
+  try {
+    const db = await getDb();
+    if (opts.every) {
+      const [r] = await db.query("SELECT 1 FROM mcp_events WHERE org_id = $1 AND method = 'page/action' AND name = $2 AND user_id IS NOT DISTINCT FROM $3 AND at > now() - make_interval(secs => $4) LIMIT 1",
+        [org.orgId, name, org.userId ?? null, opts.every / 1000]);
+      if (r) return;
+    }
+    await db.query("INSERT INTO mcp_events (org_id, method, name, client, ok, user_id) VALUES ($1, 'page/action', $2, 'portal', true, $3)", [org.orgId, name.slice(0, 200), org.userId ?? null]);
+    void import("./playbooks.js").then((m) => m.scheduleSync({ orgId: org.orgId, slug: org.slug }, org.userId)).catch(() => {});
+    capture({ distinctId: org.userId ?? `org:${org.slug}`, orgSlug: org.slug }, "portal_action", { tool: name });
+  } catch (e) { console.error("page action record failed:", (e as Error).message); }
+}

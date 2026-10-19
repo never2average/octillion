@@ -590,19 +590,10 @@ export function createServer(org: Org, context = ""): McpServer {
   }, run("list_agents"));
 
   // ---------- private assets: owned by this organization only (docs/security.md) ----------
-  const personaSchema = z.object({
-    slug: z.string().optional().describe("Update this persona (from list_personas); omit to add a new one"),
-    name: z.string().max(80), summary: z.string().max(600).optional(),
-    instructions: z.string().max(1500).optional().describe("How this developer answers a coding agent's questions"),
-    attributes: z.record(z.string(), z.unknown()).optional().describe("role, experience_years, company_size, stack[], constraints[], tone"),
-    environment: z.object({ editor: z.string(), tools: z.array(z.string()).optional() }).passthrough().optional()
-      .describe("Editor and CLI tools they have installed (see list_developer_profiles for examples)"),
-    active: z.boolean().optional(),
-  });
   registerAppTool(server, "save_personas", {
     title: "Save private personas",
     description: "Add or update your own developer personas (the developers you target). Private to your organization: no other organization can see, search or use them. Run them with run_simulation {profiles: [slug]}.",
-    inputSchema: { personas: z.array(personaSchema).min(1).max(20) },
+    inputSchema: { personas: priv.personasInputSchema },
     annotations: write, _meta: meta("save_personas"),
   }, run("save_personas"));
   registerAppTool(server, "list_personas", {
@@ -614,16 +605,7 @@ export function createServer(org: Org, context = ""): McpServer {
     title: "Import a private task set",
     description: "Bring your own tasks (for example from past case studies) as a named task set for a product. Private to your organization. Run them with run_simulation {task_set}.",
     inputSchema: {
-      product, task_set: z.string().max(120).describe("Name of the set, e.g. '2025 case studies'"),
-      description: z.string().max(2000).optional(),
-      tasks: z.array(z.object({
-        title: z.string().max(160).optional(), prompt: z.string().min(20).max(6000).describe("The task as a developer would give it to a coding agent"),
-        language: z.string().optional(), tags: z.array(z.string()).optional(),
-        platform: z.enum(["web", "mobile", "backend", "desktop", "cli", "data", "other"]).optional(),
-        template: z.enum(["express-ts", "nextjs-ts", "node-ts", "fastapi", "django", "go-http", "react-native", "flutter", "java-spring", "rust-axum", "cpp-cmake", "auto"]).optional(),
-        repo_url: z.string().optional(), expectation: z.enum(["recommend", "avoid"]).optional(),
-        provenance: z.string().max(500).optional().describe("Where the task comes from, e.g. the case study"),
-      })).min(1).max(200),
+      product, ...priv.importTasksInputShape,
     },
     annotations: write, _meta: meta("import_tasks"),
   }, run("import_tasks"));

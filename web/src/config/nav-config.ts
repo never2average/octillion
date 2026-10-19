@@ -65,6 +65,14 @@ export const portalNav: NavGroup[] = [
     ]
   },
   {
+    // What simulations run with: the account's own developers and tasks, next to the shared library ones.
+    label: 'Simulation inputs',
+    items: [
+      { title: 'Developer personas', url: '/app/personas', icon: 'userPen', shortcut: ['g', 'd'], items: [] },
+      { title: 'Programming tasks', url: '/app/tasks', icon: 'kanban', shortcut: ['g', 't'], items: [] }
+    ]
+  },
+  {
     label: 'Operational',
     items: [
       { title: 'Billing', url: '/app/billing', icon: 'billing', shortcut: ['g', 'b'], items: [] },

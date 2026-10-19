@@ -33,7 +33,7 @@ interface Client {
   id: string; client: string; group: 'chat' | 'agent' | 'editor'; method: 'ui' | 'cli' | 'config' | 'link'; steps: string;
   command?: string; snippet?: string; file?: string; install_url?: string; verified: boolean; share: number | null;
 }
-interface Stage { id: string; title: string; why: string; prompt: string; tools: string[]; expect: string; manual?: boolean; done: boolean; at: string | null }
+interface Stage { id: string; title: string; why: string; prompt: string; tools: string[]; expect: string; manual?: boolean; link?: { href: string; label: string }; done: boolean; at: string | null }
 interface Journey {
   id: string; name: string; outcome: string; who: string; time: string; example: { title: string; result: string };
   stages: Stage[]; done: number; total: number;
@@ -309,6 +309,9 @@ function JourneyView({ j, onChanged, note }: { j: Journey; onChanged: () => void
         return { id: x.id, label: x.title, done: ok, body: (
           <>
             <StepHelp help={help} done={ok} prompt={!x.manual && !gated ? x.prompt : null} />
+            {!ok && x.link && /^\/app(\/|$)/.test(x.link.href) && (
+              <a href={x.link.href} className='text-primary mt-2 inline-flex items-center gap-1 text-sm underline-offset-4 hover:underline'>Or do it on the {x.link.label} page <Icons.chevronRight className='size-3.5' /></a>
+            )}
             {!ok && x.manual && (
               <div className='mt-2 flex flex-wrap items-center gap-2'>
                 <span className='text-sm'>{x.prompt}</span>

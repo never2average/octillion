@@ -6,7 +6,8 @@
  * shows what a finished pipeline produced.
  *
  * Progress is real: a stage is done when one of its tools ran successfully for this account after the previous stage
- * was done (so re-running a pipeline after a fix counts again only from where it restarted). Stages with no tool
+ * was done (so re-running a pipeline after a fix counts again only from where it restarted); an action on an /app page
+ * that does the same as a tool (Developer personas, Programming tasks) counts as that tool. Stages with no tool
  * (shipping a docs change) are marked by the person.
  */
 import { getDb } from "./db.js";
@@ -14,6 +15,8 @@ import { capture, keepAlive } from "./telemetry.js";
 
 export interface Stage {
   id: string; title: string; why: string; prompt: string; tools: string[]; expect: string; manual?: boolean;
+  /** The /app page that does the same as the stage's tools (its actions count the same; src/analytics.ts recordPageAction). */
+  link?: { href: string; label: string };
 }
 export interface Playbook {
   id: string; name: string; outcome: string; who: string; time: string;
@@ -199,6 +202,54 @@ export const PLAYBOOKS: Playbook[] = [
         expect: "Mark this done when the draft follows what you saved without being told." },
     ],
   },
+  {
+    id: "byo-personas", name: "Bring your own developer personas", time: "fifteen minutes, plus a run",
+    outcome: "Simulations answer as the developers you actually sell to, not a generic population.",
+    who: "Product marketing, DevRel or anyone who knows the target developers.",
+    example: { title: "A mobile-first API company", result: "Three personas from their ICP (a Flutter lead at a 50-person startup, an enterprise Android team, an indie iOS developer): the enterprise persona's runs picked the incumbent twice as often." },
+    stages: [
+      { id: "describe", title: "Describe your developers", tools: ["list_developer_profiles", "list_personas"],
+        why: "Start from who you target: role, experience, company size, stack and constraints. The shared personas show the shape.",
+        prompt: "Show me the developer personas I can use, then help me describe ours: <role>, <stack>, <company size>, <what they care about>.",
+        expect: "The shared personas and your own, and a draft of yours to check.",
+        link: { href: "/app/personas", label: "Developer personas" } },
+      { id: "save", title: "Save your personas", tools: ["save_personas"],
+        why: "Saved personas are private to your account; the simulated developer answers coding agents the way they would.",
+        prompt: "Save these as our developer personas: <the personas above>.",
+        expect: "Each persona saved with its own id, private to your account. You can also add or import them on the Developer personas page.",
+        link: { href: "/app/personas", label: "Developer personas" } },
+      { id: "run", title: "Run a simulation with them", tools: ["run_simulation"],
+        why: "The same tasks, with your developers answering the agents' questions.",
+        prompt: "Run a simulation for {product} with our own developer personas.",
+        expect: "A run starts with your personas in the sessions." },
+    ],
+  },
+  {
+    id: "byo-tasks", name: "Bring your own programming tasks", time: "half an hour, plus a run",
+    outcome: "Measure agents on the tasks your customers really bring, from case studies, support tickets or sales calls.",
+    who: "DevRel, solutions engineers and anyone with real customer requests to hand.",
+    example: { title: "Case studies as tasks", result: "Twelve tasks from 2025 case studies imported as one set: agents picked the product on 9 of the 12, and the 3 losses were all on the same migration path." },
+    stages: [
+      { id: "product", title: "Pick a product", tools: ["list_products", "get_product", "list_task_sets"],
+        why: "A task set belongs to one product; its tasks are tested against that product and its competitors.",
+        prompt: "Which products do I have, and which task sets does {product} have?",
+        expect: "Your products and any task sets they already have.",
+        link: { href: "/app/tasks", label: "Programming tasks" } },
+      { id: "import", title: "Import a task set", tools: ["import_tasks"],
+        why: "Tasks phrased the way a developer asks a coding agent, never naming your product. Private to your account.",
+        prompt: "Import these tasks for {product} as a task set called <name>: <paste the tasks, one per line>.",
+        expect: "The task set with its tasks, each with a platform. You can also create, import and edit them on the Programming tasks page.",
+        link: { href: "/app/tasks", label: "Programming tasks" } },
+      { id: "run", title: "Run a simulation on it", tools: ["run_simulation"],
+        why: "Coding agents work only that set's tasks, in fresh sandboxes.",
+        prompt: "Run a simulation for {product} on the task set <name>.",
+        expect: "A run starts on that set's active tasks across the agent mix." },
+      { id: "report", title: "Read the report", tools: ["get_visibility_report"],
+        why: "How often agents picked you on your own tasks, and who won where you didn't.",
+        prompt: "Show the visibility report for that run.",
+        expect: "Hit rate per task in the set, the winners and the transcript evidence." },
+    ],
+  },
 ];
 
 // ---------- templates in the database (managed on /admin) ----------
@@ -311,7 +362,8 @@ export function cleanTemplate(b: Record<string, any>, toolNames: readonly string
     if (bad) throw new PlaybookError(`Stage ${i + 1}: ${bad} is not an Octillion tool`);
     const manual = Boolean(st.manual) || tools.length === 0;
     return { id, title: txt(st.title, 120, `Stage ${i + 1} title`), why: txt(st.why, 500, `Stage ${i + 1} why`, false),
-             prompt: txt(st.prompt, 600, `Stage ${i + 1} prompt`), tools, expect: txt(st.expect, 500, `Stage ${i + 1} "you'll see"`), ...(manual ? { manual: true } : {}) };
+             prompt: txt(st.prompt, 600, `Stage ${i + 1} prompt`), tools, expect: txt(st.expect, 500, `Stage ${i + 1} "you'll see"`), ...(manual ? { manual: true } : {}),
+             ...(typeof st.link?.href === "string" && /^\/app(\/[a-z0-9/-]*)?$/.test(st.link.href) ? { link: { href: st.link.href, label: txt(st.link.label, 60, `Stage ${i + 1} link label`, false) || "Open" } } : {}) };
   });
   return {
     name: txt(b.name, 80, "name"), outcome: txt(b.outcome, 300, "outcome"), who: txt(b.who, 200, "who", false), time: txt(b.time, 80, "time", false),
@@ -467,7 +519,7 @@ async function progressFor(orgId: number, templates: Playbook[]) {
   const marked = new Map((await db.query<{ journey_id: string; stage_id: string; done_at: Date }>(
     "SELECT journey_id, stage_id, done_at FROM journey_progress WHERE org_id = $1 AND source = 'manual'", [orgId])).map((r) => [`${r.journey_id}/${r.stage_id}`, r.done_at]));
   const events = await db.query<{ name: string; at: Date }>(
-    "SELECT name, at FROM mcp_events WHERE org_id = $1 AND method = 'tools/call' AND ok ORDER BY at", [orgId]);
+    "SELECT name, at FROM mcp_events WHERE org_id = $1 AND method IN ('tools/call', 'page/action') AND ok ORDER BY at", [orgId]); // page/action: the /app pages' equivalent of a tool
   const [prod] = await db.query<{ name: string; competitors: { name: string }[] }>(
     "SELECT name, competitors FROM products WHERE org_id = $1 ORDER BY created_at LIMIT 1", [orgId]);
   const product = prod?.name ?? "my product";
@@ -509,7 +561,7 @@ export async function adoptionByPerson(orgId: number, opts: { start?: Date; end?
   const only = opts.users?.length ? new Set(opts.users) : null;
   const journeys = await playbooksFor(orgId);
   const events = await db.query<{ user_id: string; name: string; ok: boolean; error: string | null; at: Date }>(
-    "SELECT user_id, name, ok, error, at FROM mcp_events WHERE org_id = $1 AND method = 'tools/call' AND user_id IS NOT NULL ORDER BY at", [orgId]);
+    "SELECT user_id, name, ok, error, at FROM mcp_events WHERE org_id = $1 AND method IN ('tools/call', 'page/action') AND user_id IS NOT NULL ORDER BY at", [orgId]);
   const marked = await db.query<{ journey_id: string; stage_id: string; user_id: string | null; done_at: Date }>(
     "SELECT journey_id, stage_id, user_id, done_at FROM journey_progress WHERE org_id = $1 AND source = 'manual'", [orgId]);
   const byUser = new Map<string, typeof events>();
