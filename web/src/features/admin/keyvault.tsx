@@ -62,13 +62,15 @@ export function AdminKeyVault() {
           {mine.map((c) => (
             <span key={c.id} className={c.enabled ? undefined : 'text-muted-foreground line-through'}>
               {c.client_email
-                ? <><span className='font-mono text-xs break-all'>{c.client_email}</span> <span className='text-muted-foreground'>{c.project_id ? `project ${c.project_id} · ` : ''}{c.label} · {c.uses} uses</span></>
-                : <><Mono>{c.hint}</Mono> <span className='text-muted-foreground'>{c.label} · {c.uses} uses</span></>}
+                ? <><span className='font-mono text-xs break-all'>{c.client_email}</span> <span className='text-muted-foreground'>{c.project_id ? `project ${c.project_id} · ` : ''}{c.label}</span></>
+                : <><Mono>{c.hint}</Mono> <span className='text-muted-foreground'>{c.label}</span></>}
             </span>
           ))}
         </span>
       );
     } },
+    { key: 'uses', label: 'Uses', className: 'text-right', type: 'number', value: (p) => keysOf(p).reduce((t, c) => t + c.uses, 0),
+      render: (p) => <span className='tabular-nums'>{keysOf(p).reduce((t, c) => t + c.uses, 0).toLocaleString()}</span> },
     { key: 'last', label: 'Last used', type: 'date', value: (p) => p.last_used_at ?? undefined, render: (p) => (p.last_used_at ? <When d={p.last_used_at} /> : <span className='text-muted-foreground'>never</span>) },
     { key: 'on', label: 'On', className: 'w-12 text-right', keep: true,
       render: (p) => <span onClick={(e) => e.stopPropagation()}><Gate need='keys'><Switch aria-label={`${p.slug} on`} checked={p.enabled} disabled={provOn.isPending} onCheckedChange={(c) => provOn.mutate({ slug: p.slug, enabled: c })} /></Gate></span> }
