@@ -5,13 +5,11 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Area, AreaChart, Bar, BarChart, CartesianGrid, Line, LineChart, ReferenceLine, XAxis, YAxis } from 'recharts';
 import PageContainer from '@/components/layout/page-container';
-import { Badge } from '@/components/ui/badge';
 import { StatStrip } from '@/components/layout/section';
 import { Box, RankBars, top } from '@/components/layout/chart-grid';
 import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent, type ChartConfig } from '@/components/ui/chart';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { appApi } from '@/lib/api-client';
-import { num, relative, usd } from '@/lib/octillion-format';
+import { num, usd } from '@/lib/octillion-format';
 import { DateRangePicker, last30, rangeQuery, type DateRange } from '@/components/layout/date-range-picker';
 import { MultiSelectFilter, type FilterOption } from '@/components/layout/multi-select-filter';
 import { Icons } from '@/components/icons';
@@ -256,28 +254,9 @@ function UsageBody({ u, users }: { u: Usage; users: string[] }) {
           )}
         </div>
 
-        <Box title='Recent simulations' description='The latest simulations in this period and how often agents picked your product.'>
-          {c?.recent.length ? (
-            <div className='-mx-4 overflow-x-auto px-4'>
-              <Table>
-                <TableHeader><TableRow><TableHead>Simulation</TableHead><TableHead>Product</TableHead><TableHead>Launched by</TableHead><TableHead>Status</TableHead>
-                  <TableHead className='text-right'>Sessions</TableHead><TableHead className='text-right'>Hit rate</TableHead><TableHead className='text-right'>Started</TableHead></TableRow></TableHeader>
-                <TableBody>
-                  {c.recent.map((r) => (
-                    <TableRow key={r.id}>
-                      <TableCell className='max-w-64 truncate'>{r.name}</TableCell>
-                      <TableCell>{r.product}</TableCell>
-                      <TableCell className='text-muted-foreground'>{r.by}</TableCell>
-                      <TableCell><Badge variant={r.status === 'completed' ? 'secondary' : 'outline'}>{r.status}</Badge></TableCell>
-                      <TableCell className='text-right tabular-nums'>{num(r.sessions)}</TableCell>
-                      <TableCell className='text-right tabular-nums'>{r.hit_pct == null ? <span className='text-muted-foreground'>—</span> : `${r.hit_pct}%`}<span className='text-muted-foreground'>{r.scored ? ` of ${num(r.scored)}` : ''}</span></TableCell>
-                      <TableCell className='text-muted-foreground text-right'>{relative(r.created_at)}</TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-          ) : <p className='text-muted-foreground py-6 text-center text-sm'>No simulations in this period.</p>}
+        <Box title='Recent simulations' description='Hit rate of the latest simulations in this period: how often agents picked your product.'>
+          <RankBars data={(c?.recent ?? []).filter((r) => r.scored > 0).map((r) => ({ name: r.name, value: r.hit_pct ?? 0 }))}
+            color='var(--chart-2)' format={(v) => `${v}%`} label='Hit rate' empty='No scored simulations in this period.' />
         </Box>
       </div>
     </div>

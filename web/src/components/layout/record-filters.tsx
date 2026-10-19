@@ -229,7 +229,7 @@ export function AddFilterMenu<T>({ cols, onAdd, trigger }: { cols: RecordCol<T>[
 export function FilterButton<T>({ cols, count, onAdd }: { cols: RecordCol<T>[]; count: number; onAdd: (r: FilterRule) => void }) {
   return (
     <AddFilterMenu cols={cols} onAdd={onAdd}
-      trigger={<Button variant='ghost' size='sm' className={cn(count && 'text-primary')}><IconFilter /> Filter{count ? ` ${count}` : ''}</Button>} />
+      trigger={<Button variant='ghost' size='sm' className={cn(count && 'text-primary')}><IconFilter /> Filter</Button>} />
   );
 }
 

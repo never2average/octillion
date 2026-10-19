@@ -47,7 +47,7 @@ export function LibraryViewSwitch({ kind, value, onChange }: { kind: SubmissionK
   return (
     <NativeSelect aria-label='View' value={value} onChange={(e) => onChange(e.target.value as 'library' | 'submissions')}>
       <NativeSelectOption value='library'>Shared library</NativeSelectOption>
-      <NativeSelectOption value='submissions'>Submissions{open ? ` (${open} to review)` : ''}</NativeSelectOption>
+      <NativeSelectOption value='submissions'>Submissions</NativeSelectOption>
     </NativeSelect>
   );
 }

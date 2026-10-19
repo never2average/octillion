@@ -113,8 +113,8 @@ export function BillingPage() {
           {/* People, Teams and Budget rules as tabs: the two tables get the full width and height they need. */}
           <Tabs value={tab} onValueChange={(v) => setTab(String(v))} className='gap-4'>
             <TabsList variant='line' className='gap-6 p-0'>
-              <TabsTrigger value='people' className='flex-none px-0'>People{t && <span className='text-muted-foreground ml-1.5 font-normal tabular-nums'>{t.members.length + t.invitations.length}</span>}</TabsTrigger>
-              <TabsTrigger value='teams' className='flex-none px-0'>Teams{l && <span className='text-muted-foreground ml-1.5 font-normal tabular-nums'>{l.teams.length}</span>}</TabsTrigger>
+              <TabsTrigger value='people' className='flex-none px-0'>People</TabsTrigger>
+              <TabsTrigger value='teams' className='flex-none px-0'>Teams</TabsTrigger>
               {l?.can_manage && <TabsTrigger value='rules' className='flex-none px-0'>Budget rules</TabsTrigger>}
             </TabsList>
             <TabsContent value='people'><People t={t ?? undefined} l={l ?? undefined} reload={reload} openUser={editUser} onOpened={() => setEditUser(null)} filter={peopleFilter} setFilter={setPeopleFilter} /></TabsContent>
@@ -384,7 +384,7 @@ function People({ t, l, reload, openUser, onOpened, filter = 'all', setFilter }:
           {budget && (
             <Button variant={filtered ? 'secondary' : 'outline'} size='sm' aria-pressed={!!filtered} onClick={() => setFilter?.(filtered ? 'all' : 'exceptions')}
               title='People with their own limit, adjustment, launch access or runs at once'>
-              Own settings only<span className='text-muted-foreground ml-1 tabular-nums'>{exceptions}</span>
+              Own settings only
             </Button>)}
           <RolesHelp roles={roles} />
         </>}
