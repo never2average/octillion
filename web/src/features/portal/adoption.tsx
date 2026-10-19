@@ -100,11 +100,11 @@ export function AdoptionPage() {
     ...s.groups.flatMap((g): Row[] => {
       const people = ad?.workflow?.find((w) => w.id === g.id)?.people ?? [];
       if (people.length) return people.map((p) => ({ key: `w-${g.id}-${p.user_id ?? 'key'}`, type: 'workflow' as const, name: g.label,
-        detail: `${p.used} of ${p.total} tools used · ${p.calls} call${p.calls === 1 ? '' : 's'}`, done: p.used, total: p.total, g, person: p.label }));
+        detail: `${p.calls} call${p.calls === 1 ? '' : 's'}`, done: p.used, total: p.total, g, person: p.label }));
       return narrowed ? [] : [{ key: `w-${g.id}`, type: 'workflow' as const, name: g.label, detail: 'Not tried yet', done: 0, total: g.total, g, person: null }];
     }),
     ...(narrowed ? [] : s.clients.filter((c) => c.last.slice(0, 10) >= range.from && c.last.slice(0, 10) <= range.to)
-      .map((c) => ({ key: `c-${c.client}`, type: 'client' as const, name: c.client, detail: 'Connected', done: 1, total: 1, at: c.last })))
+      .map((c) => ({ key: `c-${c.client}`, type: 'client' as const, name: c.client, detail: '', done: 1, total: 1, at: c.last })))
   ];
   // Who a row is about: the person on a use case or workflow part (nobody in the range: "Nobody yet"; calls made with a
   // connector key rather than a signed-in person: "Connector key"), you for clients (the list is yours).
@@ -113,7 +113,7 @@ export function AdoptionPage() {
   const cols: RecordCol<Row>[] = [
     { key: 'item', label: 'Use case', className: 'min-w-72', keep: true, title: true, type: 'text', value: (r) => r.name, render: (r) => (<>
       <p className='text-sm leading-none font-medium'>{r.name}</p>
-      <p className='text-muted-foreground mt-1.5 line-clamp-1 text-xs leading-none'>{r.detail}</p>
+      {r.detail && <p className='text-muted-foreground mt-1.5 line-clamp-1 text-xs leading-none'>{r.detail}</p>}
     </>) },
     { key: 'user', label: 'User', className: 'w-40', keep: true, type: 'select', value: userOf, render: (r) => <span className={cn('block max-w-40 truncate text-sm', (r.type === 'use case' && r.who) || (r.type === 'workflow' && r.person) ? '' : 'text-muted-foreground')}>{userOf(r)}</span> },
     { key: 'usage', label: 'Usage', className: 'w-44', type: 'number', value: (r) => r.done / Math.max(1, r.total), render: (r) => (

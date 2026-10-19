@@ -52,7 +52,7 @@ export function AdminAccounts() {
   const members = (o: Org) => o.clerk_org_id ? (
     <span className='inline-flex flex-wrap items-center gap-1.5 tabular-nums'>{o.members}{o.pending_invites > 0 && <StatusBadge tone='info'>+{o.pending_invites} invited</StatusBadge>}</span>
   ) : (
-    <span className='text-muted-foreground tabular-nums'>{o.active_keys} keys</span>
+    <span className='text-muted-foreground'>—</span>
   );
   const sel = (vs: string[]) => vs.map((v) => ({ value: v }));
   const cols: RecordCol<Org>[] = [

@@ -121,10 +121,6 @@ function InlineValue({ s, onSave, disabled }: { s: Setting; onSave: (v: string) 
       className={cn('h-8', s.kind === 'text' ? 'w-64 font-mono text-sm' : 'w-28 tabular-nums')} type={s.kind === 'text' ? 'text' : 'number'} min={s.min} max={s.max} step={s.kind === 'number' ? 'any' : 1} />
   );
 }
-/** Key vault: provider keys for agents, orchestrators and research. */
-export function AdminKeyVault() {
-  return <PageContainer><div className='flex w-full flex-col gap-10 pb-10'><ModelKeys /></div></PageContainer>;
-}
 
 /** The default population's mix: every registry agent with its weight, its share of the running mix, its sandboxes out
  * of the unit, and a switch. Weights need not sum to 1: shares are renormalised over the agents that are on. */
@@ -152,7 +148,7 @@ export function AdminAgentMix() {
           {a.origin === 'admin' && <span title={`Added on this page; inherits ${a.base_agent ?? a.harness}`} className='text-muted-foreground inline-flex h-5 shrink-0 items-center rounded-md px-1.5 text-xs leading-none font-medium ring-1 ring-border ring-inset'>added</span>}
         </span>
       ) },
-    { key: 'cli', label: 'CLI', type: 'select', value: (a) => a.harness, render: (a) => <Mono>{a.harness}</Mono> },
+    { key: 'cli', label: 'CLI', hidden: true, type: 'select', value: (a) => a.harness, render: (a) => <Mono>{a.harness}</Mono> },
     { key: 'model', label: 'Model', type: 'select', value: (a) => a.model ?? '', render: (a) => (a.model ? <Mono>{a.model.replace(/^.*\//, '')}</Mono> : <span className='text-muted-foreground'>its own</span>) },
     { key: 'weight', label: 'Weight', className: 'w-28 text-right', type: 'number', value: (a) => a.weight,
       render: (a) => <span onClick={(e) => e.stopPropagation()}><Gate need='harnesses'><WeightInput key={a.weight} value={a.weight} disabled={set.isPending} onSave={(w) => set.mutate({ id: a.id, market_share: w })} label={`Weight of ${a.label}`} /></Gate></span> },
@@ -274,115 +270,6 @@ function WeightInput({ value, onSave, disabled, label }: { value: number; onSave
   return (
     <Input aria-label={label} type='number' min={0} step='any' value={v} disabled={disabled} onChange={(e) => setV(e.target.value)}
       onBlur={commit} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); commit(); } }} className='ml-auto h-7 w-24 text-right tabular-nums' />
-  );
-}
-
-interface Provider { slug: string; mode: 'gateway' | 'direct'; backend: string; enabled: boolean; keys: number; enabled_keys: number; last_used_at: string | null }
-interface Credential { id: number; provider: string; label: string; hint: string; priority: number; enabled: boolean; uses: number; last_used_at: string | null; created_at: string; rotated_at: string | null }
-
-/** What each vault provider is for: the one Key vault table groups and filters by it. */
-const TYPE: Record<string, string> = {
-  anthropic: 'Inference', openai: 'Inference', google: 'Inference', cloudflare: 'Inference', dashscope: 'Inference',
-  boat: 'Sandbox', exa: 'Search', libraries_io: 'Search',
-  amp: 'Coding agent', cursor: 'Coding agent', factory: 'Coding agent', github_copilot: 'Coding agent'
-};
-const typeOf = (slug: string) => TYPE[slug] ?? 'Other';
-const TYPE_ORDER = ['Inference', 'Sandbox', 'Search', 'Coding agent', 'Other'];
-
-/**
- * The key vault as one table: a row per provider (inference, sandbox, search, coding-agent subscriptions) with its
- * type, keys by hint, and an on/off switch. Keys are added, disabled and deleted from the row's ⋯ menu. A key is posted
- * once and never shown again, only its hint.
- */
-function ModelKeys() {
-  const { lock } = useAdminRole();
-  const { data, error } = useAdmin<{ unlocked: boolean; providers: Provider[]; credentials: Credential[] }>('/compute/keys');
-  const [adding, setAdding] = useState<string | null>(null);
-  const [f, setF] = useState({ label: '', secret: '' });
-  const [err, setErr] = useState('');
-  const [del, setDel] = useState<Credential | null>(null);
-  const [type, setType] = useState('');
-  const add = useAdminAction(() => post<{ hint: string }>('/compute/keys', { provider: adding, label: f.label.trim() || undefined, secret: f.secret }),
-    { success: (r) => `Key saved (${r.hint})` });
-  const keyOn = useAdminAction((v: { id: number; enabled: boolean }) => post(`/compute/keys/${v.id}/enabled`, { enabled: v.enabled }), { success: 'Key updated' });
-  const remove = useAdminAction((id: number) => adminApi('DELETE', `/compute/keys/${id}`), { success: 'Key deleted' });
-  const provOn = useAdminAction((v: { slug: string; enabled: boolean }) => post(`/compute/providers/${encodeURIComponent(v.slug)}/enabled`, { enabled: v.enabled }), { success: 'Provider updated' });
-  const creds = data?.credentials ?? [];
-  const rows = (data?.providers ?? [])
-    .filter((p) => !type || typeOf(p.slug) === type)
-    .sort((a, b) => TYPE_ORDER.indexOf(typeOf(a.slug)) - TYPE_ORDER.indexOf(typeOf(b.slug)) || a.slug.localeCompare(b.slug));
-  const close = () => { setAdding(null); setF({ label: '', secret: '' }); setErr(''); };
-  const submit = (e: React.FormEvent) => {
-    e.preventDefault();
-    setErr('');
-    // The key leaves the form whatever happens: a failed save asks for it again rather than keeping it on screen.
-    add.mutate(undefined, { onSuccess: close, onError: (x) => { setErr(x.message); setF({ ...f, secret: '' }); } });
-  };
-  return (
-    <Section title='Key vault' description='Every key Octillion uses, encrypted at rest: inference providers, the sandbox provider, search and coding-agent subscriptions. Agents and orchestrators get scoped gateway tokens, never these keys.'
-      action={<NativeSelect aria-label='Type' value={type} onChange={(e) => setType(e.target.value)}>
-        <NativeSelectOption value=''>{counted('All types', data?.providers.length)}</NativeSelectOption>
-        {TYPE_ORDER.map((t) => <NativeSelectOption key={t} value={t}>{counted(t, data && data.providers.filter((p) => typeOf(p.slug) === t).length)}</NativeSelectOption>)}
-      </NativeSelect>}>
-      <ErrorBox error={error} />
-      {data && !data.unlocked && <Notice>The key vault is locked: set <Mono>OCTILLION_VAULT_KEY</Mono> on the server to add keys.</Notice>}
-      <List title='Providers' rows={rows} empty='No providers.'
-        rowClassName={(p) => (p.enabled ? undefined : 'text-muted-foreground')}
-        actions={(p) => [
-          { label: 'Add a key…', icon: <Icons.add />, disabled: data?.unlocked === false, onSelect: () => setAdding(p.slug) },
-          ...creds.filter((c) => c.provider === p.slug).flatMap((c, i) => [
-            { label: `${c.enabled ? 'Disable' : 'Enable'} ${c.label} (${c.hint})`, icon: c.enabled ? <Icons.eyeOff /> : <Icons.check />, separator: i === 0, onSelect: () => keyOn.mutate({ id: c.id, enabled: !c.enabled }) },
-            { label: `Delete ${c.label}…`, icon: <Icons.trash />, destructive: true, onSelect: () => setDel(c) }
-          ])
-        ].map((a) => lock(a, 'keys'))}
-        cols={[
-          ['Provider', (p) => <Mono>{p.slug}</Mono>],
-          ['Type', (p) => typeOf(p.slug)],
-          ['How it is used', (p) => <span className='text-muted-foreground'>{p.mode === 'gateway' ? 'through the gateway' : 'handed to the orchestrator'}{p.backend !== 'direct' && ` · ${p.backend}`}</span>],
-          ['Keys', (p) => {
-            const mine = creds.filter((c) => c.provider === p.slug);
-            return mine.length ? <span className='flex flex-wrap gap-x-3 gap-y-1'>{mine.map((c) => <span key={c.id} className={c.enabled ? undefined : 'text-muted-foreground line-through'}><Mono>{c.hint}</Mono> <span className='text-muted-foreground'>{c.label} · {c.uses} uses</span></span>)}</span>
-              : <span className='text-amber-700 dark:text-amber-400'>no key</span>;
-          }],
-          ['Last used', (p) => (p.last_used_at ? <When d={p.last_used_at} /> : <span className='text-muted-foreground'>never</span>)],
-          ['On', (p) => <Gate need='keys'><Switch aria-label={`${p.slug} on`} checked={p.enabled} disabled={provOn.isPending} onCheckedChange={(c) => provOn.mutate({ slug: p.slug, enabled: c })} /></Gate>, 'w-12 text-right']
-        ]} />
-      <Dialog open={!!adding} onOpenChange={(o) => !o && close()}>
-        <DialogContent className='sm:max-w-md'>
-          <form onSubmit={submit} className='grid gap-4' autoComplete='off'>
-            <DialogHeader>
-              <DialogTitle>Add a {adding} key</DialogTitle>
-              <DialogDescription>{adding && typeOf(adding)}. Shown only as a hint once saved.</DialogDescription>
-            </DialogHeader>
-            <FormRow id='mk-label' label='Label (optional)' hint={adding === 'anthropic' ? 'Use the label vertex for a Google service-account JSON (Claude on Vertex AI).' : 'A new label adds to the pool; the same label replaces that key.'}>
-              <Input id='mk-label' maxLength={60} placeholder='default' value={f.label} onChange={(e) => setF({ ...f, label: e.target.value })} />
-            </FormRow>
-            <FormRow id='mk-secret' label='Key'>
-              {f.label.trim() === 'vertex'
-                ? <Textarea id='mk-secret' rows={6} spellCheck={false} required className='font-mono text-xs' placeholder='{ "type": "service_account", … }' value={f.secret} onChange={(e) => setF({ ...f, secret: e.target.value })} />
-                : <Input id='mk-secret' type='password' autoComplete='new-password' spellCheck={false} required value={f.secret} onChange={(e) => setF({ ...f, secret: e.target.value })} />}
-            </FormRow>
-            {err && <p className='text-destructive text-sm'>{err}</p>}
-            <DialogFooter>
-              <Button type='button' variant='outline' onClick={close}>Cancel</Button>
-              <Gate need='keys'><Button type='submit' disabled={add.isPending || !f.secret.trim()}>Save key</Button></Gate>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
-      <AlertDialog open={!!del} onOpenChange={(o) => !o && setDel(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete the {del?.provider} key {del?.label}?</AlertDialogTitle>
-            <AlertDialogDescription>Calls stop using it at once. This cannot be undone: to use it again, add it again.</AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction variant='destructive' onClick={() => { if (del) remove.mutate(del.id); setDel(null); }}>Delete</AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-    </Section>
   );
 }
 
@@ -668,11 +555,11 @@ function Limits({ s, onEditing }: { s: Summary; onEditing: (key: string, on: boo
         { label: 'Our image builder and images', n: l.ours_images, className: 'bg-primary/30' },
         { label: 'Other deployments', n: l.others, className: 'bg-amber-500/70' }
       ],
-      status: statusOf(l.active_now, l.plan, l.binding === 'plan'), source: <span className='text-muted-foreground'>boat plan</span>, fixed: 'Set by your boat plan' },
+      status: statusOf(l.active_now, l.plan, l.binding === 'plan'), source: <span className='text-muted-foreground'>boat plan</span> },
     ...(['minute', 'hour', 'day'] as const).map((w): LimitRow => {
       const limit = l.starts ? l.starts[w === 'minute' ? 'per_minute' : w === 'hour' ? 'per_hour' : 'per_day'] : null;
       return { key: `starts-${w}`, label: `Our starts: per ${w}`, help: startsNote, used: l.our_starts[w], limit, unavailable: limit == null ? boatDown : null,
-        status: statusOf(l.our_starts[w], limit, false, false), source: <span className='text-muted-foreground'>boat plan · database</span>, fixed: 'Set by your boat plan', noBinding: true };
+        status: statusOf(l.our_starts[w], limit, false, false), source: <span className='text-muted-foreground'>boat plan · database</span>, noBinding: true };
     }),
     ...(l.per_job_mode ? [
       { key: 'job_orch', label: 'Job orchestrators', used: l.job_orch_live, limit: l.job_orch_cap, setting: set('OCTILLION_MAX_JOB_ORCHESTRATORS'),

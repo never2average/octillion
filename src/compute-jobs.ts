@@ -263,7 +263,8 @@ export async function listJobs(q: Record<string, unknown>) {
   rows = rows.filter((r) => keep(r) || r.id === include);
   const at = (d: string | null) => (d ? Date.parse(d) : Infinity);
   rows.sort(q.sort === "spend"
-    ? (a, b) => b.spend.total_usd - a.spend.total_usd
+    // Metered model spend only: the sandbox figure is a price-table estimate.
+    ? (a, b) => (b.spend.session_model_usd + b.spend.orchestrator_model_usd) - (a.spend.session_model_usd + a.spend.orchestrator_model_usd)
     : (a, b) => ORDER[a.state] - ORDER[b.state]
       || (ORDER[a.state] >= ORDER.failed ? at(b.finished_at ?? b.created_at) - at(a.finished_at ?? a.created_at)
         : at(a.waiting_since ?? a.running_since ?? a.created_at) - at(b.waiting_since ?? b.running_since ?? b.created_at)));

@@ -54,7 +54,7 @@ export function AdminKeyVault() {
   const cols: RecordCol<Provider>[] = [
     { key: 'provider', label: 'Provider', keep: true, type: 'text', value: (p) => nameOf(p.slug), render: (p) => <span className='font-medium' title={p.slug}>{nameOf(p.slug)}</span> },
     { key: 'type', label: 'Type', type: 'select', value: (p) => typeOf(p.slug), options: TYPES.map((t) => ({ value: t })), render: (p) => typeOf(p.slug) },
-    { key: 'use', label: 'How it is used', type: 'select', value: (p) => (p.mode === 'gateway' ? 'Agents call it through the gateway' : 'Given to orchestrators'),
+    { key: 'use', label: 'How it is used', hidden: true, type: 'select', value: (p) => (p.mode === 'gateway' ? 'Agents call it through the gateway' : 'Given to orchestrators'),
       render: (p) => <span className='text-muted-foreground'>{p.mode === 'gateway' ? 'Agents call it through the gateway' : 'Given to orchestrators'}{p.backend !== 'direct' && ` · ${p.backend}`}</span> },
     { key: 'keys', label: 'Keys', type: 'number', value: (p) => keysOf(p).length + envOf(p).length, render: (p) => {
       const mine = keysOf(p), env = envOf(p);
