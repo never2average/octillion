@@ -134,7 +134,7 @@ export function PickRatePage() {
   return (
     <PageContainer
       pageTitle='Pick rate'
-      pageDescription={`Whether the coding agents in your simulations picked your product, and what they picked instead. Scored sessions${n ? ', filtered' : ''} in this period.`}
+      pageDescription={n ? 'How often agents picked you, filtered.' : 'How often agents picked you.'}
       pageHeaderAction={
         <div className='flex flex-wrap items-center justify-end gap-2'>
           <FilterControls f={f} options={options} onChange={setFilters} />
