@@ -19,7 +19,8 @@
  *   competitor  the agent picked it (s.winner) or mentioned it (a mentions[].tool), any of those named
  *   product     one of the account's products (another account's id is ignored)
  * Options come from the period and product only, never from the other filters, so they don't vanish as you filter.
- * Titles and names only: no prompt, persona text or transcript evidence leaves this file.
+ * Titles and names only: no prompt, persona text or transcript evidence leaves this file, except the loss reasons'
+ * quotes: the agent's own words, checked in src/reasons.ts never to repeat the task prompt or persona text.
  */
 import type { Request, Response, Router } from "express";
 import { z } from "zod";
@@ -27,6 +28,7 @@ import { getDb } from "./db.js";
 import { agentLabel, HIT, PICKED, wilson } from "./queries.js";
 import { howChosen, type HowChosen, type Mention } from "./scoring.js";
 import { reportRange } from "./insights.js";
+import { LOST, REASON_CATEGORIES, reasonLabel, type Reason } from "./reasons.js";
 import { recordPageAction } from "./analytics.js";
 import * as roles from "./account-roles.js";
 import type { Org } from "./auth.js";
@@ -35,6 +37,7 @@ import type { Org } from "./auth.js";
 
 export interface VisFilters { competitor: string[]; persona: number[]; task: number[]; product: number | null }
 const LIMIT = 200;
+const NOT_EXPLAINED = "not_explained";
 const many = (v: unknown): string[] => (Array.isArray(v) ? v : v == null || v === "" ? [] : [v]).map((x) => String(x));
 const ints = (v: unknown) => [...new Set(many(v).flatMap((x) => x.split(",")).map((x) => Number(x.trim())).filter((n) => Number.isInteger(n) && n > 0 && n < 2 ** 31))].slice(0, LIMIT);
 /**
@@ -86,8 +89,12 @@ const productsOf = async (orgId: number) => (await getDb()).query<ProductRow>(
  *   cloud        tools other than the product: weight = sessions that mentioned it at any level (mentions JSON, not
  *                target) + sessions it won (winner); plus packages agents installed that no product tracks (untracked)
  *   head_to_head per competitor, on recommend tasks where it came up: you won (PICKED) vs it won (winner)
- *   reasons      competitor losses by how the winner was chosen (scoring.ts howChosen over its stored evidence), and
- *                whether the agent mentioned the product at all; no free-text reasoning is stored
+ *   reasons      why agents didn't pick you: every lost session (src/reasons.ts LOST: a competitor won, or nothing
+ *                of yours on a recommend task) by the model's reason category (agent_sessions.reason, read from the
+ *                agent's own text), share of lost sessions, its top phrases and up to 3 verbatim agent quotes; a
+ *                session with no reason yet (or one for an earlier winner) is "Not explained yet". Plus, over competitor
+ *                losses only, how the win showed up (scoring.ts howChosen over the winner's stored evidence) and
+ *                whether the agent mentioned the product at all (the how_won section)
  *   by_task / by_persona / by_platform / expectation   hits / scored per task (title), persona (name), task platform,
  *                and per expectation (recommend vs avoid) with hits and misses
  */
@@ -131,10 +138,11 @@ export async function visibilityCharts(orgId: number, range: Range, f: VisFilter
       `SELECT lower(x->>'name') AS name, count(DISTINCT s.id) AS n
          FROM ${from} CROSS JOIN LATERAL jsonb_array_elements(${arr("s.untracked")}) x
         WHERE ${where} AND x->>'name' IS NOT NULL GROUP BY 1`, vp),
-    db.query<{ w: Mention | null; considered: boolean }>(
-      `SELECT (SELECT m FROM jsonb_array_elements(${arr("s.mentions")}) m WHERE m->>'tool' = s.winner LIMIT 1) AS w,
+    db.query<{ verdict: string; winner: string | null; reason: Reason | null; w: Mention | null; considered: boolean }>(
+      `SELECT s.verdict, s.winner, CASE WHEN s.reason->>'winner' IS NOT DISTINCT FROM s.winner THEN s.reason END AS reason,
+              (SELECT m FROM jsonb_array_elements(${arr("s.mentions")}) m WHERE m->>'tool' = s.winner LIMIT 1) AS w,
               EXISTS (SELECT 1 FROM jsonb_array_elements(${arr("s.mentions")}) m WHERE m->>'target' = 'true') AS considered
-         FROM ${from} WHERE ${where} AND s.verdict = 'competitor' ORDER BY s.queued_at DESC LIMIT 5000`, vp),
+         FROM ${from} WHERE ${where} AND ${LOST} ORDER BY s.queued_at DESC LIMIT 5000`, vp),
   ]);
   const pct = (k: number, n: number) => (n ? Math.round((k / n) * 1000) / 10 : null);
   const ci = (k: number, n: number) => { const w = wilson(k, n); return w ? [Math.round(w[0] * 1000) / 10, Math.round(w[1] * 1000) / 10] as [number, number] : null; };
@@ -163,7 +171,25 @@ export async function visibilityCharts(orgId: number, range: Range, f: VisFilter
   const HOW: Record<HowChosen | "unknown", string> = { installed: "Installed its package", imported: "Imported it in code",
     built_on: "Called its API directly", recommended: "Recommended it in prose", unknown: "No evidence kept" };
   const how = new Map<string, number>();
-  for (const l of losses) { const k = howChosen(l.w) ?? "unknown"; how.set(k, (how.get(k) ?? 0) + 1); }
+  const wins = losses.filter((l) => l.verdict === "competitor");
+  for (const l of wins) { const k = howChosen(l.w) ?? "unknown"; how.set(k, (how.get(k) ?? 0) + 1); }
+  // Why: the model's reason per lost session (src/reasons.ts), by category; a session without one yet is "Not explained yet".
+  const why = new Map<string, { sessions: number; phrases: Map<string, { phrase: string; sessions: number }>; quotes: { quote: string; winner: string | null }[] }>();
+  for (const l of losses) {
+    const k = l.reason?.category && REASON_CATEGORIES.some((c) => c.id === l.reason!.category) ? l.reason.category : l.reason ? "other" : NOT_EXPLAINED;
+    const g = why.get(k) ?? { sessions: 0, phrases: new Map<string, { phrase: string; sessions: number }>(), quotes: [] as { quote: string; winner: string | null }[] };
+    g.sessions++;
+    if (l.reason) {
+      const ph = String(l.reason.phrase ?? "").trim();
+      if (ph) { const key = ph.toLowerCase(); const x = g.phrases.get(key) ?? { phrase: ph, sessions: 0 }; x.sessions++; g.phrases.set(key, x); }
+      if (l.reason.quote && g.quotes.length < 3 && !g.quotes.some((q) => q.quote === l.reason!.quote)) g.quotes.push({ quote: String(l.reason.quote), winner: l.winner });
+    }
+    why.set(k, g);
+  }
+  const lost = losses.length, explained = losses.filter((l) => l.reason).length;
+  const categories = [...why].map(([id, g]) => ({ id, label: id === NOT_EXPLAINED ? "Not explained yet" : reasonLabel(id), sessions: g.sessions, share_pct: pct(g.sessions, lost) ?? 0,
+      phrases: [...g.phrases.values()].sort((a, b) => b.sessions - a.sessions || a.phrase.localeCompare(b.phrase)).slice(0, 3), quotes: g.quotes }))
+    .sort((a, b) => Number(a.id === NOT_EXPLAINED) - Number(b.id === NOT_EXPLAINED) || b.sessions - a.sessions || a.label.localeCompare(b.label));
 
   const taskRows = tasks.map((t) => rateRow({ id: Number(t.id), title: t.title, expectation: t.expectation, platform: t.platform, picked: Number(t.picked) }, Number(t.hits), Number(t.scored)));
   const agg = <K extends string>(key: (t: (typeof taskRows)[number]) => K) => {
@@ -189,7 +215,8 @@ export async function visibilityCharts(orgId: number, range: Range, f: VisFilter
     cloud,
     head_to_head: tools.map((t) => ({ name: t.tool, won: Number(t.won), lost: Number(t.lost) })).filter((t) => t.won + t.lost > 0)
       .sort((a, b) => b.won + b.lost - (a.won + a.lost) || a.name.localeCompare(b.name)).slice(0, 8),
-    reasons: { losses: losses.length, never_mentioned: losses.filter((l) => !l.considered).length,
+    reasons: { lost, explained, not_explained: lost - explained, categories,
+      losses: wins.length, never_mentioned: wins.filter((l) => !l.considered).length,
       how: [...how].map(([id, n]) => ({ id, label: HOW[id as HowChosen | "unknown"], sessions: n })).sort((a, b) => b.sessions - a.sessions) },
     by_task: taskRows.map(({ id, title, expectation, scored, hits, misses, pick_pct, ci }) => ({ id, title, expectation, scored, hits, misses, pick_pct, ci })).sort(byRate),
     by_persona: personas.map((x) => rateRow({ id: Number(x.id), name: x.name }, Number(x.hits), Number(x.scored))).sort(byRate),
@@ -249,7 +276,8 @@ export const SECTIONS = [
   { id: "by_task", label: "Pick rate by task" },
   { id: "by_persona", label: "Pick rate by developer persona" },
   { id: "head_to_head", label: "Head-to-head" },
-  { id: "reasons", label: "How agents chose others" },
+  { id: "reasons", label: "Why agents chose others" },
+  { id: "how_won", label: "How the win showed up" },
   { id: "expectation", label: "Expectation check" },
   { id: "by_platform", label: "Pick rate by platform" },
 ] as const;
@@ -281,8 +309,11 @@ export function tables(v: Visibility, sections: SectionId[]): Table[] {
     by_task: () => ({ columns: ["id", "title", "expectation", ...rate], rows: v.by_task.map((x) => [x.id, x.title, x.expectation, ...r(x)]) }),
     by_persona: () => ({ columns: ["id", "name", ...rate], rows: v.by_persona.map((x) => [x.id, x.name, ...r(x)]) }),
     head_to_head: () => ({ columns: ["name", "won", "lost"], rows: v.head_to_head.map((x) => [x.name, x.won, x.lost]) }),
-    reasons: () => ({ columns: ["name", "sessions", "of"], rows: [...v.reasons.how.map((x) => [x.label, x.sessions, v.reasons.losses] as Cell[]),
-      ["Never mentioned you", v.reasons.never_mentioned, v.reasons.losses], ["Mentioned you, chose it", v.reasons.losses - v.reasons.never_mentioned, v.reasons.losses]] }),
+    reasons: () => ({ columns: ["id", "name", "sessions", "of", "share_pct", "phrases", "quotes"],
+      rows: v.reasons.categories.map((c) => [c.id, c.label, c.sessions, v.reasons.lost, c.share_pct, c.phrases.map((p) => `${p.phrase} (${p.sessions})`).join(" | "),
+        c.quotes.map((q) => `"${q.quote}"${q.winner ? ` (${q.winner})` : ""}`).join(" | ")] as Cell[]) }),
+    how_won: () => ({ columns: ["id", "name", "sessions", "of"], rows: [...v.reasons.how.map((x) => [x.id, x.label, x.sessions, v.reasons.losses] as Cell[]),
+      ["never_mentioned", "Never mentioned you", v.reasons.never_mentioned, v.reasons.losses], ["mentioned", "Mentioned you, chose it", v.reasons.losses - v.reasons.never_mentioned, v.reasons.losses]] }),
     expectation: () => ({ columns: ["expectation", "tasks", "scored", "hits", "misses", "picked", "pick_pct"],
       rows: v.expectation.map((e) => [e.expectation, e.tasks, e.scored, e.hits, e.misses, e.picked, e.pick_pct]) }),
     by_platform: () => ({ columns: ["platform", "tasks", ...rate], rows: v.by_platform.map((x) => [x.platform, x.tasks, ...r(x)]) }),

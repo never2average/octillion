@@ -24,7 +24,13 @@ export interface Visibility {
   competitors: { name: string; sessions: number; share_pct: number }[];
   cloud: { name: string; weight: number; mentioned: number; chosen: number; installed: number; kind: 'tracked' | 'untracked' }[];
   head_to_head: { name: string; won: number; lost: number }[];
-  reasons: { losses: number; never_mentioned: number; how: { id: string; label: string; sessions: number }[] };
+  reasons: {
+    /** Sessions the agent didn't pick you in (a competitor won, or nothing of yours on a recommend task), and how many have a model's reason. */
+    lost: number; explained: number; not_explained: number;
+    categories: { id: string; label: string; sessions: number; share_pct: number; phrases: { phrase: string; sessions: number }[]; quotes: { quote: string; winner: string | null }[] }[];
+    /** Competitor losses only: how the win showed up, and whether the agent named you. */
+    losses: number; never_mentioned: number; how: { id: string; label: string; sessions: number }[];
+  };
   by_task: (Rate & { id: number; title: string; expectation: string })[];
   by_persona: (Rate & { id: number; name: string })[];
   by_platform: (Rate & { platform: string; tasks: number })[];
@@ -61,6 +67,19 @@ function Bars({ rows, color, label, empty, max }: { rows: BarRow[]; color: strin
   );
 }
 
+/** A reason's tooltip: its share, the top phrases the model wrote and up to three of the agent's own words. */
+function ReasonTip({ c, of }: { c: Visibility['reasons']['categories'][number]; of: number }) {
+  return (
+    <div className='grid w-full max-w-72 min-w-48 gap-1 whitespace-normal'>
+      <div className='font-medium'>{c.label}</div>
+      {tipRow('Sessions', `${num(c.sessions)} of ${num(of)}`)}
+      {c.id === 'not_explained' && <p className='text-muted-foreground'>No model reason for these sessions yet.</p>}
+      {c.phrases.length > 0 && <ul className='text-muted-foreground grid gap-0.5'>{c.phrases.map((p) => <li key={p.phrase}>{p.phrase}{p.sessions > 1 ? ` (${p.sessions})` : ''}</li>)}</ul>}
+      {c.quotes.map((q, i) => <q key={i} className='text-foreground/80 border-l pl-2 italic'>{q.quote}</q>)}
+    </div>
+  );
+}
+
 const rateTip = (r: Rate) => (
   <Tip>{tipRow('Pick rate', pct(r.pick_pct))}{tipRow('Hits', `${num(r.hits)} of ${num(r.scored)}`)}{r.ci && tipRow('95% interval', `${r.ci[0]}–${r.ci[1]}%`)}</Tip>
 );
@@ -79,7 +98,8 @@ export const SECTIONS = [
   { id: 'by_task', label: 'Pick rate by task' },
   { id: 'by_persona', label: 'Pick rate by developer persona' },
   { id: 'head_to_head', label: 'Head-to-head' },
-  { id: 'reasons', label: 'How agents chose others' },
+  { id: 'reasons', label: 'Why agents chose others' },
+  { id: 'how_won', label: 'How the win showed up' },
   { id: 'expectation', label: 'Expectation check' },
   { id: 'by_platform', label: 'Pick rate by platform' }
 ] as const;
@@ -169,7 +189,31 @@ export function VisibilitySection({ v, sections, after, print }: { v: Visibility
       </Box>
     ),
     reasons: (
-      <Box title='Why agents chose others' description={t?.competitor_losses ? `How the agent settled on the other tool, in ${num(t.competitor_losses)} sessions lost to a competitor.` : 'How the agent settled on the other tool, in sessions lost to a competitor.'}>
+      <Box title='Why agents chose others' description={v?.reasons.lost
+        ? `The main reason in the agent's own words, in ${num(v.reasons.lost)} sessions that didn't pick you${v.reasons.not_explained ? ` (${num(v.reasons.not_explained)} not explained yet)` : ''}.`
+        : "The main reason in the agent's own words, in sessions that didn't pick you."}>
+        {v?.reasons.lost ? (
+          <div className='flex flex-col gap-2'>
+            <Bars rows={v.reasons.categories.map((c) => ({ name: c.label, value: c.share_pct, end: `${c.share_pct}% · ${num(c.sessions)}`, tip: <ReasonTip c={c} of={v.reasons.lost} /> }))}
+              color={THEM} label='Share' max={100} empty='' />
+            <details className='text-muted-foreground group text-xs' open={print}>
+              <summary className='hover:text-foreground cursor-pointer select-none'>Reasons and quotes</summary>
+              <ol className='mt-2 grid gap-2'>
+                {v.reasons.categories.filter((c) => c.phrases.length || c.quotes.length).map((c) => (
+                  <li key={c.id} className='grid gap-0.5'>
+                    <span className='text-foreground font-medium'>{c.label} <span className='text-muted-foreground font-normal tabular-nums'>· {num(c.sessions)}</span></span>
+                    {c.phrases.length > 0 && <span>{c.phrases.map((p) => `${p.phrase}${p.sessions > 1 ? ` (${p.sessions})` : ''}`).join(' · ')}</span>}
+                    {c.quotes.map((q, i) => <q key={i} className='text-foreground/80 italic'>{q.quote}</q>)}
+                  </li>
+                ))}
+              </ol>
+            </details>
+          </div>
+        ) : <Empty>Every session in this period picked you.</Empty>}
+      </Box>
+    ),
+    how_won: (
+      <Box title='How the win showed up' description={t?.competitor_losses ? `What the agent did with the other tool, in ${num(t.competitor_losses)} sessions lost to a competitor.` : 'What the agent did with the other tool, in sessions lost to a competitor.'}>
         {v?.reasons.losses ? (
           <div className='flex flex-col gap-3'>
             <Bars rows={v.reasons.how.map((r) => ({ name: r.label, value: r.sessions, end: `${num(r.sessions)} · ${Math.round((r.sessions / v.reasons.losses) * 100)}%`,

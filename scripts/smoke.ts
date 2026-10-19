@@ -21,6 +21,8 @@ process.env.OCTILLION_REGISTRY = "scripts/fixtures/registry.json"; // fixed weig
 process.env.OCTILLION_ORG_MONTHLY_BUDGET_USD ??= "1000";
 // Most of the run signs people into Clerk organizations created on the fly; self-serve stays on for them (checked off below).
 process.env.OCTILLION_SELF_SERVE_ACCOUNTS ??= "on";
+// Loss reasons (src/reasons.ts) call a model after scoring: off for the run, on only where the smoke test checks them.
+process.env.REASONS_ENABLED ??= "off";
 const WORKER_TOKEN = process.env.OCTILLION_WORKER_TOKEN;
 // Stand-ins for Exa and the npm registry search (src/websearch.ts): research search runs on the server.
 const searchStub = (await import("node:http")).createServer((req, res) => {
@@ -2017,7 +2019,7 @@ try {
     const reset = () => adm("PUT", "/compute/settings", { values: Object.fromEntries(keys.map((k) => [k, null])) });
     const c0 = await json(adm("GET", "/compute"));
     const byKey = (c: any, k: string) => c.settings.find((x: any) => x.key === k);
-    assert.ok(c0.groups.length === 6 && c0.settings.length >= 17 && byKey(c0, "PUBLISH_DISCOUNT_TASK_USD")?.value === 10, "every setting listed, grouped");
+    assert.ok(c0.groups.length === 7 && c0.settings.length >= 19 && byKey(c0, "REASONS_DAILY_MAX")?.value === 500 && byKey(c0, "PUBLISH_DISCOUNT_TASK_USD")?.value === 10, "every setting listed, grouped");
     // Email settings (src/email.ts): defaults, and addresses checked.
     assert.ok(byKey(c0, "EMAIL_FROM")?.value === "Octillion <hello@octillion.useimmaculate.com>" && byKey(c0, "EMAILS_ENABLED")?.value === "on"
       && byKey(c0, "EMAIL_REPLY_TO")?.value === "" && byKey(c0, "EMAIL_ADMIN_TO")?.value === "", "email settings and their defaults");
@@ -2663,7 +2665,7 @@ try {
         [String(vF.totals.scored), String(vF.totals.hits), String(vF.totals.picked), String(vF.totals.pick_pct), String(vF.totals.top_competitor)], "CSV summary = API totals");
       assert.deepEqual(secRows("by_task").map((l) => [Number(col(l, "id")), Number(col(l, "scored")), Number(col(l, "hits"))]), vF.by_task.map((t: any) => [t.id, t.scored, t.hits]), "CSV by task = API");
       assert.deepEqual(secRows("competitors").map((l) => [col(l, "name"), Number(col(l, "share_pct"))]), vF.competitors.map((c: any) => [c.name, c.share_pct]), "CSV competitor share = API");
-      for (const id of ["summary", "weekly", "by_agent", "by_harness", "by_model", "competitors", "cloud", "by_task", "by_persona", "head_to_head", "reasons", "expectation", "by_platform"])
+      for (const id of ["summary", "weekly", "by_agent", "by_harness", "by_model", "competitors", "cloud", "by_task", "by_persona", "head_to_head", "reasons", "how_won", "expectation", "by_platform"])
         assert.ok(secRows(id).length > 0, `CSV has section ${id}`);
       assert.equal(secRows("by_harness").length, vF.by_harness.length, "agent, harness and model are separate sections");
       assert.ok(!csv.includes("VIS-SECRET") && !/Decoy|decoy/.test(csv), "CSV: no prompt, persona text or another account's data");
@@ -2731,6 +2733,151 @@ try {
       assert.deepEqual(await db.query<any>("SELECT count(*)::int AS n FROM visibility_reports WHERE org_id = $1", [rowW.id]), before, "the tool writes no report");
       assert.equal((await appCall(ownerC, "DELETE", `/visibility/reports/${repD.id}`)).status, 204, "an owner deletes a member's report");
       await db.query("DELETE FROM visibility_reports WHERE id = ANY($1)", [[repO.id, foreignRep.id]]);
+      // Loss reasons (src/reasons.ts): a model's "why" per lost session, from the agent's own text only, against the
+      // Cloudflare Workers AI mock. Checked: valid category and a quote that is really in the transcript; a made-up quote
+      // dropped; an unknown category is "other"; the task prompt never reaches the model or a reason; the daily cap and
+      // the off switch; a failing model never touches scoring; the page, exports and MCP tool show the stored reasons.
+      {
+        const R = await import("../src/reasons.js");
+        const { setSettings } = await import("../src/settings.js");
+        const { normalize } = await import("../src/transcripts.js");
+        const kvR = await import("../src/keyvault.js");
+        // parseReason on its own.
+        const agentSays = "[message] I'll use Postmark because I already know its Node SDK well and it is quick to set up.";
+        const p1 = R.parseReason('{"reason_category":"Already familiar / default choice","reason_phrase":"knew the SDK","quote":"I already know its Node SDK well"}', agentSays);
+        assert.deepEqual(p1, { category: "familiar_default", phrase: "knew the SDK", quote: "I already know its Node SDK well" }, "a valid answer is kept");
+        assert.equal(R.parseReason('```json\n{"reason_category":"vibes","reason_phrase":"","quote":"quick to set up"}\n```', agentSays).category, "other", "an unknown category is other");
+        assert.equal(R.parseReason('{"reason_category":"vibes","reason_phrase":"","quote":""}', agentSays).phrase, "Other", "no phrase: the category's label");
+        assert.equal(R.parseReason('{"reason_category":"simpler setup","reason_phrase":"x","quote":"Postmark has the best docs anywhere"}', agentSays).quote, null, "a quote the agent never wrote is dropped");
+        assert.equal(R.parseReason('{"reason_category":"simpler_setup","reason_phrase":"x","quote":"i ALREADY know   its node sdk"}', agentSays).quote, "I already know its Node SDK", "case and spacing aside, the agent's own spelling is kept");
+        assert.equal(R.parseReason('{"reason_category":"Your product not known","reason_phrase":"x","quote":""}', agentSays, { named: true }).category, "considered_rejected", "named by the agent: not 'not known'");
+        assert.throws(() => R.parseReason("no json here", agentSays), "not JSON: the next model is tried");
+        assert.equal(R.parseReason(`{"reason_category":"Other","reason_phrase":"x","quote":"${"word ".repeat(30).trim()}"}`, `[message] ${"word ".repeat(40)}`).quote?.split(" ").length, 25, "a quote is at most 25 words");
+        const forb = ["Build the receipts page for the VIS shop and email the customer a receipt"];
+        const pE = R.parseReason('{"reason_category":"Other","reason_phrase":"build the receipts page for the VIS shop","quote":"build it and email the customer a receipt now"}', "[message] I will build it and email the customer a receipt now.", { forbidden: forb });
+        assert.deepEqual([pE.phrase, pE.quote], ["Other", null], "a phrase or quote that repeats the task prompt is dropped");
+
+        // Fixtures: transcripts for the lost sessions (a competitor won, or nothing on a recommend task), each with the task
+        // prompt, the simulated developer, tool output and the agent's own words. Other sessions in the database stay out.
+        const lostIds = [1, 2, 4, 5, 6].map((i) => `ses_vis_${i}_${tag}`);
+        await db.query("/* tenant: smoke fixture */ UPDATE agent_sessions SET reason_status = 'skipped' WHERE NOT (id = ANY($1)) AND reason_status IS NULL", [lostIds]);
+        const says: Record<number, string> = {
+          1: "The task says VIS-SECRET-PROMPT send a receipt. MARK-1 I'll use Postmark because I already know its Node SDK well.",
+          2: "MARK-2 SendGrid is what I usually reach for; I'll use SendGrid for this.",
+          4: "MARK-4 The repo already has a Postmark client configured, so I'll import it.",
+          5: "MARK-5 Mailgun just needs one HTTP call with no SDK, the simplest setup here.",
+          6: "MARK-6 I'll write a small SMTP sender with nodemailer.",
+        };
+        for (const i of [1, 2, 4, 5, 6]) {
+          const id = `ses_vis_${i}_${tag}`;
+          await transcripts().append({ id, org_id: rowW.id, product_id: pr.id, simulation_id: sim, model: "m" }, normalize([
+            { type: "user", message: { role: "user", content: "VIS-SECRET-PROMPT send a receipt" } },
+            { type: "simulated_user", content: "VIS-SECRET-PERSONA likes boring tools" },
+            { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: says[i] }, { type: "tool_use", name: "Bash", input: { command: i === 6 ? "npm install nodemailer" : "ls" } }] } },
+            { type: "user", message: { role: "user", content: [{ type: "tool_result", content: "TOOL-OUTPUT-SECRET 200 OK" }] } },
+          ], 0));
+        }
+        const answers: Record<string, { status?: number; content?: string }> = {
+          "MARK-1": { content: JSON.stringify({ reason_category: "Already familiar / default choice", reason_phrase: "already knew the Postmark Node SDK", quote: "I'll use Postmark because I already know its Node SDK well" }) },
+          "MARK-2": { content: JSON.stringify({ reason_category: "Better docs or examples", reason_phrase: "SendGrid docs looked better", quote: "SendGrid has the best documentation in the world" }) },
+          "MARK-4": { content: `Sure! {"reason_category": "Because vibes", "reason_phrase": "Postmark client already configured in the repo", "quote": "The repo already has a Postmark client configured"}` },
+          "MARK-5": { content: JSON.stringify({ reason_category: "Simpler setup", reason_phrase: "VIS-SECRET-PROMPT send a receipt quickly", quote: "VIS-SECRET-PROMPT send a receipt" }) },
+          "MARK-6": { content: JSON.stringify({ reason_category: "Your product not known", reason_phrase: "wrote its own SMTP sender", quote: "I'll write a small SMTP sender with nodemailer" }) },
+        };
+        mock.state.aiRequests.length = 0;
+        mock.state.aiReply = (body: any) => {
+          const u = String(body?.messages?.find((m: any) => m.role === "user")?.content ?? "");
+          return Object.entries(answers).find(([k]) => u.includes(k))?.[1] ?? { status: 500 };
+        };
+        const cfKey = await kvR.setCredential("cloudflare", `cf-smoke-${stamp}-token`);
+        Object.assign(process.env, { CLOUDFLARE_ACCOUNT_ID: "smoke-account", CLOUDFLARE_API_URL: mock.url });
+        const used0 = (await R.reasonsStatus()).used_today;
+        await setSettings("smoke", { REASONS_ENABLED: "on", REASONS_DAILY_MAX: used0 + 4 });
+
+        const before = (await vis(`product=${pr.id}`)).visibility.reasons;
+        assert.deepEqual([before.lost, before.explained, before.not_explained], [5, 0, 5], "5 lost sessions (4 competitor wins, 1 recommend task with nothing picked), none explained yet");
+        assert.deepEqual(before.categories.map((c: any) => [c.id, c.label, c.sessions, c.share_pct]), [["not_explained", "Not explained yet", 5, 100]], "not explained yet is shown, not hidden");
+
+        // The backfill (Agent configuration › Explain past losses): newest first, within today's cap of 4.
+        const bf = await json(adm("POST", "/compute/reasons/backfill"));
+        assert.deepEqual([bf.added, bf.left_behind], [4, 1], "4 queued (the cap), 1 left for later");
+        await R.reasonsIdle();
+        await R.drainReasons();
+        const reasonOf = async (i: number) => (await db.query<any>("/* tenant: smoke fixture */ SELECT reason, reason_status, reason_attempts FROM agent_sessions WHERE id = $1", [`ses_vis_${i}_${tag}`]))[0];
+        const st = await R.reasonsStatus();
+        assert.deepEqual([st.used_today - used0, st.left_today], [4, 0], "four model calls: the cap is used");
+        assert.equal(mock.state.aiRequests.length, 4, "one model call per explained session");
+        const r2 = await reasonOf(2), r4 = await reasonOf(4), r5 = await reasonOf(5), r6 = await reasonOf(6), r1 = await reasonOf(1);
+        assert.deepEqual([r2.reason.category, r2.reason.phrase, r2.reason.quote], ["docs_examples", "SendGrid docs looked better", null], "a hallucinated quote is dropped");
+        assert.deepEqual([r4.reason.category, r4.reason.quote], ["other", "The repo already has a Postmark client configured"], "an invalid category is other; the real quote stays");
+        assert.deepEqual([r5.reason.category, r5.reason.phrase, r5.reason.quote], ["simpler_setup", "Simpler setup", null], "a phrase or quote from the task prompt is dropped");
+        assert.deepEqual([r6.reason.category, r6.reason.quote, r6.reason.winner], ["not_known", "I'll write a small SMTP sender with nodemailer", null]);
+        assert.ok(r2.reason.model === "@cf/zai-org/glm-5.3-flash" && r2.reason.at && r2.reason.winner === "SendGrid", "model, time and winner stored");
+        assert.ok(r1.reason == null && r1.reason_status == null, "past the cap: not queued, not explained");
+        // Only the agent's own words reach the model: never the task prompt, the simulated developer or tool output.
+        const sent = JSON.stringify(mock.state.aiRequests);
+        assert.ok(!/VIS-SECRET|TOOL-OUTPUT-SECRET/.test(sent), "no prompt, persona or tool output in the model request");
+        assert.ok(sent.includes("MARK-5 Mailgun just needs one HTTP call") && sent.includes("Vis Mail") && sent.includes("Mailgun"), "the agent's text, the product and the winner are");
+        const usage = await db.query<any>("SELECT sum(requests)::int AS n FROM gateway_model_usage WHERE day = current_date AND provider = 'cloudflare' AND consumer = 'orchestrator'");
+        assert.ok(Number(usage[0].n) >= 4, "each call's tokens are in the model usage like other server-side calls");
+
+        // Off: the backfill refuses, a drain sends nothing, scoring queues nothing.
+        await setSettings("smoke", { REASONS_ENABLED: "off", REASONS_DAILY_MAX: used0 + 20 });
+        assert.equal((await adm("POST", "/compute/reasons/backfill")).status, 409, "off: Explain past losses refuses");
+        await db.query("/* tenant: smoke fixture */ UPDATE agent_sessions SET reason_status = 'queued', reason_next_at = now() WHERE id = $1", [`ses_vis_1_${tag}`]);
+        assert.equal((await R.drainReasons()).explained, 0, "off: nothing is sent");
+        assert.equal(mock.state.aiRequests.length, 4);
+        await setSettings("smoke", { REASONS_ENABLED: "on" });
+        assert.equal((await R.drainReasons()).explained, 1, "on again, under the cap: the queued one is explained");
+        const r1b = (await reasonOf(1)).reason;
+        assert.deepEqual([r1b.category, r1b.quote], ["familiar_default", "I'll use Postmark because I already know its Node SDK well"]);
+        const transcriptText = JSON.stringify((await transcripts().read(rowW.id, `ses_vis_1_${tag}`, 0, 50)).events);
+        assert.ok(transcriptText.includes(r1b.quote), "the quote is in the transcript");
+
+        // Another account's reason never shows.
+        await db.query(`/* tenant: smoke fixture */ UPDATE agent_sessions SET reason = '{"category":"pricing","phrase":"Decoy phrase","quote":"decoy quote","model":"m","at":"2026-01-01T00:00:00Z","winner":"DecoyTool"}' WHERE id = $1`, [`ses_decoy_${tag}`]);
+
+        // The page: ranked by share of lost sessions, top phrases and the agent's own quotes; How the win showed up apart.
+        const vR = (await vis(`product=${pr.id}`)).visibility;
+        assert.deepEqual([vR.reasons.lost, vR.reasons.explained, vR.reasons.not_explained], [5, 5, 0]);
+        assert.deepEqual(vR.reasons.categories.map((c: any) => [c.id, c.sessions, c.share_pct]).sort(),
+          [["docs_examples", 1, 20], ["familiar_default", 1, 20], ["not_known", 1, 20], ["other", 1, 20], ["simpler_setup", 1, 20]], "one each, 20% of lost sessions");
+        const fam = vR.reasons.categories.find((c: any) => c.id === "familiar_default");
+        assert.deepEqual(fam.phrases, [{ phrase: "already knew the Postmark Node SDK", sessions: 1 }]);
+        assert.deepEqual(fam.quotes, [{ quote: "I'll use Postmark because I already know its Node SDK well", winner: "Postmark" }]);
+        assert.deepEqual(Object.fromEntries(vR.reasons.how.map((r: any) => [r.id, r.sessions])), { installed: 1, imported: 1, built_on: 1, recommended: 1 }, "how the win showed up: unchanged");
+        assert.ok(!/VIS-SECRET|TOOL-OUTPUT-SECRET|Decoy|decoy/.test(JSON.stringify(vR)), "no prompt, tool output or another account's reason on the page");
+        // Exports: CSV, JSON (the print page's tables) and the MCP tool carry the same reasons.
+        const rCsv = await (await appCall(ownerC, "GET", `/visibility/export?product=${pr.id}&format=csv&section=reasons,how_won`)).text();
+        assert.ok(rCsv.includes("familiar_default,Already familiar / default choice,1,5,20,already knew the Postmark Node SDK (1)") && rCsv.includes("I'll use Postmark because I already know its Node SDK well"), "CSV: categories, phrases and quotes");
+        assert.ok(rCsv.includes("how_won,installed,Installed its package,1,4"), "CSV: how the win showed up");
+        const rJson = await json(appCall(ownerC, "GET", `/visibility/export?product=${pr.id}&format=json&section=reasons`));
+        assert.deepEqual(rJson.sections[0].rows.map((r: any) => [r[0], r[2]]).sort(), vR.reasons.categories.map((c: any) => [c.id, c.sessions]).sort(), "JSON = the page");
+        const rMcp = await mcp(acc2.user.id, { product: "Vis Mail", sections: ["reasons"] });
+        assert.ok(!rMcp.isError && JSON.stringify(rMcp.structuredContent.sections[0].rows).includes("already knew the Postmark Node SDK"), "export_visibility_report has the reasons");
+        for (const x of [rCsv, JSON.stringify(rJson), JSON.stringify(rMcp)]) assert.ok(!/VIS-SECRET|TOOL-OUTPUT-SECRET|Decoy|decoy/.test(x), "exports: nothing from the prompt or another account");
+
+        // A failing model never touches scoring: the session is scored, its reason waits for a retry with backoff, then fails.
+        const failId = `ses_vis_fail_${tag}`;
+        await db.query(`INSERT INTO agent_sessions (id, simulation_id, org_id, product_id, scenario_id, model, harness, status) VALUES ($1, $2, $3, $4, $5, 'm', 'h', 'completed')`, [failId, sim, rowW.id, pr.id, T1]);
+        await transcripts().append({ id: failId, org_id: rowW.id, product_id: pr.id, simulation_id: sim, model: "m" }, normalize([
+          { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "MARK-FAIL I'll go with Postmark." }, { type: "tool_use", name: "Bash", input: { command: "npm install postmark" } }] } }], 0));
+        const scored = await (await import("../src/worker.js")).scoreSession(failId);
+        assert.deepEqual([scored?.verdict, scored?.winner], ["competitor", "Postmark"], "scored as usual");
+        await until(async () => Number((await db.query<any>("/* tenant: smoke fixture */ SELECT reason_attempts FROM agent_sessions WHERE id = $1 AND reason_error IS NOT NULL", [failId]))[0]?.reason_attempts ?? 0) >= 1, "the reason was tried");
+        await R.reasonsIdle();
+        const [f1] = await db.query<any>("/* tenant: smoke fixture */ SELECT verdict, winner, reason, reason_status, reason_next_at > now() AS later FROM agent_sessions WHERE id = $1", [failId]);
+        assert.deepEqual([f1.verdict, f1.winner, f1.reason, f1.reason_status, f1.later], ["competitor", "Postmark", null, "queued", true], "verdict kept; retried later");
+        await db.query("/* tenant: smoke fixture */ UPDATE agent_sessions SET reason_attempts = 3, reason_next_at = now() WHERE id = $1", [failId]);
+        await R.drainReasons();
+        assert.equal((await db.query<any>("/* tenant: smoke fixture */ SELECT reason_status FROM agent_sessions WHERE id = $1", [failId]))[0].reason_status, "failed", "after the last attempt: failed");
+        assert.equal((await vis(`product=${pr.id}`)).visibility.reasons.not_explained, 1, "and it counts as not explained yet");
+
+        mock.state.aiReply = null;
+        await kvR.deleteCredential(cfKey.id);
+        await setSettings("smoke", { REASONS_ENABLED: null, REASONS_DAILY_MAX: null });
+        console.log("✓ loss reasons: agent text only, category set, verbatim quotes (made-up and prompt quotes dropped), daily cap, off switch, retries, scoring untouched, Pick rate + CSV/JSON/MCP");
+      }
       // Another account's product id is ignored, not read.
       assert.equal((await vis(`product=${dp.id}`)).visibility.product, null, "another account's product is not a filter");
       await db.query("DELETE FROM products WHERE id = ANY($1)", [[pr.id, dp.id]]); // sessions, tasks, runs and personas go with them

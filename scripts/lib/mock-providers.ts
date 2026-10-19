@@ -12,6 +12,8 @@
 // balance transactions answer 500 while down). Times are Unix seconds.
 // Resend: POST /emails (Bearer re_...; an Idempotency-Key header returns the first email's id again for the same body, 409
 // for a different one); every accepted email is in state.emails. POST /_mock/resend/outage {down} (POST /emails answers 500).
+// Cloudflare Workers AI: POST /client/v4/accounts/:id/ai/v1/chat/completions (Bearer); state.aiRequests logs each body and
+// state.aiReply(body) decides the answer (in-process only; unset: 503).
 import express from "express";
 import { randomBytes, randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
@@ -35,6 +37,8 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     customers: new Map<string, any>(), subscriptions: new Map<string, any>(), meterEvents: [] as any[], invoices: [] as any[], balanceTxns: [] as any[], stripeDown: false,
     oauth: new Map<string, any>(), keyed: new Map<string, any>(),
     emails: [] as any[], resendKeys: new Map<string, { id: string; body: string }>(), resendDown: false,
+    // Cloudflare Workers AI: every chat request (its body), and how to answer one (status and/or content; unset: 503).
+    aiRequests: [] as any[], aiReply: null as null | ((body: any) => { status?: number; content?: string }),
     prices: [
       { id: "price_mock_starter", object: "price", active: true, lookup_key: "octillion_starter", unit_amount: 49900, currency: "usd", recurring: { interval: "month" },
         nickname: "Starter", metadata: { monthly_budget_usd: "300" }, product: { id: "prod_mock_1", name: "Octillion", metadata: {} } },
@@ -364,6 +368,15 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     s.emails.push(email);
     if (key) s.resendKeys.set(key, { id: email.id, body });
     res.json({ id: email.id });
+  });
+  // ---------- Cloudflare Workers AI (OpenAI-compatible chat completions): answers come from state.aiReply ----------
+  app.post("/client/v4/accounts/:account/ai/v1/chat/completions", (req, res) => {
+    if (!/^Bearer \S+$/.test(req.get("authorization") ?? "")) return void res.status(401).json({ success: false, errors: [{ message: "Authentication error" }] });
+    s.aiRequests.push({ account: req.params.account, ...req.body });
+    const r = s.aiReply?.(req.body) ?? { status: 503 };
+    if (r.status && r.status >= 400) return void res.status(r.status).json({ success: false, errors: [{ message: "mock: no answer" }] });
+    res.json({ id: id("chatcmpl"), object: "chat.completion", model: req.body?.model, choices: [{ index: 0, message: { role: "assistant", content: r.content ?? "" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: Math.ceil(JSON.stringify(req.body?.messages ?? []).length / 4), completion_tokens: Math.ceil((r.content ?? "").length / 4) } });
   });
   app.post("/_mock/resend/outage", (req, res) => { s.resendDown = Boolean(req.body?.down); res.json({ down: s.resendDown }); });
   app.use(c);

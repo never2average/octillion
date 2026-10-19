@@ -1080,3 +1080,16 @@ CREATE TABLE IF NOT EXISTS visibility_reports (
   last_run_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS visibility_reports_org_idx ON visibility_reports (org_id, id);
+-- Why an agent did not pick the product (src/reasons.ts): a model's judgement per lost session (verdict competitor, or
+-- none / mentioned on a recommend task), read from the agent's own messages and actions only. reason: {category,
+-- phrase, quote, model, at, winner}; quote is verbatim agent text or null. reason_status: queued | done | failed |
+-- skipped (nothing the agent wrote to read); reason_next_at: when a queued job may run (retry backoff);
+-- reason_tried_at: the last model call (the daily cap REASONS_DAILY_MAX counts these).
+ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS reason JSONB;
+ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS reason_status TEXT;
+ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS reason_attempts INT NOT NULL DEFAULT 0;
+ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS reason_next_at TIMESTAMPTZ;
+ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS reason_tried_at TIMESTAMPTZ;
+ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS reason_error TEXT;
+CREATE INDEX IF NOT EXISTS agent_sessions_reason_queue_idx ON agent_sessions (reason_next_at) WHERE reason_status = 'queued';
+CREATE INDEX IF NOT EXISTS agent_sessions_reason_tried_idx ON agent_sessions (reason_tried_at) WHERE reason_tried_at IS NOT NULL;

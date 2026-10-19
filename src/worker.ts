@@ -9,6 +9,8 @@ import { findAgent } from "./agents.js";
 import { languageOf, resolveEnvironment, type PersonaEnvironment, type SessionEnvironment } from "../orchestrator/core/environment.js";
 import { extendAdaptive } from "./queries.js";
 import { revokeSessionTokens, sessionGatewayUsage } from "./gateway.js";
+import { afterScoring } from "./reasons.js";
+import { keepAlive } from "./telemetry.js";
 
 /**
  * The orchestrator's side: agent_sessions rows are the job queue.
@@ -285,6 +287,8 @@ export async function scoreSession(sessionId: string) {
             events = greatest(events, $5), user_turns = $6, untracked = $7 WHERE id = $1`,
     [sessionId, score.verdict, score.winner, JSON.stringify(score.mentions), lastSeq, userTurns, JSON.stringify(untrackedInstalls(events, [target, ...row.competitors]))],
   );
+  // Why it lost, out of band (src/reasons.ts): a lost session is queued for a model's reason; never blocks or fails scoring.
+  keepAlive(afterScoring(sessionId));
   return score;
 }
 

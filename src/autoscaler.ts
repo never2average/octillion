@@ -160,6 +160,8 @@ export class Autoscaler {
     const loop = async () => {
       try { await this.tick(); } catch (e) { this.log(`tick failed: ${(e as Error).message}`); }
       // History retention (autoscaler_ticks 14 days, compute_events 90), never inside a tick. Vercel prunes from its cron.
+      // Loss reasons (src/reasons.ts) queued while no drain ran, or due for a retry. Never inside a tick.
+      void import("./reasons.js").then((r) => r.kickReasons()).catch(() => {});
       if (Date.now() - prunedAt > 6 * 3600_000) {
         prunedAt = Date.now();
         await pruneComputeHistory().catch((e) => this.log(`prune failed: ${(e as Error).message}`));

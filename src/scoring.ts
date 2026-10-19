@@ -335,7 +335,8 @@ export const isHit = (verdict: Verdict | null, expectation: "recommend" | "avoid
  *   imported     code or config the agent wrote imports it or lists it as a dependency
  *   built_on     code the agent wrote calls its API host or sets up its credentials or client, with no install
  *   recommended  only the agent's prose chose it ("I'll use X")
- * The scorer stores no free-text reasoning; this is the rule that fired, which is the closest stored "why".
+ * The scorer stores no free-text reasoning; this is the rule that fired ("How the win showed up" on Pick rate). The
+ * model-written why, per lost session, is src/reasons.ts.
  */
 export type HowChosen = "installed" | "imported" | "built_on" | "recommended";
 export function howChosen(m: Pick<Mention, "level" | "evidence"> | null | undefined): HowChosen | null {

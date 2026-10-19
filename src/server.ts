@@ -568,7 +568,7 @@ export function createServer(org: Org, context = ""): McpServer {
     title: "Export pick rate report",
     description: "Export the Pick rate report (the portal's Pick rate page): pick rate, its 95% interval, times picked, competitor share, pick rate by agent, harness, model, task, persona and platform, head-to-head, how agents chose others and the expectation check, as tables. " +
       "Pass report_id for a report saved on the Pick rate page (its filters, dates and sections), or the filters here: competitors (sessions where the agent picked or mentioned any of them), personas and tasks (ids from list_developer_profiles / get_product), product, and days or from/to. " +
-      "format json returns the tables; csv also returns one CSV (a section column first). Titles and names only: no prompts, persona text or transcript evidence.",
+      "format json returns the tables; csv also returns one CSV (a section column first). Titles and names only: no prompts, persona text or transcript evidence; the reasons section (why agents chose others) carries a model's reason category and short phrases per lost session and a few verbatim quotes of the agent's own words.",
     inputSchema: {
       report_id: z.number().int().positive().optional().describe("A saved report's id (Pick rate page, Saved reports); its definition wins over the filters below"),
       product,

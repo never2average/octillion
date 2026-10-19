@@ -10,6 +10,7 @@ import { getProvider, useCredential, useVertexCredential, VERTEX_LABEL } from ".
 import { toVertex, vertexAccessToken, vertexConfig, type VertexConfig } from "./vertex.js";
 import { findSimilar, packageSearch, webSearch, webSearchEnabled, type SearchHit } from "./websearch.js";
 import { asData } from "../orchestrator/core/text-guard.js";
+import { recordModelUsage } from "./usage.js";
 
 /**
  * Background research on the company behind an access request, run once when the request comes in (and again from
@@ -150,45 +151,81 @@ Reply with one JSON object and nothing else:
  "competitors": [{"name": "...", "url": "..."}], "starter_tasks": ["3 realistic coding prompts a developer might give an agent where this kind of tool could be chosen, never naming the product"],
  "questions": ["2-4 questions to ask them on a first call"], "flags": ["anything that looks off: mismatched domains, no product, not a developer tool"]}`;
 
-/** The brief from Claude, else from the orchestrator's own model (OpenAI) when the vault has no Anthropic key. */
-/** The brief from the first model that answers: GLM 5.3 Flash on Cloudflare Workers AI, then Claude (the vault's
- *  Anthropic key, or Claude on Vertex AI), then the orchestrator's OpenAI model. Keys come from the vault only.
- *  Each failure is kept so the flag says why. */
+/** The brief from the first model that answers (askModel): GLM 5.3 Flash on Cloudflare, then Claude, then the
+ *  orchestrator's OpenAI model. Each failure is kept so the flag says why. */
 async function claudeBrief(evidence: unknown): Promise<(Partial<ProspectBrief> & { model: string }) | null> {
+  const r = await askModel(SYSTEM, `Evidence:\n${JSON.stringify(evidence)}`, { maxTokens: 1500, parse: parseBrief });
+  return { ...r.value, model: r.model };
+}
+
+/** What one server-side model call answered, and what it cost in tokens (when the provider said). */
+export interface ModelAnswer<T> { value: T; text: string; model: string; provider: "cloudflare" | "anthropic" | "openai"; input_tokens: number; output_tokens: number }
+export interface AskOptions<T> {
+  /** Output budget for Claude and OpenAI; Cloudflare's thinking model always gets room to reason first. */
+  maxTokens?: number;
+  /** Turns the text into the result; throwing moves on to the next model. */
+  parse: (text: string) => T;
+}
+
+/**
+ * One server-side model call, from the first model that answers: GLM 5.3 Flash on Cloudflare Workers AI (the cheapest),
+ * then Claude (the vault's Anthropic key, or Claude on Vertex AI), then the orchestrator's OpenAI model. Keys come
+ * from the vault only. Each answer's tokens are recorded in gateway_model_usage like the gateway's own requests;
+ * failures count as errors there. Throws with every model's failure when none answered.
+ */
+export async function askModel<T>(system: string, user: string, opts: AskOptions<T>): Promise<ModelAnswer<T>> {
   const brain = orchestratorBrain();
-  const tries: [string, () => Promise<string>][] = [
-    [cloudflareModel(), () => cloudflareText(evidence)],
-    [MODEL(), () => anthropicText(evidence)],
-    ...(brain.provider === "openai" ? [[brain.model, () => openaiText(evidence, brain.model)] as [string, () => Promise<string>]] : []),
+  type Raw = { text: string; input: number; output: number };
+  const tries: [ModelAnswer<T>["provider"], string, () => Promise<Raw>][] = [
+    ["cloudflare", cloudflareModel(), () => cloudflareText(system, user)],
+    ["anthropic", MODEL(), () => anthropicText(system, user, opts.maxTokens ?? 1500)],
+    ...(brain.provider === "openai" ? [["openai", brain.model, () => openaiText(system, user, brain.model)] as [ModelAnswer<T>["provider"], string, () => Promise<Raw>]] : []),
   ];
   const errors: string[] = [];
-  for (const [model, ask] of tries) {
-    try { return { ...parseBrief(await ask()), model }; }
-    catch (e) { errors.push((e as Error).message); }
+  for (const [provider, model, ask] of tries) {
+    let raw: Raw | null = null;
+    try {
+      raw = await ask();
+      const value = opts.parse(raw.text);
+      void meter(provider, model, raw, false);
+      return { value, text: raw.text, model, provider, input_tokens: raw.input, output_tokens: raw.output };
+    } catch (e) {
+      // A call that answered but could not be parsed still spent tokens.
+      if (raw) void meter(provider, model, raw, true);
+      errors.push((e as Error).message);
+    }
   }
   throw new Error(errors.join("; "));
 }
 
+const meter = (provider: string, model: string, raw: { input: number; output: number }, error: boolean) =>
+  recordModelUsage(provider, model, "orchestrator", { requests: 1, errors: error ? 1 : 0, input: raw.input, cached: 0, output: raw.output })
+    .catch((e) => console.error("model usage record failed:", (e as Error).message));
+
+const tokens = (v: unknown) => (Number.isFinite(Number(v)) ? Math.max(0, Math.trunc(Number(v))) : 0);
+
 const cloudflareModel = () => settingText("CLOUDFLARE_AI_MODEL"); // global setting (/admin/compute), else env
 
 /** Cloudflare Workers AI (OpenAI-compatible endpoint): the vault's cloudflare key; the account id (not a secret) from
- *  the provider's upstream URL (.../accounts/<id>/ai) or CLOUDFLARE_ACCOUNT_ID. */
-async function cloudflareText(evidence: unknown) {
+ *  the provider's upstream URL (.../accounts/<id>/ai) or CLOUDFLARE_ACCOUNT_ID. CLOUDFLARE_API_URL points at another
+ *  host (the smoke test's mock). */
+async function cloudflareText(system: string, user: string) {
   const p = await getProvider("cloudflare");
   const account = p?.upstream_url?.match(/\/accounts\/([^/]+)/)?.[1] ?? process.env.CLOUDFLARE_ACCOUNT_ID ?? process.env.CF_ACCOUNT_ID;
   const token = (await useCredential("cloudflare").catch(() => null))?.secret;
   if (!token) throw new Error("no Cloudflare Workers AI key in the vault");
   if (!account) throw new Error("no Cloudflare account id (the cloudflare provider's upstream URL, or CLOUDFLARE_ACCOUNT_ID)");
-  const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(account)}/ai/v1/chat/completions`, {
+  const host = (process.env.CLOUDFLARE_API_URL ?? "https://api.cloudflare.com").replace(/\/$/, "");
+  const r = await fetch(`${host}/client/v4/accounts/${encodeURIComponent(account)}/ai/v1/chat/completions`, {
     method: "POST", signal: AbortSignal.timeout(120_000), headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-    body: JSON.stringify({ model: cloudflareModel(), max_tokens: 8000 /* a thinking model: room to reason, then answer */, messages: [{ role: "system", content: SYSTEM }, { role: "user", content: `Evidence:\n${JSON.stringify(evidence)}` }] }),
+    body: JSON.stringify({ model: cloudflareModel(), max_tokens: 8000 /* a thinking model: room to reason, then answer */, messages: [{ role: "system", content: system }, { role: "user", content: user }] }),
   });
   if (!r.ok) throw new Error(`Cloudflare answered ${r.status}`);
-  const out = await r.json() as { choices?: { message?: { content?: string } }[] };
-  return out.choices?.[0]?.message?.content ?? "";
+  const out = await r.json() as { choices?: { message?: { content?: string } }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } };
+  return { text: out.choices?.[0]?.message?.content ?? "", input: tokens(out.usage?.prompt_tokens), output: tokens(out.usage?.completion_tokens) };
 }
 
-async function openaiText(evidence: unknown, model: string) {
+async function openaiText(system: string, user: string, model: string) {
   const p = await getProvider("openai");
   const cred = p?.enabled ? await useCredential("openai", { excludeLabel: VERTEX_LABEL }).catch(() => null) : null;
   if (!p || !cred) throw new Error("no OpenAI key in the vault");
@@ -196,13 +233,13 @@ async function openaiText(evidence: unknown, model: string) {
   const auth = { [p.auth_header]: `${p.auth_prefix}${cred.secret}` };
   const r = await fetch(`${base}/v1/chat/completions`, { method: "POST", signal: AbortSignal.timeout(90_000),
     headers: { "content-type": "application/json", ...auth },
-    body: JSON.stringify({ model, response_format: { type: "json_object" }, messages: [{ role: "system", content: SYSTEM }, { role: "user", content: `Evidence:\n${JSON.stringify(evidence)}` }] }) });
+    body: JSON.stringify({ model, response_format: { type: "json_object" }, messages: [{ role: "system", content: system }, { role: "user", content: user }] }) });
   if (!r.ok) throw new Error(`OpenAI answered ${r.status}`);
-  const out = await r.json() as { choices?: { message?: { content?: string } }[] };
-  return out.choices?.[0]?.message?.content ?? "";
+  const out = await r.json() as { choices?: { message?: { content?: string } }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } };
+  return { text: out.choices?.[0]?.message?.content ?? "", input: tokens(out.usage?.prompt_tokens), output: tokens(out.usage?.completion_tokens) };
 }
 
-async function anthropicText(evidence: unknown): Promise<string> {
+async function anthropicText(system: string, user: string, maxTokens: number): Promise<{ text: string; input: number; output: number }> {
   const p = await getProvider("anthropic");
   const direct = { "content-type": "application/json", "anthropic-version": "2023-06-01" };
   const onVertex = async (cfg: VertexConfig | undefined, credentialProvider?: string, noKey?: string) => {
@@ -220,12 +257,12 @@ async function anthropicText(evidence: unknown): Promise<string> {
 
   /** One Messages call; `rewrite` turns the request into Vertex's URL and body. */
   async function anthropicCall(url: string, headers: Record<string, string>, rewrite?: (payload: object) => { url: string; body: string }) {
-    const payload = { model: MODEL(), max_tokens: 1500, system: SYSTEM, messages: [{ role: "user", content: `Evidence:\n${JSON.stringify(evidence)}` }] };
+    const payload = { model: MODEL(), max_tokens: maxTokens, system, messages: [{ role: "user", content: user }] };
     const req = rewrite ? rewrite(payload) : { url, body: JSON.stringify(payload) };
     const r = await fetch(req.url, { method: "POST", headers, body: req.body, signal: AbortSignal.timeout(60_000) });
     if (!r.ok) throw new Error(`Anthropic answered ${r.status}`);
-    const out = await r.json() as { content?: { type: string; text?: string }[] };
-    return (out.content ?? []).filter((c) => c.type === "text").map((c) => c.text).join("");
+    const out = await r.json() as { content?: { type: string; text?: string }[]; usage?: { input_tokens?: number; output_tokens?: number } };
+    return { text: (out.content ?? []).filter((c) => c.type === "text").map((c) => c.text).join(""), input: tokens(out.usage?.input_tokens), output: tokens(out.usage?.output_tokens) };
   }
 }
 
