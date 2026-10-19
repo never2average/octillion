@@ -20,6 +20,7 @@ import { parseCsv } from '@/lib/csv';
 import { Chips, Mono, StatusBadge } from '@/features/admin/ui';
 import { CopyButton, ErrorState, FormRow, copy, fail, useOrgLoad } from './shared';
 import { Allowed, useAccountRole } from './role';
+import { companySize } from '@/lib/octillion-format';
 
 type Attributes = { role?: string | null; experience_years?: number | null; company_size?: string | null; stack?: string[]; constraints?: string[]; tone?: string | null; [k: string]: unknown };
 interface ApiPersona { slug: string; name: string; summary: string; instructions?: string; attributes: Attributes; environment: { editor?: string; tools?: string[] } | null; source?: string; active?: boolean }
@@ -76,7 +77,7 @@ export function PersonasPage() {
     { key: 'role', label: 'Role', className: 'w-48', type: 'select', value: (p) => p.attributes.role ?? null, render: (p) => p.attributes.role ?? NA },
     { key: 'experience', label: 'Experience', className: 'w-24 text-right', type: 'number', value: years,
       render: (p) => (years(p) == null ? NA : <span className='tabular-nums'>{years(p)} yrs</span>) },
-    { key: 'company_size', label: 'Company size', className: 'w-40', type: 'select', value: (p) => p.attributes.company_size ?? null, render: (p) => p.attributes.company_size ?? NA },
+    { key: 'company_size', label: 'Company size', className: 'w-40', type: 'select', value: (p) => companySize(p.attributes.company_size), render: (p) => companySize(p.attributes.company_size) },
     { key: 'stack', label: 'Stack', className: 'min-w-48', type: 'text', value: (p) => list(p.attributes.stack).join(', '), render: (p) => <Chips items={list(p.attributes.stack)} max={3} oneLine /> },
     { key: 'origin', label: 'Origin', className: 'w-40', type: 'select', value: (p) => p.origin,
       options: [{ value: 'Yours' }, { value: 'Written by research' }, { value: 'Shared' }], render: (p) => <span className='text-muted-foreground text-sm'>{p.origin}</span> },
@@ -156,7 +157,7 @@ function PersonaBody({ p }: { p: Persona }) {
       <dl>
         <Field label='Role'>{a.role ?? NA}</Field>
         <Field label='Experience'>{years(p) == null ? NA : `${years(p)} years`}</Field>
-        <Field label='Company size'>{a.company_size ?? NA}</Field>
+        <Field label='Company size'>{companySize(a.company_size)}</Field>
         <Field label='Stack'><Chips items={list(a.stack)} /></Field>
         <Field label='Tone'>{a.tone ?? NA}</Field>
         {p.environment?.editor && <Field label='Editor'>{p.environment.editor}</Field>}
@@ -223,7 +224,7 @@ function PersonaEditor({ draft, from, onClose, onSaved }: { draft: Draft; from?:
           <FormRow htmlFor='pp-exp' label='Experience (years)'>
             <Input id='pp-exp' type='number' min={0} max={70} value={d.experience_years} onChange={set('experience_years')} className='w-32' />
           </FormRow>
-          <FormRow htmlFor='pp-size' label='Company size'><Input id='pp-size' maxLength={80} placeholder='e.g. 50 to 199' value={d.company_size} onChange={set('company_size')} /></FormRow>
+          <FormRow htmlFor='pp-size' label='Company size'><Input id='pp-size' maxLength={80} placeholder='e.g. <20, 100-499 or 10,000+' value={d.company_size} onChange={set('company_size')} /></FormRow>
           <FormRow htmlFor='pp-stack' label='Stack' hint='Languages, frameworks and tools, separated by commas.'>
             <Input id='pp-stack' value={d.stack} onChange={set('stack')} placeholder='Dart, Flutter, Firebase' />
           </FormRow>

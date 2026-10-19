@@ -15,6 +15,7 @@ import { List } from './account-peek';
 import { post, useAdmin, useAdminAction } from './lib';
 import { Gate, useAdminRole } from './role';
 import { Chips, ErrorBox, FormRow, Mono, StatusBadge, When } from './ui';
+import { companySize } from '@/lib/octillion-format';
 
 export interface Persona {
   slug: string; external_id: string | null; name: string; summary: string; instructions: string; active: boolean;
@@ -31,10 +32,8 @@ const Label = ({ children }: { children: ReactNode }) => <div className='text-mu
 const Prose = ({ children }: { children: ReactNode }) => <div className='text-sm leading-relaxed whitespace-pre-wrap'>{children}</div>;
 // The attributes the table and form show; the rest (industry, survey, ...) are listed as they are in the peek.
 /** "100 to 499 employees" → "100 to 499"; an unknown size ("Unknown org size") is no size. */
-const sizeOf = (p: { attributes: { company_size?: string | null } }) => {
-  const v = p.attributes.company_size?.replace(/\s*employees?\s*$/i, '').trim();
-  return !v || /unknown/i.test(v) ? null : v;
-};
+/** The headcount band in its standard form (companySize): "<20", "100-499", "10,000+" or "-". */
+const sizeOf = (p: { attributes: { company_size?: string | null } }) => companySize(p.attributes.company_size);
 const SHOWN = new Set(['role', 'experience_years', 'company_size', 'stack', 'constraints', 'tone']);
 const text = (v: unknown) => (v == null || v === '' ? null : typeof v === 'object' ? JSON.stringify(v) : String(v));
 const years = (p: Persona) => (typeof p.attributes.experience_years === 'number' ? p.attributes.experience_years : null);
@@ -63,7 +62,7 @@ export function AdminPersonas() {
     { key: 'role', label: 'Role', className: 'w-56', type: 'select', value: (p) => p.attributes.role ?? null, render: (p) => p.attributes.role ?? NA },
     { key: 'experience', label: 'Experience', className: 'w-24 text-right', type: 'number', value: years,
       render: (p) => (years(p) == null ? NA : <span className='tabular-nums'>{years(p)} yrs</span>) },
-    { key: 'company_size', label: 'Company size', className: 'w-44', type: 'select', value: (p) => sizeOf(p), render: (p) => sizeOf(p) ?? NA },
+    { key: 'company_size', label: 'Company size', className: 'w-44', type: 'select', value: (p) => sizeOf(p), render: (p) => sizeOf(p) },
     { key: 'stack', label: 'Stack', className: 'min-w-56', type: 'text', value: (p) => (p.attributes.stack ?? []).join(', '), render: (p) => <Chips items={p.attributes.stack} max={3} oneLine /> },
     { key: 'tone', label: 'Tone', hidden: true, type: 'text', value: (p) => p.attributes.tone ?? null, render: (p) => p.attributes.tone ?? NA },
     { key: 'source', label: 'Origin', hidden: true, className: 'w-36', type: 'select', value: originOf,
@@ -128,7 +127,7 @@ function PersonaBody({ p }: { p: Persona }) {
       <dl>
         <Field label='Role'>{a.role ?? NA}</Field>
         <Field label='Experience'>{years(p) == null ? NA : `${years(p)} years`}</Field>
-        <Field label='Company size'>{sizeOf({ attributes: a }) ?? NA}</Field>
+        <Field label='Company size'>{sizeOf({ attributes: a })}</Field>
         <Field label='Stack'><Chips items={a.stack} /></Field>
         <Field label='Tone'>{a.tone ?? NA}</Field>
         {p.external_id && <Field label='Vault id'><Mono>{p.external_id}</Mono></Field>}
@@ -186,7 +185,7 @@ function PersonaEditor({ draft, from, onClose }: { draft: Draft; from?: Persona;
           <FormRow id='pe-exp' label='Experience (years)'>
             <Input id='pe-exp' type='number' min={0} max={70} value={d.experience_years} onChange={set('experience_years')} className='w-32' />
           </FormRow>
-          <FormRow id='pe-size' label='Company size'><Input id='pe-size' maxLength={200} placeholder='e.g. 100 to 499' value={d.company_size} onChange={set('company_size')} /></FormRow>
+          <FormRow id='pe-size' label='Company size'><Input id='pe-size' maxLength={200} placeholder='e.g. <20, 100-499 or 10,000+' value={d.company_size} onChange={set('company_size')} /></FormRow>
           <FormRow id='pe-stack' label='Stack' hint='Languages, frameworks and tools, separated by commas.'>
             <Input id='pe-stack' value={d.stack} onChange={set('stack')} placeholder='TypeScript, Next.js, Postgres' />
           </FormRow>
