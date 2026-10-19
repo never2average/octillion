@@ -1670,6 +1670,13 @@ try {
     assert.equal((await adm("GET", "/spend?from=2020-02-30")).status, 400);
     assert.equal((await adm("GET", "/spend?from=2020-03-05&to=2020-03-01")).status, 400);
     assert.equal((await adm("GET", "/spend/accounts/nope-nope")).status, 404);
+    // FinOps › Revenue without Stripe: a plain empty state, not a 500 (the Stripe figures are tested against the mock below).
+    const noStripe = await json(adm("GET", "/spend/revenue?from=2020-03-01&to=2020-03-31"));
+    assert.deepEqual([noStripe.stripe, noStripe.totals, noStripe.accounts, noStripe.plans], [{ configured: false, error: null }, null, [], []]);
+    // The page moved: /admin/finops exists and /admin/spend redirects there with its query string.
+    const fs = await import("node:fs");
+    assert.ok(fs.existsSync("web/src/app/admin/finops/page.tsx"), "the /admin/finops page");
+    assert.match(fs.readFileSync("web/src/app/admin/spend/page.tsx", "utf8"), /redirect\(qs \? `\/admin\/finops\?\$\{qs\}` : '\/admin\/finops'\)/, "/admin/spend redirects, keeping the query");
     await db.query("DELETE FROM gateway_usage WHERE token_hash LIKE 'smoke-sp-%'");
     await db.query("DELETE FROM gateway_model_usage WHERE day >= '2020-03-01' AND day < '2020-04-01'");
     await db.query("DELETE FROM orchestrator_sandboxes WHERE sandbox_id LIKE 'smoke-sp-%'");
@@ -2473,6 +2480,7 @@ try {
         ["GET", "/spend/accounts/shared", undefined, "viewer"],
         ["GET", "/spend/compute", undefined, "viewer"],
         ["GET", "/spend/storage", undefined, "viewer"],
+        ["GET", "/spend/revenue", undefined, "viewer"],
         ["POST", "/requests/999999/decline", {}, "support"],
         ["POST", `/orgs/${slugA}/invitations`, { email: "not-an-email" }, "support"],
         ["POST", "/journeys/nudges", {}, "support"],
@@ -3546,6 +3554,95 @@ try {
       assert.match((await json(appCall(ownerC, "POST", "/billing/checkout", { price_id: "price_mock_starter" }))).url, /\/checkout\//);
       process.env.OCTILLION_ORG_MONTHLY_BUDGET_USD = defaultBefore;
       console.log("✓ prepaid, invite-only: $0 without a plan, admin allowances, plans and checkout only for allowed accounts");
+    }
+
+    // ---------- FinOps › Revenue (src/revenue.ts): Stripe subscriptions and invoices against metered model spend ----------
+    {
+      // June 2021: nothing else in the smoke database or the mock lands there, so every figure is exactly the fixtures'.
+      const T = (iso: string) => Math.floor(Date.parse(iso) / 1000);
+      const near = (x: number, y: number, what: string) => assert.ok(Math.abs(x - y) < 1e-6, `${what}: ${x} != ${y}`);
+      const orgs: Record<string, Awaited<ReturnType<typeof createOrg>>> = {};
+      for (const k of ["a", "b", "c", "d"]) {
+        orgs[k] = await createOrg(`Fin ${k.toUpperCase()}`, `fin-${k}-${stamp}`);
+        await db.query("UPDATE organizations SET stripe_customer_id = $2 WHERE id = $1", [orgs[k].org.orgId, `cus_fin_${k}_${stamp}`]);
+      }
+      // A prepaid allowance on A: a spending cap, never revenue.
+      await db.query("UPDATE organizations SET budget_override_usd = 250 WHERE id = $1", [orgs.a.org.orgId]);
+      const cus = (k: string) => `cus_fin_${k}_${stamp}`;
+      await mockPost("/_mock/prices", { id: "price_mock_yearly", nickname: "Growth yearly", unit_amount: 1_200_000, interval: "year" });
+      const subA = await mockPost("/_mock/subscriptions", { customer: cus("a"), price: "price_mock_starter", start_date: T("2021-05-01T00:00:00Z"), invoice: false });
+      const subB = await mockPost("/_mock/subscriptions", { customer: cus("b"), price: "price_mock_yearly", start_date: T("2021-06-10T09:00:00Z"), invoice: false });
+      await mockPost("/_mock/subscriptions", { customer: cus("c"), price: "price_mock_growth", status: "trialing", start_date: T("2021-06-05T00:00:00Z"), trial_end: T("2021-07-15T00:00:00Z"), invoice: false });
+      const subD = await mockPost("/_mock/subscriptions", { customer: cus("d"), price: "price_mock_starter", status: "canceled", start_date: T("2021-04-01T00:00:00Z"),
+        canceled_at: T("2021-06-15T12:00:00Z"), ended_at: T("2021-06-15T12:00:00Z"), invoice: false });
+      await mockPost("/_mock/invoices", { customer: cus("a"), amount: 49_900, subscription: subA.id, created: T("2021-06-01T09:00:00Z"), paid_at: T("2021-06-01T10:00:00Z"), number: `FIN-A1-${stamp}` });
+      await mockPost("/_mock/invoices", { customer: cus("a"), amount: 49_900, subscription: subA.id, status: "open", created: T("2021-06-20T09:00:00Z"), number: `FIN-A2-${stamp}` });
+      await mockPost("/_mock/invoices", { customer: cus("d"), amount: 49_900, subscription: subD.id, created: T("2021-06-05T09:00:00Z"), paid_at: T("2021-06-05T09:30:00Z") });
+      await mockPost("/_mock/invoices", { customer: cus("b"), amount: 1_200_000, subscription: subB.id, created: T("2021-06-10T09:00:00Z"), paid_at: T("2021-06-10T09:05:00Z") });
+      invalidateSubscriptions();
+      // Metered model spend: A 100 (June 1) + 50 (June 2, nothing collected that day), B 2000 (June 10), D 600 (June 5).
+      const seed = async (k: string, cost: number, at: string) => {
+        const o = orgs[k].org, sim = `sim_fin_${k}_${at.slice(8, 10)}_${stamp}`;
+        const [p] = await db.query<{ id: number }>("INSERT INTO products (org_id, slug, name) VALUES ($1, $2, 'Fin product') RETURNING id", [o.orgId, `finp-${at.slice(8, 10)}`]);
+        const [sc] = await db.query<{ id: number }>("INSERT INTO scenarios (product_id, title, prompt) VALUES ($1, 't', 'p') RETURNING id", [p.id]);
+        await db.query(`INSERT INTO simulations (id, org_id, product_id, name, models, harness, repeats, status, created_at)
+          VALUES ($1, $2, $3, 'fin', '{m}', 'claude-code', 1, 'completed', $4)`, [sim, o.orgId, p.id, at]);
+        await db.query(`INSERT INTO agent_sessions (id, simulation_id, org_id, product_id, scenario_id, model, harness, status, queued_at, cost_usd)
+          VALUES ($1, $2, $3, $4, $5, 'claude-sonnet-5-5', 'claude-code', 'completed', $6, $7)`, [`ses_${sim}`, sim, o.orgId, p.id, sc.id, at, cost]);
+      };
+      await seed("a", 100, "2021-06-01T12:00:00Z"); await seed("a", 50, "2021-06-02T12:00:00Z");
+      await seed("b", 2000, "2021-06-10T12:00:00Z"); await seed("d", 600, "2021-06-05T12:00:00Z");
+      const q = "from=2021-06-01&to=2021-06-30";
+      const rv = await json(adm("GET", `/spend/revenue?${q}`));
+      assert.deepEqual([rv.stripe, rv.range.days.length, rv.currencies], [{ configured: true, error: null }, 30, ["usd"]]);
+      const t = rv.totals;
+      // MRR per day: A 499 throughout, B 12,000/yr = 1,000 from June 10, D 499 until it ended on June 15, C in trial (excluded).
+      const mrr = Array.from({ length: 30 }, (_, i) => 499 + (i + 1 >= 10 ? 1000 : 0) + (i + 1 <= 14 ? 499 : 0));
+      assert.deepEqual(t.daily_mrr, mrr, "MRR per day (yearly ÷ 12, trial excluded, canceled mid-range)");
+      assert.equal(t.mrr_usd, 1499, "MRR: the last day's");
+      assert.deepEqual([t.daily_paying[0], t.daily_paying[11], t.daily_paying[29], t.paying_accounts], [2, 3, 2, 2], "paying accounts per day");
+      near(t.collected_usd, 12_998, "collected: paid invoices by paid date (the open one is not)");
+      assert.deepEqual([t.daily_collected[0], t.daily_collected[4], t.daily_collected[9], t.daily_collected[19]], [499, 499, 12_000, 0]);
+      const sp = await json(adm("GET", `/spend?${q}`));
+      near(t.spend_usd, 2750, "model spend from spend.ts"); near(t.spend_usd, sp.totals.total_usd, "the same figure as Model spend");
+      near(t.margin_usd, 12_998 - 2750, "margin $"); near(t.margin_pct, (12_998 - 2750) / 12_998, "margin %");
+      near(t.daily_margin_pct[0], (499 - 100) / 499, "June 1 margin"); near(t.daily_margin_pct[4], (499 - 600) / 499, "June 5 margin (negative)");
+      assert.deepEqual([t.daily_margin_pct[1], t.daily_margin_pct[2]], [null, null], "no collection, no margin that day");
+      const acc = (k: string) => rv.accounts.find((x: any) => x.slug === orgs[k].org.slug);
+      const A = acc("a"), B = acc("b"), C = acc("c"), D = acc("d");
+      assert.deepEqual([A.plan, A.status, A.mrr_usd, A.collected_usd, A.spend_usd, A.margin_usd], ["Starter", "active", 499, 499, 150, 349]);
+      near(A.margin_pct, 349 / 499, "A margin %");
+      assert.deepEqual([A.allowance.budget_usd, A.allowance.source], [250, "override"], "the allowance is shown on its own");
+      assert.deepEqual(A.invoices.map((i: any) => [i.number, i.status, i.amount_usd]), [[`FIN-A2-${stamp}`, "open", 499], [`FIN-A1-${stamp}`, "paid", 499]], "invoices in range");
+      assert.ok(A.renews_at && !A.cancels_at && A.invoices[1].url);
+      assert.deepEqual([B.plan, B.mrr_usd, B.collected_usd, B.subscriptions[0].interval, B.subscriptions[0].mrr_usd], ["Growth yearly", 1000, 12_000, "year", 1000]);
+      assert.deepEqual([C.status, C.mrr_usd, C.collected_usd, C.daily_paying.every((x: number) => x === 0), Boolean(C.trial_end)], ["trialing", 0, 0, true, true], "a trial is not revenue");
+      assert.deepEqual([D.status, D.mrr_usd, D.ended_at, D.daily_paying.filter(Boolean).length, D.margin_usd], ["canceled", 0, "2021-06-15T12:00:00.000Z", 14, -101]);
+      assert.deepEqual(D.subscriptions.map((s: any) => [s.status, s.canceled_at]), [["canceled", "2021-06-15T12:00:00.000Z"]], "subscription history");
+      near(rv.accounts.reduce((x: number, a: any) => x + a.collected_usd, 0), t.collected_usd, "accounts add up to collected");
+      near(rv.accounts.reduce((x: number, a: any) => x + a.mrr_usd, 0), t.mrr_usd, "accounts add up to MRR (the allowance is not in it)");
+      // Grouped by plan (Stripe price).
+      const plan = (id: string) => rv.plans.find((p: any) => p.price_id === id);
+      const st = plan("price_mock_starter"), yr = plan("price_mock_yearly"), gr = plan("price_mock_growth");
+      assert.deepEqual([st.name, st.interval, st.unit_amount_usd, st.active_subscriptions, st.mrr_usd, st.collected_usd], ["Starter", "month", 499, 1, 499, 998]);
+      assert.deepEqual([yr.name, yr.interval, yr.unit_amount_usd, yr.active_subscriptions, yr.mrr_usd, yr.collected_usd], ["Growth yearly", "year", 12_000, 1, 1000, 12_000]);
+      assert.deepEqual([gr.active_subscriptions, gr.mrr_usd, gr.trialing >= 1], [0, 0, true], "trialing subscriptions are not active");
+      assert.ok(st.accounts.some((a: any) => a.slug === orgs.a.org.slug && a.mrr_usd === 499) && st.accounts.some((a: any) => a.slug === orgs.d.org.slug && a.status === "canceled" && a.mrr_usd === 0), "plan peek: its accounts");
+      near(rv.plans.reduce((x: number, p: any) => x + p.mrr_usd, 0), t.mrr_usd, "plans add up to MRR");
+      near(rv.plans.reduce((x: number, p: any) => x + p.collected_usd, 0), t.collected_usd, "plans add up to collected");
+      // Stripe down: the tab says so with a 200; the other tabs keep working.
+      const apiUrl = process.env.STRIPE_API_URL;
+      process.env.STRIPE_API_URL = "http://127.0.0.1:9";
+      invalidateSubscriptions();
+      const down = await adm("GET", `/spend/revenue?${q}`);
+      assert.equal(down.status, 200, "Stripe down is not a 500");
+      const dj = await down.json();
+      assert.ok(dj.stripe.configured && dj.stripe.error && dj.totals === null && dj.accounts.length === 0 && dj.plans.length === 0, "an error state, no figures");
+      assert.equal((await adm("GET", `/spend?${q}`)).status, 200, "Model spend still loads");
+      process.env.STRIPE_API_URL = apiUrl;
+      invalidateSubscriptions();
+      await db.query("DELETE FROM organizations WHERE id = ANY($1)", [Object.values(orgs).map((o) => o.org.orgId)]);
+      console.log("✓ finops revenue: MRR per day (monthly, yearly ÷ 12, trial excluded, canceled mid-range), collected by paid date, paying accounts, gross margin vs metered spend, allowance shown apart, by plan, Stripe down = 200 with an error");
     }
 
     // Usage metering: a finished session's cost goes to the Stripe meter once.

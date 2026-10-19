@@ -3,7 +3,7 @@ import { orgBudgets, type BudgetSource } from "./billing.js";
 import { team } from "./admin.js";
 
 /**
- * The admin Spend page (/admin/spend, GET /api/admin/onboarding/spend): what Octillion spends on models across every
+ * The admin FinOps page's Model spend tab (/admin/finops?section=spend, GET /api/admin/onboarding/spend): what Octillion spends on models across every
  * account, from metered data only. The boat sandbox price-table estimate is never counted here.
  *
  * Where each dollar comes from, and the day it lands on (UTC):

@@ -475,6 +475,8 @@ export function createApp() {
   ob.get("/spend/compute", async (req, res) => void res.json(await spendUsage.computeReport(req.query)));
   ob.get("/spend/storage", async (req, res) => void res.json(await spendUsage.storageReport(req.query)));
   ob.get("/spend/accounts/:key", async (req, res) => void res.json(await spend.accountSpend(String(req.params.key), req.query)));
+  // FinOps › Revenue (src/revenue.ts): Stripe subscriptions and invoices against metered model spend; Stripe off or down is a 200 that says so.
+  ob.get("/spend/revenue", async (req, res) => void res.json(await (await import("./revenue.js")).revenueReport(req.query)));
   // The page's only two actions (src/compute-actions.ts), both in the admin audit log: run one autoscaler tick now, and
   // cancel a queued or running session (its orchestrator stops the sandbox at the next heartbeat).
   ob.post("/compute/tick", need("compute"), async (req, res) => void res.json(await actions.runTick(adminActor(req, res))));

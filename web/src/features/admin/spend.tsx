@@ -1,9 +1,11 @@
 'use client';
-// Operations › Spend (/admin/spend; src/spend.ts and src/spend-usage.ts). Three tabs in ?section=: Model spend (GET
-// /spend, metered model cost), Compute hours (GET /spend/compute, sandbox time measured from timestamps) and Data &
-// storage (GET /spend/storage, sizes and rows). Measured figures only, never the boat price-table estimate. Each tab is
-// one row of four headline numbers with a daily sparkline and one table, grouped by account or by provider. The range
-// (UTC days) and the grouping are page state, so switching tabs keeps them. Read only.
+// Operations › FinOps (/admin/finops; /admin/spend redirects here; src/revenue.ts, src/spend.ts and src/spend-usage.ts).
+// Four tabs in ?section=: Revenue (the default; GET /spend/revenue, Stripe subscriptions and invoices against metered model
+// spend), Model spend (GET /spend, metered model cost), Compute hours (GET /spend/compute, sandbox time measured from
+// timestamps) and Data & storage (GET /spend/storage, sizes and rows). Measured figures only, never the boat price-table
+// estimate; prepaid allowances are spending caps, never revenue. Each tab is one row of four headline numbers with a
+// daily sparkline and one table, grouped by account or by provider (Revenue: by plan). The range (UTC days) and the
+// grouping are page state, so switching tabs keeps them. Read only.
 import { Suspense, useMemo, useState, type ReactNode } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useIsFetching, useQueryClient } from '@tanstack/react-query';
@@ -21,7 +23,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Icons } from '@/components/icons';
 import { cn } from '@/lib/utils';
 import { accountHref, useAdmin } from './lib';
-import { copyText, ErrorBox, Mono, StatusBadge, When } from './ui';
+import { copyText, ErrorBox, Mono, StatusBadge, When, type Tone } from './ui';
 import { AMBER, Chip, cents, PeekSection, UrlTabs } from './compute-common';
 import { MiniTable } from './compute-sessions';
 
@@ -96,9 +98,39 @@ interface Storage {
   tables: (TablePart & { daily_new: number[] })[]; stores: StoreRow[]; accounts: StorageAccount[];
 }
 
+type SubStatus = string;
+interface RevenueAccount {
+  key: string; slug: string | null; name: string; shared: boolean; linked: boolean; customer: string | null;
+  subscription_id: string | null; plan: string | null; price_id: string | null; status: SubStatus | null;
+  mrr_usd: number; collected_usd: number; spend_usd: number; margin_usd: number; margin_pct: number | null;
+  allowance: { budget_usd: number; plan: string | null; source: 'override' | 'plan' | 'default' } | null;
+  renews_at: string | null; cancels_at: string | null; ended_at: string | null; trial_end: string | null;
+  daily_mrr: number[]; daily_collected: number[]; daily_paying: number[]; daily_spend: number[];
+  invoices: { id: string; number: string | null; status: string; currency: string; created: string; paid_at: string | null; amount_usd: number; url: string | null }[];
+  subscriptions: { id: string; plan: string | null; price_id: string | null; interval: string | null; status: SubStatus; mrr_usd: number; started_at: string | null;
+    trial_end: string | null; canceled_at: string | null; ended_at: string | null; cancel_at: string | null; current_period_end: string | null }[];
+}
+interface RevenuePlan {
+  key: string; name: string; price_id: string | null; lookup_key: string | null; interval: string | null; interval_count: number | null;
+  unit_amount_usd: number | null; currency: string | null; active_subscriptions: number; trialing: number; subscriptions: number; mrr_usd: number; collected_usd: number;
+  daily_mrr: number[]; daily_collected: number[]; daily_active: number[];
+  accounts: { key: string; slug: string | null; name: string; status: SubStatus; mrr_usd: number }[];
+}
+interface Revenue {
+  range: { from: string; to: string; days: string[] };
+  stripe: { configured: boolean; error: string | null };
+  currencies: string[];
+  totals: {
+    mrr_usd: number; collected_usd: number; paying_accounts: number; spend_usd: number; margin_usd: number; margin_pct: number | null;
+    daily_mrr: number[]; daily_collected: number[]; daily_paying: number[]; daily_spend: number[]; daily_margin_pct: (number | null)[];
+  } | null;
+  accounts: RevenueAccount[]; plans: RevenuePlan[];
+}
+
 // ---------------------------------------------------------------- shared bits
 
-const TABS = [['spend', 'Model spend'], ['compute', 'Compute hours'], ['storage', 'Data & storage']] as const;
+const BASE = '/admin/finops';
+const TABS = [['revenue', 'Revenue'], ['spend', 'Model spend'], ['compute', 'Compute hours'], ['storage', 'Data & storage']] as const;
 type Tab = (typeof TABS)[number][0];
 /** Older links: the Accounts and Models tabs are Model spend now, Days became Compute hours. */
 const OLD: Record<string, Tab> = { accounts: 'spend', models: 'spend', days: 'compute' };
@@ -127,36 +159,37 @@ const short = (m: string | null) => (m ? m.replace(/^.*\//, '') : null);
 const NA = <span className='text-muted-foreground'>—</span>;
 const thisMonth = () => PRESETS.find((p) => p.id === 'month')!.range();
 const num = (v: ReactNode, title?: string) => <span className='tabular-nums' title={title}>{v}</span>;
-const exportName = (what: string, group: Group, r?: { from: string; to: string }) => `${what}-by-${group}-${r?.from ?? ''}_${r?.to ?? ''}`;
+const exportName = (what: string, group: string, r?: { from: string; to: string }) => `${what}-by-${group}-${r?.from ?? ''}_${r?.to ?? ''}`;
 
-export function AdminSpend() {
+export function AdminFinOps() {
   // useSearchParams (the tab) needs a Suspense boundary for the static render.
   return <Suspense fallback={<PageContainer><Skeleton className='h-72 rounded-lg' /></PageContainer>}><SpendPage /></Suspense>;
 }
 
 function SpendPage() {
   const section = useSearchParams().get('section') ?? '';
-  const tab: Tab = TABS.some(([id]) => id === section) ? (section as Tab) : OLD[section] ?? 'spend';
+  const tab: Tab = TABS.some(([id]) => id === section) ? (section as Tab) : OLD[section] ?? 'revenue';
   const [range, setRange] = useState<DateRange>(thisMonth);
   const [group, setGroup] = useState<Group>('account');
   const q = rangeQuery(range);
+  const revenue = useAdmin<Revenue>(tab === 'revenue' ? `/spend/revenue?${q}` : null, { keep: true });
   const spend = useAdmin<Spend>(tab === 'spend' ? `/spend?${q}` : null, { keep: true });
   const compute = useAdmin<Compute>(tab === 'compute' ? `/spend/compute?${q}` : null, { keep: true });
   const storage = useAdmin<Storage>(tab === 'storage' ? `/spend/storage?${q}` : null, { keep: true });
-  const active = tab === 'spend' ? spend : tab === 'compute' ? compute : storage;
+  const active = tab === 'revenue' ? revenue : tab === 'spend' ? spend : tab === 'compute' ? compute : storage;
   const qc = useQueryClient();
   const fetching = useIsFetching({ queryKey: ['admin'] }) > 0;
   const bar = (
     <div className='flex flex-wrap items-center gap-2'>
       <DateRangePicker value={range} onChange={setRange} />
-      <GroupBy value={group} onChange={setGroup} />
+      <GroupBy value={group} onChange={setGroup} second={tab === 'revenue' ? 'Plan' : 'Provider'} />
     </div>
   );
   const unpriced = tab === 'spend' ? spend.data?.totals.unpriced_requests ?? 0 : 0;
   return (
     <PageContainer>
       <div className='flex min-w-0 flex-col gap-3'>
-        <UrlTabs tabs={TABS} tab={tab} base='/admin/spend' right={
+        <UrlTabs tabs={TABS} tab={tab} base={BASE} right={
           <div className='flex flex-wrap items-center justify-end gap-2'>
             {unpriced > 0 && <span className={cn('text-sm', AMBER)} title={UNPRICED}>{unpriced.toLocaleString()} unpriced requests: spend is understated</span>}
             <Button variant='outline' size='sm' disabled={fetching} onClick={() => void qc.refetchQueries({ queryKey: ['admin'], type: 'active' })} title='Load the figures again'>
@@ -170,6 +203,7 @@ function SpendPage() {
             <Button variant='outline' size='xs' onClick={() => void active.refetch()}>Retry</Button>
           </div>
         )}
+        {tab === 'revenue' && <RevenueTab data={revenue.data} loading={!revenue.data && !revenue.error} bar={bar} group={group} />}
         {tab === 'spend' && <SpendTab data={spend.data} loading={!spend.data && !spend.error} bar={bar} group={group} range={range} />}
         {tab === 'compute' && <ComputeTab data={compute.data} loading={!compute.data && !compute.error} bar={bar} group={group} />}
         {tab === 'storage' && <StorageTab data={storage.data} loading={!storage.data && !storage.error} bar={bar} group={group} />}
@@ -178,13 +212,13 @@ function SpendPage() {
   );
 }
 
-/** Group by: one two-option segmented control, the chosen option filled. */
-function GroupBy({ value, onChange }: { value: Group; onChange: (g: Group) => void }) {
+/** Group by: one two-option segmented control, the chosen option filled. On Revenue the second option is Plan. */
+function GroupBy({ value, onChange, second }: { value: Group; onChange: (g: Group) => void; second: string }) {
   return (
     <ButtonGroup aria-label='Group by'>
       {(['account', 'provider'] as const).map((g) => (
         <Button key={g} variant={value === g ? 'default' : 'outline'} aria-pressed={value === g} onClick={() => onChange(g)}>
-          {g === 'account' ? 'Account' : 'Provider'}
+          {g === 'account' ? 'Account' : second}
         </Button>
       ))}
     </ButtonGroup>
@@ -246,6 +280,140 @@ function DailyBars({ days, series, format }: { days: string[]; series: { key: st
 }
 
 const none = (what = 'Nothing in this range.') => <p className='text-muted-foreground text-sm'>{what}</p>;
+
+// ---------------------------------------------------------------- Revenue
+
+const SUB_TONE = (s: SubStatus): Tone => (s === 'active' ? 'ok' : s === 'trialing' ? 'info' : /past_due|unpaid|incomplete/.test(s) ? 'bad' : 'neutral');
+const subBadge = (s: SubStatus | null) => (s ? <StatusBadge tone={SUB_TONE(s)}>{s.replace(/_/g, ' ')}</StatusBadge> : NA);
+const INVOICE_TONE: Record<string, Tone> = { paid: 'ok', open: 'warn', uncollectible: 'bad', void: 'neutral', draft: 'neutral' };
+const pct = (x: number | null | undefined) => (x == null ? '—' : `${Math.round(x * 1000) / 10}%`);
+const date = (d: string | null | undefined) => (d ? dayLabel(d.slice(0, 10), true) : '—');
+const every = (n: number | null) => (n && n > 1 ? `${n} ` : '');
+const ALLOWANCE_HINT = 'A prepaid allowance is the account’s monthly cap on model spend (set by Octillion or by its plan). It is not revenue and is never counted in MRR or collected.';
+
+/** Margin: dollars and the share of what was collected; red when negative. */
+const marginCell = (usd: number, share: number | null) => (
+  <span className={cn('tabular-nums', usd < 0 && 'text-destructive')} title='Collected minus metered model spend'>{cents(usd)}<span className='text-muted-foreground ml-1.5 text-xs'>{pct(share)}</span></span>
+);
+
+function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
+  const router = useRouter();
+  const all = data?.accounts ?? [];
+  const f = useAccountFilter(all, (a) => a.collected_usd > 0 || a.mrr_usd > 0 || a.spend_usd > 0 || a.subscriptions.length > 0 || a.invoices.length > 0, 'revenue or spend');
+  const len = data?.range.days.length ?? 0;
+  // Grouped by account: the accounts shown; grouped by plan: every account (the report's totals).
+  const src = group === 'account' ? f.rows : all;
+  const mrr = sumAt(src.map((r) => r.daily_mrr), len), got = sumAt(src.map((r) => r.daily_collected), len);
+  const paying = sumAt(src.map((r) => r.daily_paying), len), spent = sumAt(src.map((r) => r.daily_spend), len);
+  const collected = total(got), cost = total(spent);
+  const dailyMargin = got.flatMap((c, i) => (c > 0 ? [((c - spent[i]) / c) * 100] : []));
+  const ok = Boolean(data?.totals);
+  const cards = (
+    <StatStrip items={[
+      { label: 'MRR', spark: mrr, value: ok ? cents(mrr[len - 1] ?? 0) : '—' },
+      { label: 'Collected', spark: got, value: ok ? cents(collected) : '—' },
+      { label: 'Paying accounts', spark: paying, value: ok ? (paying[len - 1] ?? 0).toLocaleString() : '—' },
+      { label: 'Gross margin', spark: dailyMargin, value: ok && collected > 0 ? pct((collected - cost) / collected) : '—' }
+    ]} />
+  );
+  const stripeEmpty = data && !data.stripe.configured ? 'Stripe is not configured (STRIPE_SECRET_KEY), so there is no revenue to show.'
+    : data?.stripe.error ? `Could not read Stripe: ${data.stripe.error}` : null;
+  const mixed = (data?.currencies.length ?? 0) > 1 ? <span className={cn('text-sm', AMBER)}>Invoices in {data!.currencies.join(', ').toUpperCase()}: amounts are summed as they are.</span> : null;
+  if (group === 'provider') {
+    const cols: RecordCol<RevenuePlan>[] = [
+      { key: 'plan', label: 'Plan / price', title: true, keep: true, type: 'text', value: (p) => p.name, render: (p) => (
+        <span className='flex min-w-0 flex-col gap-1'><span className='truncate font-medium'>{p.name}</span>{p.price_id && <Mono>{p.lookup_key ?? p.price_id}</Mono>}</span>
+      ) },
+      { key: 'interval', label: 'Interval', type: 'select', value: (p) => p.interval ?? '', render: (p) => (p.interval ? `Every ${every(p.interval_count)}${p.interval}` : NA) },
+      { key: 'unit', label: 'Unit amount', className: 'text-right', type: 'number', value: (p) => p.unit_amount_usd, render: (p) => (p.unit_amount_usd == null ? NA : num(cents(p.unit_amount_usd))) },
+      { key: 'active', label: 'Subscriptions active', className: 'text-right', type: 'number', value: (p) => p.active_subscriptions, render: (p) => num(p.active_subscriptions.toLocaleString(), `${p.subscriptions} in all, ${p.trialing} in trial`) },
+      { key: 'mrr', label: 'MRR', className: 'text-right', keep: true, type: 'number', value: (p) => p.mrr_usd, render: (p) => num(cents(p.mrr_usd)) },
+      { key: 'collected', label: 'Collected in range', className: 'text-right', type: 'number', value: (p) => p.collected_usd, render: (p) => num(cents(p.collected_usd)) }
+    ];
+    return (
+      <RecordView id='finops-revenue-plans' rows={data?.plans ?? []} loading={loading} rowKey={(p) => p.key} cols={cols} noun='plans' initialSize={50} compact summary={cards}
+        searchText={(p) => `${p.name} ${p.lookup_key ?? ''} ${p.price_id ?? ''} ${p.accounts.map((a) => a.name).join(' ')}`} searchPlaceholder='Search plans, accounts'
+        filters={<>{bar}{mixed}</>} defaultSort={[{ key: 'mrr', dir: 'desc' }]} exportName={exportName('revenue', 'plan', data?.range)}
+        detailTitle={(p) => p.name}
+        detail={(p) => (
+          <div className='grid gap-6'>
+            <PeekSection title='Collected per day'>
+              <DailyBars days={data?.range.days ?? []} format={(v) => `$${v < 10 ? v.toFixed(2) : Math.round(v)}`} series={[{ key: 'collected', label: 'Collected', values: p.daily_collected }]} />
+            </PeekSection>
+            <PeekSection title='Accounts'>
+              {p.accounts.length ? <MiniTable head={['Account', 'Status', 'MRR']} rows={p.accounts.map((a) => [
+                a.slug ? <a key='a' className='hover:underline' href={accountHref(a.slug)}>{a.name}</a> : <Mono key='a'>{a.name}</Mono>, subBadge(a.status), cents(a.mrr_usd)])} />
+                : none('No subscriptions on this price.')}
+            </PeekSection>
+          </div>
+        )}
+        empty={stripeEmpty ?? 'No plans with subscriptions or payments.'} />
+    );
+  }
+  const cols: RecordCol<RevenueAccount>[] = [
+    { key: 'account', label: 'Account', title: true, keep: true, type: 'text', value: (a) => a.name, render: (a) => (
+      <span className='flex min-w-0 flex-col gap-1'>
+        <span className='flex items-center gap-1.5'><span className='truncate font-medium'>{a.name}</span>{a.shared && <Chip title={SHARED_HINT}>shared</Chip>}
+          {!a.shared && !a.slug && <Chip tone='warn' title='A Stripe customer no Octillion account is linked to'>not linked</Chip>}</span>
+        {a.slug ? <span className='text-muted-foreground truncate text-xs'>{a.slug}</span> : a.customer && <Mono>{a.customer}</Mono>}
+      </span>
+    ) },
+    { key: 'plan', label: 'Plan', type: 'select', value: (a) => a.plan ?? '', render: (a) => a.plan ?? NA },
+    { key: 'status', label: 'Status', type: 'select', value: (a) => a.status ?? '', render: (a) => subBadge(a.status) },
+    { key: 'mrr', label: 'MRR', className: 'text-right', type: 'number', value: (a) => a.mrr_usd, render: (a) => (a.mrr_usd ? num(cents(a.mrr_usd)) : NA) },
+    { key: 'collected', label: 'Collected in range', className: 'text-right', keep: true, type: 'number', value: (a) => a.collected_usd, render: (a) => (a.collected_usd ? num(cents(a.collected_usd)) : NA) },
+    { key: 'spend', label: 'Model spend in range', className: 'text-right', type: 'number', value: (a) => a.spend_usd, render: (a) => (a.spend_usd ? num(cents(a.spend_usd), 'Metered model spend (Model spend tab)') : NA) },
+    { key: 'margin', label: 'Margin in range', className: 'text-right', type: 'number', value: (a) => a.margin_usd, render: (a) => (a.collected_usd || a.spend_usd ? marginCell(a.margin_usd, a.margin_pct) : NA) },
+    { key: 'allowance', label: 'Prepaid allowance (cap, not revenue)', type: 'number', value: (a) => a.allowance?.budget_usd ?? null, render: (a) => (
+      a.allowance && a.allowance.budget_usd > 0 ? (
+        <span className='flex flex-col gap-1' title={ALLOWANCE_HINT}>
+          <span className='tabular-nums'>{cents(a.allowance.budget_usd)} this month</span>
+          <span className='text-muted-foreground text-xs'>Allowance · {SOURCE[a.allowance.source]}</span>
+        </span>
+      ) : NA
+    ) },
+    { key: 'next', label: 'Next renewal / cancel', type: 'date', value: (a) => a.cancels_at ?? a.ended_at ?? a.trial_end ?? a.renews_at, render: (a) => (
+      a.ended_at ? <span className='text-muted-foreground'>Ended {date(a.ended_at)}</span>
+        : a.cancels_at ? <span className={AMBER}>Cancels {date(a.cancels_at)}</span>
+        : a.trial_end ? <span>Trial ends {date(a.trial_end)}</span>
+        : a.renews_at ? <span>Renews {date(a.renews_at)}</span> : NA
+    ) }
+  ];
+  return (
+    <RecordView id='finops-revenue-accounts' rows={stripeEmpty ? [] : f.rows} loading={loading} rowKey={(a) => a.key} cols={cols} noun='accounts' initialSize={50} compact summary={cards}
+      searchText={(a) => `${a.name} ${a.slug ?? ''} ${a.customer ?? ''} ${a.plan ?? ''} ${a.status ?? ''}`} searchPlaceholder='Search accounts, plans'
+      filters={<>{bar}{f.controls}{mixed}</>} defaultSort={[{ key: 'collected', dir: 'desc' }]} exportName={exportName('revenue', 'account', data?.range)}
+      actions={accountActions(router)} detailTitle={accountTitle}
+      detail={(a) => (
+        <div className='grid gap-6'>
+          <PeekSection title='Collected and model spend per day'>
+            <p className='text-sm'>{cents(a.collected_usd)} collected, {cents(a.spend_usd)} metered model spend: margin {cents(a.margin_usd)} ({pct(a.margin_pct)}).</p>
+            <DailyBars days={data?.range.days ?? []} format={(v) => `$${v < 10 ? v.toFixed(2) : Math.round(v)}`}
+              series={[{ key: 'collected', label: 'Collected', values: a.daily_collected }, { key: 'spend', label: 'Model spend', values: a.daily_spend }]} />
+          </PeekSection>
+          <PeekSection title='Invoices in range'>
+            {a.invoices.length ? <MiniTable head={['Number', 'Date', 'Amount', 'Status', '']} rows={a.invoices.map((i) => [
+              <Mono key='n'>{i.number ?? i.id}</Mono>, date(i.paid_at ?? i.created), cents(i.amount_usd),
+              <StatusBadge key='s' tone={INVOICE_TONE[i.status] ?? 'neutral'}>{i.status}</StatusBadge>,
+              i.url ? <a key='u' href={i.url} target='_blank' rel='noreferrer' className='inline-flex items-center gap-1 hover:underline'>Open <Icons.externalLink className='size-3' /></a> : '—'])} />
+              : none('No invoices in this range.')}
+          </PeekSection>
+          <PeekSection title='Subscription history'>
+            {a.subscriptions.length ? <MiniTable head={['Plan', 'Status', 'Started', 'Trial end', 'Canceled', 'Ended', 'MRR']} rows={a.subscriptions.map((s) => [
+              <span key='p' className='flex flex-col'><span>{s.plan ?? '—'}</span><Mono>{s.id}</Mono></span>, subBadge(s.status), date(s.started_at), date(s.trial_end),
+              date(s.canceled_at), s.ended_at ? date(s.ended_at) : s.cancel_at ? `Cancels ${date(s.cancel_at)}` : '—', `${cents(s.mrr_usd)}${s.interval === 'year' ? ' (yearly ÷ 12)' : ''}`])} />
+              : none(a.shared ? 'Shared spend has no subscription.' : 'No Stripe subscription.')}
+          </PeekSection>
+          {a.allowance && a.allowance.budget_usd > 0 && (
+            <PeekSection title='Prepaid allowance'>
+              <p className='text-muted-foreground text-sm'>{cents(a.allowance.budget_usd)} this month ({SOURCE[a.allowance.source]}). {ALLOWANCE_HINT}</p>
+            </PeekSection>
+          )}
+        </div>
+      )}
+      empty={stripeEmpty ?? (f.filtered ? 'No accounts match.' : 'No revenue or model spend in this range.')} />
+  );
+}
 
 // ---------------------------------------------------------------- Model spend
 

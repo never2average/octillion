@@ -4,7 +4,10 @@
 // Test hooks: POST /_mock/clerk/users {email, first_name?, verified?, platform_admin?, platform_role?}, POST /_mock/invitations/:id/accept
 // {first_name?}, POST /_mock/clerk/memberships {org_id, user_id, role?, public_metadata?}, POST /_mock/session {user_id, org_id?, org_role?,
 // azp?, expired?, v1?} -> a Clerk session token, POST /_mock/oauth {user_id, jwt?, revoked?, expired?} -> an OAuth
-// access token, GET /_mock/public-key -> {pem} for CLERK_JWT_KEY, POST /_mock/subscriptions {customer, price, status?}.
+// access token, GET /_mock/public-key -> {pem} for CLERK_JWT_KEY, POST /_mock/subscriptions {customer, price, status?, start_date?, trial_end?,
+// ended_at?, canceled_at?, cancel_at_period_end?, current_period_end?, quantity?, invoice? (default true: one paid invoice now)},
+// POST /_mock/prices {id, unit_amount, interval, ...} (an archived price: not listed with active=true),
+// POST /_mock/invoices {customer, amount, status?, created?, paid_at?, subscription?, number?}. Times are Unix seconds.
 import express from "express";
 import { randomBytes } from "node:crypto";
 import type { AddressInfo } from "node:net";
@@ -33,7 +36,7 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
       { id: "price_mock_growth", object: "price", active: true, lookup_key: "octillion_growth", unit_amount: 149900, currency: "usd", recurring: { interval: "month" },
         nickname: "Growth", metadata: { monthly_budget_usd: "1500" }, product: { id: "prod_mock_1", name: "Octillion", metadata: {} } },
       { id: "price_unrelated", object: "price", active: true, lookup_key: "other_thing", unit_amount: 100, currency: "usd", recurring: null, nickname: null, metadata: {}, product: { name: "x", metadata: {} } },
-    ],
+    ] as any[],
   };
   const app = express();
   const MAPS = ["orgs", "invitations", "memberships", "users", "customers", "subscriptions", "oauth", "keyed"] as const;
@@ -196,7 +199,7 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     const c = { id: id("cus"), object: "customer", name: req.body.name, email: req.body.email ?? null, metadata: req.body.metadata ?? {} };
     s.customers.set(c.id, c); if (k) keyed.set(k, c); res.json(c);
   });
-  st.get("/v1/prices", (_req, res) => void res.json({ object: "list", data: s.prices, has_more: false }));
+  st.get("/v1/prices", (req, res) => void res.json({ object: "list", data: s.prices.filter((p) => req.query.active !== "true" || p.active), has_more: false }));
   st.get("/v1/subscriptions", (req, res) =>
     void res.json({ object: "list", data: [...s.subscriptions.values()].filter((x) => !req.query.customer || x.customer === req.query.customer), has_more: false }));
   st.post("/v1/checkout/sessions", (req, res) => {
@@ -204,7 +207,7 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     res.json({ id: id("cs"), url: `${getBase()}/checkout/${req.body.customer}/${req.body.line_items?.[0]?.price}` });
   });
   st.post("/v1/billing_portal/sessions", (req, res) => void res.json({ id: id("bps"), url: `${getBase()}/billing/${req.body.customer}` }));
-  st.get("/v1/invoices", (req, res) => void res.json({ object: "list", data: s.invoices.filter((i) => i.customer === req.query.customer), has_more: false }));
+  st.get("/v1/invoices", (req, res) => void res.json({ object: "list", data: s.invoices.filter((i) => !req.query.customer || i.customer === req.query.customer), has_more: false }));
   st.post("/v1/billing/meter_events", (req, res) => {
     if (!s.meterEvents.some((e) => e.identifier === req.body.identifier)) s.meterEvents.push(req.body);
     res.json({ object: "billing.meter_event", ...req.body });
@@ -257,16 +260,34 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     s.oauth.set(token, { id: id("oat"), user_id: b.user_id, revoked: Boolean(b.revoked), expired: Boolean(b.expired), created_at: ms() });
     res.json({ access_token: token });
   });
+  const invoice = (b: { customer: string; amount: number; status?: string; created?: number; paid_at?: number | null; subscription?: string | null; number?: string }) => {
+    const created = b.created ?? Math.floor(Date.now() / 1000), status = b.status ?? "paid";
+    const inv = { id: id("in"), object: "invoice", customer: b.customer, number: b.number ?? `MOCK-${s.invoices.length + 1}`, status, total: b.amount, amount_due: b.amount,
+      amount_paid: status === "paid" ? b.amount : 0, currency: "usd", created, subscription: b.subscription ?? null, hosted_invoice_url: `${getBase()}/invoice`,
+      status_transitions: { paid_at: status === "paid" ? b.paid_at ?? created : null } };
+    s.invoices.push(inv);
+    return inv;
+  };
   app.post("/_mock/subscriptions", (req, res) => {
-    const price = s.prices.find((p) => p.id === req.body.price);
-    const sub = { id: id("sub"), object: "subscription", customer: req.body.customer, status: req.body.status ?? "active", cancel_at_period_end: false, trial_end: null,
-      start_date: Math.floor(Date.now() / 1000), created: Math.floor(Date.now() / 1000), ended_at: null,
-      current_period_end: Math.floor(Date.now() / 1000) + 30 * 86400, items: { data: [{ price }] } };
+    const b = req.body, t = Math.floor(Date.now() / 1000);
+    const price = s.prices.find((p) => p.id === b.price);
+    const start = b.start_date ?? t;
+    const sub = { id: id("sub"), object: "subscription", customer: b.customer, status: b.status ?? "active", cancel_at_period_end: Boolean(b.cancel_at_period_end),
+      trial_end: b.trial_end ?? null, start_date: start, created: start, ended_at: b.ended_at ?? null, canceled_at: b.canceled_at ?? null, cancel_at: null,
+      current_period_end: b.current_period_end ?? t + 30 * 86400, items: { data: [{ price, quantity: b.quantity ?? 1 }] } };
     s.subscriptions.set(sub.id, sub);
-    s.invoices.push({ id: id("in"), customer: req.body.customer, number: `MOCK-${s.invoices.length + 1}`, status: "paid", total: price?.unit_amount ?? 0, currency: "usd",
-      created: Math.floor(Date.now() / 1000), hosted_invoice_url: `${getBase()}/invoice` });
+    if (b.invoice !== false) invoice({ customer: b.customer, amount: price?.unit_amount ?? 0, subscription: sub.id });
     res.json(sub);
   });
+  app.post("/_mock/prices", (req, res) => {
+    const b = req.body;
+    const price = { id: b.id, object: "price", active: false, lookup_key: b.lookup_key ?? null, unit_amount: b.unit_amount, currency: "usd",
+      recurring: { interval: b.interval ?? "month", interval_count: b.interval_count ?? 1 }, nickname: b.nickname ?? null, metadata: {},
+      product: { id: "prod_mock_1", name: "Octillion", metadata: {} } };
+    s.prices = [...s.prices.filter((p) => p.id !== b.id), price];
+    res.json(price);
+  });
+  app.post("/_mock/invoices", (req, res) => void res.json(invoice(req.body)));
   app.use(c);
   app.use(st);
 

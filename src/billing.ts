@@ -62,8 +62,11 @@ async function all<T extends { id: string }>(path: string): Promise<T[]> {
 
 export interface Plan { price_id: string; lookup_key: string; name: string; amount: number | null; currency: string; interval: string | null; monthly_budget_usd: number | null }
 export interface Subscription { id: string; customer: string; status: string; current_period_end: number | null; cancel_at_period_end: boolean; trial_end: number | null;
-  start_date?: number | null; created?: number | null; ended_at?: number | null;
-  items: { data: { price: { id: string; lookup_key: string | null; metadata?: Record<string, string>; product?: string | { metadata?: Record<string, string> } } ; current_period_end?: number }[] } }
+  start_date?: number | null; created?: number | null; ended_at?: number | null; canceled_at?: number | null; cancel_at?: number | null;
+  items: { data: { quantity?: number | null; current_period_end?: number;
+    price: { id: string; lookup_key: string | null; nickname?: string | null; unit_amount?: number | null; currency?: string;
+             recurring?: { interval: string; interval_count?: number | null } | null; metadata?: Record<string, string>;
+             product?: string | { name?: string; metadata?: Record<string, string> } } }[] } }
 
 const budgetOf = (meta?: Record<string, string>) => (meta?.monthly_budget_usd != null && meta.monthly_budget_usd !== "" ? Number(meta.monthly_budget_usd) : null);
 
@@ -104,7 +107,7 @@ export type SubscriptionSummary = NonNullable<ReturnType<typeof shapeSub>>;
 
 /** When a subscription was paid for (ms): from its start, or the end of its trial, to when it ended (null: still on). */
 export interface PaidSpan { customer: string; from: number; to: number | null }
-let subsCache: { at: number; byCustomer: Map<string, SubscriptionSummary>; spans: PaidSpan[] } | null = null;
+let subsCache: { at: number; byCustomer: Map<string, SubscriptionSummary>; spans: PaidSpan[]; raw: Subscription[] } | null = null;
 /** Every customer's current subscription in one paged list call, cached for a minute. */
 export async function subscriptionsByCustomer(fresh = false): Promise<Map<string, SubscriptionSummary>> {
   if (!fresh && subsCache && Date.now() - subsCache.at < 60_000) return subsCache.byCustomer;
@@ -114,8 +117,13 @@ export async function subscriptionsByCustomer(fresh = false): Promise<Map<string
   const byCustomer = new Map([...grouped].map(([c, list]) => [c, shapeSub(current(list), plans)!]));
   const spans = subs.filter((s) => !["incomplete", "incomplete_expired"].includes(s.status) && (s.start_date ?? s.created) != null).map((s) => ({
     customer: s.customer, from: Math.max(s.start_date ?? s.created ?? 0, s.trial_end ?? 0) * 1000, to: s.ended_at ? s.ended_at * 1000 : null }));
-  subsCache = { at: Date.now(), byCustomer, spans };
+  subsCache = { at: Date.now(), byCustomer, spans, raw: subs };
   return byCustomer;
+}
+/** Every subscription as Stripe lists it (every status), with each customer's current one: the same cached list call (FinOps Revenue). */
+export async function allSubscriptions(fresh = false): Promise<{ raw: Subscription[]; byCustomer: Map<string, SubscriptionSummary> }> {
+  const byCustomer = await subscriptionsByCustomer(fresh);
+  return { raw: subsCache?.raw ?? [], byCustomer };
 }
 /** Every subscription's paid span, from the same cached list call (the Onboarding page's Paying sparkline). */
 export async function paidSpans(): Promise<PaidSpan[]> {
@@ -123,7 +131,20 @@ export async function paidSpans(): Promise<PaidSpan[]> {
   await subscriptionsByCustomer();
   return subsCache?.spans ?? [];
 }
-export const invalidateSubscriptions = () => { subsCache = null; };
+export const invalidateSubscriptions = () => { subsCache = null; invoicesCache = null; };
+
+export interface Invoice { id: string; number: string | null; customer: string; customer_name?: string | null; customer_email?: string | null; status: string;
+  amount_paid: number; amount_due: number; total: number; currency: string; created: number; hosted_invoice_url: string | null;
+  status_transitions?: { paid_at?: number | null } | null; subscription?: string | { id: string } | null;
+  parent?: { subscription_details?: { subscription?: string | { id: string } | null } | null } | null }
+let invoicesCache: { at: number; invoices: Invoice[] } | null = null;
+/** Every invoice on the Stripe account (paged list call, at most 5,000), cached for a minute (FinOps Revenue). */
+export async function allInvoices(fresh = false): Promise<Invoice[]> {
+  if (!fresh && invoicesCache && Date.now() - invoicesCache.at < 60_000) return invoicesCache.invoices;
+  const invoices = await all<Invoice>("/v1/invoices");
+  invoicesCache = { at: Date.now(), invoices };
+  return invoices;
+}
 
 export async function checkoutUrl(customer: string, priceId: string, returnUrl: string) {
   const s = await call<{ url: string }>("POST", "/v1/checkout/sessions", {
