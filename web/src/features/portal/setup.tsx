@@ -211,7 +211,6 @@ function setupText(url: string, c: Client) {
 function ClientSteps({ c }: { c: Client }) {
   return (
     <div className='space-y-2 text-sm'>
-      {!c.install_url && !c.command && !c.snippet && <p>{c.steps}</p>}
       {c.install_url && (
         <Button size='sm' render={<a href={c.install_url} />}><Icons.add /> Add to {c.client}</Button>
       )}
