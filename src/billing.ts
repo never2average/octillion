@@ -18,7 +18,8 @@
  */
 import { createHash } from "node:crypto";
 import { getDb } from "./db.js";
-import { configJson, DEFAULT_TAX_CODE, defaultMeter, stripeTiers, usageFromTiers, type PlanConfig } from "./plan-config.js";
+import { componentJson, componentSummary, configJson, DEFAULT_TAX_CODE, METRIC_IDS, METRICS, meterFor, stripeTiers, usageFromTiers, usageLookup,
+  type Metric, type PlanConfig, type UsageComponent } from "./plan-config.js";
 
 export const stripeEnabled = () => Boolean(process.env.STRIPE_SECRET_KEY);
 const apiBase = () => (process.env.STRIPE_API_URL ?? "https://api.stripe.com").replace(/\/$/, "");
@@ -69,8 +70,8 @@ async function all<T extends { id: string }>(path: string): Promise<T[]> {
  */
 export interface Plan { price_id: string; lookup_key: string; name: string; amount: number | null; currency: string; interval: string | null; monthly_budget_usd: number | null;
   experiment: string | null; weight: number; trial_days: number | null; description: string | null; created: number | null;
-  /** Usage pricing: the metered price on a billing meter (model spend in cents), graduated tiers. */
-  usage: { price_id: string; meter: string; included_usd: number; tiers: { up_to_usd: number | null; markup: number }[] } | null;
+  /** Usage pricing: one metered price per metric (src/plan-config.ts METRICS), each on its billing meter, graduated. */
+  usage: PlanUsage[];
   /** The plan as a JSON config (src/plan-config.ts): New plan › JSON takes it back. */
   config: Record<string, unknown> }
 export interface Subscription { id: string; customer: string; status: string; metadata?: Record<string, string>; current_period_end: number | null; cancel_at_period_end: boolean; trial_end: number | null;
@@ -83,8 +84,10 @@ export interface Subscription { id: string; customer: string; status: string; me
 interface StripePrice { id: string; lookup_key: string | null; unit_amount: number | null; unit_amount_decimal?: string | null; currency: string; created?: number;
   recurring: { interval: string; usage_type?: string; meter?: string | null } | null; tiers?: { up_to: number | null; unit_amount?: number | null; unit_amount_decimal?: string | null }[];
   nickname: string | null; metadata: Record<string, string>; product: { name: string; description?: string | null; tax_code?: string | { id: string } | null; metadata: Record<string, string> } }
-/** A plan's usage price, when it also has a base fee: the plan's lookup key plus this. */
-export const USAGE_SUFFIX = "__usage";
+/** A plan's usage component: its metered price, metric and meter, in words, and as config JSON. */
+export interface PlanUsage { price_id: string; metric: Metric; meter: string; summary: string; config: Record<string, unknown> }
+/** Lookup keys of usage prices end in __<suffix> (plan-config.ts usageLookup); a plan's own price never has "__". */
+const isUsageLookup = (k: string) => k.includes("__");
 
 export interface Meter { id: string; event_name: string; status?: string }
 let metersCache: { at: number; meters: Meter[] } | null = null;
@@ -108,22 +111,27 @@ export async function listPlans(): Promise<Plan[]> {
   const ours = prices.filter((p) => p.lookup_key?.startsWith("octillion_"));
   const byLookup = new Map(ours.map((p) => [p.lookup_key!, p]));
   const meterName = (id?: string | null) => meters.find((m) => m.id === id)?.event_name ?? id ?? "";
-  const plans = ours.filter((p) => !p.lookup_key!.endsWith(USAGE_SUFFIX)).map((p) => {
+  const component = (up: StripePrice, metric: Metric): { u: UsageComponent; usage: PlanUsage } => {
+    const u = usageFromTiers(metric, meterName(up.recurring?.meter), up.tiers ?? [{ up_to: null, unit_amount_decimal: up.unit_amount_decimal ?? String(up.unit_amount ?? 0) }]);
+    return { u, usage: { price_id: up.id, metric, meter: u.meter, summary: componentSummary(u), config: componentJson(u) } };
+  };
+  const plans = ours.filter((p) => !isUsageLookup(p.lookup_key!)).map((p) => {
     const metered = p.recurring?.usage_type === "metered";
-    const up = metered ? p : byLookup.get(`${p.lookup_key}${USAGE_SUFFIX}`);
-    const usage = up ? { price_id: up.id, ...usageFromTiers(meterName(up.recurring?.meter), up.tiers ?? [{ up_to: null, unit_amount_decimal: up.unit_amount_decimal ?? String(up.unit_amount ?? 0) }]) } : null;
+    // A usage-only plan's own price is its first component (octillion_metric says which); the rest are <plan>__<metric>.
+    const own = metered ? [component(p, (p.metadata?.octillion_metric as Metric) || "model_spend")] : [];
+    const rest = METRIC_IDS.filter((m) => !own.some((x) => x.u.metric === m)).flatMap((m) => { const up = byLookup.get(usageLookup(p.lookup_key!, m)); return up ? [component(up, m)] : []; });
+    const comps = [...own, ...rest].sort((a, b) => METRIC_IDS.indexOf(a.u.metric) - METRIC_IDS.indexOf(b.u.metric));
     const extra = Object.fromEntries(Object.entries(p.product?.metadata ?? {}).filter(([k]) => !k.startsWith("octillion") && k !== "monthly_budget_usd"));
     const plan = {
       price_id: p.id, lookup_key: p.lookup_key!, name: p.nickname || p.product?.name || p.lookup_key!, amount: metered ? null : p.unit_amount, currency: p.currency,
       interval: p.recurring?.interval ?? null, monthly_budget_usd: budgetOf(p.metadata) ?? budgetOf(p.product?.metadata),
       experiment: p.metadata?.octillion_experiment || null, weight: weightOf(p.metadata?.octillion_weight),
       trial_days: Number(p.metadata?.octillion_trial_days) > 0 ? Number(p.metadata.octillion_trial_days) : null,
-      description: p.product?.description || null, created: p.created ?? null, usage,
+      description: p.product?.description || null, created: p.created ?? null, usage: comps.map((x) => x.usage),
     };
-    const { price_id: _u, ...usageConfig } = usage ?? { price_id: "" };
     return { ...plan, config: configJson({ name: plan.name, description: plan.description, interval: (plan.interval === "year" ? "year" : "month"), lookup_key: plan.lookup_key,
       base_fee_usd: metered ? 0 : (p.unit_amount ?? 0) / 100, trial_days: plan.trial_days, monthly_budget_usd: plan.monthly_budget_usd ?? 0,
-      usage: usage ? (usageConfig as NonNullable<PlanConfig["usage"]>) : null, experiment: plan.experiment, weight: plan.weight, metadata: extra,
+      usage: comps.map((x) => x.u), experiment: plan.experiment, weight: plan.weight, metadata: extra,
       tax_code: (typeof p.product?.tax_code === "string" ? p.product.tax_code : p.product?.tax_code?.id) ?? DEFAULT_TAX_CODE }) };
   });
   plansCache = { at: Date.now(), plans };
@@ -136,51 +144,69 @@ export const invalidatePlans = () => { plansCache = null; };
 export const planLookupKey = (name: string) =>
   `octillion_${name.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 60) || "plan"}`;
 
+/** The meter body for a metric: the sum of `value` per stripe_customer_id, as the report* functions send it. */
+const meterBody = (m: Metric, event: string) => ({ display_name: `Octillion ${METRICS[m].label.toLowerCase()} (${METRICS[m].unit}s)`, event_name: event,
+  default_aggregation: { formula: "sum" }, customer_mapping: { type: "by_id", event_payload_key: "stripe_customer_id" }, value_settings: { event_payload_key: "value" } });
+
+/** One line per Stripe object a plan config makes: the dry run's preview. */
+function describe(o: { create: string; body: Record<string, any> }, c: PlanConfig): string {
+  const b = o.body;
+  if (o.create === "billing.meter") return `Billing meter "${b.event_name}": the sum of each customer's reported ${METRICS[(Object.keys(METRICS) as Metric[]).find((m) => meterFor(m) === b.event_name) ?? "model_spend"].unit}s`;
+  if (o.create === "product") return `Product "${b.name}"${b.description ? `: ${b.description}` : ""} (tax code ${b.tax_code})`;
+  if (b.recurring?.usage_type === "metered") {
+    const comp = c.usage.find((u) => u.metric === b.metadata?.octillion_metric)!;
+    return `Usage price ${b.lookup_key}, graduated, billed each ${b.recurring.interval}: ${componentSummary(comp)}`;
+  }
+  return `Base price ${b.lookup_key}: $${(b.unit_amount / 100).toLocaleString("en-US")} / ${b.recurring?.interval}`;
+}
 
 /**
  * A plan from a JSON config (src/plan-config.ts, already checked): a product, a licensed price for the base fee (if
- * any) and a graduated metered price on the usage meter (if any; the meter is made when the account has none with
- * that event name, aggregating the sum of `value` by `stripe_customer_id`, which reportSessionSpend sends). The
- * plan's own price carries the lookup key, allowance, experiment and trial; the usage price of a plan with a base fee
- * is <lookup_key>__usage. `dryRun` returns what would be made and sends nothing that writes.
+ * any) and one graduated metered price per usage component, each on its metric's billing meter (made when the account
+ * has none with that event name). The plan's own price (the base fee, else the first component) carries the lookup
+ * key, allowance, experiment and trial; the other components are <lookup_key>__<metric> with octillion_plan. `dryRun`
+ * returns what would be made, a line per object, and sends nothing that writes.
  */
 export async function createPlanFromConfig(c: PlanConfig, dryRun = false) {
-  const lookups = [c.lookup_key, ...(c.usage && c.base_fee_usd > 0 ? [`${c.lookup_key}${USAGE_SUFFIX}`] : [])];
+  const hasBase = c.base_fee_usd > 0;
+  const lookupOf = (u: UsageComponent, i: number) => (!hasBase && i === 0 ? c.lookup_key : usageLookup(c.lookup_key, u.metric));
+  const lookups = [c.lookup_key, ...c.usage.map(lookupOf).filter((k) => k !== c.lookup_key)];
   const existing = await call<{ data: { id: string; active: boolean; lookup_key: string }[] }>("GET", `/v1/prices?${lookups.map((k) => `lookup_keys[]=${encodeURIComponent(k)}`).join("&")}&limit=10`);
   const taken = existing.data.find((x) => x.active) ?? existing.data[0];
   if (taken) throw new StripeError(taken.active ? `A plan with the lookup key ${taken.lookup_key} already exists. Pick another name or lookup_key.`
     : `An archived plan still holds the lookup key ${taken.lookup_key}. Pick another name or lookup_key.`, 409);
-  const meter = c.usage ? (await listMeters(true)).find((m) => m.event_name === c.usage!.meter && m.status !== "inactive") ?? null : null;
+  const meters = c.usage.length ? await listMeters(true) : [];
+  const found = new Map(c.usage.map((u) => [u.meter, meters.find((m) => m.event_name === u.meter && m.status !== "inactive") ?? null]));
   const planMeta: Record<string, string> = { monthly_budget_usd: String(c.monthly_budget_usd), ...(c.experiment ? { octillion_experiment: c.experiment, octillion_weight: String(c.weight) } : {}),
     ...(c.trial_days ? { octillion_trial_days: String(c.trial_days) } : {}) };
-  const usagePrice = (meterId: string, product: string, primary: boolean) => ({
-    product, currency: "usd", nickname: primary ? c.name : `${c.name} usage`, lookup_key: primary ? c.lookup_key : `${c.lookup_key}${USAGE_SUFFIX}`,
-    recurring: { interval: c.interval, usage_type: "metered", meter: meterId }, billing_scheme: "tiered", tiers_mode: "graduated", tiers: stripeTiers(c.usage!),
-    metadata: primary ? { ...planMeta, octillion_role: "usage" } : { octillion_role: "usage", octillion_plan: c.lookup_key },
-  });
+  const usagePrice = (u: UsageComponent, i: number, meterId: string, product: string) => {
+    const primary = !hasBase && i === 0;
+    return { product, currency: "usd", nickname: primary ? c.name : `${c.name} · ${METRICS[u.metric].label}`, lookup_key: lookupOf(u, i),
+      recurring: { interval: c.interval, usage_type: "metered", meter: meterId }, billing_scheme: "tiered", tiers_mode: "graduated", tiers: stripeTiers(u),
+      metadata: primary ? { ...planMeta, octillion_role: "usage", octillion_metric: u.metric } : { octillion_role: "usage", octillion_metric: u.metric, octillion_plan: c.lookup_key } };
+  };
   const basePrice = (product: string) => ({ product, currency: "usd", unit_amount: Math.round(c.base_fee_usd * 100), recurring: { interval: c.interval },
     nickname: c.name, lookup_key: c.lookup_key, metadata: planMeta });
   const productBody = { name: c.name, description: c.description ?? undefined, tax_code: c.tax_code, metadata: { ...c.metadata, monthly_budget_usd: String(c.monthly_budget_usd), octillion: "plan" } };
-  const meterBody = c.usage ? { display_name: "Octillion model spend (cents)", event_name: c.usage.meter, default_aggregation: { formula: "sum" },
-    customer_mapping: { type: "by_id", event_payload_key: "stripe_customer_id" }, value_settings: { event_payload_key: "value" } } : null;
+  const newMeters = c.usage.filter((u, i, all) => !found.get(u.meter) && all.findIndex((x) => x.meter === u.meter) === i);
   const plan = [
-    ...(meterBody && !meter ? [{ create: "billing.meter", body: meterBody }] : []),
-    { create: "product", body: productBody },
-    ...(c.base_fee_usd > 0 ? [{ create: "price", body: basePrice("<product>") }] : []),
-    ...(c.usage ? [{ create: "price", body: usagePrice(meter?.id ?? "<meter>", "<product>", !(c.base_fee_usd > 0)) }] : []),
+    ...newMeters.map((u) => ({ create: "billing.meter", body: meterBody(u.metric, u.meter) })),
+    { create: "product", body: productBody as Record<string, any> },
+    ...(hasBase ? [{ create: "price", body: basePrice("<product>") as Record<string, any> }] : []),
+    ...c.usage.map((u, i) => ({ create: "price", body: usagePrice(u, i, found.get(u.meter)?.id ?? `<meter ${u.meter}>`, "<product>") as Record<string, any> })),
   ];
-  if (dryRun) return { dry_run: true as const, config: configJson(c), stripe: plan, meter: c.usage ? { event_name: c.usage.meter, exists: Boolean(meter) } : null };
+  if (dryRun) return { dry_run: true as const, config: configJson(c), stripe: plan, lines: plan.map((o) => describe(o, c)),
+    meters: c.usage.map((u) => ({ metric: u.metric, event_name: u.meter, exists: Boolean(found.get(u.meter)) })) };
   const idem = `plancfg-${c.lookup_key}-${createHash("sha256").update(JSON.stringify(c)).digest("hex").slice(0, 16)}`;
-  let meterId = meter?.id ?? null;
-  if (meterBody && !meterId) {
-    meterId = (await call<{ id: string }>("POST", "/v1/billing/meters", meterBody, `${idem}-meter`)).id;
-    metersCache = null;
-  }
+  const meterIds = new Map([...found].filter(([, m]) => m).map(([k, m]) => [k, m!.id]));
+  for (const u of newMeters) meterIds.set(u.meter, (await call<{ id: string }>("POST", "/v1/billing/meters", meterBody(u.metric, u.meter), `${idem}-meter-${u.metric}`)).id);
+  if (newMeters.length) metersCache = null;
   const product = await call<{ id: string }>("POST", "/v1/products", productBody, `${idem}-product`);
-  const base = c.base_fee_usd > 0 ? await call<{ id: string }>("POST", "/v1/prices", basePrice(product.id), `${idem}-base`) : null;
-  const usage = c.usage ? await call<{ id: string }>("POST", "/v1/prices", usagePrice(meterId!, product.id, !base), `${idem}-usage`) : null;
+  const base = hasBase ? await call<{ id: string }>("POST", "/v1/prices", basePrice(product.id), `${idem}-base`) : null;
+  const usage: { metric: Metric; price_id: string }[] = [];
+  for (const [i, u] of c.usage.entries()) usage.push({ metric: u.metric, price_id: (await call<{ id: string }>("POST", "/v1/prices", usagePrice(u, i, meterIds.get(u.meter)!, product.id), `${idem}-usage-${u.metric}`)).id });
   invalidatePlans();
-  return { dry_run: false as const, price_id: (base ?? usage)!.id, usage_price_id: base && usage ? usage.id : usage && !base ? usage.id : null, lookup_key: c.lookup_key,
+  return { dry_run: false as const, price_id: base?.id ?? usage[0].price_id, usage_price_ids: usage.map((x) => x.price_id), usage, lookup_key: c.lookup_key,
            name: c.name, experiment: c.experiment, config: configJson(c) };
 }
 
@@ -201,8 +227,8 @@ export async function archivePlan(priceId: string): Promise<{ price_id: string; 
   const price = await call<{ id: string; lookup_key: string | null; active: boolean }>("GET", `/v1/prices/${priceId}`);
   if (!price.lookup_key?.startsWith("octillion_")) throw new StripeError("That price is not an Octillion plan", 400);
   if (price.active) await call("POST", `/v1/prices/${priceId}`, { active: false }, `plan-archive-${priceId}`);
-  // Its usage price goes with it.
-  const usage = await call<{ data: { id: string; active: boolean }[] }>("GET", `/v1/prices?lookup_keys[]=${encodeURIComponent(`${price.lookup_key}${USAGE_SUFFIX}`)}&limit=1`);
+  // Its usage prices go with it.
+  const usage = await call<{ data: { id: string; active: boolean }[] }>("GET", `/v1/prices?${METRIC_IDS.map((m) => `lookup_keys[]=${encodeURIComponent(usageLookup(price.lookup_key!, m))}`).join("&")}&limit=10`);
   for (const u of usage.data) if (u.active) await call("POST", `/v1/prices/${u.id}`, { active: false }, `plan-archive-${u.id}`);
   invalidatePlans();
   return { price_id: price.id, lookup_key: price.lookup_key };
@@ -279,9 +305,9 @@ export async function allInvoices(fresh = false): Promise<Invoice[]> {
  * goes on the session and on the subscription it makes, so Stripe itself records which variant converted. A plan
  * with octillion_trial_days starts with that free trial.
  */
-export async function checkoutUrl(customer: string, priceId: string, returnUrl: string, meta: Record<string, string> = {}, trialDays?: number | null, usagePriceId?: string | null) {
-  // A metered price takes no quantity; a usage-only plan is its usage price alone.
-  const items = usagePriceId === priceId ? [{ price: priceId }] : [{ price: priceId, quantity: 1 }, ...(usagePriceId ? [{ price: usagePriceId }] : [])];
+export async function checkoutUrl(customer: string, priceId: string, returnUrl: string, meta: Record<string, string> = {}, trialDays?: number | null, usagePriceIds: string[] = []) {
+  // A metered price takes no quantity; a usage-only plan's own price is its first usage price.
+  const items = [...(usagePriceIds.includes(priceId) ? [] : [{ price: priceId, quantity: 1 }]), ...usagePriceIds.map((price) => ({ price }))];
   const body = { mode: "subscription", customer, line_items: items, success_url: returnUrl, cancel_url: returnUrl, allow_promotion_codes: true, metadata: meta,
     subscription_data: { metadata: meta, ...(trialDays ? { trial_period_days: trialDays } : {}) } };
   let s: { url: string };
@@ -374,21 +400,45 @@ export async function orgBudgets(orgIds: number[]): Promise<Map<number, { budget
   return out;
 }
 
-/** Report a finished session's model cost to the usage meter (STRIPE_SPEND_METER). Best effort, never throws. */
+/**
+ * Send one usage event to a metric's meter, once it exists in Stripe (a usage plan makes it; for model spend,
+ * STRIPE_SPEND_METER also turns it on). `identifier` makes a retry count once (Stripe dedupes by it).
+ */
+async function reportUsage(metric: Metric, identifier: string, customer: string, value: number) {
+  const event = meterFor(metric);
+  if (!(metric === "model_spend" && process.env.STRIPE_SPEND_METER) && !(await listMeters()).some((m) => m.event_name === event && m.status !== "inactive")) return;
+  await call("POST", "/v1/billing/meter_events", { event_name: event, identifier, payload: { stripe_customer_id: customer, value } });
+}
+
+/**
+ * A finished session's usage, to the meters usage plans bill on: its model cost in cents (model_spend; identifier the
+ * session id, as before), 1 agent session if it completed (agent_sessions), and its sandbox minutes from start to end,
+ * rounded up (sandbox_hours). Only for an account with a Stripe customer. Best effort, never throws.
+ */
 export function reportSessionSpend(sessionId: string): void {
-  // The meter usage plans bill on (STRIPE_SPEND_METER, else octillion_model_spend): reported once it exists in Stripe
-  // (a usage plan makes it), so a plan with usage pricing bills without any setting.
-  const meter = defaultMeter();
   if (!stripeEnabled()) return;
   void (async () => {
-    if (!process.env.STRIPE_SPEND_METER && !(await listMeters()).some((m) => m.event_name === meter && m.status !== "inactive")) return;
-    const [r] = await (await getDb()).query<{ stripe_customer_id: string | null; cost_usd: number | null }>(
-      "SELECT o.stripe_customer_id, s.cost_usd FROM agent_sessions s JOIN organizations o ON o.id = s.org_id WHERE s.id = $1", [sessionId]);
-    const cents = Math.round(Number(r?.cost_usd ?? 0) * 100);
-    if (!r?.stripe_customer_id || cents <= 0) return;
-    await call("POST", "/v1/billing/meter_events", { event_name: meter, identifier: sessionId,
-      payload: { stripe_customer_id: r.stripe_customer_id, value: cents } });
-  })().catch((err) => console.error(`stripe meter event for ${sessionId} failed:`, (err as Error).message));
+    const [r] = await (await getDb()).query<{ stripe_customer_id: string | null; cost_usd: number | null; status: string; minutes: number | null }>(
+      `SELECT o.stripe_customer_id, s.cost_usd, s.status, ceil(extract(epoch FROM (s.ended_at - s.started_at)) / 60)::int AS minutes
+         FROM agent_sessions s JOIN organizations o ON o.id = s.org_id WHERE s.id = $1`, [sessionId]);
+    if (!r?.stripe_customer_id) return;
+    const cents = Math.round(Number(r.cost_usd ?? 0) * 100);
+    const jobs: Promise<unknown>[] = [];
+    if (cents > 0) jobs.push(reportUsage("model_spend", sessionId, r.stripe_customer_id, cents));
+    if (r.status === "completed") jobs.push(reportUsage("agent_sessions", `${sessionId}:session`, r.stripe_customer_id, 1));
+    if (Number(r.minutes) > 0) jobs.push(reportUsage("sandbox_hours", `${sessionId}:sandbox`, r.stripe_customer_id, Number(r.minutes)));
+    for (const x of await Promise.allSettled(jobs)) if (x.status === "rejected") console.error(`stripe usage for ${sessionId} failed:`, (x.reason as Error).message);
+  })().catch((err) => console.error(`stripe usage for ${sessionId} failed:`, (err as Error).message));
+}
+
+/** A completed simulation run, to the simulations meter (1 per run; identifier the run id). Best effort, never throws. */
+export function reportSimulationUsage(simulationId: string): void {
+  if (!stripeEnabled()) return;
+  void (async () => {
+    const [r] = await (await getDb()).query<{ stripe_customer_id: string | null }>(
+      "SELECT o.stripe_customer_id FROM simulations sim JOIN organizations o ON o.id = sim.org_id WHERE sim.id = $1 AND sim.status = 'completed'", [simulationId]);
+    if (r?.stripe_customer_id) await reportUsage("simulations", `${simulationId}:run`, r.stripe_customer_id, 1);
+  })().catch((err) => console.error(`stripe usage for run ${simulationId} failed:`, (err as Error).message));
 }
 
 // ---------- credits for library contributions (src/contributions.ts) ----------

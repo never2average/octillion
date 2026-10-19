@@ -126,7 +126,7 @@ interface RevenuePlan {
   accounts: { key: string; slug: string | null; name: string; status: SubStatus; mrr_usd: number }[];
   /** A live Octillion plan (active price, octillion_ lookup key): it can be archived. */
   live?: boolean; monthly_budget_usd?: number | null; experiment?: string | null; weight?: number; trial_days?: number | null;
-  usage?: PlanUsage | null; config?: Record<string, unknown> | null;
+  usage?: PlanUsage[] | null; config?: Record<string, unknown> | null;
 }
 interface Revenue {
   range: { from: string; to: string; days: string[] };
@@ -366,7 +366,8 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
         render: (p) => (p.monthly_budget_usd == null ? NA : num(cents(p.monthly_budget_usd), 'The plan’s monthly cap on model spend. Not revenue.')) },
       { key: 'experiment', label: 'Experiment', type: 'select', value: (p) => p.experiment ?? '', render: (p) => (p.experiment
         ? <span className='flex flex-col gap-1'><Mono>{p.experiment}</Mono><span className='text-muted-foreground text-xs'>weight {p.weight ?? 1}</span></span> : NA) },
-      { key: 'usage', label: 'Usage pricing', type: 'text', value: (p) => (p.usage ? usageText(p.usage) : ''), render: (p) => (p.usage ? <span className='text-sm'>{usageText(p.usage)}</span> : NA) },
+      { key: 'usage', label: 'Usage pricing', type: 'text', value: (p) => (p.usage ?? []).map((u) => u.summary).join('; '), render: (p) => (p.usage?.length
+        ? <span className='flex max-w-[22rem] flex-col gap-0.5 text-xs leading-snug'>{p.usage.map((u) => <span key={u.price_id}>{u.summary}</span>)}</span> : NA) },
       { key: 'trial', label: 'Free trial', className: 'text-right', type: 'number', value: (p) => p.trial_days ?? null, render: (p) => (p.trial_days ? num(`${p.trial_days} d`) : NA) }
     ];
     return (<>
@@ -556,9 +557,8 @@ function ExperimentsTab({ data, loading, bar }: TabProps<Experiments>) {
   );
 }
 
-interface PlanUsage { price_id: string; meter: string; included_usd: number; tiers: { up_to_usd: number | null; markup: number }[] }
-/** "Model spend ×1.3 over $100 included", tiers joined. */
-const usageText = (u: PlanUsage) => `Model spend ${u.tiers.map((t) => `×${t.markup}${t.up_to_usd == null ? '' : ` to $${t.up_to_usd.toLocaleString()}`}`).join(', then ')}${u.included_usd ? `, $${u.included_usd.toLocaleString()} included` : ''}`;
+/** A plan's usage component (src/billing.ts PlanUsage): one metered price per metric, with its summary in words. */
+interface PlanUsage { price_id: string; metric: string; meter: string; summary: string; config: Record<string, unknown> }
 /** A plan's config as the start of another variant of the same experiment (a new name and lookup key). */
 function variantJson(p: RevenuePlan) {
   const { lookup_key: _lk, ...c } = (p.config ?? {}) as Record<string, unknown>;
@@ -568,17 +568,7 @@ function variantJson(p: RevenuePlan) {
     control: p.experiment || !p.price_id ? undefined : { price_id: p.price_id, experiment, weight: 1 } };
 }
 
-interface DryRun { dry_run: true; config: Record<string, unknown>; meter: { event_name: string; exists: boolean } | null; stripe: { create: string; body: Record<string, any> }[] }
-/** One Stripe object New plan › JSON would make, in a line. */
-function dryLine(o: DryRun['stripe'][number]) {
-  const b = o.body;
-  if (o.create === 'billing.meter') return `Billing meter "${b.event_name}": sum of value (model spend in cents) per stripe_customer_id`;
-  if (o.create === 'product') return `Product "${b.name}"${b.description ? `: ${b.description}` : ''}`;
-  if (b.recurring?.usage_type === 'metered') return `Usage price ${b.lookup_key}: graduated, per cent of model spend — ${(b.tiers as { up_to: number | 'inf'; unit_amount_decimal: string }[])
-    .map((t) => `${t.up_to === 'inf' ? 'above' : `to $${(t.up_to / 100).toLocaleString()}`} ×${t.unit_amount_decimal}`).join(', ')} / ${b.recurring.interval}`;
-  return `Base price ${b.lookup_key}: $${(b.unit_amount / 100).toLocaleString()} / ${b.recurring?.interval}`;
-}
-
+interface DryRun { dry_run: true; config: Record<string, unknown>; lines: string[]; meters: { metric: string; event_name: string; exists: boolean }[]; stripe: { create: string; body: Record<string, any> }[] }
 /**
  * New plan's frame, for both ways in: a wide dialog (most of the screen) whose body scrolls and whose buttons stay put;
  * the title and the Form / JSON tabs on their own rows, clear of the close button.
@@ -644,15 +634,18 @@ function PlanJsonBody({ onClose, initial, control }: { onClose: () => void; init
           ) : preview ? (
             <div className='grid gap-2 rounded-md border p-3'>
               <span className='font-medium'>Will be made in Stripe</span>
-              <ul className='grid list-disc gap-1.5 pl-5'>{preview.stripe.map((o, i) => <li key={i} className='break-words'>{dryLine(o)}</li>)}</ul>
-              {preview.meter?.exists && <span className='text-muted-foreground'>Uses the existing meter {preview.meter.event_name}.</span>}
+              <ul className='grid list-disc gap-1.5 pl-5'>{preview.lines.map((l, i) => <li key={i} className='break-words'>{l}</li>)}</ul>
+              {preview.meters.some((m) => m.exists) && <span className='text-muted-foreground'>Uses the existing meter{preview.meters.filter((m) => m.exists).length > 1 ? 's' : ''} {preview.meters.filter((m) => m.exists).map((m) => m.event_name).join(', ')}.</span>}
             </div>
           ) : (
             <div className='text-muted-foreground grid gap-2 rounded-md border border-dashed p-3'>
               <span className='text-foreground font-medium'>Fields</span>
               <ul className='grid gap-1'>
                 <li><Mono>base_fee_usd</Mono> flat fee each interval (0: usage only)</li>
-                <li><Mono>usage</Mono> model spend: <Mono>included_usd</Mono>, then <Mono>markup</Mono> or <Mono>tiers</Mono></li>
+                <li><Mono>usage</Mono> a list, one per <Mono>metric</Mono>, each with an included amount, then a price or <Mono>tiers</Mono>:</li>
+                <li className='pl-3'><Mono>model_spend</Mono> <Mono>included_usd</Mono>, <Mono>markup</Mono> (× model cost)</li>
+                <li className='pl-3'><Mono>agent_sessions</Mono> · <Mono>simulations</Mono> <Mono>included</Mono>, <Mono>unit_price_usd</Mono></li>
+                <li className='pl-3'><Mono>sandbox_hours</Mono> <Mono>included_hours</Mono>, <Mono>unit_price_usd</Mono> per hour</li>
                 <li><Mono>monthly_budget_usd</Mono> the account’s monthly spend cap</li>
                 <li><Mono>trial_days</Mono>, <Mono>description</Mono>, <Mono>tax_code</Mono></li>
                 <li><Mono>experiment</Mono> + <Mono>weight</Mono> to A/B test it</li>
@@ -714,8 +707,13 @@ function PlanExperiment({ plan, experiments, onClose }: { plan: RevenuePlan; exp
 
 /** A starting point for New plan › JSON: a base fee with metered model spend over an included amount (src/plan-config.ts). */
 const PLAN_TEMPLATE = {
-  name: 'Team', description: 'For teams running weekly simulations', interval: 'month', base_fee_usd: 250, trial_days: 14, monthly_budget_usd: 2000,
-  usage: { meter: 'octillion_model_spend', included_usd: 100, tiers: [{ up_to_usd: 1000, markup: 1.3 }, { up_to_usd: null, markup: 1.15 }] },
+  name: 'Growth', description: 'For product teams tracking their agent pick rate every week', interval: 'month', base_fee_usd: 499, trial_days: 14, monthly_budget_usd: 3000,
+  usage: [
+    { metric: 'model_spend', included_usd: 150, tiers: [{ up_to_usd: 2000, markup: 1.3 }, { up_to_usd: null, markup: 1.15 }] },
+    { metric: 'agent_sessions', included: 500, unit_price_usd: 0.08 },
+    { metric: 'simulations', included: 20, unit_price_usd: 4 },
+    { metric: 'sandbox_hours', included_hours: 50, unit_price_usd: 0.6 }
+  ],
   experiment: '', weight: 1, metadata: {}
 };
 
@@ -750,13 +748,13 @@ function NewPlanDialog({ onClose, experiments, initialJson, control }: { onClose
       {(['form', 'json'] as const).map((m) => (
         <button key={m} type='button' role='tab' aria-selected={mode === m} onClick={() => setMode(m)}
           className={cn('-mb-px border-b-2 pb-2 font-medium transition-colors', mode === m ? 'border-foreground text-foreground' : 'text-muted-foreground hover:text-foreground border-transparent')}>
-          {m === 'form' ? 'Form' : 'JSON (base fee, usage tiers, metadata)'}
+          {m === 'form' ? 'Form' : 'JSON (base fee + usage pricing)'}
         </button>
       ))}
     </div>
   );
   const blurb = mode === 'json'
-    ? 'The whole plan as JSON: a base fee, usage pricing on model spend (a Stripe billing meter, graduated tiers by markup), a trial, the monthly spend cap, an experiment and metadata.'
+    ? 'The whole plan as JSON: a base fee, usage pricing on model spend, agent sessions, simulations and sandbox hours (a Stripe billing meter each, graduated tiers), a trial, the monthly spend cap, an experiment and metadata.'
     : 'A product and recurring price in Stripe. Accounts allowed plans see it on Billing and can check out; put it in an experiment to A/B test it against other plans.';
   return (
     <PlanDialogShell onClose={onClose} title='New plan' description={blurb} tabs={tabs}>
@@ -764,7 +762,7 @@ function NewPlanDialog({ onClose, experiments, initialJson, control }: { onClose
         <form onSubmit={submit} className='flex min-h-0 flex-1 flex-col'>
           <div className='grid min-h-0 content-start gap-4 overflow-y-auto px-4 pb-4 sm:grid-cols-2'>
             <FormRow id='np-name' label='Plan name' hint={name.trim() ? `Lookup key: octillion_${name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '')}` : 'Customers see this name at checkout.'}>
-              <Input id='np-name' required autoFocus minLength={2} maxLength={60} value={name} onChange={(e) => setName(e.target.value)} placeholder='Team' />
+              <Input id='np-name' required autoFocus minLength={2} maxLength={60} value={name} onChange={(e) => setName(e.target.value)} placeholder='Growth' />
             </FormRow>
             <FormRow id='np-desc' label='Description' hint='Optional. Shown at checkout.'>
               <Input id='np-desc' maxLength={300} value={description} onChange={(e) => setDescription(e.target.value)} placeholder='For teams running weekly simulations' />
@@ -791,7 +789,7 @@ function NewPlanDialog({ onClose, experiments, initialJson, control }: { onClose
             <FormRow id='np-weight' label='Traffic weight' hint={experiment.trim() ? 'Its share of accounts, relative to the other variants (1 and 1 is 50/50).' : 'With an experiment only.'}>
               <Input id='np-weight' type='number' inputMode='decimal' min='0.01' max='100' step='any' disabled={!experiment.trim()} value={weight} onChange={(e) => setWeight(e.target.value)} />
             </FormRow>
-            <p className='text-muted-foreground text-sm sm:col-span-2'>Usage-based pricing (a base fee plus model spend with tiers) is on the JSON tab.</p>
+            <p className='text-muted-foreground text-sm sm:col-span-2'>Usage-based pricing (model spend, agent sessions, simulations, sandbox hours, with tiers) is on the JSON tab.</p>
             {err && <p className='text-destructive text-sm sm:col-span-2'>{err}</p>}
           </div>
           <DialogFooter className='m-0 rounded-b-xl'>

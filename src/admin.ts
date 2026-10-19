@@ -626,7 +626,7 @@ export async function checkoutLink(actor: string, slug: string, priceId: unknown
   const customer = await ensureCustomer(actor, slug);
   billing.invalidateSubscriptions();
   log(actor, "billing.checkout_link", slug, { price: plan.price_id, ...(meta.octillion_experiment ? { experiment: meta.octillion_experiment } : {}) });
-  return { url: await billing.checkoutUrl(customer, plan.price_id, returnUrl, meta, plan.trial_days, plan.usage?.price_id) };
+  return { url: await billing.checkoutUrl(customer, plan.price_id, returnUrl, meta, plan.trial_days, plan.usage.map((u) => u.price_id)) };
 }
 
 /** A Stripe customer-portal link: plan changes, card, invoices, cancellation. */
@@ -657,8 +657,8 @@ export async function createPlan(actor: string, body: Record<string, unknown>) {
   catch (e) { throw e instanceof PlanConfigError ? Object.assign(new AdminError(e.message, 400), { problems: e.problems }) : e; }
   const r = await billing.createPlanFromConfig(cfg, body.dry_run === true);
   if (r.dry_run) return r;
-  log(actor, "billing.plan_create", null, { price: r.price_id, usage_price: r.usage_price_id, lookup_key: r.lookup_key, base_fee_usd: cfg.base_fee_usd, interval: cfg.interval,
-    monthly_budget_usd: cfg.monthly_budget_usd, usage: cfg.usage ? { meter: cfg.usage.meter, included_usd: cfg.usage.included_usd, tiers: cfg.usage.tiers.length } : null,
+  log(actor, "billing.plan_create", null, { price: r.price_id, usage_prices: r.usage_price_ids, lookup_key: r.lookup_key, base_fee_usd: cfg.base_fee_usd, interval: cfg.interval,
+    monthly_budget_usd: cfg.monthly_budget_usd, usage: cfg.usage.map((u) => ({ metric: u.metric, meter: u.meter, included: u.included, tiers: u.tiers.length })),
     experiment: cfg.experiment, weight: cfg.weight, trial_days: cfg.trial_days });
   return { ...r, amount: Math.round(cfg.base_fee_usd * 100), interval: cfg.interval, monthly_budget_usd: cfg.monthly_budget_usd, weight: cfg.weight, trial_days: cfg.trial_days, description: cfg.description };
 }

@@ -28,10 +28,8 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 
 interface Sub { status: string; plan: string | null; renews_at: string | null; cancel_at_period_end: boolean; trial_end: string | null }
 interface Plan { price_id: string; name: string; amount: number | null; currency: string; interval: string | null; monthly_budget_usd: number | null; trial_days?: number | null; description?: string | null;
-  usage?: { included_usd: number; tiers: { up_to_usd: number | null; markup: number }[] } | null }
-/** Usage pricing in words: what model spend costs on the plan. */
-const usageWords = (u: NonNullable<Plan['usage']>) =>
-  `${u.included_usd ? `${usd(u.included_usd)} of model spend included, then ` : 'Model spend '}billed at ${u.tiers.map((t) => `${t.markup}× cost${t.up_to_usd == null ? '' : ` up to ${usd(t.up_to_usd)}`}`).join(', then ')}`;
+  /** Usage pricing, one line per metric (model spend, agent sessions, simulations, sandbox hours), in words. */
+  usage?: { metric: string; summary: string }[] }
 interface Billing { enabled: boolean; customer: boolean; subscription: Sub | null; budget_usd: number; budget_source?: 'override' | 'plan' | 'default'; prepaid_allowed?: boolean; plans: Plan[]; can_manage: boolean
   contributions?: Contributions }
 /** Credits for personas and tasks Octillion accepted into its library: from Stripe's balance transactions, plus accepted ones Stripe hasn't taken yet. */
@@ -173,10 +171,10 @@ function ThisMonth({ b, u, l }: { b: Billing; u: Usage | undefined; l: Limits | 
               <span className='w-32 font-medium'>{p.name}</span>
               <span className='text-muted-foreground flex-1 text-sm leading-snug'>
                 {p.monthly_budget_usd != null ? `Up to ${usd(p.monthly_budget_usd)} of model spend a month` : 'Model spend as you go'}
-                {p.trial_days ? ` · ${p.trial_days}-day free trial` : ''}{p.usage ? <span className='block'>{usageWords(p.usage)}</span> : null}
+                {p.trial_days ? ` · ${p.trial_days}-day free trial` : ''}{p.usage?.map((u) => <span key={u.metric} className='block'>{u.summary}</span>)}
                 {p.description ? <span className='block'>{p.description}</span> : null}
               </span>
-              <span className='tabular-nums'>{p.amount == null && p.usage ? 'Usage' : money(p.amount, p.currency)}{p.interval && <span className='text-muted-foreground text-sm'> / {p.interval}</span>}{p.amount != null && p.usage ? <span className='text-muted-foreground text-sm'> + usage</span> : null}</span>
+              <span className='tabular-nums'>{p.amount == null && p.usage?.length ? 'Usage' : money(p.amount, p.currency)}{p.interval && <span className='text-muted-foreground text-sm'> / {p.interval}</span>}{p.amount != null && p.usage?.length ? <span className='text-muted-foreground text-sm'> + usage</span> : null}</span>
               {b.can_manage && <Button size='sm' disabled={busy !== null} onClick={() => go('/billing/checkout', { price_id: p.price_id }, p.price_id)}>Choose</Button>}
             </li>
           ))}

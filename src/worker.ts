@@ -1,7 +1,7 @@
 import { open as openText, openJson } from "./orgcrypto.js";
 import { getDb } from "./db.js";
 import { orgEvent } from "./telemetry.js";
-import { reportSessionSpend } from "./billing.js";
+import { reportSessionSpend, reportSimulationUsage } from "./billing.js";
 import { checkBudgetLater } from "./email.js";
 import { normalize, transcripts, type RawEvent, type SessionRef, type StoredEvent } from "./transcripts.js";
 import { scoreTranscript, developerNamedTools, untrackedInstalls, type Tool } from "./scoring.js";
@@ -318,6 +318,7 @@ export async function finishSimulationIfDone(simulationId: string, opts: { exten
     [simulationId],
   );
   if (done?.first) void orgEvent(done.org_id, done.status === "cancelled" ? "simulation_cancelled" : "simulation_completed", { simulation_id: simulationId });
+  if (done?.first && done.status === "completed") reportSimulationUsage(simulationId); // usage-based billing: 1 per completed run
 }
 
 /** Time out sessions whose worker went quiet for longer than the lease. */

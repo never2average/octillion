@@ -4646,76 +4646,103 @@ try {
       console.log("✓ pricing experiments: variants as Stripe price metadata, ~50/50 and weighted split, one sticky variant per account, tagged checkout + trial, exposure/checkout/conversion/MRR read back, control, leave");
     }
 
-    // ---------- A plan as one JSON config (src/plan-config.ts): base fee + usage on the model-spend meter, tiers ----------
+    // ---------- A plan as one JSON config (src/plan-config.ts): base fee + usage per metric, each on its own meter ----------
     {
       const B = await import("../src/billing.js");
-      const cfgName = `Usage team ${stamp}`;
-      const cfg = { name: cfgName, description: "Base plus model spend", interval: "month", base_fee_usd: 250, trial_days: 7, monthly_budget_usd: 2000,
-        usage: { included_usd: 100, tiers: [{ up_to_usd: 1000, markup: 1.3 }, { up_to_usd: null, markup: 1.15 }] }, metadata: { owner: "growth" } };
+      const cfgName = `Growth ${stamp}`;
+      const cfg = { name: cfgName, description: "For product teams tracking their pick rate", interval: "month", base_fee_usd: 499, trial_days: 7, monthly_budget_usd: 3000,
+        usage: [
+          { metric: "model_spend", included_usd: 150, tiers: [{ up_to_usd: 2000, markup: 1.3 }, { up_to_usd: null, markup: 1.15 }] },
+          { metric: "agent_sessions", included: 500, unit_price_usd: 0.08 },
+          { metric: "simulations", included: 20, tiers: [{ up_to: 100, unit_price_usd: 4 }, { up_to: null, unit_price_usd: 3 }] },
+          { metric: "sandbox_hours", included_hours: 50, unit_price_usd: 0.6 },
+        ], metadata: { owner: "growth" } };
       // Every problem at once, by path.
-      const badCfg = await adm("POST", "/plans", { config: { name: "x", base_fee_usd: -1, usage: { tiers: [{ up_to_usd: null, markup: 0 }, { up_to_usd: 5, markup: 1 }] }, color: "red", metadata: { octillion_x: "1" } } });
+      const badCfg = await adm("POST", "/plans", { config: { name: "x", base_fee_usd: -1, color: "red", metadata: { octillion_x: "1" },
+        usage: [{ metric: "model_spend", tiers: [{ up_to_usd: null, markup: 0 }, { up_to_usd: 5, markup: 1 }] }, { metric: "seats", unit_price_usd: 5 },
+                { metric: "agent_sessions", included: 1.5, unit_price_usd: 0.1 }, { metric: "agent_sessions", unit_price_usd: 0.1 }] } });
       assert.equal(badCfg.status, 400);
       const probs: string[] = (await badCfg.json()).problems;
-      for (const want of ["name:", "base_fee_usd:", "usage.tiers[0].markup", "usage.tiers[0].up_to_usd", "usage.tiers[1].up_to_usd", "color: unknown field", "metadata.octillion_x: reserved", "monthly_budget_usd: required with usage"])
+      for (const want of ["name:", "base_fee_usd:", "usage[0].tiers[0].up_to_usd", "usage[0].tiers[1].up_to_usd", "usage[0]: a model-spend markup", "usage[1].metric: one of",
+                          "usage[2].included: must be a whole number", "usage[3].metric: agent_sessions is listed twice", "color: unknown field", "metadata.octillion_x: reserved", "monthly_budget_usd: required with usage"])
         assert.ok(probs.some((p) => p.startsWith(want)), `problem listed: ${want} (${probs.join(" | ")})`);
       assert.equal((await adm("POST", "/plans", { config: "{not json" })).status, 400, "not JSON");
-      // Dry run: what would be made, nothing sent.
+      // Dry run: what would be made, a line each, nothing sent.
       const nProducts = mock.state.products.length, nPrices = mock.state.prices.length;
       const dry = await json(adm("POST", "/plans", { config: cfg, dry_run: true }));
-      assert.deepEqual(dry.stripe.map((o: any) => o.create), ["billing.meter", "product", "price", "price"], "a meter (none yet), the product, the base and usage prices");
-      assert.deepEqual(dry.stripe[3].body.tiers, [{ up_to: 10000, unit_amount_decimal: "0" }, { up_to: 100000, unit_amount_decimal: "1.3" }, { up_to: "inf", unit_amount_decimal: "1.15" }],
-        "included spend is a free first tier; bounds and prices are in cents of model spend");
+      assert.deepEqual(dry.stripe.map((o: any) => o.create), ["billing.meter", "billing.meter", "billing.meter", "billing.meter", "product", "price", "price", "price", "price", "price"],
+        "a meter per metric (none yet), the product, the base price and a usage price per metric");
+      const tiersOf = (m: string) => dry.stripe.find((o: any) => o.body.metadata?.octillion_metric === m).body.tiers;
+      assert.deepEqual(tiersOf("model_spend"), [{ up_to: 15000, unit_amount_decimal: "0" }, { up_to: 200000, unit_amount_decimal: "1.3" }, { up_to: "inf", unit_amount_decimal: "1.15" }], "model spend: cents of spend, markup per cent");
+      assert.deepEqual(tiersOf("agent_sessions"), [{ up_to: 500, unit_amount_decimal: "0" }, { up_to: "inf", unit_amount_decimal: "8" }], "sessions: 8 cents each over 500");
+      assert.deepEqual(tiersOf("simulations"), [{ up_to: 20, unit_amount_decimal: "0" }, { up_to: 100, unit_amount_decimal: "400" }, { up_to: "inf", unit_amount_decimal: "300" }]);
+      assert.deepEqual(tiersOf("sandbox_hours"), [{ up_to: 3000, unit_amount_decimal: "0" }, { up_to: "inf", unit_amount_decimal: "1" }], "sandbox: minutes, $0.60/h = 1 cent a minute");
+      assert.ok(dry.lines.length === 10 && dry.lines.some((l: string) => /Simulations: 20 included, then \$4 per run up to 100, then \$3 per run/.test(l)), `lines: ${dry.lines.join(" | ")}`);
       assert.deepEqual([mock.state.products.length, mock.state.prices.length, mock.state.meters.length], [nProducts, nPrices, 0], "a dry run creates nothing");
-      // Create: meter, product, base price (licensed) and usage price (metered, graduated, on the meter).
+      // Create: four meters, the product, the base price and four metered prices.
       const made = await json(adm("POST", "/plans", { config: cfg }));
-      assert.equal(mock.state.meters.length, 1);
-      const meter = mock.state.meters[0];
-      assert.deepEqual([meter.event_name, meter.default_aggregation?.formula, meter.customer_mapping?.event_payload_key, meter.value_settings?.event_payload_key],
-        ["octillion_model_spend", "sum", "stripe_customer_id", "value"], "the meter sums reportSessionSpend's value per customer");
-      const base = mock.state.prices.find((p: any) => p.id === made.price_id), usage = mock.state.prices.find((p: any) => p.id === made.usage_price_id);
-      assert.deepEqual([base.unit_amount, base.recurring.usage_type, base.metadata.monthly_budget_usd, base.metadata.octillion_trial_days], [25000, "licensed", "2000", "7"]);
-      assert.deepEqual([usage.lookup_key, usage.recurring.usage_type, usage.recurring.meter, usage.billing_scheme, usage.tiers_mode, usage.metadata.octillion_plan],
-        [`${made.lookup_key}__usage`, "metered", meter.id, "tiered", "graduated", made.lookup_key]);
-      assert.equal(mock.state.products.find((p: any) => p.name === cfgName).metadata.owner, "growth", "extra metadata on the product");
-      // Listed as one plan (the usage price is not a plan of its own), with its usage and its config back as JSON.
+      assert.deepEqual(mock.state.meters.map((m: any) => m.event_name).sort(), ["octillion_agent_sessions", "octillion_model_spend", "octillion_sandbox_minutes", "octillion_simulations"]);
+      assert.ok(mock.state.meters.every((m: any) => m.default_aggregation?.formula === "sum" && m.customer_mapping?.event_payload_key === "stripe_customer_id" && m.value_settings?.event_payload_key === "value"));
+      const base = mock.state.prices.find((p: any) => p.id === made.price_id);
+      assert.deepEqual([base.unit_amount, base.recurring.usage_type, base.metadata.monthly_budget_usd, base.metadata.octillion_trial_days], [49900, "licensed", "3000", "7"]);
+      const usagePrices = made.usage_price_ids.map((id: string) => mock.state.prices.find((p: any) => p.id === id));
+      assert.deepEqual(usagePrices.map((p: any) => p.lookup_key), ["usage", "agent_sessions", "simulations", "sandbox_hours"].map((x) => `${made.lookup_key}__${x}`));
+      assert.ok(usagePrices.every((p: any) => p.recurring.usage_type === "metered" && p.billing_scheme === "tiered" && p.tiers_mode === "graduated" && p.metadata.octillion_plan === made.lookup_key));
+      assert.equal(mock.state.products.find((p: any) => p.name === cfgName).tax_code, "txcd_10103001", "the product's tax code");
+      // Listed as one plan, with each component in words and the config back as JSON.
       B.invalidatePlans();
-      const listed = (await B.listPlans()).filter((p) => p.name === cfgName || p.lookup_key.startsWith(made.lookup_key));
-      assert.equal(listed.length, 1, "one plan, not two");
-      assert.deepEqual(listed[0].usage, { price_id: usage.id, meter: "octillion_model_spend", included_usd: 100, tiers: [{ up_to_usd: 1000, markup: 1.3 }, { up_to_usd: null, markup: 1.15 }] });
+      const listed = (await B.listPlans()).filter((p) => p.lookup_key.startsWith(made.lookup_key));
+      assert.equal(listed.length, 1, "one plan, not five");
+      assert.deepEqual(listed[0].usage.map((u) => u.summary), ["Model spend: $150 included, then 1.3× cost up to $2,000, then 1.15× cost", "Agent sessions: 500 included, then $0.08 per session",
+        "Simulations: 20 included, then $4 per run up to 100, then $3 per run", "Sandbox hours: 50 h included, then $0.60 per hour"]);
       const { lookup_key: lk, ...back } = listed[0].config as any;
-      assert.deepEqual({ ...back, usage: { ...back.usage, meter: undefined } }, { ...cfg, usage: { ...cfg.usage, meter: undefined } }, "Copy as JSON gives the config back");
+      assert.deepEqual(back, cfg, "Copy as JSON gives the config back");
       assert.equal(lk, made.lookup_key);
-      // Same lookup key again: refused, nothing new.
-      assert.equal((await adm("POST", "/plans", { config: cfg })).status, 409);
-      // Checkout subscribes to both: the base fee (quantity 1) and the metered price (no quantity).
+      assert.equal((await adm("POST", "/plans", { config: cfg })).status, 409, "same lookup key again: refused");
+      // Checkout subscribes to all five: the base fee (quantity 1) and each metered price (no quantity).
       await json(adm("POST", `/orgs/${slugW}/billing/checkout`, { price_id: made.price_id }));
       const cs = mock.state.checkouts.at(-1);
-      assert.deepEqual(cs.line_items.map((li: any) => [li.price, li.quantity ?? null]), [[made.price_id, "1"], [usage.id, null]], "both prices in one checkout");
+      assert.deepEqual(cs.line_items.map((li: any) => [li.price, li.quantity ?? null]), [[made.price_id, "1"], ...made.usage_price_ids.map((id: string) => [id, null])], "every price in one checkout");
       assert.equal(Number(cs.subscription_data.trial_period_days), 7);
-      // A usage-only plan: the metered price is the plan (its lookup key), on the same meter (not made twice).
-      const only = await json(adm("POST", "/plans", { config: { name: `Pay as you go ${stamp}`, monthly_budget_usd: 500, usage: { markup: 1.5 } } }));
-      assert.equal(mock.state.meters.length, 1, "the existing meter is reused");
-      assert.equal(only.usage_price_id, only.price_id);
+      // The customer's Billing page lists the components in words.
+      await db.query("UPDATE organizations SET prepaid_allowed = true WHERE id = $1", [rowW.id]);
+      const shownPlan = (await json(appCall(ownerC, "GET", "/billing"))).plans.find((p: any) => p.price_id === made.price_id);
+      assert.deepEqual(shownPlan?.usage?.map((u: any) => u.metric), ["model_spend", "agent_sessions", "simulations", "sandbox_hours"], "Billing shows each usage component");
+      // A usage-only plan: its first component's price is the plan; one existing meter is reused.
+      const only = await json(adm("POST", "/plans", { config: { name: `Starter ${stamp}`, monthly_budget_usd: 500, usage: [{ metric: "agent_sessions", unit_price_usd: 0.12 }, { metric: "model_spend", markup: 1.5 }] } }));
+      assert.equal(mock.state.meters.length, 4, "existing meters are reused");
+      assert.deepEqual([only.usage[0].metric, only.usage_price_ids[0]], ["agent_sessions", only.price_id]);
+      B.invalidatePlans();
+      assert.deepEqual((await B.listPlans()).find((p) => p.price_id === only.price_id)?.usage.map((u) => u.metric), ["model_spend", "agent_sessions"], "both components listed, the plan's own price included");
       await json(adm("POST", `/orgs/${slugW}/billing/checkout`, { price_id: only.price_id }));
-      assert.deepEqual(mock.state.checkouts.at(-1).line_items.map((li: any) => [li.price, li.quantity ?? null]), [[only.price_id, null]], "usage only: one metered item");
-      // Archive takes the usage price with it.
+      assert.deepEqual(mock.state.checkouts.at(-1).line_items.map((li: any) => [li.price, li.quantity ?? null]).sort(), only.usage_price_ids.map((id: string) => [id, null]).sort(), "usage only: metered items only");
+      // Archive takes every usage price with it.
       await json(adm("POST", `/plans/${made.price_id}/archive`));
-      assert.deepEqual([base.active, usage.active], [false, false], "both prices archived");
+      assert.ok([base, ...usagePrices].every((p: any) => p.active === false), "all five prices archived");
       await json(adm("POST", `/plans/${only.price_id}/archive`));
-      // Meter events go out without STRIPE_SPEND_METER once the meter exists.
+      // Meter events: a finished session reports model spend, 1 session (completed) and sandbox minutes; a completed run, 1 run.
       const meterBefore = process.env.STRIPE_SPEND_METER; delete process.env.STRIPE_SPEND_METER;
-      const [sx] = await db.query<{ id: string; cost_usd: number | null }>("SELECT id, cost_usd FROM agent_sessions WHERE org_id = $1 LIMIT 1", [a.org.orgId]);
+      const [sx] = await db.query<{ id: string; cost_usd: number | null; status: string; started_at: Date | null; ended_at: Date | null; simulation_id: string }>(
+        "SELECT id, cost_usd, status, started_at, ended_at, simulation_id FROM agent_sessions WHERE org_id = $1 LIMIT 1", [a.org.orgId]);
       const [ox] = await db.query<{ stripe_customer_id: string | null }>("SELECT stripe_customer_id FROM organizations WHERE id = $1", [a.org.orgId]);
       await db.query("UPDATE organizations SET stripe_customer_id = $2 WHERE id = $1", [a.org.orgId, `cus_meter_${stamp}`]);
-      await db.query("UPDATE agent_sessions SET cost_usd = 2.5 WHERE id = $1", [sx.id]);
+      await db.query("UPDATE agent_sessions SET cost_usd = 2.5, status = 'completed', started_at = now() - interval '90 minutes 10 seconds', ended_at = now() WHERE id = $1", [sx.id]);
       B.reportSessionSpend(sx.id); await settle();
-      assert.ok(mock.state.meterEvents.some((e: any) => e.identifier === sx.id && e.event_name === "octillion_model_spend" && e.payload.value === "250"), "reported to the usage meter");
+      const ev = (id: string) => mock.state.meterEvents.find((e: any) => e.identifier === id);
+      assert.deepEqual([ev(sx.id)?.event_name, ev(sx.id)?.payload.value], ["octillion_model_spend", "250"], "model spend in cents");
+      assert.deepEqual([ev(`${sx.id}:session`)?.event_name, ev(`${sx.id}:session`)?.payload.value], ["octillion_agent_sessions", "1"], "one agent session");
+      assert.deepEqual([ev(`${sx.id}:sandbox`)?.event_name, ev(`${sx.id}:sandbox`)?.payload.value], ["octillion_sandbox_minutes", "91"], "sandbox minutes, rounded up");
+      const [simRow] = await db.query<{ status: string }>("SELECT status FROM simulations WHERE id = $1", [sx.simulation_id]);
+      await db.query("UPDATE simulations SET status = 'completed' WHERE id = $1", [sx.simulation_id]);
+      B.reportSimulationUsage(sx.simulation_id); await settle();
+      assert.deepEqual([ev(`${sx.simulation_id}:run`)?.event_name, ev(`${sx.simulation_id}:run`)?.payload.value], ["octillion_simulations", "1"], "one completed run");
       // Put things back for the metering check further on (it uses the same session).
-      mock.state.meterEvents.splice(0, mock.state.meterEvents.length, ...mock.state.meterEvents.filter((e: any) => e.identifier !== sx.id));
+      mock.state.meterEvents.splice(0, mock.state.meterEvents.length, ...mock.state.meterEvents.filter((e: any) => !String(e.identifier).startsWith(sx.id) && !String(e.identifier).startsWith(sx.simulation_id)));
       await db.query("UPDATE organizations SET stripe_customer_id = $2 WHERE id = $1", [a.org.orgId, ox.stripe_customer_id]);
-      await db.query("UPDATE agent_sessions SET cost_usd = $2 WHERE id = $1", [sx.id, sx.cost_usd]);
+      await db.query("UPDATE agent_sessions SET cost_usd = $2, status = $3, started_at = $4, ended_at = $5 WHERE id = $1", [sx.id, sx.cost_usd, sx.status, sx.started_at, sx.ended_at]);
+      await db.query("UPDATE simulations SET status = $2 WHERE id = $1", [sx.simulation_id, simRow.status]);
       if (meterBefore != null) process.env.STRIPE_SPEND_METER = meterBefore;
-      console.log("✓ plan JSON config: problems by path, dry run, meter + product + base + graduated usage price, one plan listed, config round-trip, two-item checkout, usage-only, archive both, meter events");
+      console.log("✓ plan JSON config: usage per metric (model spend, agent sessions, simulations, sandbox hours), problems by path, dry run lines, a meter + graduated price each, one plan listed, config round-trip, all prices in checkout and Billing, usage-only, archive all, a meter event per metric");
     }
 
     // Usage metering: a finished session's cost goes to the Stripe meter once.

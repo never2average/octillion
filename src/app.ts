@@ -312,7 +312,7 @@ async function billingView(s: Session) {
     prepaid_allowed: Boolean(f.prepaid_allowed), month_spend_usd: await orgMonthSpendUsd(s.org),
     // Plans are invite-only; in a pricing experiment the account sees only its own variant (src/experiments.ts).
     plans: billing.stripeEnabled() && f.prepaid_allowed ? (await experiments.offeredPlans(s.org, await billing.listPlans()).catch(() => [] as billing.Plan[])).map((p) => ({ price_id: p.price_id, name: p.name, amount: p.amount, currency: p.currency, interval: p.interval, monthly_budget_usd: p.monthly_budget_usd, trial_days: p.trial_days, description: p.description,
-      usage: p.usage ? { included_usd: p.usage.included_usd, tiers: p.usage.tiers } : null })) : [],
+      usage: p.usage.map((u) => ({ metric: u.metric, summary: u.summary })) })) : [],
   };
 }
 
