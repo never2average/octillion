@@ -357,7 +357,6 @@ function ComputePage() {
       <div className='flex min-w-0 flex-col gap-3'>
         <UrlTabs tabs={TABS} tab={tab} base='/admin/compute' right={
           <div className='flex flex-wrap items-center justify-end gap-x-4 gap-y-2'>
-            {data && <VerdictLine verdict={data.verdict} />}
             <div className='flex flex-wrap items-center gap-2'>
               {data && <Freshness s={data} />}
               {paused && <Button variant='outline' size='sm' onClick={() => setResumed(true)} title={editing ? 'Refresh is paused while a setting has an unsaved edit' : 'Refresh is paused while a record is open'}><Icons.clock /> Paused · Resume</Button>}
@@ -441,20 +440,6 @@ function Freshness({ s }: { s: Summary }) {
   return <span id='tick' className={cn('text-muted-foreground text-xs whitespace-nowrap tabular-nums', tone && LEVEL[tone].text)} title={title}>{text}</span>;
 }
 
-/** The worst true rule, on the tabs row: a coloured dot and its line (a link to the records behind it); the rest on hover. */
-function VerdictLine({ verdict }: { verdict: Verdict[] }) {
-  // Healthy needs no words: the line shows only when something is amber or red.
-  const [first, ...rest] = verdict.filter((v) => v.level !== 'green');
-  if (!first) return null;
-  const dot = first.level === 'red' ? 'bg-destructive' : first.level === 'amber' ? 'bg-amber-500' : 'bg-emerald-500';
-  return (
-    <span role='status' className={cn('flex min-w-0 items-center gap-2 text-sm', LEVEL[first.level].text)} title={rest.map((v) => v.text).join('\n') || undefined}>
-      <span aria-hidden className={cn('size-2 shrink-0 rounded-full', dot)} />
-      <span className='truncate'>{first.href ? <SectionLink href={first.href} className='hover:underline'>{first.text}</SectionLink> : first.text}</span>
-      {rest.length > 0 && <span className='text-muted-foreground shrink-0 text-xs'>+{rest.length} more</span>}
-    </span>
-  );
-}
 
 type Card = { label: ReactNode; value: ReactNode; spark?: number[] };
 /** One row of the tab's four headline numbers, as on Health, each with its last 24 hours (or week) as a sparkline. */

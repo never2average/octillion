@@ -191,7 +191,7 @@ const saw = (t: Tick) => [
   t.queued != null && `queued ${t.queued}`, t.running && `running ${t.running}`, t.research && `research ${t.research}`, t.unclaimable && `can't run ${t.unclaimable}`
 ].filter(Boolean).join(' · ') || (t.queued == null ? '—' : 'nothing queued');
 const wanted = (t: Tick) => (t.desired == null && t.cap == null && t.active == null ? '—'
-  : `${t.desired ?? '—'} → ${t.cap ?? '—'} → ${t.active ?? '—'}${t.free != null ? ` · ${t.free} free` : ''}`);
+  : `${t.desired ?? '—'} → ${t.cap ?? '—'} → ${t.active ?? '—'}`);
 const launchName = (l: Launched) => l.orchestrator_id ?? (l.row ? `row ${l.row}` : l.label ?? 'an orchestrator');
 const reapName = (r: Reaped) => r.orchestrator_id ?? r.sandbox_id;
 const did = (t: Tick) => [
@@ -217,7 +217,8 @@ export function ComputeDecisions({ runtime, stats }: { runtime: 'vm' | 'vercel' 
       <span className='flex items-center gap-1.5 whitespace-nowrap'><When d={t.at} />{!t.acted && <Chip title='A minute sample: nothing changed on this tick'>sample</Chip>}</span>
     ) },
     { key: 'saw', label: 'Saw', type: 'text', value: saw, render: (t) => <span className='text-xs whitespace-nowrap'>{saw(t)}</span> },
-    { key: 'wanted', label: 'Wanted → cap → active · free', type: 'text', value: wanted, render: (t) => <span className='text-xs whitespace-nowrap tabular-nums'>{wanted(t)}</span> },
+    { key: 'wanted', label: 'Wanted → cap → active', type: 'text', value: wanted, render: (t) => <span className='text-xs whitespace-nowrap tabular-nums'>{wanted(t)}</span> },
+    { key: 'free', label: 'Free sandboxes', className: 'text-right', type: 'number', value: (t) => t.free, render: (t) => <span className='tabular-nums'>{t.free ?? <span className='text-muted-foreground'>—</span>}</span> },
     { key: 'did', label: 'Did', className: 'max-w-96', type: 'text', value: did, render: (t) => (
       t.launched.length || t.reaped.length ? <span className='line-clamp-2 text-xs' title={did(t)}>{did(t)}</span> : <span className='text-muted-foreground'>—</span>
     ) },
