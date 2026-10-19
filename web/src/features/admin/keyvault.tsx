@@ -55,22 +55,17 @@ export function AdminKeyVault() {
     { key: 'use', label: 'How it is used', hidden: true, type: 'select', value: (p) => (p.mode === 'gateway' ? 'Agents call it through the gateway' : 'Given to orchestrators'),
       render: (p) => <span className='text-muted-foreground'>{p.mode === 'gateway' ? 'Agents call it through the gateway' : 'Given to orchestrators'}{p.backend !== 'direct' && ` · ${p.backend}`}</span> },
     { key: 'keys', label: 'Keys', type: 'number', value: (p) => keysOf(p).length, render: (p) => {
-      const mine = keysOf(p), env = p.env_set ?? [];
+      const mine = keysOf(p);
       return (
         <span className='flex flex-col gap-1'>
           {!mine.length && <span className='text-amber-700 dark:text-amber-400'>no key</span>}
           {mine.map((c) => (
             <span key={c.id} className={c.enabled ? undefined : 'text-muted-foreground line-through'}>
               {c.client_email
-                ? <><Mono>{c.client_email}</Mono> <span className='text-muted-foreground'>{c.project_id ? `project ${c.project_id} · ` : ''}{c.label} · {c.uses} uses</span></>
+                ? <><span className='font-mono text-xs break-all'>{c.client_email}</span> <span className='text-muted-foreground'>{c.project_id ? `project ${c.project_id} · ` : ''}{c.label} · {c.uses} uses</span></>
                 : <><Mono>{c.hint}</Mono> <span className='text-muted-foreground'>{c.label} · {c.uses} uses</span></>}
             </span>
           ))}
-          {env.length > 0 && (
-            <span className='text-muted-foreground text-xs' title={`Nothing reads ${env.join(', ')} any more: the vault key is used.`}>
-              Also set in the server environment — safe to delete there (<Mono>{env.join(', ')}</Mono>)
-            </span>
-          )}
         </span>
       );
     } },
@@ -83,7 +78,7 @@ export function AdminKeyVault() {
       <ErrorBox error={error} />
       {data && !data.unlocked && <Notice>The key vault is locked: set <Mono>OCTILLION_VAULT_KEY</Mono> on the server to add keys.</Notice>}
       <RecordView id='key-vault' rows={data?.providers ?? []} loading={isLoading} rowKey={(p) => p.slug} cols={cols} noun='providers'
-        searchText={(p) => `${p.slug} ${nameOf(p.slug)} ${typeOf(p.slug)} ${keysOf(p).map((c) => `${c.label} ${c.hint} ${c.project_id ?? ''}`).join(' ')} ${(p.env_set ?? []).join(' ')}`}
+        searchText={(p) => `${p.slug} ${nameOf(p.slug)} ${typeOf(p.slug)} ${keysOf(p).map((c) => `${c.label} ${c.hint} ${c.project_id ?? ''}`).join(' ')}`}
         searchPlaceholder='Search providers and keys · encrypted at rest; agents get scoped gateway tokens, never these keys'
         views={[{ id: 'all', label: 'All' }, ...TYPES.slice(0, 4).map((t) => ({ id: t, label: t, match: (p: Provider) => typeOf(p.slug) === t }))]}
         defaultSort={[{ key: 'type', dir: 'asc' }]}
@@ -136,7 +131,7 @@ function AddKey({ providers, initial, onClose }: { providers: Provider[]; initia
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className='sm:max-w-md'>
-        <form onSubmit={submit} className='grid gap-4' autoComplete='off'>
+        <form onSubmit={submit} className='grid min-w-0 gap-4 [&>*]:min-w-0' autoComplete='off'>
           <DialogHeader>
             <DialogTitle>Add a key</DialogTitle>
             <DialogDescription>Encrypted at rest and shown only as a hint once saved.</DialogDescription>
@@ -151,7 +146,7 @@ function AddKey({ providers, initial, onClose }: { providers: Provider[]; initia
           </FormRow>
           <FormRow id='ak-secret' label={vertex ? 'Service-account JSON' : 'Key'}>
             {vertex
-              ? <div className='grid gap-2'>
+              ? <div className='grid min-w-0 gap-2'>
                   {!f.secret ? (
                     <label onDragOver={(e) => { e.preventDefault(); setDrag(true); }} onDragLeave={() => setDrag(false)}
                       onDrop={(e) => { e.preventDefault(); setDrag(false); readFile(e.dataTransfer.files?.[0]); }}
@@ -162,15 +157,15 @@ function AddKey({ providers, initial, onClose }: { providers: Provider[]; initia
                       <input type='file' accept='.json,application/json' className='sr-only' aria-label='Choose the service-account JSON file' onChange={(e) => { readFile(e.target.files?.[0]); e.target.value = ''; }} />
                     </label>
                   ) : (
-                    <div className={cn('flex items-start gap-3 rounded-md border px-3 py-2.5 text-sm', sa && 'error' in sa ? 'border-destructive/40' : 'border-emerald-500/40')}>
+                    <div className={cn('flex min-w-0 items-start gap-3 overflow-hidden rounded-md border px-3 py-2.5 text-sm', sa && 'error' in sa ? 'border-destructive/40' : 'border-emerald-500/40')}>
                       {sa && 'error' in sa ? <Icons.warning className='text-destructive mt-0.5 size-4 shrink-0' /> : <Icons.circleCheck className='mt-0.5 size-4 shrink-0 text-emerald-600' />}
                       <div className='min-w-0 flex-1 space-y-0.5'>
-                        <div className='truncate font-medium'>{file ?? 'Pasted key'}</div>
+                        <div className='truncate font-medium' title={file ?? undefined}>{file ?? 'Pasted key'}</div>
                         {sa && ('error' in sa
                           ? <p className='text-destructive text-xs'>{sa.error}</p>
                           : <p className='text-muted-foreground truncate text-xs'><Mono>{sa.project_id}</Mono> · <Mono>{sa.client_email}</Mono></p>)}
                       </div>
-                      <Button type='button' variant='ghost' size='xs' onClick={() => { setF({ ...f, secret: '' }); setFile(null); setPasting(false); }}>Replace</Button>
+                      <Button type='button' variant='ghost' size='xs' className='shrink-0' onClick={() => { setF({ ...f, secret: '' }); setFile(null); setPasting(false); }}>Replace</Button>
                     </div>
                   )}
                   {!f.secret && (pasting

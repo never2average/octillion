@@ -236,7 +236,7 @@ export const Mono = ({ children }: { children: ReactNode }) => <span className='
 /** One form input per row: its label above, the input, then an optional hint. */
 export function FormRow({ id, label, hint, children }: { id: string; label: ReactNode; hint?: ReactNode; children: ReactNode }) {
   return (
-    <div className='grid gap-1.5'>
+    <div className='grid min-w-0 gap-1.5'>
       <label htmlFor={id} className='text-sm leading-none font-medium'>{label}</label>
       {children}
       {hint && <p className='text-muted-foreground text-xs'>{hint}</p>}
