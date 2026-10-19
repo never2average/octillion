@@ -1,12 +1,12 @@
 'use client';
 // Operations › FinOps (/admin/finops; /admin/spend redirects here; src/revenue.ts, src/spend.ts and src/spend-usage.ts).
-// Four tabs in ?section=: Revenue (the default; GET /spend/revenue, Stripe subscriptions and invoices against metered model
-// spend), Model spend (GET /spend, metered model cost), Compute hours (GET /spend/compute, sandbox time measured from
+// Five tabs in ?section=: Revenue (the default; GET /spend/revenue, Stripe subscriptions and invoices against metered model
+// spend, by account), Plans (the same read by Stripe price: New plan, Archive plan), Model spend (GET /spend, metered model cost), Compute hours (GET /spend/compute, sandbox time measured from
 // timestamps) and Data & storage (GET /spend/storage, sizes and rows). Measured figures only, never the boat price-table
 // estimate; prepaid allowances are spending caps, never revenue. Each tab is one row of four headline numbers with a
-// daily sparkline and one table, grouped by account or by provider (Revenue: by plan). The range (UTC days) and the
-// grouping are page state, so switching tabs keeps them. Read only, except plans: on Revenue by plan an Owner adds a
-// plan in Stripe (New plan, on the Revenue tab in either grouping: POST /plans) or archives one (row ⋯ › Archive plan: POST /plans/:price_id/archive).
+// daily sparkline and one table, grouped by account or by provider (Revenue and Plans: no switch). The range (UTC days) and the
+// grouping are page state, so switching tabs keeps them. Read only, except plans: on Plans an Owner adds a
+// plan in Stripe (New plan: POST /plans) or archives one (row ⋯ › Archive plan: POST /plans/:price_id/archive).
 import { Suspense, useMemo, useState, type ReactNode } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useIsFetching, useQueryClient } from '@tanstack/react-query';
@@ -137,7 +137,7 @@ interface Revenue {
 // ---------------------------------------------------------------- shared bits
 
 const BASE = '/admin/finops';
-const TABS = [['revenue', 'Revenue'], ['spend', 'Model spend'], ['compute', 'Compute hours'], ['storage', 'Data & storage']] as const;
+const TABS = [['revenue', 'Revenue'], ['plans', 'Plans'], ['spend', 'Model spend'], ['compute', 'Compute hours'], ['storage', 'Data & storage']] as const;
 type Tab = (typeof TABS)[number][0];
 /** Older links: the Accounts and Models tabs are Model spend now, Days became Compute hours. */
 const OLD: Record<string, Tab> = { accounts: 'spend', models: 'spend', days: 'compute' };
@@ -179,17 +179,17 @@ function SpendPage() {
   const [range, setRange] = useState<DateRange>(thisMonth);
   const [group, setGroup] = useState<Group>('account');
   const q = rangeQuery(range);
-  const revenue = useAdmin<Revenue>(tab === 'revenue' ? `/spend/revenue?${q}` : null, { keep: true });
+  const revenue = useAdmin<Revenue>(tab === 'revenue' || tab === 'plans' ? `/spend/revenue?${q}` : null, { keep: true });
   const spend = useAdmin<Spend>(tab === 'spend' ? `/spend?${q}` : null, { keep: true });
   const compute = useAdmin<Compute>(tab === 'compute' ? `/spend/compute?${q}` : null, { keep: true });
   const storage = useAdmin<Storage>(tab === 'storage' ? `/spend/storage?${q}` : null, { keep: true });
-  const active = tab === 'revenue' ? revenue : tab === 'spend' ? spend : tab === 'compute' ? compute : storage;
+  const active = tab === 'revenue' || tab === 'plans' ? revenue : tab === 'spend' ? spend : tab === 'compute' ? compute : storage;
   const qc = useQueryClient();
   const fetching = useIsFetching({ queryKey: ['admin'] }) > 0;
   const bar = (
     <div className='flex flex-wrap items-center gap-2'>
       <DateRangePicker value={range} onChange={setRange} />
-      <GroupBy value={group} onChange={setGroup} second={tab === 'revenue' ? 'Plan' : 'Provider'} />
+      {tab !== 'revenue' && tab !== 'plans' && <GroupBy value={group} onChange={setGroup} second='Provider' />}
     </div>
   );
   const unpriced = tab === 'spend' ? spend.data?.totals.unpriced_requests ?? 0 : 0;
@@ -210,7 +210,8 @@ function SpendPage() {
             <Button variant='outline' size='xs' onClick={() => void active.refetch()}>Retry</Button>
           </div>
         )}
-        {tab === 'revenue' && <RevenueTab data={revenue.data} loading={!revenue.data && !revenue.error} bar={bar} group={group} />}
+        {tab === 'revenue' && <RevenueTab data={revenue.data} loading={!revenue.data && !revenue.error} bar={bar} group='account' />}
+        {tab === 'plans' && <RevenueTab data={revenue.data} loading={!revenue.data && !revenue.error} bar={bar} group='provider' />}
         {tab === 'spend' && <SpendTab data={spend.data} loading={!spend.data && !spend.error} bar={bar} group={group} range={range} />}
         {tab === 'compute' && <ComputeTab data={compute.data} loading={!compute.data && !compute.error} bar={bar} group={group} />}
         {tab === 'storage' && <StorageTab data={storage.data} loading={!storage.data && !storage.error} bar={bar} group={group} />}
@@ -219,7 +220,7 @@ function SpendPage() {
   );
 }
 
-/** Group by: one two-option segmented control, the chosen option filled. On Revenue the second option is Plan. */
+/** Group by: one two-option segmented control, the chosen option filled (not on Revenue or Plans). */
 function GroupBy({ value, onChange, second }: { value: Group; onChange: (g: Group) => void; second: string }) {
   return (
     <ButtonGroup aria-label='Group by'>
@@ -318,7 +319,15 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
   const collected = total(got), cost = total(spent);
   const dailyMargin = got.flatMap((c, i) => (c > 0 ? [((c - spent[i]) / c) * 100] : []));
   const ok = Boolean(data?.totals);
-  const cards = (
+  const plans = data?.plans ?? [];
+  const cards = group === 'provider' ? (
+    <StatStrip items={[
+      { label: 'Live plans', value: ok ? plans.filter((p) => p.live).length.toLocaleString() : '—' },
+      { label: 'Active subscriptions', spark: sumAt(plans.map((p) => p.daily_active), len), value: ok ? plans.reduce((n, p) => n + p.active_subscriptions, 0).toLocaleString() : '—' },
+      { label: 'MRR', spark: mrr, value: ok ? cents(mrr[len - 1] ?? 0) : '—' },
+      { label: 'Collected', spark: got, value: ok ? cents(collected) : '—' }
+    ]} />
+  ) : (
     <StatStrip items={[
       { label: 'MRR', spark: mrr, value: ok ? cents(mrr[len - 1] ?? 0) : '—' },
       { label: 'Collected', spark: got, value: ok ? cents(collected) : '—' },
@@ -329,8 +338,7 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
   const stripeEmpty = data && !data.stripe.configured ? 'Stripe is not connected: add its secret key on Key vault › Stripe to see revenue and create plans.'
     : data?.stripe.error ? `Could not read Stripe: ${data.stripe.error}` : null;
   const mixed = (data?.currencies.length ?? 0) > 1 ? <span className={cn('text-sm', AMBER)}>Invoices in {data!.currencies.join(', ').toUpperCase()}: amounts are summed as they are.</span> : null;
-  // New plan sits on the Revenue tab whichever way it is grouped (it was only under Group by › Plan, easy to miss).
-  // Without a Stripe key it still shows, disabled, saying where the key goes.
+  // New plan and Archive plan are on the Plans tab. Without a Stripe key New plan still shows, disabled, saying where the key goes.
   const newPlanBtn = data?.stripe.configured ? <Gate need='plans'><Button onClick={() => setNewPlan(true)}><Icons.add /> New plan</Button></Gate>
     : <span title='Add the Stripe secret key on Key vault › Stripe first' className='inline-flex cursor-not-allowed'><Button disabled><Icons.add /> New plan</Button></span>;
   const newPlanDialog = newPlan && <NewPlanDialog onClose={() => setNewPlan(false)} />;
@@ -403,11 +411,11 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
         : a.renews_at ? <span>Renews {date(a.renews_at)}</span> : NA
     ) }
   ];
-  return (<>
+  return (
     <RecordView id='finops-revenue-accounts' rows={stripeEmpty ? [] : f.rows} loading={loading} rowKey={(a) => a.key} cols={cols} noun='accounts' initialSize={50} compact summary={cards}
       searchText={(a) => `${a.name} ${a.slug ?? ''} ${a.customer ?? ''} ${a.plan ?? ''} ${a.status ?? ''}`} searchPlaceholder='Search accounts, plans'
       filters={<>{bar}{f.controls}{mixed}</>} defaultSort={[{ key: 'collected', dir: 'desc' }]} exportName={exportName('revenue', 'account', data?.range)}
-      primary={newPlanBtn} actions={accountActions(router)} detailTitle={accountTitle}
+      actions={accountActions(router)} detailTitle={accountTitle}
       detail={(a) => (
         <div className='grid gap-6'>
           <PeekSection title='Collected and model spend per day'>
@@ -436,8 +444,7 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
         </div>
       )}
       empty={stripeEmpty ?? (f.filtered ? 'No accounts match.' : 'No revenue or model spend in this range.')} />
-    {newPlanDialog}
-  </>);
+  );
 }
 
 // ---------------------------------------------------------------- Model spend

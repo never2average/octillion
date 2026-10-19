@@ -626,7 +626,7 @@ export async function portalLink(actor: string, slug: string, returnUrl = `${pub
   return { url: await billing.portalUrl(customer, returnUrl) };
 }
 
-// ---------- plans (Stripe prices with an octillion_ lookup key; FinOps › Revenue › New plan) ----------
+// ---------- plans (Stripe prices with an octillion_ lookup key; FinOps › Plans › New plan) ----------
 
 export async function plans() {
   if (!billing.stripeEnabled()) return { configured: false, plans: [] as billing.Plan[] };
