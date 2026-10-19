@@ -683,8 +683,9 @@ export function appRouter() {
     if (can(res, "budget")) {
       // `version` goes back as If-Match on PUT /limits/plan, so a save can't overwrite someone else's change unseen. It is
       // in the body, not an ETag: spend changes under the same version, and a 304 would show stale figures.
-      const [o, last_change] = await Promise.all([limits.page(org), limits.lastChange(org)]);
-      return void res.json({ ...o, last_change, can_manage: true, me: s.user, permissions: perms(res) });
+      // `changed`: who last changed each rule and when (Budget rules' Set by and Last changed), from the history.
+      const [o, changed] = await Promise.all([limits.page(org), limits.ruleChanges(org)]);
+      return void res.json({ ...o, changed, can_manage: true, me: s.user, permissions: perms(res) });
     }
     // A member: their own row and team, and "Your budget" (what is left, the budget they draw on, the rules in plain words).
     res.json({ ...(await limits.memberPage(org, s.user)), permissions: perms(res) });

@@ -19,7 +19,6 @@ import type { Org } from "./auth.js";
 import { orgBudget } from "./billing.js";
 import { getDb, type Queryable } from "./db.js";
 import { settingNumber } from "./settings.js";
-import { daySeries, sparkSpans } from "./insights.js";
 import { accountRefusal, canAccount, type AccountRole } from "./account-roles.js";
 
 /** Why a launch was refused, for /app to show beside the message; validation errors carry no code. */
@@ -285,26 +284,21 @@ export function usageAlert(spent_usd: number, cap: number, now = new Date(), rec
 const AVG_MIN_SESSIONS = 20;
 
 /**
- * The "This month" figures, live: what is running now (spend and runs), spend no person's limit covers (runs launched
- * with a connector key), and the average spend per finished session (for "≈ n sessions" beside the run dollar cap).
+ * The month's figures: the average spend per finished session (a launch's cost estimate) and the spend of the last 7
+ * days (the pace behind the usage banner).
  */
 export async function monthFigures(orgId: number) {
-  const [r] = await (await getDb()).query<{ in_flight: number; unattributed: number; finished: number; avg_usd: number | null; running: number; recent: number; recent_days: number }>(
-    `WITH s AS (SELECT a.status, sim.created_by, a.queued_at,
+  const [r] = await (await getDb()).query<{ finished: number; avg_usd: number | null; recent: number; recent_days: number }>(
+    `WITH s AS (SELECT a.status, a.queued_at,
                        GREATEST(a.cost_usd, coalesce((SELECT sum(g.cost_usd) FROM gateway_usage g WHERE g.session_id = a.id), 0)) AS usd
-                  FROM agent_sessions a LEFT JOIN simulations sim ON sim.id = a.simulation_id
-                 WHERE a.org_id = $1 AND a.queued_at >= ${MONTH})
-     SELECT coalesce(sum(usd) FILTER (WHERE status IN ('queued', 'running')), 0) AS in_flight,
-            coalesce(sum(usd) FILTER (WHERE created_by IS NULL), 0) AS unattributed,
-            count(*) FILTER (WHERE status IN ('completed', 'failed', 'timeout')) AS finished,
+                  FROM agent_sessions a WHERE a.org_id = $1 AND a.queued_at >= ${MONTH})
+     SELECT count(*) FILTER (WHERE status IN ('completed', 'failed', 'timeout')) AS finished,
             avg(usd) FILTER (WHERE status IN ('completed', 'failed', 'timeout')) AS avg_usd,
-            (SELECT count(*) FROM simulations WHERE org_id = $1 AND status IN ('queued', 'running')) AS running,
             coalesce(sum(usd) FILTER (WHERE queued_at >= greatest(${MONTH}, now() - interval '7 days')), 0) AS recent,
             extract(epoch FROM now() - greatest(${MONTH}, now() - interval '7 days')) / 86400 AS recent_days
        FROM s`, [orgId]);
   const finished = Number(r?.finished ?? 0);
-  return { in_flight_usd: cents(Number(r?.in_flight ?? 0)), running_count: Number(r?.running ?? 0), unattributed_spent_usd: cents(Number(r?.unattributed ?? 0)),
-    finished_sessions: finished, avg_session_usd: finished >= AVG_MIN_SESSIONS && r?.avg_usd != null ? cents(Number(r.avg_usd)) : null,
+  return { avg_session_usd: finished >= AVG_MIN_SESSIONS && r?.avg_usd != null ? cents(Number(r.avg_usd)) : null,
     recent: { usd: Number(r?.recent ?? 0), days: Number(r?.recent_days ?? 0) } as Recent };
 }
 
@@ -338,41 +332,17 @@ async function versionOf(q: Queryable, orgId: number) {
   return String(r?.v ?? 0);
 }
 
-/** The account-wide figures beside a picture of the rules (GET /limits and the preview both send them). */
+/** The figures beside a picture of the rules (GET /limits and the preview both send them): the reset, Octillion's session maximum, the banner. */
 function tiles(o: ReturnType<typeof shape>, { figures, budget_error }: PageLive) {
-  const { period_end, projected_usd } = pace(o.account.spent_usd, new Date(), figures.recent);
-  return { spent_live_usd: o.account.spent_usd, in_flight_usd: figures.in_flight_usd, running_count: figures.running_count, projected_usd,
-    left_usd: budget_error ? null : leftOf(o.budget_usd, o.account.spent_usd), period_end, avg_session_usd: figures.avg_session_usd,
-    unattributed_spent_usd: figures.unattributed_spent_usd, server_max_sessions: settingNumber("OCTILLION_MAX_SESSIONS_PER_RUN"), max_run_usd: o.policy.max_run_usd,
+  return { period_end: pace(0).period_end, server_max_sessions: settingNumber("OCTILLION_MAX_SESSIONS_PER_RUN"),
     alert: budget_error ? null : usageAlert(o.account.spent_usd, o.budget_usd, new Date(), figures.recent) };
 }
 
-/**
- * "This month" day by day, for the tiles' sparklines: model spend (by when the session was queued, as the month's
- * spend counts it), simulations launched, and simulations running at some point of the day.
- */
-async function monthDaily(orgId: number) {
-  const { monthDays } = sparkSpans();
-  const rows = await (await getDb()).query<{ k: string; day: string; v: unknown }>(
-    `WITH d AS (SELECT generate_series(${MONTH}, now(), interval '1 day') AS day)
-     SELECT 'spent' AS k, to_char(a.queued_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day,
-            sum(GREATEST(a.cost_usd, coalesce((SELECT sum(g.cost_usd) FROM gateway_usage g WHERE g.session_id = a.id), 0)))::float AS v
-       FROM agent_sessions a WHERE a.org_id = $1 AND a.queued_at >= ${MONTH} GROUP BY 2
-     UNION ALL
-     SELECT 'runs', to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD'), count(*) FROM simulations WHERE org_id = $1 AND created_at >= ${MONTH} GROUP BY 2
-     UNION ALL
-     SELECT 'running', to_char(d.day AT TIME ZONE 'UTC', 'YYYY-MM-DD'), count(s.id) FROM d
-       LEFT JOIN simulations s ON s.org_id = $1 AND s.created_at < d.day + interval '1 day'
-        AND (s.finished_at >= d.day OR (s.finished_at IS NULL AND s.status IN ('queued', 'running')))
-      GROUP BY d.day`, [orgId]);
-  return { days: monthDays, spent: daySeries(monthDays, rows, "spent", true), runs: daySeries(monthDays, rows, "runs"), running: daySeries(monthDays, rows, "running") };
-}
-
-/** GET /limits for an admin: the overview, the month's figures day by day, and the version to send back with a plan. */
+/** GET /limits for an admin: the overview, and the version to send back with a plan. */
 export async function page(org: { orgId: number; slug: string }) {
-  const [saved, lv, version, month_daily] = await Promise.all([load(org.orgId), remember(org.orgId, pageLive(org)), getDb().then((db) => versionOf(db, org.orgId)), monthDaily(org.orgId)]);
+  const [saved, lv, version] = await Promise.all([load(org.orgId), remember(org.orgId, pageLive(org)), getDb().then((db) => versionOf(db, org.orgId))]);
   const o = shape(saved, lv);
-  return { ...o, ...tiles(o, lv), version, month_daily };
+  return { ...o, ...tiles(o, lv), version };
 }
 
 const $usd = (v: number) => `$${v.toFixed(2)}`;
@@ -597,14 +567,36 @@ export async function history(org: { orgId: number; slug: string }, before?: num
   return { entries, next_before: entries.length === PAGE ? entries.at(-1)!.id : null };
 }
 
-/** The header's "Last changed by": the newest entry, else who last saved the policy (before history existed); null: never. */
-export async function lastChange(org: { orgId: number; slug: string }): Promise<{ by_name: string; at: Date; summary: string | null } | null> {
-  const { entries: [e] } = await history(org);
-  if (e) return { by_name: e.by_name, at: e.at, summary: e.summary };
-  const [p] = await (await getDb()).query<{ updated_at: Date | null; updated_by: string | null }>(
-    "SELECT updated_at, updated_by FROM usage_policies WHERE org_id = $1", [org.orgId]);
-  if (!p?.updated_at) return null;
-  return { by_name: byName(new Map(), p.updated_by, null), at: p.updated_at, summary: null };
+/** Who last changed a rule, and when: Budget rules' Set by and Last changed. */
+export interface RuleChange { by_name: string; at: Date }
+
+/**
+ * Who last changed each rule, from the history's before and after: "policy.<field>" for the account's rules,
+ * "team:<id>" for a team's budget or runs at once, "member:<user id>" for a person's own settings. The newest entry
+ * that changed a rule wins; a rule no entry changed is missing (Octillion's default, or set before history existed).
+ */
+export async function ruleChanges(org: { orgId: number; slug: string }): Promise<Record<string, RuleChange>> {
+  const rows = await (await getDb()).query<{ at: Date; actor: string | null; actor_user: string | null; before: any; after: any }>(
+    "SELECT at, actor, actor_user, before, after FROM usage_rule_changes WHERE org_id = $1 ORDER BY id DESC LIMIT 1000", [org.orgId]);
+  const out: Record<string, RuleChange> = {};
+  if (!rows.length) return out;
+  const names = await namesOf(org.slug);
+  const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+  for (const r of rows) {
+    const b = typeof r.before === "string" ? JSON.parse(r.before) : r.before, a = typeof r.after === "string" ? JSON.parse(r.after) : r.after;
+    if (!a || typeof a !== "object") continue;
+    const keys: string[] = [];
+    if (a.policy) for (const k of Object.keys(a.policy)) if (!same(b?.policy?.[k], a.policy[k])) keys.push(`policy.${k}`);
+    if (a.team?.id != null) keys.push(`team:${a.team.id}`);
+    if (Array.isArray(a.teams)) for (const t of a.teams) {
+      const was = Array.isArray(b?.teams) ? b.teams.find((x: { id: number }) => x.id === t.id) : undefined;
+      if (!same(was?.budget_usd, t.budget_usd) || !same(was?.max_concurrent_runs, t.max_concurrent_runs)) keys.push(`team:${t.id}`);
+    }
+    if (typeof a.user_id === "string") keys.push(`member:${a.user_id}`);
+    if (Array.isArray(a.members)) for (const m of a.members) if (typeof m?.user_id === "string") keys.push(`member:${m.user_id}`);
+    for (const k of keys) out[k] ??= { by_name: byName(names, r.actor, r.actor_user), at: r.at };
+  }
+  return out;
 }
 
 // ---------- changes from /app (account admins) ----------

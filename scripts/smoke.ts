@@ -2669,6 +2669,57 @@ try {
         }
       assert.equal((await json(appCall(bill.sess, "GET", "/billing"))).can_manage, true, "a billing manager manages billing");
       assert.equal((await json(appCall(bill.sess, "GET", "/limits"))).can_manage, true, "and Budget rules");
+      // Budget rules' table: each row's Edit saves through these endpoints. Viewers and members are refused; billing
+      // managers and owners get the same validation; each save that changes something writes one history entry.
+      {
+        const h0 = Number((await db.query<any>("SELECT coalesce(max(id), 0) AS n FROM usage_rule_changes WHERE org_id = $1", [rowW.id]))[0].n);
+        const policyWas = (await db.query<any>("SELECT * FROM usage_policies WHERE org_id = $1", [rowW.id]))[0];
+        const memberWas = (await db.query<any>("SELECT * FROM usage_members WHERE org_id = $1 AND user_id = $2", [rowW.id, acc2.user.id]))[0];
+        const rt = await json(appCall(ownerC, "POST", "/limits/teams", { name: `Rules ${stamp}` }));
+        const edits: [string, unknown, unknown][] = [ // [path, a value the rules refuse, a valid value]
+          ["/limits/policy", { max_concurrent_runs: 0 }, { max_concurrent_runs: 3 }],
+          ["/limits/policy", { mode: "custom", default_cap_usd: null }, { reserve_usd: 1 }],
+          ["/limits/policy", { max_sessions_per_run: 1e9 }, { new_members_can_run: false }],
+          [`/limits/teams/${rt.id}`, { budget_usd: -1 }, { budget_usd: 5 }],
+          [`/limits/members/${acc2.user.id}`, { max_concurrent_runs: 0 }, { cap_usd: 7 }],
+        ];
+        for (const [path, bad, good] of edits) {
+          for (const role of ["viewer", "member"]) {
+            const r = await appCall(sess[role], "PUT", path, good);
+            assert.equal(r.status, 403, `${role} may not PUT ${path}`);
+            assert.equal((await r.json()).code, "forbidden");
+          }
+          for (const role of ["billing", "owner"]) {
+            assert.equal((await appCall(sess[role], "PUT", path, bad)).status, 400, `${role} PUT ${path} ${JSON.stringify(bad)}: refused by the rules' validation`);
+            const r = await appCall(sess[role], "PUT", path, good);
+            assert.ok(r.status === 200 || r.status === 204, `${role} may PUT ${path} (${r.status})`);
+          }
+        }
+        // The plan endpoint too: refused below billing, If-Match and field errors checked for billing.
+        const v = (await json(appCall(bill.sess, "GET", "/limits"))).version;
+        for (const role of ["viewer", "member"]) assert.equal((await appCall(sess[role], "PUT", "/limits/plan", { policy: { reserve_usd: 2 } }, { "if-match": v })).status, 403);
+        assert.equal((await appCall(bill.sess, "PUT", "/limits/plan", { policy: { reserve_usd: -2 } }, { "if-match": v })).status, 422);
+        assert.equal((await appCall(bill.sess, "PUT", "/limits/plan", { policy: { reserve_usd: 2 } }, { "if-match": String(Number(v) - 1) })).status, 409);
+        assert.equal((await appCall(bill.sess, "PUT", "/limits/plan", { policy: { reserve_usd: 2 } }, { "if-match": v })).status, 204);
+        // History, server-side: the billing manager's five saves and the plan (the owner's same values add nothing), by them.
+        const logged = await db.query<any>("SELECT actor_user, summary FROM usage_rule_changes WHERE org_id = $1 AND id > $2 ORDER BY id", [rowW.id, h0]);
+        assert.deepEqual(logged.map((x: any) => x.summary.replace(/^.*?: own limit/, "*: own limit")),
+          [`Added team Rules ${stamp} (budget none)`, "Runs at once no limit → 3", "Buffer $0 → $1", "New members can launch: yes → no", `Rules ${stamp} budget none → $5`, "*: own limit none → $7", "Buffer $1 → $2"]);
+        assert.ok(logged.slice(1).every((x: any) => x.actor_user === bill.id), "each entry names who saved it");
+        const ch = (await json(appCall(ownerC, "GET", "/limits"))).changed;
+        for (const k of ["policy.max_concurrent_runs", "policy.reserve_usd", "policy.new_members_can_run", `team:${rt.id}`, `member:${acc2.user.id}`])
+          assert.ok(ch[k]?.by_name.startsWith(`bill+${stamp}`) && /^\d{4}-/.test(ch[k].at), `Set by for ${k}: ${JSON.stringify(ch[k])}`);
+        assert.equal(ch["policy.mode"], undefined, "a rule nobody changed has no Set by");
+        // Put the account back as it was, history included, for the tests below.
+        await db.query("DELETE FROM usage_teams WHERE org_id = $1 AND id = $2", [rowW.id, rt.id]);
+        if (!policyWas) await db.query("DELETE FROM usage_policies WHERE org_id = $1", [rowW.id]);
+        else await db.query(`UPDATE usage_policies SET mode = $2, reserve_usd = $3, default_cap_usd = $4, new_members_can_run = $5, max_concurrent_runs = $6,
+          max_sessions_per_run = $7, max_run_usd = $8, updated_at = $9, updated_by = $10 WHERE org_id = $1`, [rowW.id, policyWas.mode, policyWas.reserve_usd, policyWas.default_cap_usd,
+          policyWas.new_members_can_run, policyWas.max_concurrent_runs, policyWas.max_sessions_per_run, policyWas.max_run_usd, policyWas.updated_at, policyWas.updated_by]);
+        if (memberWas) await db.query("UPDATE usage_members SET cap_usd = $3 WHERE org_id = $1 AND user_id = $2", [rowW.id, acc2.user.id, memberWas.cap_usd]);
+        else await db.query("DELETE FROM usage_members WHERE org_id = $1 AND user_id = $2", [rowW.id, acc2.user.id]);
+        await db.query("DELETE FROM usage_rule_changes WHERE org_id = $1 AND id > $2", [rowW.id, h0]);
+      }
       assert.equal((await json(appCall(bill.sess, "GET", "/team"))).can_manage, false, "but not the team");
       assert.equal((await json(appCall(view.sess, "GET", "/context"))).can_manage, false);
       assert.ok((await json(appCall(ownerC, "GET", "/limits"))).admins.some((a: any) => a.name.startsWith(`bill+${stamp}`)), "billing managers are among the people to ask");
@@ -2891,11 +2942,11 @@ try {
       const ownerT = await token({ user_id: accepted.user.id }), devT = await token({ user_id: acc2.user.id });
       const lim0 = await json(appCall(ownerC, "GET", "/limits"));
       assert.equal(lim0.policy.mode, "pool");
-      // Budget rules' This month tiles: a point per day this month for spend, runs launched and runs running.
-      for (const k of ["spent", "runs", "running"]) assert.equal(lim0.month_daily?.[k]?.length, new Date().getUTCDate(), `limits ${k} has a point per day this month`);
+      // Budget rules is one table now: no This month tiles or their figures.
+      assert.ok(lim0.month_daily === undefined && lim0.spent_live_usd === undefined && lim0.last_change === undefined, "no tiles' figures, no header line");
       assert.equal(lim0.members.length, 2);
       assert.ok(lim0.members.every((m: any) => m.limit_usd === null && m.can_run), "pool: no personal caps");
-      assert.equal(lim0.last_change, null, "never saved: no last change (the page reads \"Using Octillion's default rules\")");
+      assert.deepEqual(lim0.changed, {}, "never saved: no rule has a Set by (the table reads Default)");
       assert.equal((await appCall(devC, "PUT", "/limits/policy", { mode: "even" })).status, 403, "members cannot change limits");
       const devView = await json(appCall(devC, "GET", "/limits"));
       assert.ok(!devView.can_manage && devView.members.length === 1 && devView.members[0].user_id === acc2.user.id, "members see only themselves");
@@ -3113,8 +3164,10 @@ try {
       assert.deepEqual(hist.slice(0, 3).map((e) => e.summary).map((x) => x.replace(/^.*?: team/, "*: team")),
         ["Removed team Temp (budget none; 1 person moved to Everyone else)", "*: team Everyone else → Temp", "Added team Temp (budget none)"]);
       assert.equal(hist.length, n0 + 3, "an unchanged save adds nothing");
-      const latest = (await json(appCall(ownerC, "GET", "/limits"))).last_change;
-      assert.ok(latest.summary === hist[0].summary && latest.by_name === hist[0].by_name && /^\d{4}-/.test(latest.at), "GET /limits: the newest entry");
+      // Set by and Last changed per rule: the newest entry that changed it (here the member saves above).
+      const changed = (await json(appCall(ownerC, "GET", "/limits"))).changed;
+      assert.ok(changed[`member:${acc2.user.id}`].by_name === hist[1].by_name && /^\d{4}-/.test(changed[`member:${acc2.user.id}`].at), `GET /limits: who changed each rule: ${JSON.stringify(changed)}`);
+      assert.ok(changed["policy.reserve_usd"]?.by_name && changed["policy.mode"]?.by_name, "policy fields are keyed by name");
       // Paging: 50 a page, older pages by the id of the oldest entry shown.
       await db.query("INSERT INTO usage_rule_changes (org_id, summary) SELECT $1, 'filler ' || g FROM generate_series(1, 60) g", [rowW.id]);
       const p1 = await json(appCall(ownerC, "GET", "/limits/history"));
@@ -3133,9 +3186,7 @@ try {
       await appCall(ownerC, "PUT", `/limits/members/${accepted.user.id}`, { cap_usd: 40 });
       const pg0 = await json(appCall(ownerC, "GET", "/limits"));
       assert.ok(/^\d+$/.test(pg0.version) && pg0.server_max_sessions >= 1 && /^\d{4}-\d{2}-01T00:00:00\.000Z$/.test(pg0.period_end), "GET: version, Octillion's session maximum, the reset");
-      assert.ok(pg0.spent_live_usd === pg0.account.spent_usd && typeof pg0.in_flight_usd === "number" && typeof pg0.running_count === "number" &&
-        typeof pg0.unattributed_spent_usd === "number" && pg0.max_run_usd === null && (pg0.avg_session_usd === null || pg0.avg_session_usd > 0), "GET: the This month figures");
-      assert.ok(pg0.left_usd === Math.max(0, Math.round((budget - pg0.spent_live_usd) * 100) / 100) && (pg0.projected_usd === null || pg0.projected_usd >= 0));
+      assert.ok(pg0.policy.max_run_usd === null && pg0.account.left_usd >= 0, "GET: the rules and the account's figures");
       const devLim = await json(appCall(devC, "GET", "/limits"));
       assert.ok(devLim.version === undefined && devLim.period_end === pg0.period_end && devLim.policy.max_run_usd === null, "members get the reset, not the version");
       assert.equal((await appCall(devC, "POST", "/limits/preview", {})).status, 403, "members cannot preview");
@@ -3144,7 +3195,7 @@ try {
       let pv = await json(appCall(ownerC, "POST", "/limits/preview", { policy: { reserve_usd: budget } }));
       assert.ok(pv.policy.reserve_usd === budget && pv.buffer_usd === budget && pv.account.blocked === "buffer", "the draft's policy, through allocate()");
       assert.ok(pv.changes.length === 2 && pv.changes.every((c: any) => c.blocked_now && c.blocked) && pv.summary[0] === `Buffer $0 → $${budget}`, JSON.stringify(pv.changes));
-      assert.ok(pv.spent_live_usd === pg0.spent_live_usd && pv.period_end === pg0.period_end, "the same figures as GET");
+      assert.ok(pv.period_end === pg0.period_end && pv.server_max_sessions === pg0.server_max_sessions, "the same figures as GET");
       assert.equal((await json(appCall(ownerC, "GET", "/limits"))).policy.reserve_usd, 0, "a preview writes nothing");
       pv = await json(appCall(ownerC, "POST", "/limits/preview", { team_budgets: [{ id: devrel.id, budget_usd: budget + 50 }] }));
       const codes = pv.warnings.map((w: any) => w.code);
@@ -3174,12 +3225,14 @@ try {
       assert.equal(saved.status, 204, await saved.text());
       const pg1 = await json(appCall(ownerC, "GET", "/limits"));
       assert.ok(saved.headers.get("etag") === `"${pg1.version}"` && pg1.version !== pg0.version, "the new version comes back");
-      assert.ok(pg1.policy.reserve_usd === 10 && pg1.policy.max_run_usd === 5 && pg1.max_run_usd === 5 && pg1.teams.find((t: any) => t.id === devrel.id).budget_usd === 150, "policy and team budgets saved");
+      assert.ok(pg1.policy.reserve_usd === 10 && pg1.policy.max_run_usd === 5 && pg1.teams.find((t: any) => t.id === devrel.id).budget_usd === 150, "policy and team budgets saved");
       const meP = pg1.members.find((m: any) => m.user_id === accepted.user.id), devP = pg1.members.find((m: any) => m.user_id === acc2.user.id);
       assert.ok(meP.cap_usd === null && devP.adjust_usd === 0 && devP.team_id === null, "the reset and the cleared adjustment saved; the team kept");
       const planEntry = (await json(appCall(ownerC, "GET", "/limits/history"))).entries[0];
       assert.match(planEntry.summary, /^Buffer \$0 → \$10; Most a run can spend no limit → \$5; DevRel budget \$200 → \$150; .+: reset to the defaults; .+: adjustment -\$50 cleared \(it only applies with an equal share\)$/);
-      assert.equal(pg1.last_change.summary, planEntry.summary, "one entry for the whole plan");
+      assert.ok(planEntry.id === (await json(appCall(ownerC, "GET", "/limits/history"))).entries[0].id && pg1.changed["policy.reserve_usd"] && pg1.changed["policy.max_run_usd"] &&
+        pg1.changed[`team:${devrel.id}`]?.at === planEntry.at && pg1.changed[`member:${accepted.user.id}`]?.at === planEntry.at &&
+        pg1.changed["policy.mode"].at < planEntry.at, `one entry for the whole plan, each rule it changed: ${JSON.stringify(pg1.changed)}`);
       assert.equal((await appCall(ownerC, "PUT", "/limits/plan", draft, { "if-match": pg0.version })).status, 409, "the old version no longer saves");
       // Any other change moves the version too, so a plan can't overwrite it unseen.
       await appCall(ownerC, "PUT", `/limits/teams/${devrel.id}`, { budget_usd: 160 });
