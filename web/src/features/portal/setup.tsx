@@ -118,24 +118,12 @@ function ConnectionBox({ s, onConnected }: { s: Setup; onConnected: () => void }
   const groups: [Client['group'], string][] = [['chat', 'Chat apps'], ['agent', 'Coding agents'], ['editor', 'Editors']];
   const url = s.connect.connector_url;
   const [show, setShow] = useState(!s.connect.secret);
-  // Already connected (a client reached us before, or the test just passed): a short status line, the steps folded away.
+  // Already connected (a client reached us before, or the test just passed): the test button is then secondary.
   const connected = live?.kind === 'ok' || s.clients.length > 0;
-  const [open, setOpen] = useState(!connected);
   const masked = url.replace(/([?&](?:key|token|k)=)[^&]+/i, '$1••••••••').replace(/(oct_[A-Za-z0-9]{4})[A-Za-z0-9_-]+/, '$1••••••••');
   return (
     <FloatPanel title='Connect your AI client' icon={<Icons.plug />} description={s.connect.secret ? 'Your connection URL contains your key: keep it private.' : 'Octillion runs inside the AI client you already use.'}>
-      {connected && (
-        <div className='flex items-center gap-2 text-sm'>
-          <span aria-hidden className='size-2 shrink-0 rounded-full bg-emerald-500' />
-          <span className='min-w-0 flex-1 truncate'>
-            Connected{s.clients[0] ? <> from <span className='font-medium'>{s.clients[0].client.split(' ')[0]}</span></> : ''}
-            {s.clients[0]?.last && <span className='text-muted-foreground'> · <When d={s.clients[0].last} /></span>}
-          </span>
-          <Button variant='ghost' size='xs' onClick={() => setOpen(!open)}>{open ? 'Hide steps' : 'Add another client'}</Button>
-        </div>
-      )}
-      {open && (
-        <ol className='flex flex-col gap-4'>
+      <ol className='flex flex-col gap-4'>
           <NumberedStep n={1} title='Pick your client'>
             <NativeSelect id='client-pick' aria-label='Your AI client' value={c?.id} onChange={(e) => choose(e.target.value)} className='bg-background w-full'>
               {groups.map(([g, label]) => (
@@ -176,7 +164,6 @@ function ConnectionBox({ s, onConnected }: { s: Setup; onConnected: () => void }
             )}
           </NumberedStep>
         </ol>
-      )}
     </FloatPanel>
   );
 }
