@@ -112,15 +112,15 @@ function UsageBody({ u, users }: { u: Usage; users: string[] }) {
   const visAny = (c?.visibility ?? []).some((w) => w.scored > 0);
   const tasks = (c?.tasks ?? []).map((t) => ({ ...t, name: t.title }));
   return (
-    <div className='flex w-full flex-col gap-6 pb-4'>
-      <StatStrip items={[
+    <div className='flex w-full flex-col pb-4'>
+      <StatStrip className='border-x [&>div:first-child]:pl-4 max-sm:[&>div:nth-child(odd)]:pl-4' items={[
         { label: 'Tool calls', value: num(calls), spark: series.map((d) => d.calls) },
         { label: 'Active people', value: num(u.active_people), spark: u.series?.people ?? series.map((d) => d.people) },
         { label: 'Simulations run', value: num(u.runs.simulations), spark: u.series?.simulations },
         { label: u.spend.filtered ? 'Their model spend this month' : 'Model spend this month', value: usd(u.spend.month_usd), spark: u.series?.spend }
       ]} />
 
-      <div className='border-t border-l'>
+      <div className='border-l'>
         <div className='grid lg:grid-cols-2'>
           <Box title='Tool calls per day' description='Every Octillion tool call, failed ones in red.'>
             {calls ? (

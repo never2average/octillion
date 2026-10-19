@@ -477,15 +477,15 @@ function AnalyticsBody({ a, match }: { a: Analytics; match: (r: object) => boole
   const tools = a.tools.filter(match), accounts = a.accounts.filter(match);
   const maxClient = Math.max(...a.clients.map((c) => c.accounts), 1);
   return (
-    <div className='flex w-full flex-col gap-6 pb-4'>
-      <StatStrip items={[
+    <div className='flex w-full flex-col pb-4'>
+      <StatStrip className='border-x [&>div:first-child]:pl-4 max-sm:[&>div:nth-child(odd)]:pl-4' items={[
         { label: 'Active accounts', value: num(a.totals.active_accounts), spark: series.map((d) => d.accounts) },
         { label: 'Active people', value: num(a.totals.active_people), spark: series.map((d) => d.people) },
         { label: 'Tool calls', value: num(a.totals.calls), spark: series.map((d) => d.calls) },
         { label: 'New accounts', value: num(a.totals.new_accounts), spark: series.map((d) => d.created) }
       ]} />
 
-      <div className='border-t border-l'>
+      <div className='border-l'>
         {a.growth && <GrowthRows g={a.growth} />}
         <div className='grid lg:grid-cols-2'>
           <Box title='Tool calls per day' description='Errors in red.'>
