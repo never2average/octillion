@@ -21,7 +21,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { DateRangePicker, last30, rangeQuery, type DateRange } from '@/components/layout/date-range-picker';
-import { PagedTable, TablePager, type Paged } from '@/components/layout/table-pager';
+import { TablePager, type Paged } from '@/components/layout/table-pager';
 import { StatStrip } from '@/components/layout/section';
 import { Icons } from '@/components/icons';
 import { adminApi } from '@/lib/api-client';
@@ -511,6 +511,14 @@ function AnalyticsBody({ a, match }: { a: Analytics; match: (r: object) => boole
           <Box title='Error rate by tool' description='Share of calls that failed.'>
           <RankBars data={top(tools.filter((t) => Number(t.error_pct) > 0), (t) => Number(t.error_pct)).map((t) => ({ name: t.name, value: Number(t.error_pct) }))} color='var(--destructive)' format={(v) => `${v}%`} mono empty='No tool errors in this period.' />
         </Box>
+          <Box title='Latency by tool' description='p95 time per call, slowest first.'>
+            <RankBars data={top(tools, (t) => Number(t.p95_ms ?? 0)).map((t) => ({ name: t.name, value: Number(t.p95_ms ?? 0) }))} color='var(--chart-5)' format={(v) => ms(v)} mono empty='No tool calls in this period.' />
+          </Box>
+        </div>
+        <div className='grid lg:grid-cols-2'>
+          <Box title='People per tool' description='How many people call each tool.'>
+            <RankBars data={top(tools, (t) => Number(t.people)).map((t) => ({ name: t.name, value: Number(t.people) }))} color='var(--chart-3)' format={num} mono empty='No tool calls in this period.' />
+          </Box>
           <Box title='Clients' description='AI clients that connected.'>
         {a.clients.length ? (
           <ul className='grid gap-3'>
@@ -529,27 +537,6 @@ function AnalyticsBody({ a, match }: { a: Analytics; match: (r: object) => boole
         ) : <p className='text-muted-foreground py-6 text-center text-sm'>No connections in this period.</p>}
       </Box>
         </div>
-        <Box title='Tool adoption' className='min-w-0'>
-        <PagedTable items={tools} noun='tools' initialSize={10} empty={a.tools.length ? 'No tool matches.' : 'No tool calls in this period.'}>
-          {(rows) => (
-            <Table className='min-w-[560px]'>
-              <TableHeader><TableRow>{['Tool', 'Accounts', 'People', 'Calls', 'Errors', 'p50 / p95'].map((h) => <TableHead key={h}>{h}</TableHead>)}</TableRow></TableHeader>
-              <TableBody>
-                {rows.map((t) => (
-                  <TableRow key={t.name}>
-                    <TableCell><Mono>{t.name}</Mono></TableCell>
-                    <TableCell className='tabular-nums'>{t.accounts}</TableCell>
-                    <TableCell className='tabular-nums'>{t.people}</TableCell>
-                    <TableCell className='tabular-nums'>{num(t.calls)}</TableCell>
-                    <TableCell>{Number(t.error_pct) ? <StatusBadge tone={Number(t.error_pct) >= 5 ? 'bad' : 'warn'}>{t.error_pct}%</StatusBadge> : '0%'}</TableCell>
-                    <TableCell className='text-xs whitespace-nowrap'>{ms(t.p50_ms)} / {ms(t.p95_ms)}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
-        </PagedTable>
-      </Box>
         <div className='grid lg:grid-cols-2'>
           <Box title='Calls by account' description='The ten busiest.'>
           <RankBars data={top(accounts, (r) => Number(r.calls)).map((r) => ({ name: r.name, value: Number(r.calls) }))} color='var(--chart-1)' format={num} empty='No account activity.' />
@@ -559,10 +546,14 @@ function AnalyticsBody({ a, match }: { a: Analytics; match: (r: object) => boole
         </Box>
         </div>
         <div className='grid lg:grid-cols-2'>
+          <Box title='People per account' description='Active people in each account.'>
+            <RankBars data={top(accounts, (r) => Number(r.people)).map((r) => ({ name: r.name, value: Number(r.people) }))} color='var(--chart-3)' format={num} empty='No account activity.' />
+          </Box>
           <Box title='Trend vs previous period' description='Accounts by how their calls changed.'>
           <RankBars data={trendBuckets(accounts)} color='var(--chart-4)' format={num} empty='No account activity.' />
         </Box>
-          <Box title='Weekly retention' description='Accounts by the week of their first tool call, and the share active in each week after.'>
+        </div>
+        <Box title='Weekly retention' description='Accounts by the week of their first tool call, and the share active in each week after.'>
         {a.retention.length ? (
           <div className='-mx-4 overflow-x-auto px-4'>
             <table className='w-full min-w-[640px] border-separate border-spacing-1 text-sm'>
@@ -591,31 +582,6 @@ function AnalyticsBody({ a, match }: { a: Analytics; match: (r: object) => boole
             </table>
           </div>
         ) : <p className='text-muted-foreground py-6 text-center text-sm'>No cohorts in the last 8 weeks.</p>}
-      </Box>
-        </div>
-        <Box title='Accounts'
-        description={<>Activity per account; &quot;at risk&quot; means calls halved vs the previous period.{a.accounts_total > a.accounts.length && ` Showing the ${a.accounts.length} busiest of ${num(a.accounts_total)}; the export has all.`}</>}>
-        <PagedTable items={accounts} noun='accounts' empty={a.accounts.length ? 'No account or product matches.' : 'No account activity.'}>
-          {(rows) => (
-            <Table className='min-w-[720px]'>
-              <TableHeader><TableRow>{['Account', 'Products', 'Calls', 'Trend', 'People', 'Errors', 'Last seen'].map((h) => <TableHead key={h}>{h}</TableHead>)}</TableRow></TableHeader>
-              <TableBody>
-                {rows.map((r) => (
-                  <TableRow key={r.slug}>
-                    {/* plain text: admin pages never open a customer's account */}
-                    <TableCell><span className='inline-flex items-center gap-1.5 leading-none font-medium'>{r.name}{r.at_risk && <StatusBadge tone='warn'>at risk</StatusBadge>}</span></TableCell>
-                    <TableCell className='text-muted-foreground max-w-64 truncate text-xs'>{r.products ?? '—'}</TableCell>
-                    <TableCell className='tabular-nums'>{num(r.calls)}</TableCell>
-                    <TableCell><Trend pct={r.trend} /></TableCell>
-                    <TableCell className='tabular-nums'>{r.people}</TableCell>
-                    <TableCell>{Number(r.errors) ? <StatusBadge tone='bad'>{r.errors}</StatusBadge> : '0'}</TableCell>
-                    <TableCell><When d={r.last_seen} /></TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
-        </PagedTable>
       </Box>
       </div>
     </div>
