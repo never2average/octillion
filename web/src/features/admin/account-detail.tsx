@@ -323,7 +323,7 @@ function Billing({ d, path }: { d: Detail; path: string }) {
     return (
       <Section title='Billing'>
         <p className='text-muted-foreground text-sm'>
-          Stripe is off (<Mono>STRIPE_SECRET_KEY</Mono>). The account gets the default budget of {usd(d.org.budget_usd)} a month.
+          Stripe is not connected (Key vault › Stripe). The account gets the default budget of {usd(d.org.budget_usd)} a month.
         </p>
       </Section>
     );
