@@ -193,7 +193,7 @@ export function reportMarkdown(d: Extract<Data, { view: "report" }>): string {
   const out: string[] = [`# ${name}: agent visibility report`, `Scope: ${scope}${d.filters.model ? `, model ${d.filters.model}` : ""}${d.filters.platform ? `, ${d.filters.platform} tasks only` : ""}. ${t.sessions} scored sessions.`];
 
   out.push("## Headline", ...d.headline.map((h: string) => `- ${h}`),
-    `- Hit rate ${pct(t.hit_rate)} (95% range ${range(t.hit_ci)})${t.weighted_hit_rate != null ? `, adoption-weighted ${pct(t.weighted_hit_rate)}` : ""}; lost to a competitor ${pct(t.competitor_rate)}.`);
+    `- Right call on ${pct(t.hit_rate)} of all scored sessions, should-win and control tasks together (95% range ${range(t.hit_ci)})${t.weighted_hit_rate != null ? `, adoption-weighted ${pct(t.weighted_hit_rate)}` : ""}; lost to a competitor ${pct(t.competitor_rate)}.`);
 
   if (d.by_platform?.length) out.push("## Results by platform", `| Platform | Tasks | Sessions (should win) | ${cell(name)} | Competitor | No vendor | Mentioned ${cell(name)} | 95% range | Control correct |`, "|---|---|---|---|---|---|---|---|---|",
     ...d.by_platform.map((x: any) => `| ${x.platform} | ${x.tasks} | ${x.sessions} | ${x.product} | ${x.competitor} | ${x.no_vendor} | ${x.product_mentioned} | ${range(x.hit_ci)} | ${x.control.sessions ? `${x.control.correct} of ${x.control.sessions}` : "–"} |`));

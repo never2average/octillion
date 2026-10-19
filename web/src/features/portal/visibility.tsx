@@ -16,8 +16,10 @@ interface Rate { scored: number; hits: number; misses: number; pick_pct: number 
 export interface Visibility {
   products: { id: number; name: string }[];
   product: number | null;
-  totals: Rate & { picked: number; competitor_losses: number; top_competitor: string | null };
-  weekly: { week: string; partial: boolean; scored: number; hits: number; picked: number; pick_pct: number | null; lo: number | null; hi: number | null; top_competitor: number }[];
+  totals: { scored: number; picked: number; pick_pct: number | null; ci: [number, number] | null; recommend: { scored: number; picked: number; missed: number };
+    avoid: { scored: number; avoided: number; picked: number; avoid_pct: number | null }; competitor_losses: number; top_competitor: string | null };
+  weekly: { week: string; partial: boolean; scored: number; picked: number; recommend_scored: number; recommend_picked: number; pick_pct: number | null; lo: number | null; hi: number | null;
+    avoid_scored: number; avoided: number; avoid_pct: number | null; top_competitor: number }[];
   by_agent: (Rate & { key: string; name: string })[];
   by_harness: (Rate & { key: string; name: string })[];
   by_model: (Rate & { key: string; name: string })[];
@@ -118,14 +120,14 @@ export function VisibilitySection({ v, sections, after, print }: { v: Visibility
   const scoredTasks = (v?.expectation ?? []).filter((e) => e.scored > 0);
   const show = (id: SectionId) => !sections || sections.includes(id);
   const dimBox = (d: 'agent' | 'harness' | 'model', rows: (Rate & { name: string })[]) => (
-    <Box title={`Pick rate by ${d}`} description={`Hits of scored sessions for each ${d === 'agent' ? 'coding agent' : d}, with n.`}>
+    <Box title={`Pick rate by ${d}`} description={`Picked on tasks you should win, for each ${d === 'agent' ? 'coding agent' : d}, with n.`}>
       <Bars rows={rateRows(rows, (x) => x.name)} color={YOU} label='Pick rate' max={100} empty='No scored sessions in this period.' />
     </Box>
   );
   const cells: Record<Exclude<SectionId, 'summary'>, ReactNode> = {
     weekly: (
-      <Box title='Pick rate over time' description='Each week, scored sessions that went your way; the band is the 95% interval.'>
-        {any ? (
+      <Box title='Pick rate over time' description='Each week, picked on tasks you should win; the band is the 95% interval.'>
+        {t?.recommend.scored ? (
           <ChartContainer config={{ pick_pct: { label: 'Pick rate', color: YOU }, band: { label: '95% interval', color: YOU } } satisfies ChartConfig} className='aspect-auto h-[240px] w-full'>
             <ComposedChart data={weekly} margin={{ left: 0, right: 8, top: 8 }}>
               <CartesianGrid vertical={false} />
@@ -133,13 +135,13 @@ export function VisibilitySection({ v, sections, after, print }: { v: Visibility
               <YAxis width={40} tickLine={false} axisLine={false} domain={[0, 100]} ticks={[0, 25, 50, 75, 100]} tickFormatter={(x) => `${x}%`} />
               <ChartTooltip cursor={false} content={<ChartTooltipContent labelFormatter={weekLabel}
                 formatter={(_v, name, item) => name === 'band' ? null : (
-                  <Tip>{tipRow('Pick rate', pct(item.payload.pick_pct))}{tipRow('Hits', `${num(item.payload.hits)} of ${num(item.payload.scored)}`)}
+                  <Tip>{tipRow('Pick rate', pct(item.payload.pick_pct))}{tipRow('Picked', `${num(item.payload.recommend_picked)} of ${num(item.payload.recommend_scored)}`)}
                     {item.payload.lo != null && tipRow('95% interval', `${item.payload.lo}–${item.payload.hi}%`)}</Tip>)} />} />
               <Area dataKey='band' type='monotone' fill='var(--color-band)' fillOpacity={0.15} stroke='none' connectNulls activeDot={false} isAnimationActive={false} />
               <Line dataKey='pick_pct' type='monotone' stroke='var(--color-pick_pct)' strokeWidth={2} connectNulls dot={{ r: 4, strokeWidth: 2, fill: 'var(--background)' }} activeDot={{ r: 5 }} isAnimationActive={!print} />
             </ComposedChart>
           </ChartContainer>
-        ) : <Empty>No scored sessions in this period.</Empty>}
+        ) : <Empty>No scored sessions on tasks you should win in this period.</Empty>}
       </Box>
     ),
     by_agent: dimBox('agent', v?.by_agent ?? []),
@@ -163,7 +165,7 @@ export function VisibilitySection({ v, sections, after, print }: { v: Visibility
       </Box>
     ),
     by_persona: (
-      <Box title='Pick rate by developer persona' description='Hits of scored sessions for each simulated developer, best first.'>
+      <Box title='Pick rate by developer persona' description='Picked on tasks you should win, for each simulated developer.'>
         <Bars rows={rateRows(v?.by_persona ?? [], (x) => x.name)} color={YOU} label='Pick rate' max={100} empty='No scored sessions with a persona in this period.' />
       </Box>
     ),
@@ -248,7 +250,7 @@ export function VisibilitySection({ v, sections, after, print }: { v: Visibility
       </Box>
     ),
     by_platform: (
-      <Box title='Pick rate by platform' description='Hits of scored sessions by the platform each task targets.'>
+      <Box title='Pick rate by platform' description='Picked on tasks you should win, by the platform each task targets.'>
         <Bars rows={rateRows(v?.by_platform ?? [], (x) => x.platform)} color={YOU} label='Pick rate' max={100} empty='No scored sessions in this period.' />
       </Box>
     )
@@ -263,7 +265,7 @@ export function VisibilitySection({ v, sections, after, print }: { v: Visibility
         <div className='break-inside-avoid'>
           <StatStrip className='border-x [&>div:first-child]:pl-4 max-sm:[&>div:nth-child(odd)]:pl-4' items={[
             { label: 'Pick rate', value: pct(t?.pick_pct), spark: weekly.map((w) => w.pick_pct ?? 0) },
-            { label: 'Times picked', value: num(t?.picked ?? 0), spark: weekly.map((w) => w.picked) },
+            { label: 'Correctly avoided', value: t?.avoid.scored ? pct(t.avoid.avoid_pct) : '—', spark: weekly.map((w) => w.avoid_pct ?? 0) },
             { label: 'Top competitor', value: <span className='block max-w-[11rem] truncate' title={top?.name}>{top?.name ?? '—'}</span>, spark: weekly.map((w) => w.top_competitor) },
             { label: 'Sessions scored', value: num(t?.scored ?? 0), spark: weekly.map((w) => w.scored) },
           ]} />

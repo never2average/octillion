@@ -2487,7 +2487,7 @@ try {
       const sum = (xs: any[], f: (x: any) => number) => xs.reduce((n, x) => n + f(x), 0);
       assert.equal(sum(cO.sims_weekly, (w) => w.completed + w.other), ownN.sims, "simulations per week: this account's only");
       assert.equal(sum(cO.harnesses, (h) => h.sessions), ownN.sessions, "sessions by harness: this account's only");
-      assert.equal(sum(visO.weekly, (w) => w.scored), ownN.scored); assert.equal(sum(visO.weekly, (w) => w.hits), ownN.hits);
+      assert.equal(sum(visO.weekly, (w) => w.scored), ownN.scored);
       assert.ok(visO.weekly.some((w: any) => w.pick_pct === 50), "the seeded week: one hit of two");
       assert.ok(cO.harnesses.some((h: any) => h.harness === "charts-own-harness") && !cO.harnesses.some((h: any) => h.harness === "charts-foreign-harness"), "another account's sessions never show");
       assert.ok(visO.by_task.some((t: any) => t.title === "Charts task own" && t.hits === 1 && t.misses === 1) && !visO.by_task.some((t: any) => t.title === "Charts task foreign"), "hits vs misses by task, own tasks only");
@@ -2548,24 +2548,31 @@ try {
                       VALUES ($1, $2, $3, $4, $5, 'decoy-model', 'decoy-harness', 'decoy-agent', 'completed', 'competitor', 'DecoyTool', $6, '[{"name":"decoypkg","ecosystem":"npm"}]')`,
         [`ses_decoy_${tag}`, `sim_decoy_${tag}`, other.id, dp.id, dsc.id, JSON.stringify([m("DecoyTool", "adopted", "npm install decoytool")])]);
 
+      const PICKQ = "s.verdict IN ('adopted', 'recommended')", RECQ = "sc.expectation = 'recommend'";
       const HITQ = "CASE WHEN sc.expectation = 'recommend' THEN s.verdict IN ('adopted', 'recommended') ELSE s.verdict NOT IN ('adopted', 'recommended') END";
       const scope = (extra = "") => `FROM agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id WHERE s.org_id = $1 AND s.verdict IS NOT NULL AND s.queued_at >= now() - interval '30 days'${extra}`;
       const direct = async (extra: string, params: unknown[]) => {
-        const [t] = await db.query<any>(`SELECT count(*)::int AS scored, count(*) FILTER (WHERE ${HITQ})::int AS hits, count(*) FILTER (WHERE s.verdict IN ('adopted', 'recommended'))::int AS picked ${scope(extra)}`, params);
+        const [t] = await db.query<any>(`SELECT count(*)::int AS scored, count(*) FILTER (WHERE ${PICKQ})::int AS picked,
+            count(*) FILTER (WHERE ${RECQ})::int AS rec, count(*) FILTER (WHERE ${RECQ} AND ${PICKQ})::int AS rec_picked,
+            count(*) FILTER (WHERE NOT ${RECQ})::int AS avoid, count(*) FILTER (WHERE NOT ${RECQ} AND NOT ${PICKQ})::int AS avoided ${scope(extra)}`, params);
         const winners = await db.query<any>(`SELECT s.winner AS name, count(*)::int AS n ${scope(extra)} AND s.verdict = 'competitor' AND s.winner IS NOT NULL GROUP BY 1`, params);
-        const by = async (key: string, join = "") => Object.fromEntries((await db.query<any>(
-          `SELECT ${key} AS k, count(*)::int AS scored, count(*) FILTER (WHERE ${HITQ})::int AS hits ${scope(extra).replace(" WHERE ", `${join} WHERE `)} GROUP BY 1`, params)).map((r) => [r.k, [r.scored, r.hits]]));
+        // by task: HIT (right call either way); every other breakdown: picked on recommend tasks only.
+        const by = async (key: string, join = "", rate = `count(*) FILTER (WHERE ${RECQ})::int AS scored, count(*) FILTER (WHERE ${RECQ} AND ${PICKQ})::int AS hits`) => Object.fromEntries((await db.query<any>(
+          `SELECT ${key} AS k, ${rate} ${scope(extra).replace(" WHERE ", `${join} WHERE `)} GROUP BY 1`, params)).filter((r) => r.scored > 0).map((r) => [r.k, [r.scored, r.hits]]));
         const ms = await db.query<any>(`SELECT s.id, s.verdict, s.winner, s.mentions ${scope(extra)}`, params);
         const cloud: Record<string, number> = {};
         for (const r of ms) for (const x of (r.mentions ?? []).filter((x: any) => !x.target))
           cloud[x.tool] = (cloud[x.tool] ?? 0) + 1 + (r.verdict === "competitor" && r.winner === x.tool ? 1 : 0);
         return { t, winners, cloud, agent: await by("coalesce(s.agent_id, s.model)"), harness: await by("s.harness"), model: await by("s.model"),
-                 task: await by("sc.id::text"), persona: await by("dp.id::text", " JOIN developer_profiles dp ON dp.id = s.profile_id"), platform: await by("coalesce(sc.platform, 'unspecified')") };
+                 task: await by("sc.id::text", "", `count(*)::int AS scored, count(*) FILTER (WHERE ${HITQ})::int AS hits`), persona: await by("dp.id::text", " JOIN developer_profiles dp ON dp.id = s.profile_id"), platform: await by("coalesce(sc.platform, 'unspecified')") };
       };
       const check = (v: any, d: Awaited<ReturnType<typeof direct>>, what: string) => {
-        assert.equal(v.totals.scored, d.t.scored, `${what}: sessions scored`); assert.equal(v.totals.hits, d.t.hits, `${what}: hits`);
-        assert.equal(v.totals.picked, d.t.picked, `${what}: times picked`);
-        assert.equal(v.totals.pick_pct, d.t.scored ? Math.round((d.t.hits / d.t.scored) * 1000) / 10 : null, `${what}: pick rate = hits / scored`);
+        const r1 = (k: number, n: number) => (n ? Math.round((k / n) * 1000) / 10 : null);
+        assert.equal(v.totals.scored, d.t.scored, `${what}: sessions scored`); assert.equal(v.totals.picked, d.t.picked, `${what}: times picked`);
+        assert.deepEqual(v.totals.recommend, { scored: d.t.rec, picked: d.t.rec_picked, missed: d.t.rec - d.t.rec_picked }, `${what}: recommend tasks`);
+        assert.deepEqual(v.totals.avoid, { scored: d.t.avoid, avoided: d.t.avoided, picked: d.t.avoid - d.t.avoided, avoid_pct: r1(d.t.avoided, d.t.avoid) }, `${what}: avoid tasks`);
+        assert.equal(v.totals.pick_pct, r1(d.t.rec_picked, d.t.rec), `${what}: pick rate = picked / scored on recommend tasks only`);
+        assert.equal(v.weekly.reduce((n: number, w: any) => n + w.recommend_picked, 0), d.t.rec_picked, `${what}: weekly picks on recommend tasks add up`);
         assert.equal(v.weekly.reduce((n: number, w: any) => n + w.scored, 0), d.t.scored, `${what}: weekly adds up`);
         const losses = d.winners.reduce((n: number, w: any) => n + w.n, 0);
         assert.deepEqual(Object.fromEntries(v.competitors.map((c: any) => [c.name, [c.sessions, c.share_pct]])),
@@ -2588,16 +2595,17 @@ try {
       const vP = vPPage.visibility;
       assert.equal(vP.product, pr.id);
       check(vP, await direct(" AND s.product_id = $2", [rowW.id, pr.id]), "one product");
-      // The seeded numbers, by hand: 9 scored, 3 hits, 3 picks; losses Postmark 2, SendGrid 1, Mailgun 1.
-      assert.deepEqual([vP.totals.scored, vP.totals.hits, vP.totals.picked, vP.totals.pick_pct, vP.totals.top_competitor], [9, 3, 3, 33.3, "Postmark"]);
+      // The seeded numbers, by hand: 9 scored, 3 picks; 7 on recommend tasks with 2 picks (28.6%, not the 3 of 9 hits an
+      // avoid task's right call would add); 2 on avoid tasks, 1 left out; losses Postmark 2, SendGrid 1, Mailgun 1.
+      assert.deepEqual([vP.totals.scored, vP.totals.picked, vP.totals.pick_pct, vP.totals.avoid.avoid_pct, vP.totals.top_competitor], [9, 3, 28.6, 50, "Postmark"]);
       assert.deepEqual(vP.competitors.map((c: any) => [c.name, c.share_pct]), [["Postmark", 50], ["Mailgun", 25], ["SendGrid", 25]]);
       assert.deepEqual(vP.cloud.map((c: any) => [c.name, c.weight]), [["Postmark", 5], ["SendGrid", 3], ["Mailgun", 2], ["nodemailer", 2]], "cloud: named + picked, then untracked installs (a tracked name is not repeated)");
       assert.deepEqual(vP.head_to_head, [{ name: "Postmark", won: 1, lost: 2 }, { name: "SendGrid", won: 1, lost: 1 }, { name: "Mailgun", won: 0, lost: 1 }]);
       assert.deepEqual(Object.fromEntries(vP.reasons.how.map((r: any) => [r.id, r.sessions])), { installed: 1, imported: 1, built_on: 1, recommended: 1 });
       assert.deepEqual([vP.reasons.losses, vP.reasons.never_mentioned], [4, 3]);
       assert.deepEqual(vP.expectation.map((e: any) => [e.expectation, e.scored, e.hits, e.misses]), [["recommend", 7, 2, 5], ["avoid", 2, 1, 1]]);
-      assert.ok(vP.weekly.some((w: any) => w.scored === 9 && w.lo != null && w.lo < 33.3 && w.hi > 33.3), "weekly pick rate with its Wilson interval");
-      assert.equal(vP.by_persona.find((x: any) => x.name === "Vis Solo Founder")?.scored, 4);
+      assert.ok(vP.weekly.some((w: any) => w.recommend_scored === 7 && w.lo != null && w.lo < 28.6 && w.hi > 28.6), "weekly pick rate with its Wilson interval");
+      assert.equal(vP.by_persona.find((x: any) => x.name === "Vis Solo Founder")?.scored, 3, "on recommend tasks only (its avoid-task session is not in the pick rate)");
       // The same numbers as Usage showed before the move (no filter = no change): /usage no longer carries them.
       assert.equal((await json(appCall(ownerC, "GET", `/usage?product=${pr.id}`))).charts.visibility, undefined, "visibility moved off /usage");
 
@@ -2661,8 +2669,10 @@ try {
       const col = (row: string[], c: string) => row[hdr.indexOf(c)];
       const secRows = (id: string) => lines.filter((l) => l[0] === id);
       const sumRow = (k: string) => col(secRows("summary").find((l) => col(l, "metric") === k)!, "value");
-      assert.deepEqual([sumRow("scored"), sumRow("hits"), sumRow("picked"), sumRow("pick_pct"), sumRow("top_competitor")],
-        [String(vF.totals.scored), String(vF.totals.hits), String(vF.totals.picked), String(vF.totals.pick_pct), String(vF.totals.top_competitor)], "CSV summary = API totals");
+      const blank = (x: unknown) => (x == null ? "" : String(x));
+      assert.deepEqual(["scored", "picked", "pick_pct", "recommend_scored", "recommend_picked", "avoid_scored", "avoided", "avoid_pct", "top_competitor"].map(sumRow),
+        [vF.totals.scored, vF.totals.picked, vF.totals.pick_pct, vF.totals.recommend.scored, vF.totals.recommend.picked, vF.totals.avoid.scored, vF.totals.avoid.avoided,
+         vF.totals.avoid.avoid_pct, vF.totals.top_competitor].map(blank), "CSV summary = API totals, recommend and avoid tasks apart");
       assert.deepEqual(secRows("by_task").map((l) => [Number(col(l, "id")), Number(col(l, "scored")), Number(col(l, "hits"))]), vF.by_task.map((t: any) => [t.id, t.scored, t.hits]), "CSV by task = API");
       assert.deepEqual(secRows("competitors").map((l) => [col(l, "name"), Number(col(l, "share_pct"))]), vF.competitors.map((c: any) => [c.name, c.share_pct]), "CSV competitor share = API");
       for (const id of ["summary", "weekly", "by_agent", "by_harness", "by_model", "competitors", "cloud", "by_task", "by_persona", "head_to_head", "reasons", "how_won", "expectation", "by_platform"])

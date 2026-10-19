@@ -26,6 +26,9 @@ import type { Request, Response, Router } from "express";
 import { z } from "zod";
 import { getDb } from "./db.js";
 import { agentLabel, HIT, PICKED, wilson } from "./queries.js";
+
+/** A task the product should win (HIT's recommend branch); anything else is scored as an avoid task, as in HIT. */
+const REC = `sc.expectation = 'recommend'`;
 import { howChosen, type HowChosen, type Mention } from "./scoring.js";
 import { reportRange } from "./insights.js";
 import { LOST, REASON_CATEGORIES, reasonLabel, type Reason } from "./reasons.js";
@@ -81,10 +84,10 @@ const productsOf = async (orgId: number) => (await getDb()).query<ProductRow>(
 /**
  * Scored sessions only (verdict set by src/scoring.ts), queued in the period, for the product and the filters. The hit
  * rule (HIT) and picked rule (PICKED) are src/queries.ts's, the same as get_visibility_report.
- *   totals       scored sessions, hits (HIT: picked on a recommend task, left out on an avoid one), pick rate = hits /
- *                scored with its Wilson 95% interval, times picked (PICKED, any task), competitor losses
+ *   totals       pick rate = picked / scored on recommend tasks (REC) with its Wilson 95% interval; correctly avoided =
+ *                left out / scored on avoid tasks; scored sessions and times picked (PICKED) over every task; competitor losses
  *   weekly       the same per ISO week, plus the top competitor's wins that week (the cards' sparklines)
- *   by_agent / by_harness / by_model   hits / scored per coalesce(agent_id, model), harness, model
+ *   by_agent / by_harness / by_model   picked / scored on recommend tasks per coalesce(agent_id, model), harness, model
  *   competitors  verdict = 'competitor' sessions by `winner`, share of all such sessions
  *   cloud        tools other than the product: weight = sessions that mentioned it at any level (mentions JSON, not
  *                target) + sessions it won (winner); plus packages agents installed that no product tracks (untracked)
@@ -95,8 +98,9 @@ const productsOf = async (orgId: number) => (await getDb()).query<ProductRow>(
  *                session with no reason yet (or one for an earlier winner) is "Not explained yet". Plus, over competitor
  *                losses only, how the win showed up (scoring.ts howChosen over the winner's stored evidence) and
  *                whether the agent mentioned the product at all (the how_won section)
- *   by_task / by_persona / by_platform / expectation   hits / scored per task (title), persona (name), task platform,
- *                and per expectation (recommend vs avoid) with hits and misses
+ *   by_task      hits / scored per task (title, HIT: picked on a recommend task, left out on an avoid one)
+ *   by_persona / by_platform   picked / scored on recommend tasks per persona (name), task platform
+ *   expectation  per expectation (recommend vs avoid) with hits and misses
  */
 export async function visibilityCharts(orgId: number, range: Range, f: VisFilters, products?: ProductRow[]) {
   const db = await getDb();
@@ -110,22 +114,27 @@ export async function visibilityCharts(orgId: number, range: Range, f: VisFilter
   const arr = (c: string) => `CASE WHEN jsonb_typeof(${c}) = 'array' THEN ${c} ELSE '[]'::jsonb END`;
   const wk = `to_char(date_trunc('week', s.queued_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD')`;
   type N = unknown;
+  // The headline rates read "recommend" tasks only: on an avoid task leaving you out is the right call, and counting it
+  // as a pick would make a product look more visible than it is. Avoid tasks get their own figure (correctly avoided).
+  const recRate = `count(*) FILTER (WHERE ${REC}) AS scored, count(*) FILTER (WHERE ${REC} AND ${PICKED}) AS hits`;
   const [weekly, winners, groups, tasks, personas, tools, untracked, losses] = await Promise.all([
-    db.query<{ week: string; scored: N; hits: N; picked: N }>(
-      `SELECT ${wk} AS week, count(*) AS scored, count(*) FILTER (WHERE ${HIT}) AS hits, count(*) FILTER (WHERE ${PICKED}) AS picked
+    db.query<{ week: string; scored: N; picked: N; rec: N; rec_picked: N; avoid: N; avoided: N }>(
+      `SELECT ${wk} AS week, count(*) AS scored, count(*) FILTER (WHERE ${PICKED}) AS picked,
+              count(*) FILTER (WHERE ${REC}) AS rec, count(*) FILTER (WHERE ${REC} AND ${PICKED}) AS rec_picked,
+              count(*) FILTER (WHERE NOT ${REC}) AS avoid, count(*) FILTER (WHERE NOT ${REC} AND NOT ${PICKED}) AS avoided
          FROM ${from} WHERE ${where} GROUP BY 1`, vp),
     db.query<{ week: string; winner: string; n: N }>(
       `SELECT ${wk} AS week, s.winner, count(*) AS n FROM ${from} WHERE ${where} AND s.verdict = 'competitor' AND s.winner IS NOT NULL GROUP BY 1, 2`, vp),
     db.query<{ dim: "agent" | "harness" | "model"; key: string; scored: N; hits: N }>(
-      `SELECT 'agent' AS dim, coalesce(s.agent_id, s.model) AS key, count(*) AS scored, count(*) FILTER (WHERE ${HIT}) AS hits FROM ${from} WHERE ${where} GROUP BY 2
-       UNION ALL SELECT 'harness', s.harness, count(*), count(*) FILTER (WHERE ${HIT}) FROM ${from} WHERE ${where} GROUP BY 2
-       UNION ALL SELECT 'model', s.model, count(*), count(*) FILTER (WHERE ${HIT}) FROM ${from} WHERE ${where} GROUP BY 2`, vp),
+      `SELECT 'agent' AS dim, coalesce(s.agent_id, s.model) AS key, ${recRate} FROM ${from} WHERE ${where} GROUP BY 2
+       UNION ALL SELECT 'harness', s.harness, ${recRate} FROM ${from} WHERE ${where} GROUP BY 2
+       UNION ALL SELECT 'model', s.model, ${recRate} FROM ${from} WHERE ${where} GROUP BY 2`, vp),
     db.query<{ id: number; title: string; expectation: string; platform: string; scored: N; hits: N; picked: N }>(
       `SELECT sc.id, sc.title, sc.expectation, coalesce(sc.platform, 'unspecified') AS platform, count(*) AS scored,
               count(*) FILTER (WHERE ${HIT}) AS hits, count(*) FILTER (WHERE ${PICKED}) AS picked
          FROM ${from} WHERE ${where} GROUP BY sc.id, sc.title, sc.expectation, sc.platform`, vp),
     db.query<{ id: number; name: string; scored: N; hits: N }>(
-      `SELECT dp.id, dp.name, count(*) AS scored, count(*) FILTER (WHERE ${HIT}) AS hits
+      `SELECT dp.id, dp.name, ${recRate}
          FROM ${from} JOIN developer_profiles dp ON dp.id = s.profile_id WHERE ${where} GROUP BY dp.id, dp.name`, vp),
     db.query<{ tool: string; mentioned: N; chosen: N; won: N; lost: N }>(
       `SELECT m->>'tool' AS tool, count(DISTINCT s.id) AS mentioned,
@@ -149,8 +158,8 @@ export async function visibilityCharts(orgId: number, range: Range, f: VisFilter
   const rateRow = <T,>(x: T, hits: number, scored: number) => ({ ...x, scored, hits, misses: scored - hits, pick_pct: pct(hits, scored), ci: ci(hits, scored) });
   const byRate = (a: { pick_pct: number | null; scored: number }, b: { pick_pct: number | null; scored: number }) => (b.pick_pct ?? -1) - (a.pick_pct ?? -1) || b.scored - a.scored;
 
-  const sumW = (k: "scored" | "hits" | "picked") => weekly.reduce((n, r) => n + Number(r[k]), 0);
-  const scored = sumW("scored"), hits = sumW("hits"), picked = sumW("picked");
+  const sumW = (k: "scored" | "picked" | "rec" | "rec_picked" | "avoid" | "avoided") => weekly.reduce((n, r) => n + Number(r[k]), 0);
+  const scored = sumW("scored"), picked = sumW("picked"), rec = sumW("rec"), recPicked = sumW("rec_picked"), avoid = sumW("avoid"), avoided = sumW("avoided");
   const winTot = new Map<string, number>();
   for (const r of winners) winTot.set(r.winner, (winTot.get(r.winner) ?? 0) + Number(r.n));
   const lossN = [...winTot.values()].reduce((a, b) => a + b, 0);
@@ -192,22 +201,28 @@ export async function visibilityCharts(orgId: number, range: Range, f: VisFilter
     .sort((a, b) => Number(a.id === NOT_EXPLAINED) - Number(b.id === NOT_EXPLAINED) || b.sessions - a.sessions || a.label.localeCompare(b.label));
 
   const taskRows = tasks.map((t) => rateRow({ id: Number(t.id), title: t.title, expectation: t.expectation, platform: t.platform, picked: Number(t.picked) }, Number(t.hits), Number(t.scored)));
-  const agg = <K extends string>(key: (t: (typeof taskRows)[number]) => K) => {
+  const agg = <K extends string>(key: (t: (typeof taskRows)[number]) => K, keep: (t: (typeof taskRows)[number]) => boolean = () => true) => {
     const m = new Map<K, { tasks: number; scored: number; hits: number; picked: number }>();
-    for (const t of taskRows) { const a = m.get(key(t)) ?? { tasks: 0, scored: 0, hits: 0, picked: 0 }; a.tasks++; a.scored += t.scored; a.hits += t.hits; a.picked += t.picked; m.set(key(t), a); }
+    for (const t of taskRows.filter(keep)) { const a = m.get(key(t)) ?? { tasks: 0, scored: 0, hits: 0, picked: 0 }; a.tasks++; a.scored += t.scored; a.hits += t.hits; a.picked += t.picked; m.set(key(t), a); }
     return [...m].map(([k, a]) => ({ key: k, ...rateRow({ tasks: a.tasks, picked: a.picked }, a.hits, a.scored) }));
   };
   const dim = (d: "agent" | "harness" | "model") => groups.filter((g) => g.dim === d)
-    .map((g) => rateRow({ key: g.key, name: d === "agent" ? agentLabel(g.key) : g.key }, Number(g.hits), Number(g.scored))).sort(byRate);
+    .map((g) => rateRow({ key: g.key, name: d === "agent" ? agentLabel(g.key) : g.key }, Number(g.hits), Number(g.scored))).filter((x) => x.scored > 0).sort(byRate);
 
   return {
     products: products.map((x) => ({ id: x.id, name: x.name })),
     product: pid,
-    totals: { ...rateRow({}, hits, scored), picked, competitor_losses: lossN, top_competitor: topName },
+    // pick_pct / ci: picked on recommend tasks; avoid_pct: left out on avoid tasks; scored / picked: every task.
+    totals: { scored, picked, pick_pct: pct(recPicked, rec), ci: ci(recPicked, rec),
+      recommend: { scored: rec, picked: recPicked, missed: rec - recPicked },
+      avoid: { scored: avoid, avoided, picked: avoid - avoided, avoid_pct: pct(avoided, avoid) },
+      competitor_losses: lossN, top_competitor: topName },
     weekly: weeks.map((week) => {
-      const r = W.get(week), n = Number(r?.scored ?? 0), h = Number(r?.hits ?? 0);
-      const c = ci(h, n);
-      return { week, partial: partial(week), scored: n, hits: h, picked: Number(r?.picked ?? 0), pick_pct: pct(h, n), lo: c?.[0] ?? null, hi: c?.[1] ?? null,
+      const r = W.get(week), n = Number(r?.rec ?? 0), h = Number(r?.rec_picked ?? 0);
+      const c = ci(h, n), a = Number(r?.avoid ?? 0), ok = Number(r?.avoided ?? 0);
+      return { week, partial: partial(week), scored: Number(r?.scored ?? 0), picked: Number(r?.picked ?? 0),
+               recommend_scored: n, recommend_picked: h, pick_pct: pct(h, n), lo: c?.[0] ?? null, hi: c?.[1] ?? null,
+               avoid_scored: a, avoided: ok, avoid_pct: pct(ok, a),
                top_competitor: topName ? winners.filter((x) => x.week === week && x.winner === topName).reduce((a, x) => a + Number(x.n), 0) : 0 };
     }),
     by_agent: dim("agent"), by_harness: dim("harness"), by_model: dim("model"),
@@ -219,8 +234,8 @@ export async function visibilityCharts(orgId: number, range: Range, f: VisFilter
       losses: wins.length, never_mentioned: wins.filter((l) => !l.considered).length,
       how: [...how].map(([id, n]) => ({ id, label: HOW[id as HowChosen | "unknown"], sessions: n })).sort((a, b) => b.sessions - a.sessions) },
     by_task: taskRows.map(({ id, title, expectation, scored, hits, misses, pick_pct, ci }) => ({ id, title, expectation, scored, hits, misses, pick_pct, ci })).sort(byRate),
-    by_persona: personas.map((x) => rateRow({ id: Number(x.id), name: x.name }, Number(x.hits), Number(x.scored))).sort(byRate),
-    by_platform: agg((t) => t.platform).map(({ key, ...r }) => ({ platform: key, ...r })).sort(byRate),
+    by_persona: personas.map((x) => rateRow({ id: Number(x.id), name: x.name }, Number(x.hits), Number(x.scored))).filter((x) => x.scored > 0).sort(byRate),
+    by_platform: agg((t) => t.platform, (t) => t.expectation === "recommend").map(({ key, ...r }) => ({ platform: key, ...r })).sort(byRate),
     expectation: (["recommend", "avoid"] as const).map((e) => {
       const r = agg((t) => (t.expectation === "avoid" ? "avoid" : "recommend")).find((x) => x.key === e);
       return { expectation: e, tasks: r?.tasks ?? 0, scored: r?.scored ?? 0, hits: r?.hits ?? 0, misses: r?.misses ?? 0, picked: r?.picked ?? 0, pick_pct: r?.pick_pct ?? null };
@@ -297,10 +312,11 @@ export function tables(v: Visibility, sections: SectionId[]): Table[] {
   const r = (x: { scored: number; hits: number; misses: number; pick_pct: number | null; ci: [number, number] | null }) => [x.scored, x.hits, x.misses, x.pick_pct, x.ci?.[0] ?? null, x.ci?.[1] ?? null];
   const t = v.totals;
   const make: Record<SectionId, () => Omit<Table, "id" | "title">> = {
-    summary: () => ({ columns: ["metric", "value"], rows: [["pick_pct", t.pick_pct], ["ci_low", t.ci?.[0] ?? null], ["ci_high", t.ci?.[1] ?? null], ["hits", t.hits],
-      ["scored", t.scored], ["picked", t.picked], ["competitor_losses", t.competitor_losses], ["top_competitor", t.top_competitor]] }),
-    weekly: () => ({ columns: ["week", "partial", "scored", "hits", "picked", "pick_pct", "ci_low", "ci_high", "top_competitor_wins"],
-      rows: v.weekly.map((w) => [w.week, w.partial, w.scored, w.hits, w.picked, w.pick_pct, w.lo, w.hi, w.top_competitor]) }),
+    summary: () => ({ columns: ["metric", "value"], rows: [["pick_pct", t.pick_pct], ["ci_low", t.ci?.[0] ?? null], ["ci_high", t.ci?.[1] ?? null],
+      ["recommend_scored", t.recommend.scored], ["recommend_picked", t.recommend.picked], ["avoid_pct", t.avoid.avoid_pct], ["avoid_scored", t.avoid.scored],
+      ["avoided", t.avoid.avoided], ["scored", t.scored], ["picked", t.picked], ["competitor_losses", t.competitor_losses], ["top_competitor", t.top_competitor]] }),
+    weekly: () => ({ columns: ["week", "partial", "scored", "recommend_scored", "recommend_picked", "pick_pct", "ci_low", "ci_high", "avoid_scored", "avoided", "avoid_pct", "top_competitor_wins"],
+      rows: v.weekly.map((w) => [w.week, w.partial, w.scored, w.recommend_scored, w.recommend_picked, w.pick_pct, w.lo, w.hi, w.avoid_scored, w.avoided, w.avoid_pct, w.top_competitor]) }),
     by_agent: () => ({ columns: ["key", "name", ...rate], rows: v.by_agent.map((x) => [x.key, x.name, ...r(x)]) }),
     by_harness: () => ({ columns: ["key", "name", ...rate], rows: v.by_harness.map((x) => [x.key, x.name, ...r(x)]) }),
     by_model: () => ({ columns: ["key", "name", ...rate], rows: v.by_model.map((x) => [x.key, x.name, ...r(x)]) }),
