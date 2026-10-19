@@ -54,16 +54,16 @@ export function AdminKeyVault() {
     { key: 'type', label: 'Type', type: 'select', value: (p) => typeOf(p.slug), options: TYPES.map((t) => ({ value: t })), render: (p) => typeOf(p.slug) },
     { key: 'use', label: 'How it is used', hidden: true, type: 'select', value: (p) => (p.mode === 'gateway' ? 'Agents call it through the gateway' : 'Given to orchestrators'),
       render: (p) => <span className='text-muted-foreground'>{p.mode === 'gateway' ? 'Agents call it through the gateway' : 'Given to orchestrators'}{p.backend !== 'direct' && ` · ${p.backend}`}</span> },
-    { key: 'keys', label: 'Keys', type: 'number', value: (p) => keysOf(p).length, render: (p) => {
+    { key: 'keys', label: 'Keys', className: 'w-72 max-w-72', type: 'number', value: (p) => keysOf(p).length, render: (p) => {
       const mine = keysOf(p);
       return (
         <span className='flex flex-col gap-1'>
           {!mine.length && <span className='text-amber-700 dark:text-amber-400'>no key</span>}
           {mine.map((c) => (
-            <span key={c.id} className={c.enabled ? undefined : 'text-muted-foreground line-through'}>
-              {c.client_email
-                ? <><span className='font-mono text-xs break-all'>{c.client_email}</span> <span className='text-muted-foreground'>{c.project_id ? `project ${c.project_id} · ` : ''}{c.label}</span></>
-                : <><Mono>{c.hint}</Mono> <span className='text-muted-foreground'>{c.label}</span></>}
+            // One line per key, cut short to the column's width; the full text is on hover.
+            <span key={c.id} className={cn('block truncate', !c.enabled && 'text-muted-foreground line-through')}
+              title={c.client_email ? `${c.client_email}${c.project_id ? ` · project ${c.project_id}` : ''} · ${c.label}` : `${c.hint} · ${c.label}`}>
+              <span className='font-mono text-xs'>{c.client_email ?? c.hint}</span> <span className='text-muted-foreground'>{c.label}</span>
             </span>
           ))}
         </span>
