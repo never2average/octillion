@@ -87,7 +87,7 @@ customer ── get_onboarding / get_visibility_report ──▶ results
   (`RESEARCH_MAX_SEARCHES`, default 20); the keys never reach the research sandbox. Every result URL is recorded on the
   job (`product_research.sources`) and becomes fetchable; when search is configured, each competitor's `evidence_url`
   must be one of those URLs or a page on the product's own site. Keys: `npm run keyvault -- set exa` and
-  `npm run keyvault -- set libraries_io` (orchestrator-only providers), or `EXA_API_KEY` / `LIBRARIES_IO_API_KEY` locally.
+  `npm run keyvault -- set libraries_io` (orchestrator-only providers). Keys are read from the vault only; an `EXA_API_KEY` / `LIBRARIES_IO_API_KEY` left in the environment is imported into the vault once on boot (src/keyvault-env.ts).
 - **Runs check the list too.** Scoring records the packages each agent installed that match neither the product nor a
   tracked competitor (`agent_sessions.untracked`); the report lists those from "no vendor" sessions under "Installed
   but not tracked", with an "Add as competitor" button. The dashboard shows each competitor's evidence and who added

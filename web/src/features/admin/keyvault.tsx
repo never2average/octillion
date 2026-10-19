@@ -1,6 +1,6 @@
 'use client';
-// The Key vault: every key Octillion uses, one row per provider (vault keys, plus keys set as server environment
-// variables, which the API reads directly). Add, import, disable and delete; keys are only ever shown as hints.
+// The Key vault: every key Octillion uses, one row per provider. Keys live in the vault only (keys once set as server
+// environment variables were imported on boot); add, import, disable and delete; keys are only ever shown as hints.
 import { useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
@@ -21,17 +21,16 @@ import { ErrorBox, FormRow, Mono, Notice, When } from './ui';
 
 // ---------- key vault ----------
 
-interface Provider { slug: string; mode: 'gateway' | 'direct'; backend: string; enabled: boolean; keys: number; enabled_keys: number; last_used_at: string | null }
-interface EnvKey { provider: string; name: string; serves: string; hint: string }
+interface Provider { slug: string; mode: 'gateway' | 'direct'; backend: string; enabled: boolean; keys: number; enabled_keys: number; last_used_at: string | null; env_set?: string[] }
 /** Display names for the vault's provider ids. */
 const NAME: Record<string, string> = {
   anthropic: 'Anthropic', openai: 'OpenAI', google: 'Google Gemini', cloudflare: 'Cloudflare Workers AI', dashscope: 'Alibaba DashScope',
-  boat: 'boat.dev', exa: 'Exa', libraries_io: 'Libraries.io', amp: 'Amp', cursor: 'Cursor', factory: 'Factory', github_copilot: 'GitHub Copilot'
+  vertex: 'Vertex AI (Google Cloud)', boat: 'boat.dev', exa: 'Exa', libraries_io: 'Libraries.io', amp: 'Amp', cursor: 'Cursor', factory: 'Factory', github_copilot: 'GitHub Copilot'
 };
 const nameOf = (slug: string) => NAME[slug] ?? slug;
-interface Credential { id: number; provider: string; label: string; hint: string; enabled: boolean; uses: number; last_used_at: string | null }
+interface Credential { id: number; provider: string; label: string; hint: string; enabled: boolean; uses: number; last_used_at: string | null; project_id?: string | null; client_email?: string }
 const TYPE: Record<string, string> = {
-  anthropic: 'Inference', openai: 'Inference', google: 'Inference', cloudflare: 'Inference', dashscope: 'Inference',
+  anthropic: 'Inference', openai: 'Inference', google: 'Inference', cloudflare: 'Inference', dashscope: 'Inference', vertex: 'Inference',
   boat: 'Sandbox', exa: 'Search', libraries_io: 'Search',
   amp: 'Coding agent', cursor: 'Coding agent', factory: 'Coding agent', github_copilot: 'Coding agent'
 };
@@ -41,8 +40,7 @@ const typeOf = (slug: string) => TYPE[slug] ?? 'Other';
 /** Every key Octillion uses, one row per provider; keys are added, disabled and deleted from the row's ⋯ menu. */
 export function AdminKeyVault() {
   const { lock } = useAdminRole();
-  const { data, error, isLoading } = useAdmin<{ unlocked: boolean; providers: Provider[]; credentials: Credential[]; env_keys?: EnvKey[] }>('/compute/keys');
-  const envOf = (p: Provider) => (data?.env_keys ?? []).filter((k) => k.provider === p.slug);
+  const { data, error, isLoading } = useAdmin<{ unlocked: boolean; providers: Provider[]; credentials: Credential[] }>('/compute/keys');
   const [adding, setAdding] = useState<string | null>(null);
   const [del, setDel] = useState<Credential | null>(null);
   const [importing, setImporting] = useState(false);
@@ -56,13 +54,23 @@ export function AdminKeyVault() {
     { key: 'type', label: 'Type', type: 'select', value: (p) => typeOf(p.slug), options: TYPES.map((t) => ({ value: t })), render: (p) => typeOf(p.slug) },
     { key: 'use', label: 'How it is used', hidden: true, type: 'select', value: (p) => (p.mode === 'gateway' ? 'Agents call it through the gateway' : 'Given to orchestrators'),
       render: (p) => <span className='text-muted-foreground'>{p.mode === 'gateway' ? 'Agents call it through the gateway' : 'Given to orchestrators'}{p.backend !== 'direct' && ` · ${p.backend}`}</span> },
-    { key: 'keys', label: 'Keys', type: 'number', value: (p) => keysOf(p).length + envOf(p).length, render: (p) => {
-      const mine = keysOf(p), env = envOf(p);
-      if (!mine.length && !env.length) return <span className='text-amber-700 dark:text-amber-400'>no key</span>;
+    { key: 'keys', label: 'Keys', type: 'number', value: (p) => keysOf(p).length, render: (p) => {
+      const mine = keysOf(p), env = p.env_set ?? [];
       return (
         <span className='flex flex-col gap-1'>
-          {mine.map((c) => <span key={c.id} className={c.enabled ? undefined : 'text-muted-foreground line-through'}><Mono>{c.hint}</Mono> <span className='text-muted-foreground'>vault · {c.label} · {c.uses} uses</span></span>)}
-          {env.map((k) => <span key={k.name} title={`Set as ${k.name} on the server. Serves ${k.serves}.`}><Mono>{k.hint}</Mono> <span className='text-muted-foreground'>environment · {k.serves}</span></span>)}
+          {!mine.length && <span className='text-amber-700 dark:text-amber-400'>no key</span>}
+          {mine.map((c) => (
+            <span key={c.id} className={c.enabled ? undefined : 'text-muted-foreground line-through'}>
+              {c.client_email
+                ? <><Mono>{c.client_email}</Mono> <span className='text-muted-foreground'>{c.project_id ? `project ${c.project_id} · ` : ''}{c.label} · {c.uses} uses</span></>
+                : <><Mono>{c.hint}</Mono> <span className='text-muted-foreground'>{c.label} · {c.uses} uses</span></>}
+            </span>
+          ))}
+          {env.length > 0 && (
+            <span className='text-muted-foreground text-xs' title={`Nothing reads ${env.join(', ')} any more: the vault key is used.`}>
+              Also set in the server environment — safe to delete there (<Mono>{env.join(', ')}</Mono>)
+            </span>
+          )}
         </span>
       );
     } },
@@ -75,7 +83,7 @@ export function AdminKeyVault() {
       <ErrorBox error={error} />
       {data && !data.unlocked && <Notice>The key vault is locked: set <Mono>OCTILLION_VAULT_KEY</Mono> on the server to add keys.</Notice>}
       <RecordView id='key-vault' rows={data?.providers ?? []} loading={isLoading} rowKey={(p) => p.slug} cols={cols} noun='providers'
-        searchText={(p) => `${p.slug} ${nameOf(p.slug)} ${typeOf(p.slug)} ${keysOf(p).map((c) => `${c.label} ${c.hint}`).join(' ')} ${envOf(p).map((k) => k.name).join(' ')}`}
+        searchText={(p) => `${p.slug} ${nameOf(p.slug)} ${typeOf(p.slug)} ${keysOf(p).map((c) => `${c.label} ${c.hint} ${c.project_id ?? ''}`).join(' ')} ${(p.env_set ?? []).join(' ')}`}
         searchPlaceholder='Search providers and keys · encrypted at rest; agents get scoped gateway tokens, never these keys'
         views={[{ id: 'all', label: 'All' }, ...TYPES.slice(0, 4).map((t) => ({ id: t, label: t, match: (p: Provider) => typeOf(p.slug) === t }))]}
         defaultSort={[{ key: 'type', dir: 'asc' }]}
@@ -111,10 +119,13 @@ export function AdminKeyVault() {
 function AddKey({ providers, initial, onClose }: { providers: Provider[]; initial: string; onClose: () => void }) {
   const [f, setF] = useState({ provider: initial, label: '', secret: '' });
   const [err, setErr] = useState('');
-  const add = useAdminAction(() => post<{ hint: string }>('/compute/keys', { provider: f.provider, label: f.label.trim() || undefined, secret: f.secret }), { success: (r) => `Key saved (${r.hint})` });
-  const vertex = f.provider === 'anthropic' && f.label.trim() === 'vertex';
+  const add = useAdminAction(() => post<{ hint: string; project_id?: string }>('/compute/keys', { provider: f.provider, label: f.label.trim() || undefined, secret: f.secret }),
+    { success: (r) => `Key saved (${r.project_id ? `${r.project_id} · ` : ''}${r.hint})` });
+  const vertex = f.provider === 'vertex' || (f.provider === 'anthropic' && f.label.trim() === 'vertex');
+  const sa = vertex && f.secret.trim() ? checkServiceAccount(f.secret) : null;
   const submit = (e: React.FormEvent) => {
     e.preventDefault(); setErr('');
+    if (sa && 'error' in sa) return setErr(sa.error);
     add.mutate(undefined, { onSuccess: onClose, onError: (x) => { setErr(x.message); setF({ ...f, secret: '' }); } });
   };
   return (
@@ -130,23 +141,39 @@ function AddKey({ providers, initial, onClose }: { providers: Provider[]; initia
               {providers.map((p) => <NativeSelectOption key={p.slug} value={p.slug}>{nameOf(p.slug)} · {typeOf(p.slug)}</NativeSelectOption>)}
             </NativeSelect>
           </FormRow>
-          <FormRow id='ak-label' label='Label (optional)' hint={f.provider === 'anthropic' ? 'Use the label vertex for a Google service-account JSON (Claude on Vertex AI).' : 'A new label adds to the pool; the same label replaces that key.'}>
-            <Input id='ak-label' maxLength={60} placeholder='default' value={f.label} onChange={(e) => setF({ ...f, label: e.target.value })} />
+          <FormRow id='ak-label' label='Label (optional)' hint={f.provider === 'vertex' ? 'A Google Cloud service-account JSON key; Claude on Vertex AI uses it (project from the key, region from Agent configuration).' : 'A new label adds to the pool; the same label replaces that key.'}>
+            <Input id='ak-label' maxLength={60} placeholder={f.provider === 'vertex' ? 'vertex' : 'default'} value={f.label} onChange={(e) => setF({ ...f, label: e.target.value })} />
           </FormRow>
           <FormRow id='ak-secret' label={vertex ? 'Service-account JSON' : 'Key'}>
             {vertex
-              ? <Textarea id='ak-secret' rows={6} spellCheck={false} required className='font-mono text-xs' placeholder='{ "type": "service_account", … }' value={f.secret} onChange={(e) => setF({ ...f, secret: e.target.value })} />
+              ? <div className='grid gap-2'>
+                  <Textarea id='ak-secret' rows={6} spellCheck={false} required className='font-mono text-xs' placeholder='{ "type": "service_account", "project_id": …, "client_email": …, "private_key": … }' value={f.secret} onChange={(e) => setF({ ...f, secret: e.target.value })} />
+                  <Input type='file' accept='.json,application/json' aria-label='Upload the service-account JSON' onChange={(e) => { const file = e.target.files?.[0]; if (file) void file.text().then((t) => setF((x) => ({ ...x, secret: t }))); e.target.value = ''; }} />
+                  {sa && ('error' in sa
+                    ? <p className='text-destructive text-xs'>{sa.error}</p>
+                    : <p className='text-muted-foreground text-xs'>Project <Mono>{sa.project_id}</Mono> · <Mono>{sa.client_email}</Mono></p>)}
+                </div>
               : <Input id='ak-secret' type='password' autoComplete='new-password' spellCheck={false} required value={f.secret} onChange={(e) => setF({ ...f, secret: e.target.value })} />}
           </FormRow>
           {err && <p className='text-destructive text-sm'>{err}</p>}
           <DialogFooter>
             <Button type='button' variant='outline' onClick={onClose}>Cancel</Button>
-            <Gate need='keys'><Button type='submit' disabled={add.isPending || !f.secret.trim()}>Save key</Button></Gate>
+            <Gate need='keys'><Button type='submit' disabled={add.isPending || !f.secret.trim() || (!!sa && 'error' in sa)}>Save key</Button></Gate>
           </DialogFooter>
         </form>
       </DialogContent>
     </Dialog>
   );
+}
+
+/** The same checks the server makes on a Vertex AI key (src/keyvault.ts checkServiceAccount); never shows the key. */
+function checkServiceAccount(text: string): { project_id: string; client_email: string } | { error: string } {
+  let j: Record<string, unknown>;
+  try { j = JSON.parse(text); } catch { return { error: 'That is not valid JSON: paste the whole service-account key file from Google Cloud' }; }
+  if (!j || typeof j !== 'object' || Array.isArray(j)) return { error: 'That is not a service-account key file' };
+  if (j.type !== 'service_account') return { error: 'That is not a service-account key: "type" must be "service_account"' };
+  for (const k of ['project_id', 'client_email', 'private_key']) if (typeof j[k] !== 'string' || !(j[k] as string).trim()) return { error: `The service-account key has no ${k}` };
+  return { project_id: j.project_id as string, client_email: j.client_email as string };
 }
 
 /** Environment variable names Octillion knows, to the vault provider that holds them. */
@@ -156,7 +183,7 @@ const ENV_PROVIDER: Record<string, string> = {
   LIBRARIES_IO_API_KEY: 'libraries_io', AMP_API_KEY: 'amp', CURSOR_API_KEY: 'cursor', FACTORY_API_KEY: 'factory', COPILOT_GITHUB_TOKEN: 'github_copilot'
 };
 interface Parsed { provider: string; label: string; secret: string; source: string; status?: 'saved' | 'failed'; error?: string }
-const hint = (s: string) => (s.length > 12 ? `${s.slice(0, 6)}…${s.slice(-4)}` : '••••');
+const hint = (s: string) => (s.trim().startsWith('{') ? 'service-account JSON' : s.length > 12 ? `${s.slice(0, 6)}…${s.slice(-4)}` : '••••');
 
 /**
  * Keys from a .env file (KNOWN_NAME=value), a CSV (provider,label,key) or a Google service-account JSON (Claude on
@@ -165,7 +192,10 @@ const hint = (s: string) => (s.length > 12 ? `${s.slice(0, 6)}…${s.slice(-4)}`
 function parseKeys(text: string, slugs: Set<string>): { keys: Parsed[]; skipped: string[] } {
   const t = text.trim(), keys: Parsed[] = [], skipped: string[] = [];
   if (t.startsWith('{')) {
-    try { const j = JSON.parse(t); if (j.type === 'service_account') return { keys: [{ provider: 'anthropic', label: 'vertex', secret: t, source: 'service-account JSON' }], skipped }; } catch { /* not JSON */ }
+    try {
+      const j = JSON.parse(t);
+      if (j.type === 'service_account') return { keys: [{ provider: slugs.has('vertex') ? 'vertex' : 'anthropic', label: 'vertex', secret: t, source: `service-account JSON${j.client_email ? ` (${j.client_email})` : ''}` }], skipped };
+    } catch { /* not JSON */ }
   }
   const lines = t.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
   const csv = /^provider\s*,/i.test(lines[0] ?? '');

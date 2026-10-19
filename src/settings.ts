@@ -29,6 +29,8 @@ export const SETTINGS: SettingDef[] = [
     help: "The model each orchestrator thinks with (it plays the developer and drives the agents). Applies to orchestrators started after the change." },
   { key: "CLOUDFLARE_AI_MODEL", group: "models", label: "Research quick-pass model", kind: "text", default: "@cf/zai-org/glm-5.3-flash",
     help: "Cloudflare Workers AI model for the first, quick brief on an access request's company." },
+  { key: "VERTEX_REGION", group: "models", label: "Vertex AI region", kind: "text", default: "us-east5",
+    help: "Google Cloud region for Claude (and Gemini) on Vertex AI, e.g. us-east5, europe-west1, global. The project comes from the Vertex AI service-account key in Key vault." },
   { key: "OCTILLION_DEFAULT_SAMPLES", group: "runs", label: "Default samples per task", kind: "int", default: 10, min: 1, max: 1000,
     help: "Sessions per task when a run does not say how many." },
   { key: "OCTILLION_MAX_SAMPLES", group: "runs", label: "Most samples per task", kind: "int", default: 20, min: 1, max: 1000,

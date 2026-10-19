@@ -6,8 +6,8 @@ import { keepAlive } from "./telemetry.js";
 import { getDb } from "./db.js";
 import { settingNumber, settingText } from "./settings.js";
 import { orchestratorBrain } from "./gateway.js";
-import { getProvider, useCredential, VERTEX_LABEL } from "./keyvault.js";
-import { toVertex, vertexAccessToken } from "./vertex.js";
+import { getProvider, useCredential, useVertexCredential, VERTEX_LABEL } from "./keyvault.js";
+import { toVertex, vertexAccessToken, vertexConfig, type VertexConfig } from "./vertex.js";
 import { findSimilar, packageSearch, webSearch, webSearchEnabled, type SearchHit } from "./websearch.js";
 import { asData } from "../orchestrator/core/text-guard.js";
 
@@ -151,8 +151,9 @@ Reply with one JSON object and nothing else:
  "questions": ["2-4 questions to ask them on a first call"], "flags": ["anything that looks off: mismatched domains, no product, not a developer tool"]}`;
 
 /** The brief from Claude, else from the orchestrator's own model (OpenAI) when the vault has no Anthropic key. */
-/** The brief from the first model that answers: GLM 5.3 Flash on Cloudflare Workers AI, then Claude (vault,
- *  ANTHROPIC_API_KEY or Vertex AI), then the orchestrator's OpenAI model. Each failure is kept so the flag says why. */
+/** The brief from the first model that answers: GLM 5.3 Flash on Cloudflare Workers AI, then Claude (the vault's
+ *  Anthropic key, or Claude on Vertex AI), then the orchestrator's OpenAI model. Keys come from the vault only.
+ *  Each failure is kept so the flag says why. */
 async function claudeBrief(evidence: unknown): Promise<(Partial<ProspectBrief> & { model: string }) | null> {
   const brain = orchestratorBrain();
   const tries: [string, () => Promise<string>][] = [
@@ -170,10 +171,14 @@ async function claudeBrief(evidence: unknown): Promise<(Partial<ProspectBrief> &
 
 const cloudflareModel = () => settingText("CLOUDFLARE_AI_MODEL"); // global setting (/admin/compute), else env
 
-/** Cloudflare Workers AI (OpenAI-compatible endpoint), from CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN. */
+/** Cloudflare Workers AI (OpenAI-compatible endpoint): the vault's cloudflare key; the account id (not a secret) from
+ *  the provider's upstream URL (.../accounts/<id>/ai) or CLOUDFLARE_ACCOUNT_ID. */
 async function cloudflareText(evidence: unknown) {
-  const account = process.env.CLOUDFLARE_ACCOUNT_ID ?? process.env.CF_ACCOUNT_ID, token = process.env.CLOUDFLARE_API_TOKEN ?? process.env.CF_API_TOKEN;
-  if (!account || !token) throw new Error("no Cloudflare Workers AI key (CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN)");
+  const p = await getProvider("cloudflare");
+  const account = p?.upstream_url?.match(/\/accounts\/([^/]+)/)?.[1] ?? process.env.CLOUDFLARE_ACCOUNT_ID ?? process.env.CF_ACCOUNT_ID;
+  const token = (await useCredential("cloudflare").catch(() => null))?.secret;
+  if (!token) throw new Error("no Cloudflare Workers AI key in the vault");
+  if (!account) throw new Error("no Cloudflare account id (the cloudflare provider's upstream URL, or CLOUDFLARE_ACCOUNT_ID)");
   const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(account)}/ai/v1/chat/completions`, {
     method: "POST", signal: AbortSignal.timeout(120_000), headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
     body: JSON.stringify({ model: cloudflareModel(), max_tokens: 8000 /* a thinking model: room to reason, then answer */, messages: [{ role: "system", content: SYSTEM }, { role: "user", content: `Evidence:\n${JSON.stringify(evidence)}` }] }),
@@ -185,14 +190,10 @@ async function cloudflareText(evidence: unknown) {
 
 async function openaiText(evidence: unknown, model: string) {
   const p = await getProvider("openai");
-  let base = "https://api.openai.com", auth: Record<string, string> | null = null;
-  // The vault's key when it has one (a provider row without a credential falls through to OPENAI_API_KEY).
-  const cred = p?.enabled && p.upstream_url ? await useCredential("openai", { excludeLabel: VERTEX_LABEL }).catch(() => null) : null;
-  if (cred) {
-    base = p!.upstream_url!.replace(/\/$/, "").replace(/\/v1$/, "");
-    auth = { [p!.auth_header]: `${p!.auth_prefix}${cred.secret}` };
-  } else if (process.env.OPENAI_API_KEY) auth = { authorization: `Bearer ${process.env.OPENAI_API_KEY}` };
-  if (!auth) throw new Error("no OpenAI key in the vault (or OPENAI_API_KEY)");
+  const cred = p?.enabled ? await useCredential("openai", { excludeLabel: VERTEX_LABEL }).catch(() => null) : null;
+  if (!p || !cred) throw new Error("no OpenAI key in the vault");
+  const base = (p.upstream_url ?? "https://api.openai.com").replace(/\/$/, "").replace(/\/v1$/, "");
+  const auth = { [p.auth_header]: `${p.auth_prefix}${cred.secret}` };
   const r = await fetch(`${base}/v1/chat/completions`, { method: "POST", signal: AbortSignal.timeout(90_000),
     headers: { "content-type": "application/json", ...auth },
     body: JSON.stringify({ model, response_format: { type: "json_object" }, messages: [{ role: "system", content: SYSTEM }, { role: "user", content: `Evidence:\n${JSON.stringify(evidence)}` }] }) });
@@ -204,25 +205,18 @@ async function openaiText(evidence: unknown, model: string) {
 async function anthropicText(evidence: unknown): Promise<string> {
   const p = await getProvider("anthropic");
   const direct = { "content-type": "application/json", "anthropic-version": "2023-06-01" };
-  // No vault provider: a plain ANTHROPIC_API_KEY in the environment works too.
-  if (!p?.enabled && process.env.ANTHROPIC_API_KEY) return anthropicCall("https://api.anthropic.com/v1/messages", { ...direct, "x-api-key": process.env.ANTHROPIC_API_KEY });
-  // Or Claude on Vertex AI from a service-account key in the environment (project from VERTEX_PROJECT_ID or the key).
-  const sa = process.env.VERTEX_SERVICE_ACCOUNT_JSON ?? process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
-  if (!p?.enabled && sa) {
-    const cfg = { project_id: process.env.VERTEX_PROJECT_ID ?? (() => { try { return JSON.parse(sa).project_id; } catch { return undefined; } })(), region: process.env.VERTEX_REGION ?? "global" };
-    const auth = { "content-type": "application/json", authorization: `Bearer ${await vertexAccessToken(-1, sa)}` };
-    return anthropicCall("", auth, (payload) => toVertex(cfg, "/v1/messages", Buffer.from(JSON.stringify(payload))));
-  }
-  if (!p?.enabled) throw new Error("no Anthropic provider in the vault (or ANTHROPIC_API_KEY, or VERTEX_SERVICE_ACCOUNT_JSON)");
-  if (p.backend === "vertex") {
-    const credProvider = (p.backend_config as { credential_provider?: string })?.credential_provider ?? "anthropic";
-    const cred = await useCredential(credProvider, { label: VERTEX_LABEL });
+  const onVertex = async (cfg: VertexConfig | undefined, credentialProvider?: string, noKey?: string) => {
+    const cred = await useVertexCredential("anthropic", credentialProvider)
+      .catch((e) => { throw noKey ? new Error(`${noKey} (${(e as Error).message})`) : e; });
+    const v = vertexConfig(cfg, cred.secret, settingText("VERTEX_REGION"));
     const auth = { "content-type": "application/json", authorization: `Bearer ${await vertexAccessToken(cred.id, cred.secret)}` };
-    return anthropicCall("", auth, (payload) => toVertex(p.backend_config, "/v1/messages", Buffer.from(JSON.stringify(payload))));
-  }
-  if (!p.upstream_url) throw new Error("the Anthropic provider has no upstream URL");
-  const cred = await useCredential("anthropic", { excludeLabel: VERTEX_LABEL });
-  return anthropicCall(`${p.upstream_url.replace(/\/$/, "")}/v1/messages`, { ...direct, [p.auth_header]: `${p.auth_prefix}${cred.secret}` });
+    return anthropicCall("", auth, (payload) => toVertex(v, "/v1/messages", Buffer.from(JSON.stringify(payload))));
+  };
+  if (p?.enabled && p.backend === "vertex") return onVertex(p.backend_config, (p.backend_config as VertexConfig)?.credential_provider);
+  // The vault's Anthropic key; without one, Claude on Vertex AI with the vault's Vertex service account.
+  const cred = p?.enabled && p.upstream_url ? await useCredential("anthropic", { excludeLabel: VERTEX_LABEL }).catch(() => null) : null;
+  if (cred) return anthropicCall(`${p!.upstream_url!.replace(/\/$/, "")}/v1/messages`, { ...direct, [p!.auth_header]: `${p!.auth_prefix}${cred.secret}` });
+  return onVertex(undefined, undefined, "no Anthropic key in the vault");
 
   /** One Messages call; `rewrite` turns the request into Vertex's URL and body. */
   async function anthropicCall(url: string, headers: Record<string, string>, rewrite?: (payload: object) => { url: string; body: string }) {

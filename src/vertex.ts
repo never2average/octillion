@@ -35,6 +35,16 @@ export function parseServiceAccount(secret: string): ServiceAccount {
   return sa;
 }
 
+/**
+ * The Vertex location to call: the provider's own backend_config wins where it sets project_id or region; otherwise
+ * the project comes from the service-account key and the region from the VERTEX_REGION setting (Agent configuration).
+ */
+export function vertexConfig(cfg: VertexConfig | undefined, secret: string, region: string): VertexConfig {
+  let project: string | undefined;
+  try { project = (JSON.parse(secret) as { project_id?: string }).project_id; } catch { /* parseServiceAccount says why */ }
+  return { ...(cfg ?? {}), project_id: cfg?.project_id || project, region: cfg?.region || region };
+}
+
 /** A Google OAuth access token for the service account, cached until a minute before it expires. */
 export async function vertexAccessToken(credentialId: number, secret: string): Promise<string> {
   const hit = cache.get(credentialId);

@@ -10,7 +10,7 @@ import { asData } from "../orchestrator/core/text-guard.js";
  *   packages registry search for packages doing the same job, with usage numbers (npm and crates.io, free;
  *            PyPI, Go, Maven and others through libraries.io when its key is in the vault)
  * Searches run here, never in the research sandbox, so the keys stay on the server (vault providers `exa` and
- * `libraries_io`, orchestrator-only; EXA_API_KEY / LIBRARIES_IO_API_KEY for local runs). Every result URL is recorded
+ * `libraries_io`, orchestrator-only; never environment variables). Every result URL is recorded
  * on the research job (product_research.sources): a competitor's evidence_url must be one of them.
  * Result text is web content: data, never instructions (asData).
  */
@@ -30,11 +30,10 @@ const LIBRARIES_PLATFORM: Record<string, string> = { npm: "NPM", pypi: "Pypi", c
 export interface SearchHit { url: string; title: string; text?: string; published?: string }
 export interface PackageHit { name: string; ecosystem: string; description: string; url: string; homepage?: string; repository?: string; usage?: Record<string, number> }
 
-async function key(provider: string, envName: string): Promise<string | null> {
-  if (process.env[envName]) return process.env[envName]!;
+async function key(provider: string): Promise<string | null> {
   try { return (await useCredential(provider)).secret; } catch { return null; }
 }
-export const webSearchEnabled = async () => Boolean(await key("exa", "EXA_API_KEY"));
+export const webSearchEnabled = async () => Boolean(await key("exa"));
 
 async function getJson(url: string, init: RequestInit = {}): Promise<any> {
   const r = await fetch(url, { ...init, headers: { "user-agent": UA, accept: "application/json", ...(init.headers ?? {}) }, signal: AbortSignal.timeout(SEARCH.timeoutMs) });
@@ -43,7 +42,7 @@ async function getJson(url: string, init: RequestInit = {}): Promise<any> {
 }
 
 async function exa(path: "search" | "findSimilar", body: Record<string, unknown>): Promise<SearchHit[]> {
-  const k = await key("exa", "EXA_API_KEY");
+  const k = await key("exa");
   if (!k) throw Object.assign(new Error("Web search is not configured (no Exa key in the vault); name competitors from the product's docs and package search, and say so in notes"), { status: 503 });
   const r = await getJson(`${url.exa()}/${path}`, { method: "POST", headers: { "x-api-key": k, "content-type": "application/json" },
     body: JSON.stringify({ ...body, contents: { text: { maxCharacters: 700 } } }) });
@@ -75,7 +74,7 @@ export async function packageSearch(query: string, ecosystem: string, n = 10): P
   }
   const platform = LIBRARIES_PLATFORM[ecosystem];
   if (!platform) throw Object.assign(new Error(`ecosystem must be one of ${ECOSYSTEMS.join(", ")}`), { status: 400 });
-  const k = await key("libraries_io", "LIBRARIES_IO_API_KEY");
+  const k = await key("libraries_io");
   if (!k) throw Object.assign(new Error(`${ecosystem} search needs a libraries.io key, which is not configured; use web_search (e.g. "python library for <job>") and confirm names with fetch_url on the registry`), { status: 503 });
   const r = await getJson(`${url.libraries()}/search?q=${q}&platforms=${platform}&per_page=${size}&api_key=${encodeURIComponent(k)}`);
   return (Array.isArray(r) ? r : []).map((p: any) => ({

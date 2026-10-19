@@ -32,6 +32,7 @@ import { brokerOrchestratorCredentials, brokerSessionCredentials, gatewayHandler
 import * as research from "./research.js";
 import { usageReport } from "./usage.js";
 import * as kv from "./keyvault.js";
+import { importEnvKeysOnce } from "./keyvault-env.js";
 import * as populations from "./populations.js";
 import * as onboarding from "./admin.js";
 import * as library from "./library.js";
@@ -60,6 +61,9 @@ export function createApp() {
   const app = express();
   app.set("trust proxy", true);
   app.disable("x-powered-by");
+  // Provider keys still set as environment variables go into the key vault once, before anything reads a key.
+  void importEnvKeysOnce();
+  app.use((_req, _res, next) => void importEnvKeysOnce().then(() => next()));
 
   app.get("/healthz", async (_req, res) => {
     if (draining) return void res.status(503).json({ ok: false, draining: true }); // rolling deploy: stop routing here

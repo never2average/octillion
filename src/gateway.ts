@@ -4,8 +4,8 @@ import type { Request, Response } from "express";
 import { getDb } from "./db.js";
 import { settingText } from "./settings.js";
 import { findAgent } from "./agents.js";
-import { getProvider, providersForEnv, useCredential, VERTEX_LABEL, type ProviderRow } from "./keyvault.js";
-import { adaptGeminiBody, geminiWantsThinkingLevel, toVertex, toVertexGemini, vertexAccessToken } from "./vertex.js";
+import { getProvider, providersForEnv, useCredential, useVertexCredential, VERTEX_LABEL, type ProviderRow } from "./keyvault.js";
+import { adaptGeminiBody, geminiWantsThinkingLevel, toVertex, toVertexGemini, vertexAccessToken, vertexConfig, type VertexConfig } from "./vertex.js";
 import { costOf, recordModelUsage } from "./usage.js";
 
 /**
@@ -103,7 +103,7 @@ export const orchestratorBrain = () => ({
 const SDK_BASE_SUFFIX: Record<string, string> = { openai: "/v1", dashscope: "/compatible-mode/v1" };
 
 /** Direct-mode providers whose key only the orchestrator uses; never brokered to an agent session. */
-export const ORCHESTRATOR_ONLY_PROVIDERS = new Set(["boat"]);
+export const ORCHESTRATOR_ONLY_PROVIDERS = new Set(["boat", "vertex"]);
 /** Real vendor keys in agent sessions are off unless OCTILLION_DIRECT_KEYS=allow (see docs/security.md). */
 export const directKeysAllowed = () => process.env.OCTILLION_DIRECT_KEYS === "allow";
 function directKeyAllowed(provider: string, taskSource: string | null): boolean {
@@ -220,11 +220,15 @@ export async function gatewayHandler(req: Request, res: Response) {
     return gwError(res, 429, "octillion_budget_exceeded", "This session's gateway budget is used up");
 
   let cred: { id: number; secret: string };
-  // Vertex uses the provider's service-account key (label "vertex"); direct mode never does.
-  // A Vertex provider may reuse another provider's service account (backend_config.credential_provider).
-  const credProvider = p.backend === "vertex" ? ((p.backend_config as { credential_provider?: string })?.credential_provider ?? slug) : slug;
-  try { cred = await useCredential(credProvider, p.backend === "vertex" ? { label: VERTEX_LABEL } : { excludeLabel: VERTEX_LABEL }); }
-  catch (e) { return gwError(res, 503, "api_error", (e as Error).message); }
+  // Vertex signs in with a service-account key (the Vertex AI provider's, or the provider's own "vertex" key, or
+  // backend_config.credential_provider's); project from that key and region from the VERTEX_REGION setting unless
+  // backend_config sets them. Every other backend uses the provider's own key.
+  try {
+    cred = p.backend === "vertex"
+      ? await useVertexCredential(slug, (p.backend_config as VertexConfig)?.credential_provider)
+      : await useCredential(slug, { excludeLabel: VERTEX_LABEL });
+  } catch (e) { return gwError(res, 503, "api_error", (e as Error).message); }
+  const vcfg = p.backend === "vertex" ? vertexConfig(p.backend_config, cred.secret, settingText("VERTEX_REGION")) : p.backend_config;
 
   // Path after /gw/<provider>, query without our `key` parameter.
   const url = new URL(req.originalUrl, "http://x");
@@ -247,7 +251,7 @@ export async function gatewayHandler(req: Request, res: Response) {
   if (p.backend === "vertex" && slug === "google") {
     // Gemini on Vertex: same body, different URL and auth; the request streams through.
     try {
-      const v = toVertexGemini(p.backend_config, rest, url.search);
+      const v = toVertexGemini(vcfg, rest, url.search);
       upstream = v.url;
       requestModel = v.model;
       headers.delete("x-goog-api-key");
@@ -270,7 +274,7 @@ export async function gatewayHandler(req: Request, res: Response) {
       const chunks: Buffer[] = [];
       let size = 0;
       for await (const c of req) { size += (c as Buffer).length; if (size > 30 * 1024 * 1024) throw Object.assign(new Error("Request exceeds Vertex's 30 MB limit"), { status: 413 }); chunks.push(c as Buffer); }
-      const v = toVertex(p.backend_config, rest, Buffer.concat(chunks), String(req.headers["anthropic-beta"] ?? ""));
+      const v = toVertex(vcfg, rest, Buffer.concat(chunks), String(req.headers["anthropic-beta"] ?? ""));
       upstream = v.url;
       body = v.body;
       requestModel = decodeURIComponent(v.url.match(/\/models\/([^/:]+):/)?.[1] ?? "");

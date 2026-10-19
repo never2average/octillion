@@ -4,6 +4,7 @@ import { registry, sandboxMix } from "./agents.js";
 import { getDb } from "./db.js";
 import { platformOf } from "./platform.js";
 import * as kv from "./keyvault.js";
+import { envStillSet } from "./keyvault-env.js";
 import * as populations from "./populations.js";
 import * as harnesses from "./harnesses.js";
 import { listSettings, SETTING_GROUPS, setSettings } from "./settings.js";
@@ -336,35 +337,20 @@ export async function deleteHarness(actor: string, id: string) {
 
 const vaultError = (e: unknown) => (e instanceof AdminError ? e : new AdminError((e as Error).message));
 
-/**
- * Keys set as server environment variables (Vercel). They are not in the vault: the API reads them directly, so they
- * serve what runs inside the API (web search, the research quick pass) but agents only get vault keys through the
- * gateway. Hints only; `serves` says which.
- */
-const ENV_KEYS: { provider: string; name: string; serves: string }[] = [
-  { provider: "exa", name: "EXA_API_KEY", serves: "all web search (API and agents)" },
-  { provider: "cloudflare", name: "CLOUDFLARE_API_TOKEN", serves: "research quick pass only; agents need a vault key" },
-  { provider: "openai", name: "OPENAI_API_KEY", serves: "research quick pass only; agents need a vault key" },
-  { provider: "anthropic", name: "ANTHROPIC_API_KEY", serves: "research quick pass only; agents need a vault key" },
-  { provider: "anthropic", name: "VERTEX_SERVICE_ACCOUNT_JSON", serves: "research quick pass only; agents need a vault key (label vertex)" },
-  { provider: "libraries_io", name: "LIBRARIES_IO_API_KEY", serves: "all package search (API and agents)" },
-];
-const envHint = (v: string) => (v.trim().startsWith("{") ? "service-account JSON" : v.length > 12 ? `${v.slice(0, 4)}…${v.slice(-4)}` : "set");
-function envKeys() {
-  return ENV_KEYS.filter((k) => process.env[k.name]).map((k) => ({ ...k, hint: envHint(process.env[k.name]!) }));
-}
-
 /** Providers (with how many keys they hold and when one was last used) and every credential, hints only. */
 export async function modelKeys() {
-  const [providers, creds] = await Promise.all([kv.listProviders(), kv.listCredentials() as Promise<any[]>]);
-  const credentials = creds.map(({ key_id: _k, ...c }) => ({ ...c, uses: Number(c.uses) }));
+  // Every key is a vault key (env keys were imported once, src/keyvault-env.ts); env_set names the variables still set
+  // on the server for a provider, which nothing reads any more and can be deleted there.
+  const [providers, creds, envSet] = await Promise.all([kv.listProviders(), kv.listCredentials() as Promise<any[]>, envStillSet()]);
+  const credentials = creds.map(({ key_id: _k, meta, ...c }) => ({ ...c, uses: Number(c.uses),
+    ...(meta?.client_email ? { project_id: meta.project_id || null, client_email: meta.client_email } : {}) }));
   return {
     unlocked: kv.vaultUnlocked(),
-    env_keys: envKeys(),
     providers: providers.map((p) => {
       const mine = credentials.filter((c) => c.provider === p.slug);
       const last = mine.map((c) => c.last_used_at).filter(Boolean).sort((a, b) => +new Date(b) - +new Date(a))[0] ?? null;
-      return { slug: p.slug, mode: p.mode, backend: p.backend, enabled: p.enabled, keys: mine.length, enabled_keys: mine.filter((c) => c.enabled).length, last_used_at: last };
+      return { slug: p.slug, mode: p.mode, backend: p.backend, enabled: p.enabled, keys: mine.length, enabled_keys: mine.filter((c) => c.enabled).length, last_used_at: last,
+               env_set: envSet[p.slug] ?? [] };
     }),
     credentials,
   };
@@ -378,7 +364,7 @@ export async function addModelKey(actor: string, body: { provider?: unknown; sec
   if (priority !== undefined && !Number.isFinite(priority)) throw new AdminError("Priority must be a whole number");
   const saved = await kv.setCredential(provider, secret, { label, priority }).catch((e) => { throw vaultError(e); });
   log(actor, "model_key.add", null, { provider, label: saved.label, hint: saved.hint });
-  return saved; // { id, provider, label, hint }: never the secret
+  return saved; // { id, provider, label, hint } (+ project_id, client_email for a service account): never the secret
 }
 
 export async function setModelKeyEnabled(actor: string, id: number, enabled: unknown) {

@@ -984,3 +984,23 @@ CREATE TABLE IF NOT EXISTS platform_harnesses (
 -- A task's harness preference (/admin/tasks): harness names ("pi", "claude-code") or admin-added agent ids. Sessions for
 -- the task are dealt only among those, at their usual weights; empty is the whole mix (src/agents.ts dealByPreference).
 ALTER TABLE library_tasks ADD COLUMN IF NOT EXISTS harnesses TEXT[] NOT NULL DEFAULT '{}';
+
+-- Vertex AI as its own vault provider (src/keyvault.ts VERTEX_PROVIDER): Google Cloud service-account JSON keys that
+-- Claude (and Gemini) on Vertex sign in with. Orchestrator-only (no env_vars): the key never reaches an agent session.
+INSERT INTO vault_providers (slug, mode, upstream_url, auth_header, auth_prefix, env_vars) VALUES
+  ('vertex', 'direct', 'https://aiplatform.googleapis.com', 'authorization', 'Bearer ', '{}')
+ON CONFLICT (slug) DO NOTHING;
+-- What a key is, beyond its hint (service-account keys: {project_id, client_email}; never key material).
+ALTER TABLE vault_credentials ADD COLUMN IF NOT EXISTS meta JSONB;
+
+-- Provider keys once read from server environment variables, imported into the vault once (src/keyvault-env.ts).
+-- One row per provider: after it the environment is never read for that provider again, and the import never
+-- overwrites a key already in the vault.
+CREATE TABLE IF NOT EXISTS vault_env_imports (
+  provider       TEXT PRIMARY KEY,
+  env_var        TEXT NOT NULL,                -- the variable it came from (the name only)
+  outcome        TEXT NOT NULL DEFAULT 'pending', -- pending | imported | vault_had_key
+  hint           TEXT,
+  credential_id  INT,
+  imported_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
