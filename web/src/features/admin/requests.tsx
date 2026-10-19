@@ -13,6 +13,7 @@ import {
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Icons } from '@/components/icons';
 import { cn } from '@/lib/utils';
@@ -57,7 +58,8 @@ interface Brief {
   audience: string; stage: string; competitors: { name: string; url?: string }[]; packages: string[]; starter_tasks: string[]; questions: string[]; flags: string[];
   site: { url: string; title: string; description: string } | null; sources: { url: string; title: string }[]; model: string | null; depth?: 'harness';
 }
-interface Confirm { title: string; body: ReactNode; label: string; run: () => void }
+/** A confirmation; with `reason`, a box for the optional reason that goes in the email to the requester. */
+interface Confirm { title: string; body: ReactNode; label: string; reason?: boolean; run: (reason: string) => void }
 
 const PERSONAL = /gmail|outlook|hotmail|yahoo|proton|icloud/;
 const domainOf = (email: string) => (email.split('@')[1] || '').toLowerCase();
@@ -103,7 +105,8 @@ export function AdminRequests() {
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const result = useResult();
   const qc = useQueryClient();
-  const decline = useAdminAction((q: Req) => post(`/requests/${q.id}/decline`), { success: 'Declined' });
+  const decline = useAdminAction((v: { q: Req; reason: string }) => post(`/requests/${v.q.id}/decline`, { reason: v.reason || undefined }), { success: 'Declined; they get a short email' });
+  const [reason, setReason] = useState('');
   const reopen = useAdminAction((q: Req) => post(`/requests/${q.id}/reopen`), { success: 'Back in pending' });
   const rows = useMemo(() => data?.requests ?? [], [data]);
   // With a finished deep brief, a re-run only queues a fresh deep job and the current brief stays up meanwhile.
@@ -120,12 +123,13 @@ export function AdminRequests() {
   const matches = useMemo(() => new Map(rows.map((q) => [q.id, matchOrg(q, orgList?.orgs)?.name ?? null])), [rows, orgList]);
 
   const askDecline = (q: Req) => setConfirm({
-    title: `Decline ${q.company}?`, body: 'Nothing is sent to them; you can reopen it later.', label: 'Decline', run: () => decline.mutate(q)
+    title: `Decline ${q.company}?`, body: 'They get a short, kind email saying so, with your reason if you give one. You can reopen it later.', label: 'Decline', reason: true,
+    run: (why) => decline.mutate({ q, reason: why })
   });
   // Bulk writes go one at a time so a failure is counted, not fatal; one toast and one refetch at the end.
-  const runEach = async (list: Req[], verb: 'decline' | 'reopen', clear: () => void) => {
+  const runEach = async (list: Req[], verb: 'decline' | 'reopen', clear: () => void, why = '') => {
     let failed = 0;
-    for (const q of list) { try { await post(`/requests/${q.id}/${verb}`); } catch { failed++; } }
+    for (const q of list) { try { await post(`/requests/${q.id}/${verb}`, verb === 'decline' && why ? { reason: why } : undefined); } catch { failed++; } }
     const ok = list.length - failed, past = verb === 'decline' ? 'Declined' : 'Reopened';
     if (failed) toast.error(`${past} ${ok} of ${plural(list.length)}; ${failed} failed`); else toast.success(`${past} ${plural(ok)}`);
     clear();
@@ -153,7 +157,8 @@ export function AdminRequests() {
     const pending = sel.filter((q) => q.status === 'pending'), declined = sel.filter((q) => q.status === 'declined');
     return [
       ...[{ label: `Decline ${pending.length} pending`, icon: <Icons.close />, destructive: true, disabled: !pending.length, onSelect: () => setConfirm({
-        title: `Decline ${plural(pending.length)}?`, body: 'Nothing is sent to them; you can reopen them later.', label: 'Decline', run: () => void runEach(pending, 'decline', clear)
+        title: `Decline ${plural(pending.length)}?`, body: 'Each gets a short, kind email saying so, with your reason if you give one. You can reopen them later.', label: 'Decline', reason: true,
+        run: (why) => void runEach(pending, 'decline', clear, why)
       }) },
       { label: `Reopen ${declined.length} declined`, icon: <Icons.arrowRight />, disabled: !declined.length, onSelect: () => setConfirm({
         title: `Reopen ${plural(declined.length)}?`, body: 'They go back to pending.', label: 'Reopen', run: () => void runEach(declined, 'reopen', clear)
@@ -215,15 +220,22 @@ export function AdminRequests() {
           }}
         />
       )}
-      <AlertDialog open={!!confirm} onOpenChange={(o) => !o && setConfirm(null)}>
+      <AlertDialog open={!!confirm} onOpenChange={(o) => { if (!o) { setConfirm(null); setReason(''); } }}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>{confirm?.title}</AlertDialogTitle>
             <AlertDialogDescription>{confirm?.body}</AlertDialogDescription>
           </AlertDialogHeader>
+          {confirm?.reason && (
+            <div className='grid gap-2'>
+              <Label htmlFor='decline-reason'>Reason (optional)</Label>
+              <Textarea id='decline-reason' rows={3} maxLength={1000} value={reason} onChange={(e) => setReason(e.target.value)}
+                placeholder='For example: we only support developer tools for now.' />
+            </div>
+          )}
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction variant={confirm?.label === 'Decline' ? 'destructive' : 'default'} onClick={() => { confirm?.run(); setConfirm(null); }}>
+            <AlertDialogAction variant={confirm?.label === 'Decline' ? 'destructive' : 'default'} onClick={() => { confirm?.run(reason.trim()); setConfirm(null); setReason(''); }}>
               {confirm?.label}
             </AlertDialogAction>
           </AlertDialogFooter>

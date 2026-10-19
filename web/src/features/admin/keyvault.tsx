@@ -25,17 +25,20 @@ interface Provider { slug: string; mode: 'gateway' | 'direct'; backend: string; 
 /** Display names for the vault's provider ids. */
 const NAME: Record<string, string> = {
   anthropic: 'Anthropic', openai: 'OpenAI', google: 'Google Gemini', cloudflare: 'Cloudflare Workers AI', dashscope: 'Alibaba DashScope',
-  vertex: 'Vertex AI (Google Cloud)', boat: 'boat.dev', exa: 'Exa', libraries_io: 'Libraries.io', amp: 'Amp', cursor: 'Cursor', factory: 'Factory', github_copilot: 'GitHub Copilot'
+  vertex: 'Vertex AI (Google Cloud)', boat: 'boat.dev', exa: 'Exa', libraries_io: 'Libraries.io', resend: 'Resend', amp: 'Amp', cursor: 'Cursor', factory: 'Factory', github_copilot: 'GitHub Copilot'
 };
 const nameOf = (slug: string) => NAME[slug] ?? slug;
 interface Credential { id: number; provider: string; label: string; hint: string; enabled: boolean; uses: number; last_used_at: string | null; project_id?: string | null; client_email?: string }
 const TYPE: Record<string, string> = {
   anthropic: 'Inference', openai: 'Inference', google: 'Inference', cloudflare: 'Inference', dashscope: 'Inference', vertex: 'Inference',
-  boat: 'Sandbox', exa: 'Search', libraries_io: 'Search',
+  boat: 'Sandbox', exa: 'Search', libraries_io: 'Search', resend: 'Email',
   amp: 'Coding agent', cursor: 'Coding agent', factory: 'Coding agent', github_copilot: 'Coding agent'
 };
-const TYPES = ['Inference', 'Sandbox', 'Search', 'Coding agent', 'Other'];
+const TYPES = ['Inference', 'Sandbox', 'Search', 'Email', 'Coding agent', 'Other'];
 const typeOf = (slug: string) => TYPE[slug] ?? 'Other';
+/** Server-only keys (email) are used by the API itself; never by orchestrators or agents. */
+const SERVER_ONLY = new Set(['resend']);
+const useOf = (p: { slug: string; mode: string }) => (SERVER_ONLY.has(p.slug) ? 'Used by the server only (emails)' : p.mode === 'gateway' ? 'Agents call it through the gateway' : 'Given to orchestrators');
 
 /** Every key Octillion uses, one row per provider; keys are added, disabled and deleted from the row's ⋯ menu. */
 export function AdminKeyVault() {
@@ -52,8 +55,8 @@ export function AdminKeyVault() {
   const cols: RecordCol<Provider>[] = [
     { key: 'provider', label: 'Provider', keep: true, type: 'text', value: (p) => nameOf(p.slug), render: (p) => <span className='font-medium' title={p.slug}>{nameOf(p.slug)}</span> },
     { key: 'type', label: 'Type', type: 'select', value: (p) => typeOf(p.slug), options: TYPES.map((t) => ({ value: t })), render: (p) => typeOf(p.slug) },
-    { key: 'use', label: 'How it is used', hidden: true, type: 'select', value: (p) => (p.mode === 'gateway' ? 'Agents call it through the gateway' : 'Given to orchestrators'),
-      render: (p) => <span className='text-muted-foreground'>{p.mode === 'gateway' ? 'Agents call it through the gateway' : 'Given to orchestrators'}{p.backend !== 'direct' && ` · ${p.backend}`}</span> },
+    { key: 'use', label: 'How it is used', hidden: true, type: 'select', value: useOf,
+      render: (p) => <span className='text-muted-foreground'>{useOf(p)}{p.backend !== 'direct' && ` · ${p.backend}`}</span> },
     { key: 'keys', label: 'Keys', className: 'w-72 max-w-72', type: 'number', value: (p) => keysOf(p).length, render: (p) => {
       const mine = keysOf(p);
       return (
@@ -202,7 +205,7 @@ function checkServiceAccount(text: string): { project_id: string; client_email: 
 const ENV_PROVIDER: Record<string, string> = {
   ANTHROPIC_API_KEY: 'anthropic', OPENAI_API_KEY: 'openai', CODEX_API_KEY: 'openai', GEMINI_API_KEY: 'google', GOOGLE_API_KEY: 'google',
   CLOUDFLARE_API_TOKEN: 'cloudflare', CF_API_TOKEN: 'cloudflare', DASHSCOPE_API_KEY: 'dashscope', BOAT_API_KEY: 'boat', EXA_API_KEY: 'exa',
-  LIBRARIES_IO_API_KEY: 'libraries_io', AMP_API_KEY: 'amp', CURSOR_API_KEY: 'cursor', FACTORY_API_KEY: 'factory', COPILOT_GITHUB_TOKEN: 'github_copilot'
+  LIBRARIES_IO_API_KEY: 'libraries_io', RESEND_API_KEY: 'resend', AMP_API_KEY: 'amp', CURSOR_API_KEY: 'cursor', FACTORY_API_KEY: 'factory', COPILOT_GITHUB_TOKEN: 'github_copilot'
 };
 interface Parsed { provider: string; label: string; secret: string; source: string; status?: 'saved' | 'failed'; error?: string }
 const hint = (s: string) => (s.trim().startsWith('{') ? 'service-account JSON' : s.length > 12 ? `${s.slice(0, 6)}…${s.slice(-4)}` : '••••');

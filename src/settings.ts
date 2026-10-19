@@ -9,12 +9,14 @@ import { getDb } from "./db.js";
  * setSetting() updates this process's cache at once.
  */
 
-export type SettingGroup = "models" | "runs" | "capacity" | "research" | "library";
+export type SettingGroup = "models" | "runs" | "capacity" | "research" | "library" | "email";
 export interface SettingDef {
   key: string; group: SettingGroup; label: string; help: string;
   kind: "text" | "int" | "number" | "choice";
   default: string | number;
   options?: string[]; min?: number; max?: number;
+  /** What a text setting holds (default: a model id). sender = "Name <address>" or an address; emails = addresses, comma-separated, or empty. */
+  format?: "model" | "sender" | "emails";
 }
 
 export const SETTING_GROUPS: { id: SettingGroup; label: string }[] = [
@@ -23,6 +25,7 @@ export const SETTING_GROUPS: { id: SettingGroup; label: string }[] = [
   { id: "capacity", label: "Capacity" },
   { id: "research", label: "Research" },
   { id: "library", label: "Library contributions" },
+  { id: "email", label: "Email" },
 ];
 
 export const SETTINGS: SettingDef[] = [
@@ -54,6 +57,14 @@ export const SETTINGS: SettingDef[] = [
     help: "What an account earns, as a credit on its next Stripe invoice, when Octillion accepts a developer persona it published to the library. The reviewer can change it on Accept." },
   { key: "PUBLISH_DISCOUNT_TASK_USD", group: "library", label: "Credit per accepted task (USD)", kind: "number", default: 10, min: 0, max: 1000,
     help: "What an account earns, as a credit on its next Stripe invoice, when Octillion accepts a programming task it published to the library. The reviewer can change it on Accept." },
+  { key: "EMAILS_ENABLED", group: "email", label: "Send emails", kind: "choice", default: "on", options: ["on", "off"],
+    help: "Off: nothing is sent (each email is logged as skipped). The Resend key is in Key vault; the log is on Emails." },
+  { key: "EMAIL_FROM", group: "email", label: "From", kind: "text", format: "sender", default: "Octillion <hello@octillion.useimmaculate.com>",
+    help: "The sender of every email, as Name <address>. The address's domain must be verified in Resend." },
+  { key: "EMAIL_REPLY_TO", group: "email", label: "Reply-to", kind: "text", format: "emails", default: "",
+    help: "Where replies go. Empty: to the From address." },
+  { key: "EMAIL_ADMIN_TO", group: "email", label: "Operator alerts to", kind: "text", format: "emails", default: "",
+    help: "Who gets new access requests and library submissions, comma-separated. Empty: the platform owners (Admins)." },
 ];
 const DEFS = new Map(SETTINGS.map((d) => [d.key, d]));
 
@@ -104,6 +115,18 @@ function clean(d: SettingDef, v: unknown): { value: string | number } | { error:
   }
   const s = typeof v === "string" ? v.trim() : "";
   if (d.kind === "choice") return d.options!.includes(s) ? { value: s } : { error: `${d.label} must be one of ${d.options!.join(", ")}` };
+  const address = /^[^\s@<>,;"]+@[^\s@<>,;"]+\.[^\s@<>,;"]+$/;
+  if (d.format === "emails") {
+    const list = s.split(",").map((x) => x.trim()).filter(Boolean);
+    if (list.length > 20 || list.some((x) => !address.test(x))) return { error: `${d.label} must be email addresses, comma-separated` };
+    return { value: list.join(", ") };
+  }
+  if (d.format === "sender") {
+    const m = /^(?:([^<>"\r\n]{1,80}?)\s*<([^<>]+)>|([^<>]+))$/.exec(s);
+    const addr = (m?.[2] ?? m?.[3] ?? "").trim();
+    if (!m || !address.test(addr)) return { error: `${d.label} must be Name <address> or an address` };
+    return { value: m[1] ? `${m[1].trim()} <${addr}>` : addr };
+  }
   // Model ids only: they go into orchestrator env files and provider requests.
   return /^[A-Za-z0-9@._\/:-]{1,100}$/.test(s) ? { value: s } : { error: `${d.label} must be a model id (letters, digits, @ . _ / : -)` };
 }

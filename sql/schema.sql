@@ -1038,3 +1038,30 @@ ALTER TABLE developer_profiles ADD COLUMN IF NOT EXISTS contributed_by INT REFER
 ALTER TABLE developer_profiles ADD COLUMN IF NOT EXISTS submission_id  TEXT;
 ALTER TABLE library_tasks      ADD COLUMN IF NOT EXISTS contributed_by INT REFERENCES organizations(id) ON DELETE SET NULL;
 ALTER TABLE library_tasks      ADD COLUMN IF NOT EXISTS submission_id  TEXT;
+
+-- Transactional email through Resend (src/email.ts). The key is a vault provider like any other: orchestrator/server
+-- only (no env_vars), so it never reaches an agent session.
+INSERT INTO vault_providers (slug, mode, upstream_url, auth_header, auth_prefix, env_vars) VALUES
+  ('resend', 'direct', 'https://api.resend.com', 'authorization', 'Bearer ', '{}')
+ON CONFLICT (slug) DO NOTHING;
+-- Every email Octillion tried to send: one row per message (recipient and purpose), whatever became of it. Never the
+-- address itself (a hash to match on, and the domain), never the body. The idempotency key names the message
+-- ("request:12:received", "budget:7:2026-10:80:<hash>"), so a retry or a second trigger never sends it twice; a
+-- failed or skipped one is tried again when it is triggered again.
+CREATE TABLE IF NOT EXISTS email_log (
+  id               BIGSERIAL PRIMARY KEY,
+  at               TIMESTAMPTZ NOT NULL DEFAULT now(),      -- the last attempt
+  kind             TEXT NOT NULL,                           -- request_received, request_alert, budget_80, test, ...
+  to_hash          TEXT NOT NULL,                           -- sha256 of the lowercased address
+  to_domain        TEXT NOT NULL,
+  subject          TEXT NOT NULL,
+  status           TEXT NOT NULL CHECK (status IN ('sending', 'sent', 'skipped', 'failed')),
+  provider_id      TEXT,                                    -- Resend's email id
+  error            TEXT,                                    -- why it failed or was skipped
+  attempts         INT NOT NULL DEFAULT 1,
+  meta             JSONB NOT NULL DEFAULT '{}',             -- ids it is about (request, submission, account); no addresses
+  idempotency_key  TEXT NOT NULL UNIQUE
+);
+CREATE INDEX IF NOT EXISTS email_log_at_idx ON email_log (at DESC);
+-- Why a request was declined, when the reviewer says (it goes in the email to the requester).
+ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS decline_reason TEXT;

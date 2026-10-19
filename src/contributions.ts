@@ -29,6 +29,7 @@ import { freshSettings, settingNumber } from "./settings.js";
 import * as billing from "./billing.js";
 import { AdminError, log } from "./admin.js";
 import { platformOf } from "./platform.js";
+import * as mail from "./email.js";
 
 export type Kind = "persona" | "task";
 export type SubmissionStatus = "submitted" | "accepted" | "declined" | "withdrawn";
@@ -120,6 +121,7 @@ export async function publish(org: Org, actor: string, kind: Kind, ref: string) 
     throw e;
   }
   const credit = (await discountUsd())[kind];
+  mail.fire(mail.submissionReceived({ id, kind, title, org_id: org.orgId, org_name: org.name, org_slug: org.slug, created_by: actor }));
   return { view: "library_submission" as const, submission: (await publicationsFor(org.orgId, kind)).get(String(ref))!, kind, ref: String(ref), title, credit_usd: credit };
 }
 
@@ -236,8 +238,13 @@ export async function accept(actor: string, id: string, body: Record<string, unk
   });
   log(actor, "library.submission.accept", cur.org_slug, { submission: id, kind, library_ref: libraryRef, credit_usd: credit });
   await creditNow(id);
-  return shapeAdmin(await submission(id));
+  const after = await submission(id);
+  // To the person who submitted it, with the credit as it stands now (credited, or still pending).
+  mail.fire(mail.submissionAccepted(factsOf(after), { usd: Number(after.credit_usd ?? 0), status: after.credit_status }));
+  return shapeAdmin(after);
 }
+
+const factsOf = (r: any): mail.SubmissionFacts => ({ id: r.id, kind: r.kind, title: r.title, org_id: r.org_id, org_name: r.org_name, org_slug: r.org_slug, created_by: r.created_by });
 
 /** Decline, with the reason the account sees. */
 export async function decline(actor: string, id: string, reason: unknown) {
@@ -249,6 +256,7 @@ export async function decline(actor: string, id: string, reason: unknown) {
     [id, why, actor]);
   if (!row) throw new AdminError(`This submission is ${cur.status}, not waiting for review`, 409);
   log(actor, "library.submission.decline", cur.org_slug, { submission: id, kind: cur.kind });
+  mail.fire(mail.submissionDeclined(factsOf(cur), why));
   return shapeAdmin(await submission(id));
 }
 

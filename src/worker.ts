@@ -2,6 +2,7 @@ import { open as openText, openJson } from "./orgcrypto.js";
 import { getDb } from "./db.js";
 import { orgEvent } from "./telemetry.js";
 import { reportSessionSpend } from "./billing.js";
+import { checkBudgetLater } from "./email.js";
 import { normalize, transcripts, type RawEvent, type SessionRef, type StoredEvent } from "./transcripts.js";
 import { scoreTranscript, developerNamedTools, untrackedInstalls, type Tool } from "./scoring.js";
 import { findAgent } from "./agents.js";
@@ -242,7 +243,10 @@ export async function completeSession(sessionId: string, input: CompleteInput = 
               cost_usd = greatest(cost_usd, $4) WHERE id = $1`,
       [sessionId, metered.input_tokens, metered.output_tokens, metered.cost_usd]);
   const score = await scoreSession(sessionId);
-  if (finished) reportSessionSpend(sessionId); // usage-based billing; once per session (Stripe dedupes by id too)
+  if (finished) {
+    reportSessionSpend(sessionId); // usage-based billing; once per session (Stripe dedupes by id too)
+    checkBudgetLater(s.org_id); // 80% / 100% of the monthly allowance: an email to owners and billing managers, once a month each
+  }
   await finishSimulationIfDone(s.simulation_id);
   return score;
 }

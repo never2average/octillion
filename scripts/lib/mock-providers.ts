@@ -1,4 +1,4 @@
-// Fake Clerk Backend API + Stripe for the smoke test only: scripts/smoke.ts starts it in memory on 127.0.0.1 and points
+// Fake Clerk Backend API + Stripe + Resend for the smoke test only: scripts/smoke.ts starts it in memory on 127.0.0.1 and points
 // CLERK_API_URL / STRIPE_API_URL at it. Never mounted by the server; production always talks to the real services.
 // Not a simulator of either product: only the fields Octillion reads, with the same shapes.
 // Test hooks: POST /_mock/clerk/users {email, first_name?, verified?, platform_admin?, platform_role?}, POST /_mock/invitations/:id/accept
@@ -9,8 +9,10 @@
 // POST /_mock/prices {id, unit_amount, interval, ...} (an archived price: not listed with active=true),
 // POST /_mock/invoices {customer, amount, status?, created?, paid_at?, subscription?, number?}, POST /_mock/stripe/outage {down} (customer
 // balance transactions answer 500 while down). Times are Unix seconds.
+// Resend: POST /emails (Bearer re_...; an Idempotency-Key header returns the first email's id again for the same body, 409
+// for a different one); every accepted email is in state.emails. POST /_mock/resend/outage {down} (POST /emails answers 500).
 import express from "express";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { exportJWK, exportSPKI, generateKeyPair, importJWK, SignJWT } from "jose";
 
@@ -31,6 +33,7 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     orgs: new Map<string, any>(), invitations: new Map<string, any>(), memberships: new Map<string, any>(), users: new Map<string, any>(),
     customers: new Map<string, any>(), subscriptions: new Map<string, any>(), meterEvents: [] as any[], invoices: [] as any[], balanceTxns: [] as any[], stripeDown: false,
     oauth: new Map<string, any>(), keyed: new Map<string, any>(),
+    emails: [] as any[], resendKeys: new Map<string, { id: string; body: string }>(), resendDown: false,
     prices: [
       { id: "price_mock_starter", object: "price", active: true, lookup_key: "octillion_starter", unit_amount: 49900, currency: "usd", recurring: { interval: "month" },
         nickname: "Starter", metadata: { monthly_budget_usd: "300" }, product: { id: "prod_mock_1", name: "Octillion", metadata: {} } },
@@ -305,6 +308,26 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
   });
   app.post("/_mock/invoices", (req, res) => void res.json(invoice(req.body)));
   app.post("/_mock/stripe/outage", (req, res) => { s.stripeDown = Boolean(req.body?.down); res.json({ down: s.stripeDown }); });
+
+  // ---------- Resend (POST /emails): only the fields Octillion sends ----------
+  const resendErr = (res: express.Response, statusCode: number, name: string, message: string) => void res.status(statusCode).json({ statusCode, name, message });
+  app.post("/emails", (req, res) => {
+    if (!/^Bearer re_\S+$/.test(req.get("authorization") ?? "")) return resendErr(res, 401, "missing_api_key", "Missing API key in the authorization header.");
+    if (s.resendDown) return resendErr(res, 500, "application_error", "An unexpected error occurred.");
+    const b = req.body ?? {};
+    const to = Array.isArray(b.to) ? b.to : b.to ? [b.to] : [];
+    if (!b.from || !to.length || !b.subject || !(b.text || b.html)) return resendErr(res, 422, "validation_error", "from, to, subject and text or html are required.");
+    if (to.length > 50) return resendErr(res, 422, "validation_error", "At most 50 recipients.");
+    const key = req.get("idempotency-key") ?? null, body = JSON.stringify(b);
+    if (key && key.length > 256) return resendErr(res, 422, "validation_error", "The idempotency key is too long.");
+    const prev = key ? s.resendKeys.get(key) : undefined;
+    if (prev) return prev.body === body ? void res.json({ id: prev.id }) : resendErr(res, 409, "invalid_idempotent_request", "Same idempotency key used with a different request payload.");
+    const email = { id: randomUUID(), ...b, to, idempotency_key: key, created_at: now() };
+    s.emails.push(email);
+    if (key) s.resendKeys.set(key, { id: email.id, body });
+    res.json({ id: email.id });
+  });
+  app.post("/_mock/resend/outage", (req, res) => { s.resendDown = Boolean(req.body?.down); res.json({ down: s.resendDown }); });
   app.use(c);
   app.use(st);
 

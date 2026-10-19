@@ -1992,7 +1992,15 @@ try {
     const reset = () => adm("PUT", "/compute/settings", { values: Object.fromEntries(keys.map((k) => [k, null])) });
     const c0 = await json(adm("GET", "/compute"));
     const byKey = (c: any, k: string) => c.settings.find((x: any) => x.key === k);
-    assert.ok(c0.groups.length === 5 && c0.settings.length >= 13 && byKey(c0, "PUBLISH_DISCOUNT_TASK_USD")?.value === 10, "every setting listed, grouped");
+    assert.ok(c0.groups.length === 6 && c0.settings.length >= 17 && byKey(c0, "PUBLISH_DISCOUNT_TASK_USD")?.value === 10, "every setting listed, grouped");
+    // Email settings (src/email.ts): defaults, and addresses checked.
+    assert.ok(byKey(c0, "EMAIL_FROM")?.value === "Octillion <hello@octillion.useimmaculate.com>" && byKey(c0, "EMAILS_ENABLED")?.value === "on"
+      && byKey(c0, "EMAIL_REPLY_TO")?.value === "" && byKey(c0, "EMAIL_ADMIN_TO")?.value === "", "email settings and their defaults");
+    assert.equal((await adm("PUT", "/compute/settings", { values: { EMAIL_FROM: "not an address" } })).status, 400, "the sender is checked");
+    assert.equal((await adm("PUT", "/compute/settings", { values: { EMAIL_ADMIN_TO: "a@b.dev, nope" } })).status, 400, "alert addresses are checked");
+    const ce = await json(adm("PUT", "/compute/settings", { values: { EMAIL_FROM: "Ops  <ops@octillion.test>", EMAIL_ADMIN_TO: "a@b.dev,c@d.dev" } }));
+    assert.ok(byKey(ce, "EMAIL_FROM").value === "Ops <ops@octillion.test>" && byKey(ce, "EMAIL_ADMIN_TO").value === "a@b.dev, c@d.dev", "normalised");
+    assert.ok((await adm("PUT", "/compute/settings", { values: { EMAIL_FROM: null, EMAIL_ADMIN_TO: null } })).ok);
     process.env.OCTILLION_MAX_JOB_ORCHESTRATORS = "7";
     assert.equal(AUTOSCALE.maxJobOrchestrators(), 7, "the environment applies when nothing is set here");
     assert.equal(byKey(await json(adm("GET", "/compute")), "OCTILLION_MAX_JOB_ORCHESTRATORS").source, "env");
@@ -2246,8 +2254,19 @@ try {
   const mock = await startMockProviders();
   const { pem } = await (await fetch(`${mock.url}/_mock/public-key`)).json();
   const providerEnv = { CLERK_SECRET_KEY: "sk_test_mock", CLERK_API_URL: mock.url, CLERK_FRONTEND_API_URL: mock.url, CLERK_JWT_KEY: pem,
-                        STRIPE_SECRET_KEY: "sk_test_mock", STRIPE_API_URL: mock.url, STRIPE_SPEND_METER: "octillion_model_spend" };
+                        STRIPE_SECRET_KEY: "sk_test_mock", STRIPE_API_URL: mock.url, STRIPE_SPEND_METER: "octillion_model_spend", RESEND_API_URL: mock.url };
   Object.assign(process.env, providerEnv);
+  // Email through the Resend mock from here on (src/email.ts): its key in the vault, operator alerts to one address.
+  const resendKey = await (await import("../src/keyvault.js")).setCredential("resend", `re_smoke_${stamp}_secret`);
+  const OPS = `ops+${stamp}@octillion.test`;
+  await (await import("../src/settings.js")).setSettings("smoke", { EMAIL_ADMIN_TO: OPS });
+  /** Emails the Resend mock accepted for an address (and of a kind: the "kind" tag). */
+  const sentTo = (to: string, kind?: string) => mock.state.emails.filter((e: any) => e.to.includes(to.toLowerCase()) && (!kind || e.tags?.[0]?.value === kind));
+  /** Emails are sent after the action, without waiting: poll until they land. */
+  const until = async (ok: () => boolean | Promise<boolean>, what: string) => {
+    for (let i = 0; i < 150 && !(await ok()); i++) await new Promise((r) => setTimeout(r, 20));
+    assert.ok(await ok(), what);
+  };
   const { mcpAudience } = await import("../src/clerk.js");
   const mockPost = async (path: string, body: unknown = {}) => (await fetch(`${mock.url}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })).json();
   /** A Clerk session token (what the UI sends): v2 claims with the active organization, unless told otherwise. */
@@ -2284,6 +2303,13 @@ try {
     assert.equal(corg.public_metadata.octillion_slug, slugW, "joined by public_metadata.octillion_slug");
     assert.equal(corg.public_metadata.stripe_customer_id, rowW.stripe_customer_id, "Stripe customer recorded on the Clerk org");
     assert.equal(mock.state.invitations.get(apW.invitation.id).role, "org:admin");
+    // Email: "we got it" and the operator alert when it came in, then a short welcome beside Clerk's invitation.
+    const ownerW = `owner+${stamp}@acme-smoke.dev`;
+    await until(() => sentTo(ownerW, "request_received").length === 1 && sentTo(ownerW, "request_approved").length === 1
+      && sentTo(OPS, "request_alert").some((e: any) => e.subject === `New access request: Acme Smoke ${stamp}`), "received, alert and welcome emails sent");
+    const welcome = sentTo(ownerW, "request_approved")[0];
+    assert.ok(welcome.subject === "Welcome to Octillion" && /invitation email/.test(welcome.text) && welcome.text.includes("/app to connect"), `the welcome points at Clerk's invitation and /app: ${welcome.text}`);
+    assert.equal([...mock.state.invitations.values()].filter((i: any) => i.email_address === ownerW).length, 1, "the welcome is not a second invitation");
     assert.equal(await db.query("SELECT 1 FROM api_keys WHERE org_id = $1", [rowW.id]).then((r) => r.length), 0, "no API key minted");
     assert.equal((await orgRow(slugW)).stage, "invited");
 
@@ -2584,6 +2610,7 @@ try {
         ["GET", "/spend/compute", undefined, "viewer"],
         ["GET", "/spend/storage", undefined, "viewer"],
         ["GET", "/spend/revenue", undefined, "viewer"],
+        ["GET", "/emails", undefined, "viewer"],
         ["POST", "/requests/999999/decline", {}, "support"],
         ["POST", `/orgs/${slugA}/invitations`, { email: "not-an-email" }, "support"],
         ["POST", "/journeys/nudges", {}, "support"],
@@ -2596,6 +2623,7 @@ try {
         ["POST", `/orgs/${slugA}/allowance`, { usd: "x" }, "operator"],
         ["PUT", "/populations/nope/agents/x", {}, "operator", "/api/admin"],
         ["POST", "/compute/keys", {}, "owner"],
+        ["POST", "/emails/test", {}, "owner"],
         ["DELETE", "/compute/harnesses/nope", undefined, "owner"],
         ["POST", "/admins", {}, "owner"],
         ["PATCH", "/keyvault/credentials/999999", { enabled: false }, "owner", "/api/admin"],
@@ -3472,6 +3500,10 @@ try {
           // A member publishes their persona and a task; one open request per item.
           const subP = await json(appCall(devC, "POST", `/personas/${slug}/publish`));
           assert.ok(subP.submission.status === "submitted" && subP.credit_usd === 5 && !JSON.stringify(subP).includes(rowW.clerk_org_id));
+          // The operator hears about it; decisions go to the person who submitted it (the portal actor's address).
+          await until(() => sentTo(OPS, "submission_alert").some((e: any) => e.subject.endsWith(`: Flutter lead ${BYO} v2`) && e.text.includes("/admin/personas?view=submissions")), "submission alert to the operator");
+          const submitter = String((await db.query<any>("SELECT created_by FROM library_submissions WHERE id = $1", [subP.submission.id]))[0].created_by).replace(/^customer:/, "");
+          assert.match(submitter, /@/, "the portal records who submitted it");
           e = await errOf(await appCall(devC, "POST", `/personas/${slug}/publish`));
           assert.ok(e.status === 400 && /already submitted/.test(e.error), "one open request per item");
           const [rawSub] = await db.query<any>("SELECT org_id, kind, source_ref, snapshot, status FROM library_submissions WHERE id = $1", [subP.submission.id]);
@@ -3527,6 +3559,9 @@ try {
           assert.equal((await errOf(await adm("POST", `/submissions/${subP.submission.id}/accept`, {}))).status, 409, "accepting twice is refused");
           assert.equal((await errOf(await adm("POST", `/submissions/${subP.submission.id}/retry-credit`))).status, 409, "nothing to retry once credited");
           assert.equal(credits().filter((t: any) => t.metadata.library_submission_id === subP.submission.id).length, 1, "still one transaction");
+          await until(() => sentTo(submitter, "submission_accepted").length === 1, "accepted email to the submitter");
+          const accMail = sentTo(submitter, "submission_accepted")[0];
+          assert.ok(accMail.text.includes(`"Flutter lead ${BYO} v2"`) && accMail.text.includes("$5 credit") && /next invoice/.test(accMail.text) && !/still being added/.test(accMail.text), `credit and next invoice: ${accMail.text}`);
           const pubP = (await pubOf("persona", slug)).publication;
           assert.ok(pubP.status === "accepted" && pubP.credit_usd === 5 && !("library_ref" in pubP), "the customer sees Published, never the library row");
           assert.match((await errOf(await appCall(devC, "POST", `/personas/${slug}/publish`))).error, /already accepted as it is now/, "unchanged: no second submission");
@@ -3539,6 +3574,9 @@ try {
           assert.ok(libT && libT.source === "contributed" && libT.active && libT.contributed_by === rowW.id && libT.submission_id === subT2.submission.id
             && libT.title === `Offline sync v2 ${BYO}` && libT.prompt.includes(BYO) && !libT.prompt.startsWith("enc:"), "a library task with source contributed, prompt in clear");
           assert.ok((await json(adm("GET", "/tasks?source=contributed"))).tasks.some((x: any) => x.id === libT.id), "the library's source filter finds it");
+          await until(() => sentTo(submitter, "submission_accepted").length === 2, "accepted email for the task too");
+          const pendMail = sentTo(submitter, "submission_accepted").find((e: any) => e.text.includes(`Offline sync v2 ${BYO}`));
+          assert.ok(pendMail && pendMail.text.includes("$12.50 credit") && /still being added/.test(pendMail.text), `a pending credit says so: ${pendMail?.text}`);
           const retryDown = await json(adm("POST", `/submissions/${subT2.submission.id}/retry-credit`));
           assert.equal(retryDown.credit_status, "pending", "a retry while Stripe is down stays pending");
           const billDown = await json(appCall(ownerC, "GET", "/billing"));
@@ -3560,6 +3598,8 @@ try {
           await json(appCall(devC, "PATCH", `/personas/${slug}`, { name: `Flutter lead ${BYO} v3`, summary: "Edited again" }));
           const subP2 = await json(appCall(devC, "POST", `/personas/${slug}/publish`));
           await json(adm("POST", `/submissions/${subP2.submission.id}/decline`, { reason: "Too close to one already in the library" }));
+          await until(() => sentTo(submitter, "submission_declined").length === 1, "declined email to the submitter");
+          assert.ok(sentTo(submitter, "submission_declined")[0].text.includes("The reason: Too close to one already in the library"), "with the reason");
           const dec = (await pubOf("persona", slug)).publication;
           assert.ok(dec.status === "declined" && dec.reason === "Too close to one already in the library", "the customer sees Declined and the reason");
           assert.match((await mcpAs(acc2.user.id, "list_personas", {})).text, /declined by Octillion's library: Too close/, "and over MCP");
@@ -3954,6 +3994,145 @@ try {
     assert.match(linked.clerk_org_id, /^org_/);
     assert.equal(mock.state.orgs.get(linked.clerk_org_id).public_metadata.octillion_slug, slugA);
     assert.notEqual((await post(rotated.key)).status, 401);
+
+    // ---------- transactional email through Resend (src/email.ts), against the mock ----------
+    {
+      const mail = await import("../src/email.js");
+      const kvm = await import("../src/keyvault.js");
+      const { setSettings } = await import("../src/settings.js");
+      const logOf = async (key: string) => (await db.query<any>("SELECT * FROM email_log WHERE idempotency_key = $1", [key]))[0];
+      const request = (email: string, company: string, ip: string) => fetch(`${base}/api/access-requests`, { method: "POST",
+        headers: { "content-type": "application/json", "x-forwarded-for": ip }, body: JSON.stringify({ email, company, name: "Robin Example", product_url: "https://mail.example.dev" }) });
+      const reqId = async (email: string) => Number((await json(adm("GET", "/requests"))).requests.find((q: any) => q.email === email).id);
+      const ofKey = (k: string) => mock.state.emails.filter((e: any) => e.idempotency_key === k);
+
+      const prov = await kvm.getProvider("resend");
+      assert.ok(prov && prov.mode === "direct" && prov.env_vars.length === 0, "resend is a server-only vault provider: no env vars, so never brokered to an agent");
+      assert.ok((await json(adm("GET", "/compute/keys"))).providers.some((p: any) => p.slug === "resend" && p.enabled_keys === 1), "the Key vault lists it with its key");
+
+      // 1. A request comes in: "we got it" to the requester, an alert to the operator (EMAIL_ADMIN_TO).
+      const R1 = `robin+${stamp}@mail-one.dev`;
+      assert.equal((await request(R1, `Mail One ${stamp}`, "10.77.0.1")).status, 201);
+      await until(() => sentTo(R1, "request_received").length === 1 && sentTo(OPS, "request_alert").some((e: any) => e.subject === `New access request: Mail One ${stamp}`), "received + alert sent");
+      const got = sentTo(R1, "request_received")[0];
+      assert.ok(got.subject === "We got your request for Octillion" && got.text.startsWith("Hi Robin,") && got.text.trim().endsWith("— Octillion"), `plain words, signed: ${got.text}`);
+      assert.equal(got.from, "Octillion <hello@octillion.useimmaculate.com>", "the default sender");
+      assert.ok(got.html.includes("<p") && !/<img|pixel|track/i.test(got.html) && got.idempotency_key === `request:${await reqId(R1)}:received`, "simple HTML, no images; Resend gets the Idempotency-Key");
+      const alert = sentTo(OPS, "request_alert").find((e: any) => e.subject === `New access request: Mail One ${stamp}`);
+      assert.ok(alert.text.includes(`${mail.siteUrl()}/admin/requests`) && alert.text.includes(R1), "the alert names the requester and links to /admin/requests");
+
+      // 2. Declined with a reason: once per request, even if it is reopened and declined again.
+      const id1 = await reqId(R1);
+      assert.equal((await adm("POST", `/requests/${id1}/decline`, { reason: "We only support developer tools for now." })).status, 204);
+      await until(() => sentTo(R1, "request_declined").length === 1, "decline email sent");
+      const dec = sentTo(R1, "request_declined")[0];
+      assert.ok(dec.subject === "About your Octillion request" && dec.text.includes("The reason: We only support developer tools for now.") && /reply to this email/.test(dec.text), `kind, with the reason: ${dec.text}`);
+      assert.equal((await db.query<any>("SELECT decline_reason FROM access_requests WHERE id = $1", [id1]))[0].decline_reason, "We only support developer tools for now.");
+      await adm("POST", `/requests/${id1}/reopen`);
+      await adm("POST", `/requests/${id1}/decline`, {});
+      await settle();
+      assert.equal(sentTo(R1, "request_declined").length, 1, "never a second decline email for the same request");
+
+      // 3. Resend down: the action still succeeds, the failure is recorded; triggering it again sends it.
+      await mockPost("/_mock/resend/outage", { down: true });
+      const R2 = `sam+${stamp}@mail-two.dev`;
+      assert.equal((await request(R2, `Mail Two ${stamp}`, "10.77.0.2")).status, 201, "the request is taken while Resend is down");
+      const id2 = await reqId(R2);
+      assert.equal((await adm("POST", `/requests/${id2}/decline`, {})).status, 204, "the decline succeeds while Resend is down");
+      await until(async () => (await logOf(`request:${id2}:declined`))?.status === "failed", "the failed decline email is recorded");
+      const failed = await logOf(`request:${id2}:declined`);
+      assert.ok(/Resend answered 500/.test(failed.error) && !failed.error.includes("re_smoke"), `failure recorded, never the key: ${failed.error}`);
+      assert.equal((await logOf(`request:${id2}:received`)).status, "failed");
+      assert.equal((await db.query<any>("SELECT status FROM access_requests WHERE id = $1", [id2]))[0].status, "declined");
+      await mockPost("/_mock/resend/outage", { down: false });
+      await adm("POST", `/requests/${id2}/reopen`);
+      await adm("POST", `/requests/${id2}/decline`, {});
+      await until(() => sentTo(R2, "request_declined").length === 1, "the failed email goes out when triggered again");
+      assert.ok(!sentTo(R2, "request_declined")[0].text.includes("The reason"), "no reason given: no reason line");
+      const retried = await logOf(`request:${id2}:declined`);
+      assert.ok(retried.status === "sent" && retried.attempts === 2 && retried.provider_id === sentTo(R2, "request_declined")[0].id, "the same row: sent on the second attempt, with Resend's id");
+
+      // 4. Approved: the welcome, and Clerk's invitation stays the only invitation.
+      const R3 = `kim+${stamp}@mail-three.dev`;
+      assert.equal((await request(R3, `Mail Three ${stamp}`, "10.77.0.3")).status, 201);
+      const ap3 = await json(adm("POST", `/requests/${await reqId(R3)}/approve`, {}));
+      await until(() => sentTo(R3, "request_approved").length === 1, "welcome sent");
+      const w3 = sentTo(R3, "request_approved")[0];
+      assert.ok(w3.subject === "Welcome to Octillion" && w3.text.includes(`${mail.siteUrl()}/app`) && /invitation email/.test(w3.text) && /AI coding agents/.test(w3.text), `the welcome: ${w3.text}`);
+      assert.equal([...mock.state.invitations.values()].filter((i: any) => i.email_address === R3).length, 1, "one invitation, Clerk's");
+
+      // 5. The same message twice: one email (our key, and Resend's Idempotency-Key behind it).
+      const repeatKey = `smoke:${stamp}:repeat`;
+      const once = { kind: "test" as const, to: R1, subject: "Repeat", text: "Once.", idempotencyKey: repeatKey };
+      assert.deepEqual([(await mail.send(once)).status, (await mail.send(once)).status], ["sent", "duplicate"]);
+      assert.equal(ofKey(repeatKey).length, 1, "sent once");
+      assert.equal((await logOf(repeatKey)).attempts, 1);
+
+      // 6. Skipped cleanly: emails off, or no key (nothing reaches Resend, nothing throws); sent once it is back.
+      await setSettings("smoke", { EMAILS_ENABLED: "off" });
+      const off = await mail.send({ kind: "test", to: R1, subject: "Off", text: "x", idempotencyKey: `smoke:${stamp}:off` });
+      assert.ok(off.status === "skipped" && /Emails are off/.test(off.error ?? ""), `off: ${JSON.stringify(off)}`);
+      assert.equal((await json(adm("GET", "/emails"))).status.enabled, false);
+      await setSettings("smoke", { EMAILS_ENABLED: null });
+      await kvm.setCredentialEnabled(resendKey.id, false);
+      const noKey = { kind: "test" as const, to: R1, subject: "No key", text: "x", idempotencyKey: `smoke:${stamp}:nokey` };
+      const nk = await mail.send(noKey);
+      assert.ok(nk.status === "skipped" && /No Resend key/.test(nk.error ?? ""), `no key: ${JSON.stringify(nk)}`);
+      assert.equal((await json(adm("GET", "/emails"))).status.connected, false, "the page says Resend is not connected");
+      assert.equal(ofKey(`smoke:${stamp}:off`).length + ofKey(`smoke:${stamp}:nokey`).length, 0, "nothing reached Resend");
+      await kvm.setCredentialEnabled(resendKey.id, true);
+      assert.equal((await mail.send(noKey)).status, "sent", "a skipped email goes out when triggered again");
+
+      // 7. Budget: 80% and 100% of the monthly allowance, to owners and billing managers, once per threshold per month.
+      const borg = await clerkApi("/organizations", { name: `Budget ${stamp}` });
+      const person = async (who: string, role: string, md?: Record<string, unknown>) => {
+        const email = `${who}+${stamp}@budget-mail.dev`, u = await mockPost("/_mock/clerk/users", { email });
+        await mockPost("/_mock/clerk/memberships", { org_id: borg.id, user_id: u.id, role, public_metadata: md });
+        return email;
+      };
+      const bOwner = await person("owner", "org:admin"), bBilling = await person("billing", "org:member", { octillion_role: "billing" });
+      const bMember = await person("member", "org:member"), bViewer = await person("viewer", "org:member", { octillion_role: "viewer" });
+      const [bo] = await db.query<{ id: number }>("INSERT INTO organizations (slug, name, clerk_org_id, budget_override_usd) VALUES ($1, $2, $3, 10) RETURNING id", [`budget-${stamp}`, `Budget ${stamp}`, borg.id]);
+      const [bp] = await db.query<{ id: number }>("INSERT INTO products (org_id, slug, name) VALUES ($1, 'budgetp', 'Budget product') RETURNING id", [bo.id]);
+      const [bsc] = await db.query<{ id: number }>("INSERT INTO scenarios (product_id, title, prompt) VALUES ($1, 't', 'p') RETURNING id", [bp.id]);
+      await db.query(`INSERT INTO simulations (id, org_id, product_id, name, models, harness, repeats, status) VALUES ($1, $2, $3, 'budget', '{m}', 'claude-code', 1, 'completed')`, [`sim_budget_${stamp}`, bo.id, bp.id]);
+      const spendSession = (n: number, usd: number) => db.query(`INSERT INTO agent_sessions (id, simulation_id, org_id, product_id, scenario_id, model, harness, status, cost_usd)
+        VALUES ($1, $2, $3, $4, $5, 'm', 'claude-code', 'completed', $6)`, [`ses_budget_${n}_${stamp}`, `sim_budget_${stamp}`, bo.id, bp.id, bsc.id, usd]);
+      await spendSession(1, 5);
+      assert.deepEqual(await mail.checkBudget(bo.id), { threshold: null, sent: 0 }, "50%: nothing");
+      await spendSession(2, 3.5);
+      assert.deepEqual(await mail.checkBudget(bo.id), { threshold: 80, sent: 2 }, "85%: the 80% alert, to two people");
+      assert.ok(sentTo(bOwner, "budget_80").length === 1 && sentTo(bBilling, "budget_80").length === 1 && !sentTo(bMember).length && !sentTo(bViewer).length,
+        "owners and billing managers only");
+      const b80 = sentTo(bOwner, "budget_80")[0];
+      assert.ok(b80.subject === `Budget ${stamp} has used 80% of its Octillion allowance` && b80.text.includes("$8.50 of its $10 monthly allowance") && b80.text.includes("/app/billing"), `the 80% alert: ${b80.text}`);
+      assert.deepEqual(await mail.checkBudget(bo.id), { threshold: 80, sent: 0 }, "once per threshold per month");
+      await spendSession(3, 2);
+      assert.deepEqual(await mail.checkBudget(bo.id), { threshold: 100, sent: 2 }, "105%: the 100% alert");
+      assert.ok(sentTo(bOwner, "budget_100").length === 1 && /can't start/.test(sentTo(bOwner, "budget_100")[0].text) && sentTo(bOwner, "budget_80").length === 1, "the 100% alert once, the 80% one not again");
+      assert.deepEqual(await mail.checkBudget(bo.id), { threshold: 100, sent: 0 });
+      const month = new Date().toISOString().slice(0, 7);
+      assert.equal((await db.query<any>("SELECT 1 FROM email_log WHERE idempotency_key LIKE $1", [`budget:${bo.id}:${month}:%`])).length, 4, "keyed by account, month and threshold");
+      const now = new Date(), nextMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 2));
+      assert.deepEqual(await mail.checkBudget(bo.id, nextMonth), { threshold: 100, sent: 2 }, "a new month is a new key");
+
+      // 8. /admin/emails: the log and the cards; the test button (owner only, the route matrix above checks the role).
+      const tester = `tester+${stamp}@mail-test.dev`;
+      assert.equal((await adm("POST", "/emails/test", { to: "nope" })).status, 400, "a test email needs a valid address");
+      const tr = await json(adm("POST", "/emails/test", { to: tester }));
+      assert.ok(tr.status === "sent" && sentTo(tester, "test").length === 1 && sentTo(tester, "test")[0].subject === "Octillion test email", "the test email goes out");
+      const pg = await json(adm("GET", "/emails"));
+      assert.ok(pg.status.connected && pg.status.enabled && pg.series.sent.length === 24 && pg.last_24h.sent >= 10 && pg.last_24h.failed >= 1 && pg.last_24h.skipped >= 1,
+        `cards: ${JSON.stringify(pg.last_24h)}`);
+      assert.ok(pg.rows.some((r: any) => r.kind === "test" && r.to_domain === "mail-test.dev" && r.status === "sent") && pg.rows.every((r: any) => !("to" in r) && !("to_hash" in r)), "rows show the domain only");
+
+      // 9. The log never holds an address: hashes and domains only (subjects, errors and meta included).
+      const allLog = JSON.stringify(await db.query("SELECT * FROM email_log")) + JSON.stringify(pg.rows);
+      for (const addr of [R1, R2, R3, OPS, ownerW, bOwner, bBilling, tester]) assert.ok(!allLog.includes(addr), `no full address in email_log: ${addr}`);
+      assert.ok(!/[^\s@"<>]+@[^\s@"<>]+\.[a-z]{2,}/i.test(allLog), "nothing that looks like an address");
+      await db.query("DELETE FROM organizations WHERE id = $1 OR slug = $2", [bo.id, ap3.org.slug]);
+      console.log("✓ email (Resend): request received/alert/declined/welcome, library submissions, budget 80%/100% once a month, idempotent, skipped off or keyless, failures recorded, no addresses stored, /admin/emails");
+    }
     const ovW = await json(adm("GET", "/overview"));
     assert.ok(ovW.integrations.clerk && ovW.integrations.oauth_on_mcp && ovW.integrations.stripe && ovW.paying >= 1);
     await db.query("DELETE FROM organizations WHERE slug = ANY($1)", [[slugA, slugW, rowD.slug]]);
@@ -3961,6 +4140,7 @@ try {
     console.log("✓ onboarding console with Clerk + Stripe: invitations, roles, suspension, OAuth on /mcp, plans, budget, metering, dashboard-made orgs");
   } finally {
     for (const k of Object.keys(providerEnv)) delete process.env[k];
+    await (await import("../src/settings.js")).setSettings("smoke", { EMAIL_ADMIN_TO: null }).catch(() => {});
     await mock.close();
   }
 

@@ -7,6 +7,7 @@ import * as journeys from "./journeys.js";
 import * as playbooks from "./playbooks.js";
 import * as prospect from "./prospect.js";
 import * as telemetry from "./telemetry.js";
+import * as mail from "./email.js";
 import { appRouter } from "./app.js";
 import { adminActor, adminAuthRouter, requirePlatformAdmin } from "./admin-auth.js";
 import * as roles from "./admin-roles.js";
@@ -123,6 +124,8 @@ export function createApp() {
     );
     // Background research on the company for whoever reviews the request (src/prospect.ts); kept alive on Vercel.
     telemetry.keepAlive(prospect.researchRequest(row.id));
+    // Email after the write, never in its way (src/email.ts): "we got it" to them, an alert to the operator.
+    mail.fire(mail.requestReceived({ id: row.id, email, company, name: name || null, product_url: productUrl || null, message: message || null }));
     telemetry.capture({ distinctId: email.toLowerCase() }, "access_requested", { has_product_url: Boolean(productUrl), has_message: Boolean(message) });
     const hook = process.env.ACCESS_REQUEST_WEBHOOK_URL; // e.g. a Slack incoming webhook
     if (hook)
@@ -406,7 +409,7 @@ export function createApp() {
   ob.get("/overview", async (req, res) => void res.json(await onboarding.overview(req.query)));
   ob.get("/requests", async (req, res) => void res.json({ requests: await onboarding.listRequests(req.query.status ? String(req.query.status) : undefined) }));
   ob.post("/requests/:id/approve", need("requests"), async (req, res) => void res.status(201).json(await onboarding.approveRequest(adminActor(req, res), Number(req.params.id), req.body ?? {})));
-  ob.post("/requests/:id/decline", need("requests"), async (req, res) => done(res, await onboarding.declineRequest(adminActor(req, res), Number(req.params.id))));
+  ob.post("/requests/:id/decline", need("requests"), async (req, res) => done(res, await onboarding.declineRequest(adminActor(req, res), Number(req.params.id), req.body?.reason)));
   // Research the company: the quick pass now (it also queues the deep pass on the research harness).
   ob.post("/requests/:id/research", need("requests"), async (req, res) => {
     const id = Number(req.params.id);
@@ -504,6 +507,14 @@ export function createApp() {
   ob.put("/compute/agents/:agent", need("harnesses"), async (req, res) => void res.json(await library.setAgent(adminActor(req, res), decodeURIComponent(String(req.params.agent)), req.body ?? {})));
   // Model keys on /admin/compute: the key vault (src/keyvault.ts). A secret is posted once; only its hint comes back.
   ob.get("/compute/keys", async (_req, res) => void res.json(await library.modelKeys()));
+  // Emails (src/email.ts): the log and its last 24 hours; a test email to an address typed in.
+  ob.get("/emails", async (req, res) => void res.json(await mail.emailLog(req.query)));
+  ob.post("/emails/test", need("email"), async (req, res) => {
+    if (!mail.isEmail(String(req.body?.to ?? "").trim())) throw new onboarding.AdminError("Enter a valid email address");
+    const r = await mail.sendTest(adminActor(req, res), req.body.to);
+    onboarding.log(adminActor(req, res), "email.test", null, { status: r.status, to_domain: mail.domainOf(String(req.body.to)) });
+    res.status(201).json(r);
+  });
   ob.get("/compute/sandbox", async (_req, res) => void res.json(await library.sandboxProvider()));
   ob.post("/compute/keys", need("keys"), async (req, res) => void res.status(201).json(await library.addModelKey(adminActor(req, res), req.body ?? {})));
   ob.post("/compute/keys/:id/enabled", need("keys"), async (req, res) => done(res, await library.setModelKeyEnabled(adminActor(req, res), Number(req.params.id), req.body?.enabled)));

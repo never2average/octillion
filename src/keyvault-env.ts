@@ -16,6 +16,7 @@ const EXTRA_ENV: Record<string, string[]> = {
   cloudflare: ["CLOUDFLARE_API_TOKEN", "CF_API_TOKEN"],
   exa: ["EXA_API_KEY"],
   libraries_io: ["LIBRARIES_IO_API_KEY"],
+  resend: ["RESEND_API_KEY"],
   [VERTEX_PROVIDER]: ["VERTEX_SERVICE_ACCOUNT_JSON", "GOOGLE_SERVICE_ACCOUNT_JSON"],
 };
 

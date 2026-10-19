@@ -92,6 +92,7 @@ import {
   IconCrown,
   IconX,
   IconInbox,
+  IconMail,
   IconBuildingSkyscraper,
   IconRoute,
   IconChartBar,
@@ -143,6 +144,7 @@ export const Icons = {
   // Layout
   dashboard: IconLayoutDashboard,
   inbox: IconInbox,
+  mail: IconMail,
   building: IconBuildingSkyscraper,
   route: IconRoute,
   chartBar: IconChartBar,

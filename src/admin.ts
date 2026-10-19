@@ -19,6 +19,7 @@ import * as billing from "./billing.js";
 import { clientCatalog } from "./connect-catalog.js";
 import { getDb } from "./db.js";
 import * as clerk from "./clerk.js";
+import * as mail from "./email.js";
 import { currentAdminRole } from "./admin-roles.js";
 import { accountRoleOf, clerkRoleFor, parseAccountRole, ACCOUNT_ROLE_LABELS, type AccountRole } from "./account-roles.js";
 
@@ -373,8 +374,8 @@ const intId = (v: number) => {
 export const requestExists = async (id: number) => void (await requestById(id));
 async function requestById(id: number) {
   intId(id);
-  const [r] = await (await getDb()).query<{ id: number; email: string; company: string; status: string }>(
-    "SELECT id, email, company, status FROM access_requests WHERE id = $1", [id]);
+  const [r] = await (await getDb()).query<{ id: number; email: string; company: string; status: string; name: string | null }>(
+    "SELECT id, email, company, status, name FROM access_requests WHERE id = $1", [id]);
   if (!r) throw new AdminError(`No access request ${id}`, 404);
   return r;
 }
@@ -445,14 +446,20 @@ export async function approveRequest(actor: string, id: number, opts: { name?: s
   if (!key) ({ key, invitation } = await invitePerson(actor, slug, r.email, created ? "owner" : undefined));
   await (await getDb()).query("UPDATE access_requests SET status = 'approved', org_id = (SELECT id FROM organizations WHERE slug = $2), decided_at = now() WHERE id = $1", [id, slug]);
   log(actor, "request.approve", slug, { request_id: id, email: r.email, new_org: created });
-  return result(slug, r.email, { key, invitation, created });
+  const out = await result(slug, r.email, { key, invitation, created });
+  // A short welcome beside Clerk's invitation (Clerk sends that one); after the write, never in its way.
+  mail.fire(mail.requestApproved(r, { account: out.org.name, invited: Boolean(invitation) }));
+  return out;
 }
 
-export async function declineRequest(actor: string, id: number) {
+/** Decline a request; the requester gets a short note, with `reason` when one is given. */
+export async function declineRequest(actor: string, id: number, reasonIn?: unknown) {
   const r = await requestById(id);
   if (r.status === "approved") throw new AdminError("Approved requests cannot be declined: remove the person from the account instead", 409);
-  await (await getDb()).query("UPDATE access_requests SET status = 'declined', decided_at = now() WHERE id = $1", [id]);
-  log(actor, "request.decline", null, { request_id: id, email: r.email });
+  const reason = typeof reasonIn === "string" ? reasonIn.trim().slice(0, 1000) : "";
+  await (await getDb()).query("UPDATE access_requests SET status = 'declined', decided_at = now(), decline_reason = $2 WHERE id = $1", [id, reason || null]);
+  log(actor, "request.decline", null, { request_id: id, email: r.email, with_reason: Boolean(reason) });
+  mail.fire(mail.requestDeclined(r, reason || null));
 }
 
 export async function reopenRequest(actor: string, id: number) {
