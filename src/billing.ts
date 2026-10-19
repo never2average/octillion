@@ -18,7 +18,7 @@
  */
 import { createHash } from "node:crypto";
 import { getDb } from "./db.js";
-import { configJson, defaultMeter, stripeTiers, usageFromTiers, type PlanConfig } from "./plan-config.js";
+import { configJson, DEFAULT_TAX_CODE, defaultMeter, stripeTiers, usageFromTiers, type PlanConfig } from "./plan-config.js";
 
 export const stripeEnabled = () => Boolean(process.env.STRIPE_SECRET_KEY);
 const apiBase = () => (process.env.STRIPE_API_URL ?? "https://api.stripe.com").replace(/\/$/, "");
@@ -82,7 +82,7 @@ export interface Subscription { id: string; customer: string; status: string; me
 
 interface StripePrice { id: string; lookup_key: string | null; unit_amount: number | null; unit_amount_decimal?: string | null; currency: string; created?: number;
   recurring: { interval: string; usage_type?: string; meter?: string | null } | null; tiers?: { up_to: number | null; unit_amount?: number | null; unit_amount_decimal?: string | null }[];
-  nickname: string | null; metadata: Record<string, string>; product: { name: string; description?: string | null; metadata: Record<string, string> } }
+  nickname: string | null; metadata: Record<string, string>; product: { name: string; description?: string | null; tax_code?: string | { id: string } | null; metadata: Record<string, string> } }
 /** A plan's usage price, when it also has a base fee: the plan's lookup key plus this. */
 export const USAGE_SUFFIX = "__usage";
 
@@ -123,7 +123,8 @@ export async function listPlans(): Promise<Plan[]> {
     const { price_id: _u, ...usageConfig } = usage ?? { price_id: "" };
     return { ...plan, config: configJson({ name: plan.name, description: plan.description, interval: (plan.interval === "year" ? "year" : "month"), lookup_key: plan.lookup_key,
       base_fee_usd: metered ? 0 : (p.unit_amount ?? 0) / 100, trial_days: plan.trial_days, monthly_budget_usd: plan.monthly_budget_usd ?? 0,
-      usage: usage ? (usageConfig as NonNullable<PlanConfig["usage"]>) : null, experiment: plan.experiment, weight: plan.weight, metadata: extra }) };
+      usage: usage ? (usageConfig as NonNullable<PlanConfig["usage"]>) : null, experiment: plan.experiment, weight: plan.weight, metadata: extra,
+      tax_code: (typeof p.product?.tax_code === "string" ? p.product.tax_code : p.product?.tax_code?.id) ?? DEFAULT_TAX_CODE }) };
   });
   plansCache = { at: Date.now(), plans };
   return plans;
@@ -159,7 +160,7 @@ export async function createPlanFromConfig(c: PlanConfig, dryRun = false) {
   });
   const basePrice = (product: string) => ({ product, currency: "usd", unit_amount: Math.round(c.base_fee_usd * 100), recurring: { interval: c.interval },
     nickname: c.name, lookup_key: c.lookup_key, metadata: planMeta });
-  const productBody = { name: c.name, description: c.description ?? undefined, metadata: { ...c.metadata, monthly_budget_usd: String(c.monthly_budget_usd), octillion: "plan" } };
+  const productBody = { name: c.name, description: c.description ?? undefined, tax_code: c.tax_code, metadata: { ...c.metadata, monthly_budget_usd: String(c.monthly_budget_usd), octillion: "plan" } };
   const meterBody = c.usage ? { display_name: "Octillion model spend (cents)", event_name: c.usage.meter, default_aggregation: { formula: "sum" },
     customer_mapping: { type: "by_id", event_payload_key: "stripe_customer_id" }, value_settings: { event_payload_key: "value" } } : null;
   const plan = [
@@ -235,7 +236,10 @@ let subsCache: { at: number; byCustomer: Map<string, SubscriptionSummary>; spans
 /** Every customer's current subscription in one paged list call, cached for a minute. */
 export async function subscriptionsByCustomer(fresh = false): Promise<Map<string, SubscriptionSummary>> {
   if (!fresh && subsCache && Date.now() - subsCache.at < 60_000) return subsCache.byCustomer;
-  const [subs, plans] = await Promise.all([all<Subscription>("/v1/subscriptions?status=all&expand[]=data.items.data.price.product"), listPlans()]);
+  // Stripe expands at most 4 levels (data.items.data.price.product is 5): products come from their own list instead.
+  const [subs, plans, products] = await Promise.all([all<Subscription>("/v1/subscriptions?status=all"), listPlans(), all<{ id: string; name?: string; metadata?: Record<string, string> }>("/v1/products")]);
+  const productById = new Map(products.map((p) => [p.id, p]));
+  for (const s of subs) for (const it of s.items.data) if (typeof it.price.product === "string") it.price.product = productById.get(it.price.product) ?? it.price.product;
   const grouped = new Map<string, Subscription[]>();
   for (const s of subs) grouped.set(s.customer, [...(grouped.get(s.customer) ?? []), s]);
   const byCustomer = new Map([...grouped].map(([c, list]) => [c, shapeSub(current(list), plans)!]));
@@ -278,11 +282,21 @@ export async function allInvoices(fresh = false): Promise<Invoice[]> {
 export async function checkoutUrl(customer: string, priceId: string, returnUrl: string, meta: Record<string, string> = {}, trialDays?: number | null, usagePriceId?: string | null) {
   // A metered price takes no quantity; a usage-only plan is its usage price alone.
   const items = usagePriceId === priceId ? [{ price: priceId }] : [{ price: priceId, quantity: 1 }, ...(usagePriceId ? [{ price: usagePriceId }] : [])];
-  const s = await call<{ url: string }>("POST", "/v1/checkout/sessions", {
-    mode: "subscription", customer, line_items: items,
-    success_url: returnUrl, cancel_url: returnUrl, allow_promotion_codes: true, metadata: meta,
-    subscription_data: { metadata: meta, ...(trialDays ? { trial_period_days: trialDays } : {}) },
-  });
+  const body = { mode: "subscription", customer, line_items: items, success_url: returnUrl, cancel_url: returnUrl, allow_promotion_codes: true, metadata: meta,
+    subscription_data: { metadata: meta, ...(trialDays ? { trial_period_days: trialDays } : {}) } };
+  let s: { url: string };
+  try { s = await call<{ url: string }>("POST", "/v1/checkout/sessions", body); }
+  catch (e) {
+    // Stripe Tax / Managed Payments refuse a product with no tax code (plans made before plans carried one): set the
+    // default on the plan's products once, then try again.
+    if (!(e instanceof StripeError) || !/tax code is missing/i.test(e.message)) throw e;
+    for (const it of items) {
+      const price = await call<{ product: string }>("GET", `/v1/prices/${it.price}`);
+      await call("POST", `/v1/products/${price.product}`, { tax_code: DEFAULT_TAX_CODE }, `tax-code-${price.product}`);
+    }
+    invalidatePlans();
+    s = await call<{ url: string }>("POST", "/v1/checkout/sessions", body);
+  }
   invalidateCheckouts();
   return s.url;
 }

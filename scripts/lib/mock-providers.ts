@@ -207,6 +207,13 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
   // ---------- Stripe (form-encoded) ----------
   const st = express.Router();
   st.use(auth);
+  // Like Stripe: an expand deeper than 4 levels is refused (data.items.data.price.product is 5).
+  st.use((req, res, next) => {
+    const ex = ([] as unknown[]).concat(req.query["expand[]"] ?? req.query.expand ?? []).map(String);
+    const deep = ex.find((e) => e.split(".").length > 4);
+    if (deep) return void res.status(400).json({ error: { message: `You cannot expand more than 4 levels of a property. Property: ${deep}` } });
+    next();
+  });
   const keyed = s.keyed;
   st.post("/v1/customers", (req, res) => {
     const k = req.get("idempotency-key");
@@ -227,10 +234,10 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
   st.post("/v1/products", (req, res) => {
     const k = req.get("idempotency-key");
     if (k && keyed.has(k)) return void res.json(keyed.get(k));
-    const p = { id: id("prod"), object: "product", active: true, name: req.body.name, description: req.body.description ?? null, metadata: req.body.metadata ?? {} };
+    const p = { id: id("prod"), object: "product", active: true, name: req.body.name, description: req.body.description ?? null, tax_code: req.body.tax_code ?? null, metadata: req.body.metadata ?? {} };
     s.products.push(p); if (k) keyed.set(k, p); res.json(p);
   });
-  st.get("/v1/products", (_req, res) => void res.json({ object: "list", data: s.products, has_more: false }));
+  st.get("/v1/products", (_req, res) => void res.json({ object: "list", data: [{ id: "prod_mock_1", object: "product", name: "Octillion", metadata: {} }, ...s.products], has_more: false }));
   st.post("/v1/prices", (req, res) => {
     const k = req.get("idempotency-key");
     if (k && keyed.has(k)) return void res.json(keyed.get(k));
@@ -257,8 +264,10 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     for (const [k, v] of Object.entries(req.body.metadata ?? {})) { if (v === "") delete p.metadata[k]; else p.metadata[k] = String(v); }
     res.json({ ...p, product: p.product?.id ?? p.product });
   });
+  // A subscription's prices name their product by id, as Stripe does without an expand.
+  const unexpanded = (sub: any) => ({ ...sub, items: { data: sub.items.data.map((it: any) => ({ ...it, price: it.price && { ...it.price, product: it.price.product?.id ?? it.price.product } })) } });
   st.get("/v1/subscriptions", (req, res) =>
-    void res.json({ object: "list", data: [...s.subscriptions.values()].filter((x) => !req.query.customer || x.customer === req.query.customer), has_more: false }));
+    void res.json({ object: "list", data: [...s.subscriptions.values()].filter((x) => !req.query.customer || x.customer === req.query.customer).map(unexpanded), has_more: false }));
   st.post("/v1/checkout/sessions", (req, res) => {
     if (!s.customers.has(req.body.customer)) return void res.status(400).json({ error: { message: "No such customer" } });
     const b = req.body, cs = { id: id("cs"), object: "checkout.session", created: Math.floor(Date.now() / 1000), status: "open", mode: b.mode, customer: b.customer,

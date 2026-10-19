@@ -21,6 +21,8 @@
  *                                           graduated, by the period's model spend; the last up_to_usd is null
  *     },
  *     "experiment": "team-price-oct", "weight": 1,   optional A/B test (src/experiments.ts)
+ *     "tax_code": "txcd_10103001",          the product's Stripe tax code (default: SaaS, business use); Stripe
+ *                                           Tax / Managed Payments refuse checkout for a product without one
  *     "metadata": { "owner": "growth" }     optional extra Stripe metadata (string values; octillion_ keys are reserved)
  *   }
  */
@@ -30,15 +32,17 @@ export interface UsageTier { up_to_usd: number | null; markup: number }
 export interface PlanConfig {
   name: string; description: string | null; interval: "month" | "year"; lookup_key: string; base_fee_usd: number; trial_days: number | null;
   monthly_budget_usd: number; usage: { meter: string; included_usd: number; tiers: UsageTier[] } | null;
-  experiment: string | null; weight: number; metadata: Record<string, string>;
+  experiment: string | null; weight: number; metadata: Record<string, string>; tax_code: string;
 }
+/** Stripe's tax code for software as a service, business use: what Octillion sells. */
+export const DEFAULT_TAX_CODE = "txcd_10103001";
 
 export class PlanConfigError extends Error {
   status = 400;
   constructor(public problems: string[]) { super(`The plan config has ${problems.length === 1 ? "a problem" : `${problems.length} problems`}: ${problems.join("; ")}`); }
 }
 
-const KEYS = new Set(["name", "description", "interval", "lookup_key", "base_fee_usd", "trial_days", "monthly_budget_usd", "usage", "experiment", "weight", "metadata"]);
+const KEYS = new Set(["name", "description", "interval", "lookup_key", "base_fee_usd", "trial_days", "monthly_budget_usd", "usage", "experiment", "weight", "metadata", "tax_code"]);
 const USAGE_KEYS = new Set(["meter", "included_usd", "markup", "tiers"]);
 const cents = (x: number) => Math.abs(x * 100 - Math.round(x * 100)) < 1e-6;
 export const defaultMeter = () => process.env.STRIPE_SPEND_METER || "octillion_model_spend";
@@ -126,8 +130,10 @@ export function parsePlanConfig(input: unknown): PlanConfig {
     }
     if (Object.keys(metadata).length > 20) bad.push("metadata: at most 20 keys");
   }
+  const tax_code = c.tax_code == null ? DEFAULT_TAX_CODE : String(c.tax_code).trim();
+  if (!/^txcd_\d{8}$/.test(tax_code)) bad.push("tax_code: a Stripe tax code, txcd_ and 8 digits");
   if (bad.length) throw new PlanConfigError(bad);
-  return { name, description, interval: interval as "month" | "year", lookup_key, base_fee_usd: base, trial_days: trial, monthly_budget_usd: budget, usage, experiment, weight, metadata };
+  return { tax_code, name, description, interval: interval as "month" | "year", lookup_key, base_fee_usd: base, trial_days: trial, monthly_budget_usd: budget, usage, experiment, weight, metadata };
 }
 
 /**
@@ -157,5 +163,6 @@ export function configJson(c: PlanConfig): Record<string, unknown> {
     ...(c.trial_days ? { trial_days: c.trial_days } : {}), monthly_budget_usd: c.monthly_budget_usd,
     ...(c.usage ? { usage: { meter: c.usage.meter, included_usd: c.usage.included_usd, ...(c.usage.tiers.length === 1 && c.usage.tiers[0].up_to_usd == null ? { markup: c.usage.tiers[0].markup } : { tiers: c.usage.tiers }) } } : {}),
     ...(c.experiment ? { experiment: c.experiment, weight: c.weight } : {}), ...(Object.keys(c.metadata).length ? { metadata: c.metadata } : {}),
+    ...(c.tax_code !== DEFAULT_TAX_CODE ? { tax_code: c.tax_code } : {}),
   };
 }

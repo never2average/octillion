@@ -7,7 +7,7 @@ import { SHARED, spendRange, spendReport } from "./spend.js";
  * (the system of record), against what Octillion spends on models for them (src/spend.ts, metered only). Read only.
  *
  * Stripe calls (all cached, so the tab and the rest of the console share them):
- *   - GET /v1/subscriptions?status=all&expand[]=data.items.data.price.product, paged: billing.allSubscriptions(), the
+ *   - GET /v1/subscriptions?status=all and GET /v1/products (Stripe expands 4 levels at most), paged: billing.allSubscriptions(), the
  *     same 60 s cache as subscriptionsByCustomer (the Accounts and Overview pages, orgBudgets);
  *   - GET /v1/invoices, paged (at most 5,000): billing.allInvoices(), cached 60 s;
  *   - GET /v1/prices?active=true: billing.listPlans(), cached 5 min (plan names for prices that are Octillion plans).
