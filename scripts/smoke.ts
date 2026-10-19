@@ -3196,6 +3196,36 @@ try {
       assert.ok(an.daily.length >= 1 && an.retention.length >= 1 && an.retention[0].weeks.length === 8 && an.retention[0].weeks[0] === 100, "retention: week 0 is everyone");
       assert.ok(an.accounts.some((a: any) => a.slug === slugW), "per-account activity");
       assert.ok(typeof an.ops.sessions === "number" && typeof an.ops.gateway_requests === "number");
+      // Growth: series shapes, and exact values against the records and the overview funnel.
+      {
+        const g = an.growth, sum = (xs: number[]) => xs.reduce((x, y) => x + y, 0);
+        assert.equal(g.accounts_daily.length, 30, "accounts over time: one point per day");
+        const [{ n: orgCount }] = await db.query<{ n: number }>("SELECT count(*)::int AS n FROM organizations");
+        assert.equal(g.accounts_daily.at(-1).total, orgCount, "cumulative accounts end at the account count");
+        assert.ok(g.accounts_daily.every((d: any, i: number, xs: any[]) => !i || d.total >= xs[i - 1].total), "cumulative never falls");
+        assert.ok(g.weekly.length >= 12 && g.weekly.every((w: any) => new Date(`${w.week}T00:00:00Z`).getUTCDay() === 1), "12+ ISO weeks, Monday first");
+        assert.equal(g.weekly.at(-1).partial, true, "this week is to date");
+        const since = `${g.weekly[0].week}T00:00:00Z`;
+        const [{ n: callsSince }] = await db.query<{ n: number }>("SELECT count(*)::int AS n FROM mcp_events WHERE method = 'tools/call' AND at >= $1", [since]);
+        assert.equal(sum(g.weekly.map((w: any) => w.calls)), callsSince, "weekly calls add up to the connector log");
+        assert.ok(g.weekly.every((w: any) => w.calls_per_person == null ? !w.people : Math.abs(w.calls_per_person - w.calls / w.people) < 0.06), "calls per active person");
+        assert.ok(g.weekly.slice(1).every((w: any, i: number) => { const p = g.weekly[i].calls; return p ? w.change_pct === Math.round(((w.calls - p) / p) * 1000) / 10 : w.change_pct === null; }), "week-over-week change");
+        assert.equal(g.stickiness.length, 30);
+        assert.ok(g.stickiness.every((d: any) => d.dau <= d.mau && (d.mau ? d.pct === Math.round((d.dau / d.mau) * 1000) / 10 : d.pct === null)), "DAU/MAU per day");
+        assert.ok(g.stickiness.at(-1).mau >= 1 && g.stickiness.some((d: any) => d.dau > 0), "people active");
+        assert.ok(g.client_mix.clients.length >= 1 && g.client_mix.clients.length <= 6 && g.client_mix.weeks.length === g.weekly.length, "client mix: top 5 + Other");
+        assert.equal(sum(g.client_mix.weeks.flatMap((w: any) => w.calls)), callsSince, "every call lands on one client");
+        const [{ n: simsSince }] = await db.query<{ n: number }>("SELECT count(*)::int AS n FROM simulations WHERE created_at >= $1", [since]);
+        assert.equal(sum(g.sims_weekly.map((w: any) => w.completed + w.other)), simsSince, "simulations per week add up");
+        const ovSame = await json(adm("GET", `/overview?from=${an.range.from}&to=${an.range.to}`));
+        for (const id of ["created", "onboarded", "simulated", "reported"])
+          assert.equal(g.funnel.find((f: any) => f.id === id).reached, ovSame.funnel.find((f: any) => f.id === id).reached, `funnel ${id} matches the overview`);
+        const [{ n: reqs }] = await db.query<{ n: number }>("SELECT count(*)::int AS n FROM access_requests WHERE created_at >= $1", [`${an.range.from}T00:00:00Z`]);
+        assert.equal(g.funnel[0].reached, reqs, "access requests in the range");
+        assert.ok(g.funnel.slice(1).every((f: any, i: number) => f.pct === (g.funnel[i].reached ? Math.round((f.reached / g.funnel[i].reached) * 100) : null)), "step conversion");
+        const gNone = (await json(adm("GET", "/analytics?days=30&account=__none__"))).growth;
+        assert.ok(gNone.accounts_daily.at(-1).total === 0 && gNone.weekly.every((w: any) => !w.calls) && !gNone.client_mix.clients.length && gNone.funnel[1].reached === 0, "growth follows the account filter");
+      }
       assert.equal((await json(adm("GET", "/analytics?days=999"))).days, 366, "period capped at a year");
       const ranged = await json(adm("GET", "/analytics?from=2026-01-01&to=2026-01-07"));
       assert.deepEqual(ranged.range, { from: "2026-01-01", to: "2026-01-07", days: 7 }, "a date range, both days included");

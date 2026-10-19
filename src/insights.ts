@@ -130,6 +130,129 @@ export async function parseFilters(q: AnalyticsQuery, range: ReturnType<typeof r
   return { filters, orgIds, productIds, sql };
 }
 
+// ---------- growth ----------
+
+const WEEK = 7 * DAY;
+/** The Monday (UTC) of the ISO week holding `t` (ms), at 00:00. */
+const mondayOf = (t: number) => { const d = Math.floor(t / DAY) * DAY; return d - ((new Date(d).getUTCDay() + 6) % 7) * DAY; };
+const isoOf = (t: number) => new Date(t).toISOString().slice(0, 10);
+const CLIENT_TOP = 5;
+
+/**
+ * The Growth block of Analytics (usage only, no money), in six queries plus the accounts listing the page already
+ * loads. Weekly series cover the last 12 ISO weeks (Monday to Sunday, UTC) to the range's last day, or the whole range
+ * when it is longer; the last week is `partial` when the range ends before it does. Every filter applies unless noted.
+ *   accounts_daily  accounts created up to the end of each day of the range (account and product filters only)
+ *   weekly          per week: accounts and people with a tool call, tool calls, calls per active person, and the %
+ *                   change in calls vs the week before
+ *   stickiness      per day: distinct people with a tool call that day / in the 30 days to that day (DAU/MAU)
+ *   client_mix      tool calls per week by AI client family (split_part(client, ' ', 1)). Tool calls carry no client, so
+ *                   each call counts for the client of its caller's latest handshake (same account and person) before
+ *                   it, else "unknown"; the top 5 families over the window, the rest as Other
+ *   sims_weekly     simulations created per week, completed vs the rest (account, product and user filters)
+ *   funnel          access requests made in the range, then the overview funnel (admin.funnelOf, same stages and rule)
+ *                   for the accounts created in the range; access requests ignore the filters (they have no account)
+ */
+async function growth(range: ReturnType<typeof reportRange>, { sql, orgIds }: Awaited<ReturnType<typeof parseFilters>>, orgsOnce: () => Promise<Orgs>,
+  newDailyP: Promise<{ day: string; n: number }[]>) {
+  const db = await getDb();
+  const { F, T } = range.sql, { EV, CL, ORG, O } = sql;
+  const calls = "method = 'tools/call'", person = "coalesce(user_id, 'org:' || org_id)";
+  const endMs = range.end.getTime(), lastWeek = mondayOf(endMs - DAY);
+  const firstWeek = Math.min(mondayOf(range.start.getTime()), lastWeek - 11 * WEEK);
+  const weeks: string[] = [];
+  for (let t = firstWeek; t <= lastWeek; t += WEEK) weeks.push(isoOf(t));
+  const W0 = `'${new Date(firstWeek).toISOString()}'::timestamptz`, WP = `'${new Date(firstWeek - WEEK).toISOString()}'::timestamptz`;
+  const wk = (c: string) => `to_char(date_trunc('week', ${c} AT TIME ZONE 'UTC'), 'YYYY-MM-DD')`;
+
+  const [base, weekly, sticky, mix, sims, orgs, newDaily] = await Promise.all([
+    db.query<{ before: unknown; requests: unknown }>(
+      `SELECT (SELECT count(*) FROM organizations WHERE created_at < ${F}${O ? ` AND id = ANY(${O})` : ""}) AS before,
+              (SELECT count(*) FROM access_requests WHERE created_at >= ${F} AND created_at < ${T}) AS requests`),
+    db.query<{ week: string; accounts: unknown; people: unknown; calls: unknown }>(
+      `SELECT ${wk("at")} AS week, count(DISTINCT org_id) AS accounts, count(DISTINCT ${person}) AS people, count(*) AS calls
+         FROM mcp_events WHERE ${calls} AND at >= ${WP} AND at < ${T}${EV()} GROUP BY 1`),
+    db.query<{ day: string; dau: unknown; mau: unknown }>(
+      `WITH a AS (SELECT DISTINCT ${person} AS p, (at AT TIME ZONE 'UTC')::date AS d FROM mcp_events
+                   WHERE ${calls} AND at >= ${F} - interval '29 days' AND at < ${T}${EV()}),
+            days AS (SELECT generate_series('${range.from}'::date, '${range.to}'::date, interval '1 day')::date AS day)
+       SELECT to_char(days.day, 'YYYY-MM-DD') AS day, count(DISTINCT a.p) FILTER (WHERE a.d = days.day) AS dau, count(DISTINCT a.p) AS mau
+         FROM days JOIN a ON a.d > days.day - 30 AND a.d <= days.day GROUP BY days.day`),
+    // Each call takes the client of the latest handshake by the same account and person at or before it: number the
+    // handshakes per caller in time order (a handshake sorts before a call at the same instant), then a call's group
+    // is the count of handshakes up to it.
+    db.query<{ week: string; client: string; calls: unknown }>(
+      `WITH ev AS (
+         SELECT org_id, ${person} AS p, at, method = 'tools/call' AS is_call, CASE WHEN method = 'initialize' THEN split_part(client, ' ', 1) END AS fam
+           FROM mcp_events
+          WHERE (${calls} AND at >= ${W0} AND at < ${T}${EV()}) OR (method = 'initialize' AND client IS NOT NULL AND at < ${T}${CL()})),
+       grouped AS (SELECT *, count(fam) OVER (PARTITION BY org_id, p ORDER BY at, is_call ROWS UNBOUNDED PRECEDING) AS g FROM ev),
+       tagged AS (SELECT at, is_call, max(fam) OVER (PARTITION BY org_id, p, g) AS fam FROM grouped)
+       SELECT ${wk("at")} AS week, coalesce(nullif(fam, ''), 'unknown') AS client, count(*) AS calls
+         FROM tagged WHERE is_call AND at >= ${W0} GROUP BY 1, 2`),
+    db.query<{ week: string; completed: unknown; other: unknown }>(
+      `SELECT ${wk("created_at")} AS week, count(*) FILTER (WHERE status = 'completed') AS completed, count(*) FILTER (WHERE status IS DISTINCT FROM 'completed') AS other
+         FROM simulations WHERE created_at >= ${W0} AND created_at < ${T}${ORG("", "sim")} GROUP BY 1`),
+    orgsOnce().then((x) => x.orgs, () => null),
+    newDailyP,
+  ]);
+
+  // Accounts over time: the count before the range, plus each day's new accounts.
+  let total = Number(base[0]?.before ?? 0);
+  const born = new Map(newDaily.map((r) => [r.day, Number(r.n)]));
+  const days = dayKeys(range.start, range.end);
+  const accounts_daily = days.map((day) => ({ day, total: (total += born.get(day) ?? 0) }));
+
+  const wkBy = new Map(weekly.map((r) => [r.week, { accounts: Number(r.accounts), people: Number(r.people), calls: Number(r.calls) }]));
+  const weeklyRows = weeks.map((week) => {
+    const t = Date.parse(`${week}T00:00:00Z`), cur = wkBy.get(week), c = cur?.calls ?? 0, p = wkBy.get(isoOf(t - WEEK))?.calls ?? 0;
+    return { week, accounts: cur?.accounts ?? 0, people: cur?.people ?? 0, calls: c,
+      calls_per_person: cur?.people ? Math.round((c / cur.people) * 10) / 10 : null,
+      change_pct: p ? Math.round(((c - p) / p) * 1000) / 10 : null, partial: t + WEEK > endMs };
+  });
+
+  const stBy = new Map(sticky.map((r) => [r.day, r]));
+  const stickiness = days.map((day) => {
+    const r = stBy.get(day), dau = Number(r?.dau ?? 0), mau = Number(r?.mau ?? 0);
+    return { day, dau, mau, pct: mau ? Math.round((dau / mau) * 1000) / 10 : null };
+  });
+
+  // The top families over the whole window keep their own series; the rest fold into Other.
+  const byClient = new Map<string, number>();
+  for (const r of mix) byClient.set(r.client, (byClient.get(r.client) ?? 0) + Number(r.calls));
+  const ranked = [...byClient].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([c]) => c);
+  const keep = ranked.slice(0, CLIENT_TOP), hasOther = ranked.length > CLIENT_TOP;
+  const clientsList = [...keep, ...(hasOther ? ["Other"] : [])];
+  const mixBy = new Map<string, number[]>(weeks.map((w) => [w, clientsList.map(() => 0)]));
+  for (const r of mix) {
+    const row = mixBy.get(r.week), i = keep.indexOf(r.client);
+    if (row) row[i >= 0 ? i : keep.length] += Number(r.calls);
+  }
+  const client_mix = { clients: clientsList, weeks: weeks.map((week) => ({ week, calls: mixBy.get(week)! })) };
+
+  const simBy = new Map(sims.map((r) => [r.week, r]));
+  const sims_weekly = weeks.map((week) => ({ week, completed: Number(simBy.get(week)?.completed ?? 0), other: Number(simBy.get(week)?.other ?? 0) }));
+
+  // The overview's funnel (same stages, same rule), for the accounts created in the range.
+  let funnel: { id: string; label: string; reached: number; pct: number | null }[] | null = null;
+  if (orgs) {
+    const { funnelOf } = await import("./admin.js");
+    const ids = orgIds ? new Set(orgIds) : null;
+    const cohort = orgs.filter((o) => { const t = new Date(o.created_at).getTime(); return t >= range.start.getTime() && t < endMs && (!ids || ids.has(Number(o.id))); });
+    const f = new Map(funnelOf(cohort).map((s) => [s.id, s.reached]));
+    const steps = [
+      { id: "requests", label: "Access requests", reached: Number(base[0]?.requests ?? 0) },
+      { id: "created", label: "Accounts", reached: f.get("created") ?? 0 },
+      { id: "onboarded", label: "Onboarded", reached: f.get("onboarded") ?? 0 },
+      { id: "simulated", label: "First simulation", reached: f.get("simulated") ?? 0 },
+      { id: "reported", label: "First report", reached: f.get("reported") ?? 0 },
+    ];
+    funnel = steps.map((s, i) => ({ ...s, pct: i && steps[i - 1].reached ? Math.round((s.reached / steps[i - 1].reached) * 100) : null }));
+  }
+
+  return { accounts_daily, weekly: weeklyRows, stickiness, client_mix, sims_weekly, funnel };
+}
+
 const memo = <T>(f: () => Promise<T>) => { let p: Promise<T> | null = null; return () => (p ??= f()); };
 
 /**
@@ -185,7 +308,8 @@ export async function platformAnalytics(q: AnalyticsQuery) {
   const { days } = range, { F, T, PF } = range.sql;
   const db = await getDb();
   const orgsOnce = memo(loadOrgs);
-  const [{ filters, sql: { EV, CL, ORG, O, scoped } }, facetLists] = await Promise.all([parseFilters(q, range, orgsOnce), facets(range, orgsOnce)]);
+  const [parsed, facetLists] = await Promise.all([parseFilters(q, range, orgsOnce), facets(range, orgsOnce)]);
+  const { filters, sql: { EV, CL, ORG, O, scoped } } = parsed;
   const GW = scoped ? `gateway_usage g JOIN agent_sessions s ON s.id = g.session_id WHERE g.last_at >= ${F} AND g.last_at < ${T}${ORG("s.", "session")}`
     : `gateway_usage g WHERE g.last_at >= ${F} AND g.last_at < ${T}`;
   // In the period, and in the period just before it.
@@ -193,7 +317,10 @@ export async function platformAnalytics(q: AnalyticsQuery) {
   const calls = "method = 'tools/call'";
   const person = "coalesce(user_id, 'org:' || org_id)";
 
-  const [totals, prev, daily, tools, clients, accounts, retention, ops, errors, newAccounts, errorsTotal, newDaily, opsDaily] = await Promise.all([
+  // accounts created per day, for the New accounts sparkline and Accounts over time
+  const newDailyP = db.query<{ day: string; n: number }>(`SELECT to_char(date_trunc('day', created_at), 'YYYY-MM-DD') AS day, count(*) AS n FROM organizations WHERE ${inW("created_at")}${O ? ` AND id = ANY(${O})` : ""} GROUP BY 1 ORDER BY 1`);
+  const growthP = growth(range, parsed, orgsOnce, newDailyP);
+  const [totals, prev, daily, tools, clients, accounts, retention, ops, errors, newAccounts, errorsTotal, newDaily, opsDaily, growthReport] = await Promise.all([
     db.query<Record<string, number>>(
       `SELECT count(DISTINCT org_id) FILTER (WHERE ${calls}) AS active_accounts, count(DISTINCT ${person}) FILTER (WHERE ${calls}) AS active_people,
               count(*) FILTER (WHERE ${calls}) AS calls, count(*) FILTER (WHERE ${calls} AND NOT ok) AS errors,
@@ -251,8 +378,7 @@ export async function platformAnalytics(q: AnalyticsQuery) {
          FROM mcp_events e JOIN organizations o ON o.id = e.org_id WHERE NOT e.ok AND ${inW("e.at")}${EV("e.")} ORDER BY e.at DESC LIMIT 15`),
     db.query<{ n: number }>(`SELECT count(*) AS n FROM organizations WHERE ${inW("created_at")}${O ? ` AND id = ANY(${O})` : ""}`),
     db.query<{ n: number }>(`SELECT count(*) AS n FROM mcp_events WHERE NOT ok AND ${inW("at")}${EV()}`),
-    // accounts created per day, for the New accounts sparkline
-    db.query<{ day: string; n: number }>(`SELECT to_char(date_trunc('day', created_at), 'YYYY-MM-DD') AS day, count(*) AS n FROM organizations WHERE ${inW("created_at")}${O ? ` AND id = ANY(${O})` : ""} GROUP BY 1 ORDER BY 1`),
+    newDailyP,
     // The Health figures day by day, for their sparklines (same filters as ops). Queued is the autoscaler's daily peak.
     db.query<Record<string, unknown>>(
       `WITH days AS (
@@ -273,6 +399,7 @@ export async function platformAnalytics(q: AnalyticsQuery) {
               sum(model_cost_usd) AS model_cost_usd, sum(onboardings) AS onboardings, sum(onboardings_failed) AS onboardings_failed,
               sum(gateway_errors) AS gateway_errors, sum(gateway_requests) AS gateway_requests, max(queued) AS queued
          FROM days GROUP BY day ORDER BY day`),
+    growthP,
   ]);
 
   const t = totals[0] ?? {}, p = prev[0] ?? {};
@@ -302,6 +429,7 @@ export async function platformAnalytics(q: AnalyticsQuery) {
     ops: Object.fromEntries(Object.entries(ops[0] ?? {}).map(([k, v]) => [k, Number(v)])),
     errors, errors_total: Number(errorsTotal[0]?.n ?? 0),
     accounts_total: Number((accounts[0] as any)?.total ?? 0),
+    growth: growthReport,
     filters, facets: facetLists,
   };
 }

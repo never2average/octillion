@@ -7,7 +7,7 @@ import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { IconFilter } from '@tabler/icons-react';
 import { toast } from 'sonner';
-import { Area, AreaChart, Bar, BarChart, CartesianGrid, XAxis, YAxis } from 'recharts';
+import { Area, AreaChart, Bar, BarChart, CartesianGrid, LabelList, XAxis, YAxis } from 'recharts';
 import PageContainer from '@/components/layout/page-container';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -61,6 +61,17 @@ interface Analytics {
   errors_total: number;
   filters: Record<string, unknown>;
   facets: Facets;
+  growth?: Growth;
+}
+/** The Growth block (src/insights.ts growth()): weekly series are ISO weeks (Monday, UTC); `partial` when the range ends mid-week. */
+interface Growth {
+  accounts_daily: { day: string; total: number }[];
+  weekly: { week: string; accounts: number; people: number; calls: number; calls_per_person: number | null; change_pct: number | null; partial: boolean }[];
+  stickiness: { day: string; dau: number; mau: number; pct: number | null }[];
+  client_mix: { clients: string[]; weeks: { week: string; calls: number[] }[] };
+  sims_weekly: { week: string; completed: number; other: number }[];
+  /** null when the accounts listing could not load */
+  funnel: { id: string; label: string; reached: number; pct: number | null }[] | null;
 }
 interface ErrorPage { rows: ErrorRow[]; total: number; offset: number; limit: number; kind: ErrorKind }
 
@@ -282,7 +293,7 @@ const ERROR_COLS: Record<ErrorKind, string[]> = {
 };
 const KINDS: { id: ErrorKind; label: string }[] = [{ id: 'tool', label: 'Tool call errors' }, { id: 'session', label: 'Failed agent sessions' }, { id: 'onboarding', label: 'Failed onboardings' }];
 const SECTIONS = {
-  analytics: [['summary', 'Summary'], ['daily', 'Daily'], ['tools', 'Tool adoption'], ['clients', 'Clients'], ['accounts', 'Accounts'], ['retention', 'Retention']],
+  analytics: [['summary', 'Summary'], ['growth-daily', 'Growth by day'], ['growth-weekly', 'Growth by week'], ['growth-funnel', 'Activation funnel'], ['daily', 'Daily'], ['tools', 'Tool adoption'], ['clients', 'Clients'], ['accounts', 'Accounts'], ['retention', 'Retention']],
   health: [['health-summary', 'Summary'], ['errors-tool', 'Tool call errors (all)'], ['errors-session', 'Agent session failures (all)'], ['errors-onboarding', 'Onboarding failures (all)']]
 } as const;
 const pause = () => new Promise((r) => setTimeout(r, 150)); // browsers drop back-to-back downloads
@@ -311,6 +322,19 @@ function useExport(view: 'analytics' | 'health', a: Analytics | undefined, base:
         ['active_accounts', t.active_accounts, t.change.active_accounts], ['active_people', t.active_people, t.change.active_people], ['tool_calls', t.calls, t.change.calls],
         ['new_accounts', t.new_accounts, null], ['error_pct', t.error_pct, null], ['p50_ms', t.p50_ms, null], ['p95_ms', t.p95_ms, null],
         ['accounts_with_activity', a.accounts_total, null], ['errors', a.errors_total, null]] };
+      case 'growth-daily': {
+        const g = a.growth, st = new Map((g?.stickiness ?? []).map((d) => [d.day, d]));
+        return { header: ['day', 'accounts_total', 'dau', 'mau', 'dau_mau_pct'],
+          rows: (g?.accounts_daily ?? []).map((d) => [d.day, d.total, st.get(d.day)?.dau ?? 0, st.get(d.day)?.mau ?? 0, st.get(d.day)?.pct ?? null]) };
+      }
+      case 'growth-weekly': {
+        const g = a.growth, clients = g?.client_mix.clients ?? [];
+        const mix = new Map((g?.client_mix.weeks ?? []).map((w) => [w.week, w.calls])), sims = new Map((g?.sims_weekly ?? []).map((w) => [w.week, w]));
+        return { header: ['week', 'active_accounts', 'active_people', 'calls', 'calls_change_pct', 'calls_per_person', 'sims_completed', 'sims_other', 'partial', ...clients.map((c) => `calls_${c}`)],
+          rows: (g?.weekly ?? []).map((w) => [w.week, w.accounts, w.people, w.calls, w.change_pct, w.calls_per_person, sims.get(w.week)?.completed ?? 0, sims.get(w.week)?.other ?? 0, w.partial,
+            ...clients.map((_, i) => mix.get(w.week)?.[i] ?? 0)]) };
+      }
+      case 'growth-funnel': return { header: ['step', 'label', 'count', 'pct_of_previous'], rows: (a.growth?.funnel ?? []).map((f) => [f.id, f.label, f.reached, f.pct]) };
       case 'daily': return { header: ['day', 'calls', 'errors', 'accounts', 'people'], rows: fillDays(a.daily, a.days, a.range?.from).map((d) => [d.day, d.calls, d.errors, d.accounts, d.people]) };
       case 'tools': return { header: ['tool', 'accounts', 'people', 'calls', 'error_pct', 'p50_ms', 'p95_ms'], rows: a.tools.filter(match).map((x) => [x.name, x.accounts, x.people, x.calls, x.error_pct, x.p50_ms, x.p95_ms]) };
       case 'clients': return { header: ['client', 'accounts', 'people', 'connections'], rows: a.clients.map((c) => [c.client, c.accounts, c.people, c.connections]) };
@@ -461,6 +485,7 @@ function AnalyticsBody({ a, match }: { a: Analytics; match: (r: object) => boole
       ]} />
 
       <div className='border-t border-l'>
+        {a.growth && <GrowthRows g={a.growth} />}
         <div className='grid lg:grid-cols-2'>
           <Box title='Tool calls per day' description='Errors in red.'>
           {a.totals.calls ? (
@@ -585,6 +610,171 @@ function AnalyticsBody({ a, match }: { a: Analytics; match: (r: object) => boole
       </Box>
       </div>
     </div>
+  );
+}
+
+// ---------- growth ----------
+
+const weekAxis = <XAxis dataKey='week' tickLine={false} axisLine={false} tickMargin={8} minTickGap={24} tickFormatter={shortDay} />;
+/** "Mar 2", or "Mar 2 (to date)" when the range ends before that week does. */
+const weekLabel = (v: unknown, payload: readonly { payload?: { partial?: boolean } }[] = []) => `Week of ${shortDay(String(v))}${payload[0]?.payload?.partial ? ' (to date)' : ''}`;
+const signedPct = (v: unknown) => (v == null || v === '' ? '' : `${Number(v) > 0 ? '+' : ''}${Number(v)}%`);
+const tipRow = (label: ReactNode, value: ReactNode) => (
+  <div className='flex w-full items-center justify-between gap-4'><span className='text-muted-foreground'>{label}</span><span className='text-foreground font-mono font-medium tabular-nums'>{value}</span></div>
+);
+const Empty = ({ children }: { children: ReactNode }) => <p className='text-muted-foreground py-16 text-center text-sm'>{children}</p>;
+const CLIENT_COLORS = ['var(--chart-1)', 'var(--chart-2)', 'var(--chart-3)', 'var(--chart-4)', 'var(--chart-5)'];
+
+/** The Growth block: four rows of two at the top of the Analytics grid. */
+function GrowthRows({ g }: { g: Growth }) {
+  const weekly = useMemo(() => {
+    const sims = new Map(g.sims_weekly.map((w) => [w.week, w])), mix = new Map(g.client_mix.weeks.map((w) => [w.week, w.calls]));
+    return g.weekly.map((w) => ({ ...w, completed: sims.get(w.week)?.completed ?? 0, other: sims.get(w.week)?.other ?? 0,
+      ...Object.fromEntries(g.client_mix.clients.map((_, i) => [`c${i}`, mix.get(w.week)?.[i] ?? 0])) }));
+  }, [g]);
+  const mixConfig = Object.fromEntries(g.client_mix.clients.map((c, i) => [`c${i}`, { label: c, color: c === 'Other' ? 'var(--muted-foreground)' : CLIENT_COLORS[i] }])) satisfies ChartConfig;
+  const lastTotal = g.accounts_daily.at(-1)?.total ?? 0;
+  const anyCalls = g.weekly.some((w) => w.calls > 0), labels = weekly.length <= 16;
+  const funnelMax = Math.max(1, ...(g.funnel ?? []).map((f) => f.reached));
+  return (
+    <>
+      <div className='grid lg:grid-cols-2'>
+        <Box title='Accounts over time' description='Total accounts at the end of each day. Only the account and product filters apply.'>
+          {lastTotal ? (
+            <ChartContainer config={{ total: { label: 'Accounts', color: 'var(--chart-2)' } }} className='aspect-auto h-[240px] w-full'>
+              <AreaChart data={g.accounts_daily} margin={{ left: 0, right: 8, top: 8 }}>
+                <defs>
+                  <linearGradient id='fillAccountsTotal' x1='0' y1='0' x2='0' y2='1'>
+                    <stop offset='5%' stopColor='var(--color-total)' stopOpacity={0.5} />
+                    <stop offset='95%' stopColor='var(--color-total)' stopOpacity={0.05} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid vertical={false} />
+                <XAxis dataKey='day' tickLine={false} axisLine={false} tickMargin={8} minTickGap={28} tickFormatter={shortDay} />
+                <YAxis width={32} tickLine={false} axisLine={false} allowDecimals={false} />
+                <ChartTooltip cursor={false} content={<ChartTooltipContent labelFormatter={(v) => shortDay(String(v))} indicator='dot' />} />
+                <Area dataKey='total' type='stepAfter' fill='url(#fillAccountsTotal)' stroke='var(--color-total)' strokeWidth={2} />
+              </AreaChart>
+            </ChartContainer>
+          ) : <Empty>No accounts yet.</Empty>}
+        </Box>
+        <Box title='Weekly active accounts' description='Accounts with a tool call each week (Monday to Sunday, UTC).'>
+          {anyCalls ? (
+            <ChartContainer config={{ accounts: { label: 'Active accounts', color: 'var(--chart-2)' } }} className='aspect-auto h-[240px] w-full'>
+              <BarChart data={weekly} margin={{ left: 0, right: 8, top: 8 }}>
+                <CartesianGrid vertical={false} />
+                {weekAxis}
+                <YAxis width={32} tickLine={false} axisLine={false} allowDecimals={false} />
+                <ChartTooltip cursor={false} content={<ChartTooltipContent labelFormatter={weekLabel} indicator='dashed' />} />
+                <Bar dataKey='accounts' fill='var(--color-accounts)' radius={3} />
+              </BarChart>
+            </ChartContainer>
+          ) : <Empty>No tool calls in these weeks.</Empty>}
+        </Box>
+      </div>
+      <div className='grid lg:grid-cols-2'>
+        <Box title='Stickiness' description='People active that day as a share of people active in the 30 days to it (DAU/MAU).'>
+          {g.stickiness.some((d) => d.mau > 0) ? (
+            <ChartContainer config={{ pct: { label: 'DAU/MAU', color: 'var(--chart-4)' } }} className='aspect-auto h-[240px] w-full'>
+              <AreaChart data={g.stickiness} margin={{ left: 0, right: 8, top: 8 }}>
+                <CartesianGrid vertical={false} />
+                <XAxis dataKey='day' tickLine={false} axisLine={false} tickMargin={8} minTickGap={28} tickFormatter={shortDay} />
+                <YAxis width={40} tickLine={false} axisLine={false} domain={[0, 100]} ticks={[0, 25, 50, 75, 100]} tickFormatter={(v) => `${v}%`} />
+                <ChartTooltip cursor={false} content={<ChartTooltipContent labelFormatter={(v) => shortDay(String(v))}
+                  formatter={(v, _n, item) => <div className='grid w-full gap-1'>{tipRow('DAU/MAU', `${v}%`)}{tipRow('Active that day', num(item.payload.dau))}{tipRow('Active in 30 days', num(item.payload.mau))}</div>} />} />
+                <Area dataKey='pct' type='monotone' fill='var(--color-pct)' fillOpacity={0.15} stroke='var(--color-pct)' strokeWidth={2} />
+              </AreaChart>
+            </ChartContainer>
+          ) : <Empty>Nobody was active in this period.</Empty>}
+        </Box>
+        <Box title='Week-over-week growth' description='Tool calls per week; the label is the change against the week before.'>
+          {anyCalls ? (
+            <ChartContainer config={{ calls: { label: 'Tool calls', color: 'var(--chart-1)' } }} className='aspect-auto h-[240px] w-full'>
+              <BarChart data={weekly} margin={{ left: 0, right: 8, top: labels ? 20 : 8 }}>
+                <CartesianGrid vertical={false} />
+                {weekAxis}
+                <YAxis width={40} tickLine={false} axisLine={false} allowDecimals={false} />
+                <ChartTooltip cursor={false} content={<ChartTooltipContent labelFormatter={weekLabel}
+                  formatter={(v, _n, item) => <div className='grid w-full gap-1'>{tipRow('Tool calls', num(v))}{tipRow('vs week before', signedPct(item.payload.change_pct) || '—')}</div>} />} />
+                <Bar dataKey='calls' fill='var(--color-calls)' radius={3}>
+                  {labels && <LabelList dataKey='change_pct' position='top' fontSize={10} fill='var(--muted-foreground)' formatter={signedPct} />}
+                </Bar>
+              </BarChart>
+            </ChartContainer>
+          ) : <Empty>No tool calls in these weeks.</Empty>}
+        </Box>
+      </div>
+      <div className='grid lg:grid-cols-2'>
+        <Box title='Calls per active person' description='Tool calls per week divided by the people who made them.'>
+          {g.weekly.some((w) => w.calls_per_person != null) ? (
+            <ChartContainer config={{ calls_per_person: { label: 'Calls per person', color: 'var(--chart-3)' } }} className='aspect-auto h-[240px] w-full'>
+              <BarChart data={weekly} margin={{ left: 0, right: 8, top: 8 }}>
+                <CartesianGrid vertical={false} />
+                {weekAxis}
+                <YAxis width={32} tickLine={false} axisLine={false} />
+                <ChartTooltip cursor={false} content={<ChartTooltipContent labelFormatter={weekLabel}
+                  formatter={(v, _n, item) => <div className='grid w-full gap-1'>{tipRow('Calls per person', v)}{tipRow('Tool calls', num(item.payload.calls))}{tipRow('People', num(item.payload.people))}</div>} />} />
+                <Bar dataKey='calls_per_person' fill='var(--color-calls_per_person)' radius={3} />
+              </BarChart>
+            </ChartContainer>
+          ) : <Empty>No tool calls in these weeks.</Empty>}
+        </Box>
+        <Box title='Client mix over time' description="Tool calls per week by the AI client of the caller's latest connection; the top five, the rest as Other.">
+          {g.client_mix.clients.length ? (
+            <ChartContainer config={mixConfig} className='aspect-auto h-[240px] w-full'>
+              <BarChart data={weekly} margin={{ left: 0, right: 8, top: 8 }}>
+                <CartesianGrid vertical={false} />
+                {weekAxis}
+                <YAxis width={40} tickLine={false} axisLine={false} allowDecimals={false} />
+                <ChartTooltip cursor={false} content={<ChartTooltipContent labelFormatter={weekLabel} indicator='dot' />} />
+                {g.client_mix.clients.map((_, i, all) => (
+                  <Bar key={i} dataKey={`c${i}`} stackId='mix' fill={`var(--color-c${i})`} stroke='var(--background)' strokeWidth={1}
+                    radius={i === all.length - 1 ? [3, 3, 0, 0] : 0} />
+                ))}
+                <ChartLegend content={<ChartLegendContent />} />
+              </BarChart>
+            </ChartContainer>
+          ) : <Empty>No tool calls in these weeks.</Empty>}
+        </Box>
+      </div>
+      <div className='grid lg:grid-cols-2'>
+        <Box title='Simulations per week' description='Simulations created each week, completed and the rest. Tool and client filters do not apply.'>
+          {g.sims_weekly.some((w) => w.completed + w.other > 0) ? (
+            <ChartContainer config={{ completed: { label: 'Completed', color: 'var(--chart-2)' }, other: { label: 'Not completed', color: 'var(--chart-4)' } }} className='aspect-auto h-[240px] w-full'>
+              <BarChart data={weekly} margin={{ left: 0, right: 8, top: 8 }}>
+                <CartesianGrid vertical={false} />
+                {weekAxis}
+                <YAxis width={32} tickLine={false} axisLine={false} allowDecimals={false} />
+                <ChartTooltip cursor={false} content={<ChartTooltipContent labelFormatter={weekLabel} indicator='dot' />} />
+                <Bar dataKey='completed' stackId='sims' fill='var(--color-completed)' stroke='var(--background)' strokeWidth={1} />
+                <Bar dataKey='other' stackId='sims' fill='var(--color-other)' stroke='var(--background)' strokeWidth={1} radius={[3, 3, 0, 0]} />
+                <ChartLegend content={<ChartLegendContent />} />
+              </BarChart>
+            </ChartContainer>
+          ) : <Empty>No simulations in these weeks.</Empty>}
+        </Box>
+        <Box title='Activation funnel' description='Access requests made in this period, then the accounts created in it and how far they got. Requests ignore the filters.'>
+          {!g.funnel ? <Empty>Accounts could not be loaded.</Empty> : g.funnel.every((f) => !f.reached) ? <Empty>No access requests or new accounts in this period.</Empty> : (
+            <ol className='grid gap-3'>
+              {g.funnel.map((f, i) => (
+                <li key={f.id} className='grid gap-1.5'>
+                  <div className='flex items-center justify-between gap-2 text-sm leading-none'>
+                    <span>{f.label}</span>
+                    <span className='text-muted-foreground text-xs tabular-nums'>
+                      <span className='text-foreground font-medium'>{num(f.reached)}</span>
+                      {i > 0 && <> · {f.pct == null ? '—' : `${f.pct}%`} of the step before</>}
+                    </span>
+                  </div>
+                  <div className='bg-muted h-2 overflow-hidden rounded-full'>
+                    <div className='h-full rounded-full' style={{ width: `${(f.reached / funnelMax) * 100}%`, background: 'var(--chart-1)' }} />
+                  </div>
+                </li>
+              ))}
+            </ol>
+          )}
+        </Box>
+      </div>
+    </>
   );
 }
 

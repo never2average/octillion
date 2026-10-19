@@ -225,6 +225,10 @@ function shapeOrg(f: OrgFacts, people: People | null, sub: billing.SubscriptionS
 }
 export type AdminOrg = ReturnType<typeof shapeOrg>;
 
+/** Cumulative: how many of `orgs` reached each step (their furthest step is at or past it), so the drop-off between steps is visible. */
+export const funnelOf = (orgs: readonly { stage_index: number }[]) =>
+  STAGES.map((s, i) => ({ id: s.id, label: s.label, reached: orgs.filter((o) => o.stage_index >= i).length }));
+
 async function shapeAll(rows: OrgFacts[], fresh = false) {
   const subs = await subscriptions();
   const defaultBudget = integrations().default_budget_usd;
@@ -279,8 +283,7 @@ export async function overview(q: { from?: unknown; to?: unknown } = {}) {
   return {
     public_url: publicUrl(), integrations: integrations(), stripe_error,
     requests: { pending: Number(req.pending), approved: Number(req.approved), declined: Number(req.declined), oldest_pending: req.oldest_pending },
-    // Cumulative: how many accounts reached each step, so the drop-off between steps is visible.
-    funnel: STAGES.map((s, i) => ({ id: s.id, label: s.label, reached: inCohort.filter((o) => o.stage_index >= i).length })),
+    funnel: funnelOf(inCohort),
     range: range ? { from: range.from, to: range.to, days: range.days } : null,
     attention: orgs.filter((o) => o.attention.length).map((o) => ({ slug: o.slug, name: o.name, stage_label: o.stage_label, attention: o.attention, contact: o.contact, last_seen: o.last_seen })),
     active_7d: orgs.filter((o) => o.calls_7d > 0).length,
