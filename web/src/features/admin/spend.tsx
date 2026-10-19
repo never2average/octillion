@@ -426,7 +426,10 @@ function SpendTab({ data, loading, bar, group, range }: TabProps<Spend> & { rang
   const session = sumAt(rows.map((r) => r.daily_session), len), orch = sumAt(rows.map((r) => r.daily_orchestrator), len);
   const month = sumAt(rows.map((r) => r.month_daily), data?.month.days.length ?? 0);
   const m = data?.month;
-  const pace = m ? (total(month) / m.elapsed_days) * m.days_in_month : null;
+  // Month-end pace: spend so far plus the last 7 days' daily rate times the days left (the same rule as Billing and
+  // Budget rules), not the whole-month average, which lags when spending has only just started.
+  const recentDays = m ? Math.min(7, m.elapsed_days) : 0;
+  const pace = m && recentDays > 0 ? total(month) + (total(month.slice(-7)) / recentDays) * Math.max(0, m.days_in_month - m.elapsed_days) : null;
   const cards = (
     <StatStrip items={[
       { label: 'Total spend', spark: session.map((x, i) => x + orch[i]), value: data ? cents(total(session) + total(orch)) : '—' },

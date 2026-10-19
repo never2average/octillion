@@ -360,10 +360,14 @@ async function billingUsage(s: Session) {
   const now = new Date(), start = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1), end = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1);
   const spent = daily.reduce((a, d) => a + Number(d.usd), 0);
   const elapsed = Math.max(1 / 24, (now.getTime() - start) / 86_400_000), days = (end - start) / 86_400_000;
+  // Project from the current rate (the last 7 days of this month), not the whole-month average: the same rule as
+  // Budget rules (src/limits.ts pace).
+  const since = Math.max(start, now.getTime() - 7 * 86_400_000);
+  const recent = { usd: daily.filter((d) => Date.parse(`${d.day}T00:00:00Z`) + 86_400_000 > since).reduce((a, d) => a + Number(d.usd), 0), days: (now.getTime() - since) / 86_400_000 };
   const { budget } = await orgBudget(s.org).catch(() => ({ budget: 0 }));
   return {
     period: { start: new Date(start).toISOString(), end: new Date(end).toISOString(), days, elapsed_days: elapsed },
-    spent_usd: spent, budget_usd: budget, projected_usd: (spent / elapsed) * days,
+    spent_usd: spent, budget_usd: budget, projected_usd: limits.pace(spent, now, recent).projected_usd ?? spent,
     metered_usd: Number(m?.metered ?? 0), in_flight_usd: Math.max(0, spent - Number(m?.metered ?? 0)),
     sessions: { finished: m?.finished ?? 0, running: m?.running ?? 0 },
     meter: { enabled: Boolean(process.env.STRIPE_SPEND_METER && billing.stripeEnabled()), event: process.env.STRIPE_SPEND_METER ?? null },

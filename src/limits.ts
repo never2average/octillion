@@ -248,14 +248,20 @@ export async function overview(org: { orgId: number; slug: string }) {
   return shape(saved, lv);
 }
 
+/** Spend over the last 7 days of this month (or the month so far, if shorter), to project from the current rate. */
+export interface Recent { usd: number; days: number }
+
 /**
- * Where the month stands: when it resets (UTC, like the budget), and the spend it is on pace for (live spend so far,
- * per elapsed day, times the days in the month). Before the 3rd there is too little to go on, so no pace (null).
+ * Where the month stands: when it resets (UTC, like the budget), and the spend it is on pace for: spend so far plus
+ * the current daily rate (the last 7 days, `recent`) times the days left. A whole-month average said "on pace for $8"
+ * for an account that only started spending yesterday at $5 a day. Without `recent`, the month so far is the rate.
+ * Before the 2nd there is too little to go on, so no pace (null).
  */
-export function pace(spent_usd: number, now = new Date()) {
+export function pace(spent_usd: number, now = new Date(), recent?: Recent) {
   const start = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1), end = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1);
-  const elapsed = (now.getTime() - start) / 864e5, days = (end - start) / 864e5;
-  return { period_end: new Date(end).toISOString(), projected_usd: now.getUTCDate() < 3 ? null : cents((spent_usd / elapsed) * days) };
+  const elapsed = Math.max(1 / 24, (now.getTime() - start) / 864e5), left = Math.max(0, (end - now.getTime()) / 864e5);
+  const rate = recent && recent.days > 0 ? recent.usd / recent.days : spent_usd / elapsed;
+  return { period_end: new Date(end).toISOString(), rate_usd_per_day: cents(rate), projected_usd: now.getUTCDate() < 2 ? null : cents(spent_usd + rate * left) };
 }
 
 /**
@@ -263,15 +269,14 @@ export function pace(spent_usd: number, now = new Date()) {
  * once it is 80% or more, and the day (UTC) the month's pace runs out of it, when it is on pace to go over. Null when
  * neither applies, or with no allowance.
  */
-export function usageAlert(spent_usd: number, cap: number, now = new Date()) {
+export function usageAlert(spent_usd: number, cap: number, now = new Date(), recent?: Recent) {
   if (!(cap > 0)) return null;
   const used_pct = Math.floor((spent_usd / cap) * 100);
-  const { projected_usd } = pace(spent_usd, now);
+  const { projected_usd, rate_usd_per_day } = pace(spent_usd, now, recent);
   let runs_out_on: string | null = null;
-  if (projected_usd != null && projected_usd > cap && spent_usd < cap) {
-    const start = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1);
-    const perDay = spent_usd / ((now.getTime() - start) / 864e5);
-    runs_out_on = new Date(start + (cap / perDay) * 864e5).toISOString().slice(0, 10);
+  if (projected_usd != null && projected_usd > cap && spent_usd < cap && rate_usd_per_day > 0) {
+    // At today's rate, the day what is left of the allowance is used up.
+    runs_out_on = new Date(now.getTime() + ((cap - spent_usd) / rate_usd_per_day) * 864e5).toISOString().slice(0, 10);
   }
   return used_pct >= 80 || runs_out_on ? { used_pct, runs_out_on } : null;
 }
@@ -284,8 +289,8 @@ const AVG_MIN_SESSIONS = 20;
  * with a connector key), and the average spend per finished session (for "≈ n sessions" beside the run dollar cap).
  */
 export async function monthFigures(orgId: number) {
-  const [r] = await (await getDb()).query<{ in_flight: number; unattributed: number; finished: number; avg_usd: number | null; running: number }>(
-    `WITH s AS (SELECT a.status, sim.created_by,
+  const [r] = await (await getDb()).query<{ in_flight: number; unattributed: number; finished: number; avg_usd: number | null; running: number; recent: number; recent_days: number }>(
+    `WITH s AS (SELECT a.status, sim.created_by, a.queued_at,
                        GREATEST(a.cost_usd, coalesce((SELECT sum(g.cost_usd) FROM gateway_usage g WHERE g.session_id = a.id), 0)) AS usd
                   FROM agent_sessions a LEFT JOIN simulations sim ON sim.id = a.simulation_id
                  WHERE a.org_id = $1 AND a.queued_at >= ${MONTH})
@@ -293,11 +298,14 @@ export async function monthFigures(orgId: number) {
             coalesce(sum(usd) FILTER (WHERE created_by IS NULL), 0) AS unattributed,
             count(*) FILTER (WHERE status IN ('completed', 'failed', 'timeout')) AS finished,
             avg(usd) FILTER (WHERE status IN ('completed', 'failed', 'timeout')) AS avg_usd,
-            (SELECT count(*) FROM simulations WHERE org_id = $1 AND status IN ('queued', 'running')) AS running
+            (SELECT count(*) FROM simulations WHERE org_id = $1 AND status IN ('queued', 'running')) AS running,
+            coalesce(sum(usd) FILTER (WHERE queued_at >= greatest(${MONTH}, now() - interval '7 days')), 0) AS recent,
+            extract(epoch FROM now() - greatest(${MONTH}, now() - interval '7 days')) / 86400 AS recent_days
        FROM s`, [orgId]);
   const finished = Number(r?.finished ?? 0);
   return { in_flight_usd: cents(Number(r?.in_flight ?? 0)), running_count: Number(r?.running ?? 0), unattributed_spent_usd: cents(Number(r?.unattributed ?? 0)),
-    finished_sessions: finished, avg_session_usd: finished >= AVG_MIN_SESSIONS && r?.avg_usd != null ? cents(Number(r.avg_usd)) : null };
+    finished_sessions: finished, avg_session_usd: finished >= AVG_MIN_SESSIONS && r?.avg_usd != null ? cents(Number(r.avg_usd)) : null,
+    recent: { usd: Number(r?.recent ?? 0), days: Number(r?.recent_days ?? 0) } as Recent };
 }
 
 /** The live inputs plus the month's figures, for the page and its preview. */
@@ -332,11 +340,11 @@ async function versionOf(q: Queryable, orgId: number) {
 
 /** The account-wide figures beside a picture of the rules (GET /limits and the preview both send them). */
 function tiles(o: ReturnType<typeof shape>, { figures, budget_error }: PageLive) {
-  const { period_end, projected_usd } = pace(o.account.spent_usd);
+  const { period_end, projected_usd } = pace(o.account.spent_usd, new Date(), figures.recent);
   return { spent_live_usd: o.account.spent_usd, in_flight_usd: figures.in_flight_usd, running_count: figures.running_count, projected_usd,
     left_usd: budget_error ? null : leftOf(o.budget_usd, o.account.spent_usd), period_end, avg_session_usd: figures.avg_session_usd,
     unattributed_spent_usd: figures.unattributed_spent_usd, server_max_sessions: settingNumber("OCTILLION_MAX_SESSIONS_PER_RUN"), max_run_usd: o.policy.max_run_usd,
-    alert: budget_error ? null : usageAlert(o.account.spent_usd, o.budget_usd) };
+    alert: budget_error ? null : usageAlert(o.account.spent_usd, o.budget_usd, new Date(), figures.recent) };
 }
 
 /**

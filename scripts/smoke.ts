@@ -1365,10 +1365,14 @@ try {
 
   // ---------- budget rules: the month's pace and reset (src/limits.ts pace()), UTC ----------
   {
-    const { pace } = await import("../src/limits.js");
-    assert.deepEqual(pace(50, new Date("2026-10-02T23:00:00Z")), { period_end: "2026-11-01T00:00:00.000Z", projected_usd: null }, "before the 3rd: too early to tell");
-    assert.equal(pace(100, new Date("2026-10-11T00:00:00Z")).projected_usd, 310, "$100 in 10 days of a 31-day month");
-    assert.deepEqual(pace(140, new Date("2026-02-15T00:00:00Z")), { period_end: "2026-03-01T00:00:00.000Z", projected_usd: 280 }, "February: 28 days");
+    const { pace, usageAlert } = await import("../src/limits.js");
+    assert.equal(pace(50, new Date("2026-10-01T23:00:00Z")).projected_usd, null, "on the 1st: too early to tell");
+    assert.equal(pace(100, new Date("2026-10-11T00:00:00Z")).projected_usd, 310, "no recent figure: $100 in 10 days of a 31-day month");
+    assert.deepEqual(pace(140, new Date("2026-02-15T00:00:00Z")), { period_end: "2026-03-01T00:00:00.000Z", rate_usd_per_day: 10, projected_usd: 280 }, "February: 28 days");
+    // The current rate, not the month's average: $10 spent, all of it in the last day, on the 19th at noon.
+    assert.equal(pace(10, new Date("2026-10-19T12:00:00Z"), { usd: 10, days: 1 }).projected_usd, 135, "spend that only just started projects at its own rate ($10/day × 12.5 days left)");
+    assert.equal(pace(100, new Date("2026-10-11T00:00:00Z"), { usd: 70, days: 7 }).projected_usd, 310, "a steady rate projects the same either way");
+    assert.equal(usageAlert(10, 50, new Date("2026-10-19T12:00:00Z"), { usd: 10, days: 1 })?.runs_out_on, "2026-10-23", "runs out when what is left ($40) is used at $10/day");
     assert.equal(pace(0, new Date("2026-12-20T12:00:00Z")).period_end, "2027-01-01T00:00:00.000Z", "December resets on January 1");
     console.log("✓ budget rules pace: projected month spend from live spend per elapsed UTC day, too early before the 3rd, reset date");
   }
@@ -1382,7 +1386,7 @@ try {
     assert.deepEqual(usageAlert(850, 1000, new Date("2026-10-30T00:00:00Z")), { used_pct: 85, runs_out_on: null }, "85% used, on pace for less than the allowance");
     assert.deepEqual(usageAlert(1200, 1000, oct11), { used_pct: 120, runs_out_on: null }, "already over: no run-out date");
     assert.equal(usageAlert(50, 0, oct11), null, "no allowance: no banner");
-    assert.equal(usageAlert(900, 1000, new Date("2026-10-02T00:00:00Z"))?.runs_out_on, null, "before the 3rd: no pace, the percentage still shows");
+    assert.equal(usageAlert(900, 1000, new Date("2026-10-01T12:00:00Z"))?.runs_out_on, null, "on the 1st: no pace, the percentage still shows");
 
     const pol = { mode: "even" as const, reserve_usd: 30, default_cap_usd: null, new_members_can_run: true, max_concurrent_runs: 2 };
     const teams = [{ id: 1, name: "Platform", budget_usd: 100, max_concurrent_runs: null }];
