@@ -35,6 +35,7 @@ import { ageOf, dur, SectionLink, UrlTabs, useComputeParams, useNow } from './co
 import { StatStrip } from '@/components/layout/section';
 import { ComputeOrchestrators } from './compute-orchestrators';
 import { ComputeFailures, type Failures } from './compute-failures';
+import { AdminEmails } from './emails';
 import { ComputeDecisions, type Tick } from './compute-decisions';
 
 interface Setting {
@@ -378,12 +379,13 @@ function ComputePage() {
         {tab === 'decisions' && <ComputeDecisions runtime={data?.runtime ?? null} stats={(rows) => <DecisionCards s={s} rows={rows} />} />}
         {tab === 'limits' && (isLoading ? <Skeleton className='h-72 rounded-lg' /> : s && <Limits s={s} onEditing={setEdit} />)}
         {tab === 'environment' && (isLoading ? <Skeleton className='h-72 rounded-lg' /> : s && <Environment s={s} onTest={() => void refresh()} testing={refreshing} />)}
+        {tab === 'emails' && <AdminEmails embedded />}
       </div>
     </PageContainer>
   );
 }
 
-const TABS = [['orchestrators', 'Orchestrators'], ['failures', 'Failures'], ['decisions', 'Autoscaler decisions'], ['limits', 'Limits'], ['environment', 'Environment']] as const;
+const TABS = [['orchestrators', 'Orchestrators'], ['failures', 'Failures'], ['decisions', 'Autoscaler decisions'], ['limits', 'Limits'], ['environment', 'Environment'], ['emails', 'Emails']] as const;
 
 /** Tells the page whether a record peek is open (?session, ?orch, ?job or ?tick), so the summary stops refreshing. */
 function PeekWatch({ onChange }: { onChange: (open: boolean) => void }) {

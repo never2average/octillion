@@ -1,5 +1,5 @@
 'use client';
-// /app Adoption, a Notion-style database, person by person: each use case (journeys from Octillion plus the account's
+// /app/journeys (Journeys, under Context; was Adoption), a Notion-style database, person by person: each use case (journeys from Octillion plus the account's
 // own) with everyone who has worked on it, how far they got and how much they used it, what went wrong, and who can
 // help. Stuck people ask the team; a teammate picks the request up, gets where they are stuck, and closes it when done.
 // Filters: a date range (who was active in it) and people. Use cases import and export as JSON or CSV. Click a row to

@@ -39,7 +39,6 @@ export const adminNav: NavGroup[] = [
       { title: 'Harness mix', url: '/admin/agents', icon: 'code', items: [] },
       { title: 'Agent configuration', url: '/admin/configuration', icon: 'settings', items: [] },
       { title: 'Key vault', url: '/admin/keys', icon: 'lock', shortcut: ['g', 'k'], items: [] },
-      { title: 'Emails', url: '/admin/emails', icon: 'mail', items: [] },
       { title: 'Admins', url: '/admin/admins', icon: 'teams', items: [] }
     ]
   }
@@ -54,8 +53,7 @@ export const portalNav: NavGroup[] = [
     label: 'Insights',
     items: [
       { title: 'Usage', url: '/app/usage', icon: 'chartLine', shortcut: ['g', 'u'], items: [] },
-      { title: 'Pick rate', url: '/app/pick-rate', icon: 'trendingUp', shortcut: ['g', 'v'], items: [] },
-      { title: 'Adoption', url: '/app/adoption', icon: 'route', shortcut: ['g', 'a'], items: [] }
+      { title: 'Pick rate', url: '/app/pick-rate', icon: 'trendingUp', shortcut: ['g', 'v'], items: [] }
     ]
   },
   {
@@ -63,7 +61,8 @@ export const portalNav: NavGroup[] = [
     items: [
       { title: 'Company', url: '/app/context/company', icon: 'building', shortcut: ['g', 'c'], items: [] },
       { title: 'Users', url: '/app/context/users', icon: 'teams', items: [] },
-      { title: 'Products', url: '/app/context/products', icon: 'product', shortcut: ['g', 'p'], items: [] }
+      { title: 'Products', url: '/app/context/products', icon: 'product', shortcut: ['g', 'p'], items: [] },
+      { title: 'Journeys', url: '/app/journeys', icon: 'route', shortcut: ['g', 'j'], items: [] }
     ]
   },
   {

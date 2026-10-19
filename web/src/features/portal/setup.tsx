@@ -394,7 +394,7 @@ function Timeline({ s }: { s: Setup }) {
   return (
     <TimelineSection title='Get set up' done={s.done} total={s.total} noun='steps'
       items={s.steps.map((x) => ({ id: x.id, label: x.label.replace(' (team)', ''), done: x.done, body: <StepHelp help={x.help} done={x.done} prompt={x.prompt ?? null} /> }))}
-      footer={<>How much of the workflow your team uses is on <a href='/app/adoption' className='text-primary underline-offset-4 hover:underline'>Adoption</a>.</>} />
+      footer={<>How much of the workflow your team uses is on <a href='/app/journeys' className='text-primary underline-offset-4 hover:underline'>Journeys</a>.</>} />
   );
 }
 

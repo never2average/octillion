@@ -39,7 +39,8 @@ const VIEWS: RecordViewDef<EmailRow>[] = [
   { id: 'skipped', label: 'Skipped', match: (r) => r.status === 'skipped' }
 ];
 
-export function AdminEmails() {
+/** The email log; on its own page or as Compute's Emails tab (`embedded`: no page frame, the table fills the tab). */
+export function AdminEmails({ embedded = false }: { embedded?: boolean }) {
   const { data, error, isLoading } = useAdmin<Data>('/emails', { refetchInterval: 30_000 });
   const [testing, setTesting] = useState(false);
   const s = data?.status;
@@ -57,13 +58,13 @@ export function AdminEmails() {
     { key: 'provider_id', label: 'Resend id', type: 'text', hidden: true, value: (r) => r.provider_id, render: (r) => (r.provider_id ? <Mono>{r.provider_id}</Mono> : muted('—')) },
     { key: 'about', label: 'About', type: 'text', hidden: true, value: (r) => JSON.stringify(r.meta), render: (r) => <Mono>{Object.entries(r.meta ?? {}).map(([k, v]) => `${k}: ${String(v)}`).join(' · ') || '—'}</Mono> }
   ];
-  return (
-    <PageContainer>
+  const body = (
+    <>
       <ErrorBox error={error} />
       {s && !s.enabled && <Notice>Emails are off: nothing is sent and each one is logged as skipped. Turn them on in <Link className='underline' href='/admin/configuration'>Agent configuration</Link> (Send emails).</Notice>}
       {s && s.enabled && !s.connected && <Notice>No Resend key: emails are logged as skipped. Add one to Resend in <Link className='underline' href='/admin/keys'>Key vault</Link>.</Notice>}
       <RecordView<EmailRow>
-        id='admin-emails' noun='emails' exportName='emails' views={VIEWS} defaultSort={[{ key: 'at', dir: 'desc' }]} initialSize={50}
+        id='admin-emails' noun='emails' exportName='emails' views={VIEWS} compact={embedded} defaultSort={[{ key: 'at', dir: 'desc' }]} initialSize={50}
         rows={data?.rows ?? []} rowKey={(r) => String(r.id)} cols={cols} loading={isLoading || !data}
         searchText={(r) => `${r.subject} ${kindOf(r.kind)} ${r.to_domain} ${r.status} ${r.error ?? ''}`} searchPlaceholder='Search emails by subject, kind or domain'
         summary={<StatStrip items={[
@@ -76,8 +77,9 @@ export function AdminEmails() {
         empty='No emails yet.'
       />
       {testing && <TestEmail from={s?.from ?? null} onClose={() => setTesting(false)} />}
-    </PageContainer>
+    </>
   );
+  return embedded ? <div className='flex min-w-0 flex-col gap-3'>{body}</div> : <PageContainer>{body}</PageContainer>;
 }
 
 function TestEmail({ from, onClose }: { from: string | null; onClose: () => void }) {

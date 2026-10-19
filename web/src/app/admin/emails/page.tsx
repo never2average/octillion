@@ -1,6 +1,6 @@
-import { AdminEmails } from '@/features/admin/emails';
+import { redirect } from 'next/navigation';
 
-export const metadata = { title: 'Emails' };
+/** Emails is a tab on Compute now. */
 export default function Page() {
-  return <AdminEmails />;
+  redirect('/admin/compute?section=emails');
 }

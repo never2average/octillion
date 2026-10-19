@@ -115,9 +115,6 @@ export function AdminTasks() {
   const toggle = (list: Task[], on: boolean) => setSel((s) => { const n = new Map(s); list.forEach((t) => (on ? n.set(t.id, t) : n.delete(t.id))); return n; });
   const allOnPage = rows.length > 0 && rows.every((t) => sel.has(t.id)), someOnPage = rows.some((t) => sel.has(t.id));
   // Each option with the tasks it matches under the other filters (until the first load: none shown).
-  const fc = (k: keyof NonNullable<TaskPage['facets']>, v: string) => (data?.facets ? data.facets[k][v] ?? 0 : undefined);
-  const opt = (k: keyof NonNullable<TaskPage['facets']>, v: string, label: string) => <NativeSelectOption key={v} value={v}>{counted(label, fc(k, v))}</NativeSelectOption>;
-  const facet = (k: 'language' | 'category', list: Facet[] | undefined) => (list ?? []).map((x) => opt(k, x.value, x.value));
   const narrow = !!current;
   const switcher = <LibraryViewSwitch kind='task' value={libView} onChange={setLibView} />;
 
@@ -132,22 +129,6 @@ export function AdminTasks() {
             <Icons.search className='text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2' />
             <Input type='search' value={q} onChange={(e) => setQ(e.target.value)} placeholder='Search tasks by title, prompt, tag or repository' aria-label='Search tasks' className='h-9 pl-8' />
           </div>
-          <NativeSelect aria-label='Language' value={f.language} onChange={(e) => setF({ ...f, language: e.target.value })}>
-            {opt('language', '', 'All languages')}{facet('language', data?.languages)}
-          </NativeSelect>
-          <NativeSelect aria-label='Category' value={f.category} onChange={(e) => setF({ ...f, category: e.target.value })}>
-            {opt('category', '', 'All categories')}{facet('category', data?.categories)}
-          </NativeSelect>
-          <NativeSelect aria-label='Status' value={f.active} onChange={(e) => setF({ ...f, active: e.target.value })}>
-            {opt('active', '', 'Active and inactive')}{opt('active', 'true', 'Active')}{opt('active', 'false', 'Inactive')}
-          </NativeSelect>
-          <NativeSelect aria-label='Repository' value={f.has_repo} onChange={(e) => setF({ ...f, has_repo: e.target.value })}>
-            {opt('has_repo', '', 'With or without a repo')}{opt('has_repo', 'true', 'Has a repo')}{opt('has_repo', 'false', 'No repo (starter template)')}
-          </NativeSelect>
-          <NativeSelect aria-label='Harness' value={f.harness} onChange={(e) => setF({ ...f, harness: e.target.value })}>
-            {opt('harness', '', 'Any harness preference')}{opt('harness', 'any', 'Whole mix (no preference)')}{opt('harness', 'set', 'Limited to some harnesses')}
-            {opts.map((o) => opt('harness', o.value, `Runs on ${o.label}`))}
-          </NativeSelect>
           <Gate need='library'><Button onClick={() => setDraft(blank())}><Icons.add /> New task</Button></Gate>
         </div>
 
