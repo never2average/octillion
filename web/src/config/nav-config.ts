@@ -67,7 +67,7 @@ export const portalNav: NavGroup[] = [
   },
   {
     // What simulations run with: the account's own developers and tasks (Octillion-curated ones shown by name only).
-    label: 'Simulation inputs',
+    label: 'Private data',
     items: [
       { title: 'Developer personas', url: '/app/personas', icon: 'userPen', shortcut: ['g', 'd'], items: [] },
       { title: 'Programming tasks', url: '/app/tasks', icon: 'kanban', shortcut: ['g', 't'], items: [] }
