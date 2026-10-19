@@ -112,8 +112,19 @@ export async function waitReady(id: string, timeoutMs = 300_000) {
   throw new Error(`sandbox ${id} not ready after ${timeoutMs / 1000}s`);
 }
 
+/** A boat failure worth another try: gateway errors (502/503/504, e.g. "sandbox_direct_failed: Socket is closed"), rate limits, dropped connections. */
+const transient = (e: unknown) => e instanceof BoatError ? [429, 502, 503, 504].includes(e.status)
+  : e instanceof Error && /fetch failed|socket|ECONNRESET|ETIMEDOUT|UND_ERR|aborted|timeout/i.test(`${e.message} ${(e as { cause?: Error }).cause?.message ?? ""}`);
+
+/** Writes a file. Writing the same content to the same path twice is harmless, so transient failures retry: 5 tries, 1, 2, 4, 8 s apart. */
 export async function put(id: string, p: string, content: string, encoding: "utf8" | "base64" = "utf8") {
-  await boatApi(`/sandboxes/${id}/files`, { method: "PUT", json: { path: p, content, encoding } });
+  for (let i = 0; ; i++) {
+    try { return void await boatApi(`/sandboxes/${id}/files`, { method: "PUT", json: { path: p, content, encoding } }); }
+    catch (e) {
+      if (i >= 4 || !transient(e)) throw e;
+      await sleep(((e as BoatError).retryAfterMs ?? 0) || 1000 * 2 ** i);
+    }
+  }
 }
 
 export async function run(id: string, cmd: string, timeout = 300): Promise<{ code: number | null; stdout: string; stderr: string }> {
