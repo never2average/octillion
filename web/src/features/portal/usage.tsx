@@ -1,9 +1,9 @@
 'use client';
-// /app Usage: the team's own activity across every AI client, its simulations and what agents picked, and model spend,
+// /app Usage: Visibility first (src/features/portal/visibility.tsx), then the team's own activity across every AI client, its simulations and what agents picked, and model spend,
 // for everyone or for the people picked in the People filter (server-side). The layout is admin Analytics': one stat
 // strip, then a grid of cells sharing hairlines, two per row at most (components/layout/chart-grid).
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { Area, AreaChart, Bar, BarChart, CartesianGrid, Line, LineChart, ReferenceLine, XAxis, YAxis } from 'recharts';
+import { Area, AreaChart, Bar, BarChart, CartesianGrid, ReferenceLine, XAxis, YAxis } from 'recharts';
 import PageContainer from '@/components/layout/page-container';
 import { StatStrip } from '@/components/layout/section';
 import { Box, RankBars, top } from '@/components/layout/chart-grid';
@@ -14,6 +14,7 @@ import { DateRangePicker, last30, rangeQuery, type DateRange } from '@/component
 import { MultiSelectFilter, type FilterOption } from '@/components/layout/multi-select-filter';
 import { Icons } from '@/components/icons';
 import { ErrorState, LoadingCards, useOrgLoad } from './shared';
+import { SectionHead, VisibilitySection, type Visibility } from './visibility';
 
 interface Week { week: string; partial: boolean }
 interface Usage {
@@ -32,8 +33,8 @@ interface Usage {
     clients: { client: string; calls: number }[];
     sims_weekly: (Week & { completed: number; other: number })[];
     harnesses: { harness: string; sessions: number; completed: number }[];
-    visibility: (Week & { scored: number; hits: number; hit_pct: number | null })[];
-    tasks: { id: number; title: string; hits: number; misses: number }[];
+    /** The Visibility section (src/app.ts visibilityCharts). */
+    visibility: Visibility;
     spend_by: { kind: 'person' | 'simulation'; rows: { key: string | null; name: string; usd: number }[] };
     /** Only for a Billing manager or Owner. */
     allowance_usd: number | null;
@@ -44,8 +45,6 @@ interface Usage {
 const callsConfig = { calls: { label: 'Tool calls', color: 'var(--chart-1)' }, errors: { label: 'Errors', color: 'var(--destructive)' } } satisfies ChartConfig;
 const peopleConfig = { people: { label: 'Active people', color: 'var(--chart-2)' } } satisfies ChartConfig;
 const simsConfig = { completed: { label: 'Completed', color: 'var(--chart-2)' }, other: { label: 'Not completed', color: 'var(--chart-4)' } } satisfies ChartConfig;
-const visConfig = { hit_pct: { label: 'Hit rate', color: 'var(--chart-2)' } } satisfies ChartConfig;
-const taskConfig = { hits: { label: 'Hits', color: 'var(--chart-2)' }, misses: { label: 'Misses', color: 'var(--chart-4)' } } satisfies ChartConfig;
 const spendConfig = { usd: { label: 'Model spend', color: 'var(--chart-3)' } } satisfies ChartConfig;
 
 const shortDay = (d: string) => new Date(`${d}T00:00:00Z`).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
@@ -61,7 +60,8 @@ export function UsagePage() {
   const [range, setRange] = useState<DateRange>(last30);
   const [users, setUsers] = useState<string[]>([]);
   const [useCases, setUseCases] = useState<string[]>([]);
-  const userQ = (users.length ? `&user=${encodeURIComponent(users.join(','))}` : '') + (useCases.length ? `&use_case=${encodeURIComponent(useCases.join(','))}` : '');
+  const [product, setProduct] = useState<number | null>(null);
+  const userQ = (users.length ? `&user=${encodeURIComponent(users.join(','))}` : '') + (useCases.length ? `&use_case=${encodeURIComponent(useCases.join(','))}` : '') + (product ? `&product=${product}` : '');
   const { data: u, error } = useOrgLoad(() => appApi<Usage>('GET', `/usage?${rangeQuery(range)}${userQ}`), [range.from, range.to, userQ]);
   const [ucOpts, setUcOpts] = useState<FilterOption[]>([]);
   useEffect(() => { if (u?.use_cases) setUcOpts(u.use_cases.map((x) => ({ value: x.id, label: x.name, hint: x.own ? 'yours' : undefined, count: x.calls }))); }, [u?.use_cases]);
@@ -82,12 +82,12 @@ export function UsagePage() {
         </div>
       }
     >
-      {error ? <ErrorState error={error} /> : !u ? <LoadingCards count={4} /> : <UsageBody u={u} users={users} />}
+      {error ? <ErrorState error={error} /> : !u ? <LoadingCards count={4} /> : <UsageBody u={u} users={users} product={product} onProduct={setProduct} />}
     </PageContainer>
   );
 }
 
-function UsageBody({ u, users }: { u: Usage; users: string[] }) {
+function UsageBody({ u, users, product, onProduct }: { u: Usage; users: string[]; product: number | null; onProduct: (id: number | null) => void }) {
   const days = u.days;
   // Every day of the period, zero-filled, so the charts have a continuous axis.
   const series = useMemo(() => {
@@ -107,10 +107,10 @@ function UsageBody({ u, users }: { u: Usage; users: string[] }) {
   // The allowance spread evenly over the month: the daily pace that uses it up on the last day.
   const now = new Date(), monthLen = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0)).getUTCDate();
   const pace = c?.allowance_usd && !u.spend.filtered ? c.allowance_usd / monthLen : null;
-  const visAny = (c?.visibility ?? []).some((w) => w.scored > 0);
-  const tasks = (c?.tasks ?? []).map((t) => ({ ...t, name: t.title }));
   return (
     <div className='flex w-full flex-col pb-4'>
+      <VisibilitySection v={c?.visibility} product={product} onProduct={onProduct} />
+      <SectionHead title='Activity' description='Tool calls across every AI client, simulations run and model spend.' />
       <StatStrip className='border-x [&>div:first-child]:pl-4 max-sm:[&>div:nth-child(odd)]:pl-4' items={[
         { label: 'Tool calls', value: num(calls), spark: series.map((d) => d.calls) },
         { label: 'Active people', value: num(u.active_people), spark: u.series?.people ?? series.map((d) => d.people) },
@@ -192,38 +192,6 @@ function UsageBody({ u, users }: { u: Usage; users: string[] }) {
           </Box>
           <Box title='Agent sessions by harness' description='Which coding agents worked your tasks in this period.'>
             <RankBars data={top(c?.harnesses ?? [], (h) => h.sessions).map((h) => ({ name: h.harness, value: h.sessions }))} label='Sessions' color='var(--chart-2)' format={num} mono empty='No agent sessions in this period.' />
-          </Box>
-        </div>
-
-        <div className='grid lg:grid-cols-2'>
-          <Box title='Visibility trend' description='Share of scored sessions each week where the agent picked your product.'>
-            {visAny ? (
-              <ChartContainer config={visConfig} className='aspect-auto h-[240px] w-full'>
-                <LineChart data={c!.visibility} margin={{ left: 0, right: 8, top: 8 }}>
-                  <CartesianGrid vertical={false} />
-                  {weekAxis}
-                  <YAxis width={40} tickLine={false} axisLine={false} domain={[0, 100]} ticks={[0, 25, 50, 75, 100]} tickFormatter={(v) => `${v}%`} />
-                  <ChartTooltip cursor={false} content={<ChartTooltipContent labelFormatter={weekLabel}
-                    formatter={(v, _n, item) => <div className='grid w-full gap-1'>{tipRow('Hit rate', v == null ? '—' : `${v}%`)}{tipRow('Hits', num(item.payload.hits))}{tipRow('Scored sessions', num(item.payload.scored))}</div>} />} />
-                  <Line dataKey='hit_pct' type='monotone' stroke='var(--color-hit_pct)' strokeWidth={2} connectNulls dot={{ r: 4, strokeWidth: 2, fill: 'var(--background)' }} activeDot={{ r: 5 }} />
-                </LineChart>
-              </ChartContainer>
-            ) : <Empty>No scored sessions in this period.</Empty>}
-          </Box>
-          <Box title='Hits vs misses by task' description='Scored sessions per task, the ten most run.'>
-            {tasks.length ? (
-              <ChartContainer config={taskConfig} className='aspect-auto w-full' style={{ height: Math.max(120, tasks.length * 28 + 40) }}>
-                <BarChart data={tasks} layout='vertical' margin={{ left: 0, right: 16, top: 0, bottom: 0 }}>
-                  <XAxis type='number' hide allowDecimals={false} />
-                  <YAxis type='category' dataKey='name' width={128} tickLine={false} axisLine={false} tick={{ fontSize: 11 }}
-                    tickFormatter={(v: string) => (v.length > 20 ? `${v.slice(0, 19)}…` : v)} />
-                  <ChartTooltip cursor={false} content={<ChartTooltipContent hideLabel={false} indicator='dot' />} />
-                  <Bar dataKey='hits' stackId='t' fill='var(--color-hits)' stroke='var(--background)' strokeWidth={1} barSize={16} />
-                  <Bar dataKey='misses' stackId='t' fill='var(--color-misses)' stroke='var(--background)' strokeWidth={1} barSize={16} radius={[0, 3, 3, 0]} />
-                  <ChartLegend content={<ChartLegendContent />} />
-                </BarChart>
-              </ChartContainer>
-            ) : <Empty>No scored sessions in this period.</Empty>}
           </Box>
         </div>
 

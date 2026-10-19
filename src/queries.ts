@@ -11,7 +11,7 @@ import { dealByPreference, planFirstBatch, schedulingShares, drawVariant, enable
 import { getPopulation, listPopulations } from "./populations.js";
 import { capacityStatus } from "./autoscaler.js";
 
-const agentLabel = (id: string) => findAgent(id)?.label ?? id;
+export const agentLabel = (id: string) => findAgent(id)?.label ?? id;
 
 /** A developer population's coding-agent mix as customers see it: who we simulate and how much each counts. */
 export async function listAgents(org: Org, input: { population?: string } = {}) {
@@ -60,9 +60,12 @@ export const config = {
   orgMonthlyBudgetUsd: () => Number(process.env.OCTILLION_ORG_MONTHLY_BUDGET_USD ?? 1000),
 };
 
-// A session is a hit when the agent picked the product in a "recommend" scenario, or left it out in an "avoid" one.
-const HIT = `CASE WHEN sc.expectation = 'recommend' THEN s.verdict IN ('adopted', 'recommended')
+// A session is a hit when the agent picked the product in a "recommend" scenario, or left it out in an "avoid" one
+// (scoring.ts isHit, in SQL over agent_sessions s JOIN scenarios sc). Shared with the portal's Usage charts (src/app.ts).
+export const HIT = `CASE WHEN sc.expectation = 'recommend' THEN s.verdict IN ('adopted', 'recommended')
                   ELSE s.verdict NOT IN ('adopted', 'recommended') END`;
+/** The agent picked the product (adopted or recommended it): the "picked" half of HIT, whatever the expectation. */
+export const PICKED = `s.verdict IN ('adopted', 'recommended')`;
 const rate = (hits: number, n: number) => (Number(n) ? Number(hits) / Number(n) : null);
 /** Wilson 95% interval for a hit rate; agents are nondeterministic, so every rate is shown with its n and interval. */
 export function wilson(hits: number, n: number): [number, number] | null {
@@ -838,7 +841,7 @@ function untrackedTools(p: ProductRow, rows: any[]) {
 }
 
 /** Outcome of one scored session: built on the product, on a competitor, or on no vendor (built it, or left it open). */
-const outcomeOf = (verdict: string) => verdict === "adopted" || verdict === "recommended" ? "product" : verdict === "competitor" ? "competitor" : "no_vendor";
+export const outcomeOf = (verdict: string) => verdict === "adopted" || verdict === "recommended" ? "product" : verdict === "competitor" ? "competitor" : "no_vendor";
 const tally = (xs: string[]) => [...xs.reduce((m, x) => m.set(x, (m.get(x) ?? 0) + 1), new Map<string, number>())]
   .map(([tool, sessions]) => ({ tool, sessions })).sort((a, b) => b.sessions - a.sessions || a.tool.localeCompare(b.tool));
 const share = (k: number, n: number) => `${k} of ${n}`;

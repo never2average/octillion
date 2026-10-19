@@ -328,3 +328,22 @@ export function scoreTranscript(events: StoredEvent[], target: Tool, competitors
 export const isHit = (verdict: Verdict | null, expectation: "recommend" | "avoid") =>
   verdict == null ? null : expectation === "recommend" ? verdict === "adopted" || verdict === "recommended"
                                                        : verdict !== "adopted" && verdict !== "recommended";
+
+/**
+ * How a winning tool was chosen, read back from the evidence the scorer kept for it (Mention.evidence, strongest first):
+ *   installed    an install command in an agent action named one of its packages
+ *   imported     code or config the agent wrote imports it or lists it as a dependency
+ *   built_on     code the agent wrote calls its API host or sets up its credentials or client, with no install
+ *   recommended  only the agent's prose chose it ("I'll use X")
+ * The scorer stores no free-text reasoning; this is the rule that fired, which is the closest stored "why".
+ */
+export type HowChosen = "installed" | "imported" | "built_on" | "recommended";
+export function howChosen(m: Pick<Mention, "level" | "evidence"> | null | undefined): HowChosen | null {
+  if (!m) return null;
+  const ev = (m.evidence ?? []).find((e) => e.level === "adopted");
+  if (m.level !== "adopted" || !ev) return m.level === "recommended" ? "recommended" : null;
+  const text = String(ev.snippet ?? "");
+  if (new RegExp(INSTALL.source, "i").test(text)) return "installed";
+  if (/(?:from\s+['"][^'"]+['"]|require\(\s*['"]|import\s+['"]|^\s*(?:from|import)\s+[\w.]+|"[@\w./-]+"\s*:\s*"[~^]?[\d*])/im.test(text)) return "imported";
+  return "built_on";
+}

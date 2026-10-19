@@ -2470,7 +2470,8 @@ try {
       await seedRun(other.id, "foreign", null, "charts-foreign-harness");
       await db.query("INSERT INTO mcp_events (org_id, method, name, client) VALUES ($1, 'initialize', NULL, 'zzforeign 1.0'), ($1, 'tools/call', 'zz_foreign_tool', NULL)", [other.id]);
       const cO = (await json(appCall(ownerC, "GET", "/usage"))).charts;
-      for (const k of ["workflow", "clients", "sims_weekly", "harnesses", "visibility", "tasks", "recent"]) assert.ok(Array.isArray(cO[k]), `usage charts.${k}`);
+      for (const k of ["workflow", "clients", "sims_weekly", "harnesses", "recent"]) assert.ok(Array.isArray(cO[k]), `usage charts.${k}`);
+      assert.ok(Array.isArray(cO.visibility.weekly) && Array.isArray(cO.visibility.by_task), "usage charts.visibility");
       assert.ok(cO.workflow.every((w: any) => typeof w.used === "number" && w.used <= w.total && typeof w.calls === "number"), "workflow: tools used of total");
       assert.ok(cO.clients.every((x: any) => typeof x.client === "string" && typeof x.calls === "number"));
       assert.ok(cO.sims_weekly.length >= 5 && cO.sims_weekly.every((w: any) => /^\d{4}-\d{2}-\d{2}$/.test(w.week) && new Date(`${w.week}T00:00:00Z`).getUTCDay() === 1), "a Monday per week of the period");
@@ -2482,10 +2483,10 @@ try {
       const sum = (xs: any[], f: (x: any) => number) => xs.reduce((n, x) => n + f(x), 0);
       assert.equal(sum(cO.sims_weekly, (w) => w.completed + w.other), ownN.sims, "simulations per week: this account's only");
       assert.equal(sum(cO.harnesses, (h) => h.sessions), ownN.sessions, "sessions by harness: this account's only");
-      assert.equal(sum(cO.visibility, (w) => w.scored), ownN.scored); assert.equal(sum(cO.visibility, (w) => w.hits), ownN.hits);
-      assert.ok(cO.visibility.some((w: any) => w.hit_pct === 50), "the seeded week: one hit of two");
+      assert.equal(sum(cO.visibility.weekly, (w) => w.scored), ownN.scored); assert.equal(sum(cO.visibility.weekly, (w) => w.hits), ownN.hits);
+      assert.ok(cO.visibility.weekly.some((w: any) => w.pick_pct === 50), "the seeded week: one hit of two");
       assert.ok(cO.harnesses.some((h: any) => h.harness === "charts-own-harness") && !cO.harnesses.some((h: any) => h.harness === "charts-foreign-harness"), "another account's sessions never show");
-      assert.ok(cO.tasks.some((t: any) => t.title === "Charts task own" && t.hits === 1 && t.misses === 1) && !cO.tasks.some((t: any) => t.title === "Charts task foreign"), "hits vs misses by task, own tasks only");
+      assert.ok(cO.visibility.by_task.some((t: any) => t.title === "Charts task own" && t.hits === 1 && t.misses === 1) && !cO.visibility.by_task.some((t: any) => t.title === "Charts task foreign"), "hits vs misses by task, own tasks only");
       assert.ok(!cO.clients.some((x: any) => x.client === "zzforeign"), "another account's clients never show");
       assert.ok(!cO.recent.some((r: any) => r.name === "Charts run foreign") && cO.recent.find((r: any) => r.name === "Charts run own")?.hit_pct === 50, "recent simulations: own, with the hit rate");
       assert.equal(cO.spend_by.kind, "person", "an owner sees spend by person");
@@ -2494,11 +2495,114 @@ try {
       // The people filter: an owner picking someone who launched nothing sees no runs, sessions or hits.
       const ownerP = usageO.people.find((p: any) => p.me);
       const cP = (await json(appCall(ownerC, "GET", `/usage?user=${encodeURIComponent(ownerP.user_id)}`))).charts;
-      assert.ok(!cP.harnesses.some((h: any) => h.harness === "charts-own-harness") && !cP.tasks.some((t: any) => t.title === "Charts task own"), "the people filter applies to sessions");
+      assert.ok(!cP.harnesses.some((h: any) => h.harness === "charts-own-harness") && !cP.visibility.by_task.some((t: any) => t.title === "Charts task own"), "the people filter applies to sessions");
       assert.ok(!cP.recent.some((r: any) => r.name === "Charts run own") && !cP.spend_by.rows.some((r: any) => r.usd === 1 && r.key === devP.user_id), "and to runs and spend");
       const cD = (await json(appCall(ownerC, "GET", `/usage?user=${encodeURIComponent(devP.user_id)}`))).charts;
       assert.ok(cD.harnesses.some((h: any) => h.harness === "charts-own-harness") && cD.recent.some((r: any) => r.name === "Charts run own"), "the person who launched it sees it");
     }
+    // Usage, Visibility section (src/app.ts visibilityCharts): a scored simulation in this account (two agents, two
+    // personas, recommend and avoid tasks, three competitors) and a decoy in another account. Every number must equal a
+    // direct count over agent_sessions, the decoy never shows, and the people and product filters apply.
+    {
+      const [other] = await db.query<{ id: number }>("SELECT id FROM organizations WHERE id <> $1 ORDER BY id LIMIT 1", [rowW.id]);
+      const tag = `vis${stamp}`.replace(/[^a-z0-9]/gi, "").slice(0, 24);
+      const comp = (name: string, pkg: string) => ({ name, packages: [pkg] });
+      const [pr] = await db.query<{ id: number }>("INSERT INTO products (org_id, slug, name, competitors) VALUES ($1, $2, 'Vis Mail', $3) RETURNING id",
+        [rowW.id, `vis-${tag}`, JSON.stringify([comp("Postmark", "postmark"), comp("SendGrid", "@sendgrid/mail"), comp("Mailgun", "mailgun.js")])]);
+      const task = async (title: string, expectation: string, platform: string) => (await db.query<{ id: number }>(
+        "INSERT INTO scenarios (product_id, title, prompt, expectation, platform) VALUES ($1, $2, 'VIS-SECRET-PROMPT send a receipt', $3, $4) RETURNING id", [pr.id, title, expectation, platform]))[0].id;
+      const T1 = await task("Vis send receipts", "recommend", "backend"), T2 = await task("Vis signup email", "recommend", "web"), T3 = await task("Vis local log only", "avoid", "backend");
+      const persona = async (name: string) => (await db.query<{ id: number }>(
+        "INSERT INTO developer_profiles (slug, name, org_id, product_id, source, instructions) VALUES ($1, $2, $3, $4, 'generated', 'VIS-SECRET-PERSONA') RETURNING id",
+        [`${name.toLowerCase().replace(/\W+/g, "-")}-${tag}`, name, rowW.id, pr.id]))[0].id;
+      const P1 = await persona("Vis Solo Founder"), P2 = await persona("Vis Platform Lead");
+      const sim = `sim_vis_${tag}`;
+      await db.query("INSERT INTO simulations (id, org_id, product_id, name, models, harness, repeats, status, created_by) VALUES ($1, $2, $3, 'Vis run', '{m1,m2}', 'mix', 1, 'completed', $4)",
+        [sim, rowW.id, pr.id, devP.user_id]);
+      const m = (tool: string, level: string, snippet: string, target = false) => ({ tool, target, level, first_seq: 1, evidence: [{ seq: 1, kind: level === "adopted" ? "action" : "message", level, snippet }] });
+      const A1 = ["vis-agent-one", "vis-harness-one", "vis-model-one"], A2 = ["vis-agent-two", "vis-harness-two", "vis-model-two"];
+      const rows: [number, string[], number, string, string | null, any[], any[] | null][] = [
+        [T1, A1, P1, "adopted", "Vis Mail", [m("Vis Mail", "adopted", "npm install vis-mail", true), m("Postmark", "mentioned", "Postmark is another option")], null],
+        [T1, A1, P2, "competitor", "Postmark", [m("Postmark", "adopted", "Bash\nnpm install postmark --save"), m("Vis Mail", "mentioned", "Vis Mail exists", true)], null],
+        [T1, A2, P1, "competitor", "SendGrid", [m("SendGrid", "recommended", "I'll use SendGrid for this")], null],
+        [T1, A2, P2, "recommended", "Vis Mail", [m("Vis Mail", "recommended", "I'll use Vis Mail", true), m("SendGrid", "mentioned", "SendGrid also works")], null],
+        [T2, A1, P1, "competitor", "Postmark", [m("Postmark", "adopted", "Write\nimport { ServerClient } from 'postmark';")], null],
+        [T2, A2, P2, "competitor", "Mailgun", [m("Mailgun", "adopted", "Write\nawait fetch('https://api.mailgun.net/v3/x/messages')")], [{ name: "nodemailer", ecosystem: "npm" }]],
+        [T2, A1, P2, "none", null, [], [{ name: "nodemailer", ecosystem: "npm" }, { name: "Postmark", ecosystem: "npm" }]],
+        [T3, A1, P1, "none", null, [], null],
+        [T3, A2, P2, "adopted", "Vis Mail", [m("Vis Mail", "adopted", "npm install vis-mail", true)], null],
+      ];
+      for (const [i, [sc, [agent, harness, model], prof, verdict, winner, mentions, untracked]] of rows.entries())
+        await db.query(`INSERT INTO agent_sessions (id, simulation_id, org_id, product_id, scenario_id, model, harness, agent_id, profile_id, status, verdict, winner, mentions, untracked, scored_at)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'completed', $10, $11, $12, $13, now())`,
+          [`ses_vis_${i}_${tag}`, sim, rowW.id, pr.id, sc, model, harness, agent, prof, verdict, winner, JSON.stringify(mentions), untracked ? JSON.stringify(untracked) : null]);
+      // The decoy: another account's product losing to DecoyTool, on a task and persona of its own.
+      const [dp] = await db.query<{ id: number }>("INSERT INTO products (org_id, slug, name) VALUES ($1, $2, 'Decoy Product') RETURNING id", [other.id, `decoy-${tag}`]);
+      const [dsc] = await db.query<{ id: number }>("INSERT INTO scenarios (product_id, title, prompt) VALUES ($1, 'Decoy task', 'x') RETURNING id", [dp.id]);
+      await db.query("INSERT INTO simulations (id, org_id, product_id, name, models, harness, repeats, status) VALUES ($1, $2, $3, 'Decoy run', '{m}', 'h', 1, 'completed')", [`sim_decoy_${tag}`, other.id, dp.id]);
+      await db.query(`INSERT INTO agent_sessions (id, simulation_id, org_id, product_id, scenario_id, model, harness, agent_id, status, verdict, winner, mentions, untracked)
+                      VALUES ($1, $2, $3, $4, $5, 'decoy-model', 'decoy-harness', 'decoy-agent', 'completed', 'competitor', 'DecoyTool', $6, '[{"name":"decoypkg","ecosystem":"npm"}]')`,
+        [`ses_decoy_${tag}`, `sim_decoy_${tag}`, other.id, dp.id, dsc.id, JSON.stringify([m("DecoyTool", "adopted", "npm install decoytool")])]);
+
+      const HITQ = "CASE WHEN sc.expectation = 'recommend' THEN s.verdict IN ('adopted', 'recommended') ELSE s.verdict NOT IN ('adopted', 'recommended') END";
+      const scope = (extra = "") => `FROM agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id WHERE s.org_id = $1 AND s.verdict IS NOT NULL AND s.queued_at >= now() - interval '30 days'${extra}`;
+      const direct = async (extra: string, params: unknown[]) => {
+        const [t] = await db.query<any>(`SELECT count(*)::int AS scored, count(*) FILTER (WHERE ${HITQ})::int AS hits, count(*) FILTER (WHERE s.verdict IN ('adopted', 'recommended'))::int AS picked ${scope(extra)}`, params);
+        const winners = await db.query<any>(`SELECT s.winner AS name, count(*)::int AS n ${scope(extra)} AND s.verdict = 'competitor' AND s.winner IS NOT NULL GROUP BY 1`, params);
+        const by = async (key: string, join = "") => Object.fromEntries((await db.query<any>(
+          `SELECT ${key} AS k, count(*)::int AS scored, count(*) FILTER (WHERE ${HITQ})::int AS hits ${scope(extra).replace(" WHERE ", `${join} WHERE `)} GROUP BY 1`, params)).map((r) => [r.k, [r.scored, r.hits]]));
+        const ms = await db.query<any>(`SELECT s.id, s.verdict, s.winner, s.mentions ${scope(extra)}`, params);
+        const cloud: Record<string, number> = {};
+        for (const r of ms) for (const x of (r.mentions ?? []).filter((x: any) => !x.target))
+          cloud[x.tool] = (cloud[x.tool] ?? 0) + 1 + (r.verdict === "competitor" && r.winner === x.tool ? 1 : 0);
+        return { t, winners, cloud, agent: await by("coalesce(s.agent_id, s.model)"), harness: await by("s.harness"), model: await by("s.model"),
+                 task: await by("sc.id::text"), persona: await by("dp.id::text", " JOIN developer_profiles dp ON dp.id = s.profile_id"), platform: await by("coalesce(sc.platform, 'unspecified')") };
+      };
+      const check = (v: any, d: Awaited<ReturnType<typeof direct>>, what: string) => {
+        assert.equal(v.totals.scored, d.t.scored, `${what}: sessions scored`); assert.equal(v.totals.hits, d.t.hits, `${what}: hits`);
+        assert.equal(v.totals.picked, d.t.picked, `${what}: times picked`);
+        assert.equal(v.totals.pick_pct, d.t.scored ? Math.round((d.t.hits / d.t.scored) * 1000) / 10 : null, `${what}: pick rate = hits / scored`);
+        assert.equal(v.weekly.reduce((n: number, w: any) => n + w.scored, 0), d.t.scored, `${what}: weekly adds up`);
+        const losses = d.winners.reduce((n: number, w: any) => n + w.n, 0);
+        assert.deepEqual(Object.fromEntries(v.competitors.map((c: any) => [c.name, [c.sessions, c.share_pct]])),
+          Object.fromEntries(d.winners.map((w: any) => [w.name, [w.n, Math.round((w.n / losses) * 1000) / 10]])), `${what}: competitor shares`);
+        for (const [tool, wgt] of Object.entries(d.cloud)) assert.equal(v.cloud.find((x: any) => x.name === tool)?.weight, wgt, `${what}: word-cloud weight of ${tool}`);
+        for (const [dim, key] of [["by_agent", "agent"], ["by_harness", "harness"], ["by_model", "model"], ["by_task", "task"], ["by_persona", "persona"], ["by_platform", "platform"]] as const) {
+          const got = Object.fromEntries(v[dim].map((r: any) => [dim === "by_task" || dim === "by_persona" ? String(r.id) : r.key ?? r.platform, [r.scored, r.hits]]));
+          assert.deepEqual(got, d[key], `${what}: ${dim}`);
+        }
+        const all = JSON.stringify(v);
+        assert.ok(!/Decoy|decoy/.test(all), `${what}: another account's sessions never show`);
+        assert.ok(!all.includes("VIS-SECRET"), `${what}: no task prompt or persona text in the portal`);
+      };
+      const vAll = (await json(appCall(ownerC, "GET", "/usage"))).charts.visibility;
+      check(vAll, await direct("", [rowW.id]), "all products");
+      assert.ok(vAll.products.some((x: any) => x.id === pr.id && x.name === "Vis Mail") && vAll.products.length > 1, "the product filter lists this account's products");
+      const vP = (await json(appCall(ownerC, "GET", `/usage?product=${pr.id}`))).charts.visibility;
+      assert.equal(vP.product, pr.id);
+      check(vP, await direct(" AND s.product_id = $2", [rowW.id, pr.id]), "one product");
+      // The seeded numbers, by hand: 9 scored, 3 hits, 3 picks; losses Postmark 2, SendGrid 1, Mailgun 1.
+      assert.deepEqual([vP.totals.scored, vP.totals.hits, vP.totals.picked, vP.totals.pick_pct, vP.totals.top_competitor], [9, 3, 3, 33.3, "Postmark"]);
+      assert.deepEqual(vP.competitors.map((c: any) => [c.name, c.share_pct]), [["Postmark", 50], ["Mailgun", 25], ["SendGrid", 25]]);
+      assert.deepEqual(vP.cloud.map((c: any) => [c.name, c.weight]), [["Postmark", 5], ["SendGrid", 3], ["Mailgun", 2], ["nodemailer", 2]], "cloud: named + picked, then untracked installs (a tracked name is not repeated)");
+      assert.deepEqual(vP.head_to_head, [{ name: "Postmark", won: 1, lost: 2 }, { name: "SendGrid", won: 1, lost: 1 }, { name: "Mailgun", won: 0, lost: 1 }]);
+      assert.deepEqual(Object.fromEntries(vP.reasons.how.map((r: any) => [r.id, r.sessions])), { installed: 1, imported: 1, built_on: 1, recommended: 1 });
+      assert.deepEqual([vP.reasons.losses, vP.reasons.never_mentioned], [4, 3]);
+      assert.deepEqual(vP.expectation.map((e: any) => [e.expectation, e.scored, e.hits, e.misses]), [["recommend", 7, 2, 5], ["avoid", 2, 1, 1]]);
+      assert.ok(vP.weekly.some((w: any) => w.scored === 9 && w.lo != null && w.lo < 33.3 && w.hi > 33.3), "weekly pick rate with its Wilson interval");
+      assert.equal(vP.by_persona.find((x: any) => x.name === "Vis Solo Founder")?.scored, 4);
+      // People filter: dev launched the run, the owner did not.
+      const ownerP = usageO.people.find((p: any) => p.me);
+      const vO = (await json(appCall(ownerC, "GET", `/usage?product=${pr.id}&user=${encodeURIComponent(ownerP.user_id)}`))).charts.visibility;
+      assert.deepEqual([vO.totals.scored, vO.competitors.length, vO.cloud.length], [0, 0, 0], "the people filter applies to visibility");
+      const vD = (await json(appCall(ownerC, "GET", `/usage?product=${pr.id}&user=${encodeURIComponent(devP.user_id)}`))).charts.visibility;
+      check(vD, await direct(" AND s.product_id = $2 AND s.simulation_id IN (SELECT id FROM simulations WHERE org_id = $1 AND created_by = $3)", [rowW.id, pr.id, devP.user_id]), "dev's runs");
+      assert.equal(vD.totals.scored, 9);
+      // Another account's product id is ignored, not read.
+      assert.equal((await json(appCall(ownerC, "GET", `/usage?product=${dp.id}`))).charts.visibility.product, null, "another account's product is not a filter");
+      await db.query("DELETE FROM products WHERE id = ANY($1)", [[pr.id, dp.id]]); // sessions, tasks, runs and personas go with them
+    }
+    console.log("✓ usage visibility: pick rate, competitor share, word cloud, head-to-head, reasons, by agent/task/persona/platform, own account only");
     assert.equal((await appCall(ownerC, "POST", `/team/members/${acc2.user.id}/deactivate`)).status, 204);
     const gone = await appCall(devC, "GET", "/me");
     assert.equal(gone.status, 403, "a suspended member loses the page");

@@ -14,7 +14,8 @@ import { orgForClerk } from "./auth.js";
 import { orgBudget } from "./billing.js";
 import * as billing from "./billing.js";
 import { getDb } from "./db.js";
-import { getProduct, listProducts, orgMonthSpendUsd, saveProduct, saveScenarios } from "./queries.js";
+import { agentLabel, getProduct, HIT, listProducts, orgMonthSpendUsd, PICKED, saveProduct, saveScenarios, wilson } from "./queries.js";
+import { howChosen, type HowChosen, type Mention } from "./scoring.js";
 import * as context from "./context.js";
 import { getPopulation } from "./populations.js";
 import * as playbooks from "./playbooks.js";
@@ -149,7 +150,7 @@ async function setup(s: Session, since?: string) {
  * and those runs' model spend. Without a filter it is the whole team. `people` lists who can be picked: everyone on the
  * team plus anyone who used Octillion in the period.
  */
-async function usage(s: Session, q: { from?: unknown; to?: unknown; days?: unknown; user?: unknown; use_case?: unknown }) {
+async function usage(s: Session, q: { from?: unknown; to?: unknown; days?: unknown; user?: unknown; use_case?: unknown; product?: unknown }) {
   const range = reportRange(q), days = range.days;
   const list = (v: unknown) => [...new Set(String(v ?? "").split(",").map((x) => x.trim()).filter(Boolean))].slice(0, 200);
   const users = list(q.user), useCases = list(q.use_case);
@@ -207,7 +208,7 @@ async function usage(s: Session, q: { from?: unknown; to?: unknown; days?: unkno
   const callsOf = new Map(people.map((x) => [x.user_id, Number(x.calls)]));
   const known = new Set(t.members.map((m) => m.user_id));
   const [{ budget }, spent] = await Promise.all([orgBudget(s.org).catch(() => ({ budget: 0 })), orgMonthSpendUsd(s.org)]);
-  const charts = await usageCharts(s, range, users, p, byTool, budget, t.members);
+  const charts = await usageCharts(s, range, users, p, byTool, budget, t.members, Number(q.product) || null);
   return {
     charts,
     days, range: { from: range.from, to: range.to }, daily, tools, runs: runs[0], filters: { user: users, use_case: useCases },
@@ -234,15 +235,13 @@ async function usage(s: Session, q: { from?: unknown; to?: unknown; days?: unkno
  *   clients        tool calls by AI client family; a call counts for its caller's latest handshake before it
  *   sims_weekly    simulations created per week, completed vs the rest
  *   harnesses      agent sessions of those simulations by harness, and how many completed
- *   visibility     per week: scored sessions and hits (the agent picked the product in a recommend task, or left it
- *                  out in an avoid one), and the hit rate
- *   tasks          hits and misses per task (scored sessions), the ten most run
+ *   visibility     the Visibility section: pick rate, competitors, word cloud and breakdowns (visibilityCharts below)
  *   spend_by       this month's model spend by person (billing roles: Billing manager, Owner) or else by simulation
  *   allowance_usd  the monthly allowance, for billing roles only (null otherwise)
  *   recent         the ten latest simulations in the period with their sessions and hit rate
  */
 async function usageCharts(s: Session, range: ReturnType<typeof reportRange>, users: string[], p: unknown[],
-  byTool: { name: string; calls: number }[], budget: number, members: { user_id: string; email?: string | null; name?: string | null }[]) {
+  byTool: { name: string; calls: number }[], budget: number, members: { user_id: string; email?: string | null; name?: string | null }[], product: number | null = null) {
   const db = await getDb();
   const billingRole = roles.canAccount(s.accountRole, "billing");
   const ev = users.length ? " AND user_id = ANY($4)" : "";
@@ -250,9 +249,8 @@ async function usageCharts(s: Session, range: ReturnType<typeof reportRange>, us
   const sesBy = users.length ? " AND s.simulation_id IN (SELECT id FROM simulations WHERE org_id = $1 AND created_by = ANY($4))" : "";
   const wk = (c: string) => `to_char(date_trunc('week', ${c} AT TIME ZONE 'UTC'), 'YYYY-MM-DD')`;
   const month = "date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'";
-  const HIT = `CASE WHEN sc.expectation = 'recommend' THEN s.verdict IN ('adopted', 'recommended') ELSE s.verdict NOT IN ('adopted', 'recommended') END`;
   const cost = "GREATEST(s.cost_usd, coalesce((SELECT sum(g.cost_usd) FROM gateway_usage g WHERE g.session_id = s.id), 0))";
-  const [clients, sims, harnesses, vis, tasks, spendBy, recent] = await Promise.all([
+  const [clients, sims, harnesses, spendBy, recent] = await Promise.all([
     db.query<{ client: string; calls: unknown }>(
       `WITH ev AS (
          SELECT coalesce(user_id, '') AS p, at, method = 'tools/call' AS is_call, CASE WHEN method = 'initialize' THEN split_part(client, ' ', 1) END AS fam
@@ -267,15 +265,6 @@ async function usageCharts(s: Session, range: ReturnType<typeof reportRange>, us
     db.query<{ harness: string; sessions: unknown; completed: unknown }>(
       `SELECT s.harness, count(*) AS sessions, count(*) FILTER (WHERE s.status = 'completed') AS completed
          FROM agent_sessions s WHERE s.org_id = $1 AND s.queued_at >= $2 AND s.queued_at < $3${sesBy} GROUP BY 1 ORDER BY 2 DESC`, p),
-    db.query<{ week: string; scored: unknown; hits: unknown }>(
-      `SELECT ${wk("s.queued_at")} AS week, count(*) AS scored, count(*) FILTER (WHERE ${HIT}) AS hits
-         FROM agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id
-        WHERE s.org_id = $1 AND s.verdict IS NOT NULL AND s.queued_at >= $2 AND s.queued_at < $3${sesBy} GROUP BY 1`, p),
-    db.query<{ id: number; title: string; hits: unknown; misses: unknown }>(
-      `SELECT sc.id, sc.title, count(*) FILTER (WHERE ${HIT}) AS hits, count(*) FILTER (WHERE NOT (${HIT})) AS misses
-         FROM agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id
-        WHERE s.org_id = $1 AND s.verdict IS NOT NULL AND s.queued_at >= $2 AND s.queued_at < $3${sesBy}
-        GROUP BY sc.id, sc.title ORDER BY count(*) DESC, sc.title LIMIT 10`, p),
     // This month's spend, like the card: by who launched the run (billing roles), else by simulation.
     db.query<{ key: string | null; name: string | null; usd: number }>(
       `SELECT ${billingRole ? "sim.created_by AS key, NULL AS name" : "sim.id AS key, sim.name AS name"}, sum(${cost})::float AS usd
@@ -295,7 +284,7 @@ async function usageCharts(s: Session, range: ReturnType<typeof reportRange>, us
   const weeks: string[] = [];
   for (let t = mon(range.start.getTime()); t < range.end.getTime(); t += 7 * DAY) weeks.push(new Date(t).toISOString().slice(0, 10));
   const partial = (w: string) => Date.parse(`${w}T00:00:00Z`) + 7 * DAY > range.end.getTime() || Date.parse(`${w}T00:00:00Z`) < range.start.getTime();
-  const simW = new Map(sims.map((r) => [r.week, r])), visW = new Map(vis.map((r) => [r.week, r]));
+  const simW = new Map(sims.map((r) => [r.week, r]));
   const calls = new Map(byTool.map((x) => [x.name, Number(x.calls)]));
   const who = new Map(members.map((m) => [m.user_id, m.email ?? m.name ?? null]));
   const label = (id: string | null) => (id ? (id === s.user ? "You" : who.get(id) ?? "Former member") : "Connector key");
@@ -305,17 +294,143 @@ async function usageCharts(s: Session, range: ReturnType<typeof reportRange>, us
     clients: clients.map((c) => ({ client: c.client, calls: Number(c.calls) })),
     sims_weekly: weeks.map((week) => ({ week, completed: Number(simW.get(week)?.completed ?? 0), other: Number(simW.get(week)?.other ?? 0), partial: partial(week) })),
     harnesses: harnesses.map((h) => ({ harness: h.harness, sessions: Number(h.sessions), completed: Number(h.completed) })),
-    visibility: weeks.map((week) => {
-      const r = visW.get(week), scored = Number(r?.scored ?? 0), hits = Number(r?.hits ?? 0);
-      return { week, scored, hits, hit_pct: scored ? Math.round((hits / scored) * 1000) / 10 : null, partial: partial(week) };
-    }),
-    tasks: tasks.map((x) => ({ id: Number(x.id), title: x.title, hits: Number(x.hits), misses: Number(x.misses) })),
+    visibility: await visibilityCharts(s, users, p, weeks, partial, product),
     spend_by: { kind: billingRole ? ("person" as const) : ("simulation" as const),
       rows: spendBy.map((r) => ({ key: r.key, name: billingRole ? label(r.key) : r.name ?? r.key ?? "", usd: Math.round(Number(r.usd) * 100) / 100 })) },
     allowance_usd: billingRole ? Number(budget) || null : null,
     recent: recent.map((r) => ({ id: r.id, name: r.name, product: r.product, status: r.status, created_at: r.created_at,
       by: label(r.created_by),
       sessions: Number(r.sessions), scored: Number(r.scored), hits: Number(r.hits), hit_pct: Number(r.scored) ? Math.round((Number(r.hits) / Number(r.scored)) * 1000) / 10 : null })),
+  };
+}
+
+/**
+ * The Usage page's Visibility section: did the coding agents in this account's simulations pick its product, and what
+ * did they pick instead. Scored sessions only (verdict set by src/scoring.ts), queued in the period, with the people
+ * filter ($4, the simulation's launcher) and an optional product ($5 or $4). Every query is `WHERE s.org_id = $1`; the
+ * hit rule (HIT) and picked rule (PICKED) are src/queries.ts's, the same as get_visibility_report.
+ *   totals       scored sessions, hits (HIT: picked on a recommend task, left out on an avoid one), pick rate = hits /
+ *                scored with its Wilson 95% interval, times picked (PICKED, any task), competitor losses
+ *   weekly       the same per ISO week, plus the top competitor's wins that week (the cards' sparklines)
+ *   by_agent / by_harness / by_model   hits / scored per coalesce(agent_id, model), harness, model
+ *   competitors  verdict = 'competitor' sessions by `winner`, share of all such sessions
+ *   cloud        tools other than the product: weight = sessions that mentioned it at any level (mentions JSON, not
+ *                target) + sessions it won (winner); plus packages agents installed that no product tracks (untracked)
+ *   head_to_head per competitor, on recommend tasks where it came up: you won (PICKED) vs it won (winner)
+ *   reasons      competitor losses by how the winner was chosen (scoring.ts howChosen over its stored evidence), and
+ *                whether the agent mentioned the product at all; no free-text reasoning is stored
+ *   by_task / by_persona / by_platform / expectation   hits / scored per task (title), persona (name), task platform,
+ *                and per expectation (recommend vs avoid) with hits and misses
+ * Titles and names only: no prompt, persona text or transcript evidence leaves this function.
+ */
+async function visibilityCharts(s: Session, users: string[], p: unknown[], weeks: string[], partial: (w: string) => boolean, product: number | null) {
+  const db = await getDb();
+  const products = await db.query<{ id: number; name: string; aliases: string[]; packages: string[]; competitors: { name: string; aliases?: string[]; packages?: string[] }[] }>(
+    "SELECT id, name, aliases, packages, competitors FROM products WHERE org_id = $1 ORDER BY name, id", [s.org]);
+  const pid = product && products.some((x) => x.id === product) ? product : null;
+  const vp = [...p];
+  const sesBy = users.length ? " AND s.simulation_id IN (SELECT id FROM simulations WHERE org_id = $1 AND created_by = ANY($4))" : "";
+  const prodBy = pid ? ` AND s.product_id = $${vp.push(pid)}` : "";
+  const where = `s.org_id = $1 AND s.verdict IS NOT NULL AND s.queued_at >= $2 AND s.queued_at < $3${sesBy}${prodBy}`;
+  const from = `agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id`;
+  const arr = (c: string) => `CASE WHEN jsonb_typeof(${c}) = 'array' THEN ${c} ELSE '[]'::jsonb END`;
+  const wk = `to_char(date_trunc('week', s.queued_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD')`;
+  type N = unknown;
+  const [weekly, winners, groups, tasks, personas, tools, untracked, losses] = await Promise.all([
+    db.query<{ week: string; scored: N; hits: N; picked: N }>(
+      `SELECT ${wk} AS week, count(*) AS scored, count(*) FILTER (WHERE ${HIT}) AS hits, count(*) FILTER (WHERE ${PICKED}) AS picked
+         FROM ${from} WHERE ${where} GROUP BY 1`, vp),
+    db.query<{ week: string; winner: string; n: N }>(
+      `SELECT ${wk} AS week, s.winner, count(*) AS n FROM ${from} WHERE ${where} AND s.verdict = 'competitor' AND s.winner IS NOT NULL GROUP BY 1, 2`, vp),
+    db.query<{ dim: "agent" | "harness" | "model"; key: string; scored: N; hits: N }>(
+      `SELECT 'agent' AS dim, coalesce(s.agent_id, s.model) AS key, count(*) AS scored, count(*) FILTER (WHERE ${HIT}) AS hits FROM ${from} WHERE ${where} GROUP BY 2
+       UNION ALL SELECT 'harness', s.harness, count(*), count(*) FILTER (WHERE ${HIT}) FROM ${from} WHERE ${where} GROUP BY 2
+       UNION ALL SELECT 'model', s.model, count(*), count(*) FILTER (WHERE ${HIT}) FROM ${from} WHERE ${where} GROUP BY 2`, vp),
+    db.query<{ id: number; title: string; expectation: string; platform: string; scored: N; hits: N; picked: N }>(
+      `SELECT sc.id, sc.title, sc.expectation, coalesce(sc.platform, 'unspecified') AS platform, count(*) AS scored,
+              count(*) FILTER (WHERE ${HIT}) AS hits, count(*) FILTER (WHERE ${PICKED}) AS picked
+         FROM ${from} WHERE ${where} GROUP BY sc.id, sc.title, sc.expectation, sc.platform`, vp),
+    db.query<{ id: number; name: string; scored: N; hits: N }>(
+      `SELECT dp.id, dp.name, count(*) AS scored, count(*) FILTER (WHERE ${HIT}) AS hits
+         FROM ${from} JOIN developer_profiles dp ON dp.id = s.profile_id WHERE ${where} GROUP BY dp.id, dp.name`, vp),
+    db.query<{ tool: string; mentioned: N; chosen: N; won: N; lost: N }>(
+      `SELECT m->>'tool' AS tool, count(DISTINCT s.id) AS mentioned,
+              count(DISTINCT s.id) FILTER (WHERE s.verdict = 'competitor' AND s.winner = m->>'tool') AS chosen,
+              count(DISTINCT s.id) FILTER (WHERE sc.expectation = 'recommend' AND ${PICKED}) AS won,
+              count(DISTINCT s.id) FILTER (WHERE sc.expectation = 'recommend' AND s.verdict = 'competitor' AND s.winner = m->>'tool') AS lost
+         FROM ${from} CROSS JOIN LATERAL jsonb_array_elements(${arr("s.mentions")}) m
+        WHERE ${where} AND m->>'tool' IS NOT NULL AND coalesce(m->>'target', 'false') <> 'true' GROUP BY 1`, vp),
+    db.query<{ name: string; n: N }>(
+      `SELECT lower(x->>'name') AS name, count(DISTINCT s.id) AS n
+         FROM ${from} CROSS JOIN LATERAL jsonb_array_elements(${arr("s.untracked")}) x
+        WHERE ${where} AND x->>'name' IS NOT NULL GROUP BY 1`, vp),
+    db.query<{ w: Mention | null; considered: boolean }>(
+      `SELECT (SELECT m FROM jsonb_array_elements(${arr("s.mentions")}) m WHERE m->>'tool' = s.winner LIMIT 1) AS w,
+              EXISTS (SELECT 1 FROM jsonb_array_elements(${arr("s.mentions")}) m WHERE m->>'target' = 'true') AS considered
+         FROM ${from} WHERE ${where} AND s.verdict = 'competitor' ORDER BY s.queued_at DESC LIMIT 5000`, vp),
+  ]);
+  const pct = (k: number, n: number) => (n ? Math.round((k / n) * 1000) / 10 : null);
+  const ci = (k: number, n: number) => { const w = wilson(k, n); return w ? [Math.round(w[0] * 1000) / 10, Math.round(w[1] * 1000) / 10] as [number, number] : null; };
+  const rateRow = <T,>(x: T, hits: number, scored: number) => ({ ...x, scored, hits, misses: scored - hits, pick_pct: pct(hits, scored), ci: ci(hits, scored) });
+  const byRate = (a: { pick_pct: number | null; scored: number }, b: { pick_pct: number | null; scored: number }) => (b.pick_pct ?? -1) - (a.pick_pct ?? -1) || b.scored - a.scored;
+
+  const sumW = (k: "scored" | "hits" | "picked") => weekly.reduce((n, r) => n + Number(r[k]), 0);
+  const scored = sumW("scored"), hits = sumW("hits"), picked = sumW("picked");
+  const winTot = new Map<string, number>();
+  for (const r of winners) winTot.set(r.winner, (winTot.get(r.winner) ?? 0) + Number(r.n));
+  const lossN = [...winTot.values()].reduce((a, b) => a + b, 0);
+  const competitors = [...winTot].map(([name, n]) => ({ name, sessions: n, share_pct: pct(n, lossN) ?? 0 }))
+    .sort((a, b) => b.sessions - a.sessions || a.name.localeCompare(b.name));
+  const topName = competitors[0]?.name ?? null;
+  const W = new Map(weekly.map((r) => [r.week, r]));
+
+  // Word cloud: tracked tools (competitors the scorer matched) and untracked installs no product knows by name.
+  const known = new Set(products.flatMap((x) => [x.name, ...(x.aliases ?? []), ...(x.packages ?? []),
+    ...(Array.isArray(x.competitors) ? x.competitors : []).flatMap((c) => [c.name, ...(c.aliases ?? []), ...(c.packages ?? [])])]).map((x) => String(x).toLowerCase()));
+  const tracked = tools.map((t) => ({ name: t.tool, mentioned: Number(t.mentioned), chosen: Number(t.chosen), installed: 0, kind: "tracked" as const }));
+  for (const t of tracked) known.add(t.name.toLowerCase());
+  const extra = untracked.filter((u) => !known.has(u.name)).map((u) => ({ name: u.name, mentioned: 0, chosen: 0, installed: Number(u.n), kind: "untracked" as const }));
+  const cloud = [...tracked, ...extra].map((x) => ({ ...x, weight: x.mentioned + x.chosen + x.installed }))
+    .filter((x) => x.weight > 0).sort((a, b) => b.weight - a.weight || a.name.localeCompare(b.name)).slice(0, 40);
+
+  const HOW: Record<HowChosen | "unknown", string> = { installed: "Installed its package", imported: "Imported it in code",
+    built_on: "Called its API directly", recommended: "Recommended it in prose", unknown: "No evidence kept" };
+  const how = new Map<string, number>();
+  for (const l of losses) { const k = howChosen(l.w) ?? "unknown"; how.set(k, (how.get(k) ?? 0) + 1); }
+
+  const taskRows = tasks.map((t) => rateRow({ id: Number(t.id), title: t.title, expectation: t.expectation, platform: t.platform, picked: Number(t.picked) }, Number(t.hits), Number(t.scored)));
+  const agg = <K extends string>(key: (t: (typeof taskRows)[number]) => K) => {
+    const m = new Map<K, { tasks: number; scored: number; hits: number; picked: number }>();
+    for (const t of taskRows) { const a = m.get(key(t)) ?? { tasks: 0, scored: 0, hits: 0, picked: 0 }; a.tasks++; a.scored += t.scored; a.hits += t.hits; a.picked += t.picked; m.set(key(t), a); }
+    return [...m].map(([k, a]) => ({ key: k, ...rateRow({ tasks: a.tasks, picked: a.picked }, a.hits, a.scored) }));
+  };
+  const dim = (d: "agent" | "harness" | "model") => groups.filter((g) => g.dim === d)
+    .map((g) => rateRow({ key: g.key, name: d === "agent" ? agentLabel(g.key) : g.key }, Number(g.hits), Number(g.scored))).sort(byRate);
+
+  return {
+    products: products.map((x) => ({ id: x.id, name: x.name })),
+    product: pid,
+    totals: { ...rateRow({}, hits, scored), picked, competitor_losses: lossN, top_competitor: topName },
+    weekly: weeks.map((week) => {
+      const r = W.get(week), n = Number(r?.scored ?? 0), h = Number(r?.hits ?? 0);
+      const c = ci(h, n);
+      return { week, partial: partial(week), scored: n, hits: h, picked: Number(r?.picked ?? 0), pick_pct: pct(h, n), lo: c?.[0] ?? null, hi: c?.[1] ?? null,
+               top_competitor: topName ? winners.filter((x) => x.week === week && x.winner === topName).reduce((a, x) => a + Number(x.n), 0) : 0 };
+    }),
+    by_agent: dim("agent"), by_harness: dim("harness"), by_model: dim("model"),
+    competitors,
+    cloud,
+    head_to_head: tools.map((t) => ({ name: t.tool, won: Number(t.won), lost: Number(t.lost) })).filter((t) => t.won + t.lost > 0)
+      .sort((a, b) => b.won + b.lost - (a.won + a.lost) || a.name.localeCompare(b.name)).slice(0, 8),
+    reasons: { losses: losses.length, never_mentioned: losses.filter((l) => !l.considered).length,
+      how: [...how].map(([id, n]) => ({ id, label: HOW[id as HowChosen | "unknown"], sessions: n })).sort((a, b) => b.sessions - a.sessions) },
+    by_task: taskRows.map(({ id, title, expectation, scored, hits, misses, pick_pct, ci }) => ({ id, title, expectation, scored, hits, misses, pick_pct, ci })).sort(byRate),
+    by_persona: personas.map((x) => rateRow({ id: Number(x.id), name: x.name }, Number(x.hits), Number(x.scored))).sort(byRate),
+    by_platform: agg((t) => t.platform).map(({ key, ...r }) => ({ platform: key, ...r })).sort(byRate),
+    expectation: (["recommend", "avoid"] as const).map((e) => {
+      const r = agg((t) => (t.expectation === "avoid" ? "avoid" : "recommend")).find((x) => x.key === e);
+      return { expectation: e, tasks: r?.tasks ?? 0, scored: r?.scored ?? 0, hits: r?.hits ?? 0, misses: r?.misses ?? 0, picked: r?.picked ?? 0, pick_pct: r?.pick_pct ?? null };
+    }),
   };
 }
 
