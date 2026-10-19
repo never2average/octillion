@@ -1,14 +1,14 @@
 'use client';
-// /app Usage, Visibility section: did the coding agents in your simulations pick your product, and what did they pick
-// instead. The data is GET /api/app/usage `charts.visibility` (src/app.ts visibilityCharts): scored sessions only, the
-// hit rule of get_visibility_report, scoped to the account, the period, the people filter and the product picked here.
-// Same grid as the rest of the page: a section heading row, a stat strip, then Box cells two per row.
+// /app/pick-rate: did the coding agents in your simulations pick your product, and what did they pick instead. The
+// data is GET /api/app/visibility `visibility` (src/visibility.ts visibilityCharts): scored sessions only, the hit rule
+// of get_visibility_report, scoped to the account, the period, the product and the competitor / persona / task filters
+// (the page header holds them: ./pick-rate.tsx). One stat strip, then Box cells two per row; a report (the print page)
+// shows only the sections it includes, in the same order.
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Area, Bar, BarChart, CartesianGrid, ComposedChart, LabelList, Line, ReferenceLine, XAxis, YAxis } from 'recharts';
 import { StatStrip } from '@/components/layout/section';
 import { Box } from '@/components/layout/chart-grid';
 import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent, type ChartConfig } from '@/components/ui/chart';
-import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { num } from '@/lib/octillion-format';
 import { cn } from '@/lib/utils';
 
@@ -43,19 +43,6 @@ const Tip = ({ children }: { children: ReactNode }) => <div className='grid w-fu
 const Empty = ({ children }: { children: ReactNode }) => <p className='text-muted-foreground py-14 text-center text-sm'>{children}</p>;
 const clip = (v: string, n = 22) => (v.length > n ? `${v.slice(0, n - 1)}…` : v);
 
-/** A heading row across the grid: the section's name, a line on what it covers, and its own controls. */
-export function SectionHead({ title, description, action, first }: { title: string; description: string; action?: ReactNode; first?: boolean }) {
-  return (
-    <div className={cn('flex flex-wrap items-end justify-between gap-2 border-x px-4 pt-5 pb-3', first && 'border-t')}>
-      <div className='min-w-0'>
-        <h2 className='text-base font-semibold tracking-tight'>{title}</h2>
-        <p className='text-muted-foreground mt-0.5 text-xs'>{description}</p>
-      </div>
-      {action}
-    </div>
-  );
-}
-
 interface BarRow { name: string; value: number; end: string; tip: ReactNode }
 /** Ranked horizontal bars in the order given, a value label at each bar's end and a tooltip with the counts. */
 function Bars({ rows, color, label, empty, max }: { rows: BarRow[]; color: string; label: string; empty: string; max?: number }) {
@@ -80,141 +67,172 @@ const rateTip = (r: Rate) => (
 const rateRows = <T extends Rate>(xs: T[], name: (x: T) => string, n = 10): BarRow[] =>
   xs.filter((x) => x.scored > 0).slice(0, n).map((x) => ({ name: name(x), value: x.pick_pct ?? 0, end: `${pct(x.pick_pct)} · n=${x.scored}`, tip: rateTip(x) }));
 
-export function VisibilitySection({ v, product, onProduct }: { v: Visibility | undefined; product: number | null; onProduct: (id: number | null) => void }) {
-  const [dim, setDim] = useState<'agent' | 'harness' | 'model'>('agent');
+/** The report sections, in the page's order (src/visibility.ts SECTIONS has the same ids). */
+export const SECTIONS = [
+  { id: 'summary', label: 'Summary cards' },
+  { id: 'weekly', label: 'Pick rate over time' },
+  { id: 'by_agent', label: 'Pick rate by agent' },
+  { id: 'by_harness', label: 'Pick rate by harness' },
+  { id: 'by_model', label: 'Pick rate by model' },
+  { id: 'competitors', label: 'Competitor share' },
+  { id: 'cloud', label: 'Competitor word cloud (list)' },
+  { id: 'by_task', label: 'Pick rate by task' },
+  { id: 'by_persona', label: 'Pick rate by developer persona' },
+  { id: 'head_to_head', label: 'Head-to-head' },
+  { id: 'reasons', label: 'How agents chose others' },
+  { id: 'expectation', label: 'Expectation check' },
+  { id: 'by_platform', label: 'Pick rate by platform' }
+] as const;
+export type SectionId = (typeof SECTIONS)[number]['id'];
+
+/**
+ * The page body: the stat strip, then each section's cell, two per row. `sections` limits it to those (a report);
+ * `after` renders something under a section's cell (the print page's table).
+ */
+export function VisibilitySection({ v, sections, after, print }: { v: Visibility | undefined; sections?: readonly SectionId[]; after?: (id: SectionId) => ReactNode; print?: boolean }) {
   const t = v?.totals;
   const weekly = useMemo(() => (v?.weekly ?? []).map((w) => ({ ...w, band: w.lo == null || w.hi == null ? null : [w.lo, w.hi] })), [v?.weekly]);
   const any = Boolean(t?.scored);
   const top = v?.competitors[0];
-  const productPicker = (v?.products.length ?? 0) > 1 ? (
-    <NativeSelect size='sm' aria-label='Product' value={product == null ? '' : String(product)} onChange={(e) => onProduct(e.target.value ? Number(e.target.value) : null)}>
-      <NativeSelectOption value=''>All products</NativeSelectOption>
-      {v!.products.map((p) => <NativeSelectOption key={p.id} value={String(p.id)}>{p.name}</NativeSelectOption>)}
-    </NativeSelect>
-  ) : null;
-  const dims = { agent: v?.by_agent ?? [], harness: v?.by_harness ?? [], model: v?.by_model ?? [] };
   const h2h = (v?.head_to_head ?? []).map((x) => ({ ...x, lostNeg: -x.lost }));
   const scoredTasks = (v?.expectation ?? []).filter((e) => e.scored > 0);
+  const show = (id: SectionId) => !sections || sections.includes(id);
+  const dimBox = (d: 'agent' | 'harness' | 'model', rows: (Rate & { name: string })[]) => (
+    <Box title={`Pick rate by ${d}`} description={`Hits of scored sessions for each ${d === 'agent' ? 'coding agent' : d}, with n.`}>
+      <Bars rows={rateRows(rows, (x) => x.name)} color={YOU} label='Pick rate' max={100} empty='No scored sessions in this period.' />
+    </Box>
+  );
+  const cells: Record<Exclude<SectionId, 'summary'>, ReactNode> = {
+    weekly: (
+      <Box title='Pick rate over time' description='Each week, scored sessions that went your way; the band is the 95% interval.'>
+        {any ? (
+          <ChartContainer config={{ pick_pct: { label: 'Pick rate', color: YOU }, band: { label: '95% interval', color: YOU } } satisfies ChartConfig} className='aspect-auto h-[240px] w-full'>
+            <ComposedChart data={weekly} margin={{ left: 0, right: 8, top: 8 }}>
+              <CartesianGrid vertical={false} />
+              <XAxis dataKey='week' tickLine={false} axisLine={false} tickMargin={8} minTickGap={24} tickFormatter={shortDay} />
+              <YAxis width={40} tickLine={false} axisLine={false} domain={[0, 100]} ticks={[0, 25, 50, 75, 100]} tickFormatter={(x) => `${x}%`} />
+              <ChartTooltip cursor={false} content={<ChartTooltipContent labelFormatter={weekLabel}
+                formatter={(_v, name, item) => name === 'band' ? null : (
+                  <Tip>{tipRow('Pick rate', pct(item.payload.pick_pct))}{tipRow('Hits', `${num(item.payload.hits)} of ${num(item.payload.scored)}`)}
+                    {item.payload.lo != null && tipRow('95% interval', `${item.payload.lo}–${item.payload.hi}%`)}</Tip>)} />} />
+              <Area dataKey='band' type='monotone' fill='var(--color-band)' fillOpacity={0.15} stroke='none' connectNulls activeDot={false} isAnimationActive={false} />
+              <Line dataKey='pick_pct' type='monotone' stroke='var(--color-pick_pct)' strokeWidth={2} connectNulls dot={{ r: 4, strokeWidth: 2, fill: 'var(--background)' }} activeDot={{ r: 5 }} isAnimationActive={!print} />
+            </ComposedChart>
+          </ChartContainer>
+        ) : <Empty>No scored sessions in this period.</Empty>}
+      </Box>
+    ),
+    by_agent: dimBox('agent', v?.by_agent ?? []),
+    by_harness: dimBox('harness', v?.by_harness ?? []),
+    by_model: dimBox('model', v?.by_model ?? []),
+    competitors: (
+      <Box title='Competitor share' description="When an agent didn't pick you, the tool it picked instead, as a share of those sessions.">
+        <Bars rows={(v?.competitors ?? []).slice(0, 10).map((c) => ({ name: c.name, value: c.share_pct, end: `${c.share_pct}%`,
+          tip: <Tip>{tipRow('Picked instead of you', `${num(c.sessions)} of ${num(t?.competitor_losses ?? 0)}`)}{tipRow('Share', `${c.share_pct}%`)}</Tip> }))}
+          color={THEM} label='Share' max={100} empty='No agent picked a competitor in this period.' />
+      </Box>
+    ),
+    cloud: (
+      <Box title='Competitor word cloud' description='Tools agents chose or named in your sessions, sized by how often.'>
+        <WordCloud words={v?.cloud ?? []} openList={print} />
+      </Box>
+    ),
+    by_task: (
+      <Box title='Pick rate by task' description='Hits of scored sessions on each of your tasks, best first.'>
+        <Bars rows={rateRows(v?.by_task ?? [], (x) => x.title, 12)} color={YOU} label='Pick rate' max={100} empty='No scored sessions in this period.' />
+      </Box>
+    ),
+    by_persona: (
+      <Box title='Pick rate by developer persona' description='Hits of scored sessions for each simulated developer, best first.'>
+        <Bars rows={rateRows(v?.by_persona ?? [], (x) => x.name)} color={YOU} label='Pick rate' max={100} empty='No scored sessions with a persona in this period.' />
+      </Box>
+    ),
+    head_to_head: (
+      <Box title='Head-to-head' description='On tasks you should win where a competitor came up: you picked (right) vs it picked (left).'>
+        {h2h.length ? (
+          <ChartContainer config={{ won: { label: 'You won', color: YOU }, lostNeg: { label: 'They won', color: THEM } } satisfies ChartConfig}
+            className='aspect-auto w-full' style={{ height: Math.max(140, h2h.length * 30 + 48) }}>
+            <BarChart data={h2h} layout='vertical' stackOffset='sign' margin={{ left: 0, right: 16, top: 0, bottom: 0 }}>
+              <XAxis type='number' tickLine={false} axisLine={false} allowDecimals={false} tickFormatter={(x) => String(Math.abs(Number(x)))} fontSize={11} />
+              <YAxis type='category' dataKey='name' width={120} tickLine={false} axisLine={false} tick={{ fontSize: 11 }} tickFormatter={(x: string) => clip(x, 18)} />
+              <ReferenceLine x={0} stroke='var(--border)' />
+              <ChartTooltip cursor={false} content={<ChartTooltipContent hideLabel={false}
+                formatter={(_v, name, item) => name === 'won' ? (
+                  <Tip>{tipRow('You won', num(item.payload.won))}{tipRow(`${item.payload.name} won`, num(item.payload.lost))}
+                    {tipRow('Your share', pct(item.payload.won + item.payload.lost ? Math.round((item.payload.won / (item.payload.won + item.payload.lost)) * 1000) / 10 : null))}</Tip>) : null} />} />
+              <Bar dataKey='lostNeg' stackId='h' fill='var(--color-lostNeg)' radius={4} barSize={16} />
+              <Bar dataKey='won' stackId='h' fill='var(--color-won)' radius={4} barSize={16} />
+              <ChartLegend content={<ChartLegendContent />} />
+            </BarChart>
+          </ChartContainer>
+        ) : <Empty>No competitor came up on a task you should win in this period.</Empty>}
+      </Box>
+    ),
+    reasons: (
+      <Box title='Why agents chose others' description={t?.competitor_losses ? `How the agent settled on the other tool, in ${num(t.competitor_losses)} sessions lost to a competitor.` : 'How the agent settled on the other tool, in sessions lost to a competitor.'}>
+        {v?.reasons.losses ? (
+          <div className='flex flex-col gap-3'>
+            <Bars rows={v.reasons.how.map((r) => ({ name: r.label, value: r.sessions, end: `${num(r.sessions)} · ${Math.round((r.sessions / v.reasons.losses) * 100)}%`,
+              tip: <Tip>{tipRow('Sessions', `${num(r.sessions)} of ${num(v.reasons.losses)}`)}</Tip> }))} color={THEM} label='Sessions' empty='' />
+            <Bars rows={[
+              { name: 'Never mentioned you', value: v.reasons.never_mentioned },
+              { name: 'Mentioned you, chose it', value: v.reasons.losses - v.reasons.never_mentioned },
+            ].map((r) => ({ ...r, end: `${num(r.value)} · ${Math.round((r.value / v.reasons.losses) * 100)}%`, tip: <Tip>{tipRow('Sessions', `${num(r.value)} of ${num(v.reasons.losses)}`)}</Tip> }))}
+              color='var(--muted-foreground)' label='Sessions' empty='' />
+          </div>
+        ) : <Empty>No session lost to a competitor in this period.</Empty>}
+      </Box>
+    ),
+    expectation: (
+      <Box title='Expectation check' description='Tasks that should pick you vs tasks that should not: sessions that got it right and wrong.'>
+        {scoredTasks.length ? (
+          <ChartContainer config={{ hits: { label: 'Right call', color: YOU }, misses: { label: 'Wrong call', color: THEM } } satisfies ChartConfig}
+            className='aspect-auto h-[150px] w-full'>
+            <BarChart data={scoredTasks.map((e) => ({ ...e, name: e.expectation === 'recommend' ? 'Should pick you' : 'Should avoid you' }))} layout='vertical' margin={{ left: 0, right: 16, top: 0, bottom: 0 }}>
+              <XAxis type='number' hide allowDecimals={false} />
+              <YAxis type='category' dataKey='name' width={120} tickLine={false} axisLine={false} tick={{ fontSize: 11 }} />
+              <ChartTooltip cursor={false} content={<ChartTooltipContent hideLabel={false}
+                formatter={(_v, name, item) => name === 'hits' ? (
+                  <Tip>{tipRow('Right call', num(item.payload.hits))}{tipRow('Wrong call', num(item.payload.misses))}{tipRow('Picked you', num(item.payload.picked))}
+                    {tipRow('Tasks', num(item.payload.tasks))}</Tip>) : null} />} />
+              <Bar dataKey='hits' stackId='e' fill='var(--color-hits)' stroke='var(--background)' strokeWidth={2} barSize={20} />
+              <Bar dataKey='misses' stackId='e' fill='var(--color-misses)' stroke='var(--background)' strokeWidth={2} barSize={20} radius={[0, 4, 4, 0]} />
+              <ChartLegend content={<ChartLegendContent />} />
+            </BarChart>
+          </ChartContainer>
+        ) : <Empty>No scored sessions in this period.</Empty>}
+      </Box>
+    ),
+    by_platform: (
+      <Box title='Pick rate by platform' description='Hits of scored sessions by the platform each task targets.'>
+        <Bars rows={rateRows(v?.by_platform ?? [], (x) => x.platform)} color={YOU} label='Pick rate' max={100} empty='No scored sessions in this period.' />
+      </Box>
+    )
+  };
+  const ids = SECTIONS.map((s) => s.id).filter((id): id is Exclude<SectionId, 'summary'> => id !== 'summary' && show(id));
+  // Two per row; on the print page a section's table goes right under the row holding its cell.
+  const rows: (typeof ids)[] = [];
+  for (let i = 0; i < ids.length; i += 2) rows.push(ids.slice(i, i + 2));
   return (
     <>
-      <SectionHead first title='Visibility' action={productPicker}
-        description='Whether the coding agents in your simulations picked your product, and what they picked instead. Scored sessions in this period.' />
-      <StatStrip className='border-x [&>div:first-child]:pl-4 max-sm:[&>div:nth-child(odd)]:pl-4' items={[
-        { label: 'Pick rate', value: pct(t?.pick_pct), spark: weekly.map((w) => w.pick_pct ?? 0) },
-        { label: 'Times picked', value: num(t?.picked ?? 0), spark: weekly.map((w) => w.picked) },
-        { label: 'Top competitor', value: <span className='block max-w-[11rem] truncate' title={top?.name}>{top?.name ?? '—'}</span>, spark: weekly.map((w) => w.top_competitor) },
-        { label: 'Sessions scored', value: num(t?.scored ?? 0), spark: weekly.map((w) => w.scored) },
-      ]} />
-      <div className='border-l'>
-        <div className='grid lg:grid-cols-2'>
-          <Box title='Pick rate over time' description='Each week, scored sessions that went your way; the band is the 95% interval.'>
-            {any ? (
-              <ChartContainer config={{ pick_pct: { label: 'Pick rate', color: YOU }, band: { label: '95% interval', color: YOU } } satisfies ChartConfig} className='aspect-auto h-[240px] w-full'>
-                <ComposedChart data={weekly} margin={{ left: 0, right: 8, top: 8 }}>
-                  <CartesianGrid vertical={false} />
-                  <XAxis dataKey='week' tickLine={false} axisLine={false} tickMargin={8} minTickGap={24} tickFormatter={shortDay} />
-                  <YAxis width={40} tickLine={false} axisLine={false} domain={[0, 100]} ticks={[0, 25, 50, 75, 100]} tickFormatter={(x) => `${x}%`} />
-                  <ChartTooltip cursor={false} content={<ChartTooltipContent labelFormatter={weekLabel}
-                    formatter={(_v, name, item) => name === 'band' ? null : (
-                      <Tip>{tipRow('Pick rate', pct(item.payload.pick_pct))}{tipRow('Hits', `${num(item.payload.hits)} of ${num(item.payload.scored)}`)}
-                        {item.payload.lo != null && tipRow('95% interval', `${item.payload.lo}–${item.payload.hi}%`)}</Tip>)} />} />
-                  <Area dataKey='band' type='monotone' fill='var(--color-band)' fillOpacity={0.15} stroke='none' connectNulls activeDot={false} isAnimationActive={false} />
-                  <Line dataKey='pick_pct' type='monotone' stroke='var(--color-pick_pct)' strokeWidth={2} connectNulls dot={{ r: 4, strokeWidth: 2, fill: 'var(--background)' }} activeDot={{ r: 5 }} />
-                </ComposedChart>
-              </ChartContainer>
-            ) : <Empty>No scored sessions in this period.</Empty>}
-          </Box>
-          <Box title={`Pick rate by ${dim}`} description='Hits of scored sessions for each coding agent, harness or model, with n.'
-            action={
-              <div role='group' aria-label='Group by' className='flex rounded-md border p-0.5 text-xs'>
-                {(['agent', 'harness', 'model'] as const).map((d) => (
-                  <button key={d} type='button' aria-pressed={dim === d} onClick={() => setDim(d)}
-                    className={cn('rounded px-2 py-0.5 capitalize', dim === d ? 'bg-muted text-foreground font-medium' : 'text-muted-foreground hover:text-foreground')}>{d}</button>
-                ))}
-              </div>
-            }>
-            <Bars rows={rateRows(dims[dim], (x) => x.name)} color={YOU} label='Pick rate' max={100} empty='No scored sessions in this period.' />
-          </Box>
+      {show('summary') && (
+        <div className='break-inside-avoid'>
+          <StatStrip className='border-x [&>div:first-child]:pl-4 max-sm:[&>div:nth-child(odd)]:pl-4' items={[
+            { label: 'Pick rate', value: pct(t?.pick_pct), spark: weekly.map((w) => w.pick_pct ?? 0) },
+            { label: 'Times picked', value: num(t?.picked ?? 0), spark: weekly.map((w) => w.picked) },
+            { label: 'Top competitor', value: <span className='block max-w-[11rem] truncate' title={top?.name}>{top?.name ?? '—'}</span>, spark: weekly.map((w) => w.top_competitor) },
+            { label: 'Sessions scored', value: num(t?.scored ?? 0), spark: weekly.map((w) => w.scored) },
+          ]} />
+          {after?.('summary')}
         </div>
-
-        <div className='grid lg:grid-cols-2'>
-          <Box title='Competitor share' description="When an agent didn't pick you, the tool it picked instead, as a share of those sessions.">
-            <Bars rows={(v?.competitors ?? []).slice(0, 10).map((c) => ({ name: c.name, value: c.share_pct, end: `${c.share_pct}%`,
-              tip: <Tip>{tipRow('Picked instead of you', `${num(c.sessions)} of ${num(t?.competitor_losses ?? 0)}`)}{tipRow('Share', `${c.share_pct}%`)}</Tip> }))}
-              color={THEM} label='Share' max={100} empty='No agent picked a competitor in this period.' />
-          </Box>
-          <Box title='Competitor word cloud' description='Tools agents chose or named in your sessions, sized by how often.'>
-            <WordCloud words={v?.cloud ?? []} />
-          </Box>
-        </div>
-
-        <div className='grid lg:grid-cols-2'>
-          <Box title='Pick rate by task' description='Hits of scored sessions on each of your tasks, best first.'>
-            <Bars rows={rateRows(v?.by_task ?? [], (x) => x.title, 12)} color={YOU} label='Pick rate' max={100} empty='No scored sessions in this period.' />
-          </Box>
-          <Box title='Pick rate by developer persona' description='Hits of scored sessions for each simulated developer, best first.'>
-            <Bars rows={rateRows(v?.by_persona ?? [], (x) => x.name)} color={YOU} label='Pick rate' max={100} empty='No scored sessions with a persona in this period.' />
-          </Box>
-        </div>
-
-        <div className='grid lg:grid-cols-2'>
-          <Box title='Head-to-head' description='On tasks you should win where a competitor came up: you picked (right) vs it picked (left).'>
-            {h2h.length ? (
-              <ChartContainer config={{ won: { label: 'You won', color: YOU }, lostNeg: { label: 'They won', color: THEM } } satisfies ChartConfig}
-                className='aspect-auto w-full' style={{ height: Math.max(140, h2h.length * 30 + 48) }}>
-                <BarChart data={h2h} layout='vertical' stackOffset='sign' margin={{ left: 0, right: 16, top: 0, bottom: 0 }}>
-                  <XAxis type='number' tickLine={false} axisLine={false} allowDecimals={false} tickFormatter={(x) => String(Math.abs(Number(x)))} fontSize={11} />
-                  <YAxis type='category' dataKey='name' width={120} tickLine={false} axisLine={false} tick={{ fontSize: 11 }} tickFormatter={(x: string) => clip(x, 18)} />
-                  <ReferenceLine x={0} stroke='var(--border)' />
-                  <ChartTooltip cursor={false} content={<ChartTooltipContent hideLabel={false}
-                    formatter={(_v, name, item) => name === 'won' ? (
-                      <Tip>{tipRow('You won', num(item.payload.won))}{tipRow(`${item.payload.name} won`, num(item.payload.lost))}
-                        {tipRow('Your share', pct(item.payload.won + item.payload.lost ? Math.round((item.payload.won / (item.payload.won + item.payload.lost)) * 1000) / 10 : null))}</Tip>) : null} />} />
-                  <Bar dataKey='lostNeg' stackId='h' fill='var(--color-lostNeg)' radius={4} barSize={16} />
-                  <Bar dataKey='won' stackId='h' fill='var(--color-won)' radius={4} barSize={16} />
-                  <ChartLegend content={<ChartLegendContent />} />
-                </BarChart>
-              </ChartContainer>
-            ) : <Empty>No competitor came up on a task you should win in this period.</Empty>}
-          </Box>
-          <Box title='Why agents chose others' description={t?.competitor_losses ? `How the agent settled on the other tool, in ${num(t.competitor_losses)} sessions lost to a competitor.` : 'How the agent settled on the other tool, in sessions lost to a competitor.'}>
-            {v?.reasons.losses ? (
-              <div className='flex flex-col gap-3'>
-                <Bars rows={v.reasons.how.map((r) => ({ name: r.label, value: r.sessions, end: `${num(r.sessions)} · ${Math.round((r.sessions / v.reasons.losses) * 100)}%`,
-                  tip: <Tip>{tipRow('Sessions', `${num(r.sessions)} of ${num(v.reasons.losses)}`)}</Tip> }))} color={THEM} label='Sessions' empty='' />
-                <Bars rows={[
-                  { name: 'Never mentioned you', value: v.reasons.never_mentioned },
-                  { name: 'Mentioned you, chose it', value: v.reasons.losses - v.reasons.never_mentioned },
-                ].map((r) => ({ ...r, end: `${num(r.value)} · ${Math.round((r.value / v.reasons.losses) * 100)}%`, tip: <Tip>{tipRow('Sessions', `${num(r.value)} of ${num(v.reasons.losses)}`)}</Tip> }))}
-                  color='var(--muted-foreground)' label='Sessions' empty='' />
-              </div>
-            ) : <Empty>No session lost to a competitor in this period.</Empty>}
-          </Box>
-        </div>
-
-        <div className='grid lg:grid-cols-2'>
-          <Box title='Expectation check' description='Tasks that should pick you vs tasks that should not: sessions that got it right and wrong.'>
-            {scoredTasks.length ? (
-              <ChartContainer config={{ hits: { label: 'Right call', color: YOU }, misses: { label: 'Wrong call', color: THEM } } satisfies ChartConfig}
-                className='aspect-auto h-[150px] w-full'>
-                <BarChart data={scoredTasks.map((e) => ({ ...e, name: e.expectation === 'recommend' ? 'Should pick you' : 'Should avoid you' }))} layout='vertical' margin={{ left: 0, right: 16, top: 0, bottom: 0 }}>
-                  <XAxis type='number' hide allowDecimals={false} />
-                  <YAxis type='category' dataKey='name' width={120} tickLine={false} axisLine={false} tick={{ fontSize: 11 }} />
-                  <ChartTooltip cursor={false} content={<ChartTooltipContent hideLabel={false}
-                    formatter={(_v, name, item) => name === 'hits' ? (
-                      <Tip>{tipRow('Right call', num(item.payload.hits))}{tipRow('Wrong call', num(item.payload.misses))}{tipRow('Picked you', num(item.payload.picked))}
-                        {tipRow('Tasks', num(item.payload.tasks))}</Tip>) : null} />} />
-                  <Bar dataKey='hits' stackId='e' fill='var(--color-hits)' stroke='var(--background)' strokeWidth={2} barSize={20} />
-                  <Bar dataKey='misses' stackId='e' fill='var(--color-misses)' stroke='var(--background)' strokeWidth={2} barSize={20} radius={[0, 4, 4, 0]} />
-                  <ChartLegend content={<ChartLegendContent />} />
-                </BarChart>
-              </ChartContainer>
-            ) : <Empty>No scored sessions in this period.</Empty>}
-          </Box>
-          <Box title='Pick rate by platform' description='Hits of scored sessions by the platform each task targets.'>
-            <Bars rows={rateRows(v?.by_platform ?? [], (x) => x.platform)} color={YOU} label='Pick rate' max={100} empty='No scored sessions in this period.' />
-          </Box>
-        </div>
+      )}
+      <div className={cn('border-l', !show('summary') && 'border-t')}>
+        {rows.map((r) => (
+          <div key={r.join()} className='break-inside-avoid'>
+            <div className={cn('grid', print ? 'grid-cols-2' : 'lg:grid-cols-2')}>{r.map((id) => <div key={id} className='contents'>{cells[id]}</div>)}</div>
+            {after && r.map((id) => <div key={id}>{after(id)}</div>)}
+          </div>
+        ))}
       </div>
     </>
   );
@@ -252,7 +270,7 @@ function layout(words: Word[], width: number, height: number) {
   return placed;
 }
 
-function WordCloud({ words }: { words: Word[] }) {
+function WordCloud({ words, openList }: { words: Word[]; openList?: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
   const [hover, setHover] = useState<Word | null>(null);
@@ -294,7 +312,7 @@ function WordCloud({ words }: { words: Word[] }) {
             <span key={k.id} className='flex items-center gap-1.5'><span className='size-2 rounded-full' style={{ background: k.color }} />{k.label}</span>
           ))}
         </div>
-        <details className='group'>
+        <details className='group' open={openList}>
           <summary className='hover:text-foreground cursor-pointer select-none'>View as list</summary>
           <ol className='mt-2 grid gap-0.5'>
             {words.map((w) => <li key={w.name} className='flex justify-between gap-6'><span className='text-foreground'>{w.name}</span><span className='tabular-nums'>{detail(w)}</span></li>)}

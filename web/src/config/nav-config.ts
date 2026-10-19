@@ -54,7 +54,7 @@ export const portalNav: NavGroup[] = [
     label: 'Insights',
     items: [
       { title: 'Usage', url: '/app/usage', icon: 'chartLine', shortcut: ['g', 'u'], items: [] },
-      { title: 'Visibility', url: '/app/visibility', icon: 'trendingUp', shortcut: ['g', 'v'], items: [] },
+      { title: 'Pick rate', url: '/app/pick-rate', icon: 'trendingUp', shortcut: ['g', 'v'], items: [] },
       { title: 'Adoption', url: '/app/adoption', icon: 'route', shortcut: ['g', 'a'], items: [] }
     ]
   },

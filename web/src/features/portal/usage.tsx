@@ -1,5 +1,5 @@
 'use client';
-// /app Usage: the team's own activity (Visibility, what agents picked, is its own page: src/features/portal/visibility.tsx) across every AI client, its simulations and what agents picked, and model spend,
+// /app Usage: the team's own activity (Pick rate, what agents picked, is its own page: src/features/portal/pick-rate.tsx) across every AI client, its simulations and what agents picked, and model spend,
 // for everyone or for the people picked in the People filter (server-side). The layout is admin Analytics': one stat
 // strip, then a grid of cells sharing hairlines, two per row at most (components/layout/chart-grid).
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
@@ -14,7 +14,6 @@ import { DateRangePicker, last30, rangeQuery, type DateRange } from '@/component
 import { MultiSelectFilter, type FilterOption } from '@/components/layout/multi-select-filter';
 import { Icons } from '@/components/icons';
 import { ErrorState, LoadingCards, useOrgLoad } from './shared';
-import { VisibilitySection, type Visibility } from './visibility';
 
 interface Week { week: string; partial: boolean }
 interface Usage {
@@ -33,8 +32,6 @@ interface Usage {
     clients: { client: string; calls: number }[];
     sims_weekly: (Week & { completed: number; other: number })[];
     harnesses: { harness: string; sessions: number; completed: number }[];
-    /** The Visibility section (src/app.ts visibilityCharts). */
-    visibility: Visibility;
     spend_by: { kind: 'person' | 'simulation'; rows: { key: string | null; name: string; usd: number }[] };
     /** Only for a Billing manager or Owner. */
     allowance_usd: number | null;
@@ -56,13 +53,12 @@ const tipRow = (label: ReactNode, value: ReactNode) => (
 );
 const Empty = ({ children }: { children: ReactNode }) => <p className='text-muted-foreground py-16 text-center text-sm'>{children}</p>;
 
-/** Usage (the team's activity) and Visibility (what agents picked) are two pages over the same /usage data and filters. */
-export function UsagePage({ view = 'usage' }: { view?: 'usage' | 'visibility' }) {
+/** Usage: the team's activity, for everyone or the people and use cases picked. */
+export function UsagePage() {
   const [range, setRange] = useState<DateRange>(last30);
   const [users, setUsers] = useState<string[]>([]);
   const [useCases, setUseCases] = useState<string[]>([]);
-  const [product, setProduct] = useState<number | null>(null);
-  const userQ = (users.length ? `&user=${encodeURIComponent(users.join(','))}` : '') + (useCases.length ? `&use_case=${encodeURIComponent(useCases.join(','))}` : '') + (product ? `&product=${product}` : '');
+  const userQ = (users.length ? `&user=${encodeURIComponent(users.join(','))}` : '') + (useCases.length ? `&use_case=${encodeURIComponent(useCases.join(','))}` : '');
   const { data: u, error } = useOrgLoad(() => appApi<Usage>('GET', `/usage?${rangeQuery(range)}${userQ}`), [range.from, range.to, userQ]);
   const [ucOpts, setUcOpts] = useState<FilterOption[]>([]);
   useEffect(() => { if (u?.use_cases) setUcOpts(u.use_cases.map((x) => ({ value: x.id, label: x.name, hint: x.own ? 'yours' : undefined, count: x.calls }))); }, [u?.use_cases]);
@@ -73,18 +69,17 @@ export function UsagePage({ view = 'usage' }: { view?: 'usage' | 'visibility' })
   }, [u?.people]);
   return (
     <PageContainer
-      pageTitle={view === 'visibility' ? 'Visibility' : 'Usage'}
+      pageTitle='Usage'
       pageDescription={users.length ? `${users.length === 1 ? 'One person' : `${users.length} people`} on your team, across every AI client.` : 'Your whole team, across every AI client.'}
       pageHeaderAction={
         <div className='flex flex-wrap items-center gap-2'>
-          {view === 'usage' && <MultiSelectFilter noun='use cases' icon={<Icons.route />} options={ucOpts} value={useCases} onChange={setUseCases} />}
+          <MultiSelectFilter noun='use cases' icon={<Icons.route />} options={ucOpts} value={useCases} onChange={setUseCases} />
           <MultiSelectFilter noun='people' icon={<Icons.teams />} options={peopleOpts} value={users} onChange={setUsers} />
           <DateRangePicker value={range} onChange={setRange} />
         </div>
       }
     >
       {error ? <ErrorState error={error} /> : !u ? <LoadingCards count={4} />
-        : view === 'visibility' ? <div className='flex w-full flex-col pb-4'><VisibilitySection v={u.charts?.visibility} product={product} onProduct={setProduct} /></div>
         : <UsageBody u={u} users={users} />}
     </PageContainer>
   );

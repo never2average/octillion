@@ -15,6 +15,7 @@ import * as research from "./research.js";
 import type { Org } from "./auth.js";
 import { recordMcpEvent } from "./analytics.js";
 import * as memory from "./context.js";
+import * as vis from "./visibility.js";
 
 /** Hosts (ChatGPT in particular) cache the template by URI: bump the version on breaking HTML/JS changes. */
 export const WIDGET_URI = "ui://octillion/dashboard-v2.html";
@@ -48,6 +49,7 @@ export function handlersFor(org: Org) {
     get_simulation: (a: { simulation_id: string }) => q.getSimulation(org, a.simulation_id),
     cancel_simulation: (a: { simulation_id: string }) => q.cancelSimulation(org, a.simulation_id),
     get_visibility_report: (a: { product?: string; days?: number; model?: string; population?: string; simulation?: string; platform?: string }) => q.getReport(org, a),
+    export_visibility_report: (a: Parameters<typeof vis.mcpExport>[1]) => vis.mcpExport(org, a),
     get_agent_session: (a: { session_id: string }) => q.getSession(org, a.session_id),
     get_session_transcript: (a: { session_id: string; offset?: number; limit?: number }) =>
       q.getTranscript(org, a.session_id, a.offset, a.limit),
@@ -109,6 +111,15 @@ function summarize(d: Data): string {
     }
     case "report":
       return reportMarkdown(d);
+    case "visibility_export": {
+      const sum = d.sections.find((x) => x.id === "summary");
+      const val = (k: string) => sum?.rows.find((r) => r[0] === k)?.[1];
+      const f = d.filters, picked = [f.product && `product ${f.product.name}`, f.competitor.length && `competitors ${f.competitor.join(", ")}`,
+        f.persona.length && `personas ${f.persona.map((x) => x.name ?? `#${x.id}`).join(", ")}`, f.task.length && `tasks ${f.task.map((x) => x.title ?? `#${x.id}`).join(", ")}`].filter(Boolean);
+      return `${d.report} for ${d.account}, ${d.range.from} to ${d.range.to}${picked.length ? ` (${picked.join("; ")})` : ""}: ${d.sections.map((x) => x.title).join(", ")}.` +
+        (sum ? ` Pick rate ${val("pick_pct") ?? "n/a"}% (${val("hits")} hits of ${val("scored")} scored sessions), picked ${val("picked")} times, top competitor ${val("top_competitor") ?? "none"}.` : "") +
+        (d.format === "csv" ? ` The CSV (${d.filename}) is in \`csv\`: one row per table row, a section column first.` : ` Tables per section in \`sections\` (${d.filename}).`);
+    }
     case "session": {
       const s = d.session;
       const ev = (s.mentions ?? []).map((m: any) => `${m.tool}: ${m.level}${m.evidence[0] ? ` (#${m.evidence[0].seq} "${m.evidence[0].snippet}")` : ""}`);
@@ -335,6 +346,7 @@ export const TOOL_STATUS: Record<ToolName, [string, string]> = {
   get_simulation: ["Loading simulation results…", "Simulation results ready"],
   cancel_simulation: ["Cancelling simulation…", "Simulation cancelled"],
   get_visibility_report: ["Building visibility report…", "Visibility report ready"],
+  export_visibility_report: ["Exporting pick rate report…", "Pick rate report exported"],
   get_agent_session: ["Loading agent session…", "Agent session loaded"],
   get_session_transcript: ["Reading transcript…", "Transcript loaded"],
   search_transcripts: ["Searching transcripts…", "Search complete"],
@@ -551,6 +563,27 @@ export function createServer(org: Org, context = ""): McpServer {
     },
     annotations: read, _meta: meta("get_visibility_report"),
   }, run("get_visibility_report"));
+
+  registerAppTool(server, "export_visibility_report", {
+    title: "Export pick rate report",
+    description: "Export the Pick rate report (the portal's Pick rate page): pick rate, its 95% interval, times picked, competitor share, pick rate by agent, harness, model, task, persona and platform, head-to-head, how agents chose others and the expectation check, as tables. " +
+      "Pass report_id for a report saved on the Pick rate page (its filters, dates and sections), or the filters here: competitors (sessions where the agent picked or mentioned any of them), personas and tasks (ids from list_developer_profiles / get_product), product, and days or from/to. " +
+      "format json returns the tables; csv also returns one CSV (a section column first). Titles and names only: no prompts, persona text or transcript evidence.",
+    inputSchema: {
+      report_id: z.number().int().positive().optional().describe("A saved report's id (Pick rate page, Saved reports); its definition wins over the filters below"),
+      product,
+      competitors: z.array(z.string()).max(200).optional().describe("Only sessions where the agent picked or mentioned one of these tools"),
+      personas: z.array(z.number().int().positive()).max(200).optional().describe("Developer persona ids"),
+      tasks: z.array(z.number().int().positive()).max(200).optional().describe("Task (scenario) ids"),
+      days: z.number().int().min(1).max(366).optional().describe("Look-back window (default 30)"),
+      from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("First day, YYYY-MM-DD (with to)"),
+      to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("Last day, YYYY-MM-DD, included"),
+      sections: z.array(z.enum(vis.SECTIONS.map((x) => x.id) as [vis.SectionId, ...vis.SectionId[]])).optional().describe("Default: every section"),
+      format: z.enum(["json", "csv"]).optional().describe("Default json"),
+      name: z.string().max(120).optional().describe("The report's title (default \"Pick rate report\")"),
+    },
+    annotations: read, _meta: meta("export_visibility_report"),
+  }, run("export_visibility_report"));
 
   registerAppTool(server, "get_agent_session", {
     title: "Agent session",

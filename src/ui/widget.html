@@ -477,7 +477,7 @@
   function render(d) {
     tip.style.display = "none";
     product = d.product?.slug ?? d.simulation?.product_slug ?? d.session?.product_slug ?? (typeof d.product === "string" ? d.product : product);
-    const views = { products: viewProducts, product: viewProduct, report: viewReport, simulations: viewSimulations, simulation: viewSimulation, session: viewSession, transcript: viewTranscript, search: viewSearch, memory: viewMemory, profiles: viewProfiles, agents: viewAgents, onboarding: viewOnboarding, personas: viewPersonas, task_sets: viewTaskSets, harnesses: viewHarnesses, harness_mixes: viewMixes, library_submission: viewSubmission, library: viewLibraryNote };
+    const views = { products: viewProducts, product: viewProduct, report: viewReport, simulations: viewSimulations, simulation: viewSimulation, session: viewSession, transcript: viewTranscript, search: viewSearch, memory: viewMemory, profiles: viewProfiles, agents: viewAgents, onboarding: viewOnboarding, personas: viewPersonas, task_sets: viewTaskSets, harnesses: viewHarnesses, harness_mixes: viewMixes, library_submission: viewSubmission, library: viewLibraryNote, visibility_export: viewPickRate };
     const fn = views[d.view];
     const note = d.truncated ? `<div class="warn" style="margin-bottom:12px">Result shortened to fit the host's size limit. Page through it or narrow the filters to see the rest.</div>` : "";
     app.innerHTML = nav(d.view) + note + (fn ? fn(d) : `<div class="empty">Unknown view: ${esc(d.view)}</div>`);
@@ -807,6 +807,17 @@
       </div>`).join("")}</div>` : `<div class="card empty">No profiles${query ? ` matching "${esc(query)}"` : " yet"}.</div>`}</div>`;
   }
   // browse_task_library: the dashboard has no Library tab and lists no library tasks; the model reads them from the result.
+  // export_visibility_report: the Pick rate report's sections as tables (titles and names only).
+  function viewPickRate(d) {
+    const f = d.filters || {};
+    const picked = [f.product && `Product: ${f.product.name}`, (f.competitor || []).length && `Competitors: ${f.competitor.join(", ")}`,
+      (f.persona || []).length && `Personas: ${f.persona.map((x) => x.name || `#${x.id}`).join(", ")}`, (f.task || []).length && `Tasks: ${f.task.map((x) => x.title || `#${x.id}`).join(", ")}`].filter(Boolean);
+    const cell = (v) => (v == null ? "–" : typeof v === "number" ? (Number.isInteger(v) ? num(v) : String(v)) : esc(String(v)));
+    return `<div class="stack"><div><h1>${esc(d.report)}</h1><div class="sub">${esc(d.account)} · ${esc(d.range.from)} to ${esc(d.range.to)}${picked.length ? ` · ${esc(picked.join(" · "))}` : ""}</div></div>
+      ${d.sections.map((t) => `<div class="card"><h2>${esc(t.title)}</h2>${t.rows.length ? `<div class="table-wrap"><table><thead><tr>${t.columns.map((c) => `<th>${esc(c.replace(/_/g, " "))}</th>`).join("")}</tr></thead>
+        <tbody>${t.rows.map((r) => `<tr>${r.map((v) => `<td>${cell(v)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>` : `<div class="empty">Nothing in this period.</div>`}</div>`).join("")}</div>`;
+  }
+
   function viewLibraryNote({ tasks }) {
     return `<div class="card empty">${tasks.length ? `${num(tasks.length)} task(s) from Octillion's library are in the chat. Ask me to add one to your product.` : "No matching tasks in the library."}</div>`;
   }

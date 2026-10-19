@@ -1065,3 +1065,18 @@ CREATE TABLE IF NOT EXISTS email_log (
 CREATE INDEX IF NOT EXISTS email_log_at_idx ON email_log (at DESC);
 -- Why a request was declined, when the reviewer says (it goes in the email to the requester).
 ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS decline_reason TEXT;
+-- Saved Pick rate reports (src/visibility.ts): a name and a definition per account, run and exported from the Pick
+-- rate page (/app/pick-rate) or export_visibility_report. definition: { filters: { competitor, persona, task,
+-- product }, range: { preset } | { from, to }, sections, format }. created_by: the Clerk user who saved it (edits are
+-- theirs; an Owner or Billing manager may also delete).
+CREATE TABLE IF NOT EXISTS visibility_reports (
+  id          BIGSERIAL PRIMARY KEY,
+  org_id      INT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  name        TEXT NOT NULL,
+  definition  JSONB NOT NULL DEFAULT '{}',
+  created_by  TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_run_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS visibility_reports_org_idx ON visibility_reports (org_id, id);

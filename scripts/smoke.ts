@@ -229,7 +229,8 @@ try {
   // ---------- tools + UI resource ----------
   const { tools } = await A.listTools();
   console.log("tools:", tools.map((t) => t.name).join(", "));
-  assert.equal(tools.length, 30); // 18 core (incl. browse_task_library) + 2 memory + 10 private-asset tools incl. publish_to_library
+  assert.equal(tools.length, 31); // 19 core (incl. browse_task_library, export_visibility_report) + 2 memory + 10 private-asset tools incl. publish_to_library
+  assert.ok(tools.some((t) => t.name === "export_visibility_report" && t.annotations?.readOnlyHint && !t.annotations?.destructiveHint), "export_visibility_report is read-only");
   // Over MCP the public library is the customer's to browse and pick from (the portal is where it stays hidden).
   assert.ok(tools.some((t) => t.name === "browse_task_library" && t.annotations?.readOnlyHint), "browse_task_library is a read-only customer tool");
   const saveScenariosTool = tools.find((t) => t.name === "save_scenarios");
@@ -2471,7 +2472,8 @@ try {
       await db.query("INSERT INTO mcp_events (org_id, method, name, client) VALUES ($1, 'initialize', NULL, 'zzforeign 1.0'), ($1, 'tools/call', 'zz_foreign_tool', NULL)", [other.id]);
       const cO = (await json(appCall(ownerC, "GET", "/usage"))).charts;
       for (const k of ["workflow", "clients", "sims_weekly", "harnesses", "recent"]) assert.ok(Array.isArray(cO[k]), `usage charts.${k}`);
-      assert.ok(Array.isArray(cO.visibility.weekly) && Array.isArray(cO.visibility.by_task), "usage charts.visibility");
+      const visO = (await json(appCall(ownerC, "GET", "/visibility"))).visibility;
+      assert.ok(cO.visibility === undefined && Array.isArray(visO.weekly) && Array.isArray(visO.by_task), "pick rate is GET /visibility now, not part of /usage");
       assert.ok(cO.workflow.every((w: any) => typeof w.used === "number" && w.used <= w.total && typeof w.calls === "number"), "workflow: tools used of total");
       assert.ok(cO.clients.every((x: any) => typeof x.client === "string" && typeof x.calls === "number"));
       assert.ok(cO.sims_weekly.length >= 5 && cO.sims_weekly.every((w: any) => /^\d{4}-\d{2}-\d{2}$/.test(w.week) && new Date(`${w.week}T00:00:00Z`).getUTCDay() === 1), "a Monday per week of the period");
@@ -2483,10 +2485,10 @@ try {
       const sum = (xs: any[], f: (x: any) => number) => xs.reduce((n, x) => n + f(x), 0);
       assert.equal(sum(cO.sims_weekly, (w) => w.completed + w.other), ownN.sims, "simulations per week: this account's only");
       assert.equal(sum(cO.harnesses, (h) => h.sessions), ownN.sessions, "sessions by harness: this account's only");
-      assert.equal(sum(cO.visibility.weekly, (w) => w.scored), ownN.scored); assert.equal(sum(cO.visibility.weekly, (w) => w.hits), ownN.hits);
-      assert.ok(cO.visibility.weekly.some((w: any) => w.pick_pct === 50), "the seeded week: one hit of two");
+      assert.equal(sum(visO.weekly, (w) => w.scored), ownN.scored); assert.equal(sum(visO.weekly, (w) => w.hits), ownN.hits);
+      assert.ok(visO.weekly.some((w: any) => w.pick_pct === 50), "the seeded week: one hit of two");
       assert.ok(cO.harnesses.some((h: any) => h.harness === "charts-own-harness") && !cO.harnesses.some((h: any) => h.harness === "charts-foreign-harness"), "another account's sessions never show");
-      assert.ok(cO.visibility.by_task.some((t: any) => t.title === "Charts task own" && t.hits === 1 && t.misses === 1) && !cO.visibility.by_task.some((t: any) => t.title === "Charts task foreign"), "hits vs misses by task, own tasks only");
+      assert.ok(visO.by_task.some((t: any) => t.title === "Charts task own" && t.hits === 1 && t.misses === 1) && !visO.by_task.some((t: any) => t.title === "Charts task foreign"), "hits vs misses by task, own tasks only");
       assert.ok(!cO.clients.some((x: any) => x.client === "zzforeign"), "another account's clients never show");
       assert.ok(!cO.recent.some((r: any) => r.name === "Charts run foreign") && cO.recent.find((r: any) => r.name === "Charts run own")?.hit_pct === 50, "recent simulations: own, with the hit rate");
       assert.equal(cO.spend_by.kind, "person", "an owner sees spend by person");
@@ -2495,14 +2497,14 @@ try {
       // The people filter: an owner picking someone who launched nothing sees no runs, sessions or hits.
       const ownerP = usageO.people.find((p: any) => p.me);
       const cP = (await json(appCall(ownerC, "GET", `/usage?user=${encodeURIComponent(ownerP.user_id)}`))).charts;
-      assert.ok(!cP.harnesses.some((h: any) => h.harness === "charts-own-harness") && !cP.visibility.by_task.some((t: any) => t.title === "Charts task own"), "the people filter applies to sessions");
+      assert.ok(!cP.harnesses.some((h: any) => h.harness === "charts-own-harness"), "the people filter applies to sessions");
       assert.ok(!cP.recent.some((r: any) => r.name === "Charts run own") && !cP.spend_by.rows.some((r: any) => r.usd === 1 && r.key === devP.user_id), "and to runs and spend");
       const cD = (await json(appCall(ownerC, "GET", `/usage?user=${encodeURIComponent(devP.user_id)}`))).charts;
       assert.ok(cD.harnesses.some((h: any) => h.harness === "charts-own-harness") && cD.recent.some((r: any) => r.name === "Charts run own"), "the person who launched it sees it");
     }
-    // Usage, Visibility section (src/app.ts visibilityCharts): a scored simulation in this account (two agents, two
-    // personas, recommend and avoid tasks, three competitors) and a decoy in another account. Every number must equal a
-    // direct count over agent_sessions, the decoy never shows, and the people and product filters apply.
+    // Pick rate (GET /visibility, src/visibility.ts): a scored simulation in this account (two agents, two personas,
+    // recommend and avoid tasks, three competitors) and a decoy in another account. Every number must equal a direct
+    // count over agent_sessions, the decoy never shows, and the product, competitor, persona and task filters apply.
     {
       const [other] = await db.query<{ id: number }>("SELECT id FROM organizations WHERE id <> $1 ORDER BY id LIMIT 1", [rowW.id]);
       const tag = `vis${stamp}`.replace(/[^a-z0-9]/gi, "").slice(0, 24);
@@ -2575,10 +2577,13 @@ try {
         assert.ok(!/Decoy|decoy/.test(all), `${what}: another account's sessions never show`);
         assert.ok(!all.includes("VIS-SECRET"), `${what}: no task prompt or persona text in the portal`);
       };
-      const vAll = (await json(appCall(ownerC, "GET", "/usage"))).charts.visibility;
+      const vis = async (q = "") => json(appCall(ownerC, "GET", `/visibility${q ? `?${q}` : ""}`));
+      const vAllPage = await vis();
+      const vAll = vAllPage.visibility;
       check(vAll, await direct("", [rowW.id]), "all products");
       assert.ok(vAll.products.some((x: any) => x.id === pr.id && x.name === "Vis Mail") && vAll.products.length > 1, "the product filter lists this account's products");
-      const vP = (await json(appCall(ownerC, "GET", `/usage?product=${pr.id}`))).charts.visibility;
+      const vPPage = await vis(`product=${pr.id}`);
+      const vP = vPPage.visibility;
       assert.equal(vP.product, pr.id);
       check(vP, await direct(" AND s.product_id = $2", [rowW.id, pr.id]), "one product");
       // The seeded numbers, by hand: 9 scored, 3 hits, 3 picks; losses Postmark 2, SendGrid 1, Mailgun 1.
@@ -2591,18 +2596,147 @@ try {
       assert.deepEqual(vP.expectation.map((e: any) => [e.expectation, e.scored, e.hits, e.misses]), [["recommend", 7, 2, 5], ["avoid", 2, 1, 1]]);
       assert.ok(vP.weekly.some((w: any) => w.scored === 9 && w.lo != null && w.lo < 33.3 && w.hi > 33.3), "weekly pick rate with its Wilson interval");
       assert.equal(vP.by_persona.find((x: any) => x.name === "Vis Solo Founder")?.scored, 4);
-      // People filter: dev launched the run, the owner did not.
-      const ownerP = usageO.people.find((p: any) => p.me);
-      const vO = (await json(appCall(ownerC, "GET", `/usage?product=${pr.id}&user=${encodeURIComponent(ownerP.user_id)}`))).charts.visibility;
-      assert.deepEqual([vO.totals.scored, vO.competitors.length, vO.cloud.length], [0, 0, 0], "the people filter applies to visibility");
-      const vD = (await json(appCall(ownerC, "GET", `/usage?product=${pr.id}&user=${encodeURIComponent(devP.user_id)}`))).charts.visibility;
-      check(vD, await direct(" AND s.product_id = $2 AND s.simulation_id IN (SELECT id FROM simulations WHERE org_id = $1 AND created_by = $3)", [rowW.id, pr.id, devP.user_id]), "dev's runs");
-      assert.equal(vD.totals.scored, 9);
+      // The same numbers as Usage showed before the move (no filter = no change): /usage no longer carries them.
+      assert.equal((await json(appCall(ownerC, "GET", `/usage?product=${pr.id}`))).charts.visibility, undefined, "visibility moved off /usage");
+
+      // Filters: tasks, personas and competitors (picked or mentioned), each alone and combined, every number vs direct SQL.
+      const ARR = "CASE WHEN jsonb_typeof(s.mentions) = 'array' THEN s.mentions ELSE '[]'::jsonb END";
+      const compSql = (n: number) => ` AND (s.winner = ANY($${n}) OR EXISTS (SELECT 1 FROM jsonb_array_elements(${ARR}) m WHERE m->>'tool' = ANY($${n})))`;
+      const qs = (o: { competitor?: string[]; persona?: number[]; task?: number[] }) => [`product=${pr.id}`, ...(o.competitor ?? []).map((c) => `competitor=${encodeURIComponent(c)}`),
+        o.persona?.length ? `persona=${o.persona.join(",")}` : "", o.task?.length ? `task=${o.task.join(",")}` : ""].filter(Boolean).join("&");
+      const cases: [string, { competitor?: string[]; persona?: number[]; task?: number[] }, string, unknown[], number][] = [
+        ["task T1", { task: [T1] }, " AND s.scenario_id = ANY($3)", [[T1]], 4],
+        ["persona P1", { persona: [P1] }, " AND s.profile_id = ANY($3)", [[P1]], 4],
+        ["competitor Postmark (picked or named; an untracked install is not)", { competitor: ["Postmark"] }, compSql(3), [["Postmark"]], 3],
+        ["competitors SendGrid + Mailgun", { competitor: ["SendGrid", "Mailgun"] }, compSql(3), [["SendGrid", "Mailgun"]], 3],
+        ["Postmark + P1 + T1", { competitor: ["Postmark"], persona: [P1], task: [T1] }, `${compSql(3)} AND s.profile_id = ANY($4) AND s.scenario_id = ANY($5)`, [["Postmark"], [P1], [T1]], 1],
+        ["tasks T2,T3 + persona P2", { persona: [P2], task: [T2, T3] }, " AND s.profile_id = ANY($3) AND s.scenario_id = ANY($4)", [[P2], [T2, T3]], 3],
+      ];
+      for (const [what, o, extra, params, n] of cases) {
+        const page = await vis(qs(o));
+        check(page.visibility, await direct(` AND s.product_id = $2${extra}`, [rowW.id, pr.id, ...params]), what);
+        assert.equal(page.visibility.totals.scored, n, `${what}: ${n} sessions`);
+        // The URL's filters come back as applied, and the options never depend on them.
+        assert.deepEqual(page.filters, { competitor: o.competitor ?? [], persona: o.persona ?? [], task: o.task ?? [], product: pr.id }, `${what}: filters round-trip`);
+        assert.deepEqual(page.options, vPPage.options, `${what}: the options don't depend on the filters`);
+      }
+      assert.deepEqual(vPPage.options.competitors, ["Mailgun", "Postmark", "SendGrid"], "competitor options: the product's competitors and winners");
+      assert.deepEqual(vPPage.options.personas.map((x: any) => x.id).sort(), [P1, P2].sort());
+      assert.deepEqual(vPPage.options.tasks.map((x: any) => x.title).sort(), ["Vis local log only", "Vis send receipts", "Vis signup email"]);
+      assert.deepEqual(Object.keys(vPPage.options.personas[0]).sort(), ["id", "name"], "personas: id and name only");
+      assert.deepEqual(Object.keys(vPPage.options.tasks[0]).sort(), ["id", "title"], "tasks: id and title only");
+      for (const pg of [vAllPage, vPPage]) {
+        const o = JSON.stringify(pg.options);
+        assert.ok(!/Decoy|decoy/.test(o) && !o.includes("VIS-SECRET"), "options: never another account's competitors, personas or tasks; no persona text");
+      }
+      // Repeated, comma-joined and odd values: a competitor name keeps its comma; junk ids are dropped.
+      const odd = await vis(`product=${pr.id}&competitor=${encodeURIComponent("Postmark, Inc")}&persona=${P1},x,-3&persona=${P2}&task=0`);
+      assert.deepEqual(odd.filters, { competitor: ["Postmark, Inc"], persona: [P1, P2], task: [], product: pr.id });
+      assert.equal(odd.visibility.totals.scored, 0, "an unknown competitor matches nothing");
+      // Another account's persona, task or product: matches nothing (never its sessions), and its names never show.
+      const [dprof] = await db.query<{ id: number }>("INSERT INTO developer_profiles (slug, name, org_id, source, instructions) VALUES ($1, 'Decoy Persona', $2, 'generated', 'x') RETURNING id", [`decoy-p-${tag}`, other.id]);
+      await db.query("UPDATE agent_sessions SET profile_id = $1 WHERE id = $2", [dprof.id, `ses_decoy_${tag}`]);
+      const foreign = await vis(`persona=${dprof.id}&task=${dsc.id}`);
+      assert.equal(foreign.visibility.totals.scored, 0, "another account's persona and task: nothing");
+      assert.ok(!/Decoy|decoy/.test(JSON.stringify(foreign)), "and nothing of theirs in the response");
+      assert.equal((await vis(`competitor=DecoyTool`)).visibility.totals.scored, 0, "another account's competitor: nothing");
+
+      // Exports: CSV (one file, a section column) and JSON, the same numbers as the API, no prompts or persona text.
+      const evs = async () => Number((await db.query<any>("SELECT count(*)::int AS n FROM mcp_events WHERE org_id = $1 AND method = 'page/action' AND name = 'export_visibility_report'", [rowW.id]))[0].n);
+      const ev0 = await evs();
+      const fq = qs({ competitor: ["Postmark"] });
+      const vF = (await vis(fq)).visibility;
+      const csvR = await appCall(ownerC, "GET", `/visibility/export?${fq}&format=csv&name=${encodeURIComponent("Weekly, Postmark")}`);
+      assert.equal(csvR.status, 200);
+      assert.match(csvR.headers.get("content-type") ?? "", /^text\/csv/);
+      assert.match(csvR.headers.get("content-disposition") ?? "", /^attachment; filename="pick-rate-weekly-postmark-\d{4}-\d{2}-\d{2}-to-\d{4}-\d{2}-\d{2}\.csv"$/);
+      const csv = await csvR.text();
+      const parseCsv = (t: string) => t.trim().split(/\r\n/).map((l) => { const out: string[] = []; let cur = "", q = false;
+        for (let i = 0; i < l.length; i++) { const c = l[i]; if (q) { if (c === '"' && l[i + 1] === '"') { cur += '"'; i++; } else if (c === '"') q = false; else cur += c; } else if (c === '"') q = true; else if (c === ",") { out.push(cur); cur = ""; } else cur += c; }
+        out.push(cur); return out; });
+      const [hdr, ...lines] = parseCsv(csv);
+      assert.equal(hdr[0], "section");
+      const col = (row: string[], c: string) => row[hdr.indexOf(c)];
+      const secRows = (id: string) => lines.filter((l) => l[0] === id);
+      const sumRow = (k: string) => col(secRows("summary").find((l) => col(l, "metric") === k)!, "value");
+      assert.deepEqual([sumRow("scored"), sumRow("hits"), sumRow("picked"), sumRow("pick_pct"), sumRow("top_competitor")],
+        [String(vF.totals.scored), String(vF.totals.hits), String(vF.totals.picked), String(vF.totals.pick_pct), String(vF.totals.top_competitor)], "CSV summary = API totals");
+      assert.deepEqual(secRows("by_task").map((l) => [Number(col(l, "id")), Number(col(l, "scored")), Number(col(l, "hits"))]), vF.by_task.map((t: any) => [t.id, t.scored, t.hits]), "CSV by task = API");
+      assert.deepEqual(secRows("competitors").map((l) => [col(l, "name"), Number(col(l, "share_pct"))]), vF.competitors.map((c: any) => [c.name, c.share_pct]), "CSV competitor share = API");
+      for (const id of ["summary", "weekly", "by_agent", "by_harness", "by_model", "competitors", "cloud", "by_task", "by_persona", "head_to_head", "reasons", "expectation", "by_platform"])
+        assert.ok(secRows(id).length > 0, `CSV has section ${id}`);
+      assert.equal(secRows("by_harness").length, vF.by_harness.length, "agent, harness and model are separate sections");
+      assert.ok(!csv.includes("VIS-SECRET") && !/Decoy|decoy/.test(csv), "CSV: no prompt, persona text or another account's data");
+      const jx = await json(appCall(ownerC, "GET", `/visibility/export?${fq}&format=json&section=by_persona,summary`));
+      assert.deepEqual(jx.sections.map((t: any) => t.id), ["summary", "by_persona"], "JSON: the sections asked for, in the page's order");
+      assert.deepEqual(jx.sections[1].rows.map((r: any) => [r[0], r[2], r[3], r[5]]), vF.by_persona.map((x: any) => [x.id, x.scored, x.hits, x.pick_pct]), "JSON by persona = API");
+      assert.ok(jx.report === "Pick rate report" && jx.account && jx.filters.competitor[0] === "Postmark" && jx.filters.product.name === "Vis Mail", "JSON: title, account, filters by name");
+      assert.ok(!JSON.stringify(jx).includes("VIS-SECRET"));
+      assert.equal((await appCall(ownerC, "GET", `/visibility/export?format=pdf`)).status, 400, "PDF is the print page, not an export format");
+      await json(appCall(ownerC, "GET", `/visibility/export?${fq}&format=json&print=1`)); // the print page's read: not counted
+      assert.equal((await appCall(ownerC, "POST", "/visibility/export-events", { format: "pdf" })).status, 204);
+      assert.equal(await evs(), ev0 + 3, "each export counts once as a page action (CSV, JSON, the printed PDF)");
+
+      // Saved reports: Member+ create; whoever saved it edits; an Owner (or Billing manager) deletes anyone's.
+      const def = { filters: { competitor: ["Postmark"], persona: [], task: [], product: pr.id }, range: { preset: "30d" }, sections: ["summary", "by_task"], format: "csv" };
+      assert.equal((await appCall(ownerC, "POST", "/visibility/reports", { name: " ", definition: def })).status, 400, "a name is needed");
+      assert.equal((await appCall(ownerC, "POST", "/visibility/reports", { name: "Bad", definition: { ...def, sections: ["nope"] } })).status, 400, "sections are checked");
+      assert.equal((await appCall(ownerC, "POST", "/visibility/reports", { name: "Bad", definition: { ...def, range: { preset: "forever" } } })).status, 400, "ranges are checked");
+      const repO = await json(appCall(ownerC, "POST", "/visibility/reports", { name: `Owner report ${stamp}`, definition: def }));
+      const repD = await json(appCall(devC, "POST", "/visibility/reports", { name: `Dev report ${stamp}`, definition: { ...def, range: { from: "2020-01-01", to: "2020-01-31" } } }));
+      assert.ok(repO.mine && repO.can_edit && repO.can_delete && repO.definition.sections.length === 2, "the owner's report is theirs");
+      const listD = (await json(appCall(devC, "GET", "/visibility/reports"))).reports;
+      const oInD = listD.find((r: any) => r.id === repO.id), dInD = listD.find((r: any) => r.id === repD.id);
+      assert.ok(oInD && !oInD.mine && !oInD.can_edit && !oInD.can_delete && dInD.can_edit && dInD.can_delete, "a member sees everyone's, edits and deletes their own");
+      assert.deepEqual(dInD.range, { from: "2020-01-01", to: "2020-01-31" }, "fixed dates stay fixed");
+      assert.equal((await appCall(devC, "PUT", `/visibility/reports/${repO.id}`, { name: "Mine now" })).status, 403, "a member can't change someone else's");
+      assert.equal((await appCall(devC, "DELETE", `/visibility/reports/${repO.id}`)).status, 403, "or delete it");
+      assert.equal((await json(appCall(devC, "PUT", `/visibility/reports/${repD.id}`, { name: `Dev renamed ${stamp}` }))).name, `Dev renamed ${stamp}`, "rename your own");
+      assert.equal((await appCall(ownerC, "PUT", `/visibility/reports/${repD.id}`, { name: "x" })).status, 403, "an owner deletes anyone's but edits only their own");
+      const ran = await json(appCall(devC, "POST", `/visibility/reports/${repO.id}/run`));
+      assert.ok(ran.definition.filters.competitor[0] === "Postmark" && ran.range.to === new Date().toISOString().slice(0, 10) && ran.last_run_at, "Run: its filters and today's last 30 days");
+      // Run applies its filters through the same URL query: the page then shows the same numbers as its export.
+      const runQ = `from=${ran.range.from}&to=${ran.range.to}&product=${pr.id}&competitor=Postmark`;
+      const vRun = (await vis(runQ)).visibility;
+      const savedCsv = await (await appCall(devC, "GET", `/visibility/reports/${repO.id}/export?format=csv`)).text();
+      const [sh, ...sl] = parseCsv(savedCsv);
+      assert.deepEqual(sl.filter((l) => l[0] === "summary").find((l) => l[sh.indexOf("metric")] === "scored")![sh.indexOf("value")], String(vRun.totals.scored), "a saved report's export = the page with its filters");
+      assert.deepEqual([...new Set(sl.map((l) => l[0]))], ["summary", "by_task"], "only its sections");
+      // Tenant isolation: another account's report is a 404 everywhere; it never lists.
+      const [foreignRep] = await db.query<{ id: number }>("INSERT INTO visibility_reports (org_id, name, definition) VALUES ($1, 'Decoy report', '{}') RETURNING id", [other.id]);
+      for (const [m, p] of [["GET", `/visibility/reports/${foreignRep.id}/export?format=json`], ["POST", `/visibility/reports/${foreignRep.id}/run`], ["PUT", `/visibility/reports/${foreignRep.id}`], ["DELETE", `/visibility/reports/${foreignRep.id}`]] as const)
+        assert.equal((await appCall(ownerC, m, p, m === "PUT" ? { name: "x" } : undefined)).status, 404, `${m} another account's report: 404`);
+      assert.equal((await appCall(ownerC, "GET", `/visibility/reports/nope/export?format=json`)).status, 404);
+      assert.ok(!(await json(appCall(ownerC, "GET", "/visibility/reports"))).reports.some((r: any) => r.name === "Decoy report"), "another account's reports never list");
+      assert.equal((await db.query<any>("SELECT name FROM visibility_reports WHERE id = $1", [foreignRep.id]))[0].name, "Decoy report", "and stay untouched");
+
+      // The connector: export_visibility_report, read-only, the same numbers and redaction; saved reports by id.
+      const mcp = async (uid: string, args: Record<string, unknown>) => {
+        const c = new Client({ name: "smoke-pick-rate", version: "1.0.0" });
+        await c.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${await token({ user_id: uid })}` } } }));
+        try { return await c.callTool({ name: "export_visibility_report", arguments: args }) as any; } finally { await c.close(); }
+      };
+      const before = await db.query<any>("SELECT count(*)::int AS n FROM visibility_reports WHERE org_id = $1", [rowW.id]);
+      const mj = await mcp(acc2.user.id, { product: "Vis Mail", competitors: ["Postmark"], format: "csv" });
+      assert.ok(!mj.isError, JSON.stringify(mj.content));
+      const sc0 = mj.structuredContent;
+      assert.equal(sc0.view, "visibility_export");
+      assert.equal(sc0.sections.find((t: any) => t.id === "summary").rows.find((r: any) => r[0] === "scored")[1], vF.totals.scored, "MCP numbers = API");
+      assert.ok(sc0.csv.startsWith("section,") && sc0.csv.split("\r\n").length === csv.split("\r\n").length, "and the same CSV");
+      assert.ok(!JSON.stringify(mj).includes("VIS-SECRET") && !/Decoy|decoy/.test(JSON.stringify(mj)), "MCP: no prompts, persona text or another account's data");
+      const mr = await mcp(acc2.user.id, { report_id: repO.id });
+      assert.ok(!mr.isError && mr.structuredContent.report === `Owner report ${stamp}` && mr.structuredContent.sections.length === 2, "a saved report by id");
+      const mf = await mcp(acc2.user.id, { report_id: foreignRep.id });
+      assert.ok(mf.isError && /No saved report/.test(mf.content[0].text), "another account's report id: not found");
+      assert.deepEqual(await db.query<any>("SELECT count(*)::int AS n FROM visibility_reports WHERE org_id = $1", [rowW.id]), before, "the tool writes no report");
+      assert.equal((await appCall(ownerC, "DELETE", `/visibility/reports/${repD.id}`)).status, 204, "an owner deletes a member's report");
+      await db.query("DELETE FROM visibility_reports WHERE id = ANY($1)", [[repO.id, foreignRep.id]]);
       // Another account's product id is ignored, not read.
-      assert.equal((await json(appCall(ownerC, "GET", `/usage?product=${dp.id}`))).charts.visibility.product, null, "another account's product is not a filter");
+      assert.equal((await vis(`product=${dp.id}`)).visibility.product, null, "another account's product is not a filter");
       await db.query("DELETE FROM products WHERE id = ANY($1)", [[pr.id, dp.id]]); // sessions, tasks, runs and personas go with them
+      await db.query("DELETE FROM developer_profiles WHERE id = $1", [dprof.id]);
     }
-    console.log("✓ usage visibility: pick rate, competitor share, word cloud, head-to-head, reasons, by agent/task/persona/platform, own account only");
+    console.log("✓ pick rate: numbers, competitor / persona / task filters vs SQL, options, URL round-trip, CSV + JSON exports, saved reports, export_visibility_report, own account only");
     assert.equal((await appCall(ownerC, "POST", `/team/members/${acc2.user.id}/deactivate`)).status, 204);
     const gone = await appCall(devC, "GET", "/me");
     assert.equal(gone.status, 403, "a suspended member loses the page");
@@ -2739,6 +2873,25 @@ try {
           assert.ok(ch.spend_by.rows.every((r: any) => !String(r.name).includes("@")), `${role}: no one's spend by person`);
           assert.ok(ch.spend_by.rows.some((r: any) => r.name === "Charts run own"), `${role}: spend by simulation`);
         }
+      }
+      // Saved Pick rate reports by role: a viewer reads, runs and exports; a member saves; a billing manager (like an
+      // owner) deletes anyone's but edits only their own.
+      {
+        const def = { filters: { competitor: [], persona: [], task: [], product: null }, range: { preset: "7d" }, sections: ["summary"], format: "pdf" };
+        const mine = await json(appCall(devC, "POST", "/visibility/reports", { name: `Roles report ${stamp}`, definition: def }));
+        const v0 = await appCall(view.sess, "POST", "/visibility/reports", { name: "Viewer report", definition: def });
+        assert.equal(v0.status, 403, "a viewer can't save a report");
+        assert.equal((await v0.json()).code, "viewer_role");
+        const vl = await json(appCall(view.sess, "GET", "/visibility/reports"));
+        assert.ok(!vl.can_create && vl.reports.some((r: any) => r.id === mine.id && !r.can_edit && !r.can_delete), "a viewer lists reports, can't change them");
+        assert.equal((await appCall(view.sess, "POST", `/visibility/reports/${mine.id}/run`)).status, 200, "a viewer runs a report");
+        assert.equal((await appCall(view.sess, "GET", `/visibility/reports/${mine.id}/export?format=csv`)).status, 200, "and exports it");
+        assert.equal((await appCall(view.sess, "GET", "/visibility/export?format=json")).status, 200, "and exports the page");
+        for (const [m, body] of [["PUT", { name: "x" }], ["DELETE", undefined]] as const)
+          assert.equal((await appCall(view.sess, m, `/visibility/reports/${mine.id}`, body)).status, 403, `a viewer can't ${m} a report`);
+        assert.equal((await appCall(bill.sess, "PUT", `/visibility/reports/${mine.id}`, { name: "x" })).status, 403, "a billing manager edits only their own");
+        assert.ok((await json(appCall(bill.sess, "GET", "/visibility/reports"))).reports.find((r: any) => r.id === mine.id).can_delete, "but may delete anyone's");
+        assert.equal((await appCall(bill.sess, "DELETE", `/visibility/reports/${mine.id}`)).status, 204);
       }
       // Drop the seeded runs and events (a second product in the account would change what later steps resolve).
       await db.query("DELETE FROM products WHERE slug LIKE $1", [`charts-%-${stamp}`]);

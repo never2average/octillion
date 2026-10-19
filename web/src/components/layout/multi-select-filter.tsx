@@ -26,7 +26,7 @@ export function MultiSelectFilter({ options, value, onChange, noun, icon, classN
         <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder={`Search ${options.length} ${noun}`} aria-label={`Search ${noun}`} className='h-8 text-sm' />
         <div className='flex items-center gap-3 text-xs leading-none'>
           <button type='button' className='text-primary hover:underline' onClick={() => onChange([...new Set([...value, ...shown.map((o) => o.value)])])}>Select {q ? 'matches' : 'all'}</button>
-          {value.length > 0 && <button type='button' className='text-muted-foreground hover:text-foreground' onClick={() => onChange([])}>Clear ({value.length})</button>}
+          {value.length > 0 && <button type='button' className='text-muted-foreground hover:text-foreground' onClick={() => onChange([])}>Clear</button>}
         </div>
         <ul className='flex max-h-72 flex-col gap-0.5 overflow-y-auto'>
           {!shown.length && <li className='text-muted-foreground py-2 text-xs leading-none'>{options.length ? 'No match.' : `No ${noun} yet.`}</li>}
