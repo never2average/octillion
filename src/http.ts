@@ -36,6 +36,7 @@ import { importEnvKeysOnce } from "./keyvault-env.js";
 import * as populations from "./populations.js";
 import * as onboarding from "./admin.js";
 import * as library from "./library.js";
+import * as contributions from "./contributions.js";
 import { computeSummary } from "./compute.js";
 import * as spend from "./spend.js";
 import * as spendUsage from "./spend-usage.js";
@@ -459,6 +460,11 @@ export function createApp() {
   ob.post("/tasks/active", need("library"), async (req, res) => void res.json(await library.setTasksActive(adminActor(req, res), req.body?.ids, req.body?.active)));
   ob.post("/tasks/harnesses", need("library"), async (req, res) => void res.json(await library.setTasksHarnesses(adminActor(req, res), req.body?.ids, req.body?.harnesses)));
   ob.patch("/tasks/:id", need("library"), async (req, res) => void res.json(await library.updateTask(adminActor(req, res), Number(req.params.id), req.body ?? {})));
+  // Library contributions from accounts (src/contributions.ts): review on /admin/personas and /admin/tasks (Submissions).
+  ob.get("/submissions", async (req, res) => void res.json(await contributions.listSubmissions(req.query)));
+  ob.post("/submissions/:id/accept", need("library"), async (req, res) => void res.json(await contributions.accept(adminActor(req, res), String(req.params.id), req.body ?? {})));
+  ob.post("/submissions/:id/decline", need("library"), async (req, res) => void res.json(await contributions.decline(adminActor(req, res), String(req.params.id), req.body?.reason)));
+  ob.post("/submissions/:id/retry-credit", need("library"), async (req, res) => void res.json(await contributions.retryCredit(adminActor(req, res), String(req.params.id))));
   // Global compute settings (src/settings.ts) and the default population's agent mix.
   ob.get("/compute", async (_req, res) => void res.json(await library.compute()));
   ob.put("/compute/settings", need("compute"), async (req, res) => void res.json(await library.saveSettings(adminActor(req, res), req.body?.values)));

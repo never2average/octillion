@@ -29,7 +29,7 @@ const has = (o: Record<string, unknown>, k: string) => Object.prototype.hasOwnPr
 
 // ---------- personas ----------
 
-const PERSONA_COLS = `slug, external_id, name, summary, attributes, instructions, active, source, synced_at, edited_at, edited_by`;
+const PERSONA_COLS = `slug, external_id, name, summary, attributes, instructions, active, source, synced_at, edited_at, edited_by, contributed_by, submission_id`;
 
 export async function listPersonas() {
   const rows = await (await getDb()).query(
@@ -101,7 +101,7 @@ export async function setPersonasActive(actor: string, slugs: unknown, active: u
 
 // ---------- tasks ----------
 
-const TASK_COLS = `id, slug, external_id, title, prompt, repo_url, language, category, tags, attributes, platform, active, source, synced_at, edited_at, edited_by, harnesses`;
+const TASK_COLS = `id, slug, external_id, title, prompt, repo_url, language, category, tags, attributes, platform, active, source, synced_at, edited_at, edited_by, harnesses, contributed_by, submission_id`;
 
 /**
  * What a task's harness preference may name: each harness in the registry (its sessions go to that CLI, any model), and
@@ -137,7 +137,7 @@ export async function listTasks(q: Record<string, unknown> = {}) {
   if (q.active === "true" || q.active === "false") add("active", "active = $?", q.active === "true");
   if (q.has_repo === "true") add("has_repo", "coalesce(repo_url, '') <> ''");
   if (q.has_repo === "false") add("has_repo", "coalesce(repo_url, '') = ''");
-  if (q.source === "vault" || q.source === "admin") add("source", "source = $?", q.source);
+  if (q.source === "vault" || q.source === "admin" || q.source === "contributed") add("source", "source = $?", q.source);
   if (q.edited === "true") add("edited", "edited_at IS NOT NULL");
   if (q.harness === "any") add("harness", "cardinality(harnesses) = 0");
   else if (q.harness === "set") add("harness", "cardinality(harnesses) > 0");

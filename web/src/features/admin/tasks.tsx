@@ -25,10 +25,11 @@ import { List } from './account-peek';
 import { post, useAdmin, useAdminAction } from './lib';
 import { Gate, useAdminRole } from './role';
 import { Chips, ErrorBox, FormRow, Mono, StatusBadge, When } from './ui';
+import { LibraryViewSwitch, Submissions, useLibraryView } from './submissions';
 
 export interface Task {
   id: number; slug: string; external_id: string | null; title: string; prompt: string; repo_url: string | null; language: string | null;
-  category: string | null; tags: string[]; platform: string | null; active: boolean; source: 'vault' | 'admin';
+  category: string | null; tags: string[]; platform: string | null; active: boolean; source: 'vault' | 'admin' | 'contributed';
   synced_at: string; edited_at: string | null; edited_by: string | null; attributes: Record<string, unknown>; harnesses: string[];
 }
 interface Facet { value: string; n: number }
@@ -44,7 +45,7 @@ const Dot = () => <span className='text-muted-foreground/60'>·</span>;
 const Label = ({ children }: { children: ReactNode }) => <div className='text-muted-foreground mb-2 text-xs font-medium leading-none'>{children}</div>;
 /** github.com/owner/repo: the host and path, without the scheme. */
 const repoName = (u: string) => { try { const x = new URL(u); return `${x.host}${x.pathname.replace(/\/$/, '')}`; } catch { return u.replace(/^https?:\/\//, ''); } };
-const originOf = (t: Task) => (t.source === 'admin' ? 'Written here' : t.edited_at ? 'Vault, edited here' : 'Vault');
+const originOf = (t: Task) => (t.source === 'admin' ? 'Written here' : t.source === 'contributed' ? 'Contributed by an account' : t.edited_at ? 'Vault, edited here' : 'Vault');
 const text = (v: unknown) => (v == null || v === '' ? null : typeof v === 'object' ? JSON.stringify(v) : String(v));
 const toDraft = (t: Task): Draft => ({ id: t.id, title: t.title, prompt: t.prompt, language: t.language ?? '', category: t.category ?? '', tags: t.tags.join(', '), repo_url: t.repo_url ?? '', harnesses: t.harnesses ?? [] });
 const blank = (): Draft => ({ title: '', prompt: '', language: '', category: '', tags: '', repo_url: '', harnesses: [] });
@@ -55,6 +56,7 @@ const EMPTY_F = { language: '', category: '', active: '', has_repo: '', harness:
 
 export function AdminTasks() {
   const { lock } = useAdminRole();
+  const [libView, setLibView] = useLibraryView();
   const [q, setQ] = useState('');
   const [f, setF] = useState(EMPTY_F);
   const [bulkHarness, setBulkHarness] = useState(false);
@@ -117,12 +119,15 @@ export function AdminTasks() {
   const opt = (k: keyof NonNullable<TaskPage['facets']>, v: string, label: string) => <NativeSelectOption key={v} value={v}>{counted(label, fc(k, v))}</NativeSelectOption>;
   const facet = (k: 'language' | 'category', list: Facet[] | undefined) => (list ?? []).map((x) => opt(k, x.value, x.value));
   const narrow = !!current;
+  const switcher = <LibraryViewSwitch kind='task' value={libView} onChange={setLibView} />;
 
+  if (libView === 'submissions') return <Submissions kind='task' switcher={switcher} />;
   return (
     <PageContainer>
       <ErrorBox error={error} />
       <div className='flex h-[calc(100svh-5.5rem)] min-h-[24rem] min-w-0 flex-col gap-3'>
         <div className='flex flex-wrap items-center gap-2'>
+          {switcher}
           <div className='relative min-w-48 flex-1'>
             <Icons.search className='text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2' />
             <Input type='search' value={q} onChange={(e) => setQ(e.target.value)} placeholder='Search tasks by title, prompt, tag or repository' aria-label='Search tasks' className='h-9 pl-8' />

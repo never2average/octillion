@@ -477,7 +477,7 @@
   function render(d) {
     tip.style.display = "none";
     product = d.product?.slug ?? d.simulation?.product_slug ?? d.session?.product_slug ?? (typeof d.product === "string" ? d.product : product);
-    const views = { products: viewProducts, product: viewProduct, report: viewReport, simulations: viewSimulations, simulation: viewSimulation, session: viewSession, transcript: viewTranscript, search: viewSearch, memory: viewMemory, profiles: viewProfiles, agents: viewAgents, onboarding: viewOnboarding, personas: viewPersonas, task_sets: viewTaskSets, harnesses: viewHarnesses, harness_mixes: viewMixes };
+    const views = { products: viewProducts, product: viewProduct, report: viewReport, simulations: viewSimulations, simulation: viewSimulation, session: viewSession, transcript: viewTranscript, search: viewSearch, memory: viewMemory, profiles: viewProfiles, agents: viewAgents, onboarding: viewOnboarding, personas: viewPersonas, task_sets: viewTaskSets, harnesses: viewHarnesses, harness_mixes: viewMixes, library_submission: viewSubmission };
     const fn = views[d.view];
     const note = d.truncated ? `<div class="warn" style="margin-bottom:12px">Result shortened to fit the host's size limit. Page through it or narrow the filters to see the rest.</div>` : "";
     app.innerHTML = nav(d.view) + note + (fn ? fn(d) : `<div class="empty">Unknown view: ${esc(d.view)}</div>`);
@@ -643,15 +643,21 @@
   function viewPersonas({ personas }) {
     if (!personas.length) return `<div class="card empty">No personas yet. Onboarding picks Octillion-curated ones for your product; ask me to add the developers you target.</div>`;
     return `<div class="card"><h2>Private personas</h2><div class="table-wrap"><table>
-      <thead><tr><th>Persona</th><th>Summary</th><th>Source</th><th>Slug</th></tr></thead>
-      <tbody>${personas.map((p) => `<tr${p.active ? "" : ' style="opacity:.5"'}><td>${esc(p.name)}</td><td class="muted">${esc(p.curated ? "Curated by Octillion" : p.summary || "–")}</td><td><span class="badge">${esc(p.curated ? "curated" : p.source)}</span></td><td class="muted">${esc(p.slug)}</td></tr>`).join("")}</tbody>
+      <thead><tr><th>Persona</th><th>Summary</th><th>Source</th><th>Published</th><th>Slug</th></tr></thead>
+      <tbody>${personas.map((p) => `<tr${p.active ? "" : ' style="opacity:.5"'}><td>${esc(p.name)}</td><td class="muted">${esc(p.curated ? "Curated by Octillion" : p.summary || "–")}</td><td><span class="badge">${esc(p.curated ? "curated" : p.source)}</span></td><td>${pubCell(p.publication)}</td><td class="muted">${esc(p.slug)}</td></tr>`).join("")}</tbody>
     </table></div>${privateNote}</div>`;
+  }
+  // Publication to Octillion's library (publish_to_library): Published, Submitted, Declined, or – when never published.
+  const pubLabel = (p) => (!p ? "–" : p.status === "accepted" ? "Published" : p.status === "declined" ? "Declined" : "Submitted");
+  const pubCell = (p) => (p ? `<span class="badge" data-tip="${esc(p.status === "declined" ? p.reason || "" : "")}">${pubLabel(p)}</span>` : `<span class="muted">–</span>`);
+  function viewSubmission({ kind, title, credit_usd }) {
+    return `<div class="card stack"><h2>Submitted to Octillion's library</h2><p class="sub">${kind === "persona" ? "Persona" : "Task"} <strong>${esc(title)}</strong> is waiting for Octillion's review. Only its content is shared, never your organization's name. If it is accepted it may be used for every customer, and your organization earns a $${esc(String(credit_usd))} credit on its next invoice.</p></div>`;
   }
   function viewTaskSets({ task_sets }) {
     if (!task_sets.length) return `<div class="card empty">No private task sets yet. Ask me to import your own tasks.</div>`;
     return `<div class="stack">${task_sets.map((t) => `<div class="card"><div class="spread"><h2>${esc(t.name)}</h2><span class="muted">${esc(t.product)} · ${num(t.active_tasks)} active</span></div>
       ${t.description ? `<p class="sub">${esc(t.description)}</p>` : ""}
-      <div class="table-wrap"><table><tbody>${(t.tasks || []).map((x) => `<tr${x.active ? "" : ' style="opacity:.5"'}><td class="muted">${x.id}</td><td>${esc(x.title)}</td><td><span class="badge">${esc(x.platform || "?")}</span></td><td><span class="badge">${esc(x.expectation)}</span></td></tr>`).join("")}</tbody></table></div></div>`).join("")}${privateNote}</div>`;
+      <div class="table-wrap"><table><tbody>${(t.tasks || []).map((x) => `<tr${x.active ? "" : ' style="opacity:.5"'}><td class="muted">${x.id}</td><td>${esc(x.title)}</td><td><span class="badge">${esc(x.platform || "?")}</span></td><td><span class="badge">${esc(x.expectation)}</span></td><td>${pubCell(x.publication)}</td></tr>`).join("")}</tbody></table></div></div>`).join("")}${privateNote}</div>`;
   }
   function viewHarnesses({ harnesses }) {
     if (!harnesses.length) return `<div class="card empty">No private harnesses yet. Ask me to register your coding agent.</div>`;

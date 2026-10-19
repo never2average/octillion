@@ -826,13 +826,14 @@ CREATE INDEX IF NOT EXISTS library_tasks_platform_idx ON library_tasks (platform
 -- Tenant safety (docs/security.md): a developer profile is shared (org_id NULL) exactly when it comes from the vault.
 -- A private persona inserted without its org fails instead of silently becoming visible to every organization.
 ALTER TABLE developer_profiles ALTER COLUMN source DROP DEFAULT;
--- Shared rows come from the vault or were written by Octillion staff on /admin/personas ('admin'); both are public.
+-- Shared rows come from the vault, were written by Octillion staff on /admin/personas ('admin'), or were contributed by a
+-- customer and accepted on /admin/personas ('contributed', library_submissions); all are public.
 -- Re-created when an older definition (vault only) is in place.
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'developer_profiles_owner_matches_source'
-                   AND pg_get_constraintdef(oid) LIKE '%admin%') THEN
+                   AND pg_get_constraintdef(oid) LIKE '%contributed%') THEN
     ALTER TABLE developer_profiles DROP CONSTRAINT IF EXISTS developer_profiles_owner_matches_source;
-    ALTER TABLE developer_profiles ADD CONSTRAINT developer_profiles_owner_matches_source CHECK ((org_id IS NULL) = (source IN ('vault', 'admin')));
+    ALTER TABLE developer_profiles ADD CONSTRAINT developer_profiles_owner_matches_source CHECK ((org_id IS NULL) = (source IN ('vault', 'admin', 'contributed')));
   END IF;
 END $$;
 
@@ -1004,3 +1005,36 @@ CREATE TABLE IF NOT EXISTS vault_env_imports (
   credential_id  INT,
   imported_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Library contributions (src/contributions.ts): an account publishes one of its OWN personas or tasks to Octillion's
+-- shared library. Octillion reviews it on /admin/personas and /admin/tasks (Submissions); an accepted one is copied into
+-- the library as a new row (source 'contributed') and the account gets a Stripe customer-balance credit (Stripe is the
+-- system of record for the money: credit_status/stripe_txn_id only say whether the credit has been made). The
+-- submitted content (snapshot) stays sealed with the account's key (src/orgcrypto.ts); the customer's copy stays theirs.
+CREATE TABLE IF NOT EXISTS library_submissions (
+  id             TEXT PRIMARY KEY,                       -- lsub_...
+  org_id         INT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  kind           TEXT NOT NULL CHECK (kind IN ('persona', 'task')),
+  source_ref     TEXT NOT NULL,                          -- the persona's slug or the task's scenario id
+  title          TEXT NOT NULL,                          -- the persona's name or the task's title, for the lists
+  snapshot       JSONB NOT NULL,                         -- the submitted content, sealed ({_sealed}) when the vault is unlocked
+  status         TEXT NOT NULL DEFAULT 'submitted' CHECK (status IN ('submitted', 'accepted', 'declined', 'withdrawn')),
+  decided_by     TEXT,
+  decided_at     TIMESTAMPTZ,
+  reason         TEXT,                                   -- why it was declined (shown to the account)
+  library_ref    TEXT,                                   -- the library row it became (persona slug or library_tasks id); never shown to the account
+  credit_usd     NUMERIC(10, 2),
+  credit_status  TEXT CHECK (credit_status IN ('none', 'pending', 'credited')),
+  credit_error   TEXT,
+  stripe_txn_id  TEXT,
+  created_by     TEXT,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- One open request per item.
+CREATE UNIQUE INDEX IF NOT EXISTS library_submissions_open_idx ON library_submissions (org_id, kind, source_ref) WHERE status = 'submitted';
+CREATE INDEX IF NOT EXISTS library_submissions_status_idx ON library_submissions (kind, status, created_at DESC);
+ALTER TABLE developer_profiles ADD COLUMN IF NOT EXISTS contributed_by INT REFERENCES organizations(id) ON DELETE SET NULL;
+ALTER TABLE developer_profiles ADD COLUMN IF NOT EXISTS submission_id  TEXT;
+ALTER TABLE library_tasks      ADD COLUMN IF NOT EXISTS contributed_by INT REFERENCES organizations(id) ON DELETE SET NULL;
+ALTER TABLE library_tasks      ADD COLUMN IF NOT EXISTS submission_id  TEXT;

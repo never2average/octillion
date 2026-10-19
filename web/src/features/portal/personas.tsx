@@ -1,8 +1,9 @@
 'use client';
 // /app/personas: the developers this account targets, and only the account's own (private: save_personas in the AI
-// client, or New persona and Import here; src/private.ts). The ones onboarding picked from Octillion's curated library
-// show by name only, marked Curated by Octillion: the library itself is never listed. Members add and edit, viewers
-// read, owners also delete. A save here counts for the "Bring your own developer personas" journey the same as the tool.
+// client, or New persona and Import here; src/private.ts). The ones onboarding picked for the product show by name
+// only (no badge; the library itself is never listed). Members add, edit and publish their own to Octillion's library
+// (the Published column; publish.tsx), viewers read, owners also delete. A save here counts for the "Bring your own
+// developer personas" journey the same as the tool.
 import { useMemo, useState, type ReactNode } from 'react';
 import { toast } from 'sonner';
 import PageContainer from '@/components/layout/page-container';
@@ -16,17 +17,19 @@ import { appApi } from '@/lib/api-client';
 import { parseCsv } from '@/lib/csv';
 import { Chips, Mono, StatusBadge } from '@/features/admin/ui';
 import { CopyButton, ErrorState, FormRow, copy, fail, useOrgLoad } from './shared';
+import { PUBLISHED_OPTIONS, PublishDialog, PublishedBadge, PublishedLine, publishedLabel, withdrawPublication, type Publication } from './publish';
 import { Allowed, useAccountRole } from './role';
 import { companySize } from '@/lib/octillion-format';
 
 type Attributes = { role?: string | null; experience_years?: number | null; company_size?: string | null; stack?: string[]; constraints?: string[]; tone?: string | null; [k: string]: unknown };
-interface ApiPersona { slug: string; name: string; summary: string | null; instructions?: string | null; attributes: Attributes; environment: { editor?: string; tools?: string[] } | null; source?: string; active?: boolean; curated?: boolean }
-export interface Persona extends ApiPersona { curated: boolean; active: boolean; origin: 'Yours' | 'Written by research' | typeof CURATED }
+interface ApiPersona { slug: string; name: string; summary: string | null; instructions?: string | null; attributes: Attributes; environment: { editor?: string; tools?: string[] } | null; source?: string; active?: boolean; curated?: boolean;
+  publishable?: boolean; publication?: Publication | null }
+export interface Persona extends ApiPersona { curated: boolean; active: boolean; origin: 'Yours' | 'Written by research' | typeof PICKED }
 /** What save_personas takes (POST /personas). */
 export interface PersonaInput { slug?: string; name: string; summary?: string; instructions?: string; attributes?: Record<string, unknown>; environment?: unknown; active?: boolean }
 interface Draft { slug?: string; name: string; summary: string; role: string; experience_years: string; company_size: string; stack: string; constraints: string; tone: string; instructions: string }
 
-const CURATED = 'Curated by Octillion';
+const PICKED = 'Picked by onboarding';
 const NA = <span className='text-muted-foreground'>—</span>;
 const META = 'text-muted-foreground flex flex-wrap items-center gap-x-2 gap-y-1 text-xs leading-none';
 const Dot = () => <span className='text-muted-foreground/60'>·</span>;
@@ -47,14 +50,15 @@ const toDraft = (p: Persona, copyOf = false): Draft => ({
 const blank = (): Draft => ({ name: '', summary: '', role: '', experience_years: '', company_size: '', stack: '', constraints: '', tone: '', instructions: '' });
 
 export function PersonasPage() {
-  const { data, error, reload } = useOrgLoad(() => appApi<{ personas: ApiPersona[] }>('GET', '/personas'));
+  const { data, error, reload } = useOrgLoad(() => appApi<{ personas: ApiPersona[]; publish?: { credit_usd: number } }>('GET', '/personas'));
   const { lock } = useAccountRole();
   const [draft, setDraft] = useState<{ d: Draft; from?: Persona } | null>(null);
   const [importing, setImporting] = useState(false);
+  const [publishing, setPublishing] = useState<Persona | null>(null);
 
   const rows = useMemo<Persona[]>(() => (data?.personas ?? []).map((p) => ({
     ...p, attributes: p.attributes ?? {}, curated: !!p.curated, active: p.active !== false,
-    origin: (p.curated ? CURATED : p.source === 'custom' ? 'Yours' : 'Written by research') as Persona['origin']
+    origin: (p.curated ? PICKED : p.source === 'custom' ? 'Yours' : 'Written by research') as Persona['origin']
   })), [data]);
 
   const setActive = (p: Persona, active: boolean) => appApi('PATCH', `/personas/${encodeURIComponent(p.slug)}`, { active })
@@ -67,7 +71,7 @@ export function PersonasPage() {
   const cols: RecordCol<Persona>[] = [
     { key: 'name', label: 'Persona', className: 'min-w-56', title: true, keep: true, peek: false, type: 'text', value: (p) => p.name, render: (p) => (
       <span className='flex flex-col gap-1.5'>
-        <span className='flex items-center gap-2 leading-none font-medium'>{p.name}{p.curated && <StatusBadge tone='info'>{CURATED}</StatusBadge>}</span>
+        <span className='leading-none font-medium'>{p.name}</span>
         {p.summary && <span className='text-muted-foreground line-clamp-1 text-xs leading-snug'>{p.summary}</span>}
       </span>
     ) },
@@ -77,7 +81,9 @@ export function PersonasPage() {
     { key: 'company_size', label: 'Company size', className: 'w-40', type: 'select', value: (p) => companySize(p.attributes.company_size), render: (p) => companySize(p.attributes.company_size) },
     { key: 'stack', label: 'Stack', className: 'min-w-48', type: 'text', value: (p) => list(p.attributes.stack).join(', '), render: (p) => <Chips items={list(p.attributes.stack)} max={3} oneLine /> },
     { key: 'origin', label: 'Origin', className: 'w-40', type: 'select', value: (p) => p.origin,
-      options: [{ value: 'Yours' }, { value: 'Written by research' }, { value: CURATED }], render: (p) => <span className='text-muted-foreground text-sm'>{p.origin}</span> },
+      options: [{ value: 'Yours' }, { value: 'Written by research' }, { value: PICKED }], render: (p) => <span className='text-muted-foreground text-sm'>{p.origin}</span> },
+    { key: 'published', label: 'Published', className: 'w-28', type: 'select', value: (p) => publishedLabel(p.publication), options: PUBLISHED_OPTIONS,
+      render: (p) => <PublishedBadge p={p.publication} /> },
     { key: 'slug', label: 'Id', hidden: true, type: 'text', value: (p) => p.slug, render: (p) => <Mono>{p.slug}</Mono> },
     { key: 'active', label: 'Status', name: 'Active', className: 'w-24', keep: true, type: 'boolean', value: (p) => p.active,
       render: (p) => <StatusBadge tone={p.active ? 'ok' : 'neutral'}>{p.active ? 'on' : 'off'}</StatusBadge> }
@@ -87,6 +93,9 @@ export function PersonasPage() {
     ...(editable(p) ? [lock({ label: 'Edit', icon: <Icons.edit />, onSelect: () => setDraft({ d: toDraft(p), from: p }) }, 'edit')] : []),
     ...(p.curated ? [] : [lock({ label: 'Duplicate', icon: <Icons.add />, onSelect: () => setDraft({ d: toDraft(p, true) }) }, 'edit')]),
     { label: 'Copy id', icon: <Icons.page />, onSelect: () => copy(p.slug) },
+    ...(p.publishable && p.publication?.status === 'submitted'
+      ? [lock({ label: 'Withdraw from review', icon: <Icons.xCircle />, separator: true, onSelect: () => void withdrawPublication(p.publication!, reload) }, 'edit')]
+      : p.publishable ? [lock({ label: 'Publish to Octillion’s library', icon: <Icons.share />, separator: true, onSelect: () => setPublishing(p) }, 'edit')] : []),
     ...(editable(p) ? [
       lock({ label: p.active ? 'Turn off' : 'Turn on', icon: p.active ? <Icons.eyeOff /> : <Icons.check />, separator: true, onSelect: () => void setActive(p, !p.active) }, 'edit'),
       lock({ label: 'Delete', icon: <Icons.trash />, destructive: true, onSelect: () => remove(p) }, 'manage')
@@ -107,7 +116,7 @@ export function PersonasPage() {
           searchText={(p) => `${p.name} ${p.summary ?? ''} ${p.slug} ${p.attributes.role ?? ''} ${list(p.attributes.stack).join(' ')} ${p.origin}`}
           searchPlaceholder='Search personas by name, summary or stack'
           primary={primary} primaryMenu={primaryMenu}
-          empty='No personas yet. Onboarding picks Octillion-curated personas for your product; add your own, import a list, or ask your AI client to save them.'
+          empty='No personas yet. Onboarding picks personas for your product; add your own, import a list, or ask your AI client to save them.'
           detailTitle={(p) => p.name}
           detailActions={(p) => (<>
             {editable(p) && <Allowed need='edit'><Button size='sm' variant='outline' onClick={() => setDraft({ d: toDraft(p), from: p })}><Icons.edit /> Edit</Button></Allowed>}
@@ -118,20 +127,22 @@ export function PersonasPage() {
       )}
       {draft && <PersonaEditor draft={draft.d} from={draft.from} onClose={() => setDraft(null)} onSaved={() => { setDraft(null); void reload(); }} />}
       {importing && <ImportDialog onClose={() => setImporting(false)} onDone={() => { setImporting(false); void reload(); }} />}
+      {publishing && <PublishDialog kind='persona' title={publishing.name} path={`/personas/${encodeURIComponent(publishing.slug)}/publish`} creditUsd={data?.publish?.credit_usd}
+        onClose={() => setPublishing(null)} onDone={() => { setPublishing(null); void reload(); }} />}
     </PageContainer>
   );
 }
 
-/** The persona peek: a meta line, its properties, summary, constraints, instructions, and how to use it. A curated one: its name and how to use it. */
+/** The persona peek: a meta line, its properties, summary, constraints, instructions, and how to use it. One onboarding picked: its name and how to use it. */
 function PersonaBody({ p }: { p: Persona }) {
   const a = p.attributes;
   if (p.curated) return (
     <div className='flex flex-col gap-8'>
       <div className={META}>
         <span className={p.active ? 'text-foreground font-medium' : ''}>{p.active ? 'On' : 'Off'}</span><Dot />
-        <StatusBadge tone='info'>{CURATED}</StatusBadge><Dot /><Mono>{p.slug}</Mono>
+        <Mono>{p.slug}</Mono>
       </div>
-      <p className='text-muted-foreground text-sm'>Onboarding picked this developer persona from Octillion&apos;s curated library for your product. Its details stay with Octillion.</p>
+      <p className='text-muted-foreground text-sm'>Onboarding picked this developer persona for your product. Its details aren&apos;t shown, and it can&apos;t be published.</p>
       <RunIt p={p} />
     </div>
   );
@@ -153,6 +164,7 @@ function PersonaBody({ p }: { p: Persona }) {
         {p.environment?.editor && <Field label='Editor'>{p.environment.editor}</Field>}
         {!!p.environment?.tools?.length && <Field label='Tools'><Chips items={p.environment.tools} /></Field>}
         {other.map((o) => <Field key={o.k} label={o.k}><span className='break-all'>{o.v}</span></Field>)}
+        {p.publishable && <Field label='Published'><PublishedLine p={p.publication} /></Field>}
       </dl>
       {p.summary && <section><Label>Summary</Label><Prose>{p.summary}</Prose></section>}
       {constraints.length > 0 && (

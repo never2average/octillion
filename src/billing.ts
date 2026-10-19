@@ -229,3 +229,32 @@ export function reportSessionSpend(sessionId: string): void {
       payload: { stripe_customer_id: r.stripe_customer_id, value: cents } });
   })().catch((err) => console.error(`stripe meter event for ${sessionId} failed:`, (err as Error).message));
 }
+
+// ---------- credits for library contributions (src/contributions.ts) ----------
+
+export interface BalanceTransaction { id: string; amount: number; currency: string; created: number; description: string | null; metadata?: Record<string, string> }
+/** The metadata key a library-contribution credit carries: the submission (request) id. */
+export const CONTRIBUTION_META = "library_submission_id";
+
+/**
+ * Credit a customer's Stripe balance (a negative balance transaction), which Stripe applies to their next invoice.
+ * The idempotency key is the submission id, so a retry never credits twice.
+ */
+export const creditCustomerBalance = (customer: string, o: { cents: number; description: string; submissionId: string; kind: string }) =>
+  call<BalanceTransaction>("POST", `/v1/customers/${encodeURIComponent(customer)}/balance_transactions`, {
+    amount: -Math.abs(Math.round(o.cents)), currency: "usd", description: o.description,
+    metadata: { [CONTRIBUTION_META]: o.submissionId, octillion_kind: o.kind },
+  }, `library-credit-${o.submissionId}`);
+
+/** A customer's balance transactions that are library-contribution credits (newest first, at most 500). */
+export async function contributionCredits(customer: string): Promise<BalanceTransaction[]> {
+  const out: BalanceTransaction[] = [];
+  for (let after: string | undefined; out.length < 500;) {
+    const page = await call<{ data: BalanceTransaction[]; has_more: boolean }>("GET",
+      `/v1/customers/${encodeURIComponent(customer)}/balance_transactions?limit=100${after ? `&starting_after=${after}` : ""}`);
+    out.push(...page.data);
+    if (!page.has_more || !page.data.length) break;
+    after = page.data[page.data.length - 1]!.id;
+  }
+  return out.filter((t) => t.metadata?.[CONTRIBUTION_META]);
+}

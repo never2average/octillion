@@ -1,4 +1,5 @@
 import * as priv from "./private.js";
+import * as contributions from "./contributions.js";
 import { accountRefusal, canAccount, type AccountPermission } from "./account-roles.js";
 import { readFileSync } from "node:fs";
 import { chatLine, nudgeForChat } from "./journeys.js";
@@ -60,6 +61,10 @@ export function handlersFor(org: Org) {
     list_personas: (_a: Record<string, never>) => priv.listPersonas(org),
     import_tasks: (a: { product?: string; task_set: string; description?: string; tasks: priv.TaskInput[] }) => priv.importTasks(org, a),
     list_task_sets: (a: { product?: string }) => priv.listTaskSets(org, a.product),
+    publish_to_library: (a: { persona?: string; task_id?: number }) => {
+      if ((a.persona == null) === (a.task_id == null)) throw new Error("Pass one of persona (a slug from list_personas) or task_id (a task id from list_task_sets)");
+      return contributions.publish(org, `ai:${org.userId ?? org.slug}`, a.persona != null ? "persona" : "task", String(a.persona ?? a.task_id));
+    },
     register_harness: (a: { spec: priv.HarnessSpec }) => priv.registerHarness(org, a.spec),
     list_harnesses: (_a: Record<string, never>) => priv.listHarnesses(org),
     save_to_memory: (a: { body: string; kind?: string; scope?: memory.ToolScope; product?: string }) => memory.saveMemoryFromAI(org, a),
@@ -69,6 +74,10 @@ export function handlersFor(org: Org) {
 type Handlers = ReturnType<typeof handlersFor>;
 export type ToolName = keyof Handlers;
 type Data = Awaited<ReturnType<Handlers[ToolName]>>;
+
+/** A persona's or task's publication to Octillion's library, for the summaries. */
+const pubLine = (p: { status: string; reason?: string | null } | null | undefined) =>
+  !p ? "" : p.status === "accepted" ? ", published to Octillion's library" : p.status === "declined" ? `, declined by Octillion's library${p.reason ? `: ${p.reason}` : ""}` : ", submitted to Octillion's library";
 
 /** Model-readable summary placed in the text content next to the structured data. */
 function summarize(d: Data): string {
@@ -123,12 +132,14 @@ function summarize(d: Data): string {
         : `No developer profiles${d.query ? ` match "${d.query}"` : " yet"}. Onboarding (onboard_product) picks Octillion-curated personas for each product; add your own with save_personas.`;
     case "personas":
       return d.personas.length
-        ? `${d.personas.length} persona(s) of this organization: ${d.personas.map((p: any) => `${p.slug} (${p.name}, ${p.curated ? q.CURATED.toLowerCase() : p.source}${p.active ? "" : ", inactive"})`).join("; ")}. Pass slugs as run_simulation profiles. Only this organization can see or use them.`
+        ? `${d.personas.length} persona(s) of this organization: ${d.personas.map((p: any) => `${p.slug} (${p.name}, ${p.curated ? q.CURATED.toLowerCase() : p.source}${p.active ? "" : ", inactive"}${pubLine(p.publication)})`).join("; ")}. Pass slugs as run_simulation profiles. Only this organization can see or use them.`
         : "No personas yet. Onboarding (onboard_product) picks Octillion-curated personas for each product; add your own with save_personas.";
     case "task_sets":
       return d.task_sets.length
-        ? `${d.task_sets.length} private task set(s): ${d.task_sets.map((t: any) => `${t.name} [${t.id}] for ${t.product}: ${t.active_tasks} active task(s)`).join("; ")}. Run one with run_simulation {task_set}.`
+        ? `${d.task_sets.length} private task set(s): ${d.task_sets.map((t: any) => `${t.name} [${t.id}] for ${t.product}: ${t.active_tasks} active task(s)${(t.tasks ?? []).some((x: any) => x.publication) ? ` (published to Octillion's library: ${(t.tasks ?? []).filter((x: any) => x.publication).map((x: any) => `#${x.id}${pubLine(x.publication)}`).join(", ")})` : ""}`).join("; ")}. Run one with run_simulation {task_set}.`
         : "No private task sets yet. Bring your own with import_tasks.";
+    case "library_submission":
+      return `Submitted ${d.kind === "persona" ? "persona" : "task"} "${d.title}" to Octillion's library for review. Only its content is shared, never the account's name; if Octillion accepts it, it may be used for every customer, and the account earns a $${d.credit_usd} credit on its next invoice. Its status shows in list_${d.kind === "persona" ? "personas" : "task_sets"}; it can be withdrawn from the Developer personas or Programming tasks page until it is reviewed.`;
     case "harness_mixes":
       return d.mixes.length
         ? `${d.mixes.length} private harness mix(es): ${d.mixes.map((m: any) => `${m.name} [${m.slug}]: ${m.agents.map((a: any) => `${a.agent_id} ${Math.round(a.share * 100)}%`).join(", ")}`).join("; ")}. Run one with run_simulation {population: slug}; its reports are labelled and never blended with the default mix.`
@@ -268,7 +279,7 @@ export function runTool(org: Org, name: ToolName, args: Record<string, unknown>)
  */
 export const TOOL_NEEDS: Partial<Record<ToolName, AccountPermission>> = {
   onboard_product: "launch", run_simulation: "launch",
-  save_product: "edit", save_scenarios: "edit", cancel_simulation: "edit", save_personas: "edit", import_tasks: "edit", register_harness: "edit",
+  save_product: "edit", save_scenarios: "edit", cancel_simulation: "edit", save_personas: "edit", import_tasks: "edit", register_harness: "edit", publish_to_library: "edit",
   save_harness_mix: "edit", review_draft_tasks: "edit", save_to_memory: "edit",
 };
 
@@ -328,6 +339,7 @@ export const TOOL_STATUS: Record<ToolName, [string, string]> = {
   list_personas: ["Loading private personas…", "Private personas loaded"],
   import_tasks: ["Importing private tasks…", "Private tasks imported"],
   list_task_sets: ["Loading private task sets…", "Private task sets loaded"],
+  publish_to_library: ["Submitting to Octillion's library…", "Submitted for review"],
   register_harness: ["Registering private harness…", "Private harness submitted"],
   list_harnesses: ["Loading private harnesses…", "Private harnesses loaded"],
   save_harness_mix: ["Saving private harness mix…", "Private harness mix saved"],
@@ -609,6 +621,15 @@ export function createServer(org: Org, context = ""): McpServer {
     description: "Your organization's private task sets and their tasks.",
     inputSchema: { product }, annotations: read, _meta: meta("list_task_sets"),
   }, run("list_task_sets"));
+  registerAppTool(server, "publish_to_library", {
+    title: "Publish to Octillion's library",
+    description: "Offer one of your own personas (persona: slug from list_personas) or one task of your own task sets (task_id from list_task_sets) to Octillion's shared library. Only its content is shared, never your organization's name. Octillion reviews it; if accepted it may be used for every customer and your organization earns a credit on its next invoice. Personas and tasks onboarding picked for you can't be published. One open request per item; edit it to submit again after a decision. Confirm with the user before calling.",
+    inputSchema: {
+      persona: z.string().optional().describe("Slug of one of your own personas (list_personas)"),
+      task_id: z.number().int().optional().describe("Id of a task in one of your task sets (list_task_sets)"),
+    },
+    annotations: { ...write, idempotentHint: false }, _meta: meta("publish_to_library"),
+  }, run("publish_to_library"));
   registerAppTool(server, "register_harness", {
     title: "Register a private harness",
     description: "Submit your own coding agent as a declarative spec (pinned packages with integrity hashes, the executable and its arguments, the model providers it calls through the Octillion gateway). Private to your organization. It is built and scanned in isolation and runs only once approved; real vendor keys are never given to it.",

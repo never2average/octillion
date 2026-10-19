@@ -10,7 +10,7 @@ import path from "node:path";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const TENANT_TABLES = ["agent_sessions", "simulations", "products", "scenarios", "product_research", "org_task_sets",
-  "org_harnesses", "transcript_events", "gateway_usage", "mcp_events", "worker_tokens", "api_keys"];
+  "org_harnesses", "transcript_events", "gateway_usage", "mcp_events", "worker_tokens", "api_keys", "library_submissions"];
 const BASELINE = path.join(ROOT, "scripts/tenant-sql-baseline.json");
 
 const files = readdirSync(path.join(ROOT, "src")).filter((f) => f.endsWith(".ts")).map((f) => path.join("src", f));

@@ -1,8 +1,8 @@
 'use client';
 // /app/tasks: the programming tasks this account brings, as task sets per product (org_task_sets; import_tasks in the
 // AI client, or New task set, Add task and Import here; src/private.ts), plus the tasks onboarding picked into a
-// product from Octillion's curated library, by title and status only (marked Curated by Octillion: the prompt and the
-// library itself stay Octillion's). Members create, edit and turn tasks off; viewers read.
+// product, by title and status only (no badge: the prompt and the library itself stay Octillion's). Members create,
+// edit, turn tasks off and publish their own to Octillion's library (the Published column; publish.tsx); viewers read.
 // A save here counts for the "Bring your own programming tasks" journey the same as the tool.
 import { useMemo, useState, type ReactNode } from 'react';
 import { toast } from 'sonner';
@@ -18,6 +18,7 @@ import { appApi } from '@/lib/api-client';
 import { parseCsv } from '@/lib/csv';
 import { Chips, Mono, StatusBadge } from '@/features/admin/ui';
 import { CopyButton, ErrorState, FormRow, When, fail, useOrgLoad } from './shared';
+import { PUBLISHED_OPTIONS, PublishDialog, PublishedBadge, PublishedLine, publishedLabel, withdrawPublication, type Publication } from './publish';
 import { Allowed, useAccountRole } from './role';
 
 const PLATFORMS = ['web', 'mobile', 'backend', 'desktop', 'cli', 'data', 'other'] as const;
@@ -27,9 +28,9 @@ interface Run { task_set: string; id: string; name: string; status: string; crea
 export interface Task {
   id: number; title: string; prompt: string | null; repo_url: string | null; language: string | null; tags: string[] | null; platform: string | null;
   template: string | null; expectation: 'recommend' | 'avoid'; active: boolean; source: string; provenance: string | null; curated: boolean;
-  task_set: string | null; product: string; product_name: string; created_at: string;
+  task_set: string | null; product: string; product_name: string; created_at: string; publishable?: boolean; publication?: Publication | null;
 }
-interface Data { task_sets: TaskSet[]; tasks: Task[]; runs: Run[]; products: Product[] }
+interface Data { task_sets: TaskSet[]; tasks: Task[]; runs: Run[]; products: Product[]; publish?: { credit_usd: number } }
 /** What import_tasks takes for one task. */
 export interface TaskInput { title?: string; prompt: string; language?: string; tags?: string[]; platform?: string; template?: string; repo_url?: string; expectation?: string; provenance?: string }
 interface Draft { title: string; prompt: string; language: string; platform: string; repo_url: string; tags: string }
@@ -40,8 +41,8 @@ const PROMPT = 'block font-mono text-xs leading-relaxed whitespace-pre-wrap bord
 const Dot = () => <span className='text-muted-foreground/60'>·</span>;
 const Label = ({ children }: { children: ReactNode }) => <div className='text-muted-foreground mb-2 text-xs font-medium leading-none'>{children}</div>;
 const repoName = (u: string) => { try { const x = new URL(u); return `${x.host}${x.pathname.replace(/\/$/, '')}`; } catch { return u.replace(/^https?:\/\//, ''); } };
-const CURATED_SET = '__curated';
-const CURATED = 'Curated by Octillion';
+const PICKED_SET = '__picked';
+const PICKED = 'Picked by onboarding';
 const blankDraft = (): Draft => ({ title: '', prompt: '', language: '', platform: '', repo_url: '', tags: '' });
 const toDraft = (t: Task): Draft => ({ title: t.title, prompt: t.prompt ?? '', language: t.language ?? '', platform: t.platform ?? '', repo_url: t.repo_url ?? '', tags: (t.tags ?? []).join(', ') });
 /** A draft as import_tasks input: blanks left out, so the server picks the platform and starter workspace. */
@@ -56,15 +57,15 @@ export function TasksPage() {
   const { lock } = useAccountRole();
   const [product, setProduct] = useState('');
   const [set, setSet] = useState('');
-  const [dialog, setDialog] = useState<null | { kind: 'set' } | { kind: 'add'; set: TaskSet } | { kind: 'edit'; task: Task } | { kind: 'import' }>(null);
+  const [dialog, setDialog] = useState<null | { kind: 'set' } | { kind: 'add'; set: TaskSet } | { kind: 'edit'; task: Task } | { kind: 'import' } | { kind: 'publish'; task: Task }>(null);
 
   const sets = useMemo(() => new Map((data?.task_sets ?? []).map((s) => [s.id, s])), [data]);
   const runsOf = (id: string | null) => (data?.runs ?? []).filter((r) => r.task_set === id);
   const products = data?.products ?? [];
   const setsShown = (data?.task_sets ?? []).filter((s) => !product || s.product === product);
   const rows = useMemo(() => (data?.tasks ?? []).filter((t) => (!product || t.product === product)
-    && (!set || (set === CURATED_SET ? !t.task_set : t.task_set === set))), [data, product, set]);
-  const setName = (t: Task) => (t.task_set ? sets.get(t.task_set)?.name ?? '—' : CURATED);
+    && (!set || (set === PICKED_SET ? !t.task_set : t.task_set === set))), [data, product, set]);
+  const setName = (t: Task) => (t.task_set ? sets.get(t.task_set)?.name ?? '—' : PICKED);
 
   const setActive = (t: Task, active: boolean) => appApi('PATCH', `/tasks/${t.id}`, { active })
     .then(() => { toast.success(active ? 'Task turned on' : 'Task turned off'); return reload(); }).catch(fail);
@@ -72,8 +73,8 @@ export function TasksPage() {
   const cols: RecordCol<Task>[] = [
     { key: 'title', label: 'Task', className: 'min-w-72', title: true, keep: true, peek: false, type: 'text', value: (t) => t.title, render: (t) => (
       <span className='flex min-w-0 flex-col gap-1.5'>
-        <span className='flex items-center gap-2 leading-none font-medium'><span className='truncate' title={t.title}>{t.title}</span>{t.curated && <StatusBadge tone='info'>{CURATED}</StatusBadge>}</span>
-        <span className='text-muted-foreground line-clamp-1 text-xs leading-snug'>{t.curated ? CURATED : t.prompt}</span>
+        <span className='truncate leading-none font-medium' title={t.title}>{t.title}</span>
+        {!t.curated && t.prompt && <span className='text-muted-foreground line-clamp-1 text-xs leading-snug'>{t.prompt}</span>}
       </span>
     ) },
     { key: 'set', label: 'Task set', className: 'w-48', type: 'select', value: setName, render: (t) => <span className='text-sm'>{setName(t)}</span> },
@@ -84,6 +85,8 @@ export function TasksPage() {
       render: (t) => (t.repo_url ? <span className='text-muted-foreground block max-w-52 truncate text-xs' title={t.repo_url}>{repoName(t.repo_url)}</span> : NA) },
     { key: 'tags', label: 'Tags', className: 'min-w-40', type: 'text', value: (t) => (t.tags ?? []).join(', '), render: (t) => <Chips items={t.tags} max={2} oneLine /> },
     { key: 'created_at', label: 'Added', className: 'w-28', hidden: true, type: 'date', value: (t) => t.created_at, render: (t) => <span className='text-muted-foreground text-xs'><When d={t.created_at} /></span> },
+    { key: 'published', label: 'Published', className: 'w-28', type: 'select', value: (t) => publishedLabel(t.publication), options: PUBLISHED_OPTIONS,
+      render: (t) => <PublishedBadge p={t.publication} /> },
     { key: 'active', label: 'Status', name: 'Active', className: 'w-24', keep: true, type: 'boolean', value: (t) => t.active,
       render: (t) => <StatusBadge tone={t.active ? 'ok' : 'neutral'}>{t.active ? 'on' : 'off'}</StatusBadge> }
   ];
@@ -91,6 +94,9 @@ export function TasksPage() {
   const actions = (t: Task): RowAction[] => [
     ...(t.task_set ? [lock({ label: 'Edit', icon: <Icons.edit />, onSelect: () => setDialog({ kind: 'edit', task: t }) }, 'edit')] : []),
     ...(t.task_set && sets.get(t.task_set) ? [lock({ label: 'Add a task to this set', icon: <Icons.add />, onSelect: () => setDialog({ kind: 'add', set: sets.get(t.task_set!)! }) }, 'edit')] : []),
+    ...(t.publishable && t.publication?.status === 'submitted'
+      ? [lock({ label: 'Withdraw from review', icon: <Icons.xCircle />, onSelect: () => void withdrawPublication(t.publication!, reload) }, 'edit')]
+      : t.publishable ? [lock({ label: 'Publish to Octillion’s library', icon: <Icons.share />, onSelect: () => setDialog({ kind: 'publish', task: t }) }, 'edit')] : []),
     lock({ label: t.active ? 'Turn off' : 'Turn on', icon: t.active ? <Icons.eyeOff /> : <Icons.check />, separator: true, onSelect: () => void setActive(t, !t.active) }, 'edit')
   ];
 
@@ -109,7 +115,7 @@ export function TasksPage() {
     <NativeSelect aria-label='Task set' value={set} onChange={(e) => setSet(e.target.value)}>
       <NativeSelectOption value=''>All task sets</NativeSelectOption>
       {setsShown.map((s) => <NativeSelectOption key={s.id} value={s.id}>{s.name}{products.length > 1 && !product ? ` (${products.find((p) => p.slug === s.product)?.name ?? s.product})` : ''}</NativeSelectOption>)}
-      {(data?.tasks ?? []).some((t) => !t.task_set) && <NativeSelectOption value={CURATED_SET}>{CURATED}</NativeSelectOption>}
+      {(data?.tasks ?? []).some((t) => !t.task_set) && <NativeSelectOption value={PICKED_SET}>{PICKED}</NativeSelectOption>}
     </NativeSelect>
   </>);
 
@@ -124,7 +130,7 @@ export function TasksPage() {
           searchPlaceholder='Search tasks by title, prompt, set or tag'
           filters={filters} primary={primary} primaryMenu={primaryMenu}
           empty={noProducts ? 'Add a product first: an owner adds it under Context, Products, or onboard it from your AI client.'
-            : 'No tasks yet. Onboarding picks Octillion-curated tasks for your product; create a task set or import your own.'}
+            : 'No tasks yet. Onboarding picks tasks for your product; create a task set or import your own.'}
           detailTitle={(t) => t.title}
           detailActions={(t) => (<>
             {t.task_set && <Allowed need='edit'><Button size='sm' variant='outline' onClick={() => setDialog({ kind: 'edit', task: t })}><Icons.edit /> Edit</Button></Allowed>}
@@ -136,6 +142,8 @@ export function TasksPage() {
       {data && dialog?.kind === 'set' && <TaskDialog products={products} sets={data.task_sets} product={product || products[0]?.slug} onClose={() => setDialog(null)} onSaved={() => { setDialog(null); void reload(); }} />}
       {data && dialog?.kind === 'add' && <TaskDialog products={products} sets={data.task_sets} product={dialog.set.product} fixed={dialog.set} onClose={() => setDialog(null)} onSaved={() => { setDialog(null); void reload(); }} />}
       {dialog?.kind === 'edit' && <TaskDialog products={products} sets={data?.task_sets ?? []} task={dialog.task} onClose={() => setDialog(null)} onSaved={() => { setDialog(null); void reload(); }} />}
+      {dialog?.kind === 'publish' && <PublishDialog kind='task' title={dialog.task.title} path={`/tasks/${dialog.task.id}/publish`} creditUsd={data?.publish?.credit_usd}
+        onClose={() => setDialog(null)} onDone={() => { setDialog(null); void reload(); }} />}
       {data && dialog?.kind === 'import' && <ImportDialog products={products} sets={data.task_sets} product={product || products[0]?.slug} onClose={() => setDialog(null)} onDone={() => { setDialog(null); void reload(); }} />}
     </PageContainer>
   );
@@ -143,7 +151,7 @@ export function TasksPage() {
 
 /**
  * The task peek: a meta line, properties, the prompt in full, where it came from, and its set with the runs that used
- * it. A curated task: its title, product and status, with Curated by Octillion in place of the prompt.
+ * it. A task onboarding picked: its title, product and status, without the prompt.
  */
 function TaskBody({ t, set, runs }: { t: Task; set: TaskSet | null; runs: Run[] }) {
   const prompt = set ? `Run a simulation for ${t.product_name} on the task set ${set.name}.` : `Run a simulation for ${t.product_name} on the task "${t.title}".`;
@@ -160,7 +168,6 @@ function TaskBody({ t, set, runs }: { t: Task; set: TaskSet | null; runs: Run[] 
     <div className='flex flex-col gap-8'>
       <div className={META}>
         <span className={t.active ? 'text-foreground font-medium' : ''}>{t.active ? 'On' : 'Off'}</span><Dot />
-        <StatusBadge tone='info'>{CURATED}</StatusBadge><Dot />
         <Mono>#{t.id}</Mono><Dot />
         <span>Added <When d={t.created_at} /></span>
       </div>
@@ -168,7 +175,7 @@ function TaskBody({ t, set, runs }: { t: Task; set: TaskSet | null; runs: Run[] 
         <Field label='Product'>{t.product_name}</Field>
         {t.platform && <Field label='Platform'>{t.platform}</Field>}
       </dl>
-      <section><Label>Prompt</Label><p className='text-muted-foreground text-sm'>{CURATED}. Onboarding picked this task for {t.product_name}; its prompt stays with Octillion.</p></section>
+      <section><Label>Prompt</Label><p className='text-muted-foreground text-sm'>Onboarding picked this task for {t.product_name}. Its prompt isn&apos;t shown, and it can&apos;t be published.</p></section>
       {runIt}
     </div>
   );
@@ -193,6 +200,7 @@ function TaskBody({ t, set, runs }: { t: Task; set: TaskSet | null; runs: Run[] 
         <Field label='Tags'><Chips items={t.tags} /></Field>
         {t.expectation === 'avoid' && <Field label='Expectation'>Agents should not pick the product</Field>}
         {t.provenance && <Field label='Comes from'>{t.provenance}</Field>}
+        {t.publishable && <Field label='Published'><PublishedLine p={t.publication} /></Field>}
       </dl>
       <section><Label>Prompt</Label><code className={PROMPT}>{t.prompt}</code></section>
       {set && (

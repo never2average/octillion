@@ -28,6 +28,7 @@ import * as clerk from "./clerk.js";
 import { clerkSession } from "./session.js";
 import * as roles from "./account-roles.js";
 import * as priv from "./private.js";
+import * as contributions from "./contributions.js";
 import { recordPageAction } from "./analytics.js";
 
 const publicUrl = () => (process.env.PUBLIC_URL ?? `http://127.0.0.1:${process.env.PORT ?? 3333}`).replace(/\/$/, "");
@@ -609,7 +610,7 @@ export function appRouter() {
   const qp = <T>(p: Promise<T>) => p.catch((e: Error & { code?: unknown }) => {
     if (e instanceof AppError) throw e;
     if (typeof e.code === "string" && /^[0-9A-Z]{5}$/.test(e.code)) throw new AppError(`The request could not be completed (database error ${e.code}). Check the values and try again.`);
-    throw new AppError(e.message, /^No (persona|task|product)s? |not found|unknown/i.test(e.message) ? 404 : 400);
+    throw new AppError(e.message, /^No (persona|task|product|open submission)s? |not found|unknown/i.test(e.message) ? 404 : 400);
   });
   const checked = <T>(schema: { safeParse: (v: unknown) => { success: true; data: T } | { success: false; error: any } }, v: unknown, root: string): T => {
     const r = schema.safeParse(v);
@@ -621,7 +622,7 @@ export function appRouter() {
     // Only the account's own (Octillion's shared library personas are its IP and never listed; picked copies by name).
     const own = await qp(priv.listPersonas(org));
     await recordPageAction(org, "list_personas", { every: 3_600_000 });
-    res.json({ personas: own.personas, permissions: perms(res) });
+    res.json({ personas: own.personas, permissions: perms(res), publish: { credit_usd: (await contributions.discountUsd()).persona } });
   });
   // New persona, edits by slug and Import: the save_personas shape ({ personas: [...] }, 1-20 at a time).
   api.post("/personas", express.json({ limit: "256kb" }), async (req, res) => {
@@ -652,7 +653,8 @@ export function appRouter() {
     const [sets, detail, products] = await Promise.all([qp(priv.listTaskSets(org)), priv.taskSetDetails(org), listProducts(org)]);
     await recordPageAction(org, "list_task_sets", { every: 3_600_000 });
     res.json({ task_sets: sets.task_sets, tasks: detail.tasks, runs: detail.runs,
-      products: ((products as any).products as any[]).map((p) => ({ slug: p.slug, name: p.name })), permissions: perms(res) });
+      products: ((products as any).products as any[]).map((p) => ({ slug: p.slug, name: p.name })), permissions: perms(res),
+      publish: { credit_usd: (await contributions.discountUsd()).task } });
   });
   // Create a task set, add tasks to one (same name) and Import: the import_tasks shape.
   api.post("/tasks", express.json({ limit: "1mb" }), async (req, res) => {
@@ -675,11 +677,27 @@ export function appRouter() {
   });
   // No library routes: Octillion's curated tasks reach a product only through onboarding research, never by browsing.
 
+  // Publish to Octillion's library (src/contributions.ts): the account's own personas and tasks only, Member or above.
+  // Octillion reviews each request; an accepted one earns a credit on the next invoice. Withdraw while it waits.
+  api.post("/personas/:slug/publish", async (req, res) => {
+    need(res, "edit");
+    res.status(201).json(await qp(contributions.publish(await orgOf(res), actor(res), "persona", String(req.params.slug))));
+  });
+  api.post("/tasks/:id/publish", async (req, res) => {
+    need(res, "edit");
+    res.status(201).json(await qp(contributions.publish(await orgOf(res), actor(res), "task", String(req.params.id))));
+  });
+  api.post("/submissions/:id/withdraw", async (req, res) => {
+    need(res, "edit");
+    res.json(await qp(contributions.withdraw(await orgOf(res), String(req.params.id))));
+  });
+
   // Journey tips (src/journeys.ts): everything waiting for this person, dismiss one, or turn tips off.
   api.get("/nudges", async (_req, res) => void res.json(await journeys.nudgesForApp(S(res).org, S(res).user)));
   api.post("/nudges/:id/dismiss", async (req, res) => { await journeys.dismiss(S(res).org, S(res).slug, S(res).user, Number(req.params.id)); res.status(204).end(); });
   api.post("/nudges/mute", async (req, res) => { await journeys.setMuted(S(res).org, S(res).slug, S(res).user, req.body?.muted !== false); res.status(204).end(); });
-  api.get("/billing", async (_req, res) => void res.json({ ...(await billingView(S(res))), can_manage: can(res, "billing"), permissions: perms(res) }));
+  api.get("/billing", async (_req, res) => void res.json({ ...(await billingView(S(res))), can_manage: can(res, "billing"), permissions: perms(res),
+    contributions: await contributions.creditsFor(S(res).org) }));
   api.get("/billing/usage", async (_req, res) => void res.json(await billingUsage(S(res))));
   api.post("/billing/portal", async (_req, res) => { need(res, "billing"); res.json(await admin.portalLink(actor(res), S(res).slug, `${publicUrl()}/app#billing`)); });
   api.post("/billing/checkout", async (req, res) => { need(res, "billing"); res.json(await admin.checkoutLink(actor(res), S(res).slug, req.body?.price_id, `${publicUrl()}/app#billing`, { requireAllowed: true })); });

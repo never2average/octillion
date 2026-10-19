@@ -18,6 +18,7 @@ import { resolveProduct, checkTemplate, checkPlatform, WORKSPACE_TEMPLATES, forC
 import { PLATFORMS } from "./platform.js";
 import { platformOf } from "./platform.js";
 import { environmentIssues, type PersonaEnvironment } from "../orchestrator/core/environment.js";
+import { publicationsFor } from "./contributions.js";
 
 const rid = (prefix: string) => `${prefix}_${randomBytes(9).toString("base64url").toLowerCase().replace(/[^a-z0-9]/g, "x")}`;
 /** Strip control, bidi and zero-width characters (they can hide text from a reviewer) and trim. */
@@ -120,7 +121,10 @@ export async function listPersonas(org: Org, highlight: string[] = []) {
        FROM developer_profiles WHERE org_id = $1 ORDER BY source, name`, [org.orgId]);
   await openRows(org.orgId, personas, ["summary", "instructions"]);
   for (const p of personas) p.attributes = await openJson(org.orgId, p.attributes);
-  return { view: "personas" as const, personas: personas.map(personaForCustomer), saved: highlight };
+  // Its publication to Octillion's library (src/contributions.ts): only the account's own (custom) personas can be published.
+  const pubs = await publicationsFor(org.orgId, "persona");
+  return { view: "personas" as const, saved: highlight, personas: personas.map(personaForCustomer).map((p) => ({
+    ...p, publishable: p.source === "custom", publication: p.source === "custom" ? pubs.get(p.slug) ?? null : null })) };
 }
 
 /** Turn one of the organization's own personas on or off (Turn off on /app/personas), without rewriting it. */
@@ -204,6 +208,9 @@ export async function listTaskSets(org: Org, product?: string) {
        FROM org_task_sets ts JOIN products p ON p.id = ts.product_id AND p.org_id = ts.org_id
        LEFT JOIN scenarios sc ON sc.task_set_id = ts.id
       WHERE ${where} GROUP BY ts.id, p.slug ORDER BY ts.created_at DESC`, params);
+  // Each task's publication to Octillion's library (src/contributions.ts).
+  const pubs = await publicationsFor(org.orgId, "task");
+  for (const set of sets as any[]) for (const t of set.tasks ?? []) t.publication = pubs.get(String(t.id)) ?? null;
   return { view: "task_sets" as const, task_sets: sets };
 }
 
@@ -234,7 +241,12 @@ export async function taskSetDetails(org: Org) {
     if (t.task_set) { t.prompt = await openText(org.orgId, t.prompt); t.provenance = t.provenance ? await openText(org.orgId, t.provenance) : null; }
     else t.provenance = null; // a library pick: its rationale is research's, not a provenance
   }
-  const shown = tasks.map((t) => forCustomer(t));
+  const pubs = await publicationsFor(org.orgId, "task");
+  // Only a task of the account's own sets can be published; a curated one (onboarding's pick) can't.
+  const shown = tasks.map((t) => forCustomer(t)).map((t) => {
+    const publishable = Boolean(t.task_set) && !t.curated && t.source === "custom";
+    return { ...t, publishable, publication: publishable ? pubs.get(String(t.id)) ?? null : null };
+  });
   const runs = await db.query<{ task_set: string; id: string; name: string; status: string; created_at: Date }>(
     `SELECT DISTINCT ON (ts.public_id, sim.id) ts.public_id AS task_set, sim.id, sim.name, sim.status, sim.created_at
        FROM agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id JOIN org_task_sets ts ON ts.id = sc.task_set_id AND ts.org_id = $1

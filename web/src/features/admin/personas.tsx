@@ -16,10 +16,11 @@ import { post, useAdmin, useAdminAction } from './lib';
 import { Gate, useAdminRole } from './role';
 import { Chips, ErrorBox, FormRow, Mono, StatusBadge, When } from './ui';
 import { companySize } from '@/lib/octillion-format';
+import { LibraryViewSwitch, Submissions, useLibraryView } from './submissions';
 
 export interface Persona {
   slug: string; external_id: string | null; name: string; summary: string; instructions: string; active: boolean;
-  source: 'vault' | 'admin'; synced_at: string; edited_at: string | null; edited_by: string | null;
+  source: 'vault' | 'admin' | 'contributed'; synced_at: string; edited_at: string | null; edited_by: string | null;
   attributes: { role?: string | null; experience_years?: number | null; company_size?: string | null; stack?: string[]; constraints?: string[]; tone?: string | null; [k: string]: unknown };
 }
 /** What the edit form writes (PATCH / POST /personas). */
@@ -37,7 +38,7 @@ const sizeOf = (p: { attributes: { company_size?: string | null } }) => companyS
 const SHOWN = new Set(['role', 'experience_years', 'company_size', 'stack', 'constraints', 'tone']);
 const text = (v: unknown) => (v == null || v === '' ? null : typeof v === 'object' ? JSON.stringify(v) : String(v));
 const years = (p: Persona) => (typeof p.attributes.experience_years === 'number' ? p.attributes.experience_years : null);
-const originOf = (p: Persona) => (p.source === 'admin' ? 'Written here' : p.edited_at ? 'Vault, edited here' : 'Vault');
+const originOf = (p: Persona) => (p.source === 'admin' ? 'Written here' : p.source === 'contributed' ? 'Contributed by an account' : p.edited_at ? 'Vault, edited here' : 'Vault');
 
 const toDraft = (p: Persona, copy = false): Draft => ({
   slug: copy ? undefined : p.slug, name: copy ? `${p.name} (copy)` : p.name, summary: p.summary, role: p.attributes.role ?? '',
@@ -53,6 +54,8 @@ export function AdminPersonas() {
   const setActive = useAdminAction((v: { slugs: string[]; active: boolean }) => post<{ updated: number }>('/personas/active', v),
     { success: (r) => `${r.updated} persona${r.updated === 1 ? '' : 's'} ${r.updated === 1 ? 'updated' : 'updated'}` });
   const rows = data?.personas ?? [];
+  const [view, setView] = useLibraryView();
+  const switcher = <LibraryViewSwitch kind='persona' value={view} onChange={setView} />;
 
   const cols: RecordCol<Persona>[] = [
     { key: 'name', label: 'Persona', className: 'min-w-56', title: true, keep: true, peek: false, type: 'text', value: (p) => p.name, render: (p) => (
@@ -66,7 +69,7 @@ export function AdminPersonas() {
     { key: 'stack', label: 'Stack', className: 'min-w-56', type: 'text', value: (p) => (p.attributes.stack ?? []).join(', '), render: (p) => <Chips items={p.attributes.stack} max={3} oneLine /> },
     { key: 'tone', label: 'Tone', hidden: true, type: 'text', value: (p) => p.attributes.tone ?? null, render: (p) => p.attributes.tone ?? NA },
     { key: 'source', label: 'Origin', hidden: true, className: 'w-36', type: 'select', value: originOf,
-      options: [{ value: 'Vault' }, { value: 'Vault, edited here' }, { value: 'Written here' }], render: (p) => <span className='text-muted-foreground text-sm'>{originOf(p)}</span> },
+      options: [{ value: 'Vault' }, { value: 'Vault, edited here' }, { value: 'Written here' }, { value: 'Contributed by an account' }], render: (p) => <span className='text-muted-foreground text-sm'>{originOf(p)}</span> },
     { key: 'edited_at', label: 'Edited', hidden: true, className: 'w-28', type: 'date', value: (p) => p.edited_at, render: (p) => (p.edited_at ? <When d={p.edited_at} className='text-muted-foreground text-xs' /> : NA) },
     { key: 'slug', label: 'Slug', hidden: true, type: 'text', value: (p) => p.slug, render: (p) => <Mono>{p.slug}</Mono> },
     { key: 'active', label: 'Status', name: 'Active', className: 'w-24', keep: true, type: 'boolean', value: (p) => p.active,
@@ -88,10 +91,12 @@ export function AdminPersonas() {
     ].map((a) => lock(a, 'library'));
   };
 
+  if (view === 'submissions') return <Submissions kind='persona' switcher={switcher} />;
   return (
     <PageContainer>
       <ErrorBox error={error} />
       <RecordView<Persona>
+        filters={switcher}
         id='admin-personas' noun='personas' exportName='personas' groupable
         rows={rows} rowKey={(p) => p.slug} cols={cols} actions={actions} bulk={bulk} loading={isLoading}
         defaultSort={[{ key: 'name', dir: 'asc' }]}

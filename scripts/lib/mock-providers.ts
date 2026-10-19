@@ -7,7 +7,8 @@
 // access token, GET /_mock/public-key -> {pem} for CLERK_JWT_KEY, POST /_mock/subscriptions {customer, price, status?, start_date?, trial_end?,
 // ended_at?, canceled_at?, cancel_at_period_end?, current_period_end?, quantity?, invoice? (default true: one paid invoice now)},
 // POST /_mock/prices {id, unit_amount, interval, ...} (an archived price: not listed with active=true),
-// POST /_mock/invoices {customer, amount, status?, created?, paid_at?, subscription?, number?}. Times are Unix seconds.
+// POST /_mock/invoices {customer, amount, status?, created?, paid_at?, subscription?, number?}, POST /_mock/stripe/outage {down} (customer
+// balance transactions answer 500 while down). Times are Unix seconds.
 import express from "express";
 import { randomBytes } from "node:crypto";
 import type { AddressInfo } from "node:net";
@@ -28,7 +29,7 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
   const jwk = { ...keyJson.pub, kid: "mock-1", alg: "RS256", use: "sig" };
   const s = {
     orgs: new Map<string, any>(), invitations: new Map<string, any>(), memberships: new Map<string, any>(), users: new Map<string, any>(),
-    customers: new Map<string, any>(), subscriptions: new Map<string, any>(), meterEvents: [] as any[], invoices: [] as any[],
+    customers: new Map<string, any>(), subscriptions: new Map<string, any>(), meterEvents: [] as any[], invoices: [] as any[], balanceTxns: [] as any[], stripeDown: false,
     oauth: new Map<string, any>(), keyed: new Map<string, any>(),
     prices: [
       { id: "price_mock_starter", object: "price", active: true, lookup_key: "octillion_starter", unit_amount: 49900, currency: "usd", recurring: { interval: "month" },
@@ -40,12 +41,13 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
   };
   const app = express();
   const MAPS = ["orgs", "invitations", "memberships", "users", "customers", "subscriptions", "oauth", "keyed"] as const;
-  const dump = () => JSON.stringify({ keys: keyJson, meterEvents: s.meterEvents, invoices: s.invoices,
+  const dump = () => JSON.stringify({ keys: keyJson, meterEvents: s.meterEvents, invoices: s.invoices, balanceTxns: s.balanceTxns,
     ...Object.fromEntries(MAPS.map((k) => [k, [...(s[k] as Map<string, unknown>).entries()]])) });
   const restore = (j: any) => {
     for (const k of MAPS) { const m = s[k] as Map<string, unknown>; m.clear(); for (const [a, b] of j[k] ?? []) m.set(a, b); }
     s.meterEvents.splice(0, s.meterEvents.length, ...(j.meterEvents ?? []));
     s.invoices.splice(0, s.invoices.length, ...(j.invoices ?? []));
+    s.balanceTxns.splice(0, s.balanceTxns.length, ...(j.balanceTxns ?? []));
   };
   if (saved) restore(saved);
   if (persist) app.use(async (_req, res, next) => {
@@ -208,6 +210,20 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
   });
   st.post("/v1/billing_portal/sessions", (req, res) => void res.json({ id: id("bps"), url: `${getBase()}/billing/${req.body.customer}` }));
   st.get("/v1/invoices", (req, res) => void res.json({ object: "list", data: s.invoices.filter((i) => !req.query.customer || i.customer === req.query.customer), has_more: false }));
+  // Customer balance transactions (credits are negative amounts), with Stripe's idempotency keys.
+  st.post("/v1/customers/:id/balance_transactions", (req, res) => {
+    if (s.stripeDown) return void res.status(500).json({ error: { message: "Stripe is having trouble (mock outage)" } });
+    if (!s.customers.has(req.params.id)) return void res.status(404).json({ error: { message: `No such customer: '${req.params.id}'` } });
+    const k = req.get("idempotency-key");
+    if (k && keyed.has(k)) return void res.json(keyed.get(k));
+    const t = { id: id("cbtxn"), object: "customer_balance_transaction", customer: req.params.id, amount: Number(req.body.amount), currency: req.body.currency ?? "usd",
+      description: req.body.description ?? null, metadata: req.body.metadata ?? {}, type: "adjustment", created: Math.floor(Date.now() / 1000) };
+    s.balanceTxns.push(t); if (k) keyed.set(k, t); res.json(t);
+  });
+  st.get("/v1/customers/:id/balance_transactions", (req, res) => {
+    if (s.stripeDown) return void res.status(500).json({ error: { message: "Stripe is having trouble (mock outage)" } });
+    res.json({ object: "list", data: s.balanceTxns.filter((t) => t.customer === req.params.id).reverse(), has_more: false });
+  });
   st.post("/v1/billing/meter_events", (req, res) => {
     if (!s.meterEvents.some((e) => e.identifier === req.body.identifier)) s.meterEvents.push(req.body);
     res.json({ object: "billing.meter_event", ...req.body });
@@ -288,6 +304,7 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     res.json(price);
   });
   app.post("/_mock/invoices", (req, res) => void res.json(invoice(req.body)));
+  app.post("/_mock/stripe/outage", (req, res) => { s.stripeDown = Boolean(req.body?.down); res.json({ down: s.stripeDown }); });
   app.use(c);
   app.use(st);
 

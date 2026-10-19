@@ -31,7 +31,11 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 
 interface Sub { status: string; plan: string | null; renews_at: string | null; cancel_at_period_end: boolean; trial_end: string | null }
 interface Plan { price_id: string; name: string; amount: number | null; currency: string; interval: string | null; monthly_budget_usd: number | null }
-interface Billing { enabled: boolean; customer: boolean; subscription: Sub | null; budget_usd: number; budget_source?: 'override' | 'plan' | 'default'; prepaid_allowed?: boolean; plans: Plan[]; can_manage: boolean }
+interface Billing { enabled: boolean; customer: boolean; subscription: Sub | null; budget_usd: number; budget_source?: 'override' | 'plan' | 'default'; prepaid_allowed?: boolean; plans: Plan[]; can_manage: boolean
+  contributions?: Contributions }
+/** Credits for personas and tasks Octillion accepted into its library: from Stripe's balance transactions, plus accepted ones Stripe hasn't taken yet. */
+interface Contributions { credits: { id: string; amount_usd: number; description: string | null; created: string; submission_id: string }[]; total_usd: number; error: string | null;
+  pending: { id: string; kind: 'persona' | 'task'; title: string; credit_usd: number; decided_at: string | null }[] }
 interface Usage {
   period: { start: string; end: string; days: number; elapsed_days: number };
   spent_usd: number; budget_usd: number; projected_usd: number; metered_usd: number; in_flight_usd: number;
@@ -189,7 +193,38 @@ function ThisMonth({ b, u, l }: { b: Billing; u: Usage | undefined; l: Limits | 
           ))}
         </ul>
       )}
+      {b.contributions && <ContributionCredits c={b.contributions} />}
     </Block>
+  );
+}
+
+/** "Credits from contributions": what accepted library contributions took off the next invoices (Stripe customer balance). */
+function ContributionCredits({ c }: { c: Contributions }) {
+  if (!c.credits.length && !c.pending.length) return null;
+  return (
+    <section className='flex flex-col gap-2'>
+      <div className='flex items-baseline gap-3 text-sm leading-none'>
+        <span className='font-medium'>Credits from contributions</span>
+        {c.credits.length > 0 && <span className='text-muted-foreground tabular-nums'>{usd(c.total_usd)} applied to your next invoices</span>}
+      </div>
+      <ul className='divide-y border-y text-sm'>
+        {c.credits.map((x) => (
+          <li key={x.id} className='flex items-center gap-3 py-2 leading-none'>
+            <span className='min-w-0 flex-1 truncate'>{x.description ?? 'Library contribution'}</span>
+            <span className='text-muted-foreground text-xs'>{new Date(x.created).toLocaleDateString()}</span>
+            <span className='w-20 text-right tabular-nums'>{usd(x.amount_usd)}</span>
+          </li>
+        ))}
+        {c.pending.map((x) => (
+          <li key={x.id} className='text-muted-foreground flex items-center gap-3 py-2 leading-none'>
+            <span className='min-w-0 flex-1 truncate'>Library contribution: {x.title}</span>
+            <span className='text-xs'>credit on its way</span>
+            <span className='w-20 text-right tabular-nums'>{usd(x.credit_usd)}</span>
+          </li>
+        ))}
+      </ul>
+      {c.error && <p className='text-muted-foreground text-xs'>Stripe could not list the credits just now.</p>}
+    </section>
   );
 }
 

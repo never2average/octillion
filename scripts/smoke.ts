@@ -229,7 +229,7 @@ try {
   // ---------- tools + UI resource ----------
   const { tools } = await A.listTools();
   console.log("tools:", tools.map((t) => t.name).join(", "));
-  assert.equal(tools.length, 28); // 17 core + 2 memory + 9 private-asset tools (browse_task_library is gone: the library is Octillion's IP)
+  assert.equal(tools.length, 29); // 17 core + 2 memory + 10 private-asset tools incl. publish_to_library (browse_task_library is gone: the library is Octillion's IP)
   for (const gone of ["browse_task_library"]) assert.ok(!tools.some((t) => t.name === gone), `${gone} is not a customer tool`);
   assert.ok(!tools.some((t) => /browse_task_library|library_task_id/.test(JSON.stringify([t.description, t.inputSchema]))), "no tool tells the model to browse or cite the library");
   assert.equal(tools[0].name, "get_started", "the welcome tool is listed first (the tool list is the first screen in IDE hosts)");
@@ -1992,7 +1992,7 @@ try {
     const reset = () => adm("PUT", "/compute/settings", { values: Object.fromEntries(keys.map((k) => [k, null])) });
     const c0 = await json(adm("GET", "/compute"));
     const byKey = (c: any, k: string) => c.settings.find((x: any) => x.key === k);
-    assert.ok(c0.groups.length === 4 && c0.settings.length >= 11, "every setting listed, grouped");
+    assert.ok(c0.groups.length === 5 && c0.settings.length >= 13 && byKey(c0, "PUBLISH_DISCOUNT_TASK_USD")?.value === 10, "every setting listed, grouped");
     process.env.OCTILLION_MAX_JOB_ORCHESTRATORS = "7";
     assert.equal(AUTOSCALE.maxJobOrchestrators(), 7, "the environment applies when nothing is set here");
     assert.equal(byKey(await json(adm("GET", "/compute")), "OCTILLION_MAX_JOB_ORCHESTRATORS").source, "env");
@@ -2590,6 +2590,9 @@ try {
         ["PUT", "/compute/settings", { values: {} }, "operator"],
         ["POST", "/compute/sessions/nope/cancel", {}, "operator"],
         ["POST", "/personas/active", {}, "operator"],
+        ["POST", "/submissions/nope/accept", {}, "operator"],
+        ["POST", "/submissions/nope/decline", {}, "operator"],
+        ["POST", "/submissions/nope/retry-credit", {}, "operator"],
         ["POST", `/orgs/${slugA}/allowance`, { usd: "x" }, "operator"],
         ["PUT", "/populations/nope/agents/x", {}, "operator", "/api/admin"],
         ["POST", "/compute/keys", {}, "owner"],
@@ -3439,6 +3442,152 @@ try {
           ...sharedAll.filter((p: any) => text.includes(`"${p.slug}"`)).map((p: any) => `slug ${p.slug}`),
         ].map((x) => `${path}: ${x}`));
         assert.deepEqual(leakedPortal, [], "no portal route returns library tasks or shared personas beyond the product's own titles");
+
+        // ---------- Publish to Octillion's library (src/contributions.ts): own items only, review, Stripe credit ----------
+        {
+          const pubOf = async (kind: "persona" | "task", ref: string | number) => kind === "persona"
+            ? (await json(appCall(devC, "GET", "/personas"))).personas.find((p: any) => p.slug === ref)
+            : (await json(appCall(devC, "GET", "/tasks"))).tasks.find((t: any) => t.id === ref);
+          const credits = () => mock.state.balanceTxns.filter((t: any) => t.customer === rowW.stripe_customer_id && t.metadata?.library_submission_id);
+          assert.ok(rowW.stripe_customer_id && mock.state.customers.has(rowW.stripe_customer_id), "the account has a Stripe customer");
+          const before = credits().length;
+          const pp = await json(appCall(devC, "GET", "/personas"));
+          assert.equal(pp.publish.credit_usd, 5, "the persona credit from settings (default 5)");
+          assert.equal((await json(appCall(devC, "GET", "/tasks"))).publish.credit_usd, 10, "the task credit (default 10)");
+          const mineP = pp.personas.find((p: any) => p.slug === slug);
+          assert.ok(mineP.publishable && mineP.publication === null, "an own persona can be published; not yet");
+          const pickedP = pp.personas.find((p: any) => p.slug === pickedSlug);
+          assert.ok(!pickedP.publishable && pickedP.publication === null, "a picked persona can't");
+
+          // Who may publish, and what can't be.
+          e = await errOf(await appCall(viewC, "POST", `/personas/${slug}/publish`));
+          assert.deepEqual([e.status, e.code], [403, "viewer_role"], "a viewer can't publish");
+          e = await errOf(await appCall(devC, "POST", `/personas/${pickedSlug}/publish`));
+          assert.ok(e.status === 400 && /Only personas your account wrote/.test(e.error), `a curated persona can't be published: ${e.error}`);
+          e = await errOf(await appCall(devC, "POST", `/tasks/${pick.id}/publish`));
+          assert.ok(e.status === 400 && /Only tasks from your own task sets/.test(e.error), `a curated task can't be published: ${e.error}`);
+          assert.equal((await appCall(devC, "POST", "/personas/example-solo-indie/publish")).status, 404, "a shared library persona is not the account's");
+          assert.equal((await appCall(devC, "POST", "/tasks/99999999/publish")).status, 404);
+
+          // A member publishes their persona and a task; one open request per item.
+          const subP = await json(appCall(devC, "POST", `/personas/${slug}/publish`));
+          assert.ok(subP.submission.status === "submitted" && subP.credit_usd === 5 && !JSON.stringify(subP).includes(rowW.clerk_org_id));
+          e = await errOf(await appCall(devC, "POST", `/personas/${slug}/publish`));
+          assert.ok(e.status === 400 && /already submitted/.test(e.error), "one open request per item");
+          const [rawSub] = await db.query<any>("SELECT org_id, kind, source_ref, snapshot, status FROM library_submissions WHERE id = $1", [subP.submission.id]);
+          assert.ok(rawSub.org_id === rowW.id && rawSub.kind === "persona" && typeof rawSub.snapshot._sealed === "string" && rawSub.snapshot._sealed.startsWith("enc:v1:"),
+            "the snapshot is sealed with the account's key until accepted");
+          assert.equal((await pubOf("persona", slug)).publication.status, "submitted", "the persona shows Submitted");
+          const subT = await json(appCall(devC, "POST", `/tasks/${t0.id}/publish`));
+          assert.equal((await pubOf("task", t0.id)).publication.status, "submitted");
+          // Withdraw while submitted; then submit again.
+          assert.equal((await appCall(viewC, "POST", `/submissions/${subT.submission.id}/withdraw`)).status, 403, "a viewer can't withdraw");
+          assert.equal((await json(appCall(devC, "POST", `/submissions/${subT.submission.id}/withdraw`))).withdrawn, subT.submission.id);
+          assert.equal((await pubOf("task", t0.id)).publication, null, "withdrawn: not published (—)");
+          assert.equal((await appCall(devC, "POST", `/submissions/${subT.submission.id}/withdraw`)).status, 404, "only an open request can be withdrawn");
+          const subT2 = await json(appCall(devC, "POST", `/tasks/${t0.id}/publish`));
+          // Over MCP: the same rules, and the status in list_personas / list_task_sets.
+          const viaMcp = await mcpAs(acc2.user.id, "publish_to_library", { persona: slug });
+          assert.ok(viaMcp.isError && /already submitted/.test(viaMcp.text), `publish_to_library: one open request (${viaMcp.text})`);
+          assert.ok((await mcpAs(acc2.user.id, "publish_to_library", { persona: pickedSlug })).isError, "and no curated persona");
+          assert.ok((await mcpAs(acc2.user.id, "publish_to_library", {})).isError, "persona or task_id is required");
+          const lp = await mcpAs(acc2.user.id, "list_personas", {});
+          assert.ok(lp.data.personas.find((p: any) => p.slug === slug).publication.status === "submitted" && /submitted to Octillion's library/.test(lp.text), "list_personas shows the request");
+          const lts = await mcpAs(acc2.user.id, "list_task_sets", {});
+          assert.equal(lts.data.task_sets.flatMap((x: any) => x.tasks).find((x: any) => x.id === t0.id).publication.status, "submitted", "list_task_sets too");
+          // Another account can't publish or withdraw this account's items.
+          const orgX = await (await fetch(`${mock.url}/v1/organizations`, { method: "POST", headers: { authorization: "Bearer sk_test_mock", "content-type": "application/json" }, body: JSON.stringify({ name: `Pub other ${BYO}` }) })).json();
+          const userX = await mockPost("/_mock/clerk/users", { email: `x+${stamp}@pub-${BYO.toLowerCase()}.dev` });
+          await mockPost("/_mock/clerk/memberships", { org_id: orgX.id, user_id: userX.id, role: "org:admin" });
+          const xC = await clerkSession(userX.id, orgX.id, "admin");
+          assert.equal((await appCall(xC, "GET", "/me")).status, 200);
+          assert.equal((await appCall(xC, "POST", `/personas/${slug}/publish`)).status, 404, "another account can't publish A's persona");
+          assert.equal((await appCall(xC, "POST", `/submissions/${subT2.submission.id}/withdraw`)).status, 404, "or withdraw A's request");
+
+          // Octillion reviews: the Submissions list shows the full content and the account.
+          const list = await json(adm("GET", "/submissions?kind=persona&status=submitted"));
+          const row = list.submissions.find((x: any) => x.id === subP.submission.id);
+          assert.ok(row && row.org_slug === slugW && row.content.summary === "Edited" && row.content.name === `Flutter lead ${BYO} v2` && list.default_credit_usd === 5,
+            "the admin peek gets the full submitted content and the account");
+          assert.match((await errOf(await adm("POST", `/submissions/${subP.submission.id}/decline`, { reason: "  " }))).error, /reason/i, "decline needs a reason");
+          // Accept the persona: a new shared library row, the customer's copy stays theirs, exactly one Stripe credit.
+          const acc = await json(adm("POST", `/submissions/${subP.submission.id}/accept`, {}));
+          assert.ok(acc.status === "accepted" && acc.credit_status === "credited" && acc.stripe_txn_id && acc.credit_usd === 5, `accepted and credited: ${JSON.stringify(acc)}`);
+          const [libP] = await db.query<any>("SELECT slug, name, summary, org_id, source, active, contributed_by, submission_id FROM developer_profiles WHERE slug = $1", [acc.library_ref]);
+          assert.ok(libP && libP.org_id === null && libP.source === "contributed" && libP.active && libP.contributed_by === rowW.id && libP.submission_id === subP.submission.id
+            && libP.summary === "Edited", "a shared persona with source contributed, contributed_by and the request id");
+          assert.ok((await json(adm("GET", "/personas"))).personas.some((p: any) => p.slug === libP.slug && p.source === "contributed"), "listed on /admin/personas");
+          await json(adm("PATCH", `/personas/${libP.slug}`, { summary: "Edited by Octillion" }));
+          assert.equal((await db.query<any>("SELECT summary FROM developer_profiles WHERE slug = $1", [libP.slug]))[0].summary, "Edited by Octillion", "editable like any library row");
+          const ownStill = (await db.query<any>("SELECT org_id, source FROM developer_profiles WHERE slug = $1", [slug]))[0];
+          assert.ok(ownStill.org_id === rowW.id && ownStill.source === "custom", "the customer's own copy stays theirs");
+          let mine = credits().filter((t: any) => t.metadata.library_submission_id === subP.submission.id);
+          assert.equal(mine.length, 1, "Stripe received exactly one balance transaction");
+          assert.ok(mine[0].amount === -500 && mine[0].description === `Library contribution: Flutter lead ${BYO} v2`, "a $5 credit, described");
+          assert.equal((await errOf(await adm("POST", `/submissions/${subP.submission.id}/accept`, {}))).status, 409, "accepting twice is refused");
+          assert.equal((await errOf(await adm("POST", `/submissions/${subP.submission.id}/retry-credit`))).status, 409, "nothing to retry once credited");
+          assert.equal(credits().filter((t: any) => t.metadata.library_submission_id === subP.submission.id).length, 1, "still one transaction");
+          const pubP = (await pubOf("persona", slug)).publication;
+          assert.ok(pubP.status === "accepted" && pubP.credit_usd === 5 && !("library_ref" in pubP), "the customer sees Published, never the library row");
+          assert.match((await errOf(await appCall(devC, "POST", `/personas/${slug}/publish`))).error, /already accepted as it is now/, "unchanged: no second submission");
+
+          // Stripe down: the task's accept still succeeds, credit pending; Retry credit then makes it, once.
+          await mockPost("/_mock/stripe/outage", { down: true });
+          const accT = await json(adm("POST", `/submissions/${subT2.submission.id}/accept`, { credit_usd: 12.5 }));
+          assert.ok(accT.status === "accepted" && accT.credit_status === "pending" && /trouble|502|500/i.test(accT.credit_error ?? ""), `accept stands, credit pending: ${JSON.stringify(accT)}`);
+          const [libT] = await db.query<any>("SELECT id, title, prompt, source, active, contributed_by, submission_id FROM library_tasks WHERE id = $1", [Number(accT.library_ref)]);
+          assert.ok(libT && libT.source === "contributed" && libT.active && libT.contributed_by === rowW.id && libT.submission_id === subT2.submission.id
+            && libT.title === `Offline sync v2 ${BYO}` && libT.prompt.includes(BYO) && !libT.prompt.startsWith("enc:"), "a library task with source contributed, prompt in clear");
+          assert.ok((await json(adm("GET", "/tasks?source=contributed"))).tasks.some((x: any) => x.id === libT.id), "the library's source filter finds it");
+          const retryDown = await json(adm("POST", `/submissions/${subT2.submission.id}/retry-credit`));
+          assert.equal(retryDown.credit_status, "pending", "a retry while Stripe is down stays pending");
+          const billDown = await json(appCall(ownerC, "GET", "/billing"));
+          assert.ok(billDown.contributions.pending.some((x: any) => x.id === subT2.submission.id && x.credit_usd === 12.5), "Billing shows the pending credit");
+          await mockPost("/_mock/stripe/outage", { down: false });
+          const retried = await json(adm("POST", `/submissions/${subT2.submission.id}/retry-credit`));
+          assert.ok(retried.credit_status === "credited" && retried.stripe_txn_id, "Retry credit succeeds");
+          mine = credits().filter((t: any) => t.metadata.library_submission_id === subT2.submission.id);
+          assert.ok(mine.length === 1 && mine[0].amount === -1250, "one $12.50 credit (the override)");
+          // Idempotent even if the row is set back to pending (a lost answer): the existing transaction is found, not repeated.
+          await db.query("UPDATE library_submissions SET credit_status = 'pending', stripe_txn_id = NULL WHERE id = $1", [subT2.submission.id]);
+          assert.equal((await json(adm("POST", `/submissions/${subT2.submission.id}/retry-credit`))).stripe_txn_id, mine[0].id, "the earlier transaction is reused");
+          assert.equal(credits().length, before + 2, "exactly one balance transaction per accepted item");
+          const bill = await json(appCall(ownerC, "GET", "/billing"));
+          assert.ok(bill.contributions.credits.length >= 2 && bill.contributions.credits.some((c: any) => c.submission_id === subT2.submission.id && c.amount_usd === 12.5)
+            && bill.contributions.pending.length === 0, "Billing lists the credits from Stripe");
+
+          // Decline with a reason: shown to the customer; an edited item can be submitted again.
+          await json(appCall(devC, "PATCH", `/personas/${slug}`, { name: `Flutter lead ${BYO} v3`, summary: "Edited again" }));
+          const subP2 = await json(appCall(devC, "POST", `/personas/${slug}/publish`));
+          await json(adm("POST", `/submissions/${subP2.submission.id}/decline`, { reason: "Too close to one already in the library" }));
+          const dec = (await pubOf("persona", slug)).publication;
+          assert.ok(dec.status === "declined" && dec.reason === "Too close to one already in the library", "the customer sees Declined and the reason");
+          assert.match((await mcpAs(acc2.user.id, "list_personas", {})).text, /declined by Octillion's library: Too close/, "and over MCP");
+          assert.equal(credits().length, before + 2, "a decline credits nothing");
+
+          // The lockdown holds: the customer still can't browse the library. Every portal page, every library row except the
+          // account's own contributions (its own text, which it already sees), and never a contributed row's slug or id.
+          const libOthers = (await db.query<any>("SELECT title, prompt FROM library_tasks WHERE contributed_by IS DISTINCT FROM $1", [rowW.id])).filter((t: any) => !ownPromptsW.has(t.prompt));
+          const sharedOthers = await db.query<any>("SELECT slug, name, summary, instructions FROM developer_profiles WHERE org_id IS NULL AND contributed_by IS DISTINCT FROM $1", [rowW.id]);
+          const pages2 = await Promise.all(["/personas", "/tasks", `/context/products/${slugP}`, "/setup", "/journeys", "/adoption", "/usage", "/context", "/nudges", "/billing"]
+            .map(async (path) => [path, await (await appCall(devC, "GET", path)).text()] as const));
+          const leaked2 = pages2.flatMap(([path, text]) => [
+            ...libOthers.filter((t: any) => t.prompt && text.includes(JSON.stringify(t.prompt.slice(0, 80)).slice(1, -1))).map((t: any) => `prompt of "${t.title}"`),
+            ...libOthers.filter((t: any) => !ownTitles.has(t.title) && text.includes(JSON.stringify(t.title))).map((t: any) => `title "${t.title}"`),
+            ...sharedOthers.flatMap((p: any) => [p.summary, p.instructions].filter((x: string) => x && x.length > 20 && text.includes(JSON.stringify(x.slice(0, 60)).slice(1, -1))).map(() => `text of ${p.slug}`)),
+            ...sharedOthers.filter((p: any) => text.includes(`"${p.slug}"`)).map((p: any) => `slug ${p.slug}`),
+            ...(text.includes(libP.slug) ? [`contributed slug ${libP.slug}`] : []), ...(text.includes("Edited by Octillion") ? ["Octillion's edit of the contributed persona"] : []),
+          ].map((x) => `${path}: ${x}`));
+          assert.deepEqual(leaked2, [], "after accepting, no portal route returns the library");
+          for (const [m, who] of [["GET", devC], ["POST", devC]] as const)
+            assert.equal((await appCall(who, m, "/tasks/library", m === "POST" ? { product: slugP, library_task_id: libT.id } : undefined)).status, 404, "still no library route");
+          // Tidy: the extra account, and the contributed rows (later sweeps count the library as it was).
+          const [rowX] = await db.query<{ slug: string }>("SELECT slug FROM organizations WHERE clerk_org_id = $1", [orgX.id]);
+          await db.query("DELETE FROM organizations WHERE slug = $1", [rowX.slug]);
+          await db.query("DELETE FROM developer_profiles WHERE slug = $1", [libP.slug]);
+          await db.query("DELETE FROM library_tasks WHERE id = $1", [libT.id]);
+          console.log("✓ publish to library: own items only (member, not viewer; never curated), one open request, withdraw, MCP, accept → contributed library row + one Stripe credit (idempotent, pending while Stripe is down, Retry credit), decline reason shown, lockdown intact");
+        }
         await db.query("DELETE FROM developer_profiles WHERE slug = $1", [pickedSlug]);
         // Runs that used a set: a session on one of its tasks.
         const [simRow] = await db.query<{ id: string }>("SELECT id FROM simulations WHERE org_id = $1 LIMIT 1", [rowW.id]);
