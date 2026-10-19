@@ -574,10 +574,29 @@ function dryLine(o: DryRun['stripe'][number]) {
 }
 
 /**
+ * New plan's frame, for both ways in: a wide dialog (most of the screen) whose body scrolls and whose buttons stay put;
+ * the title and the Form / JSON tabs on their own rows, clear of the close button.
+ */
+function PlanDialogShell({ onClose, title, description, tabs, children }: { onClose: () => void; title: string; description: ReactNode; tabs?: ReactNode; children: ReactNode }) {
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className='flex max-h-[90vh] w-[calc(100%-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-5xl'>
+        <DialogHeader className='gap-3 border-b px-4 pt-4 pr-12 pb-3'>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{description}</DialogDescription>
+          {tabs}
+        </DialogHeader>
+        <div className='flex min-h-0 flex-1 flex-col pt-4'>{children}</div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
  * New plan › JSON: the whole plan as one config (src/plan-config.ts), checked by the server (Check: a dry run that
  * lists what would be made in Stripe, or every problem by path) and then made (Create in Stripe).
  */
-function PlanJsonDialog({ onClose, modes, initial, control }: { onClose: () => void; modes: ReactNode; initial: string; control?: { price_id: string; experiment: string; weight: number } }) {
+function PlanJsonBody({ onClose, initial, control }: { onClose: () => void; initial: string; control?: { price_id: string; experiment: string; weight: number } }) {
   const [text, setText] = useState(initial);
   const [problems, setProblems] = useState<string[]>([]);
   const [preview, setPreview] = useState<DryRun | null>(null);
@@ -602,36 +621,47 @@ function PlanJsonDialog({ onClose, modes, initial, control }: { onClose: () => v
     });
   };
   return (
-    <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className='sm:max-w-2xl'>
-        <div className='grid gap-4'>
-          <DialogHeader>
-            <div className='flex items-center justify-between gap-3'><DialogTitle>New plan</DialogTitle>{modes}</div>
-            <DialogDescription>
-              {control && <>The plan you duplicated joins this experiment as its control when you create this one. </>}
-              The plan as JSON: a base fee, usage pricing on model spend (a Stripe billing meter; graduated tiers by markup), a free trial, the monthly spend cap,
-              an experiment and metadata. Check shows what will be made in Stripe; nothing is created until you press Create.
-            </DialogDescription>
-          </DialogHeader>
+    <>
+      <div className='grid min-h-0 gap-4 overflow-y-auto px-4 pb-4 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]'>
+        <div className='grid min-w-0 content-start gap-2'>
+          {control && <p className='text-muted-foreground text-sm'>The plan you duplicated joins this experiment as its control when you create this one.</p>}
           <Textarea aria-label='Plan config (JSON)' spellCheck={false} value={text} onChange={(e) => { setText(e.target.value); setPreview(null); }}
-            className='min-h-[320px] font-mono text-xs leading-relaxed' />
+            className='min-h-[50vh] resize-y font-mono text-xs leading-relaxed lg:min-h-[58vh]' />
           {!parsed.ok && <p className='text-destructive text-sm'>Not valid JSON: {parsed.err}</p>}
-          {problems.length > 0 && <ul className='text-destructive grid list-disc gap-1 pl-5 text-sm'>{problems.map((p) => <li key={p}>{p}</li>)}</ul>}
-          {preview && (
-            <div className='grid gap-2 rounded-md border p-3 text-sm'>
+        </div>
+        <div className='grid min-w-0 content-start gap-3 text-sm'>
+          {problems.length > 0 ? (
+            <div className='border-destructive/30 bg-destructive/5 grid gap-2 rounded-md border p-3'>
+              <span className='text-destructive font-medium'>{problems.length === 1 ? '1 problem' : `${problems.length} problems`}</span>
+              <ul className='text-destructive grid list-disc gap-1 pl-5'>{problems.map((p) => <li key={p} className='break-words'>{p}</li>)}</ul>
+            </div>
+          ) : preview ? (
+            <div className='grid gap-2 rounded-md border p-3'>
               <span className='font-medium'>Will be made in Stripe</span>
-              <ul className='grid list-disc gap-1 pl-5'>{preview.stripe.map((o, i) => <li key={i}>{dryLine(o)}</li>)}</ul>
+              <ul className='grid list-disc gap-1.5 pl-5'>{preview.stripe.map((o, i) => <li key={i} className='break-words'>{dryLine(o)}</li>)}</ul>
               {preview.meter?.exists && <span className='text-muted-foreground'>Uses the existing meter {preview.meter.event_name}.</span>}
             </div>
+          ) : (
+            <div className='text-muted-foreground grid gap-2 rounded-md border border-dashed p-3'>
+              <span className='text-foreground font-medium'>Fields</span>
+              <ul className='grid gap-1'>
+                <li><Mono>base_fee_usd</Mono> flat fee each interval (0: usage only)</li>
+                <li><Mono>usage</Mono> model spend: <Mono>included_usd</Mono>, then <Mono>markup</Mono> or <Mono>tiers</Mono></li>
+                <li><Mono>monthly_budget_usd</Mono> the account’s monthly spend cap</li>
+                <li><Mono>trial_days</Mono>, <Mono>description</Mono>, <Mono>tax_code</Mono></li>
+                <li><Mono>experiment</Mono> + <Mono>weight</Mono> to A/B test it</li>
+              </ul>
+              <span>Press Check to see what will be made in Stripe. Nothing is created until Create.</span>
+            </div>
           )}
-          <DialogFooter>
-            <Button type='button' variant='outline' onClick={onClose}>Cancel</Button>
-            <Button type='button' variant='outline' disabled={busy || !parsed.ok} onClick={() => run(true)}>Check</Button>
-            <Button type='button' disabled={busy || !parsed.ok} onClick={() => run(false)}>{make.isPending && <Icons.spinner className='animate-spin' />} Create in Stripe</Button>
-          </DialogFooter>
         </div>
-      </DialogContent>
-    </Dialog>
+      </div>
+      <DialogFooter className='m-0 rounded-b-xl'>
+        <Button type='button' variant='outline' onClick={onClose}>Cancel</Button>
+        <Button type='button' variant='outline' disabled={busy || !parsed.ok} onClick={() => run(true)}>Check</Button>
+        <Button type='button' disabled={busy || !parsed.ok} onClick={() => run(false)}>{make.isPending && <Icons.spinner className='animate-spin' />} Create in Stripe</Button>
+      </DialogFooter>
+    </>
   );
 }
 
@@ -709,58 +739,62 @@ function NewPlanDialog({ onClose, experiments, initialJson, control }: { onClose
       { onSuccess: onClose, onError: (x) => setErr(x.message) });
   };
   const per = interval === 'year' ? 'year' : 'month';
-  const modes = (
-    <ButtonGroup aria-label='How to describe the plan'>
-      {(['form', 'json'] as const).map((m) => <Button key={m} type='button' size='sm' variant={mode === m ? 'default' : 'outline'} aria-pressed={mode === m} onClick={() => setMode(m)}>{m === 'form' ? 'Form' : 'JSON'}</Button>)}
-    </ButtonGroup>
+  const tabs = (
+    <div role='tablist' aria-label='How to describe the plan' className='-mb-3 flex gap-4 text-sm'>
+      {(['form', 'json'] as const).map((m) => (
+        <button key={m} type='button' role='tab' aria-selected={mode === m} onClick={() => setMode(m)}
+          className={cn('-mb-px border-b-2 pb-2 font-medium transition-colors', mode === m ? 'border-foreground text-foreground' : 'text-muted-foreground hover:text-foreground border-transparent')}>
+          {m === 'form' ? 'Form' : 'JSON (base fee, usage tiers, metadata)'}
+        </button>
+      ))}
+    </div>
   );
-  if (mode === 'json') return <PlanJsonDialog onClose={onClose} modes={modes} initial={initialJson ?? JSON.stringify(PLAN_TEMPLATE, null, 2)} control={control} />;
+  const blurb = mode === 'json'
+    ? 'The whole plan as JSON: a base fee, usage pricing on model spend (a Stripe billing meter, graduated tiers by markup), a trial, the monthly spend cap, an experiment and metadata.'
+    : 'A product and recurring price in Stripe. Accounts allowed plans see it on Billing and can check out; put it in an experiment to A/B test it against other plans.';
   return (
-    <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className='sm:max-w-md'>
-        <form onSubmit={submit} className='grid gap-4'>
-          <DialogHeader>
-            <div className='flex items-center justify-between gap-3'><DialogTitle>New plan</DialogTitle>{modes}</div>
-            <DialogDescription>A product and recurring price in Stripe. Accounts allowed plans see it on Billing and can check out; put it in an experiment to A/B test it against other plans.</DialogDescription>
-          </DialogHeader>
-          <FormRow id='np-name' label='Plan name' hint={name.trim() ? `Lookup key: octillion_${name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '')}` : 'Customers see this name at checkout.'}>
-            <Input id='np-name' required autoFocus minLength={2} maxLength={60} value={name} onChange={(e) => setName(e.target.value)} placeholder='Team' />
-          </FormRow>
-          <FormRow id='np-interval' label='Billed every'>
-            <NativeSelect id='np-interval' value={interval} onChange={(e) => setIv(e.target.value as 'month' | 'year')}>
-              <NativeSelectOption value='month'>Month</NativeSelectOption>
-              <NativeSelectOption value='year'>Year</NativeSelectOption>
-            </NativeSelect>
-          </FormRow>
-          <FormRow id='np-amount' label={`Price per ${per} (USD)`}>
-            <Input id='np-amount' required type='number' inputMode='decimal' min='0.01' max='100000' step='0.01' value={amount} onChange={(e) => setAmount(e.target.value)} placeholder='250' />
-          </FormRow>
-          <FormRow id='np-allowance' label='Monthly allowance (USD)' hint={`The most the account can spend on models each month. Leave empty to use the price${price > 0 ? ` ($${price.toLocaleString()})` : ''}.`}>
-            <Input id='np-allowance' type='number' inputMode='decimal' min='0' step='0.01' value={allowance} onChange={(e) => setAllowance(e.target.value)} placeholder={price > 0 ? String(price) : ''} />
-          </FormRow>
-          <FormRow id='np-trial' label='Free trial (days)' hint='Optional. Checkout starts the subscription with this trial.'>
-            <Input id='np-trial' type='number' inputMode='numeric' min='1' max='730' step='1' value={trial} onChange={(e) => setTrial(e.target.value)} placeholder='None' />
-          </FormRow>
-          <FormRow id='np-desc' label='Description' hint='Optional. Shown at checkout.'>
-            <Input id='np-desc' maxLength={300} value={description} onChange={(e) => setDescription(e.target.value)} placeholder='For teams running weekly simulations' />
-          </FormRow>
-          <FormRow id='np-exp' label='Experiment' hint={experiment.trim() ? 'Each account allowed plans sees one variant of this experiment, by weight; results are on the Experiments tab.' : 'Optional. Plans with the same experiment are A/B tested against each other.'}>
-            <Input id='np-exp' list='np-exp-list' maxLength={40} value={experiment} onChange={(e) => setExperiment(e.target.value)} placeholder='e.g. team-price-oct' />
-            <datalist id='np-exp-list'>{experiments.map((x) => <option key={x} value={x} />)}</datalist>
-          </FormRow>
-          {experiment.trim() && (
-            <FormRow id='np-weight' label='Traffic weight' hint='Its share of accounts, relative to the other variants (1 and 1 is a 50/50 split).'>
-              <Input id='np-weight' type='number' inputMode='decimal' min='0.01' max='100' step='any' value={weight} onChange={(e) => setWeight(e.target.value)} />
+    <PlanDialogShell onClose={onClose} title='New plan' description={blurb} tabs={tabs}>
+      {mode === 'json' ? <PlanJsonBody onClose={onClose} initial={initialJson ?? JSON.stringify(PLAN_TEMPLATE, null, 2)} control={control} /> : (
+        <form onSubmit={submit} className='flex min-h-0 flex-1 flex-col'>
+          <div className='grid min-h-0 content-start gap-4 overflow-y-auto px-4 pb-4 sm:grid-cols-2'>
+            <FormRow id='np-name' label='Plan name' hint={name.trim() ? `Lookup key: octillion_${name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '')}` : 'Customers see this name at checkout.'}>
+              <Input id='np-name' required autoFocus minLength={2} maxLength={60} value={name} onChange={(e) => setName(e.target.value)} placeholder='Team' />
             </FormRow>
-          )}
-          {err && <p className='text-destructive text-sm'>{err}</p>}
-          <DialogFooter>
+            <FormRow id='np-desc' label='Description' hint='Optional. Shown at checkout.'>
+              <Input id='np-desc' maxLength={300} value={description} onChange={(e) => setDescription(e.target.value)} placeholder='For teams running weekly simulations' />
+            </FormRow>
+            <FormRow id='np-interval' label='Billed every'>
+              <NativeSelect id='np-interval' value={interval} onChange={(e) => setIv(e.target.value as 'month' | 'year')} className='w-full'>
+                <NativeSelectOption value='month'>Month</NativeSelectOption>
+                <NativeSelectOption value='year'>Year</NativeSelectOption>
+              </NativeSelect>
+            </FormRow>
+            <FormRow id='np-amount' label={`Price per ${per} (USD)`}>
+              <Input id='np-amount' required type='number' inputMode='decimal' min='0.01' max='100000' step='0.01' value={amount} onChange={(e) => setAmount(e.target.value)} placeholder='250' />
+            </FormRow>
+            <FormRow id='np-allowance' label='Monthly allowance (USD)' hint={`The most the account can spend on models each month. Empty: the price${price > 0 ? ` ($${price.toLocaleString()})` : ''}.`}>
+              <Input id='np-allowance' type='number' inputMode='decimal' min='0' step='0.01' value={allowance} onChange={(e) => setAllowance(e.target.value)} placeholder={price > 0 ? String(price) : ''} />
+            </FormRow>
+            <FormRow id='np-trial' label='Free trial (days)' hint='Optional. Checkout starts the subscription with this trial.'>
+              <Input id='np-trial' type='number' inputMode='numeric' min='1' max='730' step='1' value={trial} onChange={(e) => setTrial(e.target.value)} placeholder='None' />
+            </FormRow>
+            <FormRow id='np-exp' label='Experiment' hint={experiment.trim() ? 'Each account allowed plans sees one variant, by weight; results are on the Experiments tab.' : 'Optional. Plans with the same experiment are A/B tested against each other.'}>
+              <Input id='np-exp' list='np-exp-list' maxLength={40} value={experiment} onChange={(e) => setExperiment(e.target.value)} placeholder='e.g. team-price-oct' />
+              <datalist id='np-exp-list'>{experiments.map((x) => <option key={x} value={x} />)}</datalist>
+            </FormRow>
+            <FormRow id='np-weight' label='Traffic weight' hint={experiment.trim() ? 'Its share of accounts, relative to the other variants (1 and 1 is 50/50).' : 'With an experiment only.'}>
+              <Input id='np-weight' type='number' inputMode='decimal' min='0.01' max='100' step='any' disabled={!experiment.trim()} value={weight} onChange={(e) => setWeight(e.target.value)} />
+            </FormRow>
+            <p className='text-muted-foreground text-sm sm:col-span-2'>Usage-based pricing (a base fee plus model spend with tiers) is on the JSON tab.</p>
+            {err && <p className='text-destructive text-sm sm:col-span-2'>{err}</p>}
+          </div>
+          <DialogFooter className='m-0 rounded-b-xl'>
             <Button type='button' variant='outline' onClick={onClose}>Cancel</Button>
             <Button type='submit' disabled={make.isPending}>{make.isPending && <Icons.spinner className='animate-spin' />} Create plan</Button>
           </DialogFooter>
         </form>
-      </DialogContent>
-    </Dialog>
+      )}
+    </PlanDialogShell>
   );
 }
 
