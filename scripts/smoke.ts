@@ -1645,11 +1645,14 @@ try {
     near(sp.accounts.reduce((t: number, x: any) => t + x.spent_usd, 0), sp.totals.total_usd, "accounts add up to the total");
     assert.deepEqual([ax.allowance.budget_usd, ax.allowance.source, ax.month_usd, ax.month_pct], [10, "override", 0, 0], "allowance against this month's spend");
     near(ax.daily_session[1] + ax.daily_session[2], 1.75, "X by day"); assert.equal(ax.daily_session.length, 31);
-    const d2 = sp.days.find((d: any) => d.day === "2020-03-02"), d3 = sp.days.find((d: any) => d.day === "2020-03-03");
-    near(d2.total_usd, 1, "Mar 2"); near(d3.total_usd, 3.25, "Mar 3"); near(d3.orchestrator_usd, 0.5, "Mar 3 orchestrators");
-    assert.deepEqual([d3.sessions, d3.top_account.key, d3.top_model], [2, Y.org.slug, "claude-opus-5-5"]);
-    near(d3.by_account.shared.orchestrator_usd, 0.2, "the day's shared part");
-    near(sp.days.reduce((t: number, d: any) => t + d.total_usd, 0), sp.totals.total_usd, "days add up to the total");
+    assert.equal(sp.days, undefined, "no Days part any more");
+    // Grouped by provider: the model rows summed, the provider's accounts from the gateway's per-token totals.
+    const pa = sp.providers.find((p: any) => p.provider === "anthropic"), po = sp.providers.find((p: any) => p.provider === "openai");
+    assert.deepEqual([sp.providers.map((p: any) => p.provider), pa.models, pa.requests, pa.errors, pa.priced, po.priced, po.unpriced_requests], [["anthropic", "openai"], 2, 15, 1, true, false, 3]);
+    near(pa.cost_usd, 2.25, "anthropic"); near(pa.session_usd, 1.75, "anthropic sessions"); near(pa.orchestrator_usd, 0.5, "anthropic orchestrators");
+    near(sp.providers.reduce((t: number, p: any) => t + p.cost_usd, 0), sp.totals.metered_model_usd, "providers add up to the metered total");
+    assert.deepEqual(pa.top_accounts.map((a: any) => [a.key, a.requests]), [[X.org.slug, 13]], "the provider's accounts: sessions and the job's orchestrator");
+    near(pa.top_accounts[0].usd, 1.55, "X through anthropic");
     assert.equal(sp.models.length, 3);
     const unpriced = sp.models.find((m: any) => m.model === "mystery-model");
     assert.deepEqual([unpriced.priced, unpriced.unpriced_requests, sp.totals.unpriced_requests], [false, 3, 3], "unpriced rows are flagged");
@@ -1671,7 +1674,87 @@ try {
     await db.query("DELETE FROM gateway_model_usage WHERE day >= '2020-03-01' AND day < '2020-04-01'");
     await db.query("DELETE FROM orchestrator_sandboxes WHERE sandbox_id LIKE 'smoke-sp-%'");
     await db.query("DELETE FROM organizations WHERE id = ANY($1)", [[X.org.orgId, Y.org.orgId]]);
-    console.log("✓ spend: session spend (cost vs live gateway), orchestrator spend attributed by job with the rest shared, accounts, models (unpriced), days add up; launcher peek");
+    console.log("✓ spend: session spend (cost vs live gateway), orchestrator spend attributed by job with the rest shared, accounts, models (unpriced), providers add up with their accounts; launcher peek");
+  }
+
+  // ---------- Spend: compute hours and data & storage (src/spend-usage.ts), measured from timestamps and sizes ----------
+  {
+    // June 2019: nothing else in the smoke database runs then, so the hours are exactly the fixtures'.
+    const X = await createOrg("Hours X", `hours-x-${stamp}`), Y = await createOrg("Hours Y", `hours-y-${stamp}`);
+    const simX = `sim_hours_x_${stamp}`, simY = `sim_hours_y_${stamp}`;
+    const fixture = async (o: Org, sim: string) => {
+      const [p] = await db.query<{ id: number }>("INSERT INTO products (org_id, slug, name) VALUES ($1, 'hoursp', 'Hours product') RETURNING id", [o.orgId]);
+      const [sc] = await db.query<{ id: number }>("INSERT INTO scenarios (product_id, title, prompt) VALUES ($1, 't', 'p') RETURNING id", [p.id]);
+      await db.query(`INSERT INTO simulations (id, org_id, product_id, name, models, harness, repeats, status, created_at)
+        VALUES ($1, $2, $3, 'hours run', '{m}', 'claude-code', 1, 'completed', '2019-06-01T00:00:00Z')`, [sim, o.orgId, p.id]);
+      return { p: p.id, ses: (id: string, agent: string, start: string, end: string | null, meta: object, events: number) => db.query(`INSERT INTO agent_sessions
+        (id, simulation_id, org_id, product_id, scenario_id, model, harness, agent_id, status, queued_at, started_at, ended_at, metadata, events)
+        VALUES ($1, $2, $3, $4, $5, 'm', 'claude-code', $6, 'completed', $7, $7, $8, $9, $10)`, [id, sim, o.orgId, p.id, sc.id, agent, start, end, JSON.stringify(meta), events]) };
+    };
+    const fx = await fixture(X.org, simX), fy = await fixture(Y.org, simY);
+    await fx.ses(`ses_hours_x1_${stamp}`, "claude-code/sonnet", "2019-06-01T23:00:00Z", "2019-06-02T01:00:00Z", { runner: "boat", boat_sandbox_type: "default" }, 10); // 1 h + 1 h
+    await fx.ses(`ses_hours_x2_${stamp}`, "codex/gpt", "2019-06-02T00:30:00Z", "2019-06-02T01:00:00Z", { runner: "docker" }, 0);                   // 0.5 h, on Docker
+    await fy.ses(`ses_hours_y1_${stamp}`, "claude-code/sonnet", "2019-06-02T12:00:00Z", "2019-06-03T12:00:00Z", {}, 5);                           // 24 h, 12 in range
+    await db.query(`INSERT INTO orchestrator_sandboxes (sandbox_id, orchestrator_id, state, created_at, deleted_at, last_seen, job_id) VALUES
+      ('smoke-st-o1', 'orch-st-1', 'deleted', '2019-06-01T20:00:00Z', '2019-06-02T04:00:00Z', NULL, $1),
+      ('smoke-st-o2', 'orch-st-2', 'deleted', '2019-06-02T10:00:00Z', '2019-06-02T11:30:00Z', NULL, NULL),
+      ('smoke-st-o3', 'orch-st-3', 'deleted', '2019-05-31T22:00:00Z', '2019-06-01T01:00:00Z', NULL, $2),
+      ('smoke-st-o4', 'orch-st-4', 'deleted', '2019-06-02T22:00:00Z', NULL, '2019-06-02T23:00:00Z', 'job-nope')`, [simX, simY]);
+    const near = (x: number, y: number, what: string) => assert.ok(Math.abs(x - y) < 1e-3, `${what}: ${x} != ${y}`);
+    const q = "from=2019-06-01&to=2019-06-02";
+    const ch = await json(adm("GET", `/spend/compute?${q}`));
+    const acc = (rows: any[], key: string) => rows.find((x: any) => x.key === key);
+    const cx = acc(ch.accounts, X.org.slug), cy = acc(ch.accounts, Y.org.slug), cs = acc(ch.accounts, "shared");
+    // Orchestrators: X's job 4 h + 4 h; Y's job clipped to its 1 h inside the range; shared: no job 1.5 h, an unknown job 1 h (ends at last_seen).
+    assert.deepEqual([cx.daily_orchestrator, cy.daily_orchestrator, cs.daily_orchestrator], [[4, 4], [1, 0], [0, 2.5]]);
+    assert.deepEqual([cx.daily_agent, cy.daily_agent, cs.daily_agent], [[1, 1.5], [0, 12], [0, 0]]);
+    assert.deepEqual([cx.total_hours, cy.total_hours, cs.total_hours, cs.name], [10.5, 13, 2.5, "Octillion (shared)"]);
+    assert.deepEqual([cx.sessions, cx.orchestrators, cy.orchestrators, cs.orchestrators], [2, 1, 0, 2], "launched in range only");
+    assert.deepEqual([cx.avg_session_hours, cx.longest_session_hours, cy.avg_session_hours, cy.longest_session_hours], [1.25, 2, 24, 24], "whole session lengths");
+    assert.deepEqual(cx.by_agent.map((a: any) => [a.agent, a.hours, a.sessions]), [["claude-code/sonnet", 2, 1], ["codex/gpt", 0.5, 1]]);
+    assert.deepEqual(cx.by_job.map((j: any) => [j.job_id, j.kind, j.orchestrator_hours, j.agent_hours]), [[simX, "simulation", 8, 2.5]]);
+    assert.deepEqual([ch.totals.orchestrator_hours, ch.totals.agent_hours, ch.totals.total_hours], [11.5, 14.5, 26]);
+    near(ch.accounts.reduce((t: number, a: any) => t + a.total_hours, 0), ch.totals.total_hours, "accounts add up");
+    assert.deepEqual([ch.totals.daily_peak, ch.totals.peak_running, ch.totals.peak_source], [[2, 3], 3, "intervals"], "most running at once, per day");
+    // Grouped by sandbox provider: boat.dev runs the orchestrators and the boat (and default) sessions; Docker the other.
+    const boat = acc(ch.providers, "boat.dev"), docker = acc(ch.providers, "Docker");
+    assert.deepEqual([boat.orchestrator_hours, boat.agent_hours, boat.sessions, boat.orchestrators, docker.agent_hours, docker.sessions], [11.5, 14, 2, 3, 0.5, 1]);
+    near(boat.sandbox_types.reduce((t: number, x: any) => t + x.hours, 0), boat.total_hours, "sandbox types add up");
+    assert.equal(boat.sandbox_types.find((x: any) => x.kind === "Orchestrator").hours, 11.5);
+    assert.deepEqual(boat.by_account.map((a: any) => [a.key, a.total_hours]), [[Y.org.slug, 13], [X.org.slug, 10], ["shared", 2.5]]);
+    near(ch.providers.reduce((t: number, p: any) => t + p.total_hours, 0), ch.totals.total_hours, "providers add up");
+
+    // Data & storage: rows by table and account, gateway bytes by day, archived research.
+    await db.query(`INSERT INTO mcp_events (org_id, at, method) VALUES ($1, '2019-06-01T08:00:00Z', 'tools/list'), ($1, '2019-06-01T09:00:00Z', 'tools/call'),
+      ($1, '2019-06-02T08:00:00Z', 'tools/call'), ($2, '2019-06-02T09:00:00Z', 'initialize')`, [X.org.orgId, Y.org.orgId]);
+    await db.query(`INSERT INTO product_research (id, org_id, product_id, status, input, created_at, archive_key, archived_at)
+      VALUES ($1, $2, $3, 'completed', '{}', '2019-06-01T05:00:00Z', 'research/x.json', '2019-06-02T03:00:00Z')`, [`rsh_hours_${stamp}`, X.org.orgId, fx.p]);
+    await db.query(`INSERT INTO gateway_usage (token_hash, provider, session_id, orchestrator_id, requests, bytes, last_at) VALUES
+      ('smoke-st-1', 'anthropic', $1, NULL, 4, 1000, '2019-06-01T23:30:00Z'), ('smoke-st-2', 'openai', $2, NULL, 2, 500, '2019-06-02T13:00:00Z'),
+      ('smoke-st-3', 'anthropic', NULL, 'orch-st-1', 1, 250, '2019-06-02T02:00:00Z')`, [`ses_hours_x1_${stamp}`, `ses_hours_y1_${stamp}`]);
+    const st = await json(adm("GET", `/spend/storage?${q}`));
+    assert.ok(st.totals.db_bytes === null || st.totals.db_bytes > 0, "database size, or null where the database cannot say");
+    assert.deepEqual([st.totals.gateway_bytes, st.totals.daily_gateway_bytes, st.totals.transcript_store], [1750, [1000, 750], "postgres"]);
+    const tbl = (name: string) => st.tables.find((t: any) => t.name === name);
+    assert.deepEqual([tbl("mcp_events").new_rows, tbl("mcp_events").daily_new, tbl("agent_sessions").new_rows, tbl("orchestrator_sandboxes").new_rows, tbl("product_research").new_rows],
+      [4, [2, 2], 3, 3, 1]);
+    assert.ok(tbl("organizations").rows >= 2 && tbl("mcp_events").last_write, "rows and last write");
+    assert.ok(st.tables.every((t: any) => t.bytes === null || t.bytes >= 0) && (st.totals.sizes_available ? tbl("organizations").bytes > 0 : true), "table sizes");
+    assert.equal(st.totals.new_rows, st.tables.reduce((t: number, x: any) => t + x.new_rows, 0), "new rows add up");
+    const sx = acc(st.accounts, X.org.slug), sy = acc(st.accounts, Y.org.slug);
+    // X owns in range: 1 simulation, 2 sessions, 3 MCP events, 1 research job (its product and scenario were created now).
+    assert.deepEqual([sx.new_rows, sx.daily_new, sx.transcript_events, sx.new_transcript_events, sx.gateway_bytes, sy.gateway_bytes, sy.new_rows], [7, [5, 2], 10, 10, 1250, 500, 3]);
+    assert.ok(sx.rows >= 9 && sx.by_table.find((t: any) => t.name === "mcp_events").rows === 3 && sx.by_table.find((t: any) => t.name === "scenarios").rows === 1, "rows it owns, scenarios through the product");
+    assert.deepEqual(sx.gateway_by_provider, [{ provider: "anthropic", bytes: 1250 }]);
+    const store = (key: string) => st.stores.find((s: any) => s.key === key);
+    assert.deepEqual(st.stores.map((s: any) => s.kind).slice(0, 3), ["database", "transcripts", "archive"]);
+    assert.deepEqual([store("gateway:anthropic").new_bytes, store("gateway:openai").new_bytes, store("archive").new_rows, store("archive").daily_new], [1250, 500, 1, [0, 1]]);
+    assert.equal(store("transcripts").rows, tbl("transcript_events").rows, "Postgres transcripts: the transcript_events table");
+    assert.ok(store("database").parts.length === st.tables.length && store("database").rows === st.tables.reduce((t: number, x: any) => t + x.rows, 0));
+    await db.query("DELETE FROM gateway_usage WHERE token_hash LIKE 'smoke-st-%'");
+    await db.query("DELETE FROM orchestrator_sandboxes WHERE sandbox_id LIKE 'smoke-st-%'");
+    await db.query("DELETE FROM organizations WHERE id = ANY($1)", [[X.org.orgId, Y.org.orgId]]);
+    console.log("✓ spend compute hours (clipped by day, by account with shared, by agent and job, peak at once, by sandbox provider) and storage (tables, accounts, gateway bytes, archive)");
   }
 
   // ---------- autoscaler history (src/autoscaler-ticks.ts): acting ticks and minute samples, decisions, activity, pruning ----------
@@ -2362,6 +2445,8 @@ try {
         ["GET", "/compute/keys", undefined, "viewer"],
         ["GET", "/spend", undefined, "viewer"],
         ["GET", "/spend/accounts/shared", undefined, "viewer"],
+        ["GET", "/spend/compute", undefined, "viewer"],
+        ["GET", "/spend/storage", undefined, "viewer"],
         ["POST", "/requests/999999/decline", {}, "support"],
         ["POST", `/orgs/${slugA}/invitations`, { email: "not-an-email" }, "support"],
         ["POST", "/journeys/nudges", {}, "support"],

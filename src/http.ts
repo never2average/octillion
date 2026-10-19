@@ -37,6 +37,7 @@ import * as onboarding from "./admin.js";
 import * as library from "./library.js";
 import { computeSummary } from "./compute.js";
 import * as spend from "./spend.js";
+import * as spendUsage from "./spend-usage.js";
 import * as records from "./compute-records.js";
 import * as jobs from "./compute-jobs.js";
 import * as actions from "./compute-actions.js";
@@ -468,9 +469,11 @@ export function createApp() {
   ob.get("/compute/ticks", async (req, res) => void res.json(await ticks.listTicks(req.query as Record<string, unknown>)));
   ob.get("/compute/activity", async (req, res) => void res.json(await ticks.computeActivity(req.query as Record<string, unknown>)));
   ob.get("/compute/trends", async (_req, res) => void res.json(await (await import("./compute-trends.js")).computeTrends()));
-  // Spend (src/spend.ts): metered model spend across every account, by account, model and day, and one account's
+  // Spend (src/spend.ts, src/spend-usage.ts): metered model spend by account and provider, compute hours, data and storage, and one account's
   // breakdown. Read only (GETs: any admin role).
   ob.get("/spend", async (req, res) => void res.json(await spend.spendReport(req.query)));
+  ob.get("/spend/compute", async (req, res) => void res.json(await spendUsage.computeReport(req.query)));
+  ob.get("/spend/storage", async (req, res) => void res.json(await spendUsage.storageReport(req.query)));
   ob.get("/spend/accounts/:key", async (req, res) => void res.json(await spend.accountSpend(String(req.params.key), req.query)));
   // The page's only two actions (src/compute-actions.ts), both in the admin audit log: run one autoscaler tick now, and
   // cancel a queued or running session (its orchestrator stops the sandbox at the next heartbeat).

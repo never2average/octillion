@@ -51,6 +51,8 @@ interface TranscriptStore {
   /** Wake the store in the background (a paused ClickHouse Cloud service takes ~15 s to answer its first query). */
   warm(): void;
   search(p: SearchParams): Promise<SearchResult>;
+  /** Rows and bytes on disk, where the store reports them cheaply (ClickHouse system.parts); Postgres: null (its table size is the database's). */
+  stats(): Promise<{ rows: number; bytes: number } | null>;
 }
 
 // ---------- normalisation ----------
@@ -198,6 +200,15 @@ function clickhouseStore(cfg: ClickHouseConfig): TranscriptStore {
       })).json<{ left: string }>();
       if (Number(left)) throw new Error(`org ${orgId}: ${left} transcript event(s) still in ClickHouse after delete`);
     },
+    async stats() {
+      await ensure();
+      const [r] = await (await client.query({
+        query: `SELECT sum(rows) AS rows, sum(bytes_on_disk) AS bytes FROM system.parts
+                 WHERE database = {db:String} AND table = 'transcript_events' AND active`,
+        query_params: { db: cfg.database }, format: "JSONEachRow",
+      })).json<{ rows: string; bytes: string }>();
+      return { rows: Number(r?.rows ?? 0), bytes: Number(r?.bytes ?? 0) };
+    },
     async remove(orgId, sessionId) {
       await ensure();
       // Lightweight delete, waited for: the retry's events reuse the same seq numbers.
@@ -276,6 +287,7 @@ function facets(rows: { model: string; type: string; n: string | number }[]) {
 
 const postgresStore: TranscriptStore = {
   kind: "postgres",
+  async stats() { return null; },
   async append(s, events) {
     const db = await getDb();
     for (const e of events)
@@ -368,6 +380,7 @@ export function transcripts(): TranscriptStore {
     removeOrg: (orgId) => base.removeOrg(orgId),
     warm: () => base.warm(),
     search: (p) => base.search(p),
+    stats: () => base.stats(),
     async read(orgId, sessionId, offset, limit) {
       const fromArchive = async () => {
         const { archivedEvents } = await import("./archive.js");
