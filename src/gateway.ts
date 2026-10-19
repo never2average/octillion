@@ -211,7 +211,7 @@ export async function gatewayHandler(req: Request, res: Response) {
   if (!t.providers.includes(slug)) return gwError(res, 403, "permission_error", `Token is not allowed to use ${slug}`);
   // Some CLIs (Codex) probe a WebSocket transport first; refuse fast so they fall back to HTTP immediately.
   if (req.headers.upgrade) return gwError(res, 426, "invalid_request_error", "WebSocket is not supported by the Octillion gateway; use HTTP");
-  const p: ProviderRow | null = await getProvider(slug);
+  let p: ProviderRow | null = await getProvider(slug);
   if (!p?.enabled || p.mode !== "gateway" || (!p.upstream_url && p.backend !== "vertex")) return gwError(res, 404, "not_found_error", `No gateway provider ${slug}`);
 
   const [used] = await db.query<{ requests: number; tokens: number; cost: number }>(
@@ -227,7 +227,14 @@ export async function gatewayHandler(req: Request, res: Response) {
     cred = p.backend === "vertex"
       ? await useVertexCredential(slug, (p.backend_config as VertexConfig)?.credential_provider)
       : await useCredential(slug, { excludeLabel: VERTEX_LABEL });
-  } catch (e) { return gwError(res, 503, "api_error", (e as Error).message); }
+  } catch (e) {
+    // Claude with no Anthropic key: run it on Vertex AI when the vault holds a Vertex key (project from the key,
+    // region from the VERTEX_REGION setting), so adding the Vertex key is all it takes.
+    const vertex = slug === "anthropic" && p.backend !== "vertex" ? await useVertexCredential(slug).catch(() => null) : null;
+    if (!vertex) return gwError(res, 503, "api_error", (e as Error).message);
+    cred = vertex;
+    p = { ...p, backend: "vertex", backend_config: { region: "global" } }; // Claude 5 models are served from the global endpoint
+  }
   const vcfg = p.backend === "vertex" ? vertexConfig(p.backend_config, cred.secret, settingText("VERTEX_REGION")) : p.backend_config;
 
   // Path after /gw/<provider>, query without our `key` parameter.
