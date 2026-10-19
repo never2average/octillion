@@ -119,6 +119,11 @@ export function AdminKeyVault() {
 function AddKey({ providers, initial, onClose }: { providers: Provider[]; initial: string; onClose: () => void }) {
   const [f, setF] = useState({ provider: initial, label: '', secret: '' });
   const [err, setErr] = useState('');
+  const [file, setFile] = useState<string | null>(null);
+  const [pasting, setPasting] = useState(false);
+  const [drag, setDrag] = useState(false);
+  // A key file read in the browser: the BOM some editors add is dropped so the JSON parses; the text never renders.
+  const readFile = (fl: File | undefined) => { if (fl) void fl.text().then((t) => { setFile(fl.name); setErr(''); setF((x) => ({ ...x, secret: t.replace(/^\uFEFF/, '').trim() })); }); };
   const add = useAdminAction(() => post<{ hint: string; project_id?: string }>('/compute/keys', { provider: f.provider, label: f.label.trim() || undefined, secret: f.secret }),
     { success: (r) => `Key saved (${r.project_id ? `${r.project_id} · ` : ''}${r.hint})` });
   const vertex = f.provider === 'vertex' || (f.provider === 'anthropic' && f.label.trim() === 'vertex');
@@ -147,11 +152,31 @@ function AddKey({ providers, initial, onClose }: { providers: Provider[]; initia
           <FormRow id='ak-secret' label={vertex ? 'Service-account JSON' : 'Key'}>
             {vertex
               ? <div className='grid gap-2'>
-                  <Textarea id='ak-secret' rows={6} spellCheck={false} required className='font-mono text-xs' placeholder='{ "type": "service_account", "project_id": …, "client_email": …, "private_key": … }' value={f.secret} onChange={(e) => setF({ ...f, secret: e.target.value })} />
-                  <Input type='file' accept='.json,application/json' aria-label='Upload the service-account JSON' onChange={(e) => { const file = e.target.files?.[0]; if (file) void file.text().then((t) => setF((x) => ({ ...x, secret: t }))); e.target.value = ''; }} />
-                  {sa && ('error' in sa
-                    ? <p className='text-destructive text-xs'>{sa.error}</p>
-                    : <p className='text-muted-foreground text-xs'>Project <Mono>{sa.project_id}</Mono> · <Mono>{sa.client_email}</Mono></p>)}
+                  {!f.secret ? (
+                    <label onDragOver={(e) => { e.preventDefault(); setDrag(true); }} onDragLeave={() => setDrag(false)}
+                      onDrop={(e) => { e.preventDefault(); setDrag(false); readFile(e.dataTransfer.files?.[0]); }}
+                      className={cn('flex cursor-pointer flex-col items-center gap-1 rounded-md border border-dashed px-4 py-6 text-center text-sm', drag ? 'border-primary bg-primary/5' : 'hover:bg-muted/40')}>
+                      <Icons.upload className='text-muted-foreground size-5' />
+                      <span className='font-medium'>Drop the key file here, or choose it</span>
+                      <span className='text-muted-foreground text-xs'>The .json file Google Cloud downloads. It is checked here and never shown.</span>
+                      <input type='file' accept='.json,application/json' className='sr-only' aria-label='Choose the service-account JSON file' onChange={(e) => { readFile(e.target.files?.[0]); e.target.value = ''; }} />
+                    </label>
+                  ) : (
+                    <div className={cn('flex items-start gap-3 rounded-md border px-3 py-2.5 text-sm', sa && 'error' in sa ? 'border-destructive/40' : 'border-emerald-500/40')}>
+                      {sa && 'error' in sa ? <Icons.warning className='text-destructive mt-0.5 size-4 shrink-0' /> : <Icons.circleCheck className='mt-0.5 size-4 shrink-0 text-emerald-600' />}
+                      <div className='min-w-0 flex-1 space-y-0.5'>
+                        <div className='truncate font-medium'>{file ?? 'Pasted key'}</div>
+                        {sa && ('error' in sa
+                          ? <p className='text-destructive text-xs'>{sa.error}</p>
+                          : <p className='text-muted-foreground truncate text-xs'><Mono>{sa.project_id}</Mono> · <Mono>{sa.client_email}</Mono></p>)}
+                      </div>
+                      <Button type='button' variant='ghost' size='xs' onClick={() => { setF({ ...f, secret: '' }); setFile(null); setPasting(false); }}>Replace</Button>
+                    </div>
+                  )}
+                  {!f.secret && (pasting
+                    ? <Textarea id='ak-secret' rows={3} spellCheck={false} autoComplete='off' className='font-mono text-xs [-webkit-text-security:disc]' placeholder='Paste the whole key file' value={f.secret}
+                        onChange={(e) => { setFile(null); setF({ ...f, secret: e.target.value.replace(/^\uFEFF/, '').trim() }); }} />
+                    : <button type='button' className='text-muted-foreground hover:text-foreground self-start text-xs underline-offset-2 hover:underline' onClick={() => setPasting(true)}>Or paste the JSON instead</button>)}
                 </div>
               : <Input id='ak-secret' type='password' autoComplete='new-password' spellCheck={false} required value={f.secret} onChange={(e) => setF({ ...f, secret: e.target.value })} />}
           </FormRow>
