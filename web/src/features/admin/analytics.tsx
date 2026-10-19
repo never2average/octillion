@@ -23,6 +23,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { DateRangePicker, last30, rangeQuery, type DateRange } from '@/components/layout/date-range-picker';
 import { TablePager, type Paged } from '@/components/layout/table-pager';
 import { StatStrip } from '@/components/layout/section';
+import { Box, RankBars, top } from '@/components/layout/chart-grid';
 import { Icons } from '@/components/icons';
 import { adminApi } from '@/lib/api-client';
 import { downloadCsv, downloadJson, type CsvValue } from '@/lib/csv';
@@ -778,25 +779,6 @@ function GrowthRows({ g }: { g: Growth }) {
   );
 }
 
-/** One cell of the Analytics grid: title, a one-line description, then the chart or table. Cells share hairlines (the grid draws the top and left ones). */
-function Box({ title, description, action, className, children }: { title: ReactNode; description?: ReactNode; action?: ReactNode; className?: string; children: ReactNode }) {
-  return (
-    <section className={cn('flex min-w-0 flex-col gap-3 border-r border-b p-4', className)}>
-      <div className='flex flex-wrap items-start justify-between gap-2'>
-        <div className='min-w-0'>
-          <h2 className='text-sm font-semibold'>{title}</h2>
-          {description && <p className='text-muted-foreground mt-0.5 text-xs'>{description}</p>}
-        </div>
-        {action}
-      </div>
-      {children}
-    </section>
-  );
-}
-
-/** The ten largest by `by`, largest first. */
-const top = <T,>(xs: readonly T[], by: (x: T) => number, n = 10) => [...xs].sort((x, y) => by(y) - by(x)).slice(0, n).filter((x) => by(x) > 0);
-
 /** Accounts by how their calls moved against the previous period of the same length. */
 function trendBuckets(rows: readonly { trend: number | null; at_risk: boolean }[]) {
   const b = { Growing: 0, Steady: 0, Declining: 0, 'At risk': 0, New: 0 };
@@ -808,24 +790,6 @@ function trendBuckets(rows: readonly { trend: number | null; at_risk: boolean }[
     else b.Steady++;
   }
   return Object.entries(b).map(([name, value]) => ({ name, value }));
-}
-
-/** A horizontal bar chart (rows in the order given): one bar per row, its name on the left and its value at the end. */
-function RankBars({ data, color, format, empty, mono }: {
-  data: { name: string; value: number }[]; color: string; format: (v: number) => string; empty: string; mono?: boolean;
-}) {
-  if (!data.length || data.every((d) => !d.value)) return <p className='text-muted-foreground py-10 text-center text-sm'>{empty}</p>;
-  return (
-    <ChartContainer config={{ value: { label: 'Value', color } }} className='aspect-auto w-full' style={{ height: Math.max(120, data.length * 28 + 8) }}>
-      <BarChart data={data} layout='vertical' margin={{ left: 0, right: 40, top: 0, bottom: 0 }}>
-        <XAxis type='number' hide />
-        <YAxis type='category' dataKey='name' width={128} tickLine={false} axisLine={false}
-          tick={{ fontSize: 11, fontFamily: mono ? 'var(--font-mono)' : undefined }} tickFormatter={(v: string) => (v.length > 20 ? `${v.slice(0, 19)}…` : v)} />
-        <ChartTooltip cursor={false} content={<ChartTooltipContent hideLabel={false} formatter={(v) => format(Number(v))} />} />
-        <Bar dataKey='value' fill={color} radius={3} barSize={16} label={{ position: 'right', fontSize: 11, fill: 'var(--muted-foreground)', formatter: (v: unknown) => format(Number(v)) }} />
-      </BarChart>
-    </ChartContainer>
-  );
 }
 
 const ERROR_TABLE: Record<ErrorKind, { label: string; render: (r: ErrorRow) => ReactNode; className?: string }[]> = {

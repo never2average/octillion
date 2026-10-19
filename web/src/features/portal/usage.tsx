@@ -1,24 +1,25 @@
 'use client';
-// /app Usage: the team's activity across every AI client, and model spend against the plan, for everyone or for the
-// people picked in the People filter (server-side, so a per-person view can later pin it to the signed-in user).
-import { PagedTable } from '@/components/layout/table-pager';
-import { useEffect, useMemo, useState } from 'react';
-import { Area, AreaChart, Bar, BarChart, CartesianGrid, XAxis, YAxis } from 'recharts';
+// /app Usage: the team's own activity across every AI client, its simulations and what agents picked, and model spend,
+// for everyone or for the people picked in the People filter (server-side). The layout is admin Analytics': one stat
+// strip, then a grid of cells sharing hairlines, two per row at most (components/layout/chart-grid).
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { Area, AreaChart, Bar, BarChart, CartesianGrid, Line, LineChart, ReferenceLine, XAxis, YAxis } from 'recharts';
 import PageContainer from '@/components/layout/page-container';
 import { Badge } from '@/components/ui/badge';
-import { Rule, Section, StatStrip } from '@/components/layout/section';
-import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from '@/components/ui/chart';
-import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty';
+import { StatStrip } from '@/components/layout/section';
+import { Box, RankBars, top } from '@/components/layout/chart-grid';
+import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent, type ChartConfig } from '@/components/ui/chart';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { appApi } from '@/lib/api-client';
-import { num, usd } from '@/lib/octillion-format';
+import { num, relative, usd } from '@/lib/octillion-format';
 import { DateRangePicker, last30, rangeQuery, type DateRange } from '@/components/layout/date-range-picker';
 import { MultiSelectFilter, type FilterOption } from '@/components/layout/multi-select-filter';
 import { Icons } from '@/components/icons';
-import { ErrorState, LoadingCards, SpendMeter, useOrgLoad } from './shared';
+import { ErrorState, LoadingCards, useOrgLoad } from './shared';
 
+interface Week { week: string; partial: boolean }
 interface Usage {
-  days: number; range?: { from: string; to: string }; daily: { day: string; calls: number; errors: number }[];
+  days: number; range?: { from: string; to: string }; daily: { day: string; calls: number; errors: number; people: number }[];
   tools: { name: string; calls: number; errors: number; avg_ms: number | null }[];
   runs: { simulations: number; sessions: number; completed: number };
   people: { user_id: string; email: string; me: boolean; calls: number }[];
@@ -27,9 +28,36 @@ interface Usage {
   spend: { month_usd: number; budget_usd: number; filtered?: boolean };
   /** The cards' sparklines: people, simulations and finished sessions per day of the period; model spend per day this month. */
   series?: { days: string[]; people: number[]; simulations: number[]; completed: number[]; month_days: string[]; spend: number[] };
+  /** The grid's series (src/app.ts usageCharts). */
+  charts?: {
+    workflow: { id: string; label: string; used: number; total: number; calls: number }[];
+    clients: { client: string; calls: number }[];
+    sims_weekly: (Week & { completed: number; other: number })[];
+    harnesses: { harness: string; sessions: number; completed: number }[];
+    visibility: (Week & { scored: number; hits: number; hit_pct: number | null })[];
+    tasks: { id: number; title: string; hits: number; misses: number }[];
+    spend_by: { kind: 'person' | 'simulation'; rows: { key: string | null; name: string; usd: number }[] };
+    /** Only for a Billing manager or Owner. */
+    allowance_usd: number | null;
+    recent: { id: string; name: string; product: string; status: string; created_at: string; by: string; sessions: number; scored: number; hits: number; hit_pct: number | null }[];
+  };
 }
 
 const callsConfig = { calls: { label: 'Tool calls', color: 'var(--chart-1)' }, errors: { label: 'Errors', color: 'var(--destructive)' } } satisfies ChartConfig;
+const peopleConfig = { people: { label: 'Active people', color: 'var(--chart-2)' } } satisfies ChartConfig;
+const simsConfig = { completed: { label: 'Completed', color: 'var(--chart-2)' }, other: { label: 'Not completed', color: 'var(--chart-4)' } } satisfies ChartConfig;
+const visConfig = { hit_pct: { label: 'Hit rate', color: 'var(--chart-2)' } } satisfies ChartConfig;
+const taskConfig = { hits: { label: 'Hits', color: 'var(--chart-2)' }, misses: { label: 'Misses', color: 'var(--chart-4)' } } satisfies ChartConfig;
+const spendConfig = { usd: { label: 'Model spend', color: 'var(--chart-3)' } } satisfies ChartConfig;
+
+const shortDay = (d: string) => new Date(`${d}T00:00:00Z`).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+const dayAxis = <XAxis dataKey='day' tickLine={false} axisLine={false} tickMargin={8} minTickGap={28} tickFormatter={shortDay} />;
+const weekAxis = <XAxis dataKey='week' tickLine={false} axisLine={false} tickMargin={8} minTickGap={24} tickFormatter={shortDay} />;
+const weekLabel = (v: unknown, payload: readonly { payload?: { partial?: boolean } }[] = []) => `Week of ${shortDay(String(v))}${payload[0]?.payload?.partial ? ' (part)' : ''}`;
+const tipRow = (label: ReactNode, value: ReactNode) => (
+  <div className='flex w-full items-center justify-between gap-4'><span className='text-muted-foreground'>{label}</span><span className='text-foreground font-mono font-medium tabular-nums'>{value}</span></div>
+);
+const Empty = ({ children }: { children: ReactNode }) => <p className='text-muted-foreground py-16 text-center text-sm'>{children}</p>;
 
 export function UsagePage() {
   const [range, setRange] = useState<DateRange>(last30);
@@ -44,19 +72,6 @@ export function UsagePage() {
   useEffect(() => {
     if (u?.people) setPeopleOpts(u.people.map((p) => ({ value: p.user_id, label: p.me ? `${p.email} (you)` : p.email, count: p.calls })));
   }, [u?.people]);
-  const days = u?.days ?? 30;
-  // Every day of the period, zero-filled, so the charts have a continuous axis.
-  const series = useMemo(() => {
-    if (!u) return [];
-    const by = new Map(u.daily.map((d) => [d.day, d]));
-    const start = u.range ? Date.parse(`${u.range.from}T00:00:00Z`) : Date.now() - (days - 1) * 86_400_000;
-    return Array.from({ length: days }, (_, i) => {
-      const k = new Date(start + i * 86_400_000).toISOString().slice(0, 10);
-      const d = by.get(k);
-      return { day: k, calls: Number(d?.calls ?? 0), errors: Number(d?.errors ?? 0) };
-    });
-  }, [u, days]);
-  const calls = series.reduce((s, d) => s + d.calls, 0), errs = series.reduce((s, d) => s + d.errors, 0);
   return (
     <PageContainer
       pageTitle='Usage'
@@ -69,85 +84,202 @@ export function UsagePage() {
         </div>
       }
     >
-      {error ? <ErrorState error={error} /> : !u ? <LoadingCards count={4} /> : (
-        <div className='flex w-full flex-col gap-8'>
-          <div className='flex flex-col gap-3'>
-            <StatStrip items={[
-              { label: 'Tool calls', value: num(calls), spark: series.map((d) => d.calls), hint: errs ? `${num(errs)} errors` : 'no errors' },
-              { label: 'Active people', value: u.active_people, spark: u.series?.people },
-              { label: 'Simulations', value: num(u.runs.simulations), spark: u.series?.simulations, hint: useCases.length ? 'all use cases' : undefined },
-              { label: 'Agent sessions done', value: `${num(u.runs.completed)} / ${num(u.runs.sessions)}`, spark: u.series?.completed },
-              { label: u.spend.filtered ? 'Their model spend this month' : 'Model spend this month', value: usd(u.spend.month_usd), spark: u.series?.spend, hint: u.spend.filtered ? 'runs they launched' : Number(u.spend.budget_usd) ? `of ${usd(u.spend.budget_usd)}` : 'no prepaid allowance yet' }
-            ]} />
-            {!u.spend.filtered && Number(u.spend.budget_usd) > 0 && <SpendMeter spent={Number(u.spend.month_usd)} budget={Number(u.spend.budget_usd)} className='max-w-md' />}
-          </div>
-
-          <div className='flex flex-col gap-10'>
-            <Section title='Tool calls per day' description={`Every Octillion tool call${users.length ? ' from the people picked' : ' from your team'}, ${days} days.`}>
-              {calls ? (
-                <ChartContainer config={callsConfig} className='aspect-auto h-[240px] w-full'>
-                  <AreaChart data={series} margin={{ left: 0, right: 8 }}>
-                    <defs>
-                      <linearGradient id='fillCalls' x1='0' y1='0' x2='0' y2='1'>
-                        <stop offset='5%' stopColor='var(--color-calls)' stopOpacity={0.5} />
-                        <stop offset='95%' stopColor='var(--color-calls)' stopOpacity={0.05} />
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid vertical={false} strokeDasharray='3 3' />
-                    <XAxis dataKey='day' tickLine={false} axisLine={false} tickMargin={8} minTickGap={24} tickFormatter={(v: string) => v.slice(5)} />
-                    <YAxis tickLine={false} axisLine={false} width={28} allowDecimals={false} />
-                    <ChartTooltip cursor={false} content={<ChartTooltipContent indicator='dot' />} />
-                    <Area dataKey='calls' type='monotone' fill='url(#fillCalls)' stroke='var(--color-calls)' strokeWidth={2} />
-                  </AreaChart>
-                </ChartContainer>
-              ) : <NoData text='No tool calls in this period.' />}
-            </Section>
-            <Section title='Errors per day' description='Failed tool calls; see Setup for fixes.'>
-              {errs ? (
-                <ChartContainer config={callsConfig} className='aspect-auto h-[240px] w-full'>
-                  <BarChart data={series} margin={{ left: 0, right: 8 }}>
-                    <CartesianGrid vertical={false} strokeDasharray='3 3' />
-                    <XAxis dataKey='day' tickLine={false} axisLine={false} tickMargin={8} minTickGap={24} tickFormatter={(v: string) => v.slice(5)} />
-                    <YAxis tickLine={false} axisLine={false} width={24} allowDecimals={false} />
-                    <ChartTooltip cursor={false} content={<ChartTooltipContent />} />
-                    <Bar dataKey='errors' fill='var(--color-errors)' radius={3} />
-                  </BarChart>
-                </ChartContainer>
-              ) : <NoData text='No errors in this period.' />}
-            </Section>
-          </div>
-
-          <Rule />
-
-          <div className='flex flex-col gap-10'>
-            <Section title='Tools' description={users.length ? 'Which parts of Octillion the people picked use.' : 'Which parts of Octillion your team uses.'}>
-              <>
-                <div className='overflow-x-auto'>
-                  <PagedTable items={u.tools} empty='No tool calls yet.' noun='tools'>{(rows) => (
-                  <Table>
-                    <TableHeader><TableRow><TableHead>Tool</TableHead><TableHead className='text-right'>Calls</TableHead><TableHead className='text-right'>Errors</TableHead><TableHead className='text-right'>Avg</TableHead></TableRow></TableHeader>
-                    <TableBody>
-                      {rows.map((t) => (
-                        <TableRow key={t.name}>
-                          <TableCell className='font-mono text-xs'>{t.name}</TableCell>
-                          <TableCell className='text-right tabular-nums'>{num(t.calls)}</TableCell>
-                          <TableCell className='text-right'>{Number(t.errors) ? <Badge variant='destructive'>{t.errors}</Badge> : <span className='text-muted-foreground'>0</span>}</TableCell>
-                          <TableCell className='text-muted-foreground text-right tabular-nums'>{t.avg_ms != null ? `${t.avg_ms} ms` : ''}</TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                  )}</PagedTable>
-                </div>
-</>
-            </Section>
-          </div>
-        </div>
-      )}
+      {error ? <ErrorState error={error} /> : !u ? <LoadingCards count={4} /> : <UsageBody u={u} users={users} />}
     </PageContainer>
   );
 }
 
-function NoData({ text }: { text: string }) {
-  return <Empty className='py-10'><EmptyHeader><EmptyTitle className='text-base'>Nothing yet</EmptyTitle><EmptyDescription>{text}</EmptyDescription></EmptyHeader></Empty>;
+function UsageBody({ u, users }: { u: Usage; users: string[] }) {
+  const days = u.days;
+  // Every day of the period, zero-filled, so the charts have a continuous axis.
+  const series = useMemo(() => {
+    const by = new Map(u.daily.map((d) => [d.day, d]));
+    const start = u.range ? Date.parse(`${u.range.from}T00:00:00Z`) : Date.now() - (days - 1) * 86_400_000;
+    return Array.from({ length: days }, (_, i) => {
+      const k = new Date(start + i * 86_400_000).toISOString().slice(0, 10);
+      const d = by.get(k);
+      return { day: k, calls: Number(d?.calls ?? 0), errors: Number(d?.errors ?? 0), people: Number(d?.people ?? 0) };
+    });
+  }, [u, days]);
+  const spendDaily = useMemo(() => (u.series?.month_days ?? []).map((day, i) => ({ day, usd: Number(u.series?.spend[i] ?? 0) })), [u.series]);
+  const c = u.charts;
+  const calls = series.reduce((s, d) => s + d.calls, 0);
+  const picked = new Set(users);
+  const people = u.people.filter((p) => !picked.size || picked.has(p.user_id));
+  // The allowance spread evenly over the month: the daily pace that uses it up on the last day.
+  const now = new Date(), monthLen = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0)).getUTCDate();
+  const pace = c?.allowance_usd && !u.spend.filtered ? c.allowance_usd / monthLen : null;
+  const visAny = (c?.visibility ?? []).some((w) => w.scored > 0);
+  const tasks = (c?.tasks ?? []).map((t) => ({ ...t, name: t.title }));
+  return (
+    <div className='flex w-full flex-col gap-6 pb-4'>
+      <StatStrip items={[
+        { label: 'Tool calls', value: num(calls), spark: series.map((d) => d.calls) },
+        { label: 'Active people', value: num(u.active_people), spark: u.series?.people ?? series.map((d) => d.people) },
+        { label: 'Simulations run', value: num(u.runs.simulations), spark: u.series?.simulations },
+        { label: u.spend.filtered ? 'Their model spend this month' : 'Model spend this month', value: usd(u.spend.month_usd), spark: u.series?.spend }
+      ]} />
+
+      <div className='border-t border-l'>
+        <div className='grid lg:grid-cols-2'>
+          <Box title='Tool calls per day' description='Every Octillion tool call, failed ones in red.'>
+            {calls ? (
+              <ChartContainer config={callsConfig} className='aspect-auto h-[240px] w-full'>
+                <AreaChart data={series} margin={{ left: 0, right: 8, top: 8 }}>
+                  <defs>
+                    <linearGradient id='fillUsageCalls' x1='0' y1='0' x2='0' y2='1'>
+                      <stop offset='5%' stopColor='var(--color-calls)' stopOpacity={0.6} />
+                      <stop offset='95%' stopColor='var(--color-calls)' stopOpacity={0.05} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid vertical={false} />
+                  {dayAxis}
+                  <YAxis width={32} tickLine={false} axisLine={false} allowDecimals={false} />
+                  <ChartTooltip cursor={false} content={<ChartTooltipContent labelFormatter={(v) => shortDay(String(v))} indicator='dot' />} />
+                  <Area dataKey='calls' type='monotone' fill='url(#fillUsageCalls)' stroke='var(--color-calls)' strokeWidth={2} />
+                  <Area dataKey='errors' type='monotone' fill='var(--color-errors)' fillOpacity={0.25} stroke='var(--color-errors)' strokeWidth={1.5} />
+                  <ChartLegend content={<ChartLegendContent />} />
+                </AreaChart>
+              </ChartContainer>
+            ) : <Empty>No tool calls in this period.</Empty>}
+          </Box>
+          <Box title='Active people per day' description='People who made at least one tool call that day.'>
+            {calls ? (
+              <ChartContainer config={peopleConfig} className='aspect-auto h-[240px] w-full'>
+                <BarChart data={series} margin={{ left: 0, right: 8, top: 8 }}>
+                  <CartesianGrid vertical={false} />
+                  {dayAxis}
+                  <YAxis width={32} tickLine={false} axisLine={false} allowDecimals={false} />
+                  <ChartTooltip cursor={false} content={<ChartTooltipContent labelFormatter={(v) => shortDay(String(v))} indicator='dashed' />} />
+                  <Bar dataKey='people' fill='var(--color-people)' radius={3} />
+                </BarChart>
+              </ChartContainer>
+            ) : <Empty>Nobody was active in this period.</Empty>}
+          </Box>
+        </div>
+
+        <div className='grid lg:grid-cols-2'>
+          <Box title='Calls by tool' description='The ten most called Octillion tools.'>
+            <RankBars data={top(u.tools, (t) => Number(t.calls)).map((t) => ({ name: t.name, value: Number(t.calls) }))} label='Tool calls' color='var(--chart-1)' format={num} mono empty='No tool calls in this period.' />
+          </Box>
+          <Box title='Calls by person' description='Tool calls by each person on your team, busiest first.'>
+            <RankBars data={top(people, (p) => Number(p.calls)).map((p) => ({ name: p.me ? 'You' : p.email, value: Number(p.calls) }))} label='Tool calls' color='var(--chart-2)' format={num} empty='Nobody made a tool call in this period.' />
+          </Box>
+        </div>
+
+        <div className='grid lg:grid-cols-2'>
+          <Box title='Workflow adoption' description="Share of each workflow's tools your team called in this period.">
+            <RankBars data={(c?.workflow ?? []).map((w) => ({ name: w.label, value: w.total ? Math.round((w.used / w.total) * 100) : 0 }))} label='Tools used' color='var(--chart-3)' format={(v) => `${v}%`} empty='No workflow used yet in this period.' />
+          </Box>
+          <Box title='AI clients used' description="Tool calls by the AI client of the caller's latest connection.">
+            <RankBars data={top(c?.clients ?? [], (x) => x.calls).map((x) => ({ name: x.client, value: x.calls }))} label='Tool calls' color='var(--chart-4)' format={num} mono empty='No tool calls in this period.' />
+          </Box>
+        </div>
+
+        <div className='grid lg:grid-cols-2'>
+          <Box title='Simulations per week' description='Simulations started each week, completed and the rest.'>
+            {(c?.sims_weekly ?? []).some((w) => w.completed + w.other > 0) ? (
+              <ChartContainer config={simsConfig} className='aspect-auto h-[240px] w-full'>
+                <BarChart data={c!.sims_weekly} margin={{ left: 0, right: 8, top: 8 }}>
+                  <CartesianGrid vertical={false} />
+                  {weekAxis}
+                  <YAxis width={32} tickLine={false} axisLine={false} allowDecimals={false} />
+                  <ChartTooltip cursor={false} content={<ChartTooltipContent labelFormatter={weekLabel} indicator='dot' />} />
+                  <Bar dataKey='completed' stackId='sims' fill='var(--color-completed)' stroke='var(--background)' strokeWidth={1} />
+                  <Bar dataKey='other' stackId='sims' fill='var(--color-other)' stroke='var(--background)' strokeWidth={1} radius={[3, 3, 0, 0]} />
+                  <ChartLegend content={<ChartLegendContent />} />
+                </BarChart>
+              </ChartContainer>
+            ) : <Empty>No simulations in this period.</Empty>}
+          </Box>
+          <Box title='Agent sessions by harness' description='Which coding agents worked your tasks in this period.'>
+            <RankBars data={top(c?.harnesses ?? [], (h) => h.sessions).map((h) => ({ name: h.harness, value: h.sessions }))} label='Sessions' color='var(--chart-2)' format={num} mono empty='No agent sessions in this period.' />
+          </Box>
+        </div>
+
+        <div className='grid lg:grid-cols-2'>
+          <Box title='Visibility trend' description='Share of scored sessions each week where the agent picked your product.'>
+            {visAny ? (
+              <ChartContainer config={visConfig} className='aspect-auto h-[240px] w-full'>
+                <LineChart data={c!.visibility} margin={{ left: 0, right: 8, top: 8 }}>
+                  <CartesianGrid vertical={false} />
+                  {weekAxis}
+                  <YAxis width={40} tickLine={false} axisLine={false} domain={[0, 100]} ticks={[0, 25, 50, 75, 100]} tickFormatter={(v) => `${v}%`} />
+                  <ChartTooltip cursor={false} content={<ChartTooltipContent labelFormatter={weekLabel}
+                    formatter={(v, _n, item) => <div className='grid w-full gap-1'>{tipRow('Hit rate', v == null ? '—' : `${v}%`)}{tipRow('Hits', num(item.payload.hits))}{tipRow('Scored sessions', num(item.payload.scored))}</div>} />} />
+                  <Line dataKey='hit_pct' type='monotone' stroke='var(--color-hit_pct)' strokeWidth={2} connectNulls dot={{ r: 4, strokeWidth: 2, fill: 'var(--background)' }} activeDot={{ r: 5 }} />
+                </LineChart>
+              </ChartContainer>
+            ) : <Empty>No scored sessions in this period.</Empty>}
+          </Box>
+          <Box title='Hits vs misses by task' description='Scored sessions per task, the ten most run.'>
+            {tasks.length ? (
+              <ChartContainer config={taskConfig} className='aspect-auto w-full' style={{ height: Math.max(120, tasks.length * 28 + 40) }}>
+                <BarChart data={tasks} layout='vertical' margin={{ left: 0, right: 16, top: 0, bottom: 0 }}>
+                  <XAxis type='number' hide allowDecimals={false} />
+                  <YAxis type='category' dataKey='name' width={128} tickLine={false} axisLine={false} tick={{ fontSize: 11 }}
+                    tickFormatter={(v: string) => (v.length > 20 ? `${v.slice(0, 19)}…` : v)} />
+                  <ChartTooltip cursor={false} content={<ChartTooltipContent hideLabel={false} indicator='dot' />} />
+                  <Bar dataKey='hits' stackId='t' fill='var(--color-hits)' stroke='var(--background)' strokeWidth={1} barSize={16} />
+                  <Bar dataKey='misses' stackId='t' fill='var(--color-misses)' stroke='var(--background)' strokeWidth={1} barSize={16} radius={[0, 3, 3, 0]} />
+                  <ChartLegend content={<ChartLegendContent />} />
+                </BarChart>
+              </ChartContainer>
+            ) : <Empty>No scored sessions in this period.</Empty>}
+          </Box>
+        </div>
+
+        <div className='grid lg:grid-cols-2'>
+          <Box title='Model spend per day this month' description={pace ? 'Daily model spend; the dashed line is your allowance spread evenly over the month.' : 'Daily model spend on your simulations this month.'}>
+            {spendDaily.some((d) => d.usd > 0) ? (
+              <ChartContainer config={spendConfig} className='aspect-auto h-[240px] w-full'>
+                <BarChart data={spendDaily} margin={{ left: 0, right: 8, top: 8 }}>
+                  <CartesianGrid vertical={false} />
+                  {dayAxis}
+                  <YAxis width={48} tickLine={false} axisLine={false} tickFormatter={(v) => `$${v}`} domain={[0, (max: number) => Math.max(max, pace ?? 0)]} />
+                  <ChartTooltip cursor={false} content={<ChartTooltipContent labelFormatter={(v) => shortDay(String(v))} formatter={(v) => tipRow('Model spend', usd(v))} />} />
+                  <Bar dataKey='usd' fill='var(--color-usd)' radius={3} />
+                  {pace && <ReferenceLine y={pace} stroke='var(--muted-foreground)' strokeDasharray='4 4'
+                    label={{ value: `${usd(pace)}/day`, position: 'insideTopRight', fontSize: 11, fill: 'var(--muted-foreground)' }} />}
+                </BarChart>
+              </ChartContainer>
+            ) : <Empty>No model spend this month.</Empty>}
+          </Box>
+          {c?.spend_by.kind === 'person' ? (
+            <Box title='Spend by person' description='Model spend this month on the runs each person launched.'>
+              <RankBars data={c.spend_by.rows.map((r) => ({ name: r.name, value: r.usd }))} label='Model spend' color='var(--chart-3)' format={usd} empty='No model spend this month.' />
+            </Box>
+          ) : (
+            <Box title='Spend by simulation' description='Model spend this month on each simulation.'>
+              <RankBars data={(c?.spend_by.rows ?? []).map((r) => ({ name: r.name, value: r.usd }))} label='Model spend' color='var(--chart-3)' format={usd} empty='No model spend this month.' />
+            </Box>
+          )}
+        </div>
+
+        <Box title='Recent simulations' description='The latest simulations in this period and how often agents picked your product.'>
+          {c?.recent.length ? (
+            <div className='-mx-4 overflow-x-auto px-4'>
+              <Table>
+                <TableHeader><TableRow><TableHead>Simulation</TableHead><TableHead>Product</TableHead><TableHead>Launched by</TableHead><TableHead>Status</TableHead>
+                  <TableHead className='text-right'>Sessions</TableHead><TableHead className='text-right'>Hit rate</TableHead><TableHead className='text-right'>Started</TableHead></TableRow></TableHeader>
+                <TableBody>
+                  {c.recent.map((r) => (
+                    <TableRow key={r.id}>
+                      <TableCell className='max-w-64 truncate'>{r.name}</TableCell>
+                      <TableCell>{r.product}</TableCell>
+                      <TableCell className='text-muted-foreground'>{r.by}</TableCell>
+                      <TableCell><Badge variant={r.status === 'completed' ? 'secondary' : 'outline'}>{r.status}</Badge></TableCell>
+                      <TableCell className='text-right tabular-nums'>{num(r.sessions)}</TableCell>
+                      <TableCell className='text-right tabular-nums'>{r.hit_pct == null ? <span className='text-muted-foreground'>—</span> : `${r.hit_pct}%`}<span className='text-muted-foreground'>{r.scored ? ` of ${num(r.scored)}` : ''}</span></TableCell>
+                      <TableCell className='text-muted-foreground text-right'>{relative(r.created_at)}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          ) : <p className='text-muted-foreground py-6 text-center text-sm'>No simulations in this period.</p>}
+        </Box>
+      </div>
+    </div>
+  );
 }

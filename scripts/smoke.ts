@@ -2428,6 +2428,53 @@ try {
     assert.ok(usageU.tools.every((x: any) => ["run_simulation", "get_visibility_report"].includes(x.name)), "only the use case's tools");
     const usageN = await json(appCall(ownerC, "GET", "/usage?user=user_nobody"));
     assert.equal(usageN.daily.length + usageN.tools.length + Number(usageN.runs.simulations) + usageN.active_people, 0, "an unknown person has no usage");
+    // Usage charts (src/app.ts usageCharts): seed a run in this account (launched by dev: one hit, one miss) and activity
+    // in another account; every series is this account's own, and the people filter narrows them.
+    {
+      const seedRun = async (org: number, tag: string, by: string | null, harness: string) => {
+        const [pr] = await db.query<{ id: number }>("INSERT INTO products (org_id, slug, name) VALUES ($1, $2, $3) RETURNING id", [org, `charts-${tag}-${stamp}`, `Charts ${tag}`]);
+        const [sc] = await db.query<{ id: number }>("INSERT INTO scenarios (product_id, title, prompt) VALUES ($1, $2, 'Add a queue') RETURNING id", [pr.id, `Charts task ${tag}`]);
+        const sim = `sim_charts_${tag}_${stamp}`;
+        await db.query("INSERT INTO simulations (id, org_id, product_id, name, models, harness, repeats, status, created_by) VALUES ($1, $2, $3, $4, '{m}', $5, 1, 'completed', $6)",
+          [sim, org, pr.id, `Charts run ${tag}`, harness, by]);
+        for (const [i, verdict] of ["adopted", "competitor"].entries())
+          await db.query("INSERT INTO agent_sessions (id, simulation_id, org_id, product_id, scenario_id, model, harness, status, verdict, cost_usd) VALUES ($1, $2, $3, $4, $5, 'm', $6, 'completed', $7, 0.5)",
+            [`ses_charts_${tag}_${i}_${stamp}`, sim, org, pr.id, sc.id, harness, verdict]);
+      };
+      const [other] = await db.query<{ id: number }>("SELECT id FROM organizations WHERE id <> $1 ORDER BY id LIMIT 1", [rowW.id]);
+      await seedRun(rowW.id, "own", devP.user_id, "charts-own-harness");
+      await seedRun(other.id, "foreign", null, "charts-foreign-harness");
+      await db.query("INSERT INTO mcp_events (org_id, method, name, client) VALUES ($1, 'initialize', NULL, 'zzforeign 1.0'), ($1, 'tools/call', 'zz_foreign_tool', NULL)", [other.id]);
+      const cO = (await json(appCall(ownerC, "GET", "/usage"))).charts;
+      for (const k of ["workflow", "clients", "sims_weekly", "harnesses", "visibility", "tasks", "recent"]) assert.ok(Array.isArray(cO[k]), `usage charts.${k}`);
+      assert.ok(cO.workflow.every((w: any) => typeof w.used === "number" && w.used <= w.total && typeof w.calls === "number"), "workflow: tools used of total");
+      assert.ok(cO.clients.every((x: any) => typeof x.client === "string" && typeof x.calls === "number"));
+      assert.ok(cO.sims_weekly.length >= 5 && cO.sims_weekly.every((w: any) => /^\d{4}-\d{2}-\d{2}$/.test(w.week) && new Date(`${w.week}T00:00:00Z`).getUTCDay() === 1), "a Monday per week of the period");
+      const [ownN] = await db.query<{ sims: number; sessions: number; scored: number; hits: number }>(
+        `SELECT (SELECT count(*)::int FROM simulations WHERE org_id = $1 AND created_at >= now() - interval '30 days') AS sims,
+                count(*)::int AS sessions, count(*) FILTER (WHERE s.verdict IS NOT NULL)::int AS scored,
+                count(*) FILTER (WHERE CASE WHEN sc.expectation = 'recommend' THEN s.verdict IN ('adopted', 'recommended') ELSE s.verdict NOT IN ('adopted', 'recommended') END)::int AS hits
+           FROM agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id WHERE s.org_id = $1 AND s.queued_at >= now() - interval '30 days'`, [rowW.id]);
+      const sum = (xs: any[], f: (x: any) => number) => xs.reduce((n, x) => n + f(x), 0);
+      assert.equal(sum(cO.sims_weekly, (w) => w.completed + w.other), ownN.sims, "simulations per week: this account's only");
+      assert.equal(sum(cO.harnesses, (h) => h.sessions), ownN.sessions, "sessions by harness: this account's only");
+      assert.equal(sum(cO.visibility, (w) => w.scored), ownN.scored); assert.equal(sum(cO.visibility, (w) => w.hits), ownN.hits);
+      assert.ok(cO.visibility.some((w: any) => w.hit_pct === 50), "the seeded week: one hit of two");
+      assert.ok(cO.harnesses.some((h: any) => h.harness === "charts-own-harness") && !cO.harnesses.some((h: any) => h.harness === "charts-foreign-harness"), "another account's sessions never show");
+      assert.ok(cO.tasks.some((t: any) => t.title === "Charts task own" && t.hits === 1 && t.misses === 1) && !cO.tasks.some((t: any) => t.title === "Charts task foreign"), "hits vs misses by task, own tasks only");
+      assert.ok(!cO.clients.some((x: any) => x.client === "zzforeign"), "another account's clients never show");
+      assert.ok(!cO.recent.some((r: any) => r.name === "Charts run foreign") && cO.recent.find((r: any) => r.name === "Charts run own")?.hit_pct === 50, "recent simulations: own, with the hit rate");
+      assert.equal(cO.spend_by.kind, "person", "an owner sees spend by person");
+      assert.ok(cO.spend_by.rows.some((r: any) => r.name === `dev+${stamp}@acme-smoke.dev` && r.usd === 1), "the run dev launched, by email");
+      assert.ok(!(await json(appCall(ownerC, "GET", "/usage"))).tools.some((t: any) => t.name === "zz_foreign_tool"), "another account's tool calls never show");
+      // The people filter: an owner picking someone who launched nothing sees no runs, sessions or hits.
+      const ownerP = usageO.people.find((p: any) => p.me);
+      const cP = (await json(appCall(ownerC, "GET", `/usage?user=${encodeURIComponent(ownerP.user_id)}`))).charts;
+      assert.ok(!cP.harnesses.some((h: any) => h.harness === "charts-own-harness") && !cP.tasks.some((t: any) => t.title === "Charts task own"), "the people filter applies to sessions");
+      assert.ok(!cP.recent.some((r: any) => r.name === "Charts run own") && !cP.spend_by.rows.some((r: any) => r.usd === 1 && r.key === devP.user_id), "and to runs and spend");
+      const cD = (await json(appCall(ownerC, "GET", `/usage?user=${encodeURIComponent(devP.user_id)}`))).charts;
+      assert.ok(cD.harnesses.some((h: any) => h.harness === "charts-own-harness") && cD.recent.some((r: any) => r.name === "Charts run own"), "the person who launched it sees it");
+    }
     assert.equal((await appCall(ownerC, "POST", `/team/members/${acc2.user.id}/deactivate`)).status, 204);
     const gone = await appCall(devC, "GET", "/me");
     assert.equal(gone.status, 403, "a suspended member loses the page");
@@ -2502,6 +2549,21 @@ try {
       assert.match(setupV.viewer_note, /Viewers read reports/);
       assert.equal(setupV.steps.find((x: any) => x.id === "simulated").prompt, null);
       assert.equal((await json(appCall(devC, "GET", "/setup"))).viewer_note, null);
+      // Usage charts by role: spend by person and the allowance for a Billing manager or Owner; spend by simulation otherwise.
+      for (const [role, sx] of Object.entries({ viewer: view.sess, member: devC, billing: bill.sess, owner: ownerC })) {
+        const ch = (await json(appCall(sx, "GET", "/usage"))).charts;
+        const billingRole = role === "billing" || role === "owner";
+        assert.equal(ch.spend_by.kind, billingRole ? "person" : "simulation", `${role}: spend by ${ch.spend_by.kind}`);
+        if (billingRole) assert.ok(ch.allowance_usd == null || typeof ch.allowance_usd === "number");
+        else {
+          assert.equal(ch.allowance_usd, null, `${role}: no allowance`);
+          assert.ok(ch.spend_by.rows.every((r: any) => !String(r.name).includes("@")), `${role}: no one's spend by person`);
+          assert.ok(ch.spend_by.rows.some((r: any) => r.name === "Charts run own"), `${role}: spend by simulation`);
+        }
+      }
+      // Drop the seeded runs and events (a second product in the account would change what later steps resolve).
+      await db.query("DELETE FROM products WHERE slug LIKE $1", [`charts-%-${stamp}`]);
+      await db.query("DELETE FROM mcp_events WHERE name = 'zz_foreign_tool' OR client = 'zzforeign 1.0'");
       // The connector: a viewer reads but can't launch or write; checkRun refuses them with code viewer_role.
       const tool = async (uid: string, name: string, args: Record<string, unknown> = {}) => {
         const c = new Client({ name: "smoke-roles", version: "1.0.0" });

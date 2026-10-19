@@ -204,7 +204,9 @@ async function usage(s: Session, q: { from?: unknown; to?: unknown; days?: unkno
   const callsOf = new Map(people.map((x) => [x.user_id, Number(x.calls)]));
   const known = new Set(t.members.map((m) => m.user_id));
   const [{ budget }, spent] = await Promise.all([orgBudget(s.org).catch(() => ({ budget: 0 })), orgMonthSpendUsd(s.org)]);
+  const charts = await usageCharts(s, range, users, p, byTool, budget, t.members);
   return {
+    charts,
     days, range: { from: range.from, to: range.to }, daily, tools, runs: runs[0], filters: { user: users, use_case: useCases },
     use_cases: templates.map((t) => ({ id: t.id, name: t.name, own: Boolean((t as { own?: boolean }).own),
       calls: [...new Set(t.stages.flatMap((st) => st.tools))].reduce((n, x) => n + (toolCalls.get(x) ?? 0), 0) })),
@@ -219,6 +221,98 @@ async function usage(s: Session, q: { from?: unknown; to?: unknown; days?: unkno
       simulations: daySeries(periodDays, perDay, "simulations"), completed: daySeries(periodDays, perDay, "completed"),
       month_days: monthDays, spend: daySeries(monthDays, perDay, "spend", true),
     },
+  };
+}
+
+/**
+ * The Usage page's charts beyond the cards, for the caller's account only (every query is `WHERE org_id = $1`), with the
+ * same people filter ($4) and period ($2..$3) as the rest of /usage. Weeks are ISO weeks (Monday, UTC).
+ *   workflow       each workflow group (TOOL_GROUPS): how many of its tools were called, of how many, and the calls
+ *   clients        tool calls by AI client family; a call counts for its caller's latest handshake before it
+ *   sims_weekly    simulations created per week, completed vs the rest
+ *   harnesses      agent sessions of those simulations by harness, and how many completed
+ *   visibility     per week: scored sessions and hits (the agent picked the product in a recommend task, or left it
+ *                  out in an avoid one), and the hit rate
+ *   tasks          hits and misses per task (scored sessions), the ten most run
+ *   spend_by       this month's model spend by person (billing roles: Billing manager, Owner) or else by simulation
+ *   allowance_usd  the monthly allowance, for billing roles only (null otherwise)
+ *   recent         the ten latest simulations in the period with their sessions and hit rate
+ */
+async function usageCharts(s: Session, range: ReturnType<typeof reportRange>, users: string[], p: unknown[],
+  byTool: { name: string; calls: number }[], budget: number, members: { user_id: string; email?: string | null; name?: string | null }[]) {
+  const db = await getDb();
+  const billingRole = roles.canAccount(s.accountRole, "billing");
+  const ev = users.length ? " AND user_id = ANY($4)" : "";
+  const simBy = users.length ? " AND sim.created_by = ANY($4)" : "";
+  const sesBy = users.length ? " AND s.simulation_id IN (SELECT id FROM simulations WHERE org_id = $1 AND created_by = ANY($4))" : "";
+  const wk = (c: string) => `to_char(date_trunc('week', ${c} AT TIME ZONE 'UTC'), 'YYYY-MM-DD')`;
+  const month = "date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'";
+  const HIT = `CASE WHEN sc.expectation = 'recommend' THEN s.verdict IN ('adopted', 'recommended') ELSE s.verdict NOT IN ('adopted', 'recommended') END`;
+  const cost = "GREATEST(s.cost_usd, coalesce((SELECT sum(g.cost_usd) FROM gateway_usage g WHERE g.session_id = s.id), 0))";
+  const [clients, sims, harnesses, vis, tasks, spendBy, recent] = await Promise.all([
+    db.query<{ client: string; calls: unknown }>(
+      `WITH ev AS (
+         SELECT coalesce(user_id, '') AS p, at, method = 'tools/call' AS is_call, CASE WHEN method = 'initialize' THEN split_part(client, ' ', 1) END AS fam
+           FROM mcp_events
+          WHERE org_id = $1${ev} AND ((method = 'tools/call' AND at >= $2 AND at < $3) OR (method = 'initialize' AND client IS NOT NULL AND at < $3))),
+       grouped AS (SELECT *, count(fam) OVER (PARTITION BY p ORDER BY at, is_call ROWS UNBOUNDED PRECEDING) AS g FROM ev),
+       tagged AS (SELECT at, is_call, max(fam) OVER (PARTITION BY p, g) AS fam FROM grouped)
+       SELECT coalesce(nullif(fam, ''), 'unknown') AS client, count(*) AS calls FROM tagged WHERE is_call AND at >= $2 GROUP BY 1 ORDER BY 2 DESC`, p),
+    db.query<{ week: string; completed: unknown; other: unknown }>(
+      `SELECT ${wk("created_at")} AS week, count(*) FILTER (WHERE status = 'completed') AS completed, count(*) FILTER (WHERE status <> 'completed') AS other
+         FROM simulations sim WHERE org_id = $1 AND created_at >= $2 AND created_at < $3${simBy} GROUP BY 1`, p),
+    db.query<{ harness: string; sessions: unknown; completed: unknown }>(
+      `SELECT s.harness, count(*) AS sessions, count(*) FILTER (WHERE s.status = 'completed') AS completed
+         FROM agent_sessions s WHERE s.org_id = $1 AND s.queued_at >= $2 AND s.queued_at < $3${sesBy} GROUP BY 1 ORDER BY 2 DESC`, p),
+    db.query<{ week: string; scored: unknown; hits: unknown }>(
+      `SELECT ${wk("s.queued_at")} AS week, count(*) AS scored, count(*) FILTER (WHERE ${HIT}) AS hits
+         FROM agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id
+        WHERE s.org_id = $1 AND s.verdict IS NOT NULL AND s.queued_at >= $2 AND s.queued_at < $3${sesBy} GROUP BY 1`, p),
+    db.query<{ id: number; title: string; hits: unknown; misses: unknown }>(
+      `SELECT sc.id, sc.title, count(*) FILTER (WHERE ${HIT}) AS hits, count(*) FILTER (WHERE NOT (${HIT})) AS misses
+         FROM agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id
+        WHERE s.org_id = $1 AND s.verdict IS NOT NULL AND s.queued_at >= $2 AND s.queued_at < $3${sesBy}
+        GROUP BY sc.id, sc.title ORDER BY count(*) DESC, sc.title LIMIT 10`, p),
+    // This month's spend, like the card: by who launched the run (billing roles), else by simulation.
+    db.query<{ key: string | null; name: string | null; usd: number }>(
+      `SELECT ${billingRole ? "sim.created_by AS key, NULL AS name" : "sim.id AS key, sim.name AS name"}, sum(${cost})::float AS usd
+         FROM agent_sessions s JOIN simulations sim ON sim.id = s.simulation_id AND sim.org_id = $1
+        WHERE s.org_id = $1 AND s.queued_at >= ${month}${sesBy.replace("$4", "$2")}
+        GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 10`, users.length ? [s.org, users] : [s.org]),
+    db.query<{ id: string; name: string; status: string; created_at: Date; created_by: string | null; product: string; sessions: unknown; scored: unknown; hits: unknown }>(
+      `SELECT sim.id, sim.name, sim.status, sim.created_at, sim.created_by, pr.name AS product, count(s.id) AS sessions,
+              count(s.id) FILTER (WHERE s.verdict IS NOT NULL) AS scored, count(s.id) FILTER (WHERE s.verdict IS NOT NULL AND ${HIT}) AS hits
+         FROM simulations sim JOIN products pr ON pr.id = sim.product_id AND pr.org_id = $1
+         LEFT JOIN agent_sessions s ON s.simulation_id = sim.id AND s.org_id = $1 LEFT JOIN scenarios sc ON sc.id = s.scenario_id
+        WHERE sim.org_id = $1 AND sim.created_at >= $2 AND sim.created_at < $3${simBy}
+        GROUP BY sim.id, pr.name ORDER BY sim.created_at DESC LIMIT 10`, p),
+  ]);
+  // Every ISO week the period touches, oldest first.
+  const DAY = 86_400_000, mon = (t: number) => { const d = Math.floor(t / DAY) * DAY; return d - ((new Date(d).getUTCDay() + 6) % 7) * DAY; };
+  const weeks: string[] = [];
+  for (let t = mon(range.start.getTime()); t < range.end.getTime(); t += 7 * DAY) weeks.push(new Date(t).toISOString().slice(0, 10));
+  const partial = (w: string) => Date.parse(`${w}T00:00:00Z`) + 7 * DAY > range.end.getTime() || Date.parse(`${w}T00:00:00Z`) < range.start.getTime();
+  const simW = new Map(sims.map((r) => [r.week, r])), visW = new Map(vis.map((r) => [r.week, r]));
+  const calls = new Map(byTool.map((x) => [x.name, Number(x.calls)]));
+  const who = new Map(members.map((m) => [m.user_id, m.email ?? m.name ?? null]));
+  const label = (id: string | null) => (id ? (id === s.user ? "You" : who.get(id) ?? "Former member") : "Connector key");
+  return {
+    workflow: TOOL_GROUPS.map((g) => ({ id: g.id, label: g.label, total: g.tools.length,
+      used: g.tools.filter((x) => calls.get(x)).length, calls: g.tools.reduce((n, x) => n + (calls.get(x) ?? 0), 0) })),
+    clients: clients.map((c) => ({ client: c.client, calls: Number(c.calls) })),
+    sims_weekly: weeks.map((week) => ({ week, completed: Number(simW.get(week)?.completed ?? 0), other: Number(simW.get(week)?.other ?? 0), partial: partial(week) })),
+    harnesses: harnesses.map((h) => ({ harness: h.harness, sessions: Number(h.sessions), completed: Number(h.completed) })),
+    visibility: weeks.map((week) => {
+      const r = visW.get(week), scored = Number(r?.scored ?? 0), hits = Number(r?.hits ?? 0);
+      return { week, scored, hits, hit_pct: scored ? Math.round((hits / scored) * 1000) / 10 : null, partial: partial(week) };
+    }),
+    tasks: tasks.map((x) => ({ id: Number(x.id), title: x.title, hits: Number(x.hits), misses: Number(x.misses) })),
+    spend_by: { kind: billingRole ? ("person" as const) : ("simulation" as const),
+      rows: spendBy.map((r) => ({ key: r.key, name: billingRole ? label(r.key) : r.name ?? r.key ?? "", usd: Math.round(Number(r.usd) * 100) / 100 })) },
+    allowance_usd: billingRole ? Number(budget) || null : null,
+    recent: recent.map((r) => ({ id: r.id, name: r.name, product: r.product, status: r.status, created_at: r.created_at,
+      by: label(r.created_by),
+      sessions: Number(r.sessions), scored: Number(r.scored), hits: Number(r.hits), hit_pct: Number(r.scored) ? Math.round((Number(r.hits) / Number(r.scored)) * 1000) / 10 : null })),
   };
 }
 
