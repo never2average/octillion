@@ -300,7 +300,7 @@ export function List<T>({ title, rows, cols, empty, actions, rowClassName }: {
   return (
     <div className='grid gap-2'>
       <p className='text-sm leading-none font-medium'>{title}</p>
-      <div className='overflow-x-auto border-y'>
+      <div className='overflow-x-auto border'>
         <Table>
           <TableHeader>
             <TableRow className='hover:bg-transparent'>

@@ -77,7 +77,7 @@ export function AdminOverview() {
               <Icons.search className='text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2' />
               <Input type='search' value={q} onChange={(e) => setQ(e.target.value)} placeholder='Search accounts, contacts or issues' aria-label='Search accounts needing attention' className='h-9 pl-8' />
             </div>
-            <div className='border-y'>
+            <div className='border'>
               <DataList
                 noun='accounts'
                 minWidth={760}

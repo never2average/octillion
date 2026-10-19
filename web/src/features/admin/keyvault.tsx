@@ -220,9 +220,9 @@ function ImportKeys({ providers, onClose }: { providers: Provider[]; onClose: ()
             <Button className='ml-auto' disabled={!text.trim()} onClick={() => read(text)}>Read keys</Button>
           </div>
         </>) : (<>
-          <div className='max-h-72 overflow-y-auto border-y'>
-            <table className='w-full text-sm'>
-              <thead><tr className='text-muted-foreground text-xs'><th className='px-3 py-2 text-left font-normal'>From</th><th className='px-3 py-2 text-left font-normal'>Provider</th><th className='px-3 py-2 text-left font-normal'>Label</th><th className='px-3 py-2 text-left font-normal'>Key</th><th className='px-3 py-2 text-left font-normal'>Status</th></tr></thead>
+          <div className='max-h-72 overflow-y-auto border'>
+            <table className='w-full text-sm [&_td]:border-r [&_td:last-child]:border-r-0 [&_th]:border-r [&_th:last-child]:border-r-0'>
+              <thead><tr className='text-muted-foreground border-b text-xs'><th className='px-3 py-2 text-left font-normal'>From</th><th className='px-3 py-2 text-left font-normal'>Provider</th><th className='px-3 py-2 text-left font-normal'>Label</th><th className='px-3 py-2 text-left font-normal'>Key</th><th className='px-3 py-2 text-left font-normal'>Status</th></tr></thead>
               <tbody>
                 {rows.map((r, i) => (
                   <tr key={i} className='border-t'>

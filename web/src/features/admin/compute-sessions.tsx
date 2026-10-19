@@ -320,7 +320,7 @@ export function RunnableLine({ r }: { r: Runnable }) {
 /** A compact table inside a peek. */
 export function MiniTable({ head, rows }: { head: string[]; rows: ReactNode[][] }) {
   return (
-    <div className='overflow-x-auto border-y'>
+    <div className='overflow-x-auto border'>
       <Table>
         <TableHeader>
           <TableRow className='hover:bg-transparent'>{head.map((h) => <TableHead key={h} className='text-muted-foreground h-7 px-2 text-xs font-normal'>{h}</TableHead>)}</TableRow>

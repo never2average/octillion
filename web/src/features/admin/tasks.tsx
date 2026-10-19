@@ -162,7 +162,7 @@ export function AdminTasks() {
         )}
 
         <div className='flex min-h-0 flex-1 gap-4'>
-          <div className={cn('flex min-h-0 min-w-0 flex-col border-y', current ? 'hidden lg:flex lg:w-[40%] lg:shrink-0' : 'w-full')}>
+          <div className={cn('flex min-h-0 min-w-0 flex-col border', current ? 'hidden lg:flex lg:w-[40%] lg:shrink-0' : 'w-full')}>
             <div className={cn('min-h-0 flex-1 overflow-auto', isFetching && !isLoading && 'opacity-70')}>
               <Table className={cn(narrow && 'table-fixed')}>
                 <TableHeader className='bg-background sticky top-0 z-10 shadow-[0_1px_0_var(--border)]'>
