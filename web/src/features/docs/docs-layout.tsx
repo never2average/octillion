@@ -1,6 +1,6 @@
-// The docs frame shared by /app/docs and /admin/docs, inside the app shell (its sidebar and header stay): a sticky
-// navigation tree on the left (a drawer button below lg), the article at a reading width in the middle, "On this page"
-// on the right from xl up, and previous / next cards under the article. A server component: the article is rendered
+// The docs frame shared by /app/docs and /admin/docs, inside the app shell (its sidebar and header stay): the article
+// at a reading width, and one sticky column on the right from lg up with the page tree (and its filter) above "On this
+// page"; below lg a drawer button above the article. Previous / next cards under the article. A server component: the article is rendered
 // here, and only titles, hrefs and headings go to the client parts (docs-nav.tsx, docs-toc.tsx).
 import Link from 'next/link';
 import { Fragment, type ReactNode } from 'react';
@@ -28,10 +28,6 @@ export function DocsLayout({ nav, href, crumbs, title, description, headings = [
   const { prev, next } = neighbours(nav, href);
   return (
     <div className='flex w-full min-w-0 flex-1 gap-8 px-4 md:px-6 xl:gap-10'>
-      <aside className={`${STICKY} hidden w-60 shrink-0 border-r py-6 pr-4 lg:block`}>
-        <DocsSidebar groups={nav} />
-      </aside>
-
       <div className='min-w-0 flex-1 pt-3 pb-16 lg:pt-8'>
         <div className='mb-6 lg:hidden'><DocsMobileNav groups={nav} current={title} /></div>
         <article className='mx-auto w-full max-w-[720px]'>
@@ -77,8 +73,9 @@ export function DocsLayout({ nav, href, crumbs, title, description, headings = [
         </article>
       </div>
 
-      <aside className={`${STICKY} hidden w-52 shrink-0 py-8 xl:block`}>
-        <DocsToc headings={headings} />
+      <aside className={`${STICKY} hidden w-64 shrink-0 border-l py-6 pl-5 lg:block`}>
+        <DocsSidebar groups={nav} />
+        {headings.length > 0 && <div className='mt-6 border-t pt-5'><DocsToc headings={headings} /></div>}
       </aside>
     </div>
   );

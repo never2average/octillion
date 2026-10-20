@@ -119,7 +119,7 @@ function NavTree({ groups, onNavigate, drawer = false }: { groups: DocNavGroup[]
   );
 }
 
-/** The sticky left column, from lg up. */
+/** The page tree in the right column, from lg up. */
 export function DocsSidebar({ groups }: { groups: DocNavGroup[] }) {
   return <NavTree groups={groups} />;
 }
