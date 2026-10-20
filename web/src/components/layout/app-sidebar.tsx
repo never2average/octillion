@@ -141,6 +141,18 @@ export default function AppSidebar() {
       </SidebarContent>
       <SidebarFooter className='gap-2'>
         <SidebarMenu>
+          {/* Docs: a round action button pinned above the user menu; this area's guide (/app/docs or /admin/docs). */}
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              tooltip='Docs'
+              isActive={pathname === `${base}/docs` || pathname.startsWith(`${base}/docs/`)}
+              render={<Link href={`${base}/docs`} aria-label={area === 'admin' ? 'Internal docs' : 'Documentation'} />}
+              className='bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground active:bg-primary/90 active:text-primary-foreground data-active:bg-primary data-active:text-primary-foreground h-9 w-fit gap-2 rounded-full px-3.5 shadow-md shadow-black/20 group-data-[collapsible=icon]:rounded-full'
+            >
+              <Icons.book />
+              <span className='font-medium'>Docs</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
           {canSwitch && (
             <SidebarMenuItem>
               <SidebarMenuButton
