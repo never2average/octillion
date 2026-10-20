@@ -32,7 +32,7 @@ import * as priv from "./private.js";
 import * as contributions from "./contributions.js";
 import { recordPageAction } from "./analytics.js";
 import { visibilityRoutes } from "./visibility.js";
-import { answerDocs } from "./docs-answers.js";
+import { answerDocs, sseStart, streamDocsAnswer, type DocsStreamEvent } from "./docs-answers.js";
 
 /** The portal surface: library content redacted (src/queries.ts Surface). MCP tool handlers (src/server.ts) never pass it. */
 const PORTAL = { redact: true } as const;
@@ -796,6 +796,20 @@ export function appRouter() {
     const r = await answerDocs("customer", req.body?.question, { userKey: s.user ?? `org:${s.slug}`, orgId: s.org });
     capture({ distinctId: s.user ?? `org:${s.slug}`, orgSlug: s.slug }, "docs_answer_asked", { answered: r.answer != null, reason: r.reason, sources: r.sources.length });
     res.json(r);
+  });
+  // The same, streamed as server-sent events (sources, the text as it is written, the cleaned answer).
+  api.post("/docs/answer/stream", async (req, res) => {
+    const s = S(res);
+    const who = s.user ?? `org:${s.slug}`;
+    let started = false, last: DocsStreamEvent | null = null;
+    await streamDocsAnswer("customer", req.body?.question, { userKey: who, orgId: s.org }, (e) => {
+      if (!started) { sseStart(res); started = true; }
+      res.write(`data: ${JSON.stringify(e)}\n\n`);
+      last = e;
+    });
+    const done = last as DocsStreamEvent | null;
+    if (done?.type === "done") capture({ distinctId: who, orgSlug: s.slug }, "docs_answer_asked", { answered: done.answer != null, reason: done.reason, streamed: true });
+    res.end();
   });
   api.get("/billing", async (_req, res) => void res.json({ ...(await billingView(S(res))), can_manage: can(res, "billing"), permissions: perms(res),
     contributions: await contributions.creditsFor(S(res).org) }));

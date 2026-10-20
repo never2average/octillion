@@ -3319,6 +3319,28 @@ try {
         const logged = await db.query<any>("SELECT area, model, answered FROM docs_answers WHERE user_key = $1 ORDER BY id", [accepted.user.id]);
         assert.ok(logged.length >= 3 && logged.some((r: any) => r.answered === false) && logged.at(-1).answered === true && logged.at(-1).area === "customer", "each model call is logged (never the question)");
 
+        // Streamed (server-sent events): the sources first, the text as the model writes it, then the cleaned answer.
+        const events = async (res: Response) => {
+          assert.match(res.headers.get("content-type") ?? "", /^text\/event-stream/, "an event stream");
+          return (await res.text()).split("\n\n").filter((b) => b.startsWith("data:")).map((b) => JSON.parse(b.slice(5)));
+        };
+        mock.state.aiReply = (body: any) => (body?.stream && String(body?.messages?.find((m: any) => m.role === "user")?.content ?? "").includes("budget rules")
+          ? { content: "Admins set how the allowance is spent on the **Budget rules** tab [1]. See [7] and [this](https://evil.example)." } : { status: 500 });
+        const streamed = await events(await appCall(ownerC, "POST", "/docs/answer/stream", { question: BUDGET }));
+        assert.equal(streamed[0].type, "sources", "the sources come first");
+        assert.ok(streamed[0].sources.some((x: any) => x.href === "/app/docs/billing#budget-rules"));
+        assert.ok(streamed.filter((e) => e.type === "delta").map((e) => e.text).join("").includes("Budget rules"), "the text as it is written");
+        const fin = streamed.at(-1);
+        assert.deepEqual([fin.type, fin.reason, fin.model], ["done", null, "@cf/zai-org/glm-5.3-flash"], "then the answer, from the cheapest model");
+        assert.ok(fin.answer.includes("[1]") && !fin.answer.includes("[7]") && !fin.answer.includes("evil.example"), "the final answer is cleaned like the JSON one");
+        assert.ok(mock.state.aiRequests.at(-1).stream === true && !/Reply with one JSON object/.test(mock.state.aiRequests.at(-1).messages[0].content), "asked to stream plain markdown");
+        mock.state.aiReply = null;
+        const sDown = await events(await appCall(ownerC, "POST", "/docs/answer/stream", { question: BUDGET }));
+        assert.deepEqual([sDown[0].type, sDown.at(-1).type, sDown.at(-1).answer, sDown.at(-1).reason], ["sources", "done", null, "unavailable"], "no model: the sources and the reason");
+        assert.equal((await as(ownerC, "POST", "/docs/answer/stream", { question: BUDGET })).status, 403, "a customer can't stream the internal docs");
+        assert.deepEqual((await events(await as(people.viewer.sess, "POST", "/docs/answer/stream", { question: INTERNAL })))[0].sources.some((x: any) => x.href.startsWith("/admin/docs/")), true,
+          "an admin's stream draws on the internal docs");
+
         // Limits: past the daily cap or the per-person minute limit, the sources come back without a model call.
         const sentBefore = mock.state.aiRequests.length;
         await setSettings("smoke", { DOCS_ANSWERS_PER_MINUTE: logged.length });

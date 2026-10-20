@@ -49,7 +49,7 @@ import * as actions from "./compute-actions.js";
 import * as ticks from "./autoscaler-ticks.js";
 import { pruneComputeHistory } from "./autoscaler-ticks.js";
 import { freshSettings, SettingError } from "./settings.js";
-import { answerDocs } from "./docs-answers.js";
+import { answerDocs, sseStart, streamDocsAnswer } from "./docs-answers.js";
 import { freshPlatformHarnesses } from "./harnesses.js";
 
 const PORT = Number(process.env.PORT ?? 3333);
@@ -560,6 +560,14 @@ export function createApp() {
   roles.assertGuarded(admin, "/api/admin");
   // "Ask AI" in the admin Cmd+K bar (src/docs-answers.ts): the internal docs and the customer guide. Any role.
   ob.post("/docs/answer", need("read"), async (req, res) => void res.json(await answerDocs("admin", req.body?.question, { userKey: `admin:${adminActor(req, res)}` })));
+  ob.post("/docs/answer/stream", need("read"), async (req, res) => {
+    let started = false;
+    await streamDocsAnswer("admin", req.body?.question, { userKey: `admin:${adminActor(req, res)}` }, (e) => {
+      if (!started) { sseStart(res); started = true; }
+      res.write(`data: ${JSON.stringify(e)}\n\n`);
+    });
+    res.end();
+  });
   roles.assertGuarded(ob, "/api/admin/onboarding");
   // Clerk / Stripe failures are the admin's to see (a bad key, a rate limit), not a generic 500.
   ob.use((err: Error & { status?: number }, _req: Request, res: Response, next: NextFunction) => {

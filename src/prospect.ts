@@ -225,6 +225,75 @@ async function cloudflareText(system: string, user: string) {
   return { text: out.choices?.[0]?.message?.content ?? "", input: tokens(out.usage?.prompt_tokens), output: tokens(out.usage?.completion_tokens) };
 }
 
+/**
+ * askModel for an answer read as it is written: the text comes through `onDelta` as the model produces it. GLM on
+ * Cloudflare streams (server-sent events); Claude, the fallback, answers in one piece, passed on as one delta. When a
+ * model fails after part of its text went out, `onReset` says to drop it before the next one starts. Metered like
+ * askModel. Throws when no model answers.
+ */
+export async function askModelStream(system: string, user: string, opts: { maxTokens?: number; onDelta: (text: string) => void; onReset?: () => void }) {
+  const errors: string[] = [];
+  let sent = false;
+  const delta = (t: string) => { if (t) { sent = true; opts.onDelta(t); } };
+  const tries: [ModelAnswer<string>["provider"], string, () => Promise<{ text: string; input: number; output: number }>][] = [
+    ["cloudflare", cloudflareModel(), () => cloudflareStream(system, user, delta)],
+    ["anthropic", MODEL(), async () => { const raw = await anthropicText(system, user, opts.maxTokens ?? 1500); delta(raw.text); return raw; }],
+  ];
+  for (const [provider, model, ask] of tries) {
+    try {
+      const raw = await ask();
+      if (!raw.text.trim()) throw new Error("empty answer");
+      void meter(provider, model, raw, false);
+      return { text: raw.text, model, provider, input_tokens: raw.input, output_tokens: raw.output };
+    } catch (e) {
+      errors.push(`${provider}: ${(e as Error).message}`);
+      if (sent) { opts.onReset?.(); sent = false; }
+    }
+  }
+  throw new Error(`no model answered (${errors.join("; ")})`);
+}
+
+/** Workers AI chat completions with stream: true; a reply that comes back whole (no event stream) is one delta. */
+async function cloudflareStream(system: string, user: string, onDelta: (t: string) => void) {
+  const p = await getProvider("cloudflare");
+  const account = p?.upstream_url?.match(/\/accounts\/([^/]+)/)?.[1] ?? process.env.CLOUDFLARE_ACCOUNT_ID ?? process.env.CF_ACCOUNT_ID;
+  const token = (await useCredential("cloudflare").catch(() => null))?.secret;
+  if (!token) throw new Error("no Cloudflare Workers AI key in the vault");
+  if (!account) throw new Error("no Cloudflare account id (the cloudflare provider's upstream URL, or CLOUDFLARE_ACCOUNT_ID)");
+  const host = (process.env.CLOUDFLARE_API_URL ?? "https://api.cloudflare.com").replace(/\/$/, "");
+  const r = await fetch(`${host}/client/v4/accounts/${encodeURIComponent(account)}/ai/v1/chat/completions`, {
+    method: "POST", signal: AbortSignal.timeout(120_000), headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify({ model: cloudflareModel(), max_tokens: 8000, stream: true, stream_options: { include_usage: true },
+      messages: [{ role: "system", content: system }, { role: "user", content: user }] }),
+  });
+  if (!r.ok) throw new Error(`Cloudflare answered ${r.status}`);
+  type Chunk = { choices?: { delta?: { content?: string }; message?: { content?: string } }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } };
+  if (!(r.headers.get("content-type") ?? "").includes("event-stream")) {
+    const out = await r.json() as Chunk;
+    const text = out.choices?.[0]?.message?.content ?? "";
+    onDelta(text);
+    return { text, input: tokens(out.usage?.prompt_tokens), output: tokens(out.usage?.completion_tokens) };
+  }
+  let text = "", input = 0, output = 0, buf = "";
+  const decoder = new TextDecoder();
+  for await (const part of r.body as unknown as AsyncIterable<Uint8Array>) {
+    buf += decoder.decode(part, { stream: true });
+    let nl: number;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
+      if (!line.startsWith("data:")) continue;
+      const data = line.slice(5).trim();
+      if (data === "[DONE]") continue;
+      let c: Chunk;
+      try { c = JSON.parse(data) as Chunk; } catch { continue; }
+      const t = c.choices?.[0]?.delta?.content ?? "";
+      if (t) { text += t; onDelta(t); }
+      if (c.usage) { input = tokens(c.usage.prompt_tokens); output = tokens(c.usage.completion_tokens); }
+    }
+  }
+  return { text, input, output };
+}
+
 async function openaiText(system: string, user: string, model: string) {
   const p = await getProvider("openai");
   const cred = p?.enabled ? await useCredential("openai", { excludeLabel: VERTEX_LABEL }).catch(() => null) : null;

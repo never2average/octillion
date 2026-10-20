@@ -1,5 +1,5 @@
 import { getDb } from "./db.js";
-import { askModel } from "./prospect.js";
+import { askModel, askModelStream } from "./prospect.js";
 import { settingNumber } from "./settings.js";
 import { asData } from "../orchestrator/core/text-guard.js";
 import corpus from "./docs-corpus.generated.json" with { type: "json" };
@@ -36,6 +36,14 @@ const SOURCES = 6;
 const MAX_QUESTION = 400;
 
 export class DocsAnswerError extends Error { status = 400; }
+
+/** Start a server-sent event response: no buffering on the way (proxies, Vercel), headers out now. */
+export function sseStart(res: { setHeader: (k: string, v: string) => void; flushHeaders?: () => void }) {
+  res.setHeader("content-type", "text/event-stream; charset=utf-8");
+  res.setHeader("cache-control", "no-cache, no-transform");
+  res.setHeader("x-accel-buffering", "no");
+  res.flushHeaders?.();
+}
 
 // ---------- retrieval ----------
 
@@ -119,16 +127,75 @@ export function userPrompt(question: string, excerpts: DocsChunk[]) {
   ].join("\n");
 }
 
-/** The model's answer, checked: JSON with a non-empty answer; links and images become their text, HTML tags go, and
- *  citations of numbers outside 1..n are dropped. Throws (the next model is tried) when it isn't that. */
+/** An answer made safe to show: links and images become their text, HTML tags and headings go, citations of numbers
+ *  outside 1..n are dropped, at most 1500 characters. */
+export function cleanAnswer(text: string, n: number): string {
+  let a = text.replace(/!\[[^\]]*\]\([^)]*\)/g, "").replace(/\[([^\]]+)\]\([^)]*\)/g, "$1").replace(/<\/?[a-z][^>]*>/gi, "")
+    .replace(/^#{1,6}\s+/gm, "").replace(/\[(\d{1,2})\]/g, (m, d) => (Number(d) >= 1 && Number(d) <= n ? m : "")).trim();
+  if (a.length > 1500) a = `${a.slice(0, a.lastIndexOf(" ", 1497))}…`;
+  return a;
+}
+
+/** The model's answer, checked: JSON with a non-empty answer, cleaned (cleanAnswer). Throws (the next model is tried)
+ *  when it isn't that. */
 export function parseAnswer(text: string, n: number): { answer: string; covered: boolean } {
   const j = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1)) as { answer?: unknown; covered?: unknown };
-  let a = typeof j.answer === "string" ? j.answer : "";
-  a = a.replace(/!\[[^\]]*\]\([^)]*\)/g, "").replace(/\[([^\]]+)\]\([^)]*\)/g, "$1").replace(/<\/?[a-z][^>]*>/gi, "")
-    .replace(/^#{1,6}\s+/gm, "").replace(/\[(\d{1,2})\]/g, (m, d) => (Number(d) >= 1 && Number(d) <= n ? m : "")).trim();
+  const a = cleanAnswer(typeof j.answer === "string" ? j.answer : "", n);
   if (!a) throw new Error("empty answer");
-  if (a.length > 1500) a = `${a.slice(0, a.lastIndexOf(" ", 1497))}…`;
   return { answer: a, covered: j.covered !== false };
+}
+
+/** The streamed answer's instructions: the same rules, the answer written straight out as markdown (no JSON), so it
+ *  can be shown as it is written. */
+export const STREAM_SYSTEM = SYSTEM.replace(/\nReply with one JSON object[\s\S]*$/, "")
+  .replace(`and set "covered" to false.`, `starting with "The docs don't cover this."`) + `
+Reply with the answer only, in markdown, with its [n] citations.`;
+
+/** What the stream sends, in order: the sources, the answer's text as it is written (reset: drop what came so far,
+ *  another model starts), then the final answer, cleaned, or none with the reason. */
+export type DocsStreamEvent =
+  | { type: "sources"; sources: DocsSource[] }
+  | { type: "delta"; text: string }
+  | { type: "reset" }
+  | { type: "done"; answer: string | null; covered: boolean | null; model: string | null; reason: DocsAnswer["reason"] };
+
+/** Check the question, find its sections, and count it against the limits; the reason instead when it can't be asked. */
+async function prepare(area: DocsArea, question: unknown, who: { userKey: string; orgId?: number | null }) {
+  const q = typeof question === "string" ? question.replace(/\s+/g, " ").trim() : "";
+  if (q.length < 3) throw new DocsAnswerError("Ask a question of a few words");
+  if (q.length > MAX_QUESTION) throw new DocsAnswerError(`Ask in at most ${MAX_QUESTION} characters`);
+  const hits = searchDocs(q, area === "admin" ? ["customer", "admin"] : ["customer"]);
+  const sources = hits.map((c, i) => ({ n: i + 1, title: c.title, heading: c.heading, href: c.href }));
+  if (!hits.length) return { q, hits, sources, reason: "no_match" as const };
+  const used = await usage(who.userKey);
+  if (used.today >= dailyMax()) return { q, hits, sources, reason: "daily_cap" as const };
+  if (used.minute >= perMinute()) return { q, hits, sources, reason: "rate_limited" as const };
+  // The call counts against the limits from here, whether or not a model answers.
+  const [row] = await (await getDb()).query<{ id: number }>("INSERT INTO docs_answers (area, user_key, org_id, sources) VALUES ($1, $2, $3, $4) RETURNING id",
+    [area, who.userKey.slice(0, 200), who.orgId ?? null, hits.length]);
+  return { q, hits, sources, reason: null, row: row.id };
+}
+
+/**
+ * The answer streamed (POST …/docs/answer/stream): `send` gets the sources first, then the text as the model writes
+ * it, then the cleaned answer. Same retrieval, limits and counting as answerDocs. Never throws for a model failure.
+ */
+export async function streamDocsAnswer(area: DocsArea, question: unknown, who: { userKey: string; orgId?: number | null }, send: (e: DocsStreamEvent) => void) {
+  const p = await prepare(area, question, who);
+  send({ type: "sources", sources: p.sources });
+  if (p.reason) return send({ type: "done", answer: null, covered: null, model: null, reason: p.reason });
+  const db = await getDb();
+  try {
+    const r = await askModelStream(STREAM_SYSTEM, userPrompt(p.q, p.hits), { maxTokens: 700,
+      onDelta: (text) => send({ type: "delta", text }), onReset: () => send({ type: "reset" }) });
+    const answer = cleanAnswer(r.text, p.hits.length);
+    await db.query("UPDATE docs_answers SET model = $2, answered = $3 WHERE id = $1", [p.row, r.model, Boolean(answer)]);
+    send({ type: "done", answer: answer || null, covered: answer ? !/^the docs don.t cover this/i.test(answer) : null, model: r.model, reason: answer ? null : "unavailable" });
+  } catch (e) {
+    console.error("docs answer:", (e as Error).message);
+    await db.query("UPDATE docs_answers SET answered = false WHERE id = $1", [p.row]).catch(() => {});
+    send({ type: "done", answer: null, covered: null, model: null, reason: "unavailable" });
+  }
 }
 
 /**
