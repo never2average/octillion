@@ -241,7 +241,9 @@ const PROSE = new Set(["a", "an", "the", "and", "or", "of", "off", "on", "in", "
 /** A stored untracked name that could be a package (not a prose word, a number or the end of a sentence). */
 export const plausiblePackage = (name: string) => name.length > 1 && !PROSE.has(name) && !/^\d+$/.test(name) && !/[.:!?]$/.test(name);
 const TOOLING = new Set(["typescript", "ts-node", "tsx", "nodemon", "eslint", "prettier", "jest", "vitest", "mocha", "chai", "supertest",
-  "pytest", "black", "ruff", "mypy", "flake8", "isort", "pip", "setuptools", "wheel", "uv", "dotenv", "python-dotenv", "concurrently", "rimraf"]);
+  "pytest", "black", "ruff", "mypy", "flake8", "isort", "pip", "setuptools", "wheel", "uv", "dotenv", "python-dotenv", "concurrently", "rimraf",
+  // CLIs agents run to build, type-check or test (npx tsc, npx next build, npx playwright test): not a choice of vendor.
+  "tsc", "next", "playwright", "@playwright/test", "vite", "webpack", "esbuild", "turbo", "nx", "biome", "@biomejs/biome", "oxlint"]);
 
 /**
  * Packages the agent installed that are neither the product nor a tracked competitor: the alternatives research
