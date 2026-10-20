@@ -7,6 +7,7 @@ import { findAgent } from "./agents.js";
 import { getProvider, providersForEnv, useCredential, useVertexCredential, VERTEX_LABEL, type ProviderRow } from "./keyvault.js";
 import { adaptGeminiBody, geminiWantsThinkingLevel, toVertex, toVertexGemini, vertexAccessToken, vertexConfig, type VertexConfig } from "./vertex.js";
 import { costOf, recordModelUsage } from "./usage.js";
+import { SCENARIO_ROWS } from "./queries.js";
 
 /**
  * Inference gateway + credential broker (docs/credentials.md).
@@ -53,7 +54,7 @@ export async function brokerSessionCredentials(sessionId: string) {
   const db = await getDb();
   const [s] = await db.query<{ status: string; agent_id: string | null; harness: string; task_source: string | null }>(
     `/* tenant: session checked against the job token in http.ts (/sessions/:id) */ SELECT s.status, s.agent_id, s.harness, sc.source AS task_source
-       FROM agent_sessions s LEFT JOIN scenarios sc ON sc.id = s.scenario_id WHERE s.id = $1`, [sessionId]);
+       FROM agent_sessions s LEFT JOIN ${SCENARIO_ROWS} sc ON sc.id = s.scenario_id WHERE s.id = $1`, [sessionId]);
   if (!s) throw Object.assign(new Error(`No session ${sessionId}`), { status: 404 });
   if (s.status !== "running") throw Object.assign(new Error(`Session ${sessionId} is ${s.status}, not running`), { status: 409 });
 

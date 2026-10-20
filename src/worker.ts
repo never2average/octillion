@@ -7,7 +7,7 @@ import { normalize, transcripts, type RawEvent, type SessionRef, type StoredEven
 import { scoreTranscript, developerNamedTools, untrackedInstalls, type Tool } from "./scoring.js";
 import { findAgent } from "./agents.js";
 import { languageOf, resolveEnvironment, type PersonaEnvironment, type SessionEnvironment } from "../orchestrator/core/environment.js";
-import { extendAdaptive } from "./queries.js";
+import { extendAdaptive, SCENARIO_ROWS } from "./queries.js";
 import { revokeSessionTokens, sessionGatewayUsage } from "./gateway.js";
 import { afterScoring } from "./reasons.js";
 import { keepAlive } from "./telemetry.js";
@@ -66,7 +66,7 @@ export async function claimJobs(workerId: string, opts: { limit?: number; models
   const jobs = await db.transaction(async (tx) => {
     const rows = await tx.query<Omit<Job, "max_user_turns" | "profile" | "agent" | "environment"> & { profile_id: number | null; prompt_variants: Record<string, string> | null }>(
       `UPDATE agent_sessions s SET status = 'running', worker_id = $1, started_at = now(), heartbeat_at = now()
-         FROM scenarios sc
+         FROM ${SCENARIO_ROWS} sc
         WHERE sc.id = s.scenario_id AND s.id IN (
               -- Fair share across organizations, not first-come-first-served: an org's k-th queued session is ranked
               -- after the sessions it already has running, and the lowest ranks are claimed first. One org's large
@@ -103,6 +103,12 @@ export async function claimJobs(workerId: string, opts: { limit?: number; models
     const profiles = profileIds.length
       ? await tx.query<Job["profile"] & { id: number; environment: PersonaEnvironment | null }>("SELECT id, slug, name, summary, attributes, instructions, environment FROM developer_profiles WHERE id = ANY($1)", [profileIds])
       : [];
+    // A library persona linked to a product (product_personas) carries that product's environment on the link.
+    const links = profileIds.length
+      ? await tx.query<{ product_id: number; profile_id: number; environment: PersonaEnvironment | null }>(
+          "/* tenant: internal: links of the profiles and products this claim just took */ SELECT product_id, profile_id, environment FROM product_personas WHERE profile_id = ANY($1) AND product_id = ANY($2)",
+          [profileIds, productIds])
+      : [];
     const devEnv = (process.env.OCTILLION_DEV_ENV ?? "on").toLowerCase() !== "off";
     return rows.map(({ profile_id, prompt_variants, ...r }) => {
       const p = profiles.find((x) => x!.id === profile_id);
@@ -112,7 +118,8 @@ export async function claimJobs(workerId: string, opts: { limit?: number; models
         image: spec.image, requires_env: spec.requires_env, cli: spec.cli, worker_adapter: spec.worker_adapter, boat_preinstalled: spec.boat_preinstalled,
         resume: spec.resume, origin: spec.origin, base_agent: spec.base_agent,
       } : null;
-      const environment = devEnv ? resolveEnvironment(p?.environment ?? null, languageOf(r.language, r.template), words.get(r.product_id) ?? []) : null;
+      const linked = links.find((l) => l.profile_id === profile_id && l.product_id === r.product_id)?.environment;
+      const environment = devEnv ? resolveEnvironment(linked ?? p?.environment ?? null, languageOf(r.language, r.template), words.get(r.product_id) ?? []) : null;
       // The developer phrases the task in their own words when research wrote a version for this persona.
       const prompt = (p && prompt_variants?.[p.slug]) || r.prompt;
       return { ...r, prompt, agent, environment, max_user_turns: MAX_USER_TURNS(), profile: p ? { slug: p.slug, name: p.name, summary: p.summary, attributes: p.attributes, instructions: p.instructions } : null };

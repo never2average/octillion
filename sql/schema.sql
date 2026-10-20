@@ -1118,3 +1118,50 @@ ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS reason_tried_at TIMESTAMPTZ;
 ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS reason_error TEXT;
 CREATE INDEX IF NOT EXISTS agent_sessions_reason_queue_idx ON agent_sessions (reason_next_at) WHERE reason_status = 'queued';
 CREATE INDEX IF NOT EXISTS agent_sessions_reason_tried_idx ON agent_sessions (reason_tried_at) WHERE reason_tried_at IS NOT NULL;
+
+-- Octillion's library is never copied into a customer account (2026-10-20). A product's task from the library is a
+-- link: a scenarios row with library_task_id and only the product's own settings (expectation, platform, variants,
+-- set) plus whatever research adapted for the product; title, prompt, repo, language and tags left NULL / empty are
+-- read from library_tasks (queries.ts SCENARIO_ROWS). A persona from the library is a link too: product_personas,
+-- never an account-owned copy.
+ALTER TABLE scenarios ALTER COLUMN title DROP NOT NULL;
+ALTER TABLE scenarios ALTER COLUMN prompt DROP NOT NULL;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'scenarios_text_or_library') THEN
+    ALTER TABLE scenarios ADD CONSTRAINT scenarios_text_or_library CHECK (library_task_id IS NOT NULL OR (title IS NOT NULL AND prompt IS NOT NULL));
+  END IF;
+END $$;
+CREATE TABLE IF NOT EXISTS product_personas (
+  product_id   INT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  profile_id   INT NOT NULL REFERENCES developer_profiles(id) ON DELETE CASCADE,  -- a shared library persona (org_id NULL)
+  environment  JSONB,                     -- the editor, tools and skills research chose for this product
+  active       BOOLEAN NOT NULL DEFAULT true,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (product_id, profile_id)
+);
+-- A library task added by hand used to be stored as source 'manual' (shown whole in the portal, and counted as private):
+-- it is a library link like research's.
+UPDATE scenarios SET source = 'library' WHERE library_task_id IS NOT NULL AND source = 'manual';
+-- Copies made before: a task field identical to the library's goes back to being read from it.
+UPDATE scenarios sc SET title = NULL FROM library_tasks lt WHERE lt.id = sc.library_task_id AND sc.title = lt.title;
+UPDATE scenarios sc SET prompt = NULL FROM library_tasks lt WHERE lt.id = sc.library_task_id AND sc.prompt = lt.prompt;
+UPDATE scenarios sc SET repo_url = NULL FROM library_tasks lt WHERE lt.id = sc.library_task_id AND sc.repo_url = lt.repo_url;
+UPDATE scenarios sc SET language = NULL FROM library_tasks lt WHERE lt.id = sc.library_task_id AND sc.language = lt.language;
+UPDATE scenarios sc SET tags = '{}' FROM library_tasks lt WHERE lt.id = sc.library_task_id AND sc.tags <> '{}' AND sc.tags = lt.tags;
+-- Persona copies research made (source 'picked', attributes.from_profile = the shared slug): each becomes a link to
+-- its shared persona; sessions, runs and prompt variants move to the shared id / slug; the copy is deleted.
+DO $$
+DECLARE m RECORD;
+BEGIN
+  FOR m IN SELECT dp.id AS copy_id, dp.slug AS copy_slug, dp.product_id, dp.environment, dp.active, s.id AS shared_id, s.slug AS shared_slug
+             FROM developer_profiles dp JOIN developer_profiles s ON s.slug = dp.attributes->>'from_profile' AND s.org_id IS NULL
+            WHERE dp.source = 'picked' AND dp.product_id IS NOT NULL LOOP
+    INSERT INTO product_personas (product_id, profile_id, environment, active) VALUES (m.product_id, m.shared_id, m.environment, m.active)
+      ON CONFLICT (product_id, profile_id) DO UPDATE SET active = product_personas.active OR EXCLUDED.active;
+    UPDATE agent_sessions SET profile_id = m.shared_id WHERE profile_id = m.copy_id;
+    UPDATE simulations SET profile_ids = array_replace(profile_ids, m.copy_id, m.shared_id) WHERE m.copy_id = ANY(profile_ids);
+    UPDATE scenarios SET prompt_variants = (prompt_variants - m.copy_slug) || jsonb_build_object(m.shared_slug, prompt_variants->m.copy_slug)
+     WHERE product_id = m.product_id AND prompt_variants ? m.copy_slug;
+    DELETE FROM developer_profiles WHERE id = m.copy_id;
+  END LOOP;
+END $$;

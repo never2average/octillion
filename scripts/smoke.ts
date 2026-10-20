@@ -887,13 +887,22 @@ try {
     assert.equal(done.product.name, "QuickQueue");
     assert.deepEqual(done.product.packages, ["@quickqueue/sdk"]);
     assert.equal(done.personas.length, 2);
-    assert.ok(done.personas.every((x: any) => x.attributes?.from_profile && x.summary && /\(example\)$/.test(x.name)), "over MCP, picked personas are returned whole (copied from the profile data)");
-    assert.equal((await db.query<any>("SELECT count(*) AS n FROM developer_profiles WHERE org_id = $1 AND source = 'picked' AND active AND attributes->>'from_profile' IS NOT NULL AND instructions <> ''", [a.org.orgId]))[0].n, 2,
-      "server side, the picked personas are full copies of the profile data (the run role-plays them)");
+    assert.ok(done.personas.every((x: any) => x.summary && /\(example\)$/.test(x.name)), "over MCP, the product's library personas are returned whole");
+    // The library is never copied into the account: research links the shared profiles to the product.
+    assert.equal((await db.query<any>("SELECT count(*) AS n FROM developer_profiles WHERE org_id = $1 AND source = 'picked'", [a.org.orgId]))[0].n, 0, "no persona copies in the account");
+    const links = await db.query<any>(`/* tenant: smoke */ SELECT dp.slug, dp.org_id, pp.environment FROM product_personas pp JOIN developer_profiles dp ON dp.id = pp.profile_id
+                                         JOIN products p ON p.id = pp.product_id WHERE p.org_id = $1 AND p.slug = $2 AND pp.active`, [a.org.orgId, done.product.slug]);
+    assert.ok(links.length === 2 && links.every((l: any) => l.org_id == null) && links.map((l: any) => l.slug).sort().join() === done.personas.map((x: any) => x.slug).sort().join(),
+      "the product links the two shared library personas (product_personas)");
     assert.equal(done.scenarios.length, 3);
     assert.ok(done.scenarios.every((x: any) => x.source === "library" && x.library_task_id && x.prompt), "every active research problem is a cited library task, with its prompt over MCP");
-    const pickedRows = await db.query<any>("/* tenant: smoke */ SELECT sc.library_task_id, sc.prompt FROM scenarios sc JOIN products p ON p.id = sc.product_id WHERE p.org_id = $1 AND p.slug = $2 AND sc.active", [a.org.orgId, done.product.slug]);
-    assert.ok(pickedRows.length === 3 && pickedRows.every((x: any) => x.library_task_id && x.prompt), "onboarding still picks library tasks into the product server side, prompts and all");
+    // Library tasks are links: the stored row holds nothing identical to the library task (read through SCENARIO_ROWS).
+    const pickedRows = await db.query<any>(`/* tenant: smoke */ SELECT sc.library_task_id, sc.prompt AS stored, sc.title AS stored_title, sc.repo_url AS stored_repo,
+        coalesce(sc.prompt, lt.prompt) AS prompt, lt.prompt AS lib_prompt, lt.title AS lib_title, lt.repo_url AS lib_repo
+        FROM scenarios sc JOIN products p ON p.id = sc.product_id LEFT JOIN library_tasks lt ON lt.id = sc.library_task_id WHERE p.org_id = $1 AND p.slug = $2 AND sc.active`, [a.org.orgId, done.product.slug]);
+    assert.ok(pickedRows.length === 3 && pickedRows.every((x: any) => x.library_task_id && x.prompt), "onboarding links library tasks to the product, with a prompt to run");
+    assert.ok(pickedRows.every((x: any) => x.stored !== x.lib_prompt && x.stored_title !== x.lib_title && (x.stored_repo == null || x.stored_repo !== x.lib_repo)),
+      "nothing the library already has is copied into the product's rows");
     assert.equal(done.drafts.length, 1, "a draft for a library gap waits for approval, inactive");
     assert.equal(done.drafts[0].active, false);
     assert.equal(done.scenarios.find((x: any) => x.title === "Nightly digest")?.platform, "web", "research problems get a platform");
@@ -903,8 +912,9 @@ try {
     assert.ok(approved.scenarios.some((x: any) => x.id === done.drafts[0].id) && !approved.drafts.length, "an approved draft becomes an active task");
     await fails(A, "review_draft_tasks", { product: done.product.slug, reject: [done.scenarios[0].id] }, /Not draft tasks/);
     await fails(B, "review_draft_tasks", { approve: [done.drafts[0].id] }, /Not draft tasks|No products/);
-    assert.ok((await call(A, "list_developer_profiles", {})).profiles.some((x: any) => x.attributes?.from_profile === "example-startup-backend" && x.source === "picked"), "org sees its personas");
-    assert.ok(!(await call(B, "list_developer_profiles", {})).profiles.some((x: any) => x.attributes?.from_profile), "other orgs do not");
+    const aLinked = (await call(A, "list_personas", {})).personas.filter((x: any) => x.source === "library");
+    assert.ok(aLinked.length === 2 && aLinked.every((x: any) => x.instructions), "list_personas (MCP): the account's linked library personas, whole");
+    assert.ok(!(await call(B, "list_personas", {})).personas.some((x: any) => x.source === "library"), "another org's links never show");
     await call(A, "cancel_simulation", { simulation_id: accepted.simulation_id });
     console.log("✓ onboarding: research claim, progress, library search, blindness validation, apply, personas scoped, auto-run");
   }
@@ -4975,13 +4985,14 @@ try {
     const activeShared = await db.query<any>("SELECT slug, summary FROM developer_profiles WHERE org_id IS NULL AND active");
     const listedA = (await call(A, "list_developer_profiles", {})).profiles;
     assert.ok(activeShared.every((x: any) => listedA.some((p: any) => p.slug === x.slug && p.summary === x.summary)), "list_developer_profiles lists every active shared persona with its summary");
-    assert.ok(listedA.some((p: any) => p.source === "custom") && listedA.some((p: any) => p.source === "picked"), "next to the account's own (brought and picked)");
+    assert.ok(listedA.some((p: any) => p.source === "custom") && !listedA.some((p: any) => p.source === "picked"), "next to the account's own (brought); no library copies");
     const productsA = (await db.query<any>("SELECT slug FROM products WHERE org_id = $1", [a.org.orgId])).map((x: any) => x.slug);
-    const curatedA = await db.query<any>("/* tenant: smoke */ SELECT sc.id, sc.title, sc.prompt, sc.library_task_id FROM scenarios sc JOIN products p ON p.id = sc.product_id WHERE p.org_id = $1 AND sc.library_task_id IS NOT NULL", [a.org.orgId]);
+    const curatedA = await db.query<any>(`/* tenant: smoke */ SELECT sc.id, coalesce(sc.title, lt.title) AS title, coalesce(sc.prompt, lt.prompt) AS prompt, sc.library_task_id
+        FROM scenarios sc JOIN products p ON p.id = sc.product_id JOIN library_tasks lt ON lt.id = sc.library_task_id WHERE p.org_id = $1`, [a.org.orgId]);
     assert.ok(curatedA.length >= 3, "org A has tasks picked from the library");
     const shownA = (await Promise.all(productsA.map(async (product: string) => (await call(A, "get_product", { product })).scenarios))).flat();
     assert.ok(curatedA.every((c: any) => shownA.some((x: any) => x.id === c.id && x.prompt === c.prompt && x.library_task_id === c.library_task_id && !("curated" in x))),
-      "get_product returns library copies with their prompt and library id (no portal redaction over MCP)");
+      "get_product returns linked library tasks with their prompt (read from the library) and library id (no portal redaction over MCP)");
     const sessCurated = (await db.query<any>("SELECT id FROM agent_sessions WHERE org_id = $1 AND scenario_id = ANY($2) LIMIT 1", [a.org.orgId, curatedA.map((x: any) => x.id)]))[0]?.id;
     if (sessCurated) assert.ok((await call(A, "get_agent_session", { session_id: sessCurated })).session.prompt, "a session on a library copy shows the task's prompt");
     const sessShared = (await db.query<any>("SELECT s.id FROM agent_sessions s JOIN developer_profiles dp ON dp.id = s.profile_id WHERE s.org_id = $1 AND dp.org_id IS NULL LIMIT 1", [a.org.orgId]))[0]?.id;

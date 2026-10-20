@@ -14,7 +14,7 @@ import { z } from "zod";
 import { randomBytes } from "node:crypto";
 import { getDb } from "./db.js";
 import type { Org } from "./auth.js";
-import { resolveProduct, checkTemplate, checkPlatform, WORKSPACE_TEMPLATES, forCustomer, personaForCustomer, type Surface } from "./queries.js";
+import { resolveProduct, checkTemplate, checkPlatform, WORKSPACE_TEMPLATES, forCustomer, personaForCustomer, type Surface, SCENARIO_ROWS } from "./queries.js";
 import { PLATFORMS } from "./platform.js";
 import { platformOf } from "./platform.js";
 import { environmentIssues, type PersonaEnvironment } from "../orchestrator/core/environment.js";
@@ -112,15 +112,23 @@ export async function savePersonas(org: Org, items: PersonaInput[], surface: Sur
 }
 
 /**
- * The organization's own personas: brought (custom) and picked or written for it by research. Never another org's.
- * Over MCP (list_personas) each is returned whole; the portal (surface.redact, src/app.ts) shows a persona research
- * copied from Octillion's shared library (source 'picked') by name only (personaForCustomer).
+ * The organization's personas: its own (custom, or written for it by research), and the library personas research
+ * linked to its products (source 'library', product_personas; never copied into the account). Never another org's.
+ * Over MCP (list_personas) each is returned whole; the portal (surface.redact, src/app.ts) shows a library persona by
+ * name only (personaForCustomer).
  */
 export async function listPersonas(org: Org, highlight: string[] = [], surface: Surface = {}) {
-  const personas = await (await getDb()).query<any>(
+  const db = await getDb();
+  const personas = await db.query<any>(
     `SELECT slug, name, summary, attributes, instructions, environment, source, active, product_id
        FROM developer_profiles WHERE org_id = $1 ORDER BY source, name`, [org.orgId]);
   await openRows(org.orgId, personas, ["summary", "instructions"]);
+  // The library personas linked to the account's products (product_personas): Octillion's, never copied into the account.
+  personas.push(...await db.query<any>(
+    `SELECT dp.slug, dp.name, dp.summary, dp.attributes, dp.instructions, coalesce(pp.environment, dp.environment) AS environment, 'library' AS source,
+            pp.active, pp.product_id
+       FROM product_personas pp JOIN products p ON p.id = pp.product_id AND p.org_id = $1 JOIN developer_profiles dp ON dp.id = pp.profile_id AND dp.org_id IS NULL
+      ORDER BY dp.name`, [org.orgId]));
   for (const p of personas) p.attributes = await openJson(org.orgId, p.attributes);
   // Its publication to Octillion's library (src/contributions.ts): only the account's own (custom) personas can be published.
   const pubs = await publicationsFor(org.orgId, "persona");
@@ -207,7 +215,7 @@ export async function listTaskSets(org: Org, product?: string) {
             jsonb_agg(jsonb_build_object('id', sc.id, 'title', sc.title, 'platform', sc.platform, 'expectation', sc.expectation, 'active', sc.active)
                       ORDER BY sc.id) FILTER (WHERE sc.id IS NOT NULL) AS tasks
        FROM org_task_sets ts JOIN products p ON p.id = ts.product_id AND p.org_id = ts.org_id
-       LEFT JOIN scenarios sc ON sc.task_set_id = ts.id
+       LEFT JOIN ${SCENARIO_ROWS} sc ON sc.task_set_id = ts.id
       WHERE ${where} GROUP BY ts.id, p.slug ORDER BY ts.created_at DESC`, params);
   // Each task's publication to Octillion's library (src/contributions.ts).
   const pubs = await publicationsFor(org.orgId, "task");
@@ -218,7 +226,7 @@ export async function listTaskSets(org: Org, product?: string) {
 /** Scenario ids of an org's task set (by public id or name), for run_simulation {task_set}. */
 export async function taskSetScenarioIds(org: Org, productId: number, ref: string): Promise<number[]> {
   const rows = await (await getDb()).query<{ id: number }>(
-    `SELECT sc.id FROM scenarios sc JOIN org_task_sets ts ON ts.id = sc.task_set_id
+    `SELECT sc.id FROM ${SCENARIO_ROWS} sc JOIN org_task_sets ts ON ts.id = sc.task_set_id
       WHERE ts.org_id = $1 AND ts.product_id = $2 AND (ts.public_id = $3 OR ts.name = $3) AND sc.active ORDER BY sc.id`,
     [org.orgId, productId, ref]);
   if (!rows.length) throw new Error(`No task set ${ref} with active tasks. See list_task_sets.`);
@@ -235,7 +243,7 @@ export async function taskSetDetails(org: Org) {
   const tasks = await db.query<any>(
     `SELECT sc.id, sc.title, sc.prompt, sc.repo_url, sc.language, sc.tags, sc.platform, sc.template, sc.expectation, sc.active, sc.source,
             sc.rationale AS provenance, sc.library_task_id, sc.created_at, ts.public_id AS task_set, p.slug AS product, p.name AS product_name
-       FROM scenarios sc JOIN products p ON p.id = sc.product_id AND p.org_id = $1
+       FROM ${SCENARIO_ROWS} sc JOIN products p ON p.id = sc.product_id AND p.org_id = $1
        LEFT JOIN org_task_sets ts ON ts.id = sc.task_set_id AND ts.org_id = $1
       WHERE ts.id IS NOT NULL OR sc.library_task_id IS NOT NULL ORDER BY sc.id`, [org.orgId]);
   for (const t of tasks) {
@@ -250,7 +258,7 @@ export async function taskSetDetails(org: Org) {
   });
   const runs = await db.query<{ task_set: string; id: string; name: string; status: string; created_at: Date }>(
     `SELECT DISTINCT ON (ts.public_id, sim.id) ts.public_id AS task_set, sim.id, sim.name, sim.status, sim.created_at
-       FROM agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id JOIN org_task_sets ts ON ts.id = sc.task_set_id AND ts.org_id = $1
+       FROM agent_sessions s JOIN ${SCENARIO_ROWS} sc ON sc.id = s.scenario_id JOIN org_task_sets ts ON ts.id = sc.task_set_id AND ts.org_id = $1
        JOIN simulations sim ON sim.id = s.simulation_id AND sim.org_id = $1
       WHERE s.org_id = $1 ORDER BY ts.public_id, sim.id`, [org.orgId]);
   return { tasks: shown, runs };
@@ -263,7 +271,7 @@ export async function taskSetDetails(org: Org) {
 export async function updateTask(org: Org, id: number, patch: Partial<TaskInput> & { active?: boolean }) {
   const db = await getDb();
   const [row] = await db.query<any>(
-    `SELECT sc.*, ts.id AS set_id FROM scenarios sc JOIN products p ON p.id = sc.product_id AND p.org_id = $1
+    `SELECT sc.*, ts.id AS set_id FROM ${SCENARIO_ROWS} sc JOIN products p ON p.id = sc.product_id AND p.org_id = $1
        LEFT JOIN org_task_sets ts ON ts.id = sc.task_set_id AND ts.org_id = $1 WHERE sc.id = $2`, [org.orgId, id]);
   if (!row || (!row.set_id && row.library_task_id == null)) throw new Error(`No task ${id}. See list_task_sets.`);
   const fields = Object.keys(patch).filter((k) => k !== "active" && (patch as Record<string, unknown>)[k] !== undefined);

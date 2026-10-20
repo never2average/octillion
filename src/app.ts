@@ -15,7 +15,7 @@ import { orgBudget } from "./billing.js";
 import * as billing from "./billing.js";
 import * as experiments from "./experiments.js";
 import { getDb } from "./db.js";
-import { getProduct, HIT, listProducts, orgMonthSpendUsd, saveProduct, saveScenarios } from "./queries.js";
+import { getProduct, HIT, listProducts, orgMonthSpendUsd, saveProduct, saveScenarios, SCENARIO_ROWS } from "./queries.js";
 import * as context from "./context.js";
 import { getPopulation } from "./populations.js";
 import * as playbooks from "./playbooks.js";
@@ -275,7 +275,7 @@ async function usageCharts(s: Session, range: ReturnType<typeof reportRange>, us
       `SELECT sim.id, sim.name, sim.status, sim.created_at, sim.created_by, pr.name AS product, count(s.id) AS sessions,
               count(s.id) FILTER (WHERE s.verdict IS NOT NULL) AS scored, count(s.id) FILTER (WHERE s.verdict IS NOT NULL AND ${HIT}) AS hits
          FROM simulations sim JOIN products pr ON pr.id = sim.product_id AND pr.org_id = $1
-         LEFT JOIN agent_sessions s ON s.simulation_id = sim.id AND s.org_id = $1 LEFT JOIN scenarios sc ON sc.id = s.scenario_id
+         LEFT JOIN agent_sessions s ON s.simulation_id = sim.id AND s.org_id = $1 LEFT JOIN ${SCENARIO_ROWS} sc ON sc.id = s.scenario_id
         WHERE sim.org_id = $1 AND sim.created_at >= $2 AND sim.created_at < $3${simBy}
         GROUP BY sim.id, pr.name ORDER BY sim.created_at DESC LIMIT 10`, p),
   ]);

@@ -60,6 +60,19 @@ export const config = {
   orgMonthlyBudgetUsd: () => Number(process.env.OCTILLION_ORG_MONTHLY_BUDGET_USD ?? 1000),
 };
 
+/**
+ * A product's tasks as they read: the scenarios row with what it leaves empty filled from its library task. A task
+ * from Octillion's library is a link (library_task_id), never a copy (schema.sql, 2026-10-20): its title, prompt,
+ * repo, language and tags come from library_tasks unless the product has its own (an edit, or research's adaptation).
+ * Use `${SCENARIO_ROWS} sc` wherever scenarios are read; write to `scenarios` itself. List every scenarios column here.
+ */
+export const SCENARIO_ROWS = `/* tenant: the scenarios table, rows scoped by the query around it */ (SELECT sc0.id, sc0.product_id,
+    coalesce(sc0.title, lt0.title) AS title, coalesce(sc0.prompt, lt0.prompt) AS prompt, coalesce(sc0.repo_url, lt0.repo_url) AS repo_url,
+    coalesce(sc0.language, lt0.language) AS language, CASE WHEN cardinality(sc0.tags) > 0 THEN sc0.tags ELSE coalesce(lt0.tags, '{}') END AS tags,
+    sc0.expectation, sc0.active, sc0.created_at, sc0.updated_at, sc0.library_task_id, sc0.source, sc0.rationale, sc0.template,
+    sc0.prompt_variants, sc0.decision, sc0.platform, sc0.task_set_id
+  FROM scenarios sc0 LEFT JOIN library_tasks lt0 ON lt0.id = sc0.library_task_id)`;
+
 // A session is a hit when the agent picked the product in a "recommend" scenario, or left it out in an "avoid" one
 // (scoring.ts isHit, in SQL over agent_sessions s JOIN scenarios sc). Shared with the portal's Usage charts (src/app.ts).
 export const HIT = `CASE WHEN sc.expectation = 'recommend' THEN s.verdict IN ('adopted', 'recommended')
@@ -107,13 +120,13 @@ export async function listProducts(org: Org) {
   const db = await getDb();
   const products = await db.query(
     `SELECT p.id, p.slug, p.name, p.category, p.description, jsonb_array_length(p.competitors) AS competitors,
-            (SELECT count(*) FROM scenarios sc WHERE sc.product_id = p.id AND sc.active) AS scenarios,
+            (SELECT count(*) FROM ${SCENARIO_ROWS} sc WHERE sc.product_id = p.id AND sc.active) AS scenarios,
             count(s.id) AS sessions_30d,
             count(*) FILTER (WHERE ${HIT}) AS hits_30d,
             max(s.ended_at) AS last_run_at
        FROM products p
        LEFT JOIN agent_sessions s ON s.product_id = p.id AND s.verdict IS NOT NULL AND s.ended_at > now() - interval '30 days'
-       LEFT JOIN scenarios sc ON sc.id = s.scenario_id
+       LEFT JOIN ${SCENARIO_ROWS} sc ON sc.id = s.scenario_id
       WHERE p.org_id = $1
       GROUP BY p.id ORDER BY p.name`,
     [org.orgId],
@@ -178,10 +191,11 @@ export async function getProduct(org: Org, ref?: string, surface: Surface = {}) 
     `/* tenant: product from resolveProduct(org) */ SELECT sc.id, sc.title, sc.prompt, sc.repo_url, sc.language, sc.tags, sc.template, sc.platform, sc.library_task_id, sc.expectation, sc.active, sc.source, sc.rationale,
             count(s.id) AS sessions, count(*) FILTER (WHERE ${HIT}) AS hits,
             mode() WITHIN GROUP (ORDER BY s.winner) FILTER (WHERE s.winner IS NOT NULL) AS usual_winner
-       FROM scenarios sc
+       FROM ${SCENARIO_ROWS} sc
        LEFT JOIN agent_sessions s ON s.scenario_id = sc.id AND s.verdict IS NOT NULL
       WHERE sc.product_id = $1
-      GROUP BY sc.id ORDER BY sc.active DESC, sc.id`,
+      GROUP BY sc.id, sc.title, sc.prompt, sc.repo_url, sc.language, sc.tags, sc.template, sc.platform, sc.library_task_id, sc.expectation, sc.active, sc.source, sc.rationale
+      ORDER BY sc.active DESC, sc.id`,
     [p.id],
   );
   await openRows(org.orgId, scenarios as any[], ["prompt", "rationale"]);
@@ -217,9 +231,9 @@ export function forCustomer<T extends Record<string, any>>(s: T): Omit<T, "libra
   return { ...rest, prompt: null, curated } as any;
 }
 
-/** Portal only (Surface.redact): a persona copied from the shared library into the account (source 'picked') by name only. */
+/** Portal only (Surface.redact): a library persona linked to a product (source 'library'; 'picked' was the old copy) by name only. */
 export function personaForCustomer<T extends Record<string, any>>(p: T): T & { curated: boolean } {
-  if (p.source !== "picked") return { ...p, curated: false };
+  if (p.source !== "picked" && p.source !== "library") return { ...p, curated: false };
   const out: any = { ...p, curated: true, summary: null, attributes: {} };
   for (const k of ["instructions", "environment"]) if (k in out) out[k] = null;
   return out;
@@ -280,22 +294,29 @@ export async function saveScenarios(org: Org, productRef: string | undefined, it
         // A new template moves the task to that template's platform unless one was given.
         if (template && !s.platform) await tx.query("/* tenant: scenario id just verified against product_id from resolveProduct(org) above */ UPDATE scenarios SET platform = $2 WHERE id = $1", [s.id, platformOf({ template })]);
       } else {
+        // A library task is linked, never copied (SCENARIO_ROWS reads its text from library_tasks): the row stores only
+        // what the caller gave on top of it, plus the product's own settings.
+        let lib: any = null;
         if (s.library_task_id !== undefined) {
           // An active library task only (an inactive or admin-hidden one is not public).
-          const [t] = await tx.query<any>("SELECT * FROM library_tasks WHERE id = $1 AND active", [s.library_task_id]);
-          if (!t) throw new Error(`No library task ${s.library_task_id}; see browse_task_library`);
-          s = { ...s, title: s.title ?? t.title, prompt: s.prompt ?? t.prompt, repo_url: s.repo_url ?? t.repo_url ?? undefined,
-                language: s.language ?? t.language ?? undefined, tags: s.tags ?? t.tags, platform: s.platform ?? t.platform ?? undefined };
+          [lib] = await tx.query<any>("SELECT * FROM library_tasks WHERE id = $1 AND active", [s.library_task_id]);
+          if (!lib) throw new Error(`No library task ${s.library_task_id}; see browse_task_library`);
           // Curated tasks carry the starter workspace they were written for.
-          if (template == null && (WORKSPACE_TEMPLATES as readonly string[]).includes(t.attributes?.template)) template = t.attributes.template;
+          if (template == null && (WORKSPACE_TEMPLATES as readonly string[]).includes(lib.attributes?.template)) template = lib.attributes.template;
         }
-        if (!s.prompt?.trim()) throw new Error("New scenarios need a prompt (the task given to the agent) or a library_task_id");
+        const prompt = s.prompt?.trim() || null;
+        if (!prompt && !lib) throw new Error("New scenarios need a prompt (the task given to the agent) or a library_task_id");
+        // Only what differs from the library task is the product's own.
+        const own = <T,>(v: T | undefined, l: T | null | undefined) => (v == null || (lib && v === l) ? null : v);
+        const ownTags = s.tags && !(lib && JSON.stringify(s.tags) === JSON.stringify(lib.tags ?? [])) ? s.tags : [];
         await tx.query(
-          `/* tenant: product from resolveProduct(org) */ INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, library_task_id, template, platform)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-          [p.id, s.title?.trim() || s.prompt.trim().slice(0, 80), s.prompt.trim(), s.repo_url ?? null, s.language ?? null,
-           s.tags ?? [], s.expectation ?? "recommend", s.active ?? true, s.library_task_id ?? null, template ?? null,
-           checkPlatform(s.platform) ?? platformOf({ template, language: s.language, tags: s.tags, prompt: s.prompt })],
+          `/* tenant: product from resolveProduct(org) */ INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, library_task_id, template, platform, source)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+          [p.id, own(s.title?.trim() || (lib ? undefined : prompt!.slice(0, 80)), lib?.title), own(prompt ?? undefined, lib?.prompt),
+           own(s.repo_url, lib?.repo_url), own(s.language, lib?.language), ownTags, s.expectation ?? "recommend", s.active ?? true,
+           s.library_task_id ?? null, template ?? null,
+           checkPlatform(s.platform ?? lib?.platform ?? undefined) ?? platformOf({ template, language: s.language ?? lib?.language, tags: s.tags ?? lib?.tags, prompt: prompt ?? lib?.prompt }),
+           lib ? "library" : "manual"],
         );
       }
     }
@@ -370,7 +391,7 @@ export const NO_PLAN = (name?: string | null) => `${name ?? "This organization"}
 async function harnessPreferences(scenarioIds: number[]): Promise<Map<number, string[]>> {
   if (!scenarioIds.length) return new Map();
   const rows = await (await getDb()).query<{ id: number; harnesses: string[] }>(
-    `/* tenant: internal: scenario ids already scoped by the caller */ SELECT sc.id, lt.harnesses FROM scenarios sc
+    `/* tenant: internal: scenario ids already scoped by the caller */ SELECT sc.id, lt.harnesses FROM ${SCENARIO_ROWS} sc
        JOIN library_tasks lt ON lt.id = sc.library_task_id WHERE sc.id = ANY($1) AND cardinality(lt.harnesses) > 0`, [scenarioIds]);
   return new Map(rows.map((r) => [Number(r.id), r.harnesses]));
 }
@@ -398,7 +419,7 @@ export async function runSimulation(org: Org, input: RunInput) {
   if (input.task_set) {
     // Private task set: scoped to this org and product (another org's set name or id resolves to nothing).
     const ids = (await db.query<{ id: number }>(
-      `SELECT sc.id FROM scenarios sc JOIN org_task_sets ts ON ts.id = sc.task_set_id
+      `SELECT sc.id FROM ${SCENARIO_ROWS} sc JOIN org_task_sets ts ON ts.id = sc.task_set_id
         WHERE ts.org_id = $1 AND ts.product_id = $2 AND (ts.public_id = $3 OR ts.name = $3) AND sc.active ORDER BY sc.id`,
       [org.orgId, p.id, input.task_set])).map((r) => r.id);
     if (!ids.length) throw new Error(`No task set ${input.task_set} with active tasks. See list_task_sets.`);
@@ -556,7 +577,7 @@ export async function extendAdaptive(simulationId: string): Promise<number> {
     const rows = await tx.query<{ scenario_id: number; attempts: number; n: number; hits: number }>(
       `/* tenant: internal: adaptive sampling of a finished session's simulation */ SELECT s.scenario_id, count(*) AS attempts, count(*) FILTER (WHERE s.verdict IS NOT NULL) AS n,
               count(*) FILTER (WHERE s.verdict IS NOT NULL AND ${HIT}) AS hits
-         FROM agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id
+         FROM agent_sessions s JOIN ${SCENARIO_ROWS} sc ON sc.id = s.scenario_id
         WHERE s.simulation_id = $1 GROUP BY s.scenario_id ORDER BY s.scenario_id`, [simulationId]);
     let room = maxSessions - rows.reduce((t, r) => t + Number(r.attempts), 0);
     const decisions: Record<string, unknown> = {};
@@ -606,7 +627,7 @@ export async function listSimulations(org: Org, productRef?: string) {
             count(*) FILTER (WHERE s.verdict IS NOT NULL AND ${HIT}) AS hits
        FROM simulations sim JOIN products p ON p.id = sim.product_id
        LEFT JOIN agent_sessions s ON s.simulation_id = sim.id
-       LEFT JOIN scenarios sc ON sc.id = s.scenario_id
+       LEFT JOIN ${SCENARIO_ROWS} sc ON sc.id = s.scenario_id
       WHERE sim.org_id = $1 ${p ? "AND sim.product_id = $2" : ""}
       GROUP BY sim.id, p.id ORDER BY sim.created_at DESC LIMIT 50`,
     p ? [org.orgId, p.id] : [org.orgId],
@@ -627,7 +648,7 @@ export async function getSimulation(org: Org, simulationId: string) {
             s.agent_id, s.started_at, s.ended_at, s.events, s.user_turns, s.cost_usd, s.error_message, dp.name AS profile,
             s.completed_reason, (s.metadata->>'agent_turns')::int AS agent_turns,
             CASE WHEN s.verdict IS NULL THEN NULL ELSE ${HIT} END AS hit
-       FROM agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id LEFT JOIN developer_profiles dp ON dp.id = s.profile_id
+       FROM agent_sessions s JOIN ${SCENARIO_ROWS} sc ON sc.id = s.scenario_id LEFT JOIN developer_profiles dp ON dp.id = s.profile_id
       WHERE s.simulation_id = $1 AND s.org_id = $2 ORDER BY sc.id, s.model, s.attempt`,
     [simulationId, org.orgId],
   );
@@ -721,7 +742,7 @@ export async function getReport(org: Org, input: { product?: string; days?: numb
   const platform = checkPlatform(input.platform);
   if (platform) params.push(platform), (base += ` AND sc.platform = $${params.length}`);
   const filter = `${base} AND s.verdict IS NOT NULL`;
-  const from = `agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id WHERE ${filter}`;
+  const from = `agent_sessions s JOIN ${SCENARIO_ROWS} sc ON sc.id = s.scenario_id WHERE ${filter}`;
 
   const [t] = await db.query<any>(
     `SELECT count(*) AS sessions, count(*) FILTER (WHERE ${HIT}) AS hits,
@@ -775,13 +796,13 @@ export async function getReport(org: Org, input: { product?: string; days?: numb
   const byScenario = await db.query<any>(
     `SELECT sc.id, sc.title, sc.expectation, sc.platform, sc.library_task_id, sc.source, count(*) AS sessions, count(*) FILTER (WHERE ${HIT}) AS hits,
             mode() WITHIN GROUP (ORDER BY s.winner) FILTER (WHERE s.winner IS NOT NULL) AS usual_winner
-       FROM ${from} GROUP BY sc.id ORDER BY count(*) FILTER (WHERE ${HIT})::float / count(*), sc.id`,
+       FROM ${from} GROUP BY sc.id, sc.title, sc.expectation, sc.platform, sc.library_task_id, sc.source ORDER BY count(*) FILTER (WHERE ${HIT})::float / count(*), sc.id`,
     params,
   );
   const daily = await db.query<any>(
     `/* tenant: product from resolveProduct(org), in the shared filter */ SELECT d::date AS day, count(s.id) AS sessions, count(s.id) FILTER (WHERE ${HIT}) AS hits
        FROM generate_series(current_date - ($2::int - 1), current_date, interval '1 day') d
-       LEFT JOIN (agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id)
+       LEFT JOIN (agent_sessions s JOIN ${SCENARIO_ROWS} sc ON sc.id = s.scenario_id)
               ON s.ended_at::date = d::date AND ${filter}
       GROUP BY d ORDER BY d`,
     params,
@@ -795,11 +816,11 @@ export async function getReport(org: Org, input: { product?: string; days?: numb
   const rows = await db.query<any>(
     `/* tenant: product from resolveProduct(org), in the shared base filter */ SELECT s.id, s.status, s.verdict, s.winner, s.mentions, s.untracked, coalesce(s.agent_id, s.model) AS agent_id, s.cost_usd,
             sc.id AS scenario_id, sc.expectation, sc.platform, dp.name AS profile
-       FROM agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id LEFT JOIN developer_profiles dp ON dp.id = s.profile_id
+       FROM agent_sessions s JOIN ${SCENARIO_ROWS} sc ON sc.id = s.scenario_id LEFT JOIN developer_profiles dp ON dp.id = s.profile_id
       WHERE ${base} AND s.status NOT IN ('queued', 'running', 'cancelled')`,
     params,
   );
-  const promptRows = await openRows(org.orgId, await db.query<any>("/* tenant: product from resolveProduct(org) */ SELECT id, prompt FROM scenarios WHERE product_id = $1", [p.id]), ["prompt"]);
+  const promptRows = await openRows(org.orgId, await db.query<any>(`/* tenant: product from resolveProduct(org) */ SELECT sc.id, sc.prompt FROM ${SCENARIO_ROWS} sc WHERE sc.product_id = $1`, [p.id]), ["prompt"]);
   const prompts = new Map(promptRows.map((r: any) => [Number(r.id), String(r.prompt ?? "")]));
   const sections = reportSections(p, rows, byScenario, prompts, sim);
   return {
@@ -973,7 +994,9 @@ export async function listProfiles(org: Org, input: { query?: string; product?: 
   const params: unknown[] = [org.orgId];
   let where = "active AND (org_id IS NULL OR org_id = $1)";
   if (q) params.push(`%${q}%`), (where += ` AND (name ILIKE $${params.length} OR summary ILIKE $${params.length} OR attributes::text ILIKE $${params.length})`);
-  if (input.product) params.push((await resolveProduct(org, input.product)).id), (where += ` AND product_id = $${params.length}`);
+  // A product's personas: its own, and the library personas linked to it (product_personas).
+  if (input.product) params.push((await resolveProduct(org, input.product)).id),
+    (where += ` AND (product_id = $${params.length} OR id IN (SELECT profile_id FROM product_personas WHERE product_id = $${params.length} AND active))`);
   const profiles = await db.query<any>(
     `SELECT id, slug, name, summary, attributes, source, product_id FROM developer_profiles WHERE ${where}
       ORDER BY (org_id IS NULL), name LIMIT 200`,
@@ -1017,7 +1040,7 @@ export async function getSession(org: Org, sessionId: string) {
             sc.title AS scenario, sc.prompt, sc.repo_url, sc.expectation, p.name AS product, p.slug AS product_slug,
             sim.name AS simulation, dp.name AS profile, dp.slug AS profile_slug, dp.summary AS profile_summary,
             CASE WHEN s.verdict IS NULL THEN NULL ELSE ${HIT} END AS hit
-       FROM agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id JOIN products p ON p.id = s.product_id
+       FROM agent_sessions s JOIN ${SCENARIO_ROWS} sc ON sc.id = s.scenario_id JOIN products p ON p.id = s.product_id
        JOIN simulations sim ON sim.id = s.simulation_id LEFT JOIN developer_profiles dp ON dp.id = s.profile_id
       WHERE s.id = $1 AND s.org_id = $2`,
     [sessionId, org.orgId],

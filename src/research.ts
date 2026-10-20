@@ -197,8 +197,12 @@ export async function getOnboarding(org: Org, input: { research_id?: string; pro
                           [org.orgId, (await resolveProduct(org, input.product)).id]);
   if (!job) throw new Error(input.research_id ? `No onboarding ${input.research_id}` : "This product has not been onboarded yet; use onboard_product.");
   const product = await getProduct(org, String(job.product_id));
+  // The product's own personas, then the library personas linked to it (product_personas).
   const personas = await db.query(
-    `SELECT slug, name, summary, attributes FROM developer_profiles WHERE org_id = $1 AND product_id = $2 AND active ORDER BY id`,
+    `SELECT slug, name, summary, attributes FROM developer_profiles WHERE org_id = $1 AND product_id = $2 AND active
+     UNION ALL
+     SELECT dp.slug, dp.name, dp.summary, dp.attributes FROM product_personas pp JOIN developer_profiles dp ON dp.id = pp.profile_id AND dp.org_id IS NULL
+      JOIN products p ON p.id = pp.product_id AND p.org_id = $1 WHERE pp.product_id = $2 AND pp.active`,
     [org.orgId, job.product_id]);
   const [sim] = job.simulation_id
     ? await db.query<any>(
@@ -547,36 +551,44 @@ export async function completeResearch(id: string, body: { status?: string; erro
   await db.transaction(async (tx) => {
     // A new research replaces the previous generated personas and problems (kept for history, inactive).
     await tx.query("UPDATE developer_profiles SET active = false WHERE product_id = $1 AND source IN ('generated', 'picked')", [job.product_id]);
+    await tx.query("/* tenant: product of the research job (job checked against the job token in http.ts) */ UPDATE product_personas SET active = false WHERE product_id = $1", [job.product_id]);
     await tx.query("/* tenant: product of the research job (job checked against the job token in http.ts) */ UPDATE scenarios SET active = false, updated_at = now() WHERE product_id = $1 AND source IN ('generated', 'library', 'draft')", [job.product_id]);
     for (const x of r.personas) {
-      // The persona is a real developer profile from the data: identity, attributes and instructions are copied from it.
-      const [d] = await tx.query<any>("SELECT name, summary, attributes, instructions FROM developer_profiles WHERE slug = $1 AND org_id IS NULL", [x.profile_slug]);
-      const slug = `p${job.product_id}-${slugify(d.name)}-${randomId("", 3).toLowerCase().replace(/[^a-z0-9]/g, "x")}`;
-      personaSlugs.push(slug);
-      slugOf.set(x.name, slug);
+      // The persona is a shared library profile, linked to the product (product_personas), never copied into the
+      // account: sessions run on the shared profile; the link holds the environment research chose for this product.
+      const [d] = await tx.query<{ id: number; slug: string }>("SELECT id, slug FROM developer_profiles WHERE slug = $1 AND org_id IS NULL", [x.profile_slug]);
+      if (!d) continue;
+      personaSlugs.push(d.slug);
+      slugOf.set(x.name, d.slug);
       await tx.query(
-        `INSERT INTO developer_profiles (slug, name, summary, attributes, instructions, org_id, product_id, source, active, environment)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'picked', true, $8)`,
-        [slug, d.name, d.summary ?? "", JSON.stringify({ ...(d.attributes ?? {}), from_profile: x.profile_slug }), d.instructions ?? "", job.org_id, job.product_id,
-         x.environment ? JSON.stringify({ editor: x.environment.editor, tools: x.environment.tools ?? [], skills: x.environment.skills ?? [],
-                                          agent_rules: x.environment.agent_rules ?? null }) : null]);
+        `/* tenant: product of the research job (job checked against the job token in http.ts) */ INSERT INTO product_personas (product_id, profile_id, environment, active)
+         VALUES ($1, $2, $3, true) ON CONFLICT (product_id, profile_id) DO UPDATE SET environment = EXCLUDED.environment, active = true`,
+        [job.product_id, d.id, x.environment ? JSON.stringify({ editor: x.environment.editor, tools: x.environment.tools ?? [], skills: x.environment.skills ?? [],
+                                                                agent_rules: x.environment.agent_rules ?? null }) : null]);
     }
     for (const s of r.scenarios) {
       const prompt = s.prompt.trim();
       // A library task without an explicit template keeps the starter workspace it was written for.
       let template = researchTemplate(s.template);
       let repoUrl = s.repo_url ?? null;
+      // A library task is linked, never copied: the row keeps only what research changed for the product (its adapted
+      // title and prompt); what is the same as the library's stays NULL and is read from library_tasks (SCENARIO_ROWS).
+      let lib: { title: string; prompt: string; template: string | null; repo_url: string | null; language: string | null; tags: string[] } | undefined;
       if (s.library_task_id) {
+        [lib] = await tx.query<NonNullable<typeof lib>>(
+          "SELECT title, prompt, attributes->>'template' AS template, repo_url, language, tags FROM library_tasks WHERE id = $1", [s.library_task_id]);
         // Curated tasks are written for a specific pinned repo (or starter): keep the task and its codebase together.
-        const [t] = await tx.query<{ template: string | null; repo_url: string | null }>(
-          "SELECT attributes->>'template' AS template, repo_url FROM library_tasks WHERE id = $1", [s.library_task_id]);
-        if (!template) template = researchTemplate(t?.template);
-        if (!repoUrl) repoUrl = t?.repo_url ?? null;
+        if (!template) template = researchTemplate(lib?.template);
+        if (repoUrl === (lib?.repo_url ?? null)) repoUrl = null;
       }
+      const same = (v: unknown, l: unknown) => lib != null && v === l;
+      const title = s.title?.trim() || prompt.slice(0, 80);
+      const tags = s.tags ?? [];
       await tx.query(
         `/* tenant: product of the research job (job checked against the job token in http.ts) */ INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, library_task_id, source, rationale, template, prompt_variants, decision, platform)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $15, $8, $9, $10, $11, $12, $13, $14)`,
-        [job.product_id, s.title?.trim() || prompt.slice(0, 80), prompt, repoUrl, s.language ?? null, s.tags ?? [],
+        [job.product_id, same(title, lib?.title) ? null : title, same(prompt, lib?.prompt) ? null : prompt, repoUrl,
+         same(s.language ?? null, lib?.language ?? null) ? null : s.language ?? null, lib && JSON.stringify(tags) === JSON.stringify(lib.tags ?? []) ? [] : tags,
          s.expectation ?? "recommend", s.library_task_id ?? null, s.draft ? "draft" : s.library_task_id ? "library" : "generated",
          s.draft ? `Draft: ${s.library_check ?? ""}${s.rationale ? ` ${s.rationale}` : ""}` : s.rationale ?? null,
          template, JSON.stringify(Object.fromEntries(Object.entries(s.variants ?? {}).filter(([who]) => slugOf.has(who)).map(([who, t]) => [slugOf.get(who)!, t.trim()]))), s.decision ? JSON.stringify(s.decision) : null,

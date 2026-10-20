@@ -6,6 +6,7 @@ import { settingNumber, settingText } from "./settings.js";
 import { keepAlive } from "./telemetry.js";
 import { transcripts, type StoredEvent } from "./transcripts.js";
 import { asData } from "../orchestrator/core/text-guard.js";
+import { SCENARIO_ROWS } from "./queries.js";
 
 /**
  * Why an agent did not pick the customer's product: a model's short judgement per lost session, for "Why agents chose
@@ -174,11 +175,11 @@ export async function afterScoring(sessionId: string): Promise<void> {
     const db = await getDb();
     await db.query(
       `/* tenant: internal: the session just scored (from scoreSession) */ UPDATE agent_sessions s SET reason = NULL, reason_status = NULL, reason_error = NULL
-         FROM scenarios sc WHERE sc.id = s.scenario_id AND s.id = $1 AND NOT ${LOST} AND (s.reason IS NOT NULL OR s.reason_status IS NOT NULL)`, [sessionId]);
+         FROM ${SCENARIO_ROWS} sc WHERE sc.id = s.scenario_id AND s.id = $1 AND NOT ${LOST} AND (s.reason IS NOT NULL OR s.reason_status IS NOT NULL)`, [sessionId]);
     if (!enabled()) return;
     const queued = await db.query(
       `/* tenant: internal: the session just scored (from scoreSession) */ UPDATE agent_sessions s SET reason_status = 'queued', reason_next_at = now(), reason_attempts = 0, reason_error = NULL
-         FROM scenarios sc WHERE sc.id = s.scenario_id AND s.id = $1 AND ${LOST}
+         FROM ${SCENARIO_ROWS} sc WHERE sc.id = s.scenario_id AND s.id = $1 AND ${LOST}
           AND (s.reason IS NULL OR s.reason->>'winner' IS DISTINCT FROM s.winner) AND s.reason_status IS DISTINCT FROM 'queued' RETURNING s.id`, [sessionId]);
     if (queued.length) kickReasons();
   } catch (e) { console.error(`session ${sessionId}: reason not queued: ${(e as Error).message}`); }
@@ -241,7 +242,7 @@ async function explainSession(id: string): Promise<boolean> {
     product: string; description: string; prompt: string; variants: Record<string, string> | null; slug: string | null; summary: string | null; instructions: string | null }>(
     `/* tenant: internal: a claimed reason job, by session id */ SELECT s.org_id, s.winner, s.verdict, s.mentions, s.untracked, s.reason_attempts AS attempts,
             p.name AS product, p.description, sc.prompt, sc.prompt_variants AS variants, dp.slug, dp.summary, dp.instructions
-       FROM agent_sessions s JOIN products p ON p.id = s.product_id JOIN scenarios sc ON sc.id = s.scenario_id
+       FROM agent_sessions s JOIN products p ON p.id = s.product_id JOIN ${SCENARIO_ROWS} sc ON sc.id = s.scenario_id
        LEFT JOIN developer_profiles dp ON dp.id = s.profile_id WHERE s.id = $1`, [id]);
   if (!s) return false;
   try {
@@ -287,7 +288,7 @@ export async function reasonsStatus() {
             count(*) FILTER (WHERE s.reason IS NOT NULL)::int AS done, count(*) FILTER (WHERE s.reason_status = 'failed')::int AS failed,
             count(*) FILTER (WHERE s.reason_status = 'skipped')::int AS skipped,
             count(*) FILTER (WHERE (s.reason IS NULL OR s.reason->>'winner' IS DISTINCT FROM s.winner) AND s.reason_status IS DISTINCT FROM 'queued' AND s.reason_status IS DISTINCT FROM 'skipped')::int AS missing
-       FROM agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id WHERE s.verdict IS NOT NULL AND ${LOST}`);
+       FROM agent_sessions s JOIN ${SCENARIO_ROWS} sc ON sc.id = s.scenario_id WHERE s.verdict IS NOT NULL AND ${LOST}`);
   const used = await usedToday();
   return { enabled: enabled(), daily_max: dailyMax(), used_today: used, left_today: Math.max(0, dailyMax() - used), ...r };
 }
@@ -302,7 +303,7 @@ export async function queueUnexplained(max = 200) {
   const n = Math.max(0, Math.min(max, before.left_today - before.queued));
   const rows = n ? await (await getDb()).query<{ id: string }>(
     `/* tenant: internal: automatic backfill across accounts (each reason stays on its own session) */ UPDATE agent_sessions SET reason_status = 'queued', reason_next_at = now(), reason_attempts = 0, reason_error = NULL
-      WHERE id IN (SELECT s.id FROM agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id
+      WHERE id IN (SELECT s.id FROM agent_sessions s JOIN ${SCENARIO_ROWS} sc ON sc.id = s.scenario_id
                     WHERE s.verdict IS NOT NULL AND ${LOST} AND (s.reason IS NULL OR s.reason->>'winner' IS DISTINCT FROM s.winner)
                       AND s.reason_status IS DISTINCT FROM 'queued' AND s.reason_status IS DISTINCT FROM 'skipped'
                     ORDER BY s.queued_at DESC, s.id LIMIT $1)

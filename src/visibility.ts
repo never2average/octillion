@@ -25,7 +25,7 @@
 import type { Request, Response, Router } from "express";
 import { z } from "zod";
 import { getDb } from "./db.js";
-import { agentLabel, HIT, PICKED, wilson } from "./queries.js";
+import { agentLabel, HIT, PICKED, wilson, SCENARIO_ROWS } from "./queries.js";
 
 /** A task the product should win (HIT's recommend branch); anything else is scored as an avoid task, as in HIT. */
 const REC = `sc.expectation = 'recommend'`;
@@ -110,7 +110,7 @@ export async function visibilityCharts(orgId: number, range: Range, f: VisFilter
   const vp: unknown[] = [orgId, range.start, range.end];
   const prodBy = pid ? ` AND s.product_id = $${vp.push(pid)}` : "";
   const where = `s.org_id = $1 AND s.verdict IS NOT NULL AND s.queued_at >= $2 AND s.queued_at < $3${prodBy}${filterSql(f, vp)}`;
-  const from = `agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id`;
+  const from = `agent_sessions s JOIN ${SCENARIO_ROWS} sc ON sc.id = s.scenario_id`;
   const arr = (c: string) => `CASE WHEN jsonb_typeof(${c}) = 'array' THEN ${c} ELSE '[]'::jsonb END`;
   const wk = `to_char(date_trunc('week', s.queued_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD')`;
   type N = unknown;
@@ -257,7 +257,7 @@ export async function visibilityOptions(orgId: number, range: Range, product: nu
   const [winners, personas, tasks] = await Promise.all([
     db.query<{ name: string }>(`/* tenant: where has s.org_id = $1 */ SELECT DISTINCT s.winner AS name FROM agent_sessions s WHERE ${where} AND s.verdict = 'competitor' AND s.winner IS NOT NULL`, p),
     db.query<{ id: number; name: string }>(`/* tenant: where has s.org_id = $1 */ SELECT DISTINCT dp.id, dp.name FROM agent_sessions s JOIN developer_profiles dp ON dp.id = s.profile_id WHERE ${where}`, p),
-    db.query<{ id: number; title: string }>(`/* tenant: where has s.org_id = $1 */ SELECT DISTINCT sc.id, sc.title FROM agent_sessions s JOIN scenarios sc ON sc.id = s.scenario_id WHERE ${where}`, p),
+    db.query<{ id: number; title: string }>(`/* tenant: where has s.org_id = $1 */ SELECT DISTINCT sc.id, sc.title FROM agent_sessions s JOIN ${SCENARIO_ROWS} sc ON sc.id = s.scenario_id WHERE ${where}`, p),
   ]);
   const names = new Map<string, string>(); // lowercased -> first spelling seen
   for (const x of products.filter((x) => !pid || x.id === pid)) for (const c of Array.isArray(x.competitors) ? x.competitors : []) if (c?.name) names.set(String(c.name).toLowerCase(), String(c.name));

@@ -30,6 +30,7 @@ import * as billing from "./billing.js";
 import { AdminError, log } from "./admin.js";
 import { platformOf } from "./platform.js";
 import * as mail from "./email.js";
+import { SCENARIO_ROWS } from "./queries.js";
 
 export type Kind = "persona" | "task";
 export type SubmissionStatus = "submitted" | "accepted" | "declined" | "withdrawn";
@@ -87,7 +88,7 @@ async function snapshotOf(org: Org, kind: Kind, ref: string): Promise<{ title: s
   const id = Number(ref);
   const [t] = Number.isInteger(id) ? await db.query<any>(
     `SELECT sc.id, sc.title, sc.prompt, sc.repo_url, sc.language, sc.tags, sc.platform, sc.template, sc.source, sc.library_task_id, ts.id AS set_id
-       FROM scenarios sc JOIN products p ON p.id = sc.product_id AND p.org_id = $1
+       FROM ${SCENARIO_ROWS} sc JOIN products p ON p.id = sc.product_id AND p.org_id = $1
        LEFT JOIN org_task_sets ts ON ts.id = sc.task_set_id AND ts.org_id = $1 WHERE sc.id = $2`, [org.orgId, id]) : [];
   if (!t || (!t.set_id && t.library_task_id == null)) throw new Error(`No task ${ref}. See list_task_sets.`);
   if (!t.set_id || t.library_task_id != null || t.source !== "custom")
