@@ -3,7 +3,7 @@ import { SidebarTrigger } from '../ui/sidebar';
 import { Separator } from '../ui/separator';
 import { Breadcrumbs } from '../breadcrumbs';
 import SearchInput from '../search-input';
-import { DocsButton } from './docs-button';
+import { DocsButton, McpButton } from './docs-button';
 
 export default function Header() {
   return (
@@ -18,6 +18,7 @@ export default function Header() {
         <div className='hidden md:flex'>
           <SearchInput />
         </div>
+        <McpButton />
         <DocsButton />
       </div>
     </header>
