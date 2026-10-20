@@ -101,7 +101,7 @@ function DecisionGraph() {
   const ys = [50, 150, 250, 350];
   return (
     <figure className='min-w-0'>
-      <PicksList />
+      <DecisionGraphVertical />
       <svg viewBox='0 0 560 400' className='hidden h-auto w-full sm:block' role='img' aria-label='One prompt sent to four coding agents: two pick Postgres, one picks MongoDB, one uses SQLite.'>
         <rect x='1' y='174' width='170' height='52' rx='10' className='fill-card stroke-border' />
         <text x='18' y='206' className='fill-foreground font-mono text-[15px]'>&gt; add a database</text>
@@ -127,23 +127,35 @@ function DecisionGraph() {
   );
 }
 
-const PILL = { good: 'border-primary/50 bg-primary/15 text-primary', bad: 'border-destructive/50 bg-destructive/15 text-destructive', meh: 'bg-muted text-muted-foreground' };
-
-/** The same picture on a phone, where the SVG's text would be too small to read: the prompt, then one row per agent. */
-function PicksList() {
+/**
+ * The same graph turned vertical for phones, drawn at 1:1 so the text stays readable: the prompt on top, a trunk down
+ * the left that branches into one row per agent, each row flowing into its pick.
+ */
+function DecisionGraphVertical() {
+  const top = 70, step = 58;
+  const ys = PICKS.map((_, i) => top + 22 + i * step);
   return (
-    <div className='flex flex-col gap-2 sm:hidden' aria-hidden='true'>
-      <div className='bg-card mb-1 w-fit rounded-lg border px-3 py-2 font-mono text-sm'>&gt; add a database</div>
-      {PICKS.map((p) => (
-        <div key={p.agent} className='flex items-center gap-3 font-mono text-sm'>
-          <span className='bg-card flex flex-1 items-center gap-2 rounded-lg border px-3 py-2 text-muted-foreground'>
-            <AgentLogo id={p.agent} size={16} className='text-foreground' aria-hidden='true' />{p.agent}
-          </span>
-          <span className='text-muted-foreground'>→</span>
-          <span className={cn('w-28 rounded-full border px-3 py-1.5 text-center font-medium', PILL[p.tone])}>{p.pick}</span>
-        </div>
-      ))}
-    </div>
+    <svg viewBox='0 0 340 316' className='h-auto w-full sm:hidden' role='img' aria-label='One prompt sent to four coding agents: two pick Postgres, one picks MongoDB, one uses SQLite.'>
+      <rect x='1' y='1' width='176' height='42' rx='9' className='fill-card stroke-border' />
+      <text x='14' y='27' className='fill-foreground font-mono text-[13px]'>&gt; add a database</text>
+      {ys.map((y, i) => {
+        const p = PICKS[i];
+        const branch = `M22 43 L22 ${y - 14} Q22 ${y} 36 ${y} L48 ${y}`;
+        return (
+          <g key={p.agent}>
+            <path d={branch} fill='none' className='stroke-border' strokeWidth='1.5' />
+            <path d={branch} fill='none' className={FLOW} strokeWidth='1.5' />
+            <rect x='48' y={y - 18} width='150' height='36' rx='8' className='fill-card stroke-border' />
+            <AgentLogo id={p.agent} x='58' y={y - 8} size={16} className='text-foreground' aria-hidden='true' />
+            <text x='82' y={y + 4.5} className='fill-muted-foreground font-mono text-[13px]'>{p.agent}</text>
+            <path d={`M198 ${y} L226 ${y}`} className='stroke-border' strokeWidth='1.5' />
+            <path d={`M198 ${y} L226 ${y}`} className={FLOW} strokeWidth='1.5' />
+            <rect x='226' y={y - 18} width='113' height='36' rx='18' className={TONE[p.tone].box} />
+            <text x='282.5' y={y + 4.5} textAnchor='middle' className={cn('font-mono text-[13px] font-medium', TONE[p.tone].text)}>{p.pick}</text>
+          </g>
+        );
+      })}
+    </svg>
   );
 }
 
@@ -275,20 +287,43 @@ const LOOP = [
 function ApoLoop() {
   return (
     <>
-      <ol className='flex flex-col gap-2 sm:hidden' aria-label='The APO loop, repeated every release'>
-        {LOOP.map((s, i) => (
-          <li key={s.label} className='border-primary/60 flex items-baseline gap-3 rounded-xl border px-4 py-3'>
-            <span className='text-primary font-mono text-xs'>{`0${i + 1}`}</span>
-            <span className='flex flex-col'>
-              <span className='font-medium'>{s.label}</span>
-              <span className='text-muted-foreground text-sm'>{s.sub}</span>
-            </span>
-          </li>
-        ))}
-        <li className='text-muted-foreground pt-1 font-mono text-xs'>↻ repeat every release</li>
-      </ol>
+      <ApoLoopVertical />
       <ApoLoopDiagram />
     </>
+  );
+}
+
+/**
+ * The loop turned vertical for phones: the four steps stacked, joined by the same flowing dashes, and a return arc
+ * on the right from the last step back to the first.
+ */
+function ApoLoopVertical() {
+  const h = 58, gap = 30, w = 282;
+  const ys = LOOP.map((_, i) => 4 + i * (h + gap));
+  const last = ys[ys.length - 1];
+  const back = `M${w} ${last + h / 2} C${w + 50} ${last + h / 2} ${w + 50} ${ys[0] + h / 2} ${w + 6} ${ys[0] + h / 2}`;
+  return (
+    <svg viewBox='0 0 340 362' className='h-auto w-full sm:hidden' role='img' aria-label='The APO loop: profile your product, pose blind tasks, agents run them, score and fix, repeat every release.'>
+      {ys.slice(0, -1).map((y) => (
+        <g key={y}>
+          <path d={`M40 ${y + h} L40 ${y + h + gap}`} className='stroke-border' strokeWidth='1.5' />
+          <path d={`M40 ${y + h} L40 ${y + h + gap}`} className={FLOW} strokeWidth='2' />
+        </g>
+      ))}
+      <path d={back} fill='none' className='stroke-border' strokeWidth='1.5' />
+      <path d={back} fill='none' className={FLOW} strokeWidth='2' />
+      <path d={`M${w + 6} ${ys[0] + h / 2} l7 -4.5 v9 z`} className='fill-primary' />
+      {LOOP.map((st, i) => (
+        <g key={st.label}>
+          <rect x='1' y={ys[i]} width={w} height={h} rx='14' className='fill-background stroke-primary/60' />
+          <text x='18' y={ys[i] + 25} className='fill-primary font-mono text-[12px]'>{`0${i + 1}`}</text>
+          <text x='44' y={ys[i] + 25} className='fill-foreground text-[14px] font-medium'>{st.label}</text>
+          <text x='18' y={ys[i] + 44} className='fill-muted-foreground text-[12px]'>{st.sub}</text>
+        </g>
+      ))}
+      <text x='1' y={last + h + 26} className='fill-primary font-mono text-[15px] font-semibold'>APO</text>
+      <text x='42' y={last + h + 26} className='fill-muted-foreground font-mono text-[12px]'>repeat every release</text>
+    </svg>
   );
 }
 
