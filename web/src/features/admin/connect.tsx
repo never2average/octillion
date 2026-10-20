@@ -6,6 +6,7 @@ import { useState } from 'react';
 import PageContainer from '@/components/layout/page-container';
 import { Button } from '@/components/ui/button';
 import { Icons } from '@/components/icons';
+import { AgentLogo } from '@/features/site/agent-logos';
 import { useAdmin } from './lib';
 import { useAdminRole, ROLE_LABEL, type AdminRole } from './role';
 import { DataList, ErrorBox, LoadingCards, Section, copyText } from './ui';
@@ -18,10 +19,10 @@ const ORDER: AdminRole[] = ['viewer', 'support', 'operator', 'owner'];
 /** Each client's way in: one thing to paste. */
 function clients(url: string) {
   return [
-    { id: 'claude-code', label: 'Claude Code', steps: 'Run this, then /mcp in Claude Code to sign in.', text: `claude mcp add --transport http octillion-admin ${url}` },
-    { id: 'cursor', label: 'Cursor', steps: 'Add this to ~/.cursor/mcp.json. Cursor asks you to sign in when it connects.',
+    { id: 'claude-code', logo: 'claude-code', label: 'Claude Code', steps: 'Run this, then /mcp in Claude Code to sign in.', text: `claude mcp add --transport http octillion-admin ${url}` },
+    { id: 'cursor', logo: 'cursor', label: 'Cursor', steps: 'Add this to ~/.cursor/mcp.json. Cursor asks you to sign in when it connects.',
       text: JSON.stringify({ mcpServers: { 'octillion-admin': { url } } }, null, 2) },
-    { id: 'claude-desktop', label: 'Claude Desktop', steps: 'Settings › Connectors › Add custom connector, and paste this URL.', text: url }
+    { id: 'claude-desktop', logo: 'claude-code', label: 'Claude Desktop', steps: 'Settings › Connectors › Add custom connector, and paste this URL.', text: url }
   ];
 }
 
@@ -40,7 +41,7 @@ export function AdminConnect() {
           <Section title='Connect' action={
             <div className='flex gap-1' role='tablist' aria-label='Your AI client'>
               {list.map((x) => (
-                <Button key={x.id} size='xs' role='tab' aria-selected={x.id === c.id} variant={x.id === c.id ? 'secondary' : 'ghost'} onClick={() => setPick(x.id)}>{x.label}</Button>
+                <Button key={x.id} size='xs' role='tab' aria-selected={x.id === c.id} variant={x.id === c.id ? 'secondary' : 'ghost'} onClick={() => setPick(x.id)}><AgentLogo id={x.logo} size={12} aria-hidden='true' />{x.label}</Button>
               ))}
             </div>}>
             <div className='flex flex-col gap-1.5'>
