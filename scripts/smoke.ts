@@ -508,6 +508,7 @@ try {
   assert.ok(asCustomer.profile === jobs[0].profile.name && asCustomer.profile_slug === "example-solo-indie" && asCustomer.profile_summary === soloIndie.summary && asCustomer.prompt,
     "a shared persona in a run result over MCP: name, slug and summary; the task with its prompt");
   assert.ok(jobs.every((j) => j.agent_id === "claude-code/sonnet" && j.agent?.image?.boat_snapshot), "jobs carry the worker agent and its image");
+  assert.ok(jobs.every((j) => j.exec_mode === "plan"), "jobs carry their execution mode (plan then execute by default)");
   // ---------- key vault + inference gateway ----------
   const kv = await import("../src/keyvault.js");
   const http = await import("node:http");
@@ -1071,6 +1072,40 @@ try {
   const fixed = await call(B, "run_simulation", { samples: 1, name: "fixed" });
   assert.equal(fixed.simulation.max_samples, null, "`samples` alone is a fixed-size run");
   await call(B, "cancel_simulation", { simulation_id: fixed.simulation.id });
+  // ---------- execution modes: plan then execute (default) vs direct, paired ----------
+  assert.deepEqual(fixed.simulation.exec_modes, ["plan"], "runs plan then execute by default");
+  assert.ok(fixed.sessions.every((x: any) => x.exec_mode === "plan"), "every session of a default run plans first");
+  const both = await call(B, "run_simulation", { samples: 1, max_samples: 4, execution: "both", name: "modes" });
+  const bothRows = () => db.query<any>("SELECT id, status, scenario_id, agent_id, attempt, exec_mode, profile_id FROM agent_sessions WHERE simulation_id = $1 ORDER BY id", [both.simulation.id]);
+  const pairKey = (x: any) => `${x.scenario_id}/${x.agent_id}/${x.attempt}/${x.profile_id}`;
+  const pairs = (xs: any[]) => [...new Set(xs.map(pairKey))].every((k) => xs.filter((x) => pairKey(x) === k).map((x) => x.exec_mode).sort().join() === "direct,plan");
+  let bRows = await bothRows();
+  assert.ok(both.simulation.exec_modes.join() === "plan,direct" && bRows.length === 4 && pairs(bRows), "execution both: every session once per mode, paired (task, persona, agent, attempt)");
+  for (const r of bRows)
+    await db.query("UPDATE agent_sessions SET status = 'completed', ended_at = now(), scored_at = now(), verdict = $2 WHERE id = $1", [r.id, r.exec_mode === "plan" ? "recommended" : "none"]);
+  const added = await extendAdaptive(both.simulation.id);
+  bRows = await bothRows();
+  const topUps = bRows.filter((r: any) => r.status === "queued");
+  assert.ok(added > 0 && added % 2 === 0 && topUps.length === added && pairs(topUps), `adaptive top-ups stay paired across modes (${added} added)`);
+  const [bSim] = await db.query<any>("SELECT sampling FROM simulations WHERE id = $1", [both.simulation.id]);
+  assert.ok(Object.values(bSim.sampling as Record<string, any>).every((x) => x.by_mode?.plan && x.by_mode?.direct), "sampling decisions are kept per mode");
+  const view = await call(B, "get_simulation", { simulation_id: both.simulation.id });
+  const pm = view.by_mode.find((m: any) => m.mode === "plan"), dm = view.by_mode.find((m: any) => m.mode === "direct");
+  assert.ok(pm && dm && pm.by_agent.length > 0, "results split by execution mode, per agent");
+  // The mode a session actually ran in: an orchestrator that reports no exec_mode (older, or a harness that can't
+  // resume) ran it directly; one that reports plan keeps it.
+  const { completeSession: completeS } = await import("../src/worker.js");
+  const q1 = topUps.find((r: any) => r.exec_mode === "plan")!;
+  await completeS(q1.id, { status: "completed", metadata: { harness_runs: 1 } });
+  const modeOf = async (id: string) => (await db.query<any>("SELECT exec_mode FROM agent_sessions WHERE id = $1", [id]))[0].exec_mode;
+  assert.equal(await modeOf(q1.id), "direct", "a plan session finished without plan metadata ran directly");
+  const otherPlan = topUps.find((r: any) => r.exec_mode === "plan" && r.id !== q1.id) ?? null;
+  if (otherPlan) {
+    await completeS(otherPlan.id, { status: "completed", metadata: { harness_runs: 2, exec_mode: "plan", plan_mode: "native" } });
+    assert.equal(await modeOf(otherPlan.id), "plan", "a session the orchestrator ran plan-first stays plan");
+  }
+  await call(B, "cancel_simulation", { simulation_id: both.simulation.id });
+  console.log(`✓ execution modes: plan then execute by default; "both" pairs every session across modes (top-ups too), results by mode, the mode actually run is recorded`);
   delete process.env.OCTILLION_SAMPLING_MIN; delete process.env.OCTILLION_SAMPLING_MARGIN;
   console.log(`✓ adaptive sampling: agreed task settled after 2, contested task sampled to the cap (${statuses.join(", ")})`);
   console.log(`✓ claims are shared across organizations (${fair.map((j: any) => (ofB.has(j.session_id) ? "B" : "A")).join("")})`);
@@ -2708,7 +2743,7 @@ try {
          vF.totals.avoid.avoid_pct, vF.totals.top_competitor].map(blank), "CSV summary = API totals, recommend and avoid tasks apart");
       assert.deepEqual(secRows("by_task").map((l) => [Number(col(l, "id")), Number(col(l, "scored")), Number(col(l, "hits"))]), vF.by_task.map((t: any) => [t.id, t.scored, t.hits]), "CSV by task = API");
       assert.deepEqual(secRows("competitors").map((l) => [col(l, "name"), Number(col(l, "share_pct"))]), vF.competitors.map((c: any) => [c.name, c.share_pct]), "CSV competitor share = API");
-      for (const id of ["summary", "weekly", "by_agent", "by_harness", "by_model", "competitors", "cloud", "by_task", "by_persona", "head_to_head", "reasons", "how_won", "expectation", "by_platform"])
+      for (const id of ["summary", "weekly", "by_agent", "by_harness", "by_model", "by_mode", "competitors", "cloud", "by_task", "by_persona", "head_to_head", "reasons", "how_won", "expectation", "by_platform"])
         assert.ok(secRows(id).length > 0, `CSV has section ${id}`);
       assert.equal(secRows("by_harness").length, vF.by_harness.length, "agent, harness and model are separate sections");
       assert.ok(!csv.includes("VIS-SECRET") && !/Decoy|decoy/.test(csv), "CSV: no prompt, persona text or another account's data");
