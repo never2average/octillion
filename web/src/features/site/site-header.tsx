@@ -35,7 +35,7 @@ export function SiteHeader() {
                 <SheetTitle>Octillion</SheetTitle>
               </SheetHeader>
               <nav aria-label='Menu' className='flex flex-col gap-1 px-4 pb-6'>
-                {[...SECTIONS, { href: '/early-access', label: 'Early access' }, account].map((s) => (
+                {[...SECTIONS, { href: '/early-access', label: 'Early access' }, ...(account.ready ? [account] : [])].map((s) => (
                   <Link key={s.href} href={s.href} onClick={() => setOpen(false)} className='hover:bg-muted rounded-md px-3 py-2 text-sm'>
                     {s.label}
                   </Link>

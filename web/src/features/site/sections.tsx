@@ -17,7 +17,7 @@ export function Section({ id, eyebrow, title, lead, children, className, center 
   return (
     <section id={id} className={cn('scroll-mt-20 border-t py-16 sm:py-24', className)}>
       <div className='mx-auto max-w-6xl px-4 sm:px-6'>
-        <div className={cn('max-w-2xl', center && 'mx-auto text-center')}>
+        <div className={cn('max-w-2xl', center && 'sm:mx-auto sm:text-center')}>
           {eyebrow && <p className='text-primary font-mono text-xs tracking-wider uppercase'>{eyebrow}</p>}
           <h2 className='mt-2 text-3xl font-semibold tracking-tight text-balance sm:text-4xl'>{title}</h2>
           {lead && <p className='text-muted-foreground mt-3 text-lg text-pretty'>{lead}</p>}
@@ -101,7 +101,8 @@ function DecisionGraph() {
   const ys = [50, 150, 250, 350];
   return (
     <figure className='min-w-0'>
-      <svg viewBox='0 0 560 400' className='h-auto w-full' role='img' aria-label='One prompt sent to four coding agents: two pick Postgres, one picks MongoDB, one uses SQLite.'>
+      <PicksList />
+      <svg viewBox='0 0 560 400' className='hidden h-auto w-full sm:block' role='img' aria-label='One prompt sent to four coding agents: two pick Postgres, one picks MongoDB, one uses SQLite.'>
         <rect x='1' y='174' width='170' height='52' rx='10' className='fill-card stroke-border' />
         <text x='18' y='206' className='fill-foreground font-mono text-[15px]'>&gt; add a database</text>
         {ys.map((y, i) => {
@@ -123,6 +124,26 @@ function DecisionGraph() {
         })}
       </svg>
     </figure>
+  );
+}
+
+const PILL = { good: 'border-primary/50 bg-primary/15 text-primary', bad: 'border-destructive/50 bg-destructive/15 text-destructive', meh: 'bg-muted text-muted-foreground' };
+
+/** The same picture on a phone, where the SVG's text would be too small to read: the prompt, then one row per agent. */
+function PicksList() {
+  return (
+    <div className='flex flex-col gap-2 sm:hidden' aria-hidden='true'>
+      <div className='bg-card mb-1 w-fit rounded-lg border px-3 py-2 font-mono text-sm'>&gt; add a database</div>
+      {PICKS.map((p) => (
+        <div key={p.agent} className='flex items-center gap-3 font-mono text-sm'>
+          <span className='bg-card flex flex-1 items-center gap-2 rounded-lg border px-3 py-2 text-muted-foreground'>
+            <AgentLogo id={p.agent} size={16} className='text-foreground' aria-hidden='true' />{p.agent}
+          </span>
+          <span className='text-muted-foreground'>→</span>
+          <span className={cn('w-28 rounded-full border px-3 py-1.5 text-center font-medium', PILL[p.tone])}>{p.pick}</span>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -253,7 +274,27 @@ const LOOP = [
 
 function ApoLoop() {
   return (
-    <svg viewBox='-60 -10 540 440' className='mx-auto h-auto w-full max-w-lg' role='img' aria-label='The APO loop: profile your product, pose blind tasks, agents run them, score and fix, repeat every release.'>
+    <>
+      <ol className='flex flex-col gap-2 sm:hidden' aria-label='The APO loop, repeated every release'>
+        {LOOP.map((s, i) => (
+          <li key={s.label} className='border-primary/60 flex items-baseline gap-3 rounded-xl border px-4 py-3'>
+            <span className='text-primary font-mono text-xs'>{`0${i + 1}`}</span>
+            <span className='flex flex-col'>
+              <span className='font-medium'>{s.label}</span>
+              <span className='text-muted-foreground text-sm'>{s.sub}</span>
+            </span>
+          </li>
+        ))}
+        <li className='text-muted-foreground pt-1 font-mono text-xs'>↻ repeat every release</li>
+      </ol>
+      <ApoLoopDiagram />
+    </>
+  );
+}
+
+function ApoLoopDiagram() {
+  return (
+    <svg viewBox='-60 -10 540 440' className='mx-auto hidden h-auto w-full max-w-lg sm:block' role='img' aria-label='The APO loop: profile your product, pose blind tasks, agents run them, score and fix, repeat every release.'>
       <circle cx='210' cy='210' r='158' fill='none' className='stroke-border' strokeWidth='1.5' />
       <circle cx='210' cy='210' r='158' fill='none' className={FLOW} strokeWidth='2' />
       <text x='210' y='212' textAnchor='middle' className='fill-primary font-mono text-[34px] font-semibold'>APO</text>
