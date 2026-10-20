@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Icons } from '@/components/icons';
 import { useAdmin } from './lib';
 import { useAdminRole, ROLE_LABEL, type AdminRole } from './role';
-import { ErrorBox, LoadingCards, Section, copyText } from './ui';
+import { DataList, ErrorBox, LoadingCards, Section, copyText } from './ui';
 
 interface Tool { name: string; title: string; needs: AdminRole; needs_label: string; changes: boolean; destructive: boolean }
 /** A skill: a playbook shipped as an MCP prompt, a slash command in the client (src/admin-mcp.ts ADMIN_SKILLS). */
@@ -36,25 +36,24 @@ export function AdminConnect() {
     <PageContainer>
       <ErrorBox error={error} />
       {isLoading || !data ? <LoadingCards count={2} /> : (
-        <div className='flex max-w-2xl flex-col gap-8'>
-          <Section title='Connect an AI client' description={`Use the admin panel from your AI client. Calls are logged under your name${label ? ` as ${label}` : ''}.`}>
-            <div className='flex flex-col gap-3'>
-              <div className='flex flex-wrap gap-1.5' role='tablist' aria-label='Your AI client'>
-                {list.map((x) => (
-                  <Button key={x.id} size='sm' role='tab' aria-selected={x.id === c.id} variant={x.id === c.id ? 'secondary' : 'ghost'} onClick={() => setPick(x.id)}>{x.label}</Button>
-                ))}
-              </div>
-              <p className='text-muted-foreground text-sm'>{c.steps}</p>
+        <div className='flex max-w-3xl flex-col gap-8'>
+          <Section title='Connect' action={
+            <div className='flex gap-1' role='tablist' aria-label='Your AI client'>
+              {list.map((x) => (
+                <Button key={x.id} size='xs' role='tab' aria-selected={x.id === c.id} variant={x.id === c.id ? 'secondary' : 'ghost'} onClick={() => setPick(x.id)}>{x.label}</Button>
+              ))}
+            </div>}>
+            <div className='flex flex-col gap-1.5'>
               <Snippet text={c.text} />
+              <p className='text-muted-foreground text-xs'>{c.steps}{label ? ` Calls are logged under your name as ${label}.` : ''}</p>
             </div>
           </Section>
           {!!data.skills?.length && (
-            <Section title='Skills' description='Type / in your client to run one.'>
-              <div className='flex flex-wrap gap-2'>
-                {data.skills.map((k) => (
-                  <code key={k.name} title={k.description} className='bg-muted rounded-md px-2 py-1 font-mono text-xs'>/{k.name}</code>
-                ))}
-              </div>
+            <Section title='Skills'>
+              <DataList<Skill> rows={data.skills} noun='skills' empty='No skills.' minWidth={520} cols={[
+                { label: 'Skill', className: 'w-56', render: (k) => <span className='flex flex-col gap-1'><span className='font-medium'>{k.title}</span><code className='text-muted-foreground font-mono text-xs'>/{k.name}</code></span> },
+                { label: 'What it does', render: (k) => <span className='text-sm'>{k.description}{k.args.length ? <span className='text-muted-foreground block text-xs'>Asks for: {k.args.join(', ')}</span> : null}</span> }
+              ]} />
             </Section>
           )}
           <details className='text-sm'>
