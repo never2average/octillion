@@ -54,7 +54,8 @@ async function fresh(kind: "pglite" | "postgres"): Promise<Db & { drop: () => Pr
 
 /** Everything the schema defines: tables and columns (type, null, default), constraints, indexes, functions, policies. */
 async function catalog(db: Db) {
-  const q = async (sql: string) => (await db.query<Record<string, unknown>>(sql)).map((r) => JSON.stringify(r));
+  // The tenant role is named per database (0003_row_level_security): compare it by kind, not by name.
+  const q = async (sql: string) => (await db.query<Record<string, unknown>>(sql)).map((r) => JSON.stringify(r).replace(/octillion_tenant_[0-9a-f]{10}/g, "octillion_tenant_<db>"));
   return {
     columns: await q(`SELECT table_name, column_name, data_type, udt_name, is_nullable, column_default FROM information_schema.columns
                       WHERE table_schema = 'public' ORDER BY table_name, column_name`),

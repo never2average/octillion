@@ -13,6 +13,7 @@
  * the URL). Legacy keys keep working either way, for existing beta users and clients that can only send a header.
  */
 import { daySeries, reportRange, sparkSpans } from "./insights.js";
+import { asPlatform } from "./tenant-scope.js";
 import { createApiKey, createOrg, slugify } from "./auth.js";
 import { capture } from "./telemetry.js";
 import * as billing from "./billing.js";
@@ -582,6 +583,8 @@ export async function renameOrg(actor: string, slug: string, nameIn: unknown) {
 
 /** The Stripe customer for an account, created on first need and recorded on the Clerk organization too. */
 export async function ensureCustomer(actor: string, slug: string, email?: string | null) {
+  // Writes the account's Stripe link, which only the platform may change (src/tenant-scope.ts).
+  return asPlatform(async () => {
   const f = await factsBySlug(slug);
   if (f.stripe_customer_id) return f.stripe_customer_id;
   if (!billing.stripeEnabled()) throw new AdminError("Stripe is not configured (STRIPE_SECRET_KEY)", 503);
@@ -590,6 +593,7 @@ export async function ensureCustomer(actor: string, slug: string, email?: string
   if (f.clerk_org_id) await clerk.organizations.setMetadata(f.clerk_org_id, { stripe_customer_id: c.id }).catch((err) => console.error("clerk stripe link:", (err as Error).message));
   log(actor, "billing.customer", slug, { customer: c.id });
   return c.id;
+});
 }
 
 /** A Stripe Checkout link for a plan, to send to the account's billing contact. */
