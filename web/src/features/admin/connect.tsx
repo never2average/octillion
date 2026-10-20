@@ -6,10 +6,9 @@ import { useState } from 'react';
 import PageContainer from '@/components/layout/page-container';
 import { Button } from '@/components/ui/button';
 import { Icons } from '@/components/icons';
-import { cn } from '@/lib/utils';
 import { useAdmin } from './lib';
 import { useAdminRole, ROLE_LABEL, type AdminRole } from './role';
-import { ErrorBox, LoadingCards, Section, StatusBadge, copyText } from './ui';
+import { ErrorBox, LoadingCards, Section, copyText } from './ui';
 
 interface Tool { name: string; title: string; needs: AdminRole; needs_label: string; changes: boolean; destructive: boolean }
 /** A skill: a playbook shipped as an MCP prompt, a slash command in the client (src/admin-mcp.ts ADMIN_SKILLS). */
@@ -32,14 +31,13 @@ export function AdminConnect() {
   const [pick, setPick] = useState('claude-code');
   const list = clients(data?.url ?? '');
   const c = list.find((x) => x.id === pick) ?? list[0];
-  const mine = (t: Tool) => role != null && ORDER.indexOf(role) >= ORDER.indexOf(t.needs);
-  const kind = (t: Tool) => (t.destructive ? 'destructive' : t.changes ? 'changes' : null);
+  const mine = (t: Tool) => role == null || ORDER.indexOf(role) >= ORDER.indexOf(t.needs);
   return (
     <PageContainer>
       <ErrorBox error={error} />
       {isLoading || !data ? <LoadingCards count={2} /> : (
-        <div className='flex max-w-3xl flex-col gap-10'>
-          <Section title='Connect an AI client' description={`Use the admin panel from Claude or Cursor. You sign in with your admin account, and every call is logged under your name${label ? ` as ${label}` : ''}.`}>
+        <div className='flex max-w-2xl flex-col gap-8'>
+          <Section title='Connect an AI client' description={`Use the admin panel from your AI client. Calls are logged under your name${label ? ` as ${label}` : ''}.`}>
             <div className='flex flex-col gap-3'>
               <div className='flex flex-wrap gap-1.5' role='tablist' aria-label='Your AI client'>
                 {list.map((x) => (
@@ -51,28 +49,24 @@ export function AdminConnect() {
             </div>
           </Section>
           {!!data.skills?.length && (
-            <Section title='Skills' description='Type / in your client to run one. They ask before changing anything.'>
-              <ul className='flex flex-col gap-3'>
+            <Section title='Skills' description='Type / in your client to run one.'>
+              <div className='flex flex-wrap gap-2'>
                 {data.skills.map((k) => (
-                  <li key={k.name} className='flex flex-col gap-0.5 text-sm sm:flex-row sm:gap-4'>
-                    <code className='w-44 shrink-0 font-mono text-xs leading-5'>/{k.name}</code>
-                    <span className='text-muted-foreground'>{k.description}{k.args.length ? ` Asks for ${k.args.join(', ')}.` : ''}</span>
-                  </li>
+                  <code key={k.name} title={k.description} className='bg-muted rounded-md px-2 py-1 font-mono text-xs'>/{k.name}</code>
                 ))}
-              </ul>
+              </div>
             </Section>
           )}
-          <Section title='Tools' description={role ? `As ${ROLE_LABEL[role]}, tools shown faded are refused.` : undefined}>
-            <ul className='grid gap-x-6 gap-y-1.5 sm:grid-cols-2'>
-              {data.tools.map((t) => (
-                <li key={t.name} title={mine(t) ? t.title : `${t.title}: needs ${t.needs_label}`}
-                  className={cn('flex items-center gap-2 text-sm', !mine(t) && 'opacity-45')}>
-                  <code className='truncate font-mono text-xs'>{t.name}</code>
-                  {kind(t) && <StatusBadge tone={t.destructive ? 'bad' : 'warn'}>{kind(t)}</StatusBadge>}
-                </li>
+          <details className='text-sm'>
+            <summary className='text-muted-foreground hover:text-foreground cursor-pointer select-none'>
+              {data.tools.length} tools{role ? `, ${data.tools.filter(mine).length} available to you as ${ROLE_LABEL[role]}` : ''}
+            </summary>
+            <ul className='mt-3 grid gap-x-6 gap-y-1 sm:grid-cols-2'>
+              {data.tools.filter(mine).map((t) => (
+                <li key={t.name} title={t.title}><code className='font-mono text-xs'>{t.name}</code></li>
               ))}
             </ul>
-          </Section>
+          </details>
         </div>
       )}
     </PageContainer>
