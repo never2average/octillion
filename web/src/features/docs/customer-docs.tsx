@@ -6,6 +6,33 @@
 import Link from 'next/link';
 import PageContainer from '@/components/layout/page-container';
 import { Markdown, anchorId } from '@/components/markdown';
+// Generated from the MCP server itself (scripts/export-mcp-tools.ts; the smoke test fails when it is stale).
+import catalog from '@/content/mcp-tools.generated.json';
+
+/** How the tools are grouped in the guide. A tool the server has that no group names lands in "More tools". */
+const TOOL_GROUPS: [string, string[]][] = [
+  ['Start and onboard', ['get_started', 'onboard_product', 'get_onboarding', 'review_draft_tasks']],
+  ['Products and scenarios', ['list_products', 'get_product', 'save_product', 'save_scenarios', 'browse_task_library']],
+  ['Simulations', ['run_simulation', 'list_simulations', 'get_simulation', 'cancel_simulation']],
+  ['Results and evidence', ['get_visibility_report', 'export_visibility_report', 'get_agent_session', 'get_session_transcript', 'search_transcripts']],
+  ['Personas, tasks and agents', ['list_developer_profiles', 'save_personas', 'list_personas', 'import_tasks', 'list_task_sets', 'publish_to_library',
+    'list_agents', 'save_harness_mix', 'list_harness_mixes', 'register_harness', 'list_harnesses']],
+  ['Memory', ['save_to_memory', 'search_memory']]
+];
+const cell = (s: string) => s.replace(/\|/g, '\\|');
+/** The tools section's tables and the slash commands, from the generated catalog. */
+function toolsMarkdown() {
+  const byName = new Map(catalog.tools.map((t) => [t.name, t]));
+  const grouped = new Set(TOOL_GROUPS.flatMap(([, names]) => names));
+  const groups: [string, string[]][] = [...TOOL_GROUPS.map(([g, names]) => [g, names.filter((n) => byName.has(n))] as [string, string[]]),
+    ['More tools', catalog.tools.map((t) => t.name).filter((n) => !grouped.has(n))]];
+  const tables = groups.filter(([, names]) => names.length).map(([g, names]) =>
+    `### ${g}\n\n| Tool | What it does |\n|---|---|\n${names.map((n) => `| \`${n}\` | ${cell(byName.get(n)!.summary)} |`).join('\n')}`);
+  const prompts = catalog.prompts.length
+    ? `### Slash commands\n\nClients that support MCP prompts also offer ready-made playbooks that chain the tools above:\n\n${catalog.prompts.map((p) => `- \`/${p.name}\`: ${p.summary}`).join('\n')}`
+    : '';
+  return [...tables, prompts].filter(Boolean).join('\n\n');
+}
 
 const GUIDE = `
 ## What Octillion does
@@ -51,72 +78,7 @@ every stage. Stages are marked done from your real tool calls.
 
 Your AI client calls these for you; you rarely name them. They are listed in the order your client shows them.
 
-### Start and onboard
-
-| Tool | What it does |
-|---|---|
-| \`get_started\` | What Octillion does and your account's next step. Called first in a new conversation. |
-| \`onboard_product\` | Research a product from a short description, its website and docs: profile, competitors, personas and tasks. |
-| \`get_onboarding\` | Progress and output of an onboarding: research stage, profile, personas, tasks and the run it launched. |
-| \`review_draft_tasks\` | Approve or reject draft tasks research proposed where the task library had nothing fitting. Only approved drafts run. |
-
-### Products and scenarios
-
-| Tool | What it does |
-|---|---|
-| \`list_products\` | Your products with scenario counts and their 30-day hit rate. |
-| \`get_product\` | A product's context (aliases, packages, domains, competitors), its scenarios with hit rate, and recent runs. |
-| \`save_product\` | Create or update a product: the names, packages and domains used to detect it (and its competitors) in transcripts. |
-| \`save_scenarios\` | Add or edit scenarios: realistic coding tasks phrased the way a developer would, never naming the product. |
-| \`browse_task_library\` | Browse Octillion's curated library of real-world developer tasks and turn one into a scenario. |
-
-### Simulations
-
-| Tool | What it does |
-|---|---|
-| \`run_simulation\` | Launch sandboxed coding agents on the product's scenarios. Runs in the background. |
-| \`list_simulations\` | Recent simulations with progress and hit rate. |
-| \`get_simulation\` | One simulation: progress, verdict counts, hit rate by model, a scenario × model matrix and every session. |
-| \`cancel_simulation\` | Stop a simulation: queued sessions never start, running ones are stopped and their sandboxes shut down. |
-
-### Results and evidence
-
-| Tool | What it does |
-|---|---|
-| \`get_visibility_report\` | A sectioned report on whether agents pick the product: by platform, task, agent and persona, share of voice, quotes. |
-| \`export_visibility_report\` | Export the Pick rate report as tables. |
-| \`get_agent_session\` | One agent session: scenario, model, verdict, the tool it went with and the evidence for every product it mentioned. |
-| \`get_session_transcript\` | Read a session's raw transcript (messages, tool calls, commands, results), a page at a time. |
-| \`search_transcripts\` | Full-text search across your organization's agent transcripts. |
-
-### Personas, tasks and agents
-
-| Tool | What it does |
-|---|---|
-| \`list_developer_profiles\` | Developer personas you can run with: Octillion's curated ones plus your own. |
-| \`save_personas\` | Add or update your own developer personas. Private to your organization. |
-| \`list_personas\` | Your organization's own personas, and the ones research picked for your products. |
-| \`import_tasks\` | Bring your own tasks as a named task set for a product. Private to your organization. |
-| \`list_task_sets\` | Your private task sets and their tasks. |
-| \`publish_to_library\` | Offer one of your personas or tasks to Octillion's shared library (see below). |
-| \`list_agents\` | The coding-agent mix Octillion simulates for a developer population, with each agent's share and sources. |
-| \`save_harness_mix\` | Define your own mix of coding agents, for example only the ones your users run. |
-| \`list_harness_mixes\` | Your organization's own harness mixes. |
-| \`register_harness\` | Submit your own coding agent as a declarative spec. Built and scanned in isolation; runs only once approved. |
-| \`list_harnesses\` | Your private harnesses and their review status. |
-
-### Memory
-
-| Tool | What it does |
-|---|---|
-| \`save_to_memory\` | Save a lasting fact, decision, preference or note about the company, yourself or a product. |
-| \`search_memory\` | Search the account's memory before answering questions about past decisions. |
-
-### Slash commands
-
-Clients that support MCP prompts also offer ready-made playbooks that chain the tools above:
-\`onboard_product\`, \`visibility_report\` (a full written report, sectioned like a case study), \`explain_loss\` (why
-an agent chose a competitor in one session), \`compare_models\` and \`weekly_digest\`.
+${toolsMarkdown()}
 
 ## Running a simulation
 
