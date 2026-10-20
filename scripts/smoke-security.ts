@@ -2,6 +2,8 @@
 // in one body. Each takes what it needs from the smoke run (its server, database and credentials).
 import assert from "node:assert/strict";
 import type { Db } from "../src/db.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 /** No static admin token (src/admin-tokens.ts): scoped, expiring, revocable, hashed; only signed-in owners mint. */
 export async function adminTokenChecks({ base, db, ADMIN_TOKEN, staff }: { base: string; db: Db; ADMIN_TOKEN: string; staff: { id: number; token: string } }) {
@@ -48,4 +50,43 @@ export async function adminTokenChecks({ base, db, ADMIN_TOKEN, staff }: { base:
   assert.equal((await fetch(`${base}/api/admin/tokens/${staff.id}`, { method: "DELETE", headers: { authorization: `Bearer ${ADMIN_TOKEN}` } })).status, 404, "revoking twice is a 404");
   assert.equal((await get("adm_not-a-real-token")).status, 401);
   console.log("✓ admin tokens: the static OCTILLION_ADMIN_TOKEN opens nothing; tokens are hashed, scoped to a role, expiring, revocable, minted only by signed-in owners");
+}
+
+/** API keys in headers, never in URLs (src/auth.ts): Bearer or X-API-Key; legacy URL keys deprecated, logged, switchable off. */
+export async function apiKeyHeaderChecks({ base, a }: { base: string; a: { key: string; org: { slug: string } } }) {
+  assert.equal((await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json", "x-api-key": "oct_nope" }, body: "{}" })).status, 401, "an unknown key in X-API-Key is refused");
+  assert.equal((await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json", "x-api-key": "oat_not_a_key" }, body: "{}" })).status, 401, "X-API-Key carries API keys only, never an OAuth token");
+  const variants: Record<string, string>[] = [{ authorization: `Bearer ${a.key}` }, { "x-api-key": a.key }, { authorization: `Bearer ${a.key}`, "x-api-key": "oct_nope" }];
+  for (const headers of variants) {
+    const remote = new Client({ name: "smoke-http", version: "1.0.0" });
+    await remote.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers } }));
+    const r = await remote.callTool({ name: "list_products", arguments: {} });
+    assert.ok((r.structuredContent as any).products.some((p: any) => p.slug === "relayq"));
+    await remote.close();
+  }
+  // Keys in the URL: still served for existing clients, marked deprecated, logged by key prefix and never in full.
+  {
+    const init = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "legacy", version: "1" } } });
+    const legacy = () => fetch(`${base}/mcp/${a.key}`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" }, body: init });
+    const lines: string[] = [];
+    const err = console.error;
+    console.error = (...xs: unknown[]) => { lines.push(xs.map(String).join(" ")); };
+    let old!: Response;
+    try { old = await legacy(); await old.text(); } finally { console.error = err; }
+    assert.equal(old.status, 200, "a legacy connector URL keeps working while OCTILLION_URL_KEYS allows it");
+    assert.equal(old.headers.get("deprecation"), "@1792454400", "and is marked deprecated (RFC 9745, since 2026-10-20)");
+    assert.match(old.headers.get("link") ?? "", /\/mcp>; rel="successor-version"/);
+    assert.ok(lines.some((l) => l.includes(`mcp url-key deprecated org=${a.org.slug} key=${a.key.slice(0, 10)}`)), "who still uses one is logged");
+    assert.ok(!lines.some((l) => l.includes(a.key)), "the key itself is never logged");
+    process.env.OCTILLION_URL_KEYS = "off";
+    try {
+      const off = await legacy();
+      assert.equal(off.status, 401, "OCTILLION_URL_KEYS=off refuses keys in the URL");
+      assert.match((await off.json()).error.message, /Authorization: Bearer/, "and says how to send it instead");
+      const viaHeader = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${a.key}` }, body: init });
+      assert.equal(viaHeader.status, 200, "the same key in a header still works");
+      await viaHeader.text();
+    } finally { delete process.env.OCTILLION_URL_KEYS; }
+  }
+  console.log("✓ /mcp requires a key in a header (Bearer or X-API-Key) and serves that org; keys in the URL are deprecated, logged by prefix, and refused with OCTILLION_URL_KEYS=off");
 }

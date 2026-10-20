@@ -1120,14 +1120,7 @@ try {
   assert.equal(anon.status, 401);
   assert.match(anon.headers.get("www-authenticate") ?? "", /Bearer/);
   assert.equal((await fetch(`${base}/mcp/oct_nope`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status, 401);
-  for (const url of [`${base}/mcp/${a.key}`, `${base}/mcp`]) {
-    const remote = new Client({ name: "smoke-http", version: "1.0.0" });
-    await remote.connect(new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: { authorization: `Bearer ${a.key}` } } }));
-    const r = await remote.callTool({ name: "list_products", arguments: {} });
-    assert.ok((r.structuredContent as any).products.some((p: any) => p.slug === "relayq"));
-    await remote.close();
-  }
-  console.log("✓ /mcp requires a key (path or bearer) and serves that org");
+  await (await import("./smoke-security.js")).apiKeyHeaderChecks({ base, a });
   const landing = await fetch(`${base}/`);
   assert.equal(landing.status, 200);
   assert.ok((await landing.text()).includes("Octillion"));
@@ -1144,7 +1137,7 @@ try {
     method, headers: { authorization: `Bearer ${ADMIN_TOKEN}`, "x-admin-actor": "smoke", "content-type": "application/json" },
     body: body ? JSON.stringify(body) : undefined });
   const json = async (r: Response | Promise<Response>) => { const x = await r; const j = await x.json(); assert.ok(x.ok, `${x.status} ${JSON.stringify(j)}`); return j; };
-  const post = (key: string) => fetch(`${base}/mcp/${key}`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+  const post = (key: string) => fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${key}` }, body: "{}" });
   const orgRow = async (slug: string) => (await json(adm("GET", "/orgs"))).orgs.find((o: any) => o.slug === slug);
   const settle = () => new Promise((r) => setTimeout(r, 200)); // connector events are recorded fire-and-forget
   assert.equal((await fetch(`${base}/api/admin/onboarding/overview`)).status, 401, "admin API needs the admin token");
@@ -2300,13 +2293,21 @@ try {
   assert.ok(request, "new access request is pending");
   const ap = await json(adm("POST", `/requests/${request.id}/approve`, { name: `Smoke Admin ${stamp}`, slug: `smoke-admin-${stamp}` }));
   assert.match(ap.key, /^oct_/, "without Clerk, approval issues a legacy key");
-  assert.ok(ap.secret && ap.connector_url.endsWith(`/mcp/${ap.key}`) && ap.email.body.includes(ap.connector_url) && ap.email.to === request.email);
+  assert.ok(ap.secret && ap.connector_url === `${base}/mcp` && ap.email.body.includes(ap.connector_url) && ap.email.body.includes(ap.key) && ap.email.to === request.email);
+  // The key goes in each client's header setting, never in a URL (the connector URL, a command's URL, a one-click link).
+  const urlsIn = (t: unknown) => String(t ?? "").match(/[a-z][a-z0-9+.-]*:\/\/[^\s"'`<>]+/gi) ?? [];
+  for (const c of ap.clients as any[])
+    for (const u of [c.install_url, ...urlsIn(c.steps), ...urlsIn(c.command), ...urlsIn(c.snippet)].filter(Boolean)) assert.ok(!String(u).includes(ap.key), `${c.id}: no key in a URL (${String(u).slice(0, 40)})`);
+  assert.ok(urlsIn(ap.email.body).every((u) => !u.includes(ap.key)) && !ap.email.mailto.includes(ap.key) && !ap.email.mailto.includes(encodeURIComponent(ap.key)), "the email has no key in a URL, nor in its mailto link");
+  assert.ok(ap.clients.find((c: any) => c.id === "claude-code").command.includes(`--header "Authorization: Bearer ${ap.key}"`), "Claude Code sends it as a header");
+  assert.ok(JSON.parse(ap.clients.find((c: any) => c.id === "cursor").snippet).mcpServers.octillion.headers.Authorization === `Bearer ${ap.key}`, "Cursor's config carries the header");
+
   assert.equal((await adm("POST", `/requests/${request.id}/approve`, {})).status, 409, "no double approval");
   assert.equal((await adm("POST", "/requests/abc/approve", {})).status, 400, "bad id is a 400");
   const slugA = ap.org.slug;
   assert.equal((await orgRow(slugA)).stage, "created");
   const viaKey = new Client({ name: "smoke-onboarded", version: "1.0.0" });
-  await viaKey.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp/${ap.key}`)));
+  await viaKey.connect(new StreamableHTTPClientTransport(new URL(ap.connector_url), { requestInit: { headers: { authorization: `Bearer ${ap.key}` } } }));
   await viaKey.callTool({ name: "list_products", arguments: {} });
   await viaKey.close();
   await settle();
@@ -2396,7 +2397,7 @@ try {
     assert.equal(apW.key, null, "with Clerk, no secret is handed out");
     assert.equal(apW.invitation.state, "pending", "Clerk sends the invitation");
     assert.equal(apW.invitation.role, "admin", "the requester is invited as the account's admin");
-    assert.ok(!apW.secret && apW.connector_url === `${ap.connector_url.split("/mcp/")[0]}/mcp`);
+    assert.ok(!apW.secret && apW.connector_url === `${base}/mcp`);
     const slugW = apW.org.slug;
     const [rowW] = await db.query<{ id: number; clerk_org_id: string; stripe_customer_id: string }>("SELECT id, clerk_org_id, stripe_customer_id FROM organizations WHERE slug = $1", [slugW]);
     const corg = mock.state.orgs.get(rowW.clerk_org_id);

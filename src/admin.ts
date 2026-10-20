@@ -9,8 +9,8 @@
  * This module reads all three and puts the funnel in one place. Admin actions are logged to stderr; Clerk and Stripe
  * keep their own event history for what changes there.
  *
- * Without CLERK_SECRET_KEY the console falls back to per-org API keys (src/auth.ts) and hands out secret connector URLs.
- * Legacy keys keep working either way, for existing beta users and clients that can only send a header.
+ * Without CLERK_SECRET_KEY the console falls back to per-org API keys (src/auth.ts), sent by clients in a header (never in
+ * the URL). Legacy keys keep working either way, for existing beta users and clients that can only send a header.
  */
 import { daySeries, reportRange, sparkSpans } from "./insights.js";
 import { createApiKey, createOrg, slugify } from "./auth.js";
@@ -53,19 +53,23 @@ export function integrations() {
 
 // ---------- connecting ----------
 
-/** How a person connects: the plain /mcp URL with Clerk sign-in, or (legacy) a secret URL carrying their key. */
+/**
+ * How a person connects: the plain /mcp URL, with Clerk sign-in, or (legacy) with an API key sent in a header. The key
+ * never goes in the URL: URLs end up in logs, browser history and screenshots.
+ */
 export function connectInfo(key?: string) {
   const base = publicUrl();
-  const url = key ? `${base}/mcp/${key}` : `${base}/mcp`;
+  const url = `${base}/mcp`;
   // Every client Octillion supports, with its exact way in (src/connect-catalog.ts).
-  const clients = clientCatalog(url, key);
+  const signInAvailable = Boolean(clerk.clerkEnabled() && clerk.frontendApi());
+  const clients = clientCatalog(url, key, { signInAvailable });
   const subject = "Your Octillion access";
   const body = `Hi,
 
-You now have access to Octillion. ${key ? "Your personal connector link is:" : "Add this connector URL to your AI client:"}
+You now have access to Octillion. Add this connector URL to your AI client:
 
 ${url}
-${key ? "\nIt is your login: anyone with it can use your account, so keep it private.\n" : "\nIt has no secret in it: you sign in with your work email (accept the invitation email first).\n"}
+${key ? `\nYour personal API key is:\n\n${key}\n\nIt is your login: anyone with it can use your account, so keep it private. Your client sends it as a header\n(Authorization: Bearer <key>); it never goes in the URL. ${signInAvailable ? "Claude and ChatGPT's own apps cannot send it: ask us for a\nsign-in invitation to use them." : "Claude and ChatGPT's own apps cannot send it: use a client that can (listed below)."}\n` : "\nIt has no secret in it: you sign in with your work email (accept the invitation email first).\n"}
 Connect it:
 ${clients.filter((c) => ["claude", "chatgpt", "claude-code", "cursor", "codex"].includes(c.id)).map((c) => `- ${c.client}: ${c.command ? `${c.steps} ${c.command}` : c.steps}`).join("\n")}
 Every other client (Copilot, OpenCode, Gemini CLI, VS Code, Windsurf and more) is listed at ${base}/app
@@ -427,11 +431,13 @@ async function invitePerson(actor: string, slug: string, email: string, role: Ac
   return { invitation: null, key };
 }
 
+/** A mailto link is a URL (webmail turns it into an https one): the key never goes in it; the admin pastes it in. */
+export const KEY_PLACEHOLDER = "[paste the API key here]";
 const result = async (slug: string, email: string | null, extra: { key?: string; invitation?: unknown; created?: boolean }) => {
   const o = await factsBySlug(slug);
   const c = connectInfo(extra.key);
   return { org: { slug: o.slug, name: o.name }, created: extra.created ?? false, invitation: extra.invitation ?? null, key: extra.key ?? null,
-           ...c, email: { ...c.email, to: email, mailto: email ? `mailto:${encodeURIComponent(email)}?subject=${encodeURIComponent(c.email.subject)}&body=${encodeURIComponent(c.email.body)}` : null } };
+           ...c, email: { ...c.email, to: email, mailto: email ? `mailto:${encodeURIComponent(email)}?subject=${encodeURIComponent(c.email.subject)}&body=${encodeURIComponent(extra.key ? c.email.body.replaceAll(extra.key, KEY_PLACEHOLDER) : c.email.body)}` : null } };
 };
 
 /** Approve a request: a new account (name and slug default to the company), or, with `org_slug`, another person in one. */

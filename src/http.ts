@@ -19,7 +19,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createServer, runTool, TOOL_NAMES, WIDGET_HTML, type ToolName } from "./server.js";
 import { connectorEvents, recordMcpEvent } from "./analytics.js";
-import { bearer, cronSecretOk, isWorkerToken, resolveKey, resolveUserToken, type Org } from "./auth.js";
+import { bearer, cronSecretOk, headerCredential, isWorkerToken, resolveKey, resolveUserToken, urlKeysAllowed, type Org } from "./auth.js";
 import { clerkEnabled, ClerkError, frontendApi, mcpAudience } from "./clerk.js";
 import { StripeError } from "./billing.js";
 import { getDb } from "./db.js";
@@ -184,8 +184,8 @@ export function createApp() {
   });
 
   // ---------- MCP (Clerk OAuth sign-in, or a per-organization API key) ----------
-  // Keys arrive as `Authorization: Bearer oct_...` or in the connector URL, /mcp/oct_..., for hosts that
-  // only take a URL. Stateless: a fresh server per request, bound to the caller's org.
+  // Keys arrive in a header, `Authorization: Bearer oct_...` or `X-API-Key: oct_...`; hosts that only take a URL sign
+  // in with OAuth. The old connector URL with the key in it (/mcp/oct_...) is deprecated (OCTILLION_URL_KEYS). Stateless: a fresh server per request, bound to the caller's org.
   // One access-log line per connector request (also the ones analytics never sees: bad keys, GET/DELETE probes,
   // rejected Accept headers), so "connected but nothing happened" can be diagnosed. The key is never logged.
   app.use("/mcp", (req, res, next) => {
@@ -210,24 +210,49 @@ export function createApp() {
     await server.connect(transport);
     await transport.handleRequest(req, res, req.body);
   };
+  const wwwAuthenticate = () => oauthServer()
+    ? `Bearer error="unauthorized", error_description="Sign in to Octillion", resource_metadata="${PUBLIC_URL}/.well-known/oauth-protected-resource"`
+    : 'Bearer realm="octillion"';
   const unauthorized = (res: Response) =>
-    res.status(401).set("WWW-Authenticate", oauthServer()
-      ? `Bearer error="unauthorized", error_description="Sign in to Octillion", resource_metadata="${PUBLIC_URL}/.well-known/oauth-protected-resource"`
-      : 'Bearer realm="octillion"').json({
+    res.status(401).set("WWW-Authenticate", wwwAuthenticate()).json({
       jsonrpc: "2.0", id: null,
       error: { code: -32001, message: `Sign in to Octillion (or send a valid API key). Request access at ${PUBLIC_URL}` },
     });
+  // One log line per legacy URL key per process and hour: enough to know who to move, without a line per request.
+  const urlKeySeen = new Map<string, number>();
+  const noteUrlKey = (slug: string, prefix: string) => {
+    const k = `${slug} ${prefix}`, now = Date.now();
+    if (now - (urlKeySeen.get(k) ?? 0) < 3_600_000) return;
+    urlKeySeen.set(k, now);
+    console.error(`mcp url-key deprecated org=${slug} key=${prefix}… (move this client to a header or sign-in)`);
+  };
   const methodNotAllowed = (_req: Request, res: Response) =>
     void res.status(405).json({ jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed" }, id: null });
 
   app.post("/mcp", express.json({ limit: "4mb" }), async (req, res) => {
-    const token = bearer(req.headers.authorization);
-    const org = token?.startsWith("oct_") ? await resolveKey(token) : token ? await resolveUserToken(token) : null;
+    const token = headerCredential(req.headers);
+    const viaBearer = Boolean(bearer(req.headers.authorization));
+    const org = token?.startsWith("oct_") ? await resolveKey(token) : token && viaBearer ? await resolveUserToken(token) : null;
     org ? await mcp(req, res, org) : unauthorized(res);
   });
+  // Deprecated: a key in the connector URL (see urlKeysAllowed in src/auth.ts). Logged by account and key prefix,
+  // never the key, so whoever still uses one can be moved to a header or to sign-in before OCTILLION_URL_KEYS=off.
   app.post("/mcp/:key", express.json({ limit: "4mb" }), async (req, res) => {
-    const org = await resolveKey(String(req.params.key));
-    org ? await mcp(req, res, org) : unauthorized(res);
+    const key = String(req.params.key);
+    if (!urlKeysAllowed()) {
+      console.error("mcp url-key refused (OCTILLION_URL_KEYS=off)");
+      // The same WWW-Authenticate as any 401, so a connector holding the old URL can fall into sign-in (OAuth).
+      return void res.status(401).set("WWW-Authenticate", wwwAuthenticate()).json({
+        jsonrpc: "2.0", id: null,
+        error: { code: -32001, message: `API keys in the connector URL are no longer accepted. Connect to ${PUBLIC_URL}/mcp and send the key in a header (Authorization: Bearer <key>), or sign in.` },
+      });
+    }
+    const org = await resolveKey(key);
+    if (!org) return unauthorized(res);
+    // RFC 9745: deprecated since 2026-10-20 (a structured date); the successor is the plain /mcp with a header.
+    res.set({ Deprecation: "@1792454400", Link: `<${PUBLIC_URL}/mcp>; rel="successor-version"` });
+    noteUrlKey(org.slug, key.slice(0, 10));
+    await mcp(req, res, org);
   });
   app.all(["/mcp", "/mcp/:key"], methodNotAllowed);
   // The admin panel as MCP (src/admin-mcp.ts): platform admins only, each tool with its route's permission. Before
@@ -641,7 +666,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const server = createApp().listen(PORT, HOST, () => {
     console.error(`octillion (${db.kind}, transcripts in ${transcripts().kind}) listening on http://${HOST}:${PORT}`);
     console.error(`  landing page  ${PUBLIC_URL}/`);
-    console.error(`  MCP endpoint  ${PUBLIC_URL}/mcp/<api key>   (or /mcp with Authorization: Bearer <api key>)`);
+    console.error(`  MCP endpoint  ${PUBLIC_URL}/mcp   (sign in, or send Authorization: Bearer <api key>)`);
     console.error(`  worker API    ${PUBLIC_URL}/api/worker/*${process.env.OCTILLION_WORKER_TOKEN ? "" : "   (disabled: set OCTILLION_WORKER_TOKEN)"}`);
     // On-demand orchestrators (boat sandboxes launched/reaped by the server). Needs the public https URL the
     // sandboxes reach us on, the worker token and a boat key in the vault. OCTILLION_AUTOSCALE=off disables it.
