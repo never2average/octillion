@@ -39,7 +39,8 @@ export const adminNav: NavGroup[] = [
       { title: 'Harness mix', url: '/admin/agents', icon: 'code', items: [] },
       { title: 'Agent configuration', url: '/admin/configuration', icon: 'settings', items: [] },
       { title: 'Key vault', url: '/admin/keys', icon: 'lock', shortcut: ['g', 'k'], items: [] },
-      { title: 'Admins', url: '/admin/admins', icon: 'teams', items: [] }
+      { title: 'Admins', url: '/admin/admins', icon: 'teams', items: [] },
+      { title: 'Connect AI client', url: '/admin/connect', icon: 'plug', items: [] }
     ]
   }
 ];

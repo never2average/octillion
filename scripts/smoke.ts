@@ -3243,6 +3243,93 @@ try {
       console.log("✓ platform admin roles: each role's allowed and refused routes, 403 naming the role, role in the log, Admins page (env, add, change, remove), last-owner guard");
     }
 
+    // ---------- admin MCP (src/admin-mcp.ts): /admin/mcp for platform admins, each tool with its route's permission ----------
+    {
+      const { ADMIN_TOOL_NAMES } = await import("../src/admin-mcp.js");
+      const anonM = await fetch(`${base}/admin/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+      assert.equal(anonM.status, 401, "no token: 401");
+      const prmM = /resource_metadata="([^"]+)"/.exec(anonM.headers.get("www-authenticate") ?? "")?.[1];
+      assert.ok(prmM?.endsWith("/.well-known/oauth-protected-resource/admin/mcp"), `the 401 points at the admin resource's metadata: ${prmM}`);
+      const metaM = await (await fetch(prmM!.replace(/^https?:\/\/[^/]+/, base))).json();
+      assert.deepEqual(metaM.authorization_servers, [mock.url], "Clerk is the authorization server");
+      assert.equal(metaM.resource, mcpAudience().replace(/\/mcp$/, "/admin/mcp"), "the resource is the admin MCP URL");
+      const connect = async (t: string, path = "/admin/mcp") => {
+        const c = new Client({ name: "smoke-admin-mcp", version: "1.0.0" });
+        await c.connect(new StreamableHTTPClientTransport(new URL(`${base}${path}`), { requestInit: { headers: { authorization: `Bearer ${t}` } } }));
+        return c;
+      };
+      const adminUser = async (role: string) => mockPost("/_mock/clerk/users", { email: `mcp-${role}+${stamp}@roles.octillion.test`, platform_role: role });
+      const viewerU = await adminUser("viewer"), ownerU = await adminUser("owner");
+      const viewer = await connect(await token({ user_id: viewerU.id }));
+      const listed = (await viewer.listTools()).tools;
+      assert.deepEqual(listed.map((t) => t.name), ADMIN_TOOL_NAMES, "every admin tool is listed, reads first");
+      const ann = (n: string) => listed.find((t) => t.name === n)!.annotations!;
+      assert.ok(ann("list_accounts").readOnlyHint && !ann("list_accounts").destructiveHint, "reads are read-only");
+      for (const n of ["archive_plan", "decline_access_request", "cancel_simulation"]) assert.ok(!ann(n).readOnlyHint && ann(n).destructiveHint, `${n} is destructive`);
+      assert.ok(!ann("approve_access_request").readOnlyHint && !ann("approve_access_request").destructiveHint, "approve changes, not destructive");
+      // A viewer reads everything; the key vault gives hints, never a secret.
+      const accts = await viewer.callTool({ name: "list_accounts", arguments: { q: slugW } });
+      assert.ok(!accts.isError && (accts.structuredContent as any).accounts.some((o: any) => o.slug === slugW), `list_accounts: ${JSON.stringify(accts.content).slice(0, 200)}`);
+      const vault = await viewer.callTool({ name: "key_vault_status", arguments: {} });
+      assert.ok(!vault.isError && (vault.structuredContent as any).credentials.some((c: any) => c.provider === "resend" && c.hint), "key hints are listed");
+      assert.ok(!JSON.stringify(vault).includes(`re_smoke_${stamp}_secret`), "the secret never leaves");
+      for (const n of ["health_summary", "list_settings", "library_stats", "finops_plans", "list_simulations", "model_spend", "analytics_overview", "list_access_requests"]) {
+        const r = await viewer.callTool({ name: n, arguments: {} });
+        assert.ok(!r.isError, `${n}: ${JSON.stringify(r.content).slice(0, 300)}`);
+      }
+      // A viewer is refused changes, with the role each needs.
+      const refusedA = await viewer.callTool({ name: "approve_access_request", arguments: { id: 1 } });
+      assert.ok(refusedA.isError && /needs the Support role/.test((refusedA.content as any)[0].text), `viewer refused approve: ${JSON.stringify(refusedA.content)}`);
+      const refusedB = await viewer.callTool({ name: "set_account_allowance", arguments: { slug: slugW, usd: 10 } });
+      assert.ok(refusedB.isError && /you are Viewer\. This needs the Operator role/.test((refusedB.content as any)[0].text), "viewer refused allowance, naming the role");
+      const refusedC = await viewer.callTool({ name: "create_plan", arguments: { config: { name: `MCP ${stamp}`, base_fee_usd: 99 }, dry_run: true } });
+      assert.ok(refusedC.isError && /needs the Owner role/.test((refusedC.content as any)[0].text), "plans need an owner, dry run or not");
+      await viewer.close();
+      // An owner: a dry-run plan (nothing made in Stripe) and an approval, both in the audit trail.
+      const owner = await connect(await token({ user_id: ownerU.id, jwt: true }));
+      const nProducts = mock.state.products.length, nPrices = mock.state.prices.length;
+      const dry = await owner.callTool({ name: "create_plan", arguments: { config: { name: `MCP ${stamp}`, interval: "month", base_fee_usd: 99 }, dry_run: true } });
+      assert.ok(!dry.isError && (dry.structuredContent as any).dry_run && (dry.structuredContent as any).stripe.some((o: any) => o.create === "product"), `dry run: ${JSON.stringify(dry.content).slice(0, 300)}`);
+      assert.deepEqual([mock.state.products.length, mock.state.prices.length], [nProducts, nPrices], "a dry run creates nothing");
+      const badPlan = await owner.callTool({ name: "create_plan", arguments: { config: { name: "x", base_fee_usd: -1 }, dry_run: true } });
+      assert.ok(badPlan.isError && /base_fee_usd/.test((badPlan.content as any)[0].text), "a bad config lists its problems");
+      // Straight into the table: the landing form's per-IP limit (5 an hour) is spent by the tests above.
+      await db.query("INSERT INTO access_requests (email, company, product_url) VALUES ($1, $2, $3)", [`mcp+${stamp}@mcp-smoke.dev`, `MCP Smoke ${stamp}`, "https://mcp-smoke.dev"]);
+      const reqs = await owner.callTool({ name: "list_access_requests", arguments: { status: "pending" } });
+      const reqM = (reqs.structuredContent as any).requests.find((q: any) => q.email === `mcp+${stamp}@mcp-smoke.dev`);
+      assert.ok(reqM, "the new request is listed");
+      const lines: string[] = [], err = console.error;
+      console.error = (...x: unknown[]) => { lines.push(x.map(String).join(" ")); };
+      let approved;
+      try { approved = await owner.callTool({ name: "approve_access_request", arguments: { id: reqM.id } }); } finally { console.error = err; }
+      assert.ok(!approved.isError, `approve: ${JSON.stringify(approved.content).slice(0, 300)}`);
+      const ap = approved.structuredContent as any;
+      assert.ok(ap.created && ap.invitation?.state === "pending" && ap.key_issued === false && !("key" in ap), "a new account, its owner invited, no secret returned");
+      const [{ status: reqStatus }] = await db.query<{ status: string }>("SELECT status FROM access_requests WHERE id = $1", [reqM.id]);
+      assert.equal(reqStatus, "approved");
+      const actorM = `mcp-owner+${stamp}@roles.octillion.test`;
+      assert.ok(lines.some((l) => l.startsWith(`admin ${actorM} request.approve `) && l.endsWith(" role=owner")), "the approval is logged under the admin, with their role");
+      assert.ok(lines.some((l) => l.startsWith(`admin ${actorM} mcp.tool `) && l.includes('"tool":"approve_access_request"')), "and marked as made over MCP");
+      await until(async () => (await db.query("SELECT 1 FROM admin_access_log WHERE actor = $1 AND method = 'MCP' AND path = '/admin/mcp/approve_access_request' AND status = 200", [actorM.replace(/[^\w.@ -]/g, "")])).length === 1, "the call is in the admin access log (actor cleaned as the HTTP log does)");
+      await until(async () => (await db.query("SELECT 1 FROM admin_access_log WHERE method = 'MCP' AND path = '/admin/mcp/set_account_allowance' AND status = 403")).length >= 1, "refusals are logged too");
+      await owner.close();
+      // /api/admin/mcp is the same server (the web app proxies /api); the admin token is an owner there too.
+      const viaApi = await connect(await token({ user_id: ownerU.id }), "/api/admin/mcp");
+      assert.equal((await viaApi.listTools()).tools.length, ADMIN_TOOL_NAMES.length, "/api/admin/mcp serves the same tools");
+      await viaApi.close();
+      // Not an admin, or not an OAuth token: refused before any tool.
+      const nobody = await mockPost("/_mock/clerk/users", { email: `mcp-nobody+${stamp}@nowhere.dev` });
+      const init = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "x", version: "1" } } };
+      const post = (t: string) => fetch(`${base}/admin/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${t}` }, body: JSON.stringify(init) });
+      const no = await post(await token({ user_id: nobody.id }));
+      assert.equal(no.status, 403, "a signed-in non-admin is refused");
+      assert.match((await no.json()).error.message, /is not a platform admin/);
+      assert.equal((await post(await clerkSession(ownerU.id))).status, 401, "a session token is not an OAuth token");
+      assert.equal((await post(await token({ user_id: ownerU.id, revoked: true }))).status, 401, "a revoked token is refused");
+      assert.equal((await post(a.key)).status, 401, "an account API key is not an admin");
+      console.log("✓ admin MCP: OAuth discovery, platform admins only, tools with annotations, viewer reads and is refused changes naming the role, owner dry-run plan and approval, audit log, no secrets");
+    }
+
     // ---------- usage limits: budget split, teams, rollout, throughput (set by account admins on /app) ----------
     {
       const { saveProduct, saveScenarios } = await import("../src/queries.js");

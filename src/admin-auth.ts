@@ -18,7 +18,8 @@ import { clerkEnabled } from "./clerk.js";
 import { adminContext, PERMISSIONS, permissionsOf, platformRoleFor, ROLE_LABELS, type PlatformRole } from "./admin-roles.js";
 import { clerkSession } from "./session.js";
 
-function tokenOk(t: string | null) {
+/** OCTILLION_ADMIN_TOKEN, compared in constant time (also the admin MCP's, src/admin-mcp.ts). */
+export function adminTokenOk(t: string | null) {
   const want = process.env.OCTILLION_ADMIN_TOKEN;
   if (!want || !t) return false;
   const h = (x: string) => createHash("sha256").update(x).digest();
@@ -31,7 +32,7 @@ function tokenOk(t: string | null) {
  */
 export async function requirePlatformAdmin(req: Request, res: Response, next: NextFunction) {
   const go = (role: PlatformRole) => { res.locals.adminRole = role; adminContext.run({ role }, () => next()); };
-  if (tokenOk(bearer(req.headers.authorization))) return go("owner");
+  if (adminTokenOk(bearer(req.headers.authorization))) return go("owner");
   const s = await clerkSession(req);
   if (!s) return void res.status(401).json({ error: "Sign in as a platform admin", sign_in_url: "/sign-in" });
   const { email, role } = await platformRoleFor(s.userId).catch(() => ({ email: null, role: null }));
