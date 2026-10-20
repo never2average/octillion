@@ -1,6 +1,7 @@
-import { CustomerDocs } from '@/features/docs/customer-docs';
+import { redirect } from 'next/navigation';
+import { CUSTOMER_DOCS_HOME } from '@/features/docs/customer-docs';
 
-export const metadata = { title: 'Docs' };
+/** The guide opens on its first page. */
 export default function Page() {
-  return <CustomerDocs />;
+  redirect(CUSTOMER_DOCS_HOME);
 }

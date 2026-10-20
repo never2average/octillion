@@ -1,11 +1,13 @@
-// /app/docs: the customer guide, opened from the Docs button at the bottom of the sidebar. Every statement follows the
+// /app/docs: the customer guide, opened from the Docs button at the top right; one page per `## ` section of GUIDE, at
+// /app/docs/<slug of the heading>, grouped in the left navigation by PAGE_GROUPS. Every statement follows the
 // product as built: the MCP tools are the customer server's registrations (src/server.ts createServer, and its slash
 // commands in registerPrompts), the connection flow is the Setup & training page (features/portal/setup.tsx), the
 // Pick rate page is features/portal/pick-rate.tsx + visibility.tsx, Billing is features/portal/billing.tsx. Library
 // personas and tasks are Octillion's: this page names the concepts, never their content.
-import Link from 'next/link';
-import PageContainer from '@/components/layout/page-container';
-import { Markdown, anchorId } from '@/components/markdown';
+import { notFound } from 'next/navigation';
+import { Markdown } from '@/components/markdown';
+import { DocsLayout } from './docs-layout';
+import { markdownHeadings, slugify, splitLead, type DocNavGroup } from './docs-data';
 // Generated from the MCP server itself (scripts/export-mcp-tools.ts; the smoke test fails when it is stale).
 import catalog from '@/content/mcp-tools.generated.json';
 
@@ -195,22 +197,49 @@ The **People** tab lists everyone in the account with their role, team, limit an
 lists team budgets.
 `;
 
-const SECTIONS = Array.from(GUIDE.matchAll(/^## (.+)$/gm), (m) => m[1]);
+/** The left navigation's groups, by section title. A section no group names lands in "More". */
+const PAGE_GROUPS: [string, string[]][] = [
+  ['Getting started', ['What Octillion does', 'Getting started', 'Your first report in three prompts']],
+  ['Using Octillion', ['Running a simulation', 'Reading the Pick rate page', 'Personas and tasks', 'Context']],
+  ['Reference', ['MCP tools']],
+  ['Account', ['Billing']]
+];
 
-export function CustomerDocs() {
+interface GuidePage { slug: string; title: string; group: string; body: string }
+
+/** GUIDE cut at its `## ` headings, one page each; a page's `### ` subsections become its `## ` sections. */
+const PAGES: GuidePage[] = (() => {
+  const grouped = new Map(PAGE_GROUPS.flatMap(([g, titles]) => titles.map((t) => [t, g] as const)));
+  const sections = GUIDE.split(/^## /m).slice(1).map((chunk) => {
+    const nl = chunk.indexOf('\n');
+    const title = chunk.slice(0, nl).trim();
+    return { slug: slugify(title), title, group: grouped.get(title) ?? 'More', body: chunk.slice(nl + 1).replace(/^### /gm, '## ').trim() };
+  });
+  const order = [...PAGE_GROUPS.map(([g]) => g), 'More'];
+  return order.flatMap((g) => sections.filter((p) => p.group === g));
+})();
+
+const href = (slug: string) => `/app/docs/${slug}`;
+const NAV: DocNavGroup[] = [...PAGE_GROUPS.map(([g]) => g), 'More']
+  .map((g) => ({ title: g, pages: PAGES.filter((p) => p.group === g).map((p) => ({ title: p.title, href: href(p.slug), headings: markdownHeadings(p.body) })) }))
+  .filter((g) => g.pages.length);
+
+/** The first page: /app/docs opens it. */
+export const CUSTOMER_DOCS_HOME = href(PAGES[0].slug);
+export const customerDocSlugs = () => PAGES.map((p) => p.slug);
+export const findCustomerDoc = (slug: string) => PAGES.find((p) => p.slug === slug);
+
+export function CustomerDocPage({ slug }: { slug: string }) {
+  const page = findCustomerDoc(slug);
+  if (!page) notFound();
+  const { lead, rest } = splitLead(page.body);
+  const tools = page.slug === 'mcp-tools';
   return (
-    <PageContainer pageTitle='Docs' pageDescription='How Octillion works and how to use it, from connecting your AI client to reading the results.'>
-      <div className='grid w-full gap-x-10 gap-y-6 lg:grid-cols-[minmax(0,1fr)_14rem] lg:items-start'>
-        <Markdown className='order-2 lg:order-1'>{GUIDE}</Markdown>
-        <nav aria-label='On this page' className='order-1 lg:sticky lg:top-[4.5rem] lg:order-2'>
-          <div className='text-muted-foreground mb-2 text-xs font-medium tracking-wide uppercase'>On this page</div>
-          <ul className='flex flex-wrap gap-x-4 gap-y-1.5 text-sm lg:flex-col'>
-            {SECTIONS.map((s) => (
-              <li key={s}><Link href={`#${anchorId(s)}`} className='text-muted-foreground hover:text-foreground'>{s}</Link></li>
-            ))}
-          </ul>
-        </nav>
-      </div>
-    </PageContainer>
+    <DocsLayout nav={NAV} href={href(page.slug)} title={page.title} headings={markdownHeadings(rest)}
+      crumbs={[{ title: 'Docs', href: CUSTOMER_DOCS_HOME }, { title: page.group }, { title: page.title }]}
+      description={lead ? <Markdown className='text-muted-foreground max-w-none text-lg [&_p]:my-0 [&_p]:leading-relaxed'>{lead}</Markdown> : undefined}
+      meta={tools ? <span>Generated from the Octillion MCP server: {catalog.tools.length} tools{catalog.prompts.length ? `, ${catalog.prompts.length} slash commands` : ''}.</span> : undefined}>
+      <Markdown className='max-w-none'>{rest}</Markdown>
+    </DocsLayout>
   );
 }
