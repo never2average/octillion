@@ -25,7 +25,7 @@ import { fitPayload } from "./server.js";
 import { bearer } from "./auth.js";
 import { resolveAdminToken } from "./admin-tokens.js";
 import { adminContext, can, platformRoleFor, refusal, ROLE_LABELS, PERMISSIONS, type Permission, type PlatformRole } from "./admin-roles.js";
-import { clerkEnabled, frontendApi, mcpAudience, verifyOAuthToken } from "./clerk.js";
+import { clerkEnabled, frontendApi, mcpAudience, mcpAudiences, verifyOAuthToken } from "./clerk.js";
 import { getDb } from "./db.js";
 import * as onboarding from "./admin.js";
 import * as library from "./library.js";
@@ -494,7 +494,8 @@ export async function adminCallerFor(req: Request): Promise<{ caller: AdminCalle
   if (!t) return { status: 401, message: "Sign in to Octillion as a platform admin" };
   const tok = await resolveAdminToken(t);
   if (tok) return { caller: { actor: `token:${tok.label}`, role: tok.role, userId: null } };
-  const claims = await verifyOAuthToken(t);
+  // Issued for the admin MCP (either path): a token naming the customer /mcp is refused here, as an admin one is on /mcp.
+  const claims = await verifyOAuthToken(t, mcpAudiences().flatMap((a) => ADMIN_MCP_PATHS.map((p) => `${a.replace(/\/mcp$/, "")}${p}`)));
   if (!claims) return { status: 401, message: "Sign in to Octillion as a platform admin (send a Clerk OAuth access token)" };
   const { email, role } = await platformRoleFor(claims.userId).catch(() => ({ email: null, role: null }));
   if (!role) return { status: 403, message: `${email ?? "This account"} is not a platform admin. Ask an Owner on /admin/admins.` };

@@ -79,6 +79,15 @@ How Octillion uses it:
   servers and are expected to send none (check the access lines after deploying). Allowing an origin passes this check
   only: no CORS headers are sent. A server on loopback with no `PUBLIC_URL` also refuses a `Host` that is not
   localhost.
+- **OAuth token audience:** a JWT access token must come from the Clerk instance (`iss` is its Frontend API), always.
+  Its audience (a JWT's `aud`; for an opaque token, an audience field in Clerk's verify response) must name this
+  server's `/mcp` (`$PUBLIC_URL/mcp`, or one of the URIs `CLERK_MCP_AUDIENCE` lists, comma-separated); the admin MCP
+  takes only tokens naming `/admin/mcp` or `/api/admin/mcp`. `OCTILLION_OAUTH_AUDIENCE`: `auto` (default) refuses a
+  token that names another audience and accepts one that names none, logging it (`oauth audience missing …`, once per
+  client per 10 minutes, claims only), because Clerk does not document putting the resource in its tokens; `enforce`
+  also refuses tokens with no audience (turn it on once the logs show Clerk's tokens carry it); `report` refuses
+  nothing and logs mismatches. An `aud` that is not an http(s) address, or that is the client id or the issuer, names no
+  resource and counts as none. Behind a Clerk proxy URL, set `CLERK_FRONTEND_API_URL` to it (the tokens' issuer).
 - **Suspending someone:** Clerk memberships have no deactivated state, so suspension is the membership's
   `public_metadata.suspended = true`; Octillion refuses suspended members on `/mcp` and `/api/app` (at once for changes
   made through Octillion, within 30 seconds for changes made in the Clerk dashboard). Removing a member deletes the

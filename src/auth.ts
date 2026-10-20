@@ -1,6 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { getDb } from "./db.js";
-import { clerkEnabled, isSuspended, memberships, onMembershipChange, organizations, verifyOAuthToken } from "./clerk.js";
+import { clerkEnabled, isSuspended, mcpAudiences, memberships, onMembershipChange, organizations, verifyOAuthToken } from "./clerk.js";
 import { accountRoleOf, type AccountRole } from "./account-roles.js";
 
 /** The tenant a request acts for. Every query in queries.ts is scoped by orgId. */
@@ -111,11 +111,11 @@ const tokenOrgs = new Map<string, { org: Org; at: number }>();
 onMembershipChange((userId) => tokenOrgs.delete(userId)); // a suspended person is cut off at once, not after the cache
 
 /**
- * Resolve a Clerk OAuth access token to the organization the user acts for: their oldest Clerk membership that is not
+ * Resolve a Clerk OAuth access token issued for /mcp (its audience is checked, src/clerk.ts) to the organization the user acts for: their oldest Clerk membership that is not
  * suspended. A Clerk organization created in the Clerk dashboard gets its Octillion row on first use.
  */
 export async function resolveUserToken(token: string): Promise<Org | null> {
-  const claims = await verifyOAuthToken(token);
+  const claims = await verifyOAuthToken(token, mcpAudiences()); // issued for /mcp, not another resource
   if (!claims) return null;
   const hit = tokenOrgs.get(claims.userId);
   if (hit && Date.now() - hit.at < 60_000) return hit.org;
