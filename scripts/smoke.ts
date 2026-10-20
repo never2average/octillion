@@ -16,7 +16,7 @@ import { DEMO_PRODUCT, DEMO_SCENARIOS, demoTranscript } from "./demo-data.js";
 
 process.env.OCTILLION_WORKER_TOKEN ??= "smoke-worker-token";
 process.env.OCTILLION_VAULT_KEY ??= (await import("node:crypto")).randomBytes(32).toString("base64");
-process.env.OCTILLION_ADMIN_TOKEN ??= "smoke-admin-token";
+process.env.CRON_SECRET ??= "smoke-cron-secret";
 process.env.OCTILLION_REGISTRY = "scripts/fixtures/registry.json"; // fixed weights, independent of the live registry
 // Accounts without a plan get $0 by default (prepaid, invite-only); the smoke run gives every test account an allowance.
 process.env.OCTILLION_ORG_MONTHLY_BUDGET_USD ??= "1000";
@@ -50,6 +50,9 @@ process.env.RESEARCH_MAX_SEARCHES = "3";
 const { createApp } = await import("../src/http.js");
 const db = await getDb();
 console.log(`database: ${db.kind}, transcripts: ${transcripts().kind}`);
+// Admin API access for the run: a scoped, expiring token minted like `npm run admin:token` does (src/admin-tokens.ts).
+const { createAdminToken } = await import("../src/admin-tokens.js");
+const ADMIN_TOKEN = (await createAdminToken({ label: "smoke", role: "owner", days: 1, createdBy: "smoke" })).token;
 
 // ---------- agent apportionment (no I/O) ----------
 {
@@ -394,7 +397,7 @@ try {
   {
     const popSlug = `smoke-ent-${stamp}`.toLowerCase().replace(/[^a-z0-9-]/g, "");
     const admin = (method: string, path: string, body?: unknown) => fetch(`${base}/api/admin${path}`, {
-      method, headers: { authorization: "Bearer smoke-admin-token", "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+      method, headers: { authorization: `Bearer ${ADMIN_TOKEN}`, "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
     assert.equal((await fetch(`${base}/api/admin/populations`)).status, 401);
     assert.equal((await admin("POST", "/populations", { slug: popSlug, name: "Smoke enterprise", from: "global" })).status, 201);
     await admin("PUT", `/populations/${popSlug}/agents/${encodeURIComponent("codex/default")}`, { market_share: 0.6 });
@@ -578,12 +581,14 @@ try {
   assert.ok(orch.llm?.api_key.startsWith("ogw_") && orch.llm.base_url.endsWith("/gw/openai/v1"), "orchestrator LLM goes through the gateway (OpenAI SDK base with /v1)");
   assert.equal(`${orch.llm.provider}/${orch.llm.model}`, "openai/gpt-6.1-sol", "broker decides the orchestrator brain: GPT by default");
   assert.equal((await fetch(`${base}/api/admin/keyvault/credentials`)).status, 401);
-  const listed = await (await fetch(`${base}/api/admin/keyvault/credentials`, { headers: { authorization: "Bearer smoke-admin-token" } })).text();
+  const listed = await (await fetch(`${base}/api/admin/keyvault/credentials`, { headers: { authorization: `Bearer ${ADMIN_TOKEN}` } })).text();
   assert.ok(listed.includes(stored.hint) && !listed.includes(REAL_LLM_KEY) && !listed.includes(REAL_VENDOR_KEY), "admin API shows hints only");
-  await fetch(`${base}/api/admin/keyvault/providers`, { headers: { authorization: "Bearer smoke-admin-token", "x-octillion-actor": "smoke staff" } });
+  const staff = await createAdminToken({ label: "smoke staff", role: "viewer", days: 1, createdBy: "smoke" });
+  await fetch(`${base}/api/admin/keyvault/providers`, { headers: { authorization: `Bearer ${staff.token}`, "x-octillion-actor": "someone else" } });
   await new Promise((r) => setTimeout(r, 200));
-  const [logged] = await db.query<any>("SELECT actor, method, path, status FROM admin_access_log WHERE actor = 'smoke staff' ORDER BY id DESC LIMIT 1");
+  const [logged] = await db.query<any>("SELECT actor, method, path, status FROM admin_access_log WHERE actor = 'token:smoke staff' ORDER BY id DESC LIMIT 1");
   assert.ok(logged && logged.method === "GET" && logged.path === "/api/admin/keyvault/providers" && logged.status === 200, "staff access is logged");
+  await (await import("./smoke-security.js")).adminTokenChecks({ base, db, ADMIN_TOKEN, staff });
   console.log("✓ key vault + gateway: encrypted at rest, scoped tokens, real key injected upstream, streaming, metering");
 
   const outcomes = ["adopted", "competitor", "recommended", "none"] as const;
@@ -687,7 +692,7 @@ try {
     assert.ok(Math.abs((await costOf("gpt-6.1-sol", { input: 200_000, cached: 80_000, output: 10_000 }))! - (120_000 * 2 + 80_000 * 0.1 + 10_000 * 10) / 1e6) < 1e-12, "gpt-6.1-sol: cached input at the cached rate");
     assert.equal(await costOf("gpt-6.1-sol", { input: 300_000, cached: 0, output: 0 }), 300_000 * 4 / 1e6, "gpt-6.1-sol long-context tier above 272K input");
     assert.equal(await costOf("no-such-model", { input: 1, cached: 0, output: 1 }), null, "unknown models are not priced");
-    const report = await (await fetch(`${base}/api/admin/usage/models?days=1&model=claude-opus-5-5`, { headers: { authorization: "Bearer smoke-admin-token" } })).json();
+    const report = await (await fetch(`${base}/api/admin/usage/models?days=1&model=claude-opus-5-5`, { headers: { authorization: `Bearer ${ADMIN_TOKEN}` } })).json();
     assert.ok(report.totals[0]?.model === "claude-opus-5-5", "admin usage report");
     // The Vertex AI provider's key (first-class, label vertex): a Vertex backend with no key of its own signs in with
     // it; project from the key's JSON, region from the VERTEX_REGION setting (default us-east5).
@@ -1136,7 +1141,7 @@ try {
 
   // ---------- onboarding admin console: legacy keys (no Clerk) ----------
   const adm = (method: string, path: string, body?: unknown) => fetch(`${base}/api/admin/onboarding${path}`, {
-    method, headers: { authorization: `Bearer ${process.env.OCTILLION_ADMIN_TOKEN}`, "x-admin-actor": "smoke", "content-type": "application/json" },
+    method, headers: { authorization: `Bearer ${ADMIN_TOKEN}`, "x-admin-actor": "smoke", "content-type": "application/json" },
     body: body ? JSON.stringify(body) : undefined });
   const json = async (r: Response | Promise<Response>) => { const x = await r; const j = await x.json(); assert.ok(x.ok, `${x.status} ${JSON.stringify(j)}`); return j; };
   const post = (key: string) => fetch(`${base}/mcp/${key}`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
@@ -1165,7 +1170,7 @@ try {
     assert.ok(pl.personas.every((p: any) => p.source === "vault" || p.source === "admin"), "only shared personas, never an org's private ones");
     const ed = await json(adm("PATCH", "/personas/example-agency-frontend", { name: "Agency frontend lead (edited)", stack: ["React", "Next.js"], experience_years: 9, tone: "Brisk" }));
     assert.ok(ed.name === "Agency frontend lead (edited)" && ed.attributes.stack.join() === "React,Next.js" && ed.attributes.experience_years === 9
-      && ed.attributes.tone === "Brisk" && ed.edited_at && ed.edited_by === "smoke", "persona edited and stamped");
+      && ed.attributes.tone === "Brisk" && ed.edited_at && ed.edited_by === "token:smoke", "persona edited and stamped");
     assert.deepEqual(ed.attributes.role, agency.attributes.role, "attributes not sent are kept");
     assert.equal((await adm("PATCH", "/personas/example-agency-frontend", { name: "" })).status, 400, "a persona needs a name");
     assert.equal((await adm("PATCH", "/personas/nobody-here", { name: "x" })).status, 404);
@@ -1983,7 +1988,8 @@ try {
     assert.equal(Number((await db.query<any>("SELECT count(*) AS n FROM autoscaler_ticks"))[0].n), 4, "the 13-day row and today's stay");
     assert.deepEqual((await db.query<any>("SELECT sandbox_id FROM compute_events WHERE sandbox_id LIKE 'smoke-at-p%'")).map((x) => x.sandbox_id), ["smoke-at-p2"]);
     assert.equal((await fetch(`${base}/api/cron/autoscale`)).status, 401, "the cron needs its secret");
-    const cron = await (await fetch(`${base}/api/cron/autoscale`, { headers: { authorization: `Bearer ${process.env.CRON_SECRET || process.env.OCTILLION_ADMIN_TOKEN}` } })).json();
+    assert.equal((await fetch(`${base}/api/cron/autoscale`, { headers: { authorization: `Bearer ${ADMIN_TOKEN}` } })).status, 401, "an admin token is not the cron secret");
+    const cron = await (await fetch(`${base}/api/cron/autoscale`, { headers: { authorization: `Bearer ${process.env.CRON_SECRET}` } })).json();
     assert.deepEqual(cron.pruned, { ticks: 0, events: 0 }, "the cron prunes (nothing left to prune)");
 
     await db.query("DELETE FROM autoscaler_ticks");
@@ -2018,7 +2024,7 @@ try {
       const t = await json(adm("POST", "/compute/tick"));
       assert.deepEqual([t.leader, t.launched, t.reaped, t.error], [false, 0, 0, null], "a follower changes nothing");
       assert.match(t.message, /Another server holds the autoscaler lease/);
-      assert.ok(audit.some((l) => l.startsWith("admin smoke compute.tick ") && l.includes('"leader":false')), "the tick is in the admin log");
+      assert.ok(audit.some((l) => l.startsWith("admin token:smoke compute.tick ") && l.includes('"leader":false')), "the tick is in the admin log");
       // Two ticks asked for at once in one process share one tick.
       const a = new Autoscaler({ log: () => {} });
       const [x, y] = await Promise.all([a.tick(), a.tick()]);
@@ -2044,18 +2050,18 @@ try {
       assert.deepEqual([c.status, c.was], ["cancelled", "running"]);
       assert.match(c.message, /next heartbeats/);
       const [r] = await db.query<any>("/* tenant: smoke fixture */ SELECT status, ended_at, metadata FROM agent_sessions WHERE id = 'ses_smoke_ca_r'");
-      assert.ok(r.status === "cancelled" && r.ended_at && r.metadata.cancelled_by === "smoke" && r.metadata.cancelled_from === "running");
+      assert.ok(r.status === "cancelled" && r.ended_at && r.metadata.cancelled_by === "token:smoke" && r.metadata.cancelled_from === "running");
       const [spent] = await db.query<any>("/* tenant: smoke fixture */ SELECT cost_usd, tokens_in, tokens_out FROM agent_sessions WHERE id = 'ses_smoke_ca_r'");
       assert.deepEqual([Number(spent.cost_usd), Number(spent.tokens_in), Number(spent.tokens_out)], [3.4, 5000, 700], "the gateway-metered spend is the cancelled session's cost");
       const [ev] = await db.query<any>("SELECT actor, job_id, reason FROM compute_events WHERE kind = 'admin_cancel' AND session_id = 'ses_smoke_ca_r'");
-      assert.deepEqual([ev?.actor, ev?.job_id, ev?.reason], ["smoke", "sim_smoke_ca", "cancelled while running"], "the cancel is in compute_events with who did it");
+      assert.deepEqual([ev?.actor, ev?.job_id, ev?.reason], ["token:smoke", "sim_smoke_ca", "cancelled while running"], "the cancel is in compute_events with who did it");
       // A /complete that arrives after the cancel (the guarded UPDATE also covers one that read "running" first) does not undo it.
       await (await import("../src/worker.js")).completeSession("ses_smoke_ca_r", { status: "completed" });
       assert.equal((await db.query<any>("/* tenant: smoke fixture */ SELECT status FROM agent_sessions WHERE id = 'ses_smoke_ca_r'"))[0].status, "cancelled", "a cancelled session stays cancelled");
       assert.ok((await db.query<any>("SELECT revoked_at FROM gateway_tokens WHERE token_hash = 'smoke-ca-tok'"))[0].revoked_at, "its gateway token is revoked");
       assert.equal((await worker("/sessions/ses_smoke_ca_r/heartbeat", {})).status, 409, "its next heartbeat is refused, so the orchestrator kills the sandbox");
-      assert.equal((await json(adm("GET", "/compute/sessions/ses_smoke_ca_r"))).metadata.cancelled_by, "smoke", "the peek says who cancelled it");
-      assert.ok(audit.some((l) => l.startsWith("admin smoke compute.session.cancel ") && l.includes('"session_id":"ses_smoke_ca_r"') && l.includes('"was":"running"')), "the cancel is in the admin log");
+      assert.equal((await json(adm("GET", "/compute/sessions/ses_smoke_ca_r"))).metadata.cancelled_by, "token:smoke", "the peek says who cancelled it");
+      assert.ok(audit.some((l) => l.startsWith("admin token:smoke compute.session.cancel ") && l.includes('"session_id":"ses_smoke_ca_r"') && l.includes('"was":"running"')), "the cancel is in the admin log");
       assert.equal((await db.query<any>("SELECT status FROM simulations WHERE id = 'sim_smoke_ca'"))[0].status, "running", "the queued session keeps the run open");
 
       const again = await adm("POST", "/compute/sessions/ses_smoke_ca_r/cancel");
@@ -2101,7 +2107,7 @@ try {
     assert.equal(byKey(await json(adm("GET", "/compute")), "OCTILLION_MAX_JOB_ORCHESTRATORS").source, "env");
     const c1 = await json(adm("PUT", "/compute/settings", { values: { OCTILLION_MAX_JOB_ORCHESTRATORS: 3, OCTILLION_MAX_SAMPLES: "33", OCTILLION_DEFAULT_SAMPLES: 4,
       OCTILLION_JOB_POD_CAPACITY: 9, BOAT_SANDBOX_SIZE: "large", ORCHESTRATOR_MODEL: "gpt-smoke-1" } }));
-    assert.ok(byKey(c1, "OCTILLION_MAX_JOB_ORCHESTRATORS").source === "set" && byKey(c1, "OCTILLION_MAX_JOB_ORCHESTRATORS").updated_by === "smoke");
+    assert.ok(byKey(c1, "OCTILLION_MAX_JOB_ORCHESTRATORS").source === "set" && byKey(c1, "OCTILLION_MAX_JOB_ORCHESTRATORS").updated_by === "token:smoke");
     assert.equal(AUTOSCALE.maxJobOrchestrators(), 3, "a setting wins over the environment");
     assert.equal(AUTOSCALE.jobPodCapacity(), 9);
     assert.equal(config.maxSamples(), 33);
@@ -3290,11 +3296,11 @@ try {
       // Last owner: with no env owners, demote every Clerk owner but one (with the token, an owner), then the guard holds.
       delete process.env.OCTILLION_PLATFORM_ADMINS;
       list = (await json(adm("GET", "/admins"))).admins;
-      for (const a of list.filter((x: any) => x.role === "owner" && x.id !== people.owner.id)) assert.equal((await adm("POST", `/admins/${a.id}/role`, { role: "operator" })).status, 200);
+      for (const a of list.filter((x: any) => x.role === "owner" && x.id !== people.owner.id)) assert.equal((await as(people.owner.sess, "POST", `/admins/${a.id}/role`, { role: "operator" })).status, 200);
       const self = await as(people.owner.sess, "POST", `/admins/${people.owner.id}/role`, { role: "operator" });
       assert.equal(self.status, 409, "the last owner can't demote themselves");
       assert.match((await self.json()).error, /You are the last owner/);
-      assert.equal((await adm("DELETE", `/admins/${people.owner.id}`)).status, 409, "nor be removed");
+      assert.equal((await as(people.owner.sess, "DELETE", `/admins/${people.owner.id}`)).status, 409, "nor be removed");
       assert.equal((await as(people.owner.sess, "POST", `/admins/${people.operator.id}/role`, { role: "owner" })).status, 200);
       assert.equal((await as(people.owner.sess, "POST", `/admins/${people.owner.id}/role`, { role: "operator" })).status, 200, "with a second owner, they can");
       assert.equal((await as(people.owner.sess, "POST", "/admins", { email: "x@y.dev", role: "viewer" })).status, 403, "and are an operator at once");
@@ -5294,6 +5300,8 @@ try {
     console.log("✓ organization deletion: keys, sessions, products, personas, transcripts gone; dry run, tombstone, idempotent");
   }
 } finally {
+  // The run's admin tokens stop working with it (they may sit in a shared database).
+  await db.query("UPDATE admin_tokens SET revoked_at = now() WHERE created_by = 'smoke' AND revoked_at IS NULL");
   await db.query("DELETE FROM vault_providers WHERE slug IN ('smoke_llm', 'smoke_vendor')");
   await db.query("DELETE FROM gateway_tokens WHERE orchestrator_id = 'smoke-orch'");
   await db.query("DELETE FROM access_requests WHERE email = $1", [`smoke+${stamp}@example.com`]);

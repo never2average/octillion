@@ -148,7 +148,11 @@ offered (password, Google, Microsoft, GitHub, enterprise SSO) is set in the Cler
 is a platform admin when their **verified** primary email matches `OCTILLION_PLATFORM_ADMINS` (comma-separated
 addresses or `*@company.com` domains), or their Clerk `public_metadata.platform_admin` is `true`. Removing an entry
 ends that admin's access on their next request. `GET /admin/session` tells the UI who is signed in and whether they
-are a platform admin. `OCTILLION_ADMIN_TOKEN` still works as a bearer token for scripts.
+are a platform admin. Scripts use admin tokens (`npm run admin:token`, src/admin-tokens.ts): one per purpose,
+with a role and an expiry, revocable; the old static `OCTILLION_ADMIN_TOKEN` is no longer accepted. A token acts with its role but can never mint tokens or add, promote
+or remove admins (those need a signed-in owner). On a VM, mint inside the app container; on Vercel, run
+`npm run admin:token` from a checkout with the production `DATABASE_URL` in the environment (it never prints the
+URL), or, signed in as an owner, `POST /api/admin/tokens {label, role, days}`.
 
 ## Analytics
 
