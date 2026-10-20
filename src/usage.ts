@@ -18,8 +18,11 @@ async function priceOf(model: string): Promise<Price | null> {
     const rows = await (await getDb()).query<Price & { model: string }>("SELECT * FROM model_prices");
     prices = { at: Date.now(), byModel: new Map(rows.map((r) => [r.model, r])) };
   }
-  // Exact id first, then a dated/suffixed variant of a known id (e.g. gpt-6.1-sol-2026-09-01, claude-opus-5-5@...).
-  return prices.byModel.get(model) ?? [...prices.byModel].find(([k]) => model.startsWith(`${k}-`) || model.startsWith(`${k}@`))?.[1] ?? null;
+  // Exact id first, then a dated or pinned release of a known id (gpt-6.1-sol-2026-09-01, gpt-6-sol-20260901,
+  // claude-opus-5-5@20261001, ...-latest). Any other suffix is another model (glm-5.3-flash is not glm-5.3), so it
+  // stays unpriced rather than borrowing a bigger model's rate.
+  const release = /^(\d{4}-\d{2}-\d{2}|\d{8}|\d{4}|latest|v\d+)$/;
+  return prices.byModel.get(model) ?? [...prices.byModel].find(([k]) => model.startsWith(`${k}@`) || (model.startsWith(`${k}-`) && release.test(model.slice(k.length + 1))))?.[1] ?? null;
 }
 
 export interface Metered { requests: number; errors: number; input: number; cached: number; output: number }

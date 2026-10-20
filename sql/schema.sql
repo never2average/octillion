@@ -508,6 +508,17 @@ INSERT INTO model_prices (model, input_per_mtok, cached_input_per_mtok, output_p
   ('@cf/deepseek-ai/deepseek-v4-pro-0813', 1.32, 0.044, 3.96, 'Cloudflare Workers AI pricing, 2026-10-10'),
   ('@cf/openai/gpt-oss-120b',              0.35, 0.35,  0.75, 'Cloudflare Workers AI pricing, 2026-10-10 (no cached rate listed)')
 ON CONFLICT (model) DO NOTHING;
+-- GLM 5.3 Flash: the research quick pass and loss reasons (src/reasons.ts) call it server-side (2026-10-20).
+INSERT INTO model_prices (model, input_per_mtok, cached_input_per_mtok, output_per_mtok, source) VALUES
+  ('@cf/zai-org/glm-5.3-flash',            0.15, 0.03,  0.50, 'Cloudflare Workers AI pricing, 2026-10-20')
+ON CONFLICT (model) DO NOTHING;
+-- Its calls recorded before it had a row were priced as @cf/zai-org/glm-5.3 (the name-prefix fallback in src/usage.ts,
+-- now limited to dated releases), about 9x too much: repriced from their stored tokens (input includes cached). Only
+-- rows whose cost differs change, so a rerun at boot changes nothing.
+UPDATE gateway_model_usage SET priced = true,
+       cost_usd = round(((input_tokens - cached_input_tokens) * 0.15 + cached_input_tokens * 0.03 + output_tokens * 0.50) / 1000000.0, 6)
+ WHERE model = '@cf/zai-org/glm-5.3-flash'
+   AND cost_usd IS DISTINCT FROM round(((input_tokens - cached_input_tokens) * 0.15 + cached_input_tokens * 0.03 + output_tokens * 0.50) / 1000000.0, 6);
 -- The rest of the registry's gateway models (2026-10-18). Cursor, Copilot and Amp (auto/default) bill on their own
 -- subscriptions and never pass the gateway, so they have no row.
 INSERT INTO model_prices (model, input_per_mtok, cached_input_per_mtok, output_per_mtok, source) VALUES
