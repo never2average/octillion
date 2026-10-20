@@ -3,6 +3,7 @@
 // API-key auth on /mcp, the landing page and access requests.
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
+import { readFileSync } from "node:fs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -230,6 +231,13 @@ const worker = (path: string, body: unknown, { token = WORKER_TOKEN, ndjson = fa
 try {
   // ---------- tools + UI resource ----------
   const { tools } = await A.listTools();
+  // The customer docs' tool list (/app/docs) is generated from this server: it must match it.
+  {
+    const { mcpCatalog } = await import("./export-mcp-tools.js");
+    const committed = JSON.parse(readFileSync(new URL("../web/src/content/mcp-tools.generated.json", import.meta.url), "utf8"));
+    assert.deepEqual(committed, await mcpCatalog(), "web/src/content/mcp-tools.generated.json is stale: run npx tsx scripts/export-mcp-tools.ts");
+    assert.deepEqual(committed.tools.map((t: any) => t.name).sort(), tools.map((t) => t.name).sort(), "the docs list every customer tool");
+  }
   console.log("tools:", tools.map((t) => t.name).join(", "));
   assert.equal(tools.length, 31); // 19 core (incl. browse_task_library, export_visibility_report) + 2 memory + 10 private-asset tools incl. publish_to_library
   assert.ok(tools.some((t) => t.name === "export_visibility_report" && t.annotations?.readOnlyHint && !t.annotations?.destructiveHint), "export_visibility_report is read-only");
@@ -901,11 +909,19 @@ try {
         coalesce(sc.prompt, lt.prompt) AS prompt, lt.prompt AS lib_prompt, lt.title AS lib_title, lt.repo_url AS lib_repo
         FROM scenarios sc JOIN products p ON p.id = sc.product_id LEFT JOIN library_tasks lt ON lt.id = sc.library_task_id WHERE p.org_id = $1 AND p.slug = $2 AND sc.active`, [a.org.orgId, done.product.slug]);
     assert.ok(pickedRows.length === 3 && pickedRows.every((x: any) => x.library_task_id && x.prompt), "onboarding links library tasks to the product, with a prompt to run");
-    assert.ok(pickedRows.every((x: any) => x.stored !== x.lib_prompt && x.stored_title !== x.lib_title && (x.stored_repo == null || x.stored_repo !== x.lib_repo)),
-      "nothing the library already has is copied into the product's rows");
+    assert.ok(pickedRows.every((x: any) => x.stored == null && x.stored_title == null && (x.stored_repo == null || x.stored_repo !== x.lib_repo)),
+      "a library task keeps only its link: research's rewording is not stored on the product");
+    // The run adapts the library tasks when it starts, once per task and persona, and keeps the words on the run. No
+    // model answers here, so each keeps its library prompt.
+    const [runRow] = await db.query<any>("SELECT prompts FROM simulations WHERE id = $1", [accepted.simulation_id]);
+    const runKeys = Object.keys(runRow.prompts ?? {});
+    assert.equal(runKeys.length, 3 * links.length, `one prompt per library task and persona on the run (${runKeys.join(", ")})`);
+    assert.ok(runKeys.every((k) => /^\d+:[\w-]+$/.test(k) && links.some((l: any) => k.endsWith(`:${l.slug}`))), "keyed <task>:<persona slug>");
+    assert.ok(Object.values(runRow.prompts).every((v) => pickedRows.some((x: any) => x.lib_prompt === v)), "no model answered: each run prompt is the library task's own");
     assert.equal(done.drafts.length, 1, "a draft for a library gap waits for approval, inactive");
     assert.equal(done.drafts[0].active, false);
-    assert.equal(done.scenarios.find((x: any) => x.title === "Nightly digest")?.platform, "web", "research problems get a platform");
+    const digestTask = (good.scenarios as any[]).find((x) => x.title === "Nightly digest")?.library_task_id;
+    assert.equal(done.scenarios.find((x: any) => x.library_task_id === digestTask)?.platform, "web", "research problems get a platform");
     assert.ok(pickedRows.every((x: any) => !/quickqueue/i.test(x.prompt)), "problems never name the product");
     assert.equal(done.simulation.sessions, 6, "3 problems x 2 personas x 1 sample (the draft does not run)");
     const approved = await call(A, "review_draft_tasks", { product: done.product.slug, approve: [done.drafts[0].id] });

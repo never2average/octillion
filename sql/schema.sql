@@ -1170,3 +1170,13 @@ END $$;
 -- event, which is everything the agent wrote. Queued again for the automatic drain (once: only rows tried before the fix).
 UPDATE agent_sessions SET reason_status = NULL, reason_error = NULL
  WHERE reason_status = 'skipped' AND reason_error = 'the agent wrote nothing to read' AND reason_tried_at < '2026-10-20T10:30:00Z';
+
+-- A run adapts its library tasks to the product when it starts (src/adapt.ts): the words are the run's, never the
+-- product's. Keys "<scenario id>" or "<scenario id>:<persona slug>".
+ALTER TABLE simulations ADD COLUMN IF NOT EXISTS prompts JSONB NOT NULL DEFAULT '{}';
+-- Research's rewrites of library tasks (title, prompt, per-persona variants) were stored on the product: cleared, the
+-- product keeps the link and its settings; runs adapt the library task when they start. Only research's rows (they
+-- carry its rationale or variants); a task a customer gave their own words to keeps them.
+UPDATE scenarios SET title = NULL, prompt = NULL, prompt_variants = '{}', updated_at = now()
+ WHERE source = 'library' AND library_task_id IS NOT NULL AND (prompt_variants <> '{}' OR rationale IS NOT NULL)
+   AND (title IS NOT NULL OR prompt IS NOT NULL OR prompt_variants <> '{}');

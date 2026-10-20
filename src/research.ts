@@ -587,11 +587,13 @@ export async function completeResearch(id: string, body: { status?: string; erro
       await tx.query(
         `/* tenant: product of the research job (job checked against the job token in http.ts) */ INSERT INTO scenarios (product_id, title, prompt, repo_url, language, tags, expectation, active, library_task_id, source, rationale, template, prompt_variants, decision, platform)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $15, $8, $9, $10, $11, $12, $13, $14)`,
-        [job.product_id, same(title, lib?.title) ? null : title, same(prompt, lib?.prompt) ? null : prompt, repoUrl,
+        // A library task keeps only its link: runs adapt it when they start (src/adapt.ts), so research's own wording
+        // for it (title, prompt, persona variants) is checked above but not stored on the product.
+        [job.product_id, lib ? null : title, lib ? null : prompt, repoUrl,
          same(s.language ?? null, lib?.language ?? null) ? null : s.language ?? null, lib && JSON.stringify(tags) === JSON.stringify(lib.tags ?? []) ? [] : tags,
          s.expectation ?? "recommend", s.library_task_id ?? null, s.draft ? "draft" : s.library_task_id ? "library" : "generated",
          s.draft ? `Draft: ${s.library_check ?? ""}${s.rationale ? ` ${s.rationale}` : ""}` : s.rationale ?? null,
-         template, JSON.stringify(Object.fromEntries(Object.entries(s.variants ?? {}).filter(([who]) => slugOf.has(who)).map(([who, t]) => [slugOf.get(who)!, t.trim()]))), s.decision ? JSON.stringify(s.decision) : null,
+         template, JSON.stringify(lib ? {} : Object.fromEntries(Object.entries(s.variants ?? {}).filter(([who]) => slugOf.has(who)).map(([who, t]) => [slugOf.get(who)!, t.trim()]))), s.decision ? JSON.stringify(s.decision) : null,
          isPlatform(s.platform) ? s.platform : platformOf({ template, language: s.language, tags: s.tags, prompt }), !s.draft]);
     }
     await tx.query(

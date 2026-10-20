@@ -396,6 +396,32 @@ async function harnessPreferences(scenarioIds: number[]): Promise<Map<number, st
   return new Map(rows.map((r) => [Number(r.id), r.harnesses]));
 }
 
+/**
+ * The run's own words for its library tasks (src/adapt.ts): each library-linked task with no text of its own, once per
+ * persona the run uses (`<scenario id>:<persona slug>`, or `<scenario id>` with no persona). Tasks with their own text
+ * (written by the customer, or edited) run as written. Kept on the run (simulations.prompts), never on the product.
+ */
+async function runPrompts(org: Org, p: ProductRow, scenarioIds: number[], profileIds: number[]): Promise<Record<string, string>> {
+  const db = await getDb();
+  const tasks = await db.query<{ id: number; title: string; prompt: string; template: string | null; language: string | null; platform: string | null }>(
+    `/* tenant: product from resolveProduct(org) */ SELECT sc.id, sc.title, sc.prompt, sc.template, sc.language, sc.platform FROM ${SCENARIO_ROWS} sc
+      JOIN scenarios own ON own.id = sc.id WHERE sc.product_id = $1 AND sc.id = ANY($2) AND sc.library_task_id IS NOT NULL AND own.prompt IS NULL ORDER BY sc.id`,
+    [p.id, scenarioIds]);
+  if (!tasks.length) return {};
+  const personas = profileIds.length
+    ? await openRows(org.orgId, await db.query<any>("SELECT id, slug, name, summary, attributes FROM developer_profiles WHERE id = ANY($1) AND (org_id IS NULL OR org_id = $2)", [profileIds, org.orgId]), ["summary"])
+    : [];
+  for (const x of personas) x.attributes = await openJson(org.orgId, x.attributes);
+  const [prod] = await db.query<{ terms: unknown }>("/* tenant: product from resolveProduct(org) */ SELECT research->'category_terms' AS terms FROM products WHERE id = $1", [p.id]);
+  const words = [p.name, ...p.aliases, ...p.packages, ...p.domains, ...(p.competitors ?? []).flatMap((c) => [c.name, ...(c.aliases ?? []), ...(c.packages ?? []), ...(c.domains ?? [])])]
+    .filter((w): w is string => typeof w === "string" && w.trim().length > 2);
+  const { adaptPrompts } = await import("./adapt.js"); // lazily: adapt.ts uses research.ts, which imports this file
+  return adaptPrompts(tasks.flatMap((t) => (personas.length ? personas : [null]).map((x) => ({
+    key: x ? `${t.id}:${x.slug}` : String(t.id), title: t.title, prompt: t.prompt, template: t.template, language: t.language, platform: t.platform,
+    persona: x ? { name: x.name, summary: x.summary ?? "", attributes: x.attributes ?? {} } : null }))),
+    { category: p.category ?? null, description: p.description ?? null, words, categoryTerms: Array.isArray(prod?.terms) ? (prod!.terms as string[]) : [] });
+}
+
 export async function runSimulation(org: Org, input: RunInput) {
   // No plan, no runs: checked before anything else so the reason is the first thing the customer hears.
   const { budget } = await orgBudget(org.orgId); // admin allowance, else the prepaid plan's cap, else 0
@@ -513,6 +539,7 @@ export async function runSimulation(org: Org, input: RunInput) {
       { code: "run_sessions", set_by: maxSessions < config.maxSessionsPerRun() ? "account" : undefined });
 
   const used = [...new Map(plan.map((x) => [x.agent.id, x.agent])).values()];
+  const prompts = await runPrompts(org, p, scenarios.map((x) => Number(x.id)), profiles.map((x) => x.id));
   const id = randomId("sim_");
   const name = input.name?.trim() || `${p.name} · ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC`;
   await db.transaction(async (tx) => {
@@ -525,10 +552,11 @@ export async function runSimulation(org: Org, input: RunInput) {
       if (Number(n) >= personal.max_runs) throw runsAtOnceError(Number(n), personal.max_runs, personal.runs_set_by, personal.admins);
     }
     await tx.query(
-      `INSERT INTO simulations (id, org_id, product_id, name, models, harness, repeats, profile_ids, mode, agent_ids, population_id, max_samples, research_id, created_by, private)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, (SELECT research->>'research_id' FROM products WHERE id = $3), $13, $14)`,
+      `INSERT INTO simulations (id, org_id, product_id, name, models, harness, repeats, profile_ids, mode, agent_ids, population_id, max_samples, research_id, created_by, private, prompts)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, (SELECT research->>'research_id' FROM products WHERE id = $3), $13, $14, $15)`,
       [id, org.orgId, p.id, name, [...new Set(used.map((a) => a.model))], [...new Set(used.map((a) => a.harness))].join(", "),
-       explicit ? repeats : samples, profiles.map((x) => x.id), explicit ? "explicit" : "representative", used.map((a) => a.id), pop.id, maxSamples, org.userId ?? null, isPrivate],
+       explicit ? repeats : samples, profiles.map((x) => x.id), explicit ? "explicit" : "representative", used.map((a) => a.id), pop.id, maxSamples, org.userId ?? null, isPrivate,
+       JSON.stringify(prompts)],
     );
     for (const x of plan)
       await tx.query(

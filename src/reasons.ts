@@ -241,15 +241,17 @@ async function readAll(orgId: number, sessionId: string): Promise<StoredEvent[]>
 async function explainSession(id: string): Promise<boolean> {
   const db = await getDb();
   const [s] = await db.query<{ org_id: number; winner: string | null; verdict: string; mentions: Mention[] | null; untracked: { name: string }[] | null; attempts: number;
-    product: string; description: string; prompt: string; variants: Record<string, string> | null; slug: string | null; summary: string | null; instructions: string | null }>(
+    product: string; description: string; prompt: string; variants: Record<string, string> | null; slug: string | null; summary: string | null; instructions: string | null; scenario_id: number; run_prompts: Record<string, string> | null }>(
     `/* tenant: internal: a claimed reason job, by session id */ SELECT s.org_id, s.winner, s.verdict, s.mentions, s.untracked, s.reason_attempts AS attempts,
-            p.name AS product, p.description, sc.prompt, sc.prompt_variants AS variants, dp.slug, dp.summary, dp.instructions
+            p.name AS product, p.description, sc.prompt, sc.prompt_variants AS variants, dp.slug, dp.summary, dp.instructions, s.scenario_id,
+            (SELECT prompts FROM simulations WHERE id = s.simulation_id) AS run_prompts
        FROM agent_sessions s JOIN products p ON p.id = s.product_id JOIN ${SCENARIO_ROWS} sc ON sc.id = s.scenario_id
        LEFT JOIN developer_profiles dp ON dp.id = s.profile_id WHERE s.id = $1`, [id]);
   if (!s) return false;
   try {
     // Never sent, only cut out of the agent's text and checked against the answer: the task as given and the persona.
-    const forbidden = (await Promise.all([s.prompt, s.slug ? s.variants?.[s.slug] : null, s.summary, s.instructions]
+    const forbidden = (await Promise.all([s.prompt, s.slug ? s.variants?.[s.slug] : null, s.slug ? s.run_prompts?.[`${s.scenario_id}:${s.slug}`] : null,
+      s.run_prompts?.[String(s.scenario_id)], s.summary, s.instructions]
       .filter((x): x is string => Boolean(x)).map((x) => openText(s.org_id, x)))).filter(Boolean);
     const mentions = Array.isArray(s.mentions) ? s.mentions : [];
     const win = mentions.find((m) => m.tool === s.winner), mine = mentions.find((m) => m.target);

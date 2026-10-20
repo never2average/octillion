@@ -64,7 +64,7 @@ export async function claimJobs(workerId: string, opts: { limit?: number; models
   // Private runs only go to their own per-job orchestrator (job token), never to a shared one (docs/security.md).
   if (!opts.includePrivate) filter += " /* tenant: claim filter; a job token's claim is pinned to its own simulation in http.ts, the fleet token claims across orgs */ AND simulation_id NOT IN (SELECT id FROM simulations WHERE private)";
   const jobs = await db.transaction(async (tx) => {
-    const rows = await tx.query<Omit<Job, "max_user_turns" | "profile" | "agent" | "environment"> & { profile_id: number | null; prompt_variants: Record<string, string> | null }>(
+    const rows = await tx.query<Omit<Job, "max_user_turns" | "profile" | "agent" | "environment"> & { profile_id: number | null; scenario_id: number; prompt_variants: Record<string, string> | null; run_prompts: Record<string, string> | null }>(
       `UPDATE agent_sessions s SET status = 'running', worker_id = $1, started_at = now(), heartbeat_at = now()
          FROM ${SCENARIO_ROWS} sc
         WHERE sc.id = s.scenario_id AND s.id IN (
@@ -80,8 +80,9 @@ export async function claimJobs(workerId: string, opts: { limit?: number; models
                          FROM agent_sessions q WHERE q.status = 'queued' ${filter}) ranked
                       ORDER BY pos, queued_at, id LIMIT $2)
                  FOR UPDATE SKIP LOCKED)
-        RETURNING s.id AS session_id, s.simulation_id, s.org_id, s.product_id, s.model, s.harness, s.agent_id, s.attempt, s.profile_id,
+        RETURNING s.id AS session_id, s.simulation_id, s.org_id, s.product_id, s.model, s.harness, s.agent_id, s.attempt, s.profile_id, s.scenario_id,
                   sc.prompt, sc.prompt_variants, sc.repo_url, sc.language, sc.template, sc.tags, sc.title,
+                  (SELECT prompts FROM simulations WHERE id = s.simulation_id) AS run_prompts,
                   coalesce((SELECT private FROM simulations WHERE id = s.simulation_id), false) AS private`,
       params,
     );
@@ -110,7 +111,7 @@ export async function claimJobs(workerId: string, opts: { limit?: number; models
           [profileIds, productIds])
       : [];
     const devEnv = (process.env.OCTILLION_DEV_ENV ?? "on").toLowerCase() !== "off";
-    return rows.map(({ profile_id, prompt_variants, ...r }) => {
+    return rows.map(({ profile_id, prompt_variants, run_prompts, scenario_id, ...r }) => {
       const p = profiles.find((x) => x!.id === profile_id);
       const spec = r.agent_id ? findAgent(r.agent_id) : undefined;
       const agent: Job["agent"] = spec ? {
@@ -120,8 +121,9 @@ export async function claimJobs(workerId: string, opts: { limit?: number; models
       } : null;
       const linked = links.find((l) => l.profile_id === profile_id && l.product_id === r.product_id)?.environment;
       const environment = devEnv ? resolveEnvironment(linked ?? p?.environment ?? null, languageOf(r.language, r.template), words.get(r.product_id) ?? []) : null;
-      // The developer phrases the task in their own words when research wrote a version for this persona.
-      const prompt = (p && prompt_variants?.[p.slug]) || r.prompt;
+      // A library task in this run's words for this persona (src/adapt.ts, adapted when the run started), else a
+      // per-persona version stored on an older task, else the task as written.
+      const prompt = (p && run_prompts?.[`${scenario_id}:${p.slug}`]) || run_prompts?.[String(scenario_id)] || (p && prompt_variants?.[p.slug]) || r.prompt;
       return { ...r, prompt, agent, environment, max_user_turns: MAX_USER_TURNS(), profile: p ? { slug: p.slug, name: p.name, summary: p.summary, attributes: p.attributes, instructions: p.instructions } : null };
     });
   });
