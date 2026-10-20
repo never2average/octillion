@@ -90,3 +90,66 @@ export async function apiKeyHeaderChecks({ base, a }: { base: string; a: { key: 
   }
   console.log("✓ /mcp requires a key in a header (Bearer or X-API-Key) and serves that org; keys in the URL are deprecated, logged by prefix, and refused with OCTILLION_URL_KEYS=off");
 }
+
+/** Origin and Host validation on every MCP endpoint (src/origin.ts), the MCP spec's DNS-rebinding guidance. */
+export async function originChecks({ base, a }: { base: string; a: { key: string } }) {
+  // Origin (DNS-rebinding protection, MCP transport spec): a browser request from a foreign page is a 403 on every MCP
+  // endpoint before any credential is looked at; no Origin (non-browser clients) or our own origin is served.
+  {
+    const init = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "origin", version: "1" } } });
+    const hit = (path: string, origin?: string, key: string | null = a.key) => fetch(`${base}${path}`, { method: "POST", body: init,
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...(key ? { authorization: `Bearer ${key}` } : {}), ...(origin !== undefined ? { origin } : {}) } });
+    const lines: string[] = [], err = console.error;
+    console.error = (...xs: unknown[]) => { lines.push(xs.map(String).join(" ")); };
+    try {
+      for (const path of ["/mcp", `/mcp/${a.key}`, "/admin/mcp", "/api/admin/mcp"])
+        for (const origin of ["https://evil.example", `http://127.0.0.1.evil.example:${new URL(base).port}`, "null", "not a url",
+          `http://localhost:${new URL(base).port}`, `https://127.0.0.1:${new URL(base).port}`, `http://evil.example@127.0.0.1.evil.example:${new URL(base).port}`]) {
+          const r = await hit(path, origin);
+          assert.equal(r.status, 403, `${path} refuses Origin ${origin}`);
+          assert.equal((await r.json()).error.code, -32000);
+        }
+      assert.equal((await hit("/mcp", "https://evil.example", null)).status, 403, "refused before auth: no 401 hint for a foreign page");
+      for (const origin of [undefined, base, `${base}/`]) {
+        const r = await hit("/mcp", origin);
+        assert.equal(r.status, 200, `/mcp serves Origin ${origin ?? "(none)"}`);
+        await r.text();
+      }
+      for (const path of [`/mcp/${a.key}`, "/admin/mcp", "/api/admin/mcp"]) {
+        const r = await hit(path, undefined);
+        assert.notEqual(r.status, 403, `${path} without an Origin reaches auth (${r.status})`);
+        await r.text();
+      }
+      process.env.CLERK_MCP_AUDIENCE = "https://aud.example/mcp";
+      try { const r = await hit("/mcp", "https://aud.example"); assert.equal(r.status, 200, "a CLERK_MCP_AUDIENCE origin is served"); await r.text(); }
+      finally { delete process.env.CLERK_MCP_AUDIENCE; }
+      process.env.OCTILLION_MCP_ALLOWED_ORIGINS = "http://localhost:6274, https://inspector.example";
+      try {
+        const r = await hit("/mcp", "http://localhost:6274");
+        assert.equal(r.status, 200, "an origin listed in OCTILLION_MCP_ALLOWED_ORIGINS is served");
+        await r.text();
+        assert.equal((await hit("/mcp", "http://localhost:6275")).status, 403, "a different port is a different origin");
+      } finally { delete process.env.OCTILLION_MCP_ALLOWED_ORIGINS; }
+      // Every method is checked, not only POST: GET (an SSE stream), DELETE, OPTIONS, HEAD.
+      for (const path of ["/mcp", "/admin/mcp"])
+        for (const method of ["GET", "DELETE", "OPTIONS", "HEAD"])
+          assert.equal((await fetch(`${base}${path}`, { method, headers: { origin: "https://evil.example" } })).status, 403, `${method} ${path} checks Origin`);
+      // A loopback server with no PUBLIC_URL also checks Host (DNS rebinding on a developer's machine, no Origin needed).
+      const pub = process.env.PUBLIC_URL;
+      delete process.env.PUBLIC_URL;
+      try {
+        const { request } = await import("node:http");
+        const viaHost = (host: string) => new Promise<number>((done, fail) => {
+          const rq = request({ host: "127.0.0.1", port: Number(new URL(base).port), path: "/mcp", method: "POST", headers: { host, "content-type": "application/json", authorization: `Bearer ${a.key}` } }, (rs) => { rs.resume(); done(rs.statusCode ?? 0); });
+          rq.on("error", fail); rq.end("{}");
+        });
+        assert.equal(await viaHost("rebound.evil.example"), 403, "a rebound Host is refused on a loopback server");
+        assert.notEqual(await viaHost(`localhost:${new URL(base).port}`), 403, "localhost is fine");
+      } finally { process.env.PUBLIC_URL = pub; }
+    } finally { console.error = err; }
+    assert.ok(lines.some((l) => l.startsWith("mcp origin refused POST /mcp origin=\"https://evil.example\"")), "refusals are logged with the origin");
+    assert.ok(lines.filter((l) => l.includes('origin="https://evil.example"') && l.includes("POST /mcp ")).length === 1, "once a minute per origin, not per request");
+    assert.ok(!lines.some((l) => l.includes("origin refused") && l.includes(a.key)), "never with the key from a URL");
+  }
+  console.log("✓ /mcp and the admin MCP refuse foreign Origins (403, before auth); no Origin, our own, or a listed one is served");
+}

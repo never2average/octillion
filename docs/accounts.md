@@ -69,9 +69,16 @@ How Octillion uses it:
   `WWW-Authenticate`, `/.well-known/oauth-protected-resource`, CORS-open), signs the person in and sends a Clerk OAuth
   access token (opaque `oat_…` or a JWT); Octillion verifies it and uses the person's oldest membership that is not
   suspended. Existing `oct_` keys work in a header (`Authorization: Bearer`, or
-  `X-API-Key`). Keys in the URL (`/mcp/<key>`) are deprecated: served with `Deprecation: true` and logged by key prefix
+  `X-API-Key`). Keys in the URL (`/mcp/<key>`) are deprecated: served with a `Deprecation` header and logged by key prefix
   while `OCTILLION_URL_KEYS` is `allow` (the default), refused with `OCTILLION_URL_KEYS=off`; new keys are never
   issued as URLs.
+- **Origin:** browsers send an `Origin` header; on every MCP endpoint a request whose Origin is not `PUBLIC_URL`'s (or
+  a `CLERK_MCP_AUDIENCE` origin, or one listed in `OCTILLION_MCP_ALLOWED_ORIGINS`, comma-separated) is refused with a
+  403 and logged (`mcp origin refused … origin="…"`, once a minute per origin); the `/mcp` access line shows any Origin a
+  served request carried. Claude Code, Cursor and the SDKs send none; Claude's and ChatGPT's connectors call from their
+  servers and are expected to send none (check the access lines after deploying). Allowing an origin passes this check
+  only: no CORS headers are sent. A server on loopback with no `PUBLIC_URL` also refuses a `Host` that is not
+  localhost.
 - **Suspending someone:** Clerk memberships have no deactivated state, so suspension is the membership's
   `public_metadata.suspended = true`; Octillion refuses suspended members on `/mcp` and `/api/app` (at once for changes
   made through Octillion, within 30 seconds for changes made in the Clerk dashboard). Removing a member deletes the

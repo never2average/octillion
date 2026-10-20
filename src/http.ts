@@ -10,7 +10,8 @@ import * as telemetry from "./telemetry.js";
 import * as mail from "./email.js";
 import { appRouter } from "./app.js";
 import { adminActor, adminAuthRouter, requirePlatformAdmin } from "./admin-auth.js";
-import { adminSkillList, adminToolList, adminMcpResource, mountAdminMcp } from "./admin-mcp.js";
+import { ADMIN_MCP_PATHS, adminSkillList, adminToolList, adminMcpResource, mountAdminMcp } from "./admin-mcp.js";
+import { mcpOriginGuard } from "./origin.js";
 import * as roles from "./admin-roles.js";
 import * as adminTokens from "./admin-tokens.js";
 const { need } = roles;
@@ -67,6 +68,9 @@ export function createApp() {
   const app = express();
   app.set("trust proxy", true);
   app.disable("x-powered-by");
+  // Origin first (src/origin.ts, DNS-rebinding protection): a browser page from a foreign origin gets a 403 on every MCP
+  // endpoint, the admin MCP included, before any credential is looked at and before any database read.
+  app.use(["/mcp", ...ADMIN_MCP_PATHS], mcpOriginGuard);
   // Provider keys still set as environment variables go into the key vault once, before anything reads a key.
   void importEnvKeysOnce();
   adminTokens.warnRetiredAdminToken();
@@ -196,7 +200,8 @@ export function createApp() {
       const rpc = msgs.map((m: any) => (m?.method === "tools/call" ? `tools/call:${m?.params?.name}` : m?.method)).filter(Boolean).join(",");
       // On Vercel nothing ticks the autoscaler: a tool call may have queued work (onboarding, a simulation, an approval).
       if (rpc.includes("tools/call")) serverlessTick();
-      console.error(`mcp ${req.method} ${res.statusCode} org=${res.locals.org ?? "-"} rpc=${rpc || "-"} ${Date.now() - t0}ms ua="${String(req.get("user-agent") ?? "").slice(0, 80)}"`);
+      const origin = req.get("origin");
+      console.error(`mcp ${req.method} ${res.statusCode} org=${res.locals.org ?? "-"} rpc=${rpc || "-"} ${Date.now() - t0}ms ua="${String(req.get("user-agent") ?? "").slice(0, 80)}"${origin ? ` origin=${JSON.stringify(origin.slice(0, 120))}` : ""}`);
     });
     next();
   });
