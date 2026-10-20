@@ -999,7 +999,7 @@ try {
     const { classifyOrchestrator } = await import("../src/error-classes.js");
     const { launchFailure, recordComputeEvent } = await import("../src/compute-events.js");
     const { readFile } = await import("node:fs/promises");
-    // Rows written before the split carry everything in `error`; the backfill in sql/schema.sql splits them.
+    // Rows written before the split carry everything in `error`; the backfill in the baseline migration splits them.
     const legacy = [
       ["smoke-os-1", null, "ready (240s): sandbox bx_1 not ready after 240s"],
       ["smoke-os-2", "now()", "stale: no fleet check-in for 5 min"],
@@ -1008,7 +1008,7 @@ try {
     ];
     for (const [sb, ready, error] of legacy)
       await db.query(`INSERT INTO orchestrator_sandboxes (sandbox_id, state, deleted_at, ready_at, error) VALUES ($1, 'deleted', now(), ${ready ?? "NULL"}, $2)`, [sb, error]);
-    const schema = await readFile(new URL("../sql/schema.sql", import.meta.url), "utf8");
+    const schema = await readFile(new URL("../sql/migrations/0001_baseline.sql", import.meta.url), "utf8");
     const backfill = schema.match(/UPDATE orchestrator_sandboxes SET[\s\S]*?;/g) ?? [];
     assert.equal(backfill.length, 2, "the two backfill statements are in the schema");
     for (const sql of [...backfill, ...backfill]) await db.query(sql); // twice: a rerun at boot changes nothing
@@ -3657,7 +3657,8 @@ try {
       await db.query("UPDATE usage_policies SET max_concurrent_runs = 0 WHERE org_id = $1", [rowW.id]);
       await db.query("UPDATE usage_members SET can_run = NULL, max_concurrent_runs = NULL, team_id = NULL WHERE org_id = $1 AND user_id = $2", [rowW.id, acc2.user.id]);
       await db.query("UPDATE usage_members SET can_run = NULL, max_concurrent_runs = 2 WHERE org_id = $1 AND user_id = $2", [rowW.id, accepted.user.id]);
-      await db.migrate(await (await import("node:fs/promises")).readFile("sql/schema.sql", "utf8"));
+      const baseline = await (await import("node:fs/promises")).readFile("sql/migrations/0001_baseline.sql", "utf8");
+      await db.migrate((tx) => tx.exec(baseline)); // the baseline's data migrations, as they ran on a database from before them
       const [pol0] = await db.query<any>("SELECT max_concurrent_runs, new_members_can_run FROM usage_policies WHERE org_id = $1", [rowW.id]);
       assert.ok(pol0.max_concurrent_runs === null && pol0.new_members_can_run === false, "the account's 0 becomes 'only people I've allowed'");
       const mig = new Map((await db.query<any>("SELECT user_id, can_run, max_concurrent_runs FROM usage_members WHERE org_id = $1", [rowW.id])).map((m) => [m.user_id, m]));
@@ -3665,7 +3666,7 @@ try {
       assert.ok(mig.get(accepted.user.id).can_run === true && Number(mig.get(accepted.user.id).max_concurrent_runs) === 2, "someone with their own count keeps launching");
       // Meaning changes A and B are migrated once: own limits that were never applied (outside custom) and buffers
       // outside even mode are cleared, and custom with no default becomes pool. Afterwards they mean something, so stay.
-      const rerun = async () => db.migrate(await (await import("node:fs/promises")).readFile("sql/schema.sql", "utf8"));
+      const rerun = async () => db.migrate((tx) => tx.exec(baseline));
       const policyRow = async () => (await db.query<any>("SELECT mode, reserve_usd FROM usage_policies WHERE org_id = $1", [rowW.id]))[0];
       const capOf = async (uid: string) => (await db.query<any>("SELECT cap_usd FROM usage_members WHERE org_id = $1 AND user_id = $2", [rowW.id, uid]))[0]?.cap_usd;
       await db.query("UPDATE usage_policies SET mode = 'pool', reserve_usd = 50 WHERE org_id = $1", [rowW.id]);

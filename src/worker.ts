@@ -39,7 +39,7 @@ export interface Job {
   agent: { id: string; harness: string; model: string; label: string; harness_version?: string; event_format?: string; image?: { docker?: string; boat_snapshot?: string };
            requires_env?: string[]; cli?: string; worker_adapter?: string; boat_preinstalled?: boolean; resume?: boolean; origin?: string; base_agent?: string } | null;
   prompt: string; repo_url: string | null; language: string | null; max_user_turns: number;
-  /** How the agent works (schema.sql exec_mode): plan first and implement once approved, or execute directly. */
+  /** How the agent works (sql/migrations/0001_baseline.sql exec_mode): plan first and implement once approved, or execute directly. */
   exec_mode: "plan" | "direct";
   /** Starter workspace hint + scenario tags/title (the orchestrator picks a template when repo_url is null). */
   template: string | null; tags: string[]; title: string;
