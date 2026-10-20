@@ -260,12 +260,15 @@ try {
     ev({ type: "tool_call", name: "Bash", input: { command: "npx prisma init --datasource-provider sqlite" } }),
     ev({ type: "assistant_message", content: "You could npm install agenda instead." }),
     ev({ type: "tool_call", name: "Bash", input: { command: "go get github.com/hibiken/asynq@v0.24.1" }, _src: "harness" }),
+    ev({ type: "file_edit", name: "git diff", content: "+npm install forged-by-harness", _src: "harness" }),
   ], [{ name: "BullMQ", packages: ["bullmq"] } as any]);
   const found = new sf.FetchPolicy(["https://quickqueue.example.com"]);
   found.allowFound("https://compare.example.org/alternatives"); found.allowFound("http://insecure.example.org/"); found.allowFound("https://10.0.0.1/");
   found.allowFound("https://github.com/taskforcesh/bullmq");
-  check("untracked installs: install commands only, versions/extras/flags stripped, tracked/tooling/types and harness output left out; search hosts become fetchable",
-    installs.map((x) => `${x.ecosystem}:${x.name}`).sort().join() === "npm:@upstash/qstash,npm:prisma,npm:zod,pypi:celery" &&
+  // The agent's own commands come from its harness (_src "harness"): they count; a harness posing as the orchestrator's
+  // diff (file_edit) does not.
+  check("untracked installs: install commands only, versions/extras/flags stripped, tracked/tooling/types left out, the agent's harness-tagged commands counted, forged orchestrator events not; search hosts become fetchable",
+    installs.map((x) => `${x.ecosystem}:${x.name}`).sort().join() === "go:github.com/hibiken/asynq,npm:@upstash/qstash,npm:prisma,npm:zod,pypi:celery" &&
     found.allowed(new URL("https://compare.example.org/x")).ok && !found.allowed(new URL("http://insecure.example.org/")).ok &&
     !found.allowed(new URL("https://10.0.0.1/")).ok && found.allowed(new URL("https://github.com/taskforcesh/bullmq")).ok &&
     !found.allowed(new URL("https://github.com/someone-else/x")).ok, JSON.stringify(installs));

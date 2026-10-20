@@ -65,15 +65,17 @@ const ACTION_CHARS = 600;
 // ---------- the agent's own text ----------
 
 /**
- * What the agent wrote, nearest the decision first until MAX_CHARS, then back in order. Harness-tagged events and
- * simulated-developer replies are skipped (segments() already keeps only assistant text and the agent's actions).
+ * What the agent wrote, nearest the decision first until MAX_CHARS, then back in order. Simulated-developer replies
+ * are skipped; segments() keeps only assistant text and the agent's actions, and drops orchestrator-only event types
+ * a harness could forge (the agent's own lines are all _src "harness", the harness having printed them).
  * `decisionSeq`: the event where the winner first showed up (or the product, or the end).
  */
 export function agentText(events: StoredEvent[], decisionSeq: number | null, forbidden: string[] = [], maxChars = MAX_CHARS): string {
   const pieces: { seq: number; i: number; text: string }[] = [];
   const strip = echoStripper(forbidden);
   for (const e of [...events].sort((a, b) => a.seq - b.seq)) {
-    if ((e.raw as { _src?: unknown })._src === "harness" || e.type === "simulated_user") continue;
+    // Everything the agent wrote comes from its harness (_src "harness"); segments() drops what a harness could forge.
+    if (e.type === "simulated_user") continue;
     for (const seg of segments(e.raw)) {
       let t = strip(seg.text ?? "").replace(/\r/g, "").trim();
       if (!t) continue;

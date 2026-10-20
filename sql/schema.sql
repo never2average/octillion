@@ -1165,3 +1165,8 @@ BEGIN
     DELETE FROM developer_profiles WHERE id = m.copy_id;
   END LOOP;
 END $$;
+
+-- Loss reasons skipped as "the agent wrote nothing to read" before 2026-10-20: agentText dropped every _src "harness"
+-- event, which is everything the agent wrote. Queued again for the automatic drain (once: only rows tried before the fix).
+UPDATE agent_sessions SET reason_status = NULL, reason_error = NULL
+ WHERE reason_status = 'skipped' AND reason_error = 'the agent wrote nothing to read' AND reason_tried_at < '2026-10-20T10:30:00Z';

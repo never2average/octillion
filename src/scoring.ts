@@ -253,7 +253,9 @@ export function untrackedInstalls(events: StoredEvent[], tracked: Tool[]): { nam
   const known = new Set(tracked.flatMap((t) => [...(t.packages ?? []), t.name, ...(t.aliases ?? [])]).map((x) => x.toLowerCase()));
   const out = new Map<string, { name: string; ecosystem: string }>();
   for (const e of events) {
-    if ((e.raw as { _src?: unknown })._src === "harness" || e.type === "simulated_user") continue;
+    // The agent's own lines are the harness's (_src "harness": sink.ts tags everything the harness printed); segments()
+    // drops what a harness could forge as the orchestrator's (file_edit, simulated_user, session_end).
+    if (e.type === "simulated_user") continue;
     for (const seg of segments(e.raw)) {
       if (seg.kind !== "action") continue;
       const text = seg.text.replace(/\\n|\\t/g, "\n");

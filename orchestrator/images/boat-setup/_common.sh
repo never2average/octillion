@@ -48,11 +48,25 @@ ensure_node() {
 
 # npm_pin <package> <version>: install a pinned npm package globally into /usr/local (bins in /usr/local/bin).
 # --force replaces a preinstalled bin of the same name (boat ships some harnesses preinstalled).
+# Newer npm skips a package's install scripts unless they are approved (allowScripts), and some harnesses fetch their
+# native binary there (claude-code: install.cjs): so the pinned package's own install / postinstall run explicitly
+# afterwards (`npm run` is not subject to that), only for the package we pinned, never for its dependencies.
 npm_pin() {
   local pkg="$1" ver="$2"; shift 2
   ensure_node
   log "npm install -g $pkg@$ver -> /usr/local"
   $SUDO env "PATH=$PATH" npm install -g --prefix /usr/local --no-fund --no-audit --force "$@" "$pkg@$ver" >&2
+  local dir="/usr/local/lib/node_modules/$pkg"
+  # A caller that passed --ignore-scripts (pi) wants none run.
+  case " $* " in *" --ignore-scripts "*) return 0;; esac
+  if [ -f "$dir/package.json" ]; then
+    for script in install postinstall; do
+      if node -e 'process.exit(require(process.argv[1]).scripts?.[process.argv[2]] ? 0 : 1)' "$dir/package.json" "$script" 2>/dev/null; then
+        log "running $pkg's $script script"
+        $SUDO env "PATH=$PATH" npm run --prefix "$dir" --no-fund --no-audit "$script" >&2 || die "$pkg $script script failed"
+      fi
+    done
+  fi
 }
 
 # download_tarball <url> <dest-dir> [sha512]: download a release tarball over https into a fresh dir.
