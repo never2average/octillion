@@ -12,6 +12,8 @@ import { useAdminRole, ROLE_LABEL, type AdminRole } from './role';
 import { CopyField, DataList, ErrorBox, LoadingCards, Section, StatusBadge, copyText } from './ui';
 
 interface Tool { name: string; title: string; needs: AdminRole; needs_label: string; changes: boolean; destructive: boolean }
+/** A skill: a playbook shipped as an MCP prompt, a slash command in the client (src/admin-mcp.ts ADMIN_SKILLS). */
+interface Skill { name: string; title: string; description: string; args: string[] }
 const ORDER: AdminRole[] = ['viewer', 'support', 'operator', 'owner'];
 
 /** Each client's way in: a command, or a config file and its snippet. */
@@ -27,7 +29,7 @@ function clients(url: string) {
 }
 
 export function AdminConnect() {
-  const { data, error, isLoading } = useAdmin<{ url: string; tools: Tool[] }>('/mcp');
+  const { data, error, isLoading } = useAdmin<{ url: string; tools: Tool[]; skills?: Skill[] }>('/mcp');
   const { role, label } = useAdminRole();
   const [pick, setPick] = useState('claude-code');
   // The server's public URL, as on the customer setup page: the OAuth metadata names the same resource.
@@ -58,6 +60,14 @@ export function AdminConnect() {
               </p>
             </div>
           </Section>
+          {!!data.skills?.length && (
+            <Section title='Skills' description='Ready-made playbooks that chain the tools, shipped with the server: type / in your client to run one. They read, then ask before changing anything.'>
+              <DataList<Skill> rows={data.skills} noun='skills' empty='No skills.' minWidth={520} cols={[
+                { label: 'Skill', className: 'w-56', render: (k) => <span className='flex flex-col gap-1'><span className='font-medium'>{k.title}</span><code className='text-muted-foreground font-mono text-xs'>/{k.name}</code></span> },
+                { label: 'What it does', render: (k) => <span className='text-sm'>{k.description}{k.args.length ? <span className='text-muted-foreground block text-xs'>Asks for: {k.args.join(', ')}</span> : null}</span> }
+              ]} />
+            </Section>
+          )}
           <Section title='Tools' description={role ? `You are ${ROLE_LABEL[role]}: the tools marked as needing a higher role are refused.` : undefined}>
             <DataList<Tool> rows={data.tools} noun='tools' empty='No tools.' minWidth={520} cols={[
               { label: 'Tool', render: (t) => <span className='flex flex-col gap-1'><span className='font-medium'>{t.title}</span><code className='text-muted-foreground font-mono text-xs'>{t.name}</code></span> },

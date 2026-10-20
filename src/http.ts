@@ -10,7 +10,7 @@ import * as telemetry from "./telemetry.js";
 import * as mail from "./email.js";
 import { appRouter } from "./app.js";
 import { adminActor, adminAuthRouter, requirePlatformAdmin } from "./admin-auth.js";
-import { adminToolList, adminMcpResource, mountAdminMcp } from "./admin-mcp.js";
+import { adminSkillList, adminToolList, adminMcpResource, mountAdminMcp } from "./admin-mcp.js";
 import * as roles from "./admin-roles.js";
 const { need } = roles;
 import { fileURLToPath } from "node:url";
@@ -539,7 +539,7 @@ export function createApp() {
   // Admins and their roles (src/admin-roles.ts; Clerk user metadata): everyone reads, owners change.
   const changer = (req: Request, res: Response): roles.Changer => ({ actor: adminActor(req, res), userId: (res.locals.adminUserId as string | undefined) ?? null });
   // The Connect page (/admin/connect): the admin MCP URL and which tools each role may call.
-  ob.get("/mcp", (_req, res) => void res.json({ url: adminMcpResource(), tools: adminToolList() }));
+  ob.get("/mcp", (_req, res) => void res.json({ url: adminMcpResource(), tools: adminToolList(), skills: adminSkillList() }));
   ob.get("/admins", async (_req, res) => void res.json({ admins: await roles.listAdmins(), roles: roles.PLATFORM_ROLES.map((r) => ({ id: r, label: roles.ROLE_LABELS[r], help: roles.ROLE_HELP[r] })),
     me: (res.locals.adminUserId as string | undefined) ?? null }));
   ob.post("/admins", need("admins"), async (req, res) => {

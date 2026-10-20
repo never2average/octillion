@@ -363,6 +363,94 @@ export async function runAdminTool(c: AdminCaller, name: AdminToolName, args: Ar
   }
 }
 
+// ---------- skills: playbooks for recurring jobs, as MCP prompts (slash commands in the client) ----------
+
+const say = (text: string) => ({ messages: [{ role: "user" as const, content: { type: "text" as const, text } }] });
+const CONFIRM = "Never make a change without the user's explicit yes in this conversation; say which role it needs.";
+
+/**
+ * Skills shipped with the admin MCP server: each chains the tools above for one recurring job and ends with a written
+ * result. Reads only, except where a step proposes a change, which waits for the user's yes. Listed on Admin › Connect.
+ */
+export const ADMIN_SKILLS = {
+  ops_review: {
+    title: "Daily operations review",
+    description: "Health, stuck or failed runs, waiting access requests and accounts needing attention, in one short report with next steps.",
+    args: {},
+    text: () => [
+      "Do Octillion's daily operations review.",
+      "1. health_summary with failures: true. 2. list_simulations with state 'failed' since '24h', then state 'active'. 3. list_access_requests with status 'pending'. 4. list_accounts with attention_only: true.",
+      "Write a short report: **Health** (verdict, orchestrators, anything degraded), **Failures** (grouped by reason, with counts and the fix the data points to), " +
+      "**Runs** (active ones and any stuck: queued or booting a long time), **Access requests** (who is waiting and for how long), **Accounts** (what needs attention and why). " +
+      "End with at most 5 next steps, most urgent first, each naming the tool that would do it. " + CONFIRM,
+    ].join("\n"),
+  },
+  triage_requests: {
+    title: "Triage access requests",
+    description: "Every pending access request with who they are, fit and a recommendation to approve or decline; acts only on your yes.",
+    args: {},
+    text: () => [
+      "Triage the pending access requests.",
+      "1. list_access_requests with status 'pending'.",
+      "2. For each: one line on the person and company (role, team size, product, what they want), the fit signals the request carries, how long it has waited, " +
+      "and a recommendation: approve, decline, or ask a question first, with the reason.",
+      "3. Show them as a table, oldest first. Then ask which to approve or decline; call approve_access_request / decline_access_request only for the ones the user confirms (Support role). " + CONFIRM,
+    ].join("\n"),
+  },
+  account_review: {
+    title: "Account review",
+    description: "One account end to end: stage, people, usage, spend against its allowance, plan and runs, what is wrong and the next step.",
+    args: { account: z.string().describe("Account slug or name (list_accounts finds it)") },
+    text: ({ account }: { account?: string }) => [
+      `Review the Octillion account "${account ?? ""}".`,
+      "1. list_accounts with q set to it to find the slug if needed, then get_account. 2. model_spend with account set to the slug. 3. list_simulations with since '7d' and pick this account's runs.",
+      "Write: **Where they are** (stage, next step, people and who is active), **Usage** (tool calls, runs and their outcomes, errors), **Money** (model spend this month against the allowance, plan, " +
+      "subscription state), **Problems** (anything blocking or wrong, with evidence), **Next step** (one concrete action for us, one for them). " + CONFIRM,
+    ].join("\n"),
+  },
+  finops_digest: {
+    title: "FinOps digest",
+    description: "Revenue, plans, pricing experiments and model spend for a period: MRR, collected, margin, anomalies and experiment results.",
+    args: { from: z.string().optional().describe("First day, YYYY-MM-DD (default: this month)"), to: z.string().optional().describe("Last day, YYYY-MM-DD") },
+    text: ({ from, to }: { from?: string; to?: string }) => {
+      const r = JSON.stringify({ ...(from ? { from } : {}), ...(to ? { to } : {}) });
+      return [
+        `Write Octillion's FinOps digest for ${from || to ? `${from ?? "…"} to ${to ?? "today"}` : "this month"}.`,
+        `1. finops_revenue ${r}. 2. finops_plans ${r}. 3. finops_experiments ${r}. 4. model_spend ${r}.`,
+        "Write: **Revenue** (MRR now, collected, paying accounts, gross margin, the accounts that moved it), **Plans** (subscribers and MRR per plan), " +
+        "**Experiments** (per running experiment: each variant's shown, subscribed, conversion with its interval, lift vs control and whether it is significant yet; say plainly when it is too early), " +
+        "**Model spend** (by provider and top accounts; flag unpriced requests and anything spending fast against its allowance). Numbers from the tools only; no estimates.",
+      ].join("\n");
+    },
+  },
+  pricing_experiment: {
+    title: "Set up a pricing experiment",
+    description: "Design an A/B test between plans: drafts each variant's JSON config, dry-runs it in Stripe, and creates them only on your yes.",
+    args: { experiment: z.string().describe("Experiment name, e.g. growth-price-q4"), idea: z.string().describe("What to test, e.g. Growth at $499 vs $399 with higher usage rates") },
+    text: ({ experiment, idea }: { experiment?: string; idea?: string }) => [
+      `Set up the pricing experiment "${experiment ?? ""}": ${idea ?? ""}`,
+      "1. finops_plans to see the existing plans and their configs (reuse one as the control if it fits).",
+      "2. Draft one plan config per variant (the create_plan config: name, base_fee_usd, monthly_budget_usd, usage, trial_days, experiment, weight). Use real, marketable plan names.",
+      "3. create_plan with dry_run: true for each and show what Stripe would get. 4. Ask the user to confirm; then create_plan for each (Owner role), and set_plan_experiment " +
+      "to put an existing control plan in the experiment. 5. Remind them only accounts allowed plans are shown variants, and that results are on FinOps › Experiments (finops_experiments). " + CONFIRM,
+    ].join("\n"),
+  },
+  cost_check: {
+    title: "Model cost check",
+    description: "Where model spend goes and whether anything is off: by provider and account, unpriced usage, and accounts near their allowance.",
+    args: { from: z.string().optional().describe("First day, YYYY-MM-DD"), to: z.string().optional().describe("Last day, YYYY-MM-DD") },
+    text: ({ from, to }: { from?: string; to?: string }) => [
+      `Check Octillion's model costs${from || to ? ` for ${from ?? "…"} to ${to ?? "today"}` : " this month"}.`,
+      `1. model_spend ${JSON.stringify({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}. 2. list_accounts. 3. analytics_overview for the same days.`,
+      "Write: total spend and its split (sessions vs orchestrators, by provider and model), the top accounts and their spend against allowance, unpriced requests (spend is understated: name the models), " +
+      "and anything unusual (a day or account far above the rest). End with concrete fixes (a price row, an allowance, a setting), each naming the tool. " + CONFIRM,
+    ].join("\n"),
+  },
+} satisfies Record<string, { title: string; description: string; args: Record<string, z.ZodType>; text: (a: any) => string }>;
+
+/** For the Connect page: each skill, what it does and what it asks for. */
+export const adminSkillList = () => Object.entries(ADMIN_SKILLS).map(([name, s]) => ({ name, title: s.title, description: s.description, args: Object.keys(s.args) }));
+
 export function createAdminServer(c: AdminCaller): McpServer {
   const server = new McpServer(
     { name: "octillion-admin", version: "1.0.0" },
@@ -371,6 +459,7 @@ export function createAdminServer(c: AdminCaller): McpServer {
         "health_summary, list_simulations, get_simulation, finops_revenue, finops_plans, finops_experiments, model_spend, analytics_overview, " +
         "list_settings, key_vault_status, library_stats. Changes (each needs a role; refusals name it): approve/decline_access_request, " +
         "set_account_allowance, allow_prepaid_plans, create_plan (dry_run first), archive_plan, set_plan_experiment, update_setting, cancel_simulation. " +
+        "Skills (prompts, slash commands): ops_review, triage_requests, account_review, finops_digest, pricing_experiment, cost_check. " +
         `Confirm with the user before any change. This connection is ${c.actor}, role ${ROLE_LABELS[c.role]}.` },
   );
   for (const name of ADMIN_TOOL_NAMES) {
@@ -384,6 +473,8 @@ export function createAdminServer(c: AdminCaller): McpServer {
                      openWorldHint: ["approve_access_request", "decline_access_request", "create_plan", "archive_plan", "set_plan_experiment"].includes(name) },
     }, (args: Args) => runAdminTool(c, name, args));
   }
+  for (const [name, sk] of Object.entries(ADMIN_SKILLS))
+    server.registerPrompt(name, { title: sk.title, description: sk.description, argsSchema: sk.args }, (a: any) => say(sk.text(a)));
   return server;
 }
 

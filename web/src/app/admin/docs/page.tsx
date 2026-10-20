@@ -1,6 +1,7 @@
-import { AdminDocsIndex } from '@/features/docs/admin-docs';
+import { redirect } from 'next/navigation';
+import { firstAdminDocHref } from '@/features/docs/admin-docs';
 
-export const metadata = { title: 'Docs' };
+// No cover page: the first doc is the docs' landing page.
 export default function Page() {
-  return <AdminDocsIndex />;
+  redirect(firstAdminDocHref());
 }

@@ -3386,6 +3386,14 @@ try {
       assert.ok(ann("list_accounts").readOnlyHint && !ann("list_accounts").destructiveHint, "reads are read-only");
       for (const n of ["archive_plan", "decline_access_request", "cancel_simulation"]) assert.ok(!ann(n).readOnlyHint && ann(n).destructiveHint, `${n} is destructive`);
       assert.ok(!ann("approve_access_request").readOnlyHint && !ann("approve_access_request").destructiveHint, "approve changes, not destructive");
+      // Skills ship as MCP prompts: every one listed, and each fills in its arguments.
+      const { ADMIN_SKILLS } = await import("../src/admin-mcp.js");
+      const prompts = (await viewer.listPrompts()).prompts;
+      assert.deepEqual(prompts.map((p) => p.name).sort(), Object.keys(ADMIN_SKILLS).sort(), "every admin skill is listed as a prompt");
+      const ops = await viewer.getPrompt({ name: "ops_review", arguments: {} });
+      assert.ok(ops.messages[0]?.content.type === "text" && ops.messages[0].content.text.length > 100, "a skill returns its instructions");
+      const acct = await viewer.getPrompt({ name: "account_review", arguments: { account: slugW } });
+      assert.ok(acct.messages[0]?.content.type === "text" && acct.messages[0].content.text.includes(slugW), "a skill's arguments are filled in");
       // A viewer reads everything; the key vault gives hints, never a secret.
       const accts = await viewer.callTool({ name: "list_accounts", arguments: { q: slugW } });
       assert.ok(!accts.isError && (accts.structuredContent as any).accounts.some((o: any) => o.slug === slugW), `list_accounts: ${JSON.stringify(accts.content).slice(0, 200)}`);
@@ -3446,7 +3454,7 @@ try {
       assert.equal((await post(await clerkSession(ownerU.id))).status, 401, "a session token is not an OAuth token");
       assert.equal((await post(await token({ user_id: ownerU.id, revoked: true }))).status, 401, "a revoked token is refused");
       assert.equal((await post(a.key)).status, 401, "an account API key is not an admin");
-      console.log("✓ admin MCP: OAuth discovery, platform admins only, tools with annotations, viewer reads and is refused changes naming the role, owner dry-run plan and approval, audit log, no secrets");
+      console.log("✓ admin MCP: OAuth discovery, platform admins only, tools with annotations, skills as prompts, viewer reads and is refused changes naming the role, owner dry-run plan and approval, audit log, no secrets");
     }
 
     // ---------- usage limits: budget split, teams, rollout, throughput (set by account admins on /app) ----------
