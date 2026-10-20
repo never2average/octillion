@@ -7,13 +7,6 @@ export { markdownHeadings, plainHeading, slugify, type DocHeading } from '@/cont
 export interface DocNavPage { title: string; href: string; headings: DocHeading[] }
 export interface DocNavGroup { title: string; pages: DocNavPage[] }
 
-/** The pages in navigation order, with the one before and after `href`. */
-export function neighbours(groups: DocNavGroup[], href: string) {
-  const pages = groups.flatMap((g) => g.pages.map((p) => ({ ...p, group: g.title })));
-  const i = pages.findIndex((p) => p.href === href);
-  return { prev: i > 0 ? pages[i - 1] : undefined, next: i >= 0 && i < pages.length - 1 ? pages[i + 1] : undefined };
-}
-
 /**
  * A page's opening paragraph, to show under its title as the summary, and the rest of the body. A paragraph that
  * introduces what follows (ends in ":") stays in the body, as does anything that is not plain prose.

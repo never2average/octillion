@@ -29,7 +29,7 @@ export function CustomerDocPage({ slug }: { slug: string }) {
   const { lead, rest } = splitLead(page.body);
   const tools = page.slug === 'mcp-tools';
   return (
-    <DocsLayout nav={NAV} href={href(page.slug)} title={page.title} headings={markdownHeadings(rest)}
+    <DocsLayout nav={NAV} title={page.title} headings={markdownHeadings(rest)}
       description={lead ? <Markdown className='text-muted-foreground max-w-none text-lg [&_p]:my-0 [&_p]:leading-relaxed'>{lead}</Markdown> : undefined}
       meta={tools ? <span>Generated from the Octillion MCP server: {catalog.tools.length} tools{catalog.prompts.length ? `, ${catalog.prompts.length} slash commands` : ''}.</span> : undefined}>
       <Markdown className='max-w-none'>{rest}</Markdown>

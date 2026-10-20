@@ -58,7 +58,7 @@ function resolver(doc: AdminDoc) {
 export function AdminDocsIndex() {
   const groups = nav().slice(1);
   return (
-    <DocsLayout nav={nav()} href={HOME} title='Internal docs'
+    <DocsLayout nav={nav()} title='Internal docs'
       description='Internal Octillion documentation: how accounts, budgets, compute, credentials and storage work, plus specs and case studies.'
       headings={groups.map((g) => ({ id: slugify(g.title), text: g.title, depth: 2 as const }))}
       meta={<span>{ADMIN_DOCS.length} docs, from <code className='font-mono'>docs/</code> in the repository.</span>}>
@@ -93,7 +93,7 @@ export function AdminDocPage({ slug }: { slug: string }) {
   const { lead, rest } = splitLead(bodyOf(doc));
   const resolve = resolver(doc);
   return (
-    <DocsLayout nav={nav()} href={href(doc)} title={doc.title} headings={markdownHeadings(rest)}
+    <DocsLayout nav={nav()} title={doc.title} headings={markdownHeadings(rest)}
       description={lead ? <Markdown resolveHref={resolve} className='text-muted-foreground max-w-none text-lg [&_p]:my-0 [&_p]:leading-relaxed'>{lead}</Markdown> : undefined}
       meta={<span>Source: <code className='font-mono'>docs/{doc.path}</code></span>}>
       <Markdown resolveHref={resolve} className='max-w-none'>{rest}</Markdown>
