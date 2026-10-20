@@ -191,7 +191,9 @@ const saw = (t: Tick) => [
   t.queued != null && `queued ${t.queued}`, t.running && `running ${t.running}`, t.research && `research ${t.research}`, t.unclaimable && `can't run ${t.unclaimable}`
 ].filter(Boolean).join(' · ') || (t.queued == null ? '—' : 'nothing queued');
 const wanted = (t: Tick) => (t.desired == null && t.cap == null && t.active == null ? '—'
-  : `${t.desired ?? '—'} → ${t.cap ?? '—'} → ${t.active ?? '—'}`);
+  : `want ${t.desired ?? '—'} · cap ${t.cap ?? '—'} · have ${t.active ?? '—'}`);
+/** The Note cell's text: the error first, then the note, so CSV and search keep both. */
+const noted = (t: Tick) => [t.error, t.note].filter(Boolean).join(' · ');
 const launchName = (l: Launched) => l.orchestrator_id ?? (l.row ? `row ${l.row}` : l.label ?? 'an orchestrator');
 const reapName = (r: Reaped) => r.orchestrator_id ?? r.sandbox_id;
 const did = (t: Tick) => [
@@ -217,13 +219,21 @@ export function ComputeDecisions({ runtime, stats }: { runtime: 'vm' | 'vercel' 
       <span className='flex items-center gap-1.5 whitespace-nowrap'><When d={t.at} />{!t.acted && <Chip title='A minute sample: nothing changed on this tick'>sample</Chip>}</span>
     ) },
     { key: 'saw', label: 'Saw', type: 'text', value: saw, render: (t) => <span className='text-xs whitespace-nowrap'>{saw(t)}</span> },
-    { key: 'wanted', label: 'Wanted → cap → active', type: 'text', value: wanted, render: (t) => <span className='text-xs whitespace-nowrap tabular-nums'>{wanted(t)}</span> },
-    { key: 'free', label: 'Free sandboxes', className: 'text-right', type: 'number', value: (t) => t.free, render: (t) => <span className='tabular-nums'>{t.free ?? <span className='text-muted-foreground'>—</span>}</span> },
+    { key: 'wanted', label: 'Orchestrators', type: 'number', value: (t) => t.active ?? t.desired, render: (t) => (
+      <span className='grid gap-0.5 text-xs whitespace-nowrap tabular-nums'>
+        <span>{wanted(t)}</span>
+        {t.free != null && <span className='text-muted-foreground text-xs'>{t.free} sandboxes free</span>}
+      </span>
+    ) },
     { key: 'did', label: 'Did', className: 'max-w-96', type: 'text', value: did, render: (t) => (
       t.launched.length || t.reaped.length ? <span className='line-clamp-2 text-xs' title={did(t)}>{did(t)}</span> : <span className='text-muted-foreground'>—</span>
     ) },
-    { key: 'note', label: 'Note', className: 'max-w-80', type: 'text', value: (t) => t.note ?? '', render: (t) => (t.note ? <span className='line-clamp-2 text-xs' title={t.note}>{t.note}</span> : null) },
-    { key: 'error', label: 'Error', className: 'max-w-80', type: 'text', value: (t) => t.error ?? '', render: (t) => (t.error ? <span className='text-destructive line-clamp-2 text-xs' title={t.error}>{t.error}</span> : null) },
+    { key: 'note', label: 'Note', className: 'max-w-80', type: 'text', value: noted, render: (t) => (t.error || t.note ? (
+      <span className='grid gap-0.5'>
+        {t.error && <span className='text-destructive line-clamp-2 text-xs' title={t.error}>{t.error}</span>}
+        {t.note && <span className='text-muted-foreground line-clamp-2 text-xs' title={t.note}>{t.note}</span>}
+      </span>
+    ) : null) },
   ];
 
   const filters = (

@@ -86,37 +86,31 @@ const VIEWS: RecordViewDef<Row>[] = [
 const cols: RecordCol<Row>[] = [
   { key: 'name', label: 'Name', keep: true, title: true, peek: false, type: 'text', value: (r) => r.kind === 'journey' ? r.p.name : r.t.message,
     render: (r) => r.kind === 'journey' ? <span className='leading-none font-medium'>{r.p.name}</span> : <span className='line-clamp-1 text-sm leading-none'>{r.t.message}</span> },
-  { key: 'kind', label: 'Kind', className: 'w-24', keep: true, type: 'select', value: (r) => r.kind, options: [{ value: 'journey', label: 'Journey' }, { value: 'tip', label: 'Tip' }],
+  { key: 'kind', label: 'Kind', className: 'w-24', hidden: true, type: 'select', value: (r) => r.kind, options: [{ value: 'journey', label: 'Journey' }, { value: 'tip', label: 'Tip' }],
     render: (r) => <span className='text-muted-foreground text-sm leading-none'>{r.kind === 'journey' ? 'Journey' : 'Tip'}</span> },
   { key: 'status', label: 'Status', className: 'w-28', keep: true, type: 'select', value: statusOf, options: Object.keys(TONE).map((value) => ({ value })),
     render: (r) => { const s = statusOf(r); return <StatusBadge tone={TONE[s]}>{s === 'shown' && r.kind === 'tip' ? `shown ${r.t.shown_count}×` : s}</StatusBadge>; } },
-  { key: 'ref', label: 'Journey / step', hidden: true, type: 'text', value: (r) => r.kind === 'journey' ? r.p.id : `${r.t.journey}/${r.t.step}`,
-    render: (r) => <Mono>{r.kind === 'journey' ? r.p.id : `${r.t.journey} / ${r.t.step}`}</Mono> },
   { key: 'source', label: 'Source', hidden: true, className: 'w-24', type: 'select', value: sourceOf, options: SOURCES,
     render: (r) => <span className='text-muted-foreground text-xs leading-none'>{SOURCES.find((s) => s.value === sourceOf(r))?.label}</span> },
   { key: 'account', label: 'Account', hidden: true, className: 'w-36', type: 'text', value: (r) => (r.kind === 'tip' ? r.t.org_name : null),
     render: (r) => (r.kind === 'tip' ? <span className='text-xs leading-none'>{r.t.org_name}</span> : NA) },
   { key: 'audience', label: 'Audience', hidden: true, className: 'w-48', type: 'text', value: audience,
     render: (r) => { const a = audience(r); return a ? <span className='text-muted-foreground line-clamp-1 text-xs leading-none'>{a}</span> : NA; } },
-  { key: 'reach', label: 'Reach', className: 'w-56', type: 'text', value: (r) => (r.kind === 'journey' ? `${r.p.adoption?.started ?? 0} started · ${r.p.adoption?.completed ?? 0} finished` : `${r.t.org_name} · ${r.t.user_id ? 'one person' : 'everyone'}`),
-    render: (r) => <span className='text-sm leading-none'>{r.kind === 'journey' ? `${r.p.adoption?.started ?? 0} started · ${r.p.adoption?.completed ?? 0} finished` : `${r.t.org_name} · ${r.t.user_id ? (r.t.email ?? 'one person') : 'everyone'}`}</span> },
-  { key: 'stages', label: 'Stages', className: 'w-20 text-right', hidden: true, type: 'number', value: (r) => (r.kind === 'journey' ? r.p.stages.length : null),
-    render: (r) => (r.kind === 'journey' ? <span className='tabular-nums'>{r.p.stages.length}</span> : NA) },
-  { key: 'started', label: 'Started', hidden: true, className: 'w-28 text-right', type: 'number', value: (r) => (r.kind === 'journey' ? r.p.adoption?.started ?? 0 : null),
-    render: (r) => r.kind === 'journey' ? <span className='text-xs tabular-nums leading-none'>{r.p.adoption?.started ?? 0} <span className='text-muted-foreground'>· {pct(r.p.adoption?.started ?? 0, r.p.accounts_active ?? 0)}</span></span> : NA },
+  { key: 'reach', label: 'Reach', className: 'w-36', type: 'number', value: (r) => (r.kind === 'journey' ? r.p.adoption?.started ?? 0 : r.t.shown_count),
+    render: (r) => <span className='flex min-w-0 flex-col gap-1'><span className='text-sm tabular-nums leading-none'>{r.kind === 'journey' ? r.p.adoption?.started ?? 0 : r.t.shown_count}</span>
+      <span className='text-muted-foreground text-xs'>{r.kind === 'journey' ? `started · ${r.p.adoption?.completed ?? 0} finished` : 'shown'}</span></span> },
   { key: 'completed', label: 'Finished', name: 'Finished', hidden: true, className: 'w-28 text-right', type: 'number', value: (r) => (r.kind === 'journey' ? r.p.adoption?.completed ?? 0 : null),
     render: (r) => r.kind === 'journey' ? <span className='text-xs tabular-nums leading-none'>{r.p.adoption?.completed ?? 0} <span className='text-muted-foreground'>· {pct(r.p.adoption?.completed ?? 0, r.p.adoption?.started ?? 0)}</span></span> : NA },
   { key: 'median_h', label: 'Median time', hidden: true, className: 'w-24 text-right', type: 'number', value: (r) => (r.kind === 'journey' ? r.p.adoption?.median_hours_to_complete ?? null : null),
     render: (r) => (r.kind === 'journey' && hours(r.p.adoption?.median_hours_to_complete)) || NA },
   { key: 'dropoff', label: 'Most stop at', hidden: true, type: 'text', value: (r) => (r.kind === 'journey' ? r.p.adoption?.dropoff?.title ?? null : null),
     render: (r) => { const d = r.kind === 'journey' ? r.p.adoption?.dropoff : null; return d ? <span className='text-xs leading-none'>{d.title} <span className='text-muted-foreground'>−{d.lost}</span></span> : NA; } },
-  { key: 'shown', label: 'Shown', hidden: true, className: 'w-20 text-right', type: 'number', value: (r) => (r.kind === 'tip' ? r.t.shown_count : null),
-    render: (r) => (r.kind === 'tip' ? <span className='tabular-nums'>{r.t.shown_count}</span> : NA) },
-  { key: 'last_activity', label: 'Last activity', hidden: true, className: 'w-28', type: 'date', value: (r) => (r.kind === 'journey' ? r.p.adoption?.last_activity : r.t.last_shown_at) ?? null,
-    render: (r) => { const d = r.kind === 'journey' ? r.p.adoption?.last_activity : r.t.last_shown_at; return d ? <When d={d} className='text-muted-foreground text-xs' /> : NA; } },
+  { key: 'last_activity', label: 'Last activity', className: 'w-28', type: 'date', value: (r) => (r.kind === 'journey' ? r.p.adoption?.last_activity : r.t.last_shown_at) ?? null,
+    render: (r) => { const d = r.kind === 'journey' ? r.p.adoption?.last_activity : r.t.last_shown_at; return <span className='flex min-w-0 flex-col gap-1'>{d ? <When d={d} className='text-muted-foreground text-xs' /> : NA}
+      {r.kind === 'tip' && tipLive(r.t) && <span className='text-muted-foreground text-xs'>expires <When d={r.t.expires_at} /></span>}</span>; } },
   { key: 'expires_at', label: 'Expires', hidden: true, className: 'w-28', type: 'date', value: (r) => (r.kind === 'tip' ? r.t.expires_at : null),
     render: (r) => (r.kind === 'tip' ? <When d={r.t.expires_at} className='text-muted-foreground text-xs' /> : NA) },
-  { key: 'updated', label: 'Updated', className: 'w-28', type: 'date', value: (r) => (r.kind === 'journey' ? r.p.updated_at : r.t.created_at),
+  { key: 'updated', label: 'Changed', hidden: true, className: 'w-28', type: 'date', value: (r) => (r.kind === 'journey' ? r.p.updated_at : r.t.created_at),
     render: (r) => <When d={r.kind === 'journey' ? r.p.updated_at : r.t.created_at} className='text-muted-foreground text-xs' /> }
 ];
 
@@ -175,7 +169,7 @@ export function AdminJourneys() {
       <RecordView<Row>
         id='admin-journeys-v2' noun='items' exportName='journeys' groupable views={VIEWS} defaultSort={[{ key: 'name', dir: 'asc' }]}
         rows={rows} rowKey={(r) => r.key} cols={cols} actions={actions} bulk={bulk} loading={isLoading}
-        searchText={(r) => r.kind === 'journey' ? `journey ${r.p.name} ${r.p.id} ${r.p.outcome} ${r.p.who}` : `tip ${r.t.message} ${r.t.org_name} ${r.t.org_slug} ${r.t.email ?? ''} ${r.t.journey} ${r.t.step}`}
+        searchText={(r) => r.kind === 'journey' ? `journey ${r.p.name} ${r.p.id} ${r.p.outcome} ${r.p.who} ${r.p.stages.map((s) => s.title).join(' ')}` : `tip ${r.t.message} ${r.t.org_name} ${r.t.org_slug} ${r.t.email ?? ''} ${r.t.journey} ${r.t.step}`}
         searchPlaceholder='Search journeys and tips'
         primary={<Gate need='library'><Button onClick={() => setDraft(blank())}><Icons.add /> New journey</Button></Gate>}
         primaryMenu={[

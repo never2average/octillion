@@ -57,6 +57,8 @@ const jobHref = (j: JobRow) => (j.org ? `/admin/accounts/${encodeURIComponent(j.
 const done = (s: Sessions) => s.completed + s.cancelled;
 const failedOf = (s: Sessions) => s.failed + s.timeout;
 const total = (s: Sessions) => s.queued + s.running + done(s) + failedOf(s);
+/** Failed sessions plus failed orchestrator launches, as the server's "has failures" filter counts them. */
+const failuresOf = (j: JobRow) => j.failures.count + j.failed_launches;
 /** Waiting since (queued work), else running for (the orchestrator's ready time). */
 const clockOf = (j: JobRow) => (j.state === 'finished' || j.state === 'failed' ? null : j.waiting_since && j.state !== 'running' ? since(j.waiting_since) : since(j.running_since));
 
@@ -92,30 +94,44 @@ export function ComputeJobs() {
         <span className='text-muted-foreground truncate text-xs'>{accountOf(j)}{j.product && ` · ${j.product.name}`}</span>
       </span>
     ) },
-    { key: 'state', label: 'State', keep: true, type: 'select', value: (j) => j.state, render: (j) => <StatusBadge tone={STATE_TONE[j.state]}>{j.state}</StatusBadge> },
-    { key: 'why', label: 'Why waiting', className: 'max-w-72', type: 'text', value: (j) => j.why_waiting ?? '',
-      render: (j) => (j.why_waiting ? <span className='line-clamp-2 text-xs' title={j.note ?? undefined}>{j.why_waiting}</span> : null) },
+    { key: 'state', label: 'State', keep: true, type: 'select', value: (j) => j.state, render: (j) => {
+      const c = clockOf(j), waiting = !!j.waiting_since && j.state !== 'running';
+      return (
+        <span className='flex min-w-0 flex-col gap-1'>
+          <span><StatusBadge tone={STATE_TONE[j.state]}>{j.state}</StatusBadge></span>
+          {c != null ? <span className='text-muted-foreground text-xs tabular-nums' title={waiting ? 'Oldest queued work' : 'Since its orchestrator was ready'}>{waiting ? 'waiting ' : 'running '}{dur(c)}</span>
+            : j.finished_at && <span className='text-muted-foreground text-xs'>ended {dur(since(j.finished_at))} ago</span>}
+          {(j.state === 'waiting' || j.state === 'queued') && j.why_waiting && (
+            <span className='text-muted-foreground line-clamp-2 max-w-72 text-xs' title={j.note ? `${j.why_waiting}\n${j.note}` : j.why_waiting}>{j.why_waiting}</span>
+          )}
+        </span>
+      );
+    } },
     { key: 'work', label: 'Work', type: 'number', value: (j) => (j.sessions ? total(j.sessions) : null), render: (j) => <Work j={j} /> },
     { key: 'orch', label: 'Orchestrator', type: 'text', value: (j) => j.orchestrator?.orchestrator_id ?? '', render: (j) => (
       j.orchestrator ? (
         <span className='flex flex-col gap-1'>
           <span className='flex items-center gap-1.5'><Mono>{j.orchestrator.orchestrator_id ?? `row ${j.orchestrator.id}`}</Mono>
             <StatusBadge tone={ORCH_TONE[j.orchestrator.state]}>{j.orchestrator.state === 'deleted' ? 'ended' : j.orchestrator.state}</StatusBadge></span>
-          {j.orchestrators_total > 1 && <span className={cn('text-xs', j.failed_launches ? 'text-destructive' : 'text-muted-foreground')}>
-            {j.orchestrators_total} in all{j.failed_launches ? ` (${j.failed_launches} failed launch${j.failed_launches > 1 ? 'es' : ''})` : ''}</span>}
+          {j.orchestrators_total > 1 && <span className='text-muted-foreground text-xs'>{j.orchestrators_total} in all</span>}
         </span>
       ) : <span className='text-muted-foreground'>—</span>
     ) },
-    { key: 'clock', label: 'Waiting since / running for', className: 'text-right', type: 'number', value: clockOf, render: (j) => {
+    // Folded into State's second line; kept hidden for its sort.
+    { key: 'clock', label: 'Waiting since / running for', className: 'text-right', type: 'number', hidden: true, value: clockOf, render: (j) => {
       const c = clockOf(j);
       if (c == null) return j.finished_at ? <span className='text-muted-foreground text-xs'>ended {dur(since(j.finished_at))} ago</span> : <span className='text-muted-foreground'>—</span>;
       const waiting = !!j.waiting_since && j.state !== 'running';
       return <span className='tabular-nums' title={waiting ? 'Oldest queued work' : 'Since its orchestrator was ready'}>{waiting ? 'waiting ' : 'running '}{dur(c)}</span>;
     } },
-    { key: 'failures', label: 'Failures', type: 'number', value: (j) => j.failures.count, render: (j) => (
-      j.failures.count ? (
-        <span className='flex flex-wrap items-center gap-1.5'><span className='text-destructive tabular-nums'>{j.failures.count}</span>
-          {j.failures.top_label && <Chip tone='bad' title='Most common failure class'>{j.failures.top_label}</Chip>}</span>
+    // Failed sessions plus failed orchestrator launches: the server's "has failures" filter counts both (okFail).
+    { key: 'failures', label: 'Failures', type: 'number', value: failuresOf, render: (j) => (
+      failuresOf(j) ? (
+        <span className='flex flex-col gap-1'>
+          {j.failures.count > 0 && <span className='flex flex-wrap items-center gap-1.5'><span className='text-destructive tabular-nums'>{j.failures.count}</span>
+            {j.failures.top_label && <Chip tone='bad' title='Most common failure class'>{j.failures.top_label}</Chip>}</span>}
+          {j.failed_launches > 0 && <span className='text-destructive text-xs tabular-nums'>{j.failed_launches} failed launch{j.failed_launches > 1 ? 'es' : ''}</span>}
+        </span>
       ) : <span className='text-muted-foreground'>0</span>
     ) },
     // Metered model spend only (sessions and orchestrators through the gateway), not the sandbox price-table estimate.

@@ -60,6 +60,8 @@ const LIMIT = 200;
 const logsCommand = (id: string) => `npm run boat-orchestrators -- logs ${id}`;
 const copyLogs = (id: string) => copyText(logsCommand(id), 'Logs command copied. Logs are lost when the sandbox is deleted.');
 const hbAge = (o: OrchRow) => (o.state === 'deleted' ? null : since(o.heartbeat_at));
+/** Why an ended row ended, as the Ended because cell words it: the failed launch step and error, else the reap reason. */
+const endedText = (o: OrchRow) => (o.launch_step ? `${o.launch_step}: ${o.launch_error ?? ''}` : o.reap_reason ?? '');
 const workersText = (o: OrchRow) => Object.entries(o.running_by_agent).map(([a, k]) => `${a} ${k}`).join(' · ');
 /** Amber: booting past the boot limit, or a running one with no check-in for 90 s. */
 const lateOf = (o: OrchRow, l: Limits) => (o.state === 'booting' && (since(o.created_at) ?? 0) > l.boot_minutes * 60)
@@ -130,44 +132,59 @@ function OrchTable({ rows, loading, limits, boat, empty, open, onOpen, onJob, fi
   const boatNA = (v: ReactNode) => (boat && !boat.ok ? <span className='text-muted-foreground' title={`boat.dev did not answer: ${boat.error}`}>—</span> : v);
   const cols: RecordCol<OrchRow>[] = [
     { key: 'orch', label: 'Orchestrator', title: true, keep: true, type: 'text', value: (o) => o.orchestrator_id ?? `row ${o.id}`,
-      render: (o) => <span className='flex min-w-0 flex-col gap-1'><span className='truncate font-medium'>{o.orchestrator_id ?? `row ${o.id}`}</span>{o.sandbox_id && <Mono>{o.sandbox_id}</Mono>}</span> },
-    { key: 'state', label: 'State', keep: true, type: 'select', value: (o) => o.state, render: (o) => {
-      const late = lateOf(o, limits);
+      // The sandbox id moves to a tooltip once there is an orchestrator id; rows without one (failed launches, 'row N') keep it as a line.
+      render: (o) => (
+        <span className='flex min-w-0 flex-col gap-1'>
+          <span className='truncate font-medium' title={o.orchestrator_id && o.sandbox_id ? `Sandbox ${o.sandbox_id}` : undefined}>{o.orchestrator_id ?? `row ${o.id}`}</span>
+          {!o.orchestrator_id && o.sandbox_id && <Mono>{o.sandbox_id}</Mono>}
+        </span>
+      ) },
+    { key: 'state', label: 'State', className: 'max-w-72', keep: true, type: 'select', value: (o) => o.state, render: (o) => {
+      const late = lateOf(o, limits), ended = o.state === 'deleted', why = endedText(o);
+      const at = o.state_since ? new Date(o.state_since).toLocaleString() : undefined;
       return (
-        <span className='flex flex-col gap-1'>
+        <span className='flex min-w-0 flex-col gap-1'>
           <span className='flex items-center gap-1.5'><StatusBadge tone={o.state === 'deleted' && o.launch_step ? 'bad' : STATE_TONE[o.state]}>{o.state === 'deleted' ? 'ended' : o.state}</StatusBadge>
             {o.boat_state && o.state !== 'deleted' && <span className='text-muted-foreground text-xs' title='State on boat'>boat: {o.boat_state}</span>}</span>
-          <span className={cn('text-xs', late ? AMBER : 'text-muted-foreground')} title={o.state_since ? new Date(o.state_since).toLocaleString() : undefined}>{o.state === 'deleted' ? 'ended ' : 'for '}{dur(since(o.state_since))}{o.state === 'deleted' ? ' ago' : ''}</span>
+          <span className={cn('truncate text-xs', late ? AMBER : 'text-muted-foreground')} title={ended && why ? [at, why].filter(Boolean).join(' · ') : at}>
+            {ended ? 'ended ' : 'for '}{dur(since(o.state_since))}{ended ? ' ago' : ''}
+            {ended && why && <> · <span className={cn(o.launch_step && 'text-destructive')}>{why}</span></>}
+          </span>
         </span>
       );
     } },
     { key: 'job', label: 'Job', type: 'text', value: (o) => o.job_id ?? 'shared', render: (o) => (o.job_id ? <Mono>{o.job_id}</Mono> : <span className='text-muted-foreground'>shared</span>) },
-    { key: 'workers', label: 'Workers by agent', type: 'text', value: workersText, render: (o) => (o.running ? <span className='text-xs'>{workersText(o)}</span> : <span className='text-muted-foreground'>—</span>) },
-    { key: 'pods', label: 'Pods used / reserved', className: 'text-right', type: 'number', value: (o) => o.running,
-      render: (o) => <span className='tabular-nums'>{o.running} <span className='text-muted-foreground'>/ {o.pods}</span></span> },
+    // Off by default (the reason is State's second line); kept for its end-reason filter.
+    { key: 'ended', label: 'Ended because', hidden: true, className: 'max-w-72', type: 'text', value: (o) => o.end_class?.label ?? '', render: (o) => <EndedBecause o={o} /> },
+    { key: 'pods', label: 'Pods', className: 'text-right', type: 'number', value: (o) => o.running, render: (o) => (
+      <span className='flex flex-col items-end gap-1' title='Pods used / reserved, then workers by agent'>
+        <span className='tabular-nums'>{o.running} <span className='text-muted-foreground'>/ {o.pods}</span></span>
+        {o.running > 0 && <span className='text-muted-foreground text-xs'>{workersText(o)}</span>}
+      </span>
+    ) },
     { key: 'heartbeat', label: 'Heartbeat', type: 'number', value: (o) => hbAge(o), render: (o) => {
       const age = hbAge(o);
       if (o.state === 'deleted') return <span className='text-muted-foreground'>—</span>;
       return <span className={cn('tabular-nums', age == null ? 'text-muted-foreground' : age > limits.stale_minutes * 60 ? 'text-destructive' : age > limits.heartbeat_stale_s ? AMBER : undefined)}
         title={o.heartbeat_at ? new Date(o.heartbeat_at).toLocaleString() : 'Has not checked in'}>{age == null ? 'never' : `${dur(age)} ago`}</span>;
     } },
-    { key: 'boot', label: 'Boot', className: 'text-right', type: 'number', value: (o) => o.boot_ms, render: (o) => (
+    { key: 'boot', label: 'Boot', className: 'text-right', type: 'number', hidden: true, value: (o) => o.boot_ms, render: (o) => (
       <span className='inline-flex items-center justify-end gap-1.5 tabular-nums' title={phasesText(o.timings)}>
         {o.from_image && <Chip title={o.from_image}>image</Chip>}{o.boot_ms == null ? <span className='text-muted-foreground'>—</span> : dur(o.boot_ms / 1000)}
       </span>
     ) },
-    { key: 'ended', label: 'Ended because', className: 'max-w-72', type: 'text', value: (o) => o.end_class?.label ?? '', render: (o) => <EndedBecause o={o} /> },
-    { key: 'spend', label: 'Model spend', className: 'text-right', type: 'number', value: (o) => o.spend.orchestrator_model_usd, render: (o) => (
+    { key: 'spend', label: 'Model spend', className: 'text-right', type: 'number', hidden: true, value: (o) => o.spend.orchestrator_model_usd, render: (o) => (
       <span className='tabular-nums' title='Orchestrator model spend through the gateway (its lifetime)'>{cents(o.spend.orchestrator_model_usd)}</span>
     ) }
   ];
   return (
     <RecordView id='compute-orchestrators' rows={rows} loading={loading} rowKey={(o) => String(o.id)} cols={cols} noun='orchestrators' initialSize={25}
-      searchText={(o) => `${o.orchestrator_id ?? ''} ${o.sandbox_id ?? ''} ${o.job_id ?? 'shared'} ${o.state} ${workersText(o)} ${o.reap_reason ?? ''} ${o.launch_step ?? ''} ${o.launch_error ?? ''} ${o.code_hash ?? ''}`}
+      searchText={(o) => `${o.orchestrator_id ?? ''} ${o.sandbox_id ?? ''} ${o.job_id ?? 'shared'} ${o.state} ${workersText(o)} ${o.end_class?.label ?? ''} ${endedText(o)} ${o.code_hash ?? ''}`}
       searchPlaceholder='Search orchestrators, sandboxes, jobs, reasons' exportName='compute-orchestrators' filters={filters} summary={summary} compact
       openKey={open} onOpenChange={onOpen}
       actions={(o) => [
         ...(o.sandbox_id ? [{ label: 'Copy logs command', icon: <Icons.code />, onSelect: () => copyLogs(o.sandbox_id!) }] : []),
+        ...(o.sandbox_id ? [{ label: 'Copy sandbox id', icon: <Icons.page />, onSelect: () => copyText(o.sandbox_id!, 'Sandbox id copied') }] : []),
         ...(o.job_id ? [{ label: "Show this job's sessions", icon: <Icons.search />, onSelect: () => onJob(o.job_id!) }] : []),
         { label: 'Copy id', icon: <Icons.page />, onSelect: () => copyText(o.orchestrator_id ?? o.sandbox_id ?? String(o.id), 'Id copied') }
       ]}

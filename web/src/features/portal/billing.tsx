@@ -319,41 +319,60 @@ function People({ t, l, reload, filter = 'all', setFilter }: { t: Team | undefin
   const statusOf = (r: PersonRow) => (r.kind === 'invite' ? (r.x.state === 'expired' ? 'Invitation expired' : 'Invited') : r.m.status === 'active' ? 'Active' : 'Suspended');
   const cols: RecordCol<PersonRow>[] = [
     { key: 'person', label: 'Person', keep: true, type: 'text', value: (r) => (r.kind === 'invite' ? r.x.email : r.m.name || r.m.email || ''),
-      render: (r) => r.kind === 'invite' ? <span className='font-medium'>{r.x.email}</span> : (<>
+      // Invites: when it was sent, as a second line (Joined is off by default).
+      render: (r) => r.kind === 'invite' ? (<>
+        <span className='font-medium'>{r.x.email}</span>
+        <div className='text-muted-foreground mt-1 text-xs leading-none'>sent <When d={r.x.created_at} /></div>
+      </>) : (<>
         <span className='font-medium'>{r.m.name || r.m.email}</span>
         {r.m.user_id === t.me && <span className='text-muted-foreground ml-2 text-xs'>you</span>}
         {r.m.name && <span className='text-muted-foreground ml-2 text-xs'>{r.m.email}</span>}
       </>) },
     { key: 'role', label: 'Role', className: 'w-36', type: 'select', value: (r) => ACCOUNT_ROLE_LABEL[roleOf(r.kind === 'invite' ? r.x : r.m)],
-      render: (r) => { const x = roleOf(r.kind === 'invite' ? r.x : r.m); return <span className={x === 'owner' ? '' : 'text-muted-foreground'} title={roles.find((y) => y.id === x)?.help}>{ACCOUNT_ROLE_LABEL[x]}</span>; } },
-    { key: 'status', label: 'Status', className: 'w-36', type: 'select', value: statusOf,
+      // The status badge under the role, only when it isn't Active (Status itself is off by default).
+      render: (r) => { const x = roleOf(r.kind === 'invite' ? r.x : r.m), st = statusOf(r); return (<>
+        <span className={x === 'owner' ? '' : 'text-muted-foreground'} title={roles.find((y) => y.id === x)?.help}>{ACCOUNT_ROLE_LABEL[x]}</span>
+        {st !== 'Active' && <div className='mt-1'><Badge variant={st === 'Invited' ? 'outline' : 'destructive'}>{st}</Badge></div>}
+      </>); } },
+    { key: 'status', label: 'Status', className: 'w-36', type: 'select', hidden: true, value: statusOf,
       render: (r) => <Badge variant={statusOf(r) === 'Active' ? 'secondary' : statusOf(r) === 'Invited' ? 'outline' : 'destructive'}>{statusOf(r)}</Badge> },
     { key: 'team', label: 'Team', className: 'w-36', type: 'select', value: (r) => (r.kind === 'member' ? teamName(r.lim?.team_id) ?? 'No team' : 'No team'),
       render: (r) => <span className='text-muted-foreground'>{r.kind === 'member' ? teamName(r.lim?.team_id) ?? '—' : '—'}</span> },
     { key: 'spend', label: 'Spend this month', className: 'w-56', type: 'number', value: (r) => (r.kind === 'member' ? r.lim?.spent ?? 0 : 0),
-      render: (r) => r.kind === 'invite' || !r.lim ? <span className='text-muted-foreground'>—</span> : r.lim.limit_usd == null
-        ? <span className='text-xs tabular-nums'>{usd(r.lim.spent)} <span className='text-muted-foreground'>· shared budget</span></span>
-        : <Allowance spent={r.lim.spent} cap={r.lim.limit_usd} /> },
+      // Line 1: the bar (or "· shared budget" with no own limit); line 2: what is left and, when one applies, the limit that binds (red when blocked).
+      render: (r) => {
+        if (r.kind === 'invite' || !r.lim) return <span className='text-muted-foreground'>—</span>;
+        const lim = r.lim, w = limitedWord(lim.limited_by, l?.teams ?? [], lim.team_id);
+        return (<>
+          {lim.limit_usd == null
+            ? <span className='text-xs tabular-nums'>{usd(lim.spent)} <span className='text-muted-foreground'>· shared budget</span></span>
+            : <Allowance spent={lim.spent} cap={lim.limit_usd} />}
+          {(lim.left_usd != null || w) && <div className='text-muted-foreground mt-1 text-xs leading-none tabular-nums'>
+            {lim.left_usd != null && `${usd(lim.left_usd)} left`}
+            {w && <span className={cn(lim.blocked && 'text-destructive')}>{lim.left_usd != null && ' · '}{w}</span>}
+          </div>}
+        </>);
+      } },
     // What is left before the first limit that applies (their own, their budget, the buffer, the account), and which one binds.
-    { key: 'left', label: 'Left', className: 'w-24', type: 'number', value: (r) => (r.kind === 'member' && r.lim ? r.lim.left_usd ?? undefined : undefined),
+    { key: 'left', label: 'Left', className: 'w-24', type: 'number', hidden: true, value: (r) => (r.kind === 'member' && r.lim ? r.lim.left_usd ?? undefined : undefined),
       render: (r) => <span className='text-xs tabular-nums'>{r.kind === 'member' && r.lim?.left_usd != null ? usd(r.lim.left_usd) : <span className='text-muted-foreground'>—</span>}</span> },
-    { key: 'limited', label: 'Limited by', className: 'w-36', type: 'select', value: (r) => (r.kind === 'member' && r.lim ? limitedWord(r.lim.limited_by, l?.teams ?? [], r.lim.team_id) ?? '—' : '—'),
+    { key: 'limited', label: 'Limited by', className: 'w-36', type: 'select', hidden: true, value: (r) => (r.kind === 'member' && r.lim ? limitedWord(r.lim.limited_by, l?.teams ?? [], r.lim.team_id) ?? '—' : '—'),
       render: (r) => {
         const w = r.kind === 'member' && r.lim ? limitedWord(r.lim.limited_by, l?.teams ?? [], r.lim.team_id) : null;
         return w ? <span className={cn('text-xs', r.kind === 'member' && r.lim?.blocked && 'text-destructive')}>{w}</span> : <span className='text-muted-foreground'>—</span>;
       } },
-    { key: 'tokens', label: 'Tokens', className: 'w-28', type: 'number', value: (r) => (r.kind === 'member' && r.lim ? Number(r.lim.tokens_in) + Number(r.lim.tokens_out) : 0),
+    { key: 'tokens', label: 'Tokens', className: 'w-28', type: 'number', hidden: true, value: (r) => (r.kind === 'member' && r.lim ? Number(r.lim.tokens_in) + Number(r.lim.tokens_out) : 0),
       render: (r) => <span className='text-xs tabular-nums'>{r.kind === 'member' && r.lim ? num(Number(r.lim.tokens_in) + Number(r.lim.tokens_out)) : '—'}</span> },
     // The one that applies (the most specific: their own, their team's, the account's) and where it comes from: "2 · team".
-    { key: 'runs', label: 'Runs at once', className: 'w-36', render: (r) => r.kind === 'invite' || !r.lim ? <span className='text-muted-foreground'>—</span> : (
+    { key: 'runs', label: 'Runs at once', className: 'w-36', hidden: true, render: (r) => r.kind === 'invite' || !r.lim ? <span className='text-muted-foreground'>—</span> : (
       <span className='text-xs tabular-nums'>
         {r.lim.effective_max_concurrent == null ? <span className='text-muted-foreground'>no limit</span>
           : <>{r.lim.effective_max_concurrent}<span className='text-muted-foreground'> · {SOURCE_WORD[r.lim.concurrent_source ?? 'account']}</span></>}
         {r.lim.running > 0 && <span className='text-primary ml-1.5'>· {r.lim.running} now</span>}
       </span>) },
-    { key: 'can_run', label: 'Can run', className: 'w-24', type: 'select', value: (r) => (r.kind === 'member' && r.lim ? (r.lim.can_run ? 'Yes' : 'No') : '—'),
+    { key: 'can_run', label: 'Can run', className: 'w-24', type: 'select', hidden: true, value: (r) => (r.kind === 'member' && r.lim ? (r.lim.can_run ? 'Yes' : 'No') : '—'),
       render: (r) => <span className={r.kind === 'member' && r.lim?.can_run ? '' : 'text-muted-foreground'}>{r.kind === 'member' && r.lim ? (r.lim.can_run ? 'Yes' : 'No') : '—'}</span> },
-    { key: 'joined', label: 'Joined', className: 'w-28', type: 'date', value: (r) => (r.kind === 'invite' ? r.x.created_at : r.m.created_at),
+    { key: 'joined', label: 'Joined', className: 'w-28', type: 'date', hidden: true, value: (r) => (r.kind === 'invite' ? r.x.created_at : r.m.created_at),
       render: (r) => <span className='text-muted-foreground text-xs'>{r.kind === 'invite' ? <>sent <When d={r.x.created_at} /></> : <When d={r.m.created_at} />}</span> }
   ];
   return (

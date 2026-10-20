@@ -171,6 +171,10 @@ const short = (m: string | null) => (m ? m.replace(/^.*\//, '') : null);
 const NA = <span className='text-muted-foreground'>—</span>;
 const thisMonth = () => PRESETS.find((p) => p.id === 'month')!.range();
 const num = (v: ReactNode, title?: string) => <span className='tabular-nums' title={title}>{v}</span>;
+/** A number with a muted second line under it (the Experiments tab's `sub`, for right-aligned cells). */
+const twoLine = (main: ReactNode, second?: ReactNode, title?: string) => (
+  <span className='flex flex-col items-end gap-0.5 tabular-nums' title={title}>{main}{second != null && <span className='text-muted-foreground text-xs'>{second}</span>}</span>
+);
 const exportName = (what: string, group: string, r?: { from: string; to: string }) => `${what}-by-${group}-${r?.from ?? ''}_${r?.to ?? ''}`;
 
 export function AdminFinOps() {
@@ -296,6 +300,10 @@ const INVOICE_TONE: Record<string, Tone> = { paid: 'ok', open: 'warn', uncollect
 const pct = (x: number | null | undefined) => (x == null ? '—' : `${Math.round(x * 1000) / 10}%`);
 const date = (d: string | null | undefined) => (d ? dayLabel(d.slice(0, 10), true) : '—');
 const every = (n: number | null) => (n && n > 1 ? `${n} ` : '');
+const PER: Record<string, string> = { day: 'd', week: 'wk', month: 'mo', year: 'yr' };
+/** '$49 / mo', '$490 / 3 mo', or 'usage' when the plan has no base amount. */
+const priceLabel = (p: RevenuePlan) => (p.unit_amount_usd == null ? 'usage'
+  : `${cents(p.unit_amount_usd)}${p.interval ? ` / ${every(p.interval_count)}${PER[p.interval] ?? p.interval}` : ''}`);
 const ALLOWANCE_HINT = 'A prepaid allowance is the account’s monthly cap on model spend (set by Octillion or by its plan). It is not revenue and is never counted in MRR or collected.';
 
 /** Margin: dollars and the share of what was collected; red when negative. */
@@ -347,24 +355,29 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
   if (group === 'provider') {
     const cols: RecordCol<RevenuePlan>[] = [
       { key: 'plan', label: 'Plan / price', title: true, keep: true, type: 'text', value: (p) => p.name, render: (p) => (
-        <span className='flex min-w-0 flex-col gap-1'><span className='truncate font-medium'>{p.name}</span>{p.price_id && <Mono>{p.lookup_key ?? p.price_id}</Mono>}</span>
+        <span className='flex min-w-0 flex-col gap-1'><span className='truncate font-medium'>{p.name}</span>
+          {(p.price_id || p.experiment) && <span className='flex min-w-0 items-center gap-1.5'>{p.price_id && <Mono>{p.lookup_key ?? p.price_id}</Mono>}
+            {p.experiment && <Chip title={`In experiment ${p.experiment}, weight ${p.weight ?? 1}`}><span className='font-mono'>exp: {p.experiment} · w{p.weight ?? 1}</span></Chip>}</span>}
+        </span>
       ) },
-      { key: 'interval', label: 'Interval', type: 'select', value: (p) => p.interval ?? '', render: (p) => (p.interval ? `Every ${every(p.interval_count)}${p.interval}` : NA) },
-      { key: 'unit', label: 'Unit amount', className: 'text-right', type: 'number', value: (p) => p.unit_amount_usd, render: (p) => (p.unit_amount_usd == null ? NA : num(cents(p.unit_amount_usd))) },
-      { key: 'active', label: 'Subscriptions active', className: 'text-right', type: 'number', value: (p) => p.active_subscriptions, render: (p) => num(p.active_subscriptions.toLocaleString(), `${p.subscriptions} in all, ${p.trialing} in trial`) },
+      { key: 'price', label: 'Price', className: 'text-right', type: 'number', value: (p) => p.unit_amount_usd, render: (p) => twoLine(
+        <span>{priceLabel(p)}{p.unit_amount_usd != null && p.usage?.length ? <span className='text-muted-foreground ml-1 text-xs'>+ usage</span> : null}</span>,
+        p.trial_days ? `${p.trial_days}-day trial` : null) },
+      { key: 'interval', label: 'Interval', hidden: true, type: 'select', value: (p) => p.interval ?? '', render: (p) => (p.interval ? `Every ${every(p.interval_count)}${p.interval}` : NA) },
+      { key: 'active', label: 'Active', className: 'text-right', type: 'number', value: (p) => p.active_subscriptions, render: (p) => num(p.active_subscriptions.toLocaleString(), `${p.subscriptions} in all, ${p.trialing} in trial`) },
       { key: 'mrr', label: 'MRR', className: 'text-right', keep: true, type: 'number', value: (p) => p.mrr_usd, render: (p) => num(cents(p.mrr_usd)) },
-      { key: 'collected', label: 'Collected in range', className: 'text-right', type: 'number', value: (p) => p.collected_usd, render: (p) => num(cents(p.collected_usd)) },
-      { key: 'allowance', label: 'Monthly allowance', className: 'text-right', type: 'number', value: (p) => p.monthly_budget_usd ?? null,
+      { key: 'collected', label: 'Collected', className: 'text-right', type: 'number', value: (p) => p.collected_usd, render: (p) => num(cents(p.collected_usd)) },
+      { key: 'allowance', label: 'Monthly allowance', className: 'text-right', hidden: true, type: 'number', value: (p) => p.monthly_budget_usd ?? null,
         render: (p) => (p.monthly_budget_usd == null ? NA : num(cents(p.monthly_budget_usd), 'The plan’s monthly cap on model spend. Not revenue.')) },
-      { key: 'experiment', label: 'Experiment', type: 'select', value: (p) => p.experiment ?? '', render: (p) => (p.experiment
+      { key: 'experiment', label: 'Experiment', hidden: true, type: 'select', value: (p) => p.experiment ?? '', render: (p) => (p.experiment
         ? <span className='flex flex-col gap-1'><Mono>{p.experiment}</Mono><span className='text-muted-foreground text-xs'>weight {p.weight ?? 1}</span></span> : NA) },
-      { key: 'usage', label: 'Usage pricing', type: 'text', value: (p) => (p.usage ?? []).map((u) => u.summary).join('; '), render: (p) => (p.usage?.length
+      { key: 'usage', label: 'Usage pricing', hidden: true, type: 'text', value: (p) => (p.usage ?? []).map((u) => u.summary).join('; '), render: (p) => (p.usage?.length
         ? <span className='flex max-w-[22rem] flex-col gap-0.5 text-xs leading-snug'>{p.usage.map((u) => <span key={u.price_id}>{u.summary}</span>)}</span> : NA) },
-      { key: 'trial', label: 'Free trial', className: 'text-right', type: 'number', value: (p) => p.trial_days ?? null, render: (p) => (p.trial_days ? num(`${p.trial_days} d`) : NA) }
+      { key: 'trial', label: 'Free trial', className: 'text-right', hidden: true, type: 'number', value: (p) => p.trial_days ?? null, render: (p) => (p.trial_days ? num(`${p.trial_days} d`) : NA) }
     ];
     return (<>
       <RecordView id='finops-revenue-plans' rows={data?.plans ?? []} loading={loading} rowKey={(p) => p.key} cols={cols} noun='plans' initialSize={50} compact summary={cards}
-        searchText={(p) => `${p.name} ${p.lookup_key ?? ''} ${p.price_id ?? ''} ${p.accounts.map((a) => a.name).join(' ')}`} searchPlaceholder='Search plans, accounts'
+        searchText={(p) => `${p.name} ${p.lookup_key ?? ''} ${p.price_id ?? ''} ${p.accounts.map((a) => a.name).join(' ')} ${(p.usage ?? []).map((u) => u.summary).join(' ')}`} searchPlaceholder='Search plans, accounts'
         filters={<>{bar}{mixed}</>} defaultSort={[{ key: 'mrr', dir: 'desc' }]} exportName={exportName('revenue', 'plan', data?.range)}
         primary={newPlanBtn}
         actions={(p) => (p.live && p.price_id ? [
@@ -385,6 +398,11 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
                 a.slug ? <a key='a' className='hover:underline' href={accountHref(a.slug)}>{a.name}</a> : <Mono key='a'>{a.name}</Mono>, subBadge(a.status), cents(a.mrr_usd)])} />
                 : none('No subscriptions on this price.')}
             </PeekSection>
+            {p.usage?.length ? (
+              <PeekSection title='Usage pricing'>
+                <div className='grid gap-1 text-sm'>{p.usage.map((u) => <span key={u.price_id}>{u.summary}</span>)}</div>
+              </PeekSection>
+            ) : null}
           </div>
         )}
         empty={stripeEmpty ?? 'No plans yet.'} />
@@ -953,15 +971,19 @@ function SpendProviders({ data, loading, cards, bar }: { data: Spend | undefined
     return [...by.values()];
   }, [data, consumer]);
   const tok = (k: 'input_tokens' | 'cached_input_tokens' | 'output_tokens', label: string): RecordCol<ProviderRow> =>
-    ({ key: k, label, className: 'text-right', type: 'number', value: (p) => p[k], render: (p) => num(tokens(p[k]), p[k].toLocaleString()) });
+    ({ key: k, label, className: 'text-right', hidden: true, type: 'number', value: (p) => p[k], render: (p) => num(tokens(p[k]), p[k].toLocaleString()) });
   const cols: RecordCol<ProviderRow>[] = [
     { key: 'provider', label: 'Provider', title: true, keep: true, type: 'text', value: (p) => p.provider, render: (p) => <Mono>{p.provider}</Mono> },
-    { key: 'models', label: 'Models', className: 'text-right', type: 'number', value: (p) => new Set(p.models.map((m) => m.model)).size, render: (p) => num(new Set(p.models.map((m) => m.model)).size) },
-    { key: 'requests', label: 'Requests', className: 'text-right', type: 'number', value: (p) => p.requests, render: (p) => num(p.requests.toLocaleString()) },
-    { key: 'errors', label: 'Errors', className: 'text-right', type: 'number', value: (p) => p.errors, render: (p) => (p.errors ? <span className='text-destructive tabular-nums'>{p.errors.toLocaleString()}</span> : <span className='text-muted-foreground'>0</span>) },
+    { key: 'models', label: 'Models', className: 'text-right', hidden: true, type: 'number', value: (p) => new Set(p.models.map((m) => m.model)).size, render: (p) => num(new Set(p.models.map((m) => m.model)).size) },
+    { key: 'requests', label: 'Requests', className: 'text-right', type: 'number', value: (p) => p.requests, render: (p) => twoLine(p.requests.toLocaleString(),
+      p.errors > 0 ? <span className='text-destructive'>{p.errors.toLocaleString()} errors</span> : null) },
+    { key: 'errors', label: 'Errors', className: 'text-right', hidden: true, type: 'number', value: (p) => p.errors, render: (p) => (p.errors ? <span className='text-destructive tabular-nums'>{p.errors.toLocaleString()}</span> : <span className='text-muted-foreground'>0</span>) },
+    { key: 'tokens', label: 'Tokens', className: 'text-right', type: 'number', value: (p) => p.input_tokens + p.output_tokens, render: (p) => twoLine(tokens(p.input_tokens + p.output_tokens),
+      `${tokens(p.input_tokens)} in · ${tokens(p.cached_input_tokens)} cached · ${tokens(p.output_tokens)} out`, (p.input_tokens + p.output_tokens).toLocaleString()) },
     tok('input_tokens', 'Input'), tok('cached_input_tokens', 'Cached'), tok('output_tokens', 'Output'),
-    { key: 'cost', label: 'Cost', className: 'text-right', keep: true, type: 'number', value: (p) => p.cost_usd, render: (p) => num(cents(p.cost_usd)) },
-    { key: 'priced', label: 'Priced', type: 'select', value: (p) => (p.priced ? 'Priced' : 'Unpriced'), render: (p) => (
+    { key: 'cost', label: 'Cost', className: 'text-right', keep: true, type: 'number', value: (p) => p.cost_usd, render: (p) => (p.priced ? num(cents(p.cost_usd))
+      : <span className='inline-flex items-center justify-end gap-1.5 tabular-nums'><Chip tone='warn' title={`${UNPRICED} ${p.unpriced_requests.toLocaleString()} requests on unpriced days.`}>unpriced</Chip>{cents(p.cost_usd)}</span>) },
+    { key: 'priced', label: 'Priced', hidden: true, type: 'select', value: (p) => (p.priced ? 'Priced' : 'Unpriced'), render: (p) => (
       p.priced ? <StatusBadge tone='ok'>Priced</StatusBadge>
         : <StatusBadge tone='warn' title={`${UNPRICED} ${p.unpriced_requests.toLocaleString()} requests on unpriced days.`}>Unpriced</StatusBadge>
     ) }
@@ -1106,11 +1128,10 @@ function StorageTab({ data, loading, bar, group }: TabProps<Storage>) {
         <span className='flex min-w-0 flex-col gap-1'><span className='truncate font-medium'>{s.name}</span><Mono>{s.detail}</Mono></span>
       ) },
       { key: 'kind', label: 'Kind', type: 'select', value: (s) => KIND[s.kind], render: (s) => KIND[s.kind] },
-      { key: 'size', label: 'Size', className: 'text-right', keep: true, type: 'number', value: (s) => s.bytes, render: (s) => (s.bytes == null ? NA : num(bytes(s.bytes))) },
-      { key: 'rows', label: 'Rows', className: 'text-right', type: 'number', value: (s) => s.rows, render: (s) => (s.rows == null ? NA : num(count(s.rows), `${s.rows.toLocaleString()}${s.kind === 'gateway' ? ' requests' : ''}`)) },
-      { key: 'new', label: 'New in range', className: 'text-right', type: 'number', value: (s) => s.new_bytes ?? s.new_rows, render: (s) => (
-        s.new_bytes != null ? num(bytes(s.new_bytes)) : s.new_rows == null ? NA : num(count(s.new_rows))
-      ) },
+      { key: 'size', label: 'Size', className: 'text-right', keep: true, type: 'number', value: (s) => s.bytes, render: (s) => (s.bytes == null ? NA
+        : twoLine(bytes(s.bytes), s.new_bytes ? `+${bytes(s.new_bytes)}` : null, s.new_bytes ? `${bytes(s.new_bytes)} new in range` : undefined)) },
+      { key: 'rows', label: 'Rows', className: 'text-right', type: 'number', value: (s) => s.rows, render: (s) => (s.rows == null ? NA
+        : twoLine(count(s.rows), s.new_rows ? `+${count(s.new_rows)}` : null, `${s.rows.toLocaleString()}${s.kind === 'gateway' ? ' requests' : ''}${s.new_rows ? `, ${s.new_rows.toLocaleString()} new in range` : ''}`)) },
       { key: 'last', label: 'Last write', type: 'date', value: (s) => s.last_write, render: (s) => (s.last_write ? <When d={s.last_write} /> : NA) }
     ];
     const filters = (
@@ -1133,8 +1154,9 @@ function StorageTab({ data, loading, bar, group }: TabProps<Storage>) {
   }
   const cols: RecordCol<StorageAccount>[] = [
     { key: 'account', label: 'Account', title: true, keep: true, type: 'text', value: (a) => a.name, render: accountCell },
-    { key: 'rows', label: 'Rows it owns', className: 'text-right', keep: true, type: 'number', value: (a) => a.rows, render: (a) => num(count(a.rows), a.rows.toLocaleString()) },
-    { key: 'new', label: 'New rows in range', className: 'text-right', type: 'number', value: (a) => a.new_rows, render: (a) => (a.new_rows ? num(count(a.new_rows)) : NA) },
+    { key: 'rows', label: 'Rows it owns', className: 'text-right', keep: true, type: 'number', value: (a) => a.rows, render: (a) => twoLine(count(a.rows),
+      a.new_rows ? `+${count(a.new_rows)} in range` : null, a.rows.toLocaleString()) },
+    { key: 'new', label: 'New rows in range', className: 'text-right', hidden: true, type: 'number', value: (a) => a.new_rows, render: (a) => (a.new_rows ? num(count(a.new_rows)) : NA) },
     { key: 'events', label: 'Transcript events', className: 'text-right', type: 'number', value: (a) => a.transcript_events, render: (a) => (a.transcript_events ? num(count(a.transcript_events), `${a.new_transcript_events.toLocaleString()} in range`) : NA) },
     { key: 'gateway', label: 'Gateway data in range', className: 'text-right', type: 'number', value: (a) => a.gateway_bytes, render: (a) => (a.gateway_bytes ? num(bytes(a.gateway_bytes), `${a.gateway_requests.toLocaleString()} requests`) : NA) },
     { key: 'last', label: 'Last write', type: 'date', value: (a) => a.last_write, render: (a) => (a.last_write ? <When d={a.last_write} /> : NA) }
