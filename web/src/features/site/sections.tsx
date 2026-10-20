@@ -1,7 +1,7 @@
 import { Fragment } from 'react';
 import Link from 'next/link';
 import {
-  IconArrowRight, IconBolt, IconCode, IconEyeOff, IconGitCompare, IconMessageChatbot, IconSearch, IconSparkles, IconTerminal2
+  IconBolt, IconCode, IconEyeOff, IconGitCompare, IconMessageChatbot, IconSearch, IconTerminal2
 } from '@tabler/icons-react';
 import { buttonVariants } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -53,10 +53,7 @@ export function Hero() {
       <div className='relative mx-auto max-w-6xl px-4 pt-16 pb-14 sm:px-6 sm:pt-24 sm:pb-20'>
         <div className='grid gap-12 lg:grid-cols-[1fr_1.1fr] lg:items-center'>
           <div className='min-w-0'>
-            <Link href='/#apo' className='border-primary/30 bg-primary/10 text-primary hover:bg-primary/15 inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium transition-colors'>
-              <IconSparkles className='size-3.5' /> Agentic Preference Optimization <IconArrowRight className='size-3.5' />
-            </Link>
-            <h1 className='mt-6 text-3xl font-semibold tracking-tight text-balance sm:text-4xl lg:text-[2.75rem] lg:leading-[1.1]'>
+            <h1 className='text-3xl font-semibold tracking-tight text-balance sm:text-4xl lg:text-[2.75rem] lg:leading-[1.1]'>
               Get picked by <span className='text-primary'>coding agents.</span>
             </h1>
             <p className='text-muted-foreground mt-4 max-w-md text-base text-pretty sm:text-lg'>Octillion measures how often AI coding agents choose your dev tool, and shows why.</p>
