@@ -5,6 +5,16 @@ import { IconAlignLeft, IconArrowUp } from '@tabler/icons-react';
 import { cn } from '@/lib/utils';
 import type { DocHeading } from './docs-data';
 
+/** Section numbers: 1, 2, … for h2, and 1.1, 1.2, … for the h3s under them. */
+function numbered(headings: DocHeading[]) {
+  let h2 = 0, h3 = 0;
+  return headings.map((h) => {
+    if (h.depth === 3 && h2) return { h, n: `${h2}.${++h3}` };
+    h2++; h3 = 0;
+    return { h, n: `${h2}.` };
+  });
+}
+
 export function DocsToc({ headings }: { headings: DocHeading[] }) {
   const [active, setActive] = useState(headings[0]?.id ?? '');
 
@@ -39,14 +49,15 @@ export function DocsToc({ headings }: { headings: DocHeading[] }) {
       <div className='text-foreground flex items-center gap-2 text-xs font-semibold tracking-wide uppercase'>
         <IconAlignLeft className='size-3.5' /> On this page
       </div>
-      <ul className='flex flex-col border-l'>
-        {headings.map((h) => (
+      <ul className='flex flex-col'>
+        {numbered(headings).map(({ h, n }) => (
           <li key={h.id}>
             <a href={`#${h.id}`} aria-current={active === h.id ? 'location' : undefined}
               onClick={() => setActive(h.id)}
-              className={cn('-ml-px block border-l py-1 pr-1 leading-snug transition-colors', h.depth === 3 ? 'pl-6 text-[13px]' : 'pl-3',
-                active === h.id ? 'border-primary text-primary font-medium' : 'text-muted-foreground hover:text-foreground border-transparent')}>
-              {h.text}
+              className={cn('flex gap-2 py-1 leading-snug transition-colors', h.depth === 3 && 'pl-4 text-[13px]',
+                active === h.id ? 'text-primary font-medium' : 'text-muted-foreground hover:text-foreground')}>
+              <span className='shrink-0 tabular-nums opacity-70'>{n}</span>
+              <span>{h.text}</span>
             </a>
           </li>
         ))}

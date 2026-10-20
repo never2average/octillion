@@ -37,9 +37,9 @@ export function DocsLayout({ nav, title, description, headings = [], meta, child
         </article>
       </div>
 
-      <aside className={`${STICKY} hidden w-64 shrink-0 border-l py-6 pl-5 lg:block`}>
+      <aside className={`${STICKY} hidden w-64 shrink-0 py-6 lg:block`}>
         <DocsSidebar groups={nav} />
-        {headings.length > 0 && <div className='mt-6 border-t pt-5'><DocsToc headings={headings} /></div>}
+        {headings.length > 0 && <div className='mt-8'><DocsToc headings={headings} /></div>}
       </aside>
     </div>
   );

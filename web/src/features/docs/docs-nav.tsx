@@ -1,5 +1,6 @@
 'use client';
-// The docs' page navigation, in the right column: collapsible groups of pages, the current one highlighted. It gets
+// The docs' page navigation, in the right column: numbered, collapsible groups of pages (1, 1.1, …), the current one
+// highlighted, flat on the page (no rules or tinted boxes). It gets
 // only titles and hrefs as props (features/docs/docs-data.ts), never a page's body. Searching is the platform search.
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
@@ -23,24 +24,24 @@ function NavTree({ groups, onNavigate }: { groups: DocNavGroup[]; onNavigate?: (
     });
   return (
     <nav aria-label='Docs pages' className='flex flex-col gap-3'>
-      {groups.map((g) => {
+      {groups.map((g, gi) => {
         const open = !closed.has(g.title);
         return (
           <Collapsible key={g.title} open={open} onOpenChange={(o) => toggle(g.title, o)}>
-            <CollapsibleTrigger className='text-muted-foreground hover:text-foreground flex w-full items-center justify-between rounded-md px-2 py-1 text-xs font-semibold tracking-wide uppercase transition-colors'>
-              {g.title}
+            <CollapsibleTrigger className='text-muted-foreground hover:text-foreground flex w-full items-center justify-between py-1 text-xs font-semibold tracking-wide uppercase transition-colors'>
+              <span><span className='tabular-nums'>{gi + 1}.</span> {g.title}</span>
               <IconChevronRight className={cn('size-3.5 transition-transform', open && 'rotate-90')} />
             </CollapsibleTrigger>
             <CollapsibleContent>
-              <ul className='mt-1 ml-2 flex flex-col gap-0.5 border-l'>
-                {g.pages.map((page) => {
+              <ul className='mt-1 flex flex-col gap-0.5'>
+                {g.pages.map((page, pi) => {
                   const active = pathname === page.href;
                   return (
                     <li key={page.href}>
                       <Link href={page.href} onClick={onNavigate} aria-current={active ? 'page' : undefined}
-                        className={cn('-ml-px block border-l py-1.5 pr-2 pl-3 text-sm transition-colors',
-                          active ? 'border-primary text-primary bg-primary/5 font-medium' : 'text-muted-foreground hover:text-foreground hover:border-foreground/30 border-transparent')}>
-                        {page.title}
+                        className={cn('flex gap-2 py-1 text-sm transition-colors', active ? 'text-primary font-medium' : 'text-muted-foreground hover:text-foreground')}>
+                        <span className='shrink-0 tabular-nums opacity-70'>{gi + 1}.{pi + 1}</span>
+                        <span>{page.title}</span>
                       </Link>
                     </li>
                   );
