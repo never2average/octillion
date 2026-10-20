@@ -277,71 +277,68 @@ export function WhatIsApo() {
   );
 }
 
-const LOOP = [
-  { x: 210, y: 52, label: 'Profile product', sub: 'what you sell, who buys it' },
-  { x: 368, y: 210, label: 'Blind tasks', sub: 'real work, never naming you' },
-  { x: 210, y: 368, label: 'Agents run', sub: 'every major coding agent' },
-  { x: 52, y: 210, label: 'Score & fix', sub: 'docs, SDKs, examples' }
+const STEPS = [
+  { n: '01', label: 'Profile product', sub: 'what you sell, who buys it' },
+  { n: '02', label: 'Blind tasks', sub: 'real work, never naming you' },
+  { n: '03', label: 'Agents run', sub: 'every major coding agent' }
 ];
 
-function ApoLoop() {
+/** An arrowhead pointing down (or left) with its tip at x, y. */
+const tipDown = (x: number, y: number) => `M${x - 4.5} ${y - 7} L${x + 4.5} ${y - 7} L${x} ${y} Z`;
+const tipLeft = (x: number, y: number) => `M${x + 7} ${y - 4.5} L${x + 7} ${y + 4.5} L${x} ${y} Z`;
+
+/** A dashed, flowing connector with its arrowhead. */
+function Flow({ d, tip }: { d: string; tip: string }) {
   return (
-    <>
-      <ApoLoopVertical />
-      <ApoLoopDiagram />
-    </>
+    <g>
+      <path d={d} fill='none' className='stroke-border' strokeWidth='1.5' />
+      <path d={d} fill='none' className={FLOW} strokeWidth='2' />
+      <path d={tip} className='fill-primary' />
+    </g>
   );
 }
 
 /**
- * The loop turned vertical for phones: the four steps stacked, joined by the same flowing dashes, and a return arc
- * on the right from the last step back to the first.
+ * APO as an if/else: profile, pose blind tasks, let the agents run, then branch on the verdict. Picked: keep it there
+ * by tracking the pick rate every release. Not picked: score the transcripts, fix docs/SDKs/examples, and run again.
+ * One vertical drawing at every width, drawn near 1:1 on a phone so its text stays readable.
  */
-function ApoLoopVertical() {
-  const h = 58, gap = 30, w = 282;
-  const ys = LOOP.map((_, i) => 4 + i * (h + gap));
-  const last = ys[ys.length - 1];
-  const back = `M${w} ${last + h / 2} C${w + 50} ${last + h / 2} ${w + 50} ${ys[0] + h / 2} ${w + 6} ${ys[0] + h / 2}`;
+function ApoLoop() {
+  const W = 280, h = 56, x0 = 40, cx = 180;
+  const ys = STEPS.map((_, i) => i * (h + 28));
+  const dy = ys[2] + h + 30 + 40; // diamond centre
+  const by = dy + 80; // branch boxes' top
   return (
-    <svg viewBox='0 0 340 362' className='h-auto w-full sm:hidden' role='img' aria-label='The APO loop: profile your product, pose blind tasks, agents run them, score and fix, repeat every release.'>
-      {ys.slice(0, -1).map((y) => (
-        <g key={y}>
-          <path d={`M40 ${y + h} L40 ${y + h + gap}`} className='stroke-border' strokeWidth='1.5' />
-          <path d={`M40 ${y + h} L40 ${y + h + gap}`} className={FLOW} strokeWidth='2' />
+    <svg viewBox='0 0 380 460' className='mx-auto h-auto w-full max-w-md' role='img'
+      aria-label='APO: profile your product, pose blind tasks, agents run them. If an agent picks you, track the pick rate every release; if not, score and fix your docs, SDKs and examples, then run again.'>
+      {ys.slice(0, -1).map((y) => <Flow key={y} d={`M${cx} ${y + h} L${cx} ${y + h + 27}`} tip={tipDown(cx, y + h + 28)} />)}
+      <Flow d={`M${cx} ${ys[2] + h} L${cx} ${dy - 41}`} tip={tipDown(cx, dy - 40)} />
+      {STEPS.map((st, i) => (
+        <g key={st.n}>
+          <rect x={x0} y={ys[i] + 1} width={W} height={h} rx='14' className='fill-background stroke-primary/60' />
+          <text x={x0 + 16} y={ys[i] + 26} className='fill-primary font-mono text-[12px]'>{st.n}</text>
+          <text x={x0 + 42} y={ys[i] + 26} className='fill-foreground text-[14px] font-medium'>{st.label}</text>
+          <text x={x0 + 16} y={ys[i] + 45} className='fill-muted-foreground text-[12px]'>{st.sub}</text>
         </g>
       ))}
-      <path d={back} fill='none' className='stroke-border' strokeWidth='1.5' />
-      <path d={back} fill='none' className={FLOW} strokeWidth='2' />
-      <path d={`M${w + 6} ${ys[0] + h / 2} l7 -4.5 v9 z`} className='fill-primary' />
-      {LOOP.map((st, i) => (
-        <g key={st.label}>
-          <rect x='1' y={ys[i]} width={w} height={h} rx='14' className='fill-background stroke-primary/60' />
-          <text x='18' y={ys[i] + 25} className='fill-primary font-mono text-[12px]'>{`0${i + 1}`}</text>
-          <text x='44' y={ys[i] + 25} className='fill-foreground text-[14px] font-medium'>{st.label}</text>
-          <text x='18' y={ys[i] + 44} className='fill-muted-foreground text-[12px]'>{st.sub}</text>
-        </g>
-      ))}
-      <text x='1' y={last + h + 26} className='fill-primary font-mono text-[15px] font-semibold'>APO</text>
-      <text x='42' y={last + h + 26} className='fill-muted-foreground font-mono text-[12px]'>repeat every release</text>
-    </svg>
-  );
-}
-
-function ApoLoopDiagram() {
-  return (
-    <svg viewBox='-60 -10 540 440' className='mx-auto hidden h-auto w-full max-w-lg sm:block' role='img' aria-label='The APO loop: profile your product, pose blind tasks, agents run them, score and fix, repeat every release.'>
-      <circle cx='210' cy='210' r='158' fill='none' className='stroke-border' strokeWidth='1.5' />
-      <circle cx='210' cy='210' r='158' fill='none' className={FLOW} strokeWidth='2' />
-      <text x='210' y='212' textAnchor='middle' className='fill-primary font-mono text-[34px] font-semibold'>APO</text>
-      <text x='210' y='238' textAnchor='middle' className='fill-muted-foreground font-mono text-[12px]'>repeat every release</text>
-      {LOOP.map((s, i) => (
-        <g key={s.label}>
-          <rect x={s.x - 92} y={s.y - 30} width='184' height='60' rx='14' className='fill-background stroke-primary/60' />
-          <text x={s.x - 76} y={s.y - 4} className='fill-primary font-mono text-[12px]'>{`0${i + 1}`}</text>
-          <text x={s.x - 52} y={s.y - 4} className='fill-foreground text-[14px] font-medium'>{s.label}</text>
-          <text x={s.x - 76} y={s.y + 16} className='fill-muted-foreground text-[11.5px]'>{s.sub}</text>
-        </g>
-      ))}
+      {/* if: did the agent pick you? */}
+      <path d={`M${cx} ${dy - 40} L${cx + 78} ${dy} L${cx} ${dy + 40} L${cx - 78} ${dy} Z`} className='fill-primary/10 stroke-primary' strokeWidth='1.5' />
+      <text x={cx} y={dy + 5} textAnchor='middle' className='fill-foreground text-[14px] font-semibold'>Picked you?</text>
+      <Flow d={`M${cx - 78} ${dy} L${83} ${dy} L${83} ${by - 1}`} tip={tipDown(83, by)} />
+      <text x={cx - 92} y={dy - 8} textAnchor='end' className='fill-primary font-mono text-[12px]'>yes</text>
+      <Flow d={`M${cx + 78} ${dy} L${255} ${dy} L${255} ${by - 1}`} tip={tipDown(255, by)} />
+      <text x={cx + 92} y={dy - 8} className='fill-destructive font-mono text-[12px]'>no</text>
+      {/* then: keep it */}
+      <rect x='1' y={by} width='164' height={h} rx='14' className='fill-primary/15 stroke-primary/60' />
+      <text x='16' y={by + 25} className='fill-primary text-[14px] font-medium'>✓ Picked</text>
+      <text x='16' y={by + 44} className='fill-muted-foreground text-[12px]'>track it every release</text>
+      {/* else: fix and run again */}
+      <rect x='175' y={by} width='160' height={h} rx='14' className='fill-background stroke-destructive/60' />
+      <text x='190' y={by + 25} className='fill-foreground text-[14px] font-medium'><tspan className='fill-destructive font-mono text-[12px]'>04</tspan><tspan dx='8'>Score &amp; fix</tspan></text>
+      <text x='190' y={by + 44} className='fill-muted-foreground text-[12px]'>docs, SDKs, examples</text>
+      <Flow d={`M255 ${by + h} L255 ${by + h + 14} Q255 ${by + h + 22} 263 ${by + h + 22} L352 ${by + h + 22} L352 ${ys[2] + h / 2} L${x0 + W + 8} ${ys[2] + h / 2}`}
+        tip={tipLeft(x0 + W + 1, ys[2] + h / 2)} />
+      <text x='368' y={(by + ys[2] + h) / 2} textAnchor='middle' transform={`rotate(-90 368 ${(by + ys[2] + h) / 2})`} className='fill-muted-foreground font-mono text-[11px]'>run again</text>
     </svg>
   );
 }
