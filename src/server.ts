@@ -522,7 +522,7 @@ export function createServer(org: Org, context = ""): McpServer {
       samples: z.number().int().min(1).max(100).optional().describe(`Representative mode: first batch of sessions per scenario (default ${q.config.defaultSamples()}). Given alone it makes a fixed-size run with no adaptive sampling`),
       max_samples: z.number().int().min(1).max(100).optional().describe(`Representative mode: adaptive sampling cap per scenario (default ${q.config.maxSamples()}). Each scenario is sampled until its result is stable or it reaches this many sessions`),
       population: z.string().optional().describe("Developer population whose coding-agent mix to sample (list_agents); default population if omitted"),
-      profiles: z.array(z.string()).optional().describe("Developer profile slugs (list_developer_profiles); every scenario runs once per profile. Omit for a generic developer"),
+      profiles: z.array(z.string()).optional().describe("Developer profile slugs (list_developer_profiles); every scenario runs once per profile. Omit to use the product's personas (its own and the library personas research linked to it); pass [] for a generic developer"),
       repeats: z.number().int().min(1).max(10).optional().describe("Explicit mode: runs per scenario and agent (default 3)"),
       name: z.string().optional(),
     },

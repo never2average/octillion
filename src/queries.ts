@@ -444,6 +444,17 @@ export async function runSimulation(org: Org, input: RunInput) {
     const missing = wanted.filter((w) => !profiles.some((p: any) => p.slug === w));
     if (missing.length) throw new Error(`Unknown developer profile(s): ${missing.join(", ")}. See list_developer_profiles.`);
   }
+  else if (input.profiles === undefined) {
+    // No personas named: the product's own, i.e. its active personas and the library personas linked to it
+    // (product_personas), so agents talk to the developers research picked rather than to nobody. profiles: [] asks
+    // for a generic developer. At most as many as fit one session per task and persona under the run's cap.
+    profiles = await db.query<{ id: number }>(
+      `SELECT id FROM developer_profiles WHERE org_id = $1 AND product_id = $2 AND active
+       UNION SELECT pp.profile_id FROM product_personas pp JOIN developer_profiles dp ON dp.id = pp.profile_id AND dp.active AND dp.org_id IS NULL
+        WHERE pp.product_id = $2 AND pp.active
+       ORDER BY 1`, [org.orgId, p.id]);
+    profiles = profiles.slice(0, Math.max(1, Math.floor(maxSessions / Math.max(1, scenarios.length))));
+  }
   const profileIds: (number | null)[] = profiles.length ? profiles.map((p) => p.id) : [null];
   // A run on the org's own tasks or personas is private: only an orchestrator launched for this run may claim it.
   const [{ n: privateAssets }] = await db.query<{ n: number }>(
