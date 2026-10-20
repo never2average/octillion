@@ -100,6 +100,11 @@ export async function experimentsReport(q: { from?: unknown; to?: unknown } = {}
   const endAt = Math.min(Date.parse(`${R.to}T00:00:00Z`) + DAY - 1, now);
   const inRange = (ms: number) => { const d = dayOf(ms); return d >= R.from && d <= R.to; };
   const slugOfCustomer = new Map(orgs.filter((o) => o.stripe_customer_id).map((o) => [o.stripe_customer_id!, o.slug]));
+  // Octillion's customers only (as FinOps Revenue): checkouts and subscriptions of a Stripe customer no account is
+  // linked to (a deleted test customer) are left out.
+  sessions = sessions.filter((x) => x.customer != null && slugOfCustomer.has(x.customer));
+  subs = subs.filter((x) => slugOfCustomer.has(x.customer));
+  invoices = invoices.filter((x) => slugOfCustomer.has(x.customer));
   const spendOf = new Map(spend.accounts.map((a) => [a.key, sum(a.daily_session) + sum(a.daily_orchestrator)]));
 
   interface V { experiment: string; price_id: string; name: string; amount: number | null; interval: string | null; weight: number; live: boolean; created: number | null;

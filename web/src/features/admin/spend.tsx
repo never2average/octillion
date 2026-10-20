@@ -258,20 +258,12 @@ function accountActions(router: ReturnType<typeof useRouter>) {
 }
 
 /** The account filter: a multi-select, and whether accounts with nothing in the range are listed. */
-function useAccountFilter<T extends { key: string; name: string; slug: string | null }>(all: T[], has: (a: T) => boolean, noun: string) {
+/** The account picker, and the rows: the picked accounts, else the accounts with something in the range (`has`). */
+function useAccountFilter<T extends { key: string; name: string; slug: string | null }>(all: T[], has: (a: T) => boolean) {
   const [picked, setPicked] = useState<string[]>([]);
-  const [scope, setScope] = useState<'some' | 'all'>('some');
-  const rows = useMemo(() => all.filter((a) => (picked.length ? picked.includes(a.key) : scope === 'all' || has(a))), [all, picked, scope, has]);
-  const controls = (
-    <>
-      <MultiSelectFilter noun='accounts' options={all.map((a) => ({ value: a.key, label: a.name, hint: a.slug ?? undefined }))} value={picked} onChange={setPicked} />
-      <NativeSelect aria-label='Accounts shown' value={scope} disabled={picked.length > 0} onChange={(e) => setScope(e.target.value as 'some' | 'all')}>
-        <NativeSelectOption value='some'>Accounts with {noun}</NativeSelectOption>
-        <NativeSelectOption value='all'>Every account</NativeSelectOption>
-      </NativeSelect>
-    </>
-  );
-  return { rows, controls, filtered: picked.length > 0 || scope === 'all' };
+  const rows = useMemo(() => all.filter((a) => (picked.length ? picked.includes(a.key) : has(a))), [all, picked, has]);
+  const controls = <MultiSelectFilter noun='accounts' options={all.map((a) => ({ value: a.key, label: a.name, hint: a.slug ?? undefined }))} value={picked} onChange={setPicked} />;
+  return { rows, controls, filtered: picked.length > 0 };
 }
 
 /** A small stacked daily bar chart for a peek. */
@@ -319,7 +311,7 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
   const [experimenting, setExperimenting] = useState<RevenuePlan | null>(null);
   const [duplicating, setDuplicating] = useState<{ json: string; control?: { price_id: string; experiment: string; weight: number } } | null>(null);
   const all = data?.accounts ?? [];
-  const f = useAccountFilter(all, (a) => a.collected_usd > 0 || a.mrr_usd > 0 || a.spend_usd > 0 || a.subscriptions.length > 0 || a.invoices.length > 0, 'revenue or spend');
+  const f = useAccountFilter(all, (a) => a.collected_usd > 0 || a.mrr_usd > 0 || a.spend_usd > 0 || a.subscriptions.length > 0 || a.invoices.length > 0);
   const len = data?.range.days.length ?? 0;
   // Grouped by account: the accounts shown; grouped by plan: every account (the report's totals).
   const src = group === 'account' ? f.rows : all;
@@ -825,7 +817,7 @@ function ArchivePlan({ plan, onClose }: { plan: RevenuePlan | null; onClose: () 
 
 function SpendTab({ data, loading, bar, group, range }: TabProps<Spend> & { range: DateRange }) {
   const all = data?.accounts ?? [];
-  const f = useAccountFilter(all, (a) => a.spent_usd > 0 || a.month_usd > 0, 'spend');
+  const f = useAccountFilter(all, (a) => a.spent_usd > 0 || a.month_usd > 0);
   // The four numbers are the same whichever grouping: the accounts shown, or every account when grouped by provider.
   const rows = group === 'account' ? f.rows : all;
   const len = data?.range.days.length ?? 0;
@@ -1011,7 +1003,7 @@ function SpendProviders({ data, loading, cards, bar }: { data: Spend | undefined
 function ComputeTab({ data, loading, bar, group }: TabProps<Compute>) {
   const router = useRouter();
   const all = data?.accounts ?? [];
-  const f = useAccountFilter(all, (a) => a.total_hours > 0, 'compute');
+  const f = useAccountFilter(all, (a) => a.total_hours > 0);
   const len = data?.range.days.length ?? 0;
   const src = group === 'account' ? f.rows : all;
   const orch = sumAt(src.map((r) => r.daily_orchestrator), len), agent = sumAt(src.map((r) => r.daily_agent), len);
@@ -1095,7 +1087,7 @@ function ComputeTab({ data, loading, bar, group }: TabProps<Compute>) {
 function StorageTab({ data, loading, bar, group }: TabProps<Storage>) {
   const router = useRouter();
   const all = data?.accounts ?? [];
-  const f = useAccountFilter(all, (a) => a.rows > 0 || a.gateway_bytes > 0, 'data');
+  const f = useAccountFilter(all, (a) => a.rows > 0 || a.gateway_bytes > 0);
   const [kind, setKind] = useState('');
   const t = data?.totals;
   const cards = (
