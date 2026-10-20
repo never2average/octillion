@@ -16,7 +16,7 @@ import { Switch } from '@/components/ui/switch';
 import { Icons } from '@/components/icons';
 import { appApi } from '@/lib/api-client';
 import { cn } from '@/lib/utils';
-import { CopyButton, ErrorState, LoadingCards, When, copy, fail, useOrgLoad } from './shared';
+import { CopyButton, ErrorState, LoadingCards, When, fail, useOrgLoad } from './shared';
 import { Allowed } from './role';
 
 interface Step { id: string; label: string; done: boolean; at: string | null; help: string; optional?: boolean; prompt?: string | null }
@@ -145,10 +145,6 @@ function ConnectionBox({ s, onConnected }: { s: Setup; onConnected: () => void }
                 <CopyButton text={url} label='Copy URL' variant='ghost' />
               </div>
               {c && <ClientSteps c={c} />}
-              {c && (
-                <button type='button' className='text-muted-foreground hover:text-foreground self-start text-xs underline-offset-2 hover:underline'
-                  onClick={() => { copy(setupText(url, c)); }}>Copy all of this to send to a teammate</button>
-              )}
             </div>
           </NumberedStep>
           <NumberedStep n={3} title='Check it works'>
@@ -181,18 +177,6 @@ function NumberedStep({ n, title, children }: { n: number; title: string; childr
   );
 }
 
-/** Everything to paste into a message or a terminal: the URL plus the selected client's way in. */
-function setupText(url: string, c: Client) {
-  return [
-    `Octillion MCP server: ${url}`,
-    '',
-    `Add it to ${c.client}:`,
-    c.steps,
-    c.install_url && `One-click install: ${c.install_url}`,
-    c.command && `Command:\n${c.command}`,
-    c.snippet && `${c.file ? `${c.command || c.install_url ? 'Or add to' : 'In'} ${c.file}` : 'Config'}:\n${c.snippet}`
-  ].filter((x): x is string => typeof x === 'string').join('\n');
-}
 
 /** The selected client's way in: one-click install, a command, a config snippet, or steps in its settings. */
 function ClientSteps({ c }: { c: Client }) {
