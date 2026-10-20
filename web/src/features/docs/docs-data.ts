@@ -1,35 +1,11 @@
 // Shapes and helpers shared by the docs layout (server) and its navigation / table of contents (client). Only these
 // small structures (titles, hrefs, headings) ever reach the browser as props; a page's markdown body never does.
+// The markdown helpers live in content/docs-text.ts, which the API's docs corpus (scripts/sync-docs-corpus.ts) uses too.
+import type { DocHeading } from '@/content/docs-text';
+export { markdownHeadings, plainHeading, slugify, type DocHeading } from '@/content/docs-text';
 
-/** A heading of a page: its anchor id (as components/markdown.tsx renders it), text and level (2 or 3). */
-export interface DocHeading { id: string; text: string; depth: 2 | 3 }
 export interface DocNavPage { title: string; href: string; headings: DocHeading[] }
 export interface DocNavGroup { title: string; pages: DocNavPage[] }
-export interface DocCrumb { title: string; href?: string }
-
-/** The same id components/markdown.tsx gives a heading, from its plain text. */
-export const slugify = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-
-/** A heading's markdown as the text it renders to: links, emphasis, code ticks and escapes dropped. */
-export const plainHeading = (md: string) =>
-  md.replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/\\([\\`*_{}[\]()#+\-.!|])/g, '$1').replace(/`([^`]*)`/g, '$1')
-    .replace(/(\*\*|__)(.+?)\1/g, '$2').replace(/(^|\W)[*_](.+?)[*_](?=\W|$)/g, '$1$2').trim();
-
-/** The h2/h3 headings of a markdown page, skipping fenced code. */
-export function markdownHeadings(md: string): DocHeading[] {
-  const out: DocHeading[] = [];
-  let fence = '';
-  for (const line of md.split('\n')) {
-    const f = line.match(/^\s*(```|~~~)/);
-    if (f) { fence = fence ? (fence === f[1] ? '' : fence) : f[1]; continue; }
-    if (fence) continue;
-    const m = line.match(/^(##|###)\s+(.+?)\s*#*\s*$/);
-    if (!m) continue;
-    const text = plainHeading(m[2]);
-    out.push({ id: slugify(text), text, depth: m[1].length as 2 | 3 });
-  }
-  return out;
-}
 
 /** The pages in navigation order, with the one before and after `href`. */
 export function neighbours(groups: DocNavGroup[], href: string) {

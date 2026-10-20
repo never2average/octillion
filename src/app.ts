@@ -32,6 +32,7 @@ import * as priv from "./private.js";
 import * as contributions from "./contributions.js";
 import { recordPageAction } from "./analytics.js";
 import { visibilityRoutes } from "./visibility.js";
+import { answerDocs } from "./docs-answers.js";
 
 /** The portal surface: library content redacted (src/queries.ts Surface). MCP tool handlers (src/server.ts) never pass it. */
 const PORTAL = { redact: true } as const;
@@ -789,6 +790,13 @@ export function appRouter() {
   api.get("/nudges", async (_req, res) => void res.json(await journeys.nudgesForApp(S(res).org, S(res).user)));
   api.post("/nudges/:id/dismiss", async (req, res) => { await journeys.dismiss(S(res).org, S(res).slug, S(res).user, Number(req.params.id)); res.status(204).end(); });
   api.post("/nudges/mute", async (req, res) => { await journeys.setMuted(S(res).org, S(res).slug, S(res).user, req.body?.muted !== false); res.status(204).end(); });
+  // "Ask AI" in the Cmd+K bar (src/docs-answers.ts): any signed-in person; the customer guide only, never the internal docs.
+  api.post("/docs/answer", async (req, res) => {
+    const s = S(res);
+    const r = await answerDocs("customer", req.body?.question, { userKey: s.user ?? `org:${s.slug}`, orgId: s.org });
+    capture({ distinctId: s.user ?? `org:${s.slug}`, orgSlug: s.slug }, "docs_answer_asked", { answered: r.answer != null, reason: r.reason, sources: r.sources.length });
+    res.json(r);
+  });
   api.get("/billing", async (_req, res) => void res.json({ ...(await billingView(S(res))), can_manage: can(res, "billing"), permissions: perms(res),
     contributions: await contributions.creditsFor(S(res).org) }));
   api.get("/billing/usage", async (_req, res) => void res.json(await billingUsage(S(res))));

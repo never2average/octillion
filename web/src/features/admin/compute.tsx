@@ -61,7 +61,7 @@ export function AdminConfiguration() {
   const { data, error, isLoading } = useAdmin<Compute>('/compute');
   const save = useAdminAction((v: Record<string, string | null>) => adminApi<Compute>('PUT', '/compute/settings', { values: v }), { success: 'Setting saved' });
   const groupName = (id: string) => data?.groups.find((g) => g.id === id)?.label ?? id;
-  const rows = (data?.settings ?? []).filter((x) => ['models', 'runs', 'research', 'reasons', 'library', 'email'].includes(x.group));
+  const rows = (data?.settings ?? []).filter((x) => ['models', 'runs', 'research', 'reasons', 'docs', 'library', 'email'].includes(x.group));
   const changed = rows.filter((x) => x.source === 'set');
   const [askReset, setAskReset] = useState(false);
   // Back to the environment's value where one is set, else the default (saving null clears the admin's value).

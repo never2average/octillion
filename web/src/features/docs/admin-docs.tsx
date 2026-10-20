@@ -35,6 +35,9 @@ function nav(): DocNavGroup[] {
   ];
 }
 
+/** The same, for the Cmd+K bar's Docs section: passed down from the admin layout, so it reaches admins only. */
+export const adminDocsNav = () => nav();
+
 export const findAdminDoc = (slug: string): AdminDoc | undefined => ADMIN_DOCS.find((d) => d.slug === slug);
 
 /** A relative link between docs (e.g. `journeys.md`, `../beta-guide.md`) opens that doc here; other repo paths render as text. */
@@ -55,7 +58,7 @@ function resolver(doc: AdminDoc) {
 export function AdminDocsIndex() {
   const groups = nav().slice(1);
   return (
-    <DocsLayout nav={nav()} href={HOME} title='Internal docs' crumbs={[{ title: 'Docs' }, { title: 'Overview' }]}
+    <DocsLayout nav={nav()} href={HOME} title='Internal docs'
       description='Internal Octillion documentation: how accounts, budgets, compute, credentials and storage work, plus specs and case studies.'
       headings={groups.map((g) => ({ id: slugify(g.title), text: g.title, depth: 2 as const }))}
       meta={<span>{ADMIN_DOCS.length} docs, from <code className='font-mono'>docs/</code> in the repository.</span>}>
@@ -91,7 +94,6 @@ export function AdminDocPage({ slug }: { slug: string }) {
   const resolve = resolver(doc);
   return (
     <DocsLayout nav={nav()} href={href(doc)} title={doc.title} headings={markdownHeadings(rest)}
-      crumbs={[{ title: 'Docs', href: HOME }, { title: groupOf(doc) }, { title: doc.title }]}
       description={lead ? <Markdown resolveHref={resolve} className='text-muted-foreground max-w-none text-lg [&_p]:my-0 [&_p]:leading-relaxed'>{lead}</Markdown> : undefined}
       meta={<span>Source: <code className='font-mono'>docs/{doc.path}</code></span>}>
       <Markdown resolveHref={resolve} className='max-w-none'>{rest}</Markdown>

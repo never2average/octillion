@@ -238,6 +238,13 @@ try {
     assert.deepEqual(committed, await mcpCatalog(), "web/src/content/mcp-tools.generated.json is stale: run npx tsx scripts/export-mcp-tools.ts");
     assert.deepEqual(committed.tools.map((t: any) => t.name).sort(), tools.map((t) => t.name).sort(), "the docs list every customer tool");
   }
+  // The docs answers' corpus (src/docs-corpus.generated.json) is generated from the customer guide and docs/*.md: current.
+  {
+    const { docsCorpus } = await import("./sync-docs-corpus.js");
+    const committed = JSON.parse(readFileSync(new URL("../src/docs-corpus.generated.json", import.meta.url), "utf8")).chunks;
+    assert.deepEqual(committed, docsCorpus(), "src/docs-corpus.generated.json is stale: run npx tsx scripts/sync-docs-corpus.ts");
+    assert.ok(committed.every((c: any) => (c.area === "customer") === c.href.startsWith("/app/docs/")), "customer chunks link to /app/docs, admin ones to /admin/docs");
+  }
   console.log("tools:", tools.map((t) => t.name).join(", "));
   assert.equal(tools.length, 31); // 19 core (incl. browse_task_library, export_visibility_report) + 2 memory + 10 private-asset tools incl. publish_to_library
   assert.ok(tools.some((t) => t.name === "export_visibility_report" && t.annotations?.readOnlyHint && !t.annotations?.destructiveHint), "export_visibility_report is read-only");
@@ -2045,7 +2052,7 @@ try {
     const reset = () => adm("PUT", "/compute/settings", { values: Object.fromEntries(keys.map((k) => [k, null])) });
     const c0 = await json(adm("GET", "/compute"));
     const byKey = (c: any, k: string) => c.settings.find((x: any) => x.key === k);
-    assert.ok(c0.groups.length === 7 && c0.settings.length >= 19 && byKey(c0, "REASONS_DAILY_MAX")?.value === 500 && byKey(c0, "PUBLISH_DISCOUNT_TASK_USD")?.value === 10, "every setting listed, grouped");
+    assert.ok(c0.groups.length === 8 && c0.settings.length >= 21 && byKey(c0, "REASONS_DAILY_MAX")?.value === 500 && byKey(c0, "DOCS_ANSWERS_DAILY_MAX")?.value === 500 && byKey(c0, "PUBLISH_DISCOUNT_TASK_USD")?.value === 10, "every setting listed, grouped");
     // Email settings (src/email.ts): defaults, and addresses checked.
     assert.ok(byKey(c0, "EMAIL_FROM")?.value === "Octillion <hello@octillion.useimmaculate.com>" && byKey(c0, "EMAILS_ENABLED")?.value === "on"
       && byKey(c0, "EMAIL_REPLY_TO")?.value === "" && byKey(c0, "EMAIL_ADMIN_TO")?.value === "", "email settings and their defaults");
@@ -3257,6 +3264,80 @@ try {
       assert.equal((await as(people.owner.sess, "POST", `/admins/${people.owner.id}/role`, { role: "operator" })).status, 200, "with a second owner, they can");
       assert.equal((await as(people.owner.sess, "POST", "/admins", { email: "x@y.dev", role: "viewer" })).status, 403, "and are an operator at once");
       console.log("✓ platform admin roles: each role's allowed and refused routes, 403 naming the role, role in the log, Admins page (env, add, change, remove), last-owner guard");
+
+      // ---------- docs answers (src/docs-answers.ts): Ask AI in the Cmd+K bar ----------
+      {
+        const { setSettings } = await import("../src/settings.js");
+        const kvD = await import("../src/keyvault.js");
+        const cfKey = await kvD.setCredential("cloudflare", `cf-smoke-docs-${stamp}-token`);
+        Object.assign(process.env, { CLOUDFLARE_ACCOUNT_ID: "smoke-account", CLOUDFLARE_API_URL: mock.url });
+        await setSettings("smoke", { DOCS_ANSWERS_DAILY_MAX: 500, DOCS_ANSWERS_PER_MINUTE: 20 });
+        const askApp = (sess: string, question: unknown) => appCall(sess, "POST", "/docs/answer", { question });
+        const askAdmin = (sess: string, question: unknown) => as(sess, "POST", "/docs/answer", { question });
+        const BUDGET = "How do budget rules work?";
+        // An internal-docs question: Clerk and its OAuth server are in docs/accounts.md, never in the customer guide.
+        const INTERNAL = "Which system of record holds organizations, sessions and the Clerk OAuth server?";
+
+        assert.equal((await appCall("", "POST", "/docs/answer", { question: BUDGET })).status, 401, "signed out: no answers");
+        assert.equal((await askAdmin(ownerC, BUDGET)).status, 403, "a customer can't ask the internal docs");
+        assert.equal((await askApp(ownerC, "x")).status, 400, "a question of a few words");
+
+        // No model answers (the Cloudflare mock is 503 without aiReply): the matching sections still come back.
+        mock.state.aiReply = null;
+        mock.state.aiRequests.length = 0;
+        const down = await json(askApp(ownerC, BUDGET));
+        assert.deepEqual([down.answer, down.reason], [null, "unavailable"], "no model: answer null, AI summary unavailable");
+        assert.ok(down.sources.length > 0 && down.sources.length <= 6, "sources without the summary");
+        assert.deepEqual(down.sources.map((x: any) => x.n), down.sources.map((_: any, i: number) => i + 1), "numbered 1..n");
+        assert.ok(down.sources.some((x: any) => x.href === "/app/docs/billing#budget-rules"), "the Budget rules section is a source, at its anchor");
+        assert.ok(mock.state.aiRequests.length >= 1, "the model was tried");
+
+        // The customer corpus never includes the internal docs: not in the sources, not in what the model reads.
+        mock.state.aiRequests.length = 0;
+        const cInt = await json(askApp(ownerC, INTERNAL));
+        assert.ok(cInt.sources.every((x: any) => x.href.startsWith("/app/docs/")), "customer sources are customer docs only");
+        const sentC = JSON.stringify(mock.state.aiRequests);
+        assert.ok(!/src\/clerk\.ts|Admin console|system of record/i.test(sentC.replace(/<question>[^<]*<\/question>/, "")), "no internal docs text reaches the model for a customer");
+        const vInt = await json(askAdmin(people.viewer.sess, INTERNAL));
+        assert.ok(vInt.sources.some((x: any) => x.href.startsWith("/admin/docs/accounts")), "an admin's answer draws on the internal docs");
+
+        // A model answer: markdown with citations of the excerpts; made-up citations and links are dropped.
+        mock.state.aiRequests.length = 0;
+        mock.state.aiReply = (body: any) => String(body?.messages?.find((m: any) => m.role === "user")?.content ?? "").includes("budget rules")
+          ? { content: JSON.stringify({ answer: "Admins set how the allowance is spent on the **Budget rules** tab [1], including runs at once [1][2]. See [9] and [this](https://evil.example).", covered: true }) }
+          : { status: 500 };
+        const ans = await json(askApp(ownerC, BUDGET));
+        assert.equal(ans.reason, null);
+        assert.equal(ans.model, "@cf/zai-org/glm-5.3-flash", "the cheapest model first");
+        assert.ok(ans.answer.includes("[1]") && ans.answer.includes("[1][2]"), "citations kept");
+        assert.ok(!ans.answer.includes("[9]") && !ans.answer.includes("evil.example") && ans.answer.includes("See  and this."), "a citation of no excerpt and a link are dropped");
+        assert.equal(ans.covered, true);
+        const req = mock.state.aiRequests.at(-1);
+        assert.ok(req.messages[0].content.includes("Use only the excerpts") && req.messages[1].content.includes('<excerpt n="1"'), "a strict system prompt, numbered excerpts");
+        const usage = await db.query<any>("SELECT sum(requests)::int AS n FROM gateway_model_usage WHERE day = current_date AND provider = 'cloudflare' AND consumer = 'orchestrator'");
+        assert.ok(Number(usage[0].n) >= 1, "metered like other server-side model calls");
+        const logged = await db.query<any>("SELECT area, model, answered FROM docs_answers WHERE user_key = $1 ORDER BY id", [accepted.user.id]);
+        assert.ok(logged.length >= 3 && logged.some((r: any) => r.answered === false) && logged.at(-1).answered === true && logged.at(-1).area === "customer", "each model call is logged (never the question)");
+
+        // Limits: past the daily cap or the per-person minute limit, the sources come back without a model call.
+        const sentBefore = mock.state.aiRequests.length;
+        await setSettings("smoke", { DOCS_ANSWERS_PER_MINUTE: logged.length });
+        const limited = await json(askApp(ownerC, BUDGET));
+        assert.deepEqual([limited.answer, limited.reason, limited.sources.length > 0], [null, "rate_limited", true], "per-person minute limit");
+        assert.ok((await json(askAdmin(people.viewer.sess, BUDGET))).reason !== "rate_limited", "the limit is per person");
+        await setSettings("smoke", { DOCS_ANSWERS_DAILY_MAX: 0, DOCS_ANSWERS_PER_MINUTE: 20 });
+        const capped = await json(askApp(ownerC, BUDGET));
+        assert.deepEqual([capped.answer, capped.reason, capped.sources.length > 0], [null, "daily_cap", true], "daily cap, platform-wide");
+        assert.equal((await json(askAdmin(people.viewer.sess, BUDGET))).reason, "daily_cap", "the cap covers admins too");
+        assert.equal(mock.state.aiRequests.length, sentBefore + 1, "only the viewer's call under the limit reached the model");
+        assert.equal((await json(askApp(ownerC, "zzqx wvvy"))).reason, "no_match", "nothing matches: no sources, no call");
+
+        mock.state.aiReply = null;
+        await kvD.deleteCredential(cfKey.id);
+        await setSettings("smoke", { DOCS_ANSWERS_DAILY_MAX: null, DOCS_ANSWERS_PER_MINUTE: null });
+        await db.query("DELETE FROM docs_answers WHERE user_key = $1 OR user_key LIKE $2", [accepted.user.id, `admin:viewer+${stamp}%`]);
+        console.log("✓ docs answers: signed-in only, customer corpus only for /app, sources without a model, citations checked, daily cap and per-person limit, metered");
+      }
     }
 
     // ---------- admin MCP (src/admin-mcp.ts): /admin/mcp for platform admins, each tool with its route's permission ----------

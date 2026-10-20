@@ -9,7 +9,7 @@ import { getDb } from "./db.js";
  * setSetting() updates this process's cache at once.
  */
 
-export type SettingGroup = "models" | "runs" | "capacity" | "research" | "reasons" | "library" | "email";
+export type SettingGroup = "models" | "runs" | "capacity" | "research" | "reasons" | "docs" | "library" | "email";
 export interface SettingDef {
   key: string; group: SettingGroup; label: string; help: string;
   kind: "text" | "int" | "number" | "choice";
@@ -25,6 +25,7 @@ export const SETTING_GROUPS: { id: SettingGroup; label: string }[] = [
   { id: "capacity", label: "Capacity" },
   { id: "research", label: "Research" },
   { id: "reasons", label: "Loss reasons" },
+  { id: "docs", label: "Docs answers" },
   { id: "library", label: "Library contributions" },
   { id: "email", label: "Email" },
 ];
@@ -58,6 +59,10 @@ export const SETTINGS: SettingDef[] = [
     help: "On: each session an agent didn't pick the product in gets a short model reason (the cheapest model, out of band) for \"Why agents chose others\" on Pick rate. Off: nothing new is queued or sent." },
   { key: "REASONS_DAILY_MAX", group: "reasons", label: "Loss reasons a day", kind: "int", default: 500, min: 0, max: 100000,
     help: "Most model calls for loss reasons a UTC day, across all accounts (retries count). Past it, the rest wait for tomorrow." },
+  { key: "DOCS_ANSWERS_DAILY_MAX", group: "docs", label: "Docs answers a day", kind: "int", default: 500, min: 0, max: 100000,
+    help: "Most model calls for \"Ask AI\" answers in the Cmd+K bar a UTC day, across all accounts and admins. Past it, people still get the matching docs sections, without the summary." },
+  { key: "DOCS_ANSWERS_PER_MINUTE", group: "docs", label: "Docs answers a minute per person", kind: "int", default: 6, min: 0, max: 1000,
+    help: "Most \"Ask AI\" answers one person gets a minute; past it, the matching sections only." },
   { key: "PUBLISH_DISCOUNT_PERSONA_USD", group: "library", label: "Credit per accepted persona (USD)", kind: "number", default: 5, min: 0, max: 1000,
     help: "What an account earns, as a credit on its next Stripe invoice, when Octillion accepts a developer persona it published to the library. The reviewer can change it on Accept." },
   { key: "PUBLISH_DISCOUNT_TASK_USD", group: "library", label: "Credit per accepted task (USD)", kind: "number", default: 10, min: 0, max: 1000,

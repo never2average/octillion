@@ -6,8 +6,15 @@ import { useRouter } from 'next/navigation';
 import { useMemo } from 'react';
 import RenderResults from './render-result';
 import { useFilteredNavGroups } from '@/hooks/use-nav';
+import type { DocNavGroup } from '@/features/docs/docs-data';
+import { AskAiAction, AskAiProvider } from './ask-ai';
 
-export default function KBar({ children }: { children: React.ReactNode }) {
+/**
+ * The Cmd+K bar: the area's modules, its docs (a "Docs" entry to browse the pages; typing finds pages and their h2/h3
+ * sections, which open at the section), and "Ask AI" for a question (./ask-ai.tsx). `docs` is the current area's docs
+ * index, titles and headings only, passed down from the area's layout: the admin docs index reaches admins only.
+ */
+export default function KBar({ docs = [], children }: { docs?: DocNavGroup[]; children: React.ReactNode }) {
   const router = useRouter();
   const { groups } = useNav();
   const filteredGroups = useFilteredNavGroups(groups);
@@ -53,9 +60,28 @@ export default function KBar({ children }: { children: React.ReactNode }) {
     });
   }, [router, filteredGroups]);
 
+  // Docs: pages under one "Docs" entry, each page's sections under the page (shown as "page › section" when found).
+  const docActions = useMemo(() => {
+    if (!docs.length) return [];
+    const seen = new Set<string>();
+    const once = <T extends { id: string }>(a: T) => (seen.has(a.id) ? [] : (seen.add(a.id), [a]));
+    return [
+      { id: 'docs', name: 'Docs', section: 'Docs', keywords: 'docs documentation help guide', subtitle: 'Browse the documentation' },
+      ...docs.flatMap((g) => g.pages.flatMap((p) => [
+        ...once({ id: `doc:${p.href}`, parent: 'docs', name: p.title, section: 'Docs', keywords: g.title.toLowerCase(), subtitle: g.title, perform: () => router.push(p.href) }),
+        ...p.headings.flatMap((h) => once({ id: `doc:${p.href}#${h.id}`, parent: `doc:${p.href}`, name: h.text, section: 'Docs', keywords: p.title.toLowerCase(),
+          perform: () => router.push(`${p.href}#${h.id}`) }))
+      ]))
+    ];
+  }, [docs, router]);
+  const all = useMemo(() => [...actions, ...docActions], [actions, docActions]);
+
   return (
-    <KBarProvider actions={actions}>
-      <KBarComponent>{children}</KBarComponent>
+    <KBarProvider actions={all}>
+      <AskAiProvider>
+        <AskAiAction />
+        <KBarComponent>{children}</KBarComponent>
+      </AskAiProvider>
     </KBarProvider>
   );
 }

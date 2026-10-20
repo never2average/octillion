@@ -1,22 +1,20 @@
 // The docs frame shared by /app/docs and /admin/docs, inside the app shell (its sidebar and header stay): the article
-// at a reading width, and one sticky column on the right from lg up with the page tree (and its filter) above "On this
-// page"; below lg a drawer button above the article. Previous / next cards under the article. A server component: the article is rendered
-// here, and only titles, hrefs and headings go to the client parts (docs-nav.tsx, docs-toc.tsx).
+// at a reading width, "On this page" in a sticky column on the right from lg up, and previous / next cards under the
+// article. Moving between pages is previous / next and the platform search (Cmd+K), which lists every docs page. A server component: the article is rendered
+// here, and only headings go to the client part (docs-toc.tsx).
 import Link from 'next/link';
-import { Fragment, type ReactNode } from 'react';
+import type { ReactNode } from 'react';
 import { IconChevronLeft, IconChevronRight } from '@tabler/icons-react';
-import { neighbours, type DocCrumb, type DocHeading, type DocNavGroup } from './docs-data';
-import { DocsMobileNav, DocsSidebar } from './docs-nav';
+import { neighbours, type DocHeading, type DocNavGroup } from './docs-data';
 import { DocsToc } from './docs-toc';
 
 /** The columns stick under the app header (h-16, h-14 from md) and scroll on their own. */
 const STICKY = 'sticky top-14 h-[calc(100svh-3.5rem)] self-start overflow-y-auto overscroll-contain';
 
-export function DocsLayout({ nav, href, crumbs, title, description, headings = [], meta, children }: {
+export function DocsLayout({ nav, href, title, description, headings = [], meta, children }: {
   nav: DocNavGroup[];
   /** This page's href in `nav`: highlighted there, and where previous / next count from. */
   href: string;
-  crumbs: DocCrumb[];
   title: string;
   description?: ReactNode;
   /** The article's h2/h3, for "On this page". */
@@ -29,20 +27,7 @@ export function DocsLayout({ nav, href, crumbs, title, description, headings = [
   return (
     <div className='flex w-full min-w-0 flex-1 gap-8 px-4 md:px-6 xl:gap-10'>
       <div className='min-w-0 flex-1 pt-3 pb-16 lg:pt-8'>
-        <div className='mb-6 lg:hidden'><DocsMobileNav groups={nav} current={title} /></div>
         <article className='mx-auto w-full max-w-[720px]'>
-          <nav aria-label='Breadcrumb' className='mb-3'>
-            <ol className='text-muted-foreground flex flex-wrap items-center gap-1 text-sm'>
-              {crumbs.map((c, i) => (
-                <Fragment key={`${c.title}-${i}`}>
-                  {i > 0 && <li aria-hidden><IconChevronRight className='size-3.5 opacity-60' /></li>}
-                  <li className={i === crumbs.length - 1 ? 'text-foreground font-medium' : undefined}>
-                    {c.href && i < crumbs.length - 1 ? <Link href={c.href} className='hover:text-foreground transition-colors'>{c.title}</Link> : c.title}
-                  </li>
-                </Fragment>
-              ))}
-            </ol>
-          </nav>
           <header className='mb-8 border-b pb-6'>
             <h1 className='text-3xl font-bold tracking-tight text-balance sm:text-4xl'>{title}</h1>
             {description && <div className='text-muted-foreground mt-3 text-lg leading-relaxed text-pretty'>{description}</div>}
@@ -73,10 +58,11 @@ export function DocsLayout({ nav, href, crumbs, title, description, headings = [
         </article>
       </div>
 
-      <aside className={`${STICKY} hidden w-64 shrink-0 border-l py-6 pl-5 lg:block`}>
-        <DocsSidebar groups={nav} />
-        {headings.length > 0 && <div className='mt-6 border-t pt-5'><DocsToc headings={headings} /></div>}
-      </aside>
+      {headings.length > 0 && (
+        <aside className={`${STICKY} hidden w-56 shrink-0 py-8 lg:block`}>
+          <DocsToc headings={headings} />
+        </aside>
+      )}
     </div>
   );
 }

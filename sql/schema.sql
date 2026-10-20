@@ -1180,3 +1180,18 @@ ALTER TABLE simulations ADD COLUMN IF NOT EXISTS prompts JSONB NOT NULL DEFAULT 
 UPDATE scenarios SET title = NULL, prompt = NULL, prompt_variants = '{}', updated_at = now()
  WHERE source = 'library' AND library_task_id IS NOT NULL AND (prompt_variants <> '{}' OR rationale IS NOT NULL)
    AND (title IS NOT NULL OR prompt IS NOT NULL OR prompt_variants <> '{}');
+
+-- "Ask AI" answers from the docs (src/docs-answers.ts): one row per model call, for the daily cap
+-- (DOCS_ANSWERS_DAILY_MAX) and the per-person minute limit (DOCS_ANSWERS_PER_MINUTE). Never the question text.
+CREATE TABLE IF NOT EXISTS docs_answers (
+  id        BIGSERIAL PRIMARY KEY,
+  at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  area      TEXT NOT NULL,                  -- customer (/api/app) | admin (/api/admin)
+  user_key  TEXT NOT NULL,                  -- who asked: the Clerk user id, or the admin's address
+  org_id    INT REFERENCES organizations(id) ON DELETE SET NULL, -- the account they asked from (customer area)
+  sources   INT NOT NULL DEFAULT 0,         -- sections sent to the model
+  model     TEXT,                           -- the model that answered; NULL when none did
+  answered  BOOLEAN
+);
+CREATE INDEX IF NOT EXISTS docs_answers_at ON docs_answers (at);
+CREATE INDEX IF NOT EXISTS docs_answers_user ON docs_answers (user_key, at);

@@ -16,10 +16,12 @@ const ResultItem = React.forwardRef(
     },
     ref: React.Ref<HTMLDivElement>
   ) => {
+    // The "Docs" entry is already the section header: a found doc section reads "page › section".
     const ancestors = React.useMemo(() => {
-      if (!currentRootActionId) return action.ancestors;
-      const index = action.ancestors.findIndex((ancestor) => ancestor.id === currentRootActionId);
-      return action.ancestors.slice(index + 1);
+      const shown = action.ancestors.filter((ancestor) => ancestor.id !== 'docs');
+      if (!currentRootActionId) return shown;
+      const index = shown.findIndex((ancestor) => ancestor.id === currentRootActionId);
+      return shown.slice(index + 1);
     }, [action.ancestors, currentRootActionId]);
 
     return (

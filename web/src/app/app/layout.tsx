@@ -4,6 +4,7 @@ import { auth } from '@clerk/nextjs/server';
 import type { Metadata } from 'next';
 import { serverApi } from '@/lib/server-api';
 import { NoOrganization } from '@/features/portal/no-organization';
+import { customerDocsNav } from '@/features/docs/customer-docs';
 
 export const metadata: Metadata = { title: { default: 'Account', template: '%s | Octillion' } };
 
@@ -15,5 +16,5 @@ export default async function PortalLayout({ children }: { children: React.React
     const s = await serverApi<{ is_platform_admin: boolean }>('/admin/session').catch(() => null);
     return <NoOrganization platformAdmin={!!s?.body?.is_platform_admin} />;
   }
-  return <AreaShell area='portal' groups={portalNav}>{children}</AreaShell>;
+  return <AreaShell area='portal' groups={portalNav} docs={customerDocsNav()}>{children}</AreaShell>;
 }

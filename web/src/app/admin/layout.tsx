@@ -6,6 +6,8 @@ import { SignOutButton } from '@clerk/nextjs';
 import Link from 'next/link';
 import { AdminRoleProvider, type AdminSession } from '@/features/admin/role';
 import type { Metadata } from 'next';
+// Server-only: the internal docs index (titles and headings) goes to the Cmd+K bar of signed-in admins, never to /app.
+import { adminDocsNav } from '@/features/docs/admin-docs';
 
 export const metadata: Metadata = { title: { default: 'Admin', template: '%s | Octillion Admin' } };
 
@@ -28,5 +30,5 @@ export default async function AdminLayout({ children }: { children: React.ReactN
     );
   }
   const role = { role: s.body.role, permissions: s.body.permissions ?? [], needs: s.body.needs ?? {} };
-  return <AdminRoleProvider session={role}><AreaShell area='admin' groups={adminNav}>{children}</AreaShell></AdminRoleProvider>;
+  return <AdminRoleProvider session={role}><AreaShell area='admin' groups={adminNav} docs={adminDocsNav()}>{children}</AreaShell></AdminRoleProvider>;
 }
