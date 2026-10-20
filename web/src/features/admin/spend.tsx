@@ -420,13 +420,13 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
         {a.slug ? <span className='text-muted-foreground truncate text-xs'>{a.slug}</span> : a.customer && <Mono>{a.customer}</Mono>}
       </span>
     ) },
-    { key: 'plan', label: 'Plan', type: 'select', value: (a) => a.plan ?? '', render: (a) => a.plan ?? NA },
-    { key: 'status', label: 'Status', type: 'select', value: (a) => a.status ?? '', render: (a) => subBadge(a.status) },
+    { key: 'plan', label: 'Plan', hidden: true, type: 'select', value: (a) => a.plan ?? '', render: (a) => a.plan ?? NA },
+    { key: 'status', label: 'Status', hidden: true, type: 'select', value: (a) => a.status ?? '', render: (a) => subBadge(a.status) },
     { key: 'mrr', label: 'MRR', className: 'text-right', type: 'number', value: (a) => a.mrr_usd, render: (a) => (a.mrr_usd ? num(cents(a.mrr_usd)) : NA) },
-    { key: 'collected', label: 'Collected in range', className: 'text-right', keep: true, type: 'number', value: (a) => a.collected_usd, render: (a) => (a.collected_usd ? num(cents(a.collected_usd)) : NA) },
-    { key: 'spend', label: 'Model spend in range', className: 'text-right', type: 'number', value: (a) => a.spend_usd, render: (a) => (a.spend_usd ? num(cents(a.spend_usd), 'Metered model spend (Model spend tab)') : NA) },
-    { key: 'margin', label: 'Margin in range', className: 'text-right', type: 'number', value: (a) => a.margin_usd, render: (a) => (a.collected_usd || a.spend_usd ? marginCell(a.margin_usd, a.margin_pct) : NA) },
-    { key: 'allowance', label: 'Prepaid allowance (cap, not revenue)', type: 'number', value: (a) => a.allowance?.budget_usd ?? null, render: (a) => (
+    { key: 'collected', label: 'Collected', className: 'text-right', keep: true, type: 'number', value: (a) => a.collected_usd, render: (a) => (a.collected_usd ? num(cents(a.collected_usd)) : NA) },
+    { key: 'spend', label: 'Model spend', className: 'text-right', type: 'number', value: (a) => a.spend_usd, render: (a) => (a.spend_usd ? num(cents(a.spend_usd), 'Metered model spend (Model spend tab)') : NA) },
+    { key: 'margin', label: 'Margin', className: 'text-right', type: 'number', value: (a) => a.margin_usd, render: (a) => (a.collected_usd || a.spend_usd ? marginCell(a.margin_usd, a.margin_pct) : NA) },
+    { key: 'allowance', label: 'Allowance', hidden: true, type: 'number', value: (a) => a.allowance?.budget_usd ?? null, render: (a) => (
       a.allowance && a.allowance.budget_usd > 0 ? (
         <span className='flex flex-col gap-1' title={ALLOWANCE_HINT}>
           <span className='tabular-nums'>{cents(a.allowance.budget_usd)} this month</span>
@@ -434,12 +434,16 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
         </span>
       ) : NA
     ) },
-    { key: 'next', label: 'Next renewal / cancel', type: 'date', value: (a) => a.cancels_at ?? a.ended_at ?? a.trial_end ?? a.renews_at, render: (a) => (
-      a.ended_at ? <span className='text-muted-foreground'>Ended {date(a.ended_at)}</span>
-        : a.cancels_at ? <span className={AMBER}>Cancels {date(a.cancels_at)}</span>
-        : a.trial_end ? <span>Trial ends {date(a.trial_end)}</span>
-        : a.renews_at ? <span>Renews {date(a.renews_at)}</span> : NA
-    ) }
+    // Plan, status and the next lifecycle date are one fact: Plan and Status stay as hidden columns for filters and CSV.
+    { key: 'next', label: 'Subscription', type: 'date', value: (a) => a.cancels_at ?? a.ended_at ?? a.trial_end ?? a.renews_at, render: (a) => {
+      const next = a.ended_at ? `Ended ${date(a.ended_at)}` : a.cancels_at ? `Cancels ${date(a.cancels_at)}` : a.trial_end ? `Trial ends ${date(a.trial_end)}` : a.renews_at ? `Renews ${date(a.renews_at)}` : null;
+      return a.plan || a.status || next ? (
+        <span className='flex min-w-0 flex-col gap-0.5'>
+          <span className='flex min-w-0 items-center gap-1.5'><span className='truncate'>{a.plan ?? '—'}</span>{a.status && subBadge(a.status)}</span>
+          {next && <span className={cn('text-xs', a.cancels_at && !a.ended_at ? AMBER : 'text-muted-foreground')}>{next}</span>}
+        </span>
+      ) : NA;
+    } }
   ];
   return (
     <RecordView id='finops-revenue-accounts' rows={stripeEmpty ? [] : f.rows} loading={loading} rowKey={(a) => a.key} cols={cols} noun='accounts' initialSize={50} compact summary={cards}
@@ -514,7 +518,7 @@ function ExperimentsTab({ data, loading, bar }: TabProps<Experiments>) {
       { label: 'Collected from tests', spark: t?.daily_collected, value: t ? cents(t.collected_usd) : '—' }
     ]} />
   );
-  // Eight columns by default: the decision numbers. Checkouts and the interval are a second line in their cells; the
+  // Nine columns by default: the decision numbers. Checkouts and the interval are a second line in their cells; the
   // money detail (collected, model spend, margin, churn) and the experiment column are in Properties.
   const sub = (main: ReactNode, second?: ReactNode, title?: string) => (
     <span className='flex flex-col items-end gap-0.5 tabular-nums' title={title}>{main}{second != null && <span className='text-muted-foreground text-xs'>{second}</span>}</span>
@@ -526,7 +530,7 @@ function ExperimentsTab({ data, loading, bar }: TabProps<Experiments>) {
         <span className='text-muted-foreground flex min-w-0 gap-1.5 text-xs'><Mono>{v.experiment}</Mono><span className='shrink-0'>{v.amount_usd == null ? 'usage' : `$${v.amount_usd.toLocaleString()}/${v.interval === 'year' ? 'yr' : 'mo'}`}</span></span>
       </span>) },
     { key: 'experiment', label: 'Experiment', hidden: true, type: 'select', value: (v) => v.experiment, render: (v) => <Mono>{v.experiment}</Mono> },
-    { key: 'traffic', label: 'Traffic', className: 'text-right', type: 'number', value: (v) => share(v), render: (v) => (share(v) == null ? NA : sub(`${share(v)}%`, `weight ${v.weight}`)) },
+    { key: 'traffic', label: 'Traffic', className: 'text-right', type: 'number', value: (v) => share(v), render: (v) => (share(v) == null ? NA : sub(`${share(v)}%`, undefined, `Weight ${v.weight} (shown on the Plans tab)`)) },
     { key: 'exposed', label: 'Shown', className: 'text-right', type: 'number', value: (v) => v.exposed, render: (v) => sub(v.exposed.toLocaleString(), v.new_in_range ? `${v.new_in_range} new` : undefined, 'Accounts shown this variant on Billing (new: first shown in this range)') },
     { key: 'converted', label: 'Subscribed', className: 'text-right', keep: true, type: 'number', value: (v) => v.converted, render: (v) => sub(v.converted.toLocaleString(), `${v.checkouts} checkout${v.checkouts === 1 ? '' : 's'}`, `${v.checkouts} checkouts started, ${v.completed} completed`) },
     { key: 'conversion', label: 'Conversion', className: 'text-right', keep: true, type: 'number', value: (v) => v.conversion_pct, render: (v) => (v.conversion_pct == null ? NA
@@ -534,9 +538,9 @@ function ExperimentsTab({ data, loading, bar }: TabProps<Experiments>) {
     { key: 'lift', label: 'Lift', className: 'text-right', keep: true, type: 'number', value: (v) => v.lift_pts, render: (v) => (v.control ? <span className='text-muted-foreground'>control</span>
       : v.lift_pts == null ? NA : sub(<span className={cn(v.significant && (v.lift_pts > 0 ? 'font-medium text-emerald-600 dark:text-emerald-400' : 'text-destructive font-medium'))}>{v.lift_pts > 0 ? '+' : ''}{v.lift_pts} pts</span>,
           v.significant ? 'significant' : 'not yet', v.lift_ci ? `Conversion vs control, 95% interval ${v.lift_ci[0]} to ${v.lift_ci[1]} points` : undefined)) },
-    { key: 'per_exposed', label: 'Per account', className: 'text-right', type: 'number', value: (v) => v.collected_per_exposed_usd, render: (v) => (v.collected_per_exposed_usd == null ? NA
+    { key: 'per_exposed', label: '$ per shown', className: 'text-right', type: 'number', value: (v) => v.collected_per_exposed_usd, render: (v) => (v.collected_per_exposed_usd == null ? NA
       : sub(cents(v.collected_per_exposed_usd), undefined, 'Collected in the range per account shown: the number to compare prices on')) },
-    { key: 'mrr', label: 'MRR', className: 'text-right', type: 'number', value: (v) => v.mrr_usd, render: (v) => sub(cents(v.mrr_usd), `${v.paying} paying${v.trialing ? `, ${v.trialing} trial` : ''}`) },
+    { key: 'mrr', label: 'MRR', className: 'text-right', type: 'number', value: (v) => v.mrr_usd, render: (v) => sub(cents(v.mrr_usd), `${v.paying} paying`, v.trialing ? `${v.paying} paying, ${v.trialing} in trial` : undefined) },
     { key: 'collected', label: 'Collected', hidden: true, className: 'text-right', type: 'number', value: (v) => v.collected_usd, render: (v) => num(cents(v.collected_usd)) },
     { key: 'spend', label: 'Model spend', hidden: true, className: 'text-right', type: 'number', value: (v) => v.model_spend_usd, render: (v) => num(cents(v.model_spend_usd), 'Metered model spend of the accounts that subscribed, in the range') },
     { key: 'margin', label: 'Margin', hidden: true, className: 'text-right', type: 'number', value: (v) => v.margin_usd, render: (v) => num(cents(v.margin_usd)) },
@@ -864,7 +868,7 @@ function SpendAccounts({ data, loading, rows, cards, filters, filtered, range }:
   const router = useRouter();
   const cols: RecordCol<AccountRow>[] = [
     { key: 'account', label: 'Account', title: true, keep: true, type: 'text', value: (a) => a.name, render: accountCell },
-    { key: 'allowance', label: 'Plan / allowance', type: 'number', value: (a) => a.allowance?.budget_usd ?? null, render: (a) => (
+    { key: 'allowance', label: 'Plan / allowance', hidden: true, type: 'number', value: (a) => a.allowance?.budget_usd ?? null, render: (a) => (
       a.allowance ? (
         <span className='flex flex-col gap-1'>
           <span className='tabular-nums'>{a.allowance.budget_usd > 0 ? `${cents(a.allowance.budget_usd)} a month` : 'No allowance'}</span>
@@ -875,9 +879,10 @@ function SpendAccounts({ data, loading, rows, cards, filters, filtered, range }:
     { key: 'spent', label: 'Spent in range', className: 'text-right', type: 'number', value: (a) => a.spent_usd, render: (a) => num(cents(a.spent_usd), `Sessions ${cents(a.session_usd)} · orchestrators ${cents(a.orchestrator_usd)}`) },
     { key: 'session', label: 'Sessions $', className: 'text-right', hidden: true, type: 'number', value: (a) => a.session_usd, render: (a) => num(cents(a.session_usd)) },
     { key: 'orchestrator', label: 'Orchestrators $', className: 'text-right', hidden: true, type: 'number', value: (a) => a.orchestrator_usd, render: (a) => num(cents(a.orchestrator_usd)) },
-    { key: 'month', label: 'This month vs allowance', className: 'w-56', type: 'number', value: (a) => a.month_pct ?? null, render: (a) => (
+    { key: 'month', label: 'This month', className: 'w-56', type: 'number', value: (a) => a.month_pct ?? null, render: (a) => (
       a.shared ? <span className='text-muted-foreground text-xs tabular-nums'>{cents(a.month_usd)} this month, no allowance</span>
-        : <AllowanceMeter used={a.month_usd} budget={a.allowance?.budget_usd ?? 0} pct={a.month_pct} />
+        : <span className='flex flex-col gap-1'><AllowanceMeter used={a.month_usd} budget={a.allowance?.budget_usd ?? 0} pct={a.month_pct} />
+          {a.allowance && <span className='text-muted-foreground text-xs'>{a.allowance.plan ?? SOURCE[a.allowance.source]}{a.allowance.plan && a.allowance.source === 'override' && ' · set by Octillion'}</span>}</span>
     ) },
     { key: 'sessions', label: 'Sessions', className: 'text-right', type: 'number', value: (a) => a.sessions, render: (a) => (a.sessions ? num(a.sessions.toLocaleString()) : NA) },
     { key: 'top_model', label: 'Top model', type: 'select', value: (a) => a.top_model ?? '', render: (a) => (a.top_model ? <Mono>{short(a.top_model)}</Mono> : NA) },
@@ -1044,20 +1049,22 @@ function ComputeTab({ data, loading, bar, group }: TabProps<Compute>) {
       series={[{ key: 'orchestrator', label: 'Orchestrators', values: x.daily_orchestrator }, { key: 'agent', label: 'Agents', values: x.daily_agent }]} />
   );
   const hcol = <T extends { orchestrator_hours: number; agent_hours: number; total_hours: number }>(k: 'orchestrator_hours' | 'agent_hours' | 'total_hours', label: string, keep = false): RecordCol<T> =>
-    ({ key: k, label, className: 'text-right', keep, type: 'number', value: (r) => r[k], render: (r) => <span className={cn('tabular-nums', k === 'total_hours' && 'font-medium')}>{hrs(r[k])}</span> });
+    // The orchestrator/agent split is Total's second line; the two columns stay in Properties for sorting.
+    ({ key: k, label, className: 'text-right', keep, hidden: k !== 'total_hours', type: 'number', value: (r) => r[k], render: (r) => (k === 'total_hours'
+      ? twoLine(<span className='font-medium'>{hrs(r[k])}</span>, `orch ${hrs(r.orchestrator_hours)} · agents ${hrs(r.agent_hours)}`) : num(hrs(r[k]))) });
   if (group === 'provider') {
     const cols: RecordCol<ComputeProvider>[] = [
       { key: 'provider', label: 'Sandbox provider', title: true, keep: true, type: 'text', value: (p) => p.name, render: (p) => <span className='font-medium'>{p.name}</span> },
       hcol('orchestrator_hours', 'Orchestrator hours'), hcol('agent_hours', 'Agent hours'), hcol('total_hours', 'Total', true),
-      { key: 'sessions', label: 'Sessions run', className: 'text-right', type: 'number', value: (p) => p.sessions, render: (p) => num(p.sessions.toLocaleString()) },
-      { key: 'orchestrators', label: 'Orchestrators launched', className: 'text-right', type: 'number', value: (p) => p.orchestrators, render: (p) => num(p.orchestrators.toLocaleString()) },
-      { key: 'types', label: 'Sandbox types', type: 'text', value: (p) => p.sandbox_types.map((t) => t.type ?? '').join(' '), render: (p) => (
+      { key: 'sessions', label: 'Runs', className: 'text-right', type: 'number', value: (p) => p.sessions, render: (p) => twoLine(p.sessions.toLocaleString(), `${p.orchestrators.toLocaleString()} orchestrators`, 'Sessions run, and orchestrators launched') },
+      { key: 'orchestrators', label: 'Orchestrators launched', className: 'text-right', hidden: true, type: 'number', value: (p) => p.orchestrators, render: (p) => num(p.orchestrators.toLocaleString()) },
+      { key: 'types', label: 'Sandbox types', hidden: true, type: 'text', value: (p) => p.sandbox_types.map((t) => t.type ?? '').join(' '), render: (p) => (
         <span className='flex flex-wrap gap-1'>{p.sandbox_types.map((t) => <Chip key={`${t.kind}${t.type}`}>{t.kind.toLowerCase()} {t.type ?? 'default'}</Chip>)}</span>
       ) }
     ];
     return (
       <RecordView id='spend-compute-providers' rows={data?.providers ?? []} loading={loading} rowKey={(p) => p.key} cols={cols} noun='providers' initialSize={50} compact summary={cards}
-        searchText={(p) => `${p.name} ${p.by_account.map((a) => a.name).join(' ')}`} searchPlaceholder='Search providers, accounts'
+        searchText={(p) => `${p.name} ${p.by_account.map((a) => a.name).join(' ')} ${p.sandbox_types.map((t) => `${t.kind} ${t.type ?? ''}`).join(' ')}`} searchPlaceholder='Search providers, accounts'
         filters={bar} defaultSort={[{ key: 'total_hours', dir: 'desc' }]} exportName={exportName('compute-hours', 'provider', data?.range)}
         detailTitle={(p) => p.name}
         detail={(p) => (
@@ -1077,10 +1084,12 @@ function ComputeTab({ data, loading, bar, group }: TabProps<Compute>) {
   const cols: RecordCol<ComputeAccount>[] = [
     { key: 'account', label: 'Account', title: true, keep: true, type: 'text', value: (a) => a.name, render: accountCell },
     hcol('orchestrator_hours', 'Orchestrator hours'), hcol('agent_hours', 'Agent hours'), hcol('total_hours', 'Total', true),
-    { key: 'sessions', label: 'Sessions run', className: 'text-right', type: 'number', value: (a) => a.sessions, render: (a) => (a.sessions ? num(a.sessions.toLocaleString()) : NA) },
-    { key: 'orchestrators', label: 'Orchestrators launched', className: 'text-right', type: 'number', value: (a) => a.orchestrators, render: (a) => (a.orchestrators ? num(a.orchestrators.toLocaleString()) : NA) },
-    { key: 'avg', label: 'Avg session', className: 'text-right', type: 'number', value: (a) => a.avg_session_hours, render: (a) => (a.avg_session_hours == null ? NA : num(hrs(a.avg_session_hours))) },
-    { key: 'longest', label: 'Longest session', className: 'text-right', type: 'number', value: (a) => a.longest_session_hours, render: (a) => (a.longest_session_hours == null ? NA : num(hrs(a.longest_session_hours))) }
+    { key: 'sessions', label: 'Runs', className: 'text-right', type: 'number', value: (a) => a.sessions, render: (a) => (a.sessions || a.orchestrators
+      ? twoLine(a.sessions ? a.sessions.toLocaleString() : NA, `${a.orchestrators.toLocaleString()} orchestrators`, 'Sessions run, and orchestrators launched') : NA) },
+    { key: 'orchestrators', label: 'Orchestrators launched', className: 'text-right', hidden: true, type: 'number', value: (a) => a.orchestrators, render: (a) => (a.orchestrators ? num(a.orchestrators.toLocaleString()) : NA) },
+    { key: 'avg', label: 'Session length', className: 'text-right', type: 'number', value: (a) => a.avg_session_hours, render: (a) => (a.avg_session_hours == null ? NA
+      : twoLine(hrs(a.avg_session_hours), a.longest_session_hours == null ? null : `max ${hrs(a.longest_session_hours)}`, 'Average session, and the longest')) },
+    { key: 'longest', label: 'Longest session', className: 'text-right', hidden: true, type: 'number', value: (a) => a.longest_session_hours, render: (a) => (a.longest_session_hours == null ? NA : num(hrs(a.longest_session_hours))) }
   ];
   return (
     <RecordView id='spend-compute-accounts' rows={f.rows} loading={loading} rowKey={(a) => a.key} cols={cols} noun='accounts' initialSize={50} compact summary={cards}

@@ -64,14 +64,22 @@ export function ComputeFailures({ stats }: { stats?: (data: Failures | undefined
     { key: 'reason', label: 'Reason', title: true, keep: true, type: 'text', value: (r) => r.reason, render: (r) => (
       <span className='flex min-w-0 flex-col gap-1'>
         <span className={cn('font-medium', r.kind === 'routine' && 'text-muted-foreground font-normal')}>{r.reason}</span>
-        {r.detail && <span className='text-muted-foreground text-xs'>{r.detail}</span>}
+        {r.detail ? <span className='text-muted-foreground text-xs'>{r.detail}</span>
+          : r.message && <span className='text-muted-foreground line-clamp-1 font-mono text-xs' title={r.message}>{r.message}</span>}
       </span>
     ) },
     { key: 'kind', label: 'Kind', keep: true, type: 'select', value: (r) => KIND[r.kind].label, render: (r) => <StatusBadge tone={KIND[r.kind].tone}>{KIND[r.kind].label}</StatusBadge> },
-    { key: 'count', label: 'Count', className: 'text-right', type: 'number', value: (r) => r.count, render: (r) => <span className='tabular-nums'>{r.count}</span> },
-    { key: 'last', label: 'Last seen', className: 'text-right', type: 'date', value: (r) => r.last_at,
+    { key: 'count', label: 'Count', className: 'text-right', type: 'number', value: (r) => r.count, render: (r) => (
+      <span className='flex flex-col items-end gap-1'>
+        <span className='tabular-nums'>{r.count}</span>
+        <span className='text-muted-foreground text-xs' title={new Date(r.last_at).toLocaleString()}>{dur(since(r.last_at))} ago</span>
+      </span>
+    ) },
+    // Off by default (Count's second line); kept for sorting and filtering by recency.
+    { key: 'last', label: 'Last seen', hidden: true, className: 'text-right', type: 'date', value: (r) => r.last_at,
       render: (r) => <span className='text-muted-foreground text-xs' title={new Date(r.last_at).toLocaleString()}>{dur(since(r.last_at))} ago</span> },
-    { key: 'message', label: 'Message', className: 'max-w-96', type: 'text', value: (r) => r.message ?? '',
+    // Off by default (Reason's second line); turn it on to export the message.
+    { key: 'message', label: 'Message', hidden: true, className: 'max-w-96', type: 'text', value: (r) => r.message ?? '',
       render: (r) => (r.message ? <span className='text-muted-foreground line-clamp-2 font-mono text-xs' title={r.message}>{r.message}</span> : null) },
     { key: 'fix', label: 'Fix it in', type: 'text', value: (r) => r.fix?.text ?? '',
       render: (r) => (r.fix ? <Link href={r.fix.href} className='text-sm font-medium hover:underline' onClick={(e) => e.stopPropagation()}>{r.fix.text}</Link> : null) }

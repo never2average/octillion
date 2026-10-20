@@ -89,7 +89,7 @@ export function ComputeSessions() {
     { key: 'id', label: 'Session', title: true, keep: true, type: 'text', value: (s) => s.id, render: (s) => <Mono>{s.id}</Mono> },
     { key: 'job', label: 'Job', type: 'text', value: (s) => s.simulation_id,
       render: (s) => <span className='flex min-w-0 flex-col gap-1'><Mono>{s.simulation_id}</Mono><span className='text-muted-foreground truncate text-xs'>{s.org.name}</span></span> },
-    { key: 'agent', label: 'Agent · harness', type: 'select', value: (s) => s.agent_id ?? '',
+    { key: 'agent', label: 'Agent', type: 'select', value: (s) => s.agent_id ?? '',
       render: (s) => <span className='flex min-w-0 flex-col gap-1'><span className='truncate'>{s.agent_id ?? '—'}</span><span className='text-muted-foreground text-xs'>{s.harness}</span></span> },
     { key: 'status', label: 'Status', keep: true, type: 'select', value: (s) => s.status, options: STATUS_OPTS,
       render: (s) => (
@@ -99,13 +99,19 @@ export function ComputeSessions() {
           {s.infra_retries > 0 && <Chip tone='warn' title={`Queued again ${s.infra_retries}× after an infrastructure failure`}>infra retry</Chip>}
         </span>
       ) },
-    { key: 'wait', label: 'Wait', className: 'text-right', type: 'number', value: (s) => waitOf(s),
+    // Off by default (Time's second line, or its first while queued); the server's "Longest wait" order sorts by it.
+    { key: 'wait', label: 'Wait', hidden: true, className: 'text-right', type: 'number', value: (s) => waitOf(s),
       render: (s) => <span className='tabular-nums' title={`Queued ${new Date(s.queued_at).toLocaleString()}`}>{dur(waitOf(s))}</span> },
-    { key: 'run', label: 'Run time', className: 'text-right', type: 'number', value: (s) => runOf(s), render: (s) => <RunTime s={s} /> },
-    { key: 'outcome', label: 'Outcome', type: 'select', value: outcomeOf,
-      render: (s) => s.error_label ? <StatusBadge tone={s.error_class === 'unclaimable' ? 'warn' : 'bad'}>{s.error_label}</StatusBadge>
-        : s.completed_reason ? <span>{s.completed_reason.replace(/_/g, ' ')}</span> : <span className='text-muted-foreground'>—</span> },
-    { key: 'error', label: 'Error', className: 'max-w-80', type: 'text', value: (s) => s.error_message ?? '',
+    { key: 'run', label: 'Time', className: 'text-right', type: 'number', value: (s) => runOf(s), render: (s) => <RunTime s={s} /> },
+    { key: 'outcome', label: 'Outcome', type: 'select', value: outcomeOf, render: (s) => (
+      <span className='flex min-w-0 flex-col items-start gap-1'>
+        {s.error_label ? <StatusBadge tone={s.error_class === 'unclaimable' ? 'warn' : 'bad'}>{s.error_label}</StatusBadge>
+          : s.completed_reason ? <span>{s.completed_reason.replace(/_/g, ' ')}</span> : <span className='text-muted-foreground'>—</span>}
+        {s.error_message && <span className='text-muted-foreground line-clamp-1 text-xs' title={s.error_message}>{firstLine(s.error_message)}</span>}
+      </span>
+    ) },
+    // Off by default (Outcome's second line); turn it on to export the error message.
+    { key: 'error', label: 'Error', hidden: true, className: 'max-w-80', type: 'text', value: (s) => s.error_message ?? '',
       render: (s) => s.error_message ? <span className='text-muted-foreground line-clamp-1 text-xs' title={s.error_message}>{firstLine(s.error_message)}</span> : null },
     { key: 'cost', label: 'Model cost', className: 'text-right', type: 'number', value: (s) => s.cost_usd, render: (s) => <span className='tabular-nums'>{cents(s.cost_usd)}</span> }
   ];
@@ -175,11 +181,21 @@ export function ComputeSessions() {
   );
 }
 
-/** Run time: ended − started; while running, the elapsed time and the heartbeat's age (amber past 5 min). */
+/**
+ * Time: ended − started, and how long it waited to start; while queued, the wait so far (amber); while running, the
+ * elapsed time and the heartbeat's age (amber past 5 min).
+ */
 function RunTime({ s }: { s: SessionRow }) {
   const run = runOf(s);
-  if (run == null) return <span className='text-muted-foreground'>—</span>;
-  if (s.status !== 'running') return <span className='tabular-nums'>{dur(run)}</span>;
+  if (run == null) return s.status === 'queued'
+    ? <span className={cn('tabular-nums', AMBER)} title={`Queued ${new Date(s.queued_at).toLocaleString()}`}>queued {dur(waitOf(s))}</span>
+    : <span className='text-muted-foreground'>—</span>;
+  if (s.status !== 'running') return (
+    <span className='flex flex-col items-end gap-1 tabular-nums'>
+      <span>{dur(run)}</span>
+      <span className='text-muted-foreground text-xs' title={`Queued ${new Date(s.queued_at).toLocaleString()}`}>waited {dur(waitOf(s))}</span>
+    </span>
+  );
   const hb = since(s.heartbeat_at ?? s.started_at);
   return (
     <span className='flex flex-col items-end gap-1 tabular-nums'>

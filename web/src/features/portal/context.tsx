@@ -80,11 +80,14 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
       .catch(fail);
   };
   const cols: RecordCol<MemoryItem>[] = [
-    { key: 'kind', label: 'Type', className: 'w-28', keep: true, render: (m) => <span className={cn('inline-flex h-6 items-center rounded-md px-2 text-xs leading-none font-medium capitalize ring-1 ring-inset', TYPE_STYLE[m.kind] ?? TYPE_STYLE.note)}>{m.kind}</span> },
-    ...(section === 'products' ? [{ key: 'product', label: 'Product', className: 'w-44', keep: true, render: (m: MemoryItem) => <span className='text-sm font-medium'>{m.subject_name}</span> }] : []),
-    { key: 'body', label: 'Memory', keep: true, render: (m) => <p className='line-clamp-3 text-sm whitespace-pre-wrap'>{m.body}</p> },
-    { key: 'by', label: 'Added by', className: 'hidden w-48 md:table-cell', render: (m) => <span className='text-muted-foreground text-xs'>{m.created_by ?? '—'}</span> },
-    { key: 'at', label: 'Added', className: 'hidden w-32 sm:table-cell', render: (m) => <span className='text-muted-foreground text-xs'><When d={m.created_at} /></span> }
+    { key: 'kind', label: 'Type', className: 'w-28', keep: true, type: 'select', value: (m) => m.kind, options: KINDS.map((k) => ({ value: k.id, label: k.label })), render: (m) => <span className={cn('inline-flex h-6 items-center rounded-md px-2 text-xs leading-none font-medium capitalize ring-1 ring-inset', TYPE_STYLE[m.kind] ?? TYPE_STYLE.note)}>{m.kind}</span> },
+    ...(section === 'products' ? [{ key: 'product', label: 'Product', className: 'w-44', keep: true, type: 'select' as const, value: (m: MemoryItem) => m.subject_name ?? undefined, render: (m: MemoryItem) => <span className='text-sm font-medium'>{m.subject_name}</span> }] : []),
+    { key: 'body', label: 'Memory', keep: true, type: 'text', value: (m) => m.body, render: (m) => <p className='line-clamp-3 text-sm whitespace-pre-wrap'>{m.body}</p> },
+    // When on line 1, who added it on line 2 (one event; was Added by and Added).
+    { key: 'at', label: 'Added', className: 'hidden w-40 sm:table-cell', type: 'date', value: (m) => m.created_at, render: (m) => (<>
+      <span className='text-muted-foreground text-xs'><When d={m.created_at} /></span>
+      {m.created_by && <div className='text-muted-foreground mt-1 max-w-40 truncate text-xs leading-none' title={m.created_by}>{m.created_by}</div>}
+    </>) }
   ];
   const picker = section === 'users' && users && users.length > 1 && (
     <NativeSelect aria-label='User' value={subject} onChange={(e) => setSubject(e.target.value)} className='w-56'>

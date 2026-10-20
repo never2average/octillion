@@ -48,12 +48,18 @@ export function AdminEmails({ embedded = false }: { embedded?: boolean }) {
   const cols: RecordCol<EmailRow>[] = [
     { key: 'at', label: 'When', type: 'date', className: 'w-32', keep: true, value: (r) => r.at, render: (r) => <When d={r.at} className='text-muted-foreground text-xs leading-none' /> },
     { key: 'kind', label: 'Kind', type: 'select', className: 'w-44', value: (r) => kindOf(r.kind), options: Object.values(KIND).map((v) => ({ value: v })), render: (r) => kindOf(r.kind) },
-    { key: 'to', label: 'To', type: 'text', className: 'w-44', value: (r) => r.to_domain, render: (r) => muted(`…@${r.to_domain}`) },
-    { key: 'subject', label: 'Subject', type: 'text', title: true, keep: true, value: (r) => r.subject, render: (r) => <span className='block max-w-md truncate font-medium'>{r.subject}</span> },
+    { key: 'to', label: 'To', type: 'text', className: 'w-44', hidden: true, value: (r) => r.to_domain, render: (r) => muted(`…@${r.to_domain}`) },
+    { key: 'subject', label: 'Subject', type: 'text', title: true, keep: true, value: (r) => r.subject, render: (r) => (<>
+      <span className='block max-w-md truncate font-medium'>{r.subject}</span>
+      <span className='text-muted-foreground block max-w-md truncate text-xs'>…@{r.to_domain}</span>
+    </>) },
     { key: 'status', label: 'Status', type: 'select', className: 'w-28', keep: true, value: (r) => r.status,
       options: [{ value: 'sent', label: 'Sent' }, { value: 'skipped', label: 'Skipped' }, { value: 'failed', label: 'Failed' }, { value: 'sending', label: 'Sending' }],
-      render: (r) => <StatusBadge tone={TONE[r.status]}>{r.status}</StatusBadge> },
-    { key: 'error', label: 'Why', type: 'text', value: (r) => r.error, render: (r) => (r.error ? <span className='text-muted-foreground block max-w-sm truncate text-sm' title={r.error}>{r.error}</span> : muted('—')) },
+      render: (r) => { const note = [(r.status === 'failed' || r.status === 'skipped') && r.error, r.attempts > 1 && `${r.attempts} tries`].filter(Boolean).join(' · '); return (<>
+        <StatusBadge tone={TONE[r.status]}>{r.status}</StatusBadge>
+        {note && <span className='text-muted-foreground mt-1 block max-w-40 truncate text-xs' title={r.error ?? undefined}>{note}</span>}
+      </>); } },
+    { key: 'error', label: 'Why', type: 'text', hidden: true, value: (r) => r.error, render: (r) => (r.error ? <span className='text-muted-foreground block max-w-sm truncate text-sm' title={r.error}>{r.error}</span> : muted('—')) },
     { key: 'attempts', label: 'Attempts', type: 'number', hidden: true, className: 'w-24 text-right', value: (r) => r.attempts, render: (r) => r.attempts },
     { key: 'provider_id', label: 'Resend id', type: 'text', hidden: true, value: (r) => r.provider_id, render: (r) => (r.provider_id ? <Mono>{r.provider_id}</Mono> : muted('—')) },
     { key: 'about', label: 'About', type: 'text', hidden: true, value: (r) => JSON.stringify(r.meta), render: (r) => <Mono>{Object.entries(r.meta ?? {}).map(([k, v]) => `${k}: ${String(v)}`).join(' · ') || '—'}</Mono> }

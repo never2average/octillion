@@ -75,18 +75,28 @@ export function PersonasPage() {
         {p.summary && <span className='text-muted-foreground line-clamp-1 text-xs leading-snug'>{p.summary}</span>}
       </span>
     ) },
-    { key: 'role', label: 'Role', className: 'w-48', type: 'select', value: (p) => p.attributes.role ?? null, render: (p) => p.attributes.role ?? NA },
-    { key: 'experience', label: 'Experience', className: 'w-24 text-right', type: 'number', value: years,
+    { key: 'role', label: 'Role', className: 'w-48', type: 'select', value: (p) => p.attributes.role ?? null, render: (p) => (
+      <span className='flex flex-col gap-1.5'>
+        <span className='leading-none'>{p.attributes.role ?? NA}</span>
+        {years(p) != null && <span className='text-muted-foreground text-xs leading-none tabular-nums'>{years(p)} yrs</span>}
+      </span>
+    ) },
+    { key: 'experience', label: 'Experience', className: 'w-24 text-right', hidden: true, type: 'number', value: years,
       render: (p) => (years(p) == null ? NA : <span className='tabular-nums'>{years(p)} yrs</span>) },
-    { key: 'company_size', label: 'Company size', className: 'w-40', type: 'select', value: (p) => companySize(p.attributes.company_size), render: (p) => companySize(p.attributes.company_size) },
+    { key: 'company_size', label: 'Company size', className: 'w-40', hidden: true, type: 'select', value: (p) => companySize(p.attributes.company_size), render: (p) => companySize(p.attributes.company_size) },
     { key: 'stack', label: 'Stack', className: 'min-w-48', type: 'text', value: (p) => list(p.attributes.stack).join(', '), render: (p) => <Chips items={list(p.attributes.stack)} max={3} oneLine /> },
     { key: 'origin', label: 'Origin', className: 'w-40', type: 'select', value: (p) => p.origin,
       options: [{ value: 'Yours' }, { value: 'Written by research' }, { value: PICKED }], render: (p) => <span className='text-muted-foreground text-sm'>{p.origin}</span> },
-    { key: 'published', label: 'Published', className: 'w-28', type: 'select', value: (p) => publishedLabel(p.publication), options: PUBLISHED_OPTIONS,
+    { key: 'published', label: 'Published', className: 'w-28', hidden: true, type: 'select', value: (p) => publishedLabel(p.publication), options: PUBLISHED_OPTIONS,
       render: (p) => <PublishedBadge p={p.publication} /> },
     { key: 'slug', label: 'Id', hidden: true, type: 'text', value: (p) => p.slug, render: (p) => <Mono>{p.slug}</Mono> },
     { key: 'active', label: 'Status', name: 'Active', className: 'w-24', keep: true, type: 'boolean', value: (p) => p.active,
-      render: (p) => <StatusBadge tone={p.active ? 'ok' : 'neutral'}>{p.active ? 'on' : 'off'}</StatusBadge> }
+      render: (p) => (
+        <span className='flex flex-col items-start gap-1.5'>
+          <StatusBadge tone={p.active ? 'ok' : 'neutral'}>{p.active ? 'on' : 'off'}</StatusBadge>
+          {p.publication && <span className='text-muted-foreground text-xs leading-none'>{publishedLabel(p.publication)}</span>}
+        </span>
+      ) }
   ];
 
   const actions = (p: Persona): RowAction[] => [

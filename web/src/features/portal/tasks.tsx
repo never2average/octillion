@@ -78,17 +78,29 @@ export function TasksPage() {
       </span>
     ) },
     { key: 'set', label: 'Task set', className: 'w-48', type: 'select', value: setName, render: (t) => <span className='text-sm'>{setName(t)}</span> },
-    { key: 'product', label: 'Product', className: 'w-40', type: 'select', value: (t) => t.product_name, render: (t) => t.product_name },
-    { key: 'language', label: 'Language', className: 'w-28', type: 'select', value: (t) => t.language, render: (t) => t.language ?? NA },
-    { key: 'platform', label: 'Platform', className: 'w-28', type: 'select', value: (t) => t.platform, render: (t) => t.platform ?? NA },
+    { key: 'product', label: 'Product', className: 'w-40', hidden: products.length <= 1, type: 'select', value: (t) => t.product_name, render: (t) => t.product_name },
+    { key: 'stack', label: 'Stack', className: 'w-32', type: 'text', value: (t) => [t.language, t.platform].filter(Boolean).join(' / '),
+      render: (t) => (!t.language && !t.platform ? NA : (
+        <span className='flex flex-col gap-1.5'>
+          <span className='leading-none'>{t.language ?? NA}</span>
+          {t.platform && <span className='text-muted-foreground text-xs leading-none'>{t.platform}</span>}
+        </span>
+      )) },
+    { key: 'language', label: 'Language', className: 'w-28', hidden: true, type: 'select', value: (t) => t.language, render: (t) => t.language ?? NA },
+    { key: 'platform', label: 'Platform', className: 'w-28', hidden: true, type: 'select', value: (t) => t.platform, render: (t) => t.platform ?? NA },
     { key: 'repo', label: 'Repository', className: 'w-52', hidden: true, type: 'text', value: (t) => t.repo_url,
       render: (t) => (t.repo_url ? <span className='text-muted-foreground block max-w-52 truncate text-xs' title={t.repo_url}>{repoName(t.repo_url)}</span> : NA) },
     { key: 'tags', label: 'Tags', className: 'min-w-40', type: 'text', value: (t) => (t.tags ?? []).join(', '), render: (t) => <Chips items={t.tags} max={2} oneLine /> },
     { key: 'created_at', label: 'Added', className: 'w-28', hidden: true, type: 'date', value: (t) => t.created_at, render: (t) => <span className='text-muted-foreground text-xs'><When d={t.created_at} /></span> },
-    { key: 'published', label: 'Published', className: 'w-28', type: 'select', value: (t) => publishedLabel(t.publication), options: PUBLISHED_OPTIONS,
+    { key: 'published', label: 'Published', className: 'w-28', hidden: true, type: 'select', value: (t) => publishedLabel(t.publication), options: PUBLISHED_OPTIONS,
       render: (t) => <PublishedBadge p={t.publication} /> },
     { key: 'active', label: 'Status', name: 'Active', className: 'w-24', keep: true, type: 'boolean', value: (t) => t.active,
-      render: (t) => <StatusBadge tone={t.active ? 'ok' : 'neutral'}>{t.active ? 'on' : 'off'}</StatusBadge> }
+      render: (t) => (
+        <span className='flex flex-col items-start gap-1.5'>
+          <StatusBadge tone={t.active ? 'ok' : 'neutral'}>{t.active ? 'on' : 'off'}</StatusBadge>
+          {t.publication && <span className='text-muted-foreground text-xs leading-none'>{publishedLabel(t.publication)}</span>}
+        </span>
+      ) }
   ];
 
   const actions = (t: Task): RowAction[] => [
@@ -126,7 +138,7 @@ export function TasksPage() {
           id='app-tasks' noun='tasks' exportName='tasks'
           rows={rows} rowKey={(t) => String(t.id)} cols={cols} actions={actions} loading={!data}
           defaultSort={[{ key: 'set', dir: 'asc' }, { key: 'title', dir: 'asc' }]}
-          searchText={(t) => `${t.title} ${t.prompt ?? ''} ${setName(t)} ${t.product_name} ${t.language ?? ''} ${(t.tags ?? []).join(' ')}`}
+          searchText={(t) => `${t.title} ${t.prompt ?? ''} ${setName(t)} ${t.product_name} ${t.language ?? ''} ${t.platform ?? ''} ${(t.tags ?? []).join(' ')}`}
           searchPlaceholder='Search tasks by title, prompt, set or tag'
           filters={filters} primary={primary} primaryMenu={primaryMenu}
           empty={noProducts ? 'Add a product first: an owner adds it under Context, Products, or onboard it from your AI client.'

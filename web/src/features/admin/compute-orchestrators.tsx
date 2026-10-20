@@ -208,11 +208,20 @@ function UnmatchedTable({ rows, loading, empty, filters, summary }: { rows: Unma
   const cols: RecordCol<Unmatched>[] = [
     { key: 'name', label: 'Name', title: true, keep: true, type: 'text', value: (u) => u.name ?? '',
       render: (u) => <span className='flex min-w-0 flex-col gap-1'><span className='truncate'>{u.name ?? <span className='text-muted-foreground'>(unnamed)</span>}</span><Mono>{u.sandbox_id}</Mono></span> },
-    { key: 'kind', label: 'Kind', keep: true, type: 'select', value: (u) => UNMATCHED_KIND[u.kind], render: (u) => UNMATCHED_KIND[u.kind] },
-    { key: 'parent', label: 'Parent orchestrator', type: 'text', value: (u) => u.parent_orchestrator_id ?? '', render: (u) => (u.parent_orchestrator_id ? <Mono>{u.parent_orchestrator_id}</Mono> : <span className='text-muted-foreground'>—</span>) },
-    { key: 'age', label: 'Age', className: 'text-right', type: 'number', value: (u) => since(u.created_at), render: (u) => <span className='tabular-nums'>{dur(since(u.created_at))}</span> },
-    { key: 'boat', label: 'boat state', type: 'select', value: (u) => u.boat_state, render: (u) => u.boat_state },
-    { key: 'ttl', label: 'TTL left', className: 'text-right', type: 'number', value: (u) => u.ttl_left_s, render: (u) => <span className='tabular-nums'>{dur(u.ttl_left_s)}</span> }
+    { key: 'kind', label: 'Kind', keep: true, type: 'select', value: (u) => UNMATCHED_KIND[u.kind],
+      render: (u) => <span className='flex min-w-0 flex-col gap-1'><span>{UNMATCHED_KIND[u.kind]}</span>{u.parent_orchestrator_id && <span className='text-muted-foreground text-xs'><Mono>{u.parent_orchestrator_id}</Mono></span>}</span> },
+    // Off by default (Kind's second line, set only for workers with no parent); kept for its filter.
+    { key: 'parent', label: 'Parent orchestrator', hidden: true, type: 'text', value: (u) => u.parent_orchestrator_id ?? '', render: (u) => (u.parent_orchestrator_id ? <Mono>{u.parent_orchestrator_id}</Mono> : <span className='text-muted-foreground'>—</span>) },
+    { key: 'age', label: 'Age', className: 'text-right', type: 'number', value: (u) => since(u.created_at), render: (u) => (
+      <span className='flex flex-col items-end gap-1'>
+        <span className='tabular-nums'>{dur(since(u.created_at))}</span>
+        <span className='text-muted-foreground text-xs tabular-nums'>{dur(u.ttl_left_s)} left</span>
+      </span>
+    ) },
+    // Off by default; kept for filtering and grouping by boat's state.
+    { key: 'boat', label: 'boat state', hidden: true, type: 'select', value: (u) => u.boat_state, render: (u) => u.boat_state },
+    // Off by default (Age's second line); kept for sorting by time left.
+    { key: 'ttl', label: 'TTL left', hidden: true, className: 'text-right', type: 'number', value: (u) => u.ttl_left_s, render: (u) => <span className='tabular-nums'>{dur(u.ttl_left_s)}</span> }
   ];
   return (
     <RecordView id='compute-unmatched' rows={rows} loading={loading} rowKey={(u) => u.sandbox_id} cols={cols} noun='sandboxes' initialSize={25}

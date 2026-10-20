@@ -80,8 +80,17 @@ export function Submissions({ kind, switcher }: { kind: SubmissionKind; switcher
     ) },
     { key: 'account', label: 'Account', className: 'w-44', type: 'select', value: (s) => s.org_name, render: (s) => s.org_name },
     { key: 'status', label: 'Status', className: 'w-40', keep: true, type: 'select', value: (s) => STATUS[s.status].label,
-      options: Object.values(STATUS).map((x) => ({ value: x.label })), render: (s) => <StatusBadge tone={STATUS[s.status].tone} title={s.reason ?? undefined}>{STATUS[s.status].label}</StatusBadge> },
-    { key: 'credit', label: 'Credit', className: 'w-36', type: 'select', value: creditWord, options: [{ value: 'Credited' }, { value: 'Pending' }, { value: 'No credit' }, { value: '—' }],
+      options: Object.values(STATUS).map((x) => ({ value: x.label })), render: (s) => (
+        <span className='flex min-w-0 flex-col items-start gap-1.5'>
+          <StatusBadge tone={STATUS[s.status].tone} title={s.reason ?? undefined}>{STATUS[s.status].label}</StatusBadge>
+          {s.status === 'accepted' ? (
+            <span className='text-muted-foreground truncate text-xs leading-none' title={s.credit_status === 'pending' ? s.credit_error ?? undefined : undefined}>
+              <span className='tabular-nums'>{usd(s.credit_usd ?? 0)}</span> · {s.credit_status === 'credited' ? 'credited' : s.credit_status === 'pending' ? 'pending' : 'no credit'}
+            </span>
+          ) : s.decided_at && <span className='text-muted-foreground truncate text-xs leading-none'>decided <When d={s.decided_at} /></span>}
+        </span>
+      ) },
+    { key: 'credit', label: 'Credit', className: 'w-36', hidden: true, type: 'select', value: creditWord, options: [{ value: 'Credited' }, { value: 'Pending' }, { value: 'No credit' }, { value: '—' }],
       render: (s) => (s.status !== 'accepted' ? NA : (
         <span className='flex items-center gap-2'>
           <span className='tabular-nums'>{usd(s.credit_usd ?? 0)}</span>
@@ -90,8 +99,7 @@ export function Submissions({ kind, switcher }: { kind: SubmissionKind; switcher
         </span>
       )) },
     { key: 'created_at', label: 'Submitted', className: 'w-28', type: 'date', value: (s) => s.created_at, render: (s) => <When d={s.created_at} className='text-muted-foreground text-xs' /> },
-    { key: 'decided_at', label: 'Decided', className: 'w-28', hidden: true, type: 'date', value: (s) => s.decided_at, render: (s) => (s.decided_at ? <When d={s.decided_at} className='text-muted-foreground text-xs' /> : NA) },
-    { key: 'id', label: 'Request id', hidden: true, type: 'text', value: (s) => s.id, render: (s) => <Mono>{s.id}</Mono> }
+    { key: 'decided_at', label: 'Decided', className: 'w-28', hidden: true, type: 'date', value: (s) => s.decided_at, render: (s) => (s.decided_at ? <When d={s.decided_at} className='text-muted-foreground text-xs' /> : NA) }
   ];
 
   const actions = (s: Submission): RowAction[] => [

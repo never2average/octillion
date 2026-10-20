@@ -62,17 +62,21 @@ export function AdminPersonas() {
       <span className='flex flex-col gap-1.5'><span className='leading-none font-medium'>{p.name}</span>
         {p.summary && <span className='text-muted-foreground line-clamp-1 text-xs leading-snug'>{p.summary}</span>}</span>
     ) },
-    { key: 'role', label: 'Role', className: 'w-56', type: 'select', value: (p) => p.attributes.role ?? null, render: (p) => p.attributes.role ?? NA },
-    { key: 'experience', label: 'Experience', className: 'w-24 text-right', type: 'number', value: years,
+    { key: 'role', label: 'Role', className: 'w-56', type: 'select', value: (p) => p.attributes.role ?? null, render: (p) => {
+      const sub = [years(p) == null ? null : `${years(p)} yrs`, sizeOf(p) === '-' ? null : sizeOf(p)].filter(Boolean).join(' · ');
+      return (
+        <span className='flex flex-col gap-0.5'>{p.attributes.role ?? NA}{sub && <span className='text-muted-foreground text-xs tabular-nums'>{sub}</span>}</span>
+      );
+    } },
+    { key: 'experience', label: 'Experience', hidden: true, className: 'w-24 text-right', type: 'number', value: years,
       render: (p) => (years(p) == null ? NA : <span className='tabular-nums'>{years(p)} yrs</span>) },
-    { key: 'company_size', label: 'Company size', className: 'w-44', type: 'select', value: (p) => sizeOf(p), render: (p) => sizeOf(p) },
-    { key: 'stack', label: 'Stack', className: 'min-w-56', type: 'text', value: (p) => (p.attributes.stack ?? []).join(', '), render: (p) => <Chips items={p.attributes.stack} max={3} oneLine /> },
+    { key: 'company_size', label: 'Company size', hidden: true, className: 'w-44', type: 'select', value: (p) => sizeOf(p), render: (p) => sizeOf(p) },
+    { key: 'stack', label: 'Stack', hidden: true, className: 'min-w-56', type: 'text', value: (p) => (p.attributes.stack ?? []).join(', '), render: (p) => <Chips items={p.attributes.stack} max={3} oneLine /> },
     { key: 'tone', label: 'Tone', hidden: true, type: 'text', value: (p) => p.attributes.tone ?? null, render: (p) => p.attributes.tone ?? NA },
     { key: 'source', label: 'Origin', hidden: true, className: 'w-36', type: 'select', value: originOf,
       options: [{ value: 'Vault' }, { value: 'Vault, edited here' }, { value: 'Written here' }, { value: 'Contributed by an account' }], render: (p) => <span className='text-muted-foreground text-sm'>{originOf(p)}</span> },
     { key: 'edited_at', label: 'Edited', hidden: true, className: 'w-28', type: 'date', value: (p) => p.edited_at, render: (p) => (p.edited_at ? <When d={p.edited_at} className='text-muted-foreground text-xs' /> : NA) },
-    { key: 'slug', label: 'Slug', hidden: true, type: 'text', value: (p) => p.slug, render: (p) => <Mono>{p.slug}</Mono> },
-    { key: 'active', label: 'Status', name: 'Active', className: 'w-24', keep: true, type: 'boolean', value: (p) => p.active,
+    { key: 'active', label: 'Active', name: 'Active', className: 'w-24', keep: true, type: 'boolean', value: (p) => p.active,
       render: (p) => <StatusBadge tone={p.active ? 'ok' : 'neutral'}>{p.active ? 'active' : 'inactive'}</StatusBadge> }
   ];
 

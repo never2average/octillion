@@ -38,7 +38,9 @@ const TYPES = ['Inference', 'Sandbox', 'Search', 'Email', 'Coding agent', 'Other
 const typeOf = (slug: string) => TYPE[slug] ?? 'Other';
 /** Server-only keys (email) are used by the API itself; never by orchestrators or agents. */
 const SERVER_ONLY = new Set(['resend']);
-const useOf = (p: { slug: string; mode: string }) => (SERVER_ONLY.has(p.slug) ? 'Used by the server only (emails)' : p.mode === 'gateway' ? 'Agents call it through the gateway' : 'Given to orchestrators');
+const useOf = (p: { slug: string; mode: string }) => (SERVER_ONLY.has(p.slug) ? 'Server only' : p.mode === 'gateway' ? 'Gateway' : 'Orchestrator');
+/** 12400 → "12.4k". */
+const COMPACT = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
 
 /** Every key Octillion uses, one row per provider; keys are added, disabled and deleted from the row's ⋯ menu. */
 export function AdminKeyVault() {
@@ -53,9 +55,11 @@ export function AdminKeyVault() {
   const creds = data?.credentials ?? [];
   const keysOf = (p: Provider) => creds.filter((c) => c.provider === p.slug);
   const cols: RecordCol<Provider>[] = [
-    { key: 'provider', label: 'Provider', keep: true, type: 'text', value: (p) => nameOf(p.slug), render: (p) => <span className='font-medium' title={p.slug}>{nameOf(p.slug)}</span> },
-    { key: 'type', label: 'Type', type: 'select', value: (p) => typeOf(p.slug), options: TYPES.map((t) => ({ value: t })), render: (p) => typeOf(p.slug) },
-    { key: 'use', label: 'How it is used', hidden: true, type: 'select', value: useOf,
+    { key: 'provider', label: 'Provider', keep: true, type: 'text', value: (p) => nameOf(p.slug), render: (p) => (
+      <span className='flex flex-col gap-0.5'><span className='font-medium' title={p.slug}>{nameOf(p.slug)}</span><span className='text-muted-foreground text-xs'>{typeOf(p.slug)}</span></span>
+    ) },
+    { key: 'type', label: 'Type', hidden: true, type: 'select', value: (p) => typeOf(p.slug), options: TYPES.map((t) => ({ value: t })), render: (p) => typeOf(p.slug) },
+    { key: 'use', label: 'Access', hidden: true, type: 'select', value: useOf,
       render: (p) => <span className='text-muted-foreground'>{useOf(p)}{p.backend !== 'direct' && ` · ${p.backend}`}</span> },
     { key: 'keys', label: 'Keys', className: 'w-72 max-w-72', type: 'number', value: (p) => keysOf(p).length, render: (p) => {
       const mine = keysOf(p);
@@ -72,9 +76,12 @@ export function AdminKeyVault() {
         </span>
       );
     } },
-    { key: 'uses', label: 'Uses', className: 'text-right', type: 'number', value: (p) => keysOf(p).reduce((t, c) => t + c.uses, 0),
+    { key: 'uses', label: 'Uses', hidden: true, className: 'text-right', type: 'number', value: (p) => keysOf(p).reduce((t, c) => t + c.uses, 0),
       render: (p) => <span className='tabular-nums'>{keysOf(p).reduce((t, c) => t + c.uses, 0).toLocaleString()}</span> },
-    { key: 'last', label: 'Last used', type: 'date', value: (p) => p.last_used_at ?? undefined, render: (p) => (p.last_used_at ? <When d={p.last_used_at} /> : <span className='text-muted-foreground'>never</span>) },
+    { key: 'last', label: 'Last used', type: 'date', value: (p) => p.last_used_at ?? undefined, render: (p) => (
+      <span className='flex flex-col gap-0.5'>{p.last_used_at ? <When d={p.last_used_at} /> : <span className='text-muted-foreground'>never</span>}
+        <span className='text-muted-foreground text-xs tabular-nums'>{COMPACT.format(keysOf(p).reduce((t, c) => t + c.uses, 0))} uses</span></span>
+    ) },
     { key: 'on', label: 'On', className: 'w-12 text-right', keep: true,
       render: (p) => <span onClick={(e) => e.stopPropagation()}><Gate need='keys'><Switch aria-label={`${p.slug} on`} checked={p.enabled} disabled={provOn.isPending} onCheckedChange={(c) => provOn.mutate({ slug: p.slug, enabled: c })} /></Gate></span> }
   ];

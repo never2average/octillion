@@ -24,6 +24,14 @@ const billingTrouble = (o: Org) => ['past_due', 'unpaid', 'incomplete'].includes
 const dormant = (o: Org) => !o.last_seen || Date.now() - new Date(o.last_seen).getTime() > 14 * DAY;
 const budgetPct = (o: Org) => (o.budget_usd ? Math.round((o.month_spend_usd / o.budget_usd) * 100) : null);
 const dash = <span className='text-muted-foreground'>—</span>;
+/** Plan cell second line: the billing state when it is not active, else when it renews. */
+const planState = (s: NonNullable<Org['subscription']>) => {
+  const line = 'text-muted-foreground text-xs leading-none';
+  if (s.cancel_at_period_end) return <span className={line}>cancels <When d={s.renews_at} /></span>;
+  if (s.status !== 'active') return <span className={['past_due', 'unpaid', 'incomplete'].includes(s.status) ? 'text-destructive text-xs leading-none' : line}>{s.status.replace(/_/g, ' ')}</span>;
+  const d = s.renews_at ?? s.trial_end;
+  return d ? <span className={line}>renews <When d={d} /></span> : null;
+};
 const num = (n: number | null | undefined) => (n == null ? dash : n ? <span className='tabular-nums'>{n}</span> : <span className='text-muted-foreground tabular-nums'>0</span>);
 
 const VIEWS: RecordViewDef<Org>[] = [
@@ -59,23 +67,26 @@ export function AdminAccounts() {
     { key: 'name', label: 'Account', name: 'Account', className: 'min-w-64', type: 'text', title: true, keep: true, value: (o) => o.name, render: (o) => (
       <span className='leading-none font-medium'>{o.name}</span>
     ) },
-    { key: 'slug', label: 'Slug', type: 'text', hidden: true, value: (o) => o.slug, render: (o) => <code className='text-xs'>{o.slug}</code> },
     { key: 'contact', label: 'Contact', hidden: true, type: 'text', value: (o) => o.contact, render: (o) => o.contact ?? dash },
     { key: 'stage', label: 'Stage', className: 'w-48', type: 'select', keep: true, value: (o) => o.stage, options: (data?.stages ?? []).map((s) => ({ value: s.id, label: s.label })),
       render: (o) => <span className='whitespace-nowrap'><span className='hidden 2xl:inline'><StageDots index={o.stage_index} total={n} /></span>{o.stage_label}</span> },
     { key: 'next_step', label: 'Next step', type: 'text', hidden: true, value: (o) => o.next_step, render: (o) => o.next_step },
     { key: 'attention', label: 'Attention', type: 'number', keep: true, value: (o) => o.attention.length, render: (o) => o.attention.length ? (
       <Tooltip>
-        <TooltipTrigger render={<span className='inline-flex text-sm leading-none text-amber-400' />}>{o.attention.length} to check</TooltipTrigger>
+        <TooltipTrigger render={<span className='flex max-w-72 min-w-0 flex-col gap-1 text-sm leading-none text-amber-400' />}>
+          <span className='truncate leading-none'>{o.attention[0]}</span>
+          {o.attention.length > 1 && <span className='text-muted-foreground text-xs leading-none'>+{o.attention.length - 1} more</span>}
+        </TooltipTrigger>
         <TooltipContent className='block max-w-sm whitespace-pre-line'>{o.attention.join('\n')}</TooltipContent>
       </Tooltip>
     ) : dash },
     { key: 'members', label: 'Members', hidden: true, type: 'number', value: (o) => o.members, render: members },
-    { key: 'pending_invites', label: 'Pending invites', type: 'number', hidden: true, value: (o) => o.pending_invites, render: (o) => num(o.pending_invites) },
     { key: 'auth', label: 'Sign-in', type: 'select', hidden: true, options: [{ value: 'clerk', label: 'Clerk' }, { value: 'keys', label: 'Keys' }],
       value: (o) => (o.clerk_org_id ? 'clerk' : 'keys'), render: (o) => (o.clerk_org_id ? 'Clerk' : 'Keys') },
     { key: 'active_keys', label: 'Active keys', type: 'number', hidden: true, value: (o) => o.active_keys, render: (o) => num(o.active_keys) },
-    { key: 'plan', label: 'Plan', type: 'select', value: (o) => o.subscription?.plan ?? 'none', render: (o) => o.subscription?.plan ?? dash },
+    { key: 'plan', label: 'Plan', type: 'select', value: (o) => o.subscription?.plan ?? 'none', render: (o) => o.subscription ? (
+      <span className='flex flex-col gap-1'><span className='leading-none'>{o.subscription.plan ?? dash}</span>{planState(o.subscription)}</span>
+    ) : dash },
     { key: 'billing', label: 'Billing', hidden: true, type: 'select', options: sel(['active', 'trialing', 'past_due', 'unpaid', 'incomplete', 'canceled', 'none']),
       value: (o) => o.subscription?.status ?? 'none', render: (o) => <SubBadge sub={o.subscription} /> },
     { key: 'renews', label: 'Renews', type: 'date', hidden: true, value: (o) => o.subscription?.renews_at ?? o.subscription?.trial_end ?? null,
@@ -85,8 +96,11 @@ export function AdminAccounts() {
       <span className='inline-flex items-center gap-1.5 tabular-nums'>{o.calls_7d}{o.errors_7d > 0 && <StatusBadge tone='bad'>{o.errors_7d} err</StatusBadge>}</span>
     ) },
     { key: 'errors_7d', label: 'Errors 7d', type: 'number', hidden: true, value: (o) => o.errors_7d, render: (o) => num(o.errors_7d) },
-    { key: 'spend', label: 'Spend (month)', hidden: true, type: 'number', value: (o) => o.month_spend_usd, render: (o) => (
-      <span className='tabular-nums'>{dollars(o.month_spend_usd)}{o.budget_usd ? <span className='text-muted-foreground'> / {dollars(o.budget_usd)}</span> : null}</span>
+    { key: 'spend', label: 'Spend', name: 'Spend this month', hidden: true, type: 'number', value: (o) => o.month_spend_usd, render: (o) => (
+      <span className='flex flex-col gap-0.5 tabular-nums'>
+        <span>{dollars(o.month_spend_usd)}{o.budget_usd ? <span className='text-muted-foreground'> / {dollars(o.budget_usd)}</span> : null}</span>
+        {o.budget_usd > 0 && <span className='text-muted-foreground text-xs'>{budgetPct(o)}% of budget</span>}
+      </span>
     ) },
     { key: 'budget_pct', label: 'Budget used %', type: 'number', hidden: true, value: budgetPct, render: (o) => { const p = budgetPct(o); return p == null ? dash : <span className='tabular-nums'>{p}%</span>; } },
     { key: 'running', label: 'Running', type: 'number', hidden: true, value: (o) => o.onboarding_running + o.sims_running, render: (o) => num(o.onboarding_running + o.sims_running) },

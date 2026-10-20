@@ -169,26 +169,26 @@ export function AdminRequests() {
   };
 
   const cols: RecordCol<Req>[] = [
-    { key: 'company', label: 'Company', type: 'text', title: true, keep: true, peek: false, value: (q) => q.company, render: (q) => <span className='font-medium leading-none'>{q.company}</span> },
+    { key: 'company', label: 'Company', type: 'text', title: true, keep: true, peek: false, value: (q) => q.company, render: (q) => (<>
+      <p className='truncate font-medium leading-none'>{q.company}</p>
+      {host(q) && <p className='text-muted-foreground mt-1.5 truncate text-xs leading-none'>{host(q)}</p>}
+    </>) },
     { key: 'status', label: 'Status', type: 'select', className: 'w-28', keep: true, value: (q) => q.status,
       options: [{ value: 'pending', label: 'Pending' }, { value: 'approved', label: 'Approved' }, { value: 'declined', label: 'Declined' }],
       render: (q) => <StatusBadge tone={TONE[q.status]}>{q.status}</StatusBadge> },
     { key: 'person', label: 'Person', type: 'text', className: 'w-56', value: (q) => `${q.name ?? ''} ${q.email}`, render: (q) => (<>
       <p className='truncate text-sm leading-none'>{q.name || q.email}</p>
-      {(q.name || q.role) && <p className='text-muted-foreground mt-1.5 truncate text-xs leading-none'>{[q.role, q.name ? q.email : null].filter(Boolean).join(' · ')}</p>}
+      {(q.name || q.role || !isWork(q)) && <p className='text-muted-foreground mt-1.5 truncate text-xs leading-none'>{[q.role, q.name ? q.email : null, isWork(q) ? null : 'personal'].filter(Boolean).join(' · ')}</p>}
     </>) },
     { key: 'fit', label: 'Fit', type: 'select', className: 'w-28', value: (q) => q.research?.fit ?? (q.research_status === 'running' ? 'researching' : 'not researched'),
       render: (q) => q.research_status === 'running' ? muted('Researching…') : q.research ? <span className={cn('text-sm leading-none', FIT[q.research.fit])}>{q.research.fit}</span> : muted('—') },
-    { key: 'email', label: 'Email', type: 'text', hidden: true, value: (q) => q.email, render: (q) => muted(q.email) },
-    { key: 'domain', label: 'Domain', type: 'text', hidden: true, value: (q) => domainOf(q.email), render: (q) => muted(domainOf(q.email) || '—') },
     { key: 'work', label: 'Work email', type: 'boolean', hidden: true, value: isWork, render: (q) => muted(isWork(q) ? 'Yes' : 'No') },
-    { key: 'product', label: 'Product', hidden: true, type: 'text', className: 'w-44', value: link, render: (q) => muted(host(q) ?? '—') },
-    { key: 'message', label: 'Message', hidden: true, type: 'text', peek: false, value: (q) => q.message, render: (q) => (q.message ? <span className='block max-w-md truncate text-sm leading-none'>{q.message}</span> : muted('—')) },
-    { key: 'account', label: 'Account', type: 'text', hidden: true, value: (q) => q.org_name, render: (q) => muted(q.org_name ?? '—') },
-    { key: 'match', label: 'Matches account', type: 'text', hidden: true, value: (q) => matches.get(q.id), render: (q) => muted(matches.get(q.id) ?? '—') },
-    { key: 'created_at', label: 'Requested', type: 'date', className: 'w-28', keep: true, value: (q) => q.created_at, render: (q) => <When d={q.created_at} className='text-muted-foreground text-xs leading-none' /> },
-    { key: 'decided_at', label: 'Decided', type: 'date', className: 'w-28', hidden: true, value: (q) => q.decided_at, render: (q) => <When d={q.decided_at} className='text-muted-foreground text-xs leading-none' /> },
-    { key: 'waiting', label: 'Waiting (days)', hidden: true, type: 'number', className: 'w-28', value: waited, render: (q) => { const d = waited(q); return muted(d == null ? '—' : `${d}d`); } }
+    { key: 'account', label: 'Account', type: 'text', hidden: true, value: (q) => q.org_name ?? matches.get(q.id), render: (q) => (q.org_name ? <span className='block truncate text-sm leading-none'>{q.org_name}</span> : muted(matches.get(q.id) ? `matches ${matches.get(q.id)}?` : '—')) },
+    { key: 'created_at', label: 'Requested', type: 'date', className: 'w-28', keep: true, value: (q) => q.created_at, render: (q) => { const d = waited(q); return (<>
+      <When d={q.created_at} className='text-muted-foreground block text-xs leading-none' />
+      {d != null && <p className='text-muted-foreground mt-1.5 truncate text-xs leading-none'>{q.status === 'pending' ? `waiting ${d}d` : `decided ${d}d later`}</p>}
+    </>); } },
+    { key: 'decided_at', label: 'Decided', type: 'date', className: 'w-28', hidden: true, value: (q) => q.decided_at, render: (q) => <When d={q.decided_at} className='text-muted-foreground text-xs leading-none' /> }
   ];
 
   return (

@@ -147,7 +147,10 @@ export function AdminAgentMix() {
     { key: 'harness', label: 'Harness', keep: true, type: 'text', value: (a) => a.label,
       render: (a) => (
         <span title={a.id} className='flex min-w-0 items-center gap-1.5 leading-none'>
-          <span className={cn('truncate', a.status === 'On' && 'font-medium')}>{a.label}</span>
+          <span className='flex min-w-0 flex-col gap-1'>
+            <span className={cn('truncate', a.status === 'On' && 'font-medium')}>{a.label}</span>
+            {a.status !== 'On' && <span className='text-muted-foreground text-xs' title={a.paused_reason ?? undefined}>{a.status}</span>}
+          </span>
           {a.origin === 'admin' && <span title={`Added on this page; inherits ${a.base_agent ?? a.harness}`} className='text-muted-foreground inline-flex h-5 shrink-0 items-center rounded-md px-1.5 text-xs leading-none font-medium ring-1 ring-border ring-inset'>added</span>}
         </span>
       ) },
@@ -155,9 +158,16 @@ export function AdminAgentMix() {
     { key: 'model', label: 'Model', type: 'select', value: (a) => a.model ?? '', render: (a) => (a.model ? <Mono>{a.model.replace(/^.*\//, '')}</Mono> : <span className='text-muted-foreground'>its own</span>) },
     { key: 'weight', label: 'Weight', className: 'w-28 text-right', type: 'number', value: (a) => a.weight,
       render: (a) => <span onClick={(e) => e.stopPropagation()}><Gate need='harnesses'><WeightInput key={a.weight} value={a.weight} disabled={set.isPending} onSave={(w) => set.mutate({ id: a.id, market_share: w })} label={`Weight of ${a.label}`} /></Gate></span> },
-    { key: 'share', label: 'Share', className: 'text-right', type: 'number', value: (a) => a.share, render: (a) => <span className='tabular-nums'>{a.share ? pct(a.share) : '—'}</span> },
-    { key: 'sandboxes', label: 'Sandboxes', className: 'text-right', type: 'number', value: (a) => a.sandboxes, render: (a) => <span className='tabular-nums'>{a.sandboxes || '—'}</span> },
-    { key: 'status', label: 'Status', type: 'select', value: (a) => a.status, render: (a) => <span title={a.paused_reason ?? undefined} className={a.status === 'On' ? undefined : 'text-muted-foreground'}>{a.status}</span> },
+    { key: 'share', label: 'Share', className: 'text-right', type: 'number', value: (a) => a.share, render: (a) => (
+      <span className='flex flex-col items-end gap-1'>
+        <span className='tabular-nums'>{a.share ? pct(a.share) : '—'}</span>
+        {a.sandboxes > 0 && <span className='text-muted-foreground text-xs tabular-nums'>{a.sandboxes} sandbox{a.sandboxes === 1 ? '' : 'es'}</span>}
+      </span>
+    ) },
+    // Off by default (Share's second line); kept for its own sort.
+    { key: 'sandboxes', label: 'Sandboxes', hidden: true, className: 'text-right', type: 'number', value: (a) => a.sandboxes, render: (a) => <span className='tabular-nums'>{a.sandboxes || '—'}</span> },
+    // Off by default (Harness's second line when not On); kept for filtering and grouping by the finer status.
+    { key: 'status', label: 'Status', hidden: true, type: 'select', value: (a) => a.status, render: (a) => <span title={a.paused_reason ?? undefined} className={a.status === 'On' ? undefined : 'text-muted-foreground'}>{a.status}</span> },
     { key: 'on', label: 'On', className: 'w-12 text-right', keep: true,
       render: (a) => <span onClick={(e) => e.stopPropagation()}><Gate need='harnesses'><Switch aria-label={`${a.label} on`} checked={a.status === 'On'} disabled={!a.runnable || set.isPending} onCheckedChange={(c) => set.mutate({ id: a.id, paused: !c })} /></Gate></span> }
   ];
@@ -594,19 +604,23 @@ function Limits({ s, onEditing }: { s: Summary; onEditing: (key: string, on: boo
         {r.unavailable || !r.status ? <span className='text-muted-foreground'>—</span> : STATUS[r.status]}
       </span>
     ) },
-    { key: 'source', label: 'Source', type: 'text', value: (r) => r.setting?.source ?? '', render: (r) => (r.setting ? <SourceOf s={r.setting} /> : r.source) },
+    // Off by default (Change's second line, or its text on fixed rows); kept for its filter.
+    { key: 'source', label: 'Source', hidden: true, type: 'text', value: (r) => r.setting?.source ?? '', render: (r) => (r.setting ? <SourceOf s={r.setting} /> : r.source) },
     { key: 'change', label: 'Change', className: 'w-64', render: (r) => (
       r.setting ? (
-        <span className='flex items-center gap-1' onClick={(e) => e.stopPropagation()}>
-          <Gate need='compute'><LimitInput key={`${String(r.setting.value)}:${rejected}`} s={r.setting} disabled={save.isPending} onDirty={(on) => onEditing(r.setting!.key, on)}
-            onSave={(v) => save.mutate({ [r.setting!.key]: v }, { onError: () => setRejected((k) => k + 1), onSettled: () => onEditing(r.setting!.key, false) })} /></Gate>
-          {r.setting.source === 'set' && (
-            <Gate need='compute'><Button variant='ghost' size='xs' className='text-muted-foreground hover:text-foreground' disabled={save.isPending}
-              title={`Back to ${r.setting.env != null ? `the environment (${r.setting.env})` : `the default (${r.setting.default})`}`}
-              onClick={() => save.mutate({ [r.setting!.key]: null })}>Reset</Button></Gate>
-          )}
+        <span className='flex flex-col gap-1' onClick={(e) => e.stopPropagation()}>
+          <span className='flex items-center gap-1'>
+            <Gate need='compute'><LimitInput key={`${String(r.setting.value)}:${rejected}`} s={r.setting} disabled={save.isPending} onDirty={(on) => onEditing(r.setting!.key, on)}
+              onSave={(v) => save.mutate({ [r.setting!.key]: v }, { onError: () => setRejected((k) => k + 1), onSettled: () => onEditing(r.setting!.key, false) })} /></Gate>
+            {r.setting.source === 'set' && (
+              <Gate need='compute'><Button variant='ghost' size='xs' className='text-muted-foreground hover:text-foreground' disabled={save.isPending}
+                title={`Back to ${r.setting.env != null ? `the environment (${r.setting.env})` : `the default (${r.setting.default})`}`}
+                onClick={() => save.mutate({ [r.setting!.key]: null })}>Reset</Button></Gate>
+            )}
+          </span>
+          <span className='text-muted-foreground text-xs'><SourceOf s={r.setting} /></span>
         </span>
-      ) : <span className='text-muted-foreground text-xs'>{r.fixed ?? '—'}</span>
+      ) : <span className='text-muted-foreground text-xs'>{r.fixed ?? r.source ?? '—'}</span>
     ) }
   ];
   // The fixed facts live in the table: the boat plan and other deployments on its first row, the session-a-day

@@ -35,19 +35,26 @@ export function AdminAdmins() {
       <span className='flex flex-col gap-1.5'><span className='leading-none font-medium'>{a.email ?? a.id}{a.id && a.id === data?.me && <span className='text-muted-foreground font-normal'> (you)</span>}</span>
         {a.name && <span className='text-muted-foreground text-xs leading-none'>{a.name}</span>}</span>
     ) },
-    { key: 'role', label: 'Role', className: 'w-40', keep: true, type: 'select', value: (a) => a.role_label, options: roles.map((r) => ({ value: r.label })), render: (a) =>
-      edit && a.editable && a.id ? (
+    { key: 'role', label: 'Role', className: 'w-40', keep: true, type: 'select', value: (a) => a.role_label, options: roles.map((r) => ({ value: r.label })), render: (a) => {
+      const role = edit && a.editable && a.id ? (
         <NativeSelect size='sm' value={a.role} disabled={setRole.isPending} aria-label={`Role for ${a.email}`}
           onClick={(e) => e.stopPropagation()} onChange={(e) => setRole.mutate({ id: a.id!, role: e.target.value as AdminRole })}>
           {roles.map((r) => <NativeSelectOption key={r.id} value={r.id}>{r.label}</NativeSelectOption>)}
         </NativeSelect>
-      ) : <span title={roles.find((r) => r.id === a.role)?.help}>{a.role_label}</span> },
-    { key: 'source', label: 'Set in', className: 'w-32', type: 'select', value: (a) => (a.source === 'environment' ? 'Environment' : 'Clerk'),
+      ) : <span className='leading-none' title={roles.find((r) => r.id === a.role)?.help}>{a.role_label}</span>;
+      return a.source === 'environment' ? (
+        <span className='flex flex-col gap-1.5'>{role}<span className='text-muted-foreground text-xs leading-none' title='OCTILLION_PLATFORM_ADMINS on the server: change it there'>set in env</span></span>
+      ) : role;
+    } },
+    { key: 'source', label: 'Set in', className: 'w-32', hidden: true, type: 'select', value: (a) => (a.source === 'environment' ? 'Environment' : 'Clerk'),
       options: [{ value: 'Clerk' }, { value: 'Environment' }],
       render: (a) => (a.source === 'environment' ? <StatusBadge tone='info' title='OCTILLION_PLATFORM_ADMINS on the server: change it there'>environment</StatusBadge> : <span className='text-muted-foreground text-sm'>Clerk</span>) },
     { key: 'last_sign_in_at', label: 'Last sign-in', className: 'w-32', type: 'date', value: (a) => a.last_sign_in_at,
       render: (a) => (a.last_sign_in_at ? <When d={a.last_sign_in_at} className='text-muted-foreground text-xs' /> : <span className='text-muted-foreground text-xs'>never</span>) },
-    { key: 'added_by', label: 'Added by', className: 'w-56', type: 'text', value: (a) => a.added_by, render: (a) => (a.added_by ? <span className='text-sm'>{a.added_by}{a.added_at && <span className='text-muted-foreground text-xs'>, <When d={a.added_at} /></span>}</span> : NA) }
+    { key: 'added_at', label: 'Added', className: 'w-36', type: 'date', value: (a) => a.added_at, render: (a) => (a.added_at || a.added_by ? (
+      <span className='flex flex-col gap-1.5'>{a.added_at ? <When d={a.added_at} className='text-sm leading-none' /> : NA}
+        {a.added_by && <span className='text-muted-foreground truncate text-xs leading-none' title={a.added_by}>by {a.added_by}</span>}</span>
+    ) : NA) }
   ];
 
   const actions = (a: Admin): RowAction[] => (!a.editable || !a.id ? [] : [

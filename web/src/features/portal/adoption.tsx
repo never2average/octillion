@@ -98,18 +98,18 @@ export function AdoptionPage() {
     ...s.groups.flatMap((g): Row[] => {
       const people = ad?.workflow?.find((w) => w.id === g.id)?.people ?? [];
       if (people.length) return people.map((p) => ({ key: `w-${g.id}-${p.user_id ?? 'key'}`, type: 'workflow' as const, name: g.label,
-        detail: `${p.calls} call${p.calls === 1 ? '' : 's'}`, done: p.used, total: p.total, g, person: p.label }));
-      return narrowed ? [] : [{ key: `w-${g.id}`, type: 'workflow' as const, name: g.label, detail: 'Not tried yet', done: 0, total: g.total, g, person: null }];
+        detail: `Workflow · ${p.calls} call${p.calls === 1 ? '' : 's'}`, done: p.used, total: p.total, g, person: p.label }));
+      return narrowed ? [] : [{ key: `w-${g.id}`, type: 'workflow' as const, name: g.label, detail: 'Workflow · Not tried yet', done: 0, total: g.total, g, person: null }];
     }),
     ...(narrowed ? [] : s.clients.filter((c) => c.last.slice(0, 10) >= range.from && c.last.slice(0, 10) <= range.to)
-      .map((c) => ({ key: `c-${c.client}`, type: 'client' as const, name: c.client, detail: '', done: 1, total: 1, at: c.last })))
+      .map((c) => ({ key: `c-${c.client}`, type: 'client' as const, name: c.client, detail: 'AI client', done: 1, total: 1, at: c.last })))
   ];
   // Who a row is about: the person on a use case or workflow part (nobody in the range: "Nobody yet"; calls made with a
   // connector key rather than a signed-in person: "Connector key"), you for clients (the list is yours).
   const userOf = (r: Row) => r.type === 'use case' ? (r.who?.label ?? 'Nobody yet') : r.type === 'workflow' ? (r.person ?? 'Nobody yet') : 'You';
   const helpState = (r: Row) => helpStatus(r, me);
   const cols: RecordCol<Row>[] = [
-    { key: 'item', label: 'Use case', className: 'min-w-72', keep: true, title: true, type: 'text', value: (r) => r.name, render: (r) => (<>
+    { key: 'item', label: 'Item', className: 'min-w-72', keep: true, title: true, type: 'text', value: (r) => r.name, render: (r) => (<>
       <p className='text-sm leading-none font-medium'>{r.name}</p>
       {r.detail && <p className='text-muted-foreground mt-1.5 line-clamp-1 text-xs leading-none'>{r.detail}</p>}
     </>) },
@@ -117,13 +117,13 @@ export function AdoptionPage() {
     { key: 'usage', label: 'Usage', className: 'w-44', type: 'number', value: (r) => r.done / Math.max(1, r.total), render: (r) => (
       <div className='space-y-1.5'>
         <Progress done={r.done} total={r.total} check={r.type === 'client'} />
-        {r.type === 'use case' && r.who && <p className='text-muted-foreground text-xs leading-none'>{r.who.calls} call{r.who.calls === 1 ? '' : 's'}{r.who.finished ? ' · outcome reached' : ''}</p>}
+        {/* Line 2, the first that applies: what failed, the outcome reached, or where they are stuck (was the Issues column). */}
+        {r.type === 'use case' && r.who && (r.who.errors
+          ? <p className='text-destructive block max-w-44 truncate text-xs leading-none' title={r.who.last_error ?? undefined}>{r.who.errors} failed · {r.who.last_error ?? 'tool error'}</p>
+          : <p className='text-muted-foreground block max-w-44 truncate text-xs leading-none' title={!r.who.finished && r.who.stuck ? `Next: ${r.who.stuck}` : undefined}>
+            {r.who.calls} call{r.who.calls === 1 ? '' : 's'}{r.who.finished ? ' · outcome reached' : r.who.stuck ? ` · Next: ${r.who.stuck}` : ''}</p>)}
       </div>
     ) },
-    { key: 'issues', label: 'Issues', className: 'w-52', render: (r) => r.type !== 'use case' || !r.who ? <span className='text-muted-foreground'>—</span>
-      : r.who.errors ? <span className='text-destructive block max-w-52 truncate text-xs leading-none' title={r.who.last_error ?? undefined}>{r.who.errors} failed · {r.who.last_error ?? 'tool error'}</span>
-      : r.who.finished ? <span className='text-primary text-xs leading-none'>None · done</span>
-      : <span className='text-muted-foreground block max-w-52 truncate text-xs leading-none'>Next: {r.who.stuck}</span> },
     { key: 'help', label: 'Help', className: 'w-48', type: 'select', value: (r) => helpState(r).label,
       render: (r) => <HelpCell r={r} me={me} onPick={(h) => r.type === 'use case' && pickUp(h, r.j, r.who)} /> },
     { key: 'last', label: 'Last', className: 'hidden w-24 sm:table-cell', type: 'date', value: (r) => r.type === 'client' ? r.at : r.type === 'use case' ? r.who?.at ?? null : null,

@@ -537,7 +537,7 @@ function LimitsDialog({ m, lim, l, mode, onClose, onSaved }: { m: Pick<Member, '
 
 /** A rule's history key on GET /limits `changed` (who last changed it, when): "policy.<field>", "team:<id>", "member:<user id>". */
 type PolicyField = keyof Policy;
-interface RuleRow { key: string; rule: string; value: string; applies: string; by: string; at: string | null; edit?: () => void; reset?: () => void }
+interface RuleRow { key: string; rule: string; value: string; hint?: string; applies: string; by: string; at: string | null; edit?: () => void; reset?: () => void }
 type PolicyEdit = { field: PolicyField; rule: string; kind: 'mode' | 'money' | 'count' | 'bool'; hint: string };
 
 const MODE_WORDS: Record<Mode, string> = { pool: 'Shared pool: anyone can use the whole budget', even: 'Split evenly between the people who can launch',
@@ -559,11 +559,12 @@ function Rules({ l, b, reload }: { l: AdminLimits; b: Billing; reload: () => voi
   const rows: RuleRow[] = [
     { key: 'allowance', rule: 'Monthly allowance', applies: 'Account', by: 'Octillion', at: null,
       value: l.budget_error ? "Couldn't load" : l.budget_usd > 0 ? `${usd(l.budget_usd)} a month` : 'No prepaid allowance' },
-    policyRow('mode', 'How people share it', MODE_WORDS[p.mode], 'Each budget', 'mode', 'How the people in each budget share it. Own limits apply in every mode.'),
+    // The short label; the sentence is its tooltip (and the dialog's hint).
+    { ...policyRow('mode', 'How people share it', MODE_OPTIONS.find((m) => m.id === p.mode)?.label ?? p.mode, 'Each budget', 'mode', 'How the people in each budget share it. Own limits apply in every mode.'), hint: MODE_WORDS[p.mode] },
     policyRow('reserve_usd', 'Held back (buffer)', p.reserve_usd ? usd(p.reserve_usd) : 'None', 'Account', 'money', 'Nobody can launch into this. It absorbs runs that finish past a limit.'),
     ...(p.mode === 'custom' ? [policyRow('default_cap_usd', 'Default cap per person', `${usd(p.default_cap_usd ?? 0)} a month`, 'Each person without their own limit', 'money',
       'The most each person can spend a month. A budget still stops at its total.')] : []),
-    policyRow('new_members_can_run', 'New members can launch', p.new_members_can_run ? 'Yes' : 'No, only people allowed individually', 'Everyone', 'bool',
+    policyRow('new_members_can_run', 'New members can launch', p.new_members_can_run ? 'Yes' : 'No', 'Everyone', 'bool',
       "No stops everyone who hasn't been allowed individually, including people already here."),
     policyRow('max_concurrent_runs', 'Runs at once (per person)', p.max_concurrent_runs == null ? 'No limit' : String(p.max_concurrent_runs), 'Each person', 'count',
       'Whole simulations running at once. Teams and people can set their own; the most specific one wins.'),
@@ -588,10 +589,15 @@ function Rules({ l, b, reload }: { l: AdminLimits; b: Billing; reload: () => voi
   ];
   const cols: RecordCol<RuleRow>[] = [
     { key: 'rule', label: 'Rule', keep: true, title: true, type: 'text', value: (r) => r.rule, render: (r) => <span className='font-medium'>{r.rule}</span> },
-    { key: 'value', label: 'Value', type: 'text', value: (r) => r.value, render: (r) => <span className='tabular-nums'>{r.value}</span> },
+    { key: 'value', label: 'Value', type: 'text', value: (r) => r.value, render: (r) => <span className='tabular-nums' title={r.hint}>{r.value}</span> },
     { key: 'applies', label: 'Applies to', className: 'w-56', type: 'select', value: (r) => r.applies, render: (r) => <span className='text-muted-foreground'>{r.applies}</span> },
-    { key: 'by', label: 'Set by', className: 'w-48', type: 'select', value: (r) => r.by, render: (r) => <span className={r.by === 'Default' || r.by === 'Octillion' ? 'text-muted-foreground' : ''}>{r.by}</span> },
-    { key: 'at', label: 'Last changed', className: 'w-32', type: 'date', value: (r) => r.at ?? undefined,
+    // Who last changed it, and when on a second line (never for Default or Octillion, which have no date). Set by and Last changed stay hidden for filtering, grouping and sorting.
+    { key: 'changed', label: 'Changed', className: 'w-48', peek: false, render: (r) => (<>
+      <span className={r.by === 'Default' || r.by === 'Octillion' ? 'text-muted-foreground' : ''}>{r.by}</span>
+      {r.at && <div className='text-muted-foreground mt-1 text-xs leading-none'><When d={r.at} /></div>}
+    </>) },
+    { key: 'by', label: 'Set by', className: 'w-48', type: 'select', hidden: true, value: (r) => r.by, render: (r) => <span className={r.by === 'Default' || r.by === 'Octillion' ? 'text-muted-foreground' : ''}>{r.by}</span> },
+    { key: 'at', label: 'Last changed', className: 'w-32', type: 'date', hidden: true, value: (r) => r.at ?? undefined,
       render: (r) => <span className='text-muted-foreground text-xs'>{r.at ? <When d={r.at} /> : '—'}</span> }
   ];
   const actions = (r: RuleRow): RowAction[] => [
@@ -674,16 +680,21 @@ function Teams({ l, reload }: { l: Limits; reload: () => void }) {
   const manage = l.can_manage;
   const cols: RecordCol<LimitTeam>[] = [
     { key: 'team', label: 'Team', keep: true, type: 'text', value: (x) => x.name, render: (x) => <span className='font-medium'>{x.name}</span> },
-    { key: 'budget', label: 'Budget used this month', className: 'w-72', type: 'number', value: (x) => x.spent,
-      render: (x) => (x.budget_usd == null ? <span className='text-xs tabular-nums'>{usd(x.spent)} <span className='text-muted-foreground'>· no team cap</span></span> : <Allowance spent={x.spent} cap={x.budget_usd} />) },
-    // The cap already reads in "Budget used" ("$x of $cap"); kept hidden for sorting, filtering and export.
+    // Line 1: the bar (or "· no team cap"); line 2: what is left (amber when it limits the team's people).
+    { key: 'budget', label: 'Spent', className: 'w-72', type: 'number', value: (x) => x.spent,
+      render: (x) => (<>
+        {x.budget_usd == null ? <span className='text-xs tabular-nums'>{usd(x.spent)} <span className='text-muted-foreground'>· no team cap</span></span> : <Allowance spent={x.spent} cap={x.budget_usd} />}
+        {x.left_usd != null && <div className={cn('text-muted-foreground mt-1 text-xs leading-none tabular-nums', x.limited_by && 'text-amber-700 dark:text-amber-400')}
+          title={x.limited_by ? 'Limits its people (90% or more used)' : undefined}>{usd(x.left_usd)} left</div>}
+      </>) },
+    // The cap and what is left already read in "Spent" ("$x of $cap", "$y left"); kept hidden for sorting, filtering and export.
     { key: 'cap', label: 'Monthly cap', className: 'w-32', hidden: true, type: 'number', value: (x) => x.budget_usd ?? undefined, render: (x) => <span className='tabular-nums'>{x.budget_usd == null ? <span className='text-muted-foreground'>none</span> : usd(x.budget_usd)}</span> },
-    { key: 'left', label: 'Left', className: 'w-28', type: 'number', value: (x) => x.left_usd ?? undefined,
+    { key: 'left', label: 'Left', className: 'w-28', type: 'number', hidden: true, value: (x) => x.left_usd ?? undefined,
       render: (x) => <span className={cn('text-xs tabular-nums', x.limited_by && 'text-amber-700 dark:text-amber-400')} title={x.limited_by ? 'Limits its people (90% or more used)' : undefined}>
         {x.left_usd == null ? <span className='text-muted-foreground'>—</span> : usd(x.left_usd)}</span> },
-    { key: 'conc', label: 'Runs at once, per person', className: 'w-48', type: 'number', value: (x) => x.max_concurrent_runs ?? undefined,
-      render: (x) => <span className='text-xs tabular-nums'>{x.max_concurrent_runs ?? <span className='text-muted-foreground'>account default</span>}</span> },
-    { key: 'people', label: 'People', className: 'w-28', type: 'number', value: (x) => x.members, render: (x) => <span className='text-xs'>{x.members ? `${x.members} ${x.members === 1 ? 'person' : 'people'}` : <span className='text-muted-foreground'>nobody yet</span>}</span> }
+    { key: 'conc', label: <span title='Per person'>Runs at once</span>, name: 'Runs at once, per person', className: 'w-32', type: 'number', value: (x) => x.max_concurrent_runs ?? undefined,
+      render: (x) => <span className='text-xs tabular-nums'>{x.max_concurrent_runs ?? <span className='text-muted-foreground' title='Account default'>—</span>}</span> },
+    { key: 'people', label: 'People', className: 'w-20', type: 'number', value: (x) => x.members, render: (x) => <span className={cn('text-xs tabular-nums', !x.members && 'text-muted-foreground')}>{x.members}</span> }
   ];
   return (
     <>
