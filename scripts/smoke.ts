@@ -2375,9 +2375,13 @@ try {
   /** A Clerk session token (what the UI sends): v2 claims with the active organization, unless told otherwise. */
   const clerkSession = async (userId: string, orgId?: string | null, role = "member", extra: Record<string, unknown> = {}) =>
     (await mockPost("/_mock/session", { user_id: userId, org_id: orgId ?? undefined, org_role: role, ...extra })).token as string;
-  /** A Clerk OAuth access token for an MCP client (opaque by default; jwt: true for a JWT). */
-  const token = async (claims: { user_id: string; jwt?: boolean; revoked?: boolean; expired?: boolean; [k: string]: unknown }) =>
+  /**
+   * A Clerk OAuth access token for an MCP client (opaque by default; jwt: true for a JWT). Like Clerk's, it names no
+   * audience unless `aud` is given (Clerk does not document RFC 8707 resource binding).
+   */
+  const token = async (claims: { user_id: string; jwt?: boolean; revoked?: boolean; expired?: boolean; aud?: string | string[]; iss?: string; [k: string]: unknown }) =>
     (await mockPost("/_mock/oauth", claims)).access_token as string;
+  const { adminMcpResource } = await import("../src/admin-mcp.js");
   try {
     const anonW = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
     assert.equal(anonW.status, 401);
@@ -2431,6 +2435,8 @@ try {
     const bad = (t: string) => fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${t}` }, body: "{}" }).then((r) => r.status);
     assert.equal(await bad(await token({ user_id: accepted.user.id, revoked: true })), 401, "revoked token rejected");
     assert.equal(await bad(await token({ user_id: accepted.user.id, jwt: true, expired: true })), 401, "expired token rejected");
+    // Audience (RFC 8707) and issuer (scripts/smoke-security.ts).
+    await (await import("./smoke-security.js")).audienceChecks({ uid: accepted.user.id, token, callWith, bad, mcpAudience, adminMcpResource });
     assert.equal(await bad(await clerkSession(accepted.user.id, rowW.clerk_org_id, "admin")), 401, "a session token is not an OAuth token");
     const loner = await mockPost("/_mock/clerk/users", { email: `loner+${stamp}@nowhere.dev` });
     assert.equal(await bad(await token({ user_id: loner.id })), 401, "a user with no membership gets nothing");
@@ -3422,7 +3428,7 @@ try {
       };
       const adminUser = async (role: string) => mockPost("/_mock/clerk/users", { email: `mcp-${role}+${stamp}@roles.octillion.test`, platform_role: role });
       const viewerU = await adminUser("viewer"), ownerU = await adminUser("owner");
-      const viewer = await connect(await token({ user_id: viewerU.id }));
+      const viewer = await connect(await token({ user_id: viewerU.id, aud: adminMcpResource() }));
       const listed = (await viewer.listTools()).tools;
       assert.deepEqual(listed.map((t) => t.name), ADMIN_TOOL_NAMES, "every admin tool is listed, reads first");
       const ann = (n: string) => listed.find((t) => t.name === n)!.annotations!;
@@ -3456,7 +3462,7 @@ try {
       assert.ok(refusedC.isError && /needs the Owner role/.test((refusedC.content as any)[0].text), "plans need an owner, dry run or not");
       await viewer.close();
       // An owner: a dry-run plan (nothing made in Stripe) and an approval, both in the audit trail.
-      const owner = await connect(await token({ user_id: ownerU.id, jwt: true }));
+      const owner = await connect(await token({ user_id: ownerU.id, jwt: true, aud: adminMcpResource() }));
       const nProducts = mock.state.products.length, nPrices = mock.state.prices.length;
       const dry = await owner.callTool({ name: "create_plan", arguments: { config: { name: `MCP ${stamp}`, interval: "month", base_fee_usd: 99 }, dry_run: true } });
       assert.ok(!dry.isError && (dry.structuredContent as any).dry_run && (dry.structuredContent as any).stripe.some((o: any) => o.create === "product"), `dry run: ${JSON.stringify(dry.content).slice(0, 300)}`);
@@ -3484,18 +3490,26 @@ try {
       await until(async () => (await db.query("SELECT 1 FROM admin_access_log WHERE method = 'MCP' AND path = '/admin/mcp/set_account_allowance' AND status = 403")).length >= 1, "refusals are logged too");
       await owner.close();
       // /api/admin/mcp is the same server (the web app proxies /api); the admin token is an owner there too.
-      const viaApi = await connect(await token({ user_id: ownerU.id }), "/api/admin/mcp");
+      const viaApi = await connect(await token({ user_id: ownerU.id, aud: adminMcpResource("/api/admin/mcp") }), "/api/admin/mcp");
       assert.equal((await viaApi.listTools()).tools.length, ADMIN_TOOL_NAMES.length, "/api/admin/mcp serves the same tools");
       await viaApi.close();
       // Not an admin, or not an OAuth token: refused before any tool.
       const nobody = await mockPost("/_mock/clerk/users", { email: `mcp-nobody+${stamp}@nowhere.dev` });
       const init = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "x", version: "1" } } };
       const post = (t: string) => fetch(`${base}/admin/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${t}` }, body: JSON.stringify(init) });
-      const no = await post(await token({ user_id: nobody.id }));
+      const no = await post(await token({ user_id: nobody.id, aud: adminMcpResource() }));
       assert.equal(no.status, 403, "a signed-in non-admin is refused");
       assert.match((await no.json()).error.message, /is not a platform admin/);
       assert.equal((await post(await clerkSession(ownerU.id))).status, 401, "a session token is not an OAuth token");
-      assert.equal((await post(await token({ user_id: ownerU.id, revoked: true }))).status, 401, "a revoked token is refused");
+      assert.equal((await post(await token({ user_id: ownerU.id, revoked: true, aud: adminMcpResource() }))).status, 401, "a revoked token is refused");
+      // Audience: a platform owner's token that names the customer /mcp is not an admin MCP token.
+      assert.equal((await post(await token({ user_id: ownerU.id, aud: mcpAudience() }))).status, 401, "a /mcp token is refused on the admin MCP");
+      assert.equal((await post(await token({ user_id: ownerU.id, jwt: true, aud: mcpAudience() }))).status, 401, "a /mcp JWT is refused on the admin MCP");
+      const ownerInit = await post(await token({ user_id: ownerU.id }));
+      assert.equal(ownerInit.status, 200, "auto: a token naming no audience still works (the platform role is the gate)"); await ownerInit.text();
+      process.env.OCTILLION_OAUTH_AUDIENCE = "enforce";
+      try { assert.equal((await post(await token({ user_id: ownerU.id }))).status, 401, "enforce: a token with no audience is refused on the admin MCP"); }
+      finally { delete process.env.OCTILLION_OAUTH_AUDIENCE; }
       assert.equal((await post(a.key)).status, 401, "an account API key is not an admin");
       console.log("✓ admin MCP: OAuth discovery, platform admins only, tools with annotations, skills as prompts, viewer reads and is refused changes naming the role, owner dry-run plan and approval, audit log, no secrets");
     }

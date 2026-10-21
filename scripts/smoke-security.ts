@@ -153,3 +153,61 @@ export async function originChecks({ base, a }: { base: string; a: { key: string
   }
   console.log("✓ /mcp and the admin MCP refuse foreign Origins (403, before auth); no Origin, our own, or a listed one is served");
 }
+
+/**
+ * OAuth access tokens on /mcp (src/clerk.ts verifyOAuthToken): the issuer always; a token naming another audience is
+ * refused, one naming none is accepted and logged (auto), refused with OCTILLION_OAUTH_AUDIENCE=enforce.
+ */
+export async function audienceChecks({ uid, token, callWith, bad, mcpAudience, adminMcpResource }: {
+  uid: string;
+  token: (c: { user_id: string; jwt?: boolean; aud?: string | string[]; iss?: string }) => Promise<string>;
+  callWith: (t: string) => Promise<Record<string, unknown>>;
+  bad: (t: string) => Promise<number>;
+  mcpAudience: () => string;
+  adminMcpResource: (p?: string) => string;
+}) {
+  const capture = async <T>(fn: () => Promise<T>) => {
+    (await import("../src/clerk.js")).resetAudienceLog();
+    const lines: string[] = [], err = console.error;
+    console.error = (...xs: unknown[]) => { lines.push(xs.map(String).join(" ")); };
+    try { return { r: await fn(), lines }; } finally { console.error = err; }
+  };
+  for (const jwt of [false, true]) {
+    const kind = jwt ? "JWT" : "opaque";
+    assert.equal(await bad(await token({ user_id: uid, jwt, aud: "https://other-product.example.com/mcp" })), 401, `${kind}: a token for another resource is refused`);
+    assert.equal(await bad(await token({ user_id: uid, jwt, aud: adminMcpResource() })), 401, `${kind}: an admin MCP token is not a /mcp token`);
+    assert.equal(await bad(await token({ user_id: uid, jwt, aud: `${mcpAudience()}?tenant=x` })), 401, `${kind}: a resource with a different query is a different resource`);
+    assert.ok(!(await callWith(await token({ user_id: uid, jwt, aud: [`https://other-product.example.com/mcp`, `${mcpAudience()}/`] }))).isError, `${kind}: one matching audience among several, trailing slash or not, is enough`);
+    assert.equal(await bad(await token({ user_id: uid, jwt, aud: `https://other.example/x,${mcpAudience()}` })), 401, `${kind}: one aud string is never split on commas`);
+    const none = await token({ user_id: uid, jwt });
+    const { r, lines } = await capture(() => callWith(none));
+    assert.ok(!r.isError, `${kind}: auto accepts a token that names no audience`);
+    assert.ok(lines.some((l) => l.startsWith("oauth audience missing") && l.includes("accepted")) && !lines.some((l) => l.includes(none)), `${kind}: and logs it, never the token`);
+    process.env.OCTILLION_OAUTH_AUDIENCE = "enforce";
+    try { assert.equal(await bad(await token({ user_id: uid, jwt })), 401, `${kind}: enforce refuses a token with no audience`); }
+    finally { delete process.env.OCTILLION_OAUTH_AUDIENCE; }
+  }
+  // An aud that names no resource (the client id, the issuer) counts as none: accepted in auto.
+  assert.ok(!(await callWith(await token({ user_id: uid, jwt: true, aud: "mock_client" }))).isError, "aud = the client id names no resource");
+  // A trailing slash on CLERK_MCP_AUDIENCE does not break the admin MCP's resource.
+  process.env.CLERK_MCP_AUDIENCE = `${mcpAudience()}/`;
+  try { assert.ok(!adminMcpResource().includes("//admin") && adminMcpResource().endsWith("/admin/mcp"), adminMcpResource()); }
+  finally { delete process.env.CLERK_MCP_AUDIENCE; }
+  assert.equal(await bad(await token({ user_id: uid, jwt: true, aud: mcpAudience(), iss: "https://evil.example.com" })), 401, "a JWT from another issuer is refused");
+  // A second domain listed in CLERK_MCP_AUDIENCE is accepted; the first stays the advertised resource; blanks are ignored.
+  process.env.CLERK_MCP_AUDIENCE = ` , ${mcpAudience()},https://second.example.com/mcp`;
+  try {
+    assert.ok(!(await callWith(await token({ user_id: uid, jwt: true, aud: "https://second.example.com/mcp" }))).isError, "every audience CLERK_MCP_AUDIENCE lists is accepted");
+    assert.equal(mcpAudience(), process.env.CLERK_MCP_AUDIENCE!.split(",")[1]!.trim(), "the first non-blank one is the resource the metadata names");
+  } finally { delete process.env.CLERK_MCP_AUDIENCE; }
+  // Report mode: a mismatch is accepted and logged (claims only); the issuer is still checked.
+  process.env.OCTILLION_OAUTH_AUDIENCE = "report";
+  const reported = await token({ user_id: uid, jwt: true, aud: "https://other-product.example.com/mcp" });
+  try {
+    const { r, lines } = await capture(() => callWith(reported));
+    assert.ok(!r.isError, "OCTILLION_OAUTH_AUDIENCE=report accepts a mismatch");
+    assert.ok(lines.some((l) => l.includes("oauth audience mismatch") && l.includes("other-product.example.com") && l.includes("accepted")) && !lines.some((l) => l.includes(reported)), "and logs it, never the token");
+    assert.equal(await bad(await token({ user_id: uid, jwt: true, iss: "https://evil.example.com" })), 401, "report still checks the issuer");
+  } finally { delete process.env.OCTILLION_OAUTH_AUDIENCE; }
+  assert.equal(await bad(reported), 401, "back to auto: refused again");
+}
