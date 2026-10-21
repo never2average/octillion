@@ -1,4 +1,5 @@
 import * as priv from "./private.js";
+import { withTenant } from "./tenant-scope.js";
 import * as contributions from "./contributions.js";
 import { accountRefusal, canAccount, type AccountPermission } from "./account-roles.js";
 import { readFileSync } from "node:fs";
@@ -311,7 +312,8 @@ async function runToolInner(org: Org, name: ToolName, args: Record<string, unkno
   try {
     const needs = TOOL_NEEDS[name];
     if (needs && org.role && !canAccount(org.role, needs)) throw new Error(accountRefusal(needs).message);
-    const data = await (handlersFor(org)[name] as (a: unknown) => Promise<Data>)(args ?? {});
+    // Row-level security (src/tenant-scope.ts): the tool's queries can reach this organization's rows only.
+    const data = await withTenant(org.orgId, () => (handlersFor(org)[name] as (a: unknown) => Promise<Data>)(args ?? {}));
     recordMcpEvent(org, { method: "tools/call", name, ms: performance.now() - t0 });
     const structured = fitPayload(JSON.parse(JSON.stringify(data))); // Dates -> ISO strings
     const note = structured.truncated
@@ -327,6 +329,9 @@ async function runToolInner(org: Org, name: ToolName, args: Record<string, unkno
     // Database errors (SQLSTATE codes) can echo other rows' values, e.g. a unique-key clash revealing that another
     // organization uses a slug; callers get a generic message, never the raw text.
     const e = err as Error & { code?: unknown };
+    // Refused by row-level security or the tenant role's grants (src/tenant-scope.ts): a platform bug to see in the log.
+    // The message names a table or policy, never row values.
+    if (e.code === "42501") console.error(`tool ${name}: refused by the database: ${e.message}`);
     const message = typeof e.code === "string" && /^[0-9A-Z]{5}$/.test(e.code)
       ? `The request could not be completed (database error ${e.code}). Check the arguments and try again.` : e.message;
     recordMcpEvent(org, { method: "tools/call", name, ok: false, error: message, ms: performance.now() - t0 });

@@ -16,7 +16,7 @@ import { DEMO_PRODUCT, DEMO_SCENARIOS, demoTranscript } from "./demo-data.js";
 
 process.env.OCTILLION_WORKER_TOKEN ??= "smoke-worker-token";
 process.env.OCTILLION_VAULT_KEY ??= (await import("node:crypto")).randomBytes(32).toString("base64");
-process.env.OCTILLION_ADMIN_TOKEN ??= "smoke-admin-token";
+process.env.CRON_SECRET ??= "smoke-cron-secret";
 process.env.OCTILLION_REGISTRY = "scripts/fixtures/registry.json"; // fixed weights, independent of the live registry
 // Accounts without a plan get $0 by default (prepaid, invite-only); the smoke run gives every test account an allowance.
 process.env.OCTILLION_ORG_MONTHLY_BUDGET_USD ??= "1000";
@@ -50,6 +50,9 @@ process.env.RESEARCH_MAX_SEARCHES = "3";
 const { createApp } = await import("../src/http.js");
 const db = await getDb();
 console.log(`database: ${db.kind}, transcripts: ${transcripts().kind}`);
+// Admin API access for the run: a scoped, expiring token minted like `npm run admin:token` does (src/admin-tokens.ts).
+const { createAdminToken } = await import("../src/admin-tokens.js");
+const ADMIN_TOKEN = (await createAdminToken({ label: "smoke", role: "owner", days: 1, createdBy: "smoke" })).token;
 
 // ---------- agent apportionment (no I/O) ----------
 {
@@ -394,7 +397,7 @@ try {
   {
     const popSlug = `smoke-ent-${stamp}`.toLowerCase().replace(/[^a-z0-9-]/g, "");
     const admin = (method: string, path: string, body?: unknown) => fetch(`${base}/api/admin${path}`, {
-      method, headers: { authorization: "Bearer smoke-admin-token", "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+      method, headers: { authorization: `Bearer ${ADMIN_TOKEN}`, "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
     assert.equal((await fetch(`${base}/api/admin/populations`)).status, 401);
     assert.equal((await admin("POST", "/populations", { slug: popSlug, name: "Smoke enterprise", from: "global" })).status, 201);
     await admin("PUT", `/populations/${popSlug}/agents/${encodeURIComponent("codex/default")}`, { market_share: 0.6 });
@@ -578,12 +581,14 @@ try {
   assert.ok(orch.llm?.api_key.startsWith("ogw_") && orch.llm.base_url.endsWith("/gw/openai/v1"), "orchestrator LLM goes through the gateway (OpenAI SDK base with /v1)");
   assert.equal(`${orch.llm.provider}/${orch.llm.model}`, "openai/gpt-6.1-sol", "broker decides the orchestrator brain: GPT by default");
   assert.equal((await fetch(`${base}/api/admin/keyvault/credentials`)).status, 401);
-  const listed = await (await fetch(`${base}/api/admin/keyvault/credentials`, { headers: { authorization: "Bearer smoke-admin-token" } })).text();
+  const listed = await (await fetch(`${base}/api/admin/keyvault/credentials`, { headers: { authorization: `Bearer ${ADMIN_TOKEN}` } })).text();
   assert.ok(listed.includes(stored.hint) && !listed.includes(REAL_LLM_KEY) && !listed.includes(REAL_VENDOR_KEY), "admin API shows hints only");
-  await fetch(`${base}/api/admin/keyvault/providers`, { headers: { authorization: "Bearer smoke-admin-token", "x-octillion-actor": "smoke staff" } });
+  const staff = await createAdminToken({ label: "smoke staff", role: "viewer", days: 1, createdBy: "smoke" });
+  await fetch(`${base}/api/admin/keyvault/providers`, { headers: { authorization: `Bearer ${staff.token}`, "x-octillion-actor": "someone else" } });
   await new Promise((r) => setTimeout(r, 200));
-  const [logged] = await db.query<any>("SELECT actor, method, path, status FROM admin_access_log WHERE actor = 'smoke staff' ORDER BY id DESC LIMIT 1");
+  const [logged] = await db.query<any>("SELECT actor, method, path, status FROM admin_access_log WHERE actor = 'token:smoke staff' ORDER BY id DESC LIMIT 1");
   assert.ok(logged && logged.method === "GET" && logged.path === "/api/admin/keyvault/providers" && logged.status === 200, "staff access is logged");
+  await (await import("./smoke-security.js")).adminTokenChecks({ base, db, ADMIN_TOKEN, staff });
   console.log("✓ key vault + gateway: encrypted at rest, scoped tokens, real key injected upstream, streaming, metering");
 
   const outcomes = ["adopted", "competitor", "recommended", "none"] as const;
@@ -687,7 +692,7 @@ try {
     assert.ok(Math.abs((await costOf("gpt-6.1-sol", { input: 200_000, cached: 80_000, output: 10_000 }))! - (120_000 * 2 + 80_000 * 0.1 + 10_000 * 10) / 1e6) < 1e-12, "gpt-6.1-sol: cached input at the cached rate");
     assert.equal(await costOf("gpt-6.1-sol", { input: 300_000, cached: 0, output: 0 }), 300_000 * 4 / 1e6, "gpt-6.1-sol long-context tier above 272K input");
     assert.equal(await costOf("no-such-model", { input: 1, cached: 0, output: 1 }), null, "unknown models are not priced");
-    const report = await (await fetch(`${base}/api/admin/usage/models?days=1&model=claude-opus-5-5`, { headers: { authorization: "Bearer smoke-admin-token" } })).json();
+    const report = await (await fetch(`${base}/api/admin/usage/models?days=1&model=claude-opus-5-5`, { headers: { authorization: `Bearer ${ADMIN_TOKEN}` } })).json();
     assert.ok(report.totals[0]?.model === "claude-opus-5-5", "admin usage report");
     // The Vertex AI provider's key (first-class, label vertex): a Vertex backend with no key of its own signs in with
     // it; project from the key's JSON, region from the VERTEX_REGION setting (default us-east5).
@@ -1110,19 +1115,15 @@ try {
   console.log(`✓ adaptive sampling: agreed task settled after 2, contested task sampled to the cap (${statuses.join(", ")})`);
   console.log(`✓ claims are shared across organizations (${fair.map((j: any) => (ofB.has(j.session_id) ? "B" : "A")).join("")})`);
 
+  await (await import("./smoke-security.js")).rowLevelSecurityChecks({ db, a, b });
+
   // ---------- HTTP: auth, landing page, access requests ----------
   const anon = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
   assert.equal(anon.status, 401);
   assert.match(anon.headers.get("www-authenticate") ?? "", /Bearer/);
   assert.equal((await fetch(`${base}/mcp/oct_nope`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status, 401);
-  for (const url of [`${base}/mcp/${a.key}`, `${base}/mcp`]) {
-    const remote = new Client({ name: "smoke-http", version: "1.0.0" });
-    await remote.connect(new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: { authorization: `Bearer ${a.key}` } } }));
-    const r = await remote.callTool({ name: "list_products", arguments: {} });
-    assert.ok((r.structuredContent as any).products.some((p: any) => p.slug === "relayq"));
-    await remote.close();
-  }
-  console.log("✓ /mcp requires a key (path or bearer) and serves that org");
+  await (await import("./smoke-security.js")).apiKeyHeaderChecks({ base, a });
+  await (await import("./smoke-security.js")).originChecks({ base, a });
   const landing = await fetch(`${base}/`);
   assert.equal(landing.status, 200);
   assert.ok((await landing.text()).includes("Octillion"));
@@ -1136,10 +1137,10 @@ try {
 
   // ---------- onboarding admin console: legacy keys (no Clerk) ----------
   const adm = (method: string, path: string, body?: unknown) => fetch(`${base}/api/admin/onboarding${path}`, {
-    method, headers: { authorization: `Bearer ${process.env.OCTILLION_ADMIN_TOKEN}`, "x-admin-actor": "smoke", "content-type": "application/json" },
+    method, headers: { authorization: `Bearer ${ADMIN_TOKEN}`, "x-admin-actor": "smoke", "content-type": "application/json" },
     body: body ? JSON.stringify(body) : undefined });
   const json = async (r: Response | Promise<Response>) => { const x = await r; const j = await x.json(); assert.ok(x.ok, `${x.status} ${JSON.stringify(j)}`); return j; };
-  const post = (key: string) => fetch(`${base}/mcp/${key}`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+  const post = (key: string) => fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${key}` }, body: "{}" });
   const orgRow = async (slug: string) => (await json(adm("GET", "/orgs"))).orgs.find((o: any) => o.slug === slug);
   const settle = () => new Promise((r) => setTimeout(r, 200)); // connector events are recorded fire-and-forget
   assert.equal((await fetch(`${base}/api/admin/onboarding/overview`)).status, 401, "admin API needs the admin token");
@@ -1165,7 +1166,7 @@ try {
     assert.ok(pl.personas.every((p: any) => p.source === "vault" || p.source === "admin"), "only shared personas, never an org's private ones");
     const ed = await json(adm("PATCH", "/personas/example-agency-frontend", { name: "Agency frontend lead (edited)", stack: ["React", "Next.js"], experience_years: 9, tone: "Brisk" }));
     assert.ok(ed.name === "Agency frontend lead (edited)" && ed.attributes.stack.join() === "React,Next.js" && ed.attributes.experience_years === 9
-      && ed.attributes.tone === "Brisk" && ed.edited_at && ed.edited_by === "smoke", "persona edited and stamped");
+      && ed.attributes.tone === "Brisk" && ed.edited_at && ed.edited_by === "token:smoke", "persona edited and stamped");
     assert.deepEqual(ed.attributes.role, agency.attributes.role, "attributes not sent are kept");
     assert.equal((await adm("PATCH", "/personas/example-agency-frontend", { name: "" })).status, 400, "a persona needs a name");
     assert.equal((await adm("PATCH", "/personas/nobody-here", { name: "x" })).status, 404);
@@ -1983,8 +1984,11 @@ try {
     assert.equal(Number((await db.query<any>("SELECT count(*) AS n FROM autoscaler_ticks"))[0].n), 4, "the 13-day row and today's stay");
     assert.deepEqual((await db.query<any>("SELECT sandbox_id FROM compute_events WHERE sandbox_id LIKE 'smoke-at-p%'")).map((x) => x.sandbox_id), ["smoke-at-p2"]);
     assert.equal((await fetch(`${base}/api/cron/autoscale`)).status, 401, "the cron needs its secret");
-    const cron = await (await fetch(`${base}/api/cron/autoscale`, { headers: { authorization: `Bearer ${process.env.CRON_SECRET || process.env.OCTILLION_ADMIN_TOKEN}` } })).json();
+    assert.equal((await fetch(`${base}/api/cron/autoscale`, { headers: { authorization: `Bearer ${ADMIN_TOKEN}` } })).status, 401, "an admin token is not the cron secret");
+    const cron = await (await fetch(`${base}/api/cron/autoscale`, { headers: { authorization: `Bearer ${process.env.CRON_SECRET}` } })).json();
     assert.deepEqual(cron.pruned, { ticks: 0, events: 0 }, "the cron prunes (nothing left to prune)");
+    assert.equal(cron.rls, "ok", "the cron proves row-level security on the live database");
+    assert.equal(((await (await fetch(`${base}/healthz`)).json()) as any).rls_probe, "ok", "and /healthz shows it");
 
     await db.query("DELETE FROM autoscaler_ticks");
     await db.query("DELETE FROM compute_events WHERE sandbox_id LIKE 'smoke-at-%'");
@@ -2018,7 +2022,7 @@ try {
       const t = await json(adm("POST", "/compute/tick"));
       assert.deepEqual([t.leader, t.launched, t.reaped, t.error], [false, 0, 0, null], "a follower changes nothing");
       assert.match(t.message, /Another server holds the autoscaler lease/);
-      assert.ok(audit.some((l) => l.startsWith("admin smoke compute.tick ") && l.includes('"leader":false')), "the tick is in the admin log");
+      assert.ok(audit.some((l) => l.startsWith("admin token:smoke compute.tick ") && l.includes('"leader":false')), "the tick is in the admin log");
       // Two ticks asked for at once in one process share one tick.
       const a = new Autoscaler({ log: () => {} });
       const [x, y] = await Promise.all([a.tick(), a.tick()]);
@@ -2044,18 +2048,18 @@ try {
       assert.deepEqual([c.status, c.was], ["cancelled", "running"]);
       assert.match(c.message, /next heartbeats/);
       const [r] = await db.query<any>("/* tenant: smoke fixture */ SELECT status, ended_at, metadata FROM agent_sessions WHERE id = 'ses_smoke_ca_r'");
-      assert.ok(r.status === "cancelled" && r.ended_at && r.metadata.cancelled_by === "smoke" && r.metadata.cancelled_from === "running");
+      assert.ok(r.status === "cancelled" && r.ended_at && r.metadata.cancelled_by === "token:smoke" && r.metadata.cancelled_from === "running");
       const [spent] = await db.query<any>("/* tenant: smoke fixture */ SELECT cost_usd, tokens_in, tokens_out FROM agent_sessions WHERE id = 'ses_smoke_ca_r'");
       assert.deepEqual([Number(spent.cost_usd), Number(spent.tokens_in), Number(spent.tokens_out)], [3.4, 5000, 700], "the gateway-metered spend is the cancelled session's cost");
       const [ev] = await db.query<any>("SELECT actor, job_id, reason FROM compute_events WHERE kind = 'admin_cancel' AND session_id = 'ses_smoke_ca_r'");
-      assert.deepEqual([ev?.actor, ev?.job_id, ev?.reason], ["smoke", "sim_smoke_ca", "cancelled while running"], "the cancel is in compute_events with who did it");
+      assert.deepEqual([ev?.actor, ev?.job_id, ev?.reason], ["token:smoke", "sim_smoke_ca", "cancelled while running"], "the cancel is in compute_events with who did it");
       // A /complete that arrives after the cancel (the guarded UPDATE also covers one that read "running" first) does not undo it.
       await (await import("../src/worker.js")).completeSession("ses_smoke_ca_r", { status: "completed" });
       assert.equal((await db.query<any>("/* tenant: smoke fixture */ SELECT status FROM agent_sessions WHERE id = 'ses_smoke_ca_r'"))[0].status, "cancelled", "a cancelled session stays cancelled");
       assert.ok((await db.query<any>("SELECT revoked_at FROM gateway_tokens WHERE token_hash = 'smoke-ca-tok'"))[0].revoked_at, "its gateway token is revoked");
       assert.equal((await worker("/sessions/ses_smoke_ca_r/heartbeat", {})).status, 409, "its next heartbeat is refused, so the orchestrator kills the sandbox");
-      assert.equal((await json(adm("GET", "/compute/sessions/ses_smoke_ca_r"))).metadata.cancelled_by, "smoke", "the peek says who cancelled it");
-      assert.ok(audit.some((l) => l.startsWith("admin smoke compute.session.cancel ") && l.includes('"session_id":"ses_smoke_ca_r"') && l.includes('"was":"running"')), "the cancel is in the admin log");
+      assert.equal((await json(adm("GET", "/compute/sessions/ses_smoke_ca_r"))).metadata.cancelled_by, "token:smoke", "the peek says who cancelled it");
+      assert.ok(audit.some((l) => l.startsWith("admin token:smoke compute.session.cancel ") && l.includes('"session_id":"ses_smoke_ca_r"') && l.includes('"was":"running"')), "the cancel is in the admin log");
       assert.equal((await db.query<any>("SELECT status FROM simulations WHERE id = 'sim_smoke_ca'"))[0].status, "running", "the queued session keeps the run open");
 
       const again = await adm("POST", "/compute/sessions/ses_smoke_ca_r/cancel");
@@ -2101,7 +2105,7 @@ try {
     assert.equal(byKey(await json(adm("GET", "/compute")), "OCTILLION_MAX_JOB_ORCHESTRATORS").source, "env");
     const c1 = await json(adm("PUT", "/compute/settings", { values: { OCTILLION_MAX_JOB_ORCHESTRATORS: 3, OCTILLION_MAX_SAMPLES: "33", OCTILLION_DEFAULT_SAMPLES: 4,
       OCTILLION_JOB_POD_CAPACITY: 9, BOAT_SANDBOX_SIZE: "large", ORCHESTRATOR_MODEL: "gpt-smoke-1" } }));
-    assert.ok(byKey(c1, "OCTILLION_MAX_JOB_ORCHESTRATORS").source === "set" && byKey(c1, "OCTILLION_MAX_JOB_ORCHESTRATORS").updated_by === "smoke");
+    assert.ok(byKey(c1, "OCTILLION_MAX_JOB_ORCHESTRATORS").source === "set" && byKey(c1, "OCTILLION_MAX_JOB_ORCHESTRATORS").updated_by === "token:smoke");
     assert.equal(AUTOSCALE.maxJobOrchestrators(), 3, "a setting wins over the environment");
     assert.equal(AUTOSCALE.jobPodCapacity(), 9);
     assert.equal(config.maxSamples(), 33);
@@ -2294,13 +2298,21 @@ try {
   assert.ok(request, "new access request is pending");
   const ap = await json(adm("POST", `/requests/${request.id}/approve`, { name: `Smoke Admin ${stamp}`, slug: `smoke-admin-${stamp}` }));
   assert.match(ap.key, /^oct_/, "without Clerk, approval issues a legacy key");
-  assert.ok(ap.secret && ap.connector_url.endsWith(`/mcp/${ap.key}`) && ap.email.body.includes(ap.connector_url) && ap.email.to === request.email);
+  assert.ok(ap.secret && ap.connector_url === `${base}/mcp` && ap.email.body.includes(ap.connector_url) && ap.email.body.includes(ap.key) && ap.email.to === request.email);
+  // The key goes in each client's header setting, never in a URL (the connector URL, a command's URL, a one-click link).
+  const urlsIn = (t: unknown) => String(t ?? "").match(/[a-z][a-z0-9+.-]*:\/\/[^\s"'`<>]+/gi) ?? [];
+  for (const c of ap.clients as any[])
+    for (const u of [c.install_url, ...urlsIn(c.steps), ...urlsIn(c.command), ...urlsIn(c.snippet)].filter(Boolean)) assert.ok(!String(u).includes(ap.key), `${c.id}: no key in a URL (${String(u).slice(0, 40)})`);
+  assert.ok(urlsIn(ap.email.body).every((u) => !u.includes(ap.key)) && !ap.email.mailto.includes(ap.key) && !ap.email.mailto.includes(encodeURIComponent(ap.key)), "the email has no key in a URL, nor in its mailto link");
+  assert.ok(ap.clients.find((c: any) => c.id === "claude-code").command.includes(`--header "Authorization: Bearer ${ap.key}"`), "Claude Code sends it as a header");
+  assert.ok(JSON.parse(ap.clients.find((c: any) => c.id === "cursor").snippet).mcpServers.octillion.headers.Authorization === `Bearer ${ap.key}`, "Cursor's config carries the header");
+
   assert.equal((await adm("POST", `/requests/${request.id}/approve`, {})).status, 409, "no double approval");
   assert.equal((await adm("POST", "/requests/abc/approve", {})).status, 400, "bad id is a 400");
   const slugA = ap.org.slug;
   assert.equal((await orgRow(slugA)).stage, "created");
   const viaKey = new Client({ name: "smoke-onboarded", version: "1.0.0" });
-  await viaKey.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp/${ap.key}`)));
+  await viaKey.connect(new StreamableHTTPClientTransport(new URL(ap.connector_url), { requestInit: { headers: { authorization: `Bearer ${ap.key}` } } }));
   await viaKey.callTool({ name: "list_products", arguments: {} });
   await viaKey.close();
   await settle();
@@ -2367,9 +2379,13 @@ try {
   /** A Clerk session token (what the UI sends): v2 claims with the active organization, unless told otherwise. */
   const clerkSession = async (userId: string, orgId?: string | null, role = "member", extra: Record<string, unknown> = {}) =>
     (await mockPost("/_mock/session", { user_id: userId, org_id: orgId ?? undefined, org_role: role, ...extra })).token as string;
-  /** A Clerk OAuth access token for an MCP client (opaque by default; jwt: true for a JWT). */
-  const token = async (claims: { user_id: string; jwt?: boolean; revoked?: boolean; expired?: boolean; [k: string]: unknown }) =>
+  /**
+   * A Clerk OAuth access token for an MCP client (opaque by default; jwt: true for a JWT). Like Clerk's, it names no
+   * audience unless `aud` is given (Clerk does not document RFC 8707 resource binding).
+   */
+  const token = async (claims: { user_id: string; jwt?: boolean; revoked?: boolean; expired?: boolean; aud?: string | string[]; iss?: string; [k: string]: unknown }) =>
     (await mockPost("/_mock/oauth", claims)).access_token as string;
+  const { adminMcpResource } = await import("../src/admin-mcp.js");
   try {
     const anonW = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
     assert.equal(anonW.status, 401);
@@ -2390,7 +2406,7 @@ try {
     assert.equal(apW.key, null, "with Clerk, no secret is handed out");
     assert.equal(apW.invitation.state, "pending", "Clerk sends the invitation");
     assert.equal(apW.invitation.role, "admin", "the requester is invited as the account's admin");
-    assert.ok(!apW.secret && apW.connector_url === `${ap.connector_url.split("/mcp/")[0]}/mcp`);
+    assert.ok(!apW.secret && apW.connector_url === `${base}/mcp`);
     const slugW = apW.org.slug;
     const [rowW] = await db.query<{ id: number; clerk_org_id: string; stripe_customer_id: string }>("SELECT id, clerk_org_id, stripe_customer_id FROM organizations WHERE slug = $1", [slugW]);
     const corg = mock.state.orgs.get(rowW.clerk_org_id);
@@ -2423,6 +2439,8 @@ try {
     const bad = (t: string) => fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${t}` }, body: "{}" }).then((r) => r.status);
     assert.equal(await bad(await token({ user_id: accepted.user.id, revoked: true })), 401, "revoked token rejected");
     assert.equal(await bad(await token({ user_id: accepted.user.id, jwt: true, expired: true })), 401, "expired token rejected");
+    // Audience (RFC 8707) and issuer (scripts/smoke-security.ts).
+    await (await import("./smoke-security.js")).audienceChecks({ uid: accepted.user.id, token, callWith, bad, mcpAudience, adminMcpResource });
     assert.equal(await bad(await clerkSession(accepted.user.id, rowW.clerk_org_id, "admin")), 401, "a session token is not an OAuth token");
     const loner = await mockPost("/_mock/clerk/users", { email: `loner+${stamp}@nowhere.dev` });
     assert.equal(await bad(await token({ user_id: loner.id })), 401, "a user with no membership gets nothing");
@@ -3290,11 +3308,11 @@ try {
       // Last owner: with no env owners, demote every Clerk owner but one (with the token, an owner), then the guard holds.
       delete process.env.OCTILLION_PLATFORM_ADMINS;
       list = (await json(adm("GET", "/admins"))).admins;
-      for (const a of list.filter((x: any) => x.role === "owner" && x.id !== people.owner.id)) assert.equal((await adm("POST", `/admins/${a.id}/role`, { role: "operator" })).status, 200);
+      for (const a of list.filter((x: any) => x.role === "owner" && x.id !== people.owner.id)) assert.equal((await as(people.owner.sess, "POST", `/admins/${a.id}/role`, { role: "operator" })).status, 200);
       const self = await as(people.owner.sess, "POST", `/admins/${people.owner.id}/role`, { role: "operator" });
       assert.equal(self.status, 409, "the last owner can't demote themselves");
       assert.match((await self.json()).error, /You are the last owner/);
-      assert.equal((await adm("DELETE", `/admins/${people.owner.id}`)).status, 409, "nor be removed");
+      assert.equal((await as(people.owner.sess, "DELETE", `/admins/${people.owner.id}`)).status, 409, "nor be removed");
       assert.equal((await as(people.owner.sess, "POST", `/admins/${people.operator.id}/role`, { role: "owner" })).status, 200);
       assert.equal((await as(people.owner.sess, "POST", `/admins/${people.owner.id}/role`, { role: "operator" })).status, 200, "with a second owner, they can");
       assert.equal((await as(people.owner.sess, "POST", "/admins", { email: "x@y.dev", role: "viewer" })).status, 403, "and are an operator at once");
@@ -3414,7 +3432,7 @@ try {
       };
       const adminUser = async (role: string) => mockPost("/_mock/clerk/users", { email: `mcp-${role}+${stamp}@roles.octillion.test`, platform_role: role });
       const viewerU = await adminUser("viewer"), ownerU = await adminUser("owner");
-      const viewer = await connect(await token({ user_id: viewerU.id }));
+      const viewer = await connect(await token({ user_id: viewerU.id, aud: adminMcpResource() }));
       const listed = (await viewer.listTools()).tools;
       assert.deepEqual(listed.map((t) => t.name), ADMIN_TOOL_NAMES, "every admin tool is listed, reads first");
       const ann = (n: string) => listed.find((t) => t.name === n)!.annotations!;
@@ -3448,7 +3466,7 @@ try {
       assert.ok(refusedC.isError && /needs the Owner role/.test((refusedC.content as any)[0].text), "plans need an owner, dry run or not");
       await viewer.close();
       // An owner: a dry-run plan (nothing made in Stripe) and an approval, both in the audit trail.
-      const owner = await connect(await token({ user_id: ownerU.id, jwt: true }));
+      const owner = await connect(await token({ user_id: ownerU.id, jwt: true, aud: adminMcpResource() }));
       const nProducts = mock.state.products.length, nPrices = mock.state.prices.length;
       const dry = await owner.callTool({ name: "create_plan", arguments: { config: { name: `MCP ${stamp}`, interval: "month", base_fee_usd: 99 }, dry_run: true } });
       assert.ok(!dry.isError && (dry.structuredContent as any).dry_run && (dry.structuredContent as any).stripe.some((o: any) => o.create === "product"), `dry run: ${JSON.stringify(dry.content).slice(0, 300)}`);
@@ -3476,18 +3494,26 @@ try {
       await until(async () => (await db.query("SELECT 1 FROM admin_access_log WHERE method = 'MCP' AND path = '/admin/mcp/set_account_allowance' AND status = 403")).length >= 1, "refusals are logged too");
       await owner.close();
       // /api/admin/mcp is the same server (the web app proxies /api); the admin token is an owner there too.
-      const viaApi = await connect(await token({ user_id: ownerU.id }), "/api/admin/mcp");
+      const viaApi = await connect(await token({ user_id: ownerU.id, aud: adminMcpResource("/api/admin/mcp") }), "/api/admin/mcp");
       assert.equal((await viaApi.listTools()).tools.length, ADMIN_TOOL_NAMES.length, "/api/admin/mcp serves the same tools");
       await viaApi.close();
       // Not an admin, or not an OAuth token: refused before any tool.
       const nobody = await mockPost("/_mock/clerk/users", { email: `mcp-nobody+${stamp}@nowhere.dev` });
       const init = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "x", version: "1" } } };
       const post = (t: string) => fetch(`${base}/admin/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${t}` }, body: JSON.stringify(init) });
-      const no = await post(await token({ user_id: nobody.id }));
+      const no = await post(await token({ user_id: nobody.id, aud: adminMcpResource() }));
       assert.equal(no.status, 403, "a signed-in non-admin is refused");
       assert.match((await no.json()).error.message, /is not a platform admin/);
       assert.equal((await post(await clerkSession(ownerU.id))).status, 401, "a session token is not an OAuth token");
-      assert.equal((await post(await token({ user_id: ownerU.id, revoked: true }))).status, 401, "a revoked token is refused");
+      assert.equal((await post(await token({ user_id: ownerU.id, revoked: true, aud: adminMcpResource() }))).status, 401, "a revoked token is refused");
+      // Audience: a platform owner's token that names the customer /mcp is not an admin MCP token.
+      assert.equal((await post(await token({ user_id: ownerU.id, aud: mcpAudience() }))).status, 401, "a /mcp token is refused on the admin MCP");
+      assert.equal((await post(await token({ user_id: ownerU.id, jwt: true, aud: mcpAudience() }))).status, 401, "a /mcp JWT is refused on the admin MCP");
+      const ownerInit = await post(await token({ user_id: ownerU.id }));
+      assert.equal(ownerInit.status, 200, "auto: a token naming no audience still works (the platform role is the gate)"); await ownerInit.text();
+      process.env.OCTILLION_OAUTH_AUDIENCE = "enforce";
+      try { assert.equal((await post(await token({ user_id: ownerU.id }))).status, 401, "enforce: a token with no audience is refused on the admin MCP"); }
+      finally { delete process.env.OCTILLION_OAUTH_AUDIENCE; }
       assert.equal((await post(a.key)).status, 401, "an account API key is not an admin");
       console.log("✓ admin MCP: OAuth discovery, platform admins only, tools with annotations, skills as prompts, viewer reads and is refused changes naming the role, owner dry-run plan and approval, audit log, no secrets");
     }
@@ -5294,6 +5320,8 @@ try {
     console.log("✓ organization deletion: keys, sessions, products, personas, transcripts gone; dry run, tombstone, idempotent");
   }
 } finally {
+  // The run's admin tokens stop working with it (they may sit in a shared database).
+  await db.query("UPDATE admin_tokens SET revoked_at = now() WHERE created_by = 'smoke' AND revoked_at IS NULL");
   await db.query("DELETE FROM vault_providers WHERE slug IN ('smoke_llm', 'smoke_vendor')");
   await db.query("DELETE FROM gateway_tokens WHERE orchestrator_id = 'smoke-orch'");
   await db.query("DELETE FROM access_requests WHERE email = $1", [`smoke+${stamp}@example.com`]);
