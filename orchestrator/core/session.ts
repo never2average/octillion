@@ -63,7 +63,7 @@ export interface Job {
   /** A private run: the agent's network is locked down to the gateway, registries and the task's git host. */
   private?: boolean;
   /**
-   * How the agent works (server schema.sql exec_mode). "plan": its first run is a plan (the CLI's plan mode, or
+   * How the agent works (server sql/migrations/0001_baseline.sql exec_mode). "plan": its first run is a plan (the CLI's plan mode, or
    * PLAN_FIRST appended where it has none) and the developer approves before it implements. "direct" (or absent, an
    * older server): it implements straight away.
    */

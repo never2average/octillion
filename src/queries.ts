@@ -62,7 +62,7 @@ export const config = {
 
 /**
  * A product's tasks as they read: the scenarios row with what it leaves empty filled from its library task. A task
- * from Octillion's library is a link (library_task_id), never a copy (schema.sql, 2026-10-20): its title, prompt,
+ * from Octillion's library is a link (library_task_id), never a copy (sql/migrations/0001_baseline.sql, 2026-10-20): its title, prompt,
  * repo, language and tags come from library_tasks unless the product has its own (an edit, or research's adaptation).
  * Use `${SCENARIO_ROWS} sc` wherever scenarios are read; write to `scenarios` itself. List every scenarios column here.
  */
@@ -336,7 +336,7 @@ export interface RunInput {
   /** Adaptive sampling cap per scenario. Default (no `samples` given): config.maxSamples(). `samples` alone = a fixed-size run. */
   max_samples?: number;
   /**
-   * How the agents work (schema.sql, exec_mode): 'plan' (default) plans first and implements once the simulated
+   * How the agents work (sql/migrations/0001_baseline.sql, exec_mode): 'plan' (default) plans first and implements once the simulated
    * developer approves; 'direct' executes straight away; 'both' runs every session in each mode, paired, to compare.
    */
   execution?: Execution;
@@ -755,7 +755,7 @@ export async function getSimulation(org: Org, simulationId: string) {
     by_model: sim.models.map((model: string) => ({ model, ...summarize(sessions.filter((s) => s.model === model)) })),
     by_agent: agentIds.map((id) => ({ agent_id: id, label: agentLabel(id), ...summarize(sessions.filter((s) => (s.agent_id ?? s.model) === id)) })),
     by_profile: [...by((s) => s.profile ?? "")].filter(([k]) => k).map(([profile, xs]) => ({ profile, ...summarize(xs) })),
-    // Execution modes (schema.sql exec_mode): plan-then-execute and/or direct, each with its own pick rate per agent.
+    // Execution modes (sql/migrations/0001_baseline.sql exec_mode): plan-then-execute and/or direct, each with its own pick rate per agent.
     // With both, the sessions are paired, so the same agents on the same tasks compare mode against mode.
     by_mode: (["plan", "direct"] as const).filter((m) => sessions.some((s) => s.exec_mode === m)).map((mode) => {
       const xs = sessions.filter((s) => s.exec_mode === mode);

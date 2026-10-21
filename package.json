@@ -8,6 +8,8 @@
     "stack:up": "docker compose up -d --wait",
     "stack:down": "docker compose down",
     "db:reset": "tsx --env-file-if-exists=.env scripts/reset-db.ts",
+    "db:migrate": "tsx --env-file-if-exists=.env scripts/migrate.ts",
+    "test:migrations": "tsx scripts/migrations-test.ts",
     "check:tenant-sql": "tsx scripts/check-tenant-sql.ts",
     "org:delete": "tsx scripts/delete-org.ts",
     "org:create": "tsx --env-file-if-exists=.env scripts/create-org.ts",

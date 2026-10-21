@@ -229,7 +229,7 @@ export async function visibilityCharts(orgId: number, range: Range, f: VisFilter
                top_competitor: topName ? winners.filter((x) => x.week === week && x.winner === topName).reduce((a, x) => a + Number(x.n), 0) : 0 };
     }),
     by_agent: dim("agent"), by_harness: dim("harness"), by_model: dim("model"),
-    // Execution mode (schema.sql exec_mode): plan then execute vs direct, overall and per agent.
+    // Execution mode (sql/migrations/0001_baseline.sql exec_mode): plan then execute vs direct, overall and per agent.
     by_mode: (["plan", "direct"] as const).flatMap((mode) => {
       const g = groups.find((x) => x.dim === "mode" && x.key === mode);
       if (!g || !Number(g.scored)) return [];
