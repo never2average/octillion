@@ -1121,6 +1121,7 @@ try {
   assert.match(anon.headers.get("www-authenticate") ?? "", /Bearer/);
   assert.equal((await fetch(`${base}/mcp/oct_nope`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status, 401);
   await (await import("./smoke-security.js")).apiKeyHeaderChecks({ base, a });
+  await (await import("./smoke-security.js")).originChecks({ base, a });
   const landing = await fetch(`${base}/`);
   assert.equal(landing.status, 200);
   assert.ok((await landing.text()).includes("Octillion"));

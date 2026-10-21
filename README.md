@@ -210,7 +210,7 @@ logs, browser history and screenshots.
 - **Claude and ChatGPT's apps** cannot send a header: invite the person with sign-in (Clerk) instead.
 
 The old connector URL with the key in it, `https://<host>/mcp/<api key>`, is deprecated: it still works while
-`OCTILLION_URL_KEYS` is unset (`allow`), answers with a `Deprecation: true` header, and the server logs
+`OCTILLION_URL_KEYS` is unset (`allow`), answers with a `Deprecation` header (RFC 9745), and the server logs
 `mcp url-key deprecated org=<slug> key=<prefix>…` once an hour per key so those people can be moved. Set
 `OCTILLION_URL_KEYS=off` to refuse it.
 
