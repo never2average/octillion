@@ -68,7 +68,10 @@ How Octillion uses it:
 - **Connectors (`/mcp`):** the plain URL `$PUBLIC_URL/mcp`. The client finds Clerk from the 401 (`resource_metadata` in
   `WWW-Authenticate`, `/.well-known/oauth-protected-resource`, CORS-open), signs the person in and sends a Clerk OAuth
   access token (opaque `oat_…` or a JWT); Octillion verifies it and uses the person's oldest membership that is not
-  suspended. Existing `oct_` keys keep working on `/mcp/<key>` and as a bearer header.
+  suspended. Existing `oct_` keys work in a header (`Authorization: Bearer`, or
+  `X-API-Key`). Keys in the URL (`/mcp/<key>`) are deprecated: served with `Deprecation: true` and logged by key prefix
+  while `OCTILLION_URL_KEYS` is `allow` (the default), refused with `OCTILLION_URL_KEYS=off`; new keys are never
+  issued as URLs.
 - **Suspending someone:** Clerk memberships have no deactivated state, so suspension is the membership's
   `public_metadata.suspended = true`; Octillion refuses suspended members on `/mcp` and `/api/app` (at once for changes
   made through Octillion, within 30 seconds for changes made in the Clerk dashboard). Removing a member deletes the

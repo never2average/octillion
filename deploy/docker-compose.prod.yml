@@ -147,6 +147,8 @@ services:
       VAULT_TOKEN: ${VAULT_TOKEN:-}
       # On-demand orchestrators (src/autoscaler.ts). OCTILLION_AUTOSCALE=off is the kill switch.
       OCTILLION_AUTOSCALE: ${OCTILLION_AUTOSCALE:-on}
+      # Connector API keys in the URL (/mcp/oct_...): allow (deprecated, logged) or off (src/auth.ts urlKeysAllowed).
+      OCTILLION_URL_KEYS: ${OCTILLION_URL_KEYS:-allow}
       # Object storage (src/storage.ts, docs/storage.md): the same R2 bucket as the off-site database backups holds the
       # trace and research archive (src/archive.ts) and run reports. Unset R2_BUCKET = archive off.
       R2_BUCKET: ${R2_BUCKET:-}

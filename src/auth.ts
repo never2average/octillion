@@ -83,6 +83,28 @@ export function bearer(header: string | undefined): string | null {
   return m ? m[1] : null;
 }
 
+/**
+ * The credential an MCP request carries in a header: `Authorization: Bearer <oct_ key or OAuth token>`, else
+ * `X-API-Key: oct_...` (for clients whose header setting is a plain name/value pair). Never read from the URL: a URL
+ * ends up in proxy and access logs, browser history, Referer headers and screenshots.
+ */
+export function headerCredential(headers: Record<string, string | string[] | undefined>): string | null {
+  const auth = bearer(typeof headers.authorization === "string" ? headers.authorization : undefined);
+  if (auth) return auth;
+  const x = headers["x-api-key"];
+  const v = (Array.isArray(x) ? x[0] : x)?.trim();
+  return v && /^\S+$/.test(v) ? v : null;
+}
+
+/**
+ * Legacy connector URLs (/mcp/oct_...) put the key in the URL. OCTILLION_URL_KEYS:
+ *   allow (default)  still accepted, deprecated: each response says so (Deprecation header) and the server logs which
+ *                    account and key used one, so those people can be moved to a header or to sign-in
+ *   off              refused with a 401 that says how to send the key instead
+ * New keys are never issued as URLs (src/admin.ts connectInfo).
+ */
+export const urlKeysAllowed = () => (process.env.OCTILLION_URL_KEYS ?? "allow").trim().toLowerCase() !== "off";
+
 // ---------- Clerk users on /mcp (OAuth) ----------
 
 const tokenOrgs = new Map<string, { org: Org; at: number }>();

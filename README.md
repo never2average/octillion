@@ -202,13 +202,18 @@ npm run access:list                     # who asked for access on the landing pa
 npm run org:create -- "Acme Inc"        # prints the API key (once) and the connector URL
 ```
 
-Give them the connector URL `https://<host>/mcp/<api key>`:
-- **Claude:** Settings → Connectors → *Add custom connector*. On Team/Enterprise plans an owner adds it once for the org.
-- **ChatGPT:** add a custom MCP server and choose no authentication. Business, Enterprise and Edu workspaces need an admin to allow custom MCP.
-- **Claude Code:** `{"mcpServers": {"octillion": {"type": "http", "url": "https://<host>/mcp/<api key>"}}}` in `.mcp.json`.
-- **Cursor and other IDE hosts:** paste the URL into the MCP settings and enable the tools. They show text results, not the dashboard.
+Give them the connector URL `https://<host>/mcp` and the key, which their client sends in a header,
+`Authorization: Bearer <api key>` (or `X-API-Key: <api key>`). The key never goes in the URL: URLs end up in proxy
+logs, browser history and screenshots.
+- **Claude Code:** `claude mcp add --transport http octillion https://<host>/mcp --header "Authorization: Bearer <api key>"`.
+- **Cursor and other IDE hosts:** add the URL with a `headers` entry in their MCP config and enable the tools. They show text results, not the dashboard.
+- **Claude and ChatGPT's apps** cannot send a header: invite the person with sign-in (Clerk) instead.
 
-Clients that can send headers can use `POST /mcp` with `Authorization: Bearer <api key>` instead.
+The old connector URL with the key in it, `https://<host>/mcp/<api key>`, is deprecated: it still works while
+`OCTILLION_URL_KEYS` is unset (`allow`), answers with a `Deprecation: true` header, and the server logs
+`mcp url-key deprecated org=<slug> key=<prefix>…` once an hour per key so those people can be moved. Set
+`OCTILLION_URL_KEYS=off` to refuse it.
+
 The beta guide for testers is [docs/beta-guide.md](docs/beta-guide.md). Then they just talk to it. The first prompt can be *"Get me started with Octillion"*: the `get_started` tool (listed
 first) answers with the account's one next step. Or go straight to it: *"Onboard my product: Acme Queue,
 https://acme.dev, https://docs.acme.dev. It is a job queue for Node."*
