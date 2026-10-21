@@ -1,6 +1,6 @@
 #!/bin/sh
 # Zero-downtime deploy of the Octillion server:
-#   build -> migrate the database -> start a NEW replica next to the old one -> wait until it is healthy -> drain the old one(s) -> remove them.
+#   build -> migrate the database -> prove row-level security -> start a NEW replica next to the old one -> wait until it is healthy -> drain the old one(s) -> remove them.
 # New requests go to the new replica as soon as the old one starts draining (it refuses connections and Caddy retries
 # elsewhere); requests already in flight on the old replica, including agents' model streams through the gateway,
 # finish there (OCTILLION_DRAIN_SECONDS, default 300). Orchestrators launched before the new replica started are
@@ -22,6 +22,9 @@ dc build octillion
 # the release still running (docs/migrations.md), so the old replicas keep serving meanwhile.
 echo "applying database migrations"
 dc run --rm -T octillion npm run --silent db:migrate
+# Prove row-level security on the live database before anything new serves (src/rls.ts): stops the deploy otherwise.
+echo "checking row-level security"
+dc run --rm -T octillion npm run --silent check:rls
 old=$(dc ps -q octillion || true)
 count=$(printf '%s\n' "$old" | grep -c . || true)
 if [ "$count" -eq 0 ]; then

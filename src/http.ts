@@ -24,6 +24,7 @@ import { bearer, cronSecretOk, headerCredential, isWorkerToken, resolveKey, reso
 import { clerkEnabled, ClerkError, frontendApi, mcpAudience } from "./clerk.js";
 import { StripeError } from "./billing.js";
 import { getDb } from "./db.js";
+import { probeFromCron, rlsProbeState } from "./rls.js";
 import { parseJsonl, transcripts, type RawEvent } from "./transcripts.js";
 import { appendEvents, claimJobs, completeSession, heartbeat } from "./worker.js";
 import { fleetCheckin, fleetLeave, fleetStatus } from "./fleet.js";
@@ -79,7 +80,7 @@ export function createApp() {
   app.get("/healthz", async (_req, res) => {
     if (draining) return void res.status(503).json({ ok: false, draining: true }); // rolling deploy: stop routing here
     await (await getDb()).query("SELECT 1");
-    res.json({ ok: true, transcripts: transcripts().kind });
+    res.json({ ok: true, transcripts: transcripts().kind, rls_probe: rlsProbeState() });
   });
 
   // ---------- inference gateway: /gw/<provider>/... (ogw_ session tokens, real keys from the vault) ----------
@@ -105,7 +106,9 @@ export function createApp() {
     const pruned = await pruneComputeHistory().catch((e) => ({ error: (e as Error).message }));
     // Loss reasons queued while nothing drained them (src/reasons.ts): a short batch, within the daily cap.
     const reasons = await (await import("./reasons.js")).drainReasons(30).catch((e) => ({ error: (e as Error).message }));
-    res.json({ tick, pruned, reasons });
+    // Row-level security, proven on the live database (src/rls.ts): Vercel has no release step to run check:rls in.
+    const rls = await probeFromCron(getDb);
+    res.json({ tick, pruned, reasons, rls });
   });
 
   const recent = new Map<string, number[]>();

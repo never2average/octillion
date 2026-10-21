@@ -1115,6 +1115,8 @@ try {
   console.log(`✓ adaptive sampling: agreed task settled after 2, contested task sampled to the cap (${statuses.join(", ")})`);
   console.log(`✓ claims are shared across organizations (${fair.map((j: any) => (ofB.has(j.session_id) ? "B" : "A")).join("")})`);
 
+  await (await import("./smoke-security.js")).rowLevelSecurityChecks({ db, a, b });
+
   // ---------- HTTP: auth, landing page, access requests ----------
   const anon = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
   assert.equal(anon.status, 401);
@@ -1985,6 +1987,8 @@ try {
     assert.equal((await fetch(`${base}/api/cron/autoscale`, { headers: { authorization: `Bearer ${ADMIN_TOKEN}` } })).status, 401, "an admin token is not the cron secret");
     const cron = await (await fetch(`${base}/api/cron/autoscale`, { headers: { authorization: `Bearer ${process.env.CRON_SECRET}` } })).json();
     assert.deepEqual(cron.pruned, { ticks: 0, events: 0 }, "the cron prunes (nothing left to prune)");
+    assert.equal(cron.rls, "ok", "the cron proves row-level security on the live database");
+    assert.equal(((await (await fetch(`${base}/healthz`)).json()) as any).rls_probe, "ok", "and /healthz shows it");
 
     await db.query("DELETE FROM autoscaler_ticks");
     await db.query("DELETE FROM compute_events WHERE sandbox_id LIKE 'smoke-at-%'");

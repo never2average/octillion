@@ -211,3 +211,46 @@ export async function audienceChecks({ uid, token, callWith, bad, mcpAudience, a
   } finally { delete process.env.OCTILLION_OAUTH_AUDIENCE; }
   assert.equal(await bad(reported), 401, "back to auto: refused again");
 }
+
+/** Row-level security (src/tenant-scope.ts, src/rls.ts): Postgres itself keeps tenants apart. */
+export async function rowLevelSecurityChecks({ db, a, b }: { db: Db; a: { org: { orgId: number } }; b: { org: { orgId: number } } }) {
+  const { withTenant, asPlatform } = await import("../src/tenant-scope.js");
+  const { rlsCatalogProblems, rlsProbe, tenantTables } = await import("../src/rls.js");
+  assert.deepEqual(await rlsCatalogProblems(db), [], "every tenant table has row-level security and a tenant policy");
+  const probe = await rlsProbe(db);
+  assert.deepEqual(probe.problems, [], "the live probe finds nothing crossing");
+  assert.ok(probe.checked >= (await tenantTables(db)).length, `the probe covered every tenant table (${probe.checked} checks)`);
+  assert.equal(Number((await db.query<any>("SELECT count(*) AS n FROM organizations WHERE slug LIKE 'rls-probe-%'"))[0].n), 0, "the probe leaves nothing behind");
+  // A query with no org filter at all, run as A: Postgres returns A's rows only, and refuses to write B's.
+  const [bProduct] = await db.query<{ id: number }>("SELECT id FROM products WHERE org_id = $1 LIMIT 1", [b.org.orgId]);
+  assert.ok(bProduct, "B has a product to protect");
+  const seen = await withTenant(a.org.orgId, () => db.query<{ org_id: number }>("SELECT org_id FROM products"));
+  assert.ok(seen.length > 0 && seen.every((r) => r.org_id === a.org.orgId), "an unfiltered query as A sees A's products only");
+  assert.equal((await withTenant(a.org.orgId, () => db.query("SELECT 1 FROM products WHERE id = $1", [bProduct!.id]))).length, 0, "B's product by id: nothing");
+  assert.equal((await withTenant(a.org.orgId, () => db.query("UPDATE products SET name = 'x' WHERE id = $1 RETURNING id", [bProduct!.id]))).length, 0, "B's product cannot be changed");
+  await assert.rejects(withTenant(a.org.orgId, () => db.query("INSERT INTO products (org_id, slug, name) VALUES ($1, 'rls-x', 'x')", [b.org.orgId])), /row-level security/, "nor created for B");
+  await assert.rejects(withTenant(a.org.orgId, () => db.query("SELECT 1 FROM vault_credentials")), /permission denied/, "the vault is out of reach");
+  assert.equal((await withTenant(a.org.orgId, () => db.transaction((tx) => tx.query("SELECT 1 FROM products WHERE id = $1", [bProduct!.id])))).length, 0, "transactions are scoped too");
+  assert.equal((await withTenant(a.org.orgId, () => asPlatform(() => db.query("SELECT 1 FROM products WHERE id = $1", [bProduct!.id])))).length, 1, "asPlatform leaves the scope explicitly");
+  assert.equal((await db.query("SELECT 1 FROM products WHERE id = $1", [bProduct!.id])).length, 1, "platform work (no scope) is not restricted");
+  assert.throws(() => withTenant(0, () => 1), /organization id/, "a scope needs a real organization");
+  // Platform data read from inside tenant work goes through asPlatform: the vault, for one.
+  const kv = await import("../src/keyvault.js");
+  assert.ok(Array.isArray(await withTenant(a.org.orgId, () => kv.listProviders())), "the key vault is read as the platform from tenant work");
+  await assert.rejects(withTenant(a.org.orgId, () => db.query("UPDATE organizations SET name = name WHERE id = $1", [a.org.orgId])), /permission denied/, "a tenant cannot change its own account row (plans, budgets are the platform's)");
+  // A closed gate (the boot catalog check failed): tenant queries are refused, platform work carries on. That MCP tool
+  // calls are refused with it also proves they run in the tenant scope (src/server.ts runToolInner).
+  const { setTenantGate } = await import("../src/tenant-scope.js");
+  const { runTool } = await import("../src/server.js");
+  const orgA = (await db.query<{ id: number; slug: string; name: string }>("SELECT id, slug, name FROM organizations WHERE id = $1", [a.org.orgId]))[0]!;
+  const asA = { orgId: orgA.id, slug: orgA.slug, name: orgA.name };
+  assert.ok(!(await runTool(asA, "list_products", {})).isError, "a tool call works with the gate open");
+  setTenantGate(["smoke: pretend a policy is missing"]);
+  try {
+    const shut = await runTool(asA, "list_products", {});
+    assert.ok(shut.isError && JSON.stringify(shut.content).includes("row-level security is not in place"), "tool calls run in the tenant scope: refused with the gate closed");
+    await assert.rejects(withTenant(a.org.orgId, () => db.query("SELECT 1 FROM products")), /row-level security is not in place/, "gate closed: tenant queries refused");
+    assert.ok((await db.query("SELECT 1 FROM products LIMIT 1")).length >= 0, "platform queries still run");
+  } finally { setTenantGate([]); }
+  console.log("✓ row-level security: every tenant table has a policy; the live probe crosses nothing; tool calls and portal requests run as their organization");
+}
