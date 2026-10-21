@@ -12,13 +12,14 @@ import { appRouter } from "./app.js";
 import { adminActor, adminAuthRouter, requirePlatformAdmin } from "./admin-auth.js";
 import { adminSkillList, adminToolList, adminMcpResource, mountAdminMcp } from "./admin-mcp.js";
 import * as roles from "./admin-roles.js";
+import * as adminTokens from "./admin-tokens.js";
 const { need } = roles;
 import { fileURLToPath } from "node:url";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createServer, runTool, TOOL_NAMES, WIDGET_HTML, type ToolName } from "./server.js";
 import { connectorEvents, recordMcpEvent } from "./analytics.js";
-import { bearer, isWorkerToken, resolveKey, resolveUserToken, type Org } from "./auth.js";
+import { bearer, cronSecretOk, isWorkerToken, resolveKey, resolveUserToken, type Org } from "./auth.js";
 import { clerkEnabled, ClerkError, frontendApi, mcpAudience } from "./clerk.js";
 import { StripeError } from "./billing.js";
 import { getDb } from "./db.js";
@@ -68,6 +69,7 @@ export function createApp() {
   app.disable("x-powered-by");
   // Provider keys still set as environment variables go into the key vault once, before anything reads a key.
   void importEnvKeysOnce();
+  adminTokens.warnRetiredAdminToken();
   app.use((_req, _res, next) => void importEnvKeysOnce().then(() => next()));
 
   app.get("/healthz", async (_req, res) => {
@@ -93,8 +95,8 @@ export function createApp() {
   // 5-minute backstop for the event-driven autoscaler on Vercel (vercel.json crons; Vercel sends CRON_SECRET as a
   // bearer). It also prunes the autoscaler's history (src/autoscaler-ticks.ts), which a VM does from its ticking loop.
   app.get("/api/cron/autoscale", async (req, res) => {
-    const secret = process.env.CRON_SECRET || process.env.OCTILLION_ADMIN_TOKEN;
-    if (!secret || req.headers.authorization !== `Bearer ${secret}`) return void res.status(401).json({ error: "unauthorized" });
+    // CRON_SECRET only (Vercel sends it): no fallback to an admin credential.
+    if (!cronSecretOk(req.headers.authorization)) return void res.status(401).json({ error: "unauthorized" });
     const tick = await kickAutoscaler();
     const pruned = await pruneComputeHistory().catch((e) => ({ error: (e as Error).message }));
     // Loss reasons queued while nothing drained them (src/reasons.ts): a short batch, within the daily cap.
@@ -354,10 +356,13 @@ export function createApp() {
   app.use(adminAuthRouter());
   const admin = express.Router();
   admin.use(requirePlatformAdmin);
+  /** Routes only a signed-in person may use, not an admin token (requirePlatformAdmin sets adminUserId for Clerk sessions). */
+  const signedIn = (_req: Request, res: Response, next: NextFunction) =>
+    res.locals.adminUserId ? next() : void res.status(403).json({ error: "Sign in to do this: an admin token cannot mint tokens or change who is an admin", code: "signed_in_only" });
   // Every staff request is logged (who, what, when, outcome); never the body, which can hold secrets.
   admin.use((req, res, next) => {
     res.on("finish", () => {
-      const actor = String(res.locals.adminActor ?? req.headers["x-octillion-actor"] ?? "admin-token").replace(/[^\w.@ -]/g, "").slice(0, 80) || "admin-token";
+      const actor = String(res.locals.adminActor ?? "unknown").replace(/[^\w.@ :-]/g, "").slice(0, 80) || "unknown";
       void getDb().then((db) => db.query("INSERT INTO admin_access_log (actor, method, path, status, ip) VALUES ($1, $2, $3, $4, $5)",
         [actor, req.method, req.originalUrl.split("?")[0]!.slice(0, 300), res.statusCode, String(req.ip ?? "").slice(0, 64)])).catch(() => {});
     });
@@ -386,7 +391,7 @@ export function createApp() {
   });
   admin.get("/gateway/usage", async (_req, res) => {
     const rows = await (await getDb()).query(
-      `/* tenant: admin-only (OCTILLION_ADMIN_TOKEN): global gateway usage */ SELECT provider, coalesce(session_id, orchestrator_id) AS consumer, requests, errors, input_tokens, output_tokens, bytes, last_at
+      `/* tenant: admin-only (platform admins and admin tokens): global gateway usage */ SELECT provider, coalesce(session_id, orchestrator_id) AS consumer, requests, errors, input_tokens, output_tokens, bytes, last_at
          FROM gateway_usage ORDER BY last_at DESC LIMIT 500`);
     res.json({ usage: rows });
   });
@@ -408,8 +413,24 @@ export function createApp() {
   });
   admin.post("/populations/:slug/default", need("harnesses"), async (req, res) => void res.json(await populations.setDefaultPopulation(String(req.params.slug))));
   admin.get("/autoscaler", async (_req, res) => void res.json(await autoscalerStatus()));
+  // Admin tokens for scripts (src/admin-tokens.ts): owners list, mint and revoke them. Minting, and changing who is an
+  // admin, need a signed-in owner (signedIn), never a token: a leaked token cannot renew itself or make its holder an owner.
+  const tokenErr = (res: Response, e: unknown) => {
+    if (!(e instanceof adminTokens.AdminTokenError)) throw e;
+    res.status(e.status).json({ error: e.message });
+  };
+  admin.get("/tokens", need("admins"), async (_req, res) => void res.set("Cache-Control", "no-store").json({ tokens: await adminTokens.listAdminTokens(), max_days: adminTokens.ADMIN_TOKEN_MAX_DAYS }));
+  admin.post("/tokens", need("admins"), signedIn, async (req, res) => {
+    try {
+      const { token, ...row } = await adminTokens.createAdminToken({ label: req.body?.label, role: req.body?.role, days: req.body?.days === undefined ? undefined : Number(req.body.days), createdBy: adminActor(req, res) });
+      res.set("Cache-Control", "no-store").status(201).json({ token, ...row });
+    } catch (e) { tokenErr(res, e); }
+  });
+  admin.delete("/tokens/:id", need("admins"), async (req, res) => {
+    try { res.status((await adminTokens.revokeAdminToken(Number(req.params.id))) ? 204 : 404).end(); } catch (e) { tokenErr(res, e); }
+  });
   // Onboarding console (web/app/admin, src/admin.ts): requests, accounts, people (Clerk), billing (Stripe), legacy keys.
-  // X-Admin-Actor names the person in the log lines; the token is shared, so it is a label, not an identity.
+  // A signed-in admin is logged by email, an admin token as token:<label>.
   const ob = express.Router();
   ob.use((_req, res, next) => { res.set("Cache-Control", "no-store"); next(); }); // responses can carry a new key
   const slug = (req: Request) => String(req.params.slug);
@@ -542,17 +563,17 @@ export function createApp() {
   ob.get("/mcp", (_req, res) => void res.json({ url: adminMcpResource(), tools: adminToolList(), skills: adminSkillList() }));
   ob.get("/admins", async (_req, res) => void res.json({ admins: await roles.listAdmins(), roles: roles.PLATFORM_ROLES.map((r) => ({ id: r, label: roles.ROLE_LABELS[r], help: roles.ROLE_HELP[r] })),
     me: (res.locals.adminUserId as string | undefined) ?? null }));
-  ob.post("/admins", need("admins"), async (req, res) => {
+  ob.post("/admins", need("admins"), signedIn, async (req, res) => {
     const r = await roles.addAdmin(changer(req, res), req.body?.email, req.body?.role);
     onboarding.log(adminActor(req, res), "admin.add", null, { email: req.body?.email, role: req.body?.role, created: r.created });
     res.status(201).json(r);
   });
-  ob.post("/admins/:id/role", need("admins"), async (req, res) => {
+  ob.post("/admins/:id/role", need("admins"), signedIn, async (req, res) => {
     const a = await roles.setAdminRole(changer(req, res), String(req.params.id), req.body?.role);
     onboarding.log(adminActor(req, res), "admin.role", null, { user: req.params.id, role: a.role });
     res.json({ admin: a });
   });
-  ob.delete("/admins/:id", need("admins"), async (req, res) => {
+  ob.delete("/admins/:id", need("admins"), signedIn, async (req, res) => {
     await roles.removeAdmin(changer(req, res), String(req.params.id));
     onboarding.log(adminActor(req, res), "admin.remove", null, { user: req.params.id });
     res.status(204).end();

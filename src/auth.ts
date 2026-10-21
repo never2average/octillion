@@ -71,6 +71,13 @@ export function isWorkerToken(token: string | undefined | null): boolean {
   return timingSafeEqual(a, b);
 }
 
+/** The Vercel cron's bearer (CRON_SECRET), in constant time. Nothing else opens /api/cron/*. */
+export function cronSecretOk(authorization: string | undefined): boolean {
+  const want = process.env.CRON_SECRET, got = bearer(authorization);
+  if (!want || !got) return false;
+  return timingSafeEqual(Buffer.from(sha256(got)), Buffer.from(sha256(want)));
+}
+
 export function bearer(header: string | undefined): string | null {
   const m = header?.match(/^Bearer\s+(\S+)$/i);
   return m ? m[1] : null;

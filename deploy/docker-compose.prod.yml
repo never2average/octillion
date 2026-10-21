@@ -138,7 +138,6 @@ services:
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_APP_PASSWORD:-${CLICKHOUSE_PASSWORD}}
       CLICKHOUSE_DATABASE: octillion
       OCTILLION_VAULT_KEY: ${OCTILLION_VAULT_KEY:?run bootstrap.sh}
-      OCTILLION_ADMIN_TOKEN: ${OCTILLION_ADMIN_TOKEN:?run bootstrap.sh}
       OCTILLION_WORKER_TOKEN: ${OCTILLION_WORKER_TOKEN:?run bootstrap.sh}
       # The orchestrators' brain (Pi), handed out by the credential broker; switch here, not per orchestrator.
       ORCHESTRATOR_PROVIDER: ${ORCHESTRATOR_PROVIDER:-openai}

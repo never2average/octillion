@@ -176,7 +176,7 @@ People live in **Clerk**, billing in **Stripe**, product analytics in **PostHog*
 **New Relic** (OpenTelemetry). Octillion keeps only the links to them. Setup and the funnel are in
 **[docs/accounts.md](docs/accounts.md)**.
 
-- **`/admin`** (`OCTILLION_ADMIN_TOKEN`) is the onboarding console. It handles access requests (approve creates the
+- **`/admin`** (platform admins sign in with Clerk; scripts use `npm run admin:token` tokens) is the onboarding console. It handles access requests (approve creates the
   Clerk organization, Stripe customer and invitation), the funnel from invite to first report, who is stuck and why,
   members (roles, suspension) and invitations, plans and checkout/portal links, and legacy keys.
 - **`/app`** is the customer page, behind Clerk sign-in (the account is the session's active Clerk organization). It has a setup checklist with a live connection test,
@@ -291,7 +291,7 @@ npm run population -- share global codex/default 0.21
 npm run population -- pause global cursor/auto "no credentials yet"   # resume global cursor/auto
 npm run population -- create enterprise "Enterprise developers" --from global
 ```
-Admin API: `/api/admin/populations[/:slug[/agents/:agent]]` with `OCTILLION_ADMIN_TOKEN`.
+Admin API: `/api/admin/populations[/:slug[/agents/:agent]]` with an admin token (`npm run admin:token -- create --label <purpose> --role operator`).
 
 ## Orchestrators and the pod fleet
 
@@ -332,7 +332,7 @@ src/limits.ts        per-account usage limits: budget split, teams, rollout, thr
 src/context.ts       company, personal and product context for the AI client and research
 src/insights.ts      platform analytics and health for /admin (replicated from the event log)
 src/journeys.ts      journey tips: PostHog Workflows webhook, in-chat and /app delivery, recipes
-src/admin-auth.ts    platform-admin guard for /api/admin (Clerk session + allowlist, or the admin token)
+src/admin-auth.ts    platform-admin guard for /api/admin (Clerk session + allowlist, or a scoped admin token)
 src/session.ts       reads the Clerk session from a request (Bearer or __session cookie)
 src/clerk.ts         Clerk Backend API client, session and OAuth token verification, platform-admin check
 src/billing.ts       Stripe REST client: plans, subscriptions, checkout, portal, budgets, spend meter
