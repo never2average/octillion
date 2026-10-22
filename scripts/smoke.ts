@@ -4928,6 +4928,7 @@ try {
       if (sub.status === "trialing") assert.deepEqual([rm.trialing, rm.paying, rm.mrr_usd], [1, 0, 0], "in trial: not paying yet");
       else assert.deepEqual([rm.paying, rm.mrr_usd, rm.collected_usd], [1, 300, 300], "paying: MRR and the paid invoice");
       assert.ok(rep.running.includes(exp) && rep.totals.accounts >= 3);
+      await (await import("./smoke-readiness.js")).pricingVisitorChecks({ db, base, exp, variantIds: [vA.price_id, vB.price_id], adm, json });
       // Out of the experiment: no longer a variant (results keep it, as ended); operator can't change it.
       await json(adm("POST", `/plans/${other}/experiment`, { experiment: "" }));
       B.invalidatePlans();

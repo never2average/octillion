@@ -52,3 +52,40 @@ export async function healthChecks({ db, sentTo, OPS, stamp, orgId, productId, s
   await db.query("DELETE FROM agent_sessions WHERE id LIKE $1", [`ses_health_%_${stamp}`]);
   console.log("✓ health alerts: failed-session rate with error classes and version drift, stuck queue, once an hour");
 }
+
+/** The public /pricing page's experiment (src/experiments.ts visitorPlans, GET /api/pricing): a visitor gets a cookie
+ *  and one sticky variant; an account opened from that browser takes the visitor's variant; FinOps counts visitors. */
+export async function pricingVisitorChecks({ db, base, exp, variantIds, adm, json }: { db: Db; base: string; exp: string; variantIds: string[];
+  adm: (method: string, path: string, body?: unknown) => Promise<Response>; json: (r: Promise<Response>) => Promise<any> }) {
+  const E = await import("../src/experiments.js"), B = await import("../src/billing.js");
+  B.invalidatePlans();
+  const plans = await B.listPlans();
+  const lookupOf = (id: string) => plans.find((p) => p.price_id === id)!.lookup_key;
+  const variantLookups = variantIds.map(lookupOf);
+  const r1 = await fetch(`${base}/api/pricing`);
+  const cookie = /oct_vid=([A-Za-z0-9_-]+)/.exec(r1.headers.get("set-cookie") ?? "")?.[1];
+  const p1 = (await r1.json()).plans as { id: string }[];
+  assert.ok(cookie && /HttpOnly/.test(r1.headers.get("set-cookie")!), "a first visit gets a first-party visitor cookie");
+  const shown = p1.filter((p) => variantLookups.includes(p.id));
+  assert.equal(shown.length, 1, "a visitor sees one variant of the experiment");
+  assert.ok(p1.some((p) => !variantLookups.includes(p.id)), "and every plan in no experiment");
+  const again = (await (await fetch(`${base}/api/pricing`, { headers: { cookie: `oct_vid=${cookie}` } })).json()).plans as { id: string }[];
+  assert.deepEqual(again.map((p) => p.id), p1.map((p) => p.id), "the same variant on every visit");
+  assert.equal((await db.query("SELECT 1 FROM pricing_exposures WHERE visitor_id = $1 AND experiment = $2", [cookie, exp])).length, 1, "one exposure per visitor and experiment");
+  assert.ok(!JSON.stringify(p1).includes(exp), "the page never names the experiment");
+  // An account first opened from a browser takes that visitor's variant, even where the account's own pick differs:
+  // a visitor shown the variant this new account would not get.
+  const [o] = await db.query<{ id: number }>("INSERT INTO organizations (slug, name) VALUES ($1, $1) RETURNING id", [`vis-${cookie!.slice(0, 8).toLowerCase()}`]);
+  const orgId = o!.id;
+  const ownPick = E.pickVariant(orgId, exp, plans.filter((p) => p.experiment === exp))!.price_id;
+  const visitorVariant = variantIds.find((id) => id !== ownPick)!;
+  const vid2 = `${cookie}x`;
+  await db.query("INSERT INTO pricing_exposures (visitor_id, experiment, price_id) VALUES ($1, $2, $3)", [vid2, exp, visitorVariant]);
+  const offered = await E.offeredPlans(orgId, plans, vid2);
+  assert.ok(offered.some((p) => p.price_id === visitorVariant) && !offered.some((p) => p.price_id === ownPick), "the account is offered the variant its browser saw on /pricing");
+  const [ex] = await db.query<{ price_id: string; visitor_id: string }>("SELECT price_id, visitor_id FROM plan_exposures WHERE org_id = $1 AND experiment = $2", [orgId, exp]);
+  assert.deepEqual([ex?.price_id, ex?.visitor_id], [visitorVariant, vid2], "recorded as the visitor's exposure");
+  const rep = await json(adm("GET", "/spend/experiments"));
+  assert.ok(rep.variants.find((x: any) => x.experiment === exp && x.price_id === visitorVariant)?.visitors >= 1, "FinOps counts visitors per variant");
+  console.log("✓ pricing page: visitor cookie, one sticky variant per experiment, the account inherits it, visitors counted per variant");
+}

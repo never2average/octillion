@@ -4,6 +4,7 @@ import * as billing from "./billing.js";
 import { wilson } from "./queries.js";
 import { payingAt, subMonthly } from "./revenue.js";
 import { spendRange, spendReport } from "./spend.js";
+import { asPlatform } from "./tenant-scope.js";
 
 /**
  * Pricing experiments (FinOps › Experiments, GET /api/admin/onboarding/spend/experiments): A/B tests between plans.
@@ -14,6 +15,9 @@ import { spendRange, spendReport } from "./spend.js";
  *     was first shown (sticky, while that plan is live), else a weighted pick from sha256(experiment:account id).
  *   - exposure: the first time an account's Billing page shows it a variant (plan_exposures, one row per account and
  *     experiment). The only thing kept here: Stripe has no record of a page view.
+ *   - visitors: the public /pricing page assigns anonymous visitors the same way, by a random first-party visitor id
+ *     (oct_vid cookie), and records their first exposure (pricing_exposures). An account whose Billing page is opened
+ *     from a browser that saw /pricing takes that visitor's variant, so the conversion goes to what was shown.
  *   - attribution: checkout puts {octillion_slug, octillion_experiment, octillion_variant} on the session and the
  *     subscription (billing.checkoutUrl), so started checkouts and conversions are read back from Stripe.
  *
@@ -37,8 +41,14 @@ const dayOf = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 const idOf = (x: string | { id: string } | null | undefined) => (x == null ? null : typeof x === "string" ? x : x.id);
 const NEVER_PAID = new Set(["incomplete", "incomplete_expired"]);
 
-/** The variant of `experiment` for an account: weighted by the plans' weights, stable for the account. */
-export function pickVariant(orgId: number, experiment: string, variants: billing.Plan[]): billing.Plan | null {
+/** A visitor id from the oct_vid cookie (random, first-party), or null when absent or malformed. */
+export const visitorIdOf = (cookieHeader: string | undefined | null): string | null => {
+  const m = /(?:^|;\s*)oct_vid=([A-Za-z0-9_-]{16,64})(?:;|$)/.exec(cookieHeader ?? "");
+  return m ? m[1]! : null;
+};
+
+/** The variant of `experiment` for an account (or a visitor: `v:<id>`): weighted by the plans' weights, stable for it. */
+export function pickVariant(orgId: number | string, experiment: string, variants: billing.Plan[]): billing.Plan | null {
   const vs = [...variants].sort((a, b) => a.price_id.localeCompare(b.price_id));
   if (!vs.length) return null;
   const total = sum(vs.map((v) => v.weight));
@@ -52,23 +62,52 @@ export function pickVariant(orgId: number, experiment: string, variants: billing
  * The plans an account is offered: every plan in no experiment, plus its variant of each experiment (the one it was
  * shown first while that is still live). Records a first exposure for each experiment shown. Never throws on the log.
  */
-export async function offeredPlans(orgId: number, plans: billing.Plan[]): Promise<billing.Plan[]> {
+export async function offeredPlans(orgId: number, plans: billing.Plan[], visitorId?: string | null): Promise<billing.Plan[]> {
   const db = await getDb();
   const groups = new Map<string, billing.Plan[]>();
   for (const p of plans) if (p.experiment) groups.set(p.experiment, [...(groups.get(p.experiment) ?? []), p]);
   if (!groups.size) return plans;
   const seen = new Map((await db.query<{ experiment: string; price_id: string }>(
     "SELECT experiment, price_id FROM plan_exposures WHERE org_id = $1", [orgId])).map((r) => [r.experiment, r.price_id]));
+  // What this browser was shown on /pricing before (platform data, read outside the tenant scope).
+  const asVisitor = visitorId && [...groups.keys()].some((e) => !seen.has(e)) ? await visitorSeen(visitorId) : new Map<string, string>();
   const chosen = new Map<string, billing.Plan>();
   for (const [exp, vs] of groups) {
-    const v = vs.find((x) => x.price_id === seen.get(exp)) ?? pickVariant(orgId, exp, vs);
+    const v = vs.find((x) => x.price_id === seen.get(exp)) ?? vs.find((x) => x.price_id === asVisitor.get(exp)) ?? pickVariant(orgId, exp, vs);
     if (v) chosen.set(exp, v);
   }
   const fresh = [...chosen].filter(([exp]) => !seen.has(exp));
   if (fresh.length) await db.query(
-    `INSERT INTO plan_exposures (org_id, experiment, price_id, plan_name)
-     SELECT $1, x.e, x.p, x.n FROM unnest($2::text[], $3::text[], $4::text[]) AS x(e, p, n) ON CONFLICT (org_id, experiment) DO NOTHING`,
-    [orgId, fresh.map(([e]) => e), fresh.map(([, v]) => v.price_id), fresh.map(([, v]) => v.name)]).catch((e) => console.error("plan exposure:", (e as Error).message));
+    `INSERT INTO plan_exposures (org_id, experiment, price_id, plan_name, visitor_id)
+     SELECT $1, x.e, x.p, x.n, x.v FROM unnest($2::text[], $3::text[], $4::text[], $5::text[]) AS x(e, p, n, v) ON CONFLICT (org_id, experiment) DO NOTHING`,
+    [orgId, fresh.map(([e]) => e), fresh.map(([, v]) => v.price_id), fresh.map(([, v]) => v.name),
+     fresh.map(([e, v]) => (asVisitor.get(e) === v.price_id ? visitorId! : null))]).catch((e) => console.error("plan exposure:", (e as Error).message));
+  return plans.filter((p) => !p.experiment || chosen.get(p.experiment)?.price_id === p.price_id);
+}
+
+const visitorSeen = (visitorId: string) => asPlatform(async () => new Map((await (await getDb()).query<{ experiment: string; price_id: string }>(
+  "SELECT experiment, price_id FROM pricing_exposures WHERE visitor_id = $1", [visitorId])).map((r) => [r.experiment, r.price_id])));
+
+/**
+ * The plans the public /pricing page shows a visitor: every live plan in no experiment, and one variant of each
+ * experiment (the one this visitor was shown first while it is live, else a weighted pick from their id). Records the
+ * first exposure. No visitor id (cookies off): the weighted pick for a fixed id, recorded nowhere.
+ */
+export async function visitorPlans(visitorId: string | null, plans: billing.Plan[]): Promise<billing.Plan[]> {
+  const groups = new Map<string, billing.Plan[]>();
+  for (const p of plans) if (p.experiment) groups.set(p.experiment, [...(groups.get(p.experiment) ?? []), p]);
+  if (!groups.size) return plans;
+  const seen = visitorId ? await visitorSeen(visitorId) : new Map<string, string>();
+  const chosen = new Map<string, billing.Plan>();
+  for (const [exp, vs] of groups) {
+    const v = vs.find((x) => x.price_id === seen.get(exp)) ?? pickVariant(`v:${visitorId ?? "anonymous"}`, exp, vs);
+    if (v) chosen.set(exp, v);
+  }
+  const fresh = [...chosen].filter(([exp]) => !seen.has(exp));
+  if (visitorId && fresh.length) await asPlatform(async () => (await getDb()).query(
+    `INSERT INTO pricing_exposures (visitor_id, experiment, price_id)
+     SELECT $1, x.e, x.p FROM unnest($2::text[], $3::text[]) AS x(e, p) ON CONFLICT (visitor_id, experiment) DO NOTHING`,
+    [visitorId, fresh.map(([e]) => e), fresh.map(([, v]) => v.price_id)])).catch((e) => console.error("pricing exposure:", (e as Error).message));
   return plans.filter((p) => !p.experiment || chosen.get(p.experiment)?.price_id === p.price_id);
 }
 
@@ -90,9 +129,10 @@ export async function experimentsReport(q: { from?: unknown; to?: unknown } = {}
     return empty(R, true, (err as Error).message);
   }
   const db = await getDb();
-  const [exposures, orgs, spend] = await Promise.all([
+  const [exposures, visitorRows, orgs, spend] = await Promise.all([
     db.query<{ org_id: number; experiment: string; price_id: string; plan_name: string | null; first_seen_at: Date }>(
       "/* tenant: internal: admin FinOps, every account's plan exposures */ SELECT org_id, experiment, price_id, plan_name, first_seen_at FROM plan_exposures"),
+    db.query<{ experiment: string; price_id: string; first_seen_at: Date }>("SELECT experiment, price_id, first_seen_at FROM pricing_exposures"),
     db.query<{ id: number; slug: string; stripe_customer_id: string | null }>("SELECT id, slug, stripe_customer_id FROM organizations"),
     spendReport(q, now),
   ]);
@@ -108,7 +148,7 @@ export async function experimentsReport(q: { from?: unknown; to?: unknown } = {}
   const spendOf = new Map(spend.accounts.map((a) => [a.key, sum(a.daily_session) + sum(a.daily_orchestrator)]));
 
   interface V { experiment: string; price_id: string; name: string; amount: number | null; interval: string | null; weight: number; live: boolean; created: number | null;
-    exposed: Set<number>; new_in_range: number; checkouts: number; completed: number; converted: Set<string>; subs: billing.Subscription[];
+    exposed: Set<number>; new_in_range: number; visitors: number; visitors_in_range: number; checkouts: number; completed: number; converted: Set<string>; subs: billing.Subscription[];
     daily_exposed: number[]; daily_converted: number[]; daily_collected: number[] }
   const vs = new Map<string, V>();
   const v = (experiment: string, price_id: string, name?: string | null) => {
@@ -117,7 +157,7 @@ export async function experimentsReport(q: { from?: unknown; to?: unknown } = {}
     if (!x) {
       const p = plans.find((y) => y.price_id === price_id);
       x = { experiment, price_id, name: p?.name ?? name ?? price_id, amount: p?.amount ?? null, interval: p?.interval ?? null, weight: p?.experiment === experiment ? p.weight : 0,
-            live: p?.experiment === experiment, created: p?.created ?? null, exposed: new Set(), new_in_range: 0, checkouts: 0, completed: 0, converted: new Set(), subs: [],
+            live: p?.experiment === experiment, created: p?.created ?? null, exposed: new Set(), new_in_range: 0, visitors: 0, visitors_in_range: 0, checkouts: 0, completed: 0, converted: new Set(), subs: [],
             daily_exposed: R.days.map(() => 0), daily_converted: R.days.map(() => 0), daily_collected: R.days.map(() => 0) };
       vs.set(k, x);
     }
@@ -131,6 +171,13 @@ export async function experimentsReport(q: { from?: unknown; to?: unknown } = {}
     const x = v(e.experiment, e.price_id, e.plan_name);
     x.exposed.add(Number(e.org_id));
     if (inRange(t)) { x.new_in_range++; x.daily_exposed[idx.get(dayOf(t))!]++; }
+  }
+  // Anonymous /pricing visitors shown the variant (top of the funnel; conversion stays per account).
+  for (const e of visitorRows) {
+    const t = new Date(e.first_seen_at).getTime();
+    if (t > endAt) continue;
+    const x = v(e.experiment, e.price_id);
+    x.visitors++; if (inRange(t)) x.visitors_in_range++;
   }
   for (const s of sessions) {
     const m = s.metadata ?? {};
@@ -166,7 +213,7 @@ export async function experimentsReport(q: { from?: unknown; to?: unknown } = {}
     const spent = r2(sum([...x.converted].map((c) => spendOf.get(slugOfCustomer.get(c) ?? x.subs.find((s) => s.customer === c)?.metadata?.octillion_slug ?? "") ?? 0)));
     const ci = wilson(converted, exposed);
     return { experiment: x.experiment, price_id: x.price_id, name: x.name, amount_usd: x.amount == null ? null : x.amount / 100, interval: x.interval, weight: x.weight, live: x.live,
-      created: x.created, exposed, new_in_range: x.new_in_range, checkouts: x.checkouts, completed: x.completed, converted,
+      created: x.created, exposed, new_in_range: x.new_in_range, visitors: x.visitors, visitors_in_range: x.visitors_in_range, checkouts: x.checkouts, completed: x.completed, converted,
       conversion_pct: exposed ? r1((converted / exposed) * 100) : null, ci: ci ? [r1(ci[0] * 100), r1(ci[1] * 100)] as [number, number] : null,
       paying: paying.length, trialing, churned, mrr_usd: r2(sum(paying.map(subMonthly))), collected_usd: collected,
       collected_per_exposed_usd: exposed ? r2(collected / exposed) : null, model_spend_usd: spent, margin_usd: r2(collected - spent),

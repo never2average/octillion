@@ -3,5 +3,6 @@ export const SECTIONS = [
   { href: '/#apo', label: 'What is APO' },
   { href: '/#convert', label: 'Why APO' },
   { href: '/#features', label: 'Scorecard' },
+  { href: '/pricing', label: 'Pricing' },
   { href: '/#faq', label: 'FAQ' }
 ];

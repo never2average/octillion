@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { researchSearch } from "./websearch.js";
 import { canActAsOrchestrator, canActOnSession, resolveWorkerToken, type WorkerAuth } from "./workerauth.js";
 import path from "node:path";
@@ -111,6 +112,28 @@ export function createApp() {
     // Operator alerts: sessions failing too often or stuck in the queue (src/health-alerts.ts).
     const health = await (await import("./health-alerts.js")).checkHealth().then((h) => ({ alerts: h.alerts, emailed: h.emailed, slack: h.slack, error: h.error }));
     res.json({ tick, pruned, reasons, rls, health });
+  });
+
+  // The public /pricing page (web/src/features/site/pricing.tsx): the live plans, with this visitor's variant of each
+  // pricing experiment (src/experiments.ts visitorPlans). The visitor id is a random first-party cookie set here; it
+  // carries the variant into the account's Billing page. Nothing about the visitor but that id is kept.
+  app.get("/api/pricing", async (req, res) => {
+    const billing = await import("./billing.js"), experiments = await import("./experiments.js");
+    let vid = experiments.visitorIdOf(req.headers.cookie);
+    if (!vid) {
+      vid = randomBytes(16).toString("base64url");
+      res.setHeader("set-cookie", `oct_vid=${vid}; Path=/; Max-Age=31536000; SameSite=Lax; HttpOnly${process.env.VERCEL || process.env.NODE_ENV === "production" ? "; Secure" : ""}`);
+    }
+    res.setHeader("cache-control", "private, no-store");
+    if (!billing.stripeEnabled()) return void res.json({ plans: [] });
+    try {
+      const plans = await experiments.visitorPlans(vid, await billing.listPlans());
+      res.json({ plans: plans.map((p) => ({ id: p.lookup_key, name: p.name, description: p.description, amount: p.amount, currency: p.currency, interval: p.interval,
+        monthly_budget_usd: p.monthly_budget_usd, trial_days: p.trial_days, usage: p.usage.map((u) => u.summary) })) });
+    } catch (e) {
+      console.error("pricing:", (e as Error).message);
+      res.status(503).json({ error: "Pricing is unavailable right now.", plans: [] });
+    }
   });
 
   const recent = new Map<string, number[]>();

@@ -486,7 +486,7 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
 /** New plan (owner): a product and a recurring price in Stripe, with an octillion_ lookup key so checkout links can offer it. */
 interface Variant {
   experiment: string; price_id: string; name: string; amount_usd: number | null; interval: string | null; weight: number; live: boolean; control: boolean;
-  exposed: number; new_in_range: number; checkouts: number; completed: number; converted: number; conversion_pct: number | null; ci: [number, number] | null;
+  exposed: number; new_in_range: number; visitors?: number; visitors_in_range?: number; checkouts: number; completed: number; converted: number; conversion_pct: number | null; ci: [number, number] | null;
   lift_pts: number | null; lift_ci: [number, number] | null; significant: boolean; paying: number; trialing: number; churned: number; mrr_usd: number;
   collected_usd: number; collected_per_exposed_usd: number | null; model_spend_usd: number; margin_usd: number;
   daily_exposed: number[]; daily_converted: number[]; daily_collected: number[];
@@ -531,6 +531,8 @@ function ExperimentsTab({ data, loading, bar }: TabProps<Experiments>) {
       </span>) },
     { key: 'experiment', label: 'Experiment', hidden: true, type: 'select', value: (v) => v.experiment, render: (v) => <Mono>{v.experiment}</Mono> },
     { key: 'traffic', label: 'Traffic', className: 'text-right', type: 'number', value: (v) => share(v), render: (v) => (share(v) == null ? NA : sub(`${share(v)}%`, undefined, `Weight ${v.weight} (shown on the Plans tab)`)) },
+    { key: 'visitors', label: 'Visitors', className: 'text-right', type: 'number', value: (v) => v.visitors ?? 0,
+      render: (v) => sub((v.visitors ?? 0).toLocaleString(), v.visitors_in_range ? `${v.visitors_in_range} new` : undefined, 'Visitors shown this variant on the public /pricing page, before signing in (new: first shown in this range)') },
     { key: 'exposed', label: 'Shown', className: 'text-right', type: 'number', value: (v) => v.exposed, render: (v) => sub(v.exposed.toLocaleString(), v.new_in_range ? `${v.new_in_range} new` : undefined, 'Accounts shown this variant on Billing (new: first shown in this range)') },
     { key: 'converted', label: 'Subscribed', className: 'text-right', keep: true, type: 'number', value: (v) => v.converted, render: (v) => sub(v.converted.toLocaleString(), `${v.checkouts} checkout${v.checkouts === 1 ? '' : 's'}`, `${v.checkouts} checkouts started, ${v.completed} completed`) },
     { key: 'conversion', label: 'Conversion', className: 'text-right', keep: true, type: 'number', value: (v) => v.conversion_pct, render: (v) => (v.conversion_pct == null ? NA

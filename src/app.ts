@@ -305,7 +305,7 @@ async function usageCharts(s: Session, range: ReturnType<typeof reportRange>, us
   };
 }
 
-async function billingView(s: Session) {
+async function billingView(s: Session, visitorId: string | null = null) {
   const f = await admin.accountFacts(s.slug);
   const { budget, subscription, source } = await orgBudget(s.org).catch(() => ({ budget: 0, subscription: null, source: "default" as const }));
   // Plans are invite-only: only an account an admin has allowed sees them (and may check out).
@@ -313,7 +313,7 @@ async function billingView(s: Session) {
     enabled: billing.stripeEnabled(), customer: Boolean(f.stripe_customer_id), subscription, budget_usd: budget, budget_source: source,
     prepaid_allowed: Boolean(f.prepaid_allowed), month_spend_usd: await orgMonthSpendUsd(s.org),
     // Plans are invite-only; in a pricing experiment the account sees only its own variant (src/experiments.ts).
-    plans: billing.stripeEnabled() && f.prepaid_allowed ? (await experiments.offeredPlans(s.org, await billing.listPlans()).catch(() => [] as billing.Plan[])).map((p) => ({ price_id: p.price_id, name: p.name, amount: p.amount, currency: p.currency, interval: p.interval, monthly_budget_usd: p.monthly_budget_usd, trial_days: p.trial_days, description: p.description,
+    plans: billing.stripeEnabled() && f.prepaid_allowed ? (await experiments.offeredPlans(s.org, await billing.listPlans(), visitorId).catch(() => [] as billing.Plan[])).map((p) => ({ price_id: p.price_id, name: p.name, amount: p.amount, currency: p.currency, interval: p.interval, monthly_budget_usd: p.monthly_budget_usd, trial_days: p.trial_days, description: p.description,
       usage: p.usage.map((u) => ({ metric: u.metric, summary: u.summary })) })) : [],
   };
 }
@@ -813,7 +813,8 @@ export function appRouter() {
     if (done?.type === "done") capture({ distinctId: who, orgSlug: s.slug }, "docs_answer_asked", { answered: done.answer != null, reason: done.reason, streamed: true });
     res.end();
   });
-  api.get("/billing", async (_req, res) => void res.json({ ...(await billingView(S(res))), can_manage: can(res, "billing"), permissions: perms(res),
+  // The browser's /pricing visitor id: an account takes the experiment variant that browser was shown (src/experiments.ts).
+  api.get("/billing", async (req, res) => void res.json({ ...(await billingView(S(res), experiments.visitorIdOf(req.headers.cookie))), can_manage: can(res, "billing"), permissions: perms(res),
     contributions: await contributions.creditsFor(S(res).org) }));
   api.get("/billing/usage", async (_req, res) => void res.json(await billingUsage(S(res))));
   api.post("/billing/portal", async (_req, res) => { need(res, "billing"); res.json(await admin.portalLink(actor(res), S(res).slug, `${publicUrl()}/app#billing`)); });
