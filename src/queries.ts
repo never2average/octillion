@@ -11,6 +11,7 @@ import { dealByPreference, planFirstBatch, schedulingShares, drawVariant, enable
 import { getPopulation, listPopulations } from "./populations.js";
 import { capacityStatus } from "./autoscaler.js";
 import { missingAgentKeys } from "./gateway.js";
+import { asPlatform } from "./tenant-scope.js";
 import type { Population } from "./agents.js";
 
 /**
@@ -22,7 +23,9 @@ async function withKeys(pop: Population): Promise<{ pop: Population; left_out: s
   // OCTILLION_RUN_KEY_CHECK=off (test fixtures with no vault): schedule everyone; the credential broker still refuses.
   if (process.env.OCTILLION_RUN_KEY_CHECK === "off") return { pop, left_out: [] };
   const all = pop.agents.flatMap((a) => [a, ...variantsOf(a).filter((v) => v.id !== a.id)]);
-  const missing = await missingAgentKeys(all);
+  // The vault is platform state the tenant role may not read (src/rls.ts NO_ACCESS): checked outside the tenant scope,
+  // and only env var names come back.
+  const missing = await asPlatform(() => missingAgentKeys(all));
   const ok = (id: string) => !(missing.get(id)?.length);
   const left_out = new Set<string>();
   const agents = pop.agents.flatMap((a) => {
