@@ -77,7 +77,7 @@ export const SETTINGS: SettingDef[] = [
   { key: "EMAIL_ADMIN_TO", group: "email", label: "Operator alerts to", kind: "text", format: "emails", default: "",
     help: "Who gets new access requests and library submissions, comma-separated. Empty: the platform owners (Admins)." },
   { key: "ALERTS_ENABLED", group: "alerts", label: "Health alerts", kind: "choice", default: "on", options: ["on", "off"],
-    help: "On: operators get an email (and a Slack message when ALERT_SLACK_WEBHOOK_URL is set) when agent sessions fail too often or wait too long. Checked every 5 minutes; at most one alert per problem an hour." },
+    help: "On: operators get an email (and a Slack message when the Key vault holds a Slack webhook URL) when agent sessions fail too often or wait too long. Checked every 5 minutes; at most one alert per problem an hour." },
   { key: "ALERT_FAILURE_RATE", group: "alerts", label: "Failed sessions that raise an alert (%)", kind: "number", default: 10, min: 1, max: 100,
     help: "Share of the agent sessions that finished in the last hour that failed or timed out. Needs at least 5 finished sessions." },
   { key: "ALERT_QUEUE_MINUTES", group: "alerts", label: "Queue wait that raises an alert (minutes)", kind: "int", default: 30, min: 5, max: 1440,

@@ -2,6 +2,7 @@ import { getDb } from "./db.js";
 import { settingNumber, settingText, freshSettings } from "./settings.js";
 import { classifySession } from "./error-classes.js";
 import { adminRecipients, each, keyFor, lines, SIGN, siteUrl } from "./email.js";
+import { useCredential } from "./keyvault.js";
 
 /**
  * Operator health alerts, checked by the 5-minute cron (src/http.ts /api/cron/autoscale):
@@ -12,8 +13,8 @@ import { adminRecipients, each, keyFor, lines, SIGN, siteUrl } from "./email.js"
  *                  lists agents that ran on another CLI version than their pin (metadata.harness_drift).
  *   stuck queue    the oldest queued session has waited ALERT_QUEUE_MINUTES or more: no orchestrator is taking work.
  *
- * Email to the operators (EMAIL_ADMIN_TO, else the platform owners) through src/email.ts, plus a Slack message when
- * ALERT_SLACK_WEBHOOK_URL is set (env only: a webhook URL is a secret). One alert per problem per UTC hour: the email
+ * Email to the operators (EMAIL_ADMIN_TO, else the platform owners) through src/email.ts, plus a Slack message when the
+ * key vault holds a Slack incoming-webhook URL (provider "slack", migration 0005: a webhook URL is a secret). One alert per problem per UTC hour: the email
  * idempotency key carries the hour. ALERTS_ENABLED off: checked and returned, nothing sent. Never throws.
  */
 export const MIN_FINISHED = 5;
@@ -71,9 +72,13 @@ export function healthAlerts(f: HealthFacts, limits: { rate: number; queueMinute
   return out;
 }
 
+export const SLACK_PROVIDER = "slack";
+const SLACK_WEBHOOK = /^https:\/\/hooks\.slack\.com\/(services|workflows|triggers)\//;
+
 async function slack(text: string): Promise<boolean> {
-  const url = process.env.ALERT_SLACK_WEBHOOK_URL;
+  const url = await useCredential(SLACK_PROVIDER).then((c) => c.secret.trim(), () => null);
   if (!url) return false;
+  if (!SLACK_WEBHOOK.test(url)) { console.error("health alert: the vault's Slack key is not a hooks.slack.com webhook URL"); return false; }
   try {
     const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text }), signal: AbortSignal.timeout(10_000) });
     return r.ok;
