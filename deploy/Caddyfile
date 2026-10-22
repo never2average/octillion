@@ -16,3 +16,26 @@
 		flush_interval -1
 	}
 }
+
+# Consenzy (consent-data-master), deployed on this VM: API and portal listen only on the docker0 address.
+consenzy.onfinance.ai {
+	log
+	request_body {
+		max_size 2MB
+	}
+	header {
+		defer
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+	route {
+		respond /v1/admin* 404
+		reverse_proxy /v1/* 172.17.0.1:18000
+		reverse_proxy /healthz 172.17.0.1:18000
+		reverse_proxy /openapi.json 172.17.0.1:18000
+		reverse_proxy 172.17.0.1:13100
+	}
+}
