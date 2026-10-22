@@ -5,7 +5,7 @@ import { scheduledAgents, variantsOf } from "./agents.js";
 import { getPopulation } from "./populations.js";
 import { listSettings } from "./settings.js";
 import { classifySession } from "./error-classes.js";
-import { directKeysAllowed, HARNESS_ENV, ORCHESTRATOR_ONLY_PROVIDERS } from "./gateway.js";
+import { missingAgentKeys } from "./gateway.js";
 import { BOAT, BOAT_PRICE_PER_HOUR } from "../orchestrator/core/config.js";
 import * as lib from "../orchestrator/deploy/boat-lib.js";
 
@@ -146,14 +146,10 @@ export async function agentKeyCoverage(): Promise<{ agent_id: string; harness: s
   let agents: { id: string; harness: string; requires_env?: string[] }[] = [];
   try { agents = scheduledAgents(await getPopulation()).flatMap((a) => [a, ...variantsOf(a).filter((v) => v.id !== a.id)]); }
   catch { return []; }
-  const needsOf = (a: { harness: string; requires_env?: string[] }) => (a.requires_env?.length ? a.requires_env : HARNESS_ENV[a.harness] ?? []);
-  const all = [...new Set(agents.flatMap(needsOf))];
-  const providers = (await kv.providersForEnv(all))
-    .filter((p) => p.mode === "gateway" || (directKeysAllowed() && !ORCHESTRATOR_ONLY_PROVIDERS.has(p.slug)));
   const seen = new Set<string>();
-  return agents.filter((a) => !seen.has(a.id) && seen.add(a.id)).map((a) => ({
-    agent_id: a.id, harness: a.harness, missing_env: needsOf(a).filter((v) => !providers.some((p) => p.env_vars.includes(v))),
-  }));
+  const unique = agents.filter((a) => !seen.has(a.id) && seen.add(a.id));
+  const missing = await missingAgentKeys(unique);
+  return unique.map((a) => ({ agent_id: a.id, harness: a.harness, missing_env: missing.get(a.id) ?? [] }));
 }
 
 // ---------------------------------------------------------------- verdict (pure; smoke-tested)

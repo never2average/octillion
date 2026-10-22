@@ -144,6 +144,25 @@ export async function providersForEnv(envVars: string[]): Promise<ProviderRow[]>
 });
 }
 
+/**
+ * Of these gateway providers, the ones the gateway can serve right now: an enabled key of their own (not the "vertex"
+ * label), or, on a Vertex backend or for Claude's Vertex fallback (src/gateway.ts), a Vertex service-account key. The
+ * same rules as useCredential / useVertexCredential, read without using a key.
+ */
+export async function providersWithKeys(rows: ProviderRow[]): Promise<Set<string>> {
+  if (!rows.length) return new Set();
+  const keys = await (await getDb()).query<{ provider: string; label: string }>(
+    "SELECT DISTINCT provider, label FROM vault_credentials WHERE enabled");
+  const has = (provider: string, label?: string, notLabel?: string) =>
+    keys.some((k) => k.provider === provider && (label == null || k.label === label) && (notLabel == null || k.label !== notLabel));
+  const vertexFor = (slug: string, credentialProvider?: string) =>
+    credentialProvider && credentialProvider !== VERTEX_PROVIDER ? has(credentialProvider, VERTEX_LABEL)
+      : (!credentialProvider && slug !== VERTEX_PROVIDER && has(slug, VERTEX_LABEL)) || has(VERTEX_PROVIDER);
+  return new Set(rows.filter((p) => p.backend === "vertex"
+    ? vertexFor(p.slug, (p.backend_config as { credential_provider?: string } | null)?.credential_provider)
+    : has(p.slug, undefined, VERTEX_LABEL) || (p.slug === "anthropic" && vertexFor(p.slug))).map((p) => p.slug));
+}
+
 // ---------- credentials ----------
 
 export interface SavedCredential { id: number; provider: string; label: string; hint: string; project_id?: string; client_email?: string }

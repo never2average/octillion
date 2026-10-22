@@ -9,7 +9,7 @@ import { getDb } from "./db.js";
  * setSetting() updates this process's cache at once.
  */
 
-export type SettingGroup = "models" | "runs" | "capacity" | "research" | "reasons" | "docs" | "library" | "email";
+export type SettingGroup = "models" | "runs" | "capacity" | "research" | "reasons" | "docs" | "library" | "email" | "alerts";
 export interface SettingDef {
   key: string; group: SettingGroup; label: string; help: string;
   kind: "text" | "int" | "number" | "choice";
@@ -28,6 +28,7 @@ export const SETTING_GROUPS: { id: SettingGroup; label: string }[] = [
   { id: "docs", label: "Docs answers" },
   { id: "library", label: "Library contributions" },
   { id: "email", label: "Email" },
+  { id: "alerts", label: "Alerts" },
 ];
 
 export const SETTINGS: SettingDef[] = [
@@ -75,6 +76,12 @@ export const SETTINGS: SettingDef[] = [
     help: "Where replies go. Empty: to the From address." },
   { key: "EMAIL_ADMIN_TO", group: "email", label: "Operator alerts to", kind: "text", format: "emails", default: "",
     help: "Who gets new access requests and library submissions, comma-separated. Empty: the platform owners (Admins)." },
+  { key: "ALERTS_ENABLED", group: "alerts", label: "Health alerts", kind: "choice", default: "on", options: ["on", "off"],
+    help: "On: operators get an email (and a Slack message when ALERT_SLACK_WEBHOOK_URL is set) when agent sessions fail too often or wait too long. Checked every 5 minutes; at most one alert per problem an hour." },
+  { key: "ALERT_FAILURE_RATE", group: "alerts", label: "Failed sessions that raise an alert (%)", kind: "number", default: 10, min: 1, max: 100,
+    help: "Share of the agent sessions that finished in the last hour that failed or timed out. Needs at least 5 finished sessions." },
+  { key: "ALERT_QUEUE_MINUTES", group: "alerts", label: "Queue wait that raises an alert (minutes)", kind: "int", default: 30, min: 5, max: 1440,
+    help: "An agent session still queued after this long means no orchestrator is taking work." },
 ];
 const DEFS = new Map(SETTINGS.map((d) => [d.key, d]));
 

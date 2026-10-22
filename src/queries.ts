@@ -10,6 +10,28 @@ import type { Tool } from "./scoring.js";
 import { dealByPreference, planFirstBatch, schedulingShares, drawVariant, enabledAgents, findAgent, isRunnable, runnableCoverage, sandboxMix, scheduledAgents, variantsOf, type AgentSpec } from "./agents.js";
 import { getPopulation, listPopulations } from "./populations.js";
 import { capacityStatus } from "./autoscaler.js";
+import { missingAgentKeys } from "./gateway.js";
+import type { Population } from "./agents.js";
+
+/**
+ * The population without the agents no vault key can serve (gateway.ts missingAgentKeys): their sessions would fail
+ * on their first model call, so runs leave them out. A slot agent keeps the model variants that have keys and drops
+ * out when none do. `left_out` lists the agent ids dropped, for the launch note.
+ */
+async function withKeys(pop: Population): Promise<{ pop: Population; left_out: string[] }> {
+  // OCTILLION_RUN_KEY_CHECK=off (test fixtures with no vault): schedule everyone; the credential broker still refuses.
+  if (process.env.OCTILLION_RUN_KEY_CHECK === "off") return { pop, left_out: [] };
+  const all = pop.agents.flatMap((a) => [a, ...variantsOf(a).filter((v) => v.id !== a.id)]);
+  const missing = await missingAgentKeys(all);
+  const ok = (id: string) => !(missing.get(id)?.length);
+  const left_out = new Set<string>();
+  const agents = pop.agents.flatMap((a) => {
+    if (!a.model_variants) { if (ok(a.id)) return [a]; left_out.add(a.id); return []; }
+    const kept = Object.fromEntries(Object.entries(a.model_variants).filter(([id]) => ok(id) || (left_out.add(id), false)));
+    return Object.keys(kept).length ? [{ ...a, model_variants: kept }] : [];
+  });
+  return { pop: { ...pop, agents }, left_out: [...left_out].filter((id) => pop.agents.some((a) => a.weight > 0 && (a.id === id || a.model_variants?.[id]))) };
+}
 
 export const agentLabel = (id: string) => findAgent(id)?.label ?? id;
 
@@ -447,7 +469,8 @@ export async function runSimulation(org: Org, input: RunInput) {
   // The account's own limits for this person (src/limits.ts): rollout, allowance, team budget, concurrency, run size.
   const personal = await checkRun(org);
   const maxSessions = Math.min(config.maxSessionsPerRun(), personal.maxSessions ?? Infinity);
-  const pop = await getPopulation(input.population, org.orgId);
+  // Agents without a usable vault key sit this run out (their sessions would fail on the first model call).
+  const { pop, left_out: noKey } = await withKeys(await getPopulation(input.population, org.orgId));
   const enabled = enabledAgents(pop);
   if (!enabled.length) throw new Error(`No coding agents are running in developer population ${pop.slug}`);
 
@@ -525,6 +548,8 @@ export async function runSimulation(org: Org, input: RunInput) {
     let chosen = [...new Map(enabled.flatMap((a) => [a, ...variantsOf(a)]).map((a) => [a.id, a])).values()];
     if (input.agents?.length) {
       const unknown = input.agents.filter((a) => !chosen.some((e) => e.id === a));
+      const keyless = unknown.filter((a) => noKey.includes(a));
+      if (keyless.length) throw new Error(`No vault key can run ${keyless.join(", ")} right now (an admin adds it in Key vault). Available: ${chosen.map((e) => e.id).join(", ")}`);
       if (unknown.length) throw new Error(`Unknown or disabled agent(s): ${unknown.join(", ")}. Available: ${chosen.map((e) => e.id).join(", ")}`);
       chosen = chosen.filter((e) => input.agents!.includes(e.id));
     }
@@ -582,7 +607,7 @@ export async function runSimulation(org: Org, input: RunInput) {
   // What is left for the launcher (connector keys: the account's), and what this run is likely to cost (Budget rules).
   const { avg_session_usd } = await monthFigures(org.orgId);
   const budgetNote = launchNote(personal.left_usd ?? Math.max(0, Math.round((budget - spent) * 100) / 100), personal.limit_usd, plan.length, avg_session_usd);
-  return { ...(await getSimulation(org, id)), budget: budgetNote };
+  return { ...(await getSimulation(org, id)), budget: budgetNote, ...(noKey.length ? { agents_without_keys: noKey } : {}) };
 }
 
 /**
@@ -616,7 +641,7 @@ export async function extendAdaptive(simulationId: string): Promise<number> {
   const stop = overBudget || runCapped;
   // Sessions per run applies to the whole run, top-ups included: the server's limit, or the account's if lower.
   const maxSessions = await sessionsLimit(pre.org_id);
-  const pop = await getPopulation(pre.slug ?? undefined);
+  const { pop } = await withKeys(await getPopulation(pre.slug ?? undefined));
   const prefer = await harnessPreferences((await db.query<{ scenario_id: number }>(
     "/* tenant: internal: adaptive sampling of a finished session's simulation */ SELECT DISTINCT scenario_id FROM agent_sessions WHERE simulation_id = $1",
     [simulationId])).map((r) => Number(r.scenario_id)));

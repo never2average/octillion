@@ -180,6 +180,12 @@ function ThisMonth({ b, u, l }: { b: Billing; u: Usage | undefined; l: Limits | 
           ))}
         </ul>
       )}
+      {b.enabled && b.plans.length > 0 && !(live && b.customer) && b.can_manage && (
+        <p className='text-muted-foreground mt-3 text-xs'>
+          By choosing a plan you agree to the <a href='/terms' target='_blank' rel='noreferrer' className='underline underline-offset-2'>Terms of Service</a> and{' '}
+          <a href='/privacy' target='_blank' rel='noreferrer' className='underline underline-offset-2'>Privacy Policy</a>.
+        </p>
+      )}
       {b.contributions && <ContributionCredits c={b.contributions} />}
     </Block>
   );

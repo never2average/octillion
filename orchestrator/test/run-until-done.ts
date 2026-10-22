@@ -167,6 +167,27 @@ try {
     cpa.join(" ").includes("--permission-mode plan") && !cpa.includes("--dangerously-skip-permissions") && cua.join(" ").includes("--mode plan")
     && !getAdapter("codex").planArgv, cpa.join(" "));
 
+  // 5a3. version drift: a preinstalled CLI that isn't the pinned version runs (recorded as drift) instead of failing;
+  // only a missing CLI fails. Bash with stub sudo (runs the command as is) and a stub CLI on PATH.
+  const { boatEnsureHarnessScript } = await import("../core/runners.js");
+  const { mkdirSync: mk, writeFileSync: wf, chmodSync } = await import("node:fs");
+  const stub = mkdtempSync(path.join(tmpdir(), "rud-drift-"));
+  wf(path.join(stub, "sudo"), '#!/bin/bash\nwhile [ "${1:-}" = -n ] || [ "${1:-}" = -u ]; do [ "$1" = -u ] && shift; shift; done\nexec "$@"\n'); chmodSync(path.join(stub, "sudo"), 0o755);
+  mk(path.join(stub, "bin"));
+  wf(path.join(stub, "bin", "fakecli"), "#!/bin/bash\necho '2.1.302 (Fake CLI)'\n"); chmodSync(path.join(stub, "bin", "fakecli"), 0o755);
+  const runEnsure = (bin: string) => spawnSync("bash", ["-c", boatEnsureHarnessScript("fake", bin, "2.1.296", false)],
+    { env: { ...process.env, PATH: `${stub}:${process.env.PATH}` }, encoding: "utf8" });
+  const drifted = runEnsure(path.join(stub, "bin", "fakecli")), missing = runEnsure(path.join(stub, "bin", "nope"));
+  check("version drift: a newer preinstalled CLI runs and reports drift; a missing one fails",
+    drifted.status === 0 && /drift 2\.1\.302 \(Fake CLI\) \(pinned 2\.1\.296/.test(drifted.stdout) && missing.status === 1 && /is missing/.test(missing.stderr),
+    `${drifted.status} ${drifted.stdout.trim()} | ${missing.status} ${missing.stderr.trim().slice(0, 80)}`);
+  const { tarball } = await import("../deploy/boat-lib.js");
+  const bare = mkdtempSync(path.join(tmpdir(), "rud-code-"));
+  mk(path.join(bare, "orchestrator", "core"), { recursive: true }); wf(path.join(bare, "orchestrator", "core", "x.ts"), "");
+  let refused = "";
+  try { tarball(bare); } catch (e) { refused = String(e); }
+  check("orchestrator code without the agent install scripts is refused at launch", /missing orchestrator\/images\/boat-setup/.test(refused) && tarball().length > 1000, refused.slice(0, 100));
+
   // 5b. docs-only first run is not done
   const b = await WorkerSession.start(job("ses_docs", "docs_then_code") as any, localRunner);
   const rb1 = await b.waitForTurn();

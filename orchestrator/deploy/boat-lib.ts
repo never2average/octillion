@@ -157,6 +157,9 @@ export function codeFiles(root = REPO_ROOT): string[] {
   return out.sort();
 }
 
+/** What every orchestrator needs besides its TypeScript: the agent install scripts, starter repos and the registry. */
+export const REQUIRED_CODE = ["orchestrator/images/boat-setup/_common.sh", "orchestrator/images/boat-setup/claude-code.sh", "orchestrator/workspaces/", "harnesses/registry.json"];
+
 /** Content hash of the orchestrator code: keys the named snapshot image. */
 export function codeHash(root = REPO_ROOT): string {
   const h = createHash("sha256");
@@ -168,7 +171,12 @@ export function codeHash(root = REPO_ROOT): string {
  *  are kept (the setup scripts are executable); owners, times and order are fixed so the bytes depend on content only. */
 export function tarball(root = REPO_ROOT): Buffer {
   const blocks: Buffer[] = [];
-  for (const f of codeFiles(root)) {
+  const files = codeFiles(root);
+  // An orchestrator without these can't install a pinned agent or seed a starter repo: every session it ran would
+  // fail (seen 2026-10-18, when the Vercel bundle left orchestrator/images out). Refuse to launch one instead.
+  const missing = REQUIRED_CODE.filter((r) => !files.some((f) => f.startsWith(r)));
+  if (missing.length) throw new Error(`orchestrator code is incomplete (missing ${missing.join(", ")}): check vercel.json includeFiles`);
+  for (const f of files) {
     const data = readFileSync(path.join(root, f));
     const mode = statSync(path.join(root, f)).mode & 0o777;
     blocks.push(tarHeader(f, data.length, mode), data, Buffer.alloc((512 - (data.length % 512)) % 512));

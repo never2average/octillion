@@ -451,7 +451,12 @@ export function boatSetupScripts(harness: string): { common: string; script: str
   catch { return null; }
 }
 
-/** Keep the preinstalled CLI if it reports the pinned version; else install it with its boat-setup script. */
+/**
+ * Keep the preinstalled CLI if it reports the pinned version; else install it with its boat-setup script. If the pinned
+ * version can't be had (no setup script, or its install fails) but a working CLI is preinstalled, the session runs on
+ * that one instead of failing: it prints `harness <id>: drift <found> (pinned <pin>)`, which the runner records on the
+ * session (metadata.harness_drift) and the failure-rate alert reports. Only a missing CLI fails the session.
+ */
 export function boatEnsureHarnessScript(harness: string, bin: string, pin: string | null, hasSetup: boolean): string {
   return `set -uo pipefail
 # Boat VMs ship /usr/local/bin/node as a symlink into /home/user/.nvm (0750): the agent user would fall back to
@@ -463,11 +468,13 @@ pin=${shq(pin ?? "")}
 if [ -n "$cur" ] && { [ -z "$pin" ] || printf '%s' "$cur" | grep -qF -- "$pin"; }; then echo "harness ${harness}: preinstalled ($cur)"; exit 0; fi
 ${hasSetup
     ? `echo "harness ${harness}: installing pinned \${pin:-latest} (found: \${cur:-none})" >&2
-bash ${BOAT_DIR}/setup/${harness}.sh "$pin" >&2 || exit 1
+bash ${BOAT_DIR}/setup/${harness}.sh "$pin" >&2 || echo "harness ${harness}: install of $pin failed" >&2
 now="$( (sudo -n -u nobody env -i HOME=/tmp PATH=/usr/local/bin:/usr/bin:/bin ${shq(bin)} --version 2>/dev/null || true) | grep -v -i -E '^(warning|\\[|\\(node)' | head -n1)"
-printf '%s' "$now" | grep -qF -- "$pin" || { echo "harness ${harness}: after install, unprivileged --version reports '$now', expected $pin" >&2; exit 1; }
-echo "harness ${harness}: installed ($now)"`
-    : `echo "harness ${harness}: ${bin} is \${cur:-missing}, expected \${pin:-any}, and there is no boat-setup script" >&2; exit 1`}
+if printf '%s' "$now" | grep -qF -- "$pin"; then echo "harness ${harness}: installed ($now)"; exit 0; fi
+[ -n "$now" ] || { echo "harness ${harness}: after install, unprivileged --version reports nothing, expected $pin" >&2; exit 1; }
+echo "harness ${harness}: drift $now (pinned $pin)"`
+    : `[ -n "$cur" ] || { echo "harness ${harness}: ${bin} is missing, expected \${pin:-any}, and there is no boat-setup script" >&2; exit 1; }
+echo "harness ${harness}: drift $cur (pinned $pin; no boat-setup script)"`}
 `;
 }
 
@@ -488,6 +495,7 @@ export const boatRunner: Runner = {
     }
     const id: string = created?.sandbox?.id;
     let envResult: EnvironmentResult | undefined;
+    let harnessDrift: { found: string; pinned: string } | null = null;
     let egressReport: { hosts: number; probe: unknown } | undefined;
     if (!id) throw new Error(`boat create returned no sandbox id: ${JSON.stringify(created).slice(0, 300)}`);
     // A recognisable name, so `status` / cleanup can attribute worker sandboxes (best effort).
@@ -537,6 +545,10 @@ export const boatRunner: Runner = {
       }
       const ensure = await boatExec(id, boatEnsureHarnessScript(spec.adapter.id, spec.adapter.bin, pin, !!setup), 600);
       if (ensure.exitCode !== 0) throw new Error(`harness ${spec.adapter.id}${pin ? `@${pin}` : ""} not available: ${(ensure.stderr || ensure.stdout).slice(-800)}`);
+      // Ran on another version than the pin (see boatEnsureHarnessScript): kept on the session, not a failure.
+      const drift = /harness \S+: drift (.+?) \(pinned ([^;)]+)/.exec(ensure.stdout);
+      harnessDrift = drift ? { found: drift[1]!.trim().slice(0, 80), pinned: drift[2]!.trim() } : null;
+      if (harnessDrift) log(`[boat ${id}] ${spec.adapter.id} runs ${harnessDrift.found}, pinned ${harnessDrift.pinned}`);
       const seed = !spec.repoUrl && !!spec.template;
       if (seed) await put(`${BOAT_DIR}/seed.sh`, seedScript(spec.template!));
       await put(`${BOAT_DIR}/prepare.sh`, boatPrepareScript(spec.adapter.bin, spec.repoUrl, seed));
@@ -700,6 +712,7 @@ export const boatRunner: Runner = {
         return {
           ...(spec.template && !spec.repoUrl ? { workspace_template: spec.template } : {}),
           boat_sandbox_id: id,
+          ...(harnessDrift ? { harness_drift: harnessDrift } : {}),
           boat_sandbox_type: BOAT.size,
           boat_sandbox_seconds: Math.round(secs),
           boat_est_cost_usd: Number(((secs / 3600) * (BOAT_PRICE_PER_HOUR[BOAT.size] ?? 0.036)).toFixed(5)), // exact meter: GET /sandboxes/{id}/usage

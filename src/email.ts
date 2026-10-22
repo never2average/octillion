@@ -6,6 +6,7 @@
  *                       given), approved (a short welcome beside Clerk's invitation)
  *   library submissions received (operator alert), accepted (credit and when it applies), declined (with the reason)
  *   budget              an account's spend crossing 80% and 100% of its monthly allowance (to owners and billing managers)
+ *   health              agent sessions failing too often or waiting too long (operator alert, src/health-alerts.ts)
  *   test                the "Send test email" button on /admin/emails
  *
  * Rules:
@@ -30,7 +31,7 @@ import { accountRoleOf, type AccountRole } from "./account-roles.js";
 
 export const EMAIL_PROVIDER = "resend";
 export const EMAIL_KINDS = ["request_received", "request_alert", "request_declined", "request_approved", "submission_alert", "submission_accepted",
-  "submission_declined", "budget_80", "budget_100", "test"] as const;
+  "submission_declined", "budget_80", "budget_100", "health_alert", "test"] as const;
 export type EmailKind = (typeof EMAIL_KINDS)[number];
 
 export interface Email {
@@ -153,9 +154,9 @@ export function htmlOf(text: string): string {
 ${body}
 </div></body></html>`;
 }
-const SIGN = "— Octillion";
+export const SIGN = "— Octillion";
 const hello = (name?: string | null) => `Hi${name?.trim() ? ` ${name.trim().split(/\s+/)[0]}` : ""},`;
-const lines = (...parts: (string | null | false | undefined)[]) => parts.filter((p): p is string => typeof p === "string").join("\n\n");
+export const lines = (...parts: (string | null | false | undefined)[]) => parts.filter((p): p is string => typeof p === "string").join("\n\n");
 const money = (usd: number) => `$${usd.toFixed(usd % 1 ? 2 : 0)}`;
 
 // ---------- who gets what ----------
@@ -199,7 +200,7 @@ async function personOf(actor: string | null | undefined): Promise<string | null
   return null;
 }
 
-const each = (to: string[], build: (to: string) => Email) => Promise.all(to.map((t) => sendLater(build(t))));
+export const each = (to: string[], build: (to: string) => Email) => Promise.all(to.map((t) => sendLater(build(t))));
 
 // ---------- access requests (src/http.ts, src/admin.ts) ----------
 

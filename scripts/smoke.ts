@@ -18,6 +18,9 @@ process.env.OCTILLION_WORKER_TOKEN ??= "smoke-worker-token";
 process.env.OCTILLION_VAULT_KEY ??= (await import("node:crypto")).randomBytes(32).toString("base64");
 process.env.CRON_SECRET ??= "smoke-cron-secret";
 process.env.OCTILLION_REGISTRY = "scripts/fixtures/registry.json"; // fixed weights, independent of the live registry
+// The fixture agents have no vault keys until the vault section stores some: runs schedule them anyway (the key-check
+// test turns this back on).
+process.env.OCTILLION_RUN_KEY_CHECK = "off";
 // Accounts without a plan get $0 by default (prepaid, invite-only); the smoke run gives every test account an allowance.
 process.env.OCTILLION_ORG_MONTHLY_BUDGET_USD ??= "1000";
 // Most of the run signs people into Clerk organizations created on the fly; self-serve stays on for them (checked off below).
@@ -560,6 +563,8 @@ try {
   assert.ok(gw.api_key.startsWith("ogw_") && gw.base_url === `${base}/gw/smoke_llm`, "gateway providers get a scoped token + base URL");
   assert.equal(creds.providers.smoke_vendor.api_key, REAL_VENDOR_KEY, "direct providers get the real key for this session");
   assert.equal(creds.env.SMOKE_VENDOR_TOKEN, REAL_VENDOR_KEY);
+  // Agents no key can serve leave runs (scripts/smoke-readiness.ts).
+  await (await import("./smoke-readiness.js")).keyChecks({ db, worker, call, fails, A, sessionId: jobs[0].session_id });
   delete process.env.OCTILLION_DIRECT_KEYS;
   await db.query("UPDATE scenarios SET source = 'manual' WHERE id = $1", [lockedScenario]);
   // Persona table fails closed: a private persona without its org, or a shared row without the vault source, is refused.
@@ -788,7 +793,7 @@ try {
   assert.ok((await call(A, "get_visibility_report", { days: 7, platform: onePlatform })).by_scenario.every((x: any) => x.platform === onePlatform), "platform filter");
   assert.ok((await call(A, "browse_task_library", { platform: "web" })).tasks.every((x: any) => x.platform === "web"), "library filter by platform");
   assert.ok((await (await import("../src/research.js")).libraryTasks({ platform: "web" })).tasks.every((x: any) => x.platform === "web"), "and for research");
-  assert.equal((await call(A, "list_simulations")).simulations.length, 5); // includes the cancelled private task-set and harness-mix runs
+  assert.equal((await call(A, "list_simulations")).simulations.length, 6); // includes the cancelled private task-set, harness-mix and vault-key runs
   assert.equal((await call(A, "list_products")).products[0].sessions_30d, 4);
 
   const lost = report.recent_losses[0].id;
@@ -2091,7 +2096,7 @@ try {
     const reset = () => adm("PUT", "/compute/settings", { values: Object.fromEntries(keys.map((k) => [k, null])) });
     const c0 = await json(adm("GET", "/compute"));
     const byKey = (c: any, k: string) => c.settings.find((x: any) => x.key === k);
-    assert.ok(c0.groups.length === 8 && c0.settings.length >= 21 && byKey(c0, "REASONS_DAILY_MAX")?.value === 500 && byKey(c0, "DOCS_ANSWERS_DAILY_MAX")?.value === 500 && byKey(c0, "PUBLISH_DISCOUNT_TASK_USD")?.value === 10, "every setting listed, grouped");
+    assert.ok(c0.groups.length === 9 && c0.settings.length >= 24 && byKey(c0, "ALERT_FAILURE_RATE")?.value === 10 && byKey(c0, "REASONS_DAILY_MAX")?.value === 500 && byKey(c0, "DOCS_ANSWERS_DAILY_MAX")?.value === 500 && byKey(c0, "PUBLISH_DISCOUNT_TASK_USD")?.value === 10, "every setting listed, grouped");
     // Email settings (src/email.ts): defaults, and addresses checked.
     assert.ok(byKey(c0, "EMAIL_FROM")?.value === "Octillion <hello@octillion.useimmaculate.com>" && byKey(c0, "EMAILS_ENABLED")?.value === "on"
       && byKey(c0, "EMAIL_REPLY_TO")?.value === "" && byKey(c0, "EMAIL_ADMIN_TO")?.value === "", "email settings and their defaults");
@@ -5180,6 +5185,9 @@ try {
       assert.equal((await db.query<any>("SELECT 1 FROM email_log WHERE idempotency_key LIKE $1", [`budget:${bo.id}:${month}:%`])).length, 4, "keyed by account, month and threshold");
       const now = new Date(), nextMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 2));
       assert.deepEqual(await mail.checkBudget(bo.id, nextMonth), { threshold: 100, sent: 2 }, "a new month is a new key");
+
+      // 7b. Health alerts (scripts/smoke-readiness.ts).
+      await (await import("./smoke-readiness.js")).healthChecks({ db, sentTo, OPS, stamp, orgId: bo.id, productId: bp.id, scenarioId: bsc.id });
 
       // 8. /admin/emails: the log and the cards; the test button (owner only, the route matrix above checks the role).
       const tester = `tester+${stamp}@mail-test.dev`;

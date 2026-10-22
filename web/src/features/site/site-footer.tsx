@@ -19,7 +19,11 @@ export function SiteFooter() {
             ))}
           </nav>
         </div>
-        <p className='text-muted-foreground border-t pt-6 text-xs'>© 2026 Octillion</p>
+        <div className='text-muted-foreground flex flex-wrap items-center gap-x-5 gap-y-2 border-t pt-6 text-xs'>
+          <span>© 2026 Octillion</span>
+          <Link href='/terms' className='hover:text-foreground transition-colors'>Terms</Link>
+          <Link href='/privacy' className='hover:text-foreground transition-colors'>Privacy</Link>
+        </div>
       </div>
     </footer>
   );

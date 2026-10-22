@@ -108,7 +108,9 @@ export function createApp() {
     const reasons = await (await import("./reasons.js")).drainReasons(30).catch((e) => ({ error: (e as Error).message }));
     // Row-level security, proven on the live database (src/rls.ts): Vercel has no release step to run check:rls in.
     const rls = await probeFromCron(getDb);
-    res.json({ tick, pruned, reasons, rls });
+    // Operator alerts: sessions failing too often or stuck in the queue (src/health-alerts.ts).
+    const health = await (await import("./health-alerts.js")).checkHealth().then((h) => ({ alerts: h.alerts, emailed: h.emailed, slack: h.slack, error: h.error }));
+    res.json({ tick, pruned, reasons, rls, health });
   });
 
   const recent = new Map<string, number[]>();

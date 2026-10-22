@@ -308,7 +308,11 @@ export async function allInvoices(fresh = false): Promise<Invoice[]> {
 export async function checkoutUrl(customer: string, priceId: string, returnUrl: string, meta: Record<string, string> = {}, trialDays?: number | null, usagePriceIds: string[] = []) {
   // A metered price takes no quantity; a usage-only plan's own price is its first usage price.
   const items = [...(usagePriceIds.includes(priceId) ? [] : [{ price: priceId, quantity: 1 }]), ...usagePriceIds.map((price) => ({ price }))];
+  // The terms the customer agrees to, under the pay button (custom_text.submit needs no Stripe dashboard setting, unlike
+  // consent_collection.terms_of_service, which fails until a Terms URL is set in the account's public details).
+  const site = (process.env.PUBLIC_URL ?? "https://octillion.useimmaculate.com").replace(/\/$/, "");
   const body = { mode: "subscription", customer, line_items: items, success_url: returnUrl, cancel_url: returnUrl, allow_promotion_codes: true, metadata: meta,
+    custom_text: { submit: { message: `By subscribing you agree to the Octillion Terms of Service (${site}/terms) and Privacy Policy (${site}/privacy).` } },
     subscription_data: { metadata: meta, ...(trialDays ? { trial_period_days: trialDays } : {}) } };
   let s: { url: string };
   try { s = await call<{ url: string }>("POST", "/v1/checkout/sessions", body); }

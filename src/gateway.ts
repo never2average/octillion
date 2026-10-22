@@ -4,7 +4,7 @@ import type { Request, Response } from "express";
 import { getDb } from "./db.js";
 import { settingText } from "./settings.js";
 import { findAgent } from "./agents.js";
-import { getProvider, providersForEnv, useCredential, useVertexCredential, VERTEX_LABEL, type ProviderRow } from "./keyvault.js";
+import { getProvider, providersForEnv, providersWithKeys, useCredential, useVertexCredential, VERTEX_LABEL, type ProviderRow } from "./keyvault.js";
 import { adaptGeminiBody, geminiWantsThinkingLevel, toVertex, toVertexGemini, vertexAccessToken, vertexConfig, type VertexConfig } from "./vertex.js";
 import { costOf, recordModelUsage } from "./usage.js";
 import { SCENARIO_ROWS } from "./queries.js";
@@ -61,7 +61,11 @@ export async function brokerSessionCredentials(sessionId: string) {
   const needs = (s.agent_id && findAgent(s.agent_id)?.requires_env) || HARNESS_ENV[s.harness] || [];
   // Real vendor keys (direct mode) reach a session only when explicitly allowed, never for a task a customer wrote
   // (its prompt steers an agent that can read its own environment), and never for orchestrator-only keys.
-  const all = await providersForEnv(needs);
+  // A gateway provider with no usable key would fail the agent's first model call mid-session ("No anthropic credential
+  // in the vault", seen 2026-10-19): it doesn't count as supplying its variables, so the session is refused up front.
+  const listed = await providersForEnv(needs);
+  const keyed = await providersWithKeys(listed.filter((p) => p.mode === "gateway"));
+  const all = listed.filter((p) => p.mode !== "gateway" || keyed.has(p.slug));
   const providers = all.filter((p) => p.mode === "gateway" || directKeyAllowed(p.slug, s.task_source));
   const withheld = needs.filter((v) => !providers.some((p) => p.env_vars.includes(v)) && all.some((p) => p.env_vars.includes(v)));
   if (withheld.length)
@@ -93,6 +97,19 @@ export async function brokerSessionCredentials(sessionId: string) {
     }
   }
   return { expires_at: expiresAt.toISOString(), providers: out, env };
+}
+
+/**
+ * For each agent: the env vars its sessions need (registry requires_env, else the harness default) that no provider the
+ * broker may hand out supplies with a usable key. The same rule as brokerSessionCredentials: an agent with any listed
+ * here would fail with "No vault provider supplies …", so runs leave it out (queries.ts) and Compute flags it.
+ */
+export async function missingAgentKeys(agents: { id: string; harness: string; requires_env?: string[] }[]): Promise<Map<string, string[]>> {
+  const needsOf = (a: { harness: string; requires_env?: string[] }) => (a.requires_env?.length ? a.requires_env : HARNESS_ENV[a.harness] ?? []);
+  const listed = await providersForEnv([...new Set(agents.flatMap(needsOf))]);
+  const keyed = await providersWithKeys(listed.filter((p) => p.mode === "gateway"));
+  const usable = listed.filter((p) => p.mode === "gateway" ? keyed.has(p.slug) : directKeysAllowed() && !ORCHESTRATOR_ONLY_PROVIDERS.has(p.slug));
+  return new Map(agents.map((a) => [a.id, needsOf(a).filter((v) => !usable.some((p) => p.env_vars.includes(v)))]));
 }
 
 /** What the orchestrator's brain (Pi) runs on; one place for every orchestrator. Default: GPT via the gateway. */
