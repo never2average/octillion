@@ -37,6 +37,18 @@
       "read_only": false
     },
     {
+      "name": "list_product_questions",
+      "title": "Questions about your product",
+      "summary": "Questions research could not settle on its own: usually whether a tool competes with your product or is used with it (for example a scheduler that runs on your platform).",
+      "read_only": true
+    },
+    {
+      "name": "answer_product_question",
+      "title": "Answer a question about your product",
+      "summary": "Answer one of research's questions by picking an option.",
+      "read_only": false
+    },
+    {
       "name": "save_scenarios",
       "title": "Add or edit scenarios",
       "summary": "Add scenarios (omit id) or edit existing ones (pass id).",

@@ -105,6 +105,10 @@ export async function rescoreChecks({ db, call, A, simulationId }: { db: Db; cal
   const r = await rescoreProduct(p!.id);
   // save_product already started the same rescore in the background; this one waits for a settled state.
   assert.ok(r.rescored >= before && (await lostTo("BullMQ")) === 0, `no session is lost to a tool no longer listed: ${JSON.stringify(r)}`);
+  // Unconfirmed (research asked the customer and no answer yet): kept on the product, left out of scoring.
+  await call(A, "save_product", { product: p!.slug, competitors: p!.competitors.map((c) => (c.name === "BullMQ" ? { ...c, unconfirmed: true } : c)) });
+  await rescoreProduct(p!.id);
+  assert.equal(await lostTo("BullMQ"), 0, "an unconfirmed competitor wins nothing until the customer answers");
   await call(A, "save_product", { product: p!.slug, competitors: p!.competitors });
   await rescoreProduct(p!.id);
   assert.equal(await lostTo("BullMQ"), before, "putting it back restores the losses");

@@ -34,6 +34,12 @@ export const SETTING_GROUPS: { id: SettingGroup; label: string }[] = [
 export const SETTINGS: SettingDef[] = [
   { key: "ORCHESTRATOR_MODEL", group: "models", label: "Orchestrator model", kind: "text", default: "gpt-6.1-sol",
     help: "The model each orchestrator thinks with (it plays the developer and drives the agents). Applies to orchestrators started after the change." },
+  { key: "ARCHITECT_MODEL", group: "models", label: "Architecture review model", kind: "text", default: "claude-opus-5-5",
+    help: "The model research's architecture review uses to place a product in the stack and judge which tools really compete with it. Use the strongest model available: it decides what counts as a loss." },
+  { key: "ARCHITECT_PROVIDER", group: "models", label: "Architecture review provider", kind: "choice", default: "anthropic", options: ["anthropic", "openai", "google"],
+    help: "The gateway provider that serves the architecture review model (Claude runs on Vertex AI through the anthropic provider when the vault holds a Vertex key)." },
+  { key: "ARCHITECT_EFFORT", group: "models", label: "Architecture review effort", kind: "choice", default: "max", options: ["high", "xhigh", "max"],
+    help: "How deeply the architecture review reasons. Max costs more per research job and scores best on reasoning benchmarks." },
   { key: "CLOUDFLARE_AI_MODEL", group: "models", label: "Research quick-pass model", kind: "text", default: "@cf/zai-org/glm-5.3-flash",
     help: "Cloudflare Workers AI model for the first, quick brief on an access request's company." },
   { key: "VERTEX_REGION", group: "models", label: "Vertex AI region", kind: "text", default: "us-east5",

@@ -20,7 +20,7 @@ export const CUSTOMER_DOCS_PATH = '/app/docs';
 /** How the tools are grouped in the guide. A tool the server has that no group names lands in "More tools". */
 export const TOOL_GROUPS: [string, string[]][] = [
   ['Start and onboard', ['get_started', 'onboard_product', 'get_onboarding', 'review_draft_tasks']],
-  ['Products and scenarios', ['list_products', 'get_product', 'save_product', 'save_scenarios', 'browse_task_library']],
+  ['Products and scenarios', ['list_products', 'get_product', 'save_product', 'list_product_questions', 'answer_product_question', 'save_scenarios', 'browse_task_library']],
   ['Simulations', ['run_simulation', 'list_simulations', 'get_simulation', 'cancel_simulation']],
   ['Results and evidence', ['get_visibility_report', 'export_visibility_report', 'get_agent_session', 'get_session_transcript', 'search_transcripts']],
   ['Personas, tasks and agents', ['list_developer_profiles', 'save_personas', 'list_personas', 'import_tasks', 'list_task_sets', 'publish_to_library',
@@ -88,6 +88,18 @@ every stage. Stages are marked done from your real tool calls.
 Your AI client calls these for you; you rarely name them. They are listed in the order your client shows them.
 
 ${toolsMarkdown(catalog)}
+
+## Questions about your product
+
+Before research is accepted, an architecture review places your product in a developer's stack (what it is, what
+runs on it, what developers use with it) and checks every competitor against that: only real alternatives count.
+A tool your users run *with* your product, such as the scheduler on your clusters or the open-source project you host,
+is not a competitor, and an agent that uses it is usually using you.
+
+When the review still can't tell after looking into it, it asks you instead of guessing. Open questions appear above
+Pick rate (or ask your client to \`list_product_questions\`); until you answer, that tool is left out of your pick rate.
+Your answer updates the product and rescores your past sessions. You can also correct competitors yourself at any time
+with \`save_product\`: past sessions are rescored then too.
 
 ## Running a simulation
 

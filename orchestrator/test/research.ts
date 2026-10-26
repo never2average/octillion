@@ -136,7 +136,17 @@ const STEPS: [string, Record<string, unknown>][] = [
 ];
 
 const toolOutputs: { name: string; output: string }[] = [];
-let llmKeyOk = true, llmRequests = 0, reviews = 0;
+let llmKeyOk = true, llmRequests = 0, reviews = 0, architectRounds = 0;
+// The architecture reviewer: two substitutes, and one (Agenda) it stays unsure about every round, so after its rounds the
+// customer is asked instead of the reviewer guessing.
+const ARCHITECT_ANSWER = JSON.stringify({
+  placement: { layer: "Node.js job-queue library", runs_on_it: ["background jobs"], used_with: ["Redis"], adoption_signals: ["npm install acmeq"] },
+  competitors: [{ index: 0, name: "BeeQueue", relation: "substitute", confidence: "high", reason: "Another Redis queue for Node." },
+    { index: 1, name: "Agenda", relation: "substitute", confidence: "low", reason: "A scheduler; some teams run it next to a queue.",
+      question: { text: "Do your users pick Agenda instead of AcmeQ, or run it alongside AcmeQ?", options: [
+        { label: "Alongside AcmeQ, for cron-style scheduling", relation: "complement" }, { label: "Instead of AcmeQ", relation: "substitute" }] } },
+    { index: 2, name: "pg-boss", relation: "substitute", confidence: "high", reason: "A Postgres-backed queue." }],
+  missing_names: [] });
 const llm = http.createServer((req, res) => {
   let raw = "";
   req.on("data", (c) => (raw += c));
@@ -154,6 +164,7 @@ const llm = http.createServer((req, res) => {
       res.writeHead(401, { "content-type": "application/json" });
       return res.end(JSON.stringify({ error: { message: "Incorrect API key provided", type: "invalid_request_error", code: "invalid_api_key" } }));
     }
+    if (/You are a software architect/.test(JSON.stringify(body.instructions ?? "") + all) && !all.includes("failq.test")) { architectRounds++; return stream(res, body, null, ARCHITECT_ANSWER); }
     if (critic) { reviews++; return stream(res, body, null, JSON.stringify([0, 1, 2, 3].map((index) => ({ index, intrinsic_decision: true, decided_by_wording: false, vendor_vocabulary: null, problem: "" })))); }
     const names: Record<string, string> = {};
     for (const it of input) if (it?.type === "function_call") names[it.call_id] = it.name;
@@ -190,7 +201,7 @@ function stream(res: http.ServerResponse, body: any, step: [string, Record<strin
 
 const serverEnv: NodeJS.ProcessEnv = {
   PATH: process.env.PATH, HOME: process.env.HOME, PGLITE_DIR: path.join(tmp, "pglite"), HOST: "127.0.0.1", PORT: String(PORT),
-  PUBLIC_URL: BASE, OCTILLION_WORKER_TOKEN: WORKER_TOKEN, OCTILLION_VAULT_KEY: randomBytes(32).toString("base64"), VAULT_DIR: path.join(ROOT, "vault", "example"),
+  PUBLIC_URL: BASE, OCTILLION_WORKER_TOKEN: WORKER_TOKEN, ARCHITECT_PROVIDER: "openai", ARCHITECT_MODEL: "gpt-6.1-sol", ARCHITECT_EFFORT: "high", OCTILLION_ORG_MONTHLY_BUDGET_USD: "100", OCTILLION_VAULT_KEY: randomBytes(32).toString("base64"), VAULT_DIR: path.join(ROOT, "vault", "example"),
 };
 let server: ChildProcess | null = null, orch: ChildProcess | null = null;
 const textOf = (c: any): string => (Array.isArray(c) ? c.map((x) => x?.text ?? "").join("") : String(c ?? ""));
@@ -246,7 +257,7 @@ async function main() {
   orch = spawn(TSX, ["orchestrator/pi-octillion/main.ts"], {
     cwd: ROOT, stdio: ["ignore", openSync(path.join(tmp, "orchestrator.log"), "a"), openSync(path.join(tmp, "orchestrator.log"), "a")],
     env: { PATH: process.env.PATH, HOME: process.env.HOME, OCTILLION_URL: BASE, OCTILLION_WORKER_TOKEN: WORKER_TOKEN, RUNNER: "local", OCTILLION_DEV_ALLOW_LOCAL: "1", // test only
-      ORCHESTRATOR_ID: "rtest", POLL_INTERVAL_SECONDS: "1", RESEARCH_TEST_DNS: TEST_DNS, RESEARCH_TRUST_PRIVATE_HOSTS: TRUSTED },
+      ORCHESTRATOR_ID: "rtest", POLL_INTERVAL_SECONDS: "1", RESEARCH_ARCHITECT_MAX_MINUTES: "3", RESEARCH_TEST_DNS: TEST_DNS, RESEARCH_TRUST_PRIVATE_HOSTS: TRUSTED },
   });
 
   const final = new Set(["completed", "failed"]);
@@ -278,6 +289,19 @@ async function main() {
     A?.research.status === "completed" && A.product.packages?.includes("acmeq") && A.personas.length === 2 && A.drafts.length === 4 && A.scenarios.length === 0 && !A.simulation,
     `status ${A?.research.status}, packages ${JSON.stringify(A?.product.packages)}, personas ${A?.personas.length}, drafts ${A?.drafts.length}, simulation ${A?.simulation?.id ?? "none"}`);
   check("the task reviewer was consulted on the problems", reviews > 0, `${reviews} review(s)`);
+  // Architecture review: re-asked about what it was unsure of (up to 5 rounds), then the customer is asked; the unsure
+  // competitor is kept off scoring until answered, and the answer updates the product.
+  const qs = await call("list_product_questions", {});
+  const q = qs.questions?.[0];
+  const unconfirmed = (A?.product.competitors ?? []).filter((c: any) => c.unconfirmed).map((c: any) => c.name);
+  check("architecture review: unsure after its rounds -> a question for the customer, the tool kept off scoring",
+    architectRounds >= 5 && qs.questions?.length === 1 && q?.subject === "Agenda" && q.options.length === 2 && JSON.stringify(unconfirmed) === '["Agenda"]',
+    `${architectRounds} reviewer request(s), questions ${qs.questions?.length}, unconfirmed ${JSON.stringify(unconfirmed)}`);
+  const ans = await call("answer_product_question", { question_id: q?.id, option: "a" });
+  const prodAfter = await call("get_product", { product: A?.product.slug });
+  check("answering 'alongside' removes it from competitors",
+    /no longer treated as a competitor/.test(ans.effect) && !prodAfter.product.competitors.some((c: any) => c.name === "Agenda") && (await call("list_product_questions", {})).questions.length === 0,
+    ans.effect);
   // The raw error stays internal; the customer sees why in plain words.
   check("LLM unavailable -> job failed with a clear error", B?.research.status === "failed" && /research service was interrupted/.test(B.failure?.summary ?? ""), `${B?.research.status}: ${B?.failure?.summary ?? ""}`);
   check("brain went through the gateway with the vault key (never an ogw_ token upstream)", llmKeyOk && llmRequests > 0, `${llmRequests} LLM requests`);

@@ -21,6 +21,7 @@ import { RESEARCH_SYSTEM_PROMPT, researchPrompt, type ResearchInput, type Resear
 import { PROSPECT_SYSTEM_PROMPT, PROSPECT_TOOLS, prospectPrompt, type ProspectInput } from "./prospect-prompt.js";
 import { holdBusy } from "../core/activity.js";
 import { criticIssues, critiqueTasks } from "./critic.js";
+import { architectBrain, architectOutcome, ARCHITECT_TOOLS, reviewArchitecture, type ArchitectBrain, type ArchitectOutcome } from "./architect.js";
 
 /** kind 'prospect': the company behind an access request (prospect-prompt.ts), same tools minus the task library. */
 export type ResearchJob = { research_id: string; kind?: "product"; input: ResearchInput; limits?: ResearchLimits }
@@ -43,6 +44,10 @@ export const RESEARCH = {
   /** Prospect research is smaller: a brief, not a product profile with personas and problems. */
   prospectMaxCostUsd: num(env.PROSPECT_MAX_COST_USD, 0.75),
   prospectMaxMinutes: num(env.PROSPECT_MAX_MINUTES, 10),
+  /** The architecture review's own budget (architect.ts): it runs on the strongest model and investigates with tools. */
+  architectMaxCostUsd: num(env.RESEARCH_ARCHITECT_MAX_COST_USD, 6),
+  architectMaxMinutes: num(env.RESEARCH_ARCHITECT_MAX_MINUTES, 15),
+  architectFetches: num(env.RESEARCH_ARCHITECT_MAX_FETCHES, 25),
   enabled: env.RESEARCH_DISABLED !== "1",
 };
 export const RESEARCH_TOOLS = ["fetch_url", "web_search", "find_similar", "package_search", "search_library", "search_profiles", "report_progress", "validate", "submit"] as const;
@@ -77,6 +82,13 @@ export class ResearchContext {
   /** Task critic (set by runResearchJob): issues for problems that do not create a purchase decision, or null to skip. */
   critic: ((result: any) => Promise<string[] | null>) | null = null;
   criticRounds = 0;
+  /** Architecture review (set by runResearchJob): competitors that do not compete, names, and questions for the customer. */
+  architect: ((result: any) => Promise<ArchitectOutcome | null>) | null = null;
+  architectRounds = 0;
+  /** What the last review saw (name, aliases, competitors): an unchanged resubmission reuses its outcome. */
+  architectKey: string | null = null;
+  /** The latest review's outcome: its questions, unconfirmed tools and placement go on the accepted result. */
+  architecture: ArchitectOutcome | null = null;
 
   constructor(readonly job: ResearchJob) {
     this.policy = job.kind === "prospect"
@@ -95,8 +107,12 @@ function parseResult(json: string): { result?: unknown; error?: string } {
   catch (e) { return { error: `result_json is not valid JSON: ${(e as Error).message}` }; }
 }
 
-export function createResearchExtension(ctx: ResearchContext) {
-  return (pi: ExtensionAPI) => {
+/** The research tools; `only` limits them (the architecture review gets the read-only ones, on its own search budget). */
+export function createResearchExtension(ctx: ResearchContext, opts: { only?: readonly string[]; purpose?: "research" | "architect" } = {}) {
+  return (api0: ExtensionAPI) => {
+    const only = opts.only;
+    const pi = only ? new Proxy(api0, { get: (t, k) => k === "registerTool" ? (tool: any) => (only.includes(tool.name) ? t.registerTool(tool) : undefined)
+      : typeof (t as any)[k] === "function" ? (t as any)[k].bind(t) : (t as any)[k] }) : api0;
     pi.registerTool(defineTool({
       name: "fetch_url", label: "Fetch URL",
       description: "HTTP GET a page from the product's website/docs (or its package registry / GitHub) and return readable text plus same-site links. About 25 fetches per job.",
@@ -111,7 +127,7 @@ export function createResearchExtension(ctx: ResearchContext) {
     // and citable: a competitor's evidence_url must be one of them.
     const search = async (body: Record<string, unknown>) => {
       try {
-        const r: any = await api(`/api/worker/research/${enc(ctx.job.research_id)}/search`, { json: body });
+        const r: any = await api(`/api/worker/research/${enc(ctx.job.research_id)}/search`, { json: { ...body, purpose: opts.purpose ?? "research" } });
         for (const x of r.results ?? []) for (const u of [x.url, x.homepage, x.repository]) if (typeof u === "string") ctx.policy.allowFound(u);
         return text(r);
       } catch (e) { throw new Error(`search failed: ${(e as Error).message}`); }
@@ -195,7 +211,15 @@ export function createResearchExtension(ctx: ResearchContext) {
         if (r.error) {
           ctx.lastIssues = [r.error];
         } else {
-          // Task review first (at most 2 rounds per job): problems must create a purchase decision on their own.
+          // Architecture review first (at most 2 rounds per job): only substitutes may stay competitors.
+          const arch = ctx.architect && ctx.architectRounds < 2 ? (ctx.architectRounds++, await ctx.architect(r.result).catch(() => null)) : null;
+          if (arch) ctx.architecture = arch;
+          if (arch?.issues.length) {
+            ctx.lastIssues = arch.issues;
+            return text({ accepted: false, issues: arch.issues, attempts_left: left, note: "The architecture review found tools that do not compete with the product, or names to add. Fix them, then submit again." });
+          }
+          if (ctx.architecture) applyArchitecture(r.result, ctx.architecture);
+          // Task review next (at most 2 rounds per job): problems must create a purchase decision on their own.
           const review = ctx.critic && ctx.criticRounds < 2 ? (ctx.criticRounds++, await ctx.critic(r.result).catch(() => null)) : null;
           if (review?.length) {
             ctx.lastIssues = review;
@@ -218,6 +242,22 @@ export function createResearchExtension(ctx: ResearchContext) {
       },
     }));
   };
+}
+
+/**
+ * Put the architecture review's findings on the result the server saves: unsure competitors marked unconfirmed (kept
+ * off scoring), the questions for the customer, the tools judged not to compete, and the product's placement.
+ */
+export function applyArchitecture(result: any, a: ArchitectOutcome) {
+  const p = result?.product;
+  if (!p) return;
+  const unsure = new Set(a.unconfirmed.map((n) => n.toLowerCase()));
+  p.competitors = (p.competitors ?? []).map((c: any) => (unsure.has(String(c?.name ?? "").toLowerCase()) ? { ...c, unconfirmed: true } : c));
+  p.placement = a.placement;
+  if (a.not_competitors.length) p.not_competitors = a.not_competitors;
+  const listed = new Set((p.competitors ?? []).map((c: any) => String(c?.name ?? "").toLowerCase()));
+  const qs = a.questions.filter((q) => listed.has(q.subject.toLowerCase()));
+  if (qs.length) result.questions = qs;
 }
 
 function summarize(b: any) {
@@ -248,6 +288,26 @@ export async function runResearchJob(job: ResearchJob, brain: BrainLike): Promis
     const issues = criticIssues(r.verdicts);
     log(`[${id}] task review: ${issues.length} of ${tasks.length} problem(s) rejected ($${r.cost.toFixed(3)})`);
     return issues;
+  };
+  if (!prospect) ctx.architect = async (result: any) => {
+    const p = result?.product;
+    if (!p?.name || !Array.isArray(p.competitors) || !p.competitors.length) return null;
+    // A resubmission that only fixed other things (tasks, personas) has nothing new for the review: reuse its outcome.
+    const key = JSON.stringify([p.name, p.aliases ?? [], p.competitors.map((c: any) => [c?.name, c?.aliases ?? []])]);
+    if (key === ctx.architectKey && ctx.architecture) return ctx.architecture;
+    ctx.architectKey = key;
+    // The strongest model when the broker names one (ARCHITECT_*); else the research model, still with tools.
+    const strong = await architectBrain().catch((e) => { log(`[${id}] architecture review model unavailable: ${redact(String(e))}`); return null; });
+    const reviewer: ArchitectBrain = strong ?? { modelRuntime: brain.modelRuntime, model: brain.model, dir: brain.dir, effort: "high", label: "research model" };
+    ctx.policy.maxFetches += RESEARCH.architectFetches; // its own fetch budget on top of the research's
+    const r = await reviewArchitecture(reviewer, { name: String(p.name), description: p.description, category: p.category, features: p.features, aliases: p.aliases,
+      website_url: p.website_url, docs_url: p.docs_url, competitors: p.competitors.map((c: any) => ({ name: String(c?.name ?? ""), aliases: c?.aliases, domains: c?.domains, evidence_url: c?.evidence_url })) },
+      { extension: createResearchExtension(ctx, { only: ARCHITECT_TOOLS, purpose: "architect" }), maxCostUsd: RESEARCH.architectMaxCostUsd, maxMinutes: RESEARCH.architectMaxMinutes });
+    if (!r) { log(`[${id}] architecture review gave no usable answer; continuing on the rules alone`); return null; }
+    const out = architectOutcome(r.verdict, { name: String(p.name), aliases: p.aliases, competitors: p.competitors }, r.rounds);
+    log(`[${id}] architecture review (${reviewer.label}, ${r.rounds} round(s), $${r.cost.toFixed(3)}): ${r.verdict.placement.layer || "?"}; ` +
+        `${out.not_competitors.length} not competing, ${out.questions.length} for the customer, ${out.issues.length} issue(s)`);
+    return out;
   };
   const hb = setInterval(() => void ctx.progress(ctx.stage), 60_000);
   let piError: string | null = null;

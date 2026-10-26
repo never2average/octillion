@@ -15,7 +15,9 @@ import { asData } from "../orchestrator/core/text-guard.js";
  * Result text is web content: data, never instructions (asData).
  */
 
-export const SEARCH = { get maxPerJob() { return Number(process.env.RESEARCH_MAX_SEARCHES ?? 20); }, timeoutMs: 20_000 };
+export const SEARCH = { get maxPerJob() { return Number(process.env.RESEARCH_MAX_SEARCHES ?? 20); },
+  /** The architecture review's own budget (orchestrator/pi-octillion/architect.ts), counted apart from the research's. */
+  get architectMaxPerJob() { return Number(process.env.RESEARCH_ARCHITECT_MAX_SEARCHES ?? 30); }, timeoutMs: 20_000 };
 // Read per call (tests point these at stand-ins after the module is loaded).
 const url = {
   exa: () => process.env.EXA_BASE_URL ?? "https://api.exa.ai",
@@ -91,12 +93,15 @@ export type SearchRequest = { kind: "web"; query: string; limit?: number } | { k
  * One search for a running research job: counted against the job's budget, and every result URL (plus a package's
  * homepage and repository) recorded as a source the job may cite.
  */
-export async function researchSearch(jobId: string, req: SearchRequest) {
+export async function researchSearch(jobId: string, req: SearchRequest & { purpose?: "research" | "architect" }) {
   const db = await getDb();
+  const architect = req.purpose === "architect";
+  const max = architect ? SEARCH.architectMaxPerJob : SEARCH.maxPerJob;
+  const col = architect ? "architect_searches" : "searches";
   const [slot] = await db.query<{ searches: number }>(
-    "/* tenant: research id checked against the job token in http.ts (/research/:id) */ UPDATE product_research SET searches = searches + 1 WHERE id = $1 AND status = 'running' AND searches < $2 RETURNING searches",
-    [jobId, SEARCH.maxPerJob]);
-  if (!slot) throw Object.assign(new Error(`search limit reached (${SEARCH.maxPerJob} per job), or the job is not running`), { status: 429 });
+    `/* tenant: research id checked against the job token in http.ts (/research/:id) */ UPDATE product_research SET ${col} = ${col} + 1 WHERE id = $1 AND status = 'running' AND ${col} < $2 RETURNING ${col} AS searches`,
+    [jobId, max]);
+  if (!slot) throw Object.assign(new Error(`search limit reached (${max} per job${architect ? " for the architecture review" : ""}), or the job is not running`), { status: 429 });
   let results: (SearchHit | PackageHit)[];
   if (req.kind === "web" && req.query?.trim()) results = await webSearch(req.query.trim(), req.limit);
   else if (req.kind === "similar" && /^https?:\/\//.test(req.url ?? "")) results = await findSimilar(req.url, req.limit);
@@ -107,7 +112,7 @@ export async function researchSearch(jobId: string, req: SearchRequest) {
     await db.query(
       "/* tenant: research id checked against the job token in http.ts (/research/:id) */ UPDATE product_research SET sources = sources || $2::jsonb WHERE id = $1",
       [jobId, JSON.stringify(urls.map((url) => ({ url, kind: req.kind })))]);
-  return { searches_left: SEARCH.maxPerJob - slot.searches, results };
+  return { searches_left: max - slot.searches, results };
 }
 
 /** Normalised URL for matching a cited evidence_url against recorded sources (no scheme, www, fragment or trailing slash). */

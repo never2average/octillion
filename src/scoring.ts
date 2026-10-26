@@ -28,7 +28,15 @@ export interface Tool {
   name: string; aliases?: string[]; packages?: string[]; domains?: string[];
   /** Competitors only: the page that shows it competes (a search result from research), and who added it. */
   evidence_url?: string; source?: "research" | "customer" | "runs";
+  /**
+   * Competitors only: research's architecture review could not tell whether it competes with the product or is used
+   * with it, and asked the customer (product_questions). Until answered it is left out of scoring (no wins, no losses).
+   */
+  unconfirmed?: boolean;
 }
+
+/** The competitors that count for scoring: confirmed ones (an unconfirmed one waits for the customer's answer). */
+export const scoredCompetitors = (cs: Tool[] | null | undefined) => (cs ?? []).filter((c) => !c.unconfirmed);
 export interface Evidence { seq: number; kind: "message" | "action"; level: Level; snippet: string }
 export interface Mention { tool: string; target: boolean; level: Level; first_seq: number; evidence: Evidence[] }
 export interface Score { verdict: Verdict; winner: string | null; mentions: Mention[] }

@@ -4,7 +4,7 @@ import { orgEvent } from "./telemetry.js";
 import { reportSessionSpend, reportSimulationUsage } from "./billing.js";
 import { checkBudgetLater } from "./email.js";
 import { normalize, transcripts, type RawEvent, type SessionRef, type StoredEvent } from "./transcripts.js";
-import { scoreTranscript, developerNamedTools, untrackedInstalls, type Tool } from "./scoring.js";
+import { scoreTranscript, scoredCompetitors, developerNamedTools, untrackedInstalls, type Tool } from "./scoring.js";
 import { findAgent } from "./agents.js";
 import { languageOf, resolveEnvironment, type PersonaEnvironment, type SessionEnvironment } from "../orchestrator/core/environment.js";
 import { extendAdaptive, SCENARIO_ROWS } from "./queries.js";
@@ -296,7 +296,8 @@ export async function scoreSession(sessionId: string) {
   }
   const events = await allEvents(row.org_id, sessionId);
   const target = { name: row.name, aliases: row.aliases, packages: row.packages, domains: row.domains };
-  const named = developerNamedTools(events, target, row.competitors);
+  const competitors = scoredCompetitors(row.competitors);
+  const named = developerNamedTools(events, target, competitors);
   if (named.length) {
     // The simulated developer steered the agent toward a tool: the result is not blind, so it gets no verdict.
     await db.query(
@@ -305,14 +306,14 @@ export async function scoreSession(sessionId: string) {
       [sessionId, named.join(", ")]);
     return null;
   }
-  const score = scoreTranscript(events, target, row.competitors);
+  const score = scoreTranscript(events, target, competitors);
   // Recount from the store too, so transcripts an orchestrator wrote straight to ClickHouse are reflected.
   const lastSeq = events.reduce((m, e) => Math.max(m, e.seq), 0);
   const userTurns = events.filter((e) => e.type === SIMULATED_USER && (e.raw as { _src?: unknown })._src !== "harness").length;
   await db.query(
     `/* tenant: internal: scoring by session id (from completeSession) */ UPDATE agent_sessions SET verdict = $2, winner = $3, mentions = $4, scored_at = now(),
             events = greatest(events, $5), user_turns = $6, untracked = $7 WHERE id = $1`,
-    [sessionId, score.verdict, score.winner, JSON.stringify(score.mentions), lastSeq, userTurns, JSON.stringify(untrackedInstalls(events, [target, ...row.competitors]))],
+    [sessionId, score.verdict, score.winner, JSON.stringify(score.mentions), lastSeq, userTurns, JSON.stringify(untrackedInstalls(events, [target, ...(row.competitors ?? [])]))],
   );
   // Why it lost, out of band (src/reasons.ts): a lost session is queued for a model's reason; never blocks or fails scoring.
   keepAlive(afterScoring(sessionId));

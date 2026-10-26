@@ -97,7 +97,7 @@
    "title": "MCP tools",
    "href": "/app/docs/mcp-tools#products-and-scenarios",
    "heading": "Products and scenarios",
-   "text": "| Tool | What it does |\n|---|---|\n| `list_products` | List the organization's products with scenario counts and their 30-day recommendation hit rate. |\n| `get_product` | Show a product's configured context (description, aliases, package names, domains, competitors), its scenarios with per-scenario hit rate, and recent simulations. |\n| `save_product` | Create a product, or update one when `product` names an existing one. |\n| `save_scenarios` | Add scenarios (omit id) or edit existing ones (pass id). |\n| `browse_task_library` | Browse the curated library of real-world developer tasks (active ones: id, title, prompt, platform, category, language, repo, tags). |"
+   "text": "| Tool | What it does |\n|---|---|\n| `list_products` | List the organization's products with scenario counts and their 30-day recommendation hit rate. |\n| `get_product` | Show a product's configured context (description, aliases, package names, domains, competitors), its scenarios with per-scenario hit rate, and recent simulations. |\n| `save_product` | Create a product, or update one when `product` names an existing one. |\n| `list_product_questions` | Questions research could not settle on its own: usually whether a tool competes with your product or is used with it (for example a scheduler that runs on your platform). |\n| `answer_product_question` | Answer one of research's questions by picking an option. |\n| `save_scenarios` | Add scenarios (omit id) or edit existing ones (pass id). |\n| `browse_task_library` | Browse the curated library of real-world developer tasks (active ones: id, title, prompt, platform, category, language, repo, tags). |"
   },
   {
    "area": "customer",
@@ -161,6 +161,13 @@
    "href": "/app/docs/billing#budget-rules",
    "heading": "Budget rules",
    "text": "Admins set how the allowance is spent on the **Budget rules** tab; each rule shows who set it and when:\n\n- **Monthly allowance**: the account's cap on model spend, set by Octillion from your plan.\n- **How people share it**: a shared pool, split evenly between the people who can launch, or custom caps per person.\n- **Held back (buffer)**: an amount nobody can launch into, which absorbs runs that finish past a limit.\n- **New members can launch**: whether everyone can start runs, or only people allowed individually.\n- **Runs at once**, **sessions per run** and a **spend cap per run**.\n- **Team budgets** and **people's own settings**: set aside a budget for a team, or give a person their own limit.\n\nThe **People** tab lists everyone in the account with their role, team, limit and what is left; the **Teams** tab\nlists team budgets."
+  },
+  {
+   "area": "customer",
+   "title": "Questions about your product",
+   "href": "/app/docs/questions-about-your-product",
+   "heading": null,
+   "text": "Before research is accepted, an architecture review places your product in a developer's stack (what it is, what\nruns on it, what developers use with it) and checks every competitor against that: only real alternatives count.\nA tool your users run *with* your product, such as the scheduler on your clusters or the open-source project you host,\nis not a competitor, and an agent that uses it is usually using you.\n\nWhen the review still can't tell after looking into it, it asks you instead of guessing. Open questions appear above\nPick rate (or ask your client to `list_product_questions`); until you answer, that tool is left out of your pick rate.\nYour answer updates the product and rescores your past sessions. You can also correct competitors yourself at any time\nwith `save_product`: past sessions are rescored then too."
   },
   {
    "area": "admin",

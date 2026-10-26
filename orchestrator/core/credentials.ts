@@ -16,6 +16,8 @@ export const CREDENTIALS_MODE = (env.CREDENTIALS_MODE === "env" ? "env" : "broke
 export interface OrchestratorCreds {
   boat: { api_key: string } | null;
   llm: { provider: string; model?: string; base_url: string; api_key: string; expires_at?: string } | null;
+  /** Research's architecture review: the strongest model, possibly another provider (pi-octillion/architect.ts). */
+  architect?: { provider: string; model: string; effort?: string; base_url: string; api_key: string; expires_at?: string } | null;
 }
 
 export interface SessionCreds { providers: Providers; expires_at: string | null }
@@ -41,7 +43,7 @@ export async function orchestratorCredentials(force = false): Promise<Orchestrat
   orchFetching ??= (async () => {
     try {
       const r = (await withRetry(() => api("/api/worker/orchestrator/credentials", { json: { orchestrator_id: CFG.orchestratorId } }), 4)) as OrchestratorCreds;
-      orch = { boat: r?.boat ?? null, llm: r?.llm ?? null };
+      orch = { boat: r?.boat ?? null, llm: r?.llm ?? null, architect: r?.architect ?? null };
       if (orch.boat?.api_key) BOAT.apiKey = orch.boat.api_key;
       log(`credentials: orchestrator ${CFG.orchestratorId}: boat=${orch.boat ? "yes" : "no"} llm=${orch.llm ? `${orch.llm.provider}/${orch.llm.model ?? "?"} via gateway (expires ${orch.llm.expires_at ?? "?"})` : "none"}`);
       return orch;

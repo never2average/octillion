@@ -7,6 +7,7 @@
  * Nothing new is stored. Setup and usage come from the connector log Octillion already keeps (mcp_events, per user);
  * people from Clerk and the plan from Stripe, through src/admin.ts.
  */
+import * as questions from "./questions.js";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { withTenant } from "./tenant-scope.js";
 import { z } from "zod";
@@ -497,6 +498,17 @@ export function appRouter() {
         return { id: g.id, people: [...byUser].map(([id, u]) => ({ user_id: id, label: id ? label(id) : "Connector key", email: id ? who.get(id) ?? null : null,
           used: u.used.size, total: g.tools.length, calls: u.calls, last: u.last })).sort((a, b) => b.used - a.used || b.calls - a.calls) };
       }) });
+  });
+  // Questions research asks about the account's products (src/questions.ts): anyone reads, editors answer.
+  const orgOfRes = (res: Response) => ({ orgId: S(res).org, slug: S(res).slug, name: S(res).slug });
+  api.get("/questions", async (req, res) => void res.json({
+    ...(await questions.listQuestions(orgOfRes(res), { status: req.query.status === "answered" || req.query.status === "all" ? req.query.status : "open" })),
+    can_answer: can(res, "edit") }));
+  api.post("/questions/:id/answer", async (req, res) => {
+    need(res, "edit");
+    const r = await questions.answerQuestion(orgOfRes(res), { question_id: String(req.params.id), option: String(req.body?.option ?? ""), note: req.body?.note ? String(req.body.note) : undefined }, actor(res));
+    capture({ distinctId: S(res).user ?? actor(res), orgSlug: S(res).slug }, "product_question_answered", { question: r.question_id });
+    res.json(r);
   });
   // Help requests: ask the team, pick one up, close it (asker or helper), hand it back (helper) or withdraw it (asker).
   api.post("/adoption/help", async (req, res) => {

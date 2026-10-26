@@ -139,7 +139,16 @@ export async function brokerOrchestratorCredentials(orchestratorId: string) {
     ? { provider: llmProvider, model: llmModel, base_url: `${PUBLIC_URL()}/gw/${llmProvider}${SDK_BASE_SUFFIX[llmProvider] ?? ""}`,
         api_key: await mintToken("orchestrator", [llmProvider], expiresAt, { orchestratorId }), expires_at: expiresAt.toISOString() }
     : null;
-  return { boat, llm };
+  // Research's architecture review (orchestrator/pi-octillion/architect.ts) runs on the strongest model, which may be
+  // another provider than the orchestrator's own: its own token, scoped to that provider.
+  const ap = settingText("ARCHITECT_PROVIDER") || "anthropic";
+  const apr = ap === llmProvider ? p : await getProvider(ap);
+  const architect = apr?.mode === "gateway" && apr.enabled
+    ? { provider: ap, model: settingText("ARCHITECT_MODEL"), effort: settingText("ARCHITECT_EFFORT") || "max",
+        base_url: `${PUBLIC_URL()}/gw/${ap}${SDK_BASE_SUFFIX[ap] ?? ""}`,
+        api_key: await mintToken("orchestrator", [ap], expiresAt, { orchestratorId }), expires_at: expiresAt.toISOString() }
+    : null;
+  return { boat, llm, architect };
 }
 
 export async function revokeSessionTokens(sessionId: string) {

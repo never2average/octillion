@@ -32,7 +32,14 @@ export interface ResearchResult {
              category_terms?: string[];
              /** Where the product's users build, most important first (e.g. ["mobile", "web"]); problems are spread across them. */
              platforms?: string[];
-             aliases?: string[]; packages?: string[]; domains?: string[]; competitors?: Tool[] };
+             aliases?: string[]; packages?: string[]; domains?: string[]; competitors?: Tool[];
+             /** Where the product sits in a developer's stack (orchestrator/pi-octillion/architect.ts). */
+             placement?: { layer?: string; runs_on_it?: string[]; used_with?: string[]; adoption_signals?: string[] };
+             /** Tools the architecture review judged not to compete (complements, other layers): never merged back in. */
+             not_competitors?: { name: string; relation: string; reason?: string }[] };
+  /** What the architecture review could not settle: asked of the customer (product_questions, src/questions.ts). */
+  questions?: { kind: "competitor_relation"; subject: string; question: string; options: { id: string; label: string; relation: string }[];
+                context?: Record<string, unknown> }[];
   /** Picked from the shared developer-profile data (search_profiles): the profile's slug; its name, summary,
    *  attributes and instructions are copied from the data, never written by research. */
   personas: { profile_slug?: string; name: string; summary?: string; attributes?: Record<string, unknown>; instructions?: string;
@@ -541,14 +548,20 @@ export async function completeResearch(id: string, body: { status?: string; erro
   // by an earlier research) stay, so a loss to them is never scored "no vendor".
   const found = (p.competitors ?? []).map((c) => ({ ...c, source: "research" as const }));
   const known = new Set(found.map((c) => c.name.trim().toLowerCase()));
-  const competitors = [...found, ...(prod.competitors ?? []).filter((c) => !known.has(c.name.trim().toLowerCase()))];
+  // ...except tools the architecture review judged not to compete (a complement such as the product's own scheduler):
+  // an earlier research's mistake must not come back through the merge.
+  const notCompeting = new Set((p.not_competitors ?? []).map((c) => c.name.trim().toLowerCase()));
+  const competitors = [...found, ...(prod.competitors ?? []).filter((c) => !known.has(c.name.trim().toLowerCase()) && !notCompeting.has(c.name.trim().toLowerCase()))];
   await saveProduct(org, {
     product: prod.slug, name: p.name, description: p.description, category: p.category,
     website_url: p.website_url ?? job.input.website_url ?? undefined, docs_url: p.docs_url ?? job.input.docs_url ?? undefined,
     aliases: p.aliases ?? [], packages: p.packages ?? [], domains: p.domains ?? [], competitors,
   });
   await db.query("/* tenant: product of the research job (job checked against the job token in http.ts) */ UPDATE products SET features = $2, research = $3 WHERE id = $1",
-    [job.product_id, JSON.stringify(p.features ?? []), JSON.stringify({ research_id: id, sources: r.sources ?? [], category_terms: p.category_terms ?? [], at: new Date().toISOString() })]);
+    [job.product_id, JSON.stringify(p.features ?? []), JSON.stringify({ research_id: id, sources: r.sources ?? [], category_terms: p.category_terms ?? [],
+      ...(p.placement ? { placement: p.placement } : {}), ...(p.not_competitors?.length ? { not_competitors: p.not_competitors } : {}), at: new Date().toISOString() })]);
+  // Questions for the customer: one open question per tool; a newer research asking again keeps the open one.
+  if (r.questions?.length) await (await import("./questions.js")).askQuestions(job.org_id, job.product_id, id, r.questions);
 
   const personaSlugs: string[] = [];
   const slugOf = new Map<string, string>();

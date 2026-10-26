@@ -1,3 +1,4 @@
+import * as questions from "./questions.js";
 import * as priv from "./private.js";
 import { withTenant } from "./tenant-scope.js";
 import * as contributions from "./contributions.js";
@@ -33,6 +34,7 @@ const competitor = z.object({
   domains: z.array(z.string()).optional(),
   evidence_url: z.string().url().optional().describe("A page showing it competes (research sets this from its searches)"),
   source: z.enum(["research", "customer", "runs"]).optional().describe("Who added it; omit when adding by hand (customer)"),
+  unconfirmed: z.boolean().optional().describe("Research asked whether this really competes (list_product_questions); left out of scoring until answered. Keep it as returned"),
 });
 
 /** Tool name -> handler, for one organization. Shared by the MCP server and the local preview. */
@@ -44,6 +46,8 @@ export function handlersFor(org: Org) {
     get_onboarding: (a: { research_id?: string; product?: string }) => research.getOnboarding(org, a),
     get_product: (a: { product?: string }) => q.getProduct(org, a.product),
     save_product: (a: q.ProductInput) => q.saveProduct(org, a),
+    list_product_questions: (a: { product?: string; status?: "open" | "answered" | "all" }) => questions.listQuestions(org, a),
+    answer_product_question: (a: { question_id: string; option: string; note?: string }) => questions.answerQuestion(org, a, org.userId ?? "connector"),
     save_scenarios: (a: { product?: string; scenarios: q.ScenarioInput[] }) => q.saveScenarios(org, a.product, a.scenarios),
     run_simulation: (a: q.RunInput) => q.runSimulation(org, a),
     list_simulations: (a: { product?: string }) => q.listSimulations(org, a.product),
@@ -86,6 +90,12 @@ const pubLine = (p: { status: string; reason?: string | null } | null | undefine
 /** Model-readable summary placed in the text content next to the structured data. */
 function summarize(d: Data): string {
   switch (d.view) {
+    case "questions":
+      return d.questions.length
+        ? `${d.questions.length} question(s): ${d.questions.map((x: any) => `${x.id} [${x.product_slug}] ${x.question} Options: ${x.options.map((o: any) => `${o.id}) ${o.label}`).join("; ")}${x.status !== "open" ? ` (answered: ${x.answer?.label ?? ""})` : ""}`).join(" | ")}`
+        : "No open questions: research settled everything about your products on its own.";
+    case "question_answered":
+      return `Saved: ${d.subject}: ${d.answer}. ${d.effect}; past sessions are being scored again.`;
     case "products":
       if ("welcome" in d && d.welcome) return d.welcome.message;
       return d.products.length
@@ -352,6 +362,8 @@ export const TOOL_STATUS: Record<ToolName, [string, string]> = {
   list_products: ["Loading products…", "Products loaded"],
   get_product: ["Loading product context…", "Product context ready"],
   save_product: ["Saving product…", "Product saved"],
+  list_product_questions: ["Loading questions…", "Questions loaded"],
+  answer_product_question: ["Saving your answer…", "Answer saved; rescoring"],
   save_scenarios: ["Saving scenarios…", "Scenarios saved"],
   run_simulation: ["Launching coding agents…", "Simulation launched"],
   list_simulations: ["Loading simulations…", "Simulations loaded"],
@@ -497,6 +509,27 @@ export function createServer(org: Org, context = ""): McpServer {
     },
     annotations: write, _meta: meta("save_product"),
   }, run("save_product"));
+
+  registerAppTool(server, "list_product_questions", {
+    title: "Questions about your product",
+    description: "Questions research could not settle on its own: usually whether a tool competes with your product or is used with it (for example a scheduler that runs on your platform). Until you answer, that tool is left out of scoring. Answer with answer_product_question.",
+    inputSchema: {
+      product,
+      status: z.enum(["open", "answered", "all"]).optional().describe("Default: open"),
+    },
+    annotations: read, _meta: meta("list_product_questions"),
+  }, run("list_product_questions"));
+
+  registerAppTool(server, "answer_product_question", {
+    title: "Answer a question about your product",
+    description: "Answer one of research's questions by picking an option. It updates the product (a tool that competes stays a competitor; one used with your product is removed from competitors) and rescores past sessions.",
+    inputSchema: {
+      question_id: z.string().describe("pq_... from list_product_questions"),
+      option: z.string().describe("The option's id (a, b, c) or its exact label"),
+      note: z.string().max(500).optional().describe("Anything to add, kept with the answer"),
+    },
+    annotations: write, _meta: meta("answer_product_question"),
+  }, run("answer_product_question"));
 
   registerAppTool(server, "save_scenarios", {
     title: "Add or edit scenarios",

@@ -55,11 +55,8 @@ Procedure:
    (c) widely used open-source or self-hosted options when they compete for the same job (e.g. BullMQ for a hosted
    queue). A missing alternative makes the report call its wins "no tool picked". Give each its name, aliases, real
    package names and domains.
-   A competitor is a SUBSTITUTE: choosing it means not choosing the product. Never list a COMPLEMENT, a tool developers
-   use together with or on top of the product: its scheduler, runtime, SDK, protocol, framework or the open-source
-   project it hosts (e.g. Slurm on an HPC cluster provider, Postgres for a hosted-Postgres company, Kubernetes for a
-   managed-Kubernetes service). An agent that uses a complement is usually using the product, and listing it would
-   score those sessions as losses. If the product's docs tell users to use a tool, it is a complement.
+   List substitutes only (choosing one means not choosing the product); an architecture review checks each one
+   against where the product sits in the stack and sends back any that developers use with it instead.
    Find competitors with evidence, not memory: find_similar on the product's website; web_search for "alternatives to
    <product>", "<product> vs" and "best <category> for <main platform>"; package_search in the product's ecosystems
    for the job it does (usage numbers show which are widely used; take package names from there). Every competitor

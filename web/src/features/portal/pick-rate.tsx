@@ -23,6 +23,7 @@ import { Icons } from '@/components/icons';
 import { appApi } from '@/lib/api-client';
 import { cn } from '@/lib/utils';
 import { ErrorState, fail, LoadingCards, useOrgLoad } from './shared';
+import { ProductQuestions } from './questions';
 import { SECTIONS, VisibilitySection, type SectionId, type Visibility } from './visibility';
 
 // ---------- filters ----------
@@ -154,7 +155,7 @@ export function PickRatePage() {
       }
     >
       {error ? <ErrorState error={error} /> : !data ? <LoadingCards count={4} />
-        : <div className='flex w-full flex-col pb-4'><VisibilitySection v={data.visibility} /></div>}
+        : <div className='flex w-full flex-col pb-4'><ProductQuestions /><VisibilitySection v={data.visibility} /></div>}
       {builder && <ReportBuilder init={builder} options={options} canSave={Boolean(saved.data?.can_create)} onClose={() => setBuilder(null)} onSaved={() => { setBuilder(null); void saved.reload(); }} />}
       {list && <SavedReports data={saved.data} onClose={() => setList(false)} onRun={(r) => runSaved(r).catch(fail)} reload={() => void saved.reload()}
         onEdit={(r) => { setList(false); setBuilder({ name: r.name, def: r.definition, editing: r }); }} onNew={() => { setList(false); newReport(); }} />}

@@ -61,7 +61,7 @@ export class FetchPolicy {
    * `related`: the product's own links found in its registry metadata (docs site, homepage, source). Their hosts are
    * allowed like the website; a GitHub link unlocks only that owner's repositories, never all of GitHub.
    */
-  constructor(urls: (string | null | undefined)[], readonly maxFetches = 25, related: string[] = []) {
+  constructor(urls: (string | null | undefined)[], public maxFetches = 25, related: string[] = []) {
     const bases = new Set<string>();
     for (const r of related) {
       try {
