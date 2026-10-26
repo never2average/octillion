@@ -37,7 +37,8 @@ export interface BrainLike {
 export const RESEARCH = {
   concurrency: Math.max(1, num(env.RESEARCH_CONCURRENCY, 1)),
   maxMinutes: num(env.RESEARCH_MAX_MINUTES, 20),
-  maxSubmits: num(env.RESEARCH_MAX_SUBMITS, 4),
+  // Two reviews (architecture, then tasks) can each send a submission back before the server's own checks.
+  maxSubmits: num(env.RESEARCH_MAX_SUBMITS, 6),
   maxFetches: num(env.RESEARCH_MAX_FETCHES, 25),
   /** Hard LLM spend cap per research job (Pi's price table); the session is aborted and the job failed above it. */
   maxCostUsd: num(env.RESEARCH_MAX_COST_USD, 2),

@@ -5,7 +5,7 @@ import { getDb } from "./db.js";
 import { settingText } from "./settings.js";
 import { findAgent } from "./agents.js";
 import { getProvider, providersForEnv, providersWithKeys, useCredential, useVertexCredential, VERTEX_LABEL, type ProviderRow } from "./keyvault.js";
-import { adaptGeminiBody, geminiWantsThinkingLevel, toVertex, toVertexGemini, vertexAccessToken, vertexConfig, type VertexConfig } from "./vertex.js";
+import { adaptGeminiBody, geminiWantsThinkingLevel, rejectedBetas, toVertex, VERTEX_UNSUPPORTED_BETAS, toVertexGemini, vertexAccessToken, vertexConfig, type VertexConfig } from "./vertex.js";
 import { costOf, recordModelUsage } from "./usage.js";
 import { SCENARIO_ROWS } from "./queries.js";
 
@@ -330,13 +330,28 @@ export async function gatewayHandler(req: Request, res: Response) {
   }
 
   let up: globalThis.Response;
+  const send = (b: typeof body) => fetch(upstream, {
+    method: req.method, headers, redirect: "manual", body: b,
+    // @ts-expect-error Node's fetch needs duplex for streamed request bodies
+    duplex: b instanceof ReadableStream ? "half" : undefined,
+    signal: AbortSignal.timeout(Number(process.env.OCTILLION_GATEWAY_TIMEOUT_MS ?? 600_000)),
+  });
   try {
-    up = await fetch(upstream, {
-      method: req.method, headers, redirect: "manual", body,
-      // @ts-expect-error Node's fetch needs duplex for streamed request bodies
-      duplex: body instanceof ReadableStream ? "half" : undefined,
-      signal: AbortSignal.timeout(Number(process.env.OCTILLION_GATEWAY_TIMEOUT_MS ?? 600_000)),
-    });
+    up = await send(body);
+    // Claude on Vertex rejects some beta flags a harness sends: retry once without them, and drop them from then on.
+    if (up.status === 400 && p.backend === "vertex" && slug !== "google" && typeof body === "string") {
+      const text = await up.text();
+      const bad = rejectedBetas(text);
+      const json = bad.length ? JSON.parse(body) as { anthropic_beta?: string[] } : null;
+      if (json && Array.isArray(json.anthropic_beta)) {
+        for (const b of bad) VERTEX_UNSUPPORTED_BETAS.add(b);
+        json.anthropic_beta = json.anthropic_beta.filter((b) => !bad.includes(b));
+        if (!json.anthropic_beta.length) delete json.anthropic_beta;
+        console.error(`gateway ${slug} ${requestModel || "?"}: Vertex rejected beta ${bad.join(", ")}; retrying without it`);
+        body = JSON.stringify(json);
+        up = await send(body);
+      } else up = new Response(text, { status: up.status, headers: up.headers });
+    }
   } catch (e) {
     await record(hash, slug, t, { requests: 1, errors: 1, input: 0, cached: 0, output: 0, bytes: 0, model: requestModel });
     console.error(`gateway ${slug} ${requestModel || "?"}: upstream unreachable: ${(e as Error).message.slice(0, 200)}`);

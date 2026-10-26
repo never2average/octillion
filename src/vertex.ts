@@ -76,6 +76,18 @@ export function vertexBase(cfg: VertexConfig): string {
 }
 
 /** Translate a gateway request (path after /gw/<provider>, raw JSON body, client beta header) into a Vertex call. */
+/**
+ * Beta flags Vertex rejects with "Unexpected value(s) ... for the anthropic_beta parameter" (seen 2026-10-26: Pi sends
+ * inline-tools-2026-09-15). Dropped before sending; the gateway adds any new one it meets and retries without it.
+ */
+export const VERTEX_UNSUPPORTED_BETAS = new Set<string>(["inline-tools-2026-09-15"]);
+
+/** The betas a Vertex 400 says it does not accept, or [] when the error is about something else. */
+export function rejectedBetas(errorText: string): string[] {
+  const m = /Unexpected value\(s\) (.+?) for the `anthropic_beta` parameter/.exec(errorText);
+  return m ? [...m[1]!.matchAll(/`([^`]+)`/g)].map((x) => x[1]!) : [];
+}
+
 export function toVertex(cfg: VertexConfig, path: string, rawBody: Buffer, betaHeader?: string): { url: string; body: string } {
   if (!cfg.project_id) throw Object.assign(new Error("Vertex backend has no project_id configured"), { status: 503 });
   const p = path.replace(/\/+$/, "");
@@ -101,7 +113,7 @@ export function toVertex(cfg: VertexConfig, path: string, rawBody: Buffer, betaH
     json.messages = (json.messages as Record<string, unknown>[])
       .filter((m) => !(m && typeof m === "object" && m.role === "system" && (m.content === "" || (Array.isArray(m.content) && !m.content.length))))
       .map((m) => (m && typeof m === "object" ? { role: m.role, content: m.content } : m));
-  const betas = (betaHeader ?? "").split(",").map((s) => s.trim()).filter((b) => b && !b.startsWith("thinking-binding-controls"));
+  const betas = (betaHeader ?? "").split(",").map((s) => s.trim()).filter((b) => b && !b.startsWith("thinking-binding-controls") && !VERTEX_UNSUPPORTED_BETAS.has(b));
   if (betas.length) json.anthropic_beta = [...new Set([...(Array.isArray(json.anthropic_beta) ? json.anthropic_beta as string[] : []), ...betas])];
   const loc = `${vertexBase(cfg)}/v1/projects/${encodeURIComponent(cfg.project_id)}/locations/${encodeURIComponent(cfg.region ?? "global")}/publishers/anthropic/models`;
   if (isCount) {

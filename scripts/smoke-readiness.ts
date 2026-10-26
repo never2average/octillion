@@ -114,3 +114,15 @@ export async function rescoreChecks({ db, call, A, simulationId }: { db: Db; cal
   assert.equal(await lostTo("BullMQ"), before, "putting it back restores the losses");
   console.log("✓ rescoring: a corrected competitor list (e.g. a complement removed) changes past verdicts, not only new ones");
 }
+
+/** Claude on Vertex rejects some beta flags harnesses send (src/vertex.ts): parsed from its 400 and dropped from then on. */
+export async function vertexBetaChecks() {
+  const v = await import("../src/vertex.js");
+  const err = '{"type":"error","error":{"type":"invalid_request_error","message":"Unexpected value(s) `inline-tools-2026-09-15`, `made-up-2026-01-01` for the `anthropic_beta` parameter. Please consult our documentation"}}';
+  assert.deepEqual(v.rejectedBetas(err), ["inline-tools-2026-09-15", "made-up-2026-01-01"]);
+  assert.deepEqual(v.rejectedBetas('{"error":{"message":"max_tokens is too large"}}'), []);
+  const out = v.toVertex({ project_id: "p", region: "global" } as any, "/v1/messages", Buffer.from(JSON.stringify({ model: "claude-opus-5-5", max_tokens: 10, messages: [] })),
+    "inline-tools-2026-09-15, context-management-2025-06-27");
+  assert.deepEqual(JSON.parse(out.body).anthropic_beta, ["context-management-2025-06-27"], "a known-unsupported beta is dropped before sending");
+  console.log("✓ Vertex: beta flags it rejects are dropped (known ones up front, new ones after one retry)");
+}

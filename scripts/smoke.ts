@@ -797,6 +797,7 @@ try {
   assert.equal((await call(A, "list_products")).products[0].sessions_30d, 4);
 
   await (await import("./smoke-readiness.js")).rescoreChecks({ db, call, A, simulationId: sim.simulation.id });
+  await (await import("./smoke-readiness.js")).vertexBetaChecks();
   const lost = report.recent_losses[0].id;
   const session = await call(A, "get_agent_session", { session_id: lost });
   assert.equal(session.session.winner, "BullMQ");
