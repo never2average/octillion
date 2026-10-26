@@ -293,19 +293,30 @@ export function untrackedInstalls(events: StoredEvent[], tracked: Tool[]): { nam
 }
 
 /**
- * Blindness check (docs/security.md): the simulated developer must never name the product or a competitor. If its
- * replies do (for example because a planted persona told it to), the session is contaminated and gets no verdict.
+ * Blindness check (docs/security.md): the simulated developer must never introduce the product or a competitor. If a
+ * reply names one the agent had not named yet (for example because a planted persona told it to), the session is
+ * contaminated and gets no verdict.
  * Returns the names it used, or [] when clean. Only orchestrator-written replies count.
  */
 export function developerNamedTools(events: StoredEvent[], target: Tool, competitors: Tool[]): string[] {
-  const said = events.filter((e) => e.type === "simulated_user" && (e.raw as { _src?: unknown })._src !== "harness")
-    .map((e) => String((e.raw as { content?: unknown }).content ?? e.text)).join("\n");
-  if (!said) return [];
-  const out: string[] = [];
-  for (const t of [target, ...competitors])
-    for (const w of [t.name, ...(t.aliases ?? []), ...(t.packages ?? [])].filter((x) => x && x.length > 2))
-      if (new RegExp(token(w), "i").test(said)) { out.push(t.name); break; }
-  return out;
+  const tools = [target, ...competitors].map((t) => ({ name: t.name,
+    re: [t.name, ...(t.aliases ?? []), ...(t.packages ?? [])].filter((x) => x && x.length > 2).map((w) => new RegExp(token(w), "i")) }));
+  // A name the agent already used is fair to repeat (the developer's rules allow naming what the agent or task named):
+  // approving "the Alliance route" the agent proposed is an answer, not a steer. Only a name the developer said first
+  // contaminates the session.
+  const agentSaid = new Set<string>();
+  const out = new Set<string>();
+  for (const e of [...events].sort((a, b) => a.seq - b.seq)) {
+    const developer = e.type === "simulated_user" && (e.raw as { _src?: unknown })._src !== "harness";
+    const text = developer ? String((e.raw as { content?: unknown }).content ?? e.text) : segments(e.raw).map((x) => x.text).join("\n");
+    if (!text) continue;
+    for (const t of tools) {
+      if (!t.re.some((re) => re.test(text))) continue;
+      if (developer) { if (!agentSaid.has(t.name)) out.add(t.name); }
+      else agentSaid.add(t.name);
+    }
+  }
+  return [...out];
 }
 
 export function scoreTranscript(events: StoredEvent[], target: Tool, competitors: Tool[]): Score {

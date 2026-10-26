@@ -1,7 +1,7 @@
 // Scoring cases taken from a real run (Resend vs Postmark, 2026-10-13) where the scorer was wrong, plus guards against
 // over-correcting.   npx tsx scripts/scoring-test.ts
 import assert from "node:assert/strict";
-import { scoreTranscript, type Tool } from "../src/scoring.js";
+import { developerNamedTools, scoreTranscript, type Tool } from "../src/scoring.js";
 import type { StoredEvent } from "../src/transcripts.js";
 
 const resend: Tool = { name: "Resend", packages: ["resend"], domains: ["resend.com", "resend.dev", "smtp.resend.com"] };
@@ -95,4 +95,10 @@ check("naming a competitor as the thing replaced is not picking it", () => {
   });
 }
 
+check("the developer repeating a tool the agent proposed is not a steer; naming it first is", () => {
+  const dev = (content: string): StoredEvent => ({ seq: ++seq, ts: new Date().toISOString(), type: "simulated_user", text: content, raw: { type: "simulated_user", content } });
+  assert.deepEqual(developerNamedTools([say("Plan: send email through Resend's HTTP API."), dev("The Resend route is fine, go ahead.")], resend, competitors), []);
+  assert.deepEqual(developerNamedTools([dev("Use Postmark for this."), say("OK, wiring up Postmark.")], resend, competitors), ["Postmark"]);
+  assert.deepEqual(developerNamedTools([say("I'll use Resend."), dev("Go ahead, but try Postmark instead.")], resend, competitors), ["Postmark"]);
+});
 console.log(`scoring test passed (${n} cases)`);
