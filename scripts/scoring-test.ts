@@ -72,4 +72,27 @@ check("installs and imports still count", () => {
 check("naming a competitor as the thing replaced is not picking it", () => {
   assert.equal(score(say("I'll use Resend instead of SendGrid here.")).verdict, "recommended");
 });
+// Infrastructure products (2026-10-26, Digital Research Alliance of Canada): agents pick a cluster by where the work runs.
+// The Alliance's own scheduler (Slurm) is a complement, not a competitor; with the product's short names as aliases,
+// "target", "start with" and "run on" count as picking it.
+{
+  const drac: Tool = { name: "Digital Research Alliance of Canada", aliases: ["DRAC", "Digital Research Alliance", "Alliance", "Compute Canada"], domains: ["alliancecan.ca", "docs.alliancecan.ca"] };
+  const rivals: Tool[] = [{ name: "Rescale", domains: ["rescale.com"] }, { name: "AWS ParallelCluster", aliases: ["ParallelCluster"] }];
+  const sc = (...e: StoredEvent[]) => scoreTranscript(e, drac, rivals);
+  check("'Likely target: the Alliance's clusters' -> recommended", () => {
+    assert.equal(sc(say("Likely target: **Digital Research Alliance of Canada** (Alliance; ex-Compute Canada) Slurm clusters. Faculty PI sponsors accounts (CCDB).")).verdict, "recommended");
+  });
+  check("'Added a configurable Alliance Slurm array' and 'start with the Alliance account guidance' -> recommended", () => {
+    assert.equal(sc(say("Added a configurable Alliance Slurm array for 12 seeds, requiring 40 GiB free GPU memory.")).verdict, "recommended");
+    assert.equal(sc(say("Start with the Alliance account guidance before submitting anything.")).verdict, "recommended");
+  });
+  check("running jobs on a rival's platform is still a loss", () => {
+    const s = sc(say("I'll run the sweep on Rescale, which handles the queueing for you."));
+    assert.equal(s.verdict, "competitor"); assert.equal(s.winner, "Rescale");
+  });
+  check("a bare mention of the product with 'run' elsewhere stays a mention", () => {
+    assert.equal(sc(say("The Alliance publishes cluster docs. Separately, run the smoke test locally first.")).verdict, "mentioned");
+  });
+}
+
 console.log(`scoring test passed (${n} cases)`);

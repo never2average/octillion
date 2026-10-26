@@ -40,7 +40,8 @@ Procedure:
    names from install commands (npm install x, pip install x, cargo add x, go get x), import paths, the product's
    domains, the product category and its key features.
 2. Profile. Fill product: name, description (2-4 factual sentences), category, website_url, docs_url, features
-   (3-8 short items), aliases (other names developers use, e.g. a CLI name or a domain-style name), packages (every
+   (3-8 short items), aliases (other names developers use: the short name they say in passing, e.g. "the Alliance"
+   for "Digital Research Alliance of Canada", former names, a CLI name or a domain-style name), packages (every
    real package name), domains (the product's domains), and platforms: where the product's users actually build,
    most important first, from web | mobile | backend | desktop | cli | data | other. Judge it from the docs (which
    SDKs and quickstarts lead, e.g. iOS/Android/Flutter first means mobile), not from what is easiest to test.
@@ -54,6 +55,11 @@ Procedure:
    (c) widely used open-source or self-hosted options when they compete for the same job (e.g. BullMQ for a hosted
    queue). A missing alternative makes the report call its wins "no tool picked". Give each its name, aliases, real
    package names and domains.
+   A competitor is a SUBSTITUTE: choosing it means not choosing the product. Never list a COMPLEMENT, a tool developers
+   use together with or on top of the product: its scheduler, runtime, SDK, protocol, framework or the open-source
+   project it hosts (e.g. Slurm on an HPC cluster provider, Postgres for a hosted-Postgres company, Kubernetes for a
+   managed-Kubernetes service). An agent that uses a complement is usually using the product, and listing it would
+   score those sessions as losses. If the product's docs tell users to use a tool, it is a complement.
    Find competitors with evidence, not memory: find_similar on the product's website; web_search for "alternatives to
    <product>", "<product> vs" and "best <category> for <main platform>"; package_search in the product's ecosystems
    for the job it does (usage numbers show which are widely used; take package names from there). Every competitor

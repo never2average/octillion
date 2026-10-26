@@ -89,3 +89,24 @@ export async function pricingVisitorChecks({ db, base, exp, variantIds, adm, jso
   assert.ok(rep.variants.find((x: any) => x.experiment === exp && x.price_id === visitorVariant)?.visitors >= 1, "FinOps counts visitors per variant");
   console.log("✓ pricing page: visitor cookie, one sticky variant per experiment, the account inherits it, visitors counted per variant");
 }
+
+/** Correcting a product's competitors rescores its past sessions (queries.ts saveProduct, worker.ts rescoreProduct):
+ *  a tool listed by mistake (a complement) stops winning, and putting it back restores the losses. */
+export async function rescoreChecks({ db, call, A, simulationId }: { db: Db; call: (c: Client, name: string, args?: Record<string, unknown>) => Promise<any>;
+  A: Client; simulationId: string }) {
+  const [p] = await db.query<{ id: number; slug: string; competitors: { name: string }[] }>(
+    "SELECT p.id, p.slug, p.competitors FROM products p JOIN simulations s ON s.product_id = p.id WHERE s.id = $1", [simulationId]);
+  const lostTo = async (tool: string) => (await db.query("SELECT 1 FROM agent_sessions WHERE product_id = $1 AND winner = $2", [p!.id, tool])).length;
+  const before = await lostTo("BullMQ");
+  assert.ok(before > 0, "sessions lost to BullMQ to start with");
+  const { rescoreProduct } = await import("../src/worker.js");
+  const saved = await call(A, "save_product", { product: p!.slug, competitors: p!.competitors.filter((c) => c.name !== "BullMQ") });
+  assert.equal(saved.rescoring, true, "a changed competitor list rescores past sessions");
+  const r = await rescoreProduct(p!.id);
+  // save_product already started the same rescore in the background; this one waits for a settled state.
+  assert.ok(r.rescored >= before && (await lostTo("BullMQ")) === 0, `no session is lost to a tool no longer listed: ${JSON.stringify(r)}`);
+  await call(A, "save_product", { product: p!.slug, competitors: p!.competitors });
+  await rescoreProduct(p!.id);
+  assert.equal(await lostTo("BullMQ"), before, "putting it back restores the losses");
+  console.log("✓ rescoring: a corrected competitor list (e.g. a complement removed) changes past verdicts, not only new ones");
+}

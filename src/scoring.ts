@@ -128,7 +128,10 @@ const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const token = (s: string) => `(?<![\\w@/.-])${escapeRe(s)}(?![\\w-])`;
 
 const INSTALL = /\b(?:(?:npm|pnpm|yarn|bun)\s+(?:i|install|add)|npx|bunx|pip3?\s+install|uv\s+(?:add|pip\s+install)|poetry\s+add|pipenv\s+install|cargo\s+add|go\s+get|gem\s+install|bundle\s+add|composer\s+require|dotnet\s+add\s+package|brew\s+install)\b[^\n;&|]*/gi;
-const CUE = /\b(recommend\w*|suggest\w*|i'?ll\s+use|i\s+will\s+use|let'?s\s+use|we'?ll\s+use|we\s+will\s+use|go(?:ing)?\s+with|opt(?:ing)?\s+for|choos\w+|chose|pick\w*|prefer\w*|best\s+(?:choice|option|fit)|switch(?:ing)?\s+to|set(?:ting)?\s+up|install\w*|default(?:ing|ed|s)?\s+to|proceed\w*\s+(?:\w+\s+){0,6}with|stick\w*\s+with|add(?:ing|ed)\s+an?\b|integrat\w+|built\s+(?:on|with|against)|wir(?:e|ed|ing)\s+up|use|using)\b/i;
+// Infrastructure (a cluster, a cloud, a platform) is picked by where the work runs, not by a package: "target",
+// "start with", "run / submit / deploy … on", "request an account or allocation" (seen 2026-10-26: agents that sent
+// their jobs to the Digital Research Alliance's clusters only "mentioned" it).
+const CUE = /\b(recommend\w*|suggest\w*|i'?ll\s+use|i\s+will\s+use|let'?s\s+use|we'?ll\s+use|we\s+will\s+use|go(?:ing)?\s+with|opt(?:ing)?\s+for|choos\w+|chose|pick\w*|prefer\w*|best\s+(?:choice|option|fit)|switch(?:ing)?\s+to|set(?:ting)?\s+up|install\w*|default(?:ing|ed|s)?\s+to|proceed\w*\s+(?:\w+\s+){0,6}with|stick\w*\s+with|add(?:ing|ed)\s+an?\b|integrat\w+|built\s+(?:on|with|against)|wir(?:e|ed|ing)\s+up|use|using|target(?:s|ed|ing)?|start\s+with|run\w*\s+(?:\w+\s+){0,3}on|submit\w*\s+(?:\w+\s+){0,3}(?:to|on)|deploy\w*\s+(?:\w+\s+){0,3}(?:to|on)|host\w*\s+(?:\w+\s+){0,2}on|(?:request|apply\s+for|get)\s+(?:an?\s+)?(?:\w+\s+)?(?:account|allocation))\b/i;
 const NEGATION = /\b(instead\s+of|rather\s+than|avoid\w*|don'?t\s+use|do\s+not\s+use|not\s+recommended|without)\b/i;
 // A clause that only offers the tool as an option, not as the choice made.
 const HYPOTHETICAL = /\b(if\s+you(?:'d|\s+would)?\s+(?:want|prefer|need|rather|like)|you\s+(?:can|could|may|might)\s+(?:also\s+|always\s+|easily\s+)?(?:swap|switch|use|replace|move)|alternativel?y?|such\s+as|for\s+example|e\.g\.|whether\s+to)\b/i;

@@ -319,6 +319,26 @@ export async function scoreSession(sessionId: string) {
   return score;
 }
 
+/**
+ * Score every finished session of a product again, after its names or competitors change (queries.ts saveProduct):
+ * verdicts and winners are read from the stored transcripts with the product's current tool lists, so a corrected
+ * competitor list (a complement listed by mistake, a missing alias) fixes past results, not only new ones. Oldest
+ * first, one at a time. Returns how many were rescored and how many verdicts changed.
+ */
+export async function rescoreProduct(productId: number): Promise<{ rescored: number; changed: number }> {
+  const db = await getDb();
+  const rows = await db.query<{ id: string; verdict: string | null; winner: string | null }>(
+    "/* tenant: product checked by the caller (saveProduct resolves it in the org) */ SELECT id, verdict, winner FROM agent_sessions WHERE product_id = $1 AND status = 'completed' ORDER BY ended_at",
+    [productId]);
+  let changed = 0;
+  for (const r of rows) {
+    const score = await scoreSession(r.id).catch((e) => { console.error(`rescore ${r.id}:`, (e as Error).message); return undefined; });
+    if (score === undefined) continue; // scoring failed: logged, counted as rescored but not changed
+    if ((score?.verdict ?? null) !== r.verdict || (score?.winner ?? null) !== r.winner) changed++;
+  }
+  return { rescored: rows.length, changed };
+}
+
 export async function finishSimulationIfDone(simulationId: string, opts: { extend?: boolean } = {}) {
   // Adaptive runs: when a batch is done, tasks whose result is not settled yet get more sessions; only a run that
   // queues nothing more is finished. `extend: false` (an admin cancelling a session) never queues more: stopping work

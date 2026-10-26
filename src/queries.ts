@@ -10,6 +10,7 @@ import type { Tool } from "./scoring.js";
 import { dealByPreference, planFirstBatch, schedulingShares, drawVariant, enabledAgents, findAgent, isRunnable, runnableCoverage, sandboxMix, scheduledAgents, variantsOf, type AgentSpec } from "./agents.js";
 import { getPopulation, listPopulations } from "./populations.js";
 import { capacityStatus } from "./autoscaler.js";
+import { keepAlive } from "./telemetry.js";
 import { missingAgentKeys } from "./gateway.js";
 import { asPlatform } from "./tenant-scope.js";
 import type { Population } from "./agents.js";
@@ -196,7 +197,10 @@ export async function saveProduct(org: Org, input: ProductInput, surface: Surfac
        input.docs_url ?? null, clean(input.aliases) ?? null, clean(input.packages) ?? null, clean(input.domains) ?? null,
        competitors ? JSON.stringify(competitors) : null],
     );
-    return getProduct(org, existing.slug, surface);
+    // What counts as the product or a competitor changed: past sessions are scored again in the background.
+    const renamed = input.name != null || input.aliases != null || input.packages != null || input.domains != null || competitors != null;
+    if (renamed) keepAlive((await import("./worker.js")).rescoreProduct(existing.id).catch((e) => console.error(`rescore ${existing.slug}:`, (e as Error).message)));
+    return { ...(await getProduct(org, existing.slug, surface)), ...(renamed ? { rescoring: true } : {}) };
   }
   if (!input.name) throw new Error(input.product ? `No product "${input.product}"; pass name to create it.` : "name is required to create a product");
   const slug = slugify(input.product ?? input.name) || "product";
