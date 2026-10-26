@@ -300,12 +300,21 @@ export async function runResearchJob(job: ResearchJob, brain: BrainLike): Promis
     const strong = await architectBrain().catch((e) => { log(`[${id}] architecture review model unavailable: ${redact(String(e))}`); return null; });
     const reviewer: ArchitectBrain = strong ?? { modelRuntime: brain.modelRuntime, model: brain.model, dir: brain.dir, effort: "high", label: "research model" };
     ctx.policy.maxFetches += RESEARCH.architectFetches; // its own fetch budget on top of the research's
-    const r = await reviewArchitecture(reviewer, { name: String(p.name), description: p.description, category: p.category, features: p.features, aliases: p.aliases,
-      website_url: p.website_url, docs_url: p.docs_url, competitors: p.competitors.map((c: any) => ({ name: String(c?.name ?? ""), aliases: c?.aliases, domains: c?.domains, evidence_url: c?.evidence_url })) },
+    const subject = { name: String(p.name), description: p.description, category: p.category, features: p.features, aliases: p.aliases,
+      website_url: p.website_url, docs_url: p.docs_url, competitors: p.competitors.map((c: any) => ({ name: String(c?.name ?? ""), aliases: c?.aliases, domains: c?.domains, evidence_url: c?.evidence_url })) };
+    const run = (b: ArchitectBrain) => reviewArchitecture(b, subject,
       { extension: createResearchExtension(ctx, { only: ARCHITECT_TOOLS, purpose: "architect" }), maxCostUsd: RESEARCH.architectMaxCostUsd, maxMinutes: RESEARCH.architectMaxMinutes });
+    let used = reviewer.label;
+    let r = await run(reviewer);
+    // The strongest model failed (an outage, a model the gateway cannot serve): review with the research model instead.
+    if (!r && strong) {
+      log(`[${id}] architecture review on ${strong.label} failed; retrying on the research model`);
+      r = await run({ modelRuntime: brain.modelRuntime, model: brain.model, dir: brain.dir, effort: "high", label: "research model" });
+      used = "research model (fallback)";
+    }
     if (!r) { log(`[${id}] architecture review gave no usable answer; continuing on the rules alone`); return null; }
     const out = architectOutcome(r.verdict, { name: String(p.name), aliases: p.aliases, competitors: p.competitors }, r.rounds);
-    log(`[${id}] architecture review (${reviewer.label}, ${r.rounds} round(s), $${r.cost.toFixed(3)}): ${r.verdict.placement.layer || "?"}; ` +
+    log(`[${id}] architecture review (${used}, ${r.rounds} round(s), $${r.cost.toFixed(3)}): ${r.verdict.placement.layer || "?"}; ` +
         `${out.not_competitors.length} not competing, ${out.questions.length} for the customer, ${out.issues.length} issue(s)`);
     return out;
   };

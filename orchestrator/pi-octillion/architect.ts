@@ -204,7 +204,12 @@ export async function reviewArchitecture(brain: ArchitectBrain, product: Archite
       await session.prompt(round === 1 ? architectPrompt(product) : followUpPrompt(unsureOf(verdict!), round));
       rounds = round;
       verdict = answer() ?? verdict;
-      if (!verdict || !unsureOf(verdict).length) break;
+      if (!verdict) {
+        const last: any = [...session.messages].reverse().find((m: any) => m.role === "assistant");
+        log(`architecture review (${brain.label}) round ${round}: no usable answer${last?.stopReason ? ` (${last.stopReason}${last.errorMessage ? `: ${String(last.errorMessage).slice(0, 300)}` : ""})` : ""}`);
+        break;
+      }
+      if (!unsureOf(verdict).length) break;
     }
     return verdict ? { verdict, rounds, cost: session.getSessionStats().cost } : null;
   } catch (e) {

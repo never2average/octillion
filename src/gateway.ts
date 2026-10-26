@@ -339,19 +339,25 @@ export async function gatewayHandler(req: Request, res: Response) {
     });
   } catch (e) {
     await record(hash, slug, t, { requests: 1, errors: 1, input: 0, cached: 0, output: 0, bytes: 0, model: requestModel });
+    console.error(`gateway ${slug} ${requestModel || "?"}: upstream unreachable: ${(e as Error).message.slice(0, 200)}`);
     return gwError(res, 502, "api_error", `Upstream ${slug} unreachable: ${(e as Error).message}`);
   }
 
   res.status(up.status);
   up.headers.forEach((v, k) => { if (!HOP.has(k) && k !== "content-encoding" && k !== "content-length") res.setHeader(k, v); });
   const meter = new UsageMeter(up.headers.get("content-type") ?? "");
+  // An upstream error is logged with its status and the start of its message (provider error bodies are short and
+  // carry no credentials), so a failing model or parameter shows in the logs, not only as an error count.
+  let errorHead = "";
   try {
     if (up.body) for await (const chunk of up.body as unknown as AsyncIterable<Uint8Array>) {
       const b = Buffer.from(chunk);
+      if (up.status >= 400 && errorHead.length < 600) errorHead += b.toString("utf8").slice(0, 600 - errorHead.length);
       meter.feed(b);
       res.write(b);
     }
   } finally {
+    if (up.status >= 400) console.error(`gateway ${slug} ${requestModel || "?"}: upstream ${up.status}: ${errorHead.replace(/\s+/g, " ").slice(0, 600)}`);
     meter.end();
     res.end();
     const billed = !isCountTokens;
