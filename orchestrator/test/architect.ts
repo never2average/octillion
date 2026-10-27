@@ -26,6 +26,10 @@ check("parses the JSON object out of surrounding prose and normalises it", () =>
   assert.equal(v.competitors.length, 2, "an unknown relation is dropped");
   assert.equal(v.competitors[1]!.confidence, "medium", "an unknown confidence reads as medium (not sure)");
   assert.equal(parseArchitect("no json here"), null);
+  const long = "hosted serverless Postgres database (DBaaS) with branching, autoscaling and scale-to-zero, now one service in Neon's wider platform alongside Lakebase";
+  const w = parseArchitect(JSON.stringify({ placement: { layer: long, used_with: Array.from({ length: 12 }, (_, i) => `tool ${i}`) }, competitors: [] }))!;
+  assert.equal(w.placement.layer, long, "the layer is kept whole");
+  assert.equal(w.placement.used_with.length, 12, "and every item of the placement lists");
 });
 
 check("confident complement and different layer become issues and are remembered as not competing; substitutes stay", () => {

@@ -44,7 +44,7 @@ First place the product in a developer's system architecture:
 - runs_on_it: what developers build, deploy or run on it or through it.
 - used_with: tools developers use together with or on the product (its scheduler, runtime, SDK, protocol, framework,
   or the open-source project it hosts or packages).
-- adoption_signals: 3-6 short, concrete things an agent writes or does when it is using the product.
+- adoption_signals: concrete things an agent writes or does when it is using the product.
 
 Then judge every listed competitor against that placement:
 - "substitute": a developer who picks it would not pick the product for the same job. Only these are competitors.
@@ -79,6 +79,8 @@ export interface ArchitectProduct { name: string; description?: string; category
 const RELATIONS: Relation[] = ["substitute", "complement", "different_layer", "unrelated"];
 const CONFIDENCE: Confidence[] = ["high", "medium", "low"];
 const strs = (v: unknown, max = 8) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && x.trim().length > 0).map((x) => x.trim().slice(0, 200)).slice(0, max) : []);
+/** The placement is kept as the reviewer wrote it: no length or count limits, so a layer needs no trimming to fit. */
+const texts = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && x.trim().length > 0).map((x) => x.trim()) : []);
 
 export function architectPrompt(p: ArchitectProduct): string {
   return `Product under study:\n${JSON.stringify({ name: p.name, category: p.category ?? null, description: p.description ?? null, features: p.features ?? [],
@@ -102,7 +104,7 @@ export function parseArchitect(text: string): ArchitectVerdict | null {
   if (!v || typeof v !== "object" || !Array.isArray(v.competitors)) return null;
   const pl = v.placement ?? {};
   return {
-    placement: { layer: typeof pl.layer === "string" ? pl.layer.trim().slice(0, 120) : "", runs_on_it: strs(pl.runs_on_it), used_with: strs(pl.used_with), adoption_signals: strs(pl.adoption_signals, 6) },
+    placement: { layer: typeof pl.layer === "string" ? pl.layer.trim() : "", runs_on_it: texts(pl.runs_on_it), used_with: texts(pl.used_with), adoption_signals: texts(pl.adoption_signals) },
     competitors: v.competitors.filter((c: any) => c && Number.isInteger(c.index) && RELATIONS.includes(c.relation)).map((c: any): CompetitorJudgement => {
       const confidence: Confidence = CONFIDENCE.includes(c.confidence) ? c.confidence : "medium";
       const opts = Array.isArray(c.question?.options) ? c.question.options.filter((o: any) => o && typeof o.label === "string" && RELATIONS.includes(o.relation))
