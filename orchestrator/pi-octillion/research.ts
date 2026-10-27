@@ -256,6 +256,15 @@ export function applyArchitecture(result: any, a: ArchitectOutcome) {
   p.competitors = (p.competitors ?? []).map((c: any) => (unsure.has(String(c?.name ?? "").toLowerCase()) ? { ...c, unconfirmed: true } : c));
   p.placement = a.placement;
   if (a.not_competitors.length) p.not_competitors = a.not_competitors;
+  // Buy vs build: the self-host or build route is always a competitor, matched by its signals and never by name (its
+  // natural names are often the product's own engine). It converts the listed entry that already is that route.
+  const b = a.build_alternative;
+  if (b) {
+    const route = { name: b.name, kind: b.kind, signals: b.signals, source: "research" };
+    const at = (p.competitors as any[]).findIndex((c, i) => i === b.replaces_index || String(c?.name ?? "").toLowerCase() === b.name.toLowerCase());
+    if (at >= 0) p.competitors[at] = { ...route, ...(p.competitors[at]?.unconfirmed ? { unconfirmed: true } : {}) };
+    else p.competitors.push(route);
+  }
   const listed = new Set((p.competitors ?? []).map((c: any) => String(c?.name ?? "").toLowerCase()));
   const qs = a.questions.filter((q) => listed.has(q.subject.toLowerCase()));
   if (qs.length) result.questions = qs;

@@ -284,8 +284,10 @@ export function validateResearch(r: ResearchResult | undefined): string[] {
   const p = r.product;
   if (!p?.name?.trim()) issues.push("product.name is required");
   const productWords = [p?.name, ...(p?.aliases ?? []), ...(p?.packages ?? []), ...(p?.domains ?? [])].filter(Boolean) as string[];
-  const competitors = (p?.competitors ?? []).filter((c) => c?.name);
-  const competitorWords = competitors.flatMap((c) => [c.name, ...(c.aliases ?? []), ...(c.packages ?? [])]);
+  const all = (p?.competitors ?? []).filter((c) => c?.name);
+  // The buy-vs-build route (self_hosted / build) is always added on top of the vendors: it is not counted against them.
+  const competitors = all.filter((c) => c.kind !== "self_hosted" && c.kind !== "build");
+  const competitorWords = all.flatMap((c) => [c.name, ...(c.aliases ?? []), ...(c.packages ?? [])]);
   if (!(p?.aliases?.length || p?.packages?.length || p?.domains?.length))
     issues.push("product needs at least one alias, package or domain besides the name (used to detect it in transcripts)");
   if (competitors.length < LIMITS.min_competitors || competitors.length > LIMITS.max_competitors)
@@ -441,6 +443,11 @@ export async function competitorIssues(job: { sources?: { url: string }[]; input
     .flatMap((u) => { try { return u ? [new URL(u).hostname.toLowerCase().replace(/^www\./, "")] : []; } catch { return []; } });
   const issues: string[] = [];
   (r?.product?.competitors ?? []).forEach((c, i) => {
+    if (c?.kind === "self_hosted" || c?.kind === "build") {
+      // Buy vs build is always an option, not a vendor to find: it needs signals to be seen, not a cited page.
+      if (!(c.signals ?? []).some((x) => x.trim().length >= 3)) issues.push(`product.competitors[${i}] (${c.name}) is a ${c.kind} alternative: give its signals (what an agent does when it takes that route)`);
+      return;
+    }
     const e = c?.evidence_url;
     if (!e) return void issues.push(`product.competitors[${i}] (${c?.name}) needs evidence_url: a page from web_search, find_similar or package_search showing it competes; drop competitors you cannot find evidence for`);
     let host = "";

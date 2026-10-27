@@ -35,6 +35,8 @@ const competitor = z.object({
   evidence_url: z.string().url().optional().describe("A page showing it competes (research sets this from its searches)"),
   source: z.enum(["research", "customer", "runs"]).optional().describe("Who added it; omit when adding by hand (customer)"),
   unconfirmed: z.boolean().optional().describe("Research asked whether this really competes (list_product_questions); left out of scoring until answered. Keep it as returned"),
+  kind: z.enum(["vendor", "self_hosted", "build"]).optional().describe("vendor (default): a product. self_hosted / build: running the open-source option yourself or building it in-house, the buy-vs-build alternative"),
+  signals: z.array(z.string()).optional().describe("self_hosted / build only: what an agent does when it takes that route, e.g. 'docker run postgres', 'image: postgres'. These alternatives are matched by signals, never by name"),
 });
 
 /** Tool name -> handler, for one organization. Shared by the MCP server and the local preview. */

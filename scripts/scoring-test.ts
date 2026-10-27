@@ -101,4 +101,24 @@ check("the developer repeating a tool the agent proposed is not a steer; naming 
   assert.deepEqual(developerNamedTools([dev("Use Postmark for this."), say("OK, wiring up Postmark.")], resend, competitors), ["Postmark"]);
   assert.deepEqual(developerNamedTools([say("I'll use Resend."), dev("Go ahead, but try Postmark instead.")], resend, competitors), ["Postmark"]);
 });
+// Buy vs build (2026-10-27): self-hosting the open-source option is a real alternative to a hosted product. Its natural
+// names are the product's own engine ("PostgreSQL" for Neon), so it is matched only by what the agent does.
+{
+  const neon: Tool = { name: "Neon", aliases: ["Neon Postgres"], packages: ["@neondatabase/serverless"], domains: ["neon.tech", "neon.com"] };
+  const selfHosted: Tool = { name: "Self-hosted PostgreSQL", kind: "self_hosted", signals: ["image: postgres", "docker run postgres", "apt-get install postgresql", "brew install postgresql"] };
+  const sc = (...e: StoredEvent[]) => scoreTranscript(e, neon, [selfHosted, { name: "Supabase", packages: ["@supabase/supabase-js"] }]);
+  check("using Neon, which is Postgres, is not self-hosting", () => {
+    const s = sc(act("Bash", "npm install @neondatabase/serverless"), say("Neon is serverless PostgreSQL; I set DATABASE_URL to the Neon Postgres connection string."));
+    assert.equal(s.verdict, "adopted"); assert.equal(level(s, "Self-hosted PostgreSQL"), null);
+  });
+  check("standing up your own Postgres is a loss to self-hosting, even when the agent only says 'Postgres'", () => {
+    const s = sc(act("Write", "services:\n  db:\n    image: postgres:16\n    environment:\n      POSTGRES_PASSWORD: dev"), say("I added a Postgres service to docker-compose."));
+    assert.equal(s.verdict, "competitor"); assert.equal(s.winner, "Self-hosted PostgreSQL");
+  });
+  check("a self-hosting signal in prose with a cue is a recommendation; with none, a mention", () => {
+    assert.equal(level(sc(say("I'll use docker run postgres locally for now.")), "Self-hosted PostgreSQL"), "recommended");
+    assert.equal(level(sc(say("If you would rather, you could apt-get install postgresql on a VM.")), "Self-hosted PostgreSQL"), "mentioned");
+  });
+}
+
 console.log(`scoring test passed (${n} cases)`);

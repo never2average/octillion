@@ -146,6 +146,7 @@ const ARCHITECT_ANSWER = JSON.stringify({
       question: { text: "Do your users pick Agenda instead of AcmeQ, or run it alongside AcmeQ?", options: [
         { label: "Alongside AcmeQ, for cron-style scheduling", relation: "complement" }, { label: "Instead of AcmeQ", relation: "substitute" }] } },
     { index: 2, name: "pg-boss", relation: "substitute", confidence: "high", reason: "A Postgres-backed queue." }],
+  build_alternative: { kind: "build", name: "In-house job queue", signals: ["CREATE TABLE jobs", "SELECT ... FOR UPDATE SKIP LOCKED"], replaces_index: null, reason: "Teams write a queue on their database." },
   missing_names: [] });
 const llm = http.createServer((req, res) => {
   let raw = "";
@@ -295,6 +296,7 @@ async function main() {
   const q = qs.questions?.[0];
   const unconfirmed = (A?.product.competitors ?? []).filter((c: any) => c.unconfirmed).map((c: any) => c.name);
   check("architecture review: unsure after its rounds -> a question for the customer, the tool kept off scoring",
+    (A?.product.competitors ?? []).some((c: any) => c.kind === "build" && c.name === "In-house job queue" && c.signals.length === 2) &&
     architectRounds >= 5 && qs.questions?.length === 1 && q?.subject === "Agenda" && q.options.length === 2 && JSON.stringify(unconfirmed) === '["Agenda"]',
     `${architectRounds} reviewer request(s), questions ${qs.questions?.length}, unconfirmed ${JSON.stringify(unconfirmed)}`);
   const ans = await call("answer_product_question", { question_id: q?.id, option: "a" });

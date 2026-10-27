@@ -82,4 +82,24 @@ check("a question about a competitor research then removed is not asked", () => 
   assert.equal(result.questions, undefined);
 });
 
+check("buy vs build: the self-host route converts the listed entry that shared the engine's name, matched by signals", () => {
+  const neon: ArchitectProduct = { name: "Neon", competitors: [{ name: "Supabase" }, { name: "Self-hosted PostgreSQL", aliases: ["PostgreSQL", "Postgres"], domains: ["postgresql.org"] }] };
+  const v = parseArchitect(answer([{ index: 0, name: "Supabase", relation: "substitute", confidence: "high", reason: "" },
+    { index: 1, name: "Self-hosted PostgreSQL", relation: "complement", confidence: "high", reason: "Neon is Postgres." }],
+    { build_alternative: { kind: "self_hosted", name: "Self-hosted PostgreSQL", signals: ["docker run postgres", "image: postgres", "x"], replaces_index: 1, reason: "Run your own server." } }))!;
+  const o = architectOutcome(v, neon, 1);
+  assert.ok(!o.issues.some((i) => /Self-hosted/.test(i)) && !o.not_competitors.length, "never removed as a complement");
+  const result: any = { product: { name: "Neon", competitors: neon.competitors.map((c) => ({ ...c })) } };
+  applyArchitecture(result, o);
+  const route = result.product.competitors[1];
+  assert.deepEqual([route.kind, route.signals, route.aliases], ["self_hosted", ["docker run postgres", "image: postgres"], undefined], "names and aliases dropped, signals kept (too-short ones out)");
+});
+check("buy vs build: added when research listed no such route", () => {
+  const v = parseArchitect(answer([{ index: 0, name: "Rescale", relation: "substitute", confidence: "high", reason: "" }],
+    { build_alternative: { kind: "build", name: "Own cluster on cloud VMs", signals: ["terraform apply", "sbatch on our own cluster"], replaces_index: null, reason: "" } }))!;
+  const result: any = { product: { name: drac.name, competitors: [{ name: "Rescale" }] } };
+  applyArchitecture(result, architectOutcome(v, { ...drac, competitors: [{ name: "Rescale" }] }, 1));
+  assert.deepEqual(result.product.competitors.map((c: any) => [c.name, c.kind ?? "vendor"]), [["Rescale", "vendor"], ["Own cluster on cloud VMs", "build"]]);
+});
+
 console.log(`architect test passed (${n} cases)`);

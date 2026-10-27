@@ -185,6 +185,7 @@ export async function saveProduct(org: Org, input: ProductInput, surface: Surfac
     ...(c.evidence_url && /^https?:\/\//.test(c.evidence_url) ? { evidence_url: c.evidence_url } : {}),
     ...(c.source ? { source: c.source } : {}),
     ...(c.unconfirmed ? { unconfirmed: true } : {}),
+    ...(c.kind && c.kind !== "vendor" ? { kind: c.kind, signals: clean(c.signals) ?? [] } : {}),
   }));
   if (existing) {
     await db.query(

@@ -33,7 +33,18 @@ export interface Tool {
    * with it, and asked the customer (product_questions). Until answered it is left out of scoring (no wins, no losses).
    */
   unconfirmed?: boolean;
+  /**
+   * Competitors only: "vendor" (default) is a product matched by its names, packages and domains. "self_hosted" (run
+   * the open-source thing yourself) and "build" (write it in-house) are the buy-vs-build alternatives: their natural
+   * names are often the very tools developers use with the product ("PostgreSQL" for a Postgres host), so they are
+   * matched only by `signals`, what an agent does when it takes that route ("docker run postgres", "image: postgres").
+   */
+  kind?: "vendor" | "self_hosted" | "build";
+  signals?: string[];
 }
+
+/** A buy-vs-build alternative: matched by what the agent does (signals), never by name. */
+export const isBuildAlternative = (t: Pick<Tool, "kind">) => t.kind === "self_hosted" || t.kind === "build";
 
 /** The competitors that count for scoring: confirmed ones (an unconfirmed one waits for the customer's answer). */
 export const scoredCompetitors = (cs: Tool[] | null | undefined) => (cs ?? []).filter((c) => !c.unconfirmed);
@@ -148,6 +159,13 @@ const HYPOTHETICAL = /\b(if\s+you(?:'d|\s+would)?\s+(?:want|prefer|need|rather|l
 const RESEARCH_ACTION = /^\s*(?:web[_-]?(?:fetch|search)|fetch|search\w*|read\w*|grep|glob|ls|list\w*|view\w*|open\w*|find\w*|todo[_-]?write|todowrite|update[_-]?plan|plan|task|agent|browser\w*|think\w*)\s*$/i;
 
 function matchers(t: Tool) {
+  if (isBuildAlternative(t)) {
+    // Signals are phrases; whitespace in them matches any run of whitespace ("docker run postgres" in a compose file
+    // or a command line). Without signals the alternative cannot be seen, so it is never scored.
+    const sigs = (t.signals ?? []).map((x) => x.trim()).filter((x) => x.length >= 3);
+    const signal = sigs.length ? new RegExp(sigs.map((x) => escapeRe(x).replace(/\s+/g, "\\s+")).join("|"), "i") : null;
+    return { mention: signal ? (text: string) => text.search(signal) : null, pkgRe: null, imports: null, apiHost: null, ident: null, signal };
+  }
   const names = [t.name, ...(t.aliases ?? [])].filter(Boolean);
   const pkgs = (t.packages ?? []).filter(Boolean);
   const domains = (t.domains ?? []).filter(Boolean);
@@ -187,7 +205,7 @@ function matchers(t: Tool) {
   const ident = slugs.length
     ? new RegExp(`(?<![A-Za-z0-9])(?:${slugs.map(escapeRe).join("|")})[_-]?(?:api[_-]?(?:key|url|token|secret|base)|server[_-]?token|access[_-]?token|auth[_-]?token|webhook[_-]?secret|signing[_-]?secret|client|sdk)(?![a-z])`, "i")
     : null;
-  return { mention, pkgRe, imports, apiHost, ident };
+  return { mention, pkgRe, imports, apiHost, ident, signal: null as RegExp | null };
 }
 
 function snippetAround(text: string, idx: number, width = 220) {
@@ -207,6 +225,11 @@ function levelIn(kind: "message" | "action", text: string, m: ReturnType<typeof 
     if (imp) return { level: "adopted", index: imp.index ?? 0 };
     // Segments start with the tool's name on its own line (see `segments`); a lookup is never an adoption.
     const research = RESEARCH_ACTION.test(text.slice(0, text.indexOf("\n") < 0 ? text.length : text.indexOf("\n")));
+    // Self-hosting or building it: an action that does what the signal says (a command, a compose file, a config).
+    if (!research && m.signal) {
+      const at = text.search(m.signal);
+      if (at >= 0) return { level: "adopted", index: at };
+    }
     if (!research) {
       const built = (m.apiHost && text.match(m.apiHost)) || (m.ident && text.match(m.ident));
       if (built) return { level: "adopted", index: built.index ?? 0 };

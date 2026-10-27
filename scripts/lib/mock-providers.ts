@@ -340,7 +340,7 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
       else claims.o = { id: org.id, rol: String(b.org_role ?? "member").replace(/^org:/, ""), slg: org.slug };
     }
     const t = new SignJWT(claims).setProtectedHeader({ alg: "RS256", kid: "mock-1", typ: "JWT" }).setIssuer(getBase()).setSubject(b.user_id)
-      .setIssuedAt().setNotBefore(Math.floor(Date.now() / 1000) - 5).setExpirationTime(b.expired ? Math.floor(Date.now() / 1000) - 60 : "5m");
+      .setIssuedAt().setNotBefore(Math.floor(Date.now() / 1000) - 5).setExpirationTime(b.expired ? Math.floor(Date.now() / 1000) - 60 : "2h"); // outlives a whole smoke run (expiry tests ask for expired)
     res.json({ token: await t.sign(privateKey) });
   });
   /** A Clerk OAuth access token for an MCP client: opaque oat_… (verified through the Backend API) or a JWT (typ at+jwt). */
@@ -348,7 +348,7 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     const b = req.body ?? {};
     if (b.jwt) {
       const t = new SignJWT({ scp: "profile email", client_id: "mock_client", ...(b.aud ? { aud: b.aud } : {}) }).setProtectedHeader({ alg: "RS256", kid: "mock-1", typ: "at+jwt" })
-        .setIssuer(b.iss ?? getBase()).setSubject(b.user_id).setIssuedAt().setExpirationTime(b.expired ? Math.floor(Date.now() / 1000) - 60 : "5m");
+        .setIssuer(b.iss ?? getBase()).setSubject(b.user_id).setIssuedAt().setExpirationTime(b.expired ? Math.floor(Date.now() / 1000) - 60 : "2h"); // outlives a whole smoke run (expiry tests ask for expired)
       return void res.json({ access_token: await t.sign(privateKey) });
     }
     const token = `oat_${randomBytes(18).toString("hex")}`;

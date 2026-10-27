@@ -56,6 +56,17 @@ Give your confidence: "high" when the docs or clear evidence settle it, "medium"
 high, also write a question for the product's owner: one plain sentence asking how their users use the tool with or
 instead of the product, and 2-3 options, each a short description a person would recognise, mapped to a relation.
 
+Buy versus build is always a real threat: a developer can run the open-source option themselves or build the thing
+in-house instead of buying the product. Always give build_alternative, the strongest such route for this product's job:
+- kind: "self_hosted" (run an open-source project yourself, e.g. your own PostgreSQL server instead of a hosted
+  Postgres) or "build" (write it yourself, e.g. a queue on database tables instead of a queue service).
+- name: a distinct name for the route, e.g. "Self-hosted PostgreSQL", "In-house job queue".
+- signals: 3-8 concrete things an agent writes or runs when it takes that route (commands, compose or config lines,
+  code shapes), e.g. "docker run postgres", "image: postgres", "apt-get install postgresql". Never a bare product or
+  engine name: the product's own users say "Postgres" too.
+- replaces_index: the index of a listed competitor that already is this route (judge that one "substitute", never
+  "complement" because it shares a name with the engine), else null.
+
 Finally list missing_names: short, former or spoken names developers use for the product that its aliases lack (e.g.
 "the Alliance" for "Digital Research Alliance of Canada", a former company name). Never names of other products.
 
@@ -64,6 +75,7 @@ Answer with ONLY one JSON object, no prose:
  "competitors": [{"index": 0, "name": "", "relation": "substitute" | "complement" | "different_layer" | "unrelated",
                   "confidence": "high" | "medium" | "low", "reason": "",
                   "question": {"text": "", "options": [{"label": "", "relation": "substitute"}]}}],
+ "build_alternative": {"kind": "self_hosted" | "build", "name": "", "signals": [], "replaces_index": null, "reason": ""},
  "missing_names": []}
 "reason" is one short sentence with the evidence; "question" only when confidence is not high.`;
 
@@ -72,7 +84,8 @@ export type Confidence = "high" | "medium" | "low";
 export interface Placement { layer: string; runs_on_it: string[]; used_with: string[]; adoption_signals: string[] }
 export interface CompetitorJudgement { index: number; name: string; relation: Relation; confidence: Confidence; reason: string;
   question: { text: string; options: { label: string; relation: Relation }[] } | null }
-export interface ArchitectVerdict { placement: Placement; competitors: CompetitorJudgement[]; missing_names: string[] }
+export interface BuildAlternative { kind: "self_hosted" | "build"; name: string; signals: string[]; replaces_index: number | null; reason: string }
+export interface ArchitectVerdict { placement: Placement; competitors: CompetitorJudgement[]; missing_names: string[]; build_alternative: BuildAlternative | null }
 export interface ArchitectProduct { name: string; description?: string; category?: string; features?: string[]; aliases?: string[]; website_url?: string;
   docs_url?: string; competitors: { name: string; aliases?: string[]; domains?: string[]; evidence_url?: string }[] }
 
@@ -113,7 +126,15 @@ export function parseArchitect(text: string): ArchitectVerdict | null {
                question: typeof c.question?.text === "string" && c.question.text.trim() && opts.length >= 2 ? { text: c.question.text.trim().slice(0, 400), options: opts } : null };
     }),
     missing_names: strs(v.missing_names, 6),
+    build_alternative: buildAlternativeOf(v.build_alternative),
   };
+}
+
+function buildAlternativeOf(b: any): BuildAlternative | null {
+  if (!b || (b.kind !== "self_hosted" && b.kind !== "build") || typeof b.name !== "string" || !b.name.trim()) return null;
+  const signals = texts(b.signals).filter((x) => x.length >= 3);
+  return signals.length ? { kind: b.kind, name: b.name.trim(), signals, replaces_index: Number.isInteger(b.replaces_index) ? b.replaces_index : null,
+                            reason: typeof b.reason === "string" ? b.reason.trim() : "" } : null;
 }
 
 export const unsureOf = (v: ArchitectVerdict) => v.competitors.filter((c) => c.confidence !== "high");
@@ -128,10 +149,15 @@ export interface ArchitectOutcome {
   /** Confident non-substitutes, kept on the product's research so a later merge never adds them back. */
   not_competitors: { name: string; relation: Relation; reason: string }[];
   placement: Placement;
+  /** Buy vs build: the self-host or build-it-yourself route, always kept as a competitor and matched by its signals. */
+  build_alternative: BuildAlternative | null;
 }
 
 export function architectOutcome(v: ArchitectVerdict, p: ArchitectProduct, rounds: number): ArchitectOutcome {
-  const out: ArchitectOutcome = { issues: [], questions: [], unconfirmed: [], not_competitors: [], placement: v.placement };
+  const out: ArchitectOutcome = { issues: [], questions: [], unconfirmed: [], not_competitors: [], placement: v.placement, build_alternative: v.build_alternative };
+  // The listed competitor that is the buy-vs-build route stays a competitor whatever relation it was given (it is
+  // converted to that route by applyArchitecture), so it is neither removed nor asked about.
+  const routeIndex = v.build_alternative?.replaces_index ?? null;
   const why: Record<Exclude<Relation, "substitute">, string> = {
     complement: "is a complement, used with or on the product, not instead of it: an agent using it is usually using the product. Remove it from competitors",
     different_layer: "solves a different part of the stack, so it does not compete for the same decision. Remove it from competitors, or replace it with a real substitute",
@@ -139,7 +165,7 @@ export function architectOutcome(v: ArchitectVerdict, p: ArchitectProduct, round
   };
   for (const c of v.competitors) {
     const listed = p.competitors[c.index];
-    if (!listed) continue;
+    if (!listed || c.index === routeIndex || (v.build_alternative && listed.name.toLowerCase() === v.build_alternative.name.toLowerCase())) continue;
     if (c.confidence !== "high") {
       // Unsure after every round: never guessed. Ask the owner; keep it off the scoring meanwhile.
       const q = c.question ?? { text: `How do developers use ${listed.name} with ${p.name}?`, options: [
