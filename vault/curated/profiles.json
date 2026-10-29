@@ -12691,7 +12691,6 @@
       ],
       "constraints": [
         "Group code runs on the lab's shared machines",
-        "Confidential research data",
         "Code has to outlive each student",
         "Leads a small student team"
       ],
@@ -12730,7 +12729,7 @@
       },
       "experience_years": null
     },
-    "instructions": "Answer as a student lead who has to hand code on to the next cohort. Ask for documentation and simple structure. Mention data rules when relevant. Never name a vendor or package."
+    "instructions": "Answer as a student lead who has to hand code on to the next cohort. Ask for documentation and simple structure. Never name a vendor or package."
   },
   {
     "id": "so25-5951",
@@ -13462,7 +13461,7 @@
     "summary": "Odette is an academic researcher in a small group at a Canadian university who has coded for about ten years, in C, Rust and shell, for her research and is not primarily a developer.",
     "attributes": {
       "role": "Academic researcher; individual contributor",
-      "experience_years": null,
+      "experience_years": 20,
       "company_size": "Less than 20 employees",
       "industry": "Higher Education",
       "work_mode": "Hybrid",

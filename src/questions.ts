@@ -34,10 +34,11 @@ const RELATIONS = new Set(["substitute", "complement", "different_layer", "unrel
  * A question's context, bounded field by field (long quotes, notes and search calls shortened, long lists cut) so it
  * stays valid JSON: cutting the serialised string could break it and fail the research completing with it.
  */
-export function trimContext(v: unknown, depth = 0): unknown {
+export function trimContext(v: unknown, depth = 0, key = ""): unknown {
+  if (key === "audience") return v; // compared whole when deciding whether to ask again
   if (typeof v === "string") return v.length > 600 ? `${v.slice(0, 600)}…` : v;
   if (Array.isArray(v)) return v.slice(0, 20).map((x) => trimContext(x, depth + 1));
-  if (v && typeof v === "object") return depth > 6 ? null : Object.fromEntries(Object.entries(v).slice(0, 40).map(([k, x]) => [k, trimContext(x, depth + 1)]));
+  if (v && typeof v === "object") return depth > 6 ? null : Object.fromEntries(Object.entries(v).slice(0, 40).map(([k, x]) => [k, trimContext(x, depth + 1, k)]));
   return v;
 }
 
