@@ -332,10 +332,12 @@ export function GroupMenu<T>({ cols, group, setGroup }: { cols: RecordCol<T>[]; 
 }
 
 /** Sort, group and columns in one popover, so the toolbar is just search, Filter, this and the primary action. */
-export function ViewMenu<T>({ cols, sort, setSort, group, setGroup, hidden, setHidden, groupable, properties }: {
+export function ViewMenu<T>({ cols, sort, setSort, group, setGroup, hidden, setHidden, groupable, properties, labelled }: {
   cols: RecordCol<T>[]; sort: SortRule[]; setSort: (s: SortRule[]) => void;
   group: string | null; setGroup: (g: string | null) => void; hidden: string[]; setHidden: (h: string[]) => void;
   groupable?: boolean; properties?: boolean;
+  /** A text label beside the icon (list pages with the stacked toolbar: no icon-only buttons). */
+  labelled?: boolean;
 }) {
   const sortable = cols.filter(typed), groupBy = cols.filter((c) => c.type === 'select' && c.value);
   const first = sort[0], cur = groupBy.find((c) => c.key === group);
@@ -343,8 +345,8 @@ export function ViewMenu<T>({ cols, sort, setSort, group, setGroup, hidden, setH
   const label = 'text-muted-foreground text-xs font-medium leading-none';
   return (
     <Popover>
-      <PopoverTrigger render={<Button variant='ghost' size='icon' aria-label='View options' title='Sort, group and columns' />}>
-        <IconAdjustmentsHorizontal />
+      <PopoverTrigger render={labelled ? <Button variant='ghost' size='sm' title='Sort, group and columns' /> : <Button variant='ghost' size='icon' aria-label='View options' title='Sort, group and columns' />}>
+        <IconAdjustmentsHorizontal />{labelled && ' View'}
       </PopoverTrigger>
       <PopoverContent align='end' className='flex w-72 flex-col gap-4'>
         {sortable.length > 0 && (

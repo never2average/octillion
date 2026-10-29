@@ -33,6 +33,8 @@ import { autoscalerStatus, kickAutoscaler, startAutoscaler, stopAutoscaler } fro
 /** On Vercel, orchestrator traffic drives the autoscaler (no ticking loop there); elsewhere the loop does. */
 const serverlessTick = (force = false) => { if (process.env.VERCEL) telemetry.keepAlive(kickAutoscaler({ force }).catch((e) => console.error("autoscaler kick:", (e as Error).message))); };
 import { startArchiver, stopArchiver } from "./archive.js";
+import * as campaignsMod from "./campaigns.js";
+import * as gtm from "./gtm.js";
 import { storageEnabled } from "./storage.js";
 import { brokerOrchestratorCredentials, brokerSessionCredentials, gatewayHandler } from "./gateway.js";
 import * as research from "./research.js";
@@ -111,7 +113,9 @@ export function createApp() {
     const rls = await probeFromCron(getDb);
     // Operator alerts: sessions failing too often or stuck in the queue (src/health-alerts.ts).
     const health = await (await import("./health-alerts.js")).checkHealth().then((h) => ({ alerts: h.alerts, emailed: h.emailed, slack: h.slack, error: h.error }));
-    res.json({ tick, pruned, reasons, rls, health });
+    // GTM campaigns (src/campaigns.ts): start scheduled ones, enroll, send what is due (idempotent, rate-limited). Never throws.
+    const campaigns = await campaignsMod.campaignTick();
+    res.json({ tick, pruned, reasons, rls, health, campaigns });
   });
 
   // The public /pricing page (web/src/features/site/pricing.tsx): the live plans, with this visitor's variant of each
@@ -190,6 +194,26 @@ export function createApp() {
   };
   app.post("/api/journeys/nudges", express.json({ limit: "32kb" }), (req, res) => nudgeHook(req, res, bearer(req.headers.authorization)));
   app.post("/api/journeys/nudges/:secret", express.json({ limit: "32kb" }), (req, res) => nudgeHook(req, res, String(req.params.secret)));
+
+  // ---------- GTM campaign email (src/campaigns.ts): the unsubscribe link, and Resend's delivery webhooks ----------
+  // The link's token is signed; GET asks (mail scanners follow links), POST unsubscribes, which is also RFC 8058's
+  // one-click (List-Unsubscribe-Post) from the mail client.
+  app.get("/api/email/unsubscribe", (req, res) => {
+    const t = String(req.query.t ?? "");
+    const state = t === "test" ? "test" : campaignsMod.verifyUnsubscribe(t) != null ? "ask" : "invalid";
+    res.set({ "Cache-Control": "no-store", "X-Robots-Tag": "noindex" }).status(state === "invalid" ? 400 : 200).type("html").send(campaignsMod.unsubscribePage(state, t));
+  });
+  app.post("/api/email/unsubscribe", express.urlencoded({ extended: false, limit: "4kb" }), async (req, res) => {
+    const r = await campaignsMod.unsubscribe(String(req.query.t ?? ""));
+    res.set({ "Cache-Control": "no-store", "X-Robots-Tag": "noindex" }).status(r.ok ? 200 : 400).type("html").send(campaignsMod.unsubscribePage(r.test ? "test" : r.ok ? "done" : "invalid"));
+  });
+  // Svix-signed (the key vault's resend_webhook secret): the raw body is what is signed, so no JSON parser before it.
+  app.post("/api/webhooks/resend", express.raw({ type: "*/*", limit: "256kb" }), async (req, res) => {
+    const h = (k: string) => { const v = req.get(k); return v ? String(v) : undefined; };
+    const raw = Buffer.isBuffer(req.body) ? req.body.toString("utf8") : "";
+    const r = await campaignsMod.resendWebhook(raw, { id: h("svix-id"), timestamp: h("svix-timestamp"), signature: h("svix-signature") });
+    res.status(r.status).json(r.body);
+  });
 
   // ---------- OAuth discovery (Clerk is the authorization server; src/clerk.ts) ----------
   // MCP clients (Claude, ChatGPT, Claude Code, Cursor) find Clerk from the 401 below, register (CIMD or DCR) and sign
@@ -631,6 +655,23 @@ export function createApp() {
     onboarding.log(adminActor(req, res), "email.test", null, { status: r.status, to_domain: mail.domainOf(String(req.body.to)) });
     res.status(201).json(r);
   });
+  // GTM (src/gtm.ts, src/campaigns.ts): Activation and Attribution read for any admin; campaigns are owners' to change.
+  const cid = (req: Request) => Number(req.params.id);
+  ob.get("/gtm/activation", async (req, res) => void res.json(await gtm.activation(req.query)));
+  ob.get("/gtm/attribution", async (req, res) => void res.json(await gtm.attribution(req.query)));
+  ob.get("/gtm/campaigns", async (_req, res) => void res.json(await campaignsMod.listCampaigns()));
+  ob.get("/gtm/campaigns/:id", async (req, res) => void res.json(await campaignsMod.campaignDetail(cid(req))));
+  ob.post("/gtm/audience/preview", need("read"), async (req, res) => void res.json(await campaignsMod.previewAudience(req.body ?? {})));
+  ob.post("/gtm/campaigns", need("campaigns"), async (req, res) =>
+    void res.status(201).json(await campaignsMod.createCampaign(adminActor(req, res), (res.locals.adminUserId as string | undefined) ?? null, req.body ?? {})));
+  ob.put("/gtm/campaigns/:id", need("campaigns"), async (req, res) => void res.json(await campaignsMod.updateCampaign(adminActor(req, res), cid(req), req.body ?? {})));
+  ob.post("/gtm/campaigns/:id/launch", need("campaigns"), async (req, res) => void res.json(await campaignsMod.launchCampaign(adminActor(req, res), cid(req), req.body ?? {})));
+  for (const action of ["pause", "resume", "end"] as const)
+    ob.post(`/gtm/campaigns/:id/${action}`, need("campaigns"), async (req, res) => void res.json(await campaignsMod.setCampaignState(adminActor(req, res), cid(req), action)));
+  ob.post("/gtm/campaigns/:id/test", need("campaigns"), async (req, res) => void res.status(201).json(await campaignsMod.testSend(adminActor(req, res), cid(req), req.body ?? {})));
+  ob.delete("/gtm/campaigns/:id", need("campaigns"), async (req, res) => { await campaignsMod.deleteCampaign(adminActor(req, res), cid(req)); res.status(204).end(); });
+  // Process what is due now instead of waiting for the 5-minute tick (the same idempotent tick).
+  ob.post("/gtm/tick", need("campaigns"), async (_req, res) => void res.json(await campaignsMod.campaignTick()));
   ob.get("/compute/sandbox", async (_req, res) => void res.json(await library.sandboxProvider()));
   ob.post("/compute/keys", need("keys"), async (req, res) => void res.status(201).json(await library.addModelKey(adminActor(req, res), req.body ?? {})));
   ob.post("/compute/keys/:id/enabled", need("keys"), async (req, res) => done(res, await library.setModelKeyEnabled(adminActor(req, res), Number(req.params.id), req.body?.enabled)));
@@ -732,6 +773,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     // Off-machine archive of traces and research to R2 (src/archive.ts): backfills, then keeps up every 5 minutes.
     startArchiver();
     console.error(`  archive       ${storageEnabled() ? "on (traces + research to R2)" : "off (R2_* not set)"}`);
+    // GTM campaign sends every 5 minutes (src/campaigns.ts); Vercel's cron does it there. OCTILLION_CAMPAIGNS=off disables it.
+    campaignsMod.startCampaignTicker();
   });
   // Graceful drain (deploys, restarts): stop accepting connections, let in-flight requests finish (gateway streams
   // are sandboxed agents' model calls; cutting them fails the sessions), then exit. A rolling deploy starts the new

@@ -17,6 +17,7 @@ const EXTRA_ENV: Record<string, string[]> = {
   exa: ["EXA_API_KEY"],
   libraries_io: ["LIBRARIES_IO_API_KEY"],
   resend: ["RESEND_API_KEY"],
+  resend_webhook: ["RESEND_WEBHOOK_SECRET"],
   slack: ["ALERT_SLACK_WEBHOOK_URL"],
   [VERTEX_PROVIDER]: ["VERTEX_SERVICE_ACCOUNT_JSON", "GOOGLE_SERVICE_ACCOUNT_JSON"],
 };

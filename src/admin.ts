@@ -147,6 +147,8 @@ async function peopleOf(clerkOrgId: string | null, fresh = false): Promise<Peopl
   return people;
 }
 const forget = (clerkOrgId: string | null) => { if (clerkOrgId) peopleCache.delete(clerkOrgId); };
+/** An account's people and invitations from Clerk (cached a minute): GTM campaigns write to its active members. */
+export const accountPeople = (clerkOrgId: string | null) => peopleOf(clerkOrgId);
 
 async function subscriptions(): Promise<{ map: Map<string, billing.SubscriptionSummary>; error?: string }> {
   if (!billing.stripeEnabled()) return { map: new Map() };

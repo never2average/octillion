@@ -5,7 +5,7 @@
  *   viewer    reads every admin page (the key vault shows hints only)
  *   support   + access requests, creating accounts, inviting people, journey tips
  *   operator  + compute, harness mix and harnesses, agent configuration, the library, account edits, simulations
- *   owner     + the key vault, test emails, admins and their roles, plans in Stripe, and anything destructive
+ *   owner     + the key vault, test emails, GTM campaigns, admins and their roles, plans in Stripe, and anything destructive
  *
  * The role lives in Clerk (user public_metadata.platform_role), so there is no table. Owner also covers the old ways
  * in: public_metadata.platform_admin = true and an address OCTILLION_PLATFORM_ADMINS lists. Admin tokens (adm_…,
@@ -22,7 +22,7 @@ export const ROLE_HELP: Record<PlatformRole, string> = {
   viewer: "Reads every admin page. Changes nothing.",
   support: "Viewer, plus access requests, new accounts, invitations and journey tips.",
   operator: "Support, plus compute, harnesses, agent configuration, the library, account edits and simulations.",
-  owner: "Everything, including the key vault, admins and deleting things.",
+  owner: "Everything, including the key vault, email campaigns, admins and deleting things.",
 };
 
 /** Each permission and the least role that has it. */
@@ -36,6 +36,7 @@ export const PERMISSIONS = {
   harnesses: "operator",   // the harness mix (populations) and admin-added harnesses
   library: "operator",     // personas, tasks and customer journeys (playbooks)
   email: "owner",          // send a test email (/admin/emails)
+  campaigns: "owner",      // GTM campaigns: create, edit, launch, pause, test-send, delete, process sends now
   keys: "owner",           // key vault: add, import, rotate, delete keys, provider switches, the sandbox provider's key
   admins: "owner",         // add and remove admins, change their roles
   plans: "owner",          // create and archive prepaid plans in Stripe (FinOps › Revenue)

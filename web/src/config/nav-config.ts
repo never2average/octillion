@@ -14,6 +14,15 @@ export const adminNav: NavGroup[] = [
     ]
   },
   {
+    // Go-to-market: lifecycle email, the one activation funnel, and where accounts came from (src/gtm.ts, src/campaigns.ts).
+    label: 'GTM',
+    items: [
+      { title: 'Campaigns', url: '/admin/gtm/campaigns', icon: 'send', items: [] },
+      { title: 'Activation', url: '/admin/gtm/activation', icon: 'rocket', items: [] },
+      { title: 'Attribution', url: '/admin/gtm/attribution', icon: 'trendingUp', items: [] }
+    ]
+  },
+  {
     label: 'Engagement',
     items: [{ title: 'Journeys', url: '/admin/journeys', icon: 'route', shortcut: ['g', 'j'], items: [] }]
   },

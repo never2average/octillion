@@ -177,6 +177,26 @@ export const ADMIN_TOOLS = {
     },
     summary: (d) => `${d.totals.active_accounts} active account(s), ${d.totals.active_people} people, ${d.totals.calls} call(s), ${d.totals.error_pct}% errors over ${d.range.days} day(s).`,
   },
+  gtm_activation: {
+    title: "Activation funnel", needs: "read",
+    description: "GTM › Activation: the activation funnel for a period (access requested, account created, first product onboarded, first simulation, report opened, paid) with counts, conversion and median time between steps, and the accounts that need a person now. Filter by plan, utm_source, utm_campaign (comma lists; 'direct/unknown' for untagged).",
+    input: { ...range, plan: z.string().optional(), utm_source: z.string().optional(), utm_campaign: z.string().optional() },
+    run: async (a) => {
+      const { facets: _f, cohort: _c, ...d } = await (await import("./gtm.js")).activation(a);
+      return { ...d, steps: d.steps.map(({ accounts: _x, ...s }) => s), attention: d.attention.slice(0, 50).map((o) => ({ slug: o.slug, name: o.name, stage_label: o.stage_label, attention: o.attention, contact: o.contact, plan: o.plan, utm: o.utm })) };
+    },
+    summary: (d) => d.steps.map((s: { label: string; reached: number }) => `${s.label} ${s.reached}`).join(" -> ") + `; ${d.attention.length} need a person.`,
+  },
+  gtm_attribution: {
+    title: "Attribution", needs: "read",
+    description: "GTM › Attribution: for a period, access requests by utm_source / utm_medium / utm_campaign (plus direct/unknown) through approved, accounts, activated (first simulation), paying and MRR from Stripe.",
+    input: { ...range },
+    run: async (a) => {
+      const d = await (await import("./gtm.js")).attribution(a);
+      return { ...d, rows: d.rows.map(({ account_list, ...r }) => ({ ...r, accounts_sample: account_list.slice(0, 10).map((x) => x.slug) })) };
+    },
+    summary: (d) => `${d.rows.length} source(s): ${d.totals.requests} request(s), ${d.totals.accounts} account(s), ${d.totals.paying} paying, MRR ${usd(d.totals.mrr_usd)}.`,
+  },
   list_settings: {
     title: "Platform settings", needs: "read",
     description: "Global settings (Compute › Settings and Agent configuration): each key with its value in force, where it comes from (set on /admin, the environment, or the default), limits and who last changed it. Change one with update_setting.",

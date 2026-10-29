@@ -46,7 +46,7 @@ const isObj = (x: unknown): x is Record<string, unknown> => !!x && typeof x === 
 
 export function RecordView<T>({
   rows, rowKey, cols, searchText, searchPlaceholder = 'Search', filters, primary, detail, detailTitle, actions, empty, noun = 'items', loading, initialSize,
-  id, views, defaultSort, groupable, bulk, exportName, primaryMenu, properties, detailActions, compact, openKey, onOpenChange, summary
+  id, views, defaultSort, groupable, bulk, exportName, primaryMenu, properties, detailActions, compact, openKey, onOpenChange, summary, stacked, onImport, importLabel
 }: {
   rows: readonly T[];
   rowKey: (row: T) => string;
@@ -87,6 +87,12 @@ export function RecordView<T>({
   onOpenChange?: (key: string | null) => void;
   /** Headline numbers between the toolbar and the table (a StatStrip or two). */
   summary?: ReactNode;
+  /** The list-page layout: a full-width search, then a row with labelled Import / Export buttons and the primary CTA;
+   *  no icon-only buttons (the view menu and the peek's controls get words too). */
+  stacked?: boolean;
+  /** Stacked only: a labelled Import button (e.g. a file picker). */
+  onImport?: () => void;
+  importLabel?: string;
 }) {
   const ns = (s: string) => (id ? `rv:${id}:${s}` : null);
   const [q, setQ] = useState('');
@@ -247,22 +253,43 @@ export function RecordView<T>({
     return () => { window.removeEventListener('resize', fit); io.disconnect(); };
   }, [compact]);
 
+  const searchBox = (
+    <div className={cn('relative', stacked ? 'w-full' : 'min-w-48 flex-1')}>
+      <Icons.search className='text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2' />
+      <Input type='search' value={q} onChange={(e) => setQ(e.target.value)} placeholder={searchPlaceholder} aria-label={searchPlaceholder} className='h-9 pl-8' />
+    </div>
+  );
+  const viewMenu = (anyTyped || groupable || (database && cols.length > 3)) && (
+    <ViewMenu cols={cols} sort={sort} setSort={setSort} group={groupCol?.key ?? null} setGroup={setGroup}
+      hidden={hidden} setHidden={setHidden} groupable={groupable} properties={database && cols.length > 3} labelled={stacked} />
+  );
+
   return (
     // Fills the page below the header (header 3.5–4rem plus the page's padding): the table frame never scrolls or shrinks.
     <div ref={fitRef} style={compact && fitH ? { height: fitH } : undefined} className={cn('flex min-w-0 flex-col gap-3', compact ? 'min-h-[16rem]' : 'h-[calc(100svh-5.5rem)] min-h-[24rem]')}>
-      <div className='flex flex-wrap items-center gap-2'>
-        <div className='relative min-w-48 flex-1'>
-          <Icons.search className='text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2' />
-          <Input type='search' value={q} onChange={(e) => setQ(e.target.value)} placeholder={searchPlaceholder} aria-label={searchPlaceholder} className='h-9 pl-8' />
+      {stacked ? (
+        <div className='flex shrink-0 flex-col gap-2'>
+          {searchBox}
+          <div className='flex flex-wrap items-center gap-2'>
+            {filters}
+            {anyTyped && <FilterButton cols={cols} count={rules.filter(ruleActive).length} onAdd={addRule} />}
+            {viewMenu}
+            <div className='ml-auto flex flex-wrap items-center justify-end gap-2'>
+              {onImport && <Button variant='outline' onClick={onImport}><Icons.upload /> {importLabel ?? 'Import'}</Button>}
+              {exportName && <Button variant='outline' onClick={() => exportRows(data.ordered)}><Icons.download /> Export CSV</Button>}
+              {primary}
+            </div>
+          </div>
         </div>
+      ) : (
+      <div className='flex flex-wrap items-center gap-2'>
+        {searchBox}
         {filters}
         {anyTyped && <FilterButton cols={cols} count={rules.filter(ruleActive).length} onAdd={addRule} />}
-        {(anyTyped || groupable || (database && cols.length > 3)) && (
-          <ViewMenu cols={cols} sort={sort} setSort={setSort} group={groupCol?.key ?? null} setGroup={setGroup}
-            hidden={hidden} setHidden={setHidden} groupable={groupable} properties={database && cols.length > 3} />
-        )}
+        {viewMenu}
         {primaryNode}
       </div>
+      )}
       {summary && <div className='flex shrink-0 flex-col'>{summary}</div>}
 
       {selRows.length > 0 ? (
@@ -362,14 +389,18 @@ export function RecordView<T>({
         {current && detail && (
           <aside aria-label='Record' className='bg-card flex min-h-0 min-w-0 flex-1 flex-col rounded-xl border lg:w-[60%]'>
             <div className='flex items-center gap-2 border-b px-5 py-3'>
-              <Button variant='ghost' size='icon-sm' className='lg:hidden' aria-label='Back to the list' onClick={close}><Icons.chevronLeft /></Button>
+              {!stacked && <Button variant='ghost' size='icon-sm' className='lg:hidden' aria-label='Back to the list' onClick={close}><Icons.chevronLeft /></Button>}
               <div className='min-w-0 flex-1 truncate leading-none font-semibold'>{detailTitle ? detailTitle(current) : titleCol?.render(current)}</div>
               {detailActions?.(current, close)}
-              {at >= 0 && database && (<>
+              {at >= 0 && database && (stacked ? (<>
+                <Button variant='ghost' size='sm' disabled={at <= 0} onClick={() => go(-1)}><Icons.chevronUp /> Previous</Button>
+                <Button variant='ghost' size='sm' disabled={at >= navRows.length - 1} onClick={() => go(1)}><Icons.chevronDown /> Next</Button>
+              </>) : (<>
                 <Button variant='ghost' size='icon-sm' aria-label='Previous record' disabled={at <= 0} onClick={() => go(-1)}><Icons.chevronUp /></Button>
                 <Button variant='ghost' size='icon-sm' aria-label='Next record' disabled={at >= navRows.length - 1} onClick={() => go(1)}><Icons.chevronDown /></Button>
-              </>)}
-              <Button variant='ghost' size='icon-sm' aria-label='Close' onClick={close}><Icons.close /></Button>
+              </>))}
+              {stacked ? <Button variant='ghost' size='sm' onClick={close}><Icons.close /> Close</Button>
+                : <Button variant='ghost' size='icon-sm' aria-label='Close' onClick={close}><Icons.close /></Button>}
             </div>
             <div className='min-h-0 flex-1 overflow-y-auto p-5'>
               {properties && (<>

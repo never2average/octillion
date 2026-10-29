@@ -2000,6 +2000,7 @@ try {
     const cron = await (await fetch(`${base}/api/cron/autoscale`, { headers: { authorization: `Bearer ${process.env.CRON_SECRET}` } })).json();
     assert.deepEqual(cron.pruned, { ticks: 0, events: 0 }, "the cron prunes (nothing left to prune)");
     assert.equal(cron.rls, "ok", "the cron proves row-level security on the live database");
+    assert.ok(cron.campaigns && typeof cron.campaigns.sent === "number" && !cron.campaigns.error, `the cron runs the GTM campaign tick: ${JSON.stringify(cron.campaigns)}`);
     assert.equal(((await (await fetch(`${base}/healthz`)).json()) as any).rls_probe, "ok", "and /healthz shows it");
 
     await db.query("DELETE FROM autoscaler_ticks");
@@ -3271,6 +3272,12 @@ try {
         ["PUT", "/populations/nope/agents/x", {}, "operator", "/api/admin"],
         ["POST", "/compute/keys", {}, "owner"],
         ["POST", "/emails/test", {}, "owner"],
+        ["GET", "/gtm/activation", undefined, "viewer"],
+        ["GET", "/gtm/campaigns", undefined, "viewer"],
+        ["POST", "/gtm/audience/preview", { audience: { include: "nope" } }, "viewer"],
+        ["POST", "/gtm/campaigns", {}, "owner"],
+        ["POST", "/gtm/campaigns/999999/launch", {}, "owner"],
+        ["DELETE", "/gtm/campaigns/999999", undefined, "owner"],
         ["DELETE", "/compute/harnesses/nope", undefined, "owner"],
         ["POST", "/admins", {}, "owner"],
         ["PATCH", "/keyvault/credentials/999999", { enabled: false }, "owner", "/api/admin"],
@@ -3465,7 +3472,7 @@ try {
       const vault = await viewer.callTool({ name: "key_vault_status", arguments: {} });
       assert.ok(!vault.isError && (vault.structuredContent as any).credentials.some((c: any) => c.provider === "resend" && c.hint), "key hints are listed");
       assert.ok(!JSON.stringify(vault).includes(`re_smoke_${stamp}_secret`), "the secret never leaves");
-      for (const n of ["health_summary", "list_settings", "library_stats", "finops_plans", "list_simulations", "model_spend", "analytics_overview", "list_access_requests"]) {
+      for (const n of ["health_summary", "list_settings", "library_stats", "finops_plans", "list_simulations", "model_spend", "analytics_overview", "gtm_activation", "gtm_attribution", "list_access_requests"]) {
         const r = await viewer.callTool({ name: n, arguments: {} });
         assert.ok(!r.isError, `${n}: ${JSON.stringify(r.content).slice(0, 300)}`);
       }
@@ -4561,7 +4568,7 @@ try {
       assert.ok(an.daily.length >= 1 && an.retention.length >= 1 && an.retention[0].weeks.length === 8 && an.retention[0].weeks[0] === 100, "retention: week 0 is everyone");
       assert.ok(an.accounts.some((a: any) => a.slug === slugW), "per-account activity");
       assert.ok(typeof an.ops.sessions === "number" && typeof an.ops.gateway_requests === "number");
-      // Growth: series shapes, and exact values against the records and the overview funnel.
+      // Growth: series shapes, and exact values against the records (the activation funnel is GTM's: scripts/smoke-gtm.ts).
       {
         const g = an.growth, sum = (xs: number[]) => xs.reduce((x, y) => x + y, 0);
         assert.equal(g.accounts_daily.length, 30, "accounts over time: one point per day");
@@ -4582,14 +4589,9 @@ try {
         assert.equal(sum(g.client_mix.weeks.flatMap((w: any) => w.calls)), callsSince, "every call lands on one client");
         const [{ n: simsSince }] = await db.query<{ n: number }>("SELECT count(*)::int AS n FROM simulations WHERE created_at >= $1", [since]);
         assert.equal(sum(g.sims_weekly.map((w: any) => w.completed + w.other)), simsSince, "simulations per week add up");
-        const ovSame = await json(adm("GET", `/overview?from=${an.range.from}&to=${an.range.to}`));
-        for (const id of ["created", "onboarded", "simulated", "reported"])
-          assert.equal(g.funnel.find((f: any) => f.id === id).reached, ovSame.funnel.find((f: any) => f.id === id).reached, `funnel ${id} matches the overview`);
-        const [{ n: reqs }] = await db.query<{ n: number }>("SELECT count(*)::int AS n FROM access_requests WHERE created_at >= $1", [`${an.range.from}T00:00:00Z`]);
-        assert.equal(g.funnel[0].reached, reqs, "access requests in the range");
-        assert.ok(g.funnel.slice(1).every((f: any, i: number) => f.pct === (g.funnel[i].reached ? Math.round((f.reached / g.funnel[i].reached) * 100) : null)), "step conversion");
+        assert.ok(!("funnel" in g), "no second activation funnel on Analytics");
         const gNone = (await json(adm("GET", "/analytics?days=30&account=__none__"))).growth;
-        assert.ok(gNone.accounts_daily.at(-1).total === 0 && gNone.weekly.every((w: any) => !w.calls) && !gNone.client_mix.clients.length && gNone.funnel[1].reached === 0, "growth follows the account filter");
+        assert.ok(gNone.accounts_daily.at(-1).total === 0 && gNone.weekly.every((w: any) => !w.calls) && !gNone.client_mix.clients.length, "growth follows the account filter");
       }
       assert.equal((await json(adm("GET", "/analytics?days=999"))).days, 366, "period capped at a year");
       const ranged = await json(adm("GET", "/analytics?from=2026-01-01&to=2026-01-07"));
@@ -5214,6 +5216,8 @@ try {
       await db.query("DELETE FROM organizations WHERE id = $1 OR slug = $2", [bo.id, ap3.org.slug]);
       console.log("✓ email (Resend): request received/alert/declined/welcome, library submissions, budget 80%/100% once a month, idempotent, skipped off or keyless, failures recorded, no addresses stored, /admin/emails");
     }
+    // GTM: Activation, Attribution and Campaigns against the mock (scripts/smoke-gtm.ts); no real email.
+    await (await import("./smoke-gtm.js")).gtmChecks({ db, base, adm, json, mockUrl: mock.url, mockPost, sentTo, stamp });
     const ovW = await json(adm("GET", "/overview"));
     assert.ok(ovW.integrations.clerk && ovW.integrations.oauth_on_mcp && ovW.integrations.stripe && ovW.paying >= 1);
     await db.query("DELETE FROM organizations WHERE slug = ANY($1)", [[slugA, slugW, rowD.slug]]);

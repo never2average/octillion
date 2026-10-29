@@ -1,13 +1,14 @@
 'use client';
-// Overview: the onboarding funnel for accounts created in a period, and the accounts that need a person.
-import { useMemo, useState } from 'react';
+// Overview: a compact onboarding funnel for accounts created in a period, and the first few accounts that need a person.
+// The full picture (the canonical funnel with time between steps, filters, every account to act on) is GTM › Activation.
+import { useState } from 'react';
+import Link from 'next/link';
 import { DateRangePicker, last30, rangeQuery, type DateRange } from '@/components/layout/date-range-picker';
-import { Input } from '@/components/ui/input';
 import PageContainer from '@/components/layout/page-container';
 import { Icons } from '@/components/icons';
-import { useAdmin } from './lib';
+import { accountHref, useAdmin } from './lib';
 import { StatStrip } from '@/components/layout/section';
-import { DataList, ErrorBox, LoadingCards, Notice, Section, StatusBadge, When } from './ui';
+import { ErrorBox, LoadingCards, Notice, Section, StatusBadge, When } from './ui';
 
 interface Overview {
   public_url: string;
@@ -25,12 +26,11 @@ interface Overview {
 
 export function AdminOverview() {
   const [range, setRange] = useState<DateRange>(last30);
-  const [q, setQ] = useState('');
   const { data: o, error, isLoading } = useAdmin<Overview>(`/overview?${rangeQuery(range)}`);
-  const attention = useMemo(() => {
-    const words = q.trim().toLowerCase().split(/\s+/).filter(Boolean);
-    return (o?.attention ?? []).filter((a) => words.every((w) => `${a.name} ${a.slug} ${a.contact ?? ''} ${a.stage_label} ${a.attention.join(' ')}`.toLowerCase().includes(w)));
-  }, [o, q]);
+  const activation = `/admin/gtm/activation?${rangeQuery(range)}`;
+  const toActivation = (label: string) => (
+    <Link href={activation} className='text-primary inline-flex items-center gap-1.5 text-sm font-medium hover:underline'>{label} <Icons.arrowRight className='size-4' /></Link>
+  );
   const reported = o ? o.funnel[o.funnel.length - 1]?.reached ?? 0 : 0;
   const max = o ? Math.max(1, o.funnel[0]?.reached ?? 1) : 1;
   return (
@@ -52,8 +52,8 @@ export function AdminOverview() {
             ]}
           />
 
-          <Section title='Funnel' description='Accounts created in the period, by the furthest step they reached.'
-            action={<DateRangePicker value={range} onChange={setRange} />}>
+          <Section title='Funnel' description='Accounts created in the period, by the furthest step they reached. Time between steps, payment and filters are on Activation.'
+            action={<div className='flex flex-wrap items-center gap-3'>{toActivation('Open Activation')}<DateRangePicker value={range} onChange={setRange} /></div>}>
             <ol className='grid gap-2.5'>
               {o.funnel.map((f, idx) => {
                 const prev = idx ? o.funnel[idx - 1].reached : f.reached;
@@ -72,27 +72,20 @@ export function AdminOverview() {
             </ol>
           </Section>
 
-          <Section title='Needs attention' description='Accounts where a person should step in.'>
-            <div className='relative'>
-              <Icons.search className='text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2' />
-              <Input type='search' value={q} onChange={(e) => setQ(e.target.value)} placeholder='Search accounts, contacts or issues' aria-label='Search accounts needing attention' className='h-9 pl-8' />
-            </div>
-            <div className='border'>
-              <DataList
-                noun='accounts'
-                minWidth={760}
-                height='h-[28rem]'
-                rows={attention}
-                empty={q ? 'Nothing matches.' : 'Nobody is stuck.'}
-                cols={[
-                  { label: 'Account', className: 'w-48', render: (a) => <span className='font-medium'>{a.name}</span> },
-                  { label: 'Stage', className: 'w-40', render: (a) => <StatusBadge>{a.stage_label}</StatusBadge> },
-                  { label: 'Issues', render: (a) => <span className='block max-w-xl truncate text-amber-400' title={a.attention.join('\n')}>{a.attention.length > 1 ? `${a.attention.length} · ` : ''}{a.attention.join(' · ')}</span> },
-                  { label: 'Contact', className: 'w-56', render: (a) => <span className='text-muted-foreground block max-w-56 truncate'>{a.contact ?? '—'}</span> },
-                  { label: 'Last seen', className: 'w-28', render: (a) => <When d={a.last_seen} className='text-muted-foreground text-xs' /> }
-                ]}
-              />
-            </div>
+          <Section title='Needs attention' description={`${o.attention.length} account${o.attention.length === 1 ? '' : 's'} where a person should step in. Act on them from Activation (tips, nudges, the account peek).`}
+            action={toActivation(`All ${o.attention.length} in Activation`)}>
+            {o.attention.length ? (
+              <ul className='divide-y border-y'>
+                {o.attention.slice(0, 5).map((a) => (
+                  <li key={a.slug} className='grid grid-cols-[minmax(0,12rem)_10rem_1fr_6rem] items-center gap-3 py-2.5 text-sm max-md:grid-cols-[1fr_auto]'>
+                    <Link href={accountHref(a.slug)} className='truncate font-medium hover:underline'>{a.name}</Link>
+                    <span className='max-md:hidden'><StatusBadge>{a.stage_label}</StatusBadge></span>
+                    <span className='truncate text-amber-600 dark:text-amber-400 max-md:hidden' title={a.attention.join('\n')}>{a.attention.join(' · ')}</span>
+                    <When d={a.last_seen} className='text-muted-foreground text-right text-xs' />
+                  </li>
+                ))}
+              </ul>
+            ) : <p className='text-muted-foreground py-6 text-center text-sm'>Nobody is stuck.</p>}
           </Section>
         </div>
       )}

@@ -6,7 +6,7 @@ import { cloneElement, createContext, isValidElement, useContext, type ReactElem
 import type { RowAction } from '@/components/layout/record-view';
 
 export type AdminRole = 'viewer' | 'support' | 'operator' | 'owner';
-export type AdminPermission = 'read' | 'requests' | 'invite' | 'journeys' | 'accounts' | 'compute' | 'harnesses' | 'library' | 'email' | 'keys' | 'admins' | 'plans' | 'delete';
+export type AdminPermission = 'read' | 'requests' | 'invite' | 'journeys' | 'accounts' | 'compute' | 'harnesses' | 'library' | 'email' | 'campaigns' | 'keys' | 'admins' | 'plans' | 'delete';
 export interface AdminSession { role: AdminRole | null; permissions: string[]; needs: Record<string, AdminRole> }
 
 export const ROLE_LABEL: Record<AdminRole, string> = { viewer: 'Viewer', support: 'Support', operator: 'Operator', owner: 'Owner' };

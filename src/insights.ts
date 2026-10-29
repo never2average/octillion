@@ -150,10 +150,9 @@ const CLIENT_TOP = 5;
  *                   each call counts for the client of its caller's latest handshake (same account and person) before
  *                   it, else "unknown"; the top 5 families over the window, the rest as Other
  *   sims_weekly     simulations created per week, completed vs the rest (account, product and user filters)
- *   funnel          access requests made in the range, then the overview funnel (admin.funnelOf, same stages and rule)
- *                   for the accounts created in the range; access requests ignore the filters (they have no account)
+ * The activation funnel is not here: GTM › Activation (src/gtm.ts activation) is the one funnel.
  */
-async function growth(range: ReturnType<typeof reportRange>, { sql, orgIds }: Awaited<ReturnType<typeof parseFilters>>, orgsOnce: () => Promise<Orgs>,
+async function growth(range: ReturnType<typeof reportRange>, { sql }: Awaited<ReturnType<typeof parseFilters>>,
   newDailyP: Promise<{ day: string; n: number }[]>) {
   const db = await getDb();
   const { F, T } = range.sql, { EV, CL, ORG, O } = sql;
@@ -165,10 +164,9 @@ async function growth(range: ReturnType<typeof reportRange>, { sql, orgIds }: Aw
   const W0 = `'${new Date(firstWeek).toISOString()}'::timestamptz`, WP = `'${new Date(firstWeek - WEEK).toISOString()}'::timestamptz`;
   const wk = (c: string) => `to_char(date_trunc('week', ${c} AT TIME ZONE 'UTC'), 'YYYY-MM-DD')`;
 
-  const [base, weekly, sticky, mix, sims, orgs, newDaily] = await Promise.all([
-    db.query<{ before: unknown; requests: unknown }>(
-      `SELECT (SELECT count(*) FROM organizations WHERE created_at < ${F}${O ? ` AND id = ANY(${O})` : ""}) AS before,
-              (SELECT count(*) FROM access_requests WHERE created_at >= ${F} AND created_at < ${T}) AS requests`),
+  const [base, weekly, sticky, mix, sims, newDaily] = await Promise.all([
+    db.query<{ before: unknown }>(
+      `SELECT (SELECT count(*) FROM organizations WHERE created_at < ${F}${O ? ` AND id = ANY(${O})` : ""}) AS before`),
     db.query<{ week: string; accounts: unknown; people: unknown; calls: unknown }>(
       `SELECT ${wk("at")} AS week, count(DISTINCT org_id) AS accounts, count(DISTINCT ${person}) AS people, count(*) AS calls
          FROM mcp_events WHERE ${calls} AND at >= ${WP} AND at < ${T}${EV()} GROUP BY 1`),
@@ -193,7 +191,6 @@ async function growth(range: ReturnType<typeof reportRange>, { sql, orgIds }: Aw
     db.query<{ week: string; completed: unknown; other: unknown }>(
       `/* tenant: internal: admin Analytics (onboarding admin routes), every account */ SELECT ${wk("created_at")} AS week, count(*) FILTER (WHERE status = 'completed') AS completed, count(*) FILTER (WHERE status IS DISTINCT FROM 'completed') AS other
          FROM simulations WHERE created_at >= ${W0} AND created_at < ${T}${ORG("", "sim")} GROUP BY 1`),
-    orgsOnce().then((x) => x.orgs, () => null),
     newDailyP,
   ]);
 
@@ -233,24 +230,7 @@ async function growth(range: ReturnType<typeof reportRange>, { sql, orgIds }: Aw
   const simBy = new Map(sims.map((r) => [r.week, r]));
   const sims_weekly = weeks.map((week) => ({ week, completed: Number(simBy.get(week)?.completed ?? 0), other: Number(simBy.get(week)?.other ?? 0) }));
 
-  // The overview's funnel (same stages, same rule), for the accounts created in the range.
-  let funnel: { id: string; label: string; reached: number; pct: number | null }[] | null = null;
-  if (orgs) {
-    const { funnelOf } = await import("./admin.js");
-    const ids = orgIds ? new Set(orgIds) : null;
-    const cohort = orgs.filter((o) => { const t = new Date(o.created_at).getTime(); return t >= range.start.getTime() && t < endMs && (!ids || ids.has(Number(o.id))); });
-    const f = new Map(funnelOf(cohort).map((s) => [s.id, s.reached]));
-    const steps = [
-      { id: "requests", label: "Access requests", reached: Number(base[0]?.requests ?? 0) },
-      { id: "created", label: "Accounts", reached: f.get("created") ?? 0 },
-      { id: "onboarded", label: "Onboarded", reached: f.get("onboarded") ?? 0 },
-      { id: "simulated", label: "First simulation", reached: f.get("simulated") ?? 0 },
-      { id: "reported", label: "First report", reached: f.get("reported") ?? 0 },
-    ];
-    funnel = steps.map((s, i) => ({ ...s, pct: i && steps[i - 1].reached ? Math.round((s.reached / steps[i - 1].reached) * 100) : null }));
-  }
-
-  return { accounts_daily, weekly: weeklyRows, stickiness, client_mix, sims_weekly, funnel };
+  return { accounts_daily, weekly: weeklyRows, stickiness, client_mix, sims_weekly };
 }
 
 const memo = <T>(f: () => Promise<T>) => { let p: Promise<T> | null = null; return () => (p ??= f()); };
@@ -319,7 +299,7 @@ export async function platformAnalytics(q: AnalyticsQuery) {
 
   // accounts created per day, for the New accounts sparkline and Accounts over time
   const newDailyP = db.query<{ day: string; n: number }>(`SELECT to_char(date_trunc('day', created_at), 'YYYY-MM-DD') AS day, count(*) AS n FROM organizations WHERE ${inW("created_at")}${O ? ` AND id = ANY(${O})` : ""} GROUP BY 1 ORDER BY 1`);
-  const growthP = growth(range, parsed, orgsOnce, newDailyP);
+  const growthP = growth(range, parsed, newDailyP);
   const [totals, prev, daily, tools, clients, accounts, retention, ops, errors, newAccounts, errorsTotal, newDaily, opsDaily, growthReport] = await Promise.all([
     db.query<Record<string, number>>(
       `SELECT count(DISTINCT org_id) FILTER (WHERE ${calls}) AS active_accounts, count(DISTINCT ${person}) FILTER (WHERE ${calls}) AS active_people,

@@ -7,7 +7,9 @@
  *   library submissions received (operator alert), accepted (credit and when it applies), declined (with the reason)
  *   budget              an account's spend crossing 80% and 100% of its monthly allowance (to owners and billing managers)
  *   health              agent sessions failing too often or waiting too long (operator alert, src/health-alerts.ts)
- *   test                the "Send test email" button on /admin/emails
+ *   campaign            GTM lifecycle campaigns (src/campaigns.ts), with an unsubscribe link and List-Unsubscribe
+ *                       headers. The recipient's address lives only in gtm_campaign_recipients, never in this log.
+ *   test             the "Send test email" button on /admin/emails
  *
  * Rules:
  *  - The Resend key is a Key vault provider ("resend", orchestrator/server-only: no env_vars, never handed to an
@@ -31,7 +33,7 @@ import { accountRoleOf, type AccountRole } from "./account-roles.js";
 
 export const EMAIL_PROVIDER = "resend";
 export const EMAIL_KINDS = ["request_received", "request_alert", "request_declined", "request_approved", "submission_alert", "submission_accepted",
-  "submission_declined", "budget_80", "budget_100", "health_alert", "test"] as const;
+  "submission_declined", "budget_80", "budget_100", "health_alert", "campaign", "campaign_test", "test"] as const;
 export type EmailKind = (typeof EMAIL_KINDS)[number];
 
 export interface Email {
@@ -40,6 +42,10 @@ export interface Email {
   idempotencyKey: string;
   /** What it is about (ids, an account slug); anything that looks like an address is dropped. */
   meta?: Record<string, unknown>;
+  /** Extra headers (campaigns: List-Unsubscribe and List-Unsubscribe-Post). */
+  headers?: Record<string, string>;
+  /** More Resend tags after the kind (ASCII letters, digits, _ and - only). */
+  tags?: { name: string; value: string }[];
 }
 export interface EmailResult { status: "sent" | "skipped" | "failed" | "duplicate"; id?: number; provider_id?: string | null; error?: string | null }
 
@@ -127,7 +133,8 @@ async function attempt(m: Email): Promise<EmailResult> {
   const replyTo = settingText("EMAIL_REPLY_TO").split(",").map((x) => x.trim()).filter(isEmail);
   const body = {
     from: settingText("EMAIL_FROM"), to: [to], subject, text: m.text, html: m.html ?? htmlOf(m.text),
-    ...(replyTo.length ? { reply_to: replyTo } : {}), tags: [{ name: "kind", value: m.kind }],
+    ...(replyTo.length ? { reply_to: replyTo } : {}), tags: [{ name: "kind", value: m.kind }, ...(m.tags ?? [])],
+    ...(m.headers && Object.keys(m.headers).length ? { headers: m.headers } : {}),
   };
   try {
     const r = await fetch(`${apiUrl()}/emails`, {
