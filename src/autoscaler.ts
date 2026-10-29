@@ -357,7 +357,9 @@ export class Autoscaler {
           .finally(() => { this.imageBuild = null; });
       }
     } catch (e) {
-      st.error = (e as Error).message;
+      // undici's "fetch failed" hides the reason (DNS, refused, TLS) in .cause
+      const cause = (e as { cause?: { code?: string; message?: string; hostname?: string } }).cause;
+      st.error = (e as Error).message + (cause ? ` (${[cause.code, cause.hostname, cause.message].filter(Boolean).join(" ")})` : "");
       this.log(`tick error: ${st.error}`);
       await recordComputeEvent({ kind: "tick_error", reason: st.error });
     }
