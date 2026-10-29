@@ -71,8 +71,10 @@ async function stripeFacts(now = Date.now()) {
 }
 
 /** Every account's journey (see the top of the file), plus the requests and the Stripe error if any. */
-export async function journeys(opts: { fresh?: boolean } = {}) {
-  const [{ orgs, stripe_error }, requests, stripe] = await Promise.all([listOrgs(opts.fresh ?? false), requestRows(), stripeFacts()]);
+export async function journeys(opts: { fresh?: boolean; stripe?: boolean } = {}) {
+  // stripe: false skips the payment history (paid_at, paying, MRR): campaign audiences never need it.
+  const [{ orgs, stripe_error }, requests, stripe] = await Promise.all([listOrgs(opts.fresh ?? false), requestRows(),
+    opts.stripe === false ? { by: new Map<string, { paid_at: number | null; paying: boolean; mrr: number }>(), error: null } : stripeFacts()]);
   const firstReq = new Map<number, RequestRow>();
   for (const r of requests) if (r.org_id != null && !firstReq.has(r.org_id)) firstReq.set(r.org_id, r);
   const list: Journey[] = orgs.map((o) => {
@@ -117,14 +119,15 @@ export const ACTIVATION_STEPS = [
   { id: "onboarded", label: "First product onboarded" },
   { id: "simulated", label: "First simulation run" },
   { id: "reported", label: "Report opened" },
-  { id: "paid", label: "Paid" },
+  { id: "paid", label: "Paid (after opening a report)" },
 ] as const;
 
 /**
  * The Activation tab (GET /gtm/activation). For the period (from/to, default the last 30 days):
  *   requested   access requests made in it
  *   created     accounts created in it (the cohort); the later steps are that cohort, cumulative by the furthest
- *               stage reached exactly as the Overview funnel counts it (admin.funnelOf), and paid = ever paid in Stripe
+ *               stage reached exactly as the Overview funnel counts it (admin.funnelOf); paid = opened a report and
+ *               ever paid in Stripe (nested: each step is a subset of the one before; paid_any counts every payer)
  * Each step: count, % of the step before and of the first, and the median time from the step before (pairs where
  * both happened). Filters: plan (current plan name, or "none"), utm_source, utm_campaign ("direct/unknown" for none);
  * a request's plan is its account's. `attention`: every account that needs a person now (admin's own reasons), under
@@ -143,7 +146,8 @@ export async function activation(q: Record<string, unknown> = {}) {
   const reachedStage = (id: string) => cohort.filter((j) => j.org.stage_index >= stageAt(id));
   const counts: Record<string, Journey[] | null> = {
     requested: null, created: cohort, onboarded: reachedStage("onboarded"), simulated: reachedStage("simulated"), reported: reachedStage("reported"),
-    paid: cohort.filter((j) => j.paid_at),
+    // Nested: paid counts only accounts that also opened a report, so every step is a subset of the one before.
+    paid: reachedStage("reported").filter((j) => j.paid_at),
   };
   const timing: Record<string, ReturnType<typeof medianHours>> = {
     requested: { median_hours: null, measured: 0 },
@@ -151,7 +155,7 @@ export async function activation(q: Record<string, unknown> = {}) {
     onboarded: medianHours(cohort.map((j) => [j.created_at, j.onboarded_at])),
     simulated: medianHours(cohort.map((j) => [j.onboarded_at, j.simulated_at])),
     reported: medianHours(cohort.map((j) => [j.simulated_at, j.reported_at])),
-    paid: medianHours(cohort.map((j) => [j.reported_at ?? j.simulated_at ?? j.created_at, j.paid_at])),
+    paid: medianHours(reachedStage("reported").map((j) => [j.reported_at, j.paid_at])),
   };
   const reached = ACTIVATION_STEPS.map((s) => (s.id === "requested" ? reqs.length : counts[s.id]!.length));
   const pct = (a: number, b: number) => (b ? Math.round((a / b) * 1000) / 10 : null);
@@ -162,7 +166,7 @@ export async function activation(q: Record<string, unknown> = {}) {
   const tally = (xs: string[]) => Object.fromEntries([...xs.reduce((m, x) => m.set(x, (m.get(x) ?? 0) + 1), new Map<string, number>())].sort((a, b) => b[1] - a[1]));
   return {
     range: { from: range.from, to: range.to, days: range.days }, filters: f, stripe_error,
-    steps,
+    steps, paid_any: cohort.filter((j) => j.paid_at).length,
     attention: all.filter((j) => j.org.attention.length && matches(j)).map((j) => ({ ...j.org, utm: j.utm, plan: j.plan })),
     cohort: cohort.map((j) => ({ slug: j.org.slug, name: j.org.name, stage: j.org.stage, stage_label: j.org.stage_label, plan: j.plan, utm: j.utm,
       requested_at: j.requested_at, created_at: j.created_at, onboarded_at: j.onboarded_at, simulated_at: j.simulated_at, reported_at: j.reported_at, paid_at: j.paid_at })),
@@ -177,9 +181,10 @@ export async function activation(q: Record<string, unknown> = {}) {
 
 /**
  * The Attribution tab (GET /gtm/attribution): for the period, one row per utm_source / utm_medium / utm_campaign of the
- * access requests made in it, plus "direct/unknown" (no tags, and accounts created in it without any request):
- *   requests -> approved (those requests, approved) -> accounts (their accounts) -> activated (reached a first
- *   simulation) -> paying (Stripe, now) -> MRR (Stripe, now; USD a month, discounts and usage not in it)
+ * access requests made in it, plus "direct/unknown" (no tags, and accounts without any request):
+ *   requests, approved      the period's access requests, under their own tags
+ *   accounts                accounts created in the period, each once, under its earliest request's tags (as Activation)
+ *   activated, paying, MRR  of those accounts: reached a first simulation; Stripe now (USD a month, no discounts or usage)
  * Each row carries its accounts, so a click opens them.
  */
 export async function attribution(q: Record<string, unknown> = {}) {
@@ -187,7 +192,9 @@ export async function attribution(q: Record<string, unknown> = {}) {
   const { journeys: all, requests, stripe_error } = await journeys();
   const byOrg = new Map(all.map((j) => [Number(j.org.id), j]));
   const inRange = (d: Date | string) => { const t = new Date(d).getTime(); return t >= range.start.getTime() && t < range.end.getTime(); };
-  const withRequest = new Set(requests.filter((r) => r.org_id != null).map((r) => r.org_id!));
+  // Requests are counted under their own tags. Accounts are counted once each, under the tags of their earliest request
+  // (the Activation rule; none: direct/unknown), when the account was created in the period: a colleague's later
+  // request never moves or repeats an account.
   type Row = { key: string; utm_source: string; utm_medium: string; utm_campaign: string; requests: number; approved: number; orgs: Set<number> };
   const rows = new Map<string, Row>();
   const rowOf = (u: Utm) => {
@@ -200,9 +207,8 @@ export async function attribution(q: Record<string, unknown> = {}) {
     const r = rowOf(q2.utm);
     r.requests++;
     if (q2.status === "approved") r.approved++;
-    if (q2.org_id != null && byOrg.has(q2.org_id)) r.orgs.add(q2.org_id);
   }
-  for (const j of all) if (inRange(j.created_at) && !withRequest.has(Number(j.org.id))) rowOf(j.utm).orgs.add(Number(j.org.id));
+  for (const j of all) if (inRange(j.created_at)) rowOf(j.utm).orgs.add(Number(j.org.id));
   const simulated = stageAt("simulated");
   const shaped = [...rows.values()].map((r) => {
     const js = [...r.orgs].map((id) => byOrg.get(id)!);

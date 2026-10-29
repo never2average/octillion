@@ -198,9 +198,9 @@ export function createApp() {
   // ---------- GTM campaign email (src/campaigns.ts): the unsubscribe link, and Resend's delivery webhooks ----------
   // The link's token is signed; GET asks (mail scanners follow links), POST unsubscribes, which is also RFC 8058's
   // one-click (List-Unsubscribe-Post) from the mail client.
-  app.get("/api/email/unsubscribe", (req, res) => {
+  app.get("/api/email/unsubscribe", async (req, res) => {
     const t = String(req.query.t ?? "");
-    const state = t === "test" ? "test" : campaignsMod.verifyUnsubscribe(t) != null ? "ask" : "invalid";
+    const state = t === "test" ? "test" : (await campaignsMod.verifyUnsubscribe(t)) != null ? "ask" : "invalid";
     res.set({ "Cache-Control": "no-store", "X-Robots-Tag": "noindex" }).status(state === "invalid" ? 400 : 200).type("html").send(campaignsMod.unsubscribePage(state, t));
   });
   app.post("/api/email/unsubscribe", express.urlencoded({ extended: false, limit: "4kb" }), async (req, res) => {
@@ -668,6 +668,8 @@ export function createApp() {
   ob.post("/gtm/campaigns/:id/launch", need("campaigns"), async (req, res) => void res.json(await campaignsMod.launchCampaign(adminActor(req, res), cid(req), req.body ?? {})));
   for (const action of ["pause", "resume", "end"] as const)
     ob.post(`/gtm/campaigns/:id/${action}`, need("campaigns"), async (req, res) => void res.json(await campaignsMod.setCampaignState(adminActor(req, res), cid(req), action)));
+  // Send this campaign's due emails now and say what happened to its people (the Activation nudge uses it).
+  ob.post("/gtm/campaigns/:id/send-now", need("campaigns"), async (req, res) => void res.json(await campaignsMod.sendNow(adminActor(req, res), cid(req))));
   ob.post("/gtm/campaigns/:id/test", need("campaigns"), async (req, res) => void res.status(201).json(await campaignsMod.testSend(adminActor(req, res), cid(req), req.body ?? {})));
   ob.delete("/gtm/campaigns/:id", need("campaigns"), async (req, res) => { await campaignsMod.deleteCampaign(adminActor(req, res), cid(req)); res.status(204).end(); });
   // Process what is due now instead of waiting for the 5-minute tick (the same idempotent tick).

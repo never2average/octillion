@@ -30,6 +30,8 @@ type AttentionOrg = Org & { utm: Utm; plan: string };
 interface Activation {
   range: { from: string; to: string; days: number };
   stripe_error?: string;
+  /** Accounts in the cohort that paid, with or without opening a report (the funnel's Paid step is nested). */
+  paid_any: number;
   steps: Step[];
   attention: AttentionOrg[];
   cohort: { slug: string; name: string; stage_label: string; plan: string; utm: Utm }[];
@@ -86,7 +88,7 @@ function ActivationPage() {
             { label: 'Access requests', value: step('requested')?.reached ?? 0, hint: 'made in the period' },
             { label: 'New accounts', value: step('created')?.reached ?? 0, hint: `${pctText(step('created')?.pct_of_previous)} of requests` },
             { label: 'Reached a simulation', value: step('simulated')?.reached ?? 0, hint: `${pctText(step('simulated')?.pct_of_first)} of requests` },
-            { label: 'Paid', value: step('paid')?.reached ?? 0, hint: `median ${hours(step('paid')?.median_hours)} after the step before` },
+            { label: 'Paid', value: step('paid')?.reached ?? 0, hint: `after a report; ${a.paid_any} paid in all` },
             { label: 'Need a person', value: a.attention.length, hint: 'now, any period' }
           ]} />
 
@@ -157,9 +159,12 @@ function NudgeDialog({ org, onClose }: { org: AttentionOrg; onClose: () => void 
     try {
       const c = await post<{ campaign: { id: number } }>('/gtm/campaigns', { name: `Nudge: ${org.name}`, audience, steps: [{ subject, body, delay_days: 0 }] });
       await post(`/gtm/campaigns/${c.campaign.id}/launch`, {});
-      const t = await post<{ sent: number; skipped?: string }>('/gtm/tick');
-      if (t.skipped) toast.warning(`Saved and launched, not sent yet: ${t.skipped}`);
-      else toast.success('Nudge sent', { action: { label: 'Open campaign', onClick: () => router.push(`/admin/gtm/campaigns?open=${c.campaign.id}`) } });
+      // What happened to this campaign's people, not to whatever else a tick sent.
+      const r = await post<{ sent: number; suppressed: number; waiting: number; failed: number; skipped: string | null; busy: boolean }>(`/gtm/campaigns/${c.campaign.id}/send-now`);
+      const open = { label: 'Open campaign', onClick: () => router.push(`/admin/gtm/campaigns?open=${c.campaign.id}`) };
+      const parts = [r.sent && `sent to ${r.sent}`, r.suppressed && `${r.suppressed} suppressed`, r.failed && `${r.failed} failed`, r.waiting && `${r.waiting} queued`].filter(Boolean).join(', ');
+      if (r.sent) toast.success(`Nudge ${parts}`, { action: open });
+      else toast.warning(`Nudge not sent yet${parts ? ` (${parts})` : ''}${r.skipped ? `: ${r.skipped}` : r.busy ? ': another send is running, it goes out on the next tick' : ''}`, { action: open });
       onClose();
     } catch (e) {
       toast.error((e as Error).message);

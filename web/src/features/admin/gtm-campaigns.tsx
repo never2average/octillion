@@ -217,7 +217,8 @@ function Lifecycle({ c, onDeleted }: { c: Campaign; onDeleted: () => void }) {
   const act = useAdminAction((v: { action: string; body?: unknown }) => post<Detail>(`${path(c.id)}/${v.action}`, v.body ?? {}),
     { success: (r) => `${r.campaign.name}: ${r.campaign.status}` });
   const remove = useAdminAction(() => adminApi('DELETE', path(c.id)), { success: 'Campaign deleted' });
-  const tick = useAdminAction(() => post<{ sent: number; skipped?: string }>('/gtm/tick'), { success: (r) => (r.skipped ? `Nothing sent: ${r.skipped}` : `${r.sent} sent`) });
+  const tick = useAdminAction(() => post<{ sent_now: number; waiting: number; skipped: string | null; busy: boolean }>(`${path(c.id)}/send-now`),
+    { success: (r) => (r.skipped ? `Nothing sent: ${r.skipped}` : r.busy ? 'Another send is running: these go out on the next tick' : `${r.sent_now} sent, ${r.waiting} waiting`) });
   const exportJson = () => downloadJson(`campaign-${c.id}-${c.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40)}.json`,
     { name: c.name, audience: c.audience, steps: c.steps, rolling: c.rolling, conversion_days: c.conversion_days });
   return (

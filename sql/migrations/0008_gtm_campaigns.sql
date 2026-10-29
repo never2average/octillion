@@ -86,6 +86,10 @@ CREATE TABLE IF NOT EXISTS email_suppressions (
 -- Slack webhook: server-only (no env_vars), never handed to an agent. Add it on Key vault.
 INSERT INTO vault_providers (slug, mode, upstream_url, env_vars) VALUES ('resend_webhook', 'direct', 'https://api.resend.com', '{}')
 ON CONFLICT (slug) DO NOTHING;
+-- The unsubscribe links' HMAC key (src/campaigns.ts): a random secret the server generates into the vault on first use,
+-- its own key so that rotating OCTILLION_VAULT_KEY (which re-encrypts it) never breaks a link already sent.
+INSERT INTO vault_providers (slug, mode, upstream_url, env_vars) VALUES ('email_unsubscribe', 'direct', 'https://octillion.invalid', '{}')
+ON CONFLICT (slug) DO NOTHING;
 
 DO $mig$
 DECLARE r TEXT := octillion_tenant_role();

@@ -20,18 +20,21 @@
  *               Svix-signed with the key vault's resend_webhook secret), unsubscribed, and conversions within
  *               conversion_days of the first email: requested access, activated (first simulation), paid (src/gtm.ts).
  */
-import { createHmac, hkdfSync, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { hostname } from "node:os";
 import { getDb } from "./db.js";
 import * as mail from "./email.js";
 import { accountPeople, AdminError, log, STAGES } from "./admin.js";
-import { DIRECT, journeys, within, type Journey, type RequestRow } from "./gtm.js";
-import { useCredential } from "./keyvault.js";
+import { DIRECT, journeys, requestRows, within, type Journey, type RequestRow } from "./gtm.js";
+import { addCredentialIfAbsent, useCredential } from "./keyvault.js";
 import { capture } from "./telemetry.js";
 
 export const STATUSES = ["draft", "scheduled", "running", "paused", "done"] as const;
 export type CampaignStatus = (typeof STATUSES)[number];
 export const VARIABLES = ["first_name", "product"] as const;
 export const WEBHOOK_PROVIDER = "resend_webhook";
+/** The unsubscribe links' signing key: a random secret generated once into the key vault (migration 0008). */
+export const UNSUBSCRIBE_PROVIDER = "email_unsubscribe";
 const REQUEST_STATUSES = ["pending", "approved", "declined"];
 const MAX_STEPS = 10;
 
@@ -90,10 +93,30 @@ export function parseSteps(v: unknown): Step[] {
   });
 }
 
-/** {{first_name}} and {{product}}; a missing value reads naturally ("there", "your product"). */
+/**
+ * The variables' values, made safe: first_name is one word of letters (with ' or -), at most 40 characters, else
+ * "there"; product is one line without control characters, at most 80, else "your product". Neither is ever a link.
+ */
+export function safeVars(vars: { first_name?: string | null; product?: string | null }): Record<(typeof VARIABLES)[number], string> {
+  const first = String(vars.first_name ?? "").trim().split(/\s+/)[0] ?? "";
+  const product = String(vars.product ?? "").replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 80).trim();
+  return { first_name: /^\p{L}[\p{L}\p{M}'’-]{0,39}$/u.test(first) ? first : "there", product: product || "your product" };
+}
+/** {{first_name}} and {{product}} as plain text (the subject and the text part). */
 export function render(t: string, vars: { first_name?: string | null; product?: string | null }) {
-  const values: Record<string, string> = { first_name: vars.first_name?.trim() || "there", product: vars.product?.trim() || "your product" };
+  const values: Record<string, string> = safeVars(vars);
   return t.replace(VAR, (_m, k: string) => values[k] ?? "");
+}
+/**
+ * The HTML part: the admin's words through email.htmlOf (paragraphs, their own links), with each variable put in
+ * afterwards as escaped text, so a value that looks like a URL is never made a link.
+ */
+export function renderHtml(t: string, vars: { first_name?: string | null; product?: string | null }) {
+  const values: Record<string, string> = safeVars(vars), used: string[] = [];
+  const marked = t.replace(VAR, (_m, k: string) => { used.push(values[k] ?? ""); return `\u0001${used.length - 1}\u0001`; });
+  const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  // A zero-width non-joiner after each dot keeps mail clients from auto-linking a value that reads like a domain.
+  return mail.htmlOf(marked).replace(/\u0001(\d+)\u0001/g, (_m, i: string) => esc(used[Number(i)] ?? "").replace(/\./g, ".&#8204;"));
 }
 
 interface CampaignRow {
@@ -209,8 +232,12 @@ export interface Candidate {
 const firstName = (n: string | null | undefined) => n?.trim().split(/\s+/)[0] || null;
 
 /** Everyone the audience matches now, one per address (an account's member before the same person's request). */
-export async function resolveAudience(a: Audience, data?: Awaited<ReturnType<typeof journeys>>): Promise<Candidate[]> {
-  const { journeys: js, requests } = data ?? (await journeys());
+export async function resolveAudience(a: Audience, data?: { journeys: Journey[]; requests: RequestRow[] }): Promise<Candidate[]> {
+  const scoped = a.stages.length > 0 || !!a.attention || a.plans.length > 0 || a.accounts.length > 0;
+  // Requesters only, with no account filter: the requests table is all it takes (no Clerk, no Stripe). Otherwise the
+  // accounts, without Stripe's payment history (an audience never needs it; the plan comes with the account listing).
+  const { journeys: js, requests } = data ?? (a.include === "requests" && !scoped
+    ? { journeys: [] as Journey[], requests: await requestRows() } : await journeys({ stripe: false }));
   const fromT = a.created_from ? Date.parse(`${a.created_from}T00:00:00Z`) : null, toT = a.created_to ? Date.parse(`${a.created_to}T00:00:00Z`) + 86_400_000 : null;
   const dated = (d: Date | string) => { const t = new Date(d).getTime(); return (fromT == null || t >= fromT) && (toT == null || t < toT); };
   const eq = (want: string, have: string) => !want || want.toLowerCase() === (have || DIRECT).toLowerCase();
@@ -230,10 +257,14 @@ export async function resolveAudience(a: Audience, data?: Awaited<ReturnType<typ
     for (const j of orgs) {
       const base = { product: products.get(Number(j.org.id)) ?? j.org.name, source: "account" as const, org_id: Number(j.org.id), org_slug: j.org.slug, org_name: j.org.name, request_id: null };
       const people = await accountPeople(j.org.clerk_org_id);
-      const members = (people?.members ?? []).filter((m) => m.status === "active" && m.email);
-      for (const m of members) add({ ...base, email: m.email!, first_name: firstName(m.name) });
-      // No Clerk (legacy keys) or nobody in it yet: whoever asked for this account.
-      if (!members.length) for (const r of requests.filter((q) => q.org_id === Number(j.org.id) && q.status === "approved")) add({ ...base, email: r.email, first_name: firstName(r.name), request_id: r.id });
+      // Clerk failed for this account: skip it this pass (never guess with its requesters); the next pass tries again.
+      if (people?.error) { console.error(`campaign audience: ${j.org.slug} skipped (Clerk: ${people.error})`); continue; }
+      if (people) {
+        for (const m of people.members.filter((x) => x.status === "active" && x.email)) add({ ...base, email: m.email!, first_name: firstName(m.name) });
+        continue;
+      }
+      // No Clerk organization (a legacy key account): whoever asked for it.
+      for (const r of requests.filter((q) => q.org_id === Number(j.org.id) && q.status === "approved")) add({ ...base, email: r.email, first_name: firstName(r.name), request_id: r.id });
     }
   }
   if (a.include !== "accounts") {
@@ -287,20 +318,31 @@ export async function enroll(id: number): Promise<number> {
 
 // ---------- unsubscribe links ----------
 
-/** HMAC key for unsubscribe links, derived from the vault master key (current, then the previous one while rotating). */
-const unsubKeys = () => [process.env.OCTILLION_VAULT_KEY, process.env.OCTILLION_VAULT_KEY_PREVIOUS].filter((k): k is string => !!k?.trim())
-  .map((k) => Buffer.from(hkdfSync("sha256", Buffer.from(k.trim()), Buffer.from("octillion"), Buffer.from("campaign-unsubscribe-v1"), 32)));
-const sigOf = (key: Buffer, id: number) => createHmac("sha256", key).update(`unsubscribe:${id}`).digest("base64url").slice(0, 32);
-export function unsubscribeToken(recipientId: number): string {
-  const [key] = unsubKeys();
-  if (!key) throw new AdminError("Unsubscribe links need OCTILLION_VAULT_KEY", 503);
-  return `${recipientId}.${sigOf(key, recipientId)}`;
+/**
+ * HMAC key for unsubscribe links: its own random secret, generated once into the key vault (provider
+ * email_unsubscribe, label "generated"). Rotating the vault master key re-encrypts it and leaves the value alone, so a
+ * link keeps working for as long as its recipient row exists, years later included. Cached in the process.
+ */
+const UNSUB_LABEL = "generated";
+let unsubKey: Promise<Buffer> | null = null;
+export function unsubscribeKey(): Promise<Buffer> {
+  return (unsubKey ??= (async () => {
+    // Replicas race on the first one: addCredentialIfAbsent never overwrites, so they all end up with the winner's.
+    await addCredentialIfAbsent(UNSUBSCRIBE_PROVIDER, randomBytes(32).toString("base64url"), { label: UNSUB_LABEL });
+    return Buffer.from((await useCredential(UNSUBSCRIBE_PROVIDER, { label: UNSUB_LABEL })).secret);
+  })().catch((e) => { unsubKey = null; throw new AdminError(`Unsubscribe links need the key vault: ${(e as Error).message}`, 503); }));
 }
-export function verifyUnsubscribe(token: unknown): number | null {
+const sigOf = (key: Buffer, id: number) => createHmac("sha256", key).update(`unsubscribe:${id}`).digest("base64url").slice(0, 32);
+export async function unsubscribeToken(recipientId: number): Promise<string> {
+  return `${recipientId}.${sigOf(await unsubscribeKey(), recipientId)}`;
+}
+export async function verifyUnsubscribe(token: unknown): Promise<number | null> {
   const m = /^(\d{1,15})\.([A-Za-z0-9_-]{32})$/.exec(String(token ?? ""));
   if (!m) return null;
-  const id = Number(m[1]), got = Buffer.from(m[2]);
-  return unsubKeys().some((k) => { const want = Buffer.from(sigOf(k, id)); return want.length === got.length && timingSafeEqual(want, got); }) ? id : null;
+  const key = await unsubscribeKey().catch(() => null);
+  if (!key) return null;
+  const id = Number(m[1]), got = Buffer.from(m[2]), want = Buffer.from(sigOf(key, id));
+  return want.length === got.length && timingSafeEqual(want, got) ? id : null;
 }
 export const unsubscribeUrl = (token: string) => `${mail.siteUrl()}/api/email/unsubscribe?t=${encodeURIComponent(token)}`;
 const TEST_TOKEN = "test";
@@ -308,7 +350,7 @@ const TEST_TOKEN = "test";
 /** Unsubscribe whoever the token names: from this campaign, and from every campaign after (the suppression list). */
 export async function unsubscribe(token: unknown): Promise<{ ok: boolean; test?: boolean }> {
   if (token === TEST_TOKEN) return { ok: true, test: true };
-  const id = verifyUnsubscribe(token);
+  const id = await verifyUnsubscribe(token);
   if (id == null) return { ok: false };
   const db = await getDb();
   const [r] = await db.query<{ email: string; campaign_id: number }>(
@@ -361,93 +403,175 @@ export async function testSend(actor: string, id: number, body: { to?: unknown; 
   const url = unsubscribeUrl(TEST_TOKEN);
   const r = await mail.send({ kind: "campaign_test", to, idempotencyKey: `campaign-test:${c.id}:${randomUUID()}`, meta: { campaign_id: c.id, step: i },
     subject: `[Test] ${render(step.subject, sample ?? {})}`, text: render(step.body, sample ?? {}) + footer(sample?.source ?? "account", url),
+    html: renderHtml(step.body + footer(sample?.source ?? "account", url), sample ?? {}),
     headers: unsubHeaders(url), tags: [{ name: "campaign", value: String(c.id) }] });
   log(actor, "campaign.test", null, { campaign_id: c.id, step: i, status: r.status, to_domain: mail.domainOf(to) });
   return { ...r, sample: sample ? { first_name: sample.first_name, product: sample.product, source: sample.source } : null };
 }
 
 interface Due { id: number; campaign_id: number; email: string; first_name: string | null; product: string | null; source: "account" | "request"; next_step: number }
-export interface TickResult { started: number; enrolled: number; sent: number; failed: number; suppressed: number; finished: number; skipped?: string; error?: string }
+export interface TickResult {
+  started: number; enrolled: number; sent: number; failed: number; suppressed: number; finished: number;
+  /** Left for a later tick: the campaign was paused or ended mid-batch, or Resend asked us to slow down. */
+  deferred: number;
+  skipped?: string; busy?: boolean; error?: string;
+}
+const emptyTick = (): TickResult => ({ started: 0, enrolled: 0, sent: 0, failed: 0, suppressed: 0, finished: 0, deferred: 0 });
+
+/** OCTILLION_CAMPAIGNS=off stops every campaign send: the VM ticker, the Vercel cron's tick and "send now". */
+export const campaignsEnabled = () => (process.env.OCTILLION_CAMPAIGNS ?? "on").toLowerCase() !== "off";
+
+// One campaign tick at a time across every process (VM replicas, Vercel functions, "send now"): a lease row in
+// autoscaler_lease (name "campaigns"), so Resend is throttled globally, not per process.
+const LEASE = "campaigns";
+const holder = `${hostname()}-${process.pid}-${randomBytes(3).toString("hex")}`;
+async function takeLease(secs: number): Promise<boolean> {
+  const [r] = await (await getDb()).query(
+    `INSERT INTO autoscaler_lease (name, holder, expires_at) VALUES ($1, $2, now() + make_interval(secs => $3::int))
+     ON CONFLICT (name) DO UPDATE SET holder = excluded.holder, expires_at = excluded.expires_at
+       WHERE autoscaler_lease.holder = excluded.holder OR autoscaler_lease.expires_at < now() RETURNING name`, [LEASE, holder, secs]);
+  return !!r;
+}
+const releaseLease = async () => { await (await getDb()).query("DELETE FROM autoscaler_lease WHERE name = $1 AND holder = $2", [LEASE, holder]).catch(() => {}); };
 
 let inflight: Promise<TickResult> | null = null;
 /** One pass: start scheduled campaigns, enroll, send what is due (rate-limited), finish what is done. Never throws. */
 export function campaignTick(): Promise<TickResult> {
-  return (inflight ??= runTick().catch((e) => ({ started: 0, enrolled: 0, sent: 0, failed: 0, suppressed: 0, finished: 0, error: (e as Error).message }))
-    .finally(() => { inflight = null; }));
+  if (!campaignsEnabled()) return Promise.resolve({ ...emptyTick(), skipped: "Campaigns are off (OCTILLION_CAMPAIGNS=off)" });
+  return (inflight ??= runTick(null).finally(() => { inflight = null; }));
 }
 
-async function runTick(): Promise<TickResult> {
-  const db = await getDb();
-  const out: TickResult = { started: 0, enrolled: 0, sent: 0, failed: 0, suppressed: 0, finished: 0 };
-  out.started = (await db.query("UPDATE gtm_campaigns SET status = 'running', launched_at = coalesce(launched_at, now()), updated_at = now() WHERE status = 'scheduled' AND starts_at <= now() RETURNING id")).length;
-  // New ones enroll once; rolling ones re-check their audience at most every few minutes.
-  for (const { id } of await db.query<{ id: number }>(
-    "SELECT id FROM gtm_campaigns WHERE status = 'running' AND (enrolled_at IS NULL OR (rolling AND enrolled_at < now() - interval '4 minutes'))")) {
-    try { out.enrolled += await enroll(Number(id)); } catch (e) { console.error(`campaign ${id}: enrolment failed: ${(e as Error).message}`); }
-  }
-  const status = await mail.emailStatus();
-  if (!status.enabled || !status.connected) {
-    out.skipped = !status.connected ? "No Resend key in Key vault (or the provider is off)" : "Emails are off (Agent configuration, Send emails)";
-    return out;
-  }
+/**
+ * "Send now" for one campaign (the Activation nudge, the peek's button): the same tick, for this campaign only, and
+ * what happened to *its* people: sent, suppressed, still waiting (another tick holds the lease, or a later email).
+ */
+export async function sendNow(actor: string, id: number) {
+  const c = await campaignById(id);
+  if (c.status !== "running") throw new AdminError(`Only a running campaign sends (this one is ${c.status})`, 409);
+  const tick = campaignsEnabled() ? await runTick(c.id) : { ...emptyTick(), skipped: "Campaigns are off (OCTILLION_CAMPAIGNS=off)" };
+  const m = (await metrics([c.id])).get(c.id)!;
+  log(actor, "campaign.send_now", null, { campaign_id: c.id, sent: tick.sent, waiting: m.waiting });
+  return { campaign_id: c.id, sent_now: tick.sent, sent: m.sent, suppressed: m.suppressed, waiting: m.waiting, failed: m.failed, skipped: tick.skipped ?? null, busy: Boolean(tick.busy) };
+}
+
+/** Transient: Resend rate-limited or down, or email is switched off for now. Retried later, never counted as an attempt. */
+const transient = (res: mail.EmailResult) =>
+  (res.status === "failed" && /Resend answered (429|5\d\d)|did not answer/.test(res.error ?? "")) ||
+  (res.status === "skipped" && !/No valid address|No subject/.test(res.error ?? ""));
+
+async function runTick(only: number | null): Promise<TickResult> {
+  const out = emptyTick();
   const cap = envInt("CAMPAIGN_SENDS_PER_TICK", 100, 1000), gap = envInt("CAMPAIGN_SEND_INTERVAL_MS", 600, 10_000);
-  // Lease what is due: pushed 10 minutes out, so a concurrent tick (another replica, the cron) skips it.
-  const due = cap ? await db.query<Due>(
-    `UPDATE gtm_campaign_recipients r SET next_at = now() + interval '10 minutes'
-      WHERE r.id IN (SELECT x.id FROM gtm_campaign_recipients x JOIN gtm_campaigns c ON c.id = x.campaign_id
-                      WHERE c.status = 'running' AND x.status IN ('pending', 'active') AND x.next_at <= now()
-                      ORDER BY x.next_at, x.id LIMIT $1 FOR UPDATE OF x SKIP LOCKED)
-      RETURNING r.id, r.campaign_id, r.email, r.first_name, r.product, r.source, r.next_step`, [cap]) : [];
-  const campaigns = new Map<number, CampaignRow>();
-  for (const r of due) {
-    const cid = Number(r.campaign_id);
-    if (!campaigns.has(cid)) campaigns.set(cid, await campaignById(cid));
+  try {
+    if (!(await takeLease(Math.max(300, Math.ceil((cap * gap) / 1000) + 120)))) return { ...out, busy: true, skipped: "Another campaign tick is sending right now" };
+  } catch (e) { return { ...out, error: (e as Error).message }; }
+  const db = await getDb();
+  let due: Due[] = [];
+  const done = new Set<number>();
+  try {
+    out.started = (await db.query(
+      `UPDATE gtm_campaigns SET status = 'running', launched_at = coalesce(launched_at, now()), updated_at = now()
+        WHERE status = 'scheduled' AND starts_at <= now() AND ($1::bigint IS NULL OR id = $1) RETURNING id`, [only])).length;
+    // New ones enroll once; rolling ones re-check their audience at most every CAMPAIGN_ENROLL_INTERVAL_MIN (60) minutes.
+    for (const { id } of await db.query<{ id: number }>(
+      `SELECT id FROM gtm_campaigns WHERE status = 'running' AND ($2::bigint IS NULL OR id = $2)
+          AND (enrolled_at IS NULL OR (rolling AND enrolled_at < now() - make_interval(mins => $1::int)))`, [envInt("CAMPAIGN_ENROLL_INTERVAL_MIN", 60, 7 * 24 * 60), only])) {
+      try { out.enrolled += await enroll(Number(id)); } catch (e) { console.error(`campaign ${id}: enrolment failed: ${(e as Error).message}`); }
+    }
+    const status = await mail.emailStatus();
+    if (!status.enabled || !status.connected) {
+      out.skipped = !status.connected ? "No Resend key in Key vault (or the provider is off)" : "Emails are off (Agent configuration, Send emails)";
+      return out;
+    }
+    // Lease what is due: pushed 10 minutes out, so nothing else picks it while this batch runs.
+    due = cap ? await db.query<Due>(
+      `UPDATE gtm_campaign_recipients r SET next_at = now() + interval '10 minutes'
+        WHERE r.id IN (SELECT x.id FROM gtm_campaign_recipients x JOIN gtm_campaigns c ON c.id = x.campaign_id
+                        WHERE c.status = 'running' AND x.status IN ('pending', 'active') AND x.next_at <= now() AND ($2::bigint IS NULL OR c.id = $2)
+                        ORDER BY x.next_at, x.id LIMIT $1 FOR UPDATE OF x SKIP LOCKED)
+        RETURNING r.id, r.campaign_id, r.email, r.first_name, r.product, r.source, r.next_step`, [cap, only]) : [];
+    due.sort((a, b) => Number(a.id) - Number(b.id));
+    let first = true, slowDown = false;
+    for (const r of due) {
+      if (slowDown) break;
+      done.add(Number(r.id));
+      try {
+        if (!first && gap) await sleep(gap);
+        // The campaign as it is now, not as it was when the batch started: paused, ended or deleted mid-batch stops here.
+        const c = await campaignById(Number(r.campaign_id)).catch(() => null);
+        if (!c) continue; // deleted: its recipients went with it
+        if (c.status !== "running") { await release([Number(r.id)]); out.deferred++; continue; }
+        const step = c.steps[r.next_step];
+        if (!step) { await db.query("UPDATE gtm_campaign_recipients SET status = 'done', next_at = NULL WHERE id = $1", [r.id]); continue; }
+        if ((await suppressedSet([r.email])).size) {
+          await db.query("UPDATE gtm_campaign_recipients SET status = 'suppressed', next_at = NULL WHERE id = $1", [r.id]);
+          out.suppressed++;
+          continue;
+        }
+        // Claimed once per person and email, and only while the campaign still runs.
+        const [claim] = await db.query<{ id: number; attempts: number }>(
+          `INSERT INTO gtm_campaign_sends (campaign_id, recipient_id, step, status)
+           SELECT $1, $2, $3, 'sending' WHERE EXISTS (SELECT 1 FROM gtm_campaigns WHERE id = $1 AND status = 'running')
+           ON CONFLICT (recipient_id, step) DO UPDATE SET status = 'sending', attempts = gtm_campaign_sends.attempts + 1, at = now(), error = NULL
+             WHERE gtm_campaign_sends.status = 'failed' OR (gtm_campaign_sends.status = 'sending' AND gtm_campaign_sends.at < now() - interval '10 minutes')
+           RETURNING id, attempts`, [c.id, r.id, r.next_step]);
+        if (!claim) {
+          // Already sent (a tick that stopped before moving on): move on now. Paused this instant: back in the queue.
+          // Being sent elsewhere: leave the lease.
+          const [s] = await db.query<{ status: string }>("SELECT status FROM gtm_campaign_sends WHERE recipient_id = $1 AND step = $2", [r.id, r.next_step]);
+          if (s?.status === "sent") await advance(r, c);
+          else if (!s) { await release([Number(r.id)]); out.deferred++; }
+          continue;
+        }
+        first = false;
+        const url = unsubscribeUrl(await unsubscribeToken(Number(r.id)));
+        const res = await mail.send({
+          kind: "campaign", to: r.email, idempotencyKey: `campaign:${c.id}:${r.id}:${r.next_step}`, meta: { campaign_id: c.id, step: r.next_step },
+          subject: render(step.subject, r), text: render(step.body, r) + footer(r.source, url), html: renderHtml(step.body + footer(r.source, url), r),
+          headers: unsubHeaders(url), tags: [{ name: "campaign", value: String(c.id) }],
+        });
+        if (res.status === "sent" || res.status === "duplicate") {
+          await db.query("UPDATE gtm_campaign_sends SET status = 'sent', provider_id = coalesce($2, provider_id), at = now() WHERE id = $1", [claim.id, res.provider_id ?? null]);
+          await advance(r, c);
+          out.sent++;
+        } else if (transient(res)) {
+          // Not this person's fault: undo the attempt, try again in a quarter of an hour; a 429 ends the batch.
+          await db.query("UPDATE gtm_campaign_sends SET status = 'failed', attempts = greatest(attempts - 1, 0), error = $2 WHERE id = $1", [claim.id, (res.error ?? res.status).slice(0, 500)]);
+          await db.query("UPDATE gtm_campaign_recipients SET next_at = now() + interval '15 minutes' WHERE id = $1", [r.id]);
+          out.deferred++;
+          if (/Resend answered 429/.test(res.error ?? "")) slowDown = true;
+        } else {
+          await db.query("UPDATE gtm_campaign_sends SET status = 'failed', error = $2 WHERE id = $1", [claim.id, (res.error ?? res.status).slice(0, 500)]);
+          // No valid address, or a third real failure: give up on this person; else try again in half an hour.
+          const giveUp = res.status === "skipped" || Number(claim.attempts) >= 3;
+          await db.query(`UPDATE gtm_campaign_recipients SET ${giveUp ? "status = 'failed', next_at = NULL" : "next_at = now() + interval '30 minutes'"} WHERE id = $1`, [r.id]);
+          out.failed++;
+        }
+      } catch (e) {
+        // One person's problem (e.g. the campaign deleted between two queries) never stops the batch.
+        console.error(`campaign send to recipient ${r.id} skipped: ${(e as Error).message}`);
+        await release([Number(r.id)]).catch(() => {});
+      }
+    }
+    out.finished = (await db.query(
+      `UPDATE gtm_campaigns c SET status = 'done', finished_at = now(), updated_at = now()
+        WHERE c.status = 'running' AND NOT c.rolling AND c.enrolled_at IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM gtm_campaign_recipients r WHERE r.campaign_id = c.id AND r.status IN ('pending', 'active')) RETURNING id`)).length;
+    if (out.sent || out.failed || out.deferred) console.error(`campaigns: sent ${out.sent}, failed ${out.failed}, deferred ${out.deferred}, suppressed ${out.suppressed}`);
+    return out;
+  } catch (e) {
+    return { ...out, error: (e as Error).message };
+  } finally {
+    // Whatever this batch leased and did not get to goes straight back in the queue.
+    const left = due.map((r) => Number(r.id)).filter((id) => !done.has(id));
+    if (left.length) await release(left).catch(() => {});
+    await releaseLease();
   }
-  let first = true;
-  for (const r of due.sort((a, b) => Number(a.id) - Number(b.id))) {
-    const c = campaigns.get(Number(r.campaign_id))!, step = c.steps[r.next_step];
-    if (!step) { await db.query("UPDATE gtm_campaign_recipients SET status = 'done', next_at = NULL WHERE id = $1", [r.id]); continue; }
-    if ((await suppressedSet([r.email])).size) {
-      await db.query("UPDATE gtm_campaign_recipients SET status = 'suppressed', next_at = NULL WHERE id = $1", [r.id]);
-      out.suppressed++;
-      continue;
-    }
-    const [claim] = await db.query<{ id: number; attempts: number }>(
-      `INSERT INTO gtm_campaign_sends (campaign_id, recipient_id, step, status) VALUES ($1, $2, $3, 'sending')
-       ON CONFLICT (recipient_id, step) DO UPDATE SET status = 'sending', attempts = gtm_campaign_sends.attempts + 1, at = now(), error = NULL
-         WHERE gtm_campaign_sends.status = 'failed' OR (gtm_campaign_sends.status = 'sending' AND gtm_campaign_sends.at < now() - interval '10 minutes')
-       RETURNING id, attempts`, [c.id, r.id, r.next_step]);
-    if (!claim) {
-      // Already sent (a tick that stopped before moving on): move on now; being sent elsewhere: leave the lease.
-      const [s] = await db.query<{ status: string }>("SELECT status FROM gtm_campaign_sends WHERE recipient_id = $1 AND step = $2", [r.id, r.next_step]);
-      if (s?.status === "sent") await advance(r, c);
-      continue;
-    }
-    if (!first && gap) await sleep(gap);
-    first = false;
-    const url = unsubscribeUrl(unsubscribeToken(Number(r.id)));
-    const res = await mail.send({
-      kind: "campaign", to: r.email, idempotencyKey: `campaign:${c.id}:${r.id}:${r.next_step}`, meta: { campaign_id: c.id, step: r.next_step },
-      subject: render(step.subject, r), text: render(step.body, r) + footer(r.source, url), headers: unsubHeaders(url), tags: [{ name: "campaign", value: String(c.id) }],
-    });
-    if (res.status === "sent" || res.status === "duplicate") {
-      await db.query("UPDATE gtm_campaign_sends SET status = 'sent', provider_id = coalesce($2, provider_id), at = now() WHERE id = $1", [claim.id, res.provider_id ?? null]);
-      await advance(r, c);
-      out.sent++;
-    } else {
-      await db.query("UPDATE gtm_campaign_sends SET status = 'failed', error = $2 WHERE id = $1", [claim.id, (res.error ?? res.status).slice(0, 500)]);
-      // Skipped (no valid address) or three failures: give up on this person; else try again in half an hour.
-      const giveUp = res.status === "skipped" || Number(claim.attempts) >= 3;
-      await db.query(`UPDATE gtm_campaign_recipients SET ${giveUp ? "status = 'failed', next_at = NULL" : "next_at = now() + interval '30 minutes'"} WHERE id = $1`, [r.id]);
-      out.failed++;
-    }
-  }
-  out.finished = (await db.query(
-    `UPDATE gtm_campaigns c SET status = 'done', finished_at = now(), updated_at = now()
-      WHERE c.status = 'running' AND NOT c.rolling AND c.enrolled_at IS NOT NULL
-        AND NOT EXISTS (SELECT 1 FROM gtm_campaign_recipients r WHERE r.campaign_id = c.id AND r.status IN ('pending', 'active')) RETURNING id`)).length;
-  if (out.sent || out.failed) console.error(`campaigns: sent ${out.sent}, failed ${out.failed}, suppressed ${out.suppressed}`);
-  return out;
+}
+
+/** Give leased recipients back: due now (they were due when leased). */
+async function release(ids: number[]) {
+  await (await getDb()).query("UPDATE gtm_campaign_recipients SET next_at = now() WHERE id = ANY($1::bigint[]) AND status IN ('pending', 'active')", [ids]);
 }
 
 /** After step n went out: the next one is due its delay later, or the person is done. Only from step n (no double move). */
@@ -462,7 +586,7 @@ async function advance(r: Due, c: CampaignRow) {
 /** On a VM (not Vercel, whose cron calls the tick): a tick every 5 minutes. */
 let ticker: NodeJS.Timeout | null = null;
 export function startCampaignTicker() {
-  if (ticker || process.env.VERCEL || (process.env.OCTILLION_CAMPAIGNS ?? "on").toLowerCase() === "off") return;
+  if (ticker || process.env.VERCEL || !campaignsEnabled()) return;
   ticker = setInterval(() => void campaignTick(), 5 * 60_000);
   ticker.unref();
 }
@@ -501,7 +625,16 @@ export async function resendWebhook(raw: string, h: { id?: string; timestamp?: s
   const [s] = await db.query<{ recipient_id: number; campaign_id: number }>(
     `UPDATE gtm_campaign_sends SET ${col} = coalesce(${col}, $2) WHERE provider_id = $1 RETURNING recipient_id, campaign_id`, [pid, at]);
   if (!s) return { status: 200, body: { ok: true, matched: false } };
-  const hard = ev.type === "email.complained" || (ev.type === "email.bounced" && !/transient/i.test(ev.data?.bounce?.type ?? ""));
+  // Suppress on a complaint or a Permanent bounce. An Undetermined bounce suppresses only once the address has bounced
+  // twice (in any campaign); a Transient one is only recorded.
+  const bounceType = String(ev.data?.bounce?.type ?? "");
+  let hard = ev.type === "email.complained" || (ev.type === "email.bounced" && /^permanent$/i.test(bounceType));
+  if (ev.type === "email.bounced" && !hard && !/transient/i.test(bounceType)) {
+    const [{ n }] = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM gtm_campaign_sends s JOIN gtm_campaign_recipients r ON r.id = s.recipient_id
+        WHERE s.bounced_at IS NOT NULL AND r.email = (SELECT email FROM gtm_campaign_recipients WHERE id = $1)`, [s.recipient_id]);
+    hard = Number(n) >= 2;
+  }
   if (hard) {
     const [r] = await db.query<{ email: string }>(
       `UPDATE gtm_campaign_recipients SET status = CASE WHEN status = 'unsubscribed' THEN status ELSE $2 END, next_at = NULL WHERE id = $1 RETURNING email`,

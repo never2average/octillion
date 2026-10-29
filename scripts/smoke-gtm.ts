@@ -37,6 +37,8 @@ export async function gtmChecks({ db, base, adm, json, mockUrl, mockPost, sentTo
     `INSERT INTO simulations (id, org_id, product_id, name, models, harness, repeats, status, created_at) VALUES ($1, $2, $3, 'gtm', '{m}', 'claude-code', 1, 'completed', now() - $4::interval)`,
     [`sim_gtm_${o}_${randomBytes(4).toString("hex")}`, o, p, ago]);
   await sim(oB, pB, "3 days");
+  // B opened its report half a day after the simulation, and pays from half a day after that.
+  await db.query("INSERT INTO mcp_events (org_id, method, name, ok, at) VALUES ($1, 'tools/call', 'get_visibility_report', true, now() - interval '60 hours')", [oB]);
   await mockPost("/_mock/subscriptions", { customer: cusB, price: "price_mock_starter", start_date: Math.floor(Date.now() / 1000) - 2 * 86_400, invoice: false });
   billing.invalidateSubscriptions();
 
@@ -44,7 +46,10 @@ export async function gtmChecks({ db, base, adm, json, mockUrl, mockPost, sentTo
   const act = await json(adm("GET", `/gtm/activation?${range}&utm_campaign=${CAMP}`));
   const step = (id: string) => act.steps.find((s: any) => s.id === id);
   assert.deepEqual(act.steps.map((s: any) => s.id), ["requested", "created", "onboarded", "simulated", "reported", "paid"], "the canonical steps, in order");
-  assert.deepEqual(act.steps.map((s: any) => s.reached), [3, 2, 2, 1, 0, 1], `counts for the campaign's cohort: ${JSON.stringify(act.steps.map((s: any) => s.reached))}`);
+  assert.deepEqual(act.steps.map((s: any) => s.reached), [3, 2, 2, 1, 1, 1], `counts for the campaign's cohort: ${JSON.stringify(act.steps.map((s: any) => s.reached))}`);
+  assert.ok(act.steps.every((s: any, i: number) => i < 2 || s.reached <= act.steps[i - 1].reached) && act.paid_any === 1, "nested: each step a subset of the one before");
+  assert.equal(step("reported").median_hours, 12, "half a day from simulation to report");
+  assert.equal(step("paid").median_hours, 12, "and from report to payment");
   assert.equal(step("created").pct_of_previous, 66.7, "conversion from the step before");
   assert.equal(step("simulated").pct_of_first, 33.3, "and from the first");
   assert.equal(step("created").median_hours, 24, "a day from request to account");
@@ -173,10 +178,75 @@ export async function gtmChecks({ db, base, adm, json, mockUrl, mockPost, sentTo
   assert.ok(d.steps[0].sent === 2 && d.steps[1].sent === 1, "per-step sends");
   const list = await json(adm("GET", "/gtm/campaigns"));
   assert.ok(list.campaigns.some((c: any) => c.id === id && c.metrics.sent === 3 && c.conversions.activated === 1) && list.variables.includes("first_name"), "the list carries the metrics");
-  // A hard bounce suppresses the address.
+  // An Undetermined bounce is recorded but does not suppress (once); a Permanent one does.
+  await json(hook({ type: "email.bounced", data: { email_id: annPid, bounce: { type: "Undetermined" } } }, whsec));
+  assert.equal((await db.query("SELECT 1 FROM email_suppressions WHERE email_hash = $1", [mail.hashAddress(ann)])).length, 0, "one undetermined bounce: not suppressed");
   await json(hook({ type: "email.bounced", data: { email_id: annPid, bounce: { type: "Permanent" } } }, whsec));
   assert.equal((await db.query("SELECT 1 FROM email_suppressions WHERE email_hash = $1 AND reason = 'bounced'", [mail.hashAddress(ann)])).length, 1, "bounced: suppressed");
   await kvm.deleteCredential(cred.id);
+
+  // Variables are plain text: never a link, capped, a first name is one word.
+  const camp = await import("../src/campaigns.js");
+  const html = camp.renderHtml("Hi {{first_name}}, about {{product}}: https://octillion.test/app", { first_name: "<b>Eve</b> x", product: "https://evil.example/" + "x".repeat(200) });
+  assert.ok(html.includes("Hi there,") && !html.includes("evil.example/x") && html.includes("https:/&#8204;") === false && !/href="https:\/\/evil/.test(html) && html.includes('href="https://octillion.test/app"'),
+    `variables are escaped text, never linked: ${html}`);
+  assert.equal(camp.safeVars({ first_name: "Zoë-Ann Smith", product: "Line\nbreak" }).first_name, "Zoë-Ann");
+  assert.equal(camp.safeVars({ product: "p".repeat(200) }).product.length, 80);
+  assert.ok((await db.query("SELECT 1 FROM vault_credentials WHERE provider = 'email_unsubscribe' AND label = 'generated'")).length === 1, "the unsubscribe key is its own vault secret");
+
+  // Pause or delete mid-batch: nothing more goes out. Sends are spaced so the change lands between two.
+  const CB = `${CAMP}-b`, eve = `eve+${stamp}@gtm-e.dev`, fay = `fay+${stamp}@gtm-f.dev`;
+  const rE = (await db.query<{ id: number }>("INSERT INTO access_requests (email, company, name, source) VALUES ($1, 'Eve Co', 'Eve', $2::jsonb) RETURNING id", [eve, src(CB)]))[0].id;
+  const rF = (await db.query<{ id: number }>("INSERT INTO access_requests (email, company, name, source) VALUES ($1, 'Fay Co', 'Fay', $2::jsonb) RETURNING id", [fay, src(CB)]))[0].id;
+  const sentFor = (cid: number) => [eve, fay].flatMap((e) => sentTo(e, "campaign")).filter((e: any) => e.tags?.some((t: any) => t.name === "campaign" && t.value === String(cid))).length;
+  const waitFor = async (ok: () => boolean, what: string) => { for (let i = 0; i < 500 && !ok(); i++) await new Promise((r) => setTimeout(r, 20)); assert.ok(ok(), what); };
+  const mk = async (name: string) => {
+    const cidN = (await json(adm("POST", "/gtm/campaigns", { name, audience: { include: "requests", utm_campaign: CB }, steps: [steps[0]] }))).campaign.id;
+    await json(adm("POST", `/gtm/campaigns/${cidN}/launch`, {}));
+    return cidN as number;
+  };
+  process.env.CAMPAIGN_SEND_INTERVAL_MS = "1500";
+  const p1 = await mk(`Pause ${stamp}`);
+  const batch1 = json(adm("POST", "/gtm/tick"));
+  await waitFor(() => sentFor(p1) === 1, "the first email of the batch went out");
+  await json(adm("POST", `/gtm/campaigns/${p1}/pause`));
+  const t1 = await batch1;
+  assert.ok(sentFor(p1) === 1 && t1.deferred >= 1 && !t1.error, `paused mid-batch: nothing more sent (${JSON.stringify(t1)})`);
+  assert.equal((await adm("POST", "/gtm/tick")).status, 200, "the lease was given back");
+  assert.equal(sentFor(p1), 1, "still nothing while paused");
+  await json(adm("POST", `/gtm/campaigns/${p1}/resume`));
+  process.env.CAMPAIGN_SEND_INTERVAL_MS = "0";
+  await json(adm("POST", "/gtm/tick"));
+  assert.equal(sentFor(p1), 2, "resumed: the one held back goes out");
+  process.env.CAMPAIGN_SEND_INTERVAL_MS = "1500";
+  const p2 = await mk(`Deleted ${stamp}`);
+  const batch2 = json(adm("POST", "/gtm/tick"));
+  await waitFor(() => sentFor(p2) === 1, "the first email of the second batch went out");
+  await db.query("DELETE FROM gtm_campaigns WHERE id = $1", [p2]);
+  const t2 = await batch2;
+  assert.ok(sentFor(p2) === 1 && !t2.error, `deleted mid-batch: the tick carries on without error (${JSON.stringify(t2)})`);
+  process.env.CAMPAIGN_SEND_INTERVAL_MS = "0";
+  assert.ok(!(await json(adm("POST", "/gtm/tick"))).busy, "and gives its lease back");
+
+  // Send now (the Activation nudge): this campaign's own result. A Clerk member of C gets it.
+  const p3 = (await json(adm("POST", "/gtm/campaigns", { name: `Nudge ${stamp}`, audience: { include: "accounts", accounts: [slugC] }, steps: [steps[0]] }))).campaign.id;
+  await json(adm("POST", `/gtm/campaigns/${p3}/launch`, {}));
+  const sn = await json(adm("POST", `/gtm/campaigns/${p3}/send-now`));
+  assert.ok(sn.sent === 1 && sn.sent_now === 1 && sn.waiting === 0 && sentTo(dana, "campaign").length === 1, `send now reports its own campaign: ${JSON.stringify(sn)}`);
+  // Resend down (a 5xx): retried later, never counted toward the three attempts that give up on a person.
+  const p4 = (await json(adm("POST", "/gtm/campaigns", { name: `Outage ${stamp}`, audience: { include: "accounts", accounts: [slugC] }, steps: [steps[0]] }))).campaign.id;
+  await json(adm("POST", `/gtm/campaigns/${p4}/launch`, {}));
+  await mockPost("/_mock/resend/outage", { down: true });
+  const down = await json(adm("POST", `/gtm/campaigns/${p4}/send-now`));
+  await mockPost("/_mock/resend/outage", { down: false });
+  const [held] = await db.query<{ attempts: number; status: string }>("SELECT s.attempts, s.status FROM gtm_campaign_sends s WHERE s.campaign_id = $1", [p4]);
+  assert.ok(down.sent === 0 && down.waiting === 1 && down.failed === 0 && held.status === "failed" && Number(held.attempts) === 0, `a transient failure waits: ${JSON.stringify({ down, held })}`);
+  await db.query("UPDATE gtm_campaign_recipients SET next_at = now() WHERE campaign_id = $1", [p4]);
+  assert.equal((await json(adm("POST", `/gtm/campaigns/${p4}/send-now`))).sent, 1, "and goes out once Resend is back");
+  // OCTILLION_CAMPAIGNS=off stops the tick everywhere (the Vercel cron calls the same function).
+  process.env.OCTILLION_CAMPAIGNS = "off";
+  assert.match((await json(adm("POST", "/gtm/tick"))).skipped, /OCTILLION_CAMPAIGNS=off/);
+  delete process.env.OCTILLION_CAMPAIGNS;
 
   // Lifecycle: pause / edit / resume / end / delete.
   const second = (await json(adm("POST", "/gtm/campaigns", { name: `Later ${stamp}`, audience: { include: "requests", request_status: ["pending"], utm_campaign: CAMP }, steps }))).campaign.id;
@@ -193,15 +263,15 @@ export async function gtmChecks({ db, base, adm, json, mockUrl, mockPost, sentTo
   // Addresses live only in gtm_campaign_recipients: email_log has the domain, suppressions a hash.
   const elsewhere = JSON.stringify(await db.query("SELECT * FROM email_log WHERE kind IN ('campaign', 'campaign_test')"))
     + JSON.stringify(await db.query("SELECT * FROM email_suppressions")) + JSON.stringify(await db.query("SELECT * FROM gtm_campaign_sends")) + JSON.stringify(await db.query("SELECT * FROM gtm_campaigns"));
-  for (const a of [ann, bob, cara, tester]) assert.ok(!elsewhere.includes(a), `no address outside the recipients table: ${a}`);
+  for (const a of [ann, bob, cara, tester, eve, fay, dana]) assert.ok(!elsewhere.includes(a), `no address outside the recipients table: ${a}`);
   assert.ok((await db.query("SELECT 1 FROM email_log WHERE kind = 'campaign' AND to_domain = 'gtm-a.dev'")).length >= 2, "the email log keeps the domain");
 
   await adm("POST", `/gtm/campaigns/${id}/end`).catch(() => {});
-  await db.query("DELETE FROM gtm_campaigns WHERE id = $1", [id]);
+  await db.query("DELETE FROM gtm_campaigns WHERE id = ANY($1::bigint[])", [[id, p1, p3, p4]]);
   await db.query("DELETE FROM email_suppressions WHERE email_hash = ANY($1::text[])", [[ann, bob, cara].map(mail.hashAddress)]);
-  await db.query("DELETE FROM access_requests WHERE id = ANY($1::int[])", [[rA, rB, rC]]);
+  await db.query("DELETE FROM access_requests WHERE id = ANY($1::int[])", [[rA, rB, rC, rE, rF]]);
   await db.query("DELETE FROM organizations WHERE id = ANY($1::int[])", [[oA, oB, oC]]);
   delete process.env.CAMPAIGN_SEND_INTERVAL_MS;
   delete process.env.CAMPAIGN_SENDS_PER_TICK;
-  console.log("✓ GTM: Activation funnel (filters, medians, attention), Attribution by UTM to MRR, Campaigns (audience, test send, rate-limited idempotent sends, unsubscribe, suppression, Resend webhooks, conversions)");
+  console.log("✓ GTM: Activation funnel (filters, medians, attention), Attribution by UTM to MRR, Campaigns (audience, test send, rate-limited idempotent sends, pause or delete mid-batch, transient retries, send now, unsubscribe, suppression, Resend webhooks, conversions)");
 }
