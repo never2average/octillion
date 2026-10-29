@@ -76,6 +76,13 @@ export async function pickChecks({ db, worker, rid, good }: { db: Db; worker: Wo
   assert.equal(at(3).length, 0, "the Canadian academic researcher is accepted");
   const uncited = structuredClone(al); uncited.product.audience.evidence = [{ url: "https://made-up.example.net/eligibility", quote }];
   assert.ok((await iss(uncited)).some((x) => /audience restricts users but cites no fetched page/.test(x)), "a restriction must quote a fetched page");
+  // The quoted page as fetch_url read it (the orchestrator posts every page): only then does the restriction stand.
+  assert.ok((await iss(al)).some((x) => /was never fetched by this job/.test(x)), "the page was not fetched yet");
+  assert.equal((await worker(`/research/${rid}/page`, { url: "not a url", text: "x" })).status, 400);
+  assert.equal((await worker(`/research/${rid}/page`, { url: SIGNUP, text: `Install\n\n${quote}\n\nThen run the worker.` })).status, 200);
+  assert.ok(!(await iss(al)).some((x) => /audience restricts users/.test(x)), "quoted on a page the job fetched");
+  const reworded = structuredClone(al); reworded.product.audience.evidence = [{ url: SIGNUP, quote: "Only Canadian researchers with a faculty sponsor may have accounts." }];
+  assert.ok((await iss(reworded)).some((x) => /the quote is not on .* as this job fetched it/.test(x)), "a paraphrase is not a quote");
   const nameless = structuredClone(good); nameless.selection.personas[0].candidates[0].reason = "backend role on a matching stack, owns the queue";
   assert.ok((await iss(nameless)).some((x) => /selection\.personas\[0\]\.candidates\[0\]\.reason: say where example-startup-backend is \(US\)/.test(x)), "a reason must name the country");
   // A gap is accepted only when nobody fits: here Canadian researchers do.
@@ -122,7 +129,9 @@ export async function audienceLifecycleChecks({ db, worker, call, fails, A, orgI
     "the answer is the confirmed audience");
   assert.ok((await linksOf()).every((x: any) => !x.active), "personas who cannot use it are unlinked (kept, inactive)");
   const [queued] = await db.query<any>("SELECT status, input FROM product_research WHERE id = $1", [ans.research_id]);
-  assert.ok(queued.status === "queued" && /The customer confirmed who can use the product/.test(queued.input.prompt), "research runs again with the confirmed audience in its brief");
+  assert.ok(queued.status === "queued" && queued.input.personas_only === true && /New Zealand/.test(queued.input.audience),
+    "research runs again, personas only, for the confirmed audience");
+  const before = await productState(db, labRow.id);
   await fails(A, "run_simulation", { product: first.product, samples: 1 }, /No eligible personas for this product's audience yet/);
   // The re-research finds nobody in New Zealand: a verified gap, no personas, a question about supply.
   await claimNext(ans.research_id);
@@ -135,6 +144,7 @@ export async function audienceLifecycleChecks({ db, worker, call, fails, A, orgI
   const [gapRow] = await db.query<any>("SELECT research FROM products WHERE id = $1", [labRow.id]);
   assert.ok(gapRow.research.audience_gap?.searched.length === 2 && gapRow.research.audience.countries[0] === "NZ", "the gap is stored; the customer's audience stays");
   assert.equal((await linksOf()).length, 2, "old links are kept, never deleted");
+  assert.deepEqual(await productState(db, labRow.id), before, "a personas-only research leaves the profile, competitors, sources and tasks as they were");
   const supply = (await call(A, "list_product_questions", { product: first.product })).questions.find((q: any) => q.subject === "persona_supply");
   assert.ok(supply && supply.kind === "audience" && supply.status === "open" && supply.options.length >= 2, "an open persona_supply question");
   await fails(A, "run_simulation", { product: first.product, samples: 1 }, /No eligible personas/);
@@ -158,6 +168,7 @@ export async function audienceLifecycleChecks({ db, worker, call, fails, A, orgI
   const confirmed = await call(A, "answer_product_question", { question_id: nzSupply.id, option: "a" });
   assert.ok(confirmed.research_id === null && /No developer profile in the data fits yet/.test(confirmed.effect), `confirming the gap does not loop: ${JSON.stringify(confirmed).slice(0, 300)}`);
   console.log("✓ audience: customer answer narrows it and unlinks unfit personas, re-research, verified gap with a question, no stand-in run, stale questions replaced, no confirmation loop");
+  await personasOnlyChecks({ db, worker, call, A, orgId, productId: labRow.id, product: first.product, good });
 }
 
 /**
@@ -195,4 +206,56 @@ async function reportAndRunChecks({ db, call, fails, A, product, productId }: { 
     await db.query("UPDATE products SET research = $2 WHERE id = $1", [productId, JSON.stringify(was)]);
   }
   console.log("✓ reports and runs against the audience: global never split, ineligible personas left out by name, ineligible runs refused");
+}
+
+/** What a personas-only research must leave alone: the product's profile, competitors, sources and active tasks. */
+async function productState(db: Db, productId: number) {
+  const [p] = await db.query<any>("SELECT name, description, aliases, packages, domains, competitors, features, research->'sources' AS sources, research->'placement' AS placement FROM products WHERE id = $1", [productId]);
+  const tasks = await db.query<any>("/* tenant: smoke */ SELECT id FROM scenarios WHERE product_id = $1 AND active ORDER BY id", [productId]);
+  return { ...p, tasks: tasks.map((x: any) => x.id) };
+}
+
+/**
+ * Personas only (src/research.ts completePersonasOnly): with a customer-confirmed audience, the claimed job carries it
+ * as final and the stored profile; completing swaps the persona links, drops prompt variants of personas no longer
+ * linked and changes nothing else.
+ */
+async function personasOnlyChecks({ db, worker, call, A, orgId, productId, product, good }: { db: Db; worker: Worker; call: Call; A: Client; orgId: number; productId: number; product: string; good: any }) {
+  const global = { scope: "global", checked: "confirmed by the customer in answer to a question", source: "customer", confirmed: true };
+  await db.query("UPDATE products SET research = jsonb_set(research, '{audience}', $2::jsonb) - 'audience_gap' WHERE id = $1", [productId, JSON.stringify(global)]);
+  const [task] = await db.query<any>("/* tenant: smoke */ SELECT id FROM scenarios WHERE product_id = $1 AND active ORDER BY id LIMIT 1", [productId]);
+  const variant = "Our Express API sends webhooks inline and loses them when an endpoint is down; make delivery reliable with retries.";
+  await db.query("/* tenant: smoke */ UPDATE scenarios SET prompt_variants = $2 WHERE id = $1",
+    [task.id, JSON.stringify({ "example-startup-backend": variant, "example-enterprise-platform": variant })]);
+  const before = await productState(db, productId);
+  const { queuePersonasResearch } = await import("../src/questions.js");
+  const rid = await queuePersonasResearch(orgId, productId, { prompt: "GapLab is a hosted job queue.", website_url: "https://quickqueue.example.com" }, global as any);
+  const c = await (await worker("/research/claim", { worker_id: "smoke-orch", research_id: rid })).json();
+  const job = c.jobs.find((j: any) => j.research_id === rid);
+  assert.ok(job.input.personas_only === true && job.input.product_profile?.name === "GapLab" && job.input.confirmed_audience?.scope === "global",
+    `the claimed job is personas only, with the stored profile and the confirmed audience: ${JSON.stringify(job.input).slice(0, 300)}`);
+  const pick = good.personas[0];
+  const result = { product: {}, personas: [pick], selection: { personas: [
+    { round: 1, candidates: ["example-startup-backend", "example-enterprise-platform", "example-solo-indie"].map((slug, j) => ({ profile_slug: slug, keep: j < 2, reason: `${["US", "DE", "US"][j]}, industry: a backend role on a queue-heavy stack` })) },
+    { round: 2, candidates: ["example-startup-backend", "example-enterprise-platform"].map((slug, j) => ({ profile_slug: slug, keep: j === 0, reason: `${["US", "DE"][j]}, industry: ${j ? "dropped, platform teams standardise on managed queues" : "kept, owns job infrastructure"}` })) },
+    { round: 3, converged: true, why: "rechecked eligibility, stack and redundancy; nothing left to change",
+      candidates: [{ profile_slug: "example-startup-backend", keep: true, reason: "US, industry: still the closest fit" }] }] } };
+  const bad = await (await worker(`/research/${rid}/validate`, { result: { ...result, personas: [{ profile_slug: "example-startup-backend", name: "Wrong name" }] } })).json();
+  assert.ok(!bad.ok && bad.issues.some((i: string) => /is named/.test(i)) && !bad.issues.some((i: string) => /scenarios|competitors|category_terms/.test(i)),
+    `personas-only results are checked on their personas only: ${bad.issues.join(" | ")}`);
+  const done = await (await worker(`/research/${rid}/complete`, { status: "completed", result })).json();
+  assert.ok(done.status === "completed" && done.personas_only === true && done.simulation_id === null, JSON.stringify(done).slice(0, 400));
+  assert.deepEqual(await productState(db, productId), before, "profile, competitors, sources and tasks unchanged");
+  const links = await db.query<any>("/* tenant: smoke */ SELECT dp.slug, pp.active FROM product_personas pp JOIN developer_profiles dp ON dp.id = pp.profile_id WHERE pp.product_id = $1 AND pp.active", [productId]);
+  assert.deepEqual(links.map((x: any) => x.slug), ["example-startup-backend"], "the links are swapped");
+  const [v] = await db.query<any>("/* tenant: smoke */ SELECT prompt_variants FROM scenarios WHERE id = $1", [task.id]);
+  assert.deepEqual(Object.keys(v.prompt_variants), ["example-startup-backend"], "variants of personas no longer linked are dropped");
+  const [r] = await db.query<any>("SELECT research FROM products WHERE id = $1", [productId]);
+  assert.ok(r.research.personas_research_id === rid && r.research.audience.confirmed === true && !r.research.audience_gap, "the confirmed audience stays; the old gap is gone");
+  // A global product with no personas linked runs with a generic developer, as before (only a restricted one refuses).
+  await db.query("/* tenant: smoke */ UPDATE product_personas SET active = false WHERE product_id = $1", [productId]);
+  const generic = await call(A, "run_simulation", { product, samples: 1 });
+  assert.ok(generic.simulation?.id, "a global product without personas still runs");
+  await call(A, "cancel_simulation", { simulation_id: generic.simulation.id });
+  console.log("✓ personas only: claimed with the stored profile and confirmed audience, links swapped, stale variants dropped, nothing else touched; a global product without personas still runs");
 }

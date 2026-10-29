@@ -15,9 +15,10 @@ import { join } from "node:path";
 import { CFG, env, num } from "../core/config.js";
 import { redact } from "../core/credentials.js";
 import { fetchReadable, FetchPolicy } from "../core/safe-fetch.js";
+import { quotedOn, readablePage } from "../core/quote.js";
 import { isShuttingDown } from "../core/session.js";
 import { api, HttpError, log, sleep, withRetry } from "../core/util.js";
-import { RESEARCH_SYSTEM_PROMPT, researchPrompt, type ResearchInput, type ResearchLimits } from "./research-prompt.js";
+import { PERSONAS_ONLY_SYSTEM_PROMPT, RESEARCH_SYSTEM_PROMPT, personasOnlyPrompt, researchPrompt, type ResearchInput, type ResearchLimits } from "./research-prompt.js";
 import { PROSPECT_SYSTEM_PROMPT, PROSPECT_TOOLS, prospectPrompt, type ProspectInput } from "./prospect-prompt.js";
 import { holdBusy } from "../core/activity.js";
 import { criticIssues, critiqueTasks } from "./critic.js";
@@ -52,6 +53,8 @@ export const RESEARCH = {
   enabled: env.RESEARCH_DISABLED !== "1",
 };
 export const RESEARCH_TOOLS = ["fetch_url", "web_search", "find_similar", "package_search", "search_library", "search_profiles", "report_progress", "validate", "submit"] as const;
+/** A personas-only job (src/research.ts personasOnly): reads pages and picks profiles; no task library, no searches. */
+export const PERSONAS_ONLY_TOOLS = ["fetch_url", "search_profiles", "report_progress", "validate", "submit"] as const;
 const STAGES = ["reading", "profiling", "personas", "problems", "validating"] as const;
 
 const enc = encodeURIComponent;
@@ -92,6 +95,8 @@ export class ResearchContext {
   architecture: ArchitectOutcome | null = null;
   /** Rounds the audience cross-check sent back (at most AUDIENCE_ROUNDS). */
   audienceRounds = 0;
+  /** Every page fetched in this job (research and the review), by URL as requested and as finally read. */
+  readonly pages = new Map<string, string>();
 
   constructor(readonly job: ResearchJob) {
     this.policy = job.kind === "prospect"
@@ -122,8 +127,18 @@ export function createResearchExtension(ctx: ResearchContext, opts: { only?: rea
       parameters: Type.Object({ url: Type.String() }),
       executionMode: "sequential",
       async execute(_id, p) {
-        try { return text(await fetchReadable(p.url, ctx.policy)); }
+        let out: string;
+        try { out = await fetchReadable(p.url, ctx.policy); }
         catch (e) { throw new Error(`fetch_url failed: ${(e as Error).message}`); }
+        // The page as read goes to the server (and stays here), so a quote cited from it can be checked word for word.
+        const page = readablePage(out);
+        if (page) {
+          ctx.pages.set(page.url, page.text);
+          if (page.url !== p.url) ctx.pages.set(p.url, page.text);
+          await api(`/api/worker/research/${enc(ctx.job.research_id)}/page`, { json: page }).catch(() => {});
+          if (page.url !== p.url) await api(`/api/worker/research/${enc(ctx.job.research_id)}/page`, { json: { ...page, url: p.url } }).catch(() => {});
+        }
+        return text(out);
       },
     }));
     // Searches run on the server (src/websearch.ts; the keys never reach this sandbox). Result URLs become fetchable
@@ -270,19 +285,38 @@ export function createResearchExtension(ctx: ResearchContext, opts: { only?: rea
   };
 }
 
-/** Rounds the audience cross-check may send research back for, before the customer is asked instead. */
+/** Rounds the audience cross-check may send research back for, before the reviewer's quoted reading applies. */
 export const AUDIENCE_ROUNDS = 2;
 
+const pageKey = (u: string) => u.replace(/^https?:\/\/(www\.)?/i, "").replace(/[#?].*$/, "").replace(/\/+$/, "").toLowerCase();
+
 /**
- * Who may sign up, as the review read it, against research's product.audience (architect.ts audienceCrossCheck): a
- * confident, quoted restriction research lacks goes back to research (the issues returned) for AUDIENCE_ROUNDS rounds.
- * After that, or when the review is unsure, research's audience stays and an 'audience' question goes on the result
- * for the customer: a restriction the review quoted is never dropped without one.
+ * Who may sign up: research's product.audience against the review's reading (architect.ts audienceCrossCheck).
+ * - The customer confirmed an audience (job input confirmed_audience): it is final. Research is never sent back or
+ *   asked about it again; it is the result's audience.
+ * - A confident, quoted reading that differs (either way: a restriction research lacks or one the page does not state)
+ *   goes back to research (the issues returned) for AUDIENCE_ROUNDS rounds. After that the reviewer's reading applies
+ *   until the customer answers the question put on the result, so personas are picked for it.
+ * - An unsure reviewer only asks; research's reading stays.
+ * The reviewer's quote counts only when it is on the page it cites, as this job fetched it (ctx.pages).
+ * result.audience_check says which way it went (the server dismisses an open audience question on agreement).
  */
-export function audienceStep(ctx: { architecture: ArchitectOutcome | null; audienceRounds: number }, result: any): string[] {
-  if (!ctx.architecture) return [];
-  const cross = audienceCrossCheck(result?.product?.audience, ctx.architecture.audience, { final: ctx.audienceRounds >= AUDIENCE_ROUNDS });
+export function audienceStep(ctx: { architecture: ArchitectOutcome | null; audienceRounds: number; pages?: Map<string, string>; job?: { input?: any } }, result: any): string[] {
+  const confirmed = ctx.job?.input?.confirmed_audience;
+  if (confirmed && typeof confirmed === "object") {
+    result.product = { ...(result.product ?? {}), audience: { ...confirmed, source: "customer", confirmed: true } };
+    if (Array.isArray(result.questions)) result.questions = result.questions.filter((q: any) => q?.kind !== "audience");
+    result.audience_check = "confirmed";
+    return [];
+  }
+  const arch = ctx.architecture?.audience;
+  if (!arch) return [];
+  const verified = !arch.quote || !ctx.pages ? undefined
+    : [...ctx.pages].some(([u, text]) => (!arch.url || pageKey(u) === pageKey(arch.url)) && quotedOn(text, arch.quote));
+  const cross = audienceCrossCheck(result?.product?.audience, arch, { final: ctx.audienceRounds >= AUDIENCE_ROUNDS, quoteVerified: verified });
+  result.audience_check = cross.status;
   if (cross.issues.length) { ctx.audienceRounds++; return cross.issues; }
+  if (cross.apply) result.product = { ...(result.product ?? {}), audience: cross.apply };
   if (cross.question) result.questions = [...(result.questions ?? []).filter((q: any) => !(q?.kind === "audience" && q?.subject === cross.question.subject)), cross.question];
   return [];
 }
@@ -331,7 +365,10 @@ export async function runResearchJob(job: ResearchJob, brain: BrainLike): Promis
   await ctx.progress("reading", "research started");
   const prospect = job.kind === "prospect";
   const maxCost = prospect ? RESEARCH.prospectMaxCostUsd : RESEARCH.maxCostUsd, maxMinutes = prospect ? RESEARCH.prospectMaxMinutes : RESEARCH.maxMinutes;
-  if (!prospect) ctx.critic = async (result: any) => {
+  // Personas only (job input personas_only): the product, its tasks and competitors stay as they are, so neither the
+  // task review nor the architecture review runs; the audience step still applies a customer-confirmed audience.
+  const personasOnly = !prospect && (job.input as any)?.personas_only === true;
+  if (!prospect && !personasOnly) ctx.critic = async (result: any) => {
     const tasks = (Array.isArray(result?.scenarios) ? result.scenarios : []).map((x: any, index: number) =>
       ({ index, title: x?.title, prompt: String(x?.prompt ?? ""), expectation: x?.expectation, variants: x?.variants, decision: x?.decision }));
     if (!tasks.length) return null;
@@ -341,7 +378,7 @@ export async function runResearchJob(job: ResearchJob, brain: BrainLike): Promis
     log(`[${id}] task review: ${issues.length} of ${tasks.length} problem(s) rejected ($${r.cost.toFixed(3)})`);
     return issues;
   };
-  if (!prospect) ctx.architect = async (result: any) => {
+  if (!prospect && !personasOnly) ctx.architect = async (result: any) => {
     const p = result?.product;
     if (!p?.name || !Array.isArray(p.competitors) || !p.competitors.length) return null;
     // A resubmission that only fixed other things (tasks, personas) has nothing new for the review: reuse its outcome.
@@ -378,13 +415,13 @@ export async function runResearchJob(job: ResearchJob, brain: BrainLike): Promis
     const resourceLoader = new DefaultResourceLoader({
       cwd, agentDir: brain.dir,
       noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-      systemPrompt: prospect ? PROSPECT_SYSTEM_PROMPT : RESEARCH_SYSTEM_PROMPT,
+      systemPrompt: prospect ? PROSPECT_SYSTEM_PROMPT : personasOnly ? PERSONAS_ONLY_SYSTEM_PROMPT : RESEARCH_SYSTEM_PROMPT,
       extensionFactories: [{ name: "octillion-research", factory: createResearchExtension(ctx) }],
     });
     await resourceLoader.reload();
     const { session } = await createAgentSession({
       cwd, agentDir: brain.dir, modelRuntime: brain.modelRuntime, model: brain.model, thinkingLevel: "low",
-      resourceLoader, tools: prospect ? [...PROSPECT_TOOLS] : [...RESEARCH_TOOLS],
+      resourceLoader, tools: prospect ? [...PROSPECT_TOOLS] : personasOnly ? [...PERSONAS_ONLY_TOOLS] : [...RESEARCH_TOOLS],
       sessionManager: SessionManager.inMemory(cwd),
       settingsManager: SettingsManager.inMemory({ compaction: { enabled: true }, retry: { enabled: true, maxRetries: 3 } }),
     });
@@ -402,7 +439,7 @@ export async function runResearchJob(job: ResearchJob, brain: BrainLike): Promis
         const last: any = [...session.messages].reverse().find((m: any) => m.role === "assistant");
         return last?.stopReason === "error" || last?.stopReason === "aborted" ? `LLM unavailable: ${last.errorMessage ?? last.stopReason}` : null;
       };
-      await session.prompt(job.kind === "prospect" ? prospectPrompt(job.input) : researchPrompt(job.input, job.limits ?? {}));
+      await session.prompt(job.kind === "prospect" ? prospectPrompt(job.input) : personasOnly ? personasOnlyPrompt(job.input as any, job.limits ?? {}) : researchPrompt(job.input, job.limits ?? {}));
       if (!ctx.outcome) piError ??= llmError();
       // The model may end its turn without submitting; nudge it once (only if the LLM itself is working).
       if (!ctx.outcome && !piError) {

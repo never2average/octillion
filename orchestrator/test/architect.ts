@@ -5,7 +5,7 @@
  *   npx tsx orchestrator/test/architect.ts
  */
 import assert from "node:assert/strict";
-import { architectOutcome, audienceCrossCheck, followUpPrompt, parseArchitect, unsureOf, type ArchitectProduct } from "../pi-octillion/architect.js";
+import { architectOutcome, audienceCrossCheck, followUpPrompt, implies, parseArchitect, unsureOf, type ArchitectProduct } from "../pi-octillion/architect.js";
 import { AUDIENCE_ROUNDS, applyArchitecture, audienceStep } from "../pi-octillion/research.js";
 
 let n = 0;
@@ -126,7 +126,7 @@ check("a US headquarters without a quote never becomes a confident restriction",
   assert.deepEqual(x.question.options.map((o: any) => o.value.scope), ["global", "countries"], "research's reading first");
   const global = parseArchitect(answer([], { audience: { scope: "global", confidence: "high", url: "", quote: "" } }))!;
   assert.equal(global.audience!.confidence, "high", "global needs no quote");
-  assert.deepEqual(audienceCrossCheck({ scope: "global", checked: "x".repeat(30) }, global.audience), { issues: [], question: null });
+  assert.deepEqual(audienceCrossCheck({ scope: "global", checked: "x".repeat(30) }, global.audience), { issues: [], question: null, apply: null, status: "agree" });
 });
 
 check("unsureOf includes an audience that is not high confidence; follow-up asks for the sign-up pages", () => {
@@ -144,7 +144,7 @@ check("a confident, quoted restriction research lacks goes back as an issue; mat
   assert.ok(x.issues.some((i) => /add it to product\.audience\.gates as required/.test(i)));
   assert.match(audienceCrossCheck({ scope: "countries", countries: ["US"], gates: [{ strictness: "required" }] }, a).issues.join(), /limited to CA/, "other countries");
   const matching = { scope: "countries", countries: ["CA"], strictness: "exclusive", gates: [{ id: "g", strictness: "required", requirement: "x", match: { sector_any: ["academia"], research_role: true } }] };
-  assert.deepEqual(audienceCrossCheck(matching, a), { issues: [], question: null });
+  assert.deepEqual(audienceCrossCheck(matching, a), { issues: [], question: null, apply: null, status: "agree" });
   assert.deepEqual(audienceCrossCheck({ ...matching, strictness: undefined }, a).issues, [], "unset strictness is exclusive, as the server reads it");
 });
 
@@ -159,31 +159,87 @@ check("strictness is compared: an exclusive market is never accepted as primary,
   assert.ok(typical.issues.length === 1 && /has it only as typical: make it required/.test(typical.issues[0]!), typical.issues.join(" | "));
   const wider = audienceCrossCheck({ scope: "countries", countries: ["CA"], strictness: "exclusive", gates: [{ ...gate, match: { sector_any: ["academia"] } }] }, a);
   assert.ok(wider.issues.length === 1 && /"research_role":true/.test(wider.issues[0]!), "a gate without the research affiliation the page requires is too wide");
-  // The review reads "researchers or the staff they sponsor": research's researchers-only gate is narrower, never an issue.
+  // The review reads "researchers or the staff they sponsor": research's researchers-only gate is narrower than the
+  // page (it would leave out the staff), so it goes back too; the same reading passes.
   const staff = parseArchitect(answer([], { audience: allianceAudience({ gates: [{ requirement: "researchers or sponsored staff", sector_any: ["academia"], role_any: ["research_role", "academic_staff", "bogus"] }] }) }))!.audience!;
   assert.deepEqual(staff.gates[0]!.role_any, ["research_role", "academic_staff"], "unknown roles dropped");
-  assert.deepEqual(audienceCrossCheck({ scope: "countries", countries: ["CA"], gates: [gate] }, staff).issues, []);
+  assert.match(audienceCrossCheck({ scope: "countries", countries: ["CA"], gates: [gate] }, staff).issues.join(), /found no condition as narrow as "x"/);
   assert.deepEqual(audienceCrossCheck({ scope: "countries", countries: ["CA"], gates: [{ ...gate, match: { sector_any: ["academia"], role_any: ["research_role", "academic_staff"] } }] }, staff).issues, []);
   const primaryReview = parseArchitect(answer([], { audience: allianceAudience({ strictness: "primary", gates: [] }) }))!.audience!;
-  assert.deepEqual(audienceCrossCheck({ scope: "countries", countries: ["CA"], strictness: "primary" }, primaryReview), { issues: [], question: null });
+  assert.deepEqual(audienceCrossCheck({ scope: "countries", countries: ["CA"], strictness: "primary" }, primaryReview), { issues: [], question: null, apply: null, status: "agree" });
   const unsure = audienceCrossCheck({ scope: "countries", countries: ["CA"], strictness: "primary", gates: [gate] }, { ...a, confidence: "medium" });
   assert.equal(unsure.question?.options[1].value.strictness, "exclusive", "an unsure strictness difference is asked, with the review's strictness as an option");
 });
 
-check("rounds used up: a confident restriction research still lacks becomes a customer question, never dropped", () => {
+check("symmetric: a restriction research states that a confident, quoted review does not find goes back too", () => {
+  const open = parseArchitect(answer([], { audience: { scope: "global", confidence: "high", url: "https://example.com/pricing", quote: "Anyone can sign up for free, in any country." } }))!.audience!;
+  const usOnly = audienceCrossCheck({ scope: "countries", countries: ["US"], strictness: "exclusive", gates: [] }, open);
+  assert.ok(usOnly.issues.length === 1 && /found sign-up open to anyone, anywhere .* limits it to US/.test(usOnly.issues[0]!), usOnly.issues.join(" | "));
+  const gated = audienceCrossCheck({ scope: "global", gates: [{ id: "r", requirement: "a researcher", strictness: "required", match: { research_role: true } }] }, open);
+  assert.ok(gated.issues.length === 1 && /found no condition as narrow as "a researcher"/.test(gated.issues[0]!));
+  assert.deepEqual(audienceCrossCheck({ scope: "global", gates: [{ id: "t", requirement: "mostly startups", strictness: "typical", match: { org_size_any: ["20 to 99 employees"] } }] }, open).issues, [], "a typical gate is not a restriction");
+  // Saying "no restriction" without a quote is not confident: research's reading stands and the customer is asked.
+  const unquoted = audienceCrossCheck({ scope: "countries", countries: ["US"] }, { ...open, url: "", quote: "" });
+  assert.ok(!unquoted.issues.length && unquoted.status === "question" && unquoted.apply === null);
+  // After the rounds the reviewer's quoted reading applies: global again, and the customer is asked.
+  const final = audienceCrossCheck({ scope: "countries", countries: ["US"], strictness: "exclusive" }, open, { final: true });
+  assert.ok(final.status === "applied_review" && final.apply.scope === "global" && final.apply.source === "review" && final.apply.confirmed === false && final.question);
+  // A quote that is not on any page the job fetched makes the reviewer unsure.
+  const unverified = audienceCrossCheck({ scope: "global", checked: "x".repeat(30) }, parseArchitect(answer([], { audience: allianceAudience() }))!.audience, { quoteVerified: false });
+  assert.ok(!unverified.issues.length && unverified.status === "question");
+});
+
+check("covers: research_role (or academic staff) is academia by sector, so a narrower gate covers sector academia", () => {
+  const review = parseArchitect(answer([], { audience: allianceAudience() }))!.audience!; // sector academia + research_role
+  assert.ok(implies({ research_role: true }, { sector_any: ["academia"], research_role: true }));
+  assert.ok(implies({ role_any: ["research_role", "academic_staff"] }, { sector_any: ["academia"] }));
+  assert.ok(!implies({ role_any: ["research_role", "academic_staff"] }, { research_role: true }), "researchers or staff is wider than researchers");
+  assert.ok(!implies({ sector_any: ["academia"] }, { research_role: true }));
+  assert.deepEqual(audienceCrossCheck({ scope: "countries", countries: ["CA"], gates: [{ id: "r", strictness: "required", requirement: "x", match: { research_role: true } }] }, review).issues, []);
+});
+
+check("a customer-confirmed audience is final: never sent back, never asked again; agreement is reported", () => {
+  const confirmed = { scope: "global", checked: "confirmed by the customer in answer to a question", source: "customer", confirmed: true };
+  const ctx = { architecture: architectOutcome(parseArchitect(answer([], { audience: allianceAudience() }))!, drac, 1), audienceRounds: 0, job: { input: { confirmed_audience: confirmed } } };
+  const result: any = { product: { audience: { scope: "countries", countries: ["US"] } }, questions: [{ kind: "audience", subject: "audience", question: "?" }, { kind: "competitor_relation", subject: "Slurm" }] };
+  assert.deepEqual(audienceStep(ctx, result), [], "the review's CA reading is not pressed on the customer's answer");
+  assert.deepEqual([result.product.audience.scope, result.product.audience.source, result.audience_check], ["global", "customer", "confirmed"]);
+  assert.deepEqual(result.questions.map((q: any) => q.kind), ["competitor_relation"], "no audience question against it");
+  const agreeCtx = { architecture: ctx.architecture, audienceRounds: 0 };
+  const agreed: any = { product: { audience: { scope: "countries", countries: ["CA"], gates: [{ strictness: "required", match: { research_role: true } }] } } };
+  assert.deepEqual(audienceStep(agreeCtx, agreed), []);
+  assert.equal(agreed.audience_check, "agree", "the server dismisses an open review question on agreement");
+});
+
+check("rounds used up: a confident restriction research still lacks applies (and is asked about), never dropped", () => {
   const ctx = { architecture: architectOutcome(parseArchitect(answer([], { audience: allianceAudience() }))!, drac, 1), audienceRounds: 0 };
   const result: any = { product: { audience: { scope: "global", checked: "x".repeat(30) } }, questions: [] };
   for (let i = 0; i < AUDIENCE_ROUNDS; i++) assert.ok(audienceStep(ctx, result).length > 0, `round ${i + 1} goes back to research`);
   assert.deepEqual(audienceStep(ctx, result), [], "after the rounds the result is not sent back again");
+  assert.deepEqual([result.product.audience.scope, result.product.audience.countries, result.product.audience.source, result.product.audience.confirmed],
+    ["countries", ["CA"], "review", false], "the review's quoted reading is the working audience, so personas are picked for it");
+  assert.deepEqual(result.product.audience.evidence, [{ url: ccdb.url, quote: ccdb.quote }]);
+  assert.equal(result.audience_check, "applied_review");
   const q = result.questions.find((x: any) => x.kind === "audience");
-  assert.ok(q, "but the customer is asked");
+  assert.ok(q, "and the customer is asked");
   assert.deepEqual(q.options.map((o: any) => [o.value.scope, o.value.countries ?? null, o.value.strictness ?? null]), [["global", null, null], ["countries", ["CA"], "exclusive"]]);
   assert.ok(q.context.review_findings.some((x: string) => /limited to CA/.test(x)), "with the review's quoted finding");
-  audienceStep(ctx, result);
+  audienceStep(ctx, { ...result, product: { audience: { scope: "global", checked: "x".repeat(30) } } });
   assert.equal(result.questions.filter((x: any) => x.kind === "audience").length, 1, "submitting again does not ask twice");
   const agreed: any = { product: { audience: { scope: "countries", countries: ["CA"], gates: [{ strictness: "required", match: { sector_any: ["academia"], research_role: true } }] } } };
   assert.deepEqual(audienceStep(ctx, agreed), []);
   assert.equal(agreed.questions, undefined, "agreement asks nothing");
+});
+
+check("the review's quote counts only when it is on the page it cites, as this job fetched it", () => {
+  const architecture = architectOutcome(parseArchitect(answer([], { audience: allianceAudience() }))!, drac, 1);
+  const on = new Map([[`${ccdb.url}/`, `Apply\n${ccdb.quote.toUpperCase()}\nMore text.`]]);
+  const off = new Map([[ccdb.url, "Apply for an account. Anyone may apply."]]);
+  const res = () => ({ product: { audience: { scope: "global", checked: "x".repeat(30) } } } as any);
+  assert.ok(audienceStep({ architecture, audienceRounds: 0, pages: on }, res()).length > 0, "on the page: confident, sent back");
+  const r = res();
+  assert.deepEqual(audienceStep({ architecture, audienceRounds: 0, pages: off }, r), [], "not on the page: unsure");
+  assert.ok(r.audience_check === "question" && r.product.audience.scope === "global", "research's reading stays; the customer is asked");
 });
 
 console.log(`architect test passed (${n} cases)`);

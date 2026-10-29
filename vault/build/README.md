@@ -40,15 +40,19 @@ python -I so_backfill.py apply                    # facets for every profile (fa
                                                   # industry normalised to the survey's 15 options (old prose kept as
                                                   # industry_label), repeated names given a new last initial
 python -I so_backfill.py --check                  # exit 1 if apply would change the file (byte-identical re-runs)
-python3 -I check_curated.py ../curated            # facets, unique names, industry options, summary country = facets
+python3 -I check_curated.py ../curated            # facets, unique names, industry options, summary country = facets,
+                                                  # no provider-shaped wording (a national compute allocation, a
+                                                  # consortium), no company size the survey did not give
 python3 -I check_curated.py --selftest
 ```
 
 - `so_common.derive_sector` (shared by the backfill and both samplers), first match wins: academia (a student, an
   academic researcher, or Industry = Higher Education), government, finance (banking, fintech, insurance), healthcare,
-  else industry. `research_role` is separate and means research-affiliated: an academic researcher, a data or applied
-  scientist whose industry is Higher Education, or a student who names no industry other than Higher Education (a
-  student working at a software company is academia by sector but no researcher). `academic_staff` is a university's
+  else industry. `research_role` is separate and means research-affiliated: an academic researcher whose industry is
+  Higher Education, none or Other (a research institute; not a company's researcher), a data or applied scientist
+  whose industry is Higher Education, or a student with no other industry who is a graduate student (a master's or
+  professional/doctoral degree already, `ed_level`) or has a research dev type. A student working at a software
+  company, or an undergraduate, is academia by sector but no researcher. `academic_staff` is a university's
   technical staff (Industry Higher Education, employed, a developer or infrastructure role: research software engineers,
   research-computing staff), so an audience can admit "researchers or the staff they sponsor" without calling staff
   researchers. `python -I so_backfill.py selftest` checks both on the cases that went wrong.

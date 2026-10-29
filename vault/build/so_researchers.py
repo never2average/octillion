@@ -45,8 +45,11 @@ Hard rules:
 - State the country and the kind of institution exactly as the facts give them (facets.country_name, facets.sector,
   industry, employment): "a doctoral student at a Canadian university", "a data scientist at an Indian bank". Never
   another country, and no real institution names.
-- For academia, write realistic constraints: shared or national research-computing allocations and batch queues, a
-  supervisor's or a grant's budget, research data that must stay in the country when the facts imply it.
+- For academia, write realistic constraints as needs, never as a provider's offering: analyses that need more compute
+  than a laptop, a supervisor's or a grant's budget, confidential research data, reproducibility, deadlines. Never a
+  national or shared compute allocation, a consortium or a batch queue (check_curated.py refuses them: they would
+  pre-install one provider), and data residency only when the facts state it.
+- company_size is the survey's org size; when it is not given, say "Unknown" (never "University").
 - Invent a plausible first name + last initial matching nothing real, distinct from the names already in the data. No
   real people, institutions or papers.
 - instructions: 3-6 sentences on how this person answers a coding agent: what they care about (reproducible results,

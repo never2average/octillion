@@ -96,21 +96,32 @@ customer ── get_onboarding / get_visibility_report ──▶ results
 - **Personas must be people who can use the product** (`src/audience.ts`). Research states `product.audience`: global
   by default, or limited to countries (`exclusive` or `primary`) and gates (`required` or `typical`, matched on the
   profiles' survey facets: sector, research_role, academic_staff, role_any, industry, org size). `research_role` is
-  research-affiliated (an academic researcher, a data or applied scientist at a university, or a student with no job in
-  another industry); `academic_staff` is a university's technical staff (research software engineers, research-computing
+  research-affiliated (an academic researcher at a university or research institute, a data or applied scientist at a
+  university, or a graduate student with no job in another industry); `academic_staff` is a university's technical staff (research software engineers, research-computing
   staff); "researchers or the staff they sponsor" is `role_any: ["research_role", "academic_staff"]`. Every restriction
-  quotes a page the server knows the job saw (a search result or the product's own site); a headquarters, customer
+  quotes a page the job fetched: fetch_url posts each page it reads to the server (`product_research.pages`), and the
+  quote must be on that page, with its URL on the same evidence entry; a headquarters, customer
   logos or cloud regions are not restrictions. The server checks each pick against the
   facets: a pick outside an exclusive market or failing a required gate is rejected, and soft parts need half the picks.
   Every persona-round reason names the profile's country. When nobody in the data fits, research submits
   `personas: []` with `audience_gap`; the server accepts it only if no shared profile passes the hard parts, unlinks the
   old personas and asks the customer a `persona_supply` question; runs then refuse ("No eligible personas for this
-  product's audience yet") rather than use a generic developer; a run naming personas who fail the hard parts (or
-  `profiles: []`) is refused, and one that misses only soft parts runs with `audience_warnings`. The architecture review
-  reads the sign-up pages too and compares countries, strictness (exclusive vs primary) and each required gate: a
-  confident, quoted restriction research missed goes back as an issue for two rounds, then (like a disagreement it is
-  unsure of) becomes an `audience` question, never dropped. Answering one confirms the audience (source customer),
-  unlinks personas who fail it and queues research again (not when it only confirms the same hard parts of a gap). A
+  product's audience yet") rather than use a generic developer; a global product with no personas still runs with a generic developer; a
+  run naming personas who fail the hard parts (or `profiles: []`) is refused, and one that misses only soft parts runs with `audience_warnings`. The architecture review
+  reads the sign-up pages too and compares countries, strictness (exclusive vs primary) and each required gate, both
+  ways (a restriction research missed, or one the page does not state). A confident reading whose quote is on a page
+  the job fetched goes back to research for two rounds; after that the review's reading applies (source `review`,
+  unconfirmed, so personas are picked for it) and an `audience` question is asked. An unsure review only asks. A
+  customer-confirmed audience is final: research is never sent back or asked about it again, and an open review
+  question is dismissed when research agrees. Answering one confirms the audience (source customer), unlinks personas
+  who fail it and queues a personas-only research (not when it only confirms the same hard parts of a gap).
+- **Personas only** (`input.personas_only`): research re-selects the personas for the stored product and audience
+  (claimed with the stored profile, and the confirmed audience as final). Completing it swaps the persona links (old
+  ones kept inactive), merges the audience and drops prompt variants of personas no longer linked; the profile,
+  aliases, competitors, sources, placement and tasks stay, and no run starts. Operators re-pick one product with
+  `DATABASE_URL=... npx tsx scripts/repick-personas.ts --product <id> [--audience-json <file|json>]
+  [--not-competitor <name>[=relation]] [--dry-run]` (stores the audience as the customer's, records tools removed by
+  hand in `research.not_competitors`, unlinks personas the audience rules out, queues the job). A
   newer audience question with other options replaces the open one. Onboarding takes an optional `audience` (the
   customer's own words), saved as confirmed. When the audience is restricted, rolling reports leave out sessions whose
   persona cannot use the product and list those personas (`ineligible_personas`); a global product is never split.

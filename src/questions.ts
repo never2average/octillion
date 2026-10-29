@@ -153,13 +153,18 @@ async function answerAudience(org: Org, q: { id: string; product_id: number; sub
              effect: `Who can use the product: ${describeAudience(audience)} (confirmed). No developer profile in the data fits yet; research will pick personas once matching profiles are added.`,
              unlinked: unfit.map((x) => x.slug), research_id: null, rescoring: false };
   }
-  const { queueResearch } = await import("./research.js");
-  const base = last?.input ?? {};
-  const hint = `\n\nThe customer confirmed who can use the product (set product.audience to exactly this, and re-select personas only from developers who fit it): ${
-    describeAudience(audience)}. ${JSON.stringify({ scope: audience.scope, countries: audience.countries, strictness: audience.strictness, gates: audience.gates })}`;
-  const research_id = await queueResearch(org.orgId, q.product_id,
-    { ...base, prompt: String(base.prompt ?? "").replace(/\n\nThe customer confirmed who can use the product[\s\S]*$/, "") + hint, audience: describeAudience(audience) });
+  // Personas only: the product's profile, tasks, aliases and competitors stay as they are (a full research would
+  // replace them); the confirmed audience reaches research at claim as final (src/research.ts withStoredProduct).
+  const research_id = await queuePersonasResearch(org.orgId, q.product_id, last?.input ?? {}, audience);
   return { view: "question_answered" as const, question_id: q.id, subject: q.subject, answer: opt.label,
            effect: `Who can use the product: ${describeAudience(audience)}. ${unfit.length ? `${unfit.length} persona(s) who cannot use it were unlinked (${unfit.map((x) => x.slug).join(", ")}); ` : ""}research is re-selecting personas.`,
            unlinked: unfit.map((x) => x.slug), research_id, rescoring: false };
+}
+
+/** Queue research that only re-selects a product's personas for its audience (src/research.ts completePersonasOnly). */
+export async function queuePersonasResearch(orgId: number, productId: number, base: Record<string, any>, audience: Audience): Promise<string> {
+  const { queueResearch } = await import("./research.js");
+  const { confirmed_audience: _c, product_profile: _p, ...input } = base;
+  return queueResearch(orgId, productId, { ...input, personas_only: true, audience: describeAudience(audience),
+    prompt: String(input.prompt ?? "").replace(/\n\nThe customer confirmed who can use the product[\s\S]*$/, "") });
 }

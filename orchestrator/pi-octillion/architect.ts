@@ -80,7 +80,8 @@ have an account (e.g. "accounts are available to researchers at Canadian institu
   research_role (true when the user must be research-affiliated: a researcher, a scientist at a university or a
   student; working at such an institution is not enough), role_any (["research_role", "academic_staff"] when
   researchers or the university staff they sponsor, such as research software engineers, may sign up)}.
-- confidence: "high" only with a quote from a page you read that states the condition (url and quote).
+- confidence: "high" only with a quote from a page you read that states the condition (url and quote, copied
+  exactly); for global, quote the sentence that shows anyone may sign up when a page has one.
 
 Answer with ONLY one JSON object, no prose:
 {"placement": {"layer": "", "runs_on_it": [], "used_with": [], "adoption_signals": []},
@@ -184,49 +185,81 @@ const subset = (a: string[] | undefined, b: string[]) => !!a?.length && a.every(
 const matchOf = (g: ArchitectGate) => ({ ...(g.sector_any.length ? { sector_any: g.sector_any } : {}),
   ...(typeof g.research_role === "boolean" ? { research_role: g.research_role } : {}), ...(g.role_any?.length ? { role_any: g.role_any } : {}) });
 
-/** Does one of research's required gates hold the user to at least what the reviewer's required gate does? */
-function covers(rGates: any[], g: ArchitectGate): boolean {
-  return rGates.some((r) => {
-    const m = r?.match ?? {};
-    if (g.sector_any.length && !subset(m.sector_any, g.sector_any)) return false;
-    // research_role true is met by research_role true, or a role_any of only research_role.
-    if (g.research_role === true && m.research_role !== true && !(sameSet(m.role_any ?? [], ["research_role"]))) return false;
-    if (g.role_any?.length && !(m.research_role === true && g.role_any.includes("research_role")) && !(m.academic_staff === true && g.role_any.includes("academic_staff"))
-        && !subset(m.role_any, g.role_any)) return false;
-    return true;
-  });
+/**
+ * Is gate match `a` at least as narrow as `b` (every profile `a` admits, `b` admits too)? Both research affiliation
+ * and academic staff are academia by sector (vault/build/so_common.py), so either one satisfies sector academia.
+ */
+export function implies(a: any, b: any): boolean {
+  a = a ?? {}; b = b ?? {};
+  const roles: string[] = a.research_role === true ? ["research_role"] : a.academic_staff === true ? ["academic_staff"] : (a.role_any ?? []);
+  if (b.sector_any?.length && !subset(a.sector_any, b.sector_any) && !(b.sector_any.includes("academia") && roles.length && roles.every((r: string) => ROLES.includes(r))))
+    return false;
+  for (const k of ["research_role", "academic_staff"]) {
+    if (b[k] === true && !(a[k] === true || sameSet(a.role_any ?? [], [k]))) return false;
+    if (b[k] === false && a[k] !== false) return false;
+  }
+  if (b.role_any?.length && !subset(roles, b.role_any)) return false;
+  for (const k of ["industry_any", "org_size_any"]) if (b[k]?.length && !subset(a[k], b[k])) return false;
+  return true;
+}
+
+/** The reviewer's reading as a product.audience (source "review", not confirmed): what applies until the customer answers. */
+export function reviewAudience(arch: ArchitectAudience): any {
+  const evidence = arch.url && arch.quote ? [{ url: arch.url, quote: arch.quote }] : [];
+  return { scope: arch.scope, ...(arch.scope === "countries" ? { countries: arch.countries, strictness: arch.strictness ?? "exclusive" } : {}),
+    gates: arch.gates.map((g, i) => ({ id: `review-${i + 1}`, requirement: g.requirement, strictness: g.strictness, match: matchOf(g), evidence })).filter((g) => Object.keys(g.match).length),
+    evidence, checked: `the architecture review read ${arch.url || "the sign-up, account and terms pages"} for who may sign up`, source: "review", confirmed: false };
+}
+
+export interface AudienceCrossCheck {
+  /** Send research back with these (a confident reading differs and rounds are left). */
+  issues: string[];
+  /** Ask the customer which reading is right. */
+  question: any | null;
+  /** The audience to use until the customer answers: the reviewer's quoted reading, once research kept its own through the rounds. */
+  apply: any | null;
+  status: "none" | "agree" | "issues" | "question" | "applied_review";
 }
 
 /**
- * Research's product.audience against the reviewer's reading (pure; orchestrator/test/architect.ts). Compared: the
- * countries, how strict the market is (exclusive vs primary; unset is exclusive, as src/audience.ts reads it), and each
- * required gate (present, required rather than typical, and as narrow). A confident, quoted restriction research lacks
- * goes back as issues while rounds are left (`final` false); once they are used up, or when the reviewer is unsure,
- * research's reading stays and the customer is asked which is right: a disagreement is never accepted silently.
+ * Research's product.audience against the reviewer's reading (pure; orchestrator/test/architect.ts), both ways:
+ * research may miss a restriction (countries, exclusive vs primary, a required gate or how narrow it is) or state one
+ * the reviewer, quoting the page, finds is not there. A confident reading that differs goes back to research while
+ * rounds are left (`final` false). Once they are used up, the reviewer's quoted reading applies (`apply`) and the
+ * customer is asked; an unsure reviewer only asks, and research's reading stays. `quoteVerified` false (the reviewer's
+ * quote is not on any page this job fetched) makes the reviewer unsure.
  */
-export function audienceCrossCheck(research: any, arch: ArchitectAudience | null | undefined, opts: { final?: boolean } = {}): { issues: string[]; question: any | null } {
-  if (!arch) return { issues: [], question: null };
+export function audienceCrossCheck(research: any, arch: ArchitectAudience | null | undefined, opts: { final?: boolean; quoteVerified?: boolean } = {}): AudienceCrossCheck {
+  if (!arch) return { issues: [], question: null, apply: null, status: "none" };
   const rScope = research?.scope === "countries" ? "countries" : "global";
   const rCountries: string[] = rScope === "countries" && Array.isArray(research.countries) ? research.countries : [];
   const rStrict = rScope === "countries" ? (research?.strictness === "primary" ? "primary" : "exclusive") : null;
   const rRequired: any[] = (Array.isArray(research?.gates) ? research.gates : []).filter((g: any) => g?.strictness === "required");
   const aRequired = arch.gates.filter((g) => g.strictness === "required");
+  const quoted = !!arch.url && arch.quote.length >= 20 && opts.quoteVerified !== false;
   const cite = arch.url ? ` (${arch.url}: "${arch.quote}")` : "";
-  const issues: string[] = [];
+  // Research's reading is narrower or wider than the reviewer's: each list says how.
+  const narrower: string[] = [], wider: string[] = [];
   if (arch.countries.length && !sameSet(arch.countries, rCountries))
-    issues.push(`product.audience (architecture review): found sign-up limited to ${arch.countries.join(", ")}${cite}; set product.audience accordingly (scope "countries", countries ${JSON.stringify(arch.countries)}, strictness "${arch.strictness}", with that quote as evidence)`);
+    wider.push(`found sign-up limited to ${arch.countries.join(", ")}${cite}; set product.audience accordingly (scope "countries", countries ${JSON.stringify(arch.countries)}, strictness "${arch.strictness}", with that quote as evidence)`);
   else if (arch.countries.length && arch.strictness === "exclusive" && rStrict !== "exclusive")
-    issues.push(`product.audience (architecture review): nobody outside ${arch.countries.join(", ")} can sign up${cite}, but product.audience.strictness is "${rStrict}"; set strictness "exclusive", with that quote as evidence`);
-  for (const g of aRequired) if (!covers(rRequired, g)) {
+    wider.push(`nobody outside ${arch.countries.join(", ")} can sign up${cite}, but product.audience.strictness is "${rStrict}"; set strictness "exclusive", with that quote as evidence`);
+  else if (arch.countries.length && arch.strictness === "primary" && rStrict === "exclusive")
+    narrower.push(`people outside ${arch.countries.join(", ")} can sign up too${cite}, but product.audience.strictness is "exclusive"; set strictness "primary" unless a fetched page says otherwise`);
+  if (!arch.countries.length && rCountries.length)
+    narrower.push(`found sign-up open to anyone, anywhere${cite}, but product.audience limits it to ${rCountries.join(", ")}; set scope "global" unless a fetched page limits who may have an account`);
+  for (const g of aRequired) if (!rRequired.some((r) => implies(r?.match, matchOf(g)))) {
     const typical = (research?.gates ?? []).some((x: any) => x?.strictness === "typical");
-    issues.push(`product.audience (architecture review): found users must meet "${g.requirement}"${cite}; ${typical && !rRequired.length ? "product.audience has it only as typical: make it required" : "add it to product.audience.gates as required"} with match ${JSON.stringify(matchOf(g))} and that quote as evidence`);
+    wider.push(`found users must meet "${g.requirement}"${cite}; ${typical && !rRequired.length ? "product.audience has it only as typical: make it required" : "add it to product.audience.gates as required"} with match ${JSON.stringify(matchOf(g))} and that quote as evidence`);
   }
-  if (arch.confidence === "high" && !opts.final) return { issues, question: null };
-  // Unsure, or research kept its reading through the rounds: research's audience stands (it cites its own page) and
-  // the customer is asked which reading is right.
-  const disagree = issues.length > 0 || (arch.scope === "countries") !== (rScope === "countries") || (arch.scope === "countries" && arch.strictness !== rStrict) ||
-    (arch.gates.length > 0 && !rRequired.length && !(research?.gates ?? []).length);
-  if (!disagree) return { issues: [], question: null };
+  for (const r of rRequired) if (!aRequired.some((g) => implies(matchOf(g), r?.match)))
+    narrower.push(`found no condition as narrow as "${r?.requirement ?? r?.id}" (${JSON.stringify(r?.match ?? {})}) on the sign-up pages${cite}; make it typical, widen it to what the page says, or drop it`);
+  const diffs = [...wider, ...narrower].map((x) => `product.audience (architecture review): ${x}`);
+  if (!diffs.length) return { issues: [], question: null, apply: null, status: "agree" };
+  // A confident reviewer: a restriction research lacks is high only with a quote (audienceOf); saying research's
+  // restriction is not there needs a quote too. Either way the quote must be on a page this job fetched.
+  const confident = arch.confidence === "high" && opts.quoteVerified !== false && (narrower.length ? quoted : true);
+  if (confident && !opts.final) return { issues: diffs, question: null, apply: null, status: "issues" };
   const valueOf = (scope: string, countries: string[], strictness: string | null | undefined, gates: any[]) =>
     ({ scope, ...(scope === "countries" ? { countries, strictness: strictness ?? "exclusive" } : {}), gates });
   const archGates = arch.gates.map((g, i) => ({ id: `review-${i + 1}`, requirement: g.requirement, strictness: g.strictness, match: matchOf(g) }))
@@ -238,10 +271,13 @@ export function audienceCrossCheck(research: any, arch: ArchitectAudience | null
   let la = describe(rScope, rCountries, rStrict, research?.gates ?? []), lb = describe(arch.scope, arch.countries, arch.strictness, archGates);
   // Same words, different rules (e.g. how narrow a gate is): say whose reading each is.
   if (la === lb) (la += " (as research read the pages)"), (lb += ` (as the sign-up page${arch.url ? ` ${arch.url}` : ""} reads)`);
-  return { issues: [], question: { kind: "audience", subject: "audience", question: "Who can sign up for and use the product?",
-    options: [{ id: "a", label: la, value: valueOf(rScope, rCountries, rStrict, research?.gates ?? []) },
-              { id: "b", label: lb, value: valueOf(arch.scope, arch.countries, arch.strictness, archGates) }],
-    context: { research: research ?? null, review: arch, ...(issues.length ? { review_findings: issues } : {}) } } };
+  const apply = confident ? reviewAudience(arch) : null;
+  return { issues: [], apply, status: apply ? "applied_review" : "question",
+    question: { kind: "audience", subject: "audience", question: "Who can sign up for and use the product?",
+      options: [{ id: "a", label: la, value: valueOf(rScope, rCountries, rStrict, research?.gates ?? []) },
+                { id: "b", label: lb, value: valueOf(arch.scope, arch.countries, arch.strictness, archGates) }],
+      context: { research: research ?? null, review: arch, review_findings: diffs,
+                 ...(apply ? { applied: "the review's quoted reading is used for personas until you answer" } : {}) } } };
 }
 
 function buildAlternativeOf(b: any): BuildAlternative | null {

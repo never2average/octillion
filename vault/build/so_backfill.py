@@ -136,16 +136,22 @@ def selftest():
     (students whose job is at a software company counted as researchers) and the ones that must stay right."""
     from types import SimpleNamespace
     from so_common import academic_staff, research_role
-    row = lambda dev, ind, emp: SimpleNamespace(DevType=dev, Industry=ind if ind else float("nan"), Employment=emp)
-    cases = [  # (dev type, industry, employment) -> (research_role, academic_staff)
-        (("Academic researcher", "Higher Education", "Employed"), (True, False)),
+    MA, BA = "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)", "Bachelor’s degree (B.A., B.S., B.Eng., etc.)"
+    PHD, SEC = "Professional degree (JD, MD, Ph.D, Ed.D, etc.)", "Secondary school (e.g. American high school, German Realschule or Gymnasium, etc.)"
+    row = lambda dev, ind, emp, ed=MA: SimpleNamespace(DevType=dev, Industry=ind if ind else float("nan"), Employment=emp, EdLevel=ed)
+    cases = [  # (dev type, industry, employment[, highest degree]) -> (research_role, academic_staff)
+        (("Academic researcher", "Higher Education", "Employed", PHD), (True, False)),
         (("Academic researcher", None, "Student"), (True, False)),
-        (("Student", None, "Student"), (True, False)),                              # studies, no other job
-        (("Developer, full-stack", None, "Student"), (True, False)),
-        (("Student", "Higher Education", "Student"), (True, False)),
+        (("Academic researcher", "Other:", "Employed", PHD), (True, False)),         # a research institute
+        (("Academic researcher", "Software Development", "Employed", BA), (False, False)),  # so25-39139: a company's researcher
+        (("Student", None, "Student"), (True, False)),                              # a graduate student
+        (("Student", "Higher Education", "Student", PHD), (True, False)),
+        (("Student", None, "Student", BA), (False, False)),                         # so25-32122: coursework only
+        (("Developer, full-stack", None, "Student", SEC), (False, False)),          # so25-29213
         (("Developer, back-end", "Software Development", "Student"), (False, False)),  # so25-14188: works at a software company
         (("Student", "Software Development", "Student"), (False, False)),           # so25-24672
         (("Student", "Internet, Telecomm or Information Services", "Student"), (False, False)),  # so25-13334
+        (("Data scientist", None, "Student", BA), (True, False)),                   # a research dev type while studying
         (("Data scientist", "Insurance", "Employed"), (False, False)),
         (("Data scientist", "Government", "Employed"), (False, False)),
         (("Data scientist", "Higher Education", "Employed"), (True, False)),
@@ -155,9 +161,9 @@ def selftest():
         (("Project manager", "Higher Education", "Employed"), (False, False)),
         (("Developer, full-stack", "Software Development", "Employed"), (False, False)),
     ]
-    for (dev, ind, emp), want in cases:
-        got = (research_role(row(dev, ind, emp)), academic_staff(row(dev, ind, emp)))
-        assert got == want, f"{dev} / {ind} / {emp}: research_role, academic_staff = {got}, want {want}"
+    for args, want in cases:
+        got = (research_role(row(*args)), academic_staff(row(*args)))
+        assert got == want, f"{args}: research_role, academic_staff = {got}, want {want}"
     print(f"selftest ok ({len(cases)} cases)")
 
 

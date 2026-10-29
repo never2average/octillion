@@ -10,6 +10,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 
+PROVIDER_SHAPED = re.compile(r"\bnational\b[^.;\"]{0,40}\b(cluster|clusters|allocations?|compute|computing|supercomput\w*)\b|\ballocations?\b|"
+                             r"research[- ]computing|\bconsorti\w+|compute canada|digital research alliance|calcul qu[ée]bec|westgrid|sharcnet|scinet", re.I)
+
+
 def profile_problems(profiles):
     """Every shared profile needs survey facets (research filters on them and the server checks persona picks against
     them), a unique display name, an industry from the survey's options, and prose that agrees with its country."""
@@ -34,14 +38,24 @@ def profile_problems(profiles):
         if not isinstance(f.get("sector_basis"), list) or not f.get("sector_basis"): out.append(f"{pid}: facets.sector_basis is required")
         if not isinstance(f.get("research_role"), bool): out.append(f"{pid}: facets.research_role must be true or false")
         if not isinstance(f.get("academic_staff"), bool): out.append(f"{pid}: facets.academic_staff must be true or false")
-        # so_common.research_role, as far as the facets show it: a scientist outside a university, or a student whose
-        # industry is a company's, is not research-affiliated (industry_survey folds "no answer" into Other).
-        dev, ind, emp = f.get("dev_type"), f.get("industry_survey"), f.get("employment") or []
-        if f.get("research_role") is True and dev != "Academic researcher" and not (dev in ("Applied scientist", "Data scientist") and ind == "Higher Education") \
-                and not ("Student" in emp and not {"Employed", "Independent contractor, freelancer, or self-employed"} & set(emp) and ind in ("Higher Education", "Other")):
-            out.append(f"{pid}: facets.research_role is true for a {dev} ({', '.join(emp) or 'no employment'}) in {ind}: not research-affiliated")
+        # so_common.research_role, as far as the facets show it: an academic researcher at a company, a scientist outside
+        # a university, a student whose industry is a company's, or an undergraduate is not research-affiliated
+        # (industry_survey folds "no answer" and "Other:" into Other).
+        dev, ind, emp, ed = f.get("dev_type"), f.get("industry_survey"), f.get("employment") or [], str(f.get("ed_level") or "")
+        student = "Student" in emp and not {"Employed", "Independent contractor, freelancer, or self-employed"} & set(emp) and ind in ("Higher Education", "Other")
+        affiliated = (dev == "Academic researcher" and ind in ("Higher Education", "Other")) or (dev in ("Applied scientist", "Data scientist") and ind == "Higher Education") \
+            or (student and (ed.startswith(("Master’s degree", "Professional degree")) or dev in ("Applied scientist", "Data scientist")))
+        if f.get("research_role") is True and not affiliated:
+            out.append(f"{pid}: facets.research_role is true for a {dev} ({', '.join(emp) or 'no employment'}, {ed or 'no degree given'}) in {ind}: not research-affiliated")
         if f.get("academic_staff") is True and ind != "Higher Education":
             out.append(f"{pid}: facets.academic_staff is true outside Higher Education ({ind})")
+        # Personas answer for themselves, not for a product: prose shaped like one provider's offering (a national
+        # research-computing allocation, a consortium) pre-installs that provider and inflates its pick rate.
+        text = " ".join([str(p.get("summary") or ""), str(p.get("instructions") or ""), *map(str, a.get("constraints") or [])])
+        if (hit := PROVIDER_SHAPED.search(text)): out.append(f"{pid}: provider-shaped wording {hit.group(0)!r}: describe the need (e.g. more compute than a laptop), not an offering")
+        # A size the survey did not give is invented (e.g. "University" for an unknown organisation size).
+        if f.get("org_size") in (None, "I don’t know") and re.search(r"\d|universit|college|institut|company|corporat|enterprise", str(a.get("company_size") or ""), re.I):
+            out.append(f"{pid}: company_size {a.get('company_size')!r} is not in the survey (org size {f.get('org_size') or 'not given'})")
         if a.get("industry") not in INDUSTRIES: out.append(f"{pid}: industry {a.get('industry')!r} is not one of the survey's options")
         named = mentioned_countries(p.get("summary"), skip={str(p.get("name") or "").split(" ")[0]})
         if f.get("country") and named - {f["country"]}:
@@ -64,6 +78,12 @@ def selftest():
         "industry not in the enum": broken(lambda p: p["attributes"].update(industry="Higher education")),
         "summary names another country": broken(lambda p: p.update(summary="A Swedish academic researcher.")),
         "missing academic_staff": broken(lambda p: p["attributes"]["facets"].pop("academic_staff")),
+        "academic researcher at a software company": broken(lambda p: p["attributes"]["facets"].update(industry_survey="Software Development")),  # so25-39139
+        "undergraduate as researcher": broken(lambda p: p["attributes"]["facets"].update(dev_type="Student", employment=["Student"], industry_survey="Other",
+                                                                                            ed_level="Bachelor’s degree (B.A., B.S., B.Eng., etc.)")),
+        "provider-shaped constraint": broken(lambda p: p["attributes"].update(constraints=["Jobs run on a shared national research-computing allocation with a batch queue"])),
+        "provider-shaped instructions": broken(lambda p: p.update(instructions="Picks what fits the group's compute allocation.")),
+        "invented company size": broken(lambda p: (p["attributes"].update(company_size="University"), p["attributes"]["facets"].update(org_size=None))),
         # The reviewers' case: a student whose day job is at a software company was counted a researcher.
         "student at a software company as researcher": broken(lambda p: p["attributes"]["facets"].update(
             dev_type="Developer, back-end", industry_survey="Software Development", employment=["Student"])),

@@ -40,7 +40,7 @@ export async function planProfileSync(db: Q, profiles: VaultProfile[], opts: { a
   if (dup.length) throw new Error(`the file has repeated slugs: ${[...new Set(dup)].join(", ")}`);
   const slugs = rows.map((r) => r.slug);
   const existing = await db.query<Row>(
-    `/* platform: shared developer profiles (org_id NULL) and slug collisions */ SELECT dp.id, dp.slug, dp.name, dp.summary, dp.attributes, dp.instructions, dp.external_id,
+    `/* tenant: shared developer profiles (org_id NULL) and slug collisions, operator script */ SELECT dp.id, dp.slug, dp.name, dp.summary, dp.attributes, dp.instructions, dp.external_id,
             dp.active, dp.source, dp.org_id, dp.edited_at, (SELECT count(*)::int FROM product_personas pp WHERE pp.profile_id = dp.id AND pp.active) AS linked
        FROM developer_profiles dp WHERE dp.slug = ANY($1) OR (dp.org_id IS NULL AND dp.source = 'vault' AND dp.active)`, [slugs]);
   const bySlug = new Map(existing.map((r) => [r.slug, r]));
@@ -70,7 +70,7 @@ export async function applyProfileSync(db: Db, plan: ProfileSyncPlan): Promise<{
     let written = 0;
     for (const r of plan.rows) {
       written += (await tx.query(
-        `/* platform: shared developer profiles only (org_id NULL, source vault, never admin-edited) */ INSERT INTO developer_profiles (slug, external_id, name, summary, attributes, instructions, source, active, synced_at)
+        `/* tenant: shared developer profiles only (org_id NULL, source vault, never admin-edited) */ INSERT INTO developer_profiles (slug, external_id, name, summary, attributes, instructions, source, active, synced_at)
          VALUES ($1, $2, $3, $4, $5, $6, 'vault', true, now())
          ON CONFLICT (slug) DO UPDATE SET external_id = excluded.external_id, name = excluded.name, summary = excluded.summary,
            attributes = excluded.attributes, instructions = excluded.instructions, active = true, synced_at = now()
@@ -78,7 +78,7 @@ export async function applyProfileSync(db: Db, plan: ProfileSyncPlan): Promise<{
          RETURNING 1`, [r.slug, r.external_id, r.name, r.summary, r.attributes, r.instructions])).length;
     }
     const retired = plan.retire.length ? (await tx.query(
-      `/* platform: shared developer profiles only */ UPDATE developer_profiles SET active = false
+      `/* tenant: shared developer profiles only */ UPDATE developer_profiles SET active = false
         WHERE slug = ANY($1) AND active AND org_id IS NULL AND source = 'vault' AND edited_at IS NULL RETURNING 1`, [plan.retire])).length : 0;
     return { written, retired };
   });

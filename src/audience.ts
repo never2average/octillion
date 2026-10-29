@@ -25,7 +25,9 @@ export interface Audience {
   evidence?: Evidence[];
   /** What was read to decide (the sign-up, account, eligibility and terms pages): 30+ characters. */
   checked: string;
-  source?: "research" | "customer";
+  /** research: research read the pages; review: the architecture review's quoted reading, applied until the customer
+   *  answers; customer: their own word (onboarding or a confirmed answer). */
+  source?: "research" | "review" | "customer";
   confirmed?: boolean;
   customer_note?: string;
 }

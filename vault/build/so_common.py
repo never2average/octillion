@@ -93,15 +93,29 @@ def derive_sector(row):
     return "industry", [f"Industry: {ind or 'not given'}"]
 
 
+# Industries where research is the job: a university, or none named / "Other:" (the survey has no "Research" option, so a
+# research institute answers Other). A researcher at a software company does that company's work.
+RESEARCH_INDUSTRIES = (None, "Higher Education", "Other:")
+# Graduate study (the highest degree completed, so a student holding one is studying beyond it): a master's or a
+# professional/doctoral degree. Undergraduates and coursework are not research.
+GRADUATE = ("Master’s degree", "Professional degree")
+
+
+def graduate(row):
+    return any(str(_clean(row.EdLevel) or "").startswith(g) for g in GRADUATE)
+
+
 def research_role(row):
-    """Research-affiliated: does research or studies at a university. An academic researcher; a data or applied
-    scientist whose industry is Higher Education; or a student who names no industry other than Higher Education (a
-    student whose industry is a software company works there, and is no researcher). Kept apart from sector: a web
-    developer in a university's IT department is academia by sector but not a researcher (see academic_staff)."""
+    """Research-affiliated: research is their work or study. An academic researcher whose industry is a university, none
+    or other (not a company's); a data or applied scientist at a university; or a student with no job in another
+    industry who is a graduate student (a master's or doctoral degree already) or does research (a research dev type).
+    Kept apart from sector: a web developer in a university's IT department, or an undergraduate, is academia by sector
+    but not a researcher (see academic_staff)."""
     dev, ind, emp = _clean(row.DevType), _clean(row.Industry), split(row.Employment)
-    if dev == "Academic researcher": return True
+    if dev == "Academic researcher": return ind in RESEARCH_INDUSTRIES
     if dev in SCIENTIST_DEV_TYPES and ind == "Higher Education": return True
-    return "Student" in emp and not (WORKING & set(emp)) and ind in (None, "Higher Education")
+    student = "Student" in emp and not (WORKING & set(emp)) and ind in (None, "Higher Education")
+    return student and (graduate(row) or dev in SCIENTIST_DEV_TYPES)
 
 
 def academic_staff(row):
@@ -120,5 +134,5 @@ def facets_of(row):
     sector, basis = derive_sector(row)
     return {"country": iso, "country_name": ISO2_NAME[iso], "region": ISO2_REGION[iso], "sector": sector, "sector_basis": basis,
             "research_role": bool(research_role(row)), "academic_staff": bool(academic_staff(row)), "dev_type": _clean(row.DevType), "industry_survey": industry_of(row),
-            "org_size": _clean(row.OrgSize), "employment": split(row.Employment), "main_branch": _clean(row.MainBranch),
+            "org_size": _clean(row.OrgSize), "employment": split(row.Employment), "ed_level": _clean(row.EdLevel), "main_branch": _clean(row.MainBranch),
             "ai_agents": _clean(row.AIAgents), "source": "so2025"}

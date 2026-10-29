@@ -541,9 +541,11 @@ export async function runSimulation(org: Org, input: RunInput) {
        ORDER BY 1`, [org.orgId, p.id]);
     // Research stated who may use the product and found nobody who can (or the customer narrowed it since): never
     // stand in a generic or random developer, whose sessions would measure people the product does not serve.
+    // Only when the audience restricts who may use it: a global product with no personas yet runs with a generic
+    // developer, as before.
     if (!profiles.length) {
-      const [r] = await db.query<{ audience: boolean }>("/* tenant: product from resolveProduct(org) */ SELECT (research->'audience') IS NOT NULL AS audience FROM products WHERE id = $1", [p.id]);
-      if (r?.audience) throw new Error(NO_ELIGIBLE_PERSONAS);
+      const [r] = await db.query<{ audience: any }>("/* tenant: product from resolveProduct(org) */ SELECT research->'audience' AS audience FROM products WHERE id = $1", [p.id]);
+      if (r?.audience && hardKey(r.audience) !== hardKey(null)) throw new Error(NO_ELIGIBLE_PERSONAS);
     }
     profiles = profiles.slice(0, Math.max(1, Math.floor(maxSessions / Math.max(1, scenarios.length))));
   }

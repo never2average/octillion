@@ -14,3 +14,8 @@ BEGIN
   END LOOP;
   ALTER TABLE product_questions ADD CONSTRAINT product_questions_kind_check CHECK (kind IN ('competitor_relation', 'audience'));
 END $mig$;
+
+-- The pages a research job fetched, as read ({url, text}, src/research.ts recordFetchedPage): an audience restriction
+-- must quote one of them word for word, so who may use a product is never narrowed (or widened) on a remembered or
+-- invented sentence.
+ALTER TABLE product_research ADD COLUMN IF NOT EXISTS pages JSONB NOT NULL DEFAULT '[]';

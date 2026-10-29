@@ -39,18 +39,24 @@ check("validator: a global audience needs no evidence; a restriction quotes a pa
   assert.ok(audienceIssues({ ...alliance, gates: [{ ...alliance.gates![0], match: { sector_any: ["universities"] } }] }).some((i) => /sector_any must be a list of academia/.test(i)));
 });
 
-check("the cited page is one the server recorded for the job (its searches, or the product's own site), never research's own sources list", () => {
-  const result = (a: Audience, sources = [{ url: "https://made-up.example.net/eligibility" }]) =>
-    ({ product: { name: "Alliance", website_url: "https://made-up.example.net", audience: a }, sources } as any);
-  const job = { sources: [{ url: "https://www.example.org/news/alliance-accounts/" }], input: { website_url: "https://alliancecan.ca/en" } };
-  assert.deepEqual(audienceEvidenceIssues(job, result(alliance)), [], "the product's own site (job input), subdomains too");
-  const fake = { ...alliance, evidence: [{ url: "https://made-up.example.net/eligibility", quote }], gates: [{ ...alliance.gates![0]!, evidence: [{ url: "https://example.org/news/alliance-accounts", quote }] }] };
-  // A page research only listed in its own sources is not enough: the server never saw it.
-  const issues = audienceEvidenceIssues({ ...job, input: {} }, { ...result(fake), product: { ...result(fake).product, website_url: undefined } });
-  assert.ok(issues.length === 1 && issues[0]!.startsWith("product.audience: ") && issues[0]!.includes(RESTRICTION_UNCITED), issues.join(" | "));
-  assert.deepEqual(audienceEvidenceIssues(job, result({ ...fake, evidence: alliance.evidence })), [], "a search result URL counts (normalised like a competitor's evidence_url)");
+check("a restriction's quote is on the page it cites, as this job fetched it, on the same evidence entry", () => {
+  const page = { url: SIGNUP, text: `Apply for an account\n\nAccounts  are available to faculty at Canadian institutions and the students and staff they sponsor. Sponsored users renew yearly.` };
+  const result = (a: Audience) => ({ product: { name: "Alliance", audience: a }, sources: [{ url: "https://made-up.example.net/eligibility" }] } as any);
+  const job = { pages: [page] };
+  assert.deepEqual(audienceEvidenceIssues(job, result(alliance)), [], "quoted word for word (whitespace and case aside)");
+  assert.deepEqual(audienceEvidenceIssues(job, result({ ...alliance, evidence: [{ url: `https://www.alliancecan.ca/en/services/advanced-research-computing/account-management/apply-account/#x`, quote: quote.toUpperCase() }] })), [],
+    "the same page by URL (scheme, www, fragment, trailing slash aside)");
+  const paraphrase = audienceEvidenceIssues(job, result({ ...alliance, evidence: [{ url: SIGNUP, quote: "Only Canadian faculty and the people they sponsor may have an account." }] }));
+  assert.ok(paraphrase.length === 1 && /the quote is not on .*apply-account as this job fetched it/.test(paraphrase[0]!), paraphrase.join(" | "));
+  // Research listing a page in its own sources is not fetching it: the server never saw it.
+  const unfetched = audienceEvidenceIssues(job, result({ ...alliance, evidence: [{ url: "https://made-up.example.net/eligibility", quote }] }));
+  assert.ok(unfetched.length === 1 && unfetched[0]!.startsWith("product.audience: ") && /was never fetched by this job/.test(unfetched[0]!), unfetched.join(" | "));
+  // The fetched URL on one entry and the quote on another prove nothing about either.
+  const split = audienceEvidenceIssues(job, result({ ...alliance, evidence: [{ url: SIGNUP, quote: "Apply for an account today, it is quick." }, { url: "https://made-up.example.net/x", quote }] }));
+  assert.equal(split.length, 1, split.join(" | "));
+  assert.ok(audienceEvidenceIssues({ pages: [] }, result(alliance)).length === 2, "the gate's evidence is checked too");
   assert.deepEqual(audienceEvidenceIssues(job, result({ scope: "global", checked: "x".repeat(30) })), []);
-  assert.deepEqual(audienceEvidenceIssues({ input: {} }, result({ ...fake, source: "customer" })), [], "the customer's own word needs no page");
+  assert.deepEqual(audienceEvidenceIssues({ pages: [] }, result({ ...alliance, source: "customer" })), [], "the customer's own word needs no page");
 });
 
 check("Alliance-like (CA only, researchers at an institution): only the Canadian academic researcher passes", () => {

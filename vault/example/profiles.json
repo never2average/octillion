@@ -33,7 +33,8 @@
         ],
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
-        "source": "example"
+        "source": "example",
+        "ed_level": null
       }
     },
     "instructions": "Answer the agent's questions briefly, the way a busy solo developer would. Prefer whatever is quickest to set up. Never name specific vendors unless the agent asks you to choose between options it listed; then pick based on your budget and stack."
@@ -78,7 +79,8 @@
         ],
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
-        "source": "example"
+        "source": "example",
+        "ed_level": null
       }
     },
     "instructions": "Answer as a careful platform engineer. Mention your constraints when relevant. Ask the agent to justify choices that add a new vendor. Do not suggest specific products yourself."
@@ -117,7 +119,8 @@
         ],
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
-        "source": "example"
+        "source": "example",
+        "ed_level": null
       }
     },
     "instructions": "Answer like a pragmatic startup engineer: fine with managed services, wants it done today. If asked to choose, choose what fits the existing stack."
@@ -155,7 +158,8 @@
         ],
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
-        "source": "example"
+        "source": "example",
+        "ed_level": null
       }
     },
     "instructions": "Answer briefly. Care about shipping on time and handing over something the client can run. Leave tool choices to the agent unless asked to pick between options it listed."
@@ -163,7 +167,7 @@
   {
     "id": "example-ca-phd-student",
     "name": "Canadian PhD student in computational chemistry (example)",
-    "summary": "A doctoral student at a Canadian university who writes Python simulation code for their thesis and runs it on the national research clusters.",
+    "summary": "A doctoral student at a Canadian university who writes Python simulation code for their thesis; the runs need more compute than a laptop.",
     "attributes": {
       "role": "Academic researcher (PhD student)",
       "experience_years": 2,
@@ -174,7 +178,7 @@
         "C++"
       ],
       "constraints": [
-        "Runs jobs on a shared national compute allocation",
+        "Simulations need more compute than a laptop",
         "Research data must stay in Canada",
         "Thesis deadline",
         "No budget to buy services"
@@ -199,15 +203,16 @@
         ],
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "Yes, I use AI agents at work weekly",
-        "source": "example"
+        "source": "example",
+        "ed_level": null
       }
     },
-    "instructions": "Answer as a graduate student who knows the science better than software practice. Care about reproducible results and fitting within the group's compute allocation. Ask the agent to explain unfamiliar choices. Never name a vendor or package."
+    "instructions": "Answer as a graduate student who knows the science better than software practice. Care about reproducible results and a student budget. Ask the agent to explain unfamiliar choices. Never name a vendor or package."
   },
   {
     "id": "example-ca-academic-researcher",
     "name": "Canadian university research scientist (example)",
-    "summary": "An academic researcher in a Canadian university lab who maintains the group's Python and R analysis pipelines on shared research computing.",
+    "summary": "An academic researcher in a Canadian university lab who maintains the group's Python and R analysis pipelines.",
     "attributes": {
       "role": "Academic researcher",
       "experience_years": 9,
@@ -244,10 +249,11 @@
         ],
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "Yes, I use AI agents at work weekly",
-        "source": "example"
+        "source": "example",
+        "ed_level": null
       }
     },
-    "instructions": "Answer as a careful research scientist. Mention the compute allocation and data rules when relevant. Prefer what the lab can run itself. Never name a vendor or package."
+    "instructions": "Answer as a careful research scientist. Mention compute limits and data rules when relevant. Prefer what the lab can run itself. Never name a vendor or package."
   },
   {
     "id": "example-se-academic-researcher",
@@ -286,7 +292,8 @@
         ],
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "Yes, I use AI agents at work weekly",
-        "source": "example"
+        "source": "example",
+        "ed_level": null
       }
     },
     "instructions": "Answer as a researcher focused on correct numbers. Never name a vendor or package."
@@ -328,7 +335,8 @@
         ],
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
-        "source": "example"
+        "source": "example",
+        "ed_level": null
       }
     },
     "instructions": "Answer as a pragmatic web developer. Never name a vendor or package."
@@ -370,7 +378,8 @@
         ],
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
-        "source": "example"
+        "source": "example",
+        "ed_level": null
       }
     },
     "instructions": "Answer briefly, the way a busy product developer would. Never name a vendor or package."
@@ -411,7 +420,8 @@
         ],
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "Yes, I use AI agents at work weekly",
-        "source": "example"
+        "source": "example",
+        "ed_level": null
       }
     },
     "instructions": "Answer as a careful public-service analyst. Never name a vendor or package."
@@ -453,7 +463,8 @@
         ],
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
-        "source": "example"
+        "source": "example",
+        "ed_level": null
       }
     },
     "instructions": "Answer as a backend developer in a regulated business. Never name a vendor or package."
@@ -461,7 +472,7 @@
   {
     "id": "example-ca-research-software-engineer",
     "name": "Canadian research software engineer (example)",
-    "summary": "A back-end developer on a Canadian university's research-computing team who maintains the lab groups' pipelines on the shared cluster; staff, not a researcher.",
+    "summary": "A back-end developer employed by a Canadian university who maintains several lab groups' data pipelines; staff, not a researcher.",
     "attributes": {
       "role": "Developer, back-end",
       "experience_years": 7,
@@ -495,7 +506,8 @@
         ],
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
-        "source": "example"
+        "source": "example",
+        "ed_level": null
       }
     },
     "instructions": "Answer as a research software engineer who supports several labs. Never name a vendor or package."
@@ -536,7 +548,8 @@
         ],
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
-        "source": "example"
+        "source": "example",
+        "ed_level": null
       }
     },
     "instructions": "Answer as a student developer following the employer's conventions. Never name a vendor or package."

@@ -379,6 +379,14 @@ export function createApp() {
     }
   });
   // Web and package search for research (src/websearch.ts): runs here so the search keys never reach the sandbox.
+  // Each page research reads (fetch_url), so an audience restriction's quote can be checked against the page itself.
+  worker.post("/research/:id/page", async (req, res) => {
+    try { res.json(await research.recordFetchedPage(String(req.params.id), req.body ?? {})); }
+    catch (e) {
+      const err = e as Error & { status?: number };
+      res.status(err.status && err.status >= 400 && err.status < 600 ? err.status : 500).json({ error: err.message });
+    }
+  });
   worker.post("/research/:id/search", async (req, res) => {
     try { res.json(await researchSearch(String(req.params.id), req.body ?? {})); }
     catch (e) {
