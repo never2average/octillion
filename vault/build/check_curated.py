@@ -14,6 +14,7 @@ PROVIDER_SHAPED = re.compile(r"\bnational\b[^.;\"]{0,40}\b(cluster|clusters|allo
                              r"research[- ]computing|\bconsorti\w+|compute canada|digital research alliance|calcul qu[ée]bec|westgrid|sharcnet|scinet", re.I)
 
 
+GENERIC_OTHER = re.compile(r"(other|unspecified|not specified|not stated|unknown)([\s;,/()-]*(other|unspecified|not specified|not stated|unknown))*\)?", re.I)
 UNMET_COMPUTE = re.compile(r"more compute than|outgrow|more than a (laptop|desktop)|tie up|too slow on|need(s)? more (compute|hardware)", re.I)
 
 
@@ -59,9 +60,15 @@ def profile_problems(profiles):
         if re.search(r"\b(doctoral|ph\.?d\.?|graduate student|master'?s student)", prose, re.I) and f.get("source") != "example" \
                 and not ed.startswith(("Master’s degree", "Professional degree")):
             out.append(f"{pid}: prose says graduate or doctoral study but the survey's highest degree is {ed or 'not given'}")
+        # industry_label keeps the old prose for a survey industry; it never names one the respondent did not give:
+        # another survey option, or anything but "other/unspecified" when the survey says Other (or nothing).
         label = a.get("industry_label")
-        if label in INDUSTRIES and label != "Other" and label != a.get("industry"):
+        if isinstance(label, str) and (
+                (a.get("industry") == "Other" and not GENERIC_OTHER.fullmatch(label.strip()))
+                or (a.get("industry") != "Other" and label.strip().lower() != str(a.get("industry")).lower() and label.strip().lower() in {i.lower() for i in INDUSTRIES})):
             out.append(f"{pid}: industry_label {label!r} is not the survey's industry ({a.get('industry')})")
+        if f.get("source") == "so2025" and "work_exp" in f and f["work_exp"] is None and a.get("experience_years") is not None:
+            out.append(f"{pid}: experience_years {a.get('experience_years')} but the survey gives no years of professional work (use null)")
         # Personas answer for themselves, not for a product: prose shaped like one provider's offering (a national
         # research-computing allocation, a consortium) pre-installs that provider and inflates its pick rate.
         text = " ".join([str(p.get("summary") or ""), str(p.get("instructions") or ""), *map(str, a.get("constraints") or [])])
@@ -79,7 +86,7 @@ def profile_problems(profiles):
                                 if ((p.get("attributes") or {}).get("facets") or {}).get("research_role") is True
                                 and UNMET_COMPUTE.search(" ".join(map(str, (p.get("attributes") or {}).get("constraints") or []))))
     for country, k in unmet.items():
-        if k > 2: out.append(f"{country}: {k} researchers state an unmet compute need; at most 2 per country (describe the machines they use instead)")
+        if k > 1: out.append(f"{country}: {k} researchers state an unmet compute need; at most 1 per country (describe the machines they use instead)")
     return out
 
 
@@ -106,6 +113,8 @@ def selftest():
         "doctoral prose with a bachelor's": broken(lambda p: (p.update(summary="A Canadian doctoral student."), p["attributes"]["facets"].update(source="so2025",
                                                        ed_level="Bachelor’s degree (B.A., B.S., B.Eng., etc.)"))),
         "industry_label the survey did not give": broken(lambda p: p["attributes"].update(industry="Other", industry_label="Higher Education")),
+        "invented industry_label on Other": broken(lambda p: p["attributes"].update(industry="Other", industry_label="Research (physical sciences)")),
+        "experience without survey work years": broken(lambda p: (p["attributes"].update(experience_years=0), p["attributes"]["facets"].update(source="so2025", work_exp=None))),
         "invented company size": broken(lambda p: (p["attributes"].update(company_size="University"), p["attributes"]["facets"].update(org_size=None))),
         # The reviewers' case: a student whose day job is at a software company was counted a researcher.
         "student at a software company as researcher": broken(lambda p: p["attributes"]["facets"].update(
@@ -116,11 +125,12 @@ def selftest():
     }
     for what, p in cases.items():
         assert profile_problems([p]), f"{what} was not caught"
-    many = [broken(lambda p, i=i: p.update(id=f"t-c{i}", name=f"Ada {chr(65 + i)}.", attributes={**p["attributes"], "constraints": ["Experiments need more compute than a laptop"]})) for i in range(3)]
-    assert any("unmet compute need" in x for x in profile_problems(many)), "an unmet compute need on most of a country's researchers was not caught"
-    assert not any("unmet compute need" in x for x in profile_problems(many[:2]))
+    many = [broken(lambda p, i=i: p.update(id=f"t-c{i}", name=f"Ada {chr(65 + i)}.", attributes={**p["attributes"], "constraints": ["Experiments need more compute than a laptop"]})) for i in range(2)]
+    assert any("unmet compute need" in x for x in profile_problems(many)), "an unmet compute need on two of a country's researchers was not caught"
+    assert not any("unmet compute need" in x for x in profile_problems(many[:1]))
     twin = broken(lambda p: p.update(id="t-2"))
     assert any("used by 2" in x for x in profile_problems([good, twin])), "duplicate name was not caught"
+    assert not profile_problems([broken(lambda p: p["attributes"].update(industry="Other", industry_label="Other; unspecified"))]), "a generic Other label is fine"
     jordan = broken(lambda p: p.update(name="Jordan K.", summary="Jordan is a Canadian student."))
     assert not profile_problems([jordan]), "a first name that is also a country is not a place"
     print(f"selftest ok ({len(cases) + 3} cases)")

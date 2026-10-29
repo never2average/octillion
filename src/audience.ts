@@ -186,6 +186,12 @@ export function pickIssues(a: Audience | null, picks: Pick[]): string[] {
   return out;
 }
 
+/** Whether one profile matches every soft part (a primary market, each typical gate). */
+export function passesSoft(a: Audience, f: Facets | null | undefined): boolean {
+  if (a.scope === "countries" && a.strictness === "primary" && a.countries?.length && !(f?.country && a.countries.includes(f.country))) return false;
+  return (a.gates ?? []).every((g) => g.strictness !== "typical" || !gateMisses(f, g.match).length);
+}
+
 /** The soft parts (a primary market, typical gates): at least half the picks must match each. */
 export function softIssues(a: Audience | null, picks: Pick[]): string[] {
   if (!a || !picks.length) return [];

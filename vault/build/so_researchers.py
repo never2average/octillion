@@ -52,6 +52,10 @@ Hard rules:
   a batch queue): check_curated.py refuses them, since they would make one kind of product look like the answer.
   Data residency only when the facts state it. Say "graduate" or "doctoral" only when ed_level is a master's or
   higher; leave experience_years null when years_professional is not given.
+- University staff (academic_staff) are developers whose employer is a university: write them from their dev type,
+  languages, team, review and maintenance habits, AI use and employment only. Never campus IT framing the facts do
+  not give (student portals, campus sign-on, the academic calendar, serving departments), and never a provider's
+  offering. A staff member who is not primarily a developer or holds a doctorate says so plainly.
 - company_size is the survey's org size; when it is not given, say "Unknown" (never "University").
 - Invent a plausible first name + last initial matching nothing real, distinct from the names already in the data. No
   real people, institutions or papers.

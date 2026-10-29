@@ -127,6 +127,21 @@ export async function audienceLifecycleChecks({ db, worker, call, fails, A, orgI
   const [labRow] = await db.query<any>("SELECT id, competitors, research FROM products WHERE org_id = $1 AND slug = $2", [orgId, first.product]);
   assert.ok(!labRow.competitors.some((c: any) => c.name === "Inngest") && labRow.research.not_competitors.some((x: any) => x.name === "Inngest"),
     "research listed it again; it is dropped and stays recorded as not competing");
+  // The customer lists it again (by hand): it is no longer "not competing", so the next research keeps it. Answering a
+  // competitor question "substitute" does the same.
+  await call(A, "save_product", { product: first.product, competitors: [...labRow.competitors, { name: "Inngest", packages: ["inngest"] }] });
+  const [readded] = await db.query<any>("SELECT competitors, research FROM products WHERE id = $1", [labRow.id]);
+  assert.ok(readded.competitors.some((c: any) => c.name === "Inngest") && !(readded.research.not_competitors ?? []).some((x: any) => x.name === "Inngest"),
+    "a competitor added back by the customer is off the not-competing list");
+  await db.query("UPDATE products SET research = jsonb_set(research, '{not_competitors}', $2::jsonb) WHERE id = $1",
+    [labRow.id, JSON.stringify([{ name: "BullMQ", relation: "complement", reason: "the review" }])]);
+  const { askQuestions: ask } = await import("../src/questions.js");
+  assert.equal(await ask(orgId, labRow.id, lab.research.id, [{ kind: "competitor_relation", subject: "BullMQ", question: "Does BullMQ compete with GapLab?",
+    options: [{ id: "a", label: "Instead of GapLab", relation: "substitute" }, { id: "b", label: "Alongside it", relation: "complement" }] }]), 1);
+  const cq = (await call(A, "list_product_questions", { product: first.product })).questions.find((q: any) => q.subject === "BullMQ");
+  await call(A, "answer_product_question", { question_id: cq.id, option: "a" });
+  const [subst] = await db.query<any>("SELECT research FROM products WHERE id = $1", [labRow.id]);
+  assert.ok(!(subst.research.not_competitors ?? []).some((x: any) => x.name === "BullMQ") && subst.research.audience, "a substitute answer takes it off the list; other keys kept");
   const linksOf = () => db.query<any>("/* tenant: smoke */ SELECT dp.slug, pp.active FROM product_personas pp JOIN developer_profiles dp ON dp.id = pp.profile_id WHERE pp.product_id = $1 ORDER BY dp.slug", [labRow.id]);
   assert.deepEqual((await linksOf()).map((x: any) => [x.slug, x.active]), [["example-enterprise-platform", true], ["example-startup-backend", true]]);
   await reportAndRunChecks({ db, call, fails, A, product: first.product, productId: labRow.id });

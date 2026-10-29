@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { getDb } from "./db.js";
-import { resolveProduct } from "./queries.js";
+import { resolveProduct, toolNames } from "./queries.js";
 import { keepAlive } from "./telemetry.js";
 import { audienceFormIssues, describeAudience, hardKey, hardMisses, mergeAudience, type Audience } from "./audience.js";
 import type { Org } from "./auth.js";
@@ -29,6 +29,17 @@ export interface QuestionOption { id: string; label: string; relation?: string; 
 export interface AskedQuestion { kind: QuestionKind; subject: string; question: string; options: QuestionOption[]; context?: Record<string, unknown> }
 
 const RELATIONS = new Set(["substitute", "complement", "different_layer", "unrelated"]);
+
+/**
+ * A question's context, bounded field by field (long quotes, notes and search calls shortened, long lists cut) so it
+ * stays valid JSON: cutting the serialised string could break it and fail the research completing with it.
+ */
+export function trimContext(v: unknown, depth = 0): unknown {
+  if (typeof v === "string") return v.length > 600 ? `${v.slice(0, 600)}…` : v;
+  if (Array.isArray(v)) return v.slice(0, 20).map((x) => trimContext(x, depth + 1));
+  if (v && typeof v === "object") return depth > 6 ? null : Object.fromEntries(Object.entries(v).slice(0, 40).map(([k, x]) => [k, trimContext(x, depth + 1)]));
+  return v;
+}
 
 /** The options a question may carry, by kind; invalid ones are dropped (a question needs two). */
 function validOptions(q: AskedQuestion): QuestionOption[] {
@@ -61,7 +72,7 @@ export async function askQuestions(orgId: number, productId: number, researchId:
       `/* tenant: research job's own product (job checked against the job token in http.ts) */ INSERT INTO product_questions (id, org_id, product_id, research_id, kind, subject, question, options, context)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT DO NOTHING RETURNING id`,
       [`pq_${randomBytes(9).toString("base64url")}`, orgId, productId, researchId, q.kind, q.subject.trim().slice(0, 120), q.question.trim().slice(0, 500),
-       JSON.stringify(options), q.context ? JSON.stringify(q.context).slice(0, 4000) : null]);
+       JSON.stringify(options), q.context ? JSON.stringify(trimContext(q.context)) : null]);
     n += rows.length;
   }
   return n;
@@ -93,21 +104,23 @@ export async function answerQuestion(org: Org, input: { question_id: string; opt
   if (!opt) throw Object.assign(new Error(`Pick one of the options: ${q.options.map((o) => `${o.id} (${o.label})`).join("; ")}`), { status: 400 });
   if (q.kind === "audience") return answerAudience(org, q, opt, input.note, by);
 
-  const [p] = await db.query<{ competitors: Tool[] | null; research: Record<string, any> | null }>(
-    "SELECT competitors, research FROM products WHERE id = $1 AND org_id = $2", [q.product_id, org.orgId]);
   const subject = q.subject.toLowerCase();
-  const isSubject = (c: Tool) => c.name.trim().toLowerCase() === subject;
+  const isSubject = (c: Tool) => toolNames(c).includes(subject);
   const competing = opt.relation === "substitute";
-  const competitors = competing
-    ? (p?.competitors ?? []).map((c) => (isSubject(c) ? { ...c, unconfirmed: undefined } : c)).map(({ unconfirmed, ...c }) => (unconfirmed ? { ...c, unconfirmed } : c))
-    : (p?.competitors ?? []).filter((c) => !isSubject(c));
-  const research = { ...(p?.research ?? {}) };
-  if (!competing)
-    research.not_competitors = [...(research.not_competitors ?? []).filter((x: { name: string }) => x.name.toLowerCase() !== subject),
-      { name: q.subject, relation: opt.relation, reason: `the customer: ${opt.label}${input.note ? ` (${input.note.slice(0, 300)})` : ""}` }];
   await db.transaction(async (tx) => {
-    await tx.query("UPDATE products SET competitors = $3, research = $4, updated_at = now() WHERE id = $1 AND org_id = $2",
-      [q.product_id, org.orgId, JSON.stringify(competitors), JSON.stringify(research)]);
+    // Read under a row lock and write only competitors and research.not_competitors: a research or another answer
+    // landing meanwhile keeps the rest.
+    const [p] = await tx.query<{ competitors: Tool[] | null; research: Record<string, any> | null }>(
+      "SELECT competitors, research FROM products WHERE id = $1 AND org_id = $2 FOR UPDATE", [q.product_id, org.orgId]);
+    const competitors = competing
+      ? (p?.competitors ?? []).map((c) => (isSubject(c) ? { ...c, unconfirmed: undefined } : c)).map(({ unconfirmed, ...c }) => (unconfirmed ? { ...c, unconfirmed } : c))
+      : (p?.competitors ?? []).filter((c) => !isSubject(c));
+    // A substitute is a competitor again: off the not-competing list too, or the next research would drop it.
+    const others = (p?.research?.not_competitors ?? []).filter((x: { name: string }) => String(x?.name ?? "").trim().toLowerCase() !== subject);
+    const notCompetitors = competing ? others
+      : [...others, { name: q.subject, relation: opt.relation, reason: `the customer: ${opt.label}${input.note ? ` (${input.note.slice(0, 300)})` : ""}` }];
+    await tx.query(`UPDATE products SET competitors = $3, research = jsonb_set(coalesce(research, '{}'::jsonb), '{not_competitors}', $4::jsonb), updated_at = now()
+                     WHERE id = $1 AND org_id = $2`, [q.product_id, org.orgId, JSON.stringify(competitors), JSON.stringify(notCompetitors)]);
     await tx.query("UPDATE product_questions SET status = 'answered', answer = $3, answered_by = $4, answered_at = now() WHERE id = $1 AND org_id = $2",
       [q.id, org.orgId, JSON.stringify({ option: opt.id, label: opt.label, relation: opt.relation, ...(input.note ? { note: input.note.slice(0, 500) } : {}) }), by]);
   });

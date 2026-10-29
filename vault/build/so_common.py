@@ -109,6 +109,9 @@ def research_role(row):
     """Research-affiliated: research is their work or study. An academic researcher, employed or studying, whose industry
     is a university, none or other (not a company's); a data or applied scientist at a university; or a student with no job in another
     industry who is a graduate student (a master's or doctoral degree already) or does research (a research dev type).
+    An independent contractor researcher counts (research is their work, and sponsored outside collaborators can use
+    research infrastructure), unlike academic_staff, which is a university's own employees; research prompts rank such
+    contractors after affiliated researchers.
     Kept apart from sector: a web developer in a university's IT department, or an undergraduate, is academia by sector
     but not a researcher (see academic_staff)."""
     dev, ind, emp = _clean(row.DevType), _clean(row.Industry), split(row.Employment)
@@ -135,5 +138,6 @@ def facets_of(row):
     sector, basis = derive_sector(row)
     return {"country": iso, "country_name": ISO2_NAME[iso], "region": ISO2_REGION[iso], "sector": sector, "sector_basis": basis,
             "research_role": bool(research_role(row)), "academic_staff": bool(academic_staff(row)), "dev_type": _clean(row.DevType), "industry_survey": industry_of(row),
-            "org_size": _clean(row.OrgSize), "employment": split(row.Employment), "ed_level": _clean(row.EdLevel), "main_branch": _clean(row.MainBranch),
+            "org_size": _clean(row.OrgSize), "employment": split(row.Employment), "ed_level": _clean(row.EdLevel),
+            "work_exp": None if _clean(row.WorkExp) is None else int(float(row.WorkExp)), "main_branch": _clean(row.MainBranch),
             "ai_agents": _clean(row.AIAgents), "source": "so2025"}

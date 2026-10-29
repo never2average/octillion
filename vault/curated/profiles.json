@@ -53,6 +53,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 13,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -110,6 +111,7 @@
           "Employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 6,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -169,6 +171,7 @@
           "Employed"
         ],
         "ed_level": "Secondary school (e.g. American high school, German Realschule or Gymnasium, etc.)",
+        "work_exp": 24,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -227,6 +230,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 15,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -300,6 +304,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 11,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -357,6 +362,7 @@
           "Employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 15,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -419,6 +425,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 13,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -480,6 +487,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Some college/university study without earning a degree",
+        "work_exp": 20,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -545,6 +553,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 2,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -600,6 +609,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 18,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -664,6 +674,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 13,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -721,6 +732,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Other (please specify):",
+        "work_exp": 7,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -781,6 +793,7 @@
           "Employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 7,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -845,6 +858,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 13,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -900,6 +914,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 26,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -952,6 +967,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 12,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -1024,6 +1040,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 33,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -1088,6 +1105,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 18,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -1142,6 +1160,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 18,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -1203,6 +1222,7 @@
           "Employed"
         ],
         "ed_level": "Some college/university study without earning a degree",
+        "work_exp": 12,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -1256,6 +1276,7 @@
           "Employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 5,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -1316,6 +1337,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 25,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -1377,6 +1399,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 16,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -1431,6 +1454,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 26,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -1495,6 +1519,7 @@
           "Employed"
         ],
         "ed_level": "Some college/university study without earning a degree",
+        "work_exp": 21,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -1559,6 +1584,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 14,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -1615,6 +1641,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 19,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -1686,6 +1713,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 16,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -1750,6 +1778,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 4,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -1808,6 +1837,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 3,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -1869,6 +1899,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 14,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -1930,6 +1961,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Some college/university study without earning a degree",
+        "work_exp": 20,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -1989,6 +2021,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 18,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -2053,6 +2086,7 @@
           "Employed"
         ],
         "ed_level": "Some college/university study without earning a degree",
+        "work_exp": 25,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -2113,6 +2147,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 20,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -2164,6 +2199,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 37,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -2221,6 +2257,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Secondary school (e.g. American high school, German Realschule or Gymnasium, etc.)",
+        "work_exp": 25,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -2281,6 +2318,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 12,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -2338,6 +2376,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 28,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -2401,6 +2440,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 7,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -2473,6 +2513,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 16,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -2536,6 +2577,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 35,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -2591,6 +2633,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 12,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -2650,6 +2693,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 20,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -2716,6 +2760,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 19,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -2783,6 +2828,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 18,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -2841,6 +2887,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 19,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -2903,6 +2950,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 20,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -2962,6 +3010,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Some college/university study without earning a degree",
+        "work_exp": 10,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -3022,6 +3071,7 @@
           "Employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 10,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -3084,6 +3134,7 @@
           "Employed"
         ],
         "ed_level": "Associate degree (A.A., A.S., etc.)",
+        "work_exp": 12,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -3142,6 +3193,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 15,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -3214,6 +3266,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 2,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -3273,6 +3326,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 1,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -3337,6 +3391,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Some college/university study without earning a degree",
+        "work_exp": 30,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -3409,6 +3464,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 30,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -3476,6 +3532,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 30,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -3532,6 +3589,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Associate degree (A.A., A.S., etc.)",
+        "work_exp": 11,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -3590,6 +3648,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 25,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -3648,6 +3707,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 6,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -3707,6 +3767,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 14,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -3766,6 +3827,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Primary/elementary school",
+        "work_exp": 1,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -3821,6 +3883,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 34,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -3882,6 +3945,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 12,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -3941,6 +4005,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 10,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -3994,6 +4059,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 32,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -4052,6 +4118,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 13,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -4111,6 +4178,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 40,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -4165,6 +4233,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 5,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -4220,6 +4289,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 7,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -4285,6 +4355,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 10,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -4343,6 +4414,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 35,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -4396,6 +4468,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 12,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -4465,6 +4538,7 @@
           "Employed"
         ],
         "ed_level": "Some college/university study without earning a degree",
+        "work_exp": 12,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -4526,6 +4600,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 22,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -4587,6 +4662,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 23,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -4649,6 +4725,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 17,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -4710,6 +4787,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 25,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -4788,6 +4866,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 9,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -4841,6 +4920,7 @@
           "Employed"
         ],
         "ed_level": "Some college/university study without earning a degree",
+        "work_exp": 18,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -4906,6 +4986,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 10,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -4967,6 +5048,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 10,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -5022,6 +5104,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 38,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -5082,6 +5165,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 27,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -5142,6 +5226,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 18,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -5199,6 +5284,7 @@
           "Employed"
         ],
         "ed_level": "Some college/university study without earning a degree",
+        "work_exp": 18,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -5253,6 +5339,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 2,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -5307,6 +5394,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Some college/university study without earning a degree",
+        "work_exp": 17,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -5365,6 +5453,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 4,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -5418,6 +5507,7 @@
           "Employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 13,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -5488,6 +5578,7 @@
           "Employed"
         ],
         "ed_level": "Some college/university study without earning a degree",
+        "work_exp": 15,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -5546,6 +5637,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 3,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -5618,6 +5710,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 8,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -5674,6 +5767,7 @@
           "Employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 28,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -5727,6 +5821,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 25,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -5791,6 +5886,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 5,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -5847,6 +5943,7 @@
           "Employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 10,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -5900,6 +5997,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 10,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -5952,6 +6050,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 10,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -6004,6 +6103,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 8,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -6065,6 +6165,7 @@
           "Employed"
         ],
         "ed_level": "Associate degree (A.A., A.S., etc.)",
+        "work_exp": 22,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -6123,6 +6224,7 @@
           "Employed"
         ],
         "ed_level": "Some college/university study without earning a degree",
+        "work_exp": 5,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -6179,6 +6281,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 3,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -6233,6 +6336,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 25,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -6287,6 +6391,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 30,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -6359,6 +6464,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 18,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -6417,6 +6523,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 40,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -6496,6 +6603,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 2,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -6551,6 +6659,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 9,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -6604,6 +6713,7 @@
           "Employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 20,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -6664,6 +6774,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 6,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -6723,6 +6834,7 @@
           "Employed"
         ],
         "ed_level": "Associate degree (A.A., A.S., etc.)",
+        "work_exp": 3,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -6777,6 +6889,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 25,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -6842,6 +6955,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 26,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -6897,6 +7011,7 @@
           "Employed"
         ],
         "ed_level": "Associate degree (A.A., A.S., etc.)",
+        "work_exp": 8,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -6958,6 +7073,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 2,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -7016,6 +7132,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 25,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -7072,6 +7189,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 17,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -7133,6 +7251,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 5,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -7206,6 +7325,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 14,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -7265,6 +7385,7 @@
           "Employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 13,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -7325,6 +7446,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 12,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -7387,6 +7509,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 7,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -7444,6 +7567,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 1,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -7515,6 +7639,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 9,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -7576,6 +7701,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 20,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -7635,6 +7761,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 31,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -7697,6 +7824,7 @@
           "Employed"
         ],
         "ed_level": "Some college/university study without earning a degree",
+        "work_exp": 12,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -7749,6 +7877,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 19,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -7802,6 +7931,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 2,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -7864,6 +7994,7 @@
           "Employed"
         ],
         "ed_level": "Other (please specify):",
+        "work_exp": 15,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -7922,6 +8053,7 @@
           "Employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 20,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -7983,6 +8115,7 @@
           "Employed"
         ],
         "ed_level": "Associate degree (A.A., A.S., etc.)",
+        "work_exp": 13,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -8041,6 +8174,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 5,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -8108,6 +8242,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 25,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -8163,6 +8298,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 34,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -8222,6 +8358,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 8,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -8285,6 +8422,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 37,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -8341,6 +8479,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 14,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -8403,6 +8542,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 7,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -8465,6 +8605,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 10,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -8529,6 +8670,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 15,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -8581,6 +8723,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 5,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -8635,6 +8778,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 3,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -8698,6 +8842,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 5,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -8760,6 +8905,7 @@
           "Employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 16,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -8823,6 +8969,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 4,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -8890,6 +9037,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 25,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -8943,6 +9091,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 12,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -9005,6 +9154,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 19,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -9065,6 +9215,7 @@
           "Employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 7,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -9118,6 +9269,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 5,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -9178,6 +9330,7 @@
           "Employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 10,
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -9231,6 +9384,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 5,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -9292,6 +9446,7 @@
           "Employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 7,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -9347,11 +9502,11 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 8,
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
-      },
-      "industry_label": "Research (physical sciences)"
+      }
     },
     "instructions": "Elena knows her physics and her scripts, not software engineering practice, and tells the agent so. She wants the numbers to stay correct and the runs to fit the cluster's time and memory limits, using containers the group already has. She asks the agent to keep changes small and compatible with the group's existing code. She defers build setup, tests and structure to the agent but wants a plain-language explanation of what it did. She picks options by deadline pressure and by what the cluster allows."
   },
@@ -9400,11 +9555,11 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 35,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
-      },
-      "industry_label": "Research"
+      }
     },
     "instructions": "Hartmut thinks as a manager of researchers: he wants working results the team can understand, not clever code. He asks how the agent knows the output is right and wants a simple check he can show his colleagues. He defers programming detail to the agent but insists on clear documentation and minimal setup on the lab's current machines. Budget is tight, so he rejects paid or heavy additions. When offered options he picks the simplest one a new student could run."
   },
@@ -9458,6 +9613,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 5,
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -9510,6 +9666,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 55,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -9567,6 +9724,7 @@
           "Employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 24,
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -9623,6 +9781,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Other (please specify):",
+        "work_exp": 11,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -9683,6 +9842,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 35,
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -9737,6 +9897,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 2,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -9800,6 +9961,7 @@
           "Employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 30,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -9862,6 +10024,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 15,
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -9918,6 +10081,7 @@
           "Employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 3,
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -9978,6 +10142,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 30,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -10037,6 +10202,7 @@
           "Student"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 11,
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -10096,6 +10262,7 @@
           "Employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 20,
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -10159,6 +10326,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 7,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -10222,11 +10390,11 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 6,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
-      },
-      "industry_label": "Research / academia (unspecified)"
+      }
     },
     "instructions": "Camille is a professional developer, so she can discuss design and trade-offs directly. She cares that results are reproducible and that new code fits the group's existing codebase so her team can maintain it. When the agent offers options she picks the one that is simplest for her team to understand and review. She expects the agent to handle routine implementation and tests, and wants short summaries of what changed. She will push back on anything that adds maintenance load for a small group."
   },
@@ -10277,6 +10445,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 8,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -10332,6 +10501,7 @@
           "Employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 16,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -10393,6 +10563,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 5,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -10462,6 +10633,7 @@
           "Student"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 3,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -10519,6 +10691,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 2,
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -10575,6 +10748,7 @@
           "Employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 10,
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -10632,6 +10806,7 @@
           "Employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 25,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -10694,6 +10869,7 @@
           "Employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 24,
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -10753,6 +10929,7 @@
           "Employed"
         ],
         "ed_level": "Secondary school (e.g. American high school, German Realschule or Gymnasium, etc.)",
+        "work_exp": 30,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -10808,6 +10985,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 6,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -10865,6 +11043,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 15,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -10925,11 +11104,11 @@
           "Employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 8,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
-      },
-      "industry_label": "Research (other)"
+      }
     },
     "instructions": "Priya cares that results are reproducible and that performance claims hold up under scrutiny, since they will end up in a paper. She is comfortable with low-level code and will discuss design in detail. She defers to the agent on boilerplate, build setup and test scaffolding, but wants the scientific logic explained. Given options, she picks by what runs on the compute she has, what is cheapest on the grant, and what the rest of the group can maintain. She avoids anything that makes the environment harder to rebuild."
   },
@@ -10985,6 +11164,7 @@
           "Employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 16,
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -11043,6 +11223,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 10,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -11100,6 +11281,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 6,
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -11155,6 +11337,7 @@
           "Employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 6,
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -11212,6 +11395,7 @@
           "Employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 29,
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -11277,6 +11461,7 @@
           "Student"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 3,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -11334,6 +11519,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 20,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -11356,9 +11542,9 @@
         "Bash/Shell (all shells)"
       ],
       "constraints": [
-        "Works on a personal machine and the department's shared servers",
+        "Runs on a personal machine and the university's shared compute",
         "Results must be reproducible for publication",
-        "Writes code for research, not as a developer",
+        "Grant budget limits new spending",
         "Collaborators must be able to rerun the scripts"
       ],
       "tone": "Direct and pragmatic",
@@ -11388,6 +11574,7 @@
           "Employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 18,
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -11401,7 +11588,7 @@
     "summary": "Theo is a computer science student at a Canadian university who has coded for five years and builds small Python and JavaScript web tools for coursework and research projects.",
     "attributes": {
       "role": "Student",
-      "experience_years": 0,
+      "experience_years": null,
       "company_size": "Not applicable (student)",
       "industry": "Other",
       "work_mode": "Campus and home",
@@ -11447,6 +11634,7 @@
           "Student"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": null,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -11463,7 +11651,7 @@
       "experience_years": 2,
       "company_size": "Unknown",
       "industry": "Other",
-      "work_mode": "Flexible",
+      "work_mode": null,
       "stack": [
         "TypeScript",
         "JavaScript",
@@ -11475,8 +11663,8 @@
         "React"
       ],
       "constraints": [
-        "Participant data handled under the ethics approval",
         "Thesis deadline",
+        "Supervisor's grant covers only the basics",
         "Builds on the lab's existing tools",
         "Works on a personal laptop and lab machines"
       ],
@@ -11507,12 +11695,13 @@
           "Student"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 2,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
       }
     },
-    "instructions": "Answer as a capable graduate student who codes a lot. Mention the ethics rules on research data when storage or hosting comes up. Prefer approaches the lab can run itself. Never name a vendor or package; choose by the data rules and what the lab already runs."
+    "instructions": "Answer as a capable graduate student who codes a lot. Prefer approaches the lab can run itself. Never name a vendor or package; choose by cost and what the lab already runs."
   },
   {
     "id": "so25-13996",
@@ -11569,6 +11758,7 @@
           "Student"
         ],
         "ed_level": "Some college/university study without earning a degree",
+        "work_exp": 3,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -11599,7 +11789,7 @@
       ],
       "constraints": [
         "Runs analyses on the group's own workstations",
-        "Survey responses are confidential research data",
+        "Small grant budget",
         "Reproducible results for papers",
         "Small group with mixed coding skills"
       ],
@@ -11630,12 +11820,13 @@
           "Employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 5,
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
       }
     },
-    "instructions": "Answer as a researcher who writes code for analysis, not as a software engineer. Insist on correct, reproducible numbers and say where the data may live. Ask the agent to keep things simple enough for the group to maintain. Never name a vendor or package."
+    "instructions": "Answer as a researcher who writes code for analysis, not as a software engineer. Insist on correct, reproducible numbers. Ask the agent to keep things simple enough for the group to maintain. Never name a vendor or package."
   },
   {
     "id": "so25-13334",
@@ -11685,6 +11876,7 @@
           "Student"
         ],
         "ed_level": "Some college/university study without earning a degree",
+        "work_exp": 2,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -11698,7 +11890,7 @@
     "summary": "Hélène is an academic researcher in Canada who works in person at a software company of 100-499 people, writing research prototypes in C#, Java, Python and web stacks.",
     "attributes": {
       "role": "Academic researcher in industry; individual contributor",
-      "experience_years": 0,
+      "experience_years": null,
       "company_size": "100 to 499 employees",
       "industry": "Software Development",
       "work_mode": "In-person",
@@ -11748,6 +11940,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": null,
         "main_branch": "I am a developer by profession",
         "ai_agents": "No, and I don't plan to",
         "source": "so2025"
@@ -11806,6 +11999,7 @@
           "Student"
         ],
         "ed_level": "Secondary school (e.g. American high school, German Realschule or Gymnasium, etc.)",
+        "work_exp": 3,
         "main_branch": "I am a developer by profession",
         "ai_agents": null,
         "source": "so2025"
@@ -11819,7 +12013,7 @@
     "summary": "Wren is a student in Canada who is not primarily a developer but automates infrastructure with Python and shell scripts, mostly around containers and monitoring.",
     "attributes": {
       "role": "Student with DevOps work",
-      "experience_years": 0,
+      "experience_years": null,
       "company_size": "Not applicable (student)",
       "industry": "Other",
       "work_mode": "Campus",
@@ -11858,6 +12052,7 @@
           "Student"
         ],
         "ed_level": "Secondary school (e.g. American high school, German Realschule or Gymnasium, etc.)",
+        "work_exp": null,
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "No, and I don't plan to",
         "source": "so2025"
@@ -11914,6 +12109,7 @@
           "Student"
         ],
         "ed_level": "Some college/university study without earning a degree",
+        "work_exp": 2,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -11972,6 +12168,7 @@
           "Student"
         ],
         "ed_level": "Secondary school (e.g. American high school, German Realschule or Gymnasium, etc.)",
+        "work_exp": 1,
         "main_branch": "I am a developer by profession",
         "ai_agents": "No, and I don't plan to",
         "source": "so2025"
@@ -12032,6 +12229,7 @@
           "Student"
         ],
         "ed_level": "Some college/university study without earning a degree",
+        "work_exp": 15,
         "main_branch": "I am a developer by profession",
         "ai_agents": "No, and I don't plan to",
         "source": "so2025"
@@ -12045,7 +12243,7 @@
     "summary": "Laila is a student in Canada who also works in person as a full-stack developer at a software company of 20-99 people, across C#, TypeScript and Python.",
     "attributes": {
       "role": "Student; full-stack developer",
-      "experience_years": 0,
+      "experience_years": null,
       "company_size": "20 to 99 employees",
       "industry": "Software Development",
       "work_mode": "In-person",
@@ -12096,6 +12294,7 @@
           "Student"
         ],
         "ed_level": "Secondary school (e.g. American high school, German Realschule or Gymnasium, etc.)",
+        "work_exp": null,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -12121,8 +12320,8 @@
         "Bash/Shell (all shells)"
       ],
       "constraints": [
-        "Large analyses tie up the group's workstation for days",
-        "Confidential research data",
+        "Runs on the university's shared compute and his own workstation",
+        "Grant funding is limited",
         "Long-term reproducibility of published results",
         "Builds on decades of the group's own code"
       ],
@@ -12153,6 +12352,7 @@
           "Employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 37,
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "No, and I don't plan to",
         "source": "so2025"
@@ -12166,7 +12366,7 @@
     "summary": "Priya is a student in Canada who codes for her studies and a part-time role at a small software company of under 20 people, in Python, JavaScript and C++.",
     "attributes": {
       "role": "Student",
-      "experience_years": 0,
+      "experience_years": null,
       "company_size": "Less than 20 employees",
       "industry": "Software Development",
       "work_mode": "Hybrid, mostly in-person",
@@ -12212,6 +12412,7 @@
           "Student"
         ],
         "ed_level": "Some college/university study without earning a degree",
+        "work_exp": null,
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -12248,6 +12449,7 @@
       ],
       "constraints": [
         "Runs experiments on the lab's machines and his own laptop",
+        "Student budget",
         "Code released with his research must be reproducible",
         "Supervisor reviews design choices"
       ],
@@ -12279,6 +12481,7 @@
           "Student"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 2,
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "No, and I don't plan to",
         "source": "so2025"
@@ -12337,6 +12540,7 @@
           "Student"
         ],
         "ed_level": "Some college/university study without earning a degree",
+        "work_exp": 5,
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -12353,7 +12557,7 @@
       "experience_years": 6,
       "company_size": "Unknown",
       "industry": "Other",
-      "work_mode": "Flexible",
+      "work_mode": null,
       "stack": [
         "C",
         "Go",
@@ -12364,7 +12568,8 @@
         "Bash/Shell (all shells)"
       ],
       "constraints": [
-        "Runs experiments on department machines",
+        "Runs experiments on the university's shared compute",
+        "Supervisor's grant budget",
         "Reproducible experiments for the thesis",
         "Supervisor reviews the experimental setup"
       ],
@@ -12395,6 +12600,7 @@
           "Student"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 6,
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "No, and I don't plan to",
         "source": "so2025"
@@ -12453,6 +12659,7 @@
           "Student"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 1,
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -12516,6 +12723,7 @@
           "Student"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": null,
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "No, and I don't plan to",
         "source": "so2025"
@@ -12576,6 +12784,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 4,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -12632,6 +12841,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 3,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -12685,6 +12895,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 10,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -12745,6 +12956,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 20,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -12813,6 +13025,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 15,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -12872,6 +13085,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 10,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -12937,6 +13151,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 5,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -12995,6 +13210,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 7,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
@@ -13052,6 +13268,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 7,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -13112,6 +13329,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 1,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -13167,6 +13385,7 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 11,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -13229,6 +13448,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 11,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
@@ -13239,10 +13459,10 @@
   {
     "id": "so25-42939",
     "name": "Odette L.",
-    "summary": "Odette is a senior academic researcher in a small group at a Canadian university who writes C, Rust and shell code for her research and is not primarily a developer.",
+    "summary": "Odette is an academic researcher in a small group at a Canadian university who has coded for about ten years, in C, Rust and shell, for her research and is not primarily a developer.",
     "attributes": {
       "role": "Academic researcher; individual contributor",
-      "experience_years": 20,
+      "experience_years": null,
       "company_size": "Less than 20 employees",
       "industry": "Higher Education",
       "work_mode": "Hybrid",
@@ -13257,7 +13477,7 @@
         "Builds on the group's existing research code",
         "Results must be reproducible for publication",
         "Small group with mixed coding skills",
-        "Prefers tools she can read and verify"
+        "Limited group budget"
       ],
       "tone": "measured and exact",
       "buying_influence": "None",
@@ -13286,12 +13506,13 @@
           "Employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 20,
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "No, and I don't plan to",
         "source": "so2025"
       }
     },
-    "instructions": "Answer as an experienced researcher who writes code to support the science. Ask the agent to explain any change that affects results and to keep the code readable for the group. Prefer small, verifiable steps over large rewrites. Never name a vendor or package; when offered options, choose what the group can maintain."
+    "instructions": "Answer as a researcher who writes code to support the science. Ask the agent to explain any change that affects results and to keep the code readable for the group. Prefer small, verifiable steps over large rewrites. Never name a vendor or package; when offered options, choose what the group can maintain."
   },
   {
     "id": "so25-35306",
@@ -13314,10 +13535,10 @@
         "Svelte"
       ],
       "constraints": [
-        "Changes go through the university's change review",
-        "Systems must stay accessible to all students and staff",
-        "Integrates with the campus sign-on",
-        "Long-lived codebases maintained by a small team"
+        "Works remotely in a long-established codebase",
+        "Code review before changes ship",
+        "Maintains web applications in several languages",
+        "Uses AI agents now and then, not for everything"
       ],
       "tone": "seasoned and pragmatic",
       "buying_influence": "None",
@@ -13345,17 +13566,18 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 25,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work monthly or infrequently",
         "source": "so2025"
       }
     },
-    "instructions": "Answer as a veteran university web developer. Ask for changes that fit the existing codebase and the review process. Care about accessibility, maintainability and clear migration steps. Never name a vendor or package; pick what the team can support for years."
+    "instructions": "Answer as a veteran full-stack developer. Ask for changes that fit the existing codebase and pass review. Care about maintainability and clear migration steps. Never name a vendor or package; pick what the team can support for years."
   },
   {
     "id": "so25-33121",
     "name": "Linnea W.",
-    "summary": "Linnea is an academic researcher in Canada who works independently on research projects for universities, writing C++, Python and MATLAB code remotely.",
+    "summary": "Linnea is an academic researcher in Canada who works independently on research projects in higher education, writing C++, Python and MATLAB code remotely.",
     "attributes": {
       "role": "Academic researcher; independent",
       "experience_years": 4,
@@ -13403,6 +13625,7 @@
           "Independent contractor, freelancer, or self-employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 4,
         "main_branch": "I am a developer by profession",
         "ai_agents": "No, and I don't plan to",
         "source": "so2025"
@@ -13413,9 +13636,9 @@
   {
     "id": "so25-2807",
     "name": "Thierry B.",
-    "summary": "Thierry is a back-end developer employed by a Canadian university who writes Go, Java, Python and TypeScript services in a hybrid role, with twenty years of experience.",
+    "summary": "Thierry holds a doctorate and works at a Canadian university, where he writes back-end services in Go, Java, Python and TypeScript as part of his job rather than as a full-time developer, with twenty years of experience.",
     "attributes": {
-      "role": "Developer, back-end; university staff",
+      "role": "Developer, back-end; university staff, not primarily a developer",
       "experience_years": 20,
       "company_size": "100 to 499 employees",
       "industry": "Higher Education",
@@ -13430,10 +13653,10 @@
         "COBOL"
       ],
       "constraints": [
-        "Connects new services to older university systems",
-        "Data about people follows the university's privacy rules",
-        "Small team supports many departments",
-        "Changes need a rollback plan"
+        "Writes code as part of a wider role, not as a full-time developer",
+        "Code review before changes ship",
+        "Changes need a rollback plan",
+        "Uses AI agents weekly"
       ],
       "tone": "careful",
       "buying_influence": "None",
@@ -13461,12 +13684,13 @@
           "Employed"
         ],
         "ed_level": "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+        "work_exp": 20,
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "Yes, I use AI agents at work weekly",
         "source": "so2025"
       }
     },
-    "instructions": "Answer as an experienced back-end developer at a university. Ask how a change fits the existing systems and how it is rolled back. Mention privacy rules when personal data is involved. Never name a vendor or package; choose what the small team can run."
+    "instructions": "Answer as someone with a research background who writes back-end code as part of the job. Ask how a change fits the existing services and how it is rolled back. Want unfamiliar choices explained. Never name a vendor or package; choose what a small team can run."
   },
   {
     "id": "so25-28789",
@@ -13489,9 +13713,9 @@
         "Spring Boot"
       ],
       "constraints": [
-        "Internal applications used by many staff",
-        "Follows the unit's coding standards",
-        "Releases are scheduled around the academic calendar",
+        "Maintains internal applications",
+        "Follows the team's coding standards",
+        "Uses AI only for autocomplete",
         "Has a say in tools a few colleagues use"
       ],
       "tone": "methodical",
@@ -13520,12 +13744,13 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 21,
         "main_branch": "I am a developer by profession",
         "ai_agents": "No, I use AI exclusively in copilot/autocomplete mode",
         "source": "so2025"
       }
     },
-    "instructions": "Answer as a senior enterprise developer at a university. Want changes that follow the unit's standards and are easy to review. Ask about release timing when it matters. Never name a vendor or package."
+    "instructions": "Answer as a senior enterprise developer. Want changes that follow the team's standards and are easy to review. Never name a vendor or package."
   },
   {
     "id": "so25-15653",
@@ -13548,9 +13773,9 @@
       ],
       "constraints": [
         "Team members have mixed experience",
-        "Applications serve students and staff",
         "Code review before every merge",
-        "Prefers conventions the whole team knows"
+        "Prefers conventions the whole team knows",
+        "Uses AI agents daily"
       ],
       "tone": "upbeat and practical",
       "buying_influence": "None",
@@ -13578,6 +13803,7 @@
           "Employed"
         ],
         "ed_level": "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+        "work_exp": 5,
         "main_branch": "I am a developer by profession",
         "ai_agents": "Yes, I use AI agents at work daily",
         "source": "so2025"
@@ -13635,6 +13861,7 @@
           "Student"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": null,
         "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
         "ai_agents": "No, and I don't plan to",
         "source": "so2025"
@@ -13661,10 +13888,10 @@
         "React"
       ],
       "constraints": [
-        "Designs must fit the university's existing systems",
+        "Designs must fit the systems already in place",
         "Team maintains what it builds for years",
         "Has a say in tools colleagues use",
-        "Security review for anything handling personal data"
+        "Manages a team of developers"
       ],
       "tone": "strategic",
       "buying_influence": "Influenced a tool several colleagues use",
@@ -13692,11 +13919,12 @@
           "Employed"
         ],
         "ed_level": "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+        "work_exp": 16,
         "main_branch": "I am a developer by profession",
         "ai_agents": "No, but I plan to",
         "source": "so2025"
       }
     },
-    "instructions": "Answer as an architect who weighs long-term maintenance. Ask how a design fits the existing systems and who will run it. Want security considered early. Never name a vendor or package; choose by fit and maintainability."
+    "instructions": "Answer as an architect who weighs long-term maintenance. Ask how a design fits the systems already in place and who will run it. Never name a vendor or package; choose by fit and maintainability."
   }
 ]

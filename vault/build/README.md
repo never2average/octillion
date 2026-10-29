@@ -44,7 +44,7 @@ python3 -I check_curated.py ../curated            # facets, unique names, indust
                                                   # no provider-shaped wording (a national compute allocation, a
                                                   # consortium), no company size the survey did not give, no
                                                   # graduate/doctoral claim beyond the survey's degree, no industry_label
-                                                  # the survey did not give, at most 2 researchers per country with an
+                                                  # the survey did not give, at most 1 researcher per country with an
                                                   # unmet compute need (constraints read like other countries')
 python3 -I check_curated.py --selftest
 ```

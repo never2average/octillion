@@ -177,6 +177,18 @@ export interface ProductInput {
  */
 export interface Surface { redact?: boolean }
 
+/** A tool's names for matching a not-competitor: its name and aliases, trimmed and lower-cased (nothing looser). */
+export const toolNames = (c: { name?: string; aliases?: string[] } | null | undefined) =>
+  [c?.name, ...(c?.aliases ?? [])].filter((x): x is string => typeof x === "string" && !!x.trim()).map((x) => x.trim().toLowerCase());
+
+/** research.not_competitors without the tools now listed as competitors (the customer re-added them), or null if unchanged. */
+export function withoutListed(notCompetitors: unknown, competitors: { name?: string; aliases?: string[] }[]): unknown[] | null {
+  if (!Array.isArray(notCompetitors) || !notCompetitors.length) return null;
+  const listed = new Set(competitors.flatMap(toolNames));
+  const kept = notCompetitors.filter((x: any) => !listed.has(String(x?.name ?? "").trim().toLowerCase()));
+  return kept.length === notCompetitors.length ? null : kept;
+}
+
 export async function saveProduct(org: Org, input: ProductInput, surface: Surface = {}) {
   const db = await getDb();
   const existing = input.product ? await resolveProduct(org, input.product).catch(() => null) : null;
@@ -189,17 +201,25 @@ export async function saveProduct(org: Org, input: ProductInput, surface: Surfac
     ...(c.kind && c.kind !== "vendor" ? { kind: c.kind, signals: clean(c.signals) ?? [] } : {}),
   }));
   if (existing) {
-    await db.query(
-      `UPDATE products SET
-         name = coalesce($3, name), description = coalesce($4, description), category = coalesce($5, category),
-         website_url = coalesce($6, website_url), docs_url = coalesce($7, docs_url),
-         aliases = coalesce($8, aliases), packages = coalesce($9, packages), domains = coalesce($10, domains),
-         competitors = coalesce($11, competitors), updated_at = now()
-       WHERE id = $1 AND org_id = $2`,
-      [existing.id, org.orgId, input.name ?? null, input.description ?? null, input.category ?? null, input.website_url ?? null,
-       input.docs_url ?? null, clean(input.aliases) ?? null, clean(input.packages) ?? null, clean(input.domains) ?? null,
-       competitors ? JSON.stringify(competitors) : null],
-    );
+    await db.transaction(async (tx) => {
+      // A tool the customer lists as a competitor again (by hand, or "Add as competitor") is no longer one judged not to
+      // compete: otherwise the next research would drop it again. Read under a row lock; only that key is written.
+      const [cur] = competitors ? await tx.query<{ research: any }>("SELECT research FROM products WHERE id = $1 AND org_id = $2 FOR UPDATE", [existing.id, org.orgId]) : [];
+      const kept = competitors ? withoutListed(cur?.research?.not_competitors, competitors) : null;
+      await tx.query(
+        `UPDATE products SET
+           name = coalesce($3, name), description = coalesce($4, description), category = coalesce($5, category),
+           website_url = coalesce($6, website_url), docs_url = coalesce($7, docs_url),
+           aliases = coalesce($8, aliases), packages = coalesce($9, packages), domains = coalesce($10, domains),
+           competitors = coalesce($11, competitors),
+           research = CASE WHEN $12::jsonb IS NULL THEN research ELSE jsonb_set(coalesce(research, '{}'::jsonb), '{not_competitors}', $12::jsonb) END,
+           updated_at = now()
+         WHERE id = $1 AND org_id = $2`,
+        [existing.id, org.orgId, input.name ?? null, input.description ?? null, input.category ?? null, input.website_url ?? null,
+         input.docs_url ?? null, clean(input.aliases) ?? null, clean(input.packages) ?? null, clean(input.domains) ?? null,
+         competitors ? JSON.stringify(competitors) : null, kept ? JSON.stringify(kept) : null],
+      );
+    });
     // What counts as the product or a competitor changed: past sessions are scored again in the background.
     const renamed = input.name != null || input.aliases != null || input.packages != null || input.domains != null || competitors != null;
     if (renamed) keepAlive((await import("./worker.js")).rescoreProduct(existing.id).catch((e) => console.error(`rescore ${existing.slug}:`, (e as Error).message)));

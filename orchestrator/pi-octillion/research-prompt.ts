@@ -102,7 +102,9 @@ Procedure:
    - Round 2 (critique), in this order: (1) eligibility: the profile's country, then each required gate; drop every
      failure, and an exact stack match never makes up for it. (2) a real user: sector is not role (a web developer
      in a university's IT department is not a researcher, nor is a student whose job is at a software company;
-     research_role says who is, academic_staff who is university staff). (3) stack against the platforms
+     research_role says who is, academic_staff who is university staff). When the audience admits researchers and
+     staff, prefer researchers: at most one academic_staff persona unless the gate admits staff only, and an
+     independent contractor researcher (facets.employment) only after researchers employed or studying there. (3) stack against the platforms
      the problems run on, seniority, company size, redundancy. Drop the weak ones and search again for better ones.
    - Keep critiquing, one round at a time, until a full critique finds nothing to change. That last round keeps the
      same set, is marked "converged": true and says in "why" what you checked. Its kept candidates are the personas.

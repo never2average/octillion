@@ -4,7 +4,7 @@
 //   npx tsx scripts/audience-test.ts
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { audienceFormIssues, hardKey, hardMisses, mergeAudience, personaSupplyQuestion, pickIssues, RESTRICTION_UNCITED, runPersonaCheck, type Audience, type Pick } from "../src/audience.js";
+import { audienceFormIssues, passesSoft, hardKey, hardMisses, mergeAudience, personaSupplyQuestion, pickIssues, RESTRICTION_UNCITED, runPersonaCheck, type Audience, type Pick } from "../src/audience.js";
 import { mentionsCountry } from "../src/facets.js";
 import { audienceEvidenceIssues, validateResearch } from "../src/research.js";
 
@@ -116,6 +116,25 @@ check("personas named for a run: an exclusive audience refuses ineligible ones a
   const global: Audience = { scope: "global", checked: "x".repeat(30) };
   assert.deepEqual(runPersonaCheck(global, [], true), { refuse: [], warn: [] });
   assert.deepEqual(runPersonaCheck(null, [pick("example-se-academic-researcher")], false), { refuse: [], warn: [] });
+});
+
+check("passesSoft: a profile matching every soft part (so the 3-persona rule never asks for the impossible)", () => {
+  const primary: Audience = { scope: "countries", countries: ["IN"], strictness: "primary", gates: [{ id: "f", requirement: "finance", strictness: "typical", match: { sector_any: ["finance"] } }],
+                              evidence: [{ url: SIGNUP, quote }], checked: "x".repeat(30) };
+  assert.ok(passesSoft(primary, { country: "IN", sector: "finance" }));
+  assert.ok(!passesSoft(primary, { country: "IN", sector: "industry" }) && !passesSoft(primary, { country: "US", sector: "finance" }));
+  assert.ok(passesSoft(alliance, pick("example-se-academic-researcher").facets), "hard parts are not soft parts");
+});
+
+check("question context and not-competitors helpers keep JSON valid and match only exact names and aliases", async () => {
+  const { trimContext } = await import("../src/questions.js");
+  const big = { note: "x".repeat(5000), searched: Array.from({ length: 50 }, (_, i) => `search_profiles {"country":["NZ"]} ${i}`), audience: alliance };
+  const t: any = trimContext(big);
+  assert.ok(t.note.length <= 601 && t.searched.length === 20 && JSON.parse(JSON.stringify(t)).audience.countries[0] === "CA", "fields cut, structure kept");
+  const { withoutListed, toolNames } = await import("../src/queries.js");
+  assert.deepEqual(toolNames({ name: " Slurm ", aliases: ["SLURM Workload Manager"] }), ["slurm", "slurm workload manager"]);
+  assert.deepEqual(withoutListed([{ name: "Slurm" }, { name: "Rescale" }], [{ name: "Slurm Workload Manager", aliases: ["slurm"] }]), [{ name: "Rescale" }]);
+  assert.equal(withoutListed([{ name: "Slurm" }], [{ name: "Slurmish" }]), null, "no partial matches");
 });
 
 check("Neon-like (global): picks from any country raise nothing", () => {

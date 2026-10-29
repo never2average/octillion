@@ -9,14 +9,14 @@ import { companyHintForResearch } from "./context.js";
 import { completeProspect, prospectIssues } from "./prospect.js";
 import { capture, orgEvent } from "./telemetry.js";
 import { randomId, type Org } from "./auth.js";
-import { NO_PLAN, WORKSPACE_TEMPLATES, config, getProduct, resolveProduct, runSimulation, saveProduct, browseTaskLibrary } from "./queries.js";
+import { NO_PLAN, WORKSPACE_TEMPLATES, config, getProduct, resolveProduct, runSimulation, saveProduct, browseTaskLibrary, toolNames } from "./queries.js";
 import { sessionsLimit } from "./limits.js";
 import { orgBudget } from "./billing.js";
 import { PLATFORMS, isPlatform, platformOf } from "./platform.js";
 import type { Tool } from "./scoring.js";
 import { capacityStatus } from "./autoscaler.js";
 import { environmentIssues, resolveEnvironment, type PersonaEnvironment } from "../orchestrator/core/environment.js";
-import { NO_ELIGIBLE_PERSONAS, RESTRICTION_UNCITED, restrictionEvidence, hardKey, audienceFormIssues, effectiveAudience, eligibleSearch, hardSql, personaSupplyQuestion, pickIssues, urlNorm, type Audience, type AudienceGap } from "./audience.js";
+import { NO_ELIGIBLE_PERSONAS, RESTRICTION_UNCITED, restrictionEvidence, hardKey, passesSoft, audienceFormIssues, effectiveAudience, eligibleSearch, hardSql, personaSupplyQuestion, pickIssues, urlNorm, type Audience, type AudienceGap } from "./audience.js";
 import { REGIONS, ROLES, SECTORS, countryOfWord, countryTexts, isIndustry, isIso2, isRegion, isRole, isSector, mentionsCountry, INDUSTRIES } from "./facets.js";
 
 /**
@@ -217,8 +217,8 @@ export async function queueResearch(orgId: number, productId: number, input: Rec
 export async function getOnboarding(org: Org, input: { research_id?: string; product?: string }) {
   const db = await getDb();
   const [job] = input.research_id
-    ? await db.query<any>("SELECT * FROM product_research WHERE id = $1 AND org_id = $2", [input.research_id, org.orgId])
-    : await db.query<any>("SELECT * FROM product_research WHERE org_id = $1 AND product_id = $2 ORDER BY created_at DESC LIMIT 1",
+    ? await db.query<any>(`SELECT ${JOB_COLUMNS} FROM product_research WHERE id = $1 AND org_id = $2`, [input.research_id, org.orgId])
+    : await db.query<any>(`SELECT ${JOB_COLUMNS} FROM product_research WHERE org_id = $1 AND product_id = $2 ORDER BY created_at DESC LIMIT 1`,
                           [org.orgId, (await resolveProduct(org, input.product)).id]);
   if (!job) throw new Error(input.research_id ? `No onboarding ${input.research_id}` : "This product has not been onboarded yet; use onboard_product.");
   const product = await getProduct(org, String(job.product_id));
@@ -293,8 +293,11 @@ async function withStoredProduct(input: Record<string, any>, productId: number |
          placement: row?.research?.placement ?? null } } : {}) };
 }
 
+/** A research job's columns without pages (the fetched pages' text, read only to check audience evidence). */
+const JOB_COLUMNS = "id, org_id, product_id, status, stage, note, input, run, result, error, attempts, worker_id, simulation_id, created_at, started_at, heartbeat_at, finished_at, sources, searches, kind, request_id, architect_searches, archive_key, archived_at, archive_claimed_at";
+
 async function runningJob(id: string) {
-  const [job] = await (await getDb()).query<any>("/* tenant: research id checked against the job token in http.ts (/research/:id) */ SELECT * FROM product_research WHERE id = $1", [id]);
+  const [job] = await (await getDb()).query<any>(`/* tenant: research id checked against the job token in http.ts (/research/:id) */ SELECT ${JOB_COLUMNS} FROM product_research WHERE id = $1`, [id]);
   if (!job) throw Object.assign(new Error(`No research job ${id}`), { status: 404 });
   if (job.status !== "running") throw Object.assign(new Error(`Research ${id} is ${job.status}, not running`), { status: 409 });
   return job;
@@ -454,6 +457,15 @@ export function personaPartIssues(r: ResearchResult, words: string[]): string[] 
   if (!(gap != null && !personas.length))
     issues.push(...selectionIssues("personas", r.selection?.personas, personas.map((x: any) => x?.profile_slug).filter(Boolean)));
   return issues;
+}
+
+/**
+ * Questions come last, once the product, personas and tasks are written: a failure there (a malformed question) is
+ * logged and never leaves research half applied.
+ */
+async function settleQuestionsAfter(...args: Parameters<typeof settleQuestions>) {
+  try { await settleQuestions(...args); }
+  catch (e) { console.error(`research ${args[1]}: questions not settled: ${(e as Error).message}`); }
 }
 
 /**
@@ -664,7 +676,7 @@ export async function competitorIssues(job: { sources?: { url: string }[]; input
  * entry per URL (a page fetched again replaces its text); past MAX_PAGES distinct pages the call fails (409), so the
  * orchestrator knows that page cannot be cited instead of the server dropping it silently.
  */
-const MAX_PAGES = 200, MAX_PAGE_CHARS = 60_000;
+const MAX_PAGES = 200, MAX_PAGE_CHARS = 40_000; // fetch_url returns at most 40,000 characters a page
 export async function recordFetchedPage(id: string, page: { url?: unknown; text?: unknown }) {
   await runningJob(id);
   if (typeof page?.url !== "string" || !/^https?:\/\//.test(page.url) || typeof page.text !== "string")
@@ -734,20 +746,27 @@ function researchReading(a: any, customer: boolean): Audience | null {
 
 /**
  * A restricted audience with enough eligible people gets at least 3 personas, so one profile's quirks never stand for
- * everyone who may use the product.
+ * everyone who may use the product. Only when 3 picks can also meet the soft parts (half of them must): 4+ profiles
+ * pass the hard parts and 2+ of those every soft part, so two of those plus any eligible third always satisfy both.
  */
 async function personaCountIssues(job: any, r: ResearchResult | undefined): Promise<string[]> {
   const picks = (r?.personas ?? []).length;
   if (!picks || picks >= 3) return [];
   const a = await jobAudience(job, r);
   if (!a || hardKey(a) === hardKey(null)) return [];
-  const { n } = await eligibleCount(a);
-  return n >= 4 ? [`${n} profiles may use this product: pick at least 3 personas, different in role, seniority and education (search_profiles ${JSON.stringify(eligibleSearch(a))})`] : [];
+  const params: unknown[] = [];
+  const rows = await (await getDb()).query<{ facets: any }>(
+    `SELECT attributes->'facets' AS facets FROM developer_profiles WHERE active AND org_id IS NULL AND ${hardSql(a, params)}`, params);
+  const soft = rows.filter((x) => passesSoft(a, x.facets)).length;
+  return rows.length >= 4 && soft >= 2
+    ? [`${rows.length} profiles may use this product: pick at least 3 personas, different in role, seniority and education, at least 2 of them matching its typical users (search_profiles ${JSON.stringify(eligibleSearch(a))})`] : [];
 }
 
 /** Everything wrong with a job's result: the whole research, or (personas_only) the personas part and the audience. */
 async function resultIssues(job: any, r: ResearchResult | undefined): Promise<string[]> {
   const customer = await customerOwned(job);
+  const [{ pages }] = await (await getDb()).query<{ pages: any[] }>("/* tenant: research id checked against the job token in http.ts (/research/:id) */ SELECT pages FROM product_research WHERE id = $1", [job.id]);
+  job = { ...job, pages };
   const shared = async () => [...(await profileIssues(r)), ...(await audienceIssues(job, r)), ...audienceEvidenceIssues(job, r, customer), ...(await gapIssues(job, r)),
                               ...(await personaCountIssues(job, r))];
   if (isPersonasOnly(job)) {
@@ -830,7 +849,7 @@ const confirmedBefore = (a: any) => a?.source === "customer" && a?.confirmed ===
 /**
  * The customer's questions after a research: research's own (one open question per tool; an audience question about
  * another audience replaces the open one), a persona_supply question when nobody fits (not again once the customer
- * answered, or it was dismissed, for the same audience), and the open ones now out of date dismissed: persona_supply
+ * answered one for the same audience; one dismissed because personas were found does not count), and the open ones now out of date dismissed: persona_supply
  * once personas were found, the review's audience question once the audience is confirmed or the orchestrator reports
  * agreement (`check`, sent beside the result: the result's own claims count for nothing). A customer-confirmed audience
  * is never asked about again.
@@ -845,7 +864,7 @@ async function settleQuestions(job: any, id: string, r: ResearchResult, audience
   if (r.audience_gap && audience) {
     const past = await db.query<{ context: any }>(
       `/* tenant: product of the research job (job checked against the job token in http.ts) */ SELECT context FROM product_questions
-        WHERE product_id = $1 AND kind = 'audience' AND subject = 'persona_supply' AND status IN ('answered', 'dismissed')`, [job.product_id]);
+        WHERE product_id = $1 AND kind = 'audience' AND subject = 'persona_supply' AND status = 'answered'`, [job.product_id]);
     if (!past.some((q) => hardKey(q.context?.audience) === hardKey(audience))) questions.push(personaSupplyQuestion(audience, r.audience_gap));
   }
   if (questions.length) await (await import("./questions.js")).askQuestions(job.org_id, job.product_id, id, questions);
@@ -876,7 +895,6 @@ async function completePersonasOnly(job: any, id: string, r: ResearchResult, che
                                         personas_research_id: id, personas_at: new Date().toISOString() })]);
     return { audience, confirmed: confirmedBefore(stored) };
   });
-  await settleQuestions(job, id, r, audience, confirmed, check);
   const personaSlugs: string[] = [];
   await db.transaction(async (tx) => {
     await tx.query("/* tenant: product of the research job (job checked against the job token in http.ts) */ UPDATE product_personas SET active = false WHERE product_id = $1", [job.product_id]);
@@ -902,6 +920,7 @@ async function completePersonasOnly(job: any, id: string, r: ResearchResult, che
       "/* tenant: research id checked against the job token in http.ts (/research/:id) */ UPDATE product_research SET status = 'completed', stage = 'done', result = $2, finished_at = now(), heartbeat_at = now() WHERE id = $1",
       [id, JSON.stringify(r)]);
   });
+  await settleQuestionsAfter(job, id, r, audience, confirmed, check);
   return { status: "completed", product: prod.slug, personas: personaSlugs, scenarios: 0, simulation_id: null, run_error: null, personas_only: true };
 }
 
@@ -953,8 +972,10 @@ export async function completeResearch(id: string, body: { status?: string; erro
   // neither research nor an earlier research's list brings them back.
   const notCompetitors = mergeNotCompetitors(prod.research?.not_competitors, p.not_competitors);
   const notCompeting = new Set(notCompetitors.map((c) => c.name.trim().toLowerCase()));
-  const competitors = [...found.filter((c) => !notCompeting.has(c.name.trim().toLowerCase())),
-                       ...(prod.competitors ?? []).filter((c) => !known.has(c.name.trim().toLowerCase()) && !notCompeting.has(c.name.trim().toLowerCase()))];
+  // Matched on the tool's exact name or any alias (normalised), so it never returns under another of its names.
+  const judged = (c: { name: string; aliases?: string[] }) => toolNames(c).some((n) => notCompeting.has(n));
+  const competitors = [...found.filter((c) => !judged(c)),
+                       ...(prod.competitors ?? []).filter((c) => !known.has(c.name.trim().toLowerCase()) && !judged(c))];
   await saveProduct(org, {
     product: prod.slug, name: p.name, description: p.description, category: p.category,
     website_url: p.website_url ?? job.input.website_url ?? undefined, docs_url: p.docs_url ?? job.input.docs_url ?? undefined,
@@ -971,7 +992,6 @@ export async function completeResearch(id: string, body: { status?: string; erro
         ...(audience ? { audience } : {}), ...(r.audience_gap ? { audience_gap: r.audience_gap } : {}), at: new Date().toISOString() })]);
     return { audience, confirmed: confirmedBefore(cur?.research?.audience) };
   });
-  await settleQuestions(job, id, r, audience, confirmed, check);
 
   const personaSlugs: string[] = [];
   const slugOf = new Map<string, string>();
@@ -1027,6 +1047,8 @@ export async function completeResearch(id: string, body: { status?: string; erro
       "/* tenant: research id checked against the job token in http.ts (/research/:id) */ UPDATE product_research SET status = 'completed', stage = 'done', result = $2, finished_at = now(), heartbeat_at = now() WHERE id = $1",
       [id, JSON.stringify(r)]);
   });
+
+  await settleQuestionsAfter(job, id, r, audience, confirmed, check);
 
   // Launch the representative run unless the customer opted out; fit it under the per-run session cap (the server's,
   // or the account's own Budget rules limit if lower), so a low limit makes the run smaller instead of failing it.
