@@ -56,6 +56,21 @@ export async function fetchVault() {
   return { profiles: profiles as VaultProfile[], tasks: tasks as VaultTask[] };
 }
 
+/**
+ * One vault profile as its developer_profiles row (shared by syncVault and src/profile-sync.ts). Refuses a profile
+ * without a name or a survey country: research filters personas on their survey facets and the server checks every
+ * pick against them (src/research.ts audienceIssues), so a profile without a country could be picked for any market.
+ */
+export function vaultProfileRow(p: VaultProfile, i: number) {
+  if (!p?.name) throw new Error(`Vault profile #${i + 1} is missing name`);
+  const { id, slug, name, summary, instructions, attributes, ...rest } = p;
+  const country = ((attributes as any)?.facets ?? (rest as any).facets)?.country;
+  if (typeof country !== "string" || !/^[A-Z]{2}$/.test(country))
+    throw new Error(`Vault profile #${i + 1} is missing attributes.facets.country (ISO2; run vault/build/so_backfill.py apply)`);
+  return { slug: slug ? slugify(slug) : slugify(String(id ?? name)), external_id: id == null ? null : String(id), name, summary: summary ?? "",
+           attributes: JSON.stringify({ ...rest, ...(attributes ?? {}) }), instructions: instructions ?? "" };
+}
+
 /** Pull the vault into Postgres. Returns counts. */
 export async function syncVault() {
   const { profiles, tasks } = await fetchVault();
@@ -65,14 +80,8 @@ export async function syncVault() {
     let keptProfiles = 0, keptTasks = 0;
     const profileSlugs: string[] = [];
     for (const [i, p] of profiles.entries()) {
-      if (!p?.name) throw bad("profile", i, "name");
-      const { id, slug, name, summary, instructions, attributes, ...rest } = p;
-      // Research filters personas on their survey facets and the server checks every pick against them
-      // (src/research.ts audienceIssues): a profile without a country could be picked for any market.
-      const country = ((attributes as any)?.facets ?? (rest as any).facets)?.country;
-      if (typeof country !== "string" || !/^[A-Z]{2}$/.test(country)) throw bad("profile", i, "attributes.facets.country (ISO2; run vault/build/so_backfill.py apply)");
-      const s = slug ? slugify(slug) : slugify(String(id ?? name));
-      profileSlugs.push(s);
+      const r = vaultProfileRow(p, i);
+      profileSlugs.push(r.slug);
       const wrote = await tx.query(
         // Shared vault rows only: a vault slug that collides with an organization's private persona, or with a persona an
         // admin edited or wrote, never overwrites it.
@@ -82,7 +91,7 @@ export async function syncVault() {
            attributes = excluded.attributes, instructions = excluded.instructions, active = true, synced_at = now()
          WHERE developer_profiles.org_id IS NULL AND developer_profiles.source = 'vault' AND developer_profiles.edited_at IS NULL
          RETURNING 1`,
-        [s, id == null ? null : String(id), name, summary ?? "", JSON.stringify({ ...rest, ...(attributes ?? {}) }), instructions ?? ""],
+        [r.slug, r.external_id, r.name, r.summary, r.attributes, r.instructions],
       );
       if (!wrote.length) keptProfiles++;
     }

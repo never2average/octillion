@@ -9,7 +9,8 @@ Octillion pulls **developer profiles** and **tasks** from the vault with `npm ru
 
 **Profile:** `{id, slug?, name, summary?, instructions?, attributes?: {role, experience_years, company_size, stack[], constraints[], tone, ...}}`.
 Every profile needs `attributes.facets` with at least `country` (ISO2), plus `region`, `sector` (academia | government |
-finance | healthcare | industry) and `research_role` (vault/build/so_backfill.py writes them from the survey): research
+finance | healthcare | industry), `research_role` (research-affiliated) and `academic_staff` (a university's technical
+staff) (vault/build/so_backfill.py writes them from the survey): research
 picks personas by who may use a product, and the sync refuses a profile without a country.
 The orchestrator role-plays the profile when a sub-agent asks a question. `instructions` tells it how this developer answers.
 A profile must never mention a customer's product.

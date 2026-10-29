@@ -19,12 +19,15 @@ export SO_SURVEY_PARQUET=/path/to/survey_2025.parquet   # Stack Overflow Develop
 .venv/bin/python so_researchers.py merge $VAULT_BUILD_WORK/researcher-facts.json DRAFTS.json ../curated/profiles.json
 ```
 
-Then load into Postgres: `VAULT_DIR=vault/curated npm run vault:sync`.
+Then load into a local Postgres: `VAULT_DIR=vault/curated npm run vault:sync`. Into a shared or production database,
+load the profiles only, with a dry run first (never `vault:sync`: VAULT_URL wins over VAULT_DIR, it retires every task
+and profile not in the directory and it runs migrations):
+`DATABASE_URL=... npx tsx scripts/sync-profiles.ts vault/curated --dry-run`, then the same without `--dry-run`.
 
 ## Survey facets, names and thin segments (no model, no paid API)
 
 Every shared profile carries `attributes.facets`: its respondent's own survey answers (country as ISO2, region, sector,
-`sector_basis`, `research_role`, dev type, industry, org size, employment, AI-agent use). Research filters on them and
+`sector_basis`, `research_role`, `academic_staff`, dev type, industry, org size, employment, AI-agent use). Research filters on them and
 the server checks every persona pick against the product's audience with them (`src/audience.ts`); `npm run vault:sync`
 refuses a profile without `facets.country`. Use the venv at `/root/persona-axes-dataset/rl/.venv/bin/python` (pyarrow,
 pandas, huggingface_hub) with `-I`.
@@ -43,8 +46,12 @@ python3 -I check_curated.py --selftest
 
 - `so_common.derive_sector` (shared by the backfill and both samplers), first match wins: academia (a student, an
   academic researcher, or Industry = Higher Education), government, finance (banking, fintech, insurance), healthcare,
-  else industry. `research_role` (academic researcher, applied or data scientist, or a student) is separate: a web
-  developer in a university's IT department is academia by sector but not a researcher.
+  else industry. `research_role` is separate and means research-affiliated: an academic researcher, a data or applied
+  scientist whose industry is Higher Education, or a student who names no industry other than Higher Education (a
+  student working at a software company is academia by sector but no researcher). `academic_staff` is a university's
+  technical staff (Industry Higher Education, employed, a developer or infrastructure role: research software engineers,
+  research-computing staff), so an audience can admit "researchers or the staff they sponsor" without calling staff
+  researchers. `python -I so_backfill.py selftest` checks both on the cases that went wrong.
 - `geo.py` maps the survey's country names to ISO2 and regions, and the names and demonyms prose uses; `python geo.py
   --ts > ../../src/geo-data.ts` regenerates the server's copy.
 
@@ -62,7 +69,7 @@ python -I so_backfill.py apply && python3 -I check_curated.py ../curated
 
 `--relax-ai` makes "uses AI agents at work" a preference rather than a filter (only 12 Canadian academic researchers not
 already in the data use agents at work); the answer is kept in `facets.ai_agents`. Loading the result into production
-(`vault:sync`) is an operator step.
+(`scripts/sync-profiles.ts`, above) is an operator step.
 
 Rules the build enforces:
 - Tasks and personas never name a vendor, hosted service, database product, cloud or third-party package (regex check

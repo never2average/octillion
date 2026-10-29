@@ -45,6 +45,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, QA or test",
         "industry_survey": "Software Development",
         "org_size": "5,000 to 9,999 employees",
@@ -100,6 +101,7 @@
           "Industry: Government"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Government",
         "org_size": "100 to 499 employees",
@@ -157,6 +159,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Architect, software or solutions",
         "industry_survey": "Software Development",
         "org_size": "100 to 499 employees",
@@ -213,6 +216,7 @@
           "Industry: Retail and Consumer Services"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, mobile",
         "industry_survey": "Retail and Consumer Services",
         "org_size": "1,000 to 4,999 employees",
@@ -284,6 +288,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Project manager",
         "industry_survey": "Software Development",
         "org_size": "Less than 20 employees",
@@ -339,6 +344,7 @@
           "Industry: Other:"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Other",
         "org_size": "Less than 20 employees",
@@ -399,6 +405,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Software Development",
         "org_size": "100 to 499 employees",
@@ -458,6 +465,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Software Development",
         "org_size": null,
@@ -521,6 +529,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, embedded applications or devices",
         "industry_survey": "Software Development",
         "org_size": "Less than 20 employees",
@@ -574,6 +583,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, back-end",
         "industry_survey": "Software Development",
         "org_size": "20 to 99 employees",
@@ -636,6 +646,7 @@
           "Industry: Fintech"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Fintech",
         "org_size": "Less than 20 employees",
@@ -691,6 +702,7 @@
           "Industry: Healthcare"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, front-end",
         "industry_survey": "Healthcare",
         "org_size": "Just me - I am a freelancer, sole proprietor, etc.",
@@ -749,6 +761,7 @@
           "Industry: Internet, Telecomm or Information Services"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, back-end",
         "industry_survey": "Internet, Telecomm or Information Services",
         "org_size": "100 to 499 employees",
@@ -811,6 +824,7 @@
           "Industry: Other:"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Other",
         "org_size": "20 to 99 employees",
@@ -864,6 +878,7 @@
           "Industry: Computer Systems Design and Services"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, desktop or enterprise applications",
         "industry_survey": "Computer Systems Design and Services",
         "org_size": null,
@@ -914,6 +929,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Software Development",
         "org_size": "20 to 99 employees",
@@ -984,6 +1000,7 @@
           "Industry: Banking/Financial Services"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Architect, software or solutions",
         "industry_survey": "Banking/Financial Services",
         "org_size": "5,000 to 9,999 employees",
@@ -1046,6 +1063,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, back-end",
         "industry_survey": "Software Development",
         "org_size": "5,000 to 9,999 employees",
@@ -1098,6 +1116,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Software Development",
         "org_size": null,
@@ -1157,6 +1176,7 @@
           "Industry: Other:"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Other",
         "org_size": "Less than 20 employees",
@@ -1208,6 +1228,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, back-end",
         "industry_survey": "Software Development",
         "org_size": "10,000 or more employees",
@@ -1266,6 +1287,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, back-end",
         "industry_survey": "Software Development",
         "org_size": null,
@@ -1325,6 +1347,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, back-end",
         "industry_survey": "Software Development",
         "org_size": "100 to 499 employees",
@@ -1377,6 +1400,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Architect, software or solutions",
         "industry_survey": "Software Development",
         "org_size": "10,000 or more employees",
@@ -1439,6 +1463,7 @@
           "Industry: Healthcare"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Other (please specify):",
         "industry_survey": "Healthcare",
         "org_size": "1,000 to 4,999 employees",
@@ -1501,6 +1526,7 @@
           "Industry: Computer Systems Design and Services"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Architect, software or solutions",
         "industry_survey": "Computer Systems Design and Services",
         "org_size": "Less than 20 employees",
@@ -1555,6 +1581,7 @@
           "Industry: Energy"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "AI/ML engineer",
         "industry_survey": "Energy",
         "org_size": "5,000 to 9,999 employees",
@@ -1624,6 +1651,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Software Development",
         "org_size": "10,000 or more employees",
@@ -1686,6 +1714,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Software Development",
         "org_size": "20 to 99 employees",
@@ -1742,6 +1771,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, back-end",
         "industry_survey": "Software Development",
         "org_size": "Less than 20 employees",
@@ -1801,6 +1831,7 @@
           "Industry: Fintech"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, front-end",
         "industry_survey": "Fintech",
         "org_size": "20 to 99 employees",
@@ -1860,6 +1891,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Architect, software or solutions",
         "industry_survey": "Software Development",
         "org_size": "Just me - I am a freelancer, sole proprietor, etc.",
@@ -1917,6 +1949,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, back-end",
         "industry_survey": "Software Development",
         "org_size": "100 to 499 employees",
@@ -1979,6 +2012,7 @@
           "Industry: Fintech"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Fintech",
         "org_size": "20 to 99 employees",
@@ -2037,6 +2071,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, game or graphics",
         "industry_survey": "Software Development",
         "org_size": null,
@@ -2086,6 +2121,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, desktop or enterprise applications",
         "industry_survey": "Software Development",
         "org_size": "20 to 99 employees",
@@ -2141,6 +2177,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Software Development",
         "org_size": null,
@@ -2199,6 +2236,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, back-end",
         "industry_survey": "Software Development",
         "org_size": "100 to 499 employees",
@@ -2254,6 +2292,7 @@
           "Industry: Higher Education"
         ],
         "research_role": false,
+        "academic_staff": true,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Higher Education",
         "org_size": "10,000 or more employees",
@@ -2315,6 +2354,7 @@
           "Industry: Fintech"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Data engineer",
         "industry_survey": "Fintech",
         "org_size": "500 to 999 employees",
@@ -2385,6 +2425,7 @@
           "Industry: Retail and Consumer Services"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Retail and Consumer Services",
         "org_size": "10,000 or more employees",
@@ -2446,6 +2487,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Software Development",
         "org_size": "Just me - I am a freelancer, sole proprietor, etc.",
@@ -2499,6 +2541,7 @@
           "Industry: Insurance"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, front-end",
         "industry_survey": "Insurance",
         "org_size": "10,000 or more employees",
@@ -2556,6 +2599,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Software Development",
         "org_size": "Less than 20 employees",
@@ -2620,6 +2664,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Senior executive (C-suite, VP, etc.)",
         "industry_survey": "Software Development",
         "org_size": "20 to 99 employees",
@@ -2685,6 +2730,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Engineering manager",
         "industry_survey": "Software Development",
         "org_size": "1,000 to 4,999 employees",
@@ -2741,6 +2787,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, front-end",
         "industry_survey": "Software Development",
         "org_size": "10,000 or more employees",
@@ -2801,6 +2848,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Architect, software or solutions",
         "industry_survey": "Software Development",
         "org_size": "Less than 20 employees",
@@ -2858,6 +2906,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, back-end",
         "industry_survey": "Software Development",
         "org_size": null,
@@ -2916,6 +2965,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, desktop or enterprise applications",
         "industry_survey": "Software Development",
         "org_size": "Less than 20 employees",
@@ -2976,6 +3026,7 @@
           "Industry: Insurance"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Insurance",
         "org_size": "100 to 499 employees",
@@ -3032,6 +3083,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Architect, software or solutions",
         "industry_survey": "Software Development",
         "org_size": "10,000 or more employees",
@@ -3102,6 +3154,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Software Development",
         "org_size": "Just me - I am a freelancer, sole proprietor, etc.",
@@ -3159,6 +3212,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, front-end",
         "industry_survey": "Software Development",
         "org_size": "500 to 999 employees",
@@ -3221,6 +3275,7 @@
           "Industry: Retail and Consumer Services"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Retail and Consumer Services",
         "org_size": "Just me - I am a freelancer, sole proprietor, etc.",
@@ -3291,6 +3346,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Data engineer",
         "industry_survey": "Software Development",
         "org_size": "Just me - I am a freelancer, sole proprietor, etc.",
@@ -3356,6 +3412,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Data engineer",
         "industry_survey": "Software Development",
         "org_size": "500 to 999 employees",
@@ -3410,6 +3467,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, AI apps or physical AI",
         "industry_survey": "Software Development",
         "org_size": null,
@@ -3466,6 +3524,7 @@
           "Industry: Healthcare"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Healthcare",
         "org_size": "100 to 499 employees",
@@ -3522,6 +3581,7 @@
           "Industry: Banking/Financial Services"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "AI/ML engineer",
         "industry_survey": "Banking/Financial Services",
         "org_size": "1,000 to 4,999 employees",
@@ -3579,6 +3639,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, back-end",
         "industry_survey": "Software Development",
         "org_size": "Less than 20 employees",
@@ -3636,6 +3697,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "AI/ML engineer",
         "industry_survey": "Software Development",
         "org_size": null,
@@ -3689,6 +3751,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, desktop or enterprise applications",
         "industry_survey": "Software Development",
         "org_size": "10,000 or more employees",
@@ -3748,6 +3811,7 @@
           "Industry: Fintech"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, back-end",
         "industry_survey": "Fintech",
         "org_size": "1,000 to 4,999 employees",
@@ -3805,6 +3869,7 @@
           "Industry: Media & Advertising Services"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, front-end",
         "industry_survey": "Media & Advertising Services",
         "org_size": "10,000 or more employees",
@@ -3856,6 +3921,7 @@
           "Industry: Internet, Telecomm or Information Services"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, embedded applications or devices",
         "industry_survey": "Internet, Telecomm or Information Services",
         "org_size": "5,000 to 9,999 employees",
@@ -3912,6 +3978,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Software Development",
         "org_size": "20 to 99 employees",
@@ -3969,6 +4036,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Software Development",
         "org_size": null,
@@ -4021,6 +4089,7 @@
           "Industry: Manufacturing"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Data engineer",
         "industry_survey": "Manufacturing",
         "org_size": "5,000 to 9,999 employees",
@@ -4074,6 +4143,7 @@
           "Industry: Banking/Financial Services"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Banking/Financial Services",
         "org_size": "500 to 999 employees",
@@ -4137,6 +4207,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Engineering manager",
         "industry_survey": "Software Development",
         "org_size": "20 to 99 employees",
@@ -4193,6 +4264,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, desktop or enterprise applications",
         "industry_survey": "Software Development",
         "org_size": null,
@@ -4244,6 +4316,7 @@
           "Industry: Other:"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, embedded applications or devices",
         "industry_survey": "Other",
         "org_size": "1,000 to 4,999 employees",
@@ -4311,6 +4384,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Software Development",
         "org_size": "Less than 20 employees",
@@ -4370,6 +4444,7 @@
           "Industry: Media & Advertising Services"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, mobile",
         "industry_survey": "Media & Advertising Services",
         "org_size": "1,000 to 4,999 employees",
@@ -4429,6 +4504,7 @@
           "Industry: Computer Systems Design and Services"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Architect, software or solutions",
         "industry_survey": "Computer Systems Design and Services",
         "org_size": "100 to 499 employees",
@@ -4489,6 +4565,7 @@
           "Industry: Fintech"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, back-end",
         "industry_survey": "Fintech",
         "org_size": "Less than 20 employees",
@@ -4548,6 +4625,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Architect, software or solutions",
         "industry_survey": "Software Development",
         "org_size": "500 to 999 employees",
@@ -4624,6 +4702,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Other (please specify):",
         "industry_survey": "Software Development",
         "org_size": "20 to 99 employees",
@@ -4675,6 +4754,7 @@
           "Industry: Fintech"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, back-end",
         "industry_survey": "Fintech",
         "org_size": "100 to 499 employees",
@@ -4738,6 +4818,7 @@
           "Industry: Higher Education"
         ],
         "research_role": false,
+        "academic_staff": true,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Higher Education",
         "org_size": "10,000 or more employees",
@@ -4797,6 +4878,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, front-end",
         "industry_survey": "Software Development",
         "org_size": "20 to 99 employees",
@@ -4850,6 +4932,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, desktop or enterprise applications",
         "industry_survey": "Software Development",
         "org_size": "1,000 to 4,999 employees",
@@ -4908,6 +4991,7 @@
           "Industry: Banking/Financial Services"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Architect, software or solutions",
         "industry_survey": "Banking/Financial Services",
         "org_size": "5,000 to 9,999 employees",
@@ -4966,6 +5050,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, back-end",
         "industry_survey": "Software Development",
         "org_size": "1,000 to 4,999 employees",
@@ -5021,6 +5106,7 @@
           "Industry: Other:"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Other",
         "org_size": "100 to 499 employees",
@@ -5073,6 +5159,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, back-end",
         "industry_survey": "Software Development",
         "org_size": "Less than 20 employees",
@@ -5125,6 +5212,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Other (please specify):",
         "industry_survey": "Software Development",
         "org_size": "100 to 499 employees",
@@ -5181,6 +5269,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, mobile",
         "industry_survey": "Software Development",
         "org_size": "20 to 99 employees",
@@ -5232,6 +5321,7 @@
           "Industry: Other:"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, back-end",
         "industry_survey": "Other",
         "org_size": "20 to 99 employees",
@@ -5300,6 +5390,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Software Development",
         "org_size": "Less than 20 employees",
@@ -5356,6 +5447,7 @@
           "Industry: Other:"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Other",
         "org_size": null,
@@ -5426,6 +5518,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "UX, Research Ops or UI design professional",
         "industry_survey": "Software Development",
         "org_size": "1,000 to 4,999 employees",
@@ -5479,7 +5572,8 @@
         "sector_basis": [
           "Industry: Software Development"
         ],
-        "research_role": true,
+        "research_role": false,
+        "academic_staff": false,
         "dev_type": "Applied scientist",
         "industry_survey": "Software Development",
         "org_size": "20 to 99 employees",
@@ -5531,6 +5625,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, mobile",
         "industry_survey": "Software Development",
         "org_size": null,
@@ -5593,6 +5688,7 @@
           "Industry: Banking/Financial Services"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Banking/Financial Services",
         "org_size": "20 to 99 employees",
@@ -5647,6 +5743,7 @@
           "Industry: Healthcare"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, back-end",
         "industry_survey": "Healthcare",
         "org_size": "100 to 499 employees",
@@ -5698,6 +5795,7 @@
           "Industry: Healthcare"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, back-end",
         "industry_survey": "Healthcare",
         "org_size": "100 to 499 employees",
@@ -5748,6 +5846,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, mobile",
         "industry_survey": "Software Development",
         "org_size": "1,000 to 4,999 employees",
@@ -5797,7 +5896,8 @@
         "sector_basis": [
           "Industry: Software Development"
         ],
-        "research_role": true,
+        "research_role": false,
+        "academic_staff": false,
         "dev_type": "Data scientist",
         "industry_survey": "Software Development",
         "org_size": "Less than 20 employees",
@@ -5857,6 +5957,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Software Development",
         "org_size": "100 to 499 employees",
@@ -5913,6 +6014,7 @@
           "Industry: Banking/Financial Services"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Banking/Financial Services",
         "org_size": "Less than 20 employees",
@@ -5967,6 +6069,7 @@
           "DevType: Academic researcher"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Computer Systems Design and Services",
         "org_size": "20 to 99 employees",
@@ -6019,6 +6122,7 @@
           "Industry: Manufacturing"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Manufacturing",
         "org_size": "Less than 20 employees",
@@ -6071,6 +6175,7 @@
           "Industry: Computer Systems Design and Services"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Founder, technology or otherwise",
         "industry_survey": "Computer Systems Design and Services",
         "org_size": "Just me - I am a freelancer, sole proprietor, etc.",
@@ -6141,6 +6246,7 @@
           "Industry: Healthcare"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, back-end",
         "industry_survey": "Healthcare",
         "org_size": "500 to 999 employees",
@@ -6197,6 +6303,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, desktop or enterprise applications",
         "industry_survey": "Software Development",
         "org_size": null,
@@ -6274,6 +6381,7 @@
           "Industry: Manufacturing"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, back-end",
         "industry_survey": "Manufacturing",
         "org_size": "20 to 99 employees",
@@ -6327,6 +6435,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, back-end",
         "industry_survey": "Software Development",
         "org_size": "5,000 to 9,999 employees",
@@ -6378,6 +6487,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Senior executive (C-suite, VP, etc.)",
         "industry_survey": "Software Development",
         "org_size": "20 to 99 employees",
@@ -6436,6 +6546,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, back-end",
         "industry_survey": "Software Development",
         "org_size": "10,000 or more employees",
@@ -6493,6 +6604,7 @@
           "Industry: Manufacturing"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, embedded applications or devices",
         "industry_survey": "Manufacturing",
         "org_size": "500 to 999 employees",
@@ -6545,6 +6657,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Engineering manager",
         "industry_survey": "Software Development",
         "org_size": "5,000 to 9,999 employees",
@@ -6608,6 +6721,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Software Development",
         "org_size": "20 to 99 employees",
@@ -6661,6 +6775,7 @@
           "Industry: Retail and Consumer Services"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, back-end",
         "industry_survey": "Retail and Consumer Services",
         "org_size": "1,000 to 4,999 employees",
@@ -6720,6 +6835,7 @@
           "Industry: Retail and Consumer Services"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "AI/ML engineer",
         "industry_survey": "Retail and Consumer Services",
         "org_size": "10,000 or more employees",
@@ -6776,6 +6892,7 @@
           "Industry: Banking/Financial Services"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, front-end",
         "industry_survey": "Banking/Financial Services",
         "org_size": "1,000 to 4,999 employees",
@@ -6830,6 +6947,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, back-end",
         "industry_survey": "Software Development",
         "org_size": "20 to 99 employees",
@@ -6889,6 +7007,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Software Development",
         "org_size": "1,000 to 4,999 employees",
@@ -6960,6 +7079,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Software Development",
         "org_size": "500 to 999 employees",
@@ -7017,6 +7137,7 @@
           "Industry: Transportation, or Supply Chain"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, AI apps or physical AI",
         "industry_survey": "Transportation, or Supply Chain",
         "org_size": "Less than 20 employees",
@@ -7075,6 +7196,7 @@
           "Industry: Insurance"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Insurance",
         "org_size": "100 to 499 employees",
@@ -7135,6 +7257,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, mobile",
         "industry_survey": "Software Development",
         "org_size": "Less than 20 employees",
@@ -7190,6 +7313,7 @@
           "Industry: Fintech"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "AI/ML engineer",
         "industry_survey": "Fintech",
         "org_size": "100 to 499 employees",
@@ -7259,6 +7383,7 @@
           "Industry: Other:"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Other",
         "org_size": "1,000 to 4,999 employees",
@@ -7318,6 +7443,7 @@
           "Industry: Transportation, or Supply Chain"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Transportation, or Supply Chain",
         "org_size": "Less than 20 employees",
@@ -7375,6 +7501,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Architect, software or solutions",
         "industry_survey": "Software Development",
         "org_size": "100 to 499 employees",
@@ -7435,6 +7562,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Founder, technology or otherwise",
         "industry_survey": "Software Development",
         "org_size": "Less than 20 employees",
@@ -7485,6 +7613,7 @@
           "Industry: Computer Systems Design and Services"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Architect, software or solutions",
         "industry_survey": "Computer Systems Design and Services",
         "org_size": "1,000 to 4,999 employees",
@@ -7536,6 +7665,7 @@
           "Industry: Banking/Financial Services"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Data or business analyst",
         "industry_survey": "Banking/Financial Services",
         "org_size": "1,000 to 4,999 employees",
@@ -7596,6 +7726,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "AI/ML engineer",
         "industry_survey": "Software Development",
         "org_size": "500 to 999 employees",
@@ -7652,6 +7783,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, front-end",
         "industry_survey": "Software Development",
         "org_size": "Less than 20 employees",
@@ -7711,6 +7843,7 @@
           "Industry: Media & Advertising Services"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Media & Advertising Services",
         "org_size": "500 to 999 employees",
@@ -7767,6 +7900,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, AI apps or physical AI",
         "industry_survey": "Software Development",
         "org_size": "Less than 20 employees",
@@ -7832,6 +7966,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, back-end",
         "industry_survey": "Software Development",
         "org_size": "20 to 99 employees",
@@ -7885,6 +8020,7 @@
           "Industry: Banking/Financial Services"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Architect, software or solutions",
         "industry_survey": "Banking/Financial Services",
         "org_size": "1,000 to 4,999 employees",
@@ -7942,6 +8078,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Software Development",
         "org_size": "20 to 99 employees",
@@ -8003,6 +8140,7 @@
           "Industry: Healthcare"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, mobile",
         "industry_survey": "Healthcare",
         "org_size": "10,000 or more employees",
@@ -8057,6 +8195,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, front-end",
         "industry_survey": "Software Development",
         "org_size": "500 to 999 employees",
@@ -8117,6 +8256,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Software Development",
         "org_size": "1,000 to 4,999 employees",
@@ -8177,6 +8317,7 @@
           "Industry: Energy"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Architect, software or solutions",
         "industry_survey": "Energy",
         "org_size": "20 to 99 employees",
@@ -8239,6 +8380,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Software Development",
         "org_size": null,
@@ -8289,6 +8431,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Cloud infrastructure engineer",
         "industry_survey": "Software Development",
         "org_size": "100 to 499 employees",
@@ -8341,6 +8484,7 @@
           "Industry: Higher Education"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Higher Education",
         "org_size": "10,000 or more employees",
@@ -8402,6 +8546,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Software Development",
         "org_size": "Less than 20 employees",
@@ -8462,6 +8607,7 @@
           "Industry: Other:"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, back-end",
         "industry_survey": "Other",
         "org_size": "Less than 20 employees",
@@ -8523,6 +8669,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, front-end",
         "industry_survey": "Software Development",
         "org_size": "20 to 99 employees",
@@ -8588,6 +8735,7 @@
           "Industry: Banking/Financial Services"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, back-end",
         "industry_survey": "Banking/Financial Services",
         "org_size": "10,000 or more employees",
@@ -8639,6 +8787,7 @@
           "Industry: Software Development"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Database administrator or engineer",
         "industry_survey": "Software Development",
         "org_size": "100 to 499 employees",
@@ -8699,6 +8848,7 @@
           "Industry: Banking/Financial Services"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Cloud infrastructure engineer",
         "industry_survey": "Banking/Financial Services",
         "org_size": "5,000 to 9,999 employees",
@@ -8756,7 +8906,8 @@
         "sector_basis": [
           "Industry: Software Development"
         ],
-        "research_role": true,
+        "research_role": false,
+        "academic_staff": false,
         "dev_type": "Applied scientist",
         "industry_survey": "Software Development",
         "org_size": "20 to 99 employees",
@@ -8807,7 +8958,8 @@
         "sector_basis": [
           "Industry: Software Development"
         ],
-        "research_role": true,
+        "research_role": false,
+        "academic_staff": false,
         "dev_type": "Data scientist",
         "industry_survey": "Software Development",
         "org_size": "1,000 to 4,999 employees",
@@ -8866,6 +9018,7 @@
           "Industry: Higher Education"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Higher Education",
         "org_size": "1,000 to 4,999 employees",
@@ -8916,7 +9069,8 @@
         "sector_basis": [
           "Industry: Insurance"
         ],
-        "research_role": true,
+        "research_role": false,
+        "academic_staff": false,
         "dev_type": "Data scientist",
         "industry_survey": "Insurance",
         "org_size": "20 to 99 employees",
@@ -8975,7 +9129,8 @@
         "sector_basis": [
           "Industry: Healthcare"
         ],
-        "research_role": true,
+        "research_role": false,
+        "academic_staff": false,
         "dev_type": "Data scientist",
         "industry_survey": "Healthcare",
         "org_size": "10,000 or more employees",
@@ -9029,6 +9184,7 @@
           "DevType: Academic researcher"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Other",
         "org_size": "5,000 to 9,999 employees",
@@ -9080,6 +9236,7 @@
           "DevType: Academic researcher"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Other",
         "org_size": "20 to 99 employees",
@@ -9136,6 +9293,7 @@
           "Industry: Higher Education"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Higher Education",
         "org_size": "500 to 999 employees",
@@ -9186,6 +9344,7 @@
           "DevType: Academic researcher"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Government",
         "org_size": null,
@@ -9241,6 +9400,7 @@
           "Industry: Higher Education"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Higher Education",
         "org_size": "500 to 999 employees",
@@ -9294,7 +9454,8 @@
         "sector_basis": [
           "Industry: Software Development"
         ],
-        "research_role": true,
+        "research_role": false,
+        "academic_staff": false,
         "dev_type": "Data scientist",
         "industry_survey": "Software Development",
         "org_size": null,
@@ -9353,6 +9514,7 @@
           "Industry: Higher Education"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Higher Education",
         "org_size": null,
@@ -9404,7 +9566,8 @@
         "sector_basis": [
           "Industry: Fintech"
         ],
-        "research_role": true,
+        "research_role": false,
+        "academic_staff": false,
         "dev_type": "Data scientist",
         "industry_survey": "Fintech",
         "org_size": "1,000 to 4,999 employees",
@@ -9466,6 +9629,7 @@
           "Industry: Higher Education"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Higher Education",
         "org_size": "5,000 to 9,999 employees",
@@ -9526,6 +9690,7 @@
           "Industry: Higher Education"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Higher Education",
         "org_size": "500 to 999 employees",
@@ -9579,7 +9744,8 @@
         "sector_basis": [
           "Industry: Government"
         ],
-        "research_role": true,
+        "research_role": false,
+        "academic_staff": false,
         "dev_type": "Data scientist",
         "industry_survey": "Government",
         "org_size": "100 to 499 employees",
@@ -9638,6 +9804,7 @@
           "Industry: Higher Education"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Applied scientist",
         "industry_survey": "Higher Education",
         "org_size": "Less than 20 employees",
@@ -9695,6 +9862,7 @@
           "Industry: Higher Education"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Higher Education",
         "org_size": "I don’t know",
@@ -9752,6 +9920,7 @@
           "Industry: Higher Education"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Higher Education",
         "org_size": "1,000 to 4,999 employees",
@@ -9812,7 +9981,8 @@
         "sector_basis": [
           "Industry: Manufacturing"
         ],
-        "research_role": true,
+        "research_role": false,
+        "academic_staff": false,
         "dev_type": "Data scientist",
         "industry_survey": "Manufacturing",
         "org_size": "5,000 to 9,999 employees",
@@ -9874,6 +10044,7 @@
           "DevType: Academic researcher"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Other",
         "org_size": "20 to 99 employees",
@@ -9926,7 +10097,8 @@
         "sector_basis": [
           "Industry: Internet, Telecomm or Information Services"
         ],
-        "research_role": true,
+        "research_role": false,
+        "academic_staff": false,
         "dev_type": "Data scientist",
         "industry_survey": "Internet, Telecomm or Information Services",
         "org_size": "10,000 or more employees",
@@ -9979,7 +10151,8 @@
         "sector_basis": [
           "Industry: Software Development"
         ],
-        "research_role": true,
+        "research_role": false,
+        "academic_staff": false,
         "dev_type": "Data scientist",
         "industry_survey": "Software Development",
         "org_size": "10,000 or more employees",
@@ -10039,6 +10212,7 @@
           "DevType: Academic researcher"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Energy",
         "org_size": "5,000 to 9,999 employees",
@@ -10106,6 +10280,7 @@
           "DevType: Academic researcher"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Software Development",
         "org_size": "Less than 20 employees",
@@ -10160,7 +10335,8 @@
         "sector_basis": [
           "Industry: Computer Systems Design and Services"
         ],
-        "research_role": true,
+        "research_role": false,
+        "academic_staff": false,
         "dev_type": "Data scientist",
         "industry_survey": "Computer Systems Design and Services",
         "org_size": "10,000 or more employees",
@@ -10215,6 +10391,7 @@
           "Industry: Higher Education"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Higher Education",
         "org_size": "I don’t know",
@@ -10270,6 +10447,7 @@
           "DevType: Academic researcher"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Software Development",
         "org_size": "500 to 999 employees",
@@ -10330,6 +10508,7 @@
           "Industry: Higher Education"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Higher Education",
         "org_size": "1,000 to 4,999 employees",
@@ -10386,7 +10565,8 @@
         "sector_basis": [
           "Industry: Internet, Telecomm or Information Services"
         ],
-        "research_role": true,
+        "research_role": false,
+        "academic_staff": false,
         "dev_type": "Data scientist",
         "industry_survey": "Internet, Telecomm or Information Services",
         "org_size": "10,000 or more employees",
@@ -10439,7 +10619,8 @@
         "sector_basis": [
           "Industry: Healthcare"
         ],
-        "research_role": true,
+        "research_role": false,
+        "academic_staff": false,
         "dev_type": "Data scientist",
         "industry_survey": "Healthcare",
         "org_size": "10,000 or more employees",
@@ -10494,7 +10675,8 @@
         "sector_basis": [
           "Industry: Software Development"
         ],
-        "research_role": true,
+        "research_role": false,
+        "academic_staff": false,
         "dev_type": "Applied scientist",
         "industry_survey": "Software Development",
         "org_size": "10,000 or more employees",
@@ -10553,6 +10735,7 @@
           "DevType: Academic researcher"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Other",
         "org_size": "1,000 to 4,999 employees",
@@ -10611,6 +10794,7 @@
           "Industry: Higher Education"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Higher Education",
         "org_size": "I don’t know",
@@ -10666,7 +10850,8 @@
         "sector_basis": [
           "Industry: Fintech"
         ],
-        "research_role": true,
+        "research_role": false,
+        "academic_staff": false,
         "dev_type": "Applied scientist",
         "industry_survey": "Fintech",
         "org_size": "100 to 499 employees",
@@ -10722,6 +10907,7 @@
           "Industry: Higher Education"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Higher Education",
         "org_size": "1,000 to 4,999 employees",
@@ -10775,6 +10961,7 @@
           "Industry: Higher Education"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Higher Education",
         "org_size": "5,000 to 9,999 employees",
@@ -10829,7 +11016,8 @@
         "sector_basis": [
           "Industry: Energy"
         ],
-        "research_role": true,
+        "research_role": false,
+        "academic_staff": false,
         "dev_type": "Applied scientist",
         "industry_survey": "Energy",
         "org_size": "100 to 499 employees",
@@ -10893,6 +11081,7 @@
           "DevType: Academic researcher"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Other",
         "org_size": null,
@@ -10948,6 +11137,7 @@
           "DevType: Academic researcher"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Software Development",
         "org_size": null,
@@ -11000,6 +11190,7 @@
           "Industry: Higher Education"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Higher Education",
         "org_size": "I don’t know",
@@ -11057,6 +11248,7 @@
           "Employment: Student"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Student",
         "industry_survey": "Other",
         "org_size": null,
@@ -11116,6 +11308,7 @@
           "DevType: Academic researcher"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Other",
         "org_size": null,
@@ -11176,7 +11369,8 @@
         "sector_basis": [
           "Employment: Student"
         ],
-        "research_role": true,
+        "research_role": false,
+        "academic_staff": false,
         "dev_type": "Student",
         "industry_survey": "Software Development",
         "org_size": "1,000 to 4,999 employees",
@@ -11236,6 +11430,7 @@
           "Industry: Higher Education"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Higher Education",
         "org_size": "Less than 20 employees",
@@ -11288,7 +11483,8 @@
         "sector_basis": [
           "Employment: Student"
         ],
-        "research_role": true,
+        "research_role": false,
+        "academic_staff": false,
         "dev_type": "Student",
         "industry_survey": "Internet, Telecomm or Information Services",
         "org_size": "Just me - I am a freelancer, sole proprietor, etc.",
@@ -11350,6 +11546,7 @@
           "DevType: Academic researcher"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Software Development",
         "org_size": "100 to 499 employees",
@@ -11406,6 +11603,7 @@
           "Employment: Student"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Other",
         "org_size": null,
@@ -11457,6 +11655,7 @@
           "Employment: Student"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "DevOps engineer or professional",
         "industry_survey": "Other",
         "org_size": null,
@@ -11511,7 +11710,8 @@
         "sector_basis": [
           "Employment: Student"
         ],
-        "research_role": true,
+        "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, back-end",
         "industry_survey": "Software Development",
         "org_size": "5,000 to 9,999 employees",
@@ -11567,7 +11767,8 @@
         "sector_basis": [
           "Employment: Student"
         ],
-        "research_role": true,
+        "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, desktop or enterprise applications",
         "industry_survey": "Software Development",
         "org_size": "1,000 to 4,999 employees",
@@ -11626,6 +11827,7 @@
           "Employment: Student"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Developer, desktop or enterprise applications",
         "industry_survey": "Other",
         "org_size": null,
@@ -11688,7 +11890,8 @@
         "sector_basis": [
           "Employment: Student"
         ],
-        "research_role": true,
+        "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Software Development",
         "org_size": "20 to 99 employees",
@@ -11744,6 +11947,7 @@
           "Industry: Higher Education"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Higher Education",
         "org_size": "100 to 499 employees",
@@ -11800,7 +12004,8 @@
         "sector_basis": [
           "Employment: Student"
         ],
-        "research_role": true,
+        "research_role": false,
+        "academic_staff": false,
         "dev_type": "Student",
         "industry_survey": "Software Development",
         "org_size": "Less than 20 employees",
@@ -11866,6 +12071,7 @@
           "Industry: Higher Education"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Higher Education",
         "org_size": "1,000 to 4,999 employees",
@@ -11921,7 +12127,8 @@
         "sector_basis": [
           "Employment: Student"
         ],
-        "research_role": true,
+        "research_role": false,
+        "academic_staff": false,
         "dev_type": "Student",
         "industry_survey": "Government",
         "org_size": "500 to 999 employees",
@@ -11978,6 +12185,7 @@
           "DevType: Academic researcher"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Other",
         "org_size": null,
@@ -12035,6 +12243,7 @@
           "Employment: Student"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Student",
         "industry_survey": "Other",
         "org_size": null,
@@ -12098,6 +12307,7 @@
           "Industry: Higher Education"
         ],
         "research_role": true,
+        "academic_staff": false,
         "dev_type": "Academic researcher",
         "industry_survey": "Higher Education",
         "org_size": "I don’t know",
@@ -12155,6 +12365,7 @@
           "Industry: Fintech"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Fintech",
         "org_size": "20 to 99 employees",
@@ -12209,6 +12420,7 @@
           "Industry: Fintech"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, back-end",
         "industry_survey": "Fintech",
         "org_size": "1,000 to 4,999 employees",
@@ -12260,6 +12472,7 @@
           "Industry: Fintech"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, back-end",
         "industry_survey": "Fintech",
         "org_size": "1,000 to 4,999 employees",
@@ -12318,6 +12531,7 @@
           "Industry: Fintech"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Fintech",
         "org_size": "10,000 or more employees",
@@ -12384,6 +12598,7 @@
           "Industry: Banking/Financial Services"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Engineering manager",
         "industry_survey": "Banking/Financial Services",
         "org_size": "10,000 or more employees",
@@ -12441,6 +12656,7 @@
           "Industry: Fintech"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Architect, software or solutions",
         "industry_survey": "Fintech",
         "org_size": "100 to 499 employees",
@@ -12504,6 +12720,7 @@
           "Industry: Fintech"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Architect, software or solutions",
         "industry_survey": "Fintech",
         "org_size": "Less than 20 employees",
@@ -12560,6 +12777,7 @@
           "Industry: Banking/Financial Services"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "DevOps engineer or professional",
         "industry_survey": "Banking/Financial Services",
         "org_size": "10,000 or more employees",
@@ -12615,6 +12833,7 @@
           "Industry: Insurance"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, front-end",
         "industry_survey": "Insurance",
         "org_size": "500 to 999 employees",
@@ -12673,6 +12892,7 @@
           "Industry: Fintech"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "Developer, full-stack",
         "industry_survey": "Fintech",
         "org_size": "10,000 or more employees",
@@ -12725,7 +12945,8 @@
         "sector_basis": [
           "Industry: Banking/Financial Services"
         ],
-        "research_role": true,
+        "research_role": false,
+        "academic_staff": false,
         "dev_type": "Data scientist",
         "industry_survey": "Banking/Financial Services",
         "org_size": "10,000 or more employees",
@@ -12786,6 +13007,7 @@
           "Industry: Banking/Financial Services"
         ],
         "research_role": false,
+        "academic_staff": false,
         "dev_type": "DevOps engineer or professional",
         "industry_survey": "Banking/Financial Services",
         "org_size": "10,000 or more employees",

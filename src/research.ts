@@ -15,8 +15,8 @@ import { PLATFORMS, isPlatform, platformOf } from "./platform.js";
 import type { Tool } from "./scoring.js";
 import { capacityStatus } from "./autoscaler.js";
 import { environmentIssues, resolveEnvironment, type PersonaEnvironment } from "../orchestrator/core/environment.js";
-import { NO_ELIGIBLE_PERSONAS, audienceFormIssues, effectiveAudience, eligibleSearch, hardSql, personaSupplyQuestion, pickIssues, urlNorm, type Audience, type AudienceGap } from "./audience.js";
-import { REGIONS, SECTORS, countryOfWord, countryTexts, isIndustry, isIso2, isRegion, isSector, mentionsCountry, INDUSTRIES } from "./facets.js";
+import { NO_ELIGIBLE_PERSONAS, RESTRICTION_UNCITED, restrictionEvidence, audienceFormIssues, effectiveAudience, eligibleSearch, hardSql, personaSupplyQuestion, pickIssues, urlNorm, type Audience, type AudienceGap } from "./audience.js";
+import { REGIONS, ROLES, SECTORS, countryOfWord, countryTexts, isIndustry, isIso2, isRegion, isRole, isSector, mentionsCountry, INDUSTRIES } from "./facets.js";
 
 /**
  * Product onboarding (docs/onboarding.md). A customer gives a prompt, a website and docs; the orchestrator's Pi
@@ -317,9 +317,11 @@ export function validateResearch(r: ResearchResult | undefined): string[] {
   if (categoryTerms.length < 2 || categoryTerms.length > 8)
     issues.push("product.category_terms needs 2-8 words that name this kind of tool (e.g. 'transactional email service', 'email API'); prompts must not use them");
   const sourceUrls = new Set((r.sources ?? []).map((x) => urlNorm(x?.url)));
-  // Who may use the product: global by default; any restriction quotes a page this job fetched.
-  // (An audience the customer stated at onboarding needs no page: audienceIssues checks they did state one.)
-  issues.push(...audienceFormIssues(p?.audience, { sources: p?.audience?.source === "customer" ? null : sourceUrls }));
+  // Who may use the product: global by default; any restriction quotes a page (url and a 20+ character quote). Whether
+  // that page is one the job really saw is checked against the server's record (audienceEvidenceIssues), never
+  // against r.sources, which research writes itself. (An audience the customer stated at onboarding needs no page:
+  // audienceIssues checks they did state one.)
+  issues.push(...audienceFormIssues(p?.audience, { sources: p?.audience?.source === "customer" ? null : (u) => /^https?:\/\//.test(u) }));
   const personas = Array.isArray(r.personas) ? r.personas : [];
   // A verified gap (gapIssues checks nobody eligible exists) instead of padding with people who cannot use it.
   const gap = r.audience_gap;
@@ -509,12 +511,14 @@ async function gapIssues(job: { product_id: number } | null, r: ResearchResult |
 /** Words that never narrow a profile search. */
 const STOP = new Set(["a", "an", "and", "at", "for", "in", "of", "on", "or", "the", "to", "who", "with", "by", "is", "as", "from", "uses", "use", "using"]);
 
-export interface ProfileQuery { query?: string; country?: string[]; region?: string[]; sector?: string[]; research_role?: boolean; industry?: string[];
+export interface ProfileQuery { query?: string; country?: string[]; region?: string[]; sector?: string[]; research_role?: boolean; academic_staff?: boolean;
+                                role_any?: string[]; industry?: string[];
                                 slugs?: string[]; exclude?: string[]; limit?: number; seed?: string }
 
 /**
  * Shared developer profiles from the data (survey-based), for research to pick personas from. Structured filters on
- * the survey facets first (country, region, sector, research_role, industry; values within one filter are OR), then
+ * the survey facets first (country, region, sector, research_role, academic_staff, role_any, industry; values within
+ * one filter are OR), then
  * the query's words, each a point when it appears in the name, summary or attributes ("Canadian" also matches
  * "Canada" and is returned as a country hint). Equal scores are ordered by a hash of slug and seed (the research id),
  * so no slug is favoured by its spelling. `matched` counts every match, not just the ones returned.
@@ -527,6 +531,8 @@ export async function libraryProfiles(q: ProfileQuery) {
   if (country.some((c) => !isIso2(c))) throw bad(`unknown country ${country.filter((c) => !isIso2(c)).join(", ")}: use ISO2 codes (CA, US, IN, SE, ...)`);
   if (region.some((x) => !isRegion(x))) throw bad(`unknown region ${region.filter((x) => !isRegion(x)).join(", ")}; valid: ${REGIONS.join(", ")}`);
   if (sector.some((x) => !isSector(x))) throw bad(`unknown sector ${sector.filter((x) => !isSector(x)).join(", ")}; valid: ${SECTORS.join(", ")}`);
+  const roleAny = list(q.role_any);
+  if (roleAny.some((x) => !isRole(x))) throw bad(`unknown role_any ${roleAny.filter((x) => !isRole(x)).join(", ")}; valid: ${ROLES.join(", ")}`);
   if (industry.some((x) => !isIndustry(x))) throw bad(`unknown industry ${industry.filter((x) => !isIndustry(x)).join(", ")}; valid: ${INDUSTRIES.join("; ")}`);
   const db = await getDb();
   const params: unknown[] = [];
@@ -536,7 +542,8 @@ export async function libraryProfiles(q: ProfileQuery) {
   if (country.length) where.push(`${facet("country")} = ANY(${p(country)})`);
   if (region.length) where.push(`${facet("region")} = ANY(${p(region)})`);
   if (sector.length) where.push(`${facet("sector")} = ANY(${p(sector)})`);
-  if (typeof q.research_role === "boolean") where.push(`${facet("research_role")} = ${p(String(q.research_role))}`);
+  for (const k of ROLES) if (typeof q[k] === "boolean") where.push(`${facet(k)} = ${p(String(q[k]))}`);
+  if (roleAny.length) where.push(`(${roleAny.map((k) => `${facet(k)} = 'true'`).join(" OR ")})`);
   if (industry.length) where.push(`coalesce(${facet("industry_survey")}, attributes->>'industry') = ANY(${p(industry)})`);
   const slugs = list(q.slugs), exclude = list(q.exclude);
   if (slugs.length) where.push(`slug = ANY(${p(slugs)})`);
@@ -566,7 +573,8 @@ export async function libraryProfiles(q: ProfileQuery) {
   return {
     total: Number(total), matched: Number(n),
     filters: { ...(country.length ? { country } : {}), ...(region.length ? { region } : {}), ...(sector.length ? { sector } : {}),
-               ...(typeof q.research_role === "boolean" ? { research_role: q.research_role } : {}), ...(industry.length ? { industry } : {}) },
+               ...Object.fromEntries(ROLES.filter((k) => typeof q[k] === "boolean").map((k) => [k, q[k]])), ...(roleAny.length ? { role_any: roleAny } : {}),
+               ...(industry.length ? { industry } : {}) },
     hints: hints.map((h) => ({ ...h, note: `"${h.from}" names a country: filter with country: ["${h.country}"] to see only profiles there` })),
     ...(Number(n) > rows.length ? { note: `${n} profiles match; showing ${rows.length}. Narrow with filters or raise limit (max 40).` } : {}),
     profiles: rows.map(({ score, ...x }) => ({ ...x, score: Number(score) })),
@@ -600,10 +608,32 @@ export async function competitorIssues(job: { sources?: { url: string }[]; input
   return issues;
 }
 
+/**
+ * The audience's restrictions cite pages the server knows this job saw: a URL its searches returned (job.sources,
+ * recorded by src/websearch.ts) or a page on the product's own site, the same rule as a competitor's evidence_url
+ * (competitorIssues). A restriction on a page nobody fetched would narrow who may use the product on a guess.
+ */
+export function audienceEvidenceIssues(job: { sources?: { url: string }[]; input?: any }, r: ResearchResult | undefined): string[] {
+  const a = r?.product?.audience;
+  if (!a || (a as any).source === "customer") return [];
+  const seen = new Set((job.sources ?? []).map((s) => urlKey(s.url)));
+  const own = [r?.product?.website_url, r?.product?.docs_url, job.input?.website_url, job.input?.docs_url]
+    .flatMap((u) => { try { return u ? [new URL(u).hostname.toLowerCase().replace(/^www\./, "")] : []; } catch { return []; } });
+  const known = (u: string) => {
+    try { const host = new URL(u).hostname.toLowerCase().replace(/^www\./, ""); return seen.has(urlKey(u)) || own.some((h) => host === h || host.endsWith("." + h)); }
+    catch { return false; }
+  };
+  return restrictionEvidence(a).flatMap(({ where, evidence }) => {
+    const urls = (Array.isArray(evidence) ? evidence : []).map((e: any) => e?.url).filter((u: unknown): u is string => typeof u === "string");
+    return urls.length && !urls.some(known)
+      ? [`${where}: ${RESTRICTION_UNCITED} (${urls.join(", ")} is neither on the product's own site nor returned by this job's searches)`] : [];
+  });
+}
+
 export async function validateResearchJob(id: string, result: ResearchResult) {
   const job = await runningJob(id);
   if (job.kind === "prospect") { const issues = prospectIssues(result); return { ok: issues.length === 0, issues }; }
-  const issues = [...validateResearch(result), ...(await libraryIssues(result)), ...(await profileIssues(result)), ...(await audienceIssues(job, result)), ...(await gapIssues(job, result)), ...(await competitorIssues(job, result))];
+  const issues = [...validateResearch(result), ...(await libraryIssues(result)), ...(await profileIssues(result)), ...(await audienceIssues(job, result)), ...audienceEvidenceIssues(job, result), ...(await gapIssues(job, result)), ...(await competitorIssues(job, result))];
   return { ok: issues.length === 0, issues };
 }
 
@@ -677,7 +707,7 @@ export async function completeResearch(id: string, body: { status?: string; erro
     void orgEvent(job.org_id, "onboarding_failed", { research_id: id, reason: "worker" });
     return { status: "failed" };
   }
-  const issues = [...validateResearch(body.result), ...(await libraryIssues(body.result)), ...(await profileIssues(body.result)), ...(await audienceIssues(job, body.result)), ...(await gapIssues(job, body.result)), ...(await competitorIssues(job, body.result))];
+  const issues = [...validateResearch(body.result), ...(await libraryIssues(body.result)), ...(await profileIssues(body.result)), ...(await audienceIssues(job, body.result)), ...audienceEvidenceIssues(job, body.result), ...(await gapIssues(job, body.result)), ...(await competitorIssues(job, body.result))];
   if (issues.length) {
     const [{ attempts }] = await db.query<{ attempts: number }>(
       "/* tenant: research id checked against the job token in http.ts (/research/:id) */ UPDATE product_research SET attempts = attempts + 1, heartbeat_at = now(), stage = 'validating' WHERE id = $1 RETURNING attempts", [id]);
@@ -720,6 +750,10 @@ export async function completeResearch(id: string, body: { status?: string; erro
   // rather than running with people who could never use it.
   if (r.audience_gap && audience) questions.push(personaSupplyQuestion(audience, r.audience_gap));
   if (questions.length) await (await import("./questions.js")).askQuestions(job.org_id, job.product_id, id, questions);
+  // People who can use it were found: an open "nobody fits" question is out of date.
+  if (!r.audience_gap && (r.personas ?? []).length)
+    await db.query(`/* tenant: product of the research job (job checked against the job token in http.ts) */ UPDATE product_questions SET status = 'dismissed', answered_at = now(),
+                      answer = jsonb_build_object('replaced', true, 'by_research', $2::text) WHERE product_id = $1 AND kind = 'audience' AND subject = 'persona_supply' AND status = 'open'`, [job.product_id, id]);
 
   const personaSlugs: string[] = [];
   const slugOf = new Map<string, string>();

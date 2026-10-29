@@ -57,7 +57,16 @@ INDUSTRIES = ["Software Development", "Internet, Telecomm or Information Service
               "Transportation, or Supply Chain", "Computer Systems Design and Services", "Media & Advertising Services",
               "Energy", "Insurance", "Other"]
 SECTORS = ["academia", "government", "finance", "healthcare", "industry"]
-RESEARCH_DEV_TYPES = {"Academic researcher", "Applied scientist", "Data scientist"}
+# Scientists count as researchers only at a university: a data scientist at an insurer analyses claims, not research.
+SCIENTIST_DEV_TYPES = {"Applied scientist", "Data scientist"}
+# Technical roles that research infrastructure serves when held at a university (research software engineers, HPC and
+# research-computing staff). Managers, designers, analysts and sales are not; nor is anyone not employed there.
+STAFF_DEV_TYPES = {"Developer, full-stack", "Developer, back-end", "Developer, front-end", "Developer, desktop or enterprise applications",
+                   "Developer, mobile", "Developer, embedded applications or devices", "Developer, game or graphics", "Developer, QA or test",
+                   "Developer, AI apps or physical AI", "AI/ML engineer", "Data engineer", "DevOps engineer or professional",
+                   "Cloud infrastructure engineer", "System administrator", "Database administrator or engineer",
+                   "Architect, software or solutions", "Support engineer or analyst"}
+WORKING = {"Employed", "Independent contractor, freelancer, or self-employed"}
 FINANCE = {"Banking/Financial Services", "Fintech", "Insurance"}
 
 
@@ -85,9 +94,22 @@ def derive_sector(row):
 
 
 def research_role(row):
-    """Does research (or studies) themselves. Kept apart from sector: a web developer in a university's IT department is
-    academia by sector but not a researcher."""
-    return _clean(row.DevType) in RESEARCH_DEV_TYPES or "Student" in split(row.Employment)
+    """Research-affiliated: does research or studies at a university. An academic researcher; a data or applied
+    scientist whose industry is Higher Education; or a student who names no industry other than Higher Education (a
+    student whose industry is a software company works there, and is no researcher). Kept apart from sector: a web
+    developer in a university's IT department is academia by sector but not a researcher (see academic_staff)."""
+    dev, ind, emp = _clean(row.DevType), _clean(row.Industry), split(row.Employment)
+    if dev == "Academic researcher": return True
+    if dev in SCIENTIST_DEV_TYPES and ind == "Higher Education": return True
+    return "Student" in emp and not (WORKING & set(emp)) and ind in (None, "Higher Education")
+
+
+def academic_staff(row):
+    """Technical staff employed by a university (Industry Higher Education, a developer or infrastructure role): research
+    software engineers and research-computing staff, who use research infrastructure without being researchers. A
+    separate facet so an audience can say "researchers or academic staff" without calling staff researchers."""
+    emp = set(split(row.Employment))
+    return _clean(row.Industry) == "Higher Education" and bool(WORKING & emp) and _clean(row.DevType) in STAFF_DEV_TYPES
 
 
 def facets_of(row):
@@ -97,6 +119,6 @@ def facets_of(row):
     if not iso: return None
     sector, basis = derive_sector(row)
     return {"country": iso, "country_name": ISO2_NAME[iso], "region": ISO2_REGION[iso], "sector": sector, "sector_basis": basis,
-            "research_role": bool(research_role(row)), "dev_type": _clean(row.DevType), "industry_survey": industry_of(row),
+            "research_role": bool(research_role(row)), "academic_staff": bool(academic_staff(row)), "dev_type": _clean(row.DevType), "industry_survey": industry_of(row),
             "org_size": _clean(row.OrgSize), "employment": split(row.Employment), "main_branch": _clean(row.MainBranch),
             "ai_agents": _clean(row.AIAgents), "source": "so2025"}

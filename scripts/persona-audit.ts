@@ -27,14 +27,14 @@ const curated = path.join(ROOT, "vault", "curated", "profiles.json");
 if (existsSync(curated)) for (const p of JSON.parse(readFileSync(curated, "utf8"))) if (p?.attributes?.facets) local.set(String(p.slug ?? p.id).toLowerCase(), p.attributes.facets);
 
 export interface AuditRow { product_id: number; product: string; org: string; audience: Audience | null;
-  personas: { slug: string; name: string; country: string | null; sector: string | null; research_role: boolean | null; verdict: "ok" | "violates" | "unknown-audience"; why: string[]; facets_from: string }[] }
+  personas: { slug: string; name: string; country: string | null; sector: string | null; research_role: boolean | null; academic_staff: boolean | null; verdict: "ok" | "violates" | "unknown-audience"; why: string[]; facets_from: string }[] }
 
 /** The verdicts (pure): each persona against the product's stored audience. */
 export function auditProduct(p: { id: number; name: string; org: string; audience: Audience | null }, personas: { slug: string; name: string; facets: Facets | null }[]): AuditRow {
   return { product_id: p.id, product: p.name, org: p.org, audience: p.audience, personas: personas.map((x) => {
     const f = x.facets ?? local.get(x.slug) ?? null;
     const why = p.audience ? hardMisses(p.audience, f) : [];
-    return { slug: x.slug, name: x.name, country: f?.country ?? null, sector: f?.sector ?? null, research_role: f?.research_role ?? null,
+    return { slug: x.slug, name: x.name, country: f?.country ?? null, sector: f?.sector ?? null, research_role: f?.research_role ?? null, academic_staff: f?.academic_staff ?? null,
              verdict: !p.audience ? "unknown-audience" : why.length ? "violates" : "ok", why, facets_from: x.facets ? "database" : f ? "vault file" : "none" };
   }) };
 }
@@ -64,7 +64,7 @@ try {
       console.log(`\n#${r.product_id} ${r.product} (${r.org}) audience: ${a ? `${a.scope}${a.countries?.length ? ` ${a.countries.join(",")} ${a.strictness ?? "exclusive"}` : ""}` +
         `${(a.gates ?? []).length ? `; gates: ${a.gates!.map((g) => `${g.requirement} [${g.strictness}]`).join("; ")}` : ""}${a.source ? ` (${a.source}${a.confirmed ? ", confirmed" : ""})` : ""}` : "not stated yet"}`);
       for (const x of r.personas)
-        console.log(`  ${x.verdict.padEnd(16)} ${x.slug.padEnd(14)} ${x.name.padEnd(12)} ${String(x.country ?? "?").padEnd(3)} ${String(x.sector ?? "?").padEnd(11)} research_role=${x.research_role ?? "?"}` +
+        console.log(`  ${x.verdict.padEnd(16)} ${x.slug.padEnd(14)} ${x.name.padEnd(12)} ${String(x.country ?? "?").padEnd(3)} ${String(x.sector ?? "?").padEnd(11)} research_role=${x.research_role ?? "?"} academic_staff=${x.academic_staff ?? "?"}` +
           `${x.facets_from === "vault file" ? " (facets from the vault file)" : ""}${x.why.length ? `  <- ${x.why.join("; ")}` : ""}`);
     }
     console.log(`\nPersonas used by 2+ products: ${reused.length ? "" : "none"}`);

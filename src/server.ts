@@ -209,10 +209,10 @@ export function reportMarkdown(d: Extract<Data, { view: "report" }>): string {
   const cell = (s: string) => String(s ?? "").replace(/\|/g, "/");
   const scope = (m.scope ? `run ${m.scope.simulation} "${m.scope.name}" (${m.scope.status})` : `last ${d.filters.days} days`) +
     (d.population && !d.population.is_default ? `, custom harness mix "${d.population.name}" (not the market-weighted default; do not compare it with default-mix figures)` : "");
-  if (!Number(t.sessions)) return `# ${name}: agent visibility report\n\nNo scored agent sessions (${scope}${d.filters.model ? `, ${d.filters.model}` : ""}). Run a simulation with run_simulation.${(d as any).previous_persona_set ? ` (${(d as any).previous_persona_set.sessions} older sessions ran with the previous persona set, no longer linked to ${name}, and are left out.)` : ""}`;
+  if (!Number(t.sessions)) return `# ${name}: agent visibility report\n\nNo scored agent sessions (${scope}${d.filters.model ? `, ${d.filters.model}` : ""}). Run a simulation with run_simulation.${(d as any).ineligible_personas ? ` (${(d as any).ineligible_personas.sessions} sessions ran with personas who cannot use ${name} as its audience now reads, and are left out: ${(d as any).ineligible_personas.personas.join(", ")}.)` : ""}`;
   const out: string[] = [`# ${name}: agent visibility report`, `Scope: ${scope}${d.filters.model ? `, model ${d.filters.model}` : ""}${d.filters.platform ? `, ${d.filters.platform} tasks only` : ""}. ${t.sessions} scored sessions.`];
-  const prev = (d as any).previous_persona_set;
-  if (prev) out.push(`Previous persona set: ${prev.sessions} older sessions ran with personas no longer linked to ${name} (its audience changed) and are left out of these figures.`);
+  const inel = (d as any).ineligible_personas;
+  if (inel) out.push(`Left out: ${inel.sessions} sessions ran with personas who cannot use ${name} as its audience now reads (${inel.personas.join(", ")}).`);
 
   out.push("## Headline", ...d.headline.map((h: string) => `- ${h}`),
     `- Right call on ${pct(t.hit_rate)} of all scored sessions, should-win and control tasks together (95% range ${range(t.hit_ci)})${t.weighted_hit_rate != null ? `, adoption-weighted ${pct(t.weighted_hit_rate)}` : ""}; lost to a competitor ${pct(t.competitor_rate)}.`);

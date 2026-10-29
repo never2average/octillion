@@ -4,9 +4,9 @@
 //   npx tsx scripts/audience-test.ts
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { audienceFormIssues, hardMisses, mergeAudience, personaSupplyQuestion, pickIssues, RESTRICTION_UNCITED, type Audience, type Pick } from "../src/audience.js";
+import { audienceFormIssues, hardKey, hardMisses, mergeAudience, personaSupplyQuestion, pickIssues, RESTRICTION_UNCITED, runPersonaCheck, type Audience, type Pick } from "../src/audience.js";
 import { mentionsCountry } from "../src/facets.js";
-import { validateResearch } from "../src/research.js";
+import { audienceEvidenceIssues, validateResearch } from "../src/research.js";
 
 let n = 0;
 const check = (name: string, fn: () => void) => { fn(); n++; console.log(`✓ ${name}`); };
@@ -24,20 +24,33 @@ const alliance: Audience = {
   checked: "the apply-account page, the CCDB sponsorship page and the terms of use",
 };
 
-check("validator: a global audience needs no evidence; a restriction cites a fetched page; checked is required", () => {
+check("validator: a global audience needs no evidence; a restriction quotes a page; checked is required", () => {
   const audienceIssues = (a: unknown, sources = [{ url: SIGNUP }]) => validateResearch({ product: { name: "X", audience: a as Audience }, personas: [], scenarios: [], sources } as any)
     .filter((i) => /audience/.test(i) && !/audience_gap/.test(i));
   assert.deepEqual(audienceIssues({ scope: "global", checked: "the pricing, sign-up and terms pages: anyone may sign up" }), []);
-  assert.deepEqual(audienceIssues(alliance), [], "cited from a page in sources (the same normalisation as decision.evidence_url)");
-  assert.deepEqual(audienceIssues(alliance, [{ url: `${SIGNUP}/#form` }]), [], "a fragment or trailing slash is the same page");
-  const uncited = audienceIssues(alliance, [{ url: "https://alliancecan.ca/en" }]);
-  assert.ok(uncited.some((i) => i.includes(RESTRICTION_UNCITED)) && uncited.some((i) => /gates\[0\]/.test(i)), uncited.join(" | "));
+  assert.deepEqual(audienceIssues(alliance), [], "a url and a quote");
+  const unquoted = audienceIssues({ ...alliance, evidence: [] });
+  assert.ok(unquoted.some((i) => i.includes(RESTRICTION_UNCITED)), unquoted.join(" | "));
   assert.ok(audienceIssues({ ...alliance, evidence: [{ url: SIGNUP, quote: "too short" }] }).some((i) => i.includes(RESTRICTION_UNCITED)), "a quote of 20+ characters");
   assert.ok(audienceIssues({ scope: "global" }).some((i) => /checked/.test(i)), "missing checked");
   assert.ok(audienceIssues({ scope: "global", checked: "the homepage" }).some((i) => /checked.*30\+/.test(i)), "checked under 30 characters");
   assert.ok(audienceIssues(undefined).some((i) => /product\.audience is required/.test(i)));
   assert.ok(audienceIssues({ ...alliance, countries: ["Canada"] }).some((i) => /unknown ISO2 codes: Canada/.test(i)));
   assert.ok(audienceIssues({ ...alliance, gates: [{ ...alliance.gates![0], match: { sector_any: ["universities"] } }] }).some((i) => /sector_any must be a list of academia/.test(i)));
+});
+
+check("the cited page is one the server recorded for the job (its searches, or the product's own site), never research's own sources list", () => {
+  const result = (a: Audience, sources = [{ url: "https://made-up.example.net/eligibility" }]) =>
+    ({ product: { name: "Alliance", website_url: "https://made-up.example.net", audience: a }, sources } as any);
+  const job = { sources: [{ url: "https://www.example.org/news/alliance-accounts/" }], input: { website_url: "https://alliancecan.ca/en" } };
+  assert.deepEqual(audienceEvidenceIssues(job, result(alliance)), [], "the product's own site (job input), subdomains too");
+  const fake = { ...alliance, evidence: [{ url: "https://made-up.example.net/eligibility", quote }], gates: [{ ...alliance.gates![0]!, evidence: [{ url: "https://example.org/news/alliance-accounts", quote }] }] };
+  // A page research only listed in its own sources is not enough: the server never saw it.
+  const issues = audienceEvidenceIssues({ ...job, input: {} }, { ...result(fake), product: { ...result(fake).product, website_url: undefined } });
+  assert.ok(issues.length === 1 && issues[0]!.startsWith("product.audience: ") && issues[0]!.includes(RESTRICTION_UNCITED), issues.join(" | "));
+  assert.deepEqual(audienceEvidenceIssues(job, result({ ...fake, evidence: alliance.evidence })), [], "a search result URL counts (normalised like a competitor's evidence_url)");
+  assert.deepEqual(audienceEvidenceIssues(job, result({ scope: "global", checked: "x".repeat(30) })), []);
+  assert.deepEqual(audienceEvidenceIssues({ input: {} }, result({ ...fake, source: "customer" })), [], "the customer's own word needs no page");
 });
 
 check("Alliance-like (CA only, researchers at an institution): only the Canadian academic researcher passes", () => {
@@ -49,7 +62,51 @@ check("Alliance-like (CA only, researchers at an institution): only the Canadian
   assert.ok(of(2).length === 1 && /has sector industry, not academia/.test(of(2)[0]!), "the Canadian industry developer fails the gate only");
   assert.deepEqual(of(3), [], "the Canadian academic researcher is accepted");
   assert.deepEqual(hardMisses(alliance, pick("example-ca-phd-student").facets), [], "a Canadian doctoral student is a researcher");
+  // research_role is research-affiliated (vault/build/so_common.py): a student whose job is at a software company,
+  // a government data scientist and a university's own developers are not researchers.
+  assert.match(hardMisses(alliance, pick("example-ca-student-at-software-company").facets).join(), /has sector academia but research_role false/);
+  assert.match(hardMisses(alliance, pick("example-ca-gov-data-scientist").facets).join(), /research_role false/);
+  assert.match(hardMisses(alliance, pick("example-ca-research-software-engineer").facets).join(), /research_role false/);
   assert.match(hardMisses(alliance, null)[0]!, /has no country in the data/, "a profile without facets never passes an exclusive market");
+});
+
+check("researchers or academic staff: role_any lets a gate admit a university's research software engineers, not its students at companies", () => {
+  const sponsored: Audience = { ...alliance, gates: [{ ...alliance.gates![0]!, requirement: "researchers at Canadian institutions and the staff they sponsor",
+                                                      match: { sector_any: ["academia"], role_any: ["research_role", "academic_staff"] } }] };
+  assert.deepEqual(audienceFormIssues(sponsored, { sources: () => true }), []);
+  assert.ok(audienceFormIssues({ ...sponsored, gates: [{ ...sponsored.gates![0]!, match: { role_any: ["student"] } }] }, { sources: () => true })
+    .some((i) => /role_any must be a list of research_role, academic_staff/.test(i)));
+  const ok = (slug: string) => hardMisses(sponsored, pick(slug).facets);
+  assert.deepEqual(ok("example-ca-research-software-engineer"), [], "university staff pass");
+  assert.deepEqual(ok("example-ca-academic-researcher"), [], "researchers pass");
+  assert.match(ok("example-ca-student-at-software-company").join(), /is neither research_role nor academic_staff/);
+  assert.match(ok("example-us-highered-fullstack").join(), /is in US/, "staff elsewhere still fail the country");
+  assert.deepEqual(pickIssues(sponsored, [pick("example-ca-research-software-engineer"), pick("example-ca-phd-student")]), []);
+});
+
+check("hardKey: the same hard parts compare equal whatever defaults were spelled out", () => {
+  const nz = (strictness?: "exclusive" | "primary") => ({ scope: "countries" as const, countries: ["NZ"], ...(strictness ? { strictness } : {}), gates: [], checked: "x".repeat(30) });
+  assert.equal(hardKey(nz()), hardKey(nz("exclusive")), "unset strictness is exclusive (the persona_supply confirmation loop)");
+  assert.equal(hardKey(nz("primary")), hardKey({ scope: "global", checked: "" }), "a primary market restricts nobody");
+  assert.notEqual(hardKey(nz()), hardKey(nz("primary")));
+  const g = (match: any, strictness: "required" | "typical" = "required") => ({ ...alliance, gates: [{ ...alliance.gates![0]!, strictness, match }] });
+  assert.equal(hardKey(g({ research_role: true, sector_any: ["academia"] })), hardKey(g({ sector_any: ["academia"], research_role: true })), "key order");
+  assert.equal(hardKey(g({ sector_any: ["academia"] }, "typical")), hardKey({ ...alliance, gates: [] }), "typical gates are not hard");
+  assert.notEqual(hardKey(g({ sector_any: ["academia"] })), hardKey(g({ sector_any: ["academia"], research_role: true })));
+});
+
+check("personas named for a run: an exclusive audience refuses ineligible ones and a generic developer; a primary one warns", () => {
+  const refused = runPersonaCheck(alliance, [pick("example-ca-academic-researcher"), pick("example-se-academic-researcher")], false);
+  assert.ok(refused.refuse.length === 1 && /^example-se-academic-researcher is in SE/.test(refused.refuse[0]!), refused.refuse.join(" | "));
+  assert.match(runPersonaCheck(alliance, [], true).refuse.join(), /^a generic developer \(profiles: \[\]\) has no country/, "profiles: [] is refused too");
+  assert.deepEqual(runPersonaCheck(alliance, [pick("example-ca-academic-researcher")], false), { refuse: [], warn: [] });
+  const primary: Audience = { ...alliance, strictness: "primary", gates: [] };
+  const warned = runPersonaCheck(primary, [pick("example-se-academic-researcher")], false);
+  assert.ok(!warned.refuse.length && /only 0 of 1 personas are in Canada/.test(warned.warn.join()), "primary: runs, with a warning");
+  assert.ok(!runPersonaCheck(primary, [], true).refuse.length && runPersonaCheck(primary, [], true).warn.length === 1);
+  const global: Audience = { scope: "global", checked: "x".repeat(30) };
+  assert.deepEqual(runPersonaCheck(global, [], true), { refuse: [], warn: [] });
+  assert.deepEqual(runPersonaCheck(null, [pick("example-se-academic-researcher")], false), { refuse: [], warn: [] });
 });
 
 check("Neon-like (global): picks from any country raise nothing", () => {

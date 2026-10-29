@@ -1,4 +1,4 @@
-import { INDUSTRIES, SECTORS, countryName, gateMisses, gateSql, isIndustry, isIso2, isSector, type Facets, type GateMatch } from "./facets.js";
+import { INDUSTRIES, ROLES, SECTORS, countryName, gateMisses, gateSql, isIndustry, isIso2, isRole, isSector, type Facets, type GateMatch } from "./facets.js";
 
 /**
  * Who can actually use a product: product.audience, stated by research with evidence and checked by the server.
@@ -36,20 +36,31 @@ export const RESTRICTION_UNCITED = "audience restricts users but cites no fetche
 /** The same normalisation as a decision's evidence_url against the job's sources. */
 export const urlNorm = (u: unknown) => String(u ?? "").replace(/[#?].*$/, "").replace(/\/$/, "");
 
+/** Whether a cited page counts: one the server recorded for the job (src/research.ts audienceEvidenceIssues). */
+export type CitedPage = (url: string) => boolean;
 /** `sources` null: the customer stated it, and their word is the evidence. */
-const cited = (ev: unknown, sources: Set<string> | null) => sources == null ||
-  (Array.isArray(ev) && ev.some((e: any) => typeof e?.quote === "string" && e.quote.trim().length >= 20 && typeof e?.url === "string" && sources.has(urlNorm(e.url))));
+const cited = (ev: unknown, sources: CitedPage | null) => sources == null ||
+  (Array.isArray(ev) && ev.some((e: any) => typeof e?.quote === "string" && e.quote.trim().length >= 20 && typeof e?.url === "string" && sources(e.url)));
+
+/** Every evidence entry of an audience's restrictions (the countries and the required gates), with where it sits. */
+export function restrictionEvidence(a: any): { where: string; evidence: unknown }[] {
+  if (!a || typeof a !== "object") return [];
+  return [...(a.scope === "countries" ? [{ where: "product.audience", evidence: a.evidence }] : []),
+          ...(Array.isArray(a.gates) ? a.gates : []).flatMap((g: any, i: number) => (g?.strictness === "required" ? [{ where: `product.audience.gates[${i}]`, evidence: g.evidence }] : []))];
+}
 
 function matchIssues(m: any, where: string): string[] {
   const out: string[] = [];
-  if (!m || typeof m !== "object" || Array.isArray(m)) return [`${where}.match must be {sector_any?, research_role?, industry_any?, org_size_any?}`];
-  const known = ["sector_any", "research_role", "industry_any", "org_size_any"];
+  const known = ["sector_any", "research_role", "academic_staff", "role_any", "industry_any", "org_size_any"];
+  if (!m || typeof m !== "object" || Array.isArray(m)) return [`${where}.match must be {${known.map((k) => `${k}?`).join(", ")}}`];
   const extra = Object.keys(m).filter((k) => !known.includes(k));
   if (extra.length) out.push(`${where}.match has unknown keys ${extra.join(", ")}; use ${known.join(", ")}`);
   if (!known.some((k) => m[k] != null)) out.push(`${where}.match needs at least one of ${known.join(", ")}`);
   if (m.sector_any != null && (!Array.isArray(m.sector_any) || !m.sector_any.length || m.sector_any.some((s: unknown) => !isSector(s))))
     out.push(`${where}.match.sector_any must be a list of ${SECTORS.join(", ")}`);
-  if (m.research_role != null && typeof m.research_role !== "boolean") out.push(`${where}.match.research_role must be true or false`);
+  for (const k of ROLES) if (m[k] != null && typeof m[k] !== "boolean") out.push(`${where}.match.${k} must be true or false`);
+  if (m.role_any != null && (!Array.isArray(m.role_any) || !m.role_any.length || m.role_any.some((s: unknown) => !isRole(s))))
+    out.push(`${where}.match.role_any must be a list of ${ROLES.join(", ")} (any of them passes)`);
   if (m.industry_any != null && (!Array.isArray(m.industry_any) || !m.industry_any.length || m.industry_any.some((s: unknown) => !isIndustry(s))))
     out.push(`${where}.match.industry_any must be a list of the survey's industries: ${INDUSTRIES.join("; ")}`);
   if (m.org_size_any != null && (!Array.isArray(m.org_size_any) || !m.org_size_any.length || m.org_size_any.some((s: unknown) => typeof s !== "string")))
@@ -58,11 +69,12 @@ function matchIssues(m: any, where: string): string[] {
 }
 
 /**
- * Everything wrong with an audience. `sources`: the job's fetched pages, which every restriction must quote (null for
- * an audience the customer stated: their word is the evidence). `partial`: a customer-question option's value, merged
+ * Everything wrong with an audience. `sources`: which cited pages count (the server's record of the job's pages:
+ * src/research.ts audienceEvidenceIssues; a URL-shape check alone in the job-less validator), every restriction
+ * quoting one (null for an audience the customer stated: their word is the evidence). `partial`: a customer-question option's value, merged
  * into the stored audience, so only the fields it has are checked.
  */
-export function audienceFormIssues(a: any, opts: { sources: Set<string> | null; where?: string; partial?: boolean }): string[] {
+export function audienceFormIssues(a: any, opts: { sources: CitedPage | null; where?: string; partial?: boolean }): string[] {
   const where = opts.where ?? "product.audience";
   if (!a || typeof a !== "object" || Array.isArray(a))
     return [`${where} is required: who may use the product, {"scope": "global", "checked": "<the sign-up, account and terms pages you read>"} unless a fetched page restricts it`];
@@ -99,7 +111,8 @@ export function effectiveAudience(stored: any, research: any): Audience | null {
 
 const exclusive = (a: Audience) => a.scope === "countries" && (a.strictness ?? "exclusive") === "exclusive" && (a.countries?.length ?? 0) > 0;
 const firstEvidence = (ev?: Evidence[]) => (ev?.[0]?.url ? ` (evidence: ${ev[0].url})` : "");
-export const describeMatch = (m: GateMatch) => [m.sector_any?.length ? `sector ${m.sector_any.join(" or ")}` : "", typeof m.research_role === "boolean" ? `research_role ${m.research_role}` : "",
+export const describeMatch = (m: GateMatch) => [m.sector_any?.length ? `sector ${m.sector_any.join(" or ")}` : "",
+  ...ROLES.map((k) => (typeof m[k] === "boolean" ? `${k} ${m[k]}` : "")), m.role_any?.length ? `${m.role_any.join(" or ")}` : "",
   m.industry_any?.length ? `industry ${m.industry_any.join(" or ")}` : "", m.org_size_any?.length ? `org size ${m.org_size_any.join(" or ")}` : ""].filter(Boolean).join(" and ");
 
 /** Why one profile can never use the product (its hard parts), as phrases; empty when it may. */
@@ -117,13 +130,29 @@ export function hardMisses(a: Audience | null, f: Facets | null | undefined): st
   return out;
 }
 
+/** A gate match with its keys and lists in one order, so two spellings of the same rule compare equal. */
+const normMatch = (m: GateMatch | undefined) => Object.fromEntries(Object.entries(m ?? {}).filter(([, v]) => v != null && !(Array.isArray(v) && !v.length))
+  .map(([k, v]) => [k, Array.isArray(v) ? [...v].map(String).sort() : v] as const).sort(([x], [y]) => x.localeCompare(y)));
+
+/**
+ * The hard parts of an audience (what hardMisses and hardSql enforce) as one comparable string, with the defaults
+ * filled in: unset strictness is exclusive, a global or primary market restricts no country, typical gates are not
+ * hard. Two audiences with the same key accept and reject exactly the same profiles.
+ */
+export function hardKey(a: Partial<Audience> | null | undefined): string {
+  const countries = a && exclusive(a as Audience) ? [...a.countries!].sort() : [];
+  const gates = (a?.gates ?? []).filter((g) => g?.strictness === "required").map((g) => JSON.stringify(normMatch(g.match))).sort();
+  return JSON.stringify({ countries, gates });
+}
+
 /** The search that finds eligible profiles, as search_profiles arguments (named in the issues so research can run it). */
 export function eligibleSearch(a: Audience): Record<string, unknown> {
   const s: Record<string, unknown> = {};
   if (a.scope === "countries" && a.countries?.length) s.country = a.countries;
   const req = (a.gates ?? []).find((g) => g.strictness === "required");
   if (req?.match.sector_any?.length) s.sector = req.match.sector_any;
-  if (typeof req?.match.research_role === "boolean") s.research_role = req.match.research_role;
+  for (const k of ROLES) if (typeof req?.match[k] === "boolean") s[k] = req.match[k];
+  if (req?.match.role_any?.length) s.role_any = req.match.role_any;
   if (req?.match.industry_any?.length) s.industry = req.match.industry_any;
   return s;
 }
@@ -148,6 +177,17 @@ export function pickIssues(a: Audience | null, picks: Pick[]): string[] {
       out.push(`personas[${i}] ${p.slug} ${p.name} ${m}. search_profiles ${search}`);
     }
   });
+  out.push(...softIssues(a, picks));
+  const names = new Map<string, number>();
+  for (const p of picks) names.set(p.name, (names.get(p.name) ?? 0) + 1);
+  for (const [n, c] of names) if (c > 1) out.push(`${c} personas share the display name "${n}"; pick profiles with distinct names`);
+  return out;
+}
+
+/** The soft parts (a primary market, typical gates): at least half the picks must match each. */
+export function softIssues(a: Audience | null, picks: Pick[]): string[] {
+  if (!a || !picks.length) return [];
+  const out: string[] = [];
   const half = Math.ceil(picks.length / 2);
   if (a.scope === "countries" && a.strictness === "primary" && a.countries?.length) {
     const k = picks.filter((p) => p.facets?.country && a.countries!.includes(p.facets.country)).length;
@@ -157,10 +197,21 @@ export function pickIssues(a: Audience | null, picks: Pick[]): string[] {
     const k = picks.filter((p) => !gateMisses(p.facets, g.match).length).length;
     if (k < half) out.push(`only ${k} of ${picks.length} personas match '${g.requirement}' (${describeMatch(g.match)}), the product's typical user; at least ${half} must`);
   }
-  const names = new Map<string, number>();
-  for (const p of picks) names.set(p.name, (names.get(p.name) ?? 0) + 1);
-  for (const [n, c] of names) if (c > 1) out.push(`${c} personas share the display name "${n}"; pick profiles with distinct names`);
   return out;
+}
+
+/**
+ * Personas named explicitly for a run (run_simulation profiles) against the audience. Hard parts refuse the run: a
+ * profile that fails an exclusive market or a required gate, or a generic developer (profiles: [], no country or
+ * affiliation) when the audience has any. Soft parts only warn, in the run's result. Picks are shared profiles; the
+ * account's own personas are its choice and are not checked.
+ */
+export function runPersonaCheck(a: Audience | null, picks: Pick[], generic: boolean): { refuse: string[]; warn: string[] } {
+  if (!a) return { refuse: [], warn: [] };
+  const who = generic ? [{ slug: "a generic developer (profiles: [])", name: "", facets: null } as Pick] : picks;
+  const refuse = who.flatMap((p) => hardMisses(a, p.facets).map((m) => `${p.slug} ${m}`));
+  const warn = refuse.length ? [] : softIssues(a, who);
+  return { refuse, warn };
 }
 
 export const NO_ELIGIBLE_PERSONAS = "No eligible personas for this product's audience yet: no developer profile in the data can use it as its audience describes (see the open audience question)";

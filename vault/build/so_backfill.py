@@ -6,6 +6,7 @@ them (src/research.ts audienceIssues), so they must be the survey's answers, not
   python -I so_backfill.py download              # the pinned parquet into $VAULT_BUILD_WORK/so (sha256-checked)
   python -I so_backfill.py apply [PROFILES.json] # add facets, normalise industry, dedupe names; fails on any unmatched id
   python -I so_backfill.py apply --check [PROFILES.json]   # exit 1 if apply would change the file
+  python -I so_backfill.py selftest              # research_role / academic_staff on the reviewers' cases (no parquet)
 
 SO_SURVEY_PARQUET points at the parquet (default: where `download` puts it). The parquet is never committed.
 
@@ -130,9 +131,40 @@ def apply(path, check=False):
           ", ".join(f"{k} {o}->{n}" for k, (o, n) in list(renamed.items())[:8]) + (" ..." if len(renamed) > 8 else ""))
 
 
+def selftest():
+    """research_role means research-affiliated, academic_staff a university's technical staff: the cases that went wrong
+    (students whose job is at a software company counted as researchers) and the ones that must stay right."""
+    from types import SimpleNamespace
+    from so_common import academic_staff, research_role
+    row = lambda dev, ind, emp: SimpleNamespace(DevType=dev, Industry=ind if ind else float("nan"), Employment=emp)
+    cases = [  # (dev type, industry, employment) -> (research_role, academic_staff)
+        (("Academic researcher", "Higher Education", "Employed"), (True, False)),
+        (("Academic researcher", None, "Student"), (True, False)),
+        (("Student", None, "Student"), (True, False)),                              # studies, no other job
+        (("Developer, full-stack", None, "Student"), (True, False)),
+        (("Student", "Higher Education", "Student"), (True, False)),
+        (("Developer, back-end", "Software Development", "Student"), (False, False)),  # so25-14188: works at a software company
+        (("Student", "Software Development", "Student"), (False, False)),           # so25-24672
+        (("Student", "Internet, Telecomm or Information Services", "Student"), (False, False)),  # so25-13334
+        (("Data scientist", "Insurance", "Employed"), (False, False)),
+        (("Data scientist", "Government", "Employed"), (False, False)),
+        (("Data scientist", "Higher Education", "Employed"), (True, False)),
+        (("Applied scientist", "Higher Education", "Employed"), (True, False)),
+        (("Developer, back-end", "Higher Education", "Employed"), (False, True)),   # a research software engineer
+        (("System administrator", "Higher Education", "Employed"), (False, True)),  # research-computing staff
+        (("Project manager", "Higher Education", "Employed"), (False, False)),
+        (("Developer, full-stack", "Software Development", "Employed"), (False, False)),
+    ]
+    for (dev, ind, emp), want in cases:
+        got = (research_role(row(dev, ind, emp)), academic_staff(row(dev, ind, emp)))
+        assert got == want, f"{dev} / {ind} / {emp}: research_role, academic_staff = {got}, want {want}"
+    print(f"selftest ok ({len(cases)} cases)")
+
+
 if __name__ == "__main__":
     args = sys.argv[1:]
     if args[:1] == ["download"]: download()
+    elif args[:1] == ["selftest"]: selftest()
     elif args[:1] in (["apply"], ["--check"]):
         rest = [a for a in args[1:] if a != "--check"]
         apply(rest[0] if rest else PROFILES, check="--check" in args)

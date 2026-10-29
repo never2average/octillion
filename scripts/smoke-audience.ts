@@ -34,6 +34,14 @@ export async function personaSearchChecks({ db, base, token }: { db: Db; base: s
   await assert.rejects(libraryProfiles({ region: ["mars"] }), (e: any) => e.status === 400 && /north_america/.test(e.message));
   const get = (q: string) => fetch(`${base}/api/worker/library/profiles?${q}`, { headers: { authorization: `Bearer ${token}` } });
   assert.equal((await get("sector=universities")).status, 400, "the worker API answers 400");
+  // research_role is research-affiliated: the Canadian student who works at a software company is academia, not a researcher.
+  assert.ok(!caAcademics.profiles.some((x: any) => x.slug === "example-ca-student-at-software-company"), "a student working at a company is no researcher");
+  const staffOrResearch = await libraryProfiles({ country: ["CA"], role_any: ["research_role", "academic_staff"], limit: 40 });
+  assert.ok(staffOrResearch.profiles.some((x: any) => x.slug === "example-ca-research-software-engineer") && staffOrResearch.profiles.some((x: any) => x.slug === "example-ca-academic-researcher") &&
+    staffOrResearch.profiles.every((x: any) => x.attributes.facets.research_role === true || x.attributes.facets.academic_staff === true), "role_any: researchers or academic staff");
+  await assert.rejects(libraryProfiles({ role_any: ["student"] }), (e: any) => e.status === 400 && /academic_staff/.test(e.message));
+  const staffHttp = await (await get("country=CA&academic_staff=true&limit=40")).json();
+  assert.ok(staffHttp.profiles.length >= 1 && staffHttp.profiles.every((x: any) => x.attributes.facets.academic_staff === true), "academic_staff over the worker API");
   const viaHttp = await (await get("country=CA&country=SE&sector=academia&research_role=true&limit=40")).json();
   assert.ok(viaHttp.profiles.some((x: any) => x.attributes.facets.country === "SE") && viaHttp.profiles.every((x: any) => ["CA", "SE"].includes(x.attributes.facets.country)),
     "repeated params are any-of");
@@ -97,6 +105,7 @@ export async function audienceLifecycleChecks({ db, worker, call, fails, A, orgI
   const [labRow] = await db.query<any>("SELECT id FROM products WHERE org_id = $1 AND slug = $2", [orgId, first.product]);
   const linksOf = () => db.query<any>("/* tenant: smoke */ SELECT dp.slug, pp.active FROM product_personas pp JOIN developer_profiles dp ON dp.id = pp.profile_id WHERE pp.product_id = $1 ORDER BY dp.slug", [labRow.id]);
   assert.deepEqual((await linksOf()).map((x: any) => [x.slug, x.active]), [["example-enterprise-platform", true], ["example-startup-backend", true]]);
+  await reportAndRunChecks({ db, call, fails, A, product: first.product, productId: labRow.id });
   // Questions about the audience: options carry an audience value, checked like research's (bad ISO2, unknown sector).
   const { askQuestions } = await import("../src/questions.js");
   const bad = await askQuestions(orgId, labRow.id, lab.research.id, [{ kind: "audience", subject: "audience", question: "Who can sign up?",
@@ -129,5 +138,61 @@ export async function audienceLifecycleChecks({ db, worker, call, fails, A, orgI
   const supply = (await call(A, "list_product_questions", { product: first.product })).questions.find((q: any) => q.subject === "persona_supply");
   assert.ok(supply && supply.kind === "audience" && supply.status === "open" && supply.options.length >= 2, "an open persona_supply question");
   await fails(A, "run_simulation", { product: first.product, samples: 1 }, /No eligible personas/);
-  console.log("✓ audience: customer answer narrows it and unlinks unfit personas, re-research, verified gap with a question, no stand-in run");
+  // A new gap question about another audience replaces the open one: an answer never merges an audience since changed.
+  const { personaSupplyQuestion } = await import("../src/audience.js");
+  const au = { scope: "countries" as const, countries: ["AU"], strictness: "exclusive" as const, gates: [], checked: "the sign-up and terms pages say Australia only" };
+  const auGap = { searched: ['search_profiles {"country":["AU"]}'], note: "nobody in the developer data is in Australia" };
+  assert.equal(await askQuestions(orgId, labRow.id, ans.research_id, [personaSupplyQuestion(au, auGap)]), 1);
+  const openSupply = (await call(A, "list_product_questions", { product: first.product })).questions.filter((q: any) => q.subject === "persona_supply");
+  assert.ok(openSupply.length === 1 && openSupply[0].id !== supply.id && openSupply[0].context.audience.countries[0] === "AU", "the open question is about the new audience");
+  assert.equal((await db.query<any>("SELECT status FROM product_questions WHERE id = $1", [supply.id]))[0].status, "dismissed", "the old one is dismissed");
+  await fails(A, "answer_product_question", { question_id: supply.id, option: "a" }, /replaced by a newer one/);
+  assert.equal(await askQuestions(orgId, labRow.id, ans.research_id, [personaSupplyQuestion(au, auGap)]), 0, "the same question again keeps the open one");
+  // Confirming a gap for the audience in force does not queue research again, even when the stored audience leaves its
+  // strictness unset (exclusive by default) and the answer spells it out.
+  const [labNow] = await db.query<any>("SELECT research FROM products WHERE id = $1", [labRow.id]);
+  assert.equal(await askQuestions(orgId, labRow.id, ans.research_id, [personaSupplyQuestion(labNow.research.audience, gap.audience_gap)]), 1);
+  await db.query("UPDATE products SET research = research #- '{audience,strictness}' WHERE id = $1", [labRow.id]);
+  const nzSupply = (await call(A, "list_product_questions", { product: first.product })).questions.find((q: any) => q.subject === "persona_supply");
+  assert.equal(nzSupply.context.audience.countries[0], "NZ");
+  const confirmed = await call(A, "answer_product_question", { question_id: nzSupply.id, option: "a" });
+  assert.ok(confirmed.research_id === null && /No developer profile in the data fits yet/.test(confirmed.effect), `confirming the gap does not loop: ${JSON.stringify(confirmed).slice(0, 300)}`);
+  console.log("✓ audience: customer answer narrows it and unlinks unfit personas, re-research, verified gap with a question, no stand-in run, stale questions replaced, no confirmation loop");
+}
+
+/**
+ * Reports and runs on a product against its audience (src/queries.ts getReport, runSimulation): a global audience never
+ * splits the figures, explicitly named personas stay in; a restricted one leaves out (and lists) only sessions whose
+ * persona cannot use the product, and refuses a run naming such personas or a generic developer.
+ */
+async function reportAndRunChecks({ db, call, fails, A, product, productId }: { db: Db; call: Call; fails: Fails; A: Client; product: string; productId: number }) {
+  const named = ["example-startup-backend", "example-enterprise-platform", "example-ca-academic-researcher"];
+  const run = await call(A, "run_simulation", { product, samples: 1, profiles: named });
+  await db.query("/* tenant: smoke fixture */ UPDATE agent_sessions SET status = 'completed', verdict = 'recommended', ended_at = now() WHERE simulation_id = $1", [run.simulation.id]);
+  await db.query("UPDATE simulations SET status = 'completed', finished_at = now() WHERE id = $1", [run.simulation.id]);
+  const by = await db.query<any>(`/* tenant: smoke */ SELECT dp.slug, count(*)::int AS n FROM agent_sessions s JOIN developer_profiles dp ON dp.id = s.profile_id
+                                   WHERE s.simulation_id = $1 GROUP BY dp.slug`, [run.simulation.id]);
+  const n = (slug: string) => by.find((x: any) => x.slug === slug)?.n ?? 0;
+  const all = by.reduce((t: number, x: any) => t + x.n, 0);
+  assert.ok(named.every((x) => n(x) > 0), `a session per named persona: ${JSON.stringify(by)}`);
+  const wide = await call(A, "get_visibility_report", { product, days: 7 });
+  assert.ok(wide.totals.sessions === all && !wide.ineligible_personas, `global audience: every session counts, explicitly named personas too (${wide.totals.sessions} of ${all})`);
+  const [{ research: was }] = await db.query<any>("SELECT research FROM products WHERE id = $1", [productId]);
+  const quote = "Accounts are only for researchers at Canadian institutions, sponsored by a faculty member.";
+  const caOnly = { scope: "countries", countries: ["CA"], strictness: "exclusive", evidence: [{ url: "https://quickqueue.example.com/accounts", quote }], checked: "the account, eligibility and terms pages",
+                   gates: [{ id: "affiliation", requirement: "a researcher at a Canadian institution", strictness: "required", match: { sector_any: ["academia"], research_role: true } }] };
+  await db.query("UPDATE products SET research = jsonb_set(research, '{audience}', $2::jsonb) WHERE id = $1", [productId, JSON.stringify(caOnly)]);
+  try {
+    const narrow = await call(A, "get_visibility_report", { product, days: 7 });
+    assert.equal(narrow.totals.sessions, n("example-ca-academic-researcher"), "only the persona who can use it stays in, though it was never linked");
+    assert.equal(narrow.ineligible_personas?.sessions, n("example-startup-backend") + n("example-enterprise-platform"));
+    assert.deepEqual([...narrow.ineligible_personas.personas].sort(), ["example-enterprise-platform", "example-startup-backend"]);
+    assert.match(narrow.ineligible_personas.label, /cannot use the product as its audience now reads \(only users in Canada/);
+    await fails(A, "run_simulation", { product, samples: 1, profiles: ["example-startup-backend", "example-ca-academic-researcher"] },
+      /cannot use GapLab .*example-startup-backend is in US; the product serves only CA/);
+    await fails(A, "run_simulation", { product, samples: 1, profiles: [] }, /a generic developer \(profiles: \[\]\) has no country/);
+  } finally {
+    await db.query("UPDATE products SET research = $2 WHERE id = $1", [productId, JSON.stringify(was)]);
+  }
+  console.log("✓ reports and runs against the audience: global never split, ineligible personas left out by name, ineligible runs refused");
 }

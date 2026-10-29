@@ -90,7 +90,7 @@ export class ResearchContext {
   architectKey: string | null = null;
   /** The latest review's outcome: its questions, unconfirmed tools and placement go on the accepted result. */
   architecture: ArchitectOutcome | null = null;
-  /** Rounds the audience cross-check sent back (at most 2). */
+  /** Rounds the audience cross-check sent back (at most AUDIENCE_ROUNDS). */
   audienceRounds = 0;
 
   constructor(readonly job: ResearchJob) {
@@ -172,23 +172,27 @@ export function createResearchExtension(ctx: ResearchContext, opts: { only?: rea
     pi.registerTool(defineTool({
       name: "search_profiles", label: "Search developer profiles",
       description: "Search the developer-profile data (real developers from survey responses: role, experience, company size, stack, constraints, how they answer; " +
-        "attributes.facets holds their survey answers: country (ISO2), region, sector, research_role, industry). Personas must be picked from here by profile_slug. " +
-        "Filter by product.audience first (country, sector, research_role, industry; several values in one filter mean any of them), then search the query words " +
+        "attributes.facets holds their survey answers: country (ISO2), region, sector, research_role, academic_staff, industry). Personas must be picked from here by profile_slug. " +
+        "Sector academia includes every student, even one who works at a company; research_role is who is research-affiliated. " +
+        "Filter by product.audience first (country, sector, research_role or role_any, industry; several values in one filter mean any of them), then search the query words " +
         "within that. matched is how many profiles fit, not just the ones shown; matched=0 means nobody in the data fits.",
       parameters: Type.Object({
         query: Type.Optional(Type.String()),
         country: Type.Optional(Type.Array(Type.String({ minLength: 2, maxLength: 2 }), { description: "ISO2 codes, e.g. [\"CA\"]" })),
         region: Type.Optional(Type.Array(Type.Union(["north_america", "latam", "eu", "europe_other", "uk", "south_asia", "east_asia", "sea", "oceania", "mena", "africa"].map((x) => Type.Literal(x))))),
         sector: Type.Optional(Type.Array(Type.Union(["academia", "government", "finance", "healthcare", "industry"].map((x) => Type.Literal(x))))),
-        research_role: Type.Optional(Type.Boolean({ description: "true: does research or studies themselves (academic researcher, scientist, student), not only works in the sector" })),
+        research_role: Type.Optional(Type.Boolean({ description: "true: research-affiliated: an academic researcher, a data or applied scientist at a university, or a student with no job in another industry (a student working at a software company is false)" })),
+        academic_staff: Type.Optional(Type.Boolean({ description: "true: a university's technical staff (research software engineers, research-computing staff); not researchers" })),
+        role_any: Type.Optional(Type.Array(Type.Union([Type.Literal("research_role"), Type.Literal("academic_staff")]), { description: "any of these is true, e.g. researchers or academic staff" })),
         industry: Type.Optional(Type.Array(Type.String(), { description: "the survey's industry names, e.g. \"Fintech\", \"Higher Education\"" })),
         limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 40 })),
       }),
       executionMode: "sequential",
       async execute(_id, p) {
         const q = new URLSearchParams({ ...(p.query ? { query: p.query } : {}), limit: String(p.limit ?? 15), seed: ctx.job.research_id,
-                                        ...(typeof p.research_role === "boolean" ? { research_role: String(p.research_role) } : {}) });
-        for (const k of ["country", "region", "sector", "industry"] as const) for (const v of (p[k] as string[] | undefined) ?? []) q.append(k, v);
+                                        ...(typeof p.research_role === "boolean" ? { research_role: String(p.research_role) } : {}),
+                                        ...(typeof p.academic_staff === "boolean" ? { academic_staff: String(p.academic_staff) } : {}) });
+        for (const k of ["country", "region", "sector", "industry", "role_any"] as const) for (const v of (p[k] as string[] | undefined) ?? []) q.append(k, v);
         try { return text(await api(`/api/worker/library/profiles?${q}`, { method: "GET" })); }
         catch (e) { throw new Error(`search_profiles failed: ${(e as Error).message}`); }
       },
@@ -236,15 +240,11 @@ export function createResearchExtension(ctx: ResearchContext, opts: { only?: rea
             return text({ accepted: false, issues: arch.issues, attempts_left: left, note: "The architecture review found tools that do not compete with the product, or names to add. Fix them, then submit again." });
           }
           if (ctx.architecture) applyArchitecture(r.result, ctx.architecture);
-          // Who may sign up, as the review read it: a confident, quoted restriction research lacks goes back to it (at
-          // most 2 rounds); a disagreement the review is unsure of keeps research's audience and asks the customer.
-          const cross = ctx.architecture ? audienceCrossCheck((r.result as any)?.product?.audience, ctx.architecture.audience) : null;
-          if (cross?.issues.length && ctx.audienceRounds < 2) {
-            ctx.audienceRounds++;
-            ctx.lastIssues = cross.issues;
-            return text({ accepted: false, issues: cross.issues, attempts_left: left, note: "The architecture review read who may sign up differently. Fix product.audience (and the personas it rules out), then submit again." });
+          const audienceIssues = audienceStep(ctx, r.result);
+          if (audienceIssues.length) {
+            ctx.lastIssues = audienceIssues;
+            return text({ accepted: false, issues: audienceIssues, attempts_left: left, note: "The architecture review read who may sign up differently. Fix product.audience (and the personas it rules out), then submit again." });
           }
-          if (cross?.question) (r.result as any).questions = [...((r.result as any).questions ?? []), cross.question];
           // Task review next (at most 2 rounds per job): problems must create a purchase decision on their own.
           const review = ctx.critic && ctx.criticRounds < 2 ? (ctx.criticRounds++, await ctx.critic(r.result).catch(() => null)) : null;
           if (review?.length) {
@@ -268,6 +268,23 @@ export function createResearchExtension(ctx: ResearchContext, opts: { only?: rea
       },
     }));
   };
+}
+
+/** Rounds the audience cross-check may send research back for, before the customer is asked instead. */
+export const AUDIENCE_ROUNDS = 2;
+
+/**
+ * Who may sign up, as the review read it, against research's product.audience (architect.ts audienceCrossCheck): a
+ * confident, quoted restriction research lacks goes back to research (the issues returned) for AUDIENCE_ROUNDS rounds.
+ * After that, or when the review is unsure, research's audience stays and an 'audience' question goes on the result
+ * for the customer: a restriction the review quoted is never dropped without one.
+ */
+export function audienceStep(ctx: { architecture: ArchitectOutcome | null; audienceRounds: number }, result: any): string[] {
+  if (!ctx.architecture) return [];
+  const cross = audienceCrossCheck(result?.product?.audience, ctx.architecture.audience, { final: ctx.audienceRounds >= AUDIENCE_ROUNDS });
+  if (cross.issues.length) { ctx.audienceRounds++; return cross.issues; }
+  if (cross.question) result.questions = [...(result.questions ?? []).filter((q: any) => !(q?.kind === "audience" && q?.subject === cross.question.subject)), cross.question];
+  return [];
 }
 
 /**

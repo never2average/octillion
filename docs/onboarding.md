@@ -95,17 +95,25 @@ customer ── get_onboarding / get_visibility_report ──▶ results
 - **Personas** must not mention the product or its competitors (they answer the agent blind).
 - **Personas must be people who can use the product** (`src/audience.ts`). Research states `product.audience`: global
   by default, or limited to countries (`exclusive` or `primary`) and gates (`required` or `typical`, matched on the
-  profiles' survey facets: sector, research_role, industry, org size). Every restriction quotes a page fetched in the
-  job; a headquarters, customer logos or cloud regions are not restrictions. The server checks each pick against the
+  profiles' survey facets: sector, research_role, academic_staff, role_any, industry, org size). `research_role` is
+  research-affiliated (an academic researcher, a data or applied scientist at a university, or a student with no job in
+  another industry); `academic_staff` is a university's technical staff (research software engineers, research-computing
+  staff); "researchers or the staff they sponsor" is `role_any: ["research_role", "academic_staff"]`. Every restriction
+  quotes a page the server knows the job saw (a search result or the product's own site); a headquarters, customer
+  logos or cloud regions are not restrictions. The server checks each pick against the
   facets: a pick outside an exclusive market or failing a required gate is rejected, and soft parts need half the picks.
   Every persona-round reason names the profile's country. When nobody in the data fits, research submits
   `personas: []` with `audience_gap`; the server accepts it only if no shared profile passes the hard parts, unlinks the
   old personas and asks the customer a `persona_supply` question; runs then refuse ("No eligible personas for this
-  product's audience yet") rather than use a generic developer. The architecture review reads the sign-up pages too: a
-  confident, quoted restriction research missed goes back as an issue, a disagreement it is unsure of becomes an
-  `audience` question. Answering one confirms the audience (source customer), unlinks personas who fail it and queues
-  research again. Onboarding takes an optional `audience` (the customer's own words), saved as confirmed. Rolling
-  reports cover the persona set linked now; older sessions are counted apart as the previous persona set.
+  product's audience yet") rather than use a generic developer; a run naming personas who fail the hard parts (or
+  `profiles: []`) is refused, and one that misses only soft parts runs with `audience_warnings`. The architecture review
+  reads the sign-up pages too and compares countries, strictness (exclusive vs primary) and each required gate: a
+  confident, quoted restriction research missed goes back as an issue for two rounds, then (like a disagreement it is
+  unsure of) becomes an `audience` question, never dropped. Answering one confirms the audience (source customer),
+  unlinks personas who fail it and queues research again (not when it only confirms the same hard parts of a gap). A
+  newer audience question with other options replaces the open one. Onboarding takes an optional `audience` (the
+  customer's own words), saved as confirmed. When the audience is restricted, rolling reports leave out sessions whose
+  persona cannot use the product and list those personas (`ineligible_personas`); a global product is never split.
 - **Persona `environment`** `{editor, tools, skills, agent_rules}`: the editor and CLI tools come from the catalog in
   `orchestrator/core/environment.ts`. Skills (at most 6, `name` lowercase-hyphenated, `body` 40-4000 characters) and
   `agent_rules` (at most 3000 characters) are the developer's own agent setup, scaled by seniority. None of it may name

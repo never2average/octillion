@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { getDb } from "./db.js";
 import { resolveProduct } from "./queries.js";
 import { keepAlive } from "./telemetry.js";
-import { audienceFormIssues, describeAudience, hardMisses, mergeAudience, type Audience } from "./audience.js";
+import { audienceFormIssues, describeAudience, hardKey, hardMisses, mergeAudience, type Audience } from "./audience.js";
 import type { Org } from "./auth.js";
 import type { Tool } from "./scoring.js";
 
@@ -40,13 +40,23 @@ function validOptions(q: AskedQuestion): QuestionOption[] {
     ...(q.kind === "competitor_relation" ? { relation: o.relation } : { value: o.value }) }));
 }
 
-/** Store research's questions; an open question about the same subject stays as it is. */
+/**
+ * Store research's questions. An open competitor question about the same tool stays as it is. An open audience
+ * question with the same subject but other options (asked about an audience since changed) is dismissed and the new
+ * one asked in its place: answering the old one would merge an audience nobody holds any more.
+ */
 export async function askQuestions(orgId: number, productId: number, researchId: string, qs: AskedQuestion[]): Promise<number> {
   const db = await getDb();
   let n = 0;
   for (const q of qs.slice(0, 10)) {
     const options = validOptions(q);
     if ((q.kind !== "competitor_relation" && q.kind !== "audience") || !q.subject?.trim() || !q.question?.trim() || options.length < 2) continue;
+    if (q.kind === "audience")
+      await db.query(
+        `/* tenant: research job's own product (job checked against the job token in http.ts) */ UPDATE product_questions
+            SET status = 'dismissed', answered_at = now(), answer = jsonb_build_object('replaced', true, 'by_research', $5::text)
+          WHERE org_id = $1 AND product_id = $2 AND kind = 'audience' AND lower(subject) = lower($3) AND status = 'open' AND options <> $4::jsonb`,
+        [orgId, productId, q.subject.trim().slice(0, 120), JSON.stringify(options), researchId]);
     const rows = await db.query(
       `/* tenant: research job's own product (job checked against the job token in http.ts) */ INSERT INTO product_questions (id, org_id, product_id, research_id, kind, subject, question, options, context)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT DO NOTHING RETURNING id`,
@@ -77,6 +87,7 @@ export async function answerQuestion(org: Org, input: { question_id: string; opt
   const [q] = await db.query<{ id: string; product_id: number; kind: QuestionKind; subject: string; options: QuestionOption[]; status: string }>(
     "SELECT id, product_id, kind, subject, options, status FROM product_questions WHERE id = $1 AND org_id = $2", [input.question_id, org.orgId]);
   if (!q) throw Object.assign(new Error(`No question ${input.question_id}`), { status: 404 });
+  if (q.status === "dismissed") throw Object.assign(new Error("This question was replaced by a newer one: see list_product_questions"), { status: 409 });
   if (q.status !== "open") throw Object.assign(new Error("This question was already answered"), { status: 409 });
   const opt = q.options.find((o) => o.id === input.option || o.label === input.option);
   if (!opt) throw Object.assign(new Error(`Pick one of the options: ${q.options.map((o) => `${o.id} (${o.label})`).join("; ")}`), { status: 400 });
@@ -135,8 +146,9 @@ async function answerAudience(org: Org, q: { id: string; product_id: number; sub
   // Research again, with the confirmed audience in its brief, so the personas are re-picked from those who may use it.
   // Not when the customer only confirmed what research found nobody for (persona_supply, same hard parts): it would
   // find the same gap; personas are picked once matching profiles are added to the data.
-  const hard = (x: Audience | null | undefined) => JSON.stringify([x?.scope, x?.countries ?? [], x?.strictness ?? null, (x?.gates ?? []).map((g) => [g.match, g.strictness])]);
-  if (q.subject === "persona_supply" && hard(p?.research?.audience) === hard(audience)) {
+  // Compared with the defaults filled in (hardKey): an audience stored without a strictness is exclusive, the same as
+  // the answer that spells it out, so confirming it does not queue research that would find the same gap again.
+  if (q.subject === "persona_supply" && hardKey(p?.research?.audience) === hardKey(audience)) {
     return { view: "question_answered" as const, question_id: q.id, subject: q.subject, answer: opt.label,
              effect: `Who can use the product: ${describeAudience(audience)} (confirmed). No developer profile in the data fits yet; research will pick personas once matching profiles are added.`,
              unlinked: unfit.map((x) => x.slug), research_id: null, rescoring: false };

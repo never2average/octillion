@@ -29,10 +29,14 @@ Tools:
   numbers). Their result URLs are what a competitor's evidence_url cites.
 - search_library(query, category?, language?, platform?): search the curated library of about 7,000 realistic coding
   tasks; each has a platform (web, mobile, backend, desktop, cli, data, other).
-- search_profiles(query?, country?, region?, sector?, research_role?, industry?, limit?): search the developer-profile
-  data: real developers from survey responses (role, experience, company size, stack, constraints, how they answer).
-  Each has attributes.facets from their own survey answers: country (ISO2), region, sector (academia | government |
-  finance | healthcare | industry), research_role (does research or studies themselves) and the survey's industry.
+- search_profiles(query?, country?, region?, sector?, research_role?, academic_staff?, role_any?, industry?, limit?):
+  search the developer-profile data: real developers from survey responses (role, experience, company size, stack,
+  constraints, how they answer). Each has attributes.facets from their own survey answers: country (ISO2), region,
+  sector (academia | government | finance | healthcare | industry; a student is academia even when they also work at a
+  company), research_role (research-affiliated: an academic researcher, a data or applied scientist at a university,
+  or a student with no job in another industry; a student who works at a software company is not), academic_staff (a
+  university's technical staff, such as research software engineers and research-computing staff; not researchers)
+  and the survey's industry.
   Filter by product.audience first; "matched" counts everyone who fits, and matched=0 means nobody in the data fits.
   Personas are picked from here.
 - report_progress(stage, note): stages are reading, profiling, personas, problems, validating. Call it as you move on.
@@ -74,9 +78,11 @@ Procedure:
      up) or "primary" (it is built for that market, others can still use it);
    - "gates": other conditions, each {"id", "requirement" (plain words), "strictness": "required" | "typical",
      "match": {"sector_any": [academia | government | finance | healthcare | industry], "research_role": true | false,
-     "industry_any": [survey industries], "org_size_any": [...]}} (keys combine with AND, values in a key with OR). E.g.
-     accounts only for researchers at a university: {"strictness": "required", "match": {"sector_any": ["academia"],
-     "research_role": true}};
+     "academic_staff": true | false, "role_any": [research_role | academic_staff], "industry_any": [survey industries],
+     "org_size_any": [...]}} (keys combine with AND, values in a key with OR). E.g. accounts only for researchers at a
+     university: {"strictness": "required", "match": {"sector_any": ["academia"], "research_role": true}}; accounts for
+     researchers and the staff they sponsor (research software engineers, research-computing staff):
+     {"match": {"sector_any": ["academia"], "role_any": ["research_role", "academic_staff"]}};
    - every restriction cites "evidence": [{"url": a page in your sources, "quote": the sentence that says it}];
    - "checked": the pages you read to decide (30+ characters), even when the answer is global.
 3. Personas. PICK 1-4 eligible profiles from the developer-profile data (aim for 2-4); never invent one. Never pick a
@@ -84,13 +90,14 @@ Procedure:
    find none, submit "personas": [] with "audience_gap": {"searched": [the search_profiles calls you ran], "note": why
    nobody fits}. The server checks the gap: it is refused while anyone eligible exists. Choose in rounds, as many as it
    takes, and record every round in selection.personas:
-   - Round 1 (shortlist): search_profiles with the audience's filters first (country, sector, research_role, industry),
+   - Round 1 (shortlist): search_profiles with the audience's filters first (country, sector, research_role or role_any, industry),
      then by stack within them: the product's real users' roles and stacks on its main platforms (e.g. "Flutter",
      "Kotlin", "mobile", "React", "backend"). Shortlist at least twice as many profiles as you will pick (or every
      eligible one, if fewer exist), each with keep and a reason.
    - Round 2 (critique), in this order: (1) eligibility: the profile's country, then each required gate; drop every
-     failure, and an exact stack match never makes up for it. (2) a real user: industry is not role (a web developer
-     in a university's IT department is not a researcher; research_role says who is). (3) stack against the platforms
+     failure, and an exact stack match never makes up for it. (2) a real user: sector is not role (a web developer
+     in a university's IT department is not a researcher, nor is a student whose job is at a software company;
+     research_role says who is, academic_staff who is university staff). (3) stack against the platforms
      the problems run on, seniority, company size, redundancy. Drop the weak ones and search again for better ones.
    - Keep critiquing, one round at a time, until a full critique finds nothing to change. That last round keeps the
      same set, is marked "converged": true and says in "why" what you checked. Its kept candidates are the personas.
@@ -178,7 +185,7 @@ Result JSON (pass it as a JSON string in result_json):
                "website_url", "docs_url", "features": [], "aliases": [], "platforms": ["main platform first"],
                "packages": [], "domains": [], "competitors": [{"name", "aliases": [], "packages": [], "domains": [], "evidence_url"}],
                "audience": { "scope": "global" | "countries", "countries": ["ISO2, for scope countries"], "strictness": "exclusive" | "primary",
-                             "gates": [{ "id", "requirement", "strictness": "required" | "typical", "match": {"sector_any", "research_role", "industry_any", "org_size_any"},
+                             "gates": [{ "id", "requirement", "strictness": "required" | "typical", "match": {"sector_any", "research_role", "academic_staff", "role_any", "industry_any", "org_size_any"},
                                          "evidence": [{"url", "quote"}] }],
                              "evidence": [{"url": "a page in sources", "quote": "the sentence that limits sign-up"}], "checked": "the pages you read" } },
   "personas": [{ "profile_slug": "REQUIRED: from search_profiles", "name": "the profile's exact name",

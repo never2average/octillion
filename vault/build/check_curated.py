@@ -33,6 +33,15 @@ def profile_problems(profiles):
         if f.get("sector") not in SECTORS: out.append(f"{pid}: facets.sector must be one of {sorted(SECTORS)}")
         if not isinstance(f.get("sector_basis"), list) or not f.get("sector_basis"): out.append(f"{pid}: facets.sector_basis is required")
         if not isinstance(f.get("research_role"), bool): out.append(f"{pid}: facets.research_role must be true or false")
+        if not isinstance(f.get("academic_staff"), bool): out.append(f"{pid}: facets.academic_staff must be true or false")
+        # so_common.research_role, as far as the facets show it: a scientist outside a university, or a student whose
+        # industry is a company's, is not research-affiliated (industry_survey folds "no answer" into Other).
+        dev, ind, emp = f.get("dev_type"), f.get("industry_survey"), f.get("employment") or []
+        if f.get("research_role") is True and dev != "Academic researcher" and not (dev in ("Applied scientist", "Data scientist") and ind == "Higher Education") \
+                and not ("Student" in emp and not {"Employed", "Independent contractor, freelancer, or self-employed"} & set(emp) and ind in ("Higher Education", "Other")):
+            out.append(f"{pid}: facets.research_role is true for a {dev} ({', '.join(emp) or 'no employment'}) in {ind}: not research-affiliated")
+        if f.get("academic_staff") is True and ind != "Higher Education":
+            out.append(f"{pid}: facets.academic_staff is true outside Higher Education ({ind})")
         if a.get("industry") not in INDUSTRIES: out.append(f"{pid}: industry {a.get('industry')!r} is not one of the survey's options")
         named = mentioned_countries(p.get("summary"), skip={str(p.get("name") or "").split(" ")[0]})
         if f.get("country") and named - {f["country"]}:
@@ -42,7 +51,8 @@ def profile_problems(profiles):
 
 def selftest():
     good = {"id": "t-1", "name": "Ada L.", "summary": "A Canadian academic researcher.", "attributes": {"industry": "Higher Education",
-            "facets": {"country": "CA", "region": "north_america", "sector": "academia", "sector_basis": ["DevType: Academic researcher"], "research_role": True}}}
+            "facets": {"country": "CA", "region": "north_america", "sector": "academia", "sector_basis": ["DevType: Academic researcher"], "research_role": True,
+                          "academic_staff": False, "dev_type": "Academic researcher", "industry_survey": "Higher Education", "employment": ["Employed"]}}}
     assert not profile_problems([good]), profile_problems([good])
     def broken(fn):
         p = json.loads(json.dumps(good)); fn(p); return p
@@ -53,6 +63,13 @@ def selftest():
         "missing sector": broken(lambda p: p["attributes"]["facets"].pop("sector")),
         "industry not in the enum": broken(lambda p: p["attributes"].update(industry="Higher education")),
         "summary names another country": broken(lambda p: p.update(summary="A Swedish academic researcher.")),
+        "missing academic_staff": broken(lambda p: p["attributes"]["facets"].pop("academic_staff")),
+        # The reviewers' case: a student whose day job is at a software company was counted a researcher.
+        "student at a software company as researcher": broken(lambda p: p["attributes"]["facets"].update(
+            dev_type="Developer, back-end", industry_survey="Software Development", employment=["Student"])),
+        "data scientist at an insurer as researcher": broken(lambda p: p["attributes"]["facets"].update(dev_type="Data scientist", industry_survey="Insurance")),
+        "academic staff outside a university": broken(lambda p: p["attributes"]["facets"].update(research_role=False, academic_staff=True, dev_type="Developer, back-end",
+                                                                                               industry_survey="Software Development")),
     }
     for what, p in cases.items():
         assert profile_problems([p]), f"{what} was not caught"

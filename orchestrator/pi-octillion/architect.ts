@@ -73,10 +73,13 @@ List missing_names: short, former or spoken names developers use for the product
 Finally, the audience: who may sign up? Read the account, eligibility and terms pages (and pricing, if it has
 conditions). Default global. HQ, customer logos and cloud regions are NOT restrictions: only a page that says who may
 have an account (e.g. "accounts are available to researchers at Canadian institutions with a faculty sponsor") is.
-- scope: "global", or "countries" with ISO2 codes when sign-up is limited to people in those countries.
-- gates: other conditions a user must meet, each {requirement, sector_any (academia | government | finance |
-  healthcare | industry), research_role (true when the user must do research or study themselves, not only work at
-  such an institution)}.
+- scope: "global", or "countries" with ISO2 codes when sign-up is limited to people in those countries, and
+  strictness: "exclusive" (nobody elsewhere can sign up) or "primary" (built for those countries; others can still).
+- gates: other conditions a user must meet, each {requirement, strictness ("required": nobody else can sign up;
+  "typical": most users are like this), sector_any (academia | government | finance | healthcare | industry),
+  research_role (true when the user must be research-affiliated: a researcher, a scientist at a university or a
+  student; working at such an institution is not enough), role_any (["research_role", "academic_staff"] when
+  researchers or the university staff they sponsor, such as research software engineers, may sign up)}.
 - confidence: "high" only with a quote from a page you read that states the condition (url and quote).
 
 Answer with ONLY one JSON object, no prose:
@@ -86,7 +89,8 @@ Answer with ONLY one JSON object, no prose:
                   "question": {"text": "", "options": [{"label": "", "relation": "substitute"}]}}],
  "build_alternative": {"kind": "self_hosted" | "build", "name": "", "signals": [], "replaces_index": null, "reason": ""},
  "missing_names": [],
- "audience": {"scope": "global" | "countries", "countries": [], "gates": [{"requirement": "", "sector_any": [], "research_role": true}],
+ "audience": {"scope": "global" | "countries", "countries": [], "strictness": "exclusive" | "primary",
+              "gates": [{"requirement": "", "strictness": "required" | "typical", "sector_any": [], "research_role": true, "role_any": []}],
               "confidence": "high" | "medium" | "low", "url": "", "quote": ""}}
 "reason" is one short sentence with the evidence; "question" only when confidence is not high.`;
 
@@ -97,7 +101,8 @@ export interface CompetitorJudgement { index: number; name: string; relation: Re
   question: { text: string; options: { label: string; relation: Relation }[] } | null }
 export interface BuildAlternative { kind: "self_hosted" | "build"; name: string; signals: string[]; replaces_index: number | null; reason: string }
 /** Who may sign up, as the reviewer read it (cross-checked against research's product.audience: audienceCrossCheck). */
-export interface ArchitectAudience { scope: "global" | "countries"; countries: string[]; gates: { requirement: string; sector_any: string[]; research_role?: boolean }[];
+export interface ArchitectGate { requirement: string; strictness: "required" | "typical"; sector_any: string[]; research_role?: boolean; role_any?: string[] }
+export interface ArchitectAudience { scope: "global" | "countries"; countries: string[]; strictness?: "exclusive" | "primary"; gates: ArchitectGate[];
   confidence: Confidence; url: string; quote: string }
 export interface ArchitectVerdict { placement: Placement; competitors: CompetitorJudgement[]; missing_names: string[]; build_alternative: BuildAlternative | null;
   audience?: ArchitectAudience | null }
@@ -153,54 +158,90 @@ export function parseArchitect(text: string): ArchitectVerdict | null {
 }
 
 const SECTORS = ["academia", "government", "finance", "healthcare", "industry"];
+const ROLES = ["research_role", "academic_staff"];
 function audienceOf(a: any): ArchitectAudience | null {
   if (!a || (a.scope !== "global" && a.scope !== "countries")) return null;
   const countries = a.scope === "countries" ? strs(a.countries, 50).map((c) => c.toUpperCase()).filter((c) => /^[A-Z]{2}$/.test(c)) : [];
-  const gates = (Array.isArray(a.gates) ? a.gates : []).filter((g: any) => typeof g?.requirement === "string" && g.requirement.trim()).map((g: any) => ({
-    requirement: g.requirement.trim().slice(0, 300), sector_any: strs(g.sector_any).filter((s) => SECTORS.includes(s)),
-    ...(typeof g.research_role === "boolean" ? { research_role: g.research_role } : {}) }));
+  const gates: ArchitectGate[] = (Array.isArray(a.gates) ? a.gates : []).filter((g: any) => typeof g?.requirement === "string" && g.requirement.trim()).map((g: any) => ({
+    // A condition stated without a strength is read as required: the page said users must meet it.
+    requirement: g.requirement.trim().slice(0, 300), strictness: g.strictness === "typical" ? "typical" : "required",
+    sector_any: strs(g.sector_any).filter((s) => SECTORS.includes(s)),
+    ...(typeof g.research_role === "boolean" ? { research_role: g.research_role } : {}),
+    ...(strs(g.role_any).filter((r) => ROLES.includes(r)).length ? { role_any: strs(g.role_any).filter((r) => ROLES.includes(r)) } : {}) }));
   const url = typeof a.url === "string" ? a.url.trim() : "", quote = typeof a.quote === "string" ? a.quote.trim().slice(0, 600) : "";
   let confidence: Confidence = CONFIDENCE.includes(a.confidence) ? a.confidence : "medium";
   // A restriction is only as sure as the page that states it: without a quote it is never high (a US headquarters or a
   // customer list does not limit who may sign up).
   if ((countries.length || gates.length) && confidence === "high" && !(/^https?:\/\//.test(url) && quote.length >= 20)) confidence = "medium";
-  return { scope: countries.length ? "countries" : "global", countries, gates, confidence, url, quote };
+  return { scope: countries.length ? "countries" : "global", countries, ...(countries.length ? { strictness: a.strictness === "primary" ? "primary" : "exclusive" } : {}),
+           gates, confidence, url, quote };
 }
 
 const sameSet = (a: string[], b: string[]) => a.length === b.length && a.every((x) => b.includes(x));
+const subset = (a: string[] | undefined, b: string[]) => !!a?.length && a.every((x) => b.includes(x));
+
+/** An audience gate's match as the server reads it (src/facets.ts GateMatch), from the reviewer's gate. */
+const matchOf = (g: ArchitectGate) => ({ ...(g.sector_any.length ? { sector_any: g.sector_any } : {}),
+  ...(typeof g.research_role === "boolean" ? { research_role: g.research_role } : {}), ...(g.role_any?.length ? { role_any: g.role_any } : {}) });
+
+/** Does one of research's required gates hold the user to at least what the reviewer's required gate does? */
+function covers(rGates: any[], g: ArchitectGate): boolean {
+  return rGates.some((r) => {
+    const m = r?.match ?? {};
+    if (g.sector_any.length && !subset(m.sector_any, g.sector_any)) return false;
+    // research_role true is met by research_role true, or a role_any of only research_role.
+    if (g.research_role === true && m.research_role !== true && !(sameSet(m.role_any ?? [], ["research_role"]))) return false;
+    if (g.role_any?.length && !(m.research_role === true && g.role_any.includes("research_role")) && !(m.academic_staff === true && g.role_any.includes("academic_staff"))
+        && !subset(m.role_any, g.role_any)) return false;
+    return true;
+  });
+}
 
 /**
- * Research's product.audience against the reviewer's reading (pure; orchestrator/test/architect.ts). A confident,
- * quoted restriction research lacks (or other countries) goes back as an issue; a disagreement the reviewer is not
- * sure of keeps research's audience and asks the customer which is right.
+ * Research's product.audience against the reviewer's reading (pure; orchestrator/test/architect.ts). Compared: the
+ * countries, how strict the market is (exclusive vs primary; unset is exclusive, as src/audience.ts reads it), and each
+ * required gate (present, required rather than typical, and as narrow). A confident, quoted restriction research lacks
+ * goes back as issues while rounds are left (`final` false); once they are used up, or when the reviewer is unsure,
+ * research's reading stays and the customer is asked which is right: a disagreement is never accepted silently.
  */
-export function audienceCrossCheck(research: any, arch: ArchitectAudience | null | undefined): { issues: string[]; question: any | null } {
+export function audienceCrossCheck(research: any, arch: ArchitectAudience | null | undefined, opts: { final?: boolean } = {}): { issues: string[]; question: any | null } {
   if (!arch) return { issues: [], question: null };
-  const rCountries: string[] = research?.scope === "countries" && Array.isArray(research.countries) ? research.countries : [];
-  const rGates: any[] = (Array.isArray(research?.gates) ? research.gates : []).filter((g: any) => g?.strictness === "required");
-  const where = arch.countries.join(", ");
+  const rScope = research?.scope === "countries" ? "countries" : "global";
+  const rCountries: string[] = rScope === "countries" && Array.isArray(research.countries) ? research.countries : [];
+  const rStrict = rScope === "countries" ? (research?.strictness === "primary" ? "primary" : "exclusive") : null;
+  const rRequired: any[] = (Array.isArray(research?.gates) ? research.gates : []).filter((g: any) => g?.strictness === "required");
+  const aRequired = arch.gates.filter((g) => g.strictness === "required");
   const cite = arch.url ? ` (${arch.url}: "${arch.quote}")` : "";
-  const countriesDiffer = arch.countries.length ? !sameSet(arch.countries, rCountries) : false;
-  const gateMissing = arch.gates.length > 0 && !rGates.length;
-  if (arch.confidence === "high") {
-    const issues: string[] = [];
-    if (countriesDiffer) issues.push(`product.audience (architecture review): found sign-up limited to ${where}${cite}; set product.audience accordingly (scope "countries", countries ${JSON.stringify(arch.countries)}, with that quote as evidence)`);
-    if (gateMissing) issues.push(`product.audience (architecture review): found users must meet "${arch.gates.map((g) => g.requirement).join("; ")}"${cite}; add it to product.audience.gates as required, with that quote as evidence`);
-    return { issues, question: null };
+  const issues: string[] = [];
+  if (arch.countries.length && !sameSet(arch.countries, rCountries))
+    issues.push(`product.audience (architecture review): found sign-up limited to ${arch.countries.join(", ")}${cite}; set product.audience accordingly (scope "countries", countries ${JSON.stringify(arch.countries)}, strictness "${arch.strictness}", with that quote as evidence)`);
+  else if (arch.countries.length && arch.strictness === "exclusive" && rStrict !== "exclusive")
+    issues.push(`product.audience (architecture review): nobody outside ${arch.countries.join(", ")} can sign up${cite}, but product.audience.strictness is "${rStrict}"; set strictness "exclusive", with that quote as evidence`);
+  for (const g of aRequired) if (!covers(rRequired, g)) {
+    const typical = (research?.gates ?? []).some((x: any) => x?.strictness === "typical");
+    issues.push(`product.audience (architecture review): found users must meet "${g.requirement}"${cite}; ${typical && !rRequired.length ? "product.audience has it only as typical: make it required" : "add it to product.audience.gates as required"} with match ${JSON.stringify(matchOf(g))} and that quote as evidence`);
   }
-  // Not sure: research's reading stands (it cites its own page), and the customer is asked.
-  const disagree = (arch.scope === "countries") !== (research?.scope === "countries") || countriesDiffer || gateMissing;
+  if (arch.confidence === "high" && !opts.final) return { issues, question: null };
+  // Unsure, or research kept its reading through the rounds: research's audience stands (it cites its own page) and
+  // the customer is asked which reading is right.
+  const disagree = issues.length > 0 || (arch.scope === "countries") !== (rScope === "countries") || (arch.scope === "countries" && arch.strictness !== rStrict) ||
+    (arch.gates.length > 0 && !rRequired.length && !(research?.gates ?? []).length);
   if (!disagree) return { issues: [], question: null };
-  const valueOf = (scope: string, countries: string[], gates: any[]) => ({ scope, ...(scope === "countries" ? { countries, strictness: "exclusive" } : {}), gates });
-  const archGates = arch.gates.map((g, i) => ({ id: `review-${i + 1}`, requirement: g.requirement, strictness: "required",
-    match: { ...(g.sector_any.length ? { sector_any: g.sector_any } : {}), ...(typeof g.research_role === "boolean" ? { research_role: g.research_role } : {}) } }))
+  const valueOf = (scope: string, countries: string[], strictness: string | null | undefined, gates: any[]) =>
+    ({ scope, ...(scope === "countries" ? { countries, strictness: strictness ?? "exclusive" } : {}), gates });
+  const archGates = arch.gates.map((g, i) => ({ id: `review-${i + 1}`, requirement: g.requirement, strictness: g.strictness, match: matchOf(g) }))
     .filter((g) => Object.keys(g.match).length);
-  const describe = (scope: string, countries: string[], gates: { requirement: string }[]) =>
-    `${scope === "countries" && countries.length ? `Only people in ${countries.join(", ")}` : "Anyone, anywhere"}${gates.length ? `, who ${gates.map((g) => g.requirement).join("; ")}` : ""} can sign up`;
+  const describe = (scope: string, countries: string[], strictness: string | null | undefined, gates: { requirement: string; strictness?: string }[]) => {
+    const req = gates.filter((g) => g.strictness !== "typical");
+    return `${scope === "countries" && countries.length ? `${strictness === "primary" ? "Mainly" : "Only"} people in ${countries.join(", ")}` : "Anyone, anywhere"}${req.length ? `, who ${req.map((g) => g.requirement).join("; ")}` : ""} can sign up`;
+  };
+  let la = describe(rScope, rCountries, rStrict, research?.gates ?? []), lb = describe(arch.scope, arch.countries, arch.strictness, archGates);
+  // Same words, different rules (e.g. how narrow a gate is): say whose reading each is.
+  if (la === lb) (la += " (as research read the pages)"), (lb += ` (as the sign-up page${arch.url ? ` ${arch.url}` : ""} reads)`);
   return { issues: [], question: { kind: "audience", subject: "audience", question: "Who can sign up for and use the product?",
-    options: [{ id: "a", label: describe(research?.scope, rCountries, rGates), value: valueOf(research?.scope === "countries" ? "countries" : "global", rCountries, research?.gates ?? []) },
-              { id: "b", label: describe(arch.scope, arch.countries, archGates), value: valueOf(arch.scope, arch.countries, archGates) }],
-    context: { research: research ?? null, review: arch } } };
+    options: [{ id: "a", label: la, value: valueOf(rScope, rCountries, rStrict, research?.gates ?? []) },
+              { id: "b", label: lb, value: valueOf(arch.scope, arch.countries, arch.strictness, archGates) }],
+    context: { research: research ?? null, review: arch, ...(issues.length ? { review_findings: issues } : {}) } } };
 }
 
 function buildAlternativeOf(b: any): BuildAlternative | null {
