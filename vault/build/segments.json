@@ -1,0 +1,4 @@
+[
+  {"id": "ca-academia", "why": "products only Canadian researchers may use (e.g. national research computing)", "country": "CA", "sector": "academia", "research_role": true, "min": 20},
+  {"id": "in-finance", "why": "products built for Indian banks, insurers and fintechs", "country": "IN", "sector": "finance", "min": 12}
+]

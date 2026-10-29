@@ -96,6 +96,8 @@ const good = {
     category_terms: ["job queue library", "background job framework", "task queue service"], platforms: ["backend"],
     aliases: ["acme-queue"], packages: ["acmeq"], domains: ["acmequeue.test"],
     competitors: [{ name: "BeeQueue", aliases: [], packages: ["bee-queue"], domains: [] }, { name: "Agenda", aliases: [], packages: ["agenda"], domains: [] }, { name: "pg-boss", aliases: [], packages: ["pg-boss"], domains: [] }],
+    // Who may use it: an npm package anyone can install, so global (no page limits sign-up).
+    audience: { scope: "global", checked: "the homepage and the install page: anyone installs it from npm, no account or eligibility" },
   },
   personas: [{ profile_slug: STARTUP.slug, name: STARTUP.name }, { profile_slug: INDIE.slug, name: INDIE.name }],
   scenarios: [
@@ -107,12 +109,12 @@ const good = {
   selection: {
     tasks: [{ round: 1, note: "searched the library for background jobs on backend: only TypeScript examples for other stacks" }],
     personas: [
-      { round: 1, candidates: [cand(STARTUP, true, "backend engineer who owns job infrastructure"), cand(INDIE, true, "ships fast and leaves tooling to the agent"),
-        cand(ENTERPRISE, true, "runs platform work at scale, worth a look"), cand(AGENCY, false, "frontend work rarely needs a job queue")] },
-      { round: 2, candidates: [cand(STARTUP, true, "still the closest fit for Redis-backed jobs"), cand(INDIE, true, "covers the solo founder buyer"),
-        cand(ENTERPRISE, false, "enterprise platforms standardise on managed queues, too far from the product"), cand(AGENCY, false, "frontend work rarely needs a job queue")] },
+      { round: 1, candidates: [cand(STARTUP, true, "US, industry: backend engineer who owns job infrastructure"), cand(INDIE, true, "US, industry: ships fast and leaves tooling to the agent"),
+        cand(ENTERPRISE, true, "Germany, industry: runs platform work at scale, worth a look"), cand(AGENCY, false, "UK, industry: frontend work rarely needs a job queue")] },
+      { round: 2, candidates: [cand(STARTUP, true, "US, industry: still the closest fit for Redis-backed jobs"), cand(INDIE, true, "US, industry: covers the solo founder buyer"),
+        cand(ENTERPRISE, false, "DE, industry: enterprise platforms standardise on managed queues, too far from the product"), cand(AGENCY, false, "GB, industry: frontend work rarely needs a job queue")] },
       { round: 3, converged: true, why: "A full critique of both kept profiles against the product's users changed nothing.",
-        candidates: [cand(STARTUP, true, "still the closest fit for Redis-backed jobs"), cand(INDIE, true, "covers the solo founder buyer")] },
+        candidates: [cand(STARTUP, true, "US, industry: still the closest fit for Redis-backed jobs"), cand(INDIE, true, "US, industry: covers the solo founder buyer")] },
     ],
   },
   sources: [{ url: `${SITE}/`, title: "AcmeQ" }, { url: `${DOCS}/install`, title: "Installation" }],
@@ -129,6 +131,9 @@ const STEPS: [string, Record<string, unknown>][] = [
   ["fetch_url", { url: `http://evil.test:${SITE_PORT}/` }],
   ["fetch_url", { url: `${DOCS}/go-evil` }],
   ["search_library", { query: "background job queue" }],
+  // Filtered by the audience's facets first; "Canadian" in the words is returned as a country hint.
+  ["search_profiles", { query: "backend Canadian", country: ["US"], sector: ["industry"] }],
+  ["search_profiles", { industry: ["Nonsense"] }],
   ["report_progress", { stage: "validating" }],
   ["validate", { result_json: JSON.stringify(bad) }],
   ["submit", { result_json: JSON.stringify(bad) }],
@@ -147,7 +152,7 @@ const ARCHITECT_ANSWER = JSON.stringify({
         { label: "Alongside AcmeQ, for cron-style scheduling", relation: "complement" }, { label: "Instead of AcmeQ", relation: "substitute" }] } },
     { index: 2, name: "pg-boss", relation: "substitute", confidence: "high", reason: "A Postgres-backed queue." }],
   build_alternative: { kind: "build", name: "In-house job queue", signals: ["CREATE TABLE jobs", "SELECT ... FOR UPDATE SKIP LOCKED"], replaces_index: null, reason: "Teams write a queue on their database." },
-  missing_names: [] });
+  missing_names: [], audience: { scope: "global", confidence: "high", url: "", quote: "" } });
 const llm = http.createServer((req, res) => {
   let raw = "";
   req.on("data", (c) => (raw += c));
@@ -278,6 +283,12 @@ async function main() {
   check("off-allowlist host is blocked", /host evil\.test is not/.test(fetches[4] ?? ""), (fetches[4] ?? "").slice(0, 140));
   check("redirect off the allowlist is blocked", /redirect from .*go-evil to http:\/\/evil\.test.* blocked/.test(fetches[5] ?? ""), (fetches[5] ?? "").slice(0, 160));
   check("fake site never served a blocked target", siteHits.every((h) => /^(www|docs)\.acmequeue\.test\//.test(h)) && !siteHits.some((h) => h.includes("stolen")), siteHits.join(" "));
+  const sp = out("search_profiles");
+  let found: any = null; try { found = JSON.parse(sp[0] ?? "null"); } catch { /* */ }
+  check("search_profiles filters on the survey facets, counts every match and hints the country a word names",
+    found && found.matched >= 1 && found.profiles.length >= 1 && found.profiles.every((x: any) => x.attributes.facets.country === "US" && x.attributes.facets.sector === "industry") &&
+    found.hints?.some((h: any) => h.country === "CA") && found.filters.country?.[0] === "US", (sp[0] ?? "").replace(/\s+/g, " ").slice(0, 200));
+  check("search_profiles: an unknown industry is refused with the valid ones", /400.*unknown industry Nonsense.*Higher Education/s.test(sp[1] ?? ""), (sp[1] ?? "").slice(0, 200));
   const val = out("validate")[0] ?? "", sub = out("submit");
   check("validate reports the product name in a prompt", /names AcmeQ/.test(val), val.slice(0, 200));
   // The accepted submit ends the session (terminate), so its output never goes back to the LLM: check the server.

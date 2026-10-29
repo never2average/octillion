@@ -354,6 +354,7 @@ try {
   process.env.VAULT_DIR ??= "vault/example";
   const synced = await (await import("../src/vault.js")).syncVault();
   assert.ok(synced.profiles >= 3 && synced.tasks >= 3);
+  await (await import("./smoke-audience.js")).personaSearchChecks({ db, base, token: WORKER_TOKEN! });
   // Over MCP the public library is listed: active shared personas (full summary and attributes) next to the account's
   // own, and the active library tasks with their prompts; a library task is copied into a product by id.
   const profiles = await call(A, "list_developer_profiles", { query: "enterprise" });
@@ -857,7 +858,8 @@ try {
       product: { name: "QuickQueue", description: "Hosted job queue for TypeScript.", category: "Background jobs", category_terms: ["job queue", "background job service"], platforms: ["backend", "web"],
                  aliases: ["Quick Queue"], packages: ["@quickqueue/sdk"], domains: ["quickqueue.example.com"],
                  competitors: [{ name: "BullMQ", packages: ["bullmq"], evidence_url: "https://bullmq.example.io" }, { name: "Inngest", packages: ["inngest"], evidence_url: evid },
-                               { name: "Trigger.dev", packages: ["@trigger.dev/sdk"], evidence_url: "https://docs.quickqueue.example.com/vs/trigger" }] },
+                               { name: "Trigger.dev", packages: ["@trigger.dev/sdk"], evidence_url: "https://docs.quickqueue.example.com/vs/trigger" }],
+                 audience: { scope: "global", checked: "the install page and the pricing page: anyone may sign up, no eligibility rules" } },
       personas: [
         { profile_slug: "example-startup-backend", name: "Seed-stage startup backend engineer (example)" },
         { profile_slug: "example-enterprise-platform", name: "Enterprise platform engineer (example)" },
@@ -876,10 +878,10 @@ try {
                 { round: 2, candidates: [lib.tasks[0].id, more[0], more[1], more[2]].map((id: number, j: number) => ({ library_task_id: id, keep: j < 3, reason: j < 3 ? "kept after checking platform coverage" : "dropped: same feature as the first task" })) },
                 { round: 3, converged: true, why: "rechecked platforms, decisions and the control task; nothing left to change",
                   candidates: [lib.tasks[0].id, more[0], more[1]].map((id: number) => ({ library_task_id: id, keep: true, reason: "still the best fit for its feature" })) }],
-        personas: [{ round: 1, candidates: ["example-startup-backend", "example-enterprise-platform", "example-solo-indie", "example-agency-frontend"].map((slug, j) => ({ profile_slug: slug, keep: j < 3, reason: j < 3 ? "backend or full-stack role on a matching stack" : "frontend-only work; rarely runs queues" })) },
-                   { round: 2, candidates: ["example-startup-backend", "example-enterprise-platform", "example-solo-indie"].map((slug, j) => ({ profile_slug: slug, keep: j < 2, reason: j < 2 ? "kept: covers startup and enterprise" : "dropped: overlaps the startup engineer" })) },
+        personas: [{ round: 1, candidates: ["example-startup-backend", "example-enterprise-platform", "example-solo-indie", "example-agency-frontend"].map((slug, j) => ({ profile_slug: slug, keep: j < 3, reason: j < 3 ? `${["US", "DE", "US"][j]}, industry: backend or full-stack role on a matching stack` : "UK, industry: frontend-only work; rarely runs queues" })) },
+                   { round: 2, candidates: ["example-startup-backend", "example-enterprise-platform", "example-solo-indie"].map((slug, j) => ({ profile_slug: slug, keep: j < 2, reason: j < 2 ? `${["US", "Germany"][j]}, industry: kept, covers startup and enterprise` : "US, industry: dropped, overlaps the startup engineer" })) },
                    { round: 3, converged: true, why: "rechecked stack fit and company-size spread; nothing left to change",
-                     candidates: ["example-startup-backend", "example-enterprise-platform"].map((slug) => ({ profile_slug: slug, keep: true, reason: "still the best fit" })) }],
+                     candidates: ["example-startup-backend", "example-enterprise-platform"].map((slug, j) => ({ profile_slug: slug, keep: true, reason: `${["US", "DE"][j]}, industry: still the best fit` })) }],
       },
     };
     const bad = structuredClone(good);
@@ -898,6 +900,7 @@ try {
     const vu = (await (await worker(`/research/${rid}/validate`, { result: uncited })).json()).issues as string[];
     assert.ok(vu.some((i) => /competitors\[1\] \(Inngest\) needs evidence_url/.test(i)) && vu.some((i) => /made-up\.example\.net\/page was not returned/.test(i)) && vu.length === 2,
       "competitors cite a search result or the product's own site: " + vu.join(" | "));
+    await (await import("./smoke-audience.js")).pickChecks({ db, worker, rid, good });
     const ghost = structuredClone(good); (ghost.scenarios[1] as any).library_task_id = 99999999;
     assert.ok((await (await worker(`/research/${rid}/validate`, { result: ghost })).json()).issues.some((i: string) => /99999999 is not an active library task/.test(i)), "cited library ids must exist");
     const rejected = await worker(`/research/${rid}/complete`, { status: "completed", result: bad });
@@ -953,6 +956,7 @@ try {
     assert.ok(!(await call(B, "list_personas", {})).personas.some((x: any) => x.source === "library"), "another org's links never show");
     await call(A, "cancel_simulation", { simulation_id: accepted.simulation_id });
     console.log("✓ onboarding: research claim, progress, library search, blindness validation, apply, personas scoped, auto-run");
+    await (await import("./smoke-audience.js")).audienceLifecycleChecks({ db, worker, call, fails, A, orgId: a.org.orgId, good });
   }
 
   // ---------- tenant isolation ----------
@@ -1005,6 +1009,7 @@ try {
   assert.equal(classifySession({ status: "failed", error_message: "No heartbeat for 10 minutes" })?.key, "heartbeat");
   console.log("✓ infrastructure failures are retried once with a clean transcript; config errors (and missing keys) fail at once");
   await import("./error-classes-test.js"); // the error-class unit tests run as part of smoke
+  await import("./audience-test.js"); // and the audience checks on persona picks
 
   // ---------- why orchestrators ended: launch step / launch error / reap reason, and compute_events ----------
   {

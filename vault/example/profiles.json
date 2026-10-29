@@ -13,7 +13,27 @@
         "Vercel"
       ],
       "budget": "as close to free as possible",
-      "tone": "casual, terse"
+      "tone": "casual, terse",
+      "industry": "Software Development",
+      "facets": {
+        "country": "US",
+        "country_name": "United States",
+        "region": "north_america",
+        "sector": "industry",
+        "sector_basis": [
+          "Industry: Software Development"
+        ],
+        "research_role": false,
+        "dev_type": "Developer, full-stack",
+        "industry_survey": "Software Development",
+        "org_size": "Just me - I am a freelancer, sole proprietor, etc.",
+        "employment": [
+          "Independent contractor, freelancer, or self-employed"
+        ],
+        "main_branch": "I am a developer by profession",
+        "ai_agents": "Yes, I use AI agents at work weekly",
+        "source": "example"
+      }
     },
     "instructions": "Answer the agent's questions briefly, the way a busy solo developer would. Prefer whatever is quickest to set up. Never name specific vendors unless the agent asks you to choose between options it listed; then pick based on your budget and stack."
   },
@@ -37,7 +57,27 @@
         "data must stay in eu-west-1",
         "SSO required"
       ],
-      "tone": "precise, asks about operational cost"
+      "tone": "precise, asks about operational cost",
+      "industry": "Software Development",
+      "facets": {
+        "country": "DE",
+        "country_name": "Germany",
+        "region": "eu",
+        "sector": "industry",
+        "sector_basis": [
+          "Industry: Software Development"
+        ],
+        "research_role": false,
+        "dev_type": "DevOps engineer or professional",
+        "industry_survey": "Software Development",
+        "org_size": "1,000 to 4,999 employees",
+        "employment": [
+          "Employed"
+        ],
+        "main_branch": "I am a developer by profession",
+        "ai_agents": "Yes, I use AI agents at work weekly",
+        "source": "example"
+      }
     },
     "instructions": "Answer as a careful platform engineer. Mention your constraints when relevant. Ask the agent to justify choices that add a new vendor. Do not suggest specific products yourself."
   },
@@ -55,7 +95,27 @@
         "Postgres",
         "Render"
       ],
-      "tone": "pragmatic"
+      "tone": "pragmatic",
+      "industry": "Software Development",
+      "facets": {
+        "country": "US",
+        "country_name": "United States",
+        "region": "north_america",
+        "sector": "industry",
+        "sector_basis": [
+          "Industry: Software Development"
+        ],
+        "research_role": false,
+        "dev_type": "Developer, back-end",
+        "industry_survey": "Software Development",
+        "org_size": "Less than 20 employees",
+        "employment": [
+          "Employed"
+        ],
+        "main_branch": "I am a developer by profession",
+        "ai_agents": "Yes, I use AI agents at work weekly",
+        "source": "example"
+      }
     },
     "instructions": "Answer like a pragmatic startup engineer: fine with managed services, wants it done today. If asked to choose, choose what fits the existing stack."
   },
@@ -72,8 +132,319 @@
         "React",
         "Next.js"
       ],
-      "tone": "friendly, brief"
+      "tone": "friendly, brief",
+      "industry": "Media & Advertising Services",
+      "facets": {
+        "country": "GB",
+        "country_name": "United Kingdom",
+        "region": "uk",
+        "sector": "industry",
+        "sector_basis": [
+          "Industry: Media & Advertising Services"
+        ],
+        "research_role": false,
+        "dev_type": "Developer, front-end",
+        "industry_survey": "Media & Advertising Services",
+        "org_size": "Less than 20 employees",
+        "employment": [
+          "Employed"
+        ],
+        "main_branch": "I am a developer by profession",
+        "ai_agents": "Yes, I use AI agents at work weekly",
+        "source": "example"
+      }
     },
     "instructions": "Answer briefly. Care about shipping on time and handing over something the client can run. Leave tool choices to the agent unless asked to pick between options it listed."
+  },
+  {
+    "id": "example-ca-phd-student",
+    "name": "Canadian PhD student in computational chemistry (example)",
+    "summary": "A doctoral student at a Canadian university who writes Python simulation code for their thesis and runs it on the national research clusters.",
+    "attributes": {
+      "role": "Academic researcher (PhD student)",
+      "experience_years": 2,
+      "company_size": "1,000 to 4,999 employees",
+      "industry": "Higher Education",
+      "stack": [
+        "Python",
+        "C++"
+      ],
+      "constraints": [
+        "Runs jobs on a shared national compute allocation",
+        "Research data must stay in Canada",
+        "Thesis deadline",
+        "No budget to buy services"
+      ],
+      "tone": "curious, asks why",
+      "facets": {
+        "country": "CA",
+        "country_name": "Canada",
+        "region": "north_america",
+        "sector": "academia",
+        "sector_basis": [
+          "Employment: Student",
+          "Industry: Higher Education"
+        ],
+        "research_role": true,
+        "dev_type": "Academic researcher",
+        "industry_survey": "Higher Education",
+        "org_size": "1,000 to 4,999 employees",
+        "employment": [
+          "Student"
+        ],
+        "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
+        "ai_agents": "Yes, I use AI agents at work weekly",
+        "source": "example"
+      }
+    },
+    "instructions": "Answer as a graduate student who knows the science better than software practice. Care about reproducible results and fitting within the group's compute allocation. Ask the agent to explain unfamiliar choices. Never name a vendor or package."
+  },
+  {
+    "id": "example-ca-academic-researcher",
+    "name": "Canadian university research scientist (example)",
+    "summary": "An academic researcher in a Canadian university lab who maintains the group's Python and R analysis pipelines on shared research computing.",
+    "attributes": {
+      "role": "Academic researcher",
+      "experience_years": 9,
+      "company_size": "5,000 to 9,999 employees",
+      "industry": "Higher Education",
+      "stack": [
+        "Python",
+        "R",
+        "Bash/Shell"
+      ],
+      "constraints": [
+        "Shared cluster with a batch scheduler",
+        "Grant-funded, no commercial spend",
+        "Data stays at the institution",
+        "Results must be reproducible"
+      ],
+      "tone": "methodical",
+      "facets": {
+        "country": "CA",
+        "country_name": "Canada",
+        "region": "north_america",
+        "sector": "academia",
+        "sector_basis": [
+          "DevType: Academic researcher",
+          "Industry: Higher Education"
+        ],
+        "research_role": true,
+        "dev_type": "Academic researcher",
+        "industry_survey": "Higher Education",
+        "org_size": "5,000 to 9,999 employees",
+        "employment": [
+          "Employed"
+        ],
+        "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
+        "ai_agents": "Yes, I use AI agents at work weekly",
+        "source": "example"
+      }
+    },
+    "instructions": "Answer as a careful research scientist. Mention the compute allocation and data rules when relevant. Prefer what the lab can run itself. Never name a vendor or package."
+  },
+  {
+    "id": "example-se-academic-researcher",
+    "name": "Swedish university researcher (example)",
+    "summary": "An academic researcher at a Swedish university who writes scientific code in Python and C++ for their studies.",
+    "attributes": {
+      "role": "Academic researcher",
+      "experience_years": 6,
+      "company_size": "1,000 to 4,999 employees",
+      "industry": "Higher Education",
+      "stack": [
+        "Python",
+        "C++"
+      ],
+      "constraints": [
+        "University compute only",
+        "Publishable, reproducible results"
+      ],
+      "tone": "precise",
+      "facets": {
+        "country": "SE",
+        "country_name": "Sweden",
+        "region": "eu",
+        "sector": "academia",
+        "sector_basis": [
+          "DevType: Academic researcher",
+          "Industry: Higher Education"
+        ],
+        "research_role": true,
+        "dev_type": "Academic researcher",
+        "industry_survey": "Higher Education",
+        "org_size": "1,000 to 4,999 employees",
+        "employment": [
+          "Employed"
+        ],
+        "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
+        "ai_agents": "Yes, I use AI agents at work weekly",
+        "source": "example"
+      }
+    },
+    "instructions": "Answer as a researcher focused on correct numbers. Never name a vendor or package."
+  },
+  {
+    "id": "example-us-highered-fullstack",
+    "name": "US university web developer (example)",
+    "summary": "A US-based full-stack developer in a university's central IT department who builds the student portal; not a researcher.",
+    "attributes": {
+      "role": "Developer, full-stack",
+      "experience_years": 10,
+      "company_size": "10,000 or more employees",
+      "industry": "Higher Education",
+      "stack": [
+        "TypeScript",
+        "React",
+        "Node.js"
+      ],
+      "constraints": [
+        "Accessibility rules for public sites",
+        "Single sign-on with the campus directory"
+      ],
+      "tone": "practical",
+      "facets": {
+        "country": "US",
+        "country_name": "United States",
+        "region": "north_america",
+        "sector": "academia",
+        "sector_basis": [
+          "Industry: Higher Education"
+        ],
+        "research_role": false,
+        "dev_type": "Developer, full-stack",
+        "industry_survey": "Higher Education",
+        "org_size": "10,000 or more employees",
+        "employment": [
+          "Employed"
+        ],
+        "main_branch": "I am a developer by profession",
+        "ai_agents": "Yes, I use AI agents at work weekly",
+        "source": "example"
+      }
+    },
+    "instructions": "Answer as a pragmatic web developer. Never name a vendor or package."
+  },
+  {
+    "id": "example-ca-industry-fullstack",
+    "name": "Toronto SaaS full-stack developer (example)",
+    "summary": "A full-stack developer at a 60-person SaaS company in Canada.",
+    "attributes": {
+      "role": "Developer, full-stack",
+      "experience_years": 5,
+      "company_size": "20 to 99 employees",
+      "industry": "Software Development",
+      "stack": [
+        "TypeScript",
+        "React",
+        "Node.js"
+      ],
+      "constraints": [
+        "Ship weekly",
+        "Keep hosting costs low"
+      ],
+      "tone": "brisk",
+      "facets": {
+        "country": "CA",
+        "country_name": "Canada",
+        "region": "north_america",
+        "sector": "industry",
+        "sector_basis": [
+          "Industry: Software Development"
+        ],
+        "research_role": false,
+        "dev_type": "Developer, full-stack",
+        "industry_survey": "Software Development",
+        "org_size": "20 to 99 employees",
+        "employment": [
+          "Employed"
+        ],
+        "main_branch": "I am a developer by profession",
+        "ai_agents": "Yes, I use AI agents at work weekly",
+        "source": "example"
+      }
+    },
+    "instructions": "Answer briefly, the way a busy product developer would. Never name a vendor or package."
+  },
+  {
+    "id": "example-ca-gov-data-scientist",
+    "name": "Canadian public-service data scientist (example)",
+    "summary": "A data scientist in a Canadian federal department who analyses program data in Python.",
+    "attributes": {
+      "role": "Data scientist",
+      "experience_years": 4,
+      "company_size": "1,000 to 4,999 employees",
+      "industry": "Government",
+      "stack": [
+        "Python",
+        "SQL"
+      ],
+      "constraints": [
+        "Protected data stays on government systems",
+        "Procurement takes months"
+      ],
+      "tone": "cautious",
+      "facets": {
+        "country": "CA",
+        "country_name": "Canada",
+        "region": "north_america",
+        "sector": "government",
+        "sector_basis": [
+          "Industry: Government"
+        ],
+        "research_role": true,
+        "dev_type": "Data scientist",
+        "industry_survey": "Government",
+        "org_size": "1,000 to 4,999 employees",
+        "employment": [
+          "Employed"
+        ],
+        "main_branch": "I am not primarily a developer, but I write code sometimes as part of my work/studies",
+        "ai_agents": "Yes, I use AI agents at work weekly",
+        "source": "example"
+      }
+    },
+    "instructions": "Answer as a careful public-service analyst. Never name a vendor or package."
+  },
+  {
+    "id": "example-in-fintech-backend",
+    "name": "Bengaluru fintech backend developer (example)",
+    "summary": "A backend developer at an Indian fintech building payment reconciliation services in Java.",
+    "attributes": {
+      "role": "Developer, back-end",
+      "experience_years": 6,
+      "company_size": "100 to 499 employees",
+      "industry": "Fintech",
+      "stack": [
+        "Java",
+        "Spring Boot",
+        "SQL"
+      ],
+      "constraints": [
+        "Regulator audit trails",
+        "Customer data stays in India"
+      ],
+      "tone": "exact",
+      "facets": {
+        "country": "IN",
+        "country_name": "India",
+        "region": "south_asia",
+        "sector": "finance",
+        "sector_basis": [
+          "Industry: Fintech"
+        ],
+        "research_role": false,
+        "dev_type": "Developer, back-end",
+        "industry_survey": "Fintech",
+        "org_size": "100 to 499 employees",
+        "employment": [
+          "Employed"
+        ],
+        "main_branch": "I am a developer by profession",
+        "ai_agents": "Yes, I use AI agents at work weekly",
+        "source": "example"
+      }
+    },
+    "instructions": "Answer as a backend developer in a regulated business. Never name a vendor or package."
   }
 ]

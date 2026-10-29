@@ -47,3 +47,56 @@ def facts(row):
         "database_count": len(split(row.DatabaseHaveWorkedWith)), "platforms_generic": generic_platforms(split(row.PlatformHaveWorkedWith)),
     }
     return {k: (None if str(v) == "nan" else v) for k, v in f.items()}
+
+
+# ---------- facets: who the respondent is, from their survey answers alone (so_backfill.py and both samplers) ----------
+
+# The survey's Industry answer options, with the free-text "Other:" (and no answer) folded into "Other".
+INDUSTRIES = ["Software Development", "Internet, Telecomm or Information Services", "Fintech", "Banking/Financial Services",
+              "Healthcare", "Manufacturing", "Government", "Higher Education", "Retail and Consumer Services",
+              "Transportation, or Supply Chain", "Computer Systems Design and Services", "Media & Advertising Services",
+              "Energy", "Insurance", "Other"]
+SECTORS = ["academia", "government", "finance", "healthcare", "industry"]
+RESEARCH_DEV_TYPES = {"Academic researcher", "Applied scientist", "Data scientist"}
+FINANCE = {"Banking/Financial Services", "Fintech", "Insurance"}
+
+
+def _clean(v):
+    return None if v is None or str(v) == "nan" else str(v)
+
+
+def industry_of(row):
+    v = _clean(row.Industry)
+    return v if v in INDUSTRIES else "Other"
+
+
+def derive_sector(row):
+    """(sector, basis): the first rule that matches, with every answer that supports it. Academia is anyone studying or
+    researching at, or working for, a university: a student, an academic researcher, or Industry = Higher Education."""
+    emp, dev, ind = split(row.Employment), _clean(row.DevType), _clean(row.Industry)
+    academia = (["Employment: Student"] if "Student" in emp else []) + \
+               (["DevType: Academic researcher"] if dev == "Academic researcher" else []) + \
+               (["Industry: Higher Education"] if ind == "Higher Education" else [])
+    if academia: return "academia", academia
+    if ind == "Government": return "government", ["Industry: Government"]
+    if ind in FINANCE: return "finance", [f"Industry: {ind}"]
+    if ind == "Healthcare": return "healthcare", ["Industry: Healthcare"]
+    return "industry", [f"Industry: {ind or 'not given'}"]
+
+
+def research_role(row):
+    """Does research (or studies) themselves. Kept apart from sector: a web developer in a university's IT department is
+    academia by sector but not a researcher."""
+    return _clean(row.DevType) in RESEARCH_DEV_TYPES or "Student" in split(row.Employment)
+
+
+def facets_of(row):
+    """The namespaced attributes.facets object; None when the respondent gave no usable country (e.g. "Nomadic")."""
+    from geo import COUNTRY_ISO2, ISO2_NAME, ISO2_REGION
+    iso = COUNTRY_ISO2.get(_clean(row.Country) or "")
+    if not iso: return None
+    sector, basis = derive_sector(row)
+    return {"country": iso, "country_name": ISO2_NAME[iso], "region": ISO2_REGION[iso], "sector": sector, "sector_basis": basis,
+            "research_role": bool(research_role(row)), "dev_type": _clean(row.DevType), "industry_survey": industry_of(row),
+            "org_size": _clean(row.OrgSize), "employment": split(row.Employment), "main_branch": _clean(row.MainBranch),
+            "ai_agents": _clean(row.AIAgents), "source": "so2025"}

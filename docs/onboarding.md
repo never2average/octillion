@@ -93,6 +93,19 @@ customer ── get_onboarding / get_visibility_report ──▶ results
   but not tracked", with an "Add as competitor" button. The dashboard shows each competitor's evidence and who added
   it (research, the customer, or runs), with a Remove button.
 - **Personas** must not mention the product or its competitors (they answer the agent blind).
+- **Personas must be people who can use the product** (`src/audience.ts`). Research states `product.audience`: global
+  by default, or limited to countries (`exclusive` or `primary`) and gates (`required` or `typical`, matched on the
+  profiles' survey facets: sector, research_role, industry, org size). Every restriction quotes a page fetched in the
+  job; a headquarters, customer logos or cloud regions are not restrictions. The server checks each pick against the
+  facets: a pick outside an exclusive market or failing a required gate is rejected, and soft parts need half the picks.
+  Every persona-round reason names the profile's country. When nobody in the data fits, research submits
+  `personas: []` with `audience_gap`; the server accepts it only if no shared profile passes the hard parts, unlinks the
+  old personas and asks the customer a `persona_supply` question; runs then refuse ("No eligible personas for this
+  product's audience yet") rather than use a generic developer. The architecture review reads the sign-up pages too: a
+  confident, quoted restriction research missed goes back as an issue, a disagreement it is unsure of becomes an
+  `audience` question. Answering one confirms the audience (source customer), unlinks personas who fail it and queues
+  research again. Onboarding takes an optional `audience` (the customer's own words), saved as confirmed. Rolling
+  reports cover the persona set linked now; older sessions are counted apart as the previous persona set.
 - **Persona `environment`** `{editor, tools, skills, agent_rules}`: the editor and CLI tools come from the catalog in
   `orchestrator/core/environment.ts`. Skills (at most 6, `name` lowercase-hyphenated, `body` 40-4000 characters) and
   `agent_rules` (at most 3000 characters) are the developer's own agent setup, scaled by seniority. None of it may name

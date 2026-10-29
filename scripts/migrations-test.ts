@@ -172,6 +172,32 @@ async function suite(kind: "pglite" | "postgres") {
     await assert.rejects(loadMigrations(badName), /name it NNNN_/, "a badly named file is refused");
   }
 
+  // 0007 (audience questions) on a database already at 0006: it replaces 0006's inline, auto-named kind CHECK with a
+  // named one that also allows 'audience', can run twice, and still refuses an unknown kind. 0006 itself is unedited.
+  {
+    const db = await fresh(kind);
+    const upTo6 = path.join(tmp, `upto6-${kind}`);
+    cpSync(MIGRATIONS_DIR, upTo6, { recursive: true });
+    for (const m of await loadMigrations()) if (m.version > 6) rmSync(path.join(upTo6, `${String(m.version).padStart(4, "0")}_${m.name}.sql`));
+    await runMigrations(db, { dir: upTo6 });
+    const [o] = await db.query<{ id: number }>("INSERT INTO organizations (slug, name) VALUES ('mig-q', 'Q') RETURNING id");
+    const [p] = await db.query<{ id: number }>("INSERT INTO products (org_id, slug, name) VALUES ($1, 'q', 'Q') RETURNING id", [o!.id]);
+    const ask = (id: string, k: string) => db.query("INSERT INTO product_questions (id, org_id, product_id, kind, subject, question, options) VALUES ($1, $2, $3, $4, 's', 'q?', '[]')", [id, o!.id, p!.id, k]);
+    await assert.rejects(ask("pq_a0", "audience"), /check constraint/, "at 0006 an audience question is refused");
+    assert.deepEqual((await runMigrations(db)).applied.filter((x) => x.startsWith("0007")), ["0007_audience_questions"], "0007 applies on a database at 0006");
+    await ask("pq_a1", "audience");
+    await ask("pq_c1", "competitor_relation");
+    await assert.rejects(ask("pq_x1", "favourite_colour"), /check constraint/, "an unknown kind is still refused");
+    await oldBoot(db, readFileSync(path.join(MIGRATIONS_DIR, "0007_audience_questions.sql"), "utf8")); // idempotent
+    const checks = await db.query<{ conname: string }>("SELECT conname FROM pg_constraint WHERE conrelid = 'product_questions'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) ILIKE '%kind%'");
+    assert.deepEqual(checks.map((c) => c.conname), ["product_questions_kind_check"], "one named kind check");
+    try {
+      assert.equal(readFileSync(path.join(MIGRATIONS_DIR, "0006_product_questions.sql"), "utf8"),
+        execFileSync("git", ["show", "1994f80:sql/migrations/0006_product_questions.sql"], { encoding: "utf8" }), "0006 is byte-identical to the commit that added it");
+    } catch (e) { if (!/not a git repository|unknown revision|bad object/i.test(String((e as Error).message))) throw e; }
+    await db.drop();
+  }
+
   // A failing migration rolls back whole: nothing of it, and nothing pending with it, is recorded or left behind.
   {
     const db = await fresh(kind);

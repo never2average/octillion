@@ -1,9 +1,78 @@
 """Validate a subagent's curated output (accepted tasks only) against its candidate chunk.
   python3 check_curated.py CHUNK.jsonl OUTPUT.json
-Exit 0 only when every task passes.
+Validate a vault's developer profiles (a directory holding profiles.json, or the file itself):
+  python3 check_curated.py vault/curated
+  python3 check_curated.py --selftest       # each profile rule fails on a fixture that breaks it
+Exit 0 only when every task (or profile) passes.
 """
 import json, os, re, sys, collections
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+
+
+def profile_problems(profiles):
+    """Every shared profile needs survey facets (research filters on them and the server checks persona picks against
+    them), a unique display name, an industry from the survey's options, and prose that agrees with its country."""
+    from geo import ISO2_REGION, REGIONS, mentioned_countries
+    INDUSTRIES = ["Software Development", "Internet, Telecomm or Information Services", "Fintech", "Banking/Financial Services",
+                  "Healthcare", "Manufacturing", "Government", "Higher Education", "Retail and Consumer Services",
+                  "Transportation, or Supply Chain", "Computer Systems Design and Services", "Media & Advertising Services",
+                  "Energy", "Insurance", "Other"]  # so_common.INDUSTRIES (imported there with pyarrow, so repeated here)
+    SECTORS = {"academia", "government", "finance", "healthcare", "industry"}
+    out = []
+    for name, n in collections.Counter(p.get("name") for p in profiles).items():
+        if n > 1: out.append(f"name {name!r} is used by {n} profiles")
+    for p in profiles:
+        pid, a = p.get("id") or p.get("slug") or p.get("name"), p.get("attributes") or {}
+        f = a.get("facets") or {}
+        if not re.fullmatch(r"[A-Z]{2}", str(f.get("country") or "")) or f.get("country") not in ISO2_REGION:
+            out.append(f"{pid}: facets.country must be an ISO2 code (got {f.get('country')!r})")
+        elif f.get("region") != ISO2_REGION[f["country"]]:
+            out.append(f"{pid}: facets.region must be {ISO2_REGION[f['country']]} for {f['country']} (got {f.get('region')!r})")
+        if f.get("region") not in REGIONS: out.append(f"{pid}: facets.region must be one of {REGIONS}")
+        if f.get("sector") not in SECTORS: out.append(f"{pid}: facets.sector must be one of {sorted(SECTORS)}")
+        if not isinstance(f.get("sector_basis"), list) or not f.get("sector_basis"): out.append(f"{pid}: facets.sector_basis is required")
+        if not isinstance(f.get("research_role"), bool): out.append(f"{pid}: facets.research_role must be true or false")
+        if a.get("industry") not in INDUSTRIES: out.append(f"{pid}: industry {a.get('industry')!r} is not one of the survey's options")
+        named = mentioned_countries(p.get("summary"), skip={str(p.get("name") or "").split(" ")[0]})
+        if f.get("country") and named - {f["country"]}:
+            out.append(f"{pid}: summary names {sorted(named)} but facets.country is {f['country']}")
+    return out
+
+
+def selftest():
+    good = {"id": "t-1", "name": "Ada L.", "summary": "A Canadian academic researcher.", "attributes": {"industry": "Higher Education",
+            "facets": {"country": "CA", "region": "north_america", "sector": "academia", "sector_basis": ["DevType: Academic researcher"], "research_role": True}}}
+    assert not profile_problems([good]), profile_problems([good])
+    def broken(fn):
+        p = json.loads(json.dumps(good)); fn(p); return p
+    cases = {
+        "missing country": broken(lambda p: p["attributes"]["facets"].pop("country")),
+        "country not ISO2": broken(lambda p: p["attributes"]["facets"].update(country="Canada")),
+        "missing region": broken(lambda p: p["attributes"]["facets"].pop("region")),
+        "missing sector": broken(lambda p: p["attributes"]["facets"].pop("sector")),
+        "industry not in the enum": broken(lambda p: p["attributes"].update(industry="Higher education")),
+        "summary names another country": broken(lambda p: p.update(summary="A Swedish academic researcher.")),
+    }
+    for what, p in cases.items():
+        assert profile_problems([p]), f"{what} was not caught"
+    twin = broken(lambda p: p.update(id="t-2"))
+    assert any("used by 2" in x for x in profile_problems([good, twin])), "duplicate name was not caught"
+    jordan = broken(lambda p: p.update(name="Jordan K.", summary="Jordan is a Canadian student."))
+    assert not profile_problems([jordan]), "a first name that is also a country is not a place"
+    print(f"selftest ok ({len(cases) + 2} cases)")
+
+
+if len(sys.argv) == 2:
+    if sys.argv[1] == "--selftest":
+        selftest(); sys.exit(0)
+    path = os.path.join(sys.argv[1], "profiles.json") if os.path.isdir(sys.argv[1]) else sys.argv[1]
+    profiles = json.load(open(path))
+    problems = profile_problems(profiles)
+    print(f"{len(profiles)} profiles in {path}")
+    print("\n".join(problems[:60]) if problems else "OK")
+    sys.exit(1 if problems else 0)
+
 REPOS = os.environ.get("REPOS_JSON", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "curated", "repos.json"))
 cands = {json.loads(l)["source_id"]: json.loads(l) for l in open(sys.argv[1])}
 outp = json.load(open(sys.argv[2]))

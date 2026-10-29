@@ -392,8 +392,21 @@ export function createApp() {
     return !job || job.jobId.startsWith("rsh_") ? next() : forbidden(res);
   });
   worker.get("/library/profiles", async (req, res) => {
-    const q = req.query as Record<string, string | undefined>;
-    res.json(await research.libraryProfiles({ query: q.query, limit: q.limit ? Number(q.limit) : undefined }));
+    const q = req.query as Record<string, string | string[] | undefined>;
+    const one = (v: unknown) => (Array.isArray(v) ? v[0] : v) as string | undefined;
+    const many = (v: unknown) => (v == null ? undefined : (Array.isArray(v) ? v : [v]).map(String));
+    const role = one(q.research_role);
+    // Equal-scoring profiles are ordered by a hash seeded with the research id, so no slug wins by its spelling.
+    const job = jobOnly(res);
+    try {
+      res.json(await research.libraryProfiles({ query: one(q.query), limit: q.limit ? Number(one(q.limit)) : undefined, country: many(q.country), region: many(q.region),
+        sector: many(q.sector), industry: many(q.industry), research_role: role === "true" ? true : role === "false" ? false : undefined,
+        exclude: many(q.exclude), seed: job ? job.jobId : one(q.seed) }));
+    } catch (e) {
+      const err = e as Error & { status?: number };
+      if (err.status === 400) return void res.status(400).json({ error: err.message });
+      throw e;
+    }
   });
   worker.get("/library/tasks", async (req, res) => {
     const q = req.query as Record<string, string | undefined>;

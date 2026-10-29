@@ -8,8 +8,8 @@ import { Button } from '@/components/ui/button';
 import { appApi } from '@/lib/api-client';
 import { fail, useOrgLoad } from './shared';
 
-interface Question { id: string; product: string; subject: string; question: string; options: { id: string; label: string; relation: string }[];
-  context: { reason?: string } | null }
+interface Question { id: string; product: string; subject: string; question: string; options: { id: string; label: string; relation?: string; value?: Record<string, unknown> }[];
+  context: { reason?: string; note?: string } | null }
 
 export function ProductQuestions({ onAnswered }: { onAnswered?: () => void }) {
   const { data, reload } = useOrgLoad(() => appApi<{ questions: Question[]; can_answer: boolean }>('GET', '/questions'), []);
@@ -28,13 +28,13 @@ export function ProductQuestions({ onAnswered }: { onAnswered?: () => void }) {
     <section aria-label='Questions about your product' className='mb-4 flex flex-col gap-3 rounded-xl border border-amber-500/40 bg-amber-500/5 p-4'>
       <div>
         <h2 className='text-sm font-semibold'>{data.questions.length === 1 ? 'One question about your product' : `${data.questions.length} questions about your product`}</h2>
-        <p className='text-muted-foreground text-xs'>Research couldn’t settle these on its own. Until you answer, the tool is left out of your pick rate.</p>
+        <p className='text-muted-foreground text-xs'>Research couldn’t settle these on its own. Until you answer, a tool in question is left out of your pick rate, and a question about who can use the product holds back its personas.</p>
       </div>
       <ul className='flex flex-col gap-4'>
         {data.questions.map((q) => (
           <li key={q.id} className='flex flex-col gap-2'>
             <p className='text-sm font-medium'>{q.question} <span className='text-muted-foreground font-normal'>({q.product})</span></p>
-            {q.context?.reason && <p className='text-muted-foreground text-xs'>What research found: {q.context.reason}</p>}
+            {(q.context?.reason || q.context?.note) && <p className='text-muted-foreground text-xs'>What research found: {q.context.reason ?? q.context.note}</p>}
             <div className='flex flex-wrap gap-2'>
               {q.options.map((o) => (
                 <Button key={o.id} size='sm' variant='outline' className='h-auto max-w-full py-1.5 text-left whitespace-normal' disabled={!data.can_answer || busy !== null}

@@ -15,6 +15,8 @@ import { PLATFORMS, isPlatform, platformOf } from "./platform.js";
 import type { Tool } from "./scoring.js";
 import { capacityStatus } from "./autoscaler.js";
 import { environmentIssues, resolveEnvironment, type PersonaEnvironment } from "../orchestrator/core/environment.js";
+import { NO_ELIGIBLE_PERSONAS, audienceFormIssues, effectiveAudience, eligibleSearch, hardSql, personaSupplyQuestion, pickIssues, urlNorm, type Audience, type AudienceGap } from "./audience.js";
+import { REGIONS, SECTORS, countryOfWord, countryTexts, isIndustry, isIso2, isRegion, isSector, mentionsCountry, INDUSTRIES } from "./facets.js";
 
 /**
  * Product onboarding (docs/onboarding.md). A customer gives a prompt, a website and docs; the orchestrator's Pi
@@ -36,10 +38,14 @@ export interface ResearchResult {
              /** Where the product sits in a developer's stack (orchestrator/pi-octillion/architect.ts). */
              placement?: { layer?: string; runs_on_it?: string[]; used_with?: string[]; adoption_signals?: string[] };
              /** Tools the architecture review judged not to compete (complements, other layers): never merged back in. */
-             not_competitors?: { name: string; relation: string; reason?: string }[] };
+             not_competitors?: { name: string; relation: string; reason?: string }[];
+             /** Who may use the product (src/audience.ts): global unless a fetched page restricts it. Personas must fit it. */
+             audience?: Audience };
+  /** Nobody in the developer-profile data fits the audience's hard parts: what was searched (personas is then []). */
+  audience_gap?: AudienceGap;
   /** What the architecture review could not settle: asked of the customer (product_questions, src/questions.ts). */
-  questions?: { kind: "competitor_relation"; subject: string; question: string; options: { id: string; label: string; relation: string }[];
-                context?: Record<string, unknown> }[];
+  questions?: { kind: "competitor_relation" | "audience"; subject: string; question: string;
+                options: { id: string; label: string; relation?: string; value?: Record<string, unknown> }[]; context?: Record<string, unknown> }[];
   /** Picked from the shared developer-profile data (search_profiles): the profile's slug; its name, summary,
    *  attributes and instructions are copied from the data, never written by research. */
   personas: { profile_slug?: string; name: string; summary?: string; attributes?: Record<string, unknown>; instructions?: string;
@@ -161,7 +167,9 @@ export function decisionIssues(prompt: string, categoryTerms: string[]): string[
 
 // ---------- customer side ----------
 
-export interface OnboardInput { prompt: string; website_url?: string; docs_url?: string; name?: string; run?: boolean; samples?: number; population?: string }
+export interface OnboardInput { prompt: string; website_url?: string; docs_url?: string; name?: string; run?: boolean; samples?: number; population?: string;
+                              /** Who can use the product, in the customer's words: research sets product.audience to it, saved as confirmed by them. */
+                              audience?: string }
 
 export async function onboardProduct(org: Org, input: OnboardInput) {
   const prompt = input.prompt?.trim() ?? "";
@@ -184,17 +192,23 @@ export async function onboardProduct(org: Org, input: OnboardInput) {
   const db = await getDb();
   await db.query("/* tenant: product from saveProduct(org) / resolveProduct(org) */ UPDATE products SET prompt = $2 WHERE id = $1", [product.product.id, prompt]);
 
-  const id = randomId("rsh_");
-  await db.query(
-    `INSERT INTO product_research (id, org_id, product_id, input, run) VALUES ($1, $2, $3, $4, $5)`,
+  const audience = typeof input.audience === "string" && input.audience.trim() ? input.audience.trim().slice(0, 1000) : null;
+  const id = await queueResearch(org.orgId, product.product.id,
     // The company's own context (src/context.ts) rides along with the prompt, so research starts from what they know.
-    [id, org.orgId, product.product.id, JSON.stringify({ name: input.name ?? null, prompt: prompt + (await companyHintForResearch(org.orgId).catch(() => "")),
-                                                         website_url: input.website_url ?? null, docs_url: input.docs_url ?? null, related_urls: relatedUrls }),
-     // Research only by default: one orchestrator sandbox, then done. The run (one sandbox per agent session) is the
-     // explicit next step, run_simulation; `run: true` chains it here.
-     input.run === true ? JSON.stringify({ samples: input.samples ?? null, population: input.population ?? null }) : null],
-  );
+    { name: input.name ?? null, prompt: prompt + (await companyHintForResearch(org.orgId, { audience: audience ?? undefined }).catch(() => "")),
+      website_url: input.website_url ?? null, docs_url: input.docs_url ?? null, related_urls: relatedUrls, ...(audience ? { audience } : {}) },
+    // Research only by default: one orchestrator sandbox, then done. The run (one sandbox per agent session) is the
+    // explicit next step, run_simulation; `run: true` chains it here.
+    input.run === true ? { samples: input.samples ?? null, population: input.population ?? null } : null);
   return getOnboarding(org, { research_id: id });
+}
+
+/** Queue a product research job (onboarding, or again after the customer confirmed the audience: src/questions.ts). */
+export async function queueResearch(orgId: number, productId: number, input: Record<string, unknown>, run: Record<string, unknown> | null = null): Promise<string> {
+  const id = randomId("rsh_");
+  await (await getDb()).query(`INSERT INTO product_research (id, org_id, product_id, input, run) VALUES ($1, $2, $3, $4, $5)`,
+    [id, orgId, productId, JSON.stringify(input), run ? JSON.stringify(run) : null]);
+  return id;
 }
 
 export async function getOnboarding(org: Org, input: { research_id?: string; product?: string }) {
@@ -302,9 +316,20 @@ export function validateResearch(r: ResearchResult | undefined): string[] {
   const categoryTerms = (Array.isArray(p?.category_terms) ? p!.category_terms : []).filter((t) => typeof t === "string" && t.trim());
   if (categoryTerms.length < 2 || categoryTerms.length > 8)
     issues.push("product.category_terms needs 2-8 words that name this kind of tool (e.g. 'transactional email service', 'email API'); prompts must not use them");
-  const sourceUrls = new Set((r.sources ?? []).map((x) => String(x?.url ?? "").replace(/[#?].*$/, "").replace(/\/$/, "")));
+  const sourceUrls = new Set((r.sources ?? []).map((x) => urlNorm(x?.url)));
+  // Who may use the product: global by default; any restriction quotes a page this job fetched.
+  // (An audience the customer stated at onboarding needs no page: audienceIssues checks they did state one.)
+  issues.push(...audienceFormIssues(p?.audience, { sources: p?.audience?.source === "customer" ? null : sourceUrls }));
   const personas = Array.isArray(r.personas) ? r.personas : [];
-  if (personas.length < 1 || personas.length > LIMITS.max_personas) issues.push(`give 1-${LIMITS.max_personas} personas (got ${personas.length})`);
+  // A verified gap (gapIssues checks nobody eligible exists) instead of padding with people who cannot use it.
+  const gap = r.audience_gap;
+  if (gap != null) {
+    if (typeof gap !== "object" || !Array.isArray(gap.searched) || !gap.searched.some((s) => typeof s === "string" && s.trim()) ||
+        typeof gap.note !== "string" || gap.note.trim().length < 20)
+      issues.push("audience_gap must be {searched: [the search_profiles calls you ran], note: why nobody fits (20+ characters)}");
+    if (personas.length) issues.push("audience_gap is only for when no profile may use the product: submit personas: [] with it, or drop it");
+  } else if (personas.length < 1 || personas.length > LIMITS.max_personas)
+    issues.push(`give 1-${LIMITS.max_personas} personas (got ${personas.length})${personas.length ? "" : "; if no profile fits the audience, submit personas: [] with audience_gap"}`);
   personas.forEach((x, i) => {
     if (!x?.name?.trim()) issues.push(`personas[${i}].name is required`);
     if (typeof x?.profile_slug !== "string" || !x.profile_slug.trim())
@@ -387,7 +412,9 @@ export function validateResearch(r: ResearchResult | undefined): string[] {
   // Selection rounds cover the library tasks; when every problem is a draft, the rounds record the searches instead.
   const libraryIds = scenarios.map((s: any) => s?.library_task_id).filter((x: unknown): x is number => Number.isInteger(x));
   if (libraryIds.length) issues.push(...selectionIssues("tasks", r.selection?.tasks, libraryIds));
-  issues.push(...selectionIssues("personas", r.selection?.personas, personas.map((x: any) => x?.profile_slug).filter(Boolean)));
+  // With a gap there is nothing to have chosen: the gap's searches are the record.
+  if (!(gap != null && !personas.length))
+    issues.push(...selectionIssues("personas", r.selection?.personas, personas.map((x: any) => x?.profile_slug).filter(Boolean)));
   return issues;
 }
 
@@ -418,17 +445,132 @@ async function profileIssues(r: ResearchResult | undefined): Promise<string[]> {
   return issues;
 }
 
-/** Shared developer profiles from the data (survey-based), for research to pick personas from. */
-export async function libraryProfiles(q: { query?: string; limit?: number }) {
+/** The audience a job's picks are checked against: the customer's confirmed one wins over research's reading. */
+async function jobAudience(job: { product_id: number } | null, r: ResearchResult | undefined): Promise<Audience | null> {
+  const own = r?.product?.audience;
+  if (!job) return own && !audienceFormIssues(own, { sources: null }).length ? own : null;
+  const [p] = await (await getDb()).query<{ research: any }>("/* tenant: product of the research job (job checked against the job token in http.ts) */ SELECT research FROM products WHERE id = $1", [job.product_id]);
+  const a = effectiveAudience(p?.research?.audience, own);
+  // A malformed audience is reported by validateResearch; it is not used to judge picks.
+  return a && !audienceFormIssues(a, { sources: null }).length ? a : null;
+}
+
+/**
+ * Picked personas against who may use the product (src/audience.ts): an exclusive market and required gates reject
+ * every pick that fails them, primary markets and typical gates need half the picks. Every candidate's reason in the
+ * persona rounds names the profile's country, so the choice is made with it in view.
+ */
+async function audienceIssues(job: { product_id: number; input?: any } | null, r: ResearchResult | undefined): Promise<string[]> {
+  const own = r?.product?.audience;
+  const early = own?.source === "customer" && job && !job.input?.audience
+    ? ["product.audience.source \"customer\" is only for an audience the customer stated at onboarding; set it to \"research\" and cite the page"] : [];
+  const picks = (r?.personas ?? []).filter((x) => typeof x?.profile_slug === "string");
+  const rounds = Array.isArray(r?.selection?.personas) ? r!.selection!.personas! : [];
+  const candidates = rounds.flatMap((x: any) => (Array.isArray(x?.candidates) ? x.candidates : []));
+  const slugs = [...new Set([...picks.map((x) => x.profile_slug!), ...candidates.map((c: any) => c?.profile_slug).filter((s: unknown) => typeof s === "string")])];
+  if (!slugs.length) return early;
+  const rows = await (await getDb()).query<{ slug: string; name: string; facets: any }>(
+    "SELECT slug, name, attributes->'facets' AS facets FROM developer_profiles WHERE active AND org_id IS NULL AND slug = ANY($1)", [slugs]);
+  const bySlug = new Map(rows.map((x) => [x.slug, x]));
+  const issues = [...early, ...pickIssues(await jobAudience(job, r), picks.flatMap((x) => {
+    const row = bySlug.get(x.profile_slug!);
+    return row ? [{ slug: row.slug, name: x.name ?? row.name, facets: row.facets ?? null }] : [];
+  }))];
+  rounds.forEach((round: any, i: number) => (Array.isArray(round?.candidates) ? round.candidates : []).forEach((c: any, j: number) => {
+    const country = bySlug.get(c?.profile_slug)?.facets?.country;
+    if (country && typeof c?.reason === "string" && !mentionsCountry(c.reason, country))
+      issues.push(`selection.personas[${i}].candidates[${j}].reason: say where ${c.profile_slug} is (${country}) and their sector, and whether that fits who may use the product`);
+  }));
+  return issues;
+}
+
+/** How many shared profiles pass the audience's hard parts, with a few of them. */
+export async function eligibleCount(a: Audience): Promise<{ n: number; examples: string[] }> {
+  const params: unknown[] = [];
+  const where = hardSql(a, params);
+  const rows = await (await getDb()).query<{ slug: string; n: number }>(
+    `SELECT slug, count(*) OVER () AS n FROM developer_profiles WHERE active AND org_id IS NULL AND ${where} ORDER BY slug LIMIT 5`, params);
+  return { n: Number(rows[0]?.n ?? 0), examples: rows.map((x) => x.slug) };
+}
+
+/** A gap is accepted only when it is true: no shared profile passes the audience's hard parts. */
+async function gapIssues(job: { product_id: number } | null, r: ResearchResult | undefined): Promise<string[]> {
+  if (r?.audience_gap == null || (r.personas ?? []).length) return [];
+  const a = await jobAudience(job, r);
+  if (!a) return [];
+  // Profiles synced before their survey facets (vault/build/so_backfill.py) match nothing: that is no evidence of a gap.
+  const [{ faceted }] = await (await getDb()).query<{ faceted: number }>(
+    "SELECT count(*) AS faceted FROM developer_profiles WHERE active AND org_id IS NULL AND attributes->'facets'->>'country' IS NOT NULL");
+  if (!Number(faceted)) return ["audience_gap: the developer-profile data has no survey facets yet, so a gap cannot be verified; this research cannot finish until the data is synced"];
+  const { n, examples } = await eligibleCount(a);
+  return n > 0 ? [`audience_gap: ${n} eligible profiles exist (e.g. ${examples.join(", ")}); pick from them (search_profiles ${JSON.stringify(eligibleSearch(a))})`] : [];
+}
+
+/** Words that never narrow a profile search. */
+const STOP = new Set(["a", "an", "and", "at", "for", "in", "of", "on", "or", "the", "to", "who", "with", "by", "is", "as", "from", "uses", "use", "using"]);
+
+export interface ProfileQuery { query?: string; country?: string[]; region?: string[]; sector?: string[]; research_role?: boolean; industry?: string[];
+                                slugs?: string[]; exclude?: string[]; limit?: number; seed?: string }
+
+/**
+ * Shared developer profiles from the data (survey-based), for research to pick personas from. Structured filters on
+ * the survey facets first (country, region, sector, research_role, industry; values within one filter are OR), then
+ * the query's words, each a point when it appears in the name, summary or attributes ("Canadian" also matches
+ * "Canada" and is returned as a country hint). Equal scores are ordered by a hash of slug and seed (the research id),
+ * so no slug is favoured by its spelling. `matched` counts every match, not just the ones returned.
+ */
+export async function libraryProfiles(q: ProfileQuery) {
+  const bad = (msg: string) => Object.assign(new Error(msg), { status: 400 });
+  const list = (v: unknown) => (Array.isArray(v) ? v : v == null || v === "" ? [] : [v]).flatMap((x) => String(x).split(",")).map((x) => x.trim()).filter(Boolean);
+  const country = list(q.country).map((c) => countryOfWord(c) ?? c.toUpperCase());
+  const region = list(q.region), sector = list(q.sector), industry = list(q.industry);
+  if (country.some((c) => !isIso2(c))) throw bad(`unknown country ${country.filter((c) => !isIso2(c)).join(", ")}: use ISO2 codes (CA, US, IN, SE, ...)`);
+  if (region.some((x) => !isRegion(x))) throw bad(`unknown region ${region.filter((x) => !isRegion(x)).join(", ")}; valid: ${REGIONS.join(", ")}`);
+  if (sector.some((x) => !isSector(x))) throw bad(`unknown sector ${sector.filter((x) => !isSector(x)).join(", ")}; valid: ${SECTORS.join(", ")}`);
+  if (industry.some((x) => !isIndustry(x))) throw bad(`unknown industry ${industry.filter((x) => !isIndustry(x)).join(", ")}; valid: ${INDUSTRIES.join("; ")}`);
   const db = await getDb();
   const params: unknown[] = [];
-  let where = "active AND org_id IS NULL";
-  if (q.query?.trim()) params.push(`%${q.query.trim()}%`), (where += ` AND (name ILIKE $1 OR summary ILIKE $1 OR attributes::text ILIKE $1)`);
-  const profiles = await db.query(
-    `SELECT slug, name, summary, attributes, left(instructions, 600) AS instructions FROM developer_profiles WHERE ${where}
-      ORDER BY slug LIMIT ${Math.min(Math.max(Math.trunc(q.limit ?? 15), 1), 40)}`, params);
-  const [{ n }] = await db.query<{ n: number }>("SELECT count(*) AS n FROM developer_profiles WHERE active AND org_id IS NULL");
-  return { total: Number(n), profiles };
+  const p = (v: unknown) => (params.push(v), `$${params.length}`);
+  const facet = (k: string) => `(attributes->'facets'->>'${k}')`;
+  const where = ["active", "org_id IS NULL"];
+  if (country.length) where.push(`${facet("country")} = ANY(${p(country)})`);
+  if (region.length) where.push(`${facet("region")} = ANY(${p(region)})`);
+  if (sector.length) where.push(`${facet("sector")} = ANY(${p(sector)})`);
+  if (typeof q.research_role === "boolean") where.push(`${facet("research_role")} = ${p(String(q.research_role))}`);
+  if (industry.length) where.push(`coalesce(${facet("industry_survey")}, attributes->>'industry') = ANY(${p(industry)})`);
+  const slugs = list(q.slugs), exclude = list(q.exclude);
+  if (slugs.length) where.push(`slug = ANY(${p(slugs)})`);
+  if (exclude.length) where.push(`NOT (slug = ANY(${p(exclude)}))`);
+  // The query's words: each is one point; a country word also matches its country's names.
+  const hints: { country: string; from: string }[] = [];
+  const words = [...new Set((q.query ?? "").split(/[^\p{L}\p{N}+#.-]+/u).map((w) => w.replace(/^[.-]+|[.-]+$/g, "")).filter((w) => w.length >= 2 && !STOP.has(w.toLowerCase())))].slice(0, 12);
+  const groups = words.map((w) => {
+    const iso = countryOfWord(w);
+    if (iso && !hints.some((h) => h.country === iso)) hints.push({ country: iso, from: w });
+    return [...new Set([w, ...(iso ? countryTexts(iso) : [])])].map((x) => `%${x.replace(/[\\%_]/g, "\\$&")}%`);
+  });
+  const score = groups.length
+    ? groups.map((g) => { const k = p(g); return `(CASE WHEN name ILIKE ANY(${k}) OR summary ILIKE ANY(${k}) OR attributes::text ILIKE ANY(${k}) THEN 1 ELSE 0 END)`; }).join(" + ")
+    : "0";
+  const seed = p(String(q.seed ?? ""));
+  const limit = Math.min(Math.max(Math.trunc(Number(q.limit) || 15), 1), 40);
+  const rows = await db.query<any>(
+    `SELECT * FROM (SELECT slug, name, summary, attributes, left(instructions, 600) AS instructions, ${score} AS score
+                      FROM developer_profiles WHERE ${where.join(" AND ")}) m
+      ${groups.length ? "WHERE score > 0" : ""}
+      ORDER BY score DESC, md5(slug || ${seed}) LIMIT ${limit}`, params);
+  const [{ n }] = await db.query<{ n: number }>(
+    `SELECT count(*) AS n FROM (SELECT ${score} AS score FROM developer_profiles WHERE ${where.join(" AND ")}) m ${groups.length ? "WHERE score > 0" : ""}`,
+    params.slice(0, -1)); // without the seed, which only orders
+  const [{ total }] = await db.query<{ total: number }>("SELECT count(*) AS total FROM developer_profiles WHERE active AND org_id IS NULL");
+  return {
+    total: Number(total), matched: Number(n),
+    filters: { ...(country.length ? { country } : {}), ...(region.length ? { region } : {}), ...(sector.length ? { sector } : {}),
+               ...(typeof q.research_role === "boolean" ? { research_role: q.research_role } : {}), ...(industry.length ? { industry } : {}) },
+    hints: hints.map((h) => ({ ...h, note: `"${h.from}" names a country: filter with country: ["${h.country}"] to see only profiles there` })),
+    ...(Number(n) > rows.length ? { note: `${n} profiles match; showing ${rows.length}. Narrow with filters or raise limit (max 40).` } : {}),
+    profiles: rows.map(({ score, ...x }) => ({ ...x, score: Number(score) })),
+  };
 }
 
 /**
@@ -461,7 +603,7 @@ export async function competitorIssues(job: { sources?: { url: string }[]; input
 export async function validateResearchJob(id: string, result: ResearchResult) {
   const job = await runningJob(id);
   if (job.kind === "prospect") { const issues = prospectIssues(result); return { ok: issues.length === 0, issues }; }
-  const issues = [...validateResearch(result), ...(await libraryIssues(result)), ...(await profileIssues(result)), ...(await competitorIssues(job, result))];
+  const issues = [...validateResearch(result), ...(await libraryIssues(result)), ...(await profileIssues(result)), ...(await audienceIssues(job, result)), ...(await gapIssues(job, result)), ...(await competitorIssues(job, result))];
   return { ok: issues.length === 0, issues };
 }
 
@@ -535,7 +677,7 @@ export async function completeResearch(id: string, body: { status?: string; erro
     void orgEvent(job.org_id, "onboarding_failed", { research_id: id, reason: "worker" });
     return { status: "failed" };
   }
-  const issues = [...validateResearch(body.result), ...(await libraryIssues(body.result)), ...(await profileIssues(body.result)), ...(await competitorIssues(job, body.result))];
+  const issues = [...validateResearch(body.result), ...(await libraryIssues(body.result)), ...(await profileIssues(body.result)), ...(await audienceIssues(job, body.result)), ...(await gapIssues(job, body.result)), ...(await competitorIssues(job, body.result))];
   if (issues.length) {
     const [{ attempts }] = await db.query<{ attempts: number }>(
       "/* tenant: research id checked against the job token in http.ts (/research/:id) */ UPDATE product_research SET attempts = attempts + 1, heartbeat_at = now(), stage = 'validating' WHERE id = $1 RETURNING attempts", [id]);
@@ -549,8 +691,12 @@ export async function completeResearch(id: string, body: { status?: string; erro
   const r = body.result!;
   const [o] = await db.query<{ id: number; slug: string; name: string }>("SELECT id, slug, name FROM organizations WHERE id = $1", [job.org_id]);
   const org: Org = { orgId: o.id, slug: o.slug, name: o.name };
-  const [prod] = await db.query<{ slug: string; competitors: Tool[] | null }>("/* tenant: product of the research job (job checked against the job token in http.ts) */ SELECT slug, competitors FROM products WHERE id = $1", [job.product_id]);
+  const [prod] = await db.query<{ slug: string; competitors: Tool[] | null; research: any }>("/* tenant: product of the research job (job checked against the job token in http.ts) */ SELECT slug, competitors, research FROM products WHERE id = $1", [job.product_id]);
   const p = r.product;
+  // The audience: what the customer confirmed stays; else research's, marked as the customer's when they stated it
+  // at onboarding (input.audience), so a later research cannot quietly widen it.
+  const audience: Audience | null = effectiveAudience(prod.research?.audience, p.audience
+    ? { ...p.audience, ...(job.input?.audience ? { source: "customer" as const, confirmed: true } : { source: p.audience.source ?? "research" as const }) } : null);
   // The competitor list only grows: research adds what it found; competitors already on the product (added by hand or
   // by an earlier research) stay, so a loss to them is never scored "no vendor".
   const found = (p.competitors ?? []).map((c) => ({ ...c, source: "research" as const }));
@@ -566,9 +712,14 @@ export async function completeResearch(id: string, body: { status?: string; erro
   });
   await db.query("/* tenant: product of the research job (job checked against the job token in http.ts) */ UPDATE products SET features = $2, research = $3 WHERE id = $1",
     [job.product_id, JSON.stringify(p.features ?? []), JSON.stringify({ research_id: id, sources: r.sources ?? [], category_terms: p.category_terms ?? [],
-      ...(p.placement ? { placement: p.placement } : {}), ...(p.not_competitors?.length ? { not_competitors: p.not_competitors } : {}), at: new Date().toISOString() })]);
+      ...(p.placement ? { placement: p.placement } : {}), ...(p.not_competitors?.length ? { not_competitors: p.not_competitors } : {}),
+      ...(audience ? { audience } : {}), ...(r.audience_gap ? { audience_gap: r.audience_gap } : {}), at: new Date().toISOString() })]);
   // Questions for the customer: one open question per tool; a newer research asking again keeps the open one.
-  if (r.questions?.length) await (await import("./questions.js")).askQuestions(job.org_id, job.product_id, id, r.questions);
+  const questions = [...(r.questions ?? [])];
+  // Nobody in the data may use the product: ask whether the audience is right (it may be wider than the pages say)
+  // rather than running with people who could never use it.
+  if (r.audience_gap && audience) questions.push(personaSupplyQuestion(audience, r.audience_gap));
+  if (questions.length) await (await import("./questions.js")).askQuestions(job.org_id, job.product_id, id, questions);
 
   const personaSlugs: string[] = [];
   const slugOf = new Map<string, string>();
@@ -642,6 +793,8 @@ export async function completeResearch(id: string, body: { status?: string; erro
     const fit = Math.max(1, Math.floor(cap / (n * Math.max(1, profiles.length))));
     const samples = Math.min(job.run.samples ?? config.defaultSamples(), fit);
     try {
+      // No eligible persona (an audience gap): no run, rather than one with a generic developer the product never serves.
+      if (!profiles.length) throw new Error(NO_ELIGIBLE_PERSONAS);
       // `samples` is the first batch; unless the customer fixed the size, each task then samples adaptively up to the cap.
       const sim = await runSimulation(org, { product: prod.slug, profiles, samples, population: job.run.population ?? undefined, ...(scenario_ids ? { scenario_ids } : {}),
                                              ...(job.run.samples == null ? { max_samples: config.maxSamples() } : {}),

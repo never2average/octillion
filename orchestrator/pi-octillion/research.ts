@@ -21,7 +21,7 @@ import { RESEARCH_SYSTEM_PROMPT, researchPrompt, type ResearchInput, type Resear
 import { PROSPECT_SYSTEM_PROMPT, PROSPECT_TOOLS, prospectPrompt, type ProspectInput } from "./prospect-prompt.js";
 import { holdBusy } from "../core/activity.js";
 import { criticIssues, critiqueTasks } from "./critic.js";
-import { architectBrain, architectOutcome, ARCHITECT_TOOLS, reviewArchitecture, type ArchitectBrain, type ArchitectOutcome } from "./architect.js";
+import { architectBrain, architectOutcome, ARCHITECT_TOOLS, audienceCrossCheck, reviewArchitecture, type ArchitectBrain, type ArchitectOutcome } from "./architect.js";
 
 /** kind 'prospect': the company behind an access request (prospect-prompt.ts), same tools minus the task library. */
 export type ResearchJob = { research_id: string; kind?: "product"; input: ResearchInput; limits?: ResearchLimits }
@@ -90,6 +90,8 @@ export class ResearchContext {
   architectKey: string | null = null;
   /** The latest review's outcome: its questions, unconfirmed tools and placement go on the accepted result. */
   architecture: ArchitectOutcome | null = null;
+  /** Rounds the audience cross-check sent back (at most 2). */
+  audienceRounds = 0;
 
   constructor(readonly job: ResearchJob) {
     this.policy = job.kind === "prospect"
@@ -169,12 +171,26 @@ export function createResearchExtension(ctx: ResearchContext, opts: { only?: rea
     }));
     pi.registerTool(defineTool({
       name: "search_profiles", label: "Search developer profiles",
-      description: "Search the developer-profile data (real developers from survey responses: role, experience, company size, stack, constraints, how they answer). Personas must be picked from here by profile_slug.",
-      parameters: Type.Object({ query: Type.Optional(Type.String()), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 40 })) }),
+      description: "Search the developer-profile data (real developers from survey responses: role, experience, company size, stack, constraints, how they answer; " +
+        "attributes.facets holds their survey answers: country (ISO2), region, sector, research_role, industry). Personas must be picked from here by profile_slug. " +
+        "Filter by product.audience first (country, sector, research_role, industry; several values in one filter mean any of them), then search the query words " +
+        "within that. matched is how many profiles fit, not just the ones shown; matched=0 means nobody in the data fits.",
+      parameters: Type.Object({
+        query: Type.Optional(Type.String()),
+        country: Type.Optional(Type.Array(Type.String({ minLength: 2, maxLength: 2 }), { description: "ISO2 codes, e.g. [\"CA\"]" })),
+        region: Type.Optional(Type.Array(Type.Union(["north_america", "latam", "eu", "europe_other", "uk", "south_asia", "east_asia", "sea", "oceania", "mena", "africa"].map((x) => Type.Literal(x))))),
+        sector: Type.Optional(Type.Array(Type.Union(["academia", "government", "finance", "healthcare", "industry"].map((x) => Type.Literal(x))))),
+        research_role: Type.Optional(Type.Boolean({ description: "true: does research or studies themselves (academic researcher, scientist, student), not only works in the sector" })),
+        industry: Type.Optional(Type.Array(Type.String(), { description: "the survey's industry names, e.g. \"Fintech\", \"Higher Education\"" })),
+        limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 40 })),
+      }),
       executionMode: "sequential",
       async execute(_id, p) {
-        const q = new URLSearchParams({ ...(p.query ? { query: p.query } : {}), limit: String(p.limit ?? 15) });
-        return text(await api(`/api/worker/library/profiles?${q}`, { method: "GET" }));
+        const q = new URLSearchParams({ ...(p.query ? { query: p.query } : {}), limit: String(p.limit ?? 15), seed: ctx.job.research_id,
+                                        ...(typeof p.research_role === "boolean" ? { research_role: String(p.research_role) } : {}) });
+        for (const k of ["country", "region", "sector", "industry"] as const) for (const v of (p[k] as string[] | undefined) ?? []) q.append(k, v);
+        try { return text(await api(`/api/worker/library/profiles?${q}`, { method: "GET" })); }
+        catch (e) { throw new Error(`search_profiles failed: ${(e as Error).message}`); }
       },
     }));
     pi.registerTool(defineTool({
@@ -220,6 +236,15 @@ export function createResearchExtension(ctx: ResearchContext, opts: { only?: rea
             return text({ accepted: false, issues: arch.issues, attempts_left: left, note: "The architecture review found tools that do not compete with the product, or names to add. Fix them, then submit again." });
           }
           if (ctx.architecture) applyArchitecture(r.result, ctx.architecture);
+          // Who may sign up, as the review read it: a confident, quoted restriction research lacks goes back to it (at
+          // most 2 rounds); a disagreement the review is unsure of keeps research's audience and asks the customer.
+          const cross = ctx.architecture ? audienceCrossCheck((r.result as any)?.product?.audience, ctx.architecture.audience) : null;
+          if (cross?.issues.length && ctx.audienceRounds < 2) {
+            ctx.audienceRounds++;
+            ctx.lastIssues = cross.issues;
+            return text({ accepted: false, issues: cross.issues, attempts_left: left, note: "The architecture review read who may sign up differently. Fix product.audience (and the personas it rules out), then submit again." });
+          }
+          if (cross?.question) (r.result as any).questions = [...((r.result as any).questions ?? []), cross.question];
           // Task review next (at most 2 rounds per job): problems must create a purchase decision on their own.
           const review = ctx.critic && ctx.criticRounds < 2 ? (ctx.criticRounds++, await ctx.critic(r.result).catch(() => null)) : null;
           if (review?.length) {

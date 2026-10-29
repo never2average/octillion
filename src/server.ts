@@ -97,7 +97,7 @@ function summarize(d: Data): string {
         ? `${d.questions.length} question(s): ${d.questions.map((x: any) => `${x.id} [${x.product_slug}] ${x.question} Options: ${x.options.map((o: any) => `${o.id}) ${o.label}`).join("; ")}${x.status !== "open" ? ` (answered: ${x.answer?.label ?? ""})` : ""}`).join(" | ")}`
         : "No open questions: research settled everything about your products on its own.";
     case "question_answered":
-      return `Saved: ${d.subject}: ${d.answer}. ${d.effect}; past sessions are being scored again.`;
+      return `Saved: ${d.subject}: ${d.answer}. ${d.effect}${d.rescoring ? "; past sessions are being scored again" : ""}.`;
     case "products":
       if ("welcome" in d && d.welcome) return d.welcome.message;
       return d.products.length
@@ -209,8 +209,10 @@ export function reportMarkdown(d: Extract<Data, { view: "report" }>): string {
   const cell = (s: string) => String(s ?? "").replace(/\|/g, "/");
   const scope = (m.scope ? `run ${m.scope.simulation} "${m.scope.name}" (${m.scope.status})` : `last ${d.filters.days} days`) +
     (d.population && !d.population.is_default ? `, custom harness mix "${d.population.name}" (not the market-weighted default; do not compare it with default-mix figures)` : "");
-  if (!Number(t.sessions)) return `# ${name}: agent visibility report\n\nNo scored agent sessions (${scope}${d.filters.model ? `, ${d.filters.model}` : ""}). Run a simulation with run_simulation.`;
+  if (!Number(t.sessions)) return `# ${name}: agent visibility report\n\nNo scored agent sessions (${scope}${d.filters.model ? `, ${d.filters.model}` : ""}). Run a simulation with run_simulation.${(d as any).previous_persona_set ? ` (${(d as any).previous_persona_set.sessions} older sessions ran with the previous persona set, no longer linked to ${name}, and are left out.)` : ""}`;
   const out: string[] = [`# ${name}: agent visibility report`, `Scope: ${scope}${d.filters.model ? `, model ${d.filters.model}` : ""}${d.filters.platform ? `, ${d.filters.platform} tasks only` : ""}. ${t.sessions} scored sessions.`];
+  const prev = (d as any).previous_persona_set;
+  if (prev) out.push(`Previous persona set: ${prev.sessions} older sessions ran with personas no longer linked to ${name} (its audience changed) and are left out of these figures.`);
 
   out.push("## Headline", ...d.headline.map((h: string) => `- ${h}`),
     `- Right call on ${pct(t.hit_rate)} of all scored sessions, should-win and control tasks together (95% range ${range(t.hit_ci)})${t.weighted_hit_rate != null ? `, adoption-weighted ${pct(t.weighted_hit_rate)}` : ""}; lost to a competitor ${pct(t.competitor_rate)}.`);
@@ -469,6 +471,7 @@ export function createServer(org: Org, context = ""): McpServer {
       run: z.boolean().optional().describe("Also launch the coding-agent run when research finishes (default false: onboarding is research only, run_simulation is the next step)"),
       samples: z.number().int().min(1).max(20).optional().describe("Sessions per problem and persona (default: fitted to the per-run cap)"),
       population: z.string().optional().describe("Developer population whose coding-agent mix to use"),
+      audience: z.string().max(1000).optional().describe("Who can use the product, if it is limited (e.g. 'researchers at Canadian universities with a faculty sponsor'). Personas are then picked only from developers who fit, and the audience is saved as confirmed by you"),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }, _meta: meta("onboard_product"),
   }, run("onboard_product"));
@@ -514,7 +517,7 @@ export function createServer(org: Org, context = ""): McpServer {
 
   registerAppTool(server, "list_product_questions", {
     title: "Questions about your product",
-    description: "Questions research could not settle on its own: usually whether a tool competes with your product or is used with it (for example a scheduler that runs on your platform). Until you answer, that tool is left out of scoring. Answer with answer_product_question.",
+    description: "Questions research could not settle on its own: whether a tool competes with your product or is used with it (for example a scheduler that runs on your platform; until you answer, that tool is left out of scoring), or who can use the product (for example only researchers in one country; the answer re-picks the personas). Answer with answer_product_question.",
     inputSchema: {
       product,
       status: z.enum(["open", "answered", "all"]).optional().describe("Default: open"),

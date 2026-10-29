@@ -5,7 +5,7 @@
  *   npx tsx orchestrator/test/architect.ts
  */
 import assert from "node:assert/strict";
-import { architectOutcome, followUpPrompt, parseArchitect, unsureOf, type ArchitectProduct } from "../pi-octillion/architect.js";
+import { architectOutcome, audienceCrossCheck, followUpPrompt, parseArchitect, unsureOf, type ArchitectProduct } from "../pi-octillion/architect.js";
 import { applyArchitecture } from "../pi-octillion/research.js";
 
 let n = 0;
@@ -100,6 +100,50 @@ check("buy vs build: added when research listed no such route", () => {
   const result: any = { product: { name: drac.name, competitors: [{ name: "Rescale" }] } };
   applyArchitecture(result, architectOutcome(v, { ...drac, competitors: [{ name: "Rescale" }] }, 1));
   assert.deepEqual(result.product.competitors.map((c: any) => [c.name, c.kind ?? "vendor"]), [["Rescale", "vendor"], ["Own cluster on cloud VMs", "build"]]);
+});
+
+// ---------- who may sign up: the review's audience, cross-checked against research's product.audience ----------
+
+const ccdb = { url: "https://alliancecan.ca/en/services/advanced-research-computing/account-management/apply-account",
+               quote: "Faculty members at Canadian institutions can apply for an account; students and staff are sponsored by a faculty member." };
+const allianceAudience = (extra: Record<string, unknown> = {}) => ({ scope: "countries", countries: ["ca"], gates: [{ requirement: "a researcher at a Canadian institution, sponsored by faculty", sector_any: ["academia", "space"], research_role: true }],
+  confidence: "high", ...ccdb, ...extra });
+
+check("parses the optional audience block; without one the verdict has none", () => {
+  const v = parseArchitect(answer([], { audience: allianceAudience() }))!;
+  assert.deepEqual([v.audience!.scope, v.audience!.countries, v.audience!.gates[0]!.sector_any, v.audience!.gates[0]!.research_role, v.audience!.confidence],
+    ["countries", ["CA"], ["academia"], true, "high"], "ISO2 upper-cased, unknown sectors dropped");
+  assert.equal(parseArchitect(answer([]))!.audience, null);
+  assert.equal(architectOutcome(v, drac, 1).audience!.countries[0], "CA", "the outcome carries it");
+});
+
+check("a US headquarters without a quote never becomes a confident restriction", () => {
+  const v = parseArchitect(answer([], { audience: { scope: "countries", countries: ["US"], confidence: "high", url: "", quote: "" } }))!;
+  assert.equal(v.audience!.confidence, "medium", "no quote: not high");
+  const x = audienceCrossCheck({ scope: "global", checked: "pricing, sign-up and terms pages: anyone may sign up" }, v.audience);
+  assert.deepEqual(x.issues, [], "never an issue that narrows research's global audience");
+  assert.equal(x.question?.kind, "audience", "the customer is asked instead");
+  assert.deepEqual(x.question.options.map((o: any) => o.value.scope), ["global", "countries"], "research's reading first");
+  const global = parseArchitect(answer([], { audience: { scope: "global", confidence: "high", url: "", quote: "" } }))!;
+  assert.equal(global.audience!.confidence, "high", "global needs no quote");
+  assert.deepEqual(audienceCrossCheck({ scope: "global", checked: "x".repeat(30) }, global.audience), { issues: [], question: null });
+});
+
+check("unsureOf includes an audience that is not high confidence; follow-up asks for the sign-up pages", () => {
+  const v = parseArchitect(answer([{ index: 0, name: "Rescale", relation: "substitute", confidence: "high", reason: "" }], { audience: allianceAudience({ confidence: "low" }) }))!;
+  const u = unsureOf(v);
+  assert.deepEqual(u.map((x) => x.name), ["the audience (who may sign up)"]);
+  assert.match(followUpPrompt(u, 2), /sign-up, account, eligibility and terms pages/);
+  assert.equal(unsureOf(parseArchitect(answer([], { audience: allianceAudience() }))!).length, 0, "a high-confidence audience is settled");
+});
+
+check("a confident, quoted restriction research lacks goes back as an issue; matching audiences pass", () => {
+  const a = parseArchitect(answer([], { audience: allianceAudience() }))!.audience;
+  const x = audienceCrossCheck({ scope: "global", checked: "x".repeat(30) }, a);
+  assert.ok(x.issues.some((i) => /found sign-up limited to CA \(https:\/\/alliancecan\.ca.*Faculty members/.test(i) && /set product\.audience accordingly/.test(i)), x.issues.join(" | "));
+  assert.ok(x.issues.some((i) => /add it to product\.audience\.gates as required/.test(i)));
+  assert.match(audienceCrossCheck({ scope: "countries", countries: ["US"], gates: [{ strictness: "required" }] }, a).issues.join(), /limited to CA/, "other countries");
+  assert.deepEqual(audienceCrossCheck({ scope: "countries", countries: ["CA"], strictness: "exclusive", gates: [{ id: "g", strictness: "required", requirement: "x", match: { sector_any: ["academia"] } }] }, a).issues, []);
 });
 
 console.log(`architect test passed (${n} cases)`);

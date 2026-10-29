@@ -193,10 +193,12 @@ export async function contextForAI(org: Org): Promise<string> {
 }
 
 /** For onboarding research: what the company already knows, so the profile and competitor list start from it. */
-export async function companyHintForResearch(orgId: number): Promise<string> {
+export async function companyHintForResearch(orgId: number, product?: { audience?: string }): Promise<string> {
   const c = await getCompany(orgId);
   const parts = [c.about && `About the company: ${c.about}`, c.audience && `Developers they build for: ${c.audience}`,
-    c.competitors.length ? `Competitors the company tracks (include the ones that fit this product): ${c.competitors.join(", ")}` : null].filter(Boolean);
+    c.competitors.length ? `Competitors the company tracks (include the ones that fit this product): ${c.competitors.join(", ")}` : null,
+    // Stated for this product at onboarding: research sets product.audience to it (saved as the customer's, confirmed).
+    product?.audience?.trim() ? `Who can use this product, as the customer states it (set product.audience to match; pick personas only from developers who fit): ${product.audience.trim().slice(0, 1000)}` : null].filter(Boolean);
   return parts.length ? `\n\nCompany context from the account:\n${parts.join("\n")}` : "";
 }
 

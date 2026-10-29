@@ -67,8 +67,17 @@ in-house instead of buying the product. Always give build_alternative, the stron
 - replaces_index: the index of a listed competitor that already is this route (judge that one "substitute", never
   "complement" because it shares a name with the engine), else null.
 
-Finally list missing_names: short, former or spoken names developers use for the product that its aliases lack (e.g.
+List missing_names: short, former or spoken names developers use for the product that its aliases lack (e.g.
 "the Alliance" for "Digital Research Alliance of Canada", a former company name). Never names of other products.
+
+Finally, the audience: who may sign up? Read the account, eligibility and terms pages (and pricing, if it has
+conditions). Default global. HQ, customer logos and cloud regions are NOT restrictions: only a page that says who may
+have an account (e.g. "accounts are available to researchers at Canadian institutions with a faculty sponsor") is.
+- scope: "global", or "countries" with ISO2 codes when sign-up is limited to people in those countries.
+- gates: other conditions a user must meet, each {requirement, sector_any (academia | government | finance |
+  healthcare | industry), research_role (true when the user must do research or study themselves, not only work at
+  such an institution)}.
+- confidence: "high" only with a quote from a page you read that states the condition (url and quote).
 
 Answer with ONLY one JSON object, no prose:
 {"placement": {"layer": "", "runs_on_it": [], "used_with": [], "adoption_signals": []},
@@ -76,7 +85,9 @@ Answer with ONLY one JSON object, no prose:
                   "confidence": "high" | "medium" | "low", "reason": "",
                   "question": {"text": "", "options": [{"label": "", "relation": "substitute"}]}}],
  "build_alternative": {"kind": "self_hosted" | "build", "name": "", "signals": [], "replaces_index": null, "reason": ""},
- "missing_names": []}
+ "missing_names": [],
+ "audience": {"scope": "global" | "countries", "countries": [], "gates": [{"requirement": "", "sector_any": [], "research_role": true}],
+              "confidence": "high" | "medium" | "low", "url": "", "quote": ""}}
 "reason" is one short sentence with the evidence; "question" only when confidence is not high.`;
 
 export type Relation = "substitute" | "complement" | "different_layer" | "unrelated";
@@ -85,7 +96,11 @@ export interface Placement { layer: string; runs_on_it: string[]; used_with: str
 export interface CompetitorJudgement { index: number; name: string; relation: Relation; confidence: Confidence; reason: string;
   question: { text: string; options: { label: string; relation: Relation }[] } | null }
 export interface BuildAlternative { kind: "self_hosted" | "build"; name: string; signals: string[]; replaces_index: number | null; reason: string }
-export interface ArchitectVerdict { placement: Placement; competitors: CompetitorJudgement[]; missing_names: string[]; build_alternative: BuildAlternative | null }
+/** Who may sign up, as the reviewer read it (cross-checked against research's product.audience: audienceCrossCheck). */
+export interface ArchitectAudience { scope: "global" | "countries"; countries: string[]; gates: { requirement: string; sector_any: string[]; research_role?: boolean }[];
+  confidence: Confidence; url: string; quote: string }
+export interface ArchitectVerdict { placement: Placement; competitors: CompetitorJudgement[]; missing_names: string[]; build_alternative: BuildAlternative | null;
+  audience?: ArchitectAudience | null }
 export interface ArchitectProduct { name: string; description?: string; category?: string; features?: string[]; aliases?: string[]; website_url?: string;
   docs_url?: string; competitors: { name: string; aliases?: string[]; domains?: string[]; evidence_url?: string }[] }
 
@@ -101,11 +116,17 @@ export function architectPrompt(p: ArchitectProduct): string {
     JSON.stringify(p.competitors.map((c, index) => ({ index, name: c.name, aliases: c.aliases ?? [], domains: c.domains ?? [], evidence_url: c.evidence_url ?? null })), null, 1);
 }
 
+/** Something the reviewer is not yet sure of: a competitor's relation, or the audience. */
+export interface Unsure { name: string; relation: string; confidence: Confidence }
+export const AUDIENCE_UNSURE = "the audience (who may sign up)";
+
 /** The follow-up round: investigate what is still unsure, then answer the whole object again. */
-export function followUpPrompt(unsure: CompetitorJudgement[], round: number): string {
+export function followUpPrompt(unsure: Unsure[], round: number): string {
   return `Round ${round} of ${MAX_ROUNDS}. You are not yet sure about: ${unsure.map((c) => `${c.name} (${c.relation}, ${c.confidence})`).join("; ")}.
 Investigate each with your tools before answering: how the product's docs mention it, "<tool> vs <product>" comparisons,
-whether the product runs it, hosts it or replaces it. Then answer the whole JSON object again, with updated confidence.`;
+whether the product runs it, hosts it or replaces it.${unsure.some((u) => u.name === AUDIENCE_UNSURE) ? `
+For the audience: read the sign-up, account, eligibility and terms pages; quote the sentence that limits who may have an
+account, or answer global.` : ""} Then answer the whole JSON object again, with updated confidence.`;
 }
 
 /** Parse the reviewer's answer: the outermost JSON object in its text, normalised. Null when unusable. */
@@ -127,7 +148,59 @@ export function parseArchitect(text: string): ArchitectVerdict | null {
     }),
     missing_names: strs(v.missing_names, 6),
     build_alternative: buildAlternativeOf(v.build_alternative),
+    audience: audienceOf(v.audience),
   };
+}
+
+const SECTORS = ["academia", "government", "finance", "healthcare", "industry"];
+function audienceOf(a: any): ArchitectAudience | null {
+  if (!a || (a.scope !== "global" && a.scope !== "countries")) return null;
+  const countries = a.scope === "countries" ? strs(a.countries, 50).map((c) => c.toUpperCase()).filter((c) => /^[A-Z]{2}$/.test(c)) : [];
+  const gates = (Array.isArray(a.gates) ? a.gates : []).filter((g: any) => typeof g?.requirement === "string" && g.requirement.trim()).map((g: any) => ({
+    requirement: g.requirement.trim().slice(0, 300), sector_any: strs(g.sector_any).filter((s) => SECTORS.includes(s)),
+    ...(typeof g.research_role === "boolean" ? { research_role: g.research_role } : {}) }));
+  const url = typeof a.url === "string" ? a.url.trim() : "", quote = typeof a.quote === "string" ? a.quote.trim().slice(0, 600) : "";
+  let confidence: Confidence = CONFIDENCE.includes(a.confidence) ? a.confidence : "medium";
+  // A restriction is only as sure as the page that states it: without a quote it is never high (a US headquarters or a
+  // customer list does not limit who may sign up).
+  if ((countries.length || gates.length) && confidence === "high" && !(/^https?:\/\//.test(url) && quote.length >= 20)) confidence = "medium";
+  return { scope: countries.length ? "countries" : "global", countries, gates, confidence, url, quote };
+}
+
+const sameSet = (a: string[], b: string[]) => a.length === b.length && a.every((x) => b.includes(x));
+
+/**
+ * Research's product.audience against the reviewer's reading (pure; orchestrator/test/architect.ts). A confident,
+ * quoted restriction research lacks (or other countries) goes back as an issue; a disagreement the reviewer is not
+ * sure of keeps research's audience and asks the customer which is right.
+ */
+export function audienceCrossCheck(research: any, arch: ArchitectAudience | null | undefined): { issues: string[]; question: any | null } {
+  if (!arch) return { issues: [], question: null };
+  const rCountries: string[] = research?.scope === "countries" && Array.isArray(research.countries) ? research.countries : [];
+  const rGates: any[] = (Array.isArray(research?.gates) ? research.gates : []).filter((g: any) => g?.strictness === "required");
+  const where = arch.countries.join(", ");
+  const cite = arch.url ? ` (${arch.url}: "${arch.quote}")` : "";
+  const countriesDiffer = arch.countries.length ? !sameSet(arch.countries, rCountries) : false;
+  const gateMissing = arch.gates.length > 0 && !rGates.length;
+  if (arch.confidence === "high") {
+    const issues: string[] = [];
+    if (countriesDiffer) issues.push(`product.audience (architecture review): found sign-up limited to ${where}${cite}; set product.audience accordingly (scope "countries", countries ${JSON.stringify(arch.countries)}, with that quote as evidence)`);
+    if (gateMissing) issues.push(`product.audience (architecture review): found users must meet "${arch.gates.map((g) => g.requirement).join("; ")}"${cite}; add it to product.audience.gates as required, with that quote as evidence`);
+    return { issues, question: null };
+  }
+  // Not sure: research's reading stands (it cites its own page), and the customer is asked.
+  const disagree = (arch.scope === "countries") !== (research?.scope === "countries") || countriesDiffer || gateMissing;
+  if (!disagree) return { issues: [], question: null };
+  const valueOf = (scope: string, countries: string[], gates: any[]) => ({ scope, ...(scope === "countries" ? { countries, strictness: "exclusive" } : {}), gates });
+  const archGates = arch.gates.map((g, i) => ({ id: `review-${i + 1}`, requirement: g.requirement, strictness: "required",
+    match: { ...(g.sector_any.length ? { sector_any: g.sector_any } : {}), ...(typeof g.research_role === "boolean" ? { research_role: g.research_role } : {}) } }))
+    .filter((g) => Object.keys(g.match).length);
+  const describe = (scope: string, countries: string[], gates: { requirement: string }[]) =>
+    `${scope === "countries" && countries.length ? `Only people in ${countries.join(", ")}` : "Anyone, anywhere"}${gates.length ? `, who ${gates.map((g) => g.requirement).join("; ")}` : ""} can sign up`;
+  return { issues: [], question: { kind: "audience", subject: "audience", question: "Who can sign up for and use the product?",
+    options: [{ id: "a", label: describe(research?.scope, rCountries, rGates), value: valueOf(research?.scope === "countries" ? "countries" : "global", rCountries, research?.gates ?? []) },
+              { id: "b", label: describe(arch.scope, arch.countries, archGates), value: valueOf(arch.scope, arch.countries, archGates) }],
+    context: { research: research ?? null, review: arch } } };
 }
 
 function buildAlternativeOf(b: any): BuildAlternative | null {
@@ -137,7 +210,12 @@ function buildAlternativeOf(b: any): BuildAlternative | null {
                             reason: typeof b.reason === "string" ? b.reason.trim() : "" } : null;
 }
 
-export const unsureOf = (v: ArchitectVerdict) => v.competitors.filter((c) => c.confidence !== "high");
+/** What the next round investigates: competitors and the audience the reviewer is not sure of. */
+export const unsureOf = (v: ArchitectVerdict): Unsure[] => [
+  ...v.competitors.filter((c) => c.confidence !== "high"),
+  ...(v.audience && v.audience.confidence !== "high"
+    ? [{ name: AUDIENCE_UNSURE, relation: v.audience.scope === "countries" ? `limited to ${v.audience.countries.join(", ")}` : "global", confidence: v.audience.confidence }] : []),
+];
 
 /** What research does with a verdict (pure; tested in orchestrator/test/architect.ts). */
 export interface ArchitectOutcome {
@@ -151,10 +229,13 @@ export interface ArchitectOutcome {
   placement: Placement;
   /** Buy vs build: the self-host or build-it-yourself route, always kept as a competitor and matched by its signals. */
   build_alternative: BuildAlternative | null;
+  /** Who may sign up, as the reviewer read it (audienceCrossCheck against research's product.audience). */
+  audience: ArchitectAudience | null;
 }
 
 export function architectOutcome(v: ArchitectVerdict, p: ArchitectProduct, rounds: number): ArchitectOutcome {
-  const out: ArchitectOutcome = { issues: [], questions: [], unconfirmed: [], not_competitors: [], placement: v.placement, build_alternative: v.build_alternative };
+  const out: ArchitectOutcome = { issues: [], questions: [], unconfirmed: [], not_competitors: [], placement: v.placement, build_alternative: v.build_alternative,
+                               audience: v.audience ?? null };
   // The listed competitor that is the buy-vs-build route stays a competitor whatever relation it was given (it is
   // converted to that route by applyArchitecture), so it is neither removed nor asked about.
   const routeIndex = v.build_alternative?.replaces_index ?? null;

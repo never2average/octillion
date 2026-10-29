@@ -39,7 +39,7 @@
     {
       "name": "list_product_questions",
       "title": "Questions about your product",
-      "summary": "Questions research could not settle on its own: usually whether a tool competes with your product or is used with it (for example a scheduler that runs on your platform).",
+      "summary": "Questions research could not settle on its own: whether a tool competes with your product or is used with it (for example a scheduler that runs on your platform; until you answer, that tool is left…",
       "read_only": true
     },
     {

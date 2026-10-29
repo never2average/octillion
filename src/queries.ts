@@ -14,6 +14,7 @@ import { keepAlive } from "./telemetry.js";
 import { missingAgentKeys } from "./gateway.js";
 import { asPlatform } from "./tenant-scope.js";
 import type { Population } from "./agents.js";
+import { NO_ELIGIBLE_PERSONAS } from "./audience.js";
 
 /**
  * The population without the agents no vault key can serve (gateway.ts missingAgentKeys): their sessions would fail
@@ -521,6 +522,12 @@ export async function runSimulation(org: Org, input: RunInput) {
        UNION SELECT pp.profile_id FROM product_personas pp JOIN developer_profiles dp ON dp.id = pp.profile_id AND dp.active AND dp.org_id IS NULL
         WHERE pp.product_id = $2 AND pp.active
        ORDER BY 1`, [org.orgId, p.id]);
+    // Research stated who may use the product and found nobody who can (or the customer narrowed it since): never
+    // stand in a generic or random developer, whose sessions would measure people the product does not serve.
+    if (!profiles.length) {
+      const [r] = await db.query<{ audience: boolean }>("/* tenant: product from resolveProduct(org) */ SELECT (research->'audience') IS NOT NULL AS audience FROM products WHERE id = $1", [p.id]);
+      if (r?.audience) throw new Error(NO_ELIGIBLE_PERSONAS);
+    }
     profiles = profiles.slice(0, Math.max(1, Math.floor(maxSessions / Math.max(1, scenarios.length))));
   }
   const profileIds: (number | null)[] = profiles.length ? profiles.map((p) => p.id) : [null];
@@ -847,6 +854,25 @@ export async function getReport(org: Org, input: { product?: string; days?: numb
   }
   const platform = checkPlatform(input.platform);
   if (platform) params.push(platform), (base += ` AND sc.platform = $${params.length}`);
+  // A product whose personas research picks for its audience (src/audience.ts): the rolling figures cover the persona
+  // set linked now. Sessions run with personas since unlinked (people who cannot use the product) are counted apart as
+  // the previous persona set, never blended in. A single run's report keeps every session of that run.
+  let previousPersonaSet: { sessions: number; label: string } | null = null;
+  if (!sim) {
+    const [ps] = await db.query<{ managed: boolean; ids: number[] }>(
+      `/* tenant: product from resolveProduct(org) */ SELECT (p.research->'audience') IS NOT NULL AS managed,
+              ARRAY(SELECT pp.profile_id FROM product_personas pp WHERE pp.product_id = p.id AND pp.active
+                    UNION SELECT dp.id FROM developer_profiles dp WHERE dp.product_id = p.id AND dp.org_id = p.org_id AND dp.active) AS ids
+         FROM products p WHERE p.id = $1`, [p.id]);
+    if (ps?.managed) {
+      params.push((ps.ids ?? []).map(Number));
+      const [{ n: old }] = await db.query<{ n: number }>(
+        `/* tenant: product from resolveProduct(org), in the shared base filter */ SELECT count(*) AS n FROM agent_sessions s JOIN ${SCENARIO_ROWS} sc ON sc.id = s.scenario_id
+          WHERE ${base} AND s.verdict IS NOT NULL AND NOT (coalesce(s.profile_id, 0) = ANY($${params.length}))`, params);
+      base += ` AND s.profile_id = ANY($${params.length})`;
+      if (Number(old)) previousPersonaSet = { sessions: Number(old), label: "previous persona set: sessions with personas no longer linked to the product (its audience changed); left out of these figures" };
+    }
+  }
   const filter = `${base} AND s.verdict IS NOT NULL`;
   const from = `agent_sessions s JOIN ${SCENARIO_ROWS} sc ON sc.id = s.scenario_id WHERE ${filter}`;
 
@@ -933,6 +959,7 @@ export async function getReport(org: Org, input: { product?: string; days?: numb
     view: "report" as const,
     product: { id: p.id, slug: p.slug, name: p.name },
     filters: { days, model: input.model ?? null, simulation: sim?.id ?? null, platform: platform ?? null },
+    ...(previousPersonaSet ? { previous_persona_set: previousPersonaSet } : {}),
     population: { slug: pop.slug, name: pop.name, is_default: pop.is_default, private: pop.org_id != null },
     ...sections.report,
     models: await config.models(),

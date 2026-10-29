@@ -67,6 +67,10 @@ export async function syncVault() {
     for (const [i, p] of profiles.entries()) {
       if (!p?.name) throw bad("profile", i, "name");
       const { id, slug, name, summary, instructions, attributes, ...rest } = p;
+      // Research filters personas on their survey facets and the server checks every pick against them
+      // (src/research.ts audienceIssues): a profile without a country could be picked for any market.
+      const country = ((attributes as any)?.facets ?? (rest as any).facets)?.country;
+      if (typeof country !== "string" || !/^[A-Z]{2}$/.test(country)) throw bad("profile", i, "attributes.facets.country (ISO2; run vault/build/so_backfill.py apply)");
       const s = slug ? slugify(slug) : slugify(String(id ?? name));
       profileSlugs.push(s);
       const wrote = await tx.query(
