@@ -1,4 +1,5 @@
 import { vaultProfileRow, type VaultProfile } from "./vault.js";
+import { audienceFormIssues, hardMisses, type Audience } from "./audience.js";
 
 /**
  * Shared developer profiles only, from a vault file, into a given database: the operator's step after the profile data
@@ -27,6 +28,8 @@ export interface ProfileSyncPlan {
   retire: string[];
   /** No longer in the file but linked to a product as a persona: kept active unless allowRetireLinked. */
   retireBlocked: { slug: string; products: number }[];
+  /** Linked personas who cannot use their product with the facets in the file (report only: runs skip them). */
+  ineligibleLinks: { slug: string; product: string; why: string[] }[];
   rows: ReturnType<typeof vaultProfileRow>[];
 }
 
@@ -44,7 +47,7 @@ export async function planProfileSync(db: Q, profiles: VaultProfile[], opts: { a
             dp.active, dp.source, dp.org_id, dp.edited_at, (SELECT count(*)::int FROM product_personas pp WHERE pp.profile_id = dp.id AND pp.active) AS linked
        FROM developer_profiles dp WHERE dp.slug = ANY($1) OR (dp.org_id IS NULL AND dp.source = 'vault' AND dp.active)`, [slugs]);
   const bySlug = new Map(existing.map((r) => [r.slug, r]));
-  const plan: ProfileSyncPlan = { inserts: [], updates: [], renames: [], unchanged: 0, kept: [], retire: [], retireBlocked: [], rows };
+  const plan: ProfileSyncPlan = { inserts: [], updates: [], renames: [], unchanged: 0, kept: [], retire: [], retireBlocked: [], ineligibleLinks: [], rows };
   for (const r of rows) {
     const old = bySlug.get(r.slug);
     if (!old) plan.inserts.push(r.slug);
@@ -60,6 +63,15 @@ export async function planProfileSync(db: Q, profiles: VaultProfile[], opts: { a
     if (inFile.has(old.slug) || old.org_id != null || old.source !== "vault" || old.edited_at != null || !old.active) continue;
     if (old.linked && !opts.allowRetireLinked) plan.retireBlocked.push({ slug: old.slug, products: old.linked });
     else plan.retire.push(old.slug);
+  }
+  const links = await db.query<{ slug: string; product: string; audience: any }>(
+    `/* tenant: operator script: every product's linked shared personas */ SELECT dp.slug, p.name AS product, p.research->'audience' AS audience
+       FROM product_personas pp JOIN products p ON p.id = pp.product_id JOIN developer_profiles dp ON dp.id = pp.profile_id AND dp.org_id IS NULL
+      WHERE pp.active AND dp.slug = ANY($1) ORDER BY p.name, dp.slug`, [slugs]);
+  const facetsOf = new Map(rows.map((r) => [r.slug, JSON.parse(r.attributes)?.facets ?? null]));
+  for (const l of links) {
+    const why = l.audience && !audienceFormIssues(l.audience, { sources: null }).length ? hardMisses(l.audience as Audience, facetsOf.get(l.slug)) : [];
+    if (why.length) plan.ineligibleLinks.push({ slug: l.slug, product: l.product, why });
   }
   return plan;
 }

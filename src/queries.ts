@@ -534,19 +534,24 @@ export async function runSimulation(org: Org, input: RunInput) {
     // No personas named: the product's own, i.e. its active personas and the library personas linked to it
     // (product_personas), so agents talk to the developers research picked rather than to nobody. profiles: [] asks
     // for a generic developer. At most as many as fit one session per task and persona under the run's cap.
-    profiles = await db.query<{ id: number }>(
-      `SELECT id FROM developer_profiles WHERE org_id = $1 AND product_id = $2 AND active
-       UNION SELECT pp.profile_id FROM product_personas pp JOIN developer_profiles dp ON dp.id = pp.profile_id AND dp.active AND dp.org_id IS NULL
+    const linked = await db.query<{ id: number; slug: string; shared: boolean; facets: any }>(
+      `SELECT id, slug, false AS shared, NULL::jsonb AS facets FROM developer_profiles WHERE org_id = $1 AND product_id = $2 AND active
+       UNION SELECT dp.id, dp.slug, true, dp.attributes->'facets' FROM product_personas pp JOIN developer_profiles dp ON dp.id = pp.profile_id AND dp.active AND dp.org_id IS NULL
         WHERE pp.product_id = $2 AND pp.active
        ORDER BY 1`, [org.orgId, p.id]);
+    // Linked shared personas are checked again against the audience now: a profile sync can change their facets after
+    // research picked them, and one who can no longer use the product must not run. The account's own personas are its
+    // choice and stay.
+    const [r] = await db.query<{ audience: any }>("/* tenant: product from resolveProduct(org) */ SELECT research->'audience' AS audience FROM products WHERE id = $1", [p.id]);
+    const restricted = r?.audience && !audienceFormIssues(r.audience, { sources: null }).length && hardKey(r.audience) !== hardKey(null) ? (r.audience as Audience) : null;
+    const ineligible = restricted ? linked.filter((x) => x.shared && hardMisses(restricted, x.facets).length) : [];
+    profiles = linked.filter((x) => !ineligible.includes(x));
+    if (ineligible.length) audienceWarnings = [`left out ${ineligible.map((x) => x.slug).join(", ")}: linked, but cannot use ${p.name} (${describeAudience(restricted!)}) with their current profile`];
     // Research stated who may use the product and found nobody who can (or the customer narrowed it since): never
-    // stand in a generic or random developer, whose sessions would measure people the product does not serve.
-    // Only when the audience restricts who may use it: a global product with no personas yet runs with a generic
-    // developer, as before.
-    if (!profiles.length) {
-      const [r] = await db.query<{ audience: any }>("/* tenant: product from resolveProduct(org) */ SELECT research->'audience' AS audience FROM products WHERE id = $1", [p.id]);
-      if (r?.audience && hardKey(r.audience) !== hardKey(null)) throw new Error(NO_ELIGIBLE_PERSONAS);
-    }
+    // stand in a generic or random developer, whose sessions would measure people the product does not serve. Only
+    // when the audience restricts who may use it: a global product with no personas yet runs with a generic developer.
+    if (!profiles.length && restricted)
+      throw new Error(`${NO_ELIGIBLE_PERSONAS}${ineligible.length ? ` (linked but ineligible now: ${ineligible.map((x) => x.slug).join(", ")})` : ""}`);
     profiles = profiles.slice(0, Math.max(1, Math.floor(maxSessions / Math.max(1, scenarios.length))));
   }
   const profileIds: (number | null)[] = profiles.length ? profiles.map((p) => p.id) : [null];

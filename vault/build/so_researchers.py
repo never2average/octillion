@@ -45,10 +45,13 @@ Hard rules:
 - State the country and the kind of institution exactly as the facts give them (facets.country_name, facets.sector,
   industry, employment): "a doctoral student at a Canadian university", "a data scientist at an Indian bank". Never
   another country, and no real institution names.
-- For academia, write realistic constraints as needs, never as a provider's offering: analyses that need more compute
-  than a laptop, a supervisor's or a grant's budget, confidential research data, reproducibility, deadlines. Never a
-  national or shared compute allocation, a consortium or a batch queue (check_curated.py refuses them: they would
-  pre-install one provider), and data residency only when the facts state it.
+- For academia, write constraints that read like researchers' anywhere: the machines they actually use (department or
+  lab machines, a personal laptop, the university's shared compute), the group's existing code, supervisors,
+  reproducibility, confidential data, deadlines. Never invent an unmet need (more compute than they have) or a budget
+  line the facts do not give, and never a provider's offering (a national or shared compute allocation, a consortium,
+  a batch queue): check_curated.py refuses them, since they would make one kind of product look like the answer.
+  Data residency only when the facts state it. Say "graduate" or "doctoral" only when ed_level is a master's or
+  higher; leave experience_years null when years_professional is not given.
 - company_size is the survey's org size; when it is not given, say "Unknown" (never "University").
 - Invent a plausible first name + last initial matching nothing real, distinct from the names already in the data. No
   real people, institutions or papers.
@@ -91,9 +94,9 @@ def stratified(rows, n, seed, prefer_ai):
     return out
 
 
-def sample(n, out, country=None, sector=None, research_role=None, relax_ai=False, segment=None):
+def sample(n, out, country=None, sector=None, research_role=None, relax_ai=False, segment=None, role_any=None):
     df = load_survey()
-    if not (country or sector or research_role is not None):
+    if not (country or sector or research_role is not None or role_any):
         pool = df[df.DevType.isin(DEV_TYPES) & df.MainBranch.isin(BRANCHES) & df.Employment.isin(EMPLOYMENT)
                   & df.AIAgents.fillna("").str.startswith("Yes") & df.WorkExp.notna() & df.LanguageHaveWorkedWith.notna()]
         print(f"eligible researcher respondents: {len(pool)} of {len(df)}")
@@ -104,7 +107,8 @@ def sample(n, out, country=None, sector=None, research_role=None, relax_ai=False
         if not relax_ai: base = base[base.AIAgents.fillna("").str.startswith("Yes")]
         fs = base.apply(facets_of, axis=1)
         keep = fs.map(lambda f: bool(f) and (not country or f["country"] == country) and (not sector or f["sector"] == sector)
-                      and (research_role is None or f["research_role"] == research_role))
+                      and (research_role is None or f["research_role"] == research_role)
+                      and (not role_any or any(f[k] for k in role_any)))
         pool = base[keep]
         label = segment or f"{country or '*'}/{sector or '*'}/{'researcher' if research_role else '*'}"
         print(f"{label}: {len(pool)} respondents not yet in the data ({'AI agents preferred' if relax_ai else 'AI-agent users only'})")
@@ -181,7 +185,7 @@ if __name__ == "__main__":
         if "--segment" in sys.argv:
             seg = next(s for s in json.load(open(SEGMENTS)) if s["id"] == opt("--segment"))
             rest = [x for x in sys.argv[2:] if x not in ("--segment", seg["id"], "--relax-ai")]
-            sample(seg["min"], rest[0], seg.get("country"), seg.get("sector"), seg.get("research_role"), "--relax-ai" in sys.argv, seg["id"])
+            sample(seg["min"], rest[0], seg.get("country"), seg.get("sector"), seg.get("research_role"), "--relax-ai" in sys.argv, seg["id"], seg.get("role_any"))
         else:
             pos = [x for i, x in enumerate(sys.argv[2:], 2) if not x.startswith("--") and not sys.argv[i - 1] in ("--country", "--sector")]
             sample(int(pos[0]), pos[1], opt("--country"), opt("--sector"), True if "--research-role" in sys.argv else None, "--relax-ai" in sys.argv)

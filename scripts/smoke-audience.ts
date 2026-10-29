@@ -83,6 +83,15 @@ export async function pickChecks({ db, worker, rid, good }: { db: Db; worker: Wo
   assert.ok(!(await iss(al)).some((x) => /audience restricts users/.test(x)), "quoted on a page the job fetched");
   const reworded = structuredClone(al); reworded.product.audience.evidence = [{ url: SIGNUP, quote: "Only Canadian researchers with a faculty sponsor may have accounts." }];
   assert.ok((await iss(reworded)).some((x) => /the quote is not on .* as this job fetched it/.test(x)), "a paraphrase is not a quote");
+  // A restricted audience with 4+ eligible profiles needs at least 3 personas.
+  const wide = structuredClone(good); wide.product.audience = { ...caOnly, countries: ["US", "DE", "GB", "CA"], gates: [] };
+  assert.ok((await iss(wide)).some((x) => /may use this product: pick at least 3 personas, different in role, seniority and education/.test(x)), "two personas for a wide restricted audience");
+  // One entry per page; past the cap the server says so (409) instead of dropping the page silently.
+  const { recordFetchedPage } = await import("../src/research.js");
+  for (let i = 0; i < 199; i++) await recordFetchedPage(rid, { url: `https://docs.quickqueue.example.com/p/${i}`, text: "page" });
+  await assert.rejects(recordFetchedPage(rid, { url: "https://docs.quickqueue.example.com/p/over", text: "page" }), (e: any) => e.status === 409 && /page limit reached/.test(e.message));
+  await recordFetchedPage(rid, { url: `${SIGNUP}/`, text: `Install\n\n${quote}` });
+  assert.ok(!(await iss(al)).some((x) => /audience restricts users/.test(x)), "a page fetched again replaces its entry, even at the cap");
   const nameless = structuredClone(good); nameless.selection.personas[0].candidates[0].reason = "backend role on a matching stack, owns the queue";
   assert.ok((await iss(nameless)).some((x) => /selection\.personas\[0\]\.candidates\[0\]\.reason: say where example-startup-backend is \(US\)/.test(x)), "a reason must name the country");
   // A gap is accepted only when nobody fits: here Canadian researchers do.
@@ -100,16 +109,24 @@ export async function audienceLifecycleChecks({ db, worker, call, fails, A, orgI
   const lab = await call(A, "onboard_product", { name: "GapLab", prompt: "GapLab is a hosted job queue for TypeScript backends with retries and cron.", website_url: "https://quickqueue.example.com" });
   const claimNext = async (want: string) => {
     const c = await (await worker("/research/claim", { worker_id: "smoke-orch", research_id: want })).json();
-    assert.ok(c.jobs.some((j: any) => j.research_id === want), `claimed ${want}`);
+    const job = c.jobs.find((j: any) => j.research_id === want);
+    assert.ok(job, `claimed ${want}`);
     // Competitor evidence for this job: the same searches the first job ran.
     await worker(`/research/${want}/search`, { kind: "web", query: "alternatives to GapLab" });
     await worker(`/research/${want}/search`, { kind: "packages", query: "job queue", ecosystem: "npm" });
+    return job;
   };
   const asLab = (r: any) => { const x = structuredClone(r); x.product.name = "GapLab"; x.product.aliases = ["Gap Lab"]; x.product.packages = ["@gaplab/sdk"]; x.product.domains = ["gaplab.example.com"]; return x; };
-  await claimNext(lab.research.id);
+  // A tool removed by hand before (an operator's --not-competitor): research is told, and never brings it back.
+  const [{ product_id: labId }] = await db.query<any>("SELECT product_id FROM product_research WHERE id = $1", [lab.research.id]);
+  await db.query("UPDATE products SET research = $2 WHERE id = $1", [labId, JSON.stringify({ not_competitors: [{ name: "Inngest", relation: "complement", reason: "removed by hand" }] })]);
+  const labJob = await claimNext(lab.research.id);
+  assert.deepEqual(labJob.input.not_competitors, ["Inngest"], "the claimed job carries the stored not-competitors");
   const first = await (await worker(`/research/${lab.research.id}/complete`, { status: "completed", result: asLab(good) })).json();
   assert.equal(first.status, "completed", JSON.stringify(first).slice(0, 800));
-  const [labRow] = await db.query<any>("SELECT id FROM products WHERE org_id = $1 AND slug = $2", [orgId, first.product]);
+  const [labRow] = await db.query<any>("SELECT id, competitors, research FROM products WHERE org_id = $1 AND slug = $2", [orgId, first.product]);
+  assert.ok(!labRow.competitors.some((c: any) => c.name === "Inngest") && labRow.research.not_competitors.some((x: any) => x.name === "Inngest"),
+    "research listed it again; it is dropped and stays recorded as not competing");
   const linksOf = () => db.query<any>("/* tenant: smoke */ SELECT dp.slug, pp.active FROM product_personas pp JOIN developer_profiles dp ON dp.id = pp.profile_id WHERE pp.product_id = $1 ORDER BY dp.slug", [labRow.id]);
   assert.deepEqual((await linksOf()).map((x: any) => [x.slug, x.active]), [["example-enterprise-platform", true], ["example-startup-backend", true]]);
   await reportAndRunChecks({ db, call, fails, A, product: first.product, productId: labRow.id });
@@ -129,8 +146,8 @@ export async function audienceLifecycleChecks({ db, worker, call, fails, A, orgI
     "the answer is the confirmed audience");
   assert.ok((await linksOf()).every((x: any) => !x.active), "personas who cannot use it are unlinked (kept, inactive)");
   const [queued] = await db.query<any>("SELECT status, input FROM product_research WHERE id = $1", [ans.research_id]);
-  assert.ok(queued.status === "queued" && queued.input.personas_only === true && /New Zealand/.test(queued.input.audience),
-    "research runs again, personas only, for the confirmed audience");
+  assert.ok(queued.status === "queued" && queued.input.personas_only === true && queued.input.audience === undefined,
+    "research runs again, personas only; the confirmed audience is read from the product at claim, never carried in the input");
   const before = await productState(db, labRow.id);
   await fails(A, "run_simulation", { product: first.product, samples: 1 }, /No eligible personas for this product's audience yet/);
   // The re-research finds nobody in New Zealand: a verified gap, no personas, a question about supply.
@@ -202,6 +219,8 @@ async function reportAndRunChecks({ db, call, fails, A, product, productId }: { 
     await fails(A, "run_simulation", { product, samples: 1, profiles: ["example-startup-backend", "example-ca-academic-researcher"] },
       /cannot use GapLab .*example-startup-backend is in US; the product serves only CA/);
     await fails(A, "run_simulation", { product, samples: 1, profiles: [] }, /a generic developer \(profiles: \[\]\) has no country/);
+    // The linked personas (US, DE) cannot use it now: a default run leaves them out, and with nobody left it refuses.
+    await fails(A, "run_simulation", { product, samples: 1 }, /No eligible personas.*linked but ineligible now: example-(enterprise-platform|startup-backend), example-(enterprise-platform|startup-backend)/);
   } finally {
     await db.query("UPDATE products SET research = $2 WHERE id = $1", [productId, JSON.stringify(was)]);
   }
@@ -221,25 +240,60 @@ async function productState(db: Db, productId: number) {
  * linked and changes nothing else.
  */
 async function personasOnlyChecks({ db, worker, call, A, orgId, productId, product, good }: { db: Db; worker: Worker; call: Call; A: Client; orgId: number; productId: number; product: string; good: any }) {
-  const global = { scope: "global", checked: "confirmed by the customer in answer to a question", source: "customer", confirmed: true };
-  await db.query("UPDATE products SET research = jsonb_set(research, '{audience}', $2::jsonb) - 'audience_gap' WHERE id = $1", [productId, JSON.stringify(global)]);
+  const { queuePersonasResearch, askQuestions } = await import("../src/questions.js");
+  const claim = async (rid: string) => (await (await worker("/research/claim", { worker_id: "smoke-orch", research_id: rid })).json()).jobs.find((j: any) => j.research_id === rid);
   const [task] = await db.query<any>("/* tenant: smoke */ SELECT id FROM scenarios WHERE product_id = $1 AND active ORDER BY id LIMIT 1", [productId]);
   const variant = "Our Express API sends webhooks inline and loses them when an endpoint is down; make delivery reliable with retries.";
   await db.query("/* tenant: smoke */ UPDATE scenarios SET prompt_variants = $2 WHERE id = $1",
     [task.id, JSON.stringify({ "example-startup-backend": variant, "example-enterprise-platform": variant })]);
-  const before = await productState(db, productId);
-  const { queuePersonasResearch } = await import("../src/questions.js");
-  const rid = await queuePersonasResearch(orgId, productId, { prompt: "GapLab is a hosted job queue.", website_url: "https://quickqueue.example.com" }, global as any);
-  const c = await (await worker("/research/claim", { worker_id: "smoke-orch", research_id: rid })).json();
-  const job = c.jobs.find((j: any) => j.research_id === rid);
-  assert.ok(job.input.personas_only === true && job.input.product_profile?.name === "GapLab" && job.input.confirmed_audience?.scope === "global",
-    `the claimed job is personas only, with the stored profile and the confirmed audience: ${JSON.stringify(job.input).slice(0, 300)}`);
+  const openSupply = async () => (await db.query<any>("SELECT count(*)::int AS n FROM product_questions WHERE product_id = $1 AND subject = 'persona_supply' AND status = 'open'", [productId]))[0].n;
+  // The customer confirmed the New Zealand gap (answered above): the same gap found again is not asked about again,
+  // and a gap (no personas) keeps every task's prompt variants.
+  const gapRid = await queuePersonasResearch(orgId, productId, { prompt: "GapLab is a hosted job queue." });
+  assert.equal((await claim(gapRid)).input.confirmed_audience?.countries?.[0], "NZ");
+  const gapResult = { product: {}, personas: [], audience_gap: { searched: ['search_profiles {"country":["NZ"]}'], note: "still nobody in the developer data is in New Zealand" } };
+  const gapDone = await (await worker(`/research/${gapRid}/complete`, { status: "completed", result: gapResult })).json();
+  assert.equal(gapDone.status, "completed", JSON.stringify(gapDone).slice(0, 400));
+  assert.equal(await openSupply(), 0, "no persona_supply question again for an audience the customer already answered");
+  assert.deepEqual(Object.keys((await db.query<any>("/* tenant: smoke */ SELECT prompt_variants FROM scenarios WHERE id = $1", [task.id]))[0].prompt_variants).sort(),
+    ["example-enterprise-platform", "example-startup-backend"], "a gap keeps the variants");
+  // A personas-only result's audience is never the customer's unless the stored one is: claiming source "customer"
+  // and confirmed: true on an uncited restriction is refused, and the model's own audience_check dismisses nothing.
+  const research = { scope: "global", checked: "the sign-up and terms pages say anyone may sign up", source: "research" };
+  await db.query("UPDATE products SET research = jsonb_set(research, '{audience}', $2::jsonb) - 'audience_gap' WHERE id = $1", [productId, JSON.stringify(research)]);
+  assert.equal(await askQuestions(orgId, productId, gapRid, [{ kind: "audience", subject: "audience", question: "Who can sign up?",
+    options: [{ id: "a", label: "Anyone", value: { scope: "global" } }, { id: "b", label: "Only the US", value: { scope: "countries", countries: ["US"], strictness: "exclusive" } }] }]), 1);
+  const claimRid = await queuePersonasResearch(orgId, productId, { prompt: "GapLab is a hosted job queue.", audience: "only the US" });
+  const claimed = await claim(claimRid);
+  assert.ok(claimed.input.personas_only && claimed.input.confirmed_audience === undefined && (await db.query<any>("SELECT input FROM product_research WHERE id = $1", [claimRid]))[0].input.audience === undefined,
+    "a personas-only job never carries an audience of its own");
   const pick = good.personas[0];
-  const result = { product: {}, personas: [pick], selection: { personas: [
+  const rounds = [
     { round: 1, candidates: ["example-startup-backend", "example-enterprise-platform", "example-solo-indie"].map((slug, j) => ({ profile_slug: slug, keep: j < 2, reason: `${["US", "DE", "US"][j]}, industry: a backend role on a queue-heavy stack` })) },
     { round: 2, candidates: ["example-startup-backend", "example-enterprise-platform"].map((slug, j) => ({ profile_slug: slug, keep: j === 0, reason: `${["US", "DE"][j]}, industry: ${j ? "dropped, platform teams standardise on managed queues" : "kept, owns job infrastructure"}` })) },
     { round: 3, converged: true, why: "rechecked eligibility, stack and redundancy; nothing left to change",
-      candidates: [{ profile_slug: "example-startup-backend", keep: true, reason: "US, industry: still the closest fit" }] }] } };
+      candidates: [{ profile_slug: "example-startup-backend", keep: true, reason: "US, industry: still the closest fit" }] }];
+  const claimsCustomer = { product: { audience: { scope: "countries", countries: ["US"], strictness: "exclusive", checked: "the customer told us so, in writing", source: "customer", confirmed: true } },
+                           personas: [pick], selection: { personas: rounds } };
+  const refused = await (await worker(`/research/${claimRid}/validate`, { result: claimsCustomer })).json();
+  assert.ok(!refused.ok && refused.issues.some((i: string) => /source "customer" is only for/.test(i)) && refused.issues.some((i: string) => /audience restricts users but cites no fetched page/.test(i)),
+    `a result cannot make its audience the customer's: ${refused.issues.join(" | ")}`);
+  const sneaky = await (await worker(`/research/${claimRid}/complete`, { status: "completed", result: { personas: [pick], selection: { personas: rounds }, product: {}, audience_check: "agree" } })).json();
+  assert.equal(sneaky.status, "completed", JSON.stringify(sneaky).slice(0, 300));
+  const [still] = await db.query<any>("SELECT status FROM product_questions WHERE product_id = $1 AND subject = 'audience' AND status = 'open'", [productId]);
+  assert.ok(still, "the model's own audience_check dismisses nothing");
+  const [afterSneaky] = await db.query<any>("SELECT research FROM products WHERE id = $1", [productId]);
+  assert.ok(afterSneaky.research.audience.source === "research" && afterSneaky.research.audience.confirmed !== true, "the stored audience is still research's");
+  const global = { scope: "global", checked: "confirmed by the customer in answer to a question", source: "customer", confirmed: true };
+  await db.query("UPDATE products SET research = jsonb_set(research, '{audience}', $2::jsonb) - 'audience_gap' WHERE id = $1", [productId, JSON.stringify(global)]);
+  await db.query("/* tenant: smoke */ UPDATE scenarios SET prompt_variants = $2 WHERE id = $1",
+    [task.id, JSON.stringify({ "example-startup-backend": variant, "example-enterprise-platform": variant })]);
+  const before = await productState(db, productId);
+  const rid = await queuePersonasResearch(orgId, productId, { prompt: "GapLab is a hosted job queue.", website_url: "https://quickqueue.example.com" });
+  const job = await claim(rid);
+  assert.ok(job.input.personas_only === true && job.input.product_profile?.name === "GapLab" && job.input.confirmed_audience?.scope === "global",
+    `the claimed job is personas only, with the stored profile and the confirmed audience: ${JSON.stringify(job.input).slice(0, 300)}`);
+  const result = { product: {}, personas: [pick], selection: { personas: rounds } };
   const bad = await (await worker(`/research/${rid}/validate`, { result: { ...result, personas: [{ profile_slug: "example-startup-backend", name: "Wrong name" }] } })).json();
   assert.ok(!bad.ok && bad.issues.some((i: string) => /is named/.test(i)) && !bad.issues.some((i: string) => /scenarios|competitors|category_terms/.test(i)),
     `personas-only results are checked on their personas only: ${bad.issues.join(" | ")}`);

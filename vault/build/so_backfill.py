@@ -143,6 +143,7 @@ def selftest():
         (("Academic researcher", "Higher Education", "Employed", PHD), (True, False)),
         (("Academic researcher", None, "Student"), (True, False)),
         (("Academic researcher", "Other:", "Employed", PHD), (True, False)),         # a research institute
+        (("Academic researcher", None, "Not employed"), (False, False)),            # so25-17155: no institution now
         (("Academic researcher", "Software Development", "Employed", BA), (False, False)),  # so25-39139: a company's researcher
         (("Student", None, "Student"), (True, False)),                              # a graduate student
         (("Student", "Higher Education", "Student", PHD), (True, False)),
@@ -158,6 +159,7 @@ def selftest():
         (("Applied scientist", "Higher Education", "Employed"), (True, False)),
         (("Developer, back-end", "Higher Education", "Employed"), (False, True)),   # a research software engineer
         (("System administrator", "Higher Education", "Employed"), (False, True)),  # research-computing staff
+        (("Developer, back-end", "Higher Education", "Independent contractor, freelancer, or self-employed"), (False, False)),  # a contractor
         (("Project manager", "Higher Education", "Employed"), (False, False)),
         (("Developer, full-stack", "Software Development", "Employed"), (False, False)),
     ]

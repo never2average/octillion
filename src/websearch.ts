@@ -115,7 +115,6 @@ export async function researchSearch(jobId: string, req: SearchRequest & { purpo
   return { searches_left: max - slot.searches, results };
 }
 
-/** Normalised URL for matching a cited evidence_url against recorded sources (no scheme, www, fragment or trailing slash). */
-export const urlKey = (u: string) => {
-  try { const x = new URL(u); return `${x.hostname.toLowerCase().replace(/^www\./, "")}${x.pathname.replace(/\/+$/, "")}${x.search}`; } catch { return u.trim(); }
-};
+/** Normalised URL for matching a cited evidence_url against recorded sources (orchestrator/core/quote.ts, shared with
+ *  the research orchestrator so both sides match pages the same way). */
+export { urlKey } from "../orchestrator/core/quote.js";

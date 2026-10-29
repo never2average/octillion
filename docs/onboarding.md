@@ -96,24 +96,32 @@ customer ── get_onboarding / get_visibility_report ──▶ results
 - **Personas must be people who can use the product** (`src/audience.ts`). Research states `product.audience`: global
   by default, or limited to countries (`exclusive` or `primary`) and gates (`required` or `typical`, matched on the
   profiles' survey facets: sector, research_role, academic_staff, role_any, industry, org size). `research_role` is
-  research-affiliated (an academic researcher at a university or research institute, a data or applied scientist at a
-  university, or a graduate student with no job in another industry); `academic_staff` is a university's technical staff (research software engineers, research-computing
-  staff); "researchers or the staff they sponsor" is `role_any: ["research_role", "academic_staff"]`. Every restriction
-  quotes a page the job fetched: fetch_url posts each page it reads to the server (`product_research.pages`), and the
-  quote must be on that page, with its URL on the same evidence entry; a headquarters, customer
+  research-affiliated (an academic researcher, employed or studying, at a university or research institute, a data or
+  applied scientist at a university, or a graduate student with no job in another industry); `academic_staff` is a university's employed technical staff (research software engineers, research-computing
+  staff; not contractors); "researchers or the staff they sponsor" is `role_any: ["research_role", "academic_staff"]`. Every restriction
+  quotes a page the job fetched: fetch_url posts each page it reads to the server (`product_research.pages`, one entry
+  per URL, at most 200; a page the server could not record is flagged to research and never counts), and the quote
+  must be on that page, with its URL on the same evidence entry. Whether an audience is the customer's is decided on
+  the server (stored and confirmed by them, or stated at onboarding), never by a result's `source` or `confirmed`; a headquarters, customer
   logos or cloud regions are not restrictions. The server checks each pick against the
   facets: a pick outside an exclusive market or failing a required gate is rejected, and soft parts need half the picks.
   Every persona-round reason names the profile's country. When nobody in the data fits, research submits
   `personas: []` with `audience_gap`; the server accepts it only if no shared profile passes the hard parts, unlinks the
   old personas and asks the customer a `persona_supply` question; runs then refuse ("No eligible personas for this
-  product's audience yet") rather than use a generic developer; a global product with no personas still runs with a generic developer; a
+  product's audience yet") rather than use a generic developer; a global product with no personas still runs with a generic developer; linked
+  personas who can no longer use a restricted product (after a profile sync) are left out of default runs; a
   run naming personas who fail the hard parts (or `profiles: []`) is refused, and one that misses only soft parts runs with `audience_warnings`. The architecture review
   reads the sign-up pages too and compares countries, strictness (exclusive vs primary) and each required gate, both
   ways (a restriction research missed, or one the page does not state). A confident reading whose quote is on a page
   the job fetched goes back to research for two rounds; after that the review's reading applies (source `review`,
-  unconfirmed, so personas are picked for it) and an `audience` question is asked. An unsure review only asks. A
-  customer-confirmed audience is final: research is never sent back or asked about it again, and an open review
-  question is dismissed when research agrees. Answering one confirms the audience (source customer), unlinks personas
+  unconfirmed, so personas are picked for it) and an `audience` question is asked. An unsure review only asks. If the server
+  refuses the review's evidence, research's reading goes back and only the question remains. A customer-confirmed
+  audience is final: research is never sent back or asked about it again. An open review question is dismissed when
+  the orchestrator reports agreement beside the result (never from the result itself) or the audience is confirmed;
+  a persona_supply question is not asked again for an audience the customer already answered. A restricted audience
+  with 4 or more eligible profiles needs at least 3 personas, different in role, seniority and education. Tools judged
+  not to compete (`research.not_competitors`, by the review, the customer or an operator) reach every research at
+  claim and are dropped from what it saves, so they never come back. Answering one confirms the audience (source customer), unlinks personas
   who fail it and queues a personas-only research (not when it only confirms the same hard parts of a gap).
 - **Personas only** (`input.personas_only`): research re-selects the personas for the stored product and audience
   (claimed with the stored profile, and the confirmed audience as final). Completing it swaps the persona links (old
@@ -121,7 +129,9 @@ customer ── get_onboarding / get_visibility_report ──▶ results
   aliases, competitors, sources, placement and tasks stay, and no run starts. Operators re-pick one product with
   `DATABASE_URL=... npx tsx scripts/repick-personas.ts --product <id> [--audience-json <file|json>]
   [--not-competitor <name>[=relation]] [--dry-run]` (stores the audience as the customer's, records tools removed by
-  hand in `research.not_competitors`, unlinks personas the audience rules out, queues the job). A
+  hand in `research.not_competitors`, unlinks personas the audience rules out, queues the job; refused on a database
+  before migration 0007, whose server would run a full research). Writes to `products.research` read it under a row
+  lock and keep keys written meanwhile. A
   newer audience question with other options replaces the open one. Onboarding takes an optional `audience` (the
   customer's own words), saved as confirmed. When the audience is restricted, rolling reports leave out sessions whose
   persona cannot use the product and list those personas (`ineligible_personas`); a global product is never split.

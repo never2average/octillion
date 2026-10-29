@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { CFG, env, num } from "../core/config.js";
 import { redact } from "../core/credentials.js";
 import { fetchReadable, FetchPolicy } from "../core/safe-fetch.js";
-import { quotedOn, readablePage } from "../core/quote.js";
+import { quotedOn, readablePage, urlKey } from "../core/quote.js";
 import { isShuttingDown } from "../core/session.js";
 import { api, HttpError, log, sleep, withRetry } from "../core/util.js";
 import { PERSONAS_ONLY_SYSTEM_PROMPT, RESEARCH_SYSTEM_PROMPT, personasOnlyPrompt, researchPrompt, type ResearchInput, type ResearchLimits } from "./research-prompt.js";
@@ -95,7 +95,10 @@ export class ResearchContext {
   architecture: ArchitectOutcome | null = null;
   /** Rounds the audience cross-check sent back (at most AUDIENCE_ROUNDS). */
   audienceRounds = 0;
-  /** Every page fetched in this job (research and the review), by URL as requested and as finally read. */
+  audienceCheck: string | null = null;
+  researchAudience: any = undefined;
+  reviewRefused = false;
+  /** Every page fetched in this job (research and the review) that the server recorded, by URL as requested and as read. */
   readonly pages = new Map<string, string>();
 
   constructor(readonly job: ResearchJob) {
@@ -130,15 +133,20 @@ export function createResearchExtension(ctx: ResearchContext, opts: { only?: rea
         let out: string;
         try { out = await fetchReadable(p.url, ctx.policy); }
         catch (e) { throw new Error(`fetch_url failed: ${(e as Error).message}`); }
-        // The page as read goes to the server (and stays here), so a quote cited from it can be checked word for word.
+        // The page as read goes to the server, so a quote cited from it can be checked word for word. Only a page the
+        // server accepted counts here too (ctx.pages), so a quote is never "verified" against a page it cannot see.
         const page = readablePage(out);
-        if (page) {
-          ctx.pages.set(page.url, page.text);
-          if (page.url !== p.url) ctx.pages.set(p.url, page.text);
-          await api(`/api/worker/research/${enc(ctx.job.research_id)}/page`, { json: page }).catch(() => {});
-          if (page.url !== p.url) await api(`/api/worker/research/${enc(ctx.job.research_id)}/page`, { json: { ...page, url: p.url } }).catch(() => {});
+        let note = "";
+        if (page) for (const url of new Set([page.url, p.url])) {
+          try {
+            await api(`/api/worker/research/${enc(ctx.job.research_id)}/page`, { json: { url, text: page.text } });
+            ctx.pages.set(url, page.text);
+          } catch (e) {
+            log(`[${ctx.job.research_id}] page not recorded (${url}): ${redact(String((e as Error).message)).slice(0, 200)}`);
+            note = "\n\n[Note: this page could not be recorded on the server, so it cannot be cited as audience evidence.]";
+          }
         }
-        return text(out);
+        return text(out + note);
       },
     }));
     // Searches run on the server (src/websearch.ts; the keys never reach this sandbox). Result URLs become fetchable
@@ -188,7 +196,7 @@ export function createResearchExtension(ctx: ResearchContext, opts: { only?: rea
       name: "search_profiles", label: "Search developer profiles",
       description: "Search the developer-profile data (real developers from survey responses: role, experience, company size, stack, constraints, how they answer; " +
         "attributes.facets holds their survey answers: country (ISO2), region, sector, research_role, academic_staff, industry). Personas must be picked from here by profile_slug. " +
-        "Sector academia includes every student, even one who works at a company; research_role is who is research-affiliated. " +
+        "Sector academia includes every student, even an undergraduate or one who works at a company; research_role is who is research-affiliated (researchers, scientists at universities, graduate students). " +
         "Filter by product.audience first (country, sector, research_role or role_any, industry; several values in one filter mean any of them), then search the query words " +
         "within that. matched is how many profiles fit, not just the ones shown; matched=0 means nobody in the data fits.",
       parameters: Type.Object({
@@ -196,7 +204,7 @@ export function createResearchExtension(ctx: ResearchContext, opts: { only?: rea
         country: Type.Optional(Type.Array(Type.String({ minLength: 2, maxLength: 2 }), { description: "ISO2 codes, e.g. [\"CA\"]" })),
         region: Type.Optional(Type.Array(Type.Union(["north_america", "latam", "eu", "europe_other", "uk", "south_asia", "east_asia", "sea", "oceania", "mena", "africa"].map((x) => Type.Literal(x))))),
         sector: Type.Optional(Type.Array(Type.Union(["academia", "government", "finance", "healthcare", "industry"].map((x) => Type.Literal(x))))),
-        research_role: Type.Optional(Type.Boolean({ description: "true: research-affiliated: an academic researcher, a data or applied scientist at a university, or a student with no job in another industry (a student working at a software company is false)" })),
+        research_role: Type.Optional(Type.Boolean({ description: "true: research-affiliated: an academic researcher at a university or research institute, a data or applied scientist at a university, or a graduate student (or a student with a research dev type) with no job in another industry; an undergraduate or a student working at a company is false" })),
         academic_staff: Type.Optional(Type.Boolean({ description: "true: a university's technical staff (research software engineers, research-computing staff); not researchers" })),
         role_any: Type.Optional(Type.Array(Type.Union([Type.Literal("research_role"), Type.Literal("academic_staff")]), { description: "any of these is true, e.g. researchers or academic staff" })),
         industry: Type.Optional(Type.Array(Type.String(), { description: "the survey's industry names, e.g. \"Fintech\", \"Higher Education\"" })),
@@ -266,7 +274,9 @@ export function createResearchExtension(ctx: ResearchContext, opts: { only?: rea
             ctx.lastIssues = review;
             return text({ accepted: false, issues: review, attempts_left: left, note: "Task review rejected these problems: rewrite them so the requirements create the decision, then submit again." });
           }
-          const res = await completeResearch(ctx.job.research_id, { status: "completed", result: r.result });
+          let res = await completeResearch(ctx.job.research_id, { status: "completed", result: r.result, audience_check: ctx.audienceCheck ?? null });
+          if (res.status !== 200 && revertRefusedReview(ctx, r.result, res.body?.issues ?? []))
+            res = await completeResearch(ctx.job.research_id, { status: "completed", result: r.result, audience_check: ctx.audienceCheck ?? null });
           if (res.status === 200) {
             ctx.outcome = { status: "completed", detail: res.body };
             return { ...text({ accepted: true, saved: summarize(res.body) }), terminate: true };
@@ -288,7 +298,6 @@ export function createResearchExtension(ctx: ResearchContext, opts: { only?: rea
 /** Rounds the audience cross-check may send research back for, before the reviewer's quoted reading applies. */
 export const AUDIENCE_ROUNDS = 2;
 
-const pageKey = (u: string) => u.replace(/^https?:\/\/(www\.)?/i, "").replace(/[#?].*$/, "").replace(/\/+$/, "").toLowerCase();
 
 /**
  * Who may sign up: research's product.audience against the review's reading (architect.ts audienceCrossCheck).
@@ -301,24 +310,50 @@ const pageKey = (u: string) => u.replace(/^https?:\/\/(www\.)?/i, "").replace(/[
  * The reviewer's quote counts only when it is on the page it cites, as this job fetched it (ctx.pages).
  * result.audience_check says which way it went (the server dismisses an open audience question on agreement).
  */
-export function audienceStep(ctx: { architecture: ArchitectOutcome | null; audienceRounds: number; pages?: Map<string, string>; job?: { input?: any } }, result: any): string[] {
+export interface AudienceStepCtx {
+  architecture: ArchitectOutcome | null; audienceRounds: number; pages?: Map<string, string>; job?: { input?: any };
+  /** How the check went, sent beside the result (never inside it, where the model could write it). */
+  audienceCheck?: string | null;
+  /** Research's own audience while the review's applies, and whether the server refused the review's evidence. */
+  researchAudience?: any; reviewRefused?: boolean;
+}
+
+export function audienceStep(ctx: AudienceStepCtx, result: any): string[] {
+  if (result && typeof result === "object") delete result.audience_check; // the model's own claim is never sent
   const confirmed = ctx.job?.input?.confirmed_audience;
   if (confirmed && typeof confirmed === "object") {
-    result.product = { ...(result.product ?? {}), audience: { ...confirmed, source: "customer", confirmed: true } };
+    result.product = { ...(result.product ?? {}), audience: confirmed };
     if (Array.isArray(result.questions)) result.questions = result.questions.filter((q: any) => q?.kind !== "audience");
-    result.audience_check = "confirmed";
+    ctx.audienceCheck = "confirmed";
     return [];
   }
   const arch = ctx.architecture?.audience;
-  if (!arch) return [];
+  if (!arch) { ctx.audienceCheck = null; return []; }
+  // Only pages the server accepted are in ctx.pages, so a verified quote is one the server can verify too.
   const verified = !arch.quote || !ctx.pages ? undefined
-    : [...ctx.pages].some(([u, text]) => (!arch.url || pageKey(u) === pageKey(arch.url)) && quotedOn(text, arch.quote));
-  const cross = audienceCrossCheck(result?.product?.audience, arch, { final: ctx.audienceRounds >= AUDIENCE_ROUNDS, quoteVerified: verified });
-  result.audience_check = cross.status;
+    : [...ctx.pages].some(([u, text]) => (!arch.url || urlKey(u) === urlKey(arch.url)) && quotedOn(text, arch.quote));
+  const cross = audienceCrossCheck(result?.product?.audience, arch, { final: ctx.audienceRounds >= AUDIENCE_ROUNDS, quoteVerified: ctx.reviewRefused ? false : verified });
+  ctx.audienceCheck = cross.status;
   if (cross.issues.length) { ctx.audienceRounds++; return cross.issues; }
-  if (cross.apply) result.product = { ...(result.product ?? {}), audience: cross.apply };
+  if (cross.apply) {
+    ctx.researchAudience = result?.product?.audience ?? null;
+    result.product = { ...(result.product ?? {}), audience: cross.apply };
+  }
   if (cross.question) result.questions = [...(result.questions ?? []).filter((q: any) => !(q?.kind === "audience" && q?.subject === cross.question.subject)), cross.question];
   return [];
+}
+
+/**
+ * The server refused the review's applied audience on its evidence (its quote is not on a page the server recorded):
+ * research's own reading goes back on the result, the customer question stays, and the review is treated as unsure
+ * from now on, so the job never loops on a restriction nobody can cite. True when the result was changed.
+ */
+export function revertRefusedReview(ctx: AudienceStepCtx, result: any, issues: unknown[]): boolean {
+  if (ctx.audienceCheck !== "applied_review" || !issues.some((i) => /audience restricts users but cites no fetched page/.test(String(i)))) return false;
+  result.product = { ...(result.product ?? {}), audience: ctx.researchAudience ?? undefined };
+  ctx.reviewRefused = true;
+  ctx.audienceCheck = "question";
+  return true;
 }
 
 /**

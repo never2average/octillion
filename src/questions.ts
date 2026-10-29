@@ -127,7 +127,6 @@ async function answerAudience(org: Org, q: { id: string; product_id: number; sub
   const audience: Audience = mergeAudience((p?.research?.audience as Audience) ?? null, (opt.value ?? {}) as Partial<Audience>, note);
   const bad = audienceFormIssues(audience, { sources: null });
   if (bad.length) throw Object.assign(new Error(`That answer does not give a usable audience: ${bad.join("; ")}`), { status: 400 });
-  const research = { ...(p?.research ?? {}), audience };
   // The same matcher as the persona checks (src/audience.ts hardMisses), on the profiles' survey facets.
   const linked = await db.query<{ profile_id: number; slug: string; facets: any }>(
     `SELECT pp.profile_id, dp.slug, dp.attributes->'facets' AS facets FROM product_personas pp JOIN developer_profiles dp ON dp.id = pp.profile_id
@@ -136,7 +135,9 @@ async function answerAudience(org: Org, q: { id: string; product_id: number; sub
   const [last] = await db.query<{ input: Record<string, any> | null }>(
     "SELECT input FROM product_research WHERE org_id = $1 AND product_id = $2 AND kind = 'product' ORDER BY created_at DESC LIMIT 1", [org.orgId, q.product_id]);
   await db.transaction(async (tx) => {
-    await tx.query("UPDATE products SET research = $3, updated_at = now() WHERE id = $1 AND org_id = $2", [q.product_id, org.orgId, JSON.stringify(research)]);
+    // Only the audience key: a research completing meanwhile keeps everything else it wrote.
+    await tx.query("UPDATE products SET research = jsonb_set(coalesce(research, '{}'::jsonb), '{audience}', $3::jsonb), updated_at = now() WHERE id = $1 AND org_id = $2",
+      [q.product_id, org.orgId, JSON.stringify(audience)]);
     if (unfit.length)
       await tx.query("UPDATE product_personas SET active = false WHERE product_id = $1 AND profile_id = ANY($2) AND product_id IN (SELECT id FROM products WHERE org_id = $3)",
         [q.product_id, unfit.map((x) => x.profile_id), org.orgId]);
@@ -155,16 +156,17 @@ async function answerAudience(org: Org, q: { id: string; product_id: number; sub
   }
   // Personas only: the product's profile, tasks, aliases and competitors stay as they are (a full research would
   // replace them); the confirmed audience reaches research at claim as final (src/research.ts withStoredProduct).
-  const research_id = await queuePersonasResearch(org.orgId, q.product_id, last?.input ?? {}, audience);
+  const research_id = await queuePersonasResearch(org.orgId, q.product_id, last?.input ?? {});
   return { view: "question_answered" as const, question_id: q.id, subject: q.subject, answer: opt.label,
            effect: `Who can use the product: ${describeAudience(audience)}. ${unfit.length ? `${unfit.length} persona(s) who cannot use it were unlinked (${unfit.map((x) => x.slug).join(", ")}); ` : ""}research is re-selecting personas.`,
            unlinked: unfit.map((x) => x.slug), research_id, rescoring: false };
 }
 
 /** Queue research that only re-selects a product's personas for its audience (src/research.ts completePersonasOnly). */
-export async function queuePersonasResearch(orgId: number, productId: number, base: Record<string, any>, audience: Audience): Promise<string> {
+export async function queuePersonasResearch(orgId: number, productId: number, base: Record<string, any>): Promise<string> {
   const { queueResearch } = await import("./research.js");
-  const { confirmed_audience: _c, product_profile: _p, ...input } = base;
-  return queueResearch(orgId, productId, { ...input, personas_only: true, audience: describeAudience(audience),
+  // The audience is read from the product at claim (src/research.ts withStoredProduct), never carried in the input.
+  const { confirmed_audience: _c, product_profile: _p, audience: _a, not_competitors: _n, ...input } = base;
+  return queueResearch(orgId, productId, { ...input, personas_only: true,
     prompt: String(input.prompt ?? "").replace(/\n\nThe customer confirmed who can use the product[\s\S]*$/, "") });
 }

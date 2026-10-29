@@ -56,7 +56,10 @@ check("a restriction's quote is on the page it cites, as this job fetched it, on
   assert.equal(split.length, 1, split.join(" | "));
   assert.ok(audienceEvidenceIssues({ pages: [] }, result(alliance)).length === 2, "the gate's evidence is checked too");
   assert.deepEqual(audienceEvidenceIssues(job, result({ scope: "global", checked: "x".repeat(30) })), []);
-  assert.deepEqual(audienceEvidenceIssues({ pages: [] }, result({ ...alliance, source: "customer" })), [], "the customer's own word needs no page");
+  assert.deepEqual(audienceEvidenceIssues({ pages: [] }, result(alliance), true), [], "the customer's own word (known to the server) needs no page");
+  assert.equal(audienceEvidenceIssues({ pages: [] }, result({ ...alliance, source: "customer", confirmed: true })).length, 2,
+    "a result calling its audience the customer's proves nothing");
+  assert.equal(audienceEvidenceIssues(job, result({ ...alliance, evidence: [] })).length, 1, "a restriction with no evidence at all is refused here too");
 });
 
 check("Alliance-like (CA only, researchers at an institution): only the Canadian academic researcher passes", () => {

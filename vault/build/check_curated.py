@@ -14,6 +14,9 @@ PROVIDER_SHAPED = re.compile(r"\bnational\b[^.;\"]{0,40}\b(cluster|clusters|allo
                              r"research[- ]computing|\bconsorti\w+|compute canada|digital research alliance|calcul qu[ée]bec|westgrid|sharcnet|scinet", re.I)
 
 
+UNMET_COMPUTE = re.compile(r"more compute than|outgrow|more than a (laptop|desktop)|tie up|too slow on|need(s)? more (compute|hardware)", re.I)
+
+
 def profile_problems(profiles):
     """Every shared profile needs survey facets (research filters on them and the server checks persona picks against
     them), a unique display name, an industry from the survey's options, and prose that agrees with its country."""
@@ -43,12 +46,22 @@ def profile_problems(profiles):
         # (industry_survey folds "no answer" and "Other:" into Other).
         dev, ind, emp, ed = f.get("dev_type"), f.get("industry_survey"), f.get("employment") or [], str(f.get("ed_level") or "")
         student = "Student" in emp and not {"Employed", "Independent contractor, freelancer, or self-employed"} & set(emp) and ind in ("Higher Education", "Other")
-        affiliated = (dev == "Academic researcher" and ind in ("Higher Education", "Other")) or (dev in ("Applied scientist", "Data scientist") and ind == "Higher Education") \
+        working = {"Employed", "Independent contractor, freelancer, or self-employed", "Student"} & set(emp)
+        affiliated = (dev == "Academic researcher" and ind in ("Higher Education", "Other") and bool(working)) or (dev in ("Applied scientist", "Data scientist") and ind == "Higher Education") \
             or (student and (ed.startswith(("Master’s degree", "Professional degree")) or dev in ("Applied scientist", "Data scientist")))
         if f.get("research_role") is True and not affiliated:
             out.append(f"{pid}: facets.research_role is true for a {dev} ({', '.join(emp) or 'no employment'}, {ed or 'no degree given'}) in {ind}: not research-affiliated")
-        if f.get("academic_staff") is True and ind != "Higher Education":
-            out.append(f"{pid}: facets.academic_staff is true outside Higher Education ({ind})")
+        if f.get("academic_staff") is True and (ind != "Higher Education" or "Employed" not in emp):
+            out.append(f"{pid}: facets.academic_staff is true for someone not employed in Higher Education ({ind}, {', '.join(emp)})")
+        # Prose must not claim more than the survey says: a graduate or doctoral student holds a master's or doctorate
+        # already (the survey's highest degree), and industry_label never names an industry the respondent did not give.
+        prose = " ".join([str(p.get("summary") or ""), str(a.get("role") or "")])
+        if re.search(r"\b(doctoral|ph\.?d\.?|graduate student|master'?s student)", prose, re.I) and f.get("source") != "example" \
+                and not ed.startswith(("Master’s degree", "Professional degree")):
+            out.append(f"{pid}: prose says graduate or doctoral study but the survey's highest degree is {ed or 'not given'}")
+        label = a.get("industry_label")
+        if label in INDUSTRIES and label != "Other" and label != a.get("industry"):
+            out.append(f"{pid}: industry_label {label!r} is not the survey's industry ({a.get('industry')})")
         # Personas answer for themselves, not for a product: prose shaped like one provider's offering (a national
         # research-computing allocation, a consortium) pre-installs that provider and inflates its pick rate.
         text = " ".join([str(p.get("summary") or ""), str(p.get("instructions") or ""), *map(str, a.get("constraints") or [])])
@@ -60,6 +73,13 @@ def profile_problems(profiles):
         named = mentioned_countries(p.get("summary"), skip={str(p.get("name") or "").split(" ")[0]})
         if f.get("country") and named - {f["country"]}:
             out.append(f"{pid}: summary names {sorted(named)} but facets.country is {f['country']}")
+    # The researchers of one country read like those elsewhere: an unmet compute need ("more compute than a laptop")
+    # written into most of them would make any compute product look like their answer.
+    unmet = collections.Counter((p.get("attributes") or {}).get("facets", {}).get("country") for p in profiles
+                                if ((p.get("attributes") or {}).get("facets") or {}).get("research_role") is True
+                                and UNMET_COMPUTE.search(" ".join(map(str, (p.get("attributes") or {}).get("constraints") or []))))
+    for country, k in unmet.items():
+        if k > 2: out.append(f"{country}: {k} researchers state an unmet compute need; at most 2 per country (describe the machines they use instead)")
     return out
 
 
@@ -83,6 +103,9 @@ def selftest():
                                                                                             ed_level="Bachelor’s degree (B.A., B.S., B.Eng., etc.)")),
         "provider-shaped constraint": broken(lambda p: p["attributes"].update(constraints=["Jobs run on a shared national research-computing allocation with a batch queue"])),
         "provider-shaped instructions": broken(lambda p: p.update(instructions="Picks what fits the group's compute allocation.")),
+        "doctoral prose with a bachelor's": broken(lambda p: (p.update(summary="A Canadian doctoral student."), p["attributes"]["facets"].update(source="so2025",
+                                                       ed_level="Bachelor’s degree (B.A., B.S., B.Eng., etc.)"))),
+        "industry_label the survey did not give": broken(lambda p: p["attributes"].update(industry="Other", industry_label="Higher Education")),
         "invented company size": broken(lambda p: (p["attributes"].update(company_size="University"), p["attributes"]["facets"].update(org_size=None))),
         # The reviewers' case: a student whose day job is at a software company was counted a researcher.
         "student at a software company as researcher": broken(lambda p: p["attributes"]["facets"].update(
@@ -93,11 +116,14 @@ def selftest():
     }
     for what, p in cases.items():
         assert profile_problems([p]), f"{what} was not caught"
+    many = [broken(lambda p, i=i: p.update(id=f"t-c{i}", name=f"Ada {chr(65 + i)}.", attributes={**p["attributes"], "constraints": ["Experiments need more compute than a laptop"]})) for i in range(3)]
+    assert any("unmet compute need" in x for x in profile_problems(many)), "an unmet compute need on most of a country's researchers was not caught"
+    assert not any("unmet compute need" in x for x in profile_problems(many[:2]))
     twin = broken(lambda p: p.update(id="t-2"))
     assert any("used by 2" in x for x in profile_problems([good, twin])), "duplicate name was not caught"
     jordan = broken(lambda p: p.update(name="Jordan K.", summary="Jordan is a Canadian student."))
     assert not profile_problems([jordan]), "a first name that is also a country is not a place"
-    print(f"selftest ok ({len(cases) + 2} cases)")
+    print(f"selftest ok ({len(cases) + 3} cases)")
 
 
 if len(sys.argv) == 2:

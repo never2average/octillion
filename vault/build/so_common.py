@@ -41,7 +41,7 @@ def generic_platforms(ps):
 def facts(row):
     f = {
         "dev_type": row.DevType, "main_branch": row.MainBranch, "employment": row.Employment, "years_professional": row.WorkExp,
-        "years_coding": row.YearsCode, "org_size": row.OrgSize, "ic_or_manager": row.ICorPM, "industry": row.Industry,
+        "years_coding": row.YearsCode, "ed_level": row.EdLevel, "org_size": row.OrgSize, "ic_or_manager": row.ICorPM, "industry": row.Industry,
         "remote": row.RemoteWork, "country": row.Country, "purchase_influence": row.PurchaseInfluence, "ai_agents": row.AIAgents,
         "languages": split(row.LanguageHaveWorkedWith), "web_frameworks": split(row.WebframeHaveWorkedWith),
         "database_count": len(split(row.DatabaseHaveWorkedWith)), "platforms_generic": generic_platforms(split(row.PlatformHaveWorkedWith)),
@@ -106,13 +106,14 @@ def graduate(row):
 
 
 def research_role(row):
-    """Research-affiliated: research is their work or study. An academic researcher whose industry is a university, none
-    or other (not a company's); a data or applied scientist at a university; or a student with no job in another
+    """Research-affiliated: research is their work or study. An academic researcher, employed or studying, whose industry
+    is a university, none or other (not a company's); a data or applied scientist at a university; or a student with no job in another
     industry who is a graduate student (a master's or doctoral degree already) or does research (a research dev type).
     Kept apart from sector: a web developer in a university's IT department, or an undergraduate, is academia by sector
     but not a researcher (see academic_staff)."""
     dev, ind, emp = _clean(row.DevType), _clean(row.Industry), split(row.Employment)
-    if dev == "Academic researcher": return ind in RESEARCH_INDUSTRIES
+    # A researcher between positions (not employed, retired) has no institution to be affiliated with.
+    if dev == "Academic researcher": return ind in RESEARCH_INDUSTRIES and bool((WORKING | {"Student"}) & set(emp))
     if dev in SCIENTIST_DEV_TYPES and ind == "Higher Education": return True
     student = "Student" in emp and not (WORKING & set(emp)) and ind in (None, "Higher Education")
     return student and (graduate(row) or dev in SCIENTIST_DEV_TYPES)
@@ -122,8 +123,8 @@ def academic_staff(row):
     """Technical staff employed by a university (Industry Higher Education, a developer or infrastructure role): research
     software engineers and research-computing staff, who use research infrastructure without being researchers. A
     separate facet so an audience can say "researchers or academic staff" without calling staff researchers."""
-    emp = set(split(row.Employment))
-    return _clean(row.Industry) == "Higher Education" and bool(WORKING & emp) and _clean(row.DevType) in STAFF_DEV_TYPES
+    # Employed by it: a contractor billing a university is not its staff and cannot be sponsored as such.
+    return _clean(row.Industry) == "Higher Education" and "Employed" in split(row.Employment) and _clean(row.DevType) in STAFF_DEV_TYPES
 
 
 def facets_of(row):

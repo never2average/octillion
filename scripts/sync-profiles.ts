@@ -43,6 +43,8 @@ try {
   show("kept (not written)", plan.kept);
   show("retire (deactivated, never deleted)", plan.retire);
   show("not in the file but linked to a product, kept active (--allow-retire to deactivate)", plan.retireBlocked.map((x) => `${x.slug} (${x.products} product${x.products === 1 ? "" : "s"})`));
+  show("linked personas who cannot use their product with these facets (report only; runs leave them out)",
+    plan.ineligibleLinks.map((x) => `${x.slug} for ${x.product}: ${x.why.join("; ")}`));
   if (dryRun) console.log("dry run: nothing written");
   else {
     const r = await applyProfileSync(db, plan);

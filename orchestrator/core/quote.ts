@@ -16,3 +16,9 @@ export function readablePage(out: string): { url: string; text: string } | null 
   const cut = body.lastIndexOf("\n\nLinks you may fetch:\n");
   return { url: m[1]!, text: (cut >= 0 ? body.slice(0, cut) : body).replace(/\n\[truncated\]$/, "") };
 }
+
+/** Normalised URL for matching a cited page (no scheme, www, fragment or trailing slash; the path's case and the query
+ *  are kept): the server's and the orchestrator's one rule (src/websearch.ts re-exports it). */
+export const urlKey = (u: string) => {
+  try { const x = new URL(u); return `${x.hostname.toLowerCase().replace(/^www\./, "")}${x.pathname.replace(/\/+$/, "")}${x.search}`; } catch { return u.trim(); }
+};

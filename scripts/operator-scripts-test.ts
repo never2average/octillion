@@ -81,7 +81,8 @@ await check("a profile without a survey country or a repeated slug is refused be
 });
 
 await check("re-pick: a confirmed audience, a hand-removed competitor recorded, ineligible personas unlinked, a personas-only job with no run", async () => {
-  const { planRepick, applyRepick } = await import("../src/repick.js");
+  const { planRepick, applyRepick, personasOnlySupported } = await import("../src/repick.js");
+  assert.equal(await personasOnlySupported(db), true);
   const [org] = await db.query<any>("INSERT INTO organizations (slug, name) VALUES ('tanmay', 'Tanmay') RETURNING id");
   const [prod] = await db.query<any>(`INSERT INTO products (org_id, slug, name, aliases, competitors, research) VALUES ($1, 'drac', 'Digital Research Alliance of Canada', '{Alliance,"Compute Canada"}', $2, $3) RETURNING id`,
     [org.id, JSON.stringify([{ name: "Slurm" }, { name: "Rescale" }]), JSON.stringify({ audience: { scope: "global", checked: "x".repeat(30) }, sources: [{ url: "https://alliancecan.ca" }] })]);
@@ -101,9 +102,12 @@ await check("re-pick: a confirmed audience, a hand-removed competitor recorded, 
   assert.ok(plan.research_input.personas_only === true && /National research computing/.test(String(plan.research_input.prompt)));
   const unchanged = await db.query<any>("SELECT research FROM products WHERE id = $1", [prod.id]);
   assert.equal(unchanged[0].research.audience.scope, "global", "planning (the dry run) writes nothing");
+  // A research completing between the plan and the apply: its keys survive (the apply re-reads under a lock).
+  await db.query("UPDATE products SET research = research || $2::jsonb WHERE id = $1", [prod.id, JSON.stringify({ sources: [{ url: "https://alliancecan.ca" }, { url: "https://docs.alliancecan.ca" }], placement: { layer: "HPC" } })]);
   const rid = await applyRepick(db, plan);
   const [after] = await db.query<any>("SELECT research, competitors, aliases FROM products WHERE id = $1", [prod.id]);
-  assert.ok(after.research.audience.confirmed === true && after.research.not_competitors[0].name === "Slurm" && after.research.sources.length === 1, "audience and not_competitors stored, the rest kept");
+  assert.ok(after.research.audience.confirmed === true && after.research.not_competitors[0].name === "Slurm" && after.research.sources.length === 2 && after.research.placement.layer === "HPC",
+    "audience and not_competitors stored; what changed since the plan is kept");
   assert.deepEqual(after.aliases, ["Alliance", "Compute Canada"]);
   const [job] = await db.query<any>("SELECT status, input, run FROM product_research WHERE id = $1", [rid]);
   assert.ok(job.status === "queued" && job.input.personas_only === true && job.run === null, "a personas-only job, no run");
@@ -111,6 +115,15 @@ await check("re-pick: a confirmed audience, a hand-removed competitor recorded, 
   assert.deepEqual(active.map((x: any) => x.slug), ["example-ca-academic-researcher"]);
   const again = await planRepick(db, { product: prod.id, notCompetitors: ["slurm"] });
   assert.ok(!again.audience_changed && !again.not_competitors_added.length && again.audience!.confirmed === true, "re-running adds nothing twice");
+  // The profile sync reports linked personas the new facets make ineligible (report only).
+  await db.query("INSERT INTO product_personas (product_id, profile_id) SELECT $1, id FROM developer_profiles WHERE slug = 'example-us-highered-fullstack'", [prod.id]);
+  const syncPlan = await planProfileSync(db, example);
+  assert.deepEqual(syncPlan.ineligibleLinks.map((x) => [x.slug, x.product]), [["example-us-highered-fullstack", "Digital Research Alliance of Canada"]]);
+  assert.match(syncPlan.ineligibleLinks[0]!.why.join(), /is in US/);
+  // A database without migration 0007 (an older server) would run the job as a full research: refused.
+  await db.query("ALTER TABLE product_research DROP COLUMN pages");
+  await assert.rejects(planRepick(db, { product: prod.id }), /not at migration 0007/);
+  await db.query("ALTER TABLE product_research ADD COLUMN pages JSONB NOT NULL DEFAULT '[]'");
 });
 
 await db.close();
