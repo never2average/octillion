@@ -7,6 +7,7 @@
 import { useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import { DetailMeta, DetailTable, DetailTabs, KeyValueTable, LongText } from '@/components/layout/detail';
 import { RecordView, type RecordCol } from '@/components/layout/record-view';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
@@ -16,9 +17,8 @@ import { counted } from '@/lib/octillion-format';
 import { cn } from '@/lib/utils';
 import { useAdmin } from './lib';
 import { copyText, ErrorBox, Mono, Notice, StatusBadge, When, type Tone } from './ui';
-import { Chip, cents, dur, jobSessions, PeekSection, since, useComputeParams, useNow, nextPinned, useScrollTo } from './compute-common';
+import { Chip, cents, dur, jobSessions, since, useComputeParams, useNow, nextPinned, useScrollTo } from './compute-common';
 import { JobsStats } from './compute-stats';
-import { MiniTable } from './compute-sessions';
 
 type Kind = 'simulation' | 'research' | 'prospect';
 type JobState = 'waiting' | 'queued' | 'booting' | 'running' | 'draining' | 'failed' | 'finished';
@@ -184,7 +184,7 @@ export function ComputeJobs() {
           ...(j.orchestrator ? [{ label: 'Show orchestrator', icon: <Icons.route />, onSelect: () => showOrch(j.orchestrator!.id, j.id) }] : []),
           { label: 'Copy id', icon: <Icons.page />, onSelect: () => copyText(j.id, 'Job id copied') }
         ]}
-        detailTitle={(j) => <span className='flex items-center gap-2'><Mono>{j.id}</Mono><StatusBadge tone={STATE_TONE[j.state]}>{j.state}</StatusBadge></span>}
+        detailTitle={() => 'Job'}
         detail={(j) => <JobPeek id={j.id} onSessions={() => showSessions(j.id)} onOrch={(o) => showOrch(o, j.id)} />}
         empty={state === 'all' && !kind && !failures ? `No jobs active or finished in the last ${range === '1h' ? 'hour' : range === '24h' ? '24 hours' : '7 days'}.` : 'No jobs match these filters.'} compact />
     </div>
@@ -228,7 +228,8 @@ function statusSentence(j: JobRow, why: JobDetail['why']): string {
   }
 }
 
-/** One job's peek: status, why it waits, sessions by agent, its orchestrators, research details, spend, links. */
+/** One job's peek: a card with where it is and its key facts, then tabs for why it waits, sessions by agent, its
+ *  orchestrators, research details and spend. */
 function JobPeek({ id, onSessions, onOrch }: { id: string; onSessions: () => void; onOrch: (orch: number) => void }) {
   const { data, error, isLoading } = useAdmin<JobDetail>(`/compute/jobs/${encodeURIComponent(id)}`);
   if (isLoading) return <div className='grid gap-3'><Skeleton className='h-16' /><Skeleton className='h-40' /></div>;
@@ -236,89 +237,86 @@ function JobPeek({ id, onSessions, onOrch }: { id: string; onSessions: () => voi
   const j = data.job, w = data.why, r = data.research;
   const href = jobHref(j);
   return (
-    <div className='grid gap-6'>
-      <PeekSection title='Status'>
-        <p className='text-sm'>{statusSentence(j, w)}</p>
-        <p className='text-muted-foreground text-xs'>{KIND_LABEL[j.kind]}{j.name && ` "${j.name}"`} for {accountOf(j)}{j.product && ` · ${j.product.name}`} · created <When d={j.created_at} /></p>
-      </PeekSection>
-
-      {w && (
-        <PeekSection title='Why it is waiting'>
-          <p className='text-sm'>{w.text}.</p>
-          <dl className='grid grid-cols-3 gap-2 text-sm'>
-            <div><dt className='text-muted-foreground text-xs'>Free on boat</dt><dd className='tabular-nums'>{w.free ?? '—'}</dd></div>
-            <div><dt className='text-muted-foreground text-xs'>Needs (1 + pods)</dt><dd className='tabular-nums'>{w.needed ?? '—'}</dd></div>
-            <div><dt className='text-muted-foreground text-xs'>Orchestrator limit</dt><dd className='tabular-nums'>{w.cap ?? '—'}</dd></div>
-          </dl>
-          {w.note && <p className='text-muted-foreground text-xs'>Autoscaler note: <Mono>{w.note}</Mono></p>}
-        </PeekSection>
-      )}
-
-      {data.agents.length > 0 && (
-        <PeekSection title='Sessions by agent' action={<Button variant='ghost' size='xs' onClick={onSessions}>Show sessions</Button>}>
-          <MiniTable head={['Agent', 'Queued', 'Running', 'Done', 'Failed', '$']} rows={data.agents.map((a) => [
-            <span key='a' className='flex flex-col gap-0.5'>
-              <span>{a.agent_id ?? a.harness}</span>
-              {a.runnable && !a.runnable.ok && <Link href={/not in the harness mix/i.test(a.runnable.reason) ? '/admin/agents' : '/admin/keys'} className='text-destructive hover:underline'>{a.runnable.reason}</Link>}
-            </span>,
-            a.queued, a.running, a.completed, a.failed ? <span key='f' className='text-destructive'>{a.failed}</span> : 0, cents(a.usd)])} />
-        </PeekSection>
-      )}
-
-      <PeekSection title='Orchestrators for this job'>
-        {data.orchestrators.length ? (
-          <ul className='divide-y border-y'>
-            {data.orchestrators.map((o) => (
-              <li key={o.id}>
-                <button type='button' onClick={() => onOrch(o.id)} className='hover:bg-muted/50 grid w-full grid-cols-[1fr_auto] gap-x-3 gap-y-0.5 px-2 py-1.5 text-left text-xs'>
-                  <span className='flex items-center gap-1.5'><Mono>{o.orchestrator_id ?? `row ${o.id}`}</Mono><StatusBadge tone={ORCH_TONE[o.state]}>{o.state === 'deleted' ? 'ended' : o.state}</StatusBadge></span>
-                  <span className='text-muted-foreground tabular-nums'>boot {o.boot_ms == null ? '—' : dur(o.boot_ms / 1000)} · lived {dur(o.lifetime_s)}</span>
-                  {o.end_reason && <span className={cn('col-span-2 line-clamp-1', o.end_reason.key.startsWith('launch:') ? 'text-destructive' : 'text-muted-foreground')} title={o.end_reason.message}>
-                    {o.end_reason.label}: {o.end_reason.message}</span>}
-                </button>
-              </li>
-            ))}
-          </ul>
-        ) : <p className='text-muted-foreground text-sm'>No orchestrator has been launched for it.</p>}
-      </PeekSection>
-
-      {r && (
-        <PeekSection title='Research'>
-          <dl className='grid grid-cols-2 gap-2 text-sm'>
-            <div><dt className='text-muted-foreground text-xs'>Stage</dt><dd>{r.stage ?? r.status}</dd></div>
-            <div><dt className='text-muted-foreground text-xs'>Attempts rejected</dt><dd className='tabular-nums'>{r.attempts}</dd></div>
-            <div><dt className='text-muted-foreground text-xs'>Searches</dt><dd className='tabular-nums'>{r.searches}</dd></div>
-            <div><dt className='text-muted-foreground text-xs'>Last heartbeat</dt><dd><When d={r.heartbeat_at} /></dd></div>
-          </dl>
-          {r.note && <p className='text-muted-foreground text-xs'>{r.note}</p>}
-          {r.error && <pre className='bg-muted/50 max-h-48 overflow-auto rounded-md p-3 font-mono text-xs whitespace-pre-wrap'>{r.error}</pre>}
-        </PeekSection>
-      )}
-
-      <PeekSection title='Spend'>
-        <dl className='grid gap-1 text-sm'>
-          <SpendLine label='Session models (finished sessions)' v={j.spend.session_model_usd} />
-          <SpendLine label='Orchestrator model (through the gateway)' v={j.spend.orchestrator_model_usd} />
-          <SpendLine label='Total' v={j.spend.session_model_usd + j.spend.orchestrator_model_usd} strong />
-        </dl>
-        {j.kind !== 'simulation' && <Notice tone='info'>{RESEARCH_SPEND}</Notice>}
-      </PeekSection>
-
-      <PeekSection title='Links'>
-        <div className='flex flex-wrap gap-2'>
+    <div className='flex flex-col gap-4'>
+      <DetailMeta
+        title={<Mono>{j.id}</Mono>}
+        badges={<><StatusBadge tone={STATE_TONE[j.state]}>{j.state}</StatusBadge><Chip>{KIND_LABEL[j.kind]}</Chip></>}
+        subtitle={statusSentence(j, w)}
+        actions={<>
           {href && <Link href={href} className={buttonVariants({ variant: 'outline', size: 'sm' })}><Icons.account /> {j.org ? j.org.name : 'Access requests'}</Link>}
           {j.kind === 'simulation' && <Button variant='outline' size='sm' onClick={onSessions}><Icons.search /> Sessions</Button>}
           <Button variant='ghost' size='sm' onClick={() => copyText(j.id, 'Job id copied')}>Copy id</Button>
-        </div>
-      </PeekSection>
-    </div>
-  );
-}
+        </>}
+        facts={[
+          { label: 'Name', value: j.name, hidden: !j.name },
+          { label: 'Account', value: accountOf(j) },
+          { label: 'Product', value: j.product?.name, hidden: !j.product },
+          { label: 'Created', value: <When d={j.created_at} /> },
+          { label: 'Pods', value: <span className='tabular-nums'>{j.pods.running} of {j.pods.reserved}</span>, hint: 'running of reserved', hidden: !j.sessions },
+          { label: 'Failures', value: <span className={cn('tabular-nums', failuresOf(j) > 0 && 'text-destructive')}>{failuresOf(j)}</span>,
+            hint: j.failures.top_label ?? (j.failed_launches ? `${j.failed_launches} failed launch${j.failed_launches > 1 ? 'es' : ''}` : undefined) },
+          { label: 'Model spend', value: <span className='tabular-nums'>{cents(j.spend.session_model_usd + j.spend.orchestrator_model_usd)}</span> }
+        ]}
+      >
+        {j.kind !== 'simulation' && <Notice tone='info'>{RESEARCH_SPEND}</Notice>}
+      </DetailMeta>
 
-function SpendLine({ label, v, title, strong }: { label: string; v: number; title?: string; strong?: boolean }) {
-  return (
-    <div className={cn('flex justify-between gap-3', strong && 'border-t pt-1 font-medium')} title={title}>
-      <dt className={strong ? undefined : 'text-muted-foreground'}>{label}</dt><dd className='tabular-nums'>{cents(v)}</dd>
+      <DetailTabs resetKey={id} tabs={[
+        { id: 'why', label: 'Why it waits', hidden: !w, content: w && (
+          <KeyValueTable rows={[
+            { label: 'Reason', value: `${w.text}.` },
+            { label: 'Free on boat', value: <span className='tabular-nums'>{w.free ?? '—'}</span> },
+            { label: 'Needs (1 + pods)', value: <span className='tabular-nums'>{w.needed ?? '—'}</span> },
+            { label: 'Orchestrator limit', value: <span className='tabular-nums'>{w.cap ?? '—'}</span> },
+            { label: 'Autoscaler note', value: <Mono>{w.note}</Mono>, hidden: !w.note }
+          ]} />
+        ) },
+        { id: 'agents', label: 'Sessions by agent', count: data.agents.length, hidden: !data.agents.length, content: (
+          <DetailTable rows={data.agents} rowKey={(a) => a.agent_id ?? a.harness} noun='agents' empty='No sessions.'
+            primary={<Button variant='outline' onClick={onSessions}><Icons.search /> Show sessions</Button>} cols={[
+            { key: 'agent', label: 'Agent', type: 'text', value: (a) => a.agent_id ?? a.harness, render: (a) => (
+              <span className='flex flex-col gap-0.5'>
+                <span>{a.agent_id ?? a.harness}</span>
+                {a.runnable && !a.runnable.ok && <Link href={/not in the harness mix/i.test(a.runnable.reason) ? '/admin/agents' : '/admin/keys'} className='text-destructive text-xs hover:underline'>{a.runnable.reason}</Link>}
+              </span>
+            ) },
+            { key: 'queued', label: 'Queued', type: 'number', value: (a) => a.queued, render: (a) => a.queued, className: 'text-right tabular-nums' },
+            { key: 'running', label: 'Running', type: 'number', value: (a) => a.running, render: (a) => a.running, className: 'text-right tabular-nums' },
+            { key: 'done', label: 'Done', type: 'number', value: (a) => a.completed, render: (a) => a.completed, className: 'text-right tabular-nums' },
+            { key: 'failed', label: 'Failed', type: 'number', value: (a) => a.failed, render: (a) => (a.failed ? <span className='text-destructive'>{a.failed}</span> : 0), className: 'text-right tabular-nums' },
+            { key: 'usd', label: '$', type: 'number', value: (a) => a.usd, render: (a) => cents(a.usd), className: 'text-right tabular-nums' }
+          ]} />
+        ) },
+        { id: 'orchestrators', label: 'Orchestrators', count: data.orchestrators.length, content: (
+          <DetailTable rows={data.orchestrators} rowKey={(o) => String(o.id)} noun='orchestrators' empty='No orchestrator has been launched for it.' onRow={(o) => onOrch(o.id)} cols={[
+            { key: 'orch', label: 'Orchestrator', type: 'text', value: (o) => o.orchestrator_id ?? `row ${o.id}`, render: (o) => <Mono>{o.orchestrator_id ?? `row ${o.id}`}</Mono> },
+            { key: 'state', label: 'State', type: 'select', value: (o) => (o.state === 'deleted' ? 'ended' : o.state), render: (o) => <StatusBadge tone={ORCH_TONE[o.state]}>{o.state === 'deleted' ? 'ended' : o.state}</StatusBadge> },
+            { key: 'created', label: 'Created', type: 'date', value: (o) => o.created_at, render: (o) => <When d={o.created_at} /> },
+            { key: 'boot', label: 'Boot', type: 'number', value: (o) => o.boot_ms, render: (o) => (o.boot_ms == null ? '—' : dur(o.boot_ms / 1000)), className: 'text-right tabular-nums' },
+            { key: 'lived', label: 'Lived', type: 'number', value: (o) => o.lifetime_s, render: (o) => dur(o.lifetime_s), className: 'text-right tabular-nums' },
+            { key: 'end', label: 'Ended because', type: 'text', value: (o) => o.end_reason?.label ?? '', className: 'whitespace-normal leading-snug', render: (o) => (o.end_reason
+              ? <span className={cn('line-clamp-2 text-xs', o.end_reason.key.startsWith('launch:') ? 'text-destructive' : 'text-muted-foreground')} title={o.end_reason.message}>{o.end_reason.label}: {o.end_reason.message}</span>
+              : <span className='text-muted-foreground'>—</span>) }
+          ]} />
+        ) },
+        { id: 'research', label: 'Research', hidden: !r, content: r && (
+          <KeyValueTable rows={[
+            { label: 'Stage', value: r.stage ?? r.status },
+            { label: 'Attempts rejected', value: <span className='tabular-nums'>{r.attempts}</span> },
+            { label: 'Searches', value: <span className='tabular-nums'>{r.searches}</span> },
+            { label: 'Last heartbeat', value: <When d={r.heartbeat_at} /> },
+            { label: 'Note', value: r.note, hidden: !r.note },
+            { label: 'Error', value: <LongText mono>{r.error}</LongText>, hidden: !r.error }
+          ]} />
+        ) },
+        { id: 'spend', label: 'Spend', content: (
+          <KeyValueTable head={['Spend', 'Amount']} rows={[
+            { label: 'Session models (finished sessions)', value: <span className='tabular-nums'>{cents(j.spend.session_model_usd)}</span> },
+            { label: 'Orchestrator model (through the gateway)', value: <span className='tabular-nums'>{cents(j.spend.orchestrator_model_usd)}</span> },
+            { label: 'Total', value: <span className='font-medium tabular-nums'>{cents(j.spend.session_model_usd + j.spend.orchestrator_model_usd)}</span> }
+          ]} />
+        ) }
+      ]} />
     </div>
   );
 }
