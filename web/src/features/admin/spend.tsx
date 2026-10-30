@@ -15,7 +15,8 @@ import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from 'recharts';
 import PageContainer from '@/components/layout/page-container';
 import { DateRangePicker, PRESETS, rangeQuery, type DateRange } from '@/components/layout/date-range-picker';
 import { MultiSelectFilter } from '@/components/layout/multi-select-filter';
-import { RecordView, type RecordCol } from '@/components/layout/record-view';
+import { ActionsMenu, RecordView, type RecordCol, type RowAction } from '@/components/layout/record-view';
+import { DetailMeta, DetailTable, DetailTabs, type Fact } from '@/components/layout/detail';
 import { StatStrip } from '@/components/layout/section';
 import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent, type ChartConfig } from '@/components/ui/chart';
 import { Button } from '@/components/ui/button';
@@ -33,8 +34,7 @@ import { toast } from 'sonner';
 import { accountHref, post, useAdmin, useAdminAction } from './lib';
 import { Gate, useAdminRole } from './role';
 import { copyText, ErrorBox, FormRow, Mono, StatusBadge, When, type Tone } from './ui';
-import { AMBER, Chip, cents, PeekSection, UrlTabs } from './compute-common';
-import { MiniTable } from './compute-sessions';
+import { AMBER, Chip, cents, UrlTabs } from './compute-common';
 
 // ---------------------------------------------------------------- API shapes
 
@@ -253,7 +253,6 @@ const accountCell = (a: { name: string; slug: string | null; shared: boolean }) 
     {a.slug && <span className='text-muted-foreground truncate text-xs'>{a.slug}</span>}
   </span>
 );
-const accountTitle = (a: { name: string; shared: boolean }) => <span className='flex items-center gap-2'>{a.name}{a.shared && <Chip title={SHARED_HINT}>shared</Chip>}</span>;
 function accountActions(router: ReturnType<typeof useRouter>) {
   return (a: { slug: string | null }) => [
     ...(a.slug ? [{ label: 'Open account', icon: <Icons.externalLink />, onSelect: () => router.push(accountHref(a.slug!)) }] : []),
@@ -290,7 +289,44 @@ function DailyBars({ days, series, format }: { days: string[]; series: { key: st
   );
 }
 
-const none = (what = 'Nothing in this range.') => <p className='text-muted-foreground text-sm'>{what}</p>;
+// ---------------------------------------------------------------- peeks
+// Every side peek here is one shape: the record's card (title, badges, its facts, its ⋯ menu), then a tab per list,
+// each a table. The daily chart opens the first tab ("Per day"), above the same figures as a table by day.
+
+interface Chart { title: string; format: (v: number) => string; series: { key: string; label: string; values: number[] }[] }
+interface DayRow { day: string; i: number }
+
+/** The "Per day" tab: the peek's daily chart(s), compact, then one row per day of the range with every series. */
+function DailyTab({ days, charts }: { days: string[]; charts: Chart[] }) {
+  const series = charts.flatMap((c) => c.series.map((s) => ({ ...s, format: c.format })));
+  const rows: DayRow[] = days.map((day, i) => ({ day, i }));
+  const at = (s: { values: number[] }, r: DayRow) => s.values[r.i] ?? 0;
+  return (
+    <div className='flex min-w-0 flex-col gap-4'>
+      <div className={cn('grid min-w-0 gap-4', charts.length > 1 && 'xl:grid-cols-2')}>
+        {charts.map((c) => (
+          <figure key={c.title} className='flex min-w-0 flex-col gap-2'>
+            <figcaption className='text-muted-foreground text-xs font-medium'>{c.title}</figcaption>
+            <DailyBars days={days} format={c.format} series={c.series} />
+          </figure>
+        ))}
+      </div>
+      <DetailTable<DayRow> rows={rows} rowKey={(r) => r.day} noun='days' empty='No days in this range.' defaultSort={[{ key: 'day', dir: 'desc' }]} cols={[
+        { key: 'day', label: 'Day', type: 'date', value: (r) => `${r.day}T00:00:00.000Z`, render: (r) => dayLabel(r.day, true) },
+        ...series.map((s): RecordCol<DayRow> => ({ key: s.key, label: s.label, type: 'number', value: (r) => at(s, r), render: (r) => num(s.format(at(s, r))), className: 'text-right' }))
+      ]} />
+    </div>
+  );
+}
+
+/** The peek's ⋯ menu in the card: the row's own actions. */
+const peekMenu = (items: RowAction[]) => (items.length ? <ActionsMenu items={items} /> : undefined);
+/** The account fact every account peek starts with: its slug (copyable), or why it has none. */
+const accountFacts = (a: { slug: string | null; shared: boolean }): Fact[] => [
+  { label: 'Slug', value: a.slug ? <button type='button' className='hover:underline' onClick={() => copyText(a.slug!, 'Slug copied')}><Mono>{a.slug}</Mono></button>
+    : <span className='text-muted-foreground'>{a.shared ? 'Shared, no account' : 'No account linked'}</span>, hint: a.shared ? SHARED_HINT : undefined }
+];
+const sharedBadge = (a: { shared: boolean }) => (a.shared ? <Chip title={SHARED_HINT}>shared</Chip> : null);
 
 // ---------------------------------------------------------------- Revenue
 
@@ -352,6 +388,13 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
     : <span title='Set STRIPE_SECRET_KEY in the server environment (Vercel) first' className='inline-flex cursor-not-allowed'><Button disabled><Icons.add /> New plan</Button></span>;
   const experimentNames = [...new Set((data?.plans ?? []).flatMap((p) => (p.experiment ? [p.experiment] : [])))].sort();
   const newPlanDialog = newPlan && <NewPlanDialog onClose={() => setNewPlan(false)} experiments={experimentNames} />;
+  const planActions = (p: RevenuePlan): RowAction[] => (p.live && p.price_id ? [
+    { label: 'Copy price ID', icon: <Icons.page />, onSelect: () => copyText(p.price_id!, 'Price ID copied') },
+    ...(p.config ? [{ label: 'Copy as JSON', icon: <Icons.page />, onSelect: () => copyText(JSON.stringify(p.config, null, 2), 'Plan config copied') },
+      role.lock({ label: 'Duplicate as variant', icon: <Icons.add />, onSelect: () => setDuplicating(variantJson(p)) }, 'plans')] : []),
+    role.lock({ label: p.experiment ? 'Change experiment' : 'Add to experiment', icon: <Icons.sparkles />, onSelect: () => setExperimenting(p) }, 'plans'),
+    role.lock({ label: 'Archive plan', icon: <Icons.trash />, destructive: true, separator: true, onSelect: () => setArchiving(p) }, 'plans')
+  ] : []);
   if (group === 'provider') {
     const cols: RecordCol<RevenuePlan>[] = [
       { key: 'plan', label: 'Plan / price', title: true, keep: true, type: 'text', value: (p) => p.name, render: (p) => (
@@ -380,31 +423,9 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
         searchText={(p) => `${p.name} ${p.lookup_key ?? ''} ${p.price_id ?? ''} ${p.accounts.map((a) => a.name).join(' ')} ${(p.usage ?? []).map((u) => u.summary).join(' ')}`} searchPlaceholder='Search plans, accounts'
         filters={<>{bar}{mixed}</>} defaultSort={[{ key: 'mrr', dir: 'desc' }]} exportName={exportName('revenue', 'plan', data?.range)}
         primary={newPlanBtn}
-        actions={(p) => (p.live && p.price_id ? [
-          { label: 'Copy price ID', icon: <Icons.page />, onSelect: () => copyText(p.price_id!, 'Price ID copied') },
-          ...(p.config ? [{ label: 'Copy as JSON', icon: <Icons.page />, onSelect: () => copyText(JSON.stringify(p.config, null, 2), 'Plan config copied') },
-            role.lock({ label: 'Duplicate as variant', icon: <Icons.add />, onSelect: () => setDuplicating(variantJson(p)) }, 'plans')] : []),
-          role.lock({ label: p.experiment ? 'Change experiment' : 'Add to experiment', icon: <Icons.sparkles />, onSelect: () => setExperimenting(p) }, 'plans'),
-          role.lock({ label: 'Archive plan', icon: <Icons.trash />, destructive: true, separator: true, onSelect: () => setArchiving(p) }, 'plans')
-        ] : [])}
-        detailTitle={(p) => p.name}
-        detail={(p) => (
-          <div className='grid gap-6'>
-            <PeekSection title='Collected per day'>
-              <DailyBars days={data?.range.days ?? []} format={(v) => `$${v < 10 ? v.toFixed(2) : Math.round(v)}`} series={[{ key: 'collected', label: 'Collected', values: p.daily_collected }]} />
-            </PeekSection>
-            <PeekSection title='Accounts'>
-              {p.accounts.length ? <MiniTable head={['Account', 'Status', 'MRR']} rows={p.accounts.map((a) => [
-                a.slug ? <a key='a' className='hover:underline' href={accountHref(a.slug)}>{a.name}</a> : <Mono key='a'>{a.name}</Mono>, subBadge(a.status), cents(a.mrr_usd)])} />
-                : none('No subscriptions on this price.')}
-            </PeekSection>
-            {p.usage?.length ? (
-              <PeekSection title='Usage pricing'>
-                <div className='grid gap-1 text-sm'>{p.usage.map((u) => <span key={u.price_id}>{u.summary}</span>)}</div>
-              </PeekSection>
-            ) : null}
-          </div>
-        )}
+        actions={planActions}
+        detailTitle={() => 'Plan'}
+        detail={(p) => <PlanPeek p={p} days={data?.range.days ?? []} actions={planActions(p)} />}
         empty={stripeEmpty ?? 'No plans yet.'} />
       {newPlanDialog}
       {duplicating && <NewPlanDialog onClose={() => setDuplicating(null)} experiments={experimentNames} initialJson={duplicating.json} control={duplicating.control} />}
@@ -449,35 +470,114 @@ function RevenueTab({ data, loading, bar, group }: TabProps<Revenue>) {
     <RecordView id='finops-revenue-accounts' rows={stripeEmpty ? [] : f.rows} loading={loading} rowKey={(a) => a.key} cols={cols} noun='accounts' initialSize={50} compact summary={cards}
       searchText={(a) => `${a.name} ${a.slug ?? ''} ${a.customer ?? ''} ${a.plan ?? ''} ${a.status ?? ''}`} searchPlaceholder='Search accounts, plans'
       filters={<>{bar}{f.controls}{mixed}</>} defaultSort={[{ key: 'collected', dir: 'desc' }]} exportName={exportName('revenue', 'account', data?.range)}
-      actions={accountActions(router)} detailTitle={accountTitle}
-      detail={(a) => (
-        <div className='grid gap-6'>
-          <PeekSection title='Collected and model spend per day'>
-            <p className='text-sm'>{cents(a.collected_usd)} collected, {cents(a.spend_usd)} metered model spend: margin {cents(a.margin_usd)} ({pct(a.margin_pct)}).</p>
-            <DailyBars days={data?.range.days ?? []} format={(v) => `$${v < 10 ? v.toFixed(2) : Math.round(v)}`}
-              series={[{ key: 'collected', label: 'Collected', values: a.daily_collected }, { key: 'spend', label: 'Model spend', values: a.daily_spend }]} />
-          </PeekSection>
-          <PeekSection title='Invoices in range'>
-            {a.invoices.length ? <MiniTable head={['Number', 'Date', 'Amount', 'Status', '']} rows={a.invoices.map((i) => [
-              <Mono key='n'>{i.number ?? i.id}</Mono>, date(i.paid_at ?? i.created), cents(i.amount_usd),
-              <StatusBadge key='s' tone={INVOICE_TONE[i.status] ?? 'neutral'}>{i.status}</StatusBadge>,
-              i.url ? <a key='u' href={i.url} target='_blank' rel='noreferrer' className='inline-flex items-center gap-1 hover:underline'>Open <Icons.externalLink className='size-3' /></a> : '—'])} />
-              : none('No invoices in this range.')}
-          </PeekSection>
-          <PeekSection title='Subscription history'>
-            {a.subscriptions.length ? <MiniTable head={['Plan', 'Status', 'Started', 'Trial end', 'Canceled', 'Ended', 'MRR']} rows={a.subscriptions.map((s) => [
-              <span key='p' className='flex flex-col'><span>{s.plan ?? '—'}</span><Mono>{s.id}</Mono></span>, subBadge(s.status), date(s.started_at), date(s.trial_end),
-              date(s.canceled_at), s.ended_at ? date(s.ended_at) : s.cancel_at ? `Cancels ${date(s.cancel_at)}` : '—', `${cents(s.mrr_usd)}${s.interval === 'year' ? ' (yearly ÷ 12)' : ''}`])} />
-              : none(a.shared ? 'Shared spend has no subscription.' : 'No Stripe subscription.')}
-          </PeekSection>
-          {a.allowance && a.allowance.budget_usd > 0 && (
-            <PeekSection title='Prepaid allowance'>
-              <p className='text-muted-foreground text-sm'>{cents(a.allowance.budget_usd)} this month ({SOURCE[a.allowance.source]}). {ALLOWANCE_HINT}</p>
-            </PeekSection>
-          )}
-        </div>
-      )}
+      actions={accountActions(router)} detailTitle={() => 'Account'}
+      detail={(a) => <RevenueAccountPeek a={a} days={data?.range.days ?? []} actions={accountActions(router)(a)} />}
       empty={stripeEmpty ?? (f.filtered ? 'No accounts match.' : 'No revenue or model spend in this range.')} />
+  );
+}
+
+const dollarsPerDay = (v: number) => `$${v < 10 ? v.toFixed(2) : Math.round(v)}`;
+
+/** One plan (Plans tab): its price and subscriptions on the card; Per day, Accounts and Usage pricing as tabs. */
+function PlanPeek({ p, days, actions }: { p: RevenuePlan; days: string[]; actions: RowAction[] }) {
+  const router = useRouter();
+  return (
+    <div className='flex flex-col gap-4'>
+      <DetailMeta
+        title={p.name}
+        badges={<>
+          {p.live && <StatusBadge tone='ok'>live</StatusBadge>}
+          {p.experiment && <Chip title={`In experiment ${p.experiment}, weight ${p.weight ?? 1}`}><span className='font-mono'>exp: {p.experiment} · w{p.weight ?? 1}</span></Chip>}
+        </>}
+        actions={peekMenu(actions)}
+        facts={[
+          { label: 'Price', value: <>{priceLabel(p)}{p.unit_amount_usd != null && p.usage?.length ? <span className='text-muted-foreground ml-1 text-xs'>+ usage</span> : null}</>,
+            hint: p.interval ? `Every ${every(p.interval_count)}${p.interval}` : undefined },
+          { label: 'Active subscriptions', value: num(p.active_subscriptions.toLocaleString()), hint: `${p.subscriptions} in all, ${p.trialing} in trial` },
+          { label: 'MRR', value: num(cents(p.mrr_usd)) },
+          { label: 'Collected', value: num(cents(p.collected_usd)) },
+          { label: 'Monthly allowance', value: p.monthly_budget_usd == null ? NA : num(cents(p.monthly_budget_usd)),
+            hint: p.monthly_budget_usd == null ? undefined : 'The plan’s monthly cap on model spend. Not revenue.' },
+          { label: 'Free trial', value: p.trial_days ? `${p.trial_days} days` : NA },
+          { label: 'Experiment', value: p.experiment ? <Mono>{p.experiment}</Mono> : NA, hint: p.experiment ? `weight ${p.weight ?? 1}` : undefined },
+          { label: 'Price ID', value: p.price_id ? <Mono>{p.price_id}</Mono> : NA, hint: p.lookup_key ?? undefined, wide: true }
+        ]}
+      />
+      <DetailTabs resetKey={p.key} tabs={[
+        { id: 'daily', label: 'Per day', content: <DailyTab days={days} charts={[{ title: 'Collected per day', format: dollarsPerDay, series: [{ key: 'collected', label: 'Collected', values: p.daily_collected }] }]} /> },
+        { id: 'accounts', label: 'Accounts', count: p.accounts.length, content: (
+          <DetailTable rows={p.accounts} rowKey={(a) => a.key} noun='accounts' empty='No subscriptions on this price.' search={(a) => `${a.name} ${a.slug ?? ''}`}
+            onRow={(a) => { if (a.slug) router.push(accountHref(a.slug)); }} defaultSort={[{ key: 'mrr', dir: 'desc' }]} cols={[
+            { key: 'account', label: 'Account', type: 'text', value: (a) => a.name, render: (a) => (a.slug ? <span className='font-medium'>{a.name}</span> : <Mono>{a.name}</Mono>) },
+            { key: 'status', label: 'Status', type: 'select', value: (a) => a.status, render: (a) => subBadge(a.status) },
+            { key: 'mrr', label: 'MRR', type: 'number', value: (a) => a.mrr_usd, render: (a) => num(cents(a.mrr_usd)), className: 'text-right' }
+          ]} />
+        ) },
+        { id: 'usage', label: 'Usage pricing', count: p.usage?.length ?? 0, hidden: !p.usage?.length, content: (
+          <DetailTable rows={p.usage ?? []} rowKey={(u) => u.price_id} noun='usage prices' empty='No usage pricing.' cols={[
+            { key: 'metric', label: 'Metric', type: 'text', value: (u) => u.metric, render: (u) => <Mono>{u.metric}</Mono> },
+            { key: 'summary', label: 'Pricing', type: 'text', value: (u) => u.summary, render: (u) => u.summary, className: 'whitespace-normal leading-snug' }
+          ]} />
+        ) }
+      ]} />
+    </div>
+  );
+}
+
+/** One account on Revenue: collected, spend and margin on the card; Per day, Invoices and Subscriptions as tabs. */
+function RevenueAccountPeek({ a, days, actions }: { a: RevenueAccount; days: string[]; actions: RowAction[] }) {
+  type Invoice = RevenueAccount['invoices'][number];
+  type Sub = RevenueAccount['subscriptions'][number];
+  const next = a.ended_at ? `Ended ${date(a.ended_at)}` : a.cancels_at ? `Cancels ${date(a.cancels_at)}` : a.trial_end ? `Trial ends ${date(a.trial_end)}` : a.renews_at ? `Renews ${date(a.renews_at)}` : undefined;
+  const allowance = a.allowance && a.allowance.budget_usd > 0 ? a.allowance : null;
+  return (
+    <div className='flex flex-col gap-4'>
+      <DetailMeta
+        title={a.name}
+        badges={<>
+          {sharedBadge(a)}
+          {!a.shared && !a.slug && <Chip tone='warn' title='A Stripe customer no Octillion account is linked to'>not linked</Chip>}
+          {a.status && subBadge(a.status)}
+        </>}
+        actions={peekMenu(actions)}
+        facts={[
+          ...accountFacts(a),
+          { label: 'Collected', value: num(cents(a.collected_usd)) },
+          { label: 'Model spend', value: num(cents(a.spend_usd)), hint: 'Metered model spend (Model spend tab)' },
+          { label: 'Margin', value: marginCell(a.margin_usd, a.margin_pct), hint: 'Collected minus metered model spend' },
+          { label: 'MRR', value: a.mrr_usd ? num(cents(a.mrr_usd)) : NA },
+          { label: 'Plan', value: a.plan ?? NA, hint: next },
+          { label: 'Prepaid allowance', value: allowance ? <>{cents(allowance.budget_usd)} this month ({SOURCE[allowance.source]})</> : NA, hint: ALLOWANCE_HINT, hidden: !allowance, wide: true },
+          { label: 'Stripe customer', value: <Mono>{a.customer}</Mono>, hidden: !a.customer }
+        ]}
+      />
+      <DetailTabs resetKey={a.key} tabs={[
+        { id: 'daily', label: 'Per day', content: <DailyTab days={days} charts={[{ title: 'Collected and model spend per day', format: dollarsPerDay,
+          series: [{ key: 'collected', label: 'Collected', values: a.daily_collected }, { key: 'spend', label: 'Model spend', values: a.daily_spend }] }]} /> },
+        { id: 'invoices', label: 'Invoices', count: a.invoices.length, content: (
+          <DetailTable<Invoice> rows={a.invoices} rowKey={(i) => i.id} noun='invoices' empty='No invoices in this range.' defaultSort={[{ key: 'date', dir: 'desc' }]}
+            onRow={(i) => { if (i.url) window.open(i.url, '_blank', 'noopener'); }} cols={[
+            { key: 'number', label: 'Number', type: 'text', value: (i) => i.number ?? i.id, render: (i) => <Mono>{i.number ?? i.id}</Mono> },
+            { key: 'date', label: 'Date', type: 'date', value: (i) => i.paid_at ?? i.created, render: (i) => date(i.paid_at ?? i.created) },
+            { key: 'amount', label: 'Amount', type: 'number', value: (i) => i.amount_usd, render: (i) => num(cents(i.amount_usd)), className: 'text-right' },
+            { key: 'status', label: 'Status', type: 'select', value: (i) => i.status, render: (i) => <StatusBadge tone={INVOICE_TONE[i.status] ?? 'neutral'}>{i.status}</StatusBadge> },
+            { key: 'open', label: '', render: (i) => (i.url ? <a href={i.url} target='_blank' rel='noreferrer' onClick={(e) => e.stopPropagation()} className='inline-flex items-center gap-1 hover:underline'>Open <Icons.externalLink className='size-3' /></a> : NA), className: 'text-right' }
+          ]} />
+        ) },
+        { id: 'subscriptions', label: 'Subscriptions', count: a.subscriptions.length, content: (
+          <DetailTable<Sub> rows={a.subscriptions} rowKey={(x) => x.id} noun='subscriptions' empty={a.shared ? 'Shared spend has no subscription.' : 'No Stripe subscription.'}
+            defaultSort={[{ key: 'started', dir: 'desc' }]} cols={[
+            { key: 'plan', label: 'Plan', type: 'text', value: (x) => x.plan ?? '', render: (x) => <span className='flex flex-col'><span>{x.plan ?? '—'}</span><Mono>{x.id}</Mono></span> },
+            { key: 'status', label: 'Status', type: 'select', value: (x) => x.status, render: (x) => subBadge(x.status) },
+            { key: 'started', label: 'Started', type: 'date', value: (x) => x.started_at, render: (x) => date(x.started_at) },
+            { key: 'trial', label: 'Trial end', type: 'date', value: (x) => x.trial_end, render: (x) => date(x.trial_end) },
+            { key: 'canceled', label: 'Canceled', type: 'date', value: (x) => x.canceled_at, render: (x) => date(x.canceled_at) },
+            { key: 'ended', label: 'Ended', type: 'date', value: (x) => x.ended_at ?? x.cancel_at, render: (x) => (x.ended_at ? date(x.ended_at) : x.cancel_at ? `Cancels ${date(x.cancel_at)}` : '—') },
+            { key: 'mrr', label: 'MRR', type: 'number', value: (x) => x.mrr_usd, render: (x) => num(`${cents(x.mrr_usd)}${x.interval === 'year' ? ' (yearly ÷ 12)' : ''}`), className: 'text-right' }
+          ]} />
+        ) }
+      ]} />
+    </div>
   );
 }
 
@@ -548,6 +648,7 @@ function ExperimentsTab({ data, loading, bar }: TabProps<Experiments>) {
     { key: 'margin', label: 'Margin', hidden: true, className: 'text-right', type: 'number', value: (v) => v.margin_usd, render: (v) => num(cents(v.margin_usd)) },
     { key: 'churned', label: 'Churned', hidden: true, className: 'text-right', type: 'number', value: (v) => v.churned, render: (v) => num(v.churned.toLocaleString()) }
   ];
+  const variantActions = (v: Variant): RowAction[] => [{ label: 'Copy price ID', icon: <Icons.page />, onSelect: () => copyText(v.price_id, 'Price ID copied') }];
   const empty = data && !data.stripe.configured ? 'Stripe is not configured (STRIPE_SECRET_KEY in the server environment on Vercel).'
     : data?.stripe.error ? `Could not read Stripe: ${data.stripe.error}`
     : 'No experiments yet. On Plans, create two plans with the same experiment name (or ⋯ › Add to experiment on existing ones).';
@@ -555,21 +656,51 @@ function ExperimentsTab({ data, loading, bar }: TabProps<Experiments>) {
     <RecordView id='finops-experiments' rows={data?.variants ?? []} loading={loading} rowKey={(v) => `${v.experiment}:${v.price_id}`} cols={cols} noun='variants' initialSize={50} compact summary={cards}
       searchText={(v) => `${v.name} ${v.experiment} ${v.price_id}`} searchPlaceholder='Search experiments, variants' filters={bar} groupable
       exportName={exportName('experiments', 'variant', data?.range)}
-      actions={(v) => [{ label: 'Copy price ID', icon: <Icons.page />, onSelect: () => copyText(v.price_id, 'Price ID copied') }]}
-      detailTitle={(v) => `${v.experiment} · ${v.name}`}
-      detail={(v) => (
-        <div className='grid gap-6'>
-          <p className='text-sm'>{cents(v.collected_usd)} collected in the range, {cents(v.model_spend_usd)} model spend by its subscribers: margin {cents(v.margin_usd)}. {v.churned} churned.</p>
-          <PeekSection title='Per day'>
-            <DailyBars days={data?.range.days ?? []} format={(x) => String(Math.round(x * 100) / 100)}
-              series={[{ key: 'exposed', label: 'First shown', values: v.daily_exposed }, { key: 'converted', label: 'Subscribed', values: v.daily_converted }]} />
-          </PeekSection>
-          <PeekSection title='Collected per day'>
-            <DailyBars days={data?.range.days ?? []} format={(x) => `$${x < 10 ? x.toFixed(2) : Math.round(x)}`} series={[{ key: 'collected', label: 'Collected', values: v.daily_collected }]} />
-          </PeekSection>
-        </div>
-      )}
+      actions={variantActions}
+      detailTitle={() => 'Variant'}
+      detail={(v) => <VariantPeek v={v} days={data?.range.days ?? []} share={share(v)} actions={variantActions(v)} />}
       empty={empty} />
+  );
+}
+
+/** One variant of a pricing experiment: its decision numbers on the card; Per day as a tab (charts above a table by day). */
+function VariantPeek({ v, days, share, actions }: { v: Variant; days: string[]; share: number | null; actions: RowAction[] }) {
+  return (
+    <div className='flex flex-col gap-4'>
+      <DetailMeta
+        title={v.name}
+        badges={<>
+          {v.control && <StatusBadge>control</StatusBadge>}
+          {!v.live && <StatusBadge tone='neutral' title='Archived or taken out of the experiment: no new accounts see it'>ended</StatusBadge>}
+          {v.significant && !v.control && <StatusBadge tone={v.lift_pts != null && v.lift_pts > 0 ? 'ok' : 'bad'}>significant</StatusBadge>}
+        </>}
+        subtitle={<><Mono>{v.experiment}</Mono> · {v.amount_usd == null ? 'usage' : `$${v.amount_usd.toLocaleString()}/${v.interval === 'year' ? 'yr' : 'mo'}`}</>}
+        actions={peekMenu(actions)}
+        facts={[
+          { label: 'Traffic', value: share == null ? NA : `${share}%`, hint: `Weight ${v.weight} (shown on the Plans tab)` },
+          { label: 'Visitors', value: num((v.visitors ?? 0).toLocaleString()), hint: v.visitors_in_range ? `${v.visitors_in_range} new` : undefined },
+          { label: 'Shown', value: num(v.exposed.toLocaleString()), hint: v.new_in_range ? `${v.new_in_range} new` : undefined },
+          { label: 'Subscribed', value: num(v.converted.toLocaleString()), hint: `${v.checkouts} checkouts started, ${v.completed} completed` },
+          { label: 'Conversion', value: v.conversion_pct == null ? NA : `${v.conversion_pct}%`, hint: v.ci ? `95% interval ${v.ci[0]}–${v.ci[1]}%` : undefined },
+          { label: 'Lift', value: v.control ? <span className='text-muted-foreground'>control</span> : v.lift_pts == null ? NA
+              : <span className={cn('tabular-nums', v.significant && (v.lift_pts > 0 ? 'font-medium text-emerald-600 dark:text-emerald-400' : 'text-destructive font-medium'))}>{v.lift_pts > 0 ? '+' : ''}{v.lift_pts} pts</span>,
+            hint: v.control ? undefined : v.lift_ci ? `${v.significant ? 'significant' : 'not yet'}; 95% interval ${v.lift_ci[0]} to ${v.lift_ci[1]} points` : v.significant ? 'significant' : 'not yet' },
+          { label: '$ per shown', value: v.collected_per_exposed_usd == null ? NA : num(cents(v.collected_per_exposed_usd)), hint: 'Collected in the range per account shown' },
+          { label: 'MRR', value: num(cents(v.mrr_usd)), hint: `${v.paying} paying${v.trialing ? `, ${v.trialing} in trial` : ''}` },
+          { label: 'Collected', value: num(cents(v.collected_usd)) },
+          { label: 'Model spend', value: num(cents(v.model_spend_usd)), hint: 'Of its subscribers, in the range' },
+          { label: 'Margin', value: num(cents(v.margin_usd)) },
+          { label: 'Churned', value: num(v.churned.toLocaleString()) },
+          { label: 'Price ID', value: <Mono>{v.price_id}</Mono>, wide: true }
+        ]}
+      />
+      <DetailTabs resetKey={`${v.experiment}:${v.price_id}`} tabs={[
+        { id: 'daily', label: 'Per day', content: <DailyTab days={days} charts={[
+          { title: 'Per day', format: (x) => String(Math.round(x * 100) / 100), series: [{ key: 'exposed', label: 'First shown', values: v.daily_exposed }, { key: 'converted', label: 'Subscribed', values: v.daily_converted }] },
+          { title: 'Collected per day', format: dollarsPerDay, series: [{ key: 'collected', label: 'Collected', values: v.daily_collected }] }
+        ]} /> }
+      ]} />
+    </div>
   );
 }
 
@@ -894,8 +1025,8 @@ function SpendAccounts({ data, loading, rows, cards, filters, filtered, range }:
     <RecordView id='spend-accounts' rows={rows} loading={loading} rowKey={(a) => a.key} cols={cols} noun='accounts' initialSize={50} compact summary={cards}
       searchText={(a) => `${a.name} ${a.slug ?? ''} ${a.top_model ?? ''} ${a.allowance?.plan ?? ''}`} searchPlaceholder='Search accounts, models'
       filters={filters} defaultSort={[{ key: 'spent', dir: 'desc' }]} exportName={exportName('spend', 'account', data?.range)}
-      actions={accountActions(router)} detailTitle={accountTitle}
-      detail={(a) => <AccountPeek a={a} days={data?.range.days ?? []} range={range} />}
+      actions={accountActions(router)} detailTitle={() => 'Account'}
+      detail={(a) => <SpendAccountPeek a={a} days={data?.range.days ?? []} range={range} actions={accountActions(router)(a)} />}
       empty={filtered ? 'No accounts match.' : 'No model spend in this range.'} />
   );
 }
@@ -915,43 +1046,73 @@ function AllowanceMeter({ used, budget, pct }: { used: number; budget: number; p
   );
 }
 
-/** One account's peek: its daily spend, then spend by person, model, agent and product (GET /spend/accounts/:key). */
-function AccountPeek({ a, days, range }: { a: AccountRow; days: string[]; range: DateRange }) {
+/** One account's peek (Model spend): its spend on the card; Per day, then spend by person, model, agent and product
+ *  (GET /spend/accounts/:key) as tabs. */
+function SpendAccountPeek({ a, days, range, actions }: { a: AccountRow; days: string[]; range: DateRange; actions: RowAction[] }) {
   const { data, error, isLoading } = useAdmin<AccountDetail>(`/spend/accounts/${encodeURIComponent(a.key)}?${rangeQuery(range)}`);
+  type Person = AccountDetail['by_person'][number];
+  type Model = AccountDetail['by_model'][number];
+  const usd = (k: string, label = '$') => ({ key: k, label, type: 'number' as const, className: 'text-right' });
   return (
-    <div className='grid gap-6'>
-      <PeekSection title='Daily spend'>
-        <p className='text-sm'>{cents(a.spent_usd)} in range: sessions {cents(a.session_usd)}, orchestrators {cents(a.orchestrator_usd)}.</p>
-        <DailyBars days={days} format={(v) => `$${v < 10 ? v.toFixed(2) : Math.round(v)}`}
-          series={[{ key: 'session', label: 'Sessions', values: a.daily_session }, { key: 'orchestrator', label: 'Orchestrators', values: a.daily_orchestrator }]} />
-      </PeekSection>
-      {isLoading ? <Skeleton className='h-40' /> : !data ? <ErrorBox error={error} /> : (
-        <>
-          {!a.shared && (
-            <PeekSection title='By person'>
-              {data.by_person.length ? <MiniTable head={['Who', 'Sessions', 'Sessions $', 'Orchestrators $', 'Total']} rows={data.by_person.map((p) => [
-                <span key='w' title={p.user_id ?? undefined}>{p.label}</span>, p.sessions, cents(p.session_usd), cents(p.orchestrator_usd), <span key='t' className='font-medium'>{cents(p.usd)}</span>])} />
-                : none('No spend in this range.')}
-            </PeekSection>
-          )}
-          <PeekSection title={a.shared ? 'Orchestrator models (all orchestrator spend)' : 'By model'}>
-            {data.by_model.length ? <MiniTable head={a.shared ? ['Model', 'Provider', 'Requests', '$'] : ['Model', 'Sessions', '$']} rows={data.by_model.map((m) => a.shared
-              ? [<Mono key='m'>{m.model}</Mono>, <Mono key='p'>{m.provider}</Mono>, (m.requests ?? 0).toLocaleString(), cents(m.usd)]
-              : [<Mono key='m'>{m.model}</Mono>, m.sessions ?? 0, cents(m.usd)])} />
-              : none('No spend in this range.')}
-          </PeekSection>
-          {data.by_agent.length > 0 && (
-            <PeekSection title='By agent'>
-              <MiniTable head={['Agent', 'Sessions', '$']} rows={data.by_agent.map((x) => [<Mono key='a'>{x.agent}</Mono>, x.sessions, cents(x.usd)])} />
-            </PeekSection>
-          )}
-          {data.by_product.length > 0 && (
-            <PeekSection title='By product'>
-              <MiniTable head={['Product', 'Sessions', '$']} rows={data.by_product.map((x) => [x.product, x.sessions, cents(x.usd)])} />
-            </PeekSection>
-          )}
-        </>
-      )}
+    <div className='flex flex-col gap-4'>
+      <DetailMeta
+        title={a.name}
+        badges={sharedBadge(a)}
+        actions={peekMenu(actions)}
+        facts={[
+          ...accountFacts(a),
+          { label: 'Spent in range', value: num(cents(a.spent_usd)), hint: `sessions ${cents(a.session_usd)} · orchestrators ${cents(a.orchestrator_usd)}` },
+          { label: 'This month', value: a.shared ? <span className='text-muted-foreground text-xs tabular-nums'>{cents(a.month_usd)} this month, no allowance</span>
+              : <AllowanceMeter used={a.month_usd} budget={a.allowance?.budget_usd ?? 0} pct={a.month_pct} /> },
+          { label: 'Plan / allowance', value: a.allowance ? (a.allowance.budget_usd > 0 ? `${cents(a.allowance.budget_usd)} a month` : 'No allowance') : NA,
+            hint: a.allowance ? <>{a.allowance.plan ?? SOURCE[a.allowance.source]}{a.allowance.plan && a.allowance.source === 'override' && ' · set by Octillion'}</> : undefined },
+          { label: 'Sessions', value: a.sessions ? num(a.sessions.toLocaleString()) : NA },
+          { label: 'Top model', value: a.top_model ? <Mono>{short(a.top_model)}</Mono> : NA },
+          { label: 'Last spend', value: a.last_spend_at ? <When d={a.last_spend_at} /> : NA }
+        ]}
+      />
+      <ErrorBox error={error} />
+      <DetailTabs resetKey={a.key} tabs={[
+        { id: 'daily', label: 'Per day', content: <DailyTab days={days} charts={[{ title: 'Daily spend', format: dollarsPerDay,
+          series: [{ key: 'session', label: 'Sessions', values: a.daily_session }, { key: 'orchestrator', label: 'Orchestrators', values: a.daily_orchestrator }] }]} /> },
+        { id: 'people', label: 'By person', count: data?.by_person.length, hidden: a.shared, content: (
+          <DetailTable<Person> rows={data?.by_person} loading={isLoading} rowKey={(p) => p.user_id ?? p.label} noun='people' empty='No spend in this range.'
+            search={(p) => `${p.label} ${p.user_id ?? ''}`} defaultSort={[{ key: 'usd', dir: 'desc' }]} cols={[
+            { key: 'who', label: 'Who', type: 'text', value: (p) => p.label, render: (p) => <span title={p.user_id ?? undefined}>{p.label}</span> },
+            { ...usd('sessions', 'Sessions'), value: (p) => p.sessions, render: (p) => num(p.sessions) },
+            { ...usd('session_usd', 'Sessions $'), value: (p) => p.session_usd, render: (p) => num(cents(p.session_usd)) },
+            { ...usd('orchestrator_usd', 'Orchestrators $'), value: (p) => p.orchestrator_usd, render: (p) => num(cents(p.orchestrator_usd)) },
+            { ...usd('usd', 'Total'), value: (p) => p.usd, render: (p) => <span className='font-medium tabular-nums'>{cents(p.usd)}</span> }
+          ]} />
+        ) },
+        { id: 'models', label: a.shared ? 'Orchestrator models' : 'By model', count: data?.by_model.length, content: (
+          <DetailTable<Model> rows={data?.by_model} loading={isLoading} rowKey={(m) => `${m.provider ?? ''}/${m.model}`} noun='models'
+            empty='No spend in this range.' defaultSort={[{ key: 'usd', dir: 'desc' }]} cols={[
+            { key: 'model', label: 'Model', type: 'text', value: (m) => m.model, render: (m) => <Mono>{m.model}</Mono> },
+            ...(a.shared ? [
+              { key: 'provider', label: 'Provider', type: 'select' as const, value: (m: Model) => m.provider ?? '', render: (m: Model) => <Mono>{m.provider}</Mono> },
+              { ...usd('requests', 'Requests'), value: (m: Model) => m.requests ?? 0, render: (m: Model) => num((m.requests ?? 0).toLocaleString()) }
+            ] : [
+              { ...usd('sessions', 'Sessions'), value: (m: Model) => m.sessions ?? 0, render: (m: Model) => num(m.sessions ?? 0) }
+            ]),
+            { ...usd('usd'), value: (m) => m.usd, render: (m) => num(cents(m.usd)) }
+          ]} />
+        ) },
+        { id: 'agents', label: 'By agent', count: data?.by_agent.length, hidden: !data?.by_agent.length, content: (
+          <DetailTable rows={data?.by_agent} rowKey={(x) => x.agent} noun='agents' empty='No spend in this range.' defaultSort={[{ key: 'usd', dir: 'desc' }]} cols={[
+            { key: 'agent', label: 'Agent', type: 'text', value: (x) => x.agent, render: (x) => <Mono>{x.agent}</Mono> },
+            { ...usd('sessions', 'Sessions'), value: (x) => x.sessions, render: (x) => num(x.sessions) },
+            { ...usd('usd'), value: (x) => x.usd, render: (x) => num(cents(x.usd)) }
+          ]} />
+        ) },
+        { id: 'products', label: 'By product', count: data?.by_product.length, hidden: !data?.by_product.length, content: (
+          <DetailTable rows={data?.by_product} rowKey={(x) => x.product} noun='products' empty='No spend in this range.' defaultSort={[{ key: 'usd', dir: 'desc' }]} cols={[
+            { key: 'product', label: 'Product', type: 'text', value: (x) => x.product, render: (x) => x.product },
+            { ...usd('sessions', 'Sessions'), value: (x) => x.sessions, render: (x) => num(x.sessions) },
+            { ...usd('usd'), value: (x) => x.usd, render: (x) => num(cents(x.usd)) }
+          ]} />
+        ) }
+      ]} />
     </div>
   );
 }
@@ -1009,21 +1170,47 @@ function SpendProviders({ data, loading, cards, bar }: { data: Spend | undefined
     <RecordView id='spend-providers' rows={rows} loading={loading} rowKey={(p) => p.provider} cols={cols} noun='providers' initialSize={50} compact summary={cards}
       searchText={(p) => `${p.provider} ${p.models.map((m) => m.model).join(' ')} ${p.priced ? '' : 'unpriced'}`} searchPlaceholder='Search providers, models'
       filters={filters} defaultSort={[{ key: 'cost', dir: 'desc' }]} exportName={exportName('spend', 'provider', data?.range)}
-      detailTitle={(p) => <Mono>{p.provider}</Mono>}
-      detail={(p) => (
-        <div className='grid gap-6'>
-          <PeekSection title='Models'>
-            <MiniTable head={['Model', 'Used by', 'Requests', 'Tokens', 'Cost']} rows={[...p.models].sort((a, b) => b.cost_usd - a.cost_usd).map((m) => [
-              <span key='m' className='flex items-center gap-1.5'><Mono>{m.model}</Mono>{!m.priced && <Chip tone='warn' title={UNPRICED}>unpriced</Chip>}</span>,
-              CONSUMER[m.consumer], m.requests.toLocaleString(), tokens(m.input_tokens + m.output_tokens), cents(m.cost_usd)])} />
-          </PeekSection>
-          <PeekSection title='Top accounts'>
-            {p.top_accounts.length ? <MiniTable head={['Account', 'Requests', '$']} rows={p.top_accounts.map((a) => [a.name, a.requests.toLocaleString(), cents(a.usd)])} />
-              : none('No gateway requests through this provider in this range.')}
-          </PeekSection>
-        </div>
-      )}
+      detailTitle={() => 'Provider'}
+      detail={(p) => <ProviderPeek p={p} />}
       empty={consumer ? 'No providers match.' : 'No model requests in this range.'} />
+  );
+}
+
+/** One provider (Model spend by provider): its totals on the card; its Models and Top accounts as tabs. */
+function ProviderPeek({ p }: { p: ProviderRow }) {
+  const unpricedHint = `${UNPRICED} ${p.unpriced_requests.toLocaleString()} requests on unpriced days.`;
+  return (
+    <div className='flex flex-col gap-4'>
+      <DetailMeta
+        title={<Mono>{p.provider}</Mono>}
+        badges={p.priced ? <StatusBadge tone='ok'>Priced</StatusBadge> : <StatusBadge tone='warn' title={unpricedHint}>Unpriced</StatusBadge>}
+        facts={[
+          { label: 'Cost', value: num(cents(p.cost_usd)), hint: p.priced ? undefined : <span className={AMBER}>{unpricedHint}</span> },
+          { label: 'Requests', value: num(p.requests.toLocaleString()), hint: p.errors > 0 ? <span className='text-destructive'>{p.errors.toLocaleString()} errors</span> : undefined },
+          { label: 'Tokens', value: num(tokens(p.input_tokens + p.output_tokens), (p.input_tokens + p.output_tokens).toLocaleString()),
+            hint: `${tokens(p.input_tokens)} in · ${tokens(p.cached_input_tokens)} cached · ${tokens(p.output_tokens)} out` },
+          { label: 'Models', value: num(new Set(p.models.map((m) => m.model)).size) }
+        ]}
+      />
+      <DetailTabs resetKey={p.provider} tabs={[
+        { id: 'models', label: 'Models', count: p.models.length, content: (
+          <DetailTable rows={p.models} rowKey={(m) => m.key} noun='models' empty='No models.' search={(m) => m.model} defaultSort={[{ key: 'cost', dir: 'desc' }]} cols={[
+            { key: 'model', label: 'Model', type: 'text', value: (m) => m.model, render: (m) => <span className='flex items-center gap-1.5'><Mono>{m.model}</Mono>{!m.priced && <Chip tone='warn' title={UNPRICED}>unpriced</Chip>}</span> },
+            { key: 'consumer', label: 'Used by', type: 'select', value: (m) => CONSUMER[m.consumer], render: (m) => CONSUMER[m.consumer] },
+            { key: 'requests', label: 'Requests', type: 'number', value: (m) => m.requests, render: (m) => num(m.requests.toLocaleString()), className: 'text-right' },
+            { key: 'tokens', label: 'Tokens', type: 'number', value: (m) => m.input_tokens + m.output_tokens, render: (m) => num(tokens(m.input_tokens + m.output_tokens)), className: 'text-right' },
+            { key: 'cost', label: 'Cost', type: 'number', value: (m) => m.cost_usd, render: (m) => num(cents(m.cost_usd)), className: 'text-right' }
+          ]} />
+        ) },
+        { id: 'accounts', label: 'Top accounts', count: p.top_accounts.length, content: (
+          <DetailTable rows={p.top_accounts} rowKey={(a) => a.key} noun='accounts' empty='No gateway requests through this provider in this range.' defaultSort={[{ key: 'usd', dir: 'desc' }]} cols={[
+            { key: 'name', label: 'Account', type: 'text', value: (a) => a.name, render: (a) => a.name },
+            { key: 'requests', label: 'Requests', type: 'number', value: (a) => a.requests, render: (a) => num(a.requests.toLocaleString()), className: 'text-right' },
+            { key: 'usd', label: '$', type: 'number', value: (a) => a.usd, render: (a) => num(cents(a.usd)), className: 'text-right' }
+          ]} />
+        ) }
+      ]} />
+    </div>
   );
 }
 
@@ -1046,10 +1233,6 @@ function ComputeTab({ data, loading, bar, group }: TabProps<Compute>) {
     ]} />
   );
   const days = data?.range.days ?? [];
-  const daily = (x: { daily_orchestrator: number[]; daily_agent: number[] }) => (
-    <DailyBars days={days} format={(v) => hrs(v)}
-      series={[{ key: 'orchestrator', label: 'Orchestrators', values: x.daily_orchestrator }, { key: 'agent', label: 'Agents', values: x.daily_agent }]} />
-  );
   const hcol = <T extends { orchestrator_hours: number; agent_hours: number; total_hours: number }>(k: 'orchestrator_hours' | 'agent_hours' | 'total_hours', label: string, keep = false): RecordCol<T> =>
     // The orchestrator/agent split is Total's second line; the two columns stay in Properties for sorting.
     ({ key: k, label, className: 'text-right', keep, hidden: k !== 'total_hours', type: 'number', value: (r) => r[k], render: (r) => (k === 'total_hours'
@@ -1068,18 +1251,8 @@ function ComputeTab({ data, loading, bar, group }: TabProps<Compute>) {
       <RecordView id='spend-compute-providers' rows={data?.providers ?? []} loading={loading} rowKey={(p) => p.key} cols={cols} noun='providers' initialSize={50} compact summary={cards}
         searchText={(p) => `${p.name} ${p.by_account.map((a) => a.name).join(' ')} ${p.sandbox_types.map((t) => `${t.kind} ${t.type ?? ''}`).join(' ')}`} searchPlaceholder='Search providers, accounts'
         filters={bar} defaultSort={[{ key: 'total_hours', dir: 'desc' }]} exportName={exportName('compute-hours', 'provider', data?.range)}
-        detailTitle={(p) => p.name}
-        detail={(p) => (
-          <div className='grid gap-6'>
-            <PeekSection title='Hours per day'>{daily(p)}</PeekSection>
-            <PeekSection title='By sandbox type'>
-              {p.sandbox_types.length ? <MiniTable head={['Used for', 'Type', 'Hours']} rows={p.sandbox_types.map((t) => [t.kind === 'Agent' ? 'Agents' : 'Orchestrators', <Mono key='t'>{t.type ?? 'not recorded'}</Mono>, hrs(t.hours)])} /> : none()}
-            </PeekSection>
-            <PeekSection title='By account'>
-              {p.by_account.length ? <MiniTable head={['Account', 'Orchestrator hours', 'Agent hours', 'Sessions', 'Total']} rows={p.by_account.map((a) => [a.name, hrs(a.orchestrator_hours), hrs(a.agent_hours), a.sessions, <span key='t' className='font-medium'>{hrs(a.total_hours)}</span>])} /> : none()}
-            </PeekSection>
-          </div>
-        )}
+        detailTitle={() => 'Sandbox provider'}
+        detail={(p) => <ComputeProviderPeek p={p} days={days} />}
         empty='No sandboxes ran in this range.' />
     );
   }
@@ -1097,21 +1270,81 @@ function ComputeTab({ data, loading, bar, group }: TabProps<Compute>) {
     <RecordView id='spend-compute-accounts' rows={f.rows} loading={loading} rowKey={(a) => a.key} cols={cols} noun='accounts' initialSize={50} compact summary={cards}
       searchText={(a) => `${a.name} ${a.slug ?? ''} ${a.by_agent.map((x) => x.agent).join(' ')}`} searchPlaceholder='Search accounts, agents'
       filters={<>{bar}{f.controls}</>} defaultSort={[{ key: 'total_hours', dir: 'desc' }]} exportName={exportName('compute-hours', 'account', data?.range)}
-      actions={accountActions(router)} detailTitle={accountTitle}
-      detail={(a) => (
-        <div className='grid gap-6'>
-          <PeekSection title='Hours per day'>{daily(a)}</PeekSection>
-          <PeekSection title='By agent'>
-            {a.by_agent.length ? <MiniTable head={['Agent', 'Sessions', 'Hours']} rows={a.by_agent.map((x) => [<Mono key='a'>{x.agent}</Mono>, x.sessions, hrs(x.hours)])} /> : none('No agent sessions in this range.')}
-          </PeekSection>
-          <PeekSection title='Top jobs'>
-            {a.by_job.length ? <MiniTable head={['Job', 'Orchestrator hours', 'Agent hours', 'Total']} rows={a.by_job.map((j) => [
-              <span key='j' className='flex flex-col'><span>{j.name ?? (j.kind === 'research' ? 'Research' : 'Simulation')}</span><Mono>{j.job_id}</Mono></span>,
-              hrs(j.orchestrator_hours), hrs(j.agent_hours), <span key='t' className='font-medium'>{hrs(j.total_hours)}</span>])} /> : none('No job ran in this range.')}
-          </PeekSection>
-        </div>
-      )}
+      actions={accountActions(router)} detailTitle={() => 'Account'}
+      detail={(a) => <ComputeAccountPeek a={a} days={days} actions={accountActions(router)(a)} />}
       empty={f.filtered ? 'No accounts match.' : 'No sandboxes ran in this range.'} />
+  );
+}
+
+const hoursSeries = (x: { daily_orchestrator: number[]; daily_agent: number[] }): Chart => ({ title: 'Hours per day', format: (v) => hrs(v),
+  series: [{ key: 'orchestrator', label: 'Orchestrators', values: x.daily_orchestrator }, { key: 'agent', label: 'Agents', values: x.daily_agent }] });
+const hoursFacts = (x: { orchestrator_hours: number; agent_hours: number; total_hours: number; sessions: number; orchestrators: number }): Fact[] => [
+  { label: 'Total hours', value: <span className='font-medium tabular-nums'>{hrs(x.total_hours)}</span>, hint: `orch ${hrs(x.orchestrator_hours)} · agents ${hrs(x.agent_hours)}` },
+  { label: 'Orchestrator hours', value: num(hrs(x.orchestrator_hours)) },
+  { label: 'Agent hours', value: num(hrs(x.agent_hours)) },
+  { label: 'Sessions run', value: x.sessions ? num(x.sessions.toLocaleString()) : NA },
+  { label: 'Orchestrators launched', value: x.orchestrators ? num(x.orchestrators.toLocaleString()) : NA }
+];
+
+/** One sandbox provider (Compute hours by provider): its hours on the card; Per day, Sandbox types and Accounts as tabs. */
+function ComputeProviderPeek({ p, days }: { p: ComputeProvider; days: string[] }) {
+  type Acc = ComputeProvider['by_account'][number];
+  return (
+    <div className='flex flex-col gap-4'>
+      <DetailMeta title={p.name} facts={hoursFacts(p)} />
+      <DetailTabs resetKey={p.key} tabs={[
+        { id: 'daily', label: 'Per day', content: <DailyTab days={days} charts={[hoursSeries(p)]} /> },
+        { id: 'types', label: 'Sandbox types', count: p.sandbox_types.length, content: (
+          <DetailTable rows={p.sandbox_types} rowKey={(t) => `${t.kind}:${t.type ?? ''}`} noun='sandbox types' empty='Nothing in this range.' defaultSort={[{ key: 'hours', dir: 'desc' }]} cols={[
+            { key: 'kind', label: 'Used for', type: 'select', value: (t) => (t.kind === 'Agent' ? 'Agents' : 'Orchestrators'), render: (t) => (t.kind === 'Agent' ? 'Agents' : 'Orchestrators') },
+            { key: 'type', label: 'Type', type: 'text', value: (t) => t.type ?? '', render: (t) => <Mono>{t.type ?? 'not recorded'}</Mono> },
+            { key: 'hours', label: 'Hours', type: 'number', value: (t) => t.hours, render: (t) => num(hrs(t.hours)), className: 'text-right' }
+          ]} />
+        ) },
+        { id: 'accounts', label: 'Accounts', count: p.by_account.length, content: (
+          <DetailTable<Acc> rows={p.by_account} rowKey={(a) => a.key} noun='accounts' empty='Nothing in this range.' search={(a) => a.name} defaultSort={[{ key: 'total', dir: 'desc' }]} cols={[
+            { key: 'name', label: 'Account', type: 'text', value: (a) => a.name, render: (a) => a.name },
+            { key: 'orch', label: 'Orchestrator hours', type: 'number', value: (a) => a.orchestrator_hours, render: (a) => num(hrs(a.orchestrator_hours)), className: 'text-right' },
+            { key: 'agent', label: 'Agent hours', type: 'number', value: (a) => a.agent_hours, render: (a) => num(hrs(a.agent_hours)), className: 'text-right' },
+            { key: 'sessions', label: 'Sessions', type: 'number', value: (a) => a.sessions, render: (a) => num(a.sessions), className: 'text-right' },
+            { key: 'total', label: 'Total', type: 'number', value: (a) => a.total_hours, render: (a) => <span className='font-medium tabular-nums'>{hrs(a.total_hours)}</span>, className: 'text-right' }
+          ]} />
+        ) }
+      ]} />
+    </div>
+  );
+}
+
+/** One account (Compute hours): its hours on the card; Per day, By agent and Top jobs as tabs. */
+function ComputeAccountPeek({ a, days, actions }: { a: ComputeAccount; days: string[]; actions: RowAction[] }) {
+  type Job = ComputeAccount['by_job'][number];
+  return (
+    <div className='flex flex-col gap-4'>
+      <DetailMeta title={a.name} badges={sharedBadge(a)} actions={peekMenu(actions)} facts={[
+        ...accountFacts(a),
+        ...hoursFacts(a),
+        { label: 'Session length', value: a.avg_session_hours == null ? NA : num(hrs(a.avg_session_hours)), hint: a.longest_session_hours == null ? undefined : `longest ${hrs(a.longest_session_hours)}` }
+      ]} />
+      <DetailTabs resetKey={a.key} tabs={[
+        { id: 'daily', label: 'Per day', content: <DailyTab days={days} charts={[hoursSeries(a)]} /> },
+        { id: 'agents', label: 'By agent', count: a.by_agent.length, content: (
+          <DetailTable rows={a.by_agent} rowKey={(x) => x.agent} noun='agents' empty='No agent sessions in this range.' defaultSort={[{ key: 'hours', dir: 'desc' }]} cols={[
+            { key: 'agent', label: 'Agent', type: 'text', value: (x) => x.agent, render: (x) => <Mono>{x.agent}</Mono> },
+            { key: 'sessions', label: 'Sessions', type: 'number', value: (x) => x.sessions, render: (x) => num(x.sessions), className: 'text-right' },
+            { key: 'hours', label: 'Hours', type: 'number', value: (x) => x.hours, render: (x) => num(hrs(x.hours)), className: 'text-right' }
+          ]} />
+        ) },
+        { id: 'jobs', label: 'Top jobs', count: a.by_job.length, content: (
+          <DetailTable<Job> rows={a.by_job} rowKey={(j) => j.job_id} noun='jobs' empty='No job ran in this range.' defaultSort={[{ key: 'total', dir: 'desc' }]}
+            search={(j) => `${j.name ?? ''} ${j.job_id}`} cols={[
+            { key: 'job', label: 'Job', type: 'text', value: (j) => j.name ?? j.job_id, render: (j) => <span className='flex flex-col'><span>{j.name ?? (j.kind === 'research' ? 'Research' : 'Simulation')}</span><Mono>{j.job_id}</Mono></span> },
+            { key: 'orch', label: 'Orchestrator hours', type: 'number', value: (j) => j.orchestrator_hours, render: (j) => num(hrs(j.orchestrator_hours)), className: 'text-right' },
+            { key: 'agent', label: 'Agent hours', type: 'number', value: (j) => j.agent_hours, render: (j) => num(hrs(j.agent_hours)), className: 'text-right' },
+            { key: 'total', label: 'Total', type: 'number', value: (j) => j.total_hours, render: (j) => <span className='font-medium tabular-nums'>{hrs(j.total_hours)}</span>, className: 'text-right' }
+          ]} />
+        ) }
+      ]} />
+    </div>
   );
 }
 
@@ -1158,7 +1391,7 @@ function StorageTab({ data, loading, bar, group }: TabProps<Storage>) {
       <RecordView id='spend-storage-stores' rows={rows} loading={loading} rowKey={(s) => s.key} cols={cols} noun='stores' initialSize={50} compact summary={cards}
         searchText={(s) => `${s.name} ${s.detail} ${KIND[s.kind]} ${s.parts.map((p) => `${p.label} ${p.name}`).join(' ')}`} searchPlaceholder='Search stores, tables'
         filters={filters} defaultSort={[{ key: 'size', dir: 'desc' }]} exportName={exportName('storage', 'provider', data?.range)}
-        detailTitle={(s) => s.name}
+        detailTitle={() => 'Store'}
         detail={(s) => <StorePeek s={s} days={data?.range.days ?? []} />}
         empty={kind ? 'No stores match.' : 'Nothing stored yet.'} />
     );
@@ -1176,41 +1409,71 @@ function StorageTab({ data, loading, bar, group }: TabProps<Storage>) {
     <RecordView id='spend-storage-accounts' rows={f.rows} loading={loading} rowKey={(a) => a.key} cols={cols} noun='accounts' initialSize={50} compact summary={cards}
       searchText={(a) => `${a.name} ${a.slug ?? ''}`} searchPlaceholder='Search accounts'
       filters={<>{bar}{f.controls}</>} defaultSort={[{ key: 'rows', dir: 'desc' }]} exportName={exportName('storage', 'account', data?.range)}
-      actions={accountActions(router)} detailTitle={accountTitle}
-      detail={(a) => (
-        <div className='grid gap-6'>
-          <PeekSection title='New rows per day'>
-            <DailyBars days={data?.range.days ?? []} format={(v) => count(v)} series={[{ key: 'rows', label: 'New rows', values: a.daily_new }]} />
-          </PeekSection>
-          <PeekSection title='By table'>
-            {a.by_table.length ? <MiniTable head={['Table', 'Rows', 'New in range']} rows={a.by_table.map((x) => [
-              <span key='t' className='flex flex-col'><span>{x.label}</span><Mono>{x.name}</Mono></span>, x.rows.toLocaleString(), x.new_rows.toLocaleString()])} /> : none('No rows.')}
-          </PeekSection>
-          <PeekSection title='Gateway data by provider'>
-            {a.gateway_by_provider.length ? <MiniTable head={['Provider', 'Data']} rows={a.gateway_by_provider.map((x) => [<Mono key='p'>{x.provider}</Mono>, bytes(x.bytes)])} /> : none('No gateway traffic in this range.')}
-          </PeekSection>
-        </div>
-      )}
+      actions={accountActions(router)} detailTitle={() => 'Account'}
+      detail={(a) => <StorageAccountPeek a={a} days={data?.range.days ?? []} actions={accountActions(router)(a)} />}
       empty={f.filtered ? 'No accounts match.' : 'No data in this range.'} />
   );
 }
 
-function StorePeek({ s, days }: { s: StoreRow; days: string[] }) {
-  const gateway = s.kind === 'gateway';
+/** One account (Data & storage): what it holds on the card; Per day, By table and Gateway data as tabs. */
+function StorageAccountPeek({ a, days, actions }: { a: StorageAccount; days: string[]; actions: RowAction[] }) {
+  type Tbl = StorageAccount['by_table'][number];
   return (
-    <div className='grid gap-6'>
-      <PeekSection title={gateway ? 'Data per day' : 'New rows per day'}>
-        <DailyBars days={days} format={gateway ? (v) => bytes(v) : (v) => count(v)} series={[{ key: 'n', label: gateway ? 'Data' : 'New rows', values: s.daily_new }]} />
-      </PeekSection>
-      {s.parts.length > 0 && (
-        <PeekSection title={s.kind === 'database' ? 'Tables' : 'What it holds'}>
-          <MiniTable head={s.kind === 'database' ? ['Table', 'Size', 'Rows', 'New in range', 'Last write'] : ['What', 'Rows']}
-            rows={[...s.parts].sort((a, b) => (b.bytes ?? 0) - (a.bytes ?? 0) || b.rows - a.rows).map((p) => s.kind === 'database'
-              ? [<span key='t' className='flex flex-col'><span>{p.label}</span><Mono>{p.name}</Mono></span>, bytes(p.bytes), p.rows.toLocaleString(), p.new_rows.toLocaleString(),
-                p.last_write ? <When key='w' d={p.last_write} /> : '—']
-              : [<span key='t' className='flex flex-col'><span>{p.label}</span><Mono>{p.name}</Mono></span>, p.rows.toLocaleString()])} />
-        </PeekSection>
-      )}
+    <div className='flex flex-col gap-4'>
+      <DetailMeta title={a.name} badges={sharedBadge(a)} actions={peekMenu(actions)} facts={[
+        ...accountFacts(a),
+        { label: 'Rows it owns', value: num(count(a.rows), a.rows.toLocaleString()), hint: a.new_rows ? `+${count(a.new_rows)} in range` : undefined },
+        { label: 'Transcript events', value: a.transcript_events ? num(count(a.transcript_events)) : NA, hint: a.transcript_events ? `${a.new_transcript_events.toLocaleString()} in range` : undefined },
+        { label: 'Gateway data in range', value: a.gateway_bytes ? num(bytes(a.gateway_bytes)) : NA, hint: a.gateway_bytes ? `${a.gateway_requests.toLocaleString()} requests` : undefined },
+        { label: 'Last write', value: a.last_write ? <When d={a.last_write} /> : NA }
+      ]} />
+      <DetailTabs resetKey={a.key} tabs={[
+        { id: 'daily', label: 'Per day', content: <DailyTab days={days} charts={[{ title: 'New rows per day', format: (v) => count(v), series: [{ key: 'rows', label: 'New rows', values: a.daily_new }] }]} /> },
+        { id: 'tables', label: 'By table', count: a.by_table.length, content: (
+          <DetailTable<Tbl> rows={a.by_table} rowKey={(x) => x.name} noun='tables' empty='No rows.' search={(x) => `${x.label} ${x.name}`} defaultSort={[{ key: 'rows', dir: 'desc' }]} cols={[
+            { key: 'table', label: 'Table', type: 'text', value: (x) => x.label, render: (x) => <span className='flex flex-col'><span>{x.label}</span><Mono>{x.name}</Mono></span> },
+            { key: 'rows', label: 'Rows', type: 'number', value: (x) => x.rows, render: (x) => num(x.rows.toLocaleString()), className: 'text-right' },
+            { key: 'new', label: 'New in range', type: 'number', value: (x) => x.new_rows, render: (x) => num(x.new_rows.toLocaleString()), className: 'text-right' }
+          ]} />
+        ) },
+        { id: 'gateway', label: 'Gateway data', count: a.gateway_by_provider.length, content: (
+          <DetailTable rows={a.gateway_by_provider} rowKey={(x) => x.provider} noun='providers' empty='No gateway traffic in this range.' defaultSort={[{ key: 'bytes', dir: 'desc' }]} cols={[
+            { key: 'provider', label: 'Provider', type: 'text', value: (x) => x.provider, render: (x) => <Mono>{x.provider}</Mono> },
+            { key: 'bytes', label: 'Data', type: 'number', value: (x) => x.bytes, render: (x) => num(bytes(x.bytes)), className: 'text-right' }
+          ]} />
+        ) }
+      ]} />
+    </div>
+  );
+}
+
+/** One store (Data & storage by provider): its size on the card; Per day and its tables (or what it holds) as tabs. */
+function StorePeek({ s, days }: { s: StoreRow; days: string[] }) {
+  const gateway = s.kind === 'gateway', db = s.kind === 'database';
+  const parts = [...s.parts].sort((a, b) => (b.bytes ?? 0) - (a.bytes ?? 0) || b.rows - a.rows);
+  const partCols: RecordCol<TablePart>[] = [
+    { key: 'what', label: db ? 'Table' : 'What', type: 'text', value: (p) => p.label, render: (p) => <span className='flex flex-col'><span>{p.label}</span><Mono>{p.name}</Mono></span> },
+    ...(db ? [{ key: 'size', label: 'Size', type: 'number' as const, value: (p: TablePart) => p.bytes, render: (p: TablePart) => num(bytes(p.bytes)), className: 'text-right' }] : []),
+    { key: 'rows', label: 'Rows', type: 'number', value: (p) => p.rows, render: (p) => num(p.rows.toLocaleString()), className: 'text-right' },
+    ...(db ? [
+      { key: 'new', label: 'New in range', type: 'number' as const, value: (p: TablePart) => p.new_rows, render: (p: TablePart) => num(p.new_rows.toLocaleString()), className: 'text-right' },
+      { key: 'last', label: 'Last write', type: 'date' as const, value: (p: TablePart) => p.last_write, render: (p: TablePart) => (p.last_write ? <When d={p.last_write} /> : '—') }
+    ] : [])
+  ];
+  return (
+    <div className='flex flex-col gap-4'>
+      <DetailMeta title={s.name} badges={<StatusBadge>{KIND[s.kind]}</StatusBadge>} subtitle={<Mono>{s.detail}</Mono>} facts={[
+        { label: 'Size', value: s.bytes == null ? NA : num(bytes(s.bytes)), hint: s.new_bytes ? `+${bytes(s.new_bytes)} new in range` : undefined },
+        { label: gateway ? 'Requests' : 'Rows', value: s.rows == null ? NA : num(count(s.rows), s.rows.toLocaleString()), hint: s.new_rows ? `+${count(s.new_rows)} new in range` : undefined },
+        { label: 'Last write', value: s.last_write ? <When d={s.last_write} /> : NA }
+      ]} />
+      <DetailTabs resetKey={s.key} tabs={[
+        { id: 'daily', label: 'Per day', content: <DailyTab days={days} charts={[{ title: gateway ? 'Data per day' : 'New rows per day', format: gateway ? (v) => bytes(v) : (v) => count(v),
+          series: [{ key: 'n', label: gateway ? 'Data' : 'New rows', values: s.daily_new }] }]} /> },
+        { id: 'parts', label: db ? 'Tables' : 'What it holds', count: parts.length, hidden: !parts.length, content: (
+          <DetailTable<TablePart> rows={parts} rowKey={(p) => p.name} noun={db ? 'tables' : 'parts'} empty='Nothing here.' search={(p) => `${p.label} ${p.name}`} cols={partCols} />
+        ) }
+      ]} />
     </div>
   );
 }
