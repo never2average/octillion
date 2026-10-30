@@ -32,12 +32,12 @@
  */
 import { domainToASCII } from "node:url";
 import { getDomain } from "tldts";
-import { getDb } from "./db.js";
+import { getDb, type Queryable } from "./db.js";
 import { AdminError, log } from "./admin.js";
 import * as mail from "./email.js";
 import { freshSettings, settingText } from "./settings.js";
 import { consentOf, recordConsent } from "./gtm-consent.js";
-import { activity, domainOf, restrictedCountry, setStatus, SIZES, PROSPECT_STATUSES, EMAIL_STATUSES, companyDomainOf, memberIndex, type MemberIndex } from "./gtm-crm.js";
+import { activity, domainOf, restrictedCountry, setStatus, SIZES, PROSPECT_STATUSES, EMAIL_STATUSES, companyDomainOf, memberIndex, memberOrg, type MemberIndex } from "./gtm-crm.js";
 import type { Candidate } from "./campaigns.js";
 
 const fail = (msg: string, status = 400): never => { throw new AdminError(msg, status); };
@@ -97,18 +97,35 @@ export const warmupPlan = (i: Pick<Identity, "daily_cap" | "warmup_start" | "war
   Array.from({ length: days }, (_, k) => { const d = new Date(now.getTime() + k * DAY); return { day: d.toISOString().slice(0, 10), cap: warmupCap(i, d) }; });
 
 /** Emails sent (or being sent) today, UTC, per identity: across every campaign. */
-export async function sentToday(ids: number[]): Promise<Map<number, number>> {
+export async function sentToday(ids: number[], q?: Queryable): Promise<Map<number, number>> {
   if (!ids.length) return new Map();
-  // Sends that went, are going, or may have gone (uncertain / unknown), and test sends from the identity.
-  const rows = await (await getDb()).query<{ identity_id: number; n: number }>(
+  // Sends that went, are going, or may have gone (uncertain / unknown), and test sends from the identity (sent, being
+  // sent, or reserved: reserveTest).
+  const rows = await (q ?? await getDb()).query<{ identity_id: number; n: number }>(
     `SELECT identity_id, sum(n)::int AS n FROM (
        SELECT identity_id, count(*) AS n FROM gtm_campaign_sends
         WHERE identity_id = ANY($1::bigint[]) AND status IN ('sent', 'sending', 'uncertain', 'unknown') AND at >= (date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') GROUP BY identity_id
        UNION ALL
        SELECT (meta->>'identity_id')::bigint, count(*) FROM email_log
-        WHERE kind = 'outbound_test' AND status IN ('sent', 'sending') AND (meta->>'identity_id')::bigint = ANY($1::bigint[])
-          AND at >= (date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') GROUP BY 1) x GROUP BY identity_id`, [ids]);
+        WHERE kind = 'outbound_test' AND (status IN ('sent', 'sending') OR (status = 'failed' AND error = $2)) AND (meta->>'identity_id')::bigint = ANY($1::bigint[])
+          AND at >= (date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') GROUP BY 1) x GROUP BY identity_id`, [ids, RESERVED]);
   return new Map(rows.map((r) => [Number(r.identity_id), Number(r.n)]));
+}
+const RESERVED = "Reserved for a test send";
+/**
+ * A test send from an identity takes one of today's emails atomically: under the identity's row lock (one reservation
+ * at a time), the day's count is read and, when there is room, the test's email_log row is claimed first (status
+ * failed, "reserved", counted as sent); src/email.ts then takes that row over for the real send. False: the cap is spent.
+ */
+export async function reserveTest(i: Identity, key: string, to: string, campaignId: number): Promise<boolean> {
+  return (await getDb()).transaction(async (tx) => {
+    await tx.query("SELECT id FROM gtm_sender_identities WHERE id = $1 FOR UPDATE", [i.id]);
+    if (warmupCap(i) - ((await sentToday([i.id], tx)).get(i.id) ?? 0) <= 0) return false;
+    await tx.query(
+      `INSERT INTO email_log (kind, to_hash, to_domain, subject, status, idempotency_key, meta, error) VALUES ('outbound_test', $1, $2, '', 'failed', $3, $4::jsonb, $5)`,
+      [mail.hashAddress(to), mail.domainOf(to) || "-", key, JSON.stringify({ campaign_id: campaignId, identity_id: i.id }), RESERVED]);
+    return true;
+  });
 }
 /** What an identity may still send today (its warm-up cap less what it sent). */
 export async function leftToday(i: Identity) { return warmupCap(i) - ((await sentToday([i.id])).get(i.id) ?? 0); }
@@ -320,7 +337,7 @@ export async function outboundBlocks(people: { email: string; prospect_id?: numb
     const d = companyDomainOf(e);
     let why: Block | null = null;
     if (!p) why = "no_prospect";
-    else if (p.org_id != null || p.company_org != null || customer.has(e) || (d && linkedDomains.has(d)) || idx.byHash.has(mail.hashAddress(e)) || (d && idx.domains.has(d))) why = "customer";
+    else if (p.org_id != null || p.company_org != null || customer.has(e) || (d && linkedDomains.has(d)) || memberOrg(idx, e) != null) why = "customer";
     else if (NEVER.includes(p.status)) why = "status";
     else if (consent.get(e)?.basis === "withdrawn") why = "withdrawn";
     else if (restrictedCountry(p.country) && !c.allow_restricted) why = "restricted";

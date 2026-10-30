@@ -24,7 +24,7 @@ import { getDb } from "./db.js";
 import { AdminError, log } from "./admin.js";
 import { getProvider, useCredential } from "./keyvault.js";
 import * as mail from "./email.js";
-import { activity, companyDomainOf, domainOf, importProspects, upsertCompany, type ProspectInput } from "./gtm-crm.js";
+import { activity, stopOutbound, companyDomainOf, domainOf, importProspects, upsertCompany, type ProspectInput } from "./gtm-crm.js";
 import { cleanCountry } from "./gtm-consent.js";
 
 export const APOLLO_PROVIDER = "apollo";
@@ -239,6 +239,7 @@ export async function enrichProspects(actor: string, body: { ids?: unknown; forc
          typeof m.linkedin_url === "string" && /linkedin\.com\//i.test(m.linkedin_url) ? m.linkedin_url : null, cleanCountry(countryCode(m.country)), companyId,
          JSON.stringify(scrub({ ...m, email: undefined }))]);
       await activity(r.id, "enriched", null, { source: "apollo", email_status: status, credits: c / chunk.length || 0 }, actor);
+      if (status === "invalid") await stopOutbound(r.id);
     }
   }
   if (domains.size) await db.query("UPDATE gtm_companies SET enriched_at = coalesce(enriched_at, now()), enrichment_source = coalesce(enrichment_source, 'apollo') WHERE domain = ANY($1::text[])", [[...domains]]);

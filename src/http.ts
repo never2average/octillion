@@ -684,10 +684,21 @@ export function createApp() {
   ob.get("/gtm/activation", async (req, res) => void res.json(await gtm.activation(req.query)));
   ob.get("/gtm/attribution", async (req, res) => void res.json(await gtm.attribution(req.query)));
   ob.get("/gtm/campaigns", async (_req, res) => void res.json(await campaignsMod.listCampaigns()));
-  // Replies are personal data (what people wrote): only with the campaigns permission, here and in the peek.
-  ob.get("/gtm/campaigns/:id", async (req, res) =>
-    void res.json(await campaignsMod.campaignDetail(cid(req), { replies: roles.can(res.locals.adminRole as roles.PlatformRole | undefined, "campaigns") })));
-  ob.post("/gtm/audience/preview", need("read"), async (req, res) => void res.json(await campaignsMod.previewAudience(req.body ?? {})));
+  // Replies and recipients' addresses are personal data: only with the campaigns permission, here and in the peek
+  // (without it the counts stay, the addresses are blank).
+  const mayCampaigns = (res: Response) => roles.can(res.locals.adminRole as roles.PlatformRole | undefined, "campaigns");
+  ob.get("/gtm/campaigns/:id", async (req, res) => {
+    const d = await campaignsMod.campaignDetail(cid(req), { replies: mayCampaigns(res) });
+    res.json(mayCampaigns(res) ? d : { ...d, addresses_hidden: true, recipients: d.recipients.map((r) => ({ ...r, email: "" })) });
+  });
+  // The audience preview: a prospects audience (cold contacts) is the campaigns permission's; any other shows its
+  // sample without addresses unless the caller has it.
+  ob.post("/gtm/audience/preview", need("read"), async (req, res) => {
+    const prospects = (req.body?.audience as { include?: unknown } | undefined)?.include === "prospects";
+    if (prospects && !mayCampaigns(res)) return void res.status(403).json(roles.refusal("campaigns"));
+    const p = await campaignsMod.previewAudience(req.body ?? {});
+    res.json(mayCampaigns(res) ? p : { ...p, addresses_hidden: true, sample: p.sample.map((x) => ({ ...x, email: "" })) });
+  });
   ob.post("/gtm/campaigns", need("campaigns"), async (req, res) =>
     void res.status(201).json(await campaignsMod.createCampaign(adminActor(req, res), (res.locals.adminUserId as string | undefined) ?? null, req.body ?? {})));
   ob.put("/gtm/campaigns/:id", need("campaigns"), async (req, res) => void res.json(await campaignsMod.updateCampaign(adminActor(req, res), cid(req), req.body ?? {})));

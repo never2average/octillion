@@ -278,6 +278,19 @@ export async function gtmPhase2Checks({ db, base, adm, json, mockUrl, mockPost, 
   assert.equal((await json(adm("GET", "/gtm/identities"))).identities.find((i: any) => i.id === ident.id).sent_today, sentBefore + 1, "a test send counts toward the identity's daily cap");
   assert.ok((await json(adm("GET", `/gtm/campaigns/${cO}`))).setup.outbound_postal_warning === outbound.POSTAL_WARNING, "no postal address: a warning on outbound campaigns, never a block");
 
+  // Without the campaigns permission: a campaign's recipients have no addresses, and a prospects preview is refused.
+  const vDetail = await json(asViewer("GET", `/gtm/campaigns/${cO}`));
+  assert.ok(vDetail.recipients.length >= 3 && vDetail.recipients.every((r: any) => r.email === "") && vDetail.addresses_hidden, "a viewer sees counts, not addresses");
+  assert.equal(await status(asViewer("POST", "/gtm/audience/preview", { audience: { include: "prospects" } })), 403, "a prospects preview needs the campaigns permission");
+  const vPv = await json(asViewer("POST", "/gtm/audience/preview", { audience: { include: "requests" } }));
+  assert.ok(vPv.sample.every((x: any) => x.email === ""), "any other preview's sample has no addresses for a viewer");
+  // The test-send cap is taken atomically: two tests at once with one email left, one goes.
+  const left1 = (await json(adm("GET", "/gtm/identities"))).identities.find((i: any) => i.id === ident.id);
+  await json(adm("PUT", `/gtm/identities/${ident.id}`, { daily_cap: left1.sent_today + 1 }));
+  const both = await Promise.all([1, 2].map((k) => status(adm("POST", `/gtm/campaigns/${cO}/test`, { to: `race${k}+${stamp}@p2-test.dev` }))));
+  assert.deepEqual(both.sort(), [201, 409], `one test with one email left: ${both}`);
+  await json(adm("PUT", `/gtm/identities/${ident.id}`, { daily_cap: 10 }));
+
   // B1: once anyone is enrolled, a campaign never switches between prospects and accounts; and a prospect is always
   // cold email, from a valid identity, whatever the campaign row says.
   await json(adm("POST", `/gtm/campaigns/${cT}/pause`));
@@ -311,14 +324,28 @@ export async function gtmPhase2Checks({ db, base, adm, json, mockUrl, mockPost, 
   const clerkOrg = await (await fetch(`${mockUrl}/v1/organizations`, { method: "POST", headers: { authorization: "Bearer sk_test_mock", "content-type": "application/json" }, body: JSON.stringify({ name: `memorg-${stamp}` }) })).json();
   const memOrg = (await db.query<{ id: number }>("INSERT INTO organizations (slug, name, clerk_org_id) VALUES ($1, $1, $2) RETURNING id", [`memorg-${stamp}`, clerkOrg.id]))[0].id;
   created.orgs.push(memOrg);
-  for (const e of [mem, `boss+${stamp}@${memCo}`]) {
+  const gmMember = `jo.doe.${stamp}+news@gmail.com`;
+  for (const e of [mem, `boss+${stamp}@${memCo}`, gmMember]) {
     const u = await mockPost("/_mock/clerk/users", { email: e, first_name: "M" });
     await mockPost("/_mock/clerk/memberships", { org_id: clerkOrg.id, user_id: u.id, role: "org:member" });
   }
+  const invited = `inv+${stamp}@inv-${D}.dev`;
+  await fetch(`${mockUrl}/v1/organizations/${clerkOrg.id}/invitations`, { method: "POST", headers: { authorization: "Bearer sk_test_mock", "content-type": "application/json" },
+    body: JSON.stringify({ email_address: invited, role: "org:member", inviter_user_id: "user_x" }) });
   const tB2 = await tick();
   assert.ok(!sentTo(mem).length && !sentTo(colleague).length && tB2.blocked >= 2, `a new member (and a colleague at their domain) is never cold-emailed: ${JSON.stringify(tB2)}`);
+  // The same person under another spelling (Gmail's dots, googlemail, a +tag), someone at a subdomain of a customer's
+  // domain, and someone with a pending invitation are customers too.
+  const gmProspect = `jodoe${stamp}@googlemail.com`, sub = `eu+${stamp}@eu.${memCo}`;
+  for (const e of [gmProspect, sub, invited]) await json(adm("POST", "/gtm/prospects", { email: e, first_name: "Nn", lawful_basis: "legitimate_interest", country: "US", tags: `${D}-b2n` }));
+  await db.query("UPDATE gtm_prospects SET email_status = 'verified' WHERE email = ANY($1::text[])", [[gmProspect, sub, invited]]);
+  const pvN = await json(adm("POST", "/gtm/audience/preview", { audience: { include: "prospects", prospects: { tags: [`${D}-b2n`] } } }));
+  assert.ok(pvN.count - (pvN.blocked.customer ?? 0) === 0 || [gmProspect, sub, invited].every((e) => !pvN.sample.some((x: any) => x.email === e && x.consent === "legitimate_interest")),
+    `canonical address, parent domain and invitation all count as customers: ${JSON.stringify({ count: pvN.count, blocked: pvN.blocked })}`);
+  const blkN = await outbound.outboundBlocks([gmProspect, sub, invited].map((email) => ({ email })), { id: 0, allow_restricted: false });
+  assert.deepEqual([gmProspect, sub, invited].map((e) => blkN.get(e)), ["customer", "customer", "customer"], "Gmail spelling, eu.<customer domain>, a pending invitation");
   const rel = await json(adm("POST", "/gtm/prospects/relink"));
-  assert.ok(rel.prospects >= 1 && rel.companies >= 1 && (await prospectBy(mem)).status === "customer" && Number((await prospectBy(mem)).org_id) === Number(memOrg), `relink: ${JSON.stringify(rel)}`);
+  assert.ok(rel.prospects >= 1 && (await prospectBy(mem)).status === "customer" && Number((await prospectBy(mem)).org_id) === Number(memOrg), `relink: ${JSON.stringify(rel)}`);
   assert.equal(Number((await db.query<any>("SELECT org_id FROM gtm_companies WHERE domain = $1", [memCo]))[0].org_id), Number(memOrg), "their company is linked by domain");
   assert.ok((await db.query("SELECT 1 FROM gtm_jobs WHERE name = 'customer_links'")).length, "the backfill ran once (first tick) and is recorded");
   // A linked company keeps its domain and cannot be deleted (its people stay recognised).
@@ -346,10 +373,11 @@ export async function gtmPhase2Checks({ db, base, adm, json, mockUrl, mockPost, 
   assert.equal(sentTo(fc, "outbound").length, 1, "Clerk back: it goes");
   // Uncertain sends (phase 1's rules) apply to outbound: a 409 twice holds the batch as uncertain, counted toward the
   // identity's cap; the next tick replays it exactly, still from the identity and text only, once each.
-  const [un1, un2] = [P("unc1"), P("unc2")];
-  for (const e of [un1, un2]) await json(adm("POST", "/gtm/prospects", { email: e, first_name: "Una", lawful_basis: "legitimate_interest", country: "US", tags: `${D}-unc` }));
-  await db.query("UPDATE gtm_prospects SET email_status = 'verified' WHERE email = ANY($1::text[])", [[un1, un2]]);
-  const cUn = (await json(adm("POST", "/gtm/campaigns", { name: `Unc ${stamp}`, audience: { include: "prospects", prospects: { tags: [`${D}-unc`] } }, steps, sender_identity_id: ident.id }))).campaign.id;
+  // With an EU prospect in a campaign that allows them: the outbound rules decide the replay, not lifecycle opt-in.
+  const [un1, un2, un3] = [P("unc1"), P("unc2"), P("unc3")];
+  for (const e of [un1, un2, un3]) await json(adm("POST", "/gtm/prospects", { email: e, first_name: "Una", lawful_basis: "legitimate_interest", country: e === un3 ? "DE" : "US", tags: `${D}-unc` }));
+  await db.query("UPDATE gtm_prospects SET email_status = 'verified' WHERE email = ANY($1::text[])", [[un1, un2, un3]]);
+  const cUn = (await json(adm("POST", "/gtm/campaigns", { name: `Unc ${stamp}`, audience: { include: "prospects", prospects: { tags: [`${D}-unc`] } }, steps, sender_identity_id: ident.id, allow_restricted: true }))).campaign.id;
   created.campaigns.push(cUn);
   await json(adm("POST", `/gtm/campaigns/${cUn}/launch`, {}));
   await json(adm("PUT", `/gtm/identities/${ident.id}`, { daily_cap: 100 }));
@@ -357,16 +385,41 @@ export async function gtmPhase2Checks({ db, base, adm, json, mockUrl, mockPost, 
   await mockPost("/_mock/resend/uncertain", { concurrent: 2 });
   const tu = await tick();
   const held = await db.query<any>("SELECT status, identity_id, payload FROM gtm_campaign_sends WHERE campaign_id = $1", [cUn]);
-  assert.ok(tu.uncertain >= 2 && held.length === 2 && held.every((h: any) => h.status === "uncertain" && Number(h.identity_id) === ident.id && h.payload.from === `"Priya at Octillion Sales" <priya@${OUT}>` && h.payload.textOnly === true),
+  assert.ok(tu.uncertain >= 3 && held.length === 3 && held.every((h: any) => h.status === "uncertain" && Number(h.identity_id) === ident.id && h.payload.from === `"Priya at Octillion Sales" <priya@${OUT}>` && h.payload.textOnly === true),
     `outbound uncertain: held with the identity's From: ${JSON.stringify({ tu, held: held.map((h: any) => [h.status, h.identity_id]) })}`);
-  assert.equal((await json(adm("GET", "/gtm/identities"))).identities.find((i: any) => i.id === ident.id).sent_today, sentPre + 2, "uncertain sends count toward the cap");
+  assert.equal((await json(adm("GET", "/gtm/identities"))).identities.find((i: any) => i.id === ident.id).sent_today, sentPre + 3, "uncertain sends count toward the cap");
   // The replay's turn comes 5 minutes after the first try (phase 1's pacing): that time passes.
   await db.query("UPDATE gtm_campaign_sends SET uncertain_at = now() - interval '6 minutes', at = now() - interval '6 minutes' WHERE campaign_id = $1", [cUn]);
   await tick();
-  for (const e of [un1, un2]) {
+  for (const e of [un1, un2, un3]) {
     const got = sentTo(e);
     assert.ok(got.length === 1 && got[0].from === `"Priya at Octillion Sales" <priya@${OUT}>` && !got[0].html && got[0].tags?.[0]?.value === "outbound", `the replay keeps the identity's From, text only, once: ${e}`);
   }
+
+  // A prospect who said no, or became a customer, has their open sequences stopped, uncertain sends included; an
+  // owner's Resend of unknown sends applies the outbound rules (fresh customer check, identity, cap), by reason.
+  const [rq, rz] = [P("stopq"), P("stopz", `stopz-${D}.dev`)];
+  for (const e of [rq, rz]) await json(adm("POST", "/gtm/prospects", { email: e, first_name: "Sto", lawful_basis: "legitimate_interest", country: "US", tags: `${D}-stop` }));
+  await db.query("UPDATE gtm_prospects SET email_status = 'verified' WHERE email = ANY($1::text[])", [[rq, rz]]);
+  const cSt = (await json(adm("POST", "/gtm/campaigns", { name: `Stop ${stamp}`, audience: { include: "prospects", prospects: { tags: [`${D}-stop`] } }, steps, sender_identity_id: ident.id }))).campaign.id;
+  created.campaigns.push(cSt);
+  await json(adm("POST", `/gtm/campaigns/${cSt}/launch`, {}));
+  await mockPost("/_mock/resend/uncertain", { concurrent: 2 });
+  await tick();
+  const sendOf = async (e: string) => (await db.query<any>("SELECT s.status, s.error, r.status AS rstatus FROM gtm_campaign_sends s JOIN gtm_campaign_recipients r ON r.id = s.recipient_id WHERE s.campaign_id = $1 AND r.email = $2", [cSt, e]))[0];
+  assert.ok((await sendOf(rq)).status === "uncertain" && (await sendOf(rz)).status === "uncertain", "both held as uncertain");
+  await json(adm("PUT", `/gtm/prospects/${(await prospectBy(rq)).id}`, { status: "not_interested" }));
+  const sq = await sendOf(rq);
+  assert.ok(sq.status === "unknown" && /Stopped/.test(sq.error) && sq.rstatus === "suppressed", `not interested: the sequence stops, its uncertain send never replays: ${JSON.stringify(sq)}`);
+  // rz's outcome is unknown (past the replay window), and meanwhile rz joined a customer account.
+  await db.query("UPDATE gtm_campaign_sends SET status = 'unknown' WHERE campaign_id = $1 AND status = 'uncertain'", [cSt]);
+  const uz = await mockPost("/_mock/clerk/users", { email: rz, first_name: "Z" });
+  await mockPost("/_mock/clerk/memberships", { org_id: clerkOrg.id, user_id: uz.id, role: "org:member" });
+  const rs = await json(adm("POST", `/gtm/campaigns/${cSt}/resend-unknown`));
+  assert.ok(rs.resent === 0 && rs.skipped_by_reason.customer === 1 && rs.skipped_by_reason.not_waiting === 1 && !sentTo(rz).length && !sentTo(rq).length,
+    `Resend skips a new customer (read from Clerk now) and a stopped one: ${JSON.stringify(rs)}`);
+  await json(adm("POST", "/gtm/prospects/relink"));
+  assert.ok((await prospectBy(rz)).status === "customer" && (await sendOf(rz)).rstatus === "suppressed", "linked as a customer: their sequence is stopped too");
 
   // Minor: another outbound campaign's recent email keeps a prospect out of a new one (cool-off), the ledger records
   // the prospect's basis, an import needs an explicit basis for someone with no country, and an unknown company id
@@ -461,7 +514,7 @@ export async function gtmPhase2Checks({ db, base, adm, json, mockUrl, mockPost, 
   assert.ok(yRow && yRow.pipeline === 5000, "open deals count as that campaign's pipeline");
 
   // ---------- where addresses live: gtm_prospects, recipients, replies; nowhere else ----------
-  const everyone = [pa, pb, pd, pg, ph, gmailP, zed, yan, xia, cust, busy, tp, b1, mem, colleague, fc, P("wes"), un1, un2];
+  const everyone = [pa, pb, pd, pg, ph, gmailP, zed, yan, xia, cust, busy, tp, b1, mem, colleague, fc, P("wes"), un1, un2, un3, gmProspect, sub, invited, rq, rz];
   const elsewhere = JSON.stringify(await db.query("SELECT * FROM gtm_companies")) + JSON.stringify(await db.query("SELECT * FROM gtm_prospect_activities"))
     + JSON.stringify(await db.query("SELECT * FROM gtm_deals")) + JSON.stringify(await db.query("SELECT * FROM gtm_deal_stages")) + JSON.stringify(await db.query("SELECT * FROM gtm_apollo_cache"))
     + JSON.stringify(await db.query("SELECT * FROM gtm_apollo_usage")) + JSON.stringify(await db.query("SELECT * FROM gtm_sender_identities")) + JSON.stringify(await db.query("SELECT * FROM gtm_events"))

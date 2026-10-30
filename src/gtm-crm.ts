@@ -20,6 +20,7 @@
  *   timeline    the prospect's own entries (notes, status changes, import, enrichment, links, deals) and, from the
  *               campaign tables, each email sent, opened, clicked, bounced and each reply.
  */
+import { getDomain } from "tldts";
 import { getDb, type Queryable } from "./db.js";
 import { AdminError, log, accountPeople } from "./admin.js";
 import * as mail from "./email.js";
@@ -289,6 +290,7 @@ export async function updateProspect(actor: string, id: number, body: ProspectIn
     throw e;
   });
   if (status && status !== before.status) await activity(id, "status", null, { from: before.status, to: status }, actor);
+  if (status && status !== before.status && STOPPING.includes(status)) await stopOutbound(id);
   if (str(body.note, 4000)) await activity(id, "note", str(body.note, 4000), {}, actor);
   log(actor, "gtm.prospect_update", null, { prospect_id: id, fields: Object.keys(body).filter((k) => k !== "email") });
   return prospectDetail(id);
@@ -302,7 +304,25 @@ export async function setStatus(prospectId: number, to: ProspectStatus, o: { act
       WHERE p.id = $1 AND p.status <> $2 AND ($3::text[] IS NULL OR p.status = ANY($3::text[])) RETURNING old.status AS from`,
     [prospectId, to, o.only_from ?? null]);
   if (r) await activity(prospectId, "status", o.why ?? null, { from: r.from, to }, o.actor ?? null);
+  if (r && STOPPING.includes(to)) await stopOutbound(prospectId);
   return !!r;
+}
+
+/** Statuses that end every cold sequence for the person: a customer now, said no, or the address does not work. */
+export const STOPPING: string[] = ["customer", "not_interested", "bad_email"];
+/**
+ * Stop a prospect's open outbound sequences: their waiting recipient rows are suppressed (nothing more is sent), and
+ * an email whose outcome is still uncertain is parked as unknown (never replayed; and an owner's Resend skips anyone
+ * no longer waiting). Returns how many sequences it stopped.
+ */
+export async function stopOutbound(prospectId: number) {
+  const db = await getDb();
+  const rs = await db.query<{ id: number }>(
+    `UPDATE gtm_campaign_recipients SET status = 'suppressed', next_at = NULL WHERE prospect_id = $1 AND source = 'prospect' AND status IN ('pending', 'active') RETURNING id`, [prospectId]);
+  if (rs.length) await db.query(
+    `UPDATE gtm_campaign_sends SET status = 'unknown', error = 'Stopped: the prospect is a customer, said no, or their address does not work' WHERE recipient_id = ANY($1::bigint[]) AND status = 'uncertain'`,
+    [rs.map((r) => Number(r.id))]);
+  return rs.length;
 }
 
 export async function addNote(actor: string, id: number, text: unknown) {
@@ -476,33 +496,116 @@ export async function importProspects(actor: string, body: { rows?: unknown; dry
 const EVENT_LINKS = ["request_submitted", "request_approved", "account_created"];
 
 /**
- * Who is a customer now: every account's people, by address hash (their access requests that have the account, and
- * their members in Clerk, suspended ones too), and the company domains those addresses are at (never a free-mail
- * one). Cached a minute (a tick, an enrolment, an import share it). When Clerk cannot be asked for an account, `error`
- * says so and nothing is cached: callers fail closed (no cold email this pass).
+ * Who is a customer now: every account's people (their access requests that have the account, their members in Clerk,
+ * suspended ones too, and pending invitations), by a canonical address hash (lowercased, any +tag dropped, and for
+ * Gmail the dots dropped and googlemail read as gmail: memberKey), and the company domains those addresses are at,
+ * both exactly and by organisational root (eu.acme.com counts as acme.com), never a free-mail one.
+ *
+ * Built at most every MEMBER_INDEX_MAX_AGE (5 minutes; sooner when the accounts change), reading each account's members
+ * from Clerk itself (not the admin pages' one-minute cache), five accounts at a time; a tick, an enrolment and an
+ * import share it, and the tick checks each due prospect's own accounts afresh as well (freshMemberCheck). When Clerk
+ * cannot be asked for an account, `error` says so and nothing is cached: callers fail closed (no cold email this pass).
+ *
+ * Limit: Clerk's membership list gives each member's sign-in identifier, not every address on their user; a member
+ * whose other verified address is the prospect's is matched by domain only, or when they first sign in to the portal
+ * (src/app.ts links by their primary address).
  */
-export interface MemberIndex { byHash: Map<string, number>; domains: Map<string, number>; error: string | null; at: number }
+export interface MemberIndex { byHash: Map<string, number>; domains: Map<string, number>; error: string | null; at: number; sig: string }
+const MEMBER_INDEX_MAX_AGE = 5 * 60_000;
 let members: MemberIndex | null = null;
 export const forgetMembers = () => { members = null; };
+
+/** The address as the customer match compares it: lowercased, +tag dropped, Gmail's dots ignored. Hashed. */
+export function memberKey(email: string) {
+  let [local, domain] = email.trim().toLowerCase().split("@");
+  if (!local || !domain) return mail.hashAddress(email);
+  local = local.split("+")[0];
+  if (domain === "googlemail.com") domain = "gmail.com";
+  if (domain === "gmail.com") local = local.replace(/\./g, "");
+  return mail.hashAddress(`${local}@${domain}`);
+}
+/** The organisational root of a domain (public-suffix aware), or the domain itself. */
+export const orgRootOf = (d: string) => getDomain(d, { allowPrivateDomains: false }) ?? d;
+/** The account an address belongs to by the index: its own address, else its company domain or that domain's root. */
+export function memberOrg(idx: MemberIndex, email: string): number | null {
+  const org = idx.byHash.get(memberKey(email));
+  if (org != null) return org;
+  const d = companyDomainOf(email);
+  return d ? idx.domains.get(d) ?? idx.domains.get(orgRootOf(d)) ?? null : null;
+}
+
+/** What changes the index: accounts with Clerk organizations, and requests that have an account. */
+async function memberSignature() {
+  const [r] = await (await getDb()).query<{ sig: string }>(
+    `SELECT (SELECT count(*) || ':' || coalesce(max(id), 0) FROM organizations WHERE clerk_org_id IS NOT NULL) || '/' ||
+            (SELECT count(*) || ':' || coalesce(max(id), 0) FROM access_requests WHERE org_id IS NOT NULL) AS sig`);
+  return r.sig;
+}
+
+/** Run fn over items, at most n at a time. */
+async function pooled<T>(items: T[], n: number, fn: (x: T) => Promise<void>) {
+  let i = 0;
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => { while (i < items.length) await fn(items[i++]); }));
+}
+
+function addTo(out: MemberIndex, email: string, orgId: number) {
+  const e = email.trim().toLowerCase();
+  if (!mail.isEmail(e)) return;
+  out.byHash.set(memberKey(e), orgId);
+  const d = companyDomainOf(e);
+  if (!d) return;
+  if (!out.domains.has(d)) out.domains.set(d, orgId);
+  const root = orgRootOf(d);
+  if (!FREEMAIL.has(root) && !out.domains.has(root)) out.domains.set(root, orgId);
+}
+
+/** One account's people from Clerk itself (members and pending invitations), or the error. */
+async function clerkPeople(clerkOrgId: string): Promise<{ emails: string[]; error: string | null }> {
+  const people = await accountPeople(clerkOrgId, true).catch((e: Error) => ({ members: [], invitations: [], error: e.message }));
+  if (people?.error) return { emails: [], error: people.error };
+  return { emails: [...(people?.members ?? []).flatMap((m) => (m.email ? [m.email] : [])), ...(people?.invitations ?? []).filter((x) => x.state === "pending").map((x) => x.email)], error: null };
+}
+
 export async function memberIndex(o: { maxAgeMs?: number } = {}): Promise<MemberIndex> {
-  if (members && Date.now() - members.at < (o.maxAgeMs ?? 60_000)) return members;
+  const sig = await memberSignature();
+  if (members && members.sig === sig && Date.now() - members.at < (o.maxAgeMs ?? MEMBER_INDEX_MAX_AGE)) return members;
   const db = await getDb();
-  const out: MemberIndex = { byHash: new Map(), domains: new Map(), error: null, at: Date.now() };
-  const add = (email: string, orgId: number) => {
-    const e = email.trim().toLowerCase();
-    if (!mail.isEmail(e)) return;
-    out.byHash.set(mail.hashAddress(e), orgId);
-    const d = companyDomainOf(e);
-    if (d && !out.domains.has(d)) out.domains.set(d, orgId);
-  };
-  for (const r of await db.query<{ email: string; org_id: number }>("SELECT lower(email) AS email, org_id FROM access_requests WHERE org_id IS NOT NULL")) add(r.email, Number(r.org_id));
-  for (const o2 of await db.query<{ id: number; clerk_org_id: string }>("SELECT id, clerk_org_id FROM organizations WHERE clerk_org_id IS NOT NULL ORDER BY id")) {
-    const people = await accountPeople(o2.clerk_org_id).catch((e: Error) => ({ members: [], invitations: [], error: e.message }));
-    if (people?.error) { out.error = `Clerk did not list the members of account ${o2.id}: ${people.error}`; continue; }
-    for (const m of people?.members ?? []) if (m.email) add(m.email, Number(o2.id));
-  }
+  const out: MemberIndex = { byHash: new Map(), domains: new Map(), error: null, at: Date.now(), sig };
+  for (const r of await db.query<{ email: string; org_id: number }>("SELECT lower(email) AS email, org_id FROM access_requests WHERE org_id IS NOT NULL")) addTo(out, r.email, Number(r.org_id));
+  const orgs = await db.query<{ id: number; clerk_org_id: string }>("SELECT id, clerk_org_id FROM organizations WHERE clerk_org_id IS NOT NULL ORDER BY id");
+  await pooled(orgs, 5, async (o2) => {
+    const p = await clerkPeople(o2.clerk_org_id);
+    if (p.error) { out.error = `Clerk did not list the members of account ${o2.id}: ${p.error}`; return; }
+    for (const e of p.emails) addTo(out, e, Number(o2.id));
+  });
   if (!out.error) members = out;
   return out;
+}
+
+/**
+ * Before a cold email: the accounts this address could belong to (its prospect's or company's account, and any
+ * account with people at its domain or that domain's root) read again from Clerk now. "customer", "member_check"
+ * (Clerk did not answer: not this time) or null.
+ */
+export async function freshMemberCheck(email: string, idx: MemberIndex): Promise<"customer" | "member_check" | null> {
+  const db = await getDb();
+  const e = email.trim().toLowerCase(), d = companyDomainOf(e);
+  const ids = new Set<number>();
+  for (const k of d ? [d, orgRootOf(d)] : []) { const o = idx.domains.get(k); if (o != null) ids.add(o); }
+  for (const r of await db.query<{ org_id: number | null; company_org: number | null }>(
+    "SELECT p.org_id, c.org_id AS company_org FROM gtm_prospects p LEFT JOIN gtm_companies c ON c.id = p.company_id WHERE p.email = $1", [e])) {
+    if (r.org_id != null) ids.add(Number(r.org_id));
+    if (r.company_org != null) ids.add(Number(r.company_org));
+  }
+  if (!ids.size) return null;
+  const key = memberKey(e);
+  for (const o of await db.query<{ id: number; clerk_org_id: string | null }>("SELECT id, clerk_org_id FROM organizations WHERE id = ANY($1::int[])", [[...ids]])) {
+    if (!o.clerk_org_id) continue;
+    const p = await clerkPeople(o.clerk_org_id);
+    if (p.error) return "member_check";
+    if (p.emails.some((x) => memberKey(x) === key)) return "customer";
+  }
+  return null;
 }
 
 /** Link one prospect to its request and / or account: status customer with an account, a timeline entry, one event. */
@@ -595,7 +698,7 @@ export async function linkByMembers(ids?: number[]) {
   const ps = await db.query<{ id: number; email: string }>(
     "SELECT id, email FROM gtm_prospects WHERE email IS NOT NULL AND org_id IS NULL AND ($1::bigint[] IS NULL OR id = ANY($1::bigint[]))", [ids ?? null]);
   let prospects = 0, companies = 0;
-  for (const p of ps) { const org = idx.byHash.get(mail.hashAddress(p.email)); if (org != null && await markLinked(Number(p.id), { org_id: org }, "A member of an Octillion account")) prospects++; }
+  for (const p of ps) { const org = idx.byHash.get(memberKey(p.email)); if (org != null && await markLinked(Number(p.id), { org_id: org }, "A member of an Octillion account")) prospects++; }
   for (const [d, org] of idx.domains) companies += (await db.query("UPDATE gtm_companies SET org_id = $1, linked_at = now(), updated_at = now() WHERE domain = $2 AND org_id IS NULL RETURNING id", [org, d])).length;
   return { prospects, companies, requests: await linkProspects(ps.map((p) => Number(p.id))) };
 }

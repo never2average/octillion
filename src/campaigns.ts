@@ -56,7 +56,7 @@ import { DETECTED, detectSignals, EVENT_TYPES, forgetImmediate, REQUEST_EVENTS, 
 import { NO_WINDOW, nextOpening, parseWindow, recipientZone, validZone, windowOpen, type SendWindow } from "./gtm-schedule.js";
 import * as replies from "./gtm-replies.js";
 import * as outbound from "./gtm-outbound.js";
-import { backfillOnce, memberIndex, type MemberIndex } from "./gtm-crm.js";
+import { backfillOnce, freshMemberCheck, memberIndex, type MemberIndex } from "./gtm-crm.js";
 
 export const STATUSES = ["draft", "scheduled", "running", "paused", "done"] as const;
 export type CampaignStatus = (typeof STATUSES)[number];
@@ -307,16 +307,20 @@ export async function updateCampaign(actor: string, id: number, body: Record<str
   const f = fields(body, true);
   // Cold and lifecycle email never trade places: once anyone is enrolled, the audience stays prospects (outbound, from
   // an identity) or stays accounts / requesters (lifecycle, from EMAIL_FROM).
-  if (f.audience && (f.audience.include === "prospects") !== isOutbound(c)) {
-    const [{ n }] = await (await getDb()).query<{ n: number }>("SELECT count(*)::int AS n FROM gtm_campaign_recipients WHERE campaign_id = $1", [c.id]);
-    if (n) throw new AdminError("This campaign has recipients: its audience cannot switch between prospects (outbound) and accounts or requesters. Make a new campaign instead", 409);
-  }
+  const switching = !!f.audience && (f.audience.include === "prospects") !== isOutbound(c);
   if ((f.audience ?? c.audience).include === "prospects" && (body.trigger !== undefined ? f.trigger : c.trigger))
     throw new AdminError("An outbound campaign (prospects) is not triggered by events: it starts at launch or a scheduled time");
   await checkIdentity(f.sender_identity_id);
   // The trigger column is nullable: "no trigger" is a change, so it is set explicitly when sent (the identity and
-  // open tracking likewise).
-  await (await getDb()).query(
+  // open tracking likewise). A switch between prospects and accounts is checked and written under the campaign's row
+  // lock: an enrolment (whose recipients reference the row) cannot slip in between.
+  await (await getDb()).transaction(async (tx) => {
+    const [locked] = await tx.query<{ include: string }>("SELECT audience->>'include' AS include FROM gtm_campaigns WHERE id = $1 FOR UPDATE", [c.id]);
+    if (switching || (f.audience && (f.audience.include === "prospects") !== (locked?.include === "prospects"))) {
+      const [{ n }] = await tx.query<{ n: number }>("SELECT count(*)::int AS n FROM gtm_campaign_recipients WHERE campaign_id = $1", [c.id]);
+      if (n) throw new AdminError("This campaign has recipients: its audience cannot switch between prospects (outbound) and accounts or requesters. Make a new campaign instead", 409);
+    }
+    await tx.query(
     `UPDATE gtm_campaigns SET name = coalesce($2, name), audience = coalesce($3::jsonb, audience), steps = coalesce($4::jsonb, steps),
             rolling = coalesce($5, rolling), conversion_days = coalesce($6, conversion_days),
             trigger = CASE WHEN $7 THEN $8::jsonb ELSE trigger END, send_window = coalesce($9::jsonb, send_window),
@@ -327,6 +331,7 @@ export async function updateCampaign(actor: string, id: number, body: Record<str
      body.trigger !== undefined, f.trigger ? JSON.stringify(f.trigger) : null, f.send_window ? JSON.stringify(f.send_window) : null,
      body.requires_opt_in !== undefined, f.requires_opt_in ?? null, f.count_auto_replies ?? null,
      body.sender_identity_id !== undefined, f.sender_identity_id ?? null, body.track_opens !== undefined, f.track_opens ?? null, f.allow_restricted ?? null]);
+  });
   forgetImmediate();
   log(actor, "campaign.update", null, { campaign_id: c.id, fields: Object.keys(f) });
   return campaignDetail(c.id);
@@ -792,11 +797,12 @@ export async function testSend(actor: string, id: number, body: { to?: unknown; 
   if (isOutbound(c)) { const why = await outbound.identityProblem(c.sender_identity_id); if (why) throw new AdminError(why); }
   const ident = isOutbound(c) ? await outbound.identityById(c.sender_identity_id) : null;
   // A test from the identity counts toward its daily cap like any other email from it.
-  if (ident && (await outbound.leftToday(ident)) <= 0) throw new AdminError(`${ident.from_address} has sent its ${outbound.warmupCap(ident)} for today (warm-up cap): try tomorrow`, 409);
+  const testKey = `campaign-test:${c.id}:${randomUUID()}`;
+  if (ident && !(await outbound.reserveTest(ident, testKey, to, c.id))) throw new AdminError(`${ident.from_address} has sent its ${outbound.warmupCap(ident)} for today (warm-up cap): try tomorrow`, 409);
   const sample = (await resolveAudience(c.audience).catch(() => []))[0];
   const url = unsubscribeUrl(TEST_TOKEN), postal = await postalAddress();
   const src = sample?.source ?? (ident ? "prospect" : "account");
-  const r = await mail.send({ kind: ident ? "outbound_test" : "campaign_test", to, idempotencyKey: `campaign-test:${c.id}:${randomUUID()}`,
+  const r = await mail.send({ kind: ident ? "outbound_test" : "campaign_test", to, idempotencyKey: testKey,
     meta: { campaign_id: c.id, step: i, variant: k >= 0 ? VARIANT_LETTERS[k] : null, ...(ident ? { identity_id: ident.id } : {}) },
     subject: `[Test] ${render(words.subject, sample ?? {})}`, text: render(words.body, sample ?? {}) + footer(src, url, postal),
     ...(tracksOpens(c) ? { html: renderHtml(words.body + footer(src, url, postal), sample ?? {}) } : { textOnly: true }), from: ident ? outbound.senderOf(ident) : undefined,
@@ -931,15 +937,30 @@ async function sweepStuck() {
   return { uncertain: stuck.filter((s) => s.status === "uncertain").length, unknown: stuck.filter((s) => s.status === "unknown").length };
 }
 
+/**
+ * May this prospect's cold email go (again) now? The outbound rules (src/gtm-outbound.ts: customer by the member
+ * index and a fresh look at their own accounts, status, withdrawal, another sequence, the EU / EEA / UK / CH rule with
+ * the campaign's allow_restricted; never mayEnrol's opt-in rule, which is for lifecycle email) and a valid identity.
+ * The reason it may not, or null. member_check (Clerk did not answer) means "not now", never "never".
+ */
+async function prospectGate(r: { email: string; prospect_id: number | null; recipient_id: number }, c: CampaignRow, idx: MemberIndex): Promise<string | null> {
+  const why = (await outbound.outboundBlocks([{ email: r.email, prospect_id: r.prospect_id, recipient_id: r.recipient_id }], c, idx)).get(r.email);
+  if (why) return why;
+  const fresh = await freshMemberCheck(r.email, idx);
+  if (fresh) return fresh;
+  return (await outbound.identityProblem(c.sender_identity_id)) ? "identity" : null;
+}
+
 type ReplayRow = { id: number; campaign_id: number; recipient_id: number; step: number; round: number; batch_key: string; batch_pos: number; payload: Record<string, unknown>;
-  expired: boolean; due: boolean; replays: number; email: string; source: "account" | "request"; country: string | null; rstatus: string; cstatus: string | null; suppressed: boolean };
+  expired: boolean; due: boolean; replays: number; email: string; source: "account" | "request" | "prospect"; country: string | null; rstatus: string; cstatus: string | null; suppressed: boolean;
+  prospect_id: number | null };
 
 /** Replay uncertain requests that are due, each as the very same request (see above). Returns whether one was still uncertain. */
 async function replayUncertain(only: number | null, stopAt: number, gap: number, timeoutMs: () => number, out: TickResult): Promise<{ uncertain: boolean }> {
   const db = await getDb();
   const rows = await db.query<ReplayRow>(
     `SELECT s.id, s.campaign_id, s.recipient_id, s.step, s.round, s.batch_key, s.batch_pos, s.payload, s.uncertain_at < now() - interval '23 hours' AS expired,
-            ${REPLAY_DUE_SQL} AS due, s.replays, r.email, r.source, r.country, r.status AS rstatus, c.status AS cstatus,
+            ${REPLAY_DUE_SQL} AS due, s.replays, r.email, r.source, r.country, r.status AS rstatus, c.status AS cstatus, r.prospect_id,
             EXISTS (SELECT 1 FROM email_suppressions x WHERE x.email_hash = encode(sha256(convert_to(lower(trim(r.email)), 'UTF8')), 'hex')) AS suppressed
        FROM gtm_campaign_sends s JOIN gtm_campaign_recipients r ON r.id = s.recipient_id LEFT JOIN gtm_campaigns c ON c.id = s.campaign_id
       WHERE s.status = 'uncertain' AND ($1::bigint IS NULL OR s.batch_key IN (SELECT batch_key FROM gtm_campaign_sends WHERE status = 'uncertain' AND campaign_id = $1))
@@ -953,6 +974,8 @@ async function replayUncertain(only: number | null, stopAt: number, gap: number,
   };
   const consent = await consentOf(rows.map((r) => r.email));
   const campaigns = new Map<number, CampaignRow | null>();
+  // Prospects: the outbound rules, against every account's people (only looked up when a prospect is replayed).
+  let idx: Promise<MemberIndex> | null = null;
   let first = true, stillUncertain = false;
   for (const [key, g] of groups) {
     if (Date.now() >= stopAt) break;
@@ -963,15 +986,21 @@ async function replayUncertain(only: number | null, stopAt: number, gap: number,
     if (g.some((r) => r.cstatus === "paused")) continue;
     // Each member as they are now: still waiting, not suppressed, consent as this campaign needs it.
     const ok: ReplayRow[] = [], gone: ReplayRow[] = [];
+    let wait = false;
     for (const r of g) {
       const cid = Number(r.campaign_id);
       if (!campaigns.has(cid)) campaigns.set(cid, await campaignById(cid).catch(() => null));
       const c = campaigns.get(cid);
-      const fine = !!c && ["running", "done"].includes(c.status) && ["pending", "active"].includes(r.rstatus) && !r.suppressed
-        && mayEnrol({ email: r.email, source: r.source, country: r.country }, requiresOptIn(c), consent.get(r.email)).ok;
+      let fine = !!c && ["running", "done"].includes(c.status) && ["pending", "active"].includes(r.rstatus) && !r.suppressed;
+      if (fine && r.source === "prospect") {
+        const why = await prospectGate({ email: r.email, prospect_id: r.prospect_id, recipient_id: Number(r.recipient_id) }, c!, await (idx ??= memberIndex()));
+        if (why === "member_check") wait = true; // Clerk did not answer: this request waits for its next turn, unchanged
+        fine = !why;
+      } else if (fine) fine = mayEnrol({ email: r.email, source: r.source as "account" | "request", country: r.country }, requiresOptIn(c!), consent.get(r.email)).ok;
       (fine ? ok : gone).push(r);
     }
-    await park(gone, "Outcome unknown: not repeated, the person replied, unsubscribed, was suppressed or no longer has the consent this campaign needs");
+    if (wait) continue;
+    await park(gone, "Outcome unknown: not repeated, the person replied, unsubscribed, was suppressed, no longer has the consent this campaign needs, or may not get cold email now");
     if (!ok.length) continue;
     // The rest go as the same request key; with fewer emails their places are renumbered first (what a later replay repeats).
     if (ok.length < g.length)
@@ -1014,14 +1043,28 @@ export async function resendUnknown(actor: string, id: number) {
   const c = await campaignById(id);
   const db = await getDb();
   const rows = await db.query<{ id: number; recipient_id: number; step: number; round: number; payload: Record<string, unknown> | null; email: string; rstatus: string;
-    source: "account" | "request"; country: string | null; suppressed: boolean }>(
-    `SELECT s.id, s.recipient_id, s.step, s.round, s.payload, r.email, r.status AS rstatus, r.source, r.country,
+    source: "account" | "request" | "prospect"; country: string | null; suppressed: boolean; prospect_id: number | null }>(
+    `SELECT s.id, s.recipient_id, s.step, s.round, s.payload, r.email, r.status AS rstatus, r.source, r.country, r.prospect_id,
             EXISTS (SELECT 1 FROM email_suppressions x WHERE x.email_hash = encode(sha256(convert_to(lower(trim(r.email)), 'UTF8')), 'hex')) AS suppressed
        FROM gtm_campaign_sends s JOIN gtm_campaign_recipients r ON r.id = s.recipient_id WHERE s.campaign_id = $1 AND s.status = 'unknown' ORDER BY s.id`, [c.id]);
   const consent = await consentOf(rows.map((r) => r.email));
   let resent = 0, requeued = 0, skipped = 0, uncertain = 0;
+  const reasons: Record<string, number> = {};
+  const skip = (why: string) => { skipped++; reasons[why] = (reasons[why] ?? 0) + 1; };
+  // Prospects: every account's people read from Clerk now (no cache), the identity, and what it may still send today.
+  const prospects = rows.some((r) => r.source === "prospect");
+  const idx = prospects ? await memberIndex({ maxAgeMs: 0 }) : null;
+  const ident = prospects ? await outbound.identityById(c.sender_identity_id) : null;
+  let left = ident ? await outbound.leftToday(ident) : 0;
   for (const r of rows) {
-    if (!["pending", "active"].includes(r.rstatus) || r.suppressed || !mayEnrol({ email: r.email, source: r.source, country: r.country }, requiresOptIn(c), consent.get(r.email)).ok) { skipped++; continue; }
+    if (!["pending", "active"].includes(r.rstatus)) { skip("not_waiting"); continue; }
+    if (r.suppressed) { skip("suppressed"); continue; }
+    if (r.source === "prospect") {
+      const why = await prospectGate({ email: r.email, prospect_id: r.prospect_id, recipient_id: Number(r.recipient_id) }, c, idx!);
+      if (why) { skip(why); continue; }
+      if (left <= 0) { skip("daily_cap"); continue; }
+      left--;
+    } else if (!mayEnrol({ email: r.email, source: r.source, country: r.country }, requiresOptIn(c), consent.get(r.email)).ok) { skip("no_consent"); continue; }
     if (!r.payload) {
       await db.query("UPDATE gtm_campaign_sends SET status = 'failed', batch_key = NULL, batch_pos = NULL, error = $2 WHERE id = $1", [r.id, `Resent by ${actor.slice(0, 80)}`]);
       await db.query("UPDATE email_log SET status = 'failed', error = 'Outcome unknown; resent by an owner' WHERE idempotency_key = $1 AND status IN ('sending', 'failed')",
@@ -1043,8 +1086,8 @@ export async function resendUnknown(actor: string, id: number) {
     } else if (res?.uncertain) { await markUncertain({ sendId: Number(r.id), recipientId: Number(r.recipient_id) }, res, email.idempotencyKey, email); uncertain++; }
     else await db.query("UPDATE gtm_campaign_sends SET status = 'unknown', error = $2 WHERE id = $1", [r.id, `Resend refused: ${(res?.error ?? res?.status ?? "no result").slice(0, 300)}`]);
   }
-  log(actor, "campaign.resend_unknown", null, { campaign_id: c.id, resent, requeued, skipped, uncertain });
-  return { campaign_id: c.id, resent, requeued, skipped, uncertain };
+  log(actor, "campaign.resend_unknown", null, { campaign_id: c.id, resent, requeued, skipped, uncertain, reasons });
+  return { campaign_id: c.id, resent, requeued, skipped, skipped_by_reason: reasons, uncertain };
 }
 
 async function runTick(only: number | null, o: TickOptions = {}): Promise<TickResult> {
@@ -1101,7 +1144,7 @@ async function runTick(only: number | null, o: TickOptions = {}): Promise<TickRe
     const [postal, box, key] = await Promise.all([postalAddress(), replies.inbox(), unsubscribeKey()]);
     // Every account's people, for the customer check before each cold email: looked up once per tick.
     let members: Promise<MemberIndex> | null = null;
-    const memberIdx = () => (members ??= memberIndex({ maxAgeMs: 0 }));
+    const memberIdx = () => (members ??= memberIndex());
     const from = settingText("EMAIL_FROM"), defaultReplyTo = settingText("EMAIL_REPLY_TO").split(",").map((x) => x.trim()).filter(mail.isEmail);
     let attempted = 0, slowDown = replay.uncertain, calls = 0;
     // Outbound sender identities: each one's warm-up cap left today, counted over every campaign (src/gtm-outbound.ts).
@@ -1164,7 +1207,9 @@ async function runTick(only: number | null, o: TickOptions = {}): Promise<TickRe
             // fit to send; none, and nothing goes. Clerk not answering for the customer check: next time.
             let slot: { i: outbound.Identity; left: number } | null = null;
             if (r.source === "prospect") {
-              const why = (await outbound.outboundBlocks([{ email: r.email, prospect_id: r.prospect_id, recipient_id: Number(r.id) }], c, await memberIdx())).get(r.email);
+              const gate = await prospectGate({ email: r.email, prospect_id: r.prospect_id, recipient_id: Number(r.id) }, c, await memberIdx());
+              // No valid identity: nothing goes (the slot below defers them); any other reason stops this person.
+              const why = gate === "identity" ? null : gate;
               if (why === "member_check") { await db.query("UPDATE gtm_campaign_recipients SET next_at = now() + interval '15 minutes' WHERE id = $1", [r.id]); out.deferred++; continue; }
               if (why) {
                 await db.query("UPDATE gtm_campaign_recipients SET status = 'suppressed', next_at = NULL WHERE id = $1", [r.id]);
