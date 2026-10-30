@@ -7,7 +7,8 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import { toast } from 'sonner';
 import PageContainer from '@/components/layout/page-container';
-import { ActionsMenu, Field, RecordView, type RecordCol, type RowAction } from '@/components/layout/record-view';
+import { ActionsMenu, RecordView, type RecordCol, type RowAction } from '@/components/layout/record-view';
+import { DetailMeta, DetailTable, DetailTabs, KeyValueTable, LongText } from '@/components/layout/detail';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
@@ -31,10 +32,6 @@ interface Draft { slug?: string; name: string; summary: string; role: string; ex
 
 const PICKED = 'Picked by onboarding';
 const NA = <span className='text-muted-foreground'>—</span>;
-const META = 'text-muted-foreground flex flex-wrap items-center gap-x-2 gap-y-1 text-xs leading-none';
-const Dot = () => <span className='text-muted-foreground/60'>·</span>;
-const Label = ({ children }: { children: ReactNode }) => <div className='text-muted-foreground mb-2 text-xs font-medium leading-none'>{children}</div>;
-const Prose = ({ children }: { children: ReactNode }) => <div className='text-sm leading-relaxed whitespace-pre-wrap'>{children}</div>;
 const SHOWN = new Set(['role', 'experience_years', 'company_size', 'stack', 'constraints', 'tone']);
 const text = (v: unknown) => (v == null || v === '' ? null : typeof v === 'object' ? JSON.stringify(v) : String(v));
 const years = (p: Persona) => (typeof p.attributes.experience_years === 'number' ? p.attributes.experience_years : null);
@@ -127,12 +124,11 @@ export function PersonasPage() {
           searchPlaceholder='Search personas by name, summary or stack'
           primary={primary} primaryMenu={primaryMenu}
           empty='No personas yet. Onboarding picks personas for your product; add your own, import a list, or ask your AI client to save them.'
-          detailTitle={(p) => p.name}
-          detailActions={(p) => (<>
+          detailTitle={() => 'Persona'}
+          detail={(p) => <PersonaBody p={p} actions={(<>
             {editable(p) && <Allowed need='edit'><Button size='sm' variant='outline' onClick={() => setDraft({ d: toDraft(p), from: p })}><Icons.edit /> Edit</Button></Allowed>}
             <ActionsMenu items={actions(p).filter((a) => a.label !== 'Edit')} />
-          </>)}
-          detail={(p) => <PersonaBody p={p} />}
+          </>)} />}
         />
       )}
       {draft && <PersonaEditor draft={draft.d} from={draft.from} onClose={() => setDraft(null)} onSaved={() => { setDraft(null); void reload(); }} />}
@@ -143,58 +139,71 @@ export function PersonasPage() {
   );
 }
 
-/** The persona peek: a meta line, its properties, summary, constraints, instructions, and how to use it. One onboarding picked: its name and how to use it. */
-function PersonaBody({ p }: { p: Persona }) {
+/** The persona peek: the card (status, origin, id, the key facts, Edit and the ⋯ menu), then tabs: its profile, its
+ *  constraints and how to use it in a run. One onboarding picked: its name, id and how to use it. */
+function PersonaBody({ p, actions }: { p: Persona; actions: ReactNode }) {
   const a = p.attributes;
+  const status = <StatusBadge tone={p.active ? 'ok' : 'neutral'}>{p.active ? 'on' : 'off'}</StatusBadge>;
+  const useIt = { id: 'use', label: 'Use it', content: <RunIt p={p} /> };
   if (p.curated) return (
-    <div className='flex flex-col gap-8'>
-      <div className={META}>
-        <span className={p.active ? 'text-foreground font-medium' : ''}>{p.active ? 'On' : 'Off'}</span><Dot />
-        <Mono>{p.slug}</Mono>
-      </div>
-      <p className='text-muted-foreground text-sm'>Onboarding picked this developer persona for your product. Its details aren&apos;t shown, and it can&apos;t be published.</p>
-      <RunIt p={p} />
+    <div className='flex flex-col gap-4'>
+      <DetailMeta title={p.name} badges={status} actions={actions}
+        subtitle={<>Onboarding picked this developer persona for your product. Its details aren&apos;t shown, and it can&apos;t be published.</>}
+        facts={[
+          { label: 'Id', value: <Mono>{p.slug}</Mono> },
+          { label: 'Origin', value: p.origin }
+        ]} />
+      <DetailTabs resetKey={p.slug} tabs={[useIt]} />
     </div>
   );
   const other = Object.entries(a).filter(([k, v]) => !SHOWN.has(k) && text(v) != null).map(([k, v]) => ({ k, v: text(v)! }));
-  const constraints = list(a.constraints);
+  const constraints = list(a.constraints).map((c, i) => ({ i, c }));
   return (
-    <div className='flex flex-col gap-8'>
-      <div className={META}>
-        <span className={p.active ? 'text-foreground font-medium' : ''}>{p.active ? 'On' : 'Off'}</span><Dot />
-        <span>{p.origin === 'Yours' ? 'Private to your account' : 'Written by research for your account'}</span><Dot />
-        <Mono>{p.slug}</Mono>
-      </div>
-      <dl>
-        <Field label='Role'>{a.role ?? NA}</Field>
-        <Field label='Experience'>{years(p) == null ? NA : `${years(p)} years`}</Field>
-        <Field label='Company size'>{companySize(a.company_size)}</Field>
-        <Field label='Stack'><Chips items={list(a.stack)} /></Field>
-        <Field label='Tone'>{a.tone ?? NA}</Field>
-        {p.environment?.editor && <Field label='Editor'>{p.environment.editor}</Field>}
-        {!!p.environment?.tools?.length && <Field label='Tools'><Chips items={p.environment.tools} /></Field>}
-        {other.map((o) => <Field key={o.k} label={o.k}><span className='break-all'>{o.v}</span></Field>)}
-        {p.publishable && <Field label='Published'><PublishedLine p={p.publication} /></Field>}
-      </dl>
-      {p.summary && <section><Label>Summary</Label><Prose>{p.summary}</Prose></section>}
-      {constraints.length > 0 && (
-        <section><Label>Constraints</Label><ul className='list-disc space-y-1 pl-5 text-sm'>{constraints.map((c, i) => <li key={i}>{c}</li>)}</ul></section>
-      )}
-      <section><Label>Instructions</Label>{p.instructions ? <Prose>{p.instructions}</Prose> : <p className='text-muted-foreground text-sm leading-none'>None.</p>}</section>
-      <RunIt p={p} />
+    <div className='flex flex-col gap-4'>
+      <DetailMeta title={p.name} badges={status} actions={actions}
+        subtitle={p.origin === 'Yours' ? 'Private to your account' : 'Written by research for your account'}
+        facts={[
+          { label: 'Id', value: <Mono>{p.slug}</Mono> },
+          { label: 'Role', value: a.role ?? NA },
+          { label: 'Experience', value: years(p) == null ? NA : `${years(p)} years` },
+          { label: 'Company size', value: companySize(a.company_size) },
+          { label: 'Published', value: <PublishedLine p={p.publication} />, hidden: !p.publishable }
+        ]} />
+      <DetailTabs resetKey={p.slug} tabs={[
+        { id: 'profile', label: 'Profile', content: (
+          <KeyValueTable rows={[
+            { label: 'Summary', value: p.summary ? <LongText>{p.summary}</LongText> : NA },
+            { label: 'Stack', value: <Chips items={list(a.stack)} /> },
+            { label: 'Tone', value: a.tone ?? NA },
+            { label: 'Editor', value: p.environment?.editor, hidden: !p.environment?.editor },
+            { label: 'Tools', value: <Chips items={p.environment?.tools ?? []} />, hidden: !p.environment?.tools?.length },
+            ...other.map((o) => ({ label: o.k, value: <span className='break-all'>{o.v}</span> })),
+            { label: 'Instructions', value: p.instructions ? <LongText>{p.instructions}</LongText> : <span className='text-muted-foreground'>None.</span> }
+          ]} />
+        ) },
+        { id: 'constraints', label: 'Constraints', count: constraints.length, content: (
+          <DetailTable rows={constraints} rowKey={(x) => String(x.i)} noun='constraints' empty='No constraints.' cols={[
+            { key: 'n', label: '#', type: 'number', value: (x) => x.i + 1, render: (x) => <span className='text-muted-foreground tabular-nums'>{x.i + 1}</span>, className: 'w-12' },
+            { key: 'c', label: 'Constraint', type: 'text', value: (x) => x.c, render: (x) => x.c, className: 'whitespace-normal leading-snug' }
+          ]} />
+        ) },
+        useIt
+      ]} />
     </div>
   );
 }
 
+/** How to use the persona in a run: the prompt to paste, with a copy button. */
 function RunIt({ p }: { p: Persona }) {
   return (
-    <section>
-      <Label>Use it in a run</Label>
-      <div className='bg-muted/50 flex items-center gap-2 rounded-md border px-3 py-2'>
-        <code className='min-w-0 flex-1 font-mono text-xs break-words select-all'>{runPrompt(p)}</code>
-        <CopyButton text={runPrompt(p)} label='Copy prompt' />
-      </div>
-    </section>
+    <KeyValueTable rows={[
+      { label: 'Prompt', value: (
+        <div className='flex items-start gap-2'>
+          <div className='min-w-0 flex-1 select-all'><LongText mono>{runPrompt(p)}</LongText></div>
+          <CopyButton text={runPrompt(p)} label='Copy prompt' />
+        </div>
+      ) }
+    ]} />
   );
 }
 

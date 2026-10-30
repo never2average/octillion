@@ -7,7 +7,8 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import { toast } from 'sonner';
 import PageContainer from '@/components/layout/page-container';
-import { ActionsMenu, Field, RecordView, type RecordCol, type RowAction } from '@/components/layout/record-view';
+import { ActionsMenu, RecordView, type RecordCol, type RowAction } from '@/components/layout/record-view';
+import { DetailMeta, DetailTable, DetailTabs, KeyValueTable, LongText } from '@/components/layout/detail';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
@@ -36,10 +37,6 @@ export interface TaskInput { title?: string; prompt: string; language?: string; 
 interface Draft { title: string; prompt: string; language: string; platform: string; repo_url: string; tags: string }
 
 const NA = <span className='text-muted-foreground'>—</span>;
-const META = 'text-muted-foreground flex flex-wrap items-center gap-x-2 gap-y-1 text-xs leading-none';
-const PROMPT = 'block font-mono text-xs leading-relaxed whitespace-pre-wrap border-l-2 pl-3';
-const Dot = () => <span className='text-muted-foreground/60'>·</span>;
-const Label = ({ children }: { children: ReactNode }) => <div className='text-muted-foreground mb-2 text-xs font-medium leading-none'>{children}</div>;
 const repoName = (u: string) => { try { const x = new URL(u); return `${x.host}${x.pathname.replace(/\/$/, '')}`; } catch { return u.replace(/^https?:\/\//, ''); } };
 const PICKED_SET = '__picked';
 const PICKED = 'Picked by onboarding';
@@ -143,12 +140,11 @@ export function TasksPage() {
           filters={filters} primary={primary} primaryMenu={primaryMenu}
           empty={noProducts ? 'Add a product first: an owner adds it under Context, Products, or onboard it from your AI client.'
             : 'No tasks yet. Onboarding picks tasks for your product; create a task set or import your own.'}
-          detailTitle={(t) => t.title}
-          detailActions={(t) => (<>
+          detailTitle={() => 'Task'}
+          detail={(t) => <TaskBody t={t} set={t.task_set ? sets.get(t.task_set) ?? null : null} runs={runsOf(t.task_set)} actions={(<>
             {t.task_set && <Allowed need='edit'><Button size='sm' variant='outline' onClick={() => setDialog({ kind: 'edit', task: t })}><Icons.edit /> Edit</Button></Allowed>}
             <ActionsMenu items={actions(t).filter((a) => a.label !== 'Edit')} />
-          </>)}
-          detail={(t) => <TaskBody t={t} set={t.task_set ? sets.get(t.task_set) ?? null : null} runs={runsOf(t.task_set)} />}
+          </>)} />}
         />
       )}
       {data && dialog?.kind === 'set' && <TaskDialog products={products} sets={data.task_sets} product={product || products[0]?.slug} onClose={() => setDialog(null)} onSaved={() => { setDialog(null); void reload(); }} />}
@@ -161,77 +157,73 @@ export function TasksPage() {
   );
 }
 
+const runTone = (s: string) => (s === 'completed' ? 'ok' : s === 'failed' ? 'bad' : s === 'cancelled' ? 'neutral' : 'info') as 'ok' | 'bad' | 'neutral' | 'info';
+
 /**
- * The task peek: a meta line, properties, the prompt in full, where it came from, and its set with the runs that used
- * it. A task onboarding picked: its title, product and status, without the prompt.
+ * The task peek: the card (status, id, set, product, added, Edit and the ⋯ menu), then tabs: its details with the
+ * prompt in full, the runs that used its set, and how to run it. A task onboarding picked: its title, product and
+ * status, without the prompt.
  */
-function TaskBody({ t, set, runs }: { t: Task; set: TaskSet | null; runs: Run[] }) {
+function TaskBody({ t, set, runs, actions }: { t: Task; set: TaskSet | null; runs: Run[]; actions: ReactNode }) {
   const prompt = set ? `Run a simulation for ${t.product_name} on the task set ${set.name}.` : `Run a simulation for ${t.product_name} on the task "${t.title}".`;
-  const runIt = (
-    <section>
-      <Label>Run it</Label>
-      <div className='bg-muted/50 flex items-center gap-2 rounded-md border px-3 py-2'>
-        <code className='min-w-0 flex-1 font-mono text-xs break-words select-all'>{prompt}</code>
-        <CopyButton text={prompt} label='Copy prompt' />
-      </div>
-    </section>
-  );
+  const status = <StatusBadge tone={t.active ? 'ok' : 'neutral'}>{t.active ? 'on' : 'off'}</StatusBadge>;
+  const runIt = { id: 'run', label: 'Run it', content: (
+    <KeyValueTable rows={[
+      { label: 'Prompt', value: (
+        <div className='flex items-start gap-2'>
+          <div className='min-w-0 flex-1 select-all'><LongText mono>{prompt}</LongText></div>
+          <CopyButton text={prompt} label='Copy prompt' />
+        </div>
+      ) }
+    ]} />
+  ) };
   if (t.curated) return (
-    <div className='flex flex-col gap-8'>
-      <div className={META}>
-        <span className={t.active ? 'text-foreground font-medium' : ''}>{t.active ? 'On' : 'Off'}</span><Dot />
-        <Mono>#{t.id}</Mono><Dot />
-        <span>Added <When d={t.created_at} /></span>
-      </div>
-      <dl>
-        <Field label='Product'>{t.product_name}</Field>
-        {t.platform && <Field label='Platform'>{t.platform}</Field>}
-      </dl>
-      <section><Label>Prompt</Label><p className='text-muted-foreground text-sm'>Onboarding picked this task for {t.product_name}. Its prompt isn&apos;t shown, and it can&apos;t be published.</p></section>
-      {runIt}
+    <div className='flex flex-col gap-4'>
+      <DetailMeta title={t.title} badges={status} actions={actions}
+        subtitle={<>Onboarding picked this task for {t.product_name}. Its prompt isn&apos;t shown, and it can&apos;t be published.</>}
+        facts={[
+          { label: 'Id', value: <Mono>#{t.id}</Mono> },
+          { label: 'Product', value: t.product_name },
+          { label: 'Platform', value: t.platform, hidden: !t.platform },
+          { label: 'Added', value: <When d={t.created_at} /> }
+        ]} />
+      <DetailTabs resetKey={t.id} tabs={[runIt]} />
     </div>
   );
   return (
-    <div className='flex flex-col gap-8'>
-      <div className={META}>
-        <span className={t.active ? 'text-foreground font-medium' : ''}>{t.active ? 'On' : 'Off'}</span><Dot />
-        <span>Private to your account</span><Dot />
-        <Mono>#{t.id}</Mono><Dot />
-        <span>Added <When d={t.created_at} /></span>
-      </div>
-      <dl>
-        <Field label='Task set'>{set ? set.name : NA}</Field>
-        <Field label='Product'>{t.product_name}</Field>
-        <Field label='Language'>{t.language ?? NA}</Field>
-        <Field label='Platform'>{t.platform ?? NA}</Field>
-        <Field label='Repository'>
-          {t.repo_url
-            ? <a href={t.repo_url} target='_blank' rel='noopener noreferrer' className='hover:text-primary inline-flex items-center gap-1'>{repoName(t.repo_url)}<Icons.externalLink className='size-3.5' /></a>
-            : <span className='text-muted-foreground'>None: runs in the {t.template ? <Mono>{t.template}</Mono> : 'matching'} starter workspace</span>}
-        </Field>
-        <Field label='Tags'><Chips items={t.tags} /></Field>
-        {t.expectation === 'avoid' && <Field label='Expectation'>Agents should not pick the product</Field>}
-        {t.provenance && <Field label='Comes from'>{t.provenance}</Field>}
-        {t.publishable && <Field label='Published'><PublishedLine p={t.publication} /></Field>}
-      </dl>
-      <section><Label>Prompt</Label><code className={PROMPT}>{t.prompt}</code></section>
-      {set && (
-        <section>
-          <Label>Runs that used {set.name}</Label>
-          {runs.length ? (
-            <ul className='divide-y border-y text-sm'>
-              {runs.map((r) => (
-                <li key={r.id} className='flex items-center gap-3 py-2'>
-                  <span className='min-w-0 flex-1 truncate'>{r.name}</span>
-                  <StatusBadge tone={r.status === 'completed' ? 'ok' : r.status === 'failed' ? 'bad' : r.status === 'cancelled' ? 'neutral' : 'info'}>{r.status}</StatusBadge>
-                  <span className='text-muted-foreground text-xs'><When d={r.created_at} /></span>
-                </li>
-              ))}
-            </ul>
-          ) : <p className='text-muted-foreground text-sm leading-none'>No runs yet.</p>}
-        </section>
-      )}
-      {runIt}
+    <div className='flex flex-col gap-4'>
+      <DetailMeta title={t.title} badges={status} actions={actions} subtitle='Private to your account'
+        facts={[
+          { label: 'Id', value: <Mono>#{t.id}</Mono> },
+          { label: 'Task set', value: set ? set.name : NA },
+          { label: 'Product', value: t.product_name },
+          { label: 'Added', value: <When d={t.created_at} /> },
+          { label: 'Published', value: <PublishedLine p={t.publication} />, hidden: !t.publishable }
+        ]} />
+      <DetailTabs resetKey={t.id} tabs={[
+        { id: 'details', label: 'Details', content: (
+          <KeyValueTable rows={[
+            { label: 'Prompt', value: t.prompt ? <LongText mono>{t.prompt}</LongText> : NA },
+            { label: 'Language', value: t.language ?? NA },
+            { label: 'Platform', value: t.platform ?? NA },
+            { label: 'Repository', value: t.repo_url
+              ? <a href={t.repo_url} target='_blank' rel='noopener noreferrer' className='hover:text-primary inline-flex items-center gap-1'>{repoName(t.repo_url)}<Icons.externalLink className='size-3.5' /></a>
+              : <span className='text-muted-foreground'>None: runs in the {t.template ? <Mono>{t.template}</Mono> : 'matching'} starter workspace</span> },
+            { label: 'Tags', value: <Chips items={t.tags} /> },
+            { label: 'Expectation', value: 'Agents should not pick the product', hidden: t.expectation !== 'avoid' },
+            { label: 'Comes from', value: t.provenance, hidden: !t.provenance }
+          ]} />
+        ) },
+        { id: 'runs', label: 'Runs', count: runs.length, hidden: !set, content: (
+          <DetailTable rows={runs} rowKey={(r) => r.id} noun='runs' empty='No runs yet.' defaultSort={[{ key: 'at', dir: 'desc' }]}
+            search={(r) => `${r.name} ${r.status}`} searchPlaceholder={set ? `Search runs that used ${set.name}` : 'Search runs'} cols={[
+            { key: 'name', label: 'Run', type: 'text', value: (r) => r.name, render: (r) => r.name },
+            { key: 'status', label: 'Status', type: 'select', value: (r) => r.status, render: (r) => <StatusBadge tone={runTone(r.status)}>{r.status}</StatusBadge> },
+            { key: 'at', label: 'Started', type: 'date', value: (r) => r.created_at, render: (r) => <span className='text-muted-foreground text-xs'><When d={r.created_at} /></span> }
+          ]} />
+        ) },
+        runIt
+      ]} />
     </div>
   );
 }
