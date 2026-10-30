@@ -9,7 +9,8 @@
  *   email_consent_ledger  every change, in order, so "what did they agree to, and when" has an answer
  *
  * Double opt-in: anyone can type anyone's address into a public form, so a ticked box only records opt_in_pending and
- * sends one transactional email with a signed link (at most one an address a day, never to a bounced or complaining
+ * sends one transactional email with a signed link (at most one an address a calendar day, claimed atomically by an
+ * idempotency key on the address's hash and the day; never to a bounced or complaining
  * address). Only clicking it (GET asks, POST confirms: link scanners confirm nothing) records opt_in. An unconfirmed
  * tick never replaces a withdrawal or touches the suppression list; a confirmed one replaces a withdrawal and lifts an
  * "unsubscribed" suppression, never a bounce or a complaint.
@@ -130,15 +131,18 @@ export async function recordFormOptIn(email: string, o: { opt_in: unknown; wordi
   const [hard] = await db.query("SELECT 1 FROM email_suppressions WHERE email_hash = $1 AND reason IN ('bounced', 'complained')", [hash]);
   if (hard) return "blocked";
   await recordByHash(hash, "opt_in_pending", { source: "access_request_form", wording_version: v, country: o.country, request_id: o.request_id });
-  const [recent] = await db.query("SELECT 1 FROM email_log WHERE kind = 'marketing_confirm' AND to_hash = $1 AND status IN ('sent', 'sending') AND at > now() - interval '24 hours'", [hash]);
-  if (recent) return "pending_no_email";
+  // One a day an address, atomically: the email's idempotency key names the address's hash and the day, and
+  // email_log claims a key once (INSERT … ON CONFLICT), so two submissions racing get one email between them.
+  const day = new Date().toISOString().slice(0, 10);
+  const [had] = await db.query("SELECT 1 FROM email_log WHERE idempotency_key = $1 AND status IN ('sent', 'sending')", [`optin-confirm:${hash}:${day}`]);
+  if (had) return "pending_no_email";
   const url = confirmUrl(await confirmToken(email, { wording_version: v, country: o.country, request_id: o.request_id }));
-  mail.fire(mail.sendLater({ kind: "marketing_confirm", to: email, idempotencyKey: `optin-confirm:${o.request_id}`, meta: { request_id: o.request_id },
+  mail.fire(mail.sendLater({ kind: "marketing_confirm", to: email, idempotencyKey: `optin-confirm:${hash}:${day}`, meta: { request_id: o.request_id },
     subject: "Confirm Octillion's emails",
     text: mail.lines("Hi,",
       `You ticked "${OPT_IN_WORDING[v]}" when you asked for access to Octillion.`,
       `To get those emails, confirm here: ${url}`,
-      "If that wasn't you, ignore this email: nothing changes, and we won't ask again for a day. We'll still email you about your access request.",
+      "If that wasn't you, ignore this email: nothing changes, and we won't ask again today. We'll still email you about your access request.",
       mail.SIGN) }));
   return "pending";
 }

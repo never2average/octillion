@@ -337,7 +337,8 @@ function VariantTable({ c, step }: { c: Campaign; step: Detail['steps'][number] 
  * replayed as the very same request, so they never go twice; unknown ones are never sent again unless an owner says so.
  */
 function UnknownSends({ c, m }: { c: Campaign; m: Metrics }) {
-  const resend = useAdminAction(() => post<{ requeued: number }>(`${path(c.id)}/resend-unknown`), { success: (r) => `${r.requeued} email${r.requeued === 1 ? '' : 's'} back in the queue` });
+  const resend = useAdminAction(() => post<{ resent: number; requeued: number; skipped: number; uncertain: number }>(`${path(c.id)}/resend-unknown`),
+    { success: (r) => `${r.resent} resent${r.requeued ? `, ${r.requeued} back in the queue` : ''}${r.uncertain ? `, ${r.uncertain} uncertain again` : ''}${r.skipped ? `, ${r.skipped} left (replied, unsubscribed or no consent)` : ''}` });
   return (
     <Notice>
       <span className='flex flex-wrap items-center gap-x-3 gap-y-2'>
@@ -347,8 +348,10 @@ function UnknownSends({ c, m }: { c: Campaign; m: Metrics }) {
         </span>
         {m.unknown > 0 && (
           <Gate need='campaigns'>
-            <ConfirmButton label={<><Icons.send /> Resend {m.unknown}</>} title={`Resend ${m.unknown} email${m.unknown === 1 ? '' : 's'}?`} confirmLabel='Resend' disabled={resend.isPending}
-              description='They go out again as new emails. Some of these people may already have one, and would then get it twice.' onConfirm={() => resend.mutate()} />
+            <ConfirmButton label={<><Icons.send /> Resend {m.unknown} (may send a second copy to people who already got it)</>} title={`Resend ${m.unknown} email${m.unknown === 1 ? '' : 's'}?`}
+              confirmLabel='Resend anyway' disabled={resend.isPending}
+              description='Each goes again now, exactly as it was written, as a new email. Resend may already have delivered some of them: those people would get a second copy. People who replied, unsubscribed or lost consent since are left out.'
+              onConfirm={() => resend.mutate()} />
           </Gate>
         )}
       </span>

@@ -245,8 +245,12 @@ export async function gtmChecks({ db, base, adm, json, mockUrl, mockPost, sentTo
   await mockPost("/_mock/resend/outage", { down: false });
   const [held] = await db.query<{ attempts: number; status: string }>("SELECT s.attempts, s.status FROM gtm_campaign_sends s WHERE s.campaign_id = $1", [p4]);
   assert.ok(down.sent === 0 && down.waiting === 1 && down.failed === 0 && down.uncertain === 1 && held.status === "uncertain", `a 5xx is uncertain and waits: ${JSON.stringify({ down, held })}`);
-  await db.query("UPDATE gtm_campaign_recipients SET next_at = now() WHERE campaign_id = $1", [p4]);
-  assert.equal((await json(adm("POST", `/gtm/campaigns/${p4}/send-now`))).sent, 1, "and goes out once Resend is back");
+  // Its first replay is due 5 minutes later (then 1, 6 and 20 hours): as if those 5 minutes had passed.
+  await db.query("UPDATE gtm_campaign_sends SET uncertain_at = now() - interval '6 minutes', at = now() - interval '6 minutes' WHERE campaign_id = $1", [p4]);
+  // The campaign has finished meanwhile (nobody else was waiting): its uncertain email is still replayed.
+  assert.equal((await json(adm("GET", `/gtm/campaigns/${p4}`))).campaign.status, "done", "an uncertain email does not hold a campaign open");
+  await json(adm("POST", "/gtm/tick"));
+  assert.equal((await db.query<{ status: string }>("SELECT status FROM gtm_campaign_sends WHERE campaign_id = $1", [p4]))[0].status, "sent", "and goes out once Resend is back");
   // OCTILLION_CAMPAIGNS=off stops the tick everywhere (the Vercel cron calls the same function).
   process.env.OCTILLION_CAMPAIGNS = "off";
   assert.match((await json(adm("POST", "/gtm/tick"))).skipped, /OCTILLION_CAMPAIGNS=off/);

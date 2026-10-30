@@ -239,12 +239,16 @@ export interface BatchResult { results: EmailResult[]; request_key: string | nul
  * request (https://resend.com/docs/dashboard/emails/idempotency-keys), so the caller picks it (`key`) and stores it
  * first. An email whose outcome is uncertain is only ever sent again as the very same request (same key, same emails
  * in the same order, same bodies: `exact`), which Resend answers from its record of the first one; so no email goes
- * out twice. A single email goes through POST /emails with its own key (request_key says which key was used).
+ * out twice. A single email whose key is the request key goes through POST /emails (request_key says which key was
+ * used); one email under a batch's key (a replay of what is left of a batch) still goes to /emails/batch.
  * Results come back in the order given, each with its place in the request. Never throws.
  *
- * Resend documents no per-email validation mode for this endpoint (no x-batch-validation header on
- * https://resend.com/docs/api-reference/emails/send-batch-emails): a refusal (4xx) refuses the whole request. An
- * `errors` list in a successful answer, should one come, fails just the emails it names.
+ * Validation stays strict (no x-batch-validation header): one invalid email refuses the whole request (a 4xx:
+ * nothing went out). Resend also offers `x-batch-validation: permissive`
+ * (https://resend.com/docs/dashboard/emails/batch-validation-modes), which sends the valid emails and lists the
+ * invalid ones in `errors` by index; but its `data` lists only the emails created, with no documented mapping back
+ * to the request's order, so an id could not be tied to its email with certainty. Strict keeps every answer
+ * index-aligned with the request.
  */
 export async function sendBatch(ms: Email[], o: BatchOptions): Promise<BatchResult> {
   if (ms.length > BATCH_MAX) throw new Error(`a Resend batch is at most ${BATCH_MAX} emails`);
@@ -272,7 +276,7 @@ async function batchAttempt(ms: Email[], o: BatchOptions): Promise<BatchResult> 
   const ready = await notReady();
   if (typeof ready === "string") { for (const { i, c } of claimed) out[i] = await c.finish("skipped", { error: ready }); return { results: out, request_key: null }; }
   const timeoutMs = o.timeoutMs ?? 30_000;
-  if (claimed.length === 1) {
+  if (claimed.length === 1 && claimed[0].c.key === o.key) {
     const [{ i, c }] = claimed;
     out[i] = { ...(await sendClaimed(ms[i], c, ready, Math.min(timeoutMs, 15_000))), pos: 0 };
     return { results: out, request_key: c.key };
@@ -286,14 +290,12 @@ async function batchAttempt(ms: Email[], o: BatchOptions): Promise<BatchResult> 
       method: "POST", signal: AbortSignal.timeout(timeoutMs), body: JSON.stringify(claimed.map(({ i, c }) => bodyOf(ms[i], c, ready.replyTo))),
       headers: { authorization: `Bearer ${ready.cred.secret}`, "content-type": "application/json", "idempotency-key": o.key, "user-agent": "Octillion/1.0" },
     });
-    const j = await r.json().catch(() => ({})) as { data?: { id?: string }[]; errors?: { index?: number; message?: string }[]; message?: string; name?: string };
+    const j = await r.json().catch(() => ({})) as { data?: { id?: string }[]; message?: string; name?: string };
     if (!r.ok) return fail(resendError(r, j, ready.cred.secret), { retry: retryAfter(r), uncertain: uncertainStatus(r.status) });
-    const refused = new Map((j.errors ?? []).filter((x) => Number.isInteger(x.index)).map((x) => [Number(x.index), String(x.message ?? "refused")]));
-    // Each answer is at the index of its email in the request. No id (and no error for it): Resend may have it.
+    // Strict mode: each answer is at the index of its email in the request. No id: Resend may have it.
     for (const [n, { i, c }] of claimed.entries()) {
       const pid = j.data?.[n]?.id ?? null;
       out[i] = { ...(pid ? await c.finish("sent", { provider_id: pid })
-        : refused.has(n) ? await c.finish("failed", { error: `Resend refused this email: ${refused.get(n)!.slice(0, 300)}` })
         : await c.finish("failed", { error: "Outcome unknown: Resend's batch answer had no id for this email", uncertain: true })), pos: n };
     }
     return { results: out, request_key: o.key };

@@ -76,6 +76,12 @@ export async function gtmPhase1Checks({ db, base, adm, json, mockUrl, mockPost, 
   requests.push((await db.query<{ id: number }>("SELECT max(id) AS id FROM access_requests WHERE email = $1", [optDe]))[0].id);
   await new Promise((r) => setTimeout(r, 300));
   assert.equal(confirmations(optDe).length, 1, "rate-limited: one confirmation an address in 24 hours");
+  // Two submissions at once: one email between them (the day's key is claimed atomically).
+  const race = `race+${stamp}@p1-c.dev`;
+  await Promise.all([1, 2].map(() => consent.recordFormOptIn(race, { opt_in: true, wording_version: consent.OPT_IN_VERSION, country: null, request_id: requests[0] })));
+  await waitFor(() => confirmations(race).length >= 1, "a confirmation for the racing pair");
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(confirmations(race).length, 1, "exactly one, however the two raced");
   // The link: GET asks (scanners confirm nothing), a forged token does nothing, POST confirms.
   const confirmLink = /confirm here: (\S+)/.exec(confirmations(optDe)[0].text)![1].replace(/^https?:\/\/[^/]+/, base);
   const askC = await fetch(confirmLink);
@@ -274,6 +280,17 @@ export async function gtmPhase1Checks({ db, base, adm, json, mockUrl, mockPost, 
   await json(adm("PUT", `/gtm/campaigns/${cR}`, { count_auto_replies: true }));
   await json(adm("POST", `/gtm/campaigns/${cR}/resume`));
   assert.equal((await json(received(`in_c_${stamp}`, replyTo(rc), { subject: "Out of office" }))).kind, "reply", "count_auto_replies: an out-of-office counts");
+  // Suppression only grows stronger: an unsubscribe, then a complaint, is a complaint; a confirmed opt-in lifts only
+  // an unsubscribe, so it cannot undo the complaint; another unsubscribe never weakens it.
+  const unsubRb = /Unsubscribe: (\S+)/.exec(first(rb).text)![1].replace(/^https?:\/\/[^/]+/, base);
+  assert.equal((await fetch(unsubRb, { method: "POST" })).status, 200);
+  const rbPid = (await db.query<{ provider_id: string }>("SELECT s.provider_id FROM gtm_campaign_sends s JOIN gtm_campaign_recipients r ON r.id = s.recipient_id WHERE r.email = $1 AND s.campaign_id = $2 AND s.step = 0", [rb, cR]))[0].provider_id;
+  await json(hook({ type: "email.complained", data: { email_id: rbPid } }));
+  const reasonOf = async (e: string) => (await db.query<{ reason: string }>("SELECT reason FROM email_suppressions WHERE email_hash = $1", [mail.hashAddress(e)]))[0]?.reason;
+  assert.equal(await reasonOf(rb), "complained", "a complaint replaces the unsubscribe");
+  await fetch(`${base}/api/email/confirm?t=${encodeURIComponent(await consent.confirmToken(rb, { wording_version: consent.OPT_IN_VERSION, country: null, request_id: requests[0] }))}`, { method: "POST" });
+  await fetch(unsubRb, { method: "POST" });
+  assert.equal(await reasonOf(rb), "complained", "neither a confirmed opt-in nor another unsubscribe undoes it");
   // Header and subject rules, and the snippet.
   assert.match(rep.autoReason({ "x-autoreply": "yes" }, "Hi") ?? "", /x-autoreply/);
   assert.match(rep.autoReason({ precedence: "auto_reply" }, "Hi") ?? "", /Precedence/);
@@ -435,15 +452,30 @@ export async function gtmPhase1Checks({ db, base, adm, json, mockUrl, mockPost, 
   const [b4En] = await db.query<any>("SELECT enrolled, note FROM gtm_event_enrolments WHERE campaign_id = $1 AND event_id = $2", [cB4, b4Ev]);
   assert.ok(b4En && b4En.enrolled === 0 && /consent/i.test(b4En.note) && !sentTo(b4, "campaign").length, `an unknown-country requester is not an existing customer: ${JSON.stringify(b4En)}`);
   assert.equal((await db.query("SELECT 1 FROM email_consent_ledger WHERE email_hash = $1", [mail.hashAddress(b4)])).length, 0, "and no legitimate interest is recorded for them");
+  // A queued enrolment whose delay ran out more than 24 hours ago (paused, or no tick) is skipped, not enrolled late.
+  const cQ = await create({ name: `Queue age ${stamp}`, audience: { include: "requests", utm_campaign: `${S}-q` }, steps: [step("Late")], requires_opt_in: false,
+    trigger: { type: "request_submitted", delay_hours: 1 } });
+  created.push(cQ);
+  await launch(cQ);
+  const qp = `queue+${stamp}@p1-q.dev`;
+  unPeople.push(qp);
+  const qReq = await request(qp, `${S}-q`, "US");
+  requests.push(qReq);
+  const qEv = await ev.emit("request_submitted", { request_id: qReq, key: String(qReq) });
+  await tick();
+  await db.query("UPDATE gtm_event_enrolments SET due_at = now() - interval '25 hours' WHERE campaign_id = $1 AND event_id = $2", [cQ, qEv]);
+  await tick();
+  const [qEn] = await db.query<any>("SELECT processed_at, enrolled, note FROM gtm_event_enrolments WHERE campaign_id = $1 AND event_id = $2", [cQ, qEv]);
+  assert.ok(qEn.processed_at && qEn.enrolled === 0 && /Skipped/.test(qEn.note) && !sentTo(qp, "campaign").length, `stale in the queue: skipped: ${JSON.stringify(qEn)}`);
 
   // ---------- B1: an email whose outcome is uncertain never goes twice ----------
   process.env.CAMPAIGN_BATCH_SIZE = "3";
   unPeople.push(b4);
-  const uncertainCampaign = async (tag: string, n: number) => {
+  const uncertainCampaign = async (tag: string, n: number, o: { rolling?: boolean } = {}) => {
     const ps = Array.from({ length: n }, (_, i) => `${tag}${i}+${stamp}@p1-un.dev`);
     unPeople.push(...ps);
     for (const p of ps) requests.push(await request(p, `${S}-${tag}`, "US"));
-    const cid = await create({ name: `${tag} ${stamp}`, audience: { include: "requests", utm_campaign: `${S}-${tag}` }, steps: [step(`Uncertain ${tag}`)], requires_opt_in: false, rolling: true });
+    const cid = await create({ name: `${tag} ${stamp}`, audience: { include: "requests", utm_campaign: `${S}-${tag}` }, steps: [step(`Uncertain ${tag}`)], requires_opt_in: false, rolling: o.rolling ?? true });
     created.push(cid);
     await launch(cid);
     return { cid, ps, count: () => ps.map((p) => sentTo(p, "campaign").filter(tagged(cid)).length) };
@@ -455,7 +487,10 @@ export async function gtmPhase1Checks({ db, base, adm, json, mockUrl, mockPost, 
   const td = await tick();
   assert.ok(td.sent >= 3 && u1.count().every((n) => n === 1) && (await sendsOf(u1.cid)).every((s: any) => s.status === "sent"), `accepted then no answer: each email once: ${JSON.stringify({ td, n: u1.count() })}`);
   // 409 concurrent_idempotent_requests twice (the request and its replay): uncertain, kept with its exact payload,
-  // out of the queue; the next tick replays it and it goes once.
+  // out of the queue; replayed 5 minutes later as that same request, its stored payload verbatim (an edit of the
+  // step meanwhile changes nothing under that key), and it goes once.
+  const ago = (cid: number, minutes: number) => db.query(`UPDATE gtm_campaign_sends SET uncertain_at = now() - make_interval(mins => $2), at = now() - make_interval(mins => $2)
+    WHERE campaign_id = $1 AND status = 'uncertain'`, [cid, minutes]);
   const u2 = await uncertainCampaign("conc", 3);
   await mockPost("/_mock/resend/uncertain", { concurrent: 2 });
   const tc = await tick();
@@ -463,41 +498,84 @@ export async function gtmPhase1Checks({ db, base, adm, json, mockUrl, mockPost, 
   assert.ok(tc.uncertain >= 3 && u2.count().every((n) => n === 0) && held2.every((s: any) => s.status === "uncertain" && s.has_payload && /^batch:/.test(s.batch_key))
     && new Set(held2.map((s: any) => s.batch_pos)).size === 3, `a 409 is uncertain, not failed: ${JSON.stringify({ tc, held2 })}`);
   assert.ok((await detail(u2.cid)).recipients.every((r: any) => r.next_at === null && r.status === "pending"), "out of the queue while uncertain");
+  await tick();
+  assert.ok(u2.count().every((n) => n === 0), "not replayed before its turn (5 minutes)");
+  await json(adm("POST", `/gtm/campaigns/${u2.cid}/pause`));
+  await json(adm("PUT", `/gtm/campaigns/${u2.cid}`, { steps: [step("Edited after the request")] }));
+  await json(adm("POST", `/gtm/campaigns/${u2.cid}/resume`));
+  await ago(u2.cid, 6);
   const tr = await tick();
   assert.ok(u2.count().every((n) => n === 1) && (await sendsOf(u2.cid)).every((s: any) => s.status === "sent" && !s.has_payload) && tr.sent >= 3, `replayed exactly, once each: ${JSON.stringify(tr)}`);
-  // A batch answer missing an email's id: that one is unknown (Resend may have it), never resent on its own; an owner's
-  // Resend puts it back.
-  const u3 = await uncertainCampaign("omit", 2);
+  assert.ok(u2.ps.every((p) => sentTo(p, "campaign").filter(tagged(u2.cid))[0].subject === "Uncertain conc"), "the stored payload, verbatim, never the edited step");
+  // An outage (every request a 5xx): the first request and its immediate replay are uncertain and the wave stops
+  // there; the next tick sends one email as a probe, no more; replays come at 5 min, 1 h, 6 h, 20 h, so nothing is
+  // parked as unknown within the hour; once Resend is back, everything goes, once.
+  const uo = await uncertainCampaign("outage", 6);
+  await mockPost("/_mock/resend/outage", { down: true });
+  const to1 = await tick();
+  const so1 = await sendsOf(uo.cid);
+  assert.ok(to1.requests === 2 && so1.length === 3 && so1.every((s: any) => s.status === "uncertain"), `the first uncertain request stops the wave: ${JSON.stringify({ to1, so1 })}`);
+  const to2 = await tick();
+  assert.ok((await sendsOf(uo.cid)).length === 4 && to2.requests === 2, `then one email a tick as a probe: ${JSON.stringify(to2)}`);
+  await ago(uo.cid, 6);
+  const to3 = await tick();
+  const so3 = await sendsOf(uo.cid);
+  assert.ok(so3.length === 4 && so3.every((s: any) => s.status === "uncertain") && so3.some((s: any) => Number(s.replays) === 1) && to3.unknown === 0,
+    `a replay still uncertain: no new sends, nothing parked: ${JSON.stringify({ to3, so3 })}`);
+  await ago(uo.cid, 10);
+  await tick();
+  assert.ok((await sendsOf(uo.cid)).every((s: any) => s.status === "uncertain" && Number(s.replays) <= 1), "the second replay waits an hour");
+  await mockPost("/_mock/resend/outage", { down: false });
+  await ago(uo.cid, 70);
+  await tick();
+  assert.ok(uo.count().every((n) => n === 1) && (await sendsOf(uo.cid)).every((s: any) => s.status === "sent"), `back up: everyone once: ${JSON.stringify(uo.count())}`);
+  // A batch answer missing an email's id: that one is unknown (Resend may have it), never resent on its own. A
+  // non-rolling campaign still finishes (the unknown one is not waiting), and the peek shows it. An owner's Resend
+  // sends the stored email under a new key (the one deliberate duplicate risk).
+  const u3 = await uncertainCampaign("omit", 2, { rolling: false });
   await mockPost("/_mock/resend/uncertain", { omit_id: 1 });
   const to = await tick();
   const s3 = await sendsOf(u3.cid);
-  assert.ok(to.unknown >= 1 && s3.filter((s: any) => s.status === "unknown").length === 1 && s3.filter((s: any) => s.status === "sent").length === 1, `missing id: unknown: ${JSON.stringify(s3)}`);
+  assert.ok(to.unknown >= 1 && s3.filter((s: any) => s.status === "unknown" && s.has_payload).length === 1 && s3.filter((s: any) => s.status === "sent").length === 1, `missing id: unknown: ${JSON.stringify(s3)}`);
   await tick();
   assert.deepEqual(u3.count().sort(), [1, 1], "not sent again by a later tick (Resend did take it)");
-  assert.equal((await detail(u3.cid)).campaign.metrics.unknown, 1, "the campaign shows it");
-  assert.equal((await adm("POST", `/gtm/campaigns/${u3.cid}/resend-unknown`)).status, 200);
-  await tick();
+  const d3 = await detail(u3.cid);
+  assert.ok(d3.campaign.status === "done" && d3.campaign.metrics.unknown === 1, `done, and the peek still shows the unknown one: ${JSON.stringify({ status: d3.campaign.status, m: d3.campaign.metrics })}`);
+  const rs = await json(adm("POST", `/gtm/campaigns/${u3.cid}/resend-unknown`));
+  assert.equal(rs.resent, 1, `resent: ${JSON.stringify(rs)}`);
   assert.deepEqual(u3.count().sort(), [1, 2], "resent only when an owner says so");
-  // A tick killed mid-request: a claim with a request key stuck sending is unknown (never resent); one stuck before
-  // its request (no key) is safe to send.
-  const u4 = await uncertainCampaign("kill", 2);
+  const again3 = u3.ps.flatMap((p) => sentTo(p, "campaign").filter(tagged(u3.cid))).find((e: any) => /:resend:[0-9a-f]+$/.test(e.idempotency_key));
+  assert.ok(again3 && again3.subject === "Uncertain omit", "under a new key, the stored email");
+  // A tick killed mid-request: a claim with a request key stuck sending is uncertain when its payload was stored before
+  // the request (replayed as that request), unknown without one; one stuck before its request (no key) is safe to send.
+  const u4 = await uncertainCampaign("kill", 3);
   await json(adm("POST", `/gtm/campaigns/${u4.cid}/pause`));
   const r4 = (await detail(u4.cid)).recipients;
-  await db.query(`INSERT INTO gtm_campaign_sends (campaign_id, recipient_id, step, round, status, batch_key, at) VALUES ($1, $2, 0, 0, 'sending', 'batch:killed', now() - interval '11 minutes'),
-    ($1, $3, 0, 0, 'sending', NULL, now() - interval '11 minutes')`, [u4.cid, r4[0].id, r4[1].id]);
+  const killedPayload = { kind: "campaign", idempotencyKey: `campaign:${u4.cid}:${r4[2].id}:0`, subject: "Killed mid-request", text: "Stored before the request.", tags: [{ name: "campaign", value: String(u4.cid) }] };
+  await db.query(`INSERT INTO gtm_campaign_sends (campaign_id, recipient_id, step, round, status, batch_key, batch_pos, payload, at) VALUES
+    ($1, $2, 0, 0, 'sending', 'batch:killed', NULL, NULL, now() - interval '11 minutes'),
+    ($1, $3, 0, 0, 'sending', NULL, NULL, NULL, now() - interval '11 minutes'),
+    ($1, $4, 0, 0, 'sending', $5, 0, $6::jsonb, now() - interval '11 minutes')`, [u4.cid, r4[0].id, r4[1].id, r4[2].id, killedPayload.idempotencyKey, JSON.stringify(killedPayload)]);
   await json(adm("POST", `/gtm/campaigns/${u4.cid}/resume`));
   await tick();
   const s4 = await sendsOf(u4.cid);
-  assert.ok(s4[0].status === "unknown" && s4[1].status === "sent" && u4.count()[0] === 0 && u4.count()[1] === 1, `killed mid-request: ${JSON.stringify(s4)}`);
-  // An uncertain request that can no longer be made exactly (one of its people replied): parked, nothing sent.
-  const u5 = await uncertainCampaign("park", 2);
+  assert.ok(s4[0].status === "unknown" && s4[1].status === "sent" && s4[2].status === "uncertain" && u4.count()[0] === 0 && u4.count()[1] === 1, `killed mid-request: ${JSON.stringify(s4)}`);
+  await ago(u4.cid, 6);
+  await tick();
+  assert.ok((await sendsOf(u4.cid))[2].status === "sent" && sentTo(u4.ps[2], "campaign").filter(tagged(u4.cid))[0].subject === "Killed mid-request", "the killed request, replayed from its stored payload");
+  // A replay re-checks each member: one who replied, one who withdrew consent are parked; the rest go as the same key.
+  const u5 = await uncertainCampaign("park", 3);
   await mockPost("/_mock/resend/uncertain", { concurrent: 2 });
   await tick();
-  await db.query("UPDATE gtm_campaign_recipients SET status = 'replied' WHERE id = $1", [(await detail(u5.cid)).recipients[0].id]);
+  const r5 = (await detail(u5.cid)).recipients;
+  await db.query("UPDATE gtm_campaign_recipients SET status = 'replied' WHERE id = $1", [r5[0].id]);
+  await consent.recordConsent(u5.ps[1], "withdrawn", { source: "admin" });
+  await ago(u5.cid, 6);
   await tick();
-  assert.ok((await sendsOf(u5.cid)).every((s: any) => s.status === "unknown") && u5.count().every((n) => n === 0), "parked as unknown when the same request cannot be made");
+  const s5 = await sendsOf(u5.cid);
+  assert.ok(s5[0].status === "unknown" && s5[1].status === "unknown" && s5[2].status === "sent" && u5.count().join() === "0,0,1",
+    `left out of the replay, the rest sent once: ${JSON.stringify({ s5, n: u5.count() })}`);
   delete process.env.CAMPAIGN_BATCH_SIZE;
-
   // ---------- replies are personal data: the campaigns permission only ----------
   const { createAdminToken } = await import("../src/admin-tokens.js");
   const viewer = (await createAdminToken({ label: "smoke-viewer", role: "viewer", days: 1, createdBy: "smoke" })).token;
@@ -509,10 +587,10 @@ export async function gtmPhase1Checks({ db, base, adm, json, mockUrl, mockPost, 
   // ---------- CSV exports: no formula injection ----------
   const csvPath = "../web/src/lib/csv.ts";
   const csv = await import(csvPath);
-  assert.deepEqual(["=1+1", "+x", "-x", "@x", "\tx", "plain", -5].map((v) => csv.csvCell(v)), ["'=1+1", "'+x", "'-x", "'@x", "'\tx", "plain", "-5"], "cells that read as formulas are made text");
+  assert.deepEqual(["=1+1", "+x", "-x", "@x", "\tx", "  =1", " +x", "plain", -5].map((v) => csv.csvCell(v)), ["'=1+1", "'+x", "'-x", "'@x", "'\tx", "'  =1", "' +x", "plain", "-5"], "cells that read as formulas are made text");
 
   // ---------- privacy: addresses only in the recipients and replies tables ----------
-  const everyone = [pa, optDe, noDe, us, unk, comp, win, ra, rb, rc, tp, owner, ...people, ...capPeople, ...unPeople];
+  const everyone = [pa, optDe, noDe, us, unk, comp, race, win, ra, rb, rc, tp, owner, ...people, ...capPeople, ...unPeople];
   const elsewhere = JSON.stringify(await db.query("SELECT * FROM gtm_events")) + JSON.stringify(await db.query("SELECT * FROM gtm_event_enrolments"))
     + JSON.stringify(await db.query("SELECT * FROM email_consents")) + JSON.stringify(await db.query("SELECT * FROM email_consent_ledger"))
     + JSON.stringify(await db.query("SELECT * FROM gtm_org_signals")) + JSON.stringify(await db.query("SELECT * FROM gtm_campaign_sends"))

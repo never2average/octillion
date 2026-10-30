@@ -561,15 +561,22 @@ async function processEvents(only: number | null, stopAt = Infinity): Promise<{ 
        ON CONFLICT (campaign_id, event_id) DO NOTHING`,
       [c.id, t.type, t.delay_hours, c.launched_at, t.stage, t.days, t.attention, maxAgeHours]);
   }
-  const due = await db.query<DueEvent>(
-    `SELECT ee.campaign_id, ee.event_id, e.type, e.org_id, e.request_id, e.data FROM gtm_event_enrolments ee JOIN gtm_events e ON e.id = ee.event_id
-      JOIN gtm_campaigns c ON c.id = ee.campaign_id
-      WHERE ee.processed_at IS NULL AND ee.due_at <= now() AND c.status = 'running' AND ($1::bigint IS NULL OR c.id = $1) ORDER BY ee.due_at LIMIT 500`, [only]);
+  // Queued ones too: one whose delay ran out more than the max age ago (the campaign was paused meanwhile, or no tick
+  // ran) is skipped, not enrolled late.
+  const due = await db.query<DueEvent & { stale: boolean }>(
+    `SELECT ee.campaign_id, ee.event_id, e.type, e.org_id, e.request_id, e.data, ee.due_at < now() - make_interval(hours => $2::int) AS stale
+       FROM gtm_event_enrolments ee JOIN gtm_events e ON e.id = ee.event_id JOIN gtm_campaigns c ON c.id = ee.campaign_id
+      WHERE ee.processed_at IS NULL AND ee.due_at <= now() AND c.status = 'running' AND ($1::bigint IS NULL OR c.id = $1) ORDER BY ee.due_at LIMIT 500`, [only, maxAgeHours]);
   let enrolled = 0;
   for (const e of due) {
     if (Date.now() >= stopAt) break;
     const c = cs.find((x) => x.id === Number(e.campaign_id));
     if (!c) continue;
+    if (e.stale) {
+      await db.query("UPDATE gtm_event_enrolments SET processed_at = now(), note = $3 WHERE campaign_id = $1 AND event_id = $2",
+        [e.campaign_id, e.event_id, `Skipped: due more than ${maxAgeHours} hours ago (paused, or no tick ran)`]);
+      continue;
+    }
     try {
       const people = await eventPeople(c, e, await load(false, Number(e.event_id)));
       const r = people.length ? await admit(c, people, { delayDays: c.steps[0]?.delay_days ?? 0, eventId: Number(e.event_id), reentryDays: c.trigger!.reentry === "every" ? c.trigger!.reentry_days : null })
@@ -629,8 +636,17 @@ export async function unsubscribe(token: unknown): Promise<{ ok: boolean; test?:
   return { ok: true };
 }
 
+/**
+ * Suppress an address. A stronger reason replaces a weaker one (a bounce, a complaint or a manual entry over an
+ * unsubscribe; a complaint over a bounce), never the reverse: a confirmed opt-in lifts only "unsubscribed", so a later
+ * bounce or complaint must not stay recorded as an unsubscribe.
+ */
+export const SUPPRESSION_RANK_SQL = (r: string) => `CASE ${r} WHEN 'unsubscribed' THEN 1 WHEN 'bounced' THEN 2 WHEN 'manual' THEN 2 WHEN 'complained' THEN 3 ELSE 0 END`;
 async function suppress(email: string, reason: "unsubscribed" | "bounced" | "complained" | "manual", campaignId: number | null) {
-  await (await getDb()).query("INSERT INTO email_suppressions (email_hash, reason, campaign_id) VALUES ($1, $2, $3) ON CONFLICT (email_hash) DO NOTHING",
+  await (await getDb()).query(
+    `INSERT INTO email_suppressions (email_hash, reason, campaign_id) VALUES ($1, $2, $3)
+     ON CONFLICT (email_hash) DO UPDATE SET reason = excluded.reason, campaign_id = coalesce(excluded.campaign_id, email_suppressions.campaign_id)
+       WHERE ${SUPPRESSION_RANK_SQL("excluded.reason")} > ${SUPPRESSION_RANK_SQL("email_suppressions.reason")}`,
     [mail.hashAddress(email), reason, campaignId]);
 }
 
@@ -761,105 +777,165 @@ const transient = (res: mail.EmailResult) =>
 const idempotencyKeyOf = (cid: number, rid: number, step: number, round: number) => `campaign:${cid}:${rid}:${step}${round ? `:${round}` : ""}`;
 
 interface Prepared { r: Due; c: CampaignRow; claim: { id: number; attempts: number }; variant: string | null; email: mail.Email }
-/** What a send keeps while its outcome is uncertain: the email as it went, without the address (that stays on the recipient). */
+/** What a send keeps from just before its request until it is sent: the email as it goes, without the address (that stays on the recipient). */
 const payloadOf = (m: mail.Email) => ({ kind: m.kind, idempotencyKey: m.idempotencyKey, subject: m.subject, text: m.text, html: m.html, headers: m.headers, tags: m.tags,
   replyTo: m.replyTo, from: m.from, meta: m.meta });
+/** An uncertain request is replayed this long after its first try: 5 minutes, 1, 6 and 20 hours (Resend keeps a key 24). */
+const REPLAY_AFTER_MIN = [5, 60, 360, 1200];
+const REPLAY_DUE_SQL = `s.uncertain_at + make_interval(mins => (ARRAY[${REPLAY_AFTER_MIN.join(", ")}])[least(s.replays, ${REPLAY_AFTER_MIN.length - 1}) + 1]) <= now()`;
 
 /**
- * Uncertain sends. A request whose outcome is unknown (no answer, a 5xx, a 409, a function killed mid-request, a batch
- * answer without an email's id) may have gone out. Such an email is only ever sent again as the very same request:
- * the stored request key, the same emails in the same order, the same bodies (the stored payload), so Resend answers
- * from its record of the first request and nobody gets two. That is tried at once, then once a tick (replayUncertain)
- * for up to 23 hours (Resend keeps keys 24) and 3 replays; past that, or when the same request can no longer be made
- * (someone in it replied, unsubscribed, or the campaign ended), the send is parked as `unknown`: never sent again
- * unless an owner chooses Resend on the campaign. Missing ids and killed requests go straight to unknown.
+ * Uncertain sends. A request whose outcome is unknown (no answer, a 5xx, a 409, a function killed mid-request) may
+ * have gone out. Such an email is only ever sent again as the very same request: the stored request key and the
+ * stored payload sent verbatim (never re-rendered, so an edited step or a picked A/B winner can never change a body
+ * under a key Resend has seen), the same emails in the same order, so Resend answers from its record of the first
+ * request and nobody gets two. It is tried at once, then at REPLAY_AFTER_MIN (5 min, 1 h, 6 h, 20 h); a member who has
+ * since replied, unsubscribed, been suppressed or lost consent is left out (parked) and the rest go as the same request
+ * key with fewer emails (Resend refuses a known key with another body, 409, so that can never duplicate). Past 23 hours
+ * or the last replay, and for a batch answer missing an email's id, the send is parked as `unknown`: never sent again
+ * unless an owner chooses Resend (a new key: the one deliberate duplicate risk).
  */
 async function markUncertain(p: { sendId: number; recipientId: number }, res: mail.EmailResult, requestKey: string | null, email: mail.Email) {
   const db = await getDb();
   const replayable = requestKey != null && res.pos != null && !/no id for this email|without an id/.test(res.error ?? "");
+  // The payload stays either way: a replay needs it, and so does an owner's Resend of an unknown one.
   await db.query(
     `UPDATE gtm_campaign_sends SET status = $2, error = $3, batch_key = coalesce($4, batch_key), batch_pos = $5, payload = $6::jsonb, uncertain_at = coalesce(uncertain_at, now())
-      WHERE id = $1`, [p.sendId, replayable ? "uncertain" : "unknown", (res.error ?? "Outcome unknown").slice(0, 500), requestKey, res.pos ?? null,
-      replayable ? JSON.stringify(payloadOf(email)) : null]);
+      WHERE id = $1`, [p.sendId, replayable ? "uncertain" : "unknown", (res.error ?? "Outcome unknown").slice(0, 500), requestKey, res.pos ?? null, JSON.stringify(payloadOf(email))]);
   // Out of the queue until it is resolved: the claim refuses an uncertain or unknown send anyway.
   await db.query("UPDATE gtm_campaign_recipients SET next_at = NULL WHERE id = $1", [p.recipientId]);
   return replayable;
 }
 
-/** A tick that died mid-request left its sends `sending` with a request key: Resend may have them, so they are unknown. */
+/**
+ * A tick that died mid-request left its sends `sending` with a request key: Resend may have them. Their key, place
+ * and payload were stored before the request, so they are uncertain (replayed as that request); without a payload
+ * (an older send), unknown.
+ */
 async function sweepStuck() {
   const db = await getDb();
-  const stuck = await db.query<{ recipient_id: number }>(
-    `UPDATE gtm_campaign_sends SET status = 'unknown', error = 'Outcome unknown: the tick sending it stopped mid-request', uncertain_at = coalesce(uncertain_at, now())
-      WHERE status = 'sending' AND batch_key IS NOT NULL AND at < now() - interval '10 minutes' RETURNING recipient_id`);
+  const stuck = await db.query<{ recipient_id: number; status: string }>(
+    `UPDATE gtm_campaign_sends SET status = CASE WHEN payload IS NOT NULL AND batch_pos IS NOT NULL THEN 'uncertain' ELSE 'unknown' END,
+            error = 'Outcome unknown: the tick sending it stopped mid-request', uncertain_at = coalesce(uncertain_at, now())
+      WHERE status = 'sending' AND batch_key IS NOT NULL AND at < now() - interval '10 minutes' RETURNING recipient_id, status`);
   if (stuck.length) await db.query("UPDATE gtm_campaign_recipients SET next_at = NULL WHERE id = ANY($1::bigint[])", [stuck.map((s) => Number(s.recipient_id))]);
-  return stuck.length;
+  return { uncertain: stuck.filter((s) => s.status === "uncertain").length, unknown: stuck.filter((s) => s.status === "unknown").length };
 }
 
-/** Replay uncertain requests, each exactly as it was made (see above). Returns how many emails it resolved as sent. */
-async function replayUncertain(only: number | null, stopAt: number, gap: number, timeoutMs: () => number, out: TickResult): Promise<void> {
+type ReplayRow = { id: number; campaign_id: number; recipient_id: number; step: number; round: number; batch_key: string; batch_pos: number; payload: Record<string, unknown>;
+  expired: boolean; due: boolean; replays: number; email: string; source: "account" | "request"; country: string | null; rstatus: string; cstatus: string | null; suppressed: boolean };
+
+/** Replay uncertain requests that are due, each as the very same request (see above). Returns whether one was still uncertain. */
+async function replayUncertain(only: number | null, stopAt: number, gap: number, timeoutMs: () => number, out: TickResult): Promise<{ uncertain: boolean }> {
   const db = await getDb();
-  const rows = await db.query<{ id: number; campaign_id: number; recipient_id: number; step: number; round: number; batch_key: string; batch_pos: number; payload: Record<string, unknown>;
-    expired: boolean; replays: number; email: string; rstatus: string; cstatus: string | null; suppressed: boolean }>(
-    `SELECT s.id, s.campaign_id, s.recipient_id, s.step, s.round, s.batch_key, s.batch_pos, s.payload, s.uncertain_at < now() - interval '23 hours' AS expired, s.replays,
-            r.email, r.status AS rstatus, c.status AS cstatus,
+  const rows = await db.query<ReplayRow>(
+    `SELECT s.id, s.campaign_id, s.recipient_id, s.step, s.round, s.batch_key, s.batch_pos, s.payload, s.uncertain_at < now() - interval '23 hours' AS expired,
+            ${REPLAY_DUE_SQL} AS due, s.replays, r.email, r.source, r.country, r.status AS rstatus, c.status AS cstatus,
             EXISTS (SELECT 1 FROM email_suppressions x WHERE x.email_hash = encode(sha256(convert_to(lower(trim(r.email)), 'UTF8')), 'hex')) AS suppressed
        FROM gtm_campaign_sends s JOIN gtm_campaign_recipients r ON r.id = s.recipient_id LEFT JOIN gtm_campaigns c ON c.id = s.campaign_id
       WHERE s.status = 'uncertain' AND ($1::bigint IS NULL OR s.batch_key IN (SELECT batch_key FROM gtm_campaign_sends WHERE status = 'uncertain' AND campaign_id = $1))
       ORDER BY s.batch_key, s.batch_pos`, [only]);
-  const groups = new Map<string, typeof rows>();
+  const groups = new Map<string, ReplayRow[]>();
   for (const r of rows) groups.set(r.batch_key, [...(groups.get(r.batch_key) ?? []), r]);
-  const park = async (g: typeof rows, why: string) => {
-    await db.query("UPDATE gtm_campaign_sends SET status = 'unknown', error = $2, payload = NULL WHERE id = ANY($1::bigint[]) AND status = 'uncertain'", [g.map((r) => Number(r.id)), why]);
+  const park = async (g: ReplayRow[], why: string) => {
+    if (!g.length) return;
+    await db.query("UPDATE gtm_campaign_sends SET status = 'unknown', error = $2 WHERE id = ANY($1::bigint[]) AND status = 'uncertain'", [g.map((r) => Number(r.id)), why]);
     out.unknown += g.length;
   };
-  let first = true;
+  const consent = await consentOf(rows.map((r) => r.email));
+  const campaigns = new Map<number, CampaignRow | null>();
+  let first = true, stillUncertain = false;
   for (const [key, g] of groups) {
     if (Date.now() >= stopAt) break;
-    // A paused campaign waits (unless the key is about to expire): its people may still get this email when it resumes.
-    if (g.some((r) => r.cstatus === "paused") && !g.some((r) => r.expired)) continue;
-    if (g.some((r) => r.expired || Number(r.replays) >= 3)) { await park(g, "Outcome unknown: could not be confirmed within Resend's idempotency window"); continue; }
-    if (g.some((r) => r.cstatus !== "running" || !["pending", "active"].includes(r.rstatus) || r.suppressed)) {
-      await park(g, "Outcome unknown: the same request can no longer be made (someone in it replied, unsubscribed or was suppressed, or the campaign ended)");
-      continue;
+    if (g.some((r) => r.expired || Number(r.replays) >= REPLAY_AFTER_MIN.length)) { await park(g, "Outcome unknown: could not be confirmed within Resend's idempotency window"); continue; }
+    if (!g[0].due) continue;
+    // A paused campaign waits: its people may still get this email when it resumes. A finished one still replays
+    // (the email was already on its way); a deleted one took its sends with it.
+    if (g.some((r) => r.cstatus === "paused")) continue;
+    // Each member as they are now: still waiting, not suppressed, consent as this campaign needs it.
+    const ok: ReplayRow[] = [], gone: ReplayRow[] = [];
+    for (const r of g) {
+      const cid = Number(r.campaign_id);
+      if (!campaigns.has(cid)) campaigns.set(cid, await campaignById(cid).catch(() => null));
+      const c = campaigns.get(cid);
+      const fine = !!c && ["running", "done"].includes(c.status) && ["pending", "active"].includes(r.rstatus) && !r.suppressed
+        && mayEnrol({ email: r.email, source: r.source, country: r.country }, requiresOptIn(c), consent.get(r.email)).ok;
+      (fine ? ok : gone).push(r);
     }
+    await park(gone, "Outcome unknown: not repeated, the person replied, unsubscribed, was suppressed or no longer has the consent this campaign needs");
+    if (!ok.length) continue;
+    // The rest go as the same request key; with fewer emails their places are renumbered first (what a later replay repeats).
+    if (ok.length < g.length)
+      for (const [n, r] of ok.entries()) await db.query("UPDATE gtm_campaign_sends SET batch_pos = $2 WHERE id = $1", [r.id, n]);
     if (!first && gap) await sleep(gap);
     first = false;
-    const ms = g.map((r) => ({ ...(r.payload as unknown as mail.Email), to: r.email }));
+    const ms = ok.map((r) => ({ ...(r.payload as unknown as mail.Email), to: r.email }));
     const sent = await mail.sendBatch(ms, { key, exact: true, timeoutMs: timeoutMs() });
     out.requests++;
-    let rateLimited = false;
-    for (const [n, r] of g.entries()) {
+    let stop = false;
+    for (const [n, r] of ok.entries()) {
       const res = sent.results[n];
       if (res?.status === "sent" || res?.status === "duplicate") {
         await db.query("UPDATE gtm_campaign_sends SET status = 'sent', provider_id = coalesce($2, provider_id), payload = NULL, error = NULL, at = now() WHERE id = $1",
           [r.id, res.provider_id ?? null]);
-        const c = await campaignById(Number(r.campaign_id)).catch(() => null);
+        const c = campaigns.get(Number(r.campaign_id));
         if (c) await advance({ id: Number(r.recipient_id), next_step: Number(r.step), round: Number(r.round) } as Due, c);
         out.sent++;
-      } else if (res && /Resend answered 429/.test(res.error ?? "")) rateLimited = true;
-      else if (res?.uncertain) { await db.query("UPDATE gtm_campaign_sends SET replays = replays + 1, error = $2 WHERE id = $1", [r.id, (res.error ?? "").slice(0, 500)]); out.uncertain++; }
-      else await park([r], `Outcome unknown: the replay was refused (${(res?.error ?? res?.status ?? "no result").slice(0, 200)})`);
+      } else if (res && (/Resend answered 429/.test(res.error ?? "") || res.status === "skipped")) {
+        // Rate-limited, or emails switched off meanwhile: nothing was tried; still uncertain, for a later replay.
+        stop = true;
+      } else if (res?.uncertain) {
+        await db.query("UPDATE gtm_campaign_sends SET replays = replays + 1, error = $2, at = now() WHERE id = $1", [r.id, (res.error ?? "").slice(0, 500)]);
+        out.uncertain++;
+        stillUncertain = true;
+      } else await park([r], `Outcome unknown: the replay was refused (${(res?.error ?? res?.status ?? "no result").slice(0, 200)})`);
     }
-    if (rateLimited) break;
+    if (stop || stillUncertain) break; // Resend is not answering well: the other replays wait for their turn
   }
+  return { uncertain: stillUncertain };
 }
 
-/** An owner's "Resend": the campaign's unknown sends go back in the queue as new sends (Resend may deliver some twice). */
+/**
+ * An owner's "Resend" of a campaign's unknown sends: each goes again now, from its stored payload, under a new key (its
+ * old one may already have delivered it; this is the one place an email may knowingly go twice). People who since
+ * replied, unsubscribed, were suppressed or lost consent are left as they are. An older unknown send without a stored
+ * payload goes back in the queue instead (rendered again, when the campaign runs).
+ */
 export async function resendUnknown(actor: string, id: number) {
   const c = await campaignById(id);
   const db = await getDb();
-  const rows = await db.query<{ recipient_id: number; step: number; round: number }>(
-    `UPDATE gtm_campaign_sends SET status = 'failed', batch_key = NULL, batch_pos = NULL, payload = NULL, error = $2
-      WHERE campaign_id = $1 AND status = 'unknown' RETURNING recipient_id, step, round`, [c.id, `Resent by ${actor.slice(0, 80)}`]);
-  if (rows.length) {
-    // Their email_log rows may still say sending (a killed request): free them, or the new attempt would wait on them.
-    await db.query("UPDATE email_log SET status = 'failed', error = 'Outcome unknown; resent by an owner' WHERE idempotency_key = ANY($1::text[]) AND status IN ('sending', 'failed')",
-      [rows.map((r) => idempotencyKeyOf(c.id, Number(r.recipient_id), Number(r.step), Number(r.round)))]);
-    await db.query("UPDATE gtm_campaign_recipients SET next_at = now() WHERE id = ANY($1::bigint[]) AND status IN ('pending', 'active')", [rows.map((r) => Number(r.recipient_id))]);
+  const rows = await db.query<{ id: number; recipient_id: number; step: number; round: number; payload: Record<string, unknown> | null; email: string; rstatus: string;
+    source: "account" | "request"; country: string | null; suppressed: boolean }>(
+    `SELECT s.id, s.recipient_id, s.step, s.round, s.payload, r.email, r.status AS rstatus, r.source, r.country,
+            EXISTS (SELECT 1 FROM email_suppressions x WHERE x.email_hash = encode(sha256(convert_to(lower(trim(r.email)), 'UTF8')), 'hex')) AS suppressed
+       FROM gtm_campaign_sends s JOIN gtm_campaign_recipients r ON r.id = s.recipient_id WHERE s.campaign_id = $1 AND s.status = 'unknown' ORDER BY s.id`, [c.id]);
+  const consent = await consentOf(rows.map((r) => r.email));
+  let resent = 0, requeued = 0, skipped = 0, uncertain = 0;
+  for (const r of rows) {
+    if (!["pending", "active"].includes(r.rstatus) || r.suppressed || !mayEnrol({ email: r.email, source: r.source, country: r.country }, requiresOptIn(c), consent.get(r.email)).ok) { skipped++; continue; }
+    if (!r.payload) {
+      await db.query("UPDATE gtm_campaign_sends SET status = 'failed', batch_key = NULL, batch_pos = NULL, error = $2 WHERE id = $1", [r.id, `Resent by ${actor.slice(0, 80)}`]);
+      await db.query("UPDATE email_log SET status = 'failed', error = 'Outcome unknown; resent by an owner' WHERE idempotency_key = $1 AND status IN ('sending', 'failed')",
+        [idempotencyKeyOf(c.id, Number(r.recipient_id), Number(r.step), Number(r.round))]);
+      await db.query("UPDATE gtm_campaign_recipients SET next_at = now() WHERE id = $1 AND status IN ('pending', 'active')", [r.recipient_id]);
+      requeued++;
+      continue;
+    }
+    const base = String(r.payload.idempotencyKey ?? idempotencyKeyOf(c.id, Number(r.recipient_id), Number(r.step), Number(r.round))).replace(/:resend:[\w-]+$/, "");
+    const email = { ...(r.payload as unknown as mail.Email), to: r.email, idempotencyKey: `${base}:resend:${randomBytes(4).toString("hex")}` };
+    // Recorded before the request, like any send: a crash now leaves it uncertain under the new key, not lost.
+    await db.query("UPDATE gtm_campaign_sends SET status = 'sending', batch_key = $2, batch_pos = 0, payload = $3::jsonb, uncertain_at = NULL, replays = 0, at = now(), error = $4 WHERE id = $1",
+      [r.id, email.idempotencyKey, JSON.stringify(payloadOf(email)), `Resent by ${actor.slice(0, 80)}`]);
+    const [res] = (await mail.sendBatch([email], { key: email.idempotencyKey })).results;
+    if (res?.status === "sent" || res?.status === "duplicate") {
+      await db.query("UPDATE gtm_campaign_sends SET status = 'sent', provider_id = coalesce($2, provider_id), payload = NULL, at = now() WHERE id = $1", [r.id, res.provider_id ?? null]);
+      await advance({ id: Number(r.recipient_id), next_step: Number(r.step), round: Number(r.round) } as Due, c);
+      resent++;
+    } else if (res?.uncertain) { await markUncertain({ sendId: Number(r.id), recipientId: Number(r.recipient_id) }, res, email.idempotencyKey, email); uncertain++; }
+    else await db.query("UPDATE gtm_campaign_sends SET status = 'unknown', error = $2 WHERE id = $1", [r.id, `Resend refused: ${(res?.error ?? res?.status ?? "no result").slice(0, 300)}`]);
   }
-  log(actor, "campaign.resend_unknown", null, { campaign_id: c.id, sends: rows.length });
-  return { campaign_id: c.id, requeued: rows.length };
+  log(actor, "campaign.resend_unknown", null, { campaign_id: c.id, resent, requeued, skipped, uncertain });
+  return { campaign_id: c.id, resent, requeued, skipped, uncertain };
 }
 
 async function runTick(only: number | null, o: TickOptions = {}): Promise<TickResult> {
@@ -900,12 +976,20 @@ async function runTick(only: number | null, o: TickOptions = {}): Promise<TickRe
       out.skipped = !status.connected ? "No Resend key in Key vault (or the provider is off)" : "Emails are off (Agent configuration, Send emails)";
       return out;
     }
-    // Earlier requests whose outcome is unknown come first: a killed one is parked, an uncertain one replayed exactly.
-    out.unknown += await sweepStuck();
-    if (Date.now() < stopAt) await replayUncertain(only, stopAt, gap, timeoutMs, out);
+    // Earlier requests whose outcome is unknown come first: a killed one becomes uncertain (or unknown without its
+    // payload), an uncertain one is replayed exactly when its turn comes.
+    const swept = await sweepStuck();
+    out.uncertain += swept.uncertain; out.unknown += swept.unknown;
+    const replay = Date.now() < stopAt ? await replayUncertain(only, stopAt, gap, timeoutMs, out) : { uncertain: false };
+    // Outage back-off: while Resend's last answer to us was uncertain (in the last 30 minutes), new sends go one email
+    // at a time as a probe, and stop at the first uncertain one; a clean answer lifts it. A replay still uncertain
+    // in this tick means no new sends at all.
+    const [{ recent }] = await db.query<{ recent: boolean }>(
+      "SELECT EXISTS (SELECT 1 FROM gtm_campaign_sends WHERE status = 'uncertain' AND at > now() - interval '30 minutes') AS recent");
+    let probing = Boolean(recent);
     const [postal, box, key] = await Promise.all([postalAddress(), replies.inbox(), unsubscribeKey()]);
     const from = settingText("EMAIL_FROM"), defaultReplyTo = settingText("EMAIL_REPLY_TO").split(",").map((x) => x.trim()).filter(mail.isEmail);
-    let attempted = 0, slowDown = false, calls = 0;
+    let attempted = 0, slowDown = replay.uncertain, calls = 0;
     // Waves: lease up to ten batches' worth, send them batch by batch, and go again while the cap and the time allow.
     while (!slowDown && attempted < cap && Date.now() < stopAt) {
       const wave = await db.query<Due>(
@@ -928,7 +1012,7 @@ async function runTick(only: number | null, o: TickOptions = {}): Promise<TickRe
         const slice = wave.slice(w, w + size * 2);
         const [suppressedNow, consentNow] = await Promise.all([suppressedSet(slice.map((r) => r.email)), consentOf(slice.map((r) => r.email))]);
         const campaigns = new Map<number, CampaignRow | null>();
-        while (w < wave.length && chunk.length < size && attempted + chunk.length < cap) {
+        while (w < wave.length && chunk.length < (probing ? 1 : size) && attempted + chunk.length < cap) {
           const r = wave[w++];
           done.add(Number(r.id));
           try {
@@ -995,10 +1079,14 @@ async function runTick(only: number | null, o: TickOptions = {}): Promise<TickRe
         }
         if (!chunk.length) continue;
         attempted += chunk.length;
-        // The request key is recorded on every claim before the request is made: a tick killed after this point
-        // leaves sends that sweepStuck parks as unknown, never sends again on its own.
+        // The request key, each email's place and its payload are recorded on every claim before the request is made:
+        // a tick killed after this point leaves sends that sweepStuck makes uncertain (replayed as this request,
+        // payload verbatim), never sent again as a new one.
         const requestKey = chunk.length === 1 ? chunk[0].email.idempotencyKey : mail.batchKeyOf(chunk.map((p) => p.email.idempotencyKey));
-        await db.query("UPDATE gtm_campaign_sends SET batch_key = $2 WHERE id = ANY($1::bigint[])", [chunk.map((p) => Number(p.claim.id)), requestKey]);
+        await db.query(
+          `UPDATE gtm_campaign_sends s SET batch_key = $2, batch_pos = v.pos, payload = v.payload, variant = v.variant
+             FROM jsonb_to_recordset($1::jsonb) AS v(id bigint, pos int, payload jsonb, variant text) WHERE s.id = v.id`,
+          [JSON.stringify(chunk.map((p, n) => ({ id: Number(p.claim.id), pos: n, payload: payloadOf(p.email), variant: p.variant }))), requestKey]);
         const ms = chunk.map((p) => p.email);
         let sent = await mail.sendBatch(ms, { key: requestKey, timeoutMs: timeoutMs() });
         calls++;
@@ -1018,7 +1106,7 @@ async function runTick(only: number | null, o: TickOptions = {}): Promise<TickRe
         for (const [n, p] of chunk.entries()) {
           const res = sent.results[n] ?? { status: "failed" as const, error: "no result", uncertain: true, pos: null };
           if (res.status === "sent" || res.status === "duplicate") {
-            await db.query("UPDATE gtm_campaign_sends SET status = 'sent', provider_id = coalesce($2, provider_id), variant = $3, batch_key = coalesce($4, batch_key), at = now() WHERE id = $1",
+            await db.query("UPDATE gtm_campaign_sends SET status = 'sent', provider_id = coalesce($2, provider_id), variant = $3, batch_key = coalesce($4, batch_key), payload = NULL, at = now() WHERE id = $1",
               [p.claim.id, res.provider_id ?? null, p.variant, sent.request_key]);
             await advance(p.r, p.c);
             out.sent++;
@@ -1041,6 +1129,11 @@ async function runTick(only: number | null, o: TickOptions = {}): Promise<TickRe
             out.failed++;
           }
         }
+        // Resend did not answer this request well (after its immediate replay): no new batches this tick, and the
+        // next ticks probe one email at a time until an answer is clean. A clean answer ends a probe.
+        if (sent.results.some((x) => x?.uncertain)) { slowDown = true; break; }
+        if (probing && sent.results.some((x) => x?.status === "sent")) probing = false;
+        else if (probing) break;
         if (retryMs) {
           // Rate-limited: wait what Resend asked when the time allows (and go on), else stop this tick here.
           if (Date.now() + retryMs < stopAt) { await sleep(retryMs); await takeLease(leaseSecs).catch(() => false); break; }
@@ -1058,7 +1151,11 @@ async function runTick(only: number | null, o: TickOptions = {}): Promise<TickRe
     out.finished = (await db.query(
       `UPDATE gtm_campaigns c SET status = 'done', finished_at = now(), updated_at = now()
         WHERE c.status = 'running' AND NOT c.rolling AND c.trigger IS NULL AND c.enrolled_at IS NOT NULL
-          AND NOT EXISTS (SELECT 1 FROM gtm_campaign_recipients r WHERE r.campaign_id = c.id AND r.status IN ('pending', 'active')) RETURNING id`)).length;
+          AND NOT EXISTS (SELECT 1 FROM gtm_campaign_recipients r WHERE r.campaign_id = c.id AND r.status IN ('pending', 'active')
+                            -- Someone whose email is uncertain or unknown is not waiting for the campaign: it can finish
+                            -- (the peek still shows them; replays and an owner's Resend still work on a done campaign).
+                            AND NOT EXISTS (SELECT 1 FROM gtm_campaign_sends s WHERE s.recipient_id = r.id AND s.round = r.round AND s.step = r.next_step
+                                              AND s.status IN ('uncertain', 'unknown'))) RETURNING id`)).length;
     if (out.sent || out.failed || out.deferred || out.uncertain || out.unknown)
       console.error(`campaigns: sent ${out.sent} in ${out.requests} request(s), failed ${out.failed}, deferred ${out.deferred}, uncertain ${out.uncertain}, unknown ${out.unknown}, outside window ${out.outside_window}, suppressed ${out.suppressed}, no consent ${out.no_consent}`);
     return out;

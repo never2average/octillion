@@ -3,10 +3,11 @@ export type CsvValue = string | number | boolean | null | undefined;
 
 export const csvCell = (v: CsvValue): string => {
   if (v === null || v === undefined) return '';
-  // Formula injection: a text cell starting with = + - @ (or a tab / CR) is run as a formula by spreadsheet apps, and
-  // exports carry text people typed (reply bodies, names, subjects). A leading ' makes it plain text. Numbers stay numbers.
+  // Formula injection: a text cell starting with = + - @ (after any leading spaces), or with a tab / CR, is run as a
+  // formula by spreadsheet apps, and exports carry text people typed (reply bodies, names, subjects). A leading '
+  // makes it plain text. Numbers stay numbers.
   const raw = String(v);
-  const s = typeof v === 'string' && /^[=+\-@\t\r]/.test(raw) ? `'${raw}` : raw;
+  const s = typeof v === 'string' && /^(\s*[=+\-@]|[\t\r])/.test(raw) ? `'${raw}` : raw;
   return /[",\r\n]/.test(s) || s !== s.trim() ? `"${s.replace(/"/g, '""')}"` : s;
 };
 
