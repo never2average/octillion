@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react';
 import PageContainer from '@/components/layout/page-container';
 import { DetailMeta, DetailTable, DetailTabs } from '@/components/layout/detail';
 import { Button, buttonVariants } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -32,15 +33,11 @@ export function AdminAccountDetail({ slug }: { slug: string }) {
   const linked = d && (d.org.clerk_org_id ?? d.org.workos_org_id);
 
   return (
-    <PageContainer
-      pageTitle={d?.org.name ?? slug}
-      pageDescription={d ? 'Clerk and Stripe keep the change history (Events).' : 'Loading account…'}
-      pageHeaderAction={
-        <Link className={buttonVariants({ variant: 'outline' })} href='/admin/accounts'>
-          <Icons.chevronLeft className='size-4' /> Accounts
-        </Link>
-      }
-    >
+    // No page title: the card is the page's header, with a small way back above it.
+    <PageContainer>
+      <Link href='/admin/accounts' className='text-muted-foreground hover:text-foreground mb-3 inline-flex w-fit items-center gap-1 text-sm'>
+        <Icons.chevronLeft className='size-4' /> Accounts
+      </Link>
       <ErrorBox error={error} />
       {isLoading || !d ? (
         <div className='flex flex-col gap-4'>
@@ -56,7 +53,7 @@ export function AdminAccountDetail({ slug }: { slug: string }) {
             tabs={[
               { id: 'onboarding', label: 'Onboarding', content: <Onboarding d={d} labelOf={labelOf} /> },
               { id: 'people', label: 'People', count: linked ? (d.members ?? []).length : undefined, content: <People d={d} path={path} onResult={show} /> },
-              { id: 'invitations', label: 'Invitations', count: (d.invitations ?? []).length, hidden: !linked, content: <Invitations d={d} path={path} /> },
+              { id: 'invitations', label: 'Invitations', count: (d.invitations ?? []).length, hidden: !linked || !(d.invitations ?? []).length, content: <Invitations d={d} path={path} /> },
               { id: 'billing', label: 'Billing', count: d.integrations.stripe ? (d.invoices ?? []).length : undefined, content: <Billing d={d} path={path} /> },
               { id: 'activity', label: 'Tool use', count: d.tools.length, content: <Activity d={d} /> },
               { id: 'errors', label: 'Errors', count: d.errors.length, content: <Errors d={d} /> },
@@ -94,7 +91,7 @@ function AccountMeta({ d, path }: { d: Detail; path: string }) {
         {s?.cancel_at_period_end && <StatusBadge tone='warn'>cancels</StatusBadge>}
         {d.org.attention.length > 0 && <StatusBadge tone='warn'>{`${d.org.attention.length} to look at`}</StatusBadge>}
       </>}
-      subtitle={<>Next: {d.org.next_step}</>}
+      subtitle={<>Next: {d.org.next_step} · Clerk and Stripe keep the change history (Events).</>}
       actions={<>
         {!linked && clerkOn && <Gate need='accounts'><Button variant='outline' disabled={link.isPending} onClick={() => link.mutate()}>Move to Clerk</Button></Gate>}
         <Rename path={path} name={d.org.name} />
@@ -132,23 +129,37 @@ function AccountMeta({ d, path }: { d: Detail; path: string }) {
   );
 }
 
+/** A labelled Rename button; the name is edited in a dialog. */
 function Rename({ path, name }: { path: string; name: string }) {
+  const [open, setOpen] = useState(false);
   const [v, setV] = useState(name);
-  useEffect(() => setV(name), [name]);
+  useEffect(() => setV(name), [name, open]);
   const rename = useAdminAction(() => adminApi('PATCH', path, { name: v }), { success: 'Renamed' });
   return (
-    <form
-      className='flex gap-2'
-      onSubmit={(e) => {
-        e.preventDefault();
-        rename.mutate();
-      }}
-    >
-      <Input value={v} onChange={(e) => setV(e.target.value)} className='w-44 sm:w-56' aria-label='Account name' />
-      <Gate need='accounts'><Button variant='outline' type='submit' disabled={rename.isPending || v.trim() === name || !v.trim()}>
-        Rename
-      </Button></Gate>
-    </form>
+    <>
+      <Gate need='accounts'><Button variant='outline' onClick={() => setOpen(true)}><Icons.edit className='size-3.5' /> Rename</Button></Gate>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className='sm:max-w-md'>
+          <form
+            className='grid gap-4'
+            onSubmit={(e) => {
+              e.preventDefault();
+              rename.mutate(undefined, { onSuccess: () => setOpen(false) });
+            }}
+          >
+            <DialogHeader>
+              <DialogTitle>Rename account</DialogTitle>
+              <DialogDescription>The slug stays the same.</DialogDescription>
+            </DialogHeader>
+            <Input autoFocus value={v} onChange={(e) => setV(e.target.value)} aria-label='Account name' />
+            <DialogFooter>
+              <Button type='button' variant='outline' onClick={() => setOpen(false)}>Cancel</Button>
+              <Gate need='accounts'><Button type='submit' disabled={rename.isPending || v.trim() === name || !v.trim()}>Rename</Button></Gate>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 
@@ -331,7 +342,7 @@ function Billing({ d, path }: { d: Detail; path: string }) {
       empty={stripe ? 'No invoices yet.' : <>Stripe is off (<Mono>STRIPE_SECRET_KEY</Mono>). The account gets the default budget of {usd(d.org.budget_usd)} a month.</>}
       search={stripe ? (x: any) => `${x.number ?? ''} ${x.id} ${x.status}` : undefined} searchPlaceholder='Search invoices'
       defaultSort={[{ key: 'date', dir: 'desc' }]}
-      onRow={(x: any) => x.url && window.open(x.url, '_blank', 'noopener')}
+      onRow={(x: any) => x.url && window.open(x.url, '_blank', 'noopener')} rowClickable={(x: any) => !!x.url}
       filters={stripe ? (
         <div className='flex flex-wrap gap-2'>
           {d.plans.length ? (

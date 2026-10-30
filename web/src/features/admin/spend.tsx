@@ -507,7 +507,7 @@ function PlanPeek({ p, days, actions }: { p: RevenuePlan; days: string[]; action
         { id: 'daily', label: 'Per day', content: <DailyTab days={days} charts={[{ title: 'Collected per day', format: dollarsPerDay, series: [{ key: 'collected', label: 'Collected', values: p.daily_collected }] }]} /> },
         { id: 'accounts', label: 'Accounts', count: p.accounts.length, content: (
           <DetailTable rows={p.accounts} rowKey={(a) => a.key} noun='accounts' empty='No subscriptions on this price.' search={(a) => `${a.name} ${a.slug ?? ''}`}
-            onRow={(a) => { if (a.slug) router.push(accountHref(a.slug)); }} defaultSort={[{ key: 'mrr', dir: 'desc' }]} cols={[
+            onRow={(a) => { if (a.slug) router.push(accountHref(a.slug)); }} rowClickable={(a) => !!a.slug} defaultSort={[{ key: 'mrr', dir: 'desc' }]} cols={[
             { key: 'account', label: 'Account', type: 'text', value: (a) => a.name, render: (a) => (a.slug ? <span className='font-medium'>{a.name}</span> : <Mono>{a.name}</Mono>) },
             { key: 'status', label: 'Status', type: 'select', value: (a) => a.status, render: (a) => subBadge(a.status) },
             { key: 'mrr', label: 'MRR', type: 'number', value: (a) => a.mrr_usd, render: (a) => num(cents(a.mrr_usd)), className: 'text-right' }
@@ -556,7 +556,7 @@ function RevenueAccountPeek({ a, days, actions }: { a: RevenueAccount; days: str
           series: [{ key: 'collected', label: 'Collected', values: a.daily_collected }, { key: 'spend', label: 'Model spend', values: a.daily_spend }] }]} /> },
         { id: 'invoices', label: 'Invoices', count: a.invoices.length, content: (
           <DetailTable<Invoice> rows={a.invoices} rowKey={(i) => i.id} noun='invoices' empty='No invoices in this range.' defaultSort={[{ key: 'date', dir: 'desc' }]}
-            onRow={(i) => { if (i.url) window.open(i.url, '_blank', 'noopener'); }} cols={[
+            onRow={(i) => { if (i.url) window.open(i.url, '_blank', 'noopener'); }} rowClickable={(i) => !!i.url} cols={[
             { key: 'number', label: 'Number', type: 'text', value: (i) => i.number ?? i.id, render: (i) => <Mono>{i.number ?? i.id}</Mono> },
             { key: 'date', label: 'Date', type: 'date', value: (i) => i.paid_at ?? i.created, render: (i) => date(i.paid_at ?? i.created) },
             { key: 'amount', label: 'Amount', type: 'number', value: (i) => i.amount_usd, render: (i) => num(cents(i.amount_usd)), className: 'text-right' },

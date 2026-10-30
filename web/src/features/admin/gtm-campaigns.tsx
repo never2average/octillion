@@ -689,7 +689,7 @@ function CampaignEditor({ c, stages, tab, setTab, before, after, card }: {
   return (
     <div className='flex flex-col gap-4'>
       {card(saveButton, editing)}
-      <DetailTabs tabs={tabs} value={tab} onValueChange={setTab} defaultTab={c.status === 'draft' ? 'emails' : 'recipients'} />
+      <DetailTabs resetKey={c.id} tabs={tabs} value={tab} onValueChange={setTab} defaultTab={c.status === 'draft' ? 'emails' : 'recipients'} />
     </div>
   );
 }

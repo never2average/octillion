@@ -283,7 +283,7 @@ function OrchPeek({ id, onJob }: { id: number; onJob: (job: string) => void }) {
         { id: 'workers', label: 'Workers now', count: data.boat.ok ? data.workers.length : null, content: (
           <DetailTable rows={data.boat.ok ? data.workers : []} rowKey={(w) => w.sandbox_id} noun='workers'
             empty={data.boat.ok ? 'No worker sandboxes on boat for it.' : `boat.dev did not answer: ${data.boat.error}`}
-            onRow={(w) => w.session_id && openSession(w.session_id)} cols={[
+            onRow={(w) => w.session_id && openSession(w.session_id)} rowClickable={(w) => !!w.session_id} cols={[
             { key: 'agent', label: 'Agent', type: 'text', value: (w) => w.agent_id ?? '', render: (w) => w.agent_id ?? '—' },
             { key: 'session', label: 'Session', type: 'text', value: (w) => w.session_id ?? '', render: (w) => (w.session_id ? <Mono>{w.session_id}</Mono> : <span className='text-muted-foreground'>idle</span>) },
             { key: 'status', label: 'Status', type: 'select', value: (w) => w.status ?? '', render: (w) => w.status ?? '—' },

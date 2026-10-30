@@ -146,7 +146,7 @@ export function Editor({ draft: initial, tools, onClose }: { draft: Draft; tools
             ) },
             { id: 'stages', label: 'Stages', count: d.stages.length, content: (
               <div className='flex flex-col gap-4'>
-                <DetailTable rows={stageRows} rowKey={(r) => String(r.i)} noun='stages' empty='No stages yet.'
+                <DetailTable rows={stageRows} rowKey={(r) => String(r.i)} initialSize={100} noun='stages' empty='No stages yet.'
                   onRow={(r) => setOpen(open === r.i ? null : r.i)} actions={(r) => stageActions(r.st, r.i)}
                   rowClassName={(r) => (open === r.i ? 'bg-muted/50' : undefined)}
                   primary={<Button size='sm' variant='outline' disabled={d.stages.length >= 12} onClick={addStage}><Icons.add /> Add stage</Button>}

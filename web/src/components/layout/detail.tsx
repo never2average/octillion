@@ -5,7 +5,10 @@
 //   DetailTable — each tab's table: RecordView embedded (search, sortable typed columns, paging, row click-through).
 //   KeyValueTable — a Field | Value table for a tab whose data is inherently key/value (settings, configuration).
 //   TimelineTable — a timeline as When | Event | Detail | Actor.
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Button } from '@/components/ui/button';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+import { Icons } from '@/components/icons';
 import { RecordView, type RecordCol, type RowAction, type SortRule } from '@/components/layout/record-view';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -36,7 +39,7 @@ export function DetailMeta({ title, subtitle, badges, actions, facts, children, 
     <section aria-label='Summary' className={cn('bg-card text-card-foreground @container flex min-w-0 flex-col gap-4 rounded-xl border p-4 sm:p-5', className)}>
       {head && (
         <div className='flex flex-wrap items-start justify-between gap-x-4 gap-y-2'>
-          <div className='flex min-w-0 flex-1 flex-col gap-1.5'>
+          <div className='flex min-w-[min(100%,20rem)] flex-1 flex-col gap-1.5'>
             {(title || badges) && (
               <div className='flex min-w-0 flex-wrap items-center gap-2'>
                 {title && <h2 className='min-w-0 truncate text-lg leading-tight font-semibold tracking-tight'>{title}</h2>}
@@ -45,7 +48,7 @@ export function DetailMeta({ title, subtitle, badges, actions, facts, children, 
             )}
             {subtitle && <div className='text-muted-foreground min-w-0 text-sm leading-snug'>{subtitle}</div>}
           </div>
-          {actions && <div className='flex shrink-0 flex-wrap items-center justify-end gap-2'>{actions}</div>}
+          {actions && <div className='flex max-w-full flex-wrap items-center justify-end gap-2'>{actions}</div>}
         </div>
       )}
       {shown.length > 0 && (
@@ -64,7 +67,8 @@ export function DetailMeta({ title, subtitle, badges, actions, facts, children, 
   );
 }
 
-export interface DetailTab { id: string; label: ReactNode; count?: number | null; content: ReactNode; hidden?: boolean }
+/** `keepMounted`: the panel stays mounted while another tab is open (an editor whose unsaved input must survive). */
+export interface DetailTab { id: string; label: ReactNode; count?: number | null; content: ReactNode; hidden?: boolean; keepMounted?: boolean }
 
 const readTab = (param: string) => {
   try { return new URLSearchParams(window.location.search).get(param); } catch { return null; }
@@ -73,7 +77,12 @@ const readTab = (param: string) => {
 /** The tab selector under the card. `url` keeps the open tab in the address (?tab=, or `url` when it is a string) so a
  *  page can be linked to a tab; without it (a peek) the tab is local state. `resetKey` reopens the first tab when it
  *  changes (the next record in a peek). */
-export function DetailTabs({ tabs, url, defaultTab, value, onValueChange, resetKey, className }: {
+export function DetailTabs(props: DetailTabsProps) {
+  // A new resetKey remounts the bar, so the next record starts on its first tab with fresh measurements.
+  return <DetailTabsInner key={props.resetKey ?? '_'} {...props} />;
+}
+
+interface DetailTabsProps {
   tabs: DetailTab[];
   url?: boolean | string;
   defaultTab?: string;
@@ -82,12 +91,13 @@ export function DetailTabs({ tabs, url, defaultTab, value, onValueChange, resetK
   onValueChange?: (id: string) => void;
   resetKey?: string | number;
   className?: string;
-}) {
+}
+
+function DetailTabsInner({ tabs, url, defaultTab, value, onValueChange, className }: DetailTabsProps) {
   const shown = tabs.filter((t) => !t.hidden);
   const first = defaultTab && shown.some((t) => t.id === defaultTab) ? defaultTab : shown[0]?.id;
   const param = typeof url === 'string' ? url : 'tab';
   const [local, setLocal] = useState<string | undefined>(first);
-  useEffect(() => { if (resetKey !== undefined) setLocal(first); }, [resetKey]); // eslint-disable-line react-hooks/exhaustive-deps
   // The address is read after mount (so server markup matches) and written with replaceState (no history entry per tab).
   useEffect(() => {
     if (!url) return;
@@ -106,21 +116,74 @@ export function DetailTabs({ tabs, url, defaultTab, value, onValueChange, resetK
   }, [url, param, first, onValueChange]);
   const raw = value ?? local;
   const current = raw && shown.some((t) => t.id === raw) ? raw : first;
+
+  // Overflow: as many tabs as fit stay in the bar, the rest go in a labelled "More (n)" menu at its end; the open tab is
+  // always in the bar (it takes the last visible slot). Widths come from an invisible copy of the bar, measured on resize.
+  const barRef = useRef<HTMLDivElement>(null);
+  const measureRef = useRef<HTMLDivElement>(null);
+  const [fit, setFit] = useState<number | null>(null); // null: everything fits (and before the first measure)
+  const sig = shown.map((t) => `${t.id}:${t.count ?? ''}`).join('|');
+  useLayoutEffect(() => {
+    const bar = barRef.current, m = measureRef.current;
+    if (!bar || !m) return;
+    const measure = () => {
+      const items = Array.from(m.children) as HTMLElement[];
+      const more = items.pop();
+      const ws = items.map((el) => el.getBoundingClientRect().width);
+      const avail = bar.clientWidth - 8;
+      if (ws.reduce((a, b) => a + b, 0) <= avail) { setFit(null); return; }
+      const room = avail - (more?.getBoundingClientRect().width ?? 100) - 8;
+      let used = 0, k = 0;
+      while (k < ws.length && used + ws[k] <= room) used += ws[k++];
+      setFit(Math.max(1, k));
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(bar);
+    return () => ro.disconnect();
+  }, [sig]);
   if (!shown.length) return null;
+  let inBar = shown, inMenu: DetailTab[] = [];
+  if (fit != null && fit < shown.length) {
+    const at = shown.findIndex((t) => t.id === current);
+    const keep = at >= fit ? [...shown.slice(0, fit - 1), shown[at]] : shown.slice(0, fit);
+    inBar = keep;
+    inMenu = shown.filter((t) => !keep.includes(t));
+  }
+  const label = (t: DetailTab) => (<>
+    {t.label}
+    {t.count != null && <span className='text-muted-foreground text-xs tabular-nums'>{t.count}</span>}
+  </>);
   return (
     <Tabs value={current} onValueChange={(v) => set(String(v))} className={cn('min-w-0 gap-3', className)}>
-      <div className='-mx-1 overflow-x-auto px-1 pb-1'>
-        <TabsList>
-          {shown.map((t) => (
-            <TabsTrigger key={t.id} value={t.id} className='px-2.5'>
-              {t.label}
-              {t.count != null && <span className='text-muted-foreground text-xs tabular-nums'>{t.count}</span>}
-            </TabsTrigger>
+      <div ref={barRef} className='relative flex min-w-0 items-center gap-2'>
+        <TabsList className='max-w-full overflow-hidden'>
+          {inBar.map((t) => (
+            <TabsTrigger key={t.id} value={t.id} className='px-2.5'>{label(t)}</TabsTrigger>
           ))}
         </TabsList>
+        {inMenu.length > 0 && (
+          <DropdownMenu>
+            <DropdownMenuTrigger render={<Button variant='ghost' size='sm' className='text-muted-foreground shrink-0' />}>
+              More ({inMenu.length}) <Icons.chevronDown className='size-3.5' />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align='end' className='w-52'>
+              {inMenu.map((t) => (
+                <DropdownMenuItem key={t.id} onClick={() => set(t.id)} className='justify-between gap-3'>{label(t)}</DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
+        {/* the invisible copy the bar is measured with: one span per tab (trigger padding included), then the More button */}
+        <div ref={measureRef} aria-hidden className='pointer-events-none invisible absolute top-0 left-0 flex whitespace-nowrap'>
+          {shown.map((t) => (
+            <span key={t.id} className='inline-flex items-center gap-1.5 border border-transparent px-2.5 text-sm font-medium'>{label(t)}</span>
+          ))}
+          <span className='inline-flex items-center gap-1.5 px-3 text-sm font-medium'>More ({shown.length}) <Icons.chevronDown className='size-3.5' /></span>
+        </div>
       </div>
       {shown.map((t) => (
-        <TabsContent key={t.id} value={t.id} className='min-w-0'>{t.content}</TabsContent>
+        <TabsContent key={t.id} value={t.id} keepMounted={t.keepMounted} className='min-w-0'>{t.content}</TabsContent>
       ))}
     </Tabs>
   );
@@ -130,7 +193,7 @@ export function DetailTabs({ tabs, url, defaultTab, value, onValueChange, resetK
  *  typed columns sort on their header, 10 rows a page, and `onRow` opens the row's own record. Columns with a `value`
  *  and no `type` sort as text. */
 export function DetailTable<T>({ rows, cols, rowKey, search, searchPlaceholder, onRow, empty, noun = 'items', actions, primary, filters,
-  defaultSort, exportName, initialSize = 10, rowClassName, loading }: {
+  defaultSort, exportName, initialSize = 10, rowClassName, rowClickable, loading }: {
   rows: readonly T[] | undefined;
   cols: RecordCol<T>[];
   rowKey?: (row: T) => string;
@@ -149,18 +212,21 @@ export function DetailTable<T>({ rows, cols, rowKey, search, searchPlaceholder, 
   exportName?: string;
   initialSize?: number;
   rowClassName?: (row: T) => string | undefined;
+  /** Which rows `onRow` applies to (the others show no pointer and take no click); default: every row. */
+  rowClickable?: (row: T) => boolean;
   loading?: boolean;
 }) {
   const list = rows ?? [];
   const index = useMemo(() => new Map(list.map((r, i) => [r, i])), [list]);
-  const key = useCallback((r: T) => (rowKey ? rowKey(r) : String(index.get(r) ?? 0)), [rowKey, index]);
+  // Always unique: the row's own key (when given) plus its position, so two rows sharing a label never collide.
+  const key = useCallback((r: T) => `${rowKey ? rowKey(r) : ''}#${index.get(r) ?? 0}`, [rowKey, index]);
   const typedCols = useMemo(() => cols.map((c) => (c.value && !c.type ? { ...c, type: 'text' as const } : c)), [cols]);
   return (
     <RecordView<T>
       embedded rows={list} rowKey={key} cols={typedCols} noun={noun} empty={empty} loading={loading}
       searchText={search ?? (() => '')} noSearch={!search} searchPlaceholder={searchPlaceholder ?? `Search ${noun}`}
       onRow={onRow} actions={actions} primary={primary} filters={filters} defaultSort={defaultSort} exportName={exportName}
-      initialSize={initialSize} rowClassName={rowClassName}
+      initialSize={initialSize} rowClassName={rowClassName} rowClickable={rowClickable}
     />
   );
 }

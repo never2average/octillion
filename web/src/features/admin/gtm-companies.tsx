@@ -151,7 +151,7 @@ function CompanyPeek({ id, sizes, onDeleted }: { id: number; sizes: string[]; on
         ]}
       />
       <DetailTabs resetKey={id} tabs={[
-        { id: 'details', label: 'Details', content: <CompanyEditor key={`${c.id}:${c.updated_at}`} c={c} sizes={sizes} /> },
+        { id: 'details', label: 'Details', keepMounted: true, content: <CompanyEditor key={`${c.id}:${c.updated_at}`} c={c} sizes={sizes} /> },
         { id: 'prospects', label: 'Prospects', count: d.prospects.length, content: (
           <DetailTable noun='prospects' rows={d.prospects} rowKey={(x) => String(x.id)} empty='Nobody from this company yet.'
             search={(x) => `${personName(x)} ${x.email ?? ''} ${x.title ?? ''}`} searchPlaceholder='Search prospects'

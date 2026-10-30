@@ -325,7 +325,7 @@ function TickPeek({ t, onOrch }: { t: Tick; onOrch: (row: number) => void }) {
           ]} />
         ) },
         { id: 'launched', label: 'Launched', count: t.launched.length, content: (
-          <DetailTable rows={t.launched} noun='launches' empty='Nothing launched.' onRow={(l) => l.row && onOrch(l.row)} cols={[
+          <DetailTable rows={t.launched} noun='launches' empty='Nothing launched.' onRow={(l) => l.row && onOrch(l.row)} rowClickable={(l) => !!l.row} cols={[
             { key: 'orch', label: 'Orchestrator', type: 'text', value: launchName, render: (l) => orchCell(l.row, launchName(l)) },
             { key: 'job', label: 'Job', type: 'text', value: (l) => l.job_id ?? '', render: (l) => (l.job_id ? <Mono>{l.job_id}</Mono> : <span className='text-muted-foreground'>—</span>) },
             { key: 'pods', label: 'Pods', type: 'number', value: (l) => l.pods, render: (l) => l.pods ?? '—', className: 'text-right tabular-nums' },
@@ -334,7 +334,7 @@ function TickPeek({ t, onOrch }: { t: Tick; onOrch: (row: number) => void }) {
           ]} />
         ) },
         { id: 'reaped', label: 'Reaped', count: t.reaped.length, content: (
-          <DetailTable rows={t.reaped} noun='reaps' empty='Nothing reaped.' onRow={(r) => r.row && onOrch(r.row)} cols={[
+          <DetailTable rows={t.reaped} noun='reaps' empty='Nothing reaped.' onRow={(r) => r.row && onOrch(r.row)} rowClickable={(r) => !!r.row} cols={[
             { key: 'orch', label: 'Orchestrator', type: 'text', value: reapName, render: (r) => orchCell(r.row, reapName(r)) },
             { key: 'job', label: 'Job', type: 'text', value: (r) => r.job_id ?? '', render: (r) => (r.job_id ? <Mono>{r.job_id}</Mono> : <span className='text-muted-foreground'>—</span>) },
             { key: 'reason', label: 'Reason', type: 'text', value: (r) => r.reason, render: (r) => <span className='text-muted-foreground'>{r.reason}</span>, className: 'whitespace-normal leading-snug' }

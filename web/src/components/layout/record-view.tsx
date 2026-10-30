@@ -47,7 +47,7 @@ const isObj = (x: unknown): x is Record<string, unknown> => !!x && typeof x === 
 export function RecordView<T>({
   rows, rowKey, cols, searchText, searchPlaceholder = 'Search', filters, primary, detail, detailTitle, actions, empty, noun = 'items', loading, initialSize,
   id, views, defaultSort, groupable, bulk, exportName, primaryMenu, properties, detailActions, compact, openKey, onOpenChange, summary, stacked, onImport, importLabel,
-  embedded, onRow, rowClassName, noSearch
+  embedded, onRow, rowClickable, rowClassName, noSearch
 }: {
   rows: readonly T[];
   rowKey: (row: T) => string;
@@ -100,6 +100,8 @@ export function RecordView<T>({
   /** A click on a row goes elsewhere (another record) instead of opening a peek. */
   onRow?: (row: T) => void;
   rowClassName?: (row: T) => string | undefined;
+  /** Which rows open something (no pointer, focus or click on the others); default: every row. */
+  rowClickable?: (row: T) => boolean;
   /** No search box (a short, fixed list). */
   noSearch?: boolean;
 }) {
@@ -263,6 +265,7 @@ export function RecordView<T>({
   }, [compact]);
 
   const clickable = !!detail || !!onRow;
+  const canClick = (r: T) => clickable && (rowClickable ? rowClickable(r) : true);
   const clickRow = (r: T, k: string) => (detail ? setOpen(open === k ? null : k) : onRow?.(r));
   const searchBox = noSearch ? null : (
     <div className={cn('relative', stacked ? 'w-full' : 'min-w-48 flex-1')}>
@@ -389,10 +392,10 @@ export function RecordView<T>({
                       )}
                       {r && (
                         <TableRow data-state={open === k ? 'selected' : undefined}
-                          className={cn('align-top', clickable && 'cursor-pointer', sel.has(k) && open !== k && 'bg-muted/40', rowClassName?.(r))}
-                          onClick={clickable ? () => clickRow(r, k) : undefined}
-                          onKeyDown={clickable ? (e) => { if (e.key === 'Enter') { if (detail) setOpen(k); else onRow?.(r); } } : undefined}
-                          tabIndex={clickable ? 0 : undefined}>
+                          className={cn('align-top', canClick(r) && 'cursor-pointer', sel.has(k) && open !== k && 'bg-muted/40', rowClassName?.(r))}
+                          onClick={canClick(r) ? () => clickRow(r, k) : undefined}
+                          onKeyDown={canClick(r) ? (e) => { if (e.key === 'Enter') { if (detail) setOpen(k); else onRow?.(r); } } : undefined}
+                          tabIndex={canClick(r) ? 0 : undefined}>
                           {bulk && (
                             <TableCell className='w-8 py-3' onClick={(e) => e.stopPropagation()}>
                               <Checkbox aria-label='Select row' checked={sel.has(k)} onCheckedChange={(on) => toggle([k], !!on)} />

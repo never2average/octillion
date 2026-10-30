@@ -362,7 +362,8 @@ function fixFor(a: string, o: Org, d: OrgDetail | undefined, ctl: AccountCtl, vi
   if ((a.startsWith('Joined ') && a.includes('never connected')) || a.startsWith('Connected but never called')) return { label: 'Copy welcome email', onSelect: x.welcome };
   if (['Using tools but has not onboarded', 'Product onboarded, no simulation', 'Simulation ran, report never opened'].some((m) => a.startsWith(m))) return { label: 'Send a tip…', onSelect: x.tip, need: 'journeys' };
   if (a.startsWith('Stripe subscription is') || a.startsWith('Subscription cancels')) return { label: 'Copy portal link', onSelect: x.portal, need: 'accounts' };
-  if (a.startsWith('Product onboarding failed') || a.includes('tool errors')) return { label: 'View', onSelect: () => view('usage') };
+  if (a.startsWith('Product onboarding failed')) return { label: 'View', onSelect: () => view('research') };
+  if (a.includes('tool errors')) return { label: 'View', onSelect: () => view('errors') };
   return null;
 }
 
@@ -423,7 +424,9 @@ export function AccountPeek({ org, ctl, actions }: { org: Org; ctl: AccountCtl; 
   const subState = s ? (s.cancel_at_period_end ? 'cancels' : s.status.replace(/_/g, ' ')) : null;
   const subTone: Tone = !s ? 'neutral' : s.cancel_at_period_end ? 'warn' : s.status === 'active' ? 'ok' : s.status === 'trialing' ? 'info' : ['past_due', 'unpaid', 'incomplete'].includes(s.status) ? 'bad' : 'neutral';
   const milestones = stages.filter((k) => org.reached?.[k]).map((k) => ({ k, at: org.reached[k] }));
-  const view = (t: string) => setTab(t === 'usage' ? 'tools' : t);
+  // Section names some callers use, mapped to this peek's tab ids.
+  const TAB_OF: Record<string, string> = { usage: 'tools', people: 'members', billing: 'invoices', onboarding: 'milestones' };
+  const view = (t: string) => setTab(TAB_OF[t] ?? t);
 
   return (
     <div className='flex flex-col gap-4'>
@@ -481,7 +484,7 @@ export function AccountPeek({ org, ctl, actions }: { org: Org; ctl: AccountCtl; 
       {!d ? (!error &&
         <div className='grid gap-3'><Skeleton className='h-8 w-80' /><Skeleton className='h-40' /></div>
       ) : (
-        <DetailTabs value={tab} onValueChange={setTab} tabs={[
+        <DetailTabs resetKey={org.slug} value={tab} onValueChange={setTab} tabs={[
           { id: 'members', label: 'Members', count: d.members.length, hidden: !org.clerk_org_id, content: (
             <DetailTable rows={d.members} rowKey={(m) => m.id} noun='members' empty='Nobody has joined yet.' actions={member}
               search={(m) => `${m.email ?? ''} ${m.name ?? ''} ${m.user_id}`} searchPlaceholder='Search members' cols={[
@@ -555,7 +558,7 @@ export function AccountPeek({ org, ctl, actions }: { org: Org; ctl: AccountCtl; 
           ) },
           { id: 'invoices', label: 'Invoices', count: d.invoices.length, hidden: !d.integrations.stripe, content: (
             <DetailTable rows={d.invoices} rowKey={(x) => x.id} noun='invoices' empty='No invoices yet.' defaultSort={[{ key: 'date', dir: 'desc' }]}
-              onRow={(x) => x.url && window.open(x.url, '_blank', 'noopener')} cols={[
+              onRow={(x) => x.url && window.open(x.url, '_blank', 'noopener')} rowClickable={(x) => !!x.url} cols={[
               { key: 'invoice', label: 'Invoice', type: 'text', value: (x) => x.number || x.id, render: (x) => x.number || x.id },
               { key: 'status', label: 'Status', type: 'select', value: (x) => x.status, render: (x) => word(x.status === 'paid' ? 'ok' : x.status === 'open' ? 'warn' : x.status === 'uncollectible' ? 'bad' : 'neutral', x.status) },
               { key: 'total', label: 'Total', type: 'number', value: (x) => Number(x.total), render: (x) => money(x.total, x.currency), className: 'text-right tabular-nums' },

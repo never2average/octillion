@@ -8,7 +8,8 @@ import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 import PageContainer from '@/components/layout/page-container';
 import { StatStrip } from '@/components/layout/section';
-import { ActionsMenu, RecordView, type RecordCol, type RowAction } from '@/components/layout/record-view';
+import { RecordView, type RecordCol, type RowAction } from '@/components/layout/record-view';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { DetailMeta, DetailTable, DetailTabs, KeyValueTable, TimelineTable } from '@/components/layout/detail';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -220,7 +221,18 @@ function ProspectPeek({ id, statuses, bases, onDeleted }: { id: number; statuses
           <Gate need='campaigns'><Button size='sm' variant='outline' disabled={deal.isPending} onClick={() => deal.mutate()}><Icons.add /> Create deal</Button></Gate>
           <Gate need='campaigns'><ConfirmButton variant='destructive' label={<><Icons.trash /> Delete</>} title='Delete this prospect?' confirmLabel='Delete'
             description='Their timeline goes too; the suppression list keeps what it has.' onConfirm={() => remove.mutate(undefined, { onSuccess: onDeleted })} /></Gate>
-          <ActionsMenu items={statusActions} label='Change status' />
+          {statusActions.length > 0 && (
+            <DropdownMenu>
+              <DropdownMenuTrigger render={<Button size='sm' variant='outline' />}>Change status <Icons.chevronDown className='size-3.5' /></DropdownMenuTrigger>
+              <DropdownMenuContent align='end' className='w-52'>
+                {statusActions.map((a) => (
+                  <DropdownMenuItem key={a.label} disabled={a.disabled} onClick={a.onSelect}>
+                    {a.label}{a.hint && <span className='text-muted-foreground ml-auto pl-3 text-xs'>{a.hint}</span>}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
         </>}
         facts={[
           { label: 'Email', value: x.email, hint: x.email ? <StatusBadge tone={EMAIL_TONE[x.email_status] ?? 'neutral'}>{x.email_status.replace(/_/g, ' ')}</StatusBadge> : undefined },
@@ -240,7 +252,7 @@ function ProspectPeek({ id, statuses, bases, onDeleted }: { id: number; statuses
         {(x.org_slug || x.company_org_id) && <Notice tone='ok'>{x.org_slug ? `Linked to the account ${x.org_name ?? x.org_slug}` : 'Their company is a customer'}: outbound never writes to them.</Notice>}
       </DetailMeta>
       <DetailTabs resetKey={id} tabs={[
-        { id: 'details', label: 'Details', content: <ProspectEditor key={`${x.id}:${x.updated_at}`} x={x} bases={bases} /> },
+        { id: 'details', label: 'Details', keepMounted: true, content: <ProspectEditor key={`${x.id}:${x.updated_at}`} x={x} bases={bases} /> },
         { id: 'timeline', label: 'Timeline', count: d.timeline.length, content: (
           <div className='flex flex-col gap-3'>
             <NoteBox id={id} />
