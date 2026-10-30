@@ -34,7 +34,7 @@ interface Step { subject: string; body: string; delay_days: number; variants?: V
 type TriggerType = 'account_created' | 'request_submitted' | 'request_approved' | 'stage_reached' | 'stuck' | 'report_opened' | 'first_payment' | 'attention';
 interface Trigger { type: TriggerType; stage: string | null; days: number | null; attention: string; delay_hours: number; reentry: 'once' | 'every'; reentry_days: number }
 interface SendWindow { days: number[]; start_hour: number; end_hour: number; time_zone: string }
-interface Metrics { recipients: number; suppressed: number; unsubscribed: number; failed: number; waiting: number; reached: number; replied: number; replies_open: number; sent: number; delivered: number; bounced: number; complained: number; opened: number; clicked: number }
+interface Metrics { recipients: number; suppressed: number; unsubscribed: number; failed: number; waiting: number; reached: number; replied: number; replies_open: number; no_consent: number; uncertain: number; unknown: number; sent: number; delivered: number; bounced: number; complained: number; opened: number; clicked: number }
 interface Conversions { days: number; requested: number; activated: number; paid: number }
 interface Campaign {
   id: number; name: string; status: Status; audience: Audience; steps: Step[]; rolling: boolean; conversion_days: number; starts_at: string | null;
@@ -153,15 +153,19 @@ function CampaignsPage() {
     { key: 'updated_at', label: 'Updated', type: 'date', value: (c) => c.updated_at, render: (c) => <When d={c.updated_at} className='text-muted-foreground text-sm' /> }
   ];
 
-  const view = p.open('view') === 'replies' ? 'replies' : 'campaigns';
+  // Replies are personal data: the view is the campaigns permission's (the server refuses it to anyone else).
+  const { can } = useAdminRole();
+  const view = p.open('view') === 'replies' && can('campaigns') ? 'replies' : 'campaigns';
   const openReplies = list.reduce((t, c) => t + (c.metrics?.replies_open ?? 0), 0);
   // Campaigns and Replies: two views of the Campaigns tab (labelled buttons), kept in the URL like the open peek.
   const subViews = (
     <div className='flex items-center gap-1' role='group' aria-label='Campaigns views'>
       <Button size='sm' variant={view === 'campaigns' ? 'secondary' : 'ghost'} aria-pressed={view === 'campaigns'} onClick={() => p.write({ view: null, open: null })}><Icons.mail /> Campaigns</Button>
-      <Button size='sm' variant={view === 'replies' ? 'secondary' : 'ghost'} aria-pressed={view === 'replies'} onClick={() => p.write({ view: 'replies', open: null })}>
-        <Icons.inbox /> Replies{openReplies ? ` (${openReplies} open)` : ''}
-      </Button>
+      {can('campaigns') && (
+        <Button size='sm' variant={view === 'replies' ? 'secondary' : 'ghost'} aria-pressed={view === 'replies'} onClick={() => p.write({ view: 'replies', open: null })}>
+          <Icons.inbox /> Replies{openReplies ? ` (${openReplies} open)` : ''}
+        </Button>
+      )}
     </div>
   );
 
@@ -212,6 +216,7 @@ function CampaignPeek({ id, stages, onDeleted }: { id: number; stages: { id: str
   return (
     <div className='flex flex-col gap-8'>
       <Lifecycle c={c} onDeleted={onDeleted} />
+      {mt && (mt.uncertain > 0 || mt.unknown > 0) && <UnknownSends c={c} m={mt} />}
       {mt && (
         <StatStrip items={[
           { label: 'Recipients', value: mt.recipients, hint: `${mt.waiting} waiting, ${mt.suppressed} suppressed` },
@@ -231,9 +236,11 @@ function CampaignPeek({ id, stages, onDeleted }: { id: number; stages: { id: str
           ]} />
         </Section>
       )}
-      <Section title='Replies' description={d.setup.replies_inbox ? `A reply stops that person's emails. Replies go to ${d.setup.replies_inbox} (a per-person address).` : undefined}>
-        <CampaignReplies replies={d.replies} />
-      </Section>
+      {!d.replies.hidden && (
+        <Section title='Replies' description={d.setup.replies_inbox ? `A reply stops that person's emails. Replies go to ${d.setup.replies_inbox} (a per-person address).` : undefined}>
+          <CampaignReplies replies={d.replies} />
+        </Section>
+      )}
       {d.conversions && (
         <Section title={`Conversions within ${d.conversions.days} days of the first email`} description='From Activation: an access request from that address, the account’s first simulation, its first payment in Stripe.'>
           <StatStrip items={[
@@ -270,7 +277,7 @@ function CampaignPeek({ id, stages, onDeleted }: { id: number; stages: { id: str
               { label: 'Person', render: (r) => <span className='flex flex-col gap-0.5'><span className='font-medium'>{r.first_name ?? r.email.split('@')[0]}</span><span className='text-muted-foreground text-xs'>{r.email}</span></span> },
               { label: 'From', render: (r) => <span className='text-sm'>{r.account ? r.account.name : r.source === 'request' ? 'Access request' : '—'}</span> },
               { label: 'Status', render: (r) => <span className='flex flex-col gap-0.5'>
-                <StatusBadge tone={r.status === 'done' || r.status === 'active' || r.status === 'replied' ? 'ok' : ['unsubscribed', 'bounced', 'failed'].includes(r.status) ? 'bad' : r.status === 'suppressed' ? 'warn' : 'neutral'}>{r.status}</StatusBadge>
+                <StatusBadge tone={r.status === 'done' || r.status === 'active' || r.status === 'replied' ? 'ok' : ['unsubscribed', 'bounced', 'failed'].includes(r.status) ? 'bad' : r.status === 'suppressed' || r.status === 'no_consent' ? 'warn' : 'neutral'}>{r.status}</StatusBadge>
                 {r.round > 0 && <span className='text-muted-foreground text-xs'>round {r.round + 1}</span>}</span> },
               { label: 'Next', render: (r) => (r.next_at && ['pending', 'active'].includes(r.status) ? <span className='text-sm'>Email {r.next_step + 1} <When d={r.next_at} className='text-muted-foreground' /></span> : <span className='text-muted-foreground'>—</span>) },
               { label: 'Time zone', render: (r) => <span className='text-muted-foreground text-xs'>{r.time_zone}{r.country ? ` · ${r.country}` : ''}</span> },
@@ -322,6 +329,30 @@ function VariantTable({ c, step }: { c: Campaign; step: Detail['steps'][number] 
           ]} />
       </div>
     </Section>
+  );
+}
+
+/**
+ * Emails Resend may or may not have sent (no answer, a 5xx, a 409, a batch answer missing an id): uncertain ones are
+ * replayed as the very same request, so they never go twice; unknown ones are never sent again unless an owner says so.
+ */
+function UnknownSends({ c, m }: { c: Campaign; m: Metrics }) {
+  const resend = useAdminAction(() => post<{ requeued: number }>(`${path(c.id)}/resend-unknown`), { success: (r) => `${r.requeued} email${r.requeued === 1 ? '' : 's'} back in the queue` });
+  return (
+    <Notice>
+      <span className='flex flex-wrap items-center gap-x-3 gap-y-2'>
+        <span>
+          {m.uncertain > 0 && <>{m.uncertain} email{m.uncertain === 1 ? '' : 's'} with an uncertain outcome: repeated as the very same request on the next tick, so nobody gets two. </>}
+          {m.unknown > 0 && <>{m.unknown} email{m.unknown === 1 ? '' : 's'} whose outcome could not be confirmed: Resend may have sent {m.unknown === 1 ? 'it' : 'them'}. Not sent again unless you resend.</>}
+        </span>
+        {m.unknown > 0 && (
+          <Gate need='campaigns'>
+            <ConfirmButton label={<><Icons.send /> Resend {m.unknown}</>} title={`Resend ${m.unknown} email${m.unknown === 1 ? '' : 's'}?`} confirmLabel='Resend' disabled={resend.isPending}
+              description='They go out again as new emails. Some of these people may already have one, and would then get it twice.' onConfirm={() => resend.mutate()} />
+          </Gate>
+        )}
+      </span>
+    </Notice>
   );
 }
 

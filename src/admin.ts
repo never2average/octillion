@@ -449,6 +449,12 @@ const result = async (slug: string, email: string | null, extra: { key?: string;
            ...c, email: { ...c.email, to: email, mailto: email ? `mailto:${encodeURIComponent(email)}?subject=${encodeURIComponent(c.email.subject)}&body=${encodeURIComponent(extra.key ? c.email.body.replaceAll(extra.key, KEY_PLACEHOLDER) : c.email.body)}` : null } };
 };
 
+/** An account's id by slug, for GTM events (null when it is gone). */
+const orgIdOf = async (slug: string) => {
+  const [o] = await (await getDb()).query<{ id: number }>("SELECT id FROM organizations WHERE slug = $1", [slug]);
+  return o ? Number(o.id) : null;
+};
+
 /** Approve a request: a new account (name and slug default to the company), or, with `org_slug`, another person in one. */
 export async function approveRequest(actor: string, id: number, opts: { name?: string; slug?: string; org_slug?: string } = {}) {
   const r = await requestById(id);
@@ -467,9 +473,9 @@ export async function approveRequest(actor: string, id: number, opts: { name?: s
   // A short welcome beside Clerk's invitation (Clerk sends that one); after the write, never in its way.
   mail.fire(mail.requestApproved(r, { account: out.org.name, invited: Boolean(invitation) }));
   // GTM triggers (src/gtm-events.ts), after every write above, so whoever a campaign enrols is already linked.
-  const [{ id: orgId }] = await (await getDb()).query<{ id: number }>("SELECT id FROM organizations WHERE slug = $1", [slug]);
-  gtmEvents.emitLater("request_approved", { request_id: id, org_id: Number(orgId), key: String(id) });
-  if (created) gtmEvents.emitLater("account_created", { org_id: Number(orgId), key: String(orgId) });
+  // The account's id is looked up in the background: never in the approval's way.
+  gtmEvents.emitLater("request_approved", async () => ({ request_id: id, org_id: await orgIdOf(slug), key: String(id) }));
+  if (created) gtmEvents.emitLater("account_created", async () => { const o = await orgIdOf(slug); return o ? { org_id: o, key: String(o) } : null; });
   return out;
 }
 
@@ -497,8 +503,7 @@ export async function createAccount(actor: string, input: { name?: string; slug?
   const made = await newAccount(actor, String(input.name ?? ""), input.slug, email);
   let key = made.key, invitation: unknown = null;
   if (email && !key) ({ key, invitation } = await invitePerson(actor, made.slug, email, "owner"));
-  const [{ id: orgId }] = await (await getDb()).query<{ id: number }>("SELECT id FROM organizations WHERE slug = $1", [made.slug]);
-  gtmEvents.emitLater("account_created", { org_id: Number(orgId), key: String(orgId) });
+  gtmEvents.emitLater("account_created", async () => { const o = await orgIdOf(made.slug); return o ? { org_id: o, key: String(o) } : null; });
   return result(made.slug, email, { key, invitation, created: true });
 }
 

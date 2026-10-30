@@ -236,14 +236,15 @@ export async function gtmChecks({ db, base, adm, json, mockUrl, mockPost, sentTo
   await json(adm("POST", `/gtm/campaigns/${p3}/launch`, {}));
   const sn = await json(adm("POST", `/gtm/campaigns/${p3}/send-now`));
   assert.ok(sn.sent === 1 && sn.sent_now === 1 && sn.waiting === 0 && sentTo(dana, "campaign").length === 1, `send now reports its own campaign: ${JSON.stringify(sn)}`);
-  // Resend down (a 5xx): retried later, never counted toward the three attempts that give up on a person.
+  // Resend down (a 5xx): Resend may have failed after sending, so the email is uncertain: replayed later as the very
+  // same request (its own idempotency key), never as a new one, and never counted as a failure.
   const p4 = (await json(adm("POST", "/gtm/campaigns", { name: `Outage ${stamp}`, audience: { include: "accounts", accounts: [slugC] }, steps: [steps[0]] }))).campaign.id;
   await json(adm("POST", `/gtm/campaigns/${p4}/launch`, {}));
   await mockPost("/_mock/resend/outage", { down: true });
   const down = await json(adm("POST", `/gtm/campaigns/${p4}/send-now`));
   await mockPost("/_mock/resend/outage", { down: false });
   const [held] = await db.query<{ attempts: number; status: string }>("SELECT s.attempts, s.status FROM gtm_campaign_sends s WHERE s.campaign_id = $1", [p4]);
-  assert.ok(down.sent === 0 && down.waiting === 1 && down.failed === 0 && held.status === "failed" && Number(held.attempts) === 0, `a transient failure waits: ${JSON.stringify({ down, held })}`);
+  assert.ok(down.sent === 0 && down.waiting === 1 && down.failed === 0 && down.uncertain === 1 && held.status === "uncertain", `a 5xx is uncertain and waits: ${JSON.stringify({ down, held })}`);
   await db.query("UPDATE gtm_campaign_recipients SET next_at = now() WHERE campaign_id = $1", [p4]);
   assert.equal((await json(adm("POST", `/gtm/campaigns/${p4}/send-now`))).sent, 1, "and goes out once Resend is back");
   // OCTILLION_CAMPAIGNS=off stops the tick everywhere (the Vercel cron calls the same function).

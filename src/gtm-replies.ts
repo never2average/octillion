@@ -15,6 +15,10 @@
  *              campaign counts auto-replies (count_auto_replies)
  *   bounces    a delivery report (multipart/report, mailer-daemon / postmaster, "Undeliverable") is ignored here:
  *              bounces come from Resend's email.bounced event
+ *   race       a reply stops what has not been claimed yet. The send claim re-checks that the person is still waiting
+ *              just before it is made, so the window is the time between that claim and Resend's answer for the batch
+ *              it is in (a few seconds; at most the request timeout): a reply landing then cannot recall that email,
+ *              and it may still arrive. Nothing after it is sent.
  *   stored     gtm_replies: the From address, subject, a snippet (quoted history cut) and the text (at most 20,000
  *              characters). With gtm_campaign_recipients, the only place GTM keeps an address.
  */

@@ -15,7 +15,7 @@ export interface Reply {
   from_email: string | null; from_matches: boolean; subject: string | null; snippet: string | null; body: string | null; received_at: string; handled_at: string | null; handled_by: string | null;
   step: number | null; variant: string | null;
 }
-export interface Replies { inbox: string | null; counts: { open: number; handled: number; auto: number; total: number }; replies: Reply[] }
+export interface Replies { inbox: string | null; counts: { open: number; handled: number; auto: number; total: number } | null; replies: Reply[]; hidden?: boolean }
 
 const VIEWS: RecordViewDef<Reply>[] = [
   { id: 'open', label: 'Open', match: (r) => r.kind === 'reply' && !r.handled_at, sort: [{ key: 'received_at', dir: 'desc' }] },
@@ -106,7 +106,7 @@ export function RepliesView({ open, setOpen }: { open: string | null; setOpen: (
         searchText={(r) => `${who(r)} ${r.email} ${r.from_email ?? ''} ${r.campaign_name} ${r.subject ?? ''} ${r.snippet ?? ''}`}
         searchPlaceholder='Search replies by person, campaign, subject or words'
         empty={data?.inbox ? 'No replies yet. When someone answers a campaign email, it shows here and their sequence stops.' : 'No replies: replies are not tracked yet.'}
-        summary={data && (
+        summary={data?.counts && (
           <StatStrip items={[
             { label: 'Open', value: data.counts.open, hint: 'replies nobody has handled' },
             { label: 'Handled', value: data.counts.handled },

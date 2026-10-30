@@ -46,9 +46,16 @@ export async function emit(type: EventType, e: EmitInput): Promise<number | null
   return r ? Number(r.id) : null;
 }
 
-/** emit() without waiting and without ever failing the caller (kept alive on Vercel). Platform work, whoever starts it. */
-export function emitLater(type: EventType, e: EmitInput): void {
-  const p = asPlatform(() => emit(type, e)).catch((err) => console.error(`gtm event ${type}: not recorded: ${(err as Error).message}`));
+/**
+ * emit() without waiting and without ever failing or slowing the caller (kept alive on Vercel). Platform work, whoever
+ * starts it. `e` may be a function that works the event out (a lookup after the caller's writes): it runs in the
+ * background too, and null skips the event.
+ */
+export function emitLater(type: EventType, e: EmitInput | (() => Promise<EmitInput | null>)): void {
+  const p = asPlatform(async () => {
+    const x = typeof e === "function" ? await e() : e;
+    if (x) await emit(type, x);
+  }).catch((err) => console.error(`gtm event ${type}: not recorded: ${(err as Error).message}`));
   keepAlive(p);
 }
 
@@ -84,14 +91,19 @@ const YOUNG_MS = 2 * 86_400_000;
 
 /**
  * Compare each account's journey with the detector's last look and emit what changed (see the top of the file).
- * `stuck` lists the stage / days pairs running campaigns trigger on. Returns how many events were new.
+ * Each event carries when it happened (`at`: the stage's own time, the payment's, the moment it became stuck) and,
+ * for a change only seen now, data.after: the detector's previous look (the change happened after it). A campaign
+ * counts an event only when both are after its launch (src/campaigns.ts processEvents), so a stale snapshot never
+ * mails people about something that happened before. `stuck` lists the stage / days pairs running campaigns trigger on,
+ * each with `since`: only accounts that entered the stage then or later qualify. Returns how many events were new.
  */
-export async function detectSignals(js: Journey[], o: { stuck: { stage: string; days: number }[]; payments: boolean; now?: number }): Promise<number> {
+export async function detectSignals(js: Journey[], o: { stuck: { stage: string; days: number; since?: number }[]; payments: boolean; now?: number }): Promise<number> {
   const db = await getDb(), now = o.now ?? Date.now();
-  const prev = new Map((await db.query<{ org_id: number; stage: string; attention: string[]; paid: boolean }>("SELECT org_id, stage, attention, paid FROM gtm_org_signals"))
-    .map((r) => [Number(r.org_id), r]));
+  const prev = new Map((await db.query<{ org_id: number; stage: string; attention: string[]; paid: boolean; seen_at: Date }>(
+    "SELECT org_id, stage, attention, paid, seen_at FROM gtm_org_signals")).map((r) => [Number(r.org_id), r]));
   let n = 0;
-  const add = async (type: EventType, orgId: number, key: string, data: Record<string, unknown>) => { if (await emit(type, { org_id: orgId, key, data })) n++; };
+  const add = async (type: EventType, orgId: number, key: string, data: Record<string, unknown>, at?: Date) => { if (await emit(type, { org_id: orgId, key, data, at })) n++; };
+  const time = (d: Date | string | null | undefined) => { const t = d ? new Date(d) : null; return t && !Number.isNaN(t.getTime()) && t.getTime() <= now ? t : null; };
   for (const j of js) {
     const orgId = Number(j.org.id);
     // The stage ids in order (the journey's `reached` lists them in STAGES order, src/admin.ts).
@@ -100,22 +112,33 @@ export async function detectSignals(js: Journey[], o: { stuck: { stage: string; 
     const paid = Boolean(j.paid_at);
     const p = prev.get(orgId);
     const young = now - new Date(j.created_at).getTime() < YOUNG_MS;
-    if (p || young) {
+    // What was seen before: the last look, or, for an account under two days old seen for the first time, its creation.
+    const after = p ? new Date(p.seen_at) : young ? new Date(j.created_at) : null;
+    if (after) {
+      // A stage the snapshot names but the list no longer has: start again from here, silently.
       const from = p ? order.indexOf(p.stage) : -1;
-      for (let i = Math.max(from + 1, 0); i <= j.org.stage_index; i++) await add("stage_reached", orgId, `${orgId}:${order[i]}`, { stage: order[i] });
+      if (!p || from >= 0)
+        for (let i = from + 1; i <= j.org.stage_index; i++) {
+          const at = time(j.org.reached[order[i] as keyof typeof j.org.reached]);
+          await add("stage_reached", orgId, `${orgId}:${order[i]}`, { stage: order[i], after: (at ?? after).toISOString() }, at ?? undefined);
+        }
       const had = new Set(p?.attention ?? []);
       for (const [k, reason] of j.org.attention.entries()) {
         const r = attention[k] ?? norm(reason);
-        if (!had.has(r)) await add("attention", orgId, `${orgId}:${hash(r)}:${dayOf(new Date(now))}`, { reason: reason.slice(0, 300) });
+        if (!had.has(r)) await add("attention", orgId, `${orgId}:${hash(r)}:${dayOf(new Date(now))}`, { reason: reason.slice(0, 300), after: after.toISOString() });
       }
       // Only a recent first payment: one from months ago, seen now because a campaign started asking, is not news.
-      if (o.payments && paid && !p?.paid && now - new Date(j.paid_at!).getTime() < YOUNG_MS) await add("first_payment", orgId, `${orgId}`, { paid_at: j.paid_at });
-    }
-    // Stuck: at the stage for N days, measured from when it was reached (a person moving on and back starts again).
-    for (const s of o.stuck) {
-      const since = j.org.stage === s.stage ? j.org.reached[s.stage as keyof typeof j.org.reached] : null;
-      if (since && now - new Date(since).getTime() >= s.days * 86_400_000)
-        await add("stuck", orgId, `${orgId}:${s.stage}:${s.days}:${dayOf(since)}`, { stage: s.stage, days: s.days });
+      const paidAt = time(j.paid_at);
+      if (o.payments && paid && !p?.paid && paidAt && now - paidAt.getTime() < YOUNG_MS) await add("first_payment", orgId, `${orgId}`, { paid_at: j.paid_at, after: paidAt.toISOString() }, paidAt);
+      // Stuck: at the stage for N days, from when it was reached (moving on and back starts again), and reached no
+      // earlier than the campaign asking allows. Never on a first sighting of an older account.
+      for (const s of o.stuck) {
+        const since = j.org.stage === s.stage ? time(j.org.reached[s.stage as keyof typeof j.org.reached]) : null;
+        if (!since || since.getTime() < (s.since ?? -Infinity)) continue;
+        const stuckAt = new Date(since.getTime() + s.days * 86_400_000);
+        if (stuckAt.getTime() <= now)
+          await add("stuck", orgId, `${orgId}:${s.stage}:${s.days}:${dayOf(since)}`, { stage: s.stage, days: s.days, reached_at: since.toISOString(), after: stuckAt.toISOString() }, stuckAt);
+      }
     }
     // Payments not looked at this time (no campaign wants them): keep what was known.
     await db.query(

@@ -15,7 +15,8 @@
 // Resend: POST /emails (Bearer re_...; an Idempotency-Key header returns the first email's id again for the same body, 409
 // for a different one); every accepted email is in state.emails. POST /_mock/resend/outage {down} (POST /emails answers 500).
 // POST /emails/batch (state.batches), GET /emails/receiving/:id (inbound, registered by POST /_mock/resend/received),
-// POST /_mock/resend/ratelimit {count, retry_after} (the next requests answer 429 with a retry-after header).
+// POST /_mock/resend/ratelimit {count, retry_after} (the next requests answer 429 with a retry-after header),
+// POST /_mock/resend/uncertain {concurrent, drop_after_accept, omit_id} (outcomes a sender cannot be sure of).
 // Cloudflare Workers AI: POST /client/v4/accounts/:id/ai/v1/chat/completions (Bearer); state.aiRequests logs each body and
 // state.aiReply(body) decides the answer (in-process only; unset: 503).
 import express from "express";
@@ -42,6 +43,9 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     oauth: new Map<string, any>(), keyed: new Map<string, any>(),
     emails: [] as any[], resendKeys: new Map<string, { id: string; body: string }>(), resendDown: false,
     batches: [] as { key: string | null; size: number }[], received: new Map<string, any>(), resendLimited: 0, resendRetryAfter: 1,
+    // Uncertain outcomes, each for the next `n` requests: a 409 concurrent_idempotent_requests (nothing recorded); the
+    // request accepted and recorded, then the connection dropped (no answer); a batch answer missing the first email's id.
+    resendConcurrent: 0, resendDropAfterAccept: 0, resendOmitId: 0,
     // Cloudflare Workers AI: every chat request (its body), and how to answer one (status and/or content; unset: 503).
     aiRequests: [] as any[], aiReply: null as null | ((body: any) => { status?: number; content?: string }),
     prices: [
@@ -408,6 +412,7 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     if (!/^Bearer re_\S+$/.test(req.get("authorization") ?? "")) return resendErr(res, 401, "missing_api_key", "Missing API key in the authorization header.");
     if (s.resendDown) return resendErr(res, 500, "application_error", "An unexpected error occurred.");
     if (s.resendLimited > 0) { s.resendLimited--; res.set("retry-after", String(s.resendRetryAfter)); return resendErr(res, 429, "rate_limit_exceeded", "Too many requests."); }
+    if (s.resendConcurrent > 0) { s.resendConcurrent--; return resendErr(res, 409, "concurrent_idempotent_requests", "Same idempotency key used while original request is still in progress."); }
     const b = req.body ?? {};
     const to = Array.isArray(b.to) ? b.to : b.to ? [b.to] : [];
     if (!b.from || !to.length || !b.subject || !(b.text || b.html)) return resendErr(res, 422, "validation_error", "from, to, subject and text or html are required.");
@@ -419,6 +424,7 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     const email = { id: randomUUID(), ...b, to, idempotency_key: key, created_at: now() };
     s.emails.push(email);
     if (key) s.resendKeys.set(key, { id: email.id, body });
+    if (s.resendDropAfterAccept > 0) { s.resendDropAfterAccept--; return void req.socket.destroy(); }
     res.json({ id: email.id });
   });
   // POST /emails/batch: up to 100 emails, one Idempotency-Key for the request (the same key and body answer the first
@@ -428,6 +434,7 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     if (!/^Bearer re_\S+$/.test(req.get("authorization") ?? "")) return resendErr(res, 401, "missing_api_key", "Missing API key in the authorization header.");
     if (s.resendDown) return resendErr(res, 500, "application_error", "An unexpected error occurred.");
     if (s.resendLimited > 0) { s.resendLimited--; res.set("retry-after", String(s.resendRetryAfter)); return resendErr(res, 429, "rate_limit_exceeded", "Too many requests."); }
+    if (s.resendConcurrent > 0) { s.resendConcurrent--; return resendErr(res, 409, "concurrent_idempotent_requests", "Same idempotency key used while original request is still in progress."); }
     const list = Array.isArray(req.body) ? req.body : [];
     if (!list.length || list.length > 100) return resendErr(res, 422, "validation_error", "Between 1 and 100 emails.");
     if (list.some((b: any) => !b?.from || !(Array.isArray(b.to) ? b.to.length : b.to) || !b.subject || !(b.text || b.html))) return resendErr(res, 422, "validation_error", "from, to, subject and text or html are required.");
@@ -440,7 +447,9 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
       s.emails.push(email);
       return { id: email.id };
     });
+    if (s.resendOmitId > 0) { s.resendOmitId--; data[0] = {} as { id: string }; }
     if (key) s.resendKeys.set(key, { id: JSON.stringify(data), body });
+    if (s.resendDropAfterAccept > 0) { s.resendDropAfterAccept--; return void req.socket.destroy(); }
     res.json({ data });
   });
   // GET /emails/receiving/:id: an inbound email registered by POST /_mock/resend/received {id, from, to, subject, text, html?, headers?}.
@@ -453,6 +462,10 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
   });
   app.post("/_mock/resend/received", (req, res) => { s.received.set(String(req.body.id), req.body); res.json({ ok: true }); });
   app.get("/_mock/resend/batches", (_req, res) => void res.json({ batches: s.batches }));
+  app.post("/_mock/resend/uncertain", (req, res) => {
+    s.resendConcurrent = Number(req.body?.concurrent ?? 0); s.resendDropAfterAccept = Number(req.body?.drop_after_accept ?? 0); s.resendOmitId = Number(req.body?.omit_id ?? 0);
+    res.json({ ok: true });
+  });
   app.post("/_mock/resend/ratelimit", (req, res) => { s.resendLimited = Number(req.body?.count ?? 0); s.resendRetryAfter = Number(req.body?.retry_after ?? 1); res.json({ ok: true }); });
   // ---------- Cloudflare Workers AI (OpenAI-compatible chat completions): answers come from state.aiReply ----------
   app.post("/client/v4/accounts/:account/ai/v1/chat/completions", (req, res) => {

@@ -106,6 +106,8 @@ export function createApp() {
   // 5-minute backstop for the event-driven autoscaler on Vercel (vercel.json crons; Vercel sends CRON_SECRET as a
   // bearer). It also prunes the autoscaler's history (src/autoscaler-ticks.ts), which a VM does from its ticking loop.
   app.get("/api/cron/autoscale", async (req, res) => {
+    // The function's 300 s (vercel.json maxDuration) count from here: the campaign tick is told when it must be done.
+    const deadline = Date.now() + 300_000;
     // CRON_SECRET only (Vercel sends it): no fallback to an admin credential.
     if (!cronSecretOk(req.headers.authorization)) return void res.status(401).json({ error: "unauthorized" });
     const tick = await kickAutoscaler();
@@ -117,7 +119,7 @@ export function createApp() {
     // Operator alerts: sessions failing too often or stuck in the queue (src/health-alerts.ts).
     const health = await (await import("./health-alerts.js")).checkHealth().then((h) => ({ alerts: h.alerts, emailed: h.emailed, slack: h.slack, error: h.error }));
     // GTM campaigns (src/campaigns.ts): start scheduled ones, enroll, send what is due (idempotent, rate-limited). Never throws.
-    const campaigns = await campaignsMod.campaignTick();
+    const campaigns = await campaignsMod.campaignTick({ deadline });
     res.json({ tick, pruned, reasons, rls, health, campaigns });
   });
 
@@ -159,7 +161,9 @@ export function createApp() {
     const agents = (Array.isArray(req.body?.agents) ? req.body.agents : []).map((x: unknown) => s(x, 40)).filter(Boolean).slice(0, 12);
     const src = req.body?.source && typeof req.body.source === "object" ? req.body.source : {};
     const source = Object.fromEntries([...["referrer", "landing", "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"].map((k) => [k, s(src[k], 300)]),
-      ["country", s(req.headers["x-vercel-ip-country"], 8)], ["city", s(decodeURIComponent(String(req.headers["x-vercel-ip-city"] ?? "")), 80)]].filter(([, v]) => v));
+      // Vercel's IP headers only on Vercel: anywhere else a client could send them (consent rules read the country).
+      ["country", consent.requestCountry(req.headers["x-vercel-ip-country"]) ?? ""],
+      ["city", process.env.VERCEL ? s(decodeURIComponent(String(req.headers["x-vercel-ip-city"] ?? "")), 80) : ""]].filter(([, v]) => v));
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return void res.status(400).json({ error: "Please enter a valid email." });
     if (!company) return void res.status(400).json({ error: "Please tell us your company." });
     const [row] = await (await getDb()).query<{ id: number }>(
@@ -168,8 +172,8 @@ export function createApp() {
       [email, company, productUrl || null, message || null, name || null, role || null, teamSize || null, agents, Object.keys(source).length ? JSON.stringify(source) : null,
        docsUrl || null, competitors || null, goal || null, timeline || null, heardFrom || null, subindustry || null],
     );
-    // The marketing opt-in checkbox (unticked by default): recorded by address hash, with the wording version and
-    // the country (src/gtm-consent.ts). A failure here never fails the request.
+    // The marketing opt-in checkbox (unticked by default): pending until the person clicks the confirmation email it
+    // sends (double opt-in, src/gtm-consent.ts). A failure here never fails the request.
     await consent.recordFormOptIn(email, { opt_in: req.body?.marketing_opt_in, wording_version: req.body?.marketing_wording, country: consent.cleanCountry(source.country), request_id: row.id })
       .catch((e) => console.error("access request consent: not recorded:", (e as Error).message));
     gtmEvents.emitLater("request_submitted", { request_id: row.id, key: String(row.id) });
@@ -210,6 +214,15 @@ export function createApp() {
     const t = String(req.query.t ?? "");
     const state = t === "test" ? "test" : (await campaignsMod.verifyUnsubscribe(t)) != null ? "ask" : "invalid";
     res.set({ "Cache-Control": "no-store", "X-Robots-Tag": "noindex" }).status(state === "invalid" ? 400 : 200).type("html").send(campaignsMod.unsubscribePage(state, t));
+  });
+  // The marketing opt-in's confirmation link (double opt-in, src/gtm-consent.ts): GET asks, POST confirms.
+  app.get("/api/email/confirm", async (req, res) => {
+    const t = String(req.query.t ?? ""), ok = await consent.verifyConfirm(t);
+    res.set({ "Cache-Control": "no-store", "X-Robots-Tag": "noindex" }).status(ok ? 200 : 400).type("html").send(consent.confirmPage(ok ? "ask" : "invalid", t));
+  });
+  app.post("/api/email/confirm", express.urlencoded({ extended: false, limit: "4kb" }), async (req, res) => {
+    const ok = await consent.confirmOptIn(String(req.query.t ?? ""));
+    res.set({ "Cache-Control": "no-store", "X-Robots-Tag": "noindex" }).status(ok ? 200 : 400).type("html").send(consent.confirmPage(ok ? "done" : "invalid"));
   });
   app.post("/api/email/unsubscribe", express.urlencoded({ extended: false, limit: "4kb" }), async (req, res) => {
     const r = await campaignsMod.unsubscribe(String(req.query.t ?? ""));
@@ -668,7 +681,9 @@ export function createApp() {
   ob.get("/gtm/activation", async (req, res) => void res.json(await gtm.activation(req.query)));
   ob.get("/gtm/attribution", async (req, res) => void res.json(await gtm.attribution(req.query)));
   ob.get("/gtm/campaigns", async (_req, res) => void res.json(await campaignsMod.listCampaigns()));
-  ob.get("/gtm/campaigns/:id", async (req, res) => void res.json(await campaignsMod.campaignDetail(cid(req))));
+  // Replies are personal data (what people wrote): only with the campaigns permission, here and in the peek.
+  ob.get("/gtm/campaigns/:id", async (req, res) =>
+    void res.json(await campaignsMod.campaignDetail(cid(req), { replies: roles.can(res.locals.adminRole as roles.PlatformRole | undefined, "campaigns") })));
   ob.post("/gtm/audience/preview", need("read"), async (req, res) => void res.json(await campaignsMod.previewAudience(req.body ?? {})));
   ob.post("/gtm/campaigns", need("campaigns"), async (req, res) =>
     void res.status(201).json(await campaignsMod.createCampaign(adminActor(req, res), (res.locals.adminUserId as string | undefined) ?? null, req.body ?? {})));
@@ -686,7 +701,9 @@ export function createApp() {
   ob.post("/gtm/campaigns/:id/steps/:step/winner", need("campaigns"), async (req, res) =>
     void res.json(await campaignsMod.pickWinner(adminActor(req, res), cid(req), req.params.step, req.body?.variant)));
   // Replies (src/gtm-replies.ts): every campaign's inbox, or one campaign's (?campaign_id=), and marking one handled.
-  ob.get("/gtm/replies", async (req, res) => void res.json(await gtmReplies.listReplies(req.query)));
+  ob.get("/gtm/replies", need("campaigns"), async (req, res) => void res.json(await gtmReplies.listReplies(req.query)));
+  // Sends whose outcome is unknown (src/campaigns.ts): back in the queue, only when an owner says so.
+  ob.post("/gtm/campaigns/:id/resend-unknown", need("campaigns"), async (req, res) => void res.json(await campaignsMod.resendUnknown(adminActor(req, res), cid(req))));
   ob.post("/gtm/replies/:id/handled", need("campaigns"), async (req, res) =>
     void res.json(await gtmReplies.setHandled(adminActor(req, res), Number(req.params.id), req.body?.handled !== false)));
   ob.get("/compute/sandbox", async (_req, res) => void res.json(await library.sandboxProvider()));

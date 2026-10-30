@@ -458,12 +458,14 @@ async function admit(c: CampaignRow, people: Candidate[], o: { delayDays: number
      ON CONFLICT (campaign_id, email) DO UPDATE SET round = r.round + 1, status = excluded.status, next_step = 0, next_at = excluded.next_at, entered_at = now(),
             event_id = excluded.event_id, replied_at = NULL, first_name = excluded.first_name, product = excluded.product, country = coalesce(excluded.country, r.country),
             time_zone = coalesce(excluded.time_zone, r.time_zone), consent_basis = excluded.consent_basis
-       WHERE $5::int IS NOT NULL AND r.status IN ('done', 'replied', 'failed') AND coalesce(r.entered_at, r.added_at) < now() - make_interval(days => coalesce($5::int, 0))
+       WHERE $5::int IS NOT NULL AND r.status IN ('done', 'failed') AND coalesce(r.entered_at, r.added_at) < now() - make_interval(days => coalesce($5::int, 0))
      RETURNING r.id, r.email, r.consent_basis AS basis, r.round`,
     [c.id, JSON.stringify(rows), o.delayDays, o.eventId ?? null, o.reentryDays ?? null]) : [];
-  // An existing customer written to under legitimate interest: recorded once (never over an opt-in or a withdrawal).
-  const have = await consentOf(added.filter((r) => r.basis === "legitimate_interest").map((r) => r.email));
-  for (const r of added.filter((x) => x.basis === "legitimate_interest" && !have.has(x.email)))
+  // An existing customer (an account's member, never a requester) written to under legitimate interest: recorded once
+  // (never over an opt-in or a withdrawal).
+  const customer = (e: string) => rows.find((x) => x.email === e)?.source === "account";
+  const have = await consentOf(added.filter((r) => r.basis === "legitimate_interest" && customer(r.email)).map((r) => r.email));
+  for (const r of added.filter((x) => x.basis === "legitimate_interest" && customer(x.email) && !have.has(x.email)))
     await recordConsent(r.email, "legitimate_interest", { source: "account", campaign_id: c.id, country: rows.find((x) => x.email === r.email)?.country ?? null });
   return { added: added.length, no_consent: people.length - ok.length };
 }
@@ -484,7 +486,9 @@ interface DueEvent { campaign_id: number; event_id: number; type: EventType; org
 
 /**
  * The people an event is about, under the campaign's UTM and plan filters: a request's requester; an account's active
- * members, else (nobody has joined yet: right after the account is made) whoever asked for it.
+ * members, else (nobody has joined yet: right after the account is made) whoever asked for it. Those requesters stay
+ * requesters (source "request", their own country) for the consent decision: never an existing customer's
+ * legitimate interest.
  */
 async function eventPeople(c: CampaignRow, e: DueEvent, data: { journeys: Journey[]; requests: RequestRow[] }): Promise<Candidate[]> {
   const a = c.audience;
@@ -497,44 +501,65 @@ async function eventPeople(c: CampaignRow, e: DueEvent, data: { journeys: Journe
   if (!j) return [];
   const people = await resolveAudience({ ...filters, include: "accounts", accounts: [j.org.slug] }, { journeys: [j], requests: data.requests });
   if (people.length || (filters.plans.length && !filters.plans.includes(j.plan))) return people;
-  return resolveAudience({ ...filters, include: "requests", request_status: ["approved"] }, { journeys: [j], requests: data.requests.filter((q) => q.org_id === Number(j.org.id)) })
-    .then((xs) => xs.map((x) => ({ ...x, source: "account" as const })));
+  return resolveAudience({ ...filters, include: "requests", request_status: ["approved"] }, { journeys: [j], requests: data.requests.filter((q) => q.org_id === Number(j.org.id)) });
 }
 
 /**
  * One pass over triggered campaigns: the detector (when one waits for a derived event, at most every
- * CAMPAIGN_SIGNAL_INTERVAL_MIN, 10, minutes), each campaign's new matching events (after it started) queued with the
- * trigger's delay, and the queued ones that are due enrolled. Idempotent: (campaign, event) is one row.
+ * CAMPAIGN_SIGNAL_INTERVAL_MIN, 10, minutes), each campaign's new matching events queued with the trigger's delay, and
+ * the queued ones that are due enrolled. Idempotent: (campaign, event) is one row. An event counts for a campaign only
+ * when what it reports happened after the campaign launched: its time, and for a detected change its lower bound
+ * (data.after: the detector's previous look, so a change that may predate the launch never counts), and for "stuck"
+ * the stage was entered at most 2 days before the launch. An event first seen more than CAMPAIGN_EVENT_MAX_AGE_HOURS
+ * (24) after it happened (the campaign was paused, or no tick ran) is skipped. Stops at `stopAt`.
  */
-async function processEvents(only: number | null): Promise<{ events: number; enrolled: number }> {
+async function processEvents(only: number | null, stopAt = Infinity): Promise<{ events: number; enrolled: number }> {
   const db = await getDb();
   const cs = (await db.query<CampaignRow>(`SELECT ${COLS} FROM gtm_campaigns WHERE status = 'running' AND trigger IS NOT NULL AND ($1::bigint IS NULL OR id = $1)`, [only]))
     .map(shapeRow).filter((c) => c.trigger);
   if (!cs.length) return { events: 0, enrolled: 0 };
   let data: { journeys: Journey[]; requests: RequestRow[] } | null = null;
-  const load = async (stripe = false) => (data ??= await journeys({ stripe }));
+  // Loaded once a pass; again for an event recorded after the load (its people may be newer than that snapshot).
+  let loadedThrough = 0; // the newest event id when the journeys were loaded
+  const load = async (stripe = false, eventId = 0) => {
+    if (!data || eventId > loadedThrough) {
+      loadedThrough = Number((await db.query<{ n: number }>("SELECT coalesce(max(id), 0) AS n FROM gtm_events"))[0].n);
+      data = await journeys({ stripe });
+    }
+    return data;
+  };
   let events = 0;
   const detected = cs.filter((c) => DETECTED.includes(c.trigger!.type));
   if (detected.length) {
     const mins = Math.max(0, Math.round(Number(process.env.CAMPAIGN_SIGNAL_INTERVAL_MIN ?? 10)));
     const [{ fresh }] = await db.query<{ fresh: boolean }>("SELECT coalesce(max(seen_at) > now() - make_interval(mins => $1::int), false) AS fresh FROM gtm_org_signals", [mins]);
-    if (!fresh || only != null) {
+    // The detector loads every account's journey (Clerk included): not with under a minute left.
+    if ((!fresh || only != null) && stopAt - Date.now() > 60_000) {
       const payments = detected.some((c) => c.trigger!.type === "first_payment");
       const d = await load(payments);
-      const stuck = [...new Map(detected.filter((c) => c.trigger!.type === "stuck").map((c) => [`${c.trigger!.stage}:${c.trigger!.days}`, { stage: c.trigger!.stage!, days: c.trigger!.days! }])).values()];
-      events += await detectSignals(d.journeys, { stuck, payments });
+      // Stuck: only accounts that entered the stage at most 2 days before the earliest campaign asking launched.
+      const stuck = new Map<string, { stage: string; days: number; since: number }>();
+      for (const c of detected.filter((x) => x.trigger!.type === "stuck")) {
+        const k = `${c.trigger!.stage}:${c.trigger!.days}`, since = new Date(c.launched_at ?? Date.now()).getTime() - 2 * 86_400_000;
+        stuck.set(k, { stage: c.trigger!.stage!, days: c.trigger!.days!, since: Math.min(since, stuck.get(k)?.since ?? Infinity) });
+      }
+      events += await detectSignals(d.journeys, { stuck: [...stuck.values()], payments });
     }
   }
+  const maxAgeHours = clampInt(Number(process.env.CAMPAIGN_EVENT_MAX_AGE_HOURS ?? 24), 1, 24 * 90, 24);
   for (const c of cs) {
     const t = c.trigger!;
     await db.query(
       `INSERT INTO gtm_event_enrolments (campaign_id, event_id, due_at)
        SELECT $1, e.id, e.at + make_interval(secs => $3::float8 * 3600) FROM gtm_events e
         WHERE e.type = $2 AND e.at >= coalesce($4::timestamptz, now()) - interval '1 minute'
+          AND coalesce((e.data->>'after')::timestamptz, e.at) >= coalesce($4::timestamptz, now()) - interval '1 minute'
+          AND (e.type <> 'stuck' OR (e.data->>'reached_at')::timestamptz >= coalesce($4::timestamptz, now()) - interval '2 days')
+          AND e.at >= now() - make_interval(hours => $8::int)
           AND ($5::text IS NULL OR e.data->>'stage' = $5) AND ($6::int IS NULL OR (e.data->>'days')::int = $6)
           AND ($7 = '' OR strpos(lower(e.data->>'reason'), lower($7)) > 0)
        ON CONFLICT (campaign_id, event_id) DO NOTHING`,
-      [c.id, t.type, t.delay_hours, c.launched_at, t.stage, t.days, t.attention]);
+      [c.id, t.type, t.delay_hours, c.launched_at, t.stage, t.days, t.attention, maxAgeHours]);
   }
   const due = await db.query<DueEvent>(
     `SELECT ee.campaign_id, ee.event_id, e.type, e.org_id, e.request_id, e.data FROM gtm_event_enrolments ee JOIN gtm_events e ON e.id = ee.event_id
@@ -542,10 +567,11 @@ async function processEvents(only: number | null): Promise<{ events: number; enr
       WHERE ee.processed_at IS NULL AND ee.due_at <= now() AND c.status = 'running' AND ($1::bigint IS NULL OR c.id = $1) ORDER BY ee.due_at LIMIT 500`, [only]);
   let enrolled = 0;
   for (const e of due) {
+    if (Date.now() >= stopAt) break;
     const c = cs.find((x) => x.id === Number(e.campaign_id));
     if (!c) continue;
     try {
-      const people = await eventPeople(c, e, await load());
+      const people = await eventPeople(c, e, await load(false, Number(e.event_id)));
       const r = people.length ? await admit(c, people, { delayDays: c.steps[0]?.delay_days ?? 0, eventId: Number(e.event_id), reentryDays: c.trigger!.reentry === "every" ? c.trigger!.reentry_days : null })
         : { added: 0, no_consent: 0 };
       const note = r.added ? null : !people.length ? "Nobody to write to" : r.no_consent === people.length ? "No consent on record" : "Already enrolled (re-entry rule)";
@@ -666,11 +692,22 @@ export interface TickResult {
   deferred: number;
   /** Due outside the campaign's send window: moved to the next opening. */
   outside_window: number;
+  /** Consent gone since enrolment (withdrawn, or the campaign now needs an opt-in): not sent. */
+  no_consent: number;
+  /** Resend may have them (see "uncertain sends" below): waiting for a replay, or parked for an owner. */
+  uncertain: number; unknown: number;
   /** Triggered campaigns: new events the detector found, and Resend requests made. */
   events: number; requests: number;
   skipped?: string; busy?: boolean; error?: string;
 }
-const emptyTick = (): TickResult => ({ started: 0, enrolled: 0, sent: 0, failed: 0, suppressed: 0, finished: 0, deferred: 0, outside_window: 0, events: 0, requests: 0 });
+const emptyTick = (): TickResult => ({ started: 0, enrolled: 0, sent: 0, failed: 0, suppressed: 0, finished: 0, deferred: 0, outside_window: 0, no_consent: 0,
+  uncertain: 0, unknown: 0, events: 0, requests: 0 });
+export interface TickOptions {
+  /** Wall-clock time (ms) the caller must be done by: the Vercel cron passes its request start plus the function's 300 s. */
+  deadline?: number;
+}
+/** No new Resend request starts with less than this left before the deadline: one batch (30 s) plus its replay (30 s). */
+const DEADLINE_RESERVE_MS = 70_000;
 
 /** OCTILLION_CAMPAIGNS=off stops every campaign send: the VM ticker, the Vercel cron's tick and "send now". */
 export const campaignsEnabled = () => (process.env.OCTILLION_CAMPAIGNS ?? "on").toLowerCase() !== "off";
@@ -698,9 +735,9 @@ function serial<T>(fn: () => Promise<T>): Promise<T> {
 }
 let inflight: Promise<TickResult> | null = null;
 /** One pass: start scheduled campaigns, enroll, send what is due (rate-limited), finish what is done. Never throws. */
-export function campaignTick(): Promise<TickResult> {
+export function campaignTick(o: TickOptions = {}): Promise<TickResult> {
   if (!campaignsEnabled()) return Promise.resolve({ ...emptyTick(), skipped: "Campaigns are off (OCTILLION_CAMPAIGNS=off)" });
-  return (inflight ??= serial(() => runTick(null)).finally(() => { inflight = null; }));
+  return (inflight ??= serial(() => runTick(null, o)).finally(() => { inflight = null; }));
 }
 
 /**
@@ -714,24 +751,128 @@ export async function sendNow(actor: string, id: number) {
   const m = (await metrics([c.id])).get(c.id)!;
   log(actor, "campaign.send_now", null, { campaign_id: c.id, sent: tick.sent, waiting: m.waiting });
   return { campaign_id: c.id, sent_now: tick.sent, sent: m.sent, suppressed: m.suppressed, waiting: m.waiting, failed: m.failed, outside_window: tick.outside_window,
-    skipped: tick.skipped ?? null, busy: Boolean(tick.busy) };
+    uncertain: m.uncertain, unknown: m.unknown, skipped: tick.skipped ?? null, busy: Boolean(tick.busy) };
 }
 
-/** Transient: Resend rate-limited or down, or email is switched off for now. Retried later, never counted as an attempt. */
+/** Transient: Resend rate-limited, or email is switched off for now. Retried later, never counted as an attempt. */
 const transient = (res: mail.EmailResult) =>
-  (res.status === "failed" && /Resend answered (429|5\d\d)|did not answer/.test(res.error ?? "")) ||
+  (res.status === "failed" && /Resend answered 429/.test(res.error ?? "")) ||
   (res.status === "skipped" && !/No valid address|No subject/.test(res.error ?? ""));
 const idempotencyKeyOf = (cid: number, rid: number, step: number, round: number) => `campaign:${cid}:${rid}:${step}${round ? `:${round}` : ""}`;
 
 interface Prepared { r: Due; c: CampaignRow; claim: { id: number; attempts: number }; variant: string | null; email: mail.Email }
+/** What a send keeps while its outcome is uncertain: the email as it went, without the address (that stays on the recipient). */
+const payloadOf = (m: mail.Email) => ({ kind: m.kind, idempotencyKey: m.idempotencyKey, subject: m.subject, text: m.text, html: m.html, headers: m.headers, tags: m.tags,
+  replyTo: m.replyTo, from: m.from, meta: m.meta });
 
-async function runTick(only: number | null): Promise<TickResult> {
+/**
+ * Uncertain sends. A request whose outcome is unknown (no answer, a 5xx, a 409, a function killed mid-request, a batch
+ * answer without an email's id) may have gone out. Such an email is only ever sent again as the very same request:
+ * the stored request key, the same emails in the same order, the same bodies (the stored payload), so Resend answers
+ * from its record of the first request and nobody gets two. That is tried at once, then once a tick (replayUncertain)
+ * for up to 23 hours (Resend keeps keys 24) and 3 replays; past that, or when the same request can no longer be made
+ * (someone in it replied, unsubscribed, or the campaign ended), the send is parked as `unknown`: never sent again
+ * unless an owner chooses Resend on the campaign. Missing ids and killed requests go straight to unknown.
+ */
+async function markUncertain(p: { sendId: number; recipientId: number }, res: mail.EmailResult, requestKey: string | null, email: mail.Email) {
+  const db = await getDb();
+  const replayable = requestKey != null && res.pos != null && !/no id for this email|without an id/.test(res.error ?? "");
+  await db.query(
+    `UPDATE gtm_campaign_sends SET status = $2, error = $3, batch_key = coalesce($4, batch_key), batch_pos = $5, payload = $6::jsonb, uncertain_at = coalesce(uncertain_at, now())
+      WHERE id = $1`, [p.sendId, replayable ? "uncertain" : "unknown", (res.error ?? "Outcome unknown").slice(0, 500), requestKey, res.pos ?? null,
+      replayable ? JSON.stringify(payloadOf(email)) : null]);
+  // Out of the queue until it is resolved: the claim refuses an uncertain or unknown send anyway.
+  await db.query("UPDATE gtm_campaign_recipients SET next_at = NULL WHERE id = $1", [p.recipientId]);
+  return replayable;
+}
+
+/** A tick that died mid-request left its sends `sending` with a request key: Resend may have them, so they are unknown. */
+async function sweepStuck() {
+  const db = await getDb();
+  const stuck = await db.query<{ recipient_id: number }>(
+    `UPDATE gtm_campaign_sends SET status = 'unknown', error = 'Outcome unknown: the tick sending it stopped mid-request', uncertain_at = coalesce(uncertain_at, now())
+      WHERE status = 'sending' AND batch_key IS NOT NULL AND at < now() - interval '10 minutes' RETURNING recipient_id`);
+  if (stuck.length) await db.query("UPDATE gtm_campaign_recipients SET next_at = NULL WHERE id = ANY($1::bigint[])", [stuck.map((s) => Number(s.recipient_id))]);
+  return stuck.length;
+}
+
+/** Replay uncertain requests, each exactly as it was made (see above). Returns how many emails it resolved as sent. */
+async function replayUncertain(only: number | null, stopAt: number, gap: number, timeoutMs: () => number, out: TickResult): Promise<void> {
+  const db = await getDb();
+  const rows = await db.query<{ id: number; campaign_id: number; recipient_id: number; step: number; round: number; batch_key: string; batch_pos: number; payload: Record<string, unknown>;
+    expired: boolean; replays: number; email: string; rstatus: string; cstatus: string | null; suppressed: boolean }>(
+    `SELECT s.id, s.campaign_id, s.recipient_id, s.step, s.round, s.batch_key, s.batch_pos, s.payload, s.uncertain_at < now() - interval '23 hours' AS expired, s.replays,
+            r.email, r.status AS rstatus, c.status AS cstatus,
+            EXISTS (SELECT 1 FROM email_suppressions x WHERE x.email_hash = encode(sha256(convert_to(lower(trim(r.email)), 'UTF8')), 'hex')) AS suppressed
+       FROM gtm_campaign_sends s JOIN gtm_campaign_recipients r ON r.id = s.recipient_id LEFT JOIN gtm_campaigns c ON c.id = s.campaign_id
+      WHERE s.status = 'uncertain' AND ($1::bigint IS NULL OR s.batch_key IN (SELECT batch_key FROM gtm_campaign_sends WHERE status = 'uncertain' AND campaign_id = $1))
+      ORDER BY s.batch_key, s.batch_pos`, [only]);
+  const groups = new Map<string, typeof rows>();
+  for (const r of rows) groups.set(r.batch_key, [...(groups.get(r.batch_key) ?? []), r]);
+  const park = async (g: typeof rows, why: string) => {
+    await db.query("UPDATE gtm_campaign_sends SET status = 'unknown', error = $2, payload = NULL WHERE id = ANY($1::bigint[]) AND status = 'uncertain'", [g.map((r) => Number(r.id)), why]);
+    out.unknown += g.length;
+  };
+  let first = true;
+  for (const [key, g] of groups) {
+    if (Date.now() >= stopAt) break;
+    // A paused campaign waits (unless the key is about to expire): its people may still get this email when it resumes.
+    if (g.some((r) => r.cstatus === "paused") && !g.some((r) => r.expired)) continue;
+    if (g.some((r) => r.expired || Number(r.replays) >= 3)) { await park(g, "Outcome unknown: could not be confirmed within Resend's idempotency window"); continue; }
+    if (g.some((r) => r.cstatus !== "running" || !["pending", "active"].includes(r.rstatus) || r.suppressed)) {
+      await park(g, "Outcome unknown: the same request can no longer be made (someone in it replied, unsubscribed or was suppressed, or the campaign ended)");
+      continue;
+    }
+    if (!first && gap) await sleep(gap);
+    first = false;
+    const ms = g.map((r) => ({ ...(r.payload as unknown as mail.Email), to: r.email }));
+    const sent = await mail.sendBatch(ms, { key, exact: true, timeoutMs: timeoutMs() });
+    out.requests++;
+    let rateLimited = false;
+    for (const [n, r] of g.entries()) {
+      const res = sent.results[n];
+      if (res?.status === "sent" || res?.status === "duplicate") {
+        await db.query("UPDATE gtm_campaign_sends SET status = 'sent', provider_id = coalesce($2, provider_id), payload = NULL, error = NULL, at = now() WHERE id = $1",
+          [r.id, res.provider_id ?? null]);
+        const c = await campaignById(Number(r.campaign_id)).catch(() => null);
+        if (c) await advance({ id: Number(r.recipient_id), next_step: Number(r.step), round: Number(r.round) } as Due, c);
+        out.sent++;
+      } else if (res && /Resend answered 429/.test(res.error ?? "")) rateLimited = true;
+      else if (res?.uncertain) { await db.query("UPDATE gtm_campaign_sends SET replays = replays + 1, error = $2 WHERE id = $1", [r.id, (res.error ?? "").slice(0, 500)]); out.uncertain++; }
+      else await park([r], `Outcome unknown: the replay was refused (${(res?.error ?? res?.status ?? "no result").slice(0, 200)})`);
+    }
+    if (rateLimited) break;
+  }
+}
+
+/** An owner's "Resend": the campaign's unknown sends go back in the queue as new sends (Resend may deliver some twice). */
+export async function resendUnknown(actor: string, id: number) {
+  const c = await campaignById(id);
+  const db = await getDb();
+  const rows = await db.query<{ recipient_id: number; step: number; round: number }>(
+    `UPDATE gtm_campaign_sends SET status = 'failed', batch_key = NULL, batch_pos = NULL, payload = NULL, error = $2
+      WHERE campaign_id = $1 AND status = 'unknown' RETURNING recipient_id, step, round`, [c.id, `Resent by ${actor.slice(0, 80)}`]);
+  if (rows.length) {
+    // Their email_log rows may still say sending (a killed request): free them, or the new attempt would wait on them.
+    await db.query("UPDATE email_log SET status = 'failed', error = 'Outcome unknown; resent by an owner' WHERE idempotency_key = ANY($1::text[]) AND status IN ('sending', 'failed')",
+      [rows.map((r) => idempotencyKeyOf(c.id, Number(r.recipient_id), Number(r.step), Number(r.round)))]);
+    await db.query("UPDATE gtm_campaign_recipients SET next_at = now() WHERE id = ANY($1::bigint[]) AND status IN ('pending', 'active')", [rows.map((r) => Number(r.recipient_id))]);
+  }
+  log(actor, "campaign.resend_unknown", null, { campaign_id: c.id, sends: rows.length });
+  return { campaign_id: c.id, requeued: rows.length };
+}
+
+async function runTick(only: number | null, o: TickOptions = {}): Promise<TickResult> {
   const out = emptyTick();
   const t0 = Date.now();
   await freshSettings().catch(() => {});
   const cap = clampInt(settingNumber("CAMPAIGN_SENDS_PER_TICK"), 0, 20_000, 1000), size = clampInt(settingNumber("CAMPAIGN_BATCH_SIZE"), 1, mail.BATCH_MAX, 100);
   const gap = clampInt(settingNumber("CAMPAIGN_SEND_INTERVAL_MS"), 0, 10_000, 600), budget = clampInt(settingNumber("CAMPAIGN_TICK_SECONDS"), 10, 280, 180) * 1000;
-  const leaseSecs = Math.ceil(budget / 1000) + 120;
+  // No new request after stopAt: the tick's own budget, and the caller's deadline less one batch and its replay.
+  const stopAt = Math.min(t0 + budget, o.deadline != null ? o.deadline - DEADLINE_RESERVE_MS : Infinity);
+  // A request's timeout fits what is left before the deadline, with room for its one replay.
+  const timeoutMs = () => (o.deadline == null ? 30_000 : Math.max(5_000, Math.min(30_000, Math.floor((o.deadline - Date.now() - 5_000) / 2))));
+  const leaseSecs = Math.max(60, Math.ceil((stopAt - t0) / 1000)) + 120;
   try {
     if (!(await takeLease(leaseSecs))) return { ...out, busy: true, skipped: "Another campaign tick is sending right now" };
   } catch (e) { return { ...out, error: (e as Error).message }; }
@@ -747,10 +888,11 @@ async function runTick(only: number | null): Promise<TickResult> {
     for (const { id } of await db.query<{ id: number }>(
       `SELECT id FROM gtm_campaigns WHERE status = 'running' AND trigger IS NULL AND ($2::bigint IS NULL OR id = $2)
           AND (enrolled_at IS NULL OR (rolling AND enrolled_at < now() - make_interval(mins => $1::int)))`, [enrollEvery, only])) {
+      if (Date.now() >= stopAt) break;
       try { out.enrolled += await enroll(Number(id)); } catch (e) { console.error(`campaign ${id}: enrolment failed: ${(e as Error).message}`); }
     }
     try {
-      const ev = await processEvents(only);
+      const ev = await processEvents(only, stopAt);
       out.events = ev.events; out.enrolled += ev.enrolled;
     } catch (e) { console.error(`campaigns: events not processed: ${(e as Error).message}`); }
     const status = await mail.emailStatus();
@@ -758,10 +900,14 @@ async function runTick(only: number | null): Promise<TickResult> {
       out.skipped = !status.connected ? "No Resend key in Key vault (or the provider is off)" : "Emails are off (Agent configuration, Send emails)";
       return out;
     }
+    // Earlier requests whose outcome is unknown come first: a killed one is parked, an uncertain one replayed exactly.
+    out.unknown += await sweepStuck();
+    if (Date.now() < stopAt) await replayUncertain(only, stopAt, gap, timeoutMs, out);
     const [postal, box, key] = await Promise.all([postalAddress(), replies.inbox(), unsubscribeKey()]);
+    const from = settingText("EMAIL_FROM"), defaultReplyTo = settingText("EMAIL_REPLY_TO").split(",").map((x) => x.trim()).filter(mail.isEmail);
     let attempted = 0, slowDown = false, calls = 0;
     // Waves: lease up to ten batches' worth, send them batch by batch, and go again while the cap and the time allow.
-    while (!slowDown && attempted < cap && Date.now() - t0 < budget) {
+    while (!slowDown && attempted < cap && Date.now() < stopAt) {
       const wave = await db.query<Due>(
         `UPDATE gtm_campaign_recipients r SET next_at = now() + interval '10 minutes'
           WHERE r.id IN (SELECT x.id FROM gtm_campaign_recipients x JOIN gtm_campaigns c ON c.id = x.campaign_id
@@ -772,13 +918,15 @@ async function runTick(only: number | null): Promise<TickResult> {
       wave.sort((a, b) => Number(a.id) - Number(b.id));
       due.push(...wave);
       for (let w = 0; w < wave.length && !slowDown && attempted < cap; ) {
-        if (Date.now() - t0 >= budget) break;
+        if (Date.now() >= stopAt) break;
         // The pause between Resend requests comes before the next batch is filled, so a pause, an end or a reply in
         // the meantime is seen.
         if (calls && gap) await sleep(gap);
         const chunk: Prepared[] = [];
-        // Fill one batch: each person checked against the campaign as it is now, the suppression list, the window.
-        const suppressedNow = await suppressedSet(wave.slice(w, w + size * 2).map((r) => r.email));
+        // Fill one batch: each person checked against the campaign as it is now, the suppression list, consent (as
+        // it is now: withdrawn since, or the campaign needing an opt-in), and the window.
+        const slice = wave.slice(w, w + size * 2);
+        const [suppressedNow, consentNow] = await Promise.all([suppressedSet(slice.map((r) => r.email)), consentOf(slice.map((r) => r.email))]);
         const campaigns = new Map<number, CampaignRow | null>();
         while (w < wave.length && chunk.length < size && attempted + chunk.length < cap) {
           const r = wave[w++];
@@ -797,6 +945,11 @@ async function runTick(only: number | null): Promise<TickResult> {
               out.suppressed++;
               continue;
             }
+            if (!mayEnrol({ email: r.email, source: r.source, country: r.country }, requiresOptIn(c), consentNow.get(r.email)).ok) {
+              await db.query("UPDATE gtm_campaign_recipients SET status = 'no_consent', next_at = NULL WHERE id = $1", [r.id]);
+              out.no_consent++;
+              continue;
+            }
             const zone = recipientZone(r.time_zone, r.country, c.send_window.time_zone);
             if (!windowOpen(c.send_window, new Date(), zone)) {
               await db.query("UPDATE gtm_campaign_recipients SET next_at = $2 WHERE id = $1", [r.id, nextOpening(c.send_window, new Date(), zone)]);
@@ -804,27 +957,32 @@ async function runTick(only: number | null): Promise<TickResult> {
               continue;
             }
             // Claimed once per person, round and email, and only while the campaign runs and the person still waits
-            // (a reply or an unsubscribe a moment ago stops it).
+            // (a reply or an unsubscribe a moment ago stops it). Taken again only after a certain failure, or when a
+            // tick died before making its request (no request key yet); never while uncertain or unknown.
             const [claim] = await db.query<{ id: number; attempts: number }>(
               `INSERT INTO gtm_campaign_sends (campaign_id, recipient_id, step, round, status)
                SELECT $1, $2, $3, $4, 'sending' WHERE EXISTS (SELECT 1 FROM gtm_campaigns WHERE id = $1 AND status = 'running')
                  AND EXISTS (SELECT 1 FROM gtm_campaign_recipients WHERE id = $2 AND status IN ('pending', 'active'))
-               ON CONFLICT (recipient_id, round, step) DO UPDATE SET status = 'sending', attempts = gtm_campaign_sends.attempts + 1, at = now(), error = NULL
-                 WHERE gtm_campaign_sends.status = 'failed' OR (gtm_campaign_sends.status = 'sending' AND gtm_campaign_sends.at < now() - interval '10 minutes')
+               ON CONFLICT (recipient_id, round, step) DO UPDATE SET status = 'sending', attempts = gtm_campaign_sends.attempts + 1, at = now(), error = NULL,
+                 batch_key = NULL, batch_pos = NULL
+                 WHERE gtm_campaign_sends.status = 'failed'
+                    OR (gtm_campaign_sends.status = 'sending' AND gtm_campaign_sends.batch_key IS NULL AND gtm_campaign_sends.at < now() - interval '10 minutes')
                RETURNING id, attempts`, [c.id, r.id, r.next_step, r.round]);
             if (!claim) {
               // Already sent (a tick that stopped before moving on): move on now. Paused this instant: back in the queue.
-              // Being sent elsewhere: leave the lease.
+              // Being sent elsewhere, uncertain or unknown: out of the queue until that is resolved.
               const [s] = await db.query<{ status: string }>("SELECT status FROM gtm_campaign_sends WHERE recipient_id = $1 AND round = $2 AND step = $3", [r.id, r.round, r.next_step]);
               if (s?.status === "sent") await advance(r, c);
               else if (!s) { await release([Number(r.id)]); out.deferred++; }
+              else if (s.status === "uncertain" || s.status === "unknown") await db.query("UPDATE gtm_campaign_recipients SET next_at = NULL WHERE id = $1", [r.id]);
               continue;
             }
             const v = pickVariant(step, c.id, r.next_step, Number(r.id));
             const url = unsubscribeUrl(await unsubscribeToken(Number(r.id)));
-            const replyTo = box ? [await replies.replyAddress(Number(r.id), key, box)] : undefined;
+            // Sender and reply-to fixed now, so a replay of this email is byte for byte the same request.
+            const replyTo = box ? [await replies.replyAddress(Number(r.id), key, box)] : defaultReplyTo;
             chunk.push({ r, c, claim, variant: v.letter, email: {
-              kind: "campaign", to: r.email, idempotencyKey: idempotencyKeyOf(c.id, Number(r.id), r.next_step, r.round),
+              kind: "campaign", to: r.email, idempotencyKey: idempotencyKeyOf(c.id, Number(r.id), r.next_step, r.round), from,
               meta: { campaign_id: c.id, step: r.next_step, ...(v.letter ? { variant: v.letter } : {}), ...(r.round ? { round: r.round } : {}) },
               subject: render(v.subject, r), text: render(v.body, r) + footer(r.source, url, postal), html: renderHtml(v.body + footer(r.source, url, postal), r),
               headers: unsubHeaders(url), tags: [{ name: "campaign", value: String(c.id) }], replyTo,
@@ -837,25 +995,39 @@ async function runTick(only: number | null): Promise<TickResult> {
         }
         if (!chunk.length) continue;
         attempted += chunk.length;
-        let sent = await mail.sendBatch(chunk.map((p) => p.email));
+        // The request key is recorded on every claim before the request is made: a tick killed after this point
+        // leaves sends that sweepStuck parks as unknown, never sends again on its own.
+        const requestKey = chunk.length === 1 ? chunk[0].email.idempotencyKey : mail.batchKeyOf(chunk.map((p) => p.email.idempotencyKey));
+        await db.query("UPDATE gtm_campaign_sends SET batch_key = $2 WHERE id = ANY($1::bigint[])", [chunk.map((p) => Number(p.claim.id)), requestKey]);
+        const ms = chunk.map((p) => p.email);
+        let sent = await mail.sendBatch(ms, { key: requestKey, timeoutMs: timeoutMs() });
         calls++;
-        // No answer at all: the same set again, at once and with the same request key, so Resend answers from its
-        // record of the first request if that one went through (never a second copy).
-        if (sent.batch_key && sent.results.every((x) => x.status === "failed" && /did not answer/.test(x.error ?? ""))) {
+        // The whole request uncertain (no answer, a 5xx, a 409): once more at once, as the very same request.
+        const inRequest = chunk.map((p, n) => ({ p, n, res: sent.results[n] })).filter((x) => x.res?.pos != null).sort((a, b) => a.res!.pos! - b.res!.pos!);
+        const wholeUncertain = sent.request_key != null && inRequest.length > 0 && inRequest.every((x) => x.res!.uncertain && !/no id for this email|without an id/.test(x.res!.error ?? ""));
+        if (wholeUncertain && (o.deadline == null || Date.now() + DEADLINE_RESERVE_MS / 2 < o.deadline)) {
           await sleep(Math.min(2000, gap || 2000));
-          sent = await mail.sendBatch(chunk.map((p) => p.email));
+          const again = await mail.sendBatch(inRequest.map((x) => x.p.email), { key: sent.request_key!, exact: true, timeoutMs: timeoutMs() });
           calls++;
+          const results = [...sent.results];
+          // Positions are the original request's either way (the replay is that request again).
+          for (const [k, x] of inRequest.entries()) results[x.n] = { ...(again.results[k] ?? { status: "failed" as const, uncertain: true }), pos: x.res!.pos };
+          sent = { results, request_key: sent.request_key };
         }
         let retryMs = 0;
         for (const [n, p] of chunk.entries()) {
-          const res = sent.results[n] ?? { status: "failed" as const, error: "no result" };
+          const res = sent.results[n] ?? { status: "failed" as const, error: "no result", uncertain: true, pos: null };
           if (res.status === "sent" || res.status === "duplicate") {
-            await db.query("UPDATE gtm_campaign_sends SET status = 'sent', provider_id = coalesce($2, provider_id), variant = $3, batch_key = $4, at = now() WHERE id = $1",
-              [p.claim.id, res.provider_id ?? null, p.variant, sent.batch_key]);
+            await db.query("UPDATE gtm_campaign_sends SET status = 'sent', provider_id = coalesce($2, provider_id), variant = $3, batch_key = coalesce($4, batch_key), at = now() WHERE id = $1",
+              [p.claim.id, res.provider_id ?? null, p.variant, sent.request_key]);
             await advance(p.r, p.c);
             out.sent++;
+          } else if (res.uncertain) {
+            await db.query("UPDATE gtm_campaign_sends SET variant = $2 WHERE id = $1", [p.claim.id, p.variant]);
+            if (await markUncertain({ sendId: Number(p.claim.id), recipientId: Number(p.r.id) }, res, sent.request_key, p.email)) out.uncertain++;
+            else out.unknown++;
           } else if (transient(res)) {
-            // Not this person's fault: undo the attempt. A 429 retries after Resend's retry-after; the rest in a quarter of an hour.
+            // Refused before anything went out: undo the attempt. A 429 retries after Resend's retry-after; the rest in a quarter of an hour.
             const r429 = /Resend answered 429/.test(res.error ?? "");
             if (r429) retryMs = Math.max(retryMs, res.retry_after_ms ?? 1000);
             await db.query("UPDATE gtm_campaign_sends SET status = 'failed', attempts = greatest(attempts - 1, 0), error = $2 WHERE id = $1", [p.claim.id, (res.error ?? res.status).slice(0, 500)]);
@@ -863,15 +1035,15 @@ async function runTick(only: number | null): Promise<TickResult> {
             out.deferred++;
           } else {
             await db.query("UPDATE gtm_campaign_sends SET status = 'failed', error = $2 WHERE id = $1", [p.claim.id, (res.error ?? res.status).slice(0, 500)]);
-            // No valid address, or a third real failure: give up on this person; else try again in half an hour.
+            // No valid address, or a third refusal: give up on this person; else try again in half an hour.
             const giveUp = res.status === "skipped" || Number(p.claim.attempts) >= 3;
             await db.query(`UPDATE gtm_campaign_recipients SET ${giveUp ? "status = 'failed', next_at = NULL" : "next_at = now() + interval '30 minutes'"} WHERE id = $1`, [p.r.id]);
             out.failed++;
           }
         }
         if (retryMs) {
-          // Rate-limited: wait what Resend asked when the time budget allows (and go on), else stop this tick here.
-          if (Date.now() - t0 + retryMs < budget) { await sleep(retryMs); await takeLease(leaseSecs).catch(() => false); break; }
+          // Rate-limited: wait what Resend asked when the time allows (and go on), else stop this tick here.
+          if (Date.now() + retryMs < stopAt) { await sleep(retryMs); await takeLease(leaseSecs).catch(() => false); break; }
           slowDown = true;
         }
       }
@@ -882,13 +1054,13 @@ async function runTick(only: number | null): Promise<TickResult> {
       // Keep the lease for as long as the tick runs.
       if (!(await takeLease(leaseSecs).catch(() => false))) break;
     }
-    out.requests = calls;
+    out.requests += calls;
     out.finished = (await db.query(
       `UPDATE gtm_campaigns c SET status = 'done', finished_at = now(), updated_at = now()
         WHERE c.status = 'running' AND NOT c.rolling AND c.trigger IS NULL AND c.enrolled_at IS NOT NULL
           AND NOT EXISTS (SELECT 1 FROM gtm_campaign_recipients r WHERE r.campaign_id = c.id AND r.status IN ('pending', 'active')) RETURNING id`)).length;
-    if (out.sent || out.failed || out.deferred)
-      console.error(`campaigns: sent ${out.sent} in ${calls} request(s), failed ${out.failed}, deferred ${out.deferred}, outside window ${out.outside_window}, suppressed ${out.suppressed}`);
+    if (out.sent || out.failed || out.deferred || out.uncertain || out.unknown)
+      console.error(`campaigns: sent ${out.sent} in ${out.requests} request(s), failed ${out.failed}, deferred ${out.deferred}, uncertain ${out.uncertain}, unknown ${out.unknown}, outside window ${out.outside_window}, suppressed ${out.suppressed}, no consent ${out.no_consent}`);
     return out;
   } catch (e) {
     return { ...out, error: (e as Error).message };
@@ -986,7 +1158,7 @@ export async function resendWebhook(raw: string, h: { id?: string; timestamp?: s
 
 // ---------- reading: the list and one campaign ----------
 
-type Metrics = { recipients: number; suppressed: number; unsubscribed: number; failed: number; waiting: number; reached: number; replied: number;
+type Metrics = { recipients: number; suppressed: number; unsubscribed: number; failed: number; waiting: number; reached: number; replied: number; no_consent: number; uncertain: number; unknown: number;
   sent: number; delivered: number; bounced: number; complained: number; opened: number; clicked: number; replies_open: number };
 async function metrics(ids: number[]): Promise<Map<number, Metrics>> {
   const db = await getDb();
@@ -994,17 +1166,18 @@ async function metrics(ids: number[]): Promise<Map<number, Metrics>> {
     db.query<Record<string, unknown>>(
       `SELECT campaign_id, count(*) AS recipients, count(*) FILTER (WHERE status = 'suppressed') AS suppressed, count(*) FILTER (WHERE status = 'unsubscribed') AS unsubscribed,
               count(*) FILTER (WHERE status = 'failed') AS failed, count(*) FILTER (WHERE status IN ('pending', 'active')) AS waiting,
-              count(*) FILTER (WHERE first_sent_at IS NOT NULL) AS reached, count(*) FILTER (WHERE replied_at IS NOT NULL) AS replied
+              count(*) FILTER (WHERE first_sent_at IS NOT NULL) AS reached, count(*) FILTER (WHERE replied_at IS NOT NULL) AS replied, count(*) FILTER (WHERE status = 'no_consent') AS no_consent
          FROM gtm_campaign_recipients WHERE campaign_id = ANY($1::bigint[]) GROUP BY campaign_id`, [ids]),
     db.query<Record<string, unknown>>(
       `SELECT campaign_id, count(*) FILTER (WHERE status = 'sent') AS sent, count(*) FILTER (WHERE delivered_at IS NOT NULL) AS delivered,
               count(*) FILTER (WHERE bounced_at IS NOT NULL) AS bounced, count(*) FILTER (WHERE complained_at IS NOT NULL) AS complained,
-              count(DISTINCT recipient_id) FILTER (WHERE opened_at IS NOT NULL) AS opened, count(DISTINCT recipient_id) FILTER (WHERE clicked_at IS NOT NULL) AS clicked
+              count(DISTINCT recipient_id) FILTER (WHERE opened_at IS NOT NULL) AS opened, count(DISTINCT recipient_id) FILTER (WHERE clicked_at IS NOT NULL) AS clicked,
+              count(*) FILTER (WHERE status = 'uncertain') AS uncertain, count(*) FILTER (WHERE status = 'unknown') AS unknown
          FROM gtm_campaign_sends WHERE campaign_id = ANY($1::bigint[]) GROUP BY campaign_id`, [ids]),
     db.query<Record<string, unknown>>(
       `SELECT campaign_id, count(*) FILTER (WHERE kind = 'reply' AND handled_at IS NULL) AS replies_open FROM gtm_replies WHERE campaign_id = ANY($1::bigint[]) GROUP BY campaign_id`, [ids]),
   ]) : [[], [], []];
-  const zero: Metrics = { recipients: 0, suppressed: 0, unsubscribed: 0, failed: 0, waiting: 0, reached: 0, replied: 0, sent: 0, delivered: 0, bounced: 0, complained: 0, opened: 0, clicked: 0, replies_open: 0 };
+  const zero: Metrics = { recipients: 0, suppressed: 0, unsubscribed: 0, failed: 0, waiting: 0, reached: 0, replied: 0, no_consent: 0, uncertain: 0, unknown: 0, sent: 0, delivered: 0, bounced: 0, complained: 0, opened: 0, clicked: 0, replies_open: 0 };
   const out = new Map(ids.map((id) => [id, { ...zero }]));
   for (const r of [...rs, ...ss, ...ys]) {
     const m = out.get(Number(r.campaign_id));
@@ -1095,7 +1268,8 @@ export async function listCampaigns() {
   };
 }
 
-export async function campaignDetail(id: number) {
+/** One campaign. `replies`: include what people replied (personal data: the campaigns permission only). */
+export async function campaignDetail(id: number, o: { replies?: boolean } = {}) {
   const c = await campaignById(id);
   const db = await getDb();
   const [m, recipients, steps, data, variantRows, replyRows, eventRows] = await Promise.all([
@@ -1114,7 +1288,7 @@ export async function campaignDetail(id: number) {
       `SELECT s.step, s.variant, s.recipient_id, s.opened_at IS NOT NULL AS opened, s.clicked_at IS NOT NULL AS clicked,
               EXISTS (SELECT 1 FROM gtm_replies y WHERE y.send_id = s.id AND y.kind = 'reply') AS replied
          FROM gtm_campaign_sends s WHERE s.campaign_id = $1 AND s.status = 'sent' AND s.variant IS NOT NULL`, [c.id]),
-    replies.listReplies({ campaign_id: c.id, limit: 50 }),
+    o.replies === false ? null : replies.listReplies({ campaign_id: c.id, limit: 50 }),
     db.query<Record<string, unknown>>(
       `SELECT count(*) AS matched, count(*) FILTER (WHERE processed_at IS NULL) AS queued, coalesce(sum(enrolled), 0) AS enrolled,
               count(*) FILTER (WHERE processed_at IS NOT NULL AND enrolled = 0) AS skipped FROM gtm_event_enrolments WHERE campaign_id = $1`, [c.id]),
@@ -1144,7 +1318,7 @@ export async function campaignDetail(id: number) {
       return { ...s, index: i, sent: Number(x?.sent ?? 0), failed: Number(x?.failed ?? 0), delivered: Number(x?.delivered ?? 0), bounced: Number(x?.bounced ?? 0),
         opened: Number(x?.opened ?? 0), clicked: Number(x?.clicked ?? 0), variant_stats: variants };
     }),
-    replies: replyRows,
+    replies: replyRows ?? { inbox: null, counts: null, replies: [], hidden: true },
     recipients: recipients.map((r) => {
       const s = sendBy.get(Number(r.id)), cv = conv?.per.get(Number(r.id));
       return { id: Number(r.id), email: r.email, first_name: r.first_name, product: r.product, source: r.source, status: r.status, next_step: r.next_step, next_at: r.next_at,

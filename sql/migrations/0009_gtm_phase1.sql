@@ -19,12 +19,15 @@
 ALTER TABLE gtm_campaigns ADD COLUMN IF NOT EXISTS trigger JSONB;
 ALTER TABLE gtm_campaigns ADD COLUMN IF NOT EXISTS send_window JSONB NOT NULL DEFAULT '{}';
 ALTER TABLE gtm_campaigns ADD COLUMN IF NOT EXISTS requires_opt_in BOOLEAN;
+-- Campaigns that existed before consent rules: off, so a rolling one keeps writing to whom it wrote to before (only new
+-- campaigns get the default). The EU / EEA / UK / CH rule for requesters (src/gtm-consent.ts) applies to every campaign.
+UPDATE gtm_campaigns SET requires_opt_in = false WHERE requires_opt_in IS NULL;
 ALTER TABLE gtm_campaigns ADD COLUMN IF NOT EXISTS count_auto_replies BOOLEAN NOT NULL DEFAULT false;
 
 -- ---------- recipients: replied, re-entry rounds, time zone and country ----------
 ALTER TABLE gtm_campaign_recipients DROP CONSTRAINT IF EXISTS gtm_campaign_recipients_status_check;
 ALTER TABLE gtm_campaign_recipients ADD CONSTRAINT gtm_campaign_recipients_status_check
-  CHECK (status IN ('pending', 'active', 'done', 'suppressed', 'unsubscribed', 'bounced', 'failed', 'replied'));
+  CHECK (status IN ('pending', 'active', 'done', 'suppressed', 'unsubscribed', 'bounced', 'failed', 'replied', 'no_consent'));
 ALTER TABLE gtm_campaign_recipients ADD COLUMN IF NOT EXISTS round INT NOT NULL DEFAULT 0;        -- re-entries: 0 the first time
 ALTER TABLE gtm_campaign_recipients ADD COLUMN IF NOT EXISTS entered_at TIMESTAMPTZ;              -- the latest (re-)entry
 ALTER TABLE gtm_campaign_recipients ADD COLUMN IF NOT EXISTS event_id BIGINT;                     -- the event that enrolled it (triggered)
@@ -36,7 +39,17 @@ ALTER TABLE gtm_campaign_recipients ADD COLUMN IF NOT EXISTS consent_basis TEXT;
 -- ---------- sends: one per recipient, round and step; the variant it got ----------
 ALTER TABLE gtm_campaign_sends ADD COLUMN IF NOT EXISTS round INT NOT NULL DEFAULT 0;
 ALTER TABLE gtm_campaign_sends ADD COLUMN IF NOT EXISTS variant TEXT;                             -- 'A'..'D' (null: a step without variants)
-ALTER TABLE gtm_campaign_sends ADD COLUMN IF NOT EXISTS batch_key TEXT;                           -- the Resend batch request it went in
+ALTER TABLE gtm_campaign_sends ADD COLUMN IF NOT EXISTS batch_key TEXT;                           -- the Resend request it went in, set before it is made
+-- uncertain: Resend may have accepted it (no answer, 5xx, 409, a function killed mid-request); it is only ever sent
+-- again as the very same request (batch_key, batch_pos, payload: replayed byte for byte, so Resend's idempotency key
+-- answers it). unknown: that was not possible (expired, replayed too often, the set changed): never resent unless an
+-- owner says so (Resend on the campaign).
+ALTER TABLE gtm_campaign_sends DROP CONSTRAINT IF EXISTS gtm_campaign_sends_status_check;
+ALTER TABLE gtm_campaign_sends ADD CONSTRAINT gtm_campaign_sends_status_check CHECK (status IN ('sending', 'sent', 'failed', 'uncertain', 'unknown'));
+ALTER TABLE gtm_campaign_sends ADD COLUMN IF NOT EXISTS batch_pos INT;                            -- its place in that request
+ALTER TABLE gtm_campaign_sends ADD COLUMN IF NOT EXISTS payload JSONB;                             -- while uncertain: the email as sent, without the address
+ALTER TABLE gtm_campaign_sends ADD COLUMN IF NOT EXISTS uncertain_at TIMESTAMPTZ;
+ALTER TABLE gtm_campaign_sends ADD COLUMN IF NOT EXISTS replays INT NOT NULL DEFAULT 0;
 ALTER TABLE gtm_campaign_sends DROP CONSTRAINT IF EXISTS gtm_campaign_sends_recipient_id_step_key;
 CREATE UNIQUE INDEX IF NOT EXISTS gtm_campaign_sends_once ON gtm_campaign_sends (recipient_id, round, step);
 
@@ -100,11 +113,12 @@ CREATE TABLE IF NOT EXISTS gtm_org_signals (
 );
 
 -- ---------- marketing consent (src/gtm-consent.ts) ----------
--- The basis in force for an address, keyed by its hash, and every change to it. opt_in: the person ticked the box
--- (source, wording version, when); legitimate_interest: an existing customer; withdrawn: unsubscribed.
+-- The basis in force for an address, keyed by its hash, and every change to it. opt_in_pending: the person ticked the
+-- box and has not confirmed yet (double opt-in); opt_in: they clicked the confirmation link (source, wording version,
+-- when); legitimate_interest: an existing customer; withdrawn: unsubscribed or complained.
 CREATE TABLE IF NOT EXISTS email_consents (
   email_hash       TEXT PRIMARY KEY,
-  basis            TEXT NOT NULL CHECK (basis IN ('opt_in', 'legitimate_interest', 'withdrawn')),
+  basis            TEXT NOT NULL CHECK (basis IN ('opt_in', 'opt_in_pending', 'legitimate_interest', 'withdrawn')),
   source           TEXT NOT NULL,                              -- access_request_form, account, unsubscribe, admin
   wording_version  TEXT,
   country          TEXT,
@@ -113,7 +127,7 @@ CREATE TABLE IF NOT EXISTS email_consents (
 CREATE TABLE IF NOT EXISTS email_consent_ledger (
   id               BIGSERIAL PRIMARY KEY,
   email_hash       TEXT NOT NULL,
-  basis            TEXT NOT NULL CHECK (basis IN ('opt_in', 'legitimate_interest', 'withdrawn')),
+  basis            TEXT NOT NULL CHECK (basis IN ('opt_in', 'opt_in_pending', 'legitimate_interest', 'withdrawn')),
   source           TEXT NOT NULL,
   wording_version  TEXT,
   country          TEXT,

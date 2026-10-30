@@ -33,7 +33,7 @@ import { accountRoleOf, type AccountRole } from "./account-roles.js";
 
 export const EMAIL_PROVIDER = "resend";
 export const EMAIL_KINDS = ["request_received", "request_alert", "request_declined", "request_approved", "submission_alert", "submission_accepted",
-  "submission_declined", "budget_80", "budget_100", "health_alert", "campaign", "campaign_test", "test"] as const;
+  "submission_declined", "budget_80", "budget_100", "health_alert", "campaign", "campaign_test", "marketing_confirm", "test"] as const;
 export type EmailKind = (typeof EMAIL_KINDS)[number];
 
 export interface Email {
@@ -48,11 +48,21 @@ export interface Email {
   tags?: { name: string; value: string }[];
   /** This message's Reply-To instead of the setting's (campaigns: a per-recipient address, so a reply maps back). */
   replyTo?: string[];
+  /** The sender, when the caller fixed it (a campaign send keeps the From it was first sent with, for an exact replay). */
+  from?: string;
 }
 export interface EmailResult {
   status: "sent" | "skipped" | "failed" | "duplicate"; id?: number; provider_id?: string | null; error?: string | null;
   /** Resend answered 429: how long it asked us to wait (its retry-after header). */
   retry_after_ms?: number;
+  /**
+   * Resend may have accepted it: no answer (a timeout, a dropped connection), a 5xx, a 409 (the same idempotency key in
+   * flight, or used for another body), or a batch answer without this email's id. Only ever retried as the very same
+   * request (src/campaigns.ts), never as a new one.
+   */
+  uncertain?: boolean;
+  /** Its place in the Resend request it went in (null: it was not in one). */
+  pos?: number | null;
 }
 
 const ADDRESS = /^[^\s@<>,;"]+@[^\s@<>,;"]+\.[^\s@<>,;"]+$/;
@@ -120,15 +130,17 @@ const retryAfter = (r: Response) => {
 
 interface Claimed {
   row: number; to: string; key: string; subject: string;
-  finish: (status: "sent" | "skipped" | "failed", extra?: { provider_id?: string | null; error?: string | null; retry_after_ms?: number | null }) => Promise<EmailResult>;
+  finish: (status: "sent" | "skipped" | "failed", extra?: { provider_id?: string | null; error?: string | null; retry_after_ms?: number | null; uncertain?: boolean }) => Promise<EmailResult>;
 }
 interface Ready { cred: { secret: string }; replyTo: string[] }
 
 /**
- * Claim the message in email_log: a new row, or another try at one that did not go out (failed, skipped, or stuck
- * sending for ten minutes). Sent or being sent: a duplicate. No address or no words: skipped (and recorded).
+ * Claim the message in email_log: a new row, or another try at one that did not go out (failed or skipped). A row
+ * stuck sending for ten minutes is taken again only with `stuck` (a single email: the same Idempotency-Key makes that
+ * retry safe); a batch never takes one (it may be in a request Resend accepted): that message comes back uncertain.
+ * Sent or being sent: a duplicate. No address or no words: skipped (and recorded).
  */
-async function claim(m: Email): Promise<Claimed | EmailResult> {
+async function claim(m: Email, stuck = true): Promise<Claimed | EmailResult> {
   const to = String(m.to ?? "").trim().toLowerCase();
   const key = String(m.idempotencyKey ?? "").slice(0, 256);
   if (!key) throw new Error("an idempotency key is required");
@@ -137,17 +149,23 @@ async function claim(m: Email): Promise<Claimed | EmailResult> {
   const [row] = await db.query<{ id: number }>(
     `INSERT INTO email_log (kind, to_hash, to_domain, subject, status, idempotency_key, meta) VALUES ($1, $2, $3, $4, 'sending', $5, $6::jsonb)
      ON CONFLICT (idempotency_key) DO UPDATE SET status = 'sending', at = now(), attempts = email_log.attempts + 1, error = NULL, subject = excluded.subject
-       WHERE email_log.status IN ('failed', 'skipped') OR (email_log.status = 'sending' AND email_log.at < now() - interval '10 minutes')
+       WHERE email_log.status IN ('failed', 'skipped') OR ($7 AND email_log.status = 'sending' AND email_log.at < now() - interval '10 minutes')
      RETURNING id`,
-    [m.kind, hashAddress(to), domainOf(to) || "-", subject, key, JSON.stringify(scrub(m.meta ?? {}))]);
-  if (!row) return { status: "duplicate" };
+    [m.kind, hashAddress(to), domainOf(to) || "-", subject, key, JSON.stringify(scrub(m.meta ?? {})), stuck]);
+  if (!row) {
+    const [was] = await db.query<{ status: string }>("SELECT status FROM email_log WHERE idempotency_key = $1", [key]);
+    return was?.status === "sending" && !stuck
+      ? { status: "failed", uncertain: true, error: "Outcome unknown: this email may still be in a request Resend accepted" }
+      : { status: "duplicate" };
+  }
   const id = Number(row.id);
   const finish: Claimed["finish"] = async (status, extra = {}) => {
     const error = extra.error ? extra.error.slice(0, 500) : null;
     await db.query("UPDATE email_log SET status = $2, provider_id = $3, error = $4 WHERE id = $1", [id, status, extra.provider_id ?? null, error]);
     console.error(`email ${m.kind} ${status} to=*@${domainOf(to) || "?"} key=${key}${error ? ` (${error})` : ""}`);
     telemetry.capture({ distinctId: "octillion:email" }, `email_${status}`, { kind: m.kind, to_domain: domainOf(to) || null, ...(error ? { error } : {}) });
-    return { status, id, provider_id: extra.provider_id ?? null, error, ...(extra.retry_after_ms != null ? { retry_after_ms: extra.retry_after_ms } : {}) };
+    return { status, id, provider_id: extra.provider_id ?? null, error, ...(extra.retry_after_ms != null ? { retry_after_ms: extra.retry_after_ms } : {}),
+      ...(extra.uncertain ? { uncertain: true } : {}) };
   };
   if (!isEmail(to)) return finish("skipped", { error: "No valid address to send to" });
   if (!subject || !String(m.text ?? "").trim()) return finish("skipped", { error: "No subject or text" });
@@ -169,7 +187,7 @@ async function notReady(): Promise<Ready | string> {
 const bodyOf = (m: Email, c: Claimed, defaultReplyTo: string[]) => {
   const own = (m.replyTo ?? []).filter(isEmail), replyTo = own.length ? own : defaultReplyTo;
   return {
-    from: settingText("EMAIL_FROM"), to: [c.to], subject: c.subject, text: m.text, html: m.html ?? htmlOf(m.text),
+    from: m.from || settingText("EMAIL_FROM"), to: [c.to], subject: c.subject, text: m.text, html: m.html ?? htmlOf(m.text),
     ...(replyTo.length ? { reply_to: replyTo } : {}), tags: [{ name: "kind", value: m.kind }, ...(m.tags ?? [])],
     ...(m.headers && Object.keys(m.headers).length ? { headers: m.headers } : {}),
   };
@@ -177,78 +195,110 @@ const bodyOf = (m: Email, c: Claimed, defaultReplyTo: string[]) => {
 const resendError = (r: Response, j: { message?: string; name?: string }, secret: string) =>
   `Resend answered ${r.status}${j.name ? ` ${j.name}` : ""}: ${String(j.message ?? "").replaceAll(secret, "…").slice(0, 300)}`;
 
-async function sendClaimed(m: Email, c: Claimed, ready: Ready): Promise<EmailResult> {
+/**
+ * Whether Resend may have accepted the request anyway: a 5xx (it may fail after sending) or a 409 (the same key in
+ * flight, concurrent_idempotent_requests, or used with another body, invalid_idempotent_request:
+ * https://resend.com/docs/api-reference/errors). A 429 and any other 4xx are refusals: nothing went out.
+ */
+const uncertainStatus = (status: number) => status >= 500 || status === 409;
+
+async function sendClaimed(m: Email, c: Claimed, ready: Ready, timeoutMs = 15_000): Promise<EmailResult> {
   try {
     const r = await fetch(`${apiUrl()}/emails`, {
-      method: "POST", signal: AbortSignal.timeout(15_000), body: JSON.stringify(bodyOf(m, c, ready.replyTo)),
+      method: "POST", signal: AbortSignal.timeout(timeoutMs), body: JSON.stringify(bodyOf(m, c, ready.replyTo)),
       headers: { authorization: `Bearer ${ready.cred.secret}`, "content-type": "application/json", "idempotency-key": c.key, "user-agent": "Octillion/1.0" },
     });
     const j = await r.json().catch(() => ({})) as { id?: string; message?: string; name?: string };
-    if (!r.ok) return c.finish("failed", { error: resendError(r, j, ready.cred.secret), retry_after_ms: retryAfter(r) });
-    return c.finish("sent", { provider_id: j.id ?? null });
+    if (!r.ok) return c.finish("failed", { error: resendError(r, j, ready.cred.secret), retry_after_ms: retryAfter(r), uncertain: uncertainStatus(r.status) });
+    if (!j.id) return c.finish("failed", { error: "Outcome unknown: Resend answered without an id", uncertain: true });
+    return c.finish("sent", { provider_id: j.id });
   } catch (e) {
-    return c.finish("failed", { error: `Resend did not answer: ${(e as Error).message}` });
+    return c.finish("failed", { error: `Resend did not answer: ${(e as Error).message}`, uncertain: true });
   }
 }
 
 /** Resend's batch endpoint takes at most 100 emails a request (https://resend.com/docs/api-reference/emails/send-batch-emails). */
 export const BATCH_MAX = 100;
 
-/** The batch request's idempotency key: names exactly this set of messages. */
+/** A batch request's idempotency key: names exactly this set of messages. */
 export const batchKeyOf = (keys: string[]) => `batch:${createHash("sha256").update([...keys].sort().join("\n")).digest("hex").slice(0, 48)}`;
 
+export interface BatchOptions {
+  /** The request's Idempotency-Key, chosen (and stored) by the caller before the request is made. */
+  key: string;
+  /** A replay: every message must go, in this order, exactly as before; if one cannot, none goes (all come back uncertain). */
+  exact?: boolean;
+  timeoutMs?: number;
+}
+export interface BatchResult { results: EmailResult[]; request_key: string | null }
+
 /**
- * Several emails in one Resend request (POST /emails/batch), each still its own email_log row claimed by its own
- * idempotency key, so a message already sent (or being sent) is dropped from the batch and never goes twice. Resend's
- * Idempotency-Key covers the whole request (https://resend.com/docs/dashboard/emails/idempotency-keys): it is derived
- * from the claimed messages' keys (batchKeyOf), so retrying the same set after a timeout or a 429 is answered from
- * Resend's record of the first request instead of sending again. One message left after claiming goes through the
- * plain endpoint with its own key. Results come back in the order given. Never throws.
+ * Several emails in one Resend request (POST /emails/batch). Each still has its own email_log row claimed by its own
+ * idempotency key: one already sent comes back a duplicate and is left out; one that may be in a request Resend
+ * accepted (its row stuck sending) comes back uncertain and is left out. Resend's Idempotency-Key covers the whole
+ * request (https://resend.com/docs/dashboard/emails/idempotency-keys), so the caller picks it (`key`) and stores it
+ * first. An email whose outcome is uncertain is only ever sent again as the very same request (same key, same emails
+ * in the same order, same bodies: `exact`), which Resend answers from its record of the first one; so no email goes
+ * out twice. A single email goes through POST /emails with its own key (request_key says which key was used).
+ * Results come back in the order given, each with its place in the request. Never throws.
+ *
+ * Resend documents no per-email validation mode for this endpoint (no x-batch-validation header on
+ * https://resend.com/docs/api-reference/emails/send-batch-emails): a refusal (4xx) refuses the whole request. An
+ * `errors` list in a successful answer, should one come, fails just the emails it names.
  */
-export async function sendBatch(ms: Email[]): Promise<{ results: EmailResult[]; batch_key: string | null }> {
+export async function sendBatch(ms: Email[], o: BatchOptions): Promise<BatchResult> {
   if (ms.length > BATCH_MAX) throw new Error(`a Resend batch is at most ${BATCH_MAX} emails`);
-  try { return await asPlatform(() => batchAttempt(ms)); }
+  try { return await asPlatform(() => batchAttempt(ms, o)); }
   catch (e) {
+    // Not recorded: no claim was finished and no request is known to have been made.
     console.error(`email batch: not recorded: ${(e as Error).message}`);
-    return { results: ms.map(() => ({ status: "failed" as const, error: (e as Error).message })), batch_key: null };
+    return { results: ms.map(() => ({ status: "failed" as const, error: (e as Error).message, uncertain: true })), request_key: null };
   }
 }
 
-async function batchAttempt(ms: Email[]): Promise<{ results: EmailResult[]; batch_key: string | null }> {
+async function batchAttempt(ms: Email[], o: BatchOptions): Promise<BatchResult> {
   const out: EmailResult[] = new Array(ms.length);
   const claimed: { i: number; c: Claimed }[] = [];
   for (const [i, m] of ms.entries()) {
-    const c = await claim(m);
-    if ("row" in c) claimed.push({ i, c }); else out[i] = c;
+    const c = await claim(m, false);
+    if ("row" in c) claimed.push({ i, c }); else out[i] = { ...c, pos: null };
   }
-  if (!claimed.length) return { results: out, batch_key: null };
+  // A replay that cannot be the very same request is not made: every email in it stays uncertain.
+  if (o.exact && claimed.length < ms.length) {
+    for (const { i, c } of claimed) out[i] = { ...(await c.finish("failed", { error: "Outcome unknown: not replayed, the request could not be repeated exactly", uncertain: true })), pos: null };
+    return { results: out.map((r) => (r.status === "duplicate" ? r : { ...r, status: "failed" as const, uncertain: true })), request_key: null };
+  }
+  if (!claimed.length) return { results: out, request_key: null };
   const ready = await notReady();
-  if (typeof ready === "string") { for (const { i, c } of claimed) out[i] = await c.finish("skipped", { error: ready }); return { results: out, batch_key: null }; }
+  if (typeof ready === "string") { for (const { i, c } of claimed) out[i] = await c.finish("skipped", { error: ready }); return { results: out, request_key: null }; }
+  const timeoutMs = o.timeoutMs ?? 30_000;
   if (claimed.length === 1) {
     const [{ i, c }] = claimed;
-    out[i] = await sendClaimed(ms[i], c, ready);
-    return { results: out, batch_key: null };
+    out[i] = { ...(await sendClaimed(ms[i], c, ready, Math.min(timeoutMs, 15_000))), pos: 0 };
+    return { results: out, request_key: c.key };
   }
-  const key = batchKeyOf(claimed.map(({ c }) => c.key));
-  const fail = async (error: string, retry: number | null = null) => {
-    for (const { i, c } of claimed) out[i] = await c.finish("failed", { error, retry_after_ms: retry });
-    return { results: out, batch_key: key };
+  const fail = async (error: string, extra: { retry?: number | null; uncertain?: boolean } = {}) => {
+    for (const [n, { i, c }] of claimed.entries()) out[i] = { ...(await c.finish("failed", { error, retry_after_ms: extra.retry ?? null, uncertain: extra.uncertain })), pos: n };
+    return { results: out, request_key: o.key };
   };
   try {
     const r = await fetch(`${apiUrl()}/emails/batch`, {
-      method: "POST", signal: AbortSignal.timeout(30_000), body: JSON.stringify(claimed.map(({ i, c }) => bodyOf(ms[i], c, ready.replyTo))),
-      headers: { authorization: `Bearer ${ready.cred.secret}`, "content-type": "application/json", "idempotency-key": key, "user-agent": "Octillion/1.0" },
+      method: "POST", signal: AbortSignal.timeout(timeoutMs), body: JSON.stringify(claimed.map(({ i, c }) => bodyOf(ms[i], c, ready.replyTo))),
+      headers: { authorization: `Bearer ${ready.cred.secret}`, "content-type": "application/json", "idempotency-key": o.key, "user-agent": "Octillion/1.0" },
     });
-    const j = await r.json().catch(() => ({})) as { data?: { id?: string }[]; message?: string; name?: string };
-    if (!r.ok) return fail(resendError(r, j, ready.cred.secret), retryAfter(r));
-    // Each answer is at the index of its email in the request.
+    const j = await r.json().catch(() => ({})) as { data?: { id?: string }[]; errors?: { index?: number; message?: string }[]; message?: string; name?: string };
+    if (!r.ok) return fail(resendError(r, j, ready.cred.secret), { retry: retryAfter(r), uncertain: uncertainStatus(r.status) });
+    const refused = new Map((j.errors ?? []).filter((x) => Number.isInteger(x.index)).map((x) => [Number(x.index), String(x.message ?? "refused")]));
+    // Each answer is at the index of its email in the request. No id (and no error for it): Resend may have it.
     for (const [n, { i, c }] of claimed.entries()) {
       const pid = j.data?.[n]?.id ?? null;
-      out[i] = pid ? await c.finish("sent", { provider_id: pid }) : await c.finish("failed", { error: "Resend did not answer: no id for this email in the batch" });
+      out[i] = { ...(pid ? await c.finish("sent", { provider_id: pid })
+        : refused.has(n) ? await c.finish("failed", { error: `Resend refused this email: ${refused.get(n)!.slice(0, 300)}` })
+        : await c.finish("failed", { error: "Outcome unknown: Resend's batch answer had no id for this email", uncertain: true })), pos: n };
     }
-    return { results: out, batch_key: key };
+    return { results: out, request_key: o.key };
   } catch (e) {
-    return fail(`Resend did not answer: ${(e as Error).message}`);
+    return fail(`Resend did not answer: ${(e as Error).message}`, { uncertain: true });
   }
 }
 
