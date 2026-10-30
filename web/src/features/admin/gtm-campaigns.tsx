@@ -4,12 +4,13 @@
 // audience preview, a test send to an address typed in, and who it went to. Owners change campaigns; everyone reads.
 // Outbound (src/gtm-outbound.ts): an audience of prospects, sent from a sender identity on the outreach subdomain
 // (the Senders view manages them and their warm-up), text only unless the campaign tracks opens.
-import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import PageContainer from '@/components/layout/page-container';
 import { StatStrip } from '@/components/layout/section';
 import { RecordView, type RecordCol } from '@/components/layout/record-view';
+import { DetailMeta, DetailTable, DetailTabs, KeyValueTable, type DetailTab, type KV } from '@/components/layout/detail';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
@@ -21,9 +22,9 @@ import { Icons } from '@/components/icons';
 import { adminApi } from '@/lib/api-client';
 import { downloadJson } from '@/lib/csv';
 import { post, useAdmin, useAdminAction } from './lib';
-import { ConfirmButton, DataList, ErrorBox, FormRow, Notice, Section, StatusBadge, When, type Tone } from './ui';
+import { ConfirmButton, ErrorBox, Notice, StatusBadge, When, type Tone } from './ui';
 import { Gate, useAdminRole } from './role';
-import { GtmTabs, useGtmParams } from './gtm-common';
+import { formKV, GtmTabs, useGtmParams } from './gtm-common';
 import { CampaignReplies, RepliesView, type Replies } from './gtm-replies';
 import { SendersView, type Identities } from './gtm-senders';
 
@@ -227,7 +228,7 @@ function CampaignsPage() {
               { label: 'Unsubscribed', value: sum('unsubscribed'), hint: `${sum('suppressed')} suppressed at send` }
             ]} />
           )}
-          detailTitle={(c) => <span className='flex items-center gap-2'>{c.name}<StatusBadge tone={TONE[c.status]}>{c.status}</StatusBadge><KindBadge c={c} /></span>}
+          detailTitle={() => 'Campaign'}
           detail={(c, close) => <CampaignPeek id={c.id} stages={stages} onDeleted={close} />}
         />}
       </div>
@@ -237,89 +238,141 @@ function CampaignsPage() {
 
 // ---------- one campaign ----------
 
+const RECIPIENT_TONE = (s: string): Tone => (s === 'done' || s === 'active' || s === 'replied' ? 'ok' : ['unsubscribed', 'bounced', 'failed'].includes(s) ? 'bad' : s === 'suppressed' || s === 'no_consent' ? 'warn' : 'neutral');
+const dash = <span className='text-muted-foreground'>—</span>;
+
+/** The campaign's card (its facts, the lifecycle buttons and Save), then a tab per list and per part of the editor. The
+ *  editor's state is keyed on the campaign's version (as before); the open tab, the schedule time and the test send
+ *  live here, so a save or a refresh keeps them. */
 function CampaignPeek({ id, stages, onDeleted }: { id: number; stages: { id: string; label: string }[]; onDeleted: () => void }) {
   const { data: d, error } = useAdmin<Detail>(path(id), { refetchInterval: 30_000 });
+  const [tab, setTab] = useState<string | undefined>(undefined);
+  const [at, setAt] = useState('');
+  const [test, setTest] = useState({ to: '', step: '0', variant: '' });
+  // The next record in the peek opens on its first tab, with nothing typed.
+  useEffect(() => { setTab(undefined); setAt(''); setTest({ to: '', step: '0', variant: '' }); }, [id]);
   if (error) return <ErrorBox error={error} />;
   if (!d) return <Skeleton className='h-96 rounded-lg' />;
-  const c = d.campaign, mt = c.metrics;
-  return (
-    <div className='flex flex-col gap-8'>
-      <Lifecycle c={c} onDeleted={onDeleted} />
-      {mt && (mt.uncertain > 0 || mt.unknown > 0) && <UnknownSends c={c} m={mt} />}
-      {mt && (
-        <StatStrip items={[
-          { label: 'Recipients', value: mt.recipients, hint: `${mt.waiting} waiting, ${mt.suppressed} suppressed` },
-          { label: 'Sent', value: mt.sent, hint: `${mt.delivered} delivered, ${mt.bounced} bounced` },
-          { label: 'Opened', value: pct(mt.opened, mt.reached), hint: `${mt.clicked} clicked` },
-          { label: 'Replied', value: mt.replied, hint: mt.replies_open ? `${mt.replies_open} not handled` : 'all handled' },
-          { label: 'Unsubscribed', value: mt.unsubscribed, hint: mt.failed ? `${mt.failed} failed` : 'none failed' }
+  const c = d.campaign;
+  const before: DetailTab[] = [
+    { id: 'recipients', label: 'Recipients', count: d.recipients.length, content: <RecipientsTable c={c} rows={d.recipients} /> },
+    { id: 'replies', label: 'Replies', count: d.replies.replies.length, hidden: d.replies.hidden, content: <CampaignReplies replies={d.replies} /> },
+    { id: 'performance', label: 'By email', hidden: !d.steps.some((s) => s.sent), content: (
+      <DetailTable noun='emails' rows={d.steps} rowKey={(s) => String(s.index)} empty='No emails.'
+        cols={[
+          { key: 'index', label: '#', type: 'number', value: (s) => s.index + 1, className: 'w-10', render: (s) => s.index + 1 },
+          { key: 'subject', label: 'Subject', type: 'text', value: (s) => s.subject, className: 'whitespace-normal', render: (s) => <span className='font-medium'>{s.subject}{s.variants?.length ? <span className='text-muted-foreground text-xs font-normal'> · {s.variants.length} variants</span> : null}</span> },
+          { key: 'sent', label: 'Sent', type: 'number', value: (s) => s.sent, render: (s) => <span className='tabular-nums'>{s.sent}{s.failed ? <span className='text-destructive text-xs'> · {s.failed} failed</span> : null}</span> },
+          { key: 'delivered', label: 'Delivered', type: 'number', value: (s) => s.delivered, render: (s) => <span className='tabular-nums'>{s.delivered}</span> },
+          { key: 'opened', label: 'Opened', type: 'number', value: (s) => s.opened, render: (s) => <span className='tabular-nums'>{s.opened} · {pct(s.opened, s.sent)}</span> },
+          { key: 'clicked', label: 'Clicked', type: 'number', value: (s) => s.clicked, render: (s) => <span className='tabular-nums'>{s.clicked}</span> }
         ]} />
-      )}
-      {c.trigger && d.events && (
-        <Section title='Trigger' description={triggerText(c.trigger, stages) ?? ''}>
-          <StatStrip items={[
-            { label: 'Events matched', value: d.events.matched, hint: 'since it started' },
-            { label: 'Waiting for the delay', value: d.events.queued },
-            { label: 'Enrolled', value: d.events.enrolled },
-            { label: 'Not enrolled', value: d.events.skipped, hint: 'no consent, re-entry rule or nobody to write to' }
-          ]} />
-        </Section>
-      )}
-      {!d.replies.hidden && (
-        <Section title='Replies' description={d.setup.replies_inbox ? `A reply stops that person's emails. Replies go to ${d.setup.replies_inbox} (a per-person address).` : undefined}>
-          <CampaignReplies replies={d.replies} />
-        </Section>
-      )}
-      {d.conversions && (
-        <Section title={`Conversions within ${d.conversions.days} days of the first email`} description='From Activation: an access request from that address, the account’s first simulation, its first payment in Stripe.'>
-          <StatStrip items={[
-            { label: 'Requested access', value: d.conversions.requested },
-            { label: 'Activated', value: d.conversions.activated },
-            { label: 'Paid', value: d.conversions.paid }
-          ]} />
-        </Section>
-      )}
-      {d.steps.some((s) => s.sent) && (
-        <Section title='By email'>
-          <div className='border'>
-            <DataList noun='emails' minWidth={560} rows={d.steps} empty='No emails.'
-              cols={[
-                { label: '#', className: 'w-10', render: (s) => s.index + 1 },
-                { label: 'Subject', render: (s) => <span className='font-medium'>{s.subject}{s.variants?.length ? <span className='text-muted-foreground text-xs font-normal'> · {s.variants.length} variants</span> : null}</span> },
-                { label: 'Sent', render: (s) => <span className='tabular-nums'>{s.sent}{s.failed ? <span className='text-destructive text-xs'> · {s.failed} failed</span> : null}</span> },
-                { label: 'Delivered', render: (s) => <span className='tabular-nums'>{s.delivered}</span> },
-                { label: 'Opened', render: (s) => <span className='tabular-nums'>{s.opened} · {pct(s.opened, s.sent)}</span> },
-                { label: 'Clicked', render: (s) => <span className='tabular-nums'>{s.clicked}</span> }
-              ]} />
-          </div>
-        </Section>
-      )}
-      {d.steps.filter((s) => s.variant_stats.length).map((s) => <VariantTable key={s.index} c={c} step={s} />)}
+    ) },
+    { id: 'variants', label: 'A/B variants', hidden: !d.steps.some((s) => s.variant_stats.length), content: <VariantsTable c={c} steps={d.steps} /> }
+  ];
+  const after: DetailTab[] = [
+    { id: 'test', label: 'Test send', content: <TestSend c={c} v={test} set={setTest} /> }
+  ];
+  return (
+    <CampaignEditor key={`${c.id}:${c.updated_at}`} c={c} stages={stages} tab={tab} setTab={setTab} before={before} after={after}
+      card={(save, editing) => <CampaignMeta d={d} stages={stages} onDeleted={onDeleted} at={at} setAt={setAt} save={save} editing={editing} />} />
+  );
+}
+
+/** Who it goes to: enrolled when the campaign starts (and as people match, when it keeps enrolling). */
+function RecipientsTable({ c, rows }: { c: Campaign; rows: Recipient[] }) {
+  return (
+    <DetailTable<Recipient> noun='recipients' rows={rows} rowKey={(r) => String(r.id)}
+      empty={c.status === 'draft' || c.status === 'scheduled' ? 'Nobody yet: people are enrolled when it starts.' : 'Nobody matched.'}
+      search={(r) => `${r.first_name ?? ''} ${r.email} ${r.account?.name ?? ''} ${r.status} ${r.country ?? ''}`} searchPlaceholder='Search recipients by name, email, account or status'
+      cols={[
+        { key: 'person', label: 'Person', type: 'text', value: (r) => r.first_name ?? r.email, render: (r) => <span className='flex flex-col gap-0.5'><span className='font-medium'>{r.first_name ?? r.email.split('@')[0]}</span><span className='text-muted-foreground text-xs'>{r.email}</span></span> },
+        { key: 'from', label: 'From', type: 'text', value: (r) => (r.account ? r.account.name : r.source === 'request' ? 'Access request' : ''), render: (r) => <span className='text-sm'>{r.account ? r.account.name : r.source === 'request' ? 'Access request' : '—'}</span> },
+        { key: 'status', label: 'Status', type: 'select', value: (r) => r.status, render: (r) => <span className='flex flex-col gap-0.5'>
+          <StatusBadge tone={RECIPIENT_TONE(r.status)}>{r.status}</StatusBadge>
+          {r.round > 0 && <span className='text-muted-foreground text-xs'>round {r.round + 1}</span>}</span> },
+        { key: 'next', label: 'Next', type: 'date', value: (r) => (r.next_at && ['pending', 'active'].includes(r.status) ? r.next_at : null), render: (r) => (r.next_at && ['pending', 'active'].includes(r.status) ? <span className='text-sm'>Email {r.next_step + 1} <When d={r.next_at} className='text-muted-foreground' /></span> : dash) },
+        { key: 'tz', label: 'Time zone', type: 'text', value: (r) => r.time_zone, render: (r) => <span className='text-muted-foreground text-xs'>{r.time_zone}{r.country ? ` · ${r.country}` : ''}</span> },
+        { key: 'consent', label: 'Consent', type: 'select', value: (r) => (r.consent_basis ? CONSENT_LABEL[r.consent_basis] ?? r.consent_basis : ''), render: (r) => <span className='text-muted-foreground text-xs'>{r.consent_basis ? CONSENT_LABEL[r.consent_basis] ?? r.consent_basis : '—'}</span> },
+        { key: 'last_sent', label: 'Last sent', type: 'date', value: (r) => r.last_sent_at, render: (r) => <When d={r.last_sent_at} className='text-muted-foreground text-sm' /> },
+        { key: 'engaged', label: 'Engaged', render: (r) => <span className='text-muted-foreground text-xs'>{[r.delivered && 'delivered', r.opened && 'opened', r.clicked && 'clicked', r.bounced && 'bounced'].filter(Boolean).join(', ') || '—'}</span> },
+        { key: 'converted', label: 'Converted', render: (r) => <span className='text-xs'>{[r.requested && 'requested', r.activated && 'activated', r.paid && 'paid'].filter(Boolean).join(', ') || <span className='text-muted-foreground'>—</span>}</span> }
+      ]} />
+  );
+}
+
+/** The card: name, status, the numbers and dates, the notices, and the lifecycle buttons with Save. */
+function CampaignMeta({ d, stages, onDeleted, at, setAt, save, editing }: {
+  d: Detail; stages: { id: string; label: string }[]; onDeleted: () => void; at: string; setAt: (v: string) => void; save: ReactNode; editing: string;
+}) {
+  const c = d.campaign, mt = c.metrics;
+  const trig = triggerText(c.trigger, stages);
+  return (
+    <DetailMeta
+      title={c.name}
+      badges={<><StatusBadge tone={TONE[c.status]}>{c.status}</StatusBadge><KindBadge c={c} /></>}
+      subtitle={c.trigger ? <><span className='text-foreground font-medium'>Triggered:</span> {trig}</> : audienceText(c.audience, stages)}
+      actions={<><Lifecycle c={c} onDeleted={onDeleted} at={at} setAt={setAt} />{save}</>}
+      facts={[
+        { label: 'Owner', value: c.owner },
+        { label: 'Created', value: <When d={c.created_at} />, hint: <>updated <When d={c.updated_at} /></> },
+        { label: 'Starts', value: <When d={c.starts_at} />, hidden: c.status !== 'scheduled' || !c.starts_at },
+        { label: 'Started', value: c.launched_at ? <When d={c.launched_at} /> : null, hint: c.finished_at ? <>finished <When d={c.finished_at} /></> : undefined },
+        { label: 'Emails', value: <span className='tabular-nums'>{c.steps.length}</span> },
+        { label: 'Recipients', value: mt?.recipients, hint: mt ? `${mt.waiting} waiting, ${mt.suppressed} suppressed` : undefined, hidden: !mt },
+        { label: 'Sent', value: mt?.sent, hint: mt ? `${mt.delivered} delivered, ${mt.bounced} bounced` : undefined, hidden: !mt },
+        { label: 'Opened', value: mt ? pct(mt.opened, mt.reached) : null, hint: mt ? `${mt.clicked} clicked` : undefined, hidden: !mt },
+        { label: 'Replied', value: mt?.replied, hint: mt ? (mt.replies_open ? `${mt.replies_open} not handled` : 'all handled') : undefined, hidden: !mt },
+        { label: 'Unsubscribed', value: mt?.unsubscribed, hint: mt ? (mt.failed ? `${mt.failed} failed` : 'none failed') : undefined, hidden: !mt },
+        { label: 'Requested access', value: d.conversions?.requested, hint: d.conversions ? `within ${d.conversions.days} days of the first email` : undefined, hidden: !d.conversions },
+        { label: 'Activated', value: d.conversions?.activated, hint: 'the account’s first simulation', hidden: !d.conversions },
+        { label: 'Paid', value: d.conversions?.paid, hint: 'its first payment in Stripe', hidden: !d.conversions },
+        { label: 'Events matched', value: d.events?.matched, hint: 'since it started', hidden: !(c.trigger && d.events) },
+        { label: 'Waiting for the delay', value: d.events?.queued, hidden: !(c.trigger && d.events) },
+        { label: 'Enrolled', value: d.events?.enrolled, hidden: !(c.trigger && d.events) },
+        { label: 'Not enrolled', value: d.events?.skipped, hint: 'no consent, re-entry rule or nobody to write to', hidden: !(c.trigger && d.events) },
+        { label: 'Replies go to', value: d.setup.replies_inbox, hint: "A reply stops that person's emails (a per-person address).", hidden: d.replies.hidden || !d.setup.replies_inbox, wide: true },
+        { label: 'Changes', value: editing, wide: true }
+      ]}
+    >
+      {c.audience.include === 'prospects' && !c.sender_identity_id && <Notice tone='info'>Choose a sender identity before launching (Settings).</Notice>}
+      {mt && (mt.uncertain > 0 || mt.unknown > 0) && <UnknownSends c={c} m={mt} />}
       {c.audience.include === 'prospects' && d.setup.outbound_postal_warning
         ? <Notice>{d.setup.outbound_postal_warning} (Agent configuration, Campaigns: Sender postal address). This never stops a send.</Notice>
         : !d.setup.postal_address_set && <Notice tone='info'>{d.setup.postal_hint} (Agent configuration, Campaigns: Sender postal address). Emails still go out without it.</Notice>}
-      <Editor key={`${c.id}:${c.updated_at}`} c={c} stages={stages} />
-      <TestSend c={c} />
-      <Section title='Recipients' description='Who it goes to: enrolled when the campaign starts (and as people match, when it keeps enrolling).'>
-        <div className='border'>
-          <DataList<Recipient> noun='recipients' minWidth={980} height='h-[28rem]' rows={d.recipients}
-            empty={c.status === 'draft' || c.status === 'scheduled' ? 'Nobody yet: people are enrolled when it starts.' : 'Nobody matched.'}
-            cols={[
-              { label: 'Person', render: (r) => <span className='flex flex-col gap-0.5'><span className='font-medium'>{r.first_name ?? r.email.split('@')[0]}</span><span className='text-muted-foreground text-xs'>{r.email}</span></span> },
-              { label: 'From', render: (r) => <span className='text-sm'>{r.account ? r.account.name : r.source === 'request' ? 'Access request' : '—'}</span> },
-              { label: 'Status', render: (r) => <span className='flex flex-col gap-0.5'>
-                <StatusBadge tone={r.status === 'done' || r.status === 'active' || r.status === 'replied' ? 'ok' : ['unsubscribed', 'bounced', 'failed'].includes(r.status) ? 'bad' : r.status === 'suppressed' || r.status === 'no_consent' ? 'warn' : 'neutral'}>{r.status}</StatusBadge>
-                {r.round > 0 && <span className='text-muted-foreground text-xs'>round {r.round + 1}</span>}</span> },
-              { label: 'Next', render: (r) => (r.next_at && ['pending', 'active'].includes(r.status) ? <span className='text-sm'>Email {r.next_step + 1} <When d={r.next_at} className='text-muted-foreground' /></span> : <span className='text-muted-foreground'>—</span>) },
-              { label: 'Time zone', render: (r) => <span className='text-muted-foreground text-xs'>{r.time_zone}{r.country ? ` · ${r.country}` : ''}</span> },
-              { label: 'Consent', render: (r) => <span className='text-muted-foreground text-xs'>{r.consent_basis ? CONSENT_LABEL[r.consent_basis] ?? r.consent_basis : '—'}</span> },
-              { label: 'Last sent', render: (r) => <When d={r.last_sent_at} className='text-muted-foreground text-sm' /> },
-              { label: 'Engaged', render: (r) => <span className='text-muted-foreground text-xs'>{[r.delivered && 'delivered', r.opened && 'opened', r.clicked && 'clicked', r.bounced && 'bounced'].filter(Boolean).join(', ') || '—'}</span> },
-              { label: 'Converted', render: (r) => <span className='text-xs'>{[r.requested && 'requested', r.activated && 'activated', r.paid && 'paid'].filter(Boolean).join(', ') || <span className='text-muted-foreground'>—</span>}</span> }
-            ]} />
-        </div>
-      </Section>
-    </div>
+    </DetailMeta>
+  );
+}
+
+/** Every step's A/B variants in one table: sends, opens, clicks, replies and conversions each, tested against A, and Pick winner. */
+function VariantsTable({ c, steps }: { c: Campaign; steps: Detail['steps'] }) {
+  const win = useAdminAction((v: { step: number; letter: string }) => post<Detail>(`${path(c.id)}/steps/${v.step}/winner`, { variant: v.letter }), { success: (r) => `Variant chosen for ${r.campaign.name}` });
+  type Row = { step: Detail['steps'][number]; v: VariantStat; decided: boolean };
+  const rows: Row[] = steps.filter((s) => s.variant_stats.length).flatMap((s) => {
+    const decided = s.variant_stats.some((v) => v.weight === 100);
+    return s.variant_stats.map((v) => ({ step: s, v, decided }));
+  });
+  return (
+    <DetailTable<Row> noun='variants' rows={rows} rowKey={(r) => `${r.step.index}:${r.v.letter}`} empty='No variants.'
+      filters={<span className='text-muted-foreground text-xs'>Each person gets one variant, always the same. Replies and conversions are tested against A (two-proportion z-test).</span>}
+      cols={[
+        { key: 'email', label: 'Email', type: 'number', value: (r) => r.step.index + 1, render: (r) => `Email ${r.step.index + 1}` },
+        { key: 'variant', label: 'Variant', type: 'text', value: (r) => r.v.letter, render: ({ v }) => <span className='flex flex-col gap-0.5'><span className='font-medium'>{v.letter} <span className='text-muted-foreground text-xs font-normal'>· {v.weight}%</span></span><span className='text-muted-foreground line-clamp-1 text-xs'>{v.subject}</span></span> },
+        { key: 'sent', label: 'Sent', type: 'number', value: (r) => r.v.sent, render: ({ v }) => <span className='tabular-nums'>{v.sent}</span> },
+        { key: 'opened', label: 'Opened', type: 'number', value: (r) => r.v.opened, render: ({ v }) => <span className='tabular-nums'>{v.opened} · {pct(v.opened, v.sent)}</span> },
+        { key: 'clicked', label: 'Clicked', type: 'number', value: (r) => r.v.clicked, render: ({ v }) => <span className='tabular-nums'>{v.clicked} · {pct(v.clicked, v.sent)}</span> },
+        { key: 'replied', label: 'Replied', type: 'number', value: (r) => r.v.replied, render: ({ v }) => <span className='tabular-nums'>{v.replied} · {pct(v.replied, v.sent)}</span> },
+        { key: 'reply_test', label: 'Reply rate vs A', render: ({ v }) => <TestCell t={v.reply_test} /> },
+        { key: 'converted', label: 'Converted', type: 'number', value: (r) => r.v.converted, render: ({ v }) => <span className='tabular-nums'>{v.converted} · {pct(v.converted, v.sent)}</span> },
+        { key: 'conversion_test', label: 'Conversion vs A', render: ({ v }) => <TestCell t={v.conversion_test} /> },
+        { key: 'winner', label: '', render: ({ v, step, decided }) => (v.weight === 100 ? <StatusBadge tone='ok'>winner</StatusBadge> : c.status !== 'done' && (
+          <Gate need='campaigns'>
+            <ConfirmButton label={<><Icons.check /> Pick winner</>} title={`Send variant ${v.letter} to everyone?`} confirmLabel={`Pick ${v.letter}`} disabled={win.isPending}
+              description={`Variant ${v.letter} goes to 100% for email ${step.index + 1}; the others stop being sent (their numbers stay).${decided ? ' This replaces the winner picked before.' : ''}`}
+              onConfirm={() => win.mutate({ step: step.index, letter: v.letter })} />
+          </Gate>
+        )) }
+      ]} />
   );
 }
 
@@ -333,35 +386,6 @@ function TestCell({ t }: { t: ZTest | null }) {
   </span>;
 }
 
-/** One step's A/B variants: sends, opens, clicks, replies and conversions each, tested against A, and Pick winner. */
-function VariantTable({ c, step }: { c: Campaign; step: Detail['steps'][number] }) {
-  const win = useAdminAction((letter: string) => post<Detail>(`${path(c.id)}/steps/${step.index}/winner`, { variant: letter }), { success: (r) => `Variant chosen for ${r.campaign.name}` });
-  const decided = step.variant_stats.some((v) => v.weight === 100);
-  return (
-    <Section title={`Email ${step.index + 1}: A/B variants`} description='Each person gets one variant, always the same. Replies and conversions are tested against A (two-proportion z-test).'>
-      <div className='border'>
-        <DataList<VariantStat> noun='variants' minWidth={860} rows={step.variant_stats} empty='No variants.'
-          cols={[
-            { label: 'Variant', render: (v) => <span className='flex flex-col gap-0.5'><span className='font-medium'>{v.letter} <span className='text-muted-foreground text-xs font-normal'>· {v.weight}%</span></span><span className='text-muted-foreground line-clamp-1 text-xs'>{v.subject}</span></span> },
-            { label: 'Sent', render: (v) => <span className='tabular-nums'>{v.sent}</span> },
-            { label: 'Opened', render: (v) => <span className='tabular-nums'>{v.opened} · {pct(v.opened, v.sent)}</span> },
-            { label: 'Clicked', render: (v) => <span className='tabular-nums'>{v.clicked} · {pct(v.clicked, v.sent)}</span> },
-            { label: 'Replied', render: (v) => <span className='tabular-nums'>{v.replied} · {pct(v.replied, v.sent)}</span> },
-            { label: 'Reply rate vs A', render: (v) => <TestCell t={v.reply_test} /> },
-            { label: 'Converted', render: (v) => <span className='tabular-nums'>{v.converted} · {pct(v.converted, v.sent)}</span> },
-            { label: 'Conversion vs A', render: (v) => <TestCell t={v.conversion_test} /> },
-            { label: '', render: (v) => (v.weight === 100 ? <StatusBadge tone='ok'>winner</StatusBadge> : c.status !== 'done' && (
-              <Gate need='campaigns'>
-                <ConfirmButton label={<><Icons.check /> Pick winner</>} title={`Send variant ${v.letter} to everyone?`} confirmLabel={`Pick ${v.letter}`} disabled={win.isPending}
-                  description={`Variant ${v.letter} goes to 100% for email ${step.index + 1}; the others stop being sent (their numbers stay).${decided ? ' This replaces the winner picked before.' : ''}`}
-                  onConfirm={() => win.mutate(v.letter)} />
-              </Gate>
-            )) }
-          ]} />
-      </div>
-    </Section>
-  );
-}
 
 /**
  * Emails Resend may or may not have sent (no answer, a 5xx, a 409, a batch answer missing an id): uncertain ones are
@@ -391,8 +415,7 @@ function UnknownSends({ c, m }: { c: Campaign; m: Metrics }) {
 }
 
 /** Launch, schedule, pause, resume, end, delete, export: each a labelled button, owners only. */
-function Lifecycle({ c, onDeleted }: { c: Campaign; onDeleted: () => void }) {
-  const [at, setAt] = useState('');
+function Lifecycle({ c, onDeleted, at, setAt }: { c: Campaign; onDeleted: () => void; at: string; setAt: (v: string) => void }) {
   const act = useAdminAction((v: { action: string; body?: unknown }) => post<Detail>(`${path(c.id)}/${v.action}`, v.body ?? {}),
     { success: (r) => `${r.campaign.name}: ${r.campaign.status}` });
   const remove = useAdminAction(() => adminApi('DELETE', path(c.id)), { success: 'Campaign deleted' });
@@ -402,51 +425,54 @@ function Lifecycle({ c, onDeleted }: { c: Campaign; onDeleted: () => void }) {
     { name: c.name, audience: c.audience, steps: c.steps, rolling: c.rolling, conversion_days: c.conversion_days, trigger: c.trigger, send_window: c.send_window,
       requires_opt_in: c.requires_opt_in, count_auto_replies: c.count_auto_replies, track_opens: c.track_opens ?? null, allow_restricted: c.allow_restricted ?? false });
   return (
-    <div className='flex flex-col gap-3'>
-      <p className='text-muted-foreground text-sm'>
-        <KindBadge c={c} /> Owned by {c.owner}. {c.launched_at ? <>Started <When d={c.launched_at} />. </> : null}{c.finished_at ? <>Finished <When d={c.finished_at} />.</> : null}
-        {c.audience.include === 'prospects' && !c.sender_identity_id ? ' Choose a sender identity before launching.' : ''}
-      </p>
-      <div className='flex flex-wrap items-center gap-2'>
-        {c.status === 'draft' && (<>
-          <Gate need='campaigns'>
-            <ConfirmButton variant='default' label={<><Icons.send /> Launch now</>} title={`Launch ${c.name}?`} confirmLabel='Launch'
-              description={c.trigger ? 'Nobody is enrolled now: from now on, each time the trigger happens, the people it is about join (after its delay).'
-                : 'Everyone the audience matches now is enrolled, and the first email goes out on the next tick (within 5 minutes).'}
-              onConfirm={() => act.mutate({ action: 'launch' })} disabled={!c.steps.length || act.isPending} />
-          </Gate>
-          <Input type='datetime-local' aria-label='Start at' className='h-7 w-52' value={at} onChange={(e) => setAt(e.target.value)} />
-          <Gate need='campaigns'>
-            <Button size='sm' variant='outline' disabled={!at || act.isPending} onClick={() => act.mutate({ action: 'launch', body: { at: new Date(at).toISOString() } })}><Icons.calendar /> Schedule</Button>
-          </Gate>
-        </>)}
-        {(c.status === 'running' || c.status === 'scheduled') && <Gate need='campaigns'><Button size='sm' variant='outline' onClick={() => act.mutate({ action: 'pause' })}><Icons.clock /> Pause</Button></Gate>}
-        {c.status === 'running' && <Gate need='campaigns'><Button size='sm' variant='outline' disabled={tick.isPending} onClick={() => tick.mutate()}><Icons.play /> Send what is due now</Button></Gate>}
-        {c.status === 'paused' && <Gate need='campaigns'><Button size='sm' onClick={() => act.mutate({ action: 'resume' })}><Icons.play /> Resume</Button></Gate>}
-        {c.status !== 'done' && c.status !== 'draft' && (
-          <Gate need='campaigns'>
-            <ConfirmButton label={<><Icons.circleX /> End</>} title={`End ${c.name}?`} confirmLabel='End campaign'
-              description='Nobody gets another email from it. Its numbers stay.' onConfirm={() => act.mutate({ action: 'end' })} />
-          </Gate>
-        )}
-        <Button size='sm' variant='ghost' onClick={exportJson}><Icons.download /> Export JSON</Button>
-        {(c.status === 'draft' || c.status === 'done') && (
-          <Gate need='campaigns'>
-            <ConfirmButton variant='destructive' label={<><Icons.trash /> Delete</>} title={`Delete ${c.name}?`} confirmLabel='Delete'
-              description='The campaign, its recipients and its numbers are deleted. Unsubscribes stay on the suppression list.'
-              onConfirm={() => remove.mutate(undefined, { onSuccess: onDeleted })} />
-          </Gate>
-        )}
-      </div>
-    </div>
+    <>
+      {c.status === 'draft' && (<>
+        <Gate need='campaigns'>
+          <ConfirmButton variant='default' label={<><Icons.send /> Launch now</>} title={`Launch ${c.name}?`} confirmLabel='Launch'
+            description={c.trigger ? 'Nobody is enrolled now: from now on, each time the trigger happens, the people it is about join (after its delay).'
+              : 'Everyone the audience matches now is enrolled, and the first email goes out on the next tick (within 5 minutes).'}
+            onConfirm={() => act.mutate({ action: 'launch' })} disabled={!c.steps.length || act.isPending} />
+        </Gate>
+        <Input type='datetime-local' aria-label='Start at' className='h-7 w-52' value={at} onChange={(e) => setAt(e.target.value)} />
+        <Gate need='campaigns'>
+          <Button size='sm' variant='outline' disabled={!at || act.isPending} onClick={() => act.mutate({ action: 'launch', body: { at: new Date(at).toISOString() } })}><Icons.calendar /> Schedule</Button>
+        </Gate>
+      </>)}
+      {(c.status === 'running' || c.status === 'scheduled') && <Gate need='campaigns'><Button size='sm' variant='outline' onClick={() => act.mutate({ action: 'pause' })}><Icons.clock /> Pause</Button></Gate>}
+      {c.status === 'running' && <Gate need='campaigns'><Button size='sm' variant='outline' disabled={tick.isPending} onClick={() => tick.mutate()}><Icons.play /> Send what is due now</Button></Gate>}
+      {c.status === 'paused' && <Gate need='campaigns'><Button size='sm' onClick={() => act.mutate({ action: 'resume' })}><Icons.play /> Resume</Button></Gate>}
+      {c.status !== 'done' && c.status !== 'draft' && (
+        <Gate need='campaigns'>
+          <ConfirmButton label={<><Icons.circleX /> End</>} title={`End ${c.name}?`} confirmLabel='End campaign'
+            description='Nobody gets another email from it. Its numbers stay.' onConfirm={() => act.mutate({ action: 'end' })} />
+        </Gate>
+      )}
+      <Button size='sm' variant='ghost' onClick={exportJson}><Icons.download /> Export JSON</Button>
+      {(c.status === 'draft' || c.status === 'done') && (
+        <Gate need='campaigns'>
+          <ConfirmButton variant='destructive' label={<><Icons.trash /> Delete</>} title={`Delete ${c.name}?`} confirmLabel='Delete'
+            description='The campaign, its recipients and its numbers are deleted. Unsubscribes stay on the suppression list.'
+            onConfirm={() => remove.mutate(undefined, { onSuccess: onDeleted })} />
+        </Gate>
+      )}
+    </>
   );
 }
 
 const csv = (xs: string[]) => xs.join(', ');
 const uncsv = (s: string) => s.split(',').map((x) => x.trim()).filter(Boolean);
+/** A row of checkboxes (stages, statuses, sizes, days) as one KeyValueTable value. */
+const Checks = ({ children }: { children: ReactNode }) => <div className='flex flex-wrap gap-x-4 gap-y-2'>{children}</div>;
 
-/** Name, audience (with a live preview) and the emails. Read-only once it runs: pause it to edit. */
-function Editor({ c, stages }: { c: Campaign; stages: { id: string; label: string }[] }) {
+/**
+ * Name, audience (with a live preview), the emails, the settings and the send window: one editor, one Save (on the
+ * card), a tab each. Read-only once it runs: pause it to edit. `card` gets the Save button and what editing allows;
+ * `before` and `after` are the campaign's other tabs.
+ */
+function CampaignEditor({ c, stages, tab, setTab, before, after, card }: {
+  c: Campaign; stages: { id: string; label: string }[]; tab: string | undefined; setTab: (t: string) => void;
+  before: DetailTab[]; after: DetailTab[]; card: (save: ReactNode, editing: string) => ReactNode;
+}) {
   const { can } = useAdminRole();
   const editable = EDITABLE.includes(c.status) && can('campaigns');
   const [name, setName] = useState(c.name);
@@ -488,250 +514,183 @@ function Editor({ c, stages }: { c: Campaign; stages: { id: string; label: strin
   const setStep = (i: number, patch: Partial<Step>) => setSteps((xs) => xs.map((s, j) => (j === i ? { ...s, ...patch } : s)));
   const dis = !editable;
   const locked = (c.metrics?.recipients ?? 0) > 0;
-  return (
-    <Section title='Campaign' description={editable ? 'Changes apply to whoever has not had an email yet.' : c.status === 'running' ? 'Pause the campaign to change it.' : 'Read only.'}
-      action={editable && <Button size='sm' disabled={!dirty || save.isPending} onClick={() => save.mutate()}><Icons.check /> {save.isPending ? 'Saving…' : 'Save changes'}</Button>}>
-      <div className='grid gap-5'>
-        <FormRow id={`c-${c.id}-name`} label='Name'><Input id={`c-${c.id}-name`} disabled={dis} value={name} onChange={(e) => setName(e.target.value)} /></FormRow>
+  const editing = editable ? 'Changes apply to whoever has not had an email yet.' : c.status === 'running' ? 'Pause the campaign to change it.' : 'Read only.';
+  const saveButton = editable && <Button size='sm' disabled={!dirty || save.isPending} onClick={() => save.mutate()}><Icons.check /> {save.isPending ? 'Saving…' : 'Save changes'}</Button>;
+  const triggered = !!trigger && !outbound;
+  // Each part of the editor is a Field | Value table inside a fieldset, so a read-only campaign disables every input at once.
+  const part = (rows: KV[], top?: ReactNode) => (
+    <fieldset disabled={dis} className='flex min-w-0 flex-col gap-3'>
+      {top}
+      <KeyValueTable rows={rows} />
+    </fieldset>
+  );
 
-        <fieldset className='grid gap-4 rounded-lg border p-4' disabled={dis}>
-          <legend className='px-1 text-sm font-medium'>Who joins, and when</legend>
-          <FormRow id={`c-${c.id}-start`} label='Starts' hint={trigger ? 'People join when the event happens after launch; the audience below narrows it by UTM tags and plan.' : 'Everyone the audience matches when it starts (and later, with Keep enrolling).'}>
-            <NativeSelect id={`c-${c.id}-start`} className='w-full' value={trigger && !outbound ? 'trigger' : 'audience'} onChange={(e) => (e.target.value === 'trigger' ? setT({}) : setTrigger(null))}>
-              <NativeSelectOption value='audience'>For an audience, at launch or a scheduled time</NativeSelectOption>
-              {!outbound && <NativeSelectOption value='trigger'>Triggered by an event</NativeSelectOption>}
-            </NativeSelect>
-          </FormRow>
-          {trigger && !outbound && (
-            <div className='grid gap-4 sm:grid-cols-2'>
-              <FormRow id={`c-${c.id}-ttype`} label='When this happens'>
-                <NativeSelect id={`c-${c.id}-ttype`} className='w-full' value={trigger.type}
-                  onChange={(e) => { const type = e.target.value as TriggerType; setT({ type, stage: type === 'stage_reached' || type === 'stuck' ? trigger.stage ?? stages[5]?.id ?? 'onboarded' : null, days: type === 'stuck' ? trigger.days ?? 3 : null }); }}>
-                  {TRIGGERS.map((t) => <NativeSelectOption key={t.id} value={t.id}>{t.label}</NativeSelectOption>)}
-                </NativeSelect>
-              </FormRow>
-              {(trigger.type === 'stage_reached' || trigger.type === 'stuck') && (
-                <FormRow id={`c-${c.id}-tstage`} label='Stage'>
-                  <NativeSelect id={`c-${c.id}-tstage`} className='w-full' value={trigger.stage ?? ''} onChange={(e) => setT({ stage: e.target.value })}>
-                    {stages.map((s) => <NativeSelectOption key={s.id} value={s.id}>{s.label}</NativeSelectOption>)}
-                  </NativeSelect>
-                </FormRow>
-              )}
-              {trigger.type === 'stuck' && (
-                <FormRow id={`c-${c.id}-tdays`} label='Stuck for (days)'>
-                  <Input id={`c-${c.id}-tdays`} type='number' min={1} max={365} value={trigger.days ?? 3} onChange={(e) => setT({ days: Math.max(1, Math.trunc(Number(e.target.value) || 1)) })} />
-                </FormRow>
-              )}
-              {trigger.type === 'attention' && (
-                <FormRow id={`c-${c.id}-tatt`} label='Reason contains' hint='Empty: any new reason.'>
-                  <Input id={`c-${c.id}-tatt`} value={trigger.attention} placeholder='e.g. no simulation' onChange={(e) => setT({ attention: e.target.value })} />
-                </FormRow>
-              )}
-              <FormRow id={`c-${c.id}-tdelay`} label='Wait before enrolling (hours)' hint='0: within moments of the event.'>
-                <Input id={`c-${c.id}-tdelay`} type='number' min={0} max={2160} step='any' value={trigger.delay_hours} onChange={(e) => setT({ delay_hours: Math.max(0, Number(e.target.value) || 0) })} />
-              </FormRow>
-              <FormRow id={`c-${c.id}-treentry`} label='Can a person join again?'>
-                <span className='flex items-center gap-2'>
-                  <NativeSelect id={`c-${c.id}-treentry`} className='w-full' value={trigger.reentry} onChange={(e) => setT({ reentry: e.target.value as Trigger['reentry'] })}>
-                    <NativeSelectOption value='once'>Once ever</NativeSelectOption>
-                    <NativeSelectOption value='every'>Again, after a number of days</NativeSelectOption>
-                  </NativeSelect>
-                  {trigger.reentry === 'every' && <Input type='number' aria-label='Days before joining again' className='w-24' min={1} max={3650} value={trigger.reentry_days || 30}
-                    onChange={(e) => setT({ reentry_days: Math.max(1, Math.trunc(Number(e.target.value) || 1)) })} />}
-                </span>
-              </FormRow>
-            </div>
-          )}
-        </fieldset>
+  const settings = part([
+    formKV(`c-${c.id}-name`, 'Name', <Input id={`c-${c.id}-name`} disabled={dis} value={name} onChange={(e) => setName(e.target.value)} />),
+    formKV(`c-${c.id}-start`, 'Starts', (
+      <NativeSelect id={`c-${c.id}-start`} className='w-full' value={trigger && !outbound ? 'trigger' : 'audience'} onChange={(e) => (e.target.value === 'trigger' ? setT({}) : setTrigger(null))}>
+        <NativeSelectOption value='audience'>For an audience, at launch or a scheduled time</NativeSelectOption>
+        {!outbound && <NativeSelectOption value='trigger'>Triggered by an event</NativeSelectOption>}
+      </NativeSelect>
+    ), trigger ? 'People join when the event happens after launch; the audience narrows it by UTM tags and plan.' : 'Everyone the audience matches when it starts (and later, with Keep enrolling).'),
+    formKV(`c-${c.id}-ttype`, 'When this happens', trigger && (
+      <NativeSelect id={`c-${c.id}-ttype`} className='w-full' value={trigger.type}
+        onChange={(e) => { const type = e.target.value as TriggerType; setT({ type, stage: type === 'stage_reached' || type === 'stuck' ? trigger.stage ?? stages[5]?.id ?? 'onboarded' : null, days: type === 'stuck' ? trigger.days ?? 3 : null }); }}>
+        {TRIGGERS.map((t) => <NativeSelectOption key={t.id} value={t.id}>{t.label}</NativeSelectOption>)}
+      </NativeSelect>
+    ), undefined, !triggered),
+    formKV(`c-${c.id}-tstage`, 'Stage', trigger && (
+      <NativeSelect id={`c-${c.id}-tstage`} className='w-full' value={trigger.stage ?? ''} onChange={(e) => setT({ stage: e.target.value })}>
+        {stages.map((s) => <NativeSelectOption key={s.id} value={s.id}>{s.label}</NativeSelectOption>)}
+      </NativeSelect>
+    ), undefined, !triggered || !(trigger?.type === 'stage_reached' || trigger?.type === 'stuck')),
+    formKV(`c-${c.id}-tdays`, 'Stuck for (days)', trigger && (
+      <Input id={`c-${c.id}-tdays`} type='number' min={1} max={365} value={trigger.days ?? 3} onChange={(e) => setT({ days: Math.max(1, Math.trunc(Number(e.target.value) || 1)) })} />
+    ), undefined, !triggered || trigger?.type !== 'stuck'),
+    formKV(`c-${c.id}-tatt`, 'Reason contains', trigger && (
+      <Input id={`c-${c.id}-tatt`} value={trigger.attention} placeholder='e.g. no simulation' onChange={(e) => setT({ attention: e.target.value })} />
+    ), 'Empty: any new reason.', !triggered || trigger?.type !== 'attention'),
+    formKV(`c-${c.id}-tdelay`, 'Wait before enrolling (hours)', trigger && (
+      <Input id={`c-${c.id}-tdelay`} type='number' min={0} max={2160} step='any' value={trigger.delay_hours} onChange={(e) => setT({ delay_hours: Math.max(0, Number(e.target.value) || 0) })} />
+    ), '0: within moments of the event.', !triggered),
+    formKV(`c-${c.id}-treentry`, 'Can a person join again?', trigger && (
+      <span className='flex items-center gap-2'>
+        <NativeSelect id={`c-${c.id}-treentry`} className='w-full' value={trigger.reentry} onChange={(e) => setT({ reentry: e.target.value as Trigger['reentry'] })}>
+          <NativeSelectOption value='once'>Once ever</NativeSelectOption>
+          <NativeSelectOption value='every'>Again, after a number of days</NativeSelectOption>
+        </NativeSelect>
+        {trigger.reentry === 'every' && <Input type='number' aria-label='Days before joining again' className='w-24' min={1} max={3650} value={trigger.reentry_days || 30}
+          onChange={(e) => setT({ reentry_days: Math.max(1, Math.trunc(Number(e.target.value) || 1)) })} />}
+      </span>
+    ), undefined, !triggered),
+    formKV(`c-${c.id}-identity`, 'Send from', (<>
+      <NativeSelect id={`c-${c.id}-identity`} className='w-full' value={identity == null ? '' : String(identity)} onChange={(e) => setIdentity(e.target.value ? Number(e.target.value) : null)}>
+        <NativeSelectOption value=''>Choose a sender identity</NativeSelectOption>
+        {(ids?.identities ?? []).map((i) => <NativeSelectOption key={i.id} value={String(i.id)} disabled={!i.enabled || i.on_product_domain}>
+          {i.from_name} &lt;{i.from_address}&gt; · {i.sent_today}/{i.cap_today} today{!i.enabled ? ' (off)' : ''}{i.on_product_domain ? ' (product domain: refused)' : ''}
+        </NativeSelectOption>)}
+      </NativeSelect>
+      {ids && !ids.identities.length && <Notice>No sender identity yet: add one in Senders (e.g. you@outreach.{ids.product_domain ?? 'example.com'}, verified in Resend). The campaign cannot launch without one.</Notice>}
+    </>), `A sender identity on the outreach subdomain (Senders view). Never the product's sender domain${ids?.product_domain ? ` (${ids.product_domain})` : ''}.`, !outbound),
+    formKV(`c-${c.id}-opens`, 'Track opens', <Switch id={`c-${c.id}-opens`} disabled={dis} checked={trackOpens ?? false} onCheckedChange={(v) => setTrackOpens(v)} />,
+      'Off (the default for outbound): plain text only, no HTML part, so no tracking pixel. Better for deliverability.', !outbound),
+    formKV(`c-${c.id}-restricted`, 'Allow prospects in the EU / EEA / UK / CH', <Switch id={`c-${c.id}-restricted`} disabled={dis} checked={allowRestricted} onCheckedChange={setAllowRestricted} />,
+      'Off: they (and anyone with no country) are left out. On: they get it on the lawful basis recorded at import.', !outbound),
+    formKV(`c-${c.id}-rolling`, 'Keep enrolling', <Switch id={`c-${c.id}-rolling`} disabled={dis} checked={rolling} onCheckedChange={setRolling} />,
+      'People who match later join while it runs (checked every 5 minutes).'),
+    formKV(`c-${c.id}-days`, 'Count conversions within (days)', <Input id={`c-${c.id}-days`} disabled={dis} type='number' min={1} max={365} value={days} onChange={(e) => setDays(e.target.value)} />),
+    formKV(`c-${c.id}-optin`, 'Requires opt-in', <Switch id={`c-${c.id}-optin`} disabled={dis} checked={optIn ?? optInDefault} onCheckedChange={(v) => setOptIn(v)} />,
+      <>Only people who ticked the marketing box. {optIn == null ? `Default for this audience: ${optInDefault ? 'on' : 'off'}.` : ''} Requesters from the EU, EEA, UK or Switzerland (or an unknown country) always need it.</>, outbound),
+    formKV(`c-${c.id}-auto`, 'Count auto-replies as replies', <Switch id={`c-${c.id}-auto`} disabled={dis} checked={countAuto} onCheckedChange={setCountAuto} />,
+      'Off: an out-of-office is kept but the emails go on. On: it stops them like a reply.')
+  ]);
 
-        <fieldset className='grid gap-4 rounded-lg border p-4' disabled={dis}>
-          <legend className='px-1 text-sm font-medium'>Audience</legend>
-          <div className='grid gap-4 sm:grid-cols-2'>
-            <FormRow id={`c-${c.id}-include`} label='Who' hint='Accounts: their active members (Clerk), else whoever asked for the account. Requesters: the person on the access request.'>
-              <NativeSelect id={`c-${c.id}-include`} className='w-full' value={a.include} onChange={(e) => { set('include', e.target.value as Audience['include']); if (e.target.value === 'prospects') setTrigger(null); }}>
-                {/* Once anyone is enrolled, cold and lifecycle email never trade places (the server refuses it too). */}
-                <NativeSelectOption value='accounts' disabled={locked && c.audience.include === 'prospects'}>Accounts</NativeSelectOption>
-                <NativeSelectOption value='requests' disabled={locked && c.audience.include === 'prospects'}>Access requesters</NativeSelectOption>
-                <NativeSelectOption value='both' disabled={locked && c.audience.include === 'prospects'}>Both</NativeSelectOption>
-                <NativeSelectOption value='prospects' disabled={locked && c.audience.include !== 'prospects'}>Prospects (outbound)</NativeSelectOption>
-              </NativeSelect>
-              {locked && <span className='text-muted-foreground text-xs'>This campaign has recipients, so it stays {c.audience.include === 'prospects' ? 'outbound' : 'lifecycle'}: make a new campaign to change that.</span>}
-            </FormRow>
-            {!outbound && <FormRow id={`c-${c.id}-attention`} label='Needs a person for' hint='Text an attention reason contains, e.g. "no simulation" or "report never opened".'>
-              <Input id={`c-${c.id}-attention`} value={a.attention} onChange={(e) => set('attention', e.target.value)} placeholder='Any' />
-            </FormRow>}
-          </div>
-          {outbound ? (<>
-            <div className='grid gap-1.5'>
-              <span className='text-sm leading-none font-medium'>Prospect status <span className='text-muted-foreground font-normal'>· customers, replied, interested, not interested and bad addresses are never enrolled</span></span>
-              <div className='flex flex-wrap gap-x-4 gap-y-2'>
-                {PROSPECT_STATUSES.map((s) => <label key={s.id} className='flex items-center gap-2 text-sm leading-none'><Checkbox disabled={dis} checked={pf.statuses.includes(s.id)} onCheckedChange={(on) => togglePf('statuses', s.id, !!on)} />{s.label}</label>)}
-              </div>
-            </div>
-            <div className='grid gap-1.5'>
-              <span className='text-sm leading-none font-medium'>Email status <span className='text-muted-foreground font-normal'>· verified only by default</span></span>
-              <div className='flex flex-wrap gap-x-4 gap-y-2'>
-                {EMAIL_STATUSES.map((s) => <label key={s} className='flex items-center gap-2 text-sm leading-none'><Checkbox disabled={dis} checked={pf.email_statuses.includes(s)} onCheckedChange={(on) => togglePf('email_statuses', s, !!on)} />{s.replace(/_/g, ' ')}</label>)}
-              </div>
-            </div>
-            <div className='grid gap-1.5'>
-              <span className='text-sm leading-none font-medium'>Company size</span>
-              <div className='flex flex-wrap gap-x-4 gap-y-2'>
-                {SIZES.map((s) => <label key={s} className='flex items-center gap-2 text-sm leading-none'><Checkbox disabled={dis} checked={pf.sizes.includes(s)} onCheckedChange={(on) => togglePf('sizes', s, !!on)} />{s}</label>)}
-              </div>
-            </div>
-            <div className='grid gap-4 sm:grid-cols-3'>
-              {(['titles', 'tags', 'industries', 'countries', 'owners'] as const).map((k) => (
-                <FormRow key={k} id={`c-${c.id}-pf-${k}`} label={{ titles: 'Title contains', tags: 'Tags', industries: 'Industry contains', countries: 'Countries', owners: 'Owners' }[k]} hint='Comma-separated; empty: any.'>
-                  <Input id={`c-${c.id}-pf-${k}`} value={pf[k]} placeholder='Any' onChange={(e) => setPf((x) => ({ ...x, [k]: e.target.value }))} />
-                </FormRow>
-              ))}
-            </div>
-            {pf.prospect_ids.length > 0 && <p className='text-muted-foreground text-xs'>Only the {pf.prospect_ids.length} prospects chosen on the Prospects page (and only those the filter above also matches). <Button size='xs' variant='ghost' onClick={() => setPf((x) => ({ ...x, prospect_ids: [] }))}>Use the filter alone</Button></p>}
-          </>) : (<>
-          <div className='grid gap-1.5'>
-            <span className='text-sm leading-none font-medium'>Stage (the furthest step reached)</span>
-            <div className='flex flex-wrap gap-x-4 gap-y-2'>
-              {stages.map((s) => (
-                <label key={s.id} className='flex items-center gap-2 text-sm leading-none'>
-                  <Checkbox disabled={dis} checked={a.stages.includes(s.id)} onCheckedChange={(on) => toggle('stages', s.id, !!on)} />{s.label}
-                </label>
-              ))}
-            </div>
-          </div>
-          {a.include !== 'accounts' && (
-            <div className='grid gap-1.5'>
-              <span className='text-sm leading-none font-medium'>Request status</span>
-              <div className='flex flex-wrap gap-x-4 gap-y-2'>
-                {['pending', 'approved', 'declined'].map((s) => (
-                  <label key={s} className='flex items-center gap-2 text-sm leading-none capitalize'>
-                    <Checkbox disabled={dis} checked={a.request_status.includes(s)} onCheckedChange={(on) => toggle('request_status', s, !!on)} />{s}
-                  </label>
-                ))}
-              </div>
-            </div>
-          )}
-          <div className='grid gap-4 sm:grid-cols-3'>
-            <FormRow id={`c-${c.id}-src`} label='utm_source'><Input id={`c-${c.id}-src`} value={a.utm_source} onChange={(e) => set('utm_source', e.target.value)} placeholder='Any' /></FormRow>
-            <FormRow id={`c-${c.id}-med`} label='utm_medium'><Input id={`c-${c.id}-med`} value={a.utm_medium} onChange={(e) => set('utm_medium', e.target.value)} placeholder='Any' /></FormRow>
-            <FormRow id={`c-${c.id}-camp`} label='utm_campaign'><Input id={`c-${c.id}-camp`} value={a.utm_campaign} onChange={(e) => set('utm_campaign', e.target.value)} placeholder='Any' /></FormRow>
-          </div>
-          <div className='grid gap-4 sm:grid-cols-2'>
-            <FormRow id={`c-${c.id}-from`} label='Created from'><Input id={`c-${c.id}-from`} type='date' value={a.created_from ?? ''} onChange={(e) => set('created_from', e.target.value || null)} /></FormRow>
-            <FormRow id={`c-${c.id}-to`} label='Created to'><Input id={`c-${c.id}-to`} type='date' value={a.created_to ?? ''} onChange={(e) => set('created_to', e.target.value || null)} /></FormRow>
-            <FormRow id={`c-${c.id}-plans`} label='Plans' hint='Comma-separated plan names, or none.'><Input id={`c-${c.id}-plans`} value={plans} onChange={(e) => setPlans(e.target.value)} placeholder='Any' /></FormRow>
-            <FormRow id={`c-${c.id}-accounts`} label='Only these accounts' hint='Comma-separated slugs.'><Input id={`c-${c.id}-accounts`} value={accounts} onChange={(e) => setAccounts(e.target.value)} placeholder='Any' /></FormRow>
-          </div>
-          </>)}
-          {trigger && !outbound ? <p className='text-muted-foreground text-xs'>Triggered: the event decides who; only the UTM tags and plans here narrow it.</p> : <AudiencePreview audience={audience} optIn={optIn} campaignId={c.id} allowRestricted={allowRestricted} />}
-        </fieldset>
+  const pfLabel = { titles: 'Title contains', tags: 'Tags', industries: 'Industry contains', countries: 'Countries', owners: 'Owners' } as const;
+  const audienceTab = part([
+    formKV(`c-${c.id}-include`, 'Who', (
+      <NativeSelect id={`c-${c.id}-include`} className='w-full' value={a.include} onChange={(e) => { set('include', e.target.value as Audience['include']); if (e.target.value === 'prospects') setTrigger(null); }}>
+        {/* Once anyone is enrolled, cold and lifecycle email never trade places (the server refuses it too). */}
+        <NativeSelectOption value='accounts' disabled={locked && c.audience.include === 'prospects'}>Accounts</NativeSelectOption>
+        <NativeSelectOption value='requests' disabled={locked && c.audience.include === 'prospects'}>Access requesters</NativeSelectOption>
+        <NativeSelectOption value='both' disabled={locked && c.audience.include === 'prospects'}>Both</NativeSelectOption>
+        <NativeSelectOption value='prospects' disabled={locked && c.audience.include !== 'prospects'}>Prospects (outbound)</NativeSelectOption>
+      </NativeSelect>
+    ), <>Accounts: their active members (Clerk), else whoever asked for the account. Requesters: the person on the access request.
+      {locked && <> This campaign has recipients, so it stays {c.audience.include === 'prospects' ? 'outbound' : 'lifecycle'}: make a new campaign to change that.</>}</>),
+    formKV(`c-${c.id}-attention`, 'Needs a person for', <Input id={`c-${c.id}-attention`} value={a.attention} onChange={(e) => set('attention', e.target.value)} placeholder='Any' />,
+      'Text an attention reason contains, e.g. "no simulation" or "report never opened".', outbound),
+    // Outbound: the prospect filter.
+    formKV(undefined, 'Prospect status', <Checks>{PROSPECT_STATUSES.map((s) => <label key={s.id} className='flex items-center gap-2 text-sm leading-none'><Checkbox disabled={dis} checked={pf.statuses.includes(s.id)} onCheckedChange={(on) => togglePf('statuses', s.id, !!on)} />{s.label}</label>)}</Checks>,
+      'Customers, replied, interested, not interested and bad addresses are never enrolled.', !outbound),
+    formKV(undefined, 'Email status', <Checks>{EMAIL_STATUSES.map((s) => <label key={s} className='flex items-center gap-2 text-sm leading-none'><Checkbox disabled={dis} checked={pf.email_statuses.includes(s)} onCheckedChange={(on) => togglePf('email_statuses', s, !!on)} />{s.replace(/_/g, ' ')}</label>)}</Checks>,
+      'Verified only by default.', !outbound),
+    formKV(undefined, 'Company size', <Checks>{SIZES.map((s) => <label key={s} className='flex items-center gap-2 text-sm leading-none'><Checkbox disabled={dis} checked={pf.sizes.includes(s)} onCheckedChange={(on) => togglePf('sizes', s, !!on)} />{s}</label>)}</Checks>, undefined, !outbound),
+    ...(['titles', 'tags', 'industries', 'countries', 'owners'] as const).map((k) =>
+      formKV(`c-${c.id}-pf-${k}`, pfLabel[k], <Input id={`c-${c.id}-pf-${k}`} value={pf[k]} placeholder='Any' onChange={(e) => setPf((x) => ({ ...x, [k]: e.target.value }))} />, 'Comma-separated; empty: any.', !outbound)),
+    formKV(undefined, 'Chosen prospects', <span className='flex flex-wrap items-center gap-2'>
+      <span className='text-muted-foreground text-xs'>Only the {pf.prospect_ids.length} prospects chosen on the Prospects page (and only those the filter above also matches).</span>
+      <Button size='xs' variant='ghost' onClick={() => setPf((x) => ({ ...x, prospect_ids: [] }))}>Use the filter alone</Button>
+    </span>, undefined, !outbound || !pf.prospect_ids.length),
+    // Lifecycle: accounts and access requesters.
+    formKV(undefined, 'Stage (the furthest step reached)', <Checks>{stages.map((s) => (
+      <label key={s.id} className='flex items-center gap-2 text-sm leading-none'>
+        <Checkbox disabled={dis} checked={a.stages.includes(s.id)} onCheckedChange={(on) => toggle('stages', s.id, !!on)} />{s.label}
+      </label>
+    ))}</Checks>, undefined, outbound),
+    formKV(undefined, 'Request status', <Checks>{['pending', 'approved', 'declined'].map((s) => (
+      <label key={s} className='flex items-center gap-2 text-sm leading-none capitalize'>
+        <Checkbox disabled={dis} checked={a.request_status.includes(s)} onCheckedChange={(on) => toggle('request_status', s, !!on)} />{s}
+      </label>
+    ))}</Checks>, undefined, outbound || a.include === 'accounts'),
+    formKV(`c-${c.id}-src`, 'utm_source', <Input id={`c-${c.id}-src`} value={a.utm_source} onChange={(e) => set('utm_source', e.target.value)} placeholder='Any' />, undefined, outbound),
+    formKV(`c-${c.id}-med`, 'utm_medium', <Input id={`c-${c.id}-med`} value={a.utm_medium} onChange={(e) => set('utm_medium', e.target.value)} placeholder='Any' />, undefined, outbound),
+    formKV(`c-${c.id}-camp`, 'utm_campaign', <Input id={`c-${c.id}-camp`} value={a.utm_campaign} onChange={(e) => set('utm_campaign', e.target.value)} placeholder='Any' />, undefined, outbound),
+    formKV(`c-${c.id}-from`, 'Created from', <Input id={`c-${c.id}-from`} type='date' value={a.created_from ?? ''} onChange={(e) => set('created_from', e.target.value || null)} />, undefined, outbound),
+    formKV(`c-${c.id}-to`, 'Created to', <Input id={`c-${c.id}-to`} type='date' value={a.created_to ?? ''} onChange={(e) => set('created_to', e.target.value || null)} />, undefined, outbound),
+    formKV(`c-${c.id}-plans`, 'Plans', <Input id={`c-${c.id}-plans`} value={plans} onChange={(e) => setPlans(e.target.value)} placeholder='Any' />, 'Comma-separated plan names, or none.', outbound),
+    formKV(`c-${c.id}-accounts`, 'Only these accounts', <Input id={`c-${c.id}-accounts`} value={accounts} onChange={(e) => setAccounts(e.target.value)} placeholder='Any' />, 'Comma-separated slugs.', outbound),
+    { label: 'Triggered', value: <span className='text-muted-foreground text-xs'>The event decides who; only the UTM tags and plans here narrow it.</span>, hidden: !triggered }
+  ]);
 
-        {outbound && (
-          <fieldset className='grid gap-4 rounded-lg border p-4' disabled={dis}>
-            <legend className='px-1 text-sm font-medium'>Outbound</legend>
-            <FormRow id={`c-${c.id}-identity`} label='Send from' hint={`A sender identity on the outreach subdomain (Senders view). Never the product's sender domain${ids?.product_domain ? ` (${ids.product_domain})` : ''}.`}>
-              <NativeSelect id={`c-${c.id}-identity`} className='w-full' value={identity == null ? '' : String(identity)} onChange={(e) => setIdentity(e.target.value ? Number(e.target.value) : null)}>
-                <NativeSelectOption value=''>Choose a sender identity</NativeSelectOption>
-                {(ids?.identities ?? []).map((i) => <NativeSelectOption key={i.id} value={String(i.id)} disabled={!i.enabled || i.on_product_domain}>
-                  {i.from_name} &lt;{i.from_address}&gt; · {i.sent_today}/{i.cap_today} today{!i.enabled ? ' (off)' : ''}{i.on_product_domain ? ' (product domain: refused)' : ''}
-                </NativeSelectOption>)}
-              </NativeSelect>
-            </FormRow>
-            {ids && !ids.identities.length && <Notice>No sender identity yet: add one in Senders (e.g. you@outreach.{ids.product_domain ?? 'example.com'}, verified in Resend). The campaign cannot launch without one.</Notice>}
-            <div className='grid gap-4 sm:grid-cols-2'>
-              <label htmlFor={`c-${c.id}-opens`} className='flex items-start justify-between gap-3 text-sm'>
-                <span><span className='font-medium'>Track opens</span><span className='text-muted-foreground block text-xs'>Off (the default for outbound): plain text only, no HTML part, so no tracking pixel. Better for deliverability.</span></span>
-                <Switch id={`c-${c.id}-opens`} disabled={dis} checked={trackOpens ?? false} onCheckedChange={(v) => setTrackOpens(v)} />
-              </label>
-              <label htmlFor={`c-${c.id}-restricted`} className='flex items-start justify-between gap-3 text-sm'>
-                <span><span className='font-medium'>Allow prospects in the EU / EEA / UK / CH</span><span className='text-muted-foreground block text-xs'>Off: they (and anyone with no country) are left out. On: they get it on the lawful basis recorded at import.</span></span>
-                <Switch id={`c-${c.id}-restricted`} disabled={dis} checked={allowRestricted} onCheckedChange={setAllowRestricted} />
-              </label>
-            </div>
-          </fieldset>
-        )}
-
-        <fieldset className='grid gap-4' disabled={dis}>
-          <legend className='mb-2 text-sm font-medium'>Emails <span className='text-muted-foreground font-normal'>· {'{{first_name}}'} and {'{{product}}'} are filled in for each person; an unsubscribe link is added at the end.</span></legend>
-          {steps.map((s, i) => (
-            <div key={i} className='grid gap-3 rounded-lg border p-4'>
-              <div className='flex flex-wrap items-center gap-3'>
-                <span className='text-sm font-medium'>Email {i + 1}</span>
-                <label className='text-muted-foreground flex items-center gap-2 text-sm'>
-                  {i ? 'days after the one before' : 'days after enrolment'}
-                  <Input type='number' min={0} max={365} className='h-7 w-20' aria-label={`Delay in days for email ${i + 1}`} value={s.delay_days}
-                    onChange={(e) => setStep(i, { delay_days: Math.max(0, Math.min(365, Math.trunc(Number(e.target.value) || 0))) })} />
-                </label>
-                {steps.length > 1 && <Button size='sm' variant='ghost' className='text-destructive ml-auto' onClick={() => setSteps((xs) => xs.filter((_, j) => j !== i))}><Icons.trash /> Remove email</Button>}
-              </div>
-              {!s.variants?.length ? (<>
-                <Input aria-label={`Subject of email ${i + 1}`} placeholder='Subject' value={s.subject} onChange={(e) => setStep(i, { subject: e.target.value })} />
-                <Textarea aria-label={`Body of email ${i + 1}`} rows={7} placeholder='Plain text' value={s.body} onChange={(e) => setStep(i, { body: e.target.value })} />
-                {editable && <Button size='sm' variant='outline' className='self-start' onClick={() => setStep(i, { variants: [{ subject: s.subject, body: s.body, weight: 50 }, { subject: s.subject, body: '', weight: 50 }] })}>
-                  <Icons.add /> Add A/B variants</Button>}
-              </>) : (
-                <VariantsEditor i={i} variants={s.variants} editable={editable}
-                  onChange={(vs) => setStep(i, vs.length < 2 ? { variants: undefined, subject: vs[0]?.subject ?? s.subject, body: vs[0]?.body ?? s.body } : { variants: vs, subject: vs[0].subject, body: vs[0].body })} />
-              )}
-            </div>
-          ))}
-          {editable && steps.length < 10 && (
-            <Button size='sm' variant='outline' className='self-start' onClick={() => setSteps((xs) => [...xs, { subject: '', body: '', delay_days: 3 }])}><Icons.add /> Add an email</Button>
-          )}
-        </fieldset>
-
-        <div className='grid gap-4 sm:grid-cols-2'>
-          <label htmlFor={`c-${c.id}-rolling`} className='flex items-start justify-between gap-3 text-sm'>
-            <span><span className='font-medium'>Keep enrolling</span><span className='text-muted-foreground block text-xs'>People who match later join while it runs (checked every 5 minutes).</span></span>
-            <Switch id={`c-${c.id}-rolling`} disabled={dis} checked={rolling} onCheckedChange={setRolling} />
+  const emailsTab = part(steps.map((s, i) => ({
+    label: `Email ${i + 1}`,
+    value: (
+      <div className='grid min-w-0 gap-3'>
+        <div className='flex flex-wrap items-center gap-3'>
+          <label className='text-muted-foreground flex items-center gap-2 text-sm'>
+            {i ? 'days after the one before' : 'days after enrolment'}
+            <Input type='number' min={0} max={365} className='h-7 w-20' aria-label={`Delay in days for email ${i + 1}`} value={s.delay_days}
+              onChange={(e) => setStep(i, { delay_days: Math.max(0, Math.min(365, Math.trunc(Number(e.target.value) || 0))) })} />
           </label>
-          <FormRow id={`c-${c.id}-days`} label='Count conversions within (days)'>
-            <Input id={`c-${c.id}-days`} disabled={dis} type='number' min={1} max={365} value={days} onChange={(e) => setDays(e.target.value)} />
-          </FormRow>
+          {steps.length > 1 && <Button size='sm' variant='ghost' className='text-destructive ml-auto' onClick={() => setSteps((xs) => xs.filter((_, j) => j !== i))}><Icons.trash /> Remove email</Button>}
         </div>
-
-        <fieldset className='grid gap-4 rounded-lg border p-4' disabled={dis}>
-          <legend className='px-1 text-sm font-medium'>Send window</legend>
-          <div className='grid gap-1.5'>
-            <span className='text-sm leading-none font-medium'>Days <span className='text-muted-foreground font-normal'>· none ticked: any day and hour</span></span>
-            <div className='flex flex-wrap gap-x-4 gap-y-2'>
-              {DAYS.map((d, k) => (
-                <label key={d} className='flex items-center gap-2 text-sm leading-none'>
-                  <Checkbox disabled={dis} checked={win.days.includes(k + 1)} onCheckedChange={(on) => setWin((w) => ({ ...w, days: on ? [...w.days, k + 1].sort() : w.days.filter((x) => x !== k + 1) }))} />{d}
-                </label>
-              ))}
-            </div>
-          </div>
-          {win.days.length > 0 && (
-            <div className='grid gap-4 sm:grid-cols-3'>
-              <FormRow id={`c-${c.id}-wfrom`} label='From (hour, local)'>
-                <Input id={`c-${c.id}-wfrom`} type='number' min={0} max={23} value={win.start_hour} onChange={(e) => setWin((w) => ({ ...w, start_hour: Math.min(23, Math.max(0, Math.trunc(Number(e.target.value) || 0))) }))} />
-              </FormRow>
-              <FormRow id={`c-${c.id}-wto`} label='Until (hour, local)'>
-                <Input id={`c-${c.id}-wto`} type='number' min={1} max={24} value={win.end_hour} onChange={(e) => setWin((w) => ({ ...w, end_hour: Math.min(24, Math.max(1, Math.trunc(Number(e.target.value) || 0))) }))} />
-              </FormRow>
-              <FormRow id={`c-${c.id}-wtz`} label='Default time zone' hint="Used when a person's own zone and country are unknown.">
-                <Input id={`c-${c.id}-wtz`} value={win.time_zone} placeholder='UTC' onChange={(e) => setWin((w) => ({ ...w, time_zone: e.target.value.trim() }))} />
-              </FormRow>
-            </div>
-          )}
-          <p className='text-muted-foreground text-xs'>Hours are each person&apos;s own: their stored time zone, else their access request&apos;s country, else the default. An email due outside the window waits for it to open.</p>
-        </fieldset>
-
-        <fieldset className='grid gap-4 sm:grid-cols-2' disabled={dis}>
-          {!outbound && <label htmlFor={`c-${c.id}-optin`} className='flex items-start justify-between gap-3 text-sm'>
-            <span><span className='font-medium'>Requires opt-in</span><span className='text-muted-foreground block text-xs'>
-              Only people who ticked the marketing box. {optIn == null ? `Default for this audience: ${optInDefault ? 'on' : 'off'}.` : ''} Requesters from the EU, EEA, UK or Switzerland (or an unknown country) always need it.
-            </span></span>
-            <Switch id={`c-${c.id}-optin`} disabled={dis} checked={optIn ?? optInDefault} onCheckedChange={(v) => setOptIn(v)} />
-          </label>}
-          <label htmlFor={`c-${c.id}-auto`} className='flex items-start justify-between gap-3 text-sm'>
-            <span><span className='font-medium'>Count auto-replies as replies</span><span className='text-muted-foreground block text-xs'>Off: an out-of-office is kept but the emails go on. On: it stops them like a reply.</span></span>
-            <Switch id={`c-${c.id}-auto`} disabled={dis} checked={countAuto} onCheckedChange={setCountAuto} />
-          </label>
-        </fieldset>
+        {!s.variants?.length ? (<>
+          <Input aria-label={`Subject of email ${i + 1}`} placeholder='Subject' value={s.subject} onChange={(e) => setStep(i, { subject: e.target.value })} />
+          <Textarea aria-label={`Body of email ${i + 1}`} rows={7} placeholder='Plain text' value={s.body} onChange={(e) => setStep(i, { body: e.target.value })} />
+          {editable && <Button size='sm' variant='outline' className='self-start' onClick={() => setStep(i, { variants: [{ subject: s.subject, body: s.body, weight: 50 }, { subject: s.subject, body: '', weight: 50 }] })}>
+            <Icons.add /> Add A/B variants</Button>}
+        </>) : (
+          <VariantsEditor i={i} variants={s.variants} editable={editable}
+            onChange={(vs) => setStep(i, vs.length < 2 ? { variants: undefined, subject: vs[0]?.subject ?? s.subject, body: vs[0]?.body ?? s.body } : { variants: vs, subject: vs[0].subject, body: vs[0].body })} />
+        )}
       </div>
-    </Section>
+    )
+  })), (
+    <div className='flex flex-wrap items-center justify-between gap-2'>
+      <span className='text-muted-foreground text-xs'>{'{{first_name}}'} and {'{{product}}'} are filled in for each person; an unsubscribe link is added at the end.</span>
+      {editable && steps.length < 10 && (
+        <Button size='sm' variant='outline' onClick={() => setSteps((xs) => [...xs, { subject: '', body: '', delay_days: 3 }])}><Icons.add /> Add an email</Button>
+      )}
+    </div>
+  ));
+
+  const windowTab = part([
+    formKV(undefined, 'Days', <Checks>{DAYS.map((d, k) => (
+      <label key={d} className='flex items-center gap-2 text-sm leading-none'>
+        <Checkbox disabled={dis} checked={win.days.includes(k + 1)} onCheckedChange={(on) => setWin((w) => ({ ...w, days: on ? [...w.days, k + 1].sort() : w.days.filter((x) => x !== k + 1) }))} />{d}
+      </label>
+    ))}</Checks>, 'None ticked: any day and hour.'),
+    formKV(`c-${c.id}-wfrom`, 'From (hour, local)', <Input id={`c-${c.id}-wfrom`} type='number' min={0} max={23} value={win.start_hour} onChange={(e) => setWin((w) => ({ ...w, start_hour: Math.min(23, Math.max(0, Math.trunc(Number(e.target.value) || 0))) }))} />, undefined, !win.days.length),
+    formKV(`c-${c.id}-wto`, 'Until (hour, local)', <Input id={`c-${c.id}-wto`} type='number' min={1} max={24} value={win.end_hour} onChange={(e) => setWin((w) => ({ ...w, end_hour: Math.min(24, Math.max(1, Math.trunc(Number(e.target.value) || 0))) }))} />, undefined, !win.days.length),
+    formKV(`c-${c.id}-wtz`, 'Default time zone', <Input id={`c-${c.id}-wtz`} value={win.time_zone} placeholder='UTC' onChange={(e) => setWin((w) => ({ ...w, time_zone: e.target.value.trim() }))} />,
+      "Used when a person's own zone and country are unknown.", !win.days.length),
+    { label: 'Hours', value: <span className='text-muted-foreground text-xs'>Hours are each person&apos;s own: their stored time zone, else their access request&apos;s country, else the default. An email due outside the window waits for it to open.</span> }
+  ]);
+
+  const tabs: DetailTab[] = [
+    ...before,
+    { id: 'emails', label: 'Emails', count: steps.length, content: emailsTab },
+    { id: 'audience', label: 'Audience', content: audienceTab },
+    { id: 'preview', label: 'Who gets it', hidden: triggered, content: <AudiencePreview audience={audience} optIn={optIn} campaignId={c.id} allowRestricted={allowRestricted} /> },
+    { id: 'settings', label: 'Settings', content: settings },
+    { id: 'window', label: 'Send window', content: windowTab },
+    ...after
+  ];
+  return (
+    <div className='flex flex-col gap-4'>
+      {card(saveButton, editing)}
+      <DetailTabs tabs={tabs} value={tab} onValueChange={setTab} defaultTab={c.status === 'draft' ? 'emails' : 'recipients'} />
+    </div>
   );
 }
 
@@ -770,8 +729,9 @@ function AudiencePreview({ audience, optIn, campaignId, allowRestricted }: { aud
   useEffect(() => { const t = setTimeout(() => setQ({ audience, optIn, allowRestricted }), 500); return () => clearTimeout(t); }, [audience, optIn, allowRestricted]);
   const { data, error, isFetching } = useQuery({ queryKey: ['admin', 'gtm-preview', campaignId, JSON.stringify(q)], staleTime: 15_000, retry: false,
     queryFn: () => post<Preview>('/gtm/audience/preview', { audience: q.audience, requires_opt_in: q.optIn, campaign_id: campaignId, allow_restricted: q.allowRestricted }) });
-  return (
-    <div className='grid gap-2'>
+  type Sample = Preview['sample'][number];
+  const summary = (
+    <div className='grid gap-1'>
       <div className='flex flex-wrap items-baseline gap-x-3 text-sm'>
         <span className='font-medium'>{data ? `${data.sendable} ${data.sendable === 1 ? 'person' : 'people'} would get it` : isFetching ? 'Counting…' : '—'}</span>
         {data && (audience.include === 'prospects'
@@ -782,44 +742,52 @@ function AudiencePreview({ audience, optIn, campaignId, allowRestricted }: { aud
         <p className='text-muted-foreground text-xs'>Left out: {Object.entries(data.blocked).map(([k, v]) => `${v} ${BLOCK_LABEL[k] ?? k}`).join(', ')}.</p>
       )}
       {error && <p className='text-destructive text-sm'>{(error as Error).message}</p>}
-      {!!data?.sample.length && (
-        <div className='border'>
-          <DataList noun='people' minWidth={520} rows={data.sample} empty='Nobody.'
-            cols={[
-              { label: 'Person', render: (s) => <span className='flex flex-col gap-0.5'><span>{s.first_name ?? '—'}</span><span className='text-muted-foreground text-xs'>{s.email}</span></span> },
-              { label: '{{product}}', render: (s) => s.product ?? '—' },
-              { label: 'From', render: (s) => (s.org_name ?? (s.source === 'request' ? 'Access request' : '—')) },
-              { label: 'Consent', render: (s) => <span className='text-muted-foreground text-xs'>{CONSENT_LABEL[s.consent] ?? s.consent}</span> },
-              { label: '', render: (s) => (s.suppressed ? <StatusBadge tone='warn'>suppressed</StatusBadge> : ['needs_opt_in', 'withdrawn', ...Object.keys(BLOCK_LABEL)].includes(s.consent) ? <StatusBadge tone='neutral'>not sent</StatusBadge> : null) }
-            ]} />
-        </div>
-      )}
     </div>
+  );
+  return (
+    <DetailTable<Sample> noun='people' rows={data?.sample ?? []} loading={!data && isFetching}
+      empty={data ? 'Nobody matches yet.' : 'Counting…'} filters={summary}
+      search={(s) => `${s.first_name ?? ''} ${s.email} ${s.product ?? ''} ${s.org_name ?? ''}`} searchPlaceholder='Search the first matches'
+      cols={[
+        { key: 'person', label: 'Person', type: 'text', value: (s) => s.first_name ?? s.email, render: (s) => <span className='flex flex-col gap-0.5'><span>{s.first_name ?? '—'}</span><span className='text-muted-foreground text-xs'>{s.email}</span></span> },
+        { key: 'product', label: '{{product}}', type: 'text', value: (s) => s.product ?? '', render: (s) => s.product ?? '—' },
+        { key: 'from', label: 'From', type: 'text', value: (s) => s.org_name ?? (s.source === 'request' ? 'Access request' : ''), render: (s) => (s.org_name ?? (s.source === 'request' ? 'Access request' : '—')) },
+        { key: 'consent', label: 'Consent', type: 'select', value: (s) => CONSENT_LABEL[s.consent] ?? s.consent, render: (s) => <span className='text-muted-foreground text-xs'>{CONSENT_LABEL[s.consent] ?? s.consent}</span> },
+        { key: 'sent', label: '', render: (s) => (s.suppressed ? <StatusBadge tone='warn'>suppressed</StatusBadge> : ['needs_opt_in', 'withdrawn', ...Object.keys(BLOCK_LABEL)].includes(s.consent) ? <StatusBadge tone='neutral'>not sent</StatusBadge> : null) }
+      ]} />
   );
 }
 
+type TestState = { to: string; step: string; variant: string };
+
 /** One email to an address typed in, rendered for the first match (marked [Test]; its unsubscribe link does nothing). */
-function TestSend({ c }: { c: Campaign }) {
-  const [to, setTo] = useState('');
-  const [step, setStep] = useState('0');
-  const [variant, setVariant] = useState('');
+function TestSend({ c, v, set }: { c: Campaign; v: TestState; set: (f: (s: TestState) => TestState) => void }) {
+  const { to, step, variant } = v;
+  const setTo = (to: string) => set((s) => ({ ...s, to }));
+  const setVariant = (variant: string) => set((s) => ({ ...s, variant }));
+  const setStep = (step: string) => set((s) => ({ ...s, step, variant: '' }));
   const variants = c.steps[Number(step)]?.variants ?? [];
   const send = useAdminAction(() => post<{ status: string; error?: string | null; warnings?: string[] }>(`${path(c.id)}/test`, { to: to.trim(), step: Number(step), variant: variant || undefined }),
     { success: (r) => (r.status === 'sent' ? `Test sent to ${to.trim()}${r.warnings?.length ? `. ${r.warnings.join('. ')}` : ''}` : `Not sent: ${r.error ?? r.status}`) });
   return (
-    <Section title='Test send' description='Saved content, filled in for the first person the audience matches. The subject starts with [Test].'>
-      <form className='flex flex-wrap items-center gap-2' onSubmit={(e) => { e.preventDefault(); send.mutate(); }}>
-        <Input type='email' required placeholder='you@octillion.dev' aria-label='Send a test to' className='h-8 max-w-72' value={to} onChange={(e) => setTo(e.target.value)} />
-        <NativeSelect aria-label='Which email' className='h-8' value={step} onChange={(e) => { setStep(e.target.value); setVariant(''); }}>
-          {c.steps.map((s, i) => <NativeSelectOption key={i} value={String(i)}>Email {i + 1}: {s.subject.slice(0, 40)}</NativeSelectOption>)}
-        </NativeSelect>
-        {variants.length > 1 && (
-          <NativeSelect aria-label='Which variant' className='h-8' value={variant} onChange={(e) => setVariant(e.target.value)}>
+    <form className='flex flex-col gap-3' onSubmit={(e) => { e.preventDefault(); send.mutate(); }}>
+      <div className='flex flex-wrap items-center justify-between gap-2'>
+        <span className='text-muted-foreground text-xs'>Saved content, filled in for the first person the audience matches. The subject starts with [Test].</span>
+        <Gate need='campaigns'><Button type='submit' size='sm' variant='outline' disabled={!to.trim() || !c.steps.length || send.isPending}><Icons.send /> Send test</Button></Gate>
+      </div>
+      <KeyValueTable rows={[
+        formKV(`c-${c.id}-test-to`, 'Send a test to', <Input id={`c-${c.id}-test-to`} type='email' required placeholder='you@octillion.dev' value={to} onChange={(e) => setTo(e.target.value)} />),
+        formKV(`c-${c.id}-test-step`, 'Which email', (
+          <NativeSelect id={`c-${c.id}-test-step`} className='w-full' value={step} onChange={(e) => setStep(e.target.value)}>
+            {c.steps.map((s, i) => <NativeSelectOption key={i} value={String(i)}>Email {i + 1}: {s.subject.slice(0, 40)}</NativeSelectOption>)}
+          </NativeSelect>
+        )),
+        formKV(`c-${c.id}-test-variant`, 'Which variant', (
+          <NativeSelect id={`c-${c.id}-test-variant`} className='w-full' value={variant} onChange={(e) => setVariant(e.target.value)}>
             {variants.map((_, k) => <NativeSelectOption key={k} value={k ? LETTERS[k] : ''}>Variant {LETTERS[k]}</NativeSelectOption>)}
           </NativeSelect>
-        )}
-        <Gate need='campaigns'><Button type='submit' size='sm' variant='outline' disabled={!to.trim() || !c.steps.length || send.isPending}><Icons.send /> Send test</Button></Gate>
-      </form>
-    </Section>
+        ), undefined, variants.length <= 1)
+      ]} />
+    </form>
   );
 }
