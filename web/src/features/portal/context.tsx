@@ -15,7 +15,8 @@ import { csvCell, parseCsv } from '@/lib/csv';
 import { counted } from '@/lib/octillion-format';
 import { cn } from '@/lib/utils';
 import { Dock, KINDS, TYPE_STYLE, type Kind, type MemoryItem, type MemoryScope } from './memory';
-import { Field, RecordView, type RecordCol, type RowAction } from '@/components/layout/record-view';
+import { ActionsMenu, RecordView, type RecordCol, type RowAction } from '@/components/layout/record-view';
+import { DetailMeta, DetailTabs, KeyValueTable, LongText } from '@/components/layout/detail';
 import { ErrorState, LoadingCards, When, fail, useOrgLoad } from './shared';
 import { Allowed, useAccountRole } from './role';
 
@@ -69,6 +70,11 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
       .catch((e) => { fail(e); return false; });
   const remove = (m: MemoryItem) => appApi('DELETE', `/context/memories/${m.id}`).then(() => { toast.success('Removed from memory'); load(); }).catch(fail);
 
+  const memoryActions = (m: MemoryItem): RowAction[] => [
+    { label: 'Edit', icon: <Icons.edit />, onSelect: () => setEditing({ item: m }) },
+    { label: 'Remove', icon: <Icons.trash />, destructive: true, onSelect: () => void remove(m) }
+  ];
+
   const noSubject = section === 'users' && !subject;
   const file = useRef<HTMLInputElement>(null);
   const importFile = async (f: File) => {
@@ -107,27 +113,34 @@ function MemoryTable({ d, section }: { d: Ctx; section: ContextSection }) {
       <RecordView<MemoryItem>
         key={subject}
         rows={items ?? []} rowKey={(m) => String(m.id)} cols={cols} loading={items === null && !noSubject} noun='memories'
-        actions={(m) => m.can_delete && can('edit') ? [
-          { label: 'Edit', icon: <Icons.edit />, onSelect: () => setEditing({ item: m }) },
-          { label: 'Remove', icon: <Icons.trash />, destructive: true, onSelect: () => void remove(m) }
-        ] : []}
+        actions={(m) => m.can_delete && can('edit') ? memoryActions(m) : []}
         searchText={(m) => `${m.kind} ${m.body} ${m.created_by ?? ''} ${m.subject_name ?? ''}`}
         searchPlaceholder={`Search ${label ? `${label === 'You' ? 'your' : `${label}'s`} ` : ''}memory`}
         filters={picker || undefined}
         primary={primary || undefined} primaryMenu={primaryMenu}
         empty={noSubject ? 'Nobody to show.' : 'Nothing remembered yet. Add the first memory, or import a CSV or JSON file.'}
-        detailTitle={(m) => `${m.kind[0].toUpperCase()}${m.kind.slice(1)}${m.subject_name && section === 'products' ? ` · ${m.subject_name}` : ''}`}
-        detail={(m) => (
-          <div className='flex flex-col gap-5'>
-            <p className='text-base whitespace-pre-wrap'>{m.body}</p>
-            <dl>
-              <Field label='Type'><span className={cn('inline-flex h-6 items-center rounded-md px-2 text-xs leading-none font-medium capitalize ring-1 ring-inset', TYPE_STYLE[m.kind] ?? TYPE_STYLE.note)}>{m.kind}</span></Field>
-              {section === 'products' && <Field label='Product'>{m.subject_name}</Field>}
-              <Field label='Added by'>{m.created_by ?? '—'}</Field>
-              <Field label='Added'><When d={m.created_at} /></Field>
-            </dl>
-          </div>
-        )}
+        detailTitle={() => 'Memory'}
+        detail={(m) => {
+          const kindBadge = <span className={cn('inline-flex h-6 items-center rounded-md px-2 text-xs leading-none font-medium capitalize ring-1 ring-inset', TYPE_STYLE[m.kind] ?? TYPE_STYLE.note)}>{m.kind}</span>;
+          return (
+            <div className='flex flex-col gap-4'>
+              <DetailMeta
+                title={`${m.kind[0].toUpperCase()}${m.kind.slice(1)}${m.subject_name && section === 'products' ? ` · ${m.subject_name}` : ''}`}
+                badges={kindBadge}
+                actions={m.can_delete && can('edit') ? <ActionsMenu items={memoryActions(m)} /> : undefined}
+                facts={[
+                  { label: 'Type', value: kindBadge },
+                  { label: 'Product', value: m.subject_name, hidden: section !== 'products' },
+                  { label: 'Added by', value: m.created_by ?? '—' },
+                  { label: 'Added', value: <When d={m.created_at} /> }
+                ]}
+              />
+              <DetailTabs resetKey={m.id} tabs={[
+                { id: 'memory', label: 'Memory', content: <KeyValueTable rows={[{ label: 'Memory', value: <LongText>{m.body}</LongText> }]} /> }
+              ]} />
+            </div>
+          );
+        }}
       />
       <input ref={file} type='file' accept='.csv,.json,text/csv,application/json' className='hidden' onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) void importFile(f); }} />
       {editing && <MemoryEditor key={editing.item?.id ?? 'new'} item={editing.item} label={label} products={section === 'products' ? productNames : undefined} onClose={() => setEditing(null)} onSave={save} />}
