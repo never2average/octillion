@@ -33,6 +33,9 @@ export function recordMcpEvent(org: Org, e: McpEvent): void {
   // A successful tool call may complete a stage of a customer journey (src/playbooks.ts): sync shortly after.
   if (e.method === "tools/call" && e.ok !== false)
     void import("./playbooks.js").then((m) => m.scheduleSync({ orgId: org.orgId, slug: org.slug }, org.userId)).catch(() => {});
+  // A GTM trigger (src/gtm-events.ts): the visibility report opened, once a day per account.
+  if (e.method === "tools/call" && e.name === "get_visibility_report" && e.ok !== false)
+    void import("./gtm-events.js").then((g) => g.emitLater("report_opened", { org_id: org.orgId, key: `${org.orgId}:${new Date().toISOString().slice(0, 10)}` })).catch(() => {});
   const event = e.method === "tools/call" ? "tool_called" : PRODUCT_EVENTS[e.method];
   if (!event) return;
   const actor = { distinctId: org.userId ?? `org:${org.slug}`, orgSlug: org.slug };

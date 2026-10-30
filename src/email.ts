@@ -46,8 +46,14 @@ export interface Email {
   headers?: Record<string, string>;
   /** More Resend tags after the kind (ASCII letters, digits, _ and - only). */
   tags?: { name: string; value: string }[];
+  /** This message's Reply-To instead of the setting's (campaigns: a per-recipient address, so a reply maps back). */
+  replyTo?: string[];
 }
-export interface EmailResult { status: "sent" | "skipped" | "failed" | "duplicate"; id?: number; provider_id?: string | null; error?: string | null }
+export interface EmailResult {
+  status: "sent" | "skipped" | "failed" | "duplicate"; id?: number; provider_id?: string | null; error?: string | null;
+  /** Resend answered 429: how long it asked us to wait (its retry-after header). */
+  retry_after_ms?: number;
+}
 
 const ADDRESS = /^[^\s@<>,;"]+@[^\s@<>,;"]+\.[^\s@<>,;"]+$/;
 export const isEmail = (v: unknown): v is string => typeof v === "string" && v.length <= 254 && ADDRESS.test(v.trim());
@@ -98,13 +104,36 @@ export function sendLater(m: Email): Promise<EmailResult> {
 }
 
 async function attempt(m: Email): Promise<EmailResult> {
+  const c = await claim(m);
+  if (!("row" in c)) return c;
+  const ready = await notReady();
+  if (typeof ready === "string") return c.finish("skipped", { error: ready });
+  return sendClaimed(m, c, ready);
+}
+
+/** Resend's retry-after header (seconds) on a 429, in ms (at most two minutes); null for anything else. */
+const retryAfter = (r: Response) => {
+  if (r.status !== 429) return null;
+  const s = Number(r.headers.get("retry-after") ?? r.headers.get("ratelimit-reset"));
+  return Number.isFinite(s) && s >= 0 ? Math.min(s, 120) * 1000 : 1000;
+};
+
+interface Claimed {
+  row: number; to: string; key: string; subject: string;
+  finish: (status: "sent" | "skipped" | "failed", extra?: { provider_id?: string | null; error?: string | null; retry_after_ms?: number | null }) => Promise<EmailResult>;
+}
+interface Ready { cred: { secret: string }; replyTo: string[] }
+
+/**
+ * Claim the message in email_log: a new row, or another try at one that did not go out (failed, skipped, or stuck
+ * sending for ten minutes). Sent or being sent: a duplicate. No address or no words: skipped (and recorded).
+ */
+async function claim(m: Email): Promise<Claimed | EmailResult> {
   const to = String(m.to ?? "").trim().toLowerCase();
   const key = String(m.idempotencyKey ?? "").slice(0, 256);
   if (!key) throw new Error("an idempotency key is required");
   const subject = String(m.subject ?? "").replace(/[\r\n]+/g, " ").trim().slice(0, 200);
   const db = await getDb();
-  // Claim the message: a new row, or another try at one that did not go out (failed, skipped, or stuck sending for
-  // ten minutes). Sent or being sent: nothing to do.
   const [row] = await db.query<{ id: number }>(
     `INSERT INTO email_log (kind, to_hash, to_domain, subject, status, idempotency_key, meta) VALUES ($1, $2, $3, $4, 'sending', $5, $6::jsonb)
      ON CONFLICT (idempotency_key) DO UPDATE SET status = 'sending', at = now(), attempts = email_log.attempts + 1, error = NULL, subject = excluded.subject
@@ -113,40 +142,134 @@ async function attempt(m: Email): Promise<EmailResult> {
     [m.kind, hashAddress(to), domainOf(to) || "-", subject, key, JSON.stringify(scrub(m.meta ?? {}))]);
   if (!row) return { status: "duplicate" };
   const id = Number(row.id);
-  const finish = async (status: "sent" | "skipped" | "failed", extra: { provider_id?: string | null; error?: string | null } = {}): Promise<EmailResult> => {
+  const finish: Claimed["finish"] = async (status, extra = {}) => {
     const error = extra.error ? extra.error.slice(0, 500) : null;
     await db.query("UPDATE email_log SET status = $2, provider_id = $3, error = $4 WHERE id = $1", [id, status, extra.provider_id ?? null, error]);
     console.error(`email ${m.kind} ${status} to=*@${domainOf(to) || "?"} key=${key}${error ? ` (${error})` : ""}`);
     telemetry.capture({ distinctId: "octillion:email" }, `email_${status}`, { kind: m.kind, to_domain: domainOf(to) || null, ...(error ? { error } : {}) });
-    return { status, id, provider_id: extra.provider_id ?? null, error };
+    return { status, id, provider_id: extra.provider_id ?? null, error, ...(extra.retry_after_ms != null ? { retry_after_ms: extra.retry_after_ms } : {}) };
   };
-
   if (!isEmail(to)) return finish("skipped", { error: "No valid address to send to" });
   if (!subject || !String(m.text ?? "").trim()) return finish("skipped", { error: "No subject or text" });
-  await freshSettings();
-  if (settingText("EMAILS_ENABLED") !== "on") return finish("skipped", { error: "Emails are off (Agent configuration, Send emails)" });
-  const provider = await getProvider(EMAIL_PROVIDER);
-  if (!provider?.enabled) return finish("skipped", { error: "The Resend provider is off in Key vault" });
-  const cred = await useCredential(EMAIL_PROVIDER).catch(() => null);
-  if (!cred) return finish("skipped", { error: "No Resend key in Key vault" });
+  return { row: id, to, key, subject, finish };
+}
 
-  const replyTo = settingText("EMAIL_REPLY_TO").split(",").map((x) => x.trim()).filter(isEmail);
-  const body = {
-    from: settingText("EMAIL_FROM"), to: [to], subject, text: m.text, html: m.html ?? htmlOf(m.text),
+/** Emails on, the provider on, a key: the key and the default reply-to; else why not. */
+async function notReady(): Promise<Ready | string> {
+  await freshSettings();
+  if (settingText("EMAILS_ENABLED") !== "on") return "Emails are off (Agent configuration, Send emails)";
+  const provider = await getProvider(EMAIL_PROVIDER);
+  if (!provider?.enabled) return "The Resend provider is off in Key vault";
+  const cred = await useCredential(EMAIL_PROVIDER).catch(() => null);
+  if (!cred) return "No Resend key in Key vault";
+  return { cred, replyTo: settingText("EMAIL_REPLY_TO").split(",").map((x) => x.trim()).filter(isEmail) };
+}
+
+/** The Resend body for one email: the message's own reply-to (a campaign's per-recipient address) before the setting's. */
+const bodyOf = (m: Email, c: Claimed, defaultReplyTo: string[]) => {
+  const own = (m.replyTo ?? []).filter(isEmail), replyTo = own.length ? own : defaultReplyTo;
+  return {
+    from: settingText("EMAIL_FROM"), to: [c.to], subject: c.subject, text: m.text, html: m.html ?? htmlOf(m.text),
     ...(replyTo.length ? { reply_to: replyTo } : {}), tags: [{ name: "kind", value: m.kind }, ...(m.tags ?? [])],
     ...(m.headers && Object.keys(m.headers).length ? { headers: m.headers } : {}),
   };
+};
+const resendError = (r: Response, j: { message?: string; name?: string }, secret: string) =>
+  `Resend answered ${r.status}${j.name ? ` ${j.name}` : ""}: ${String(j.message ?? "").replaceAll(secret, "…").slice(0, 300)}`;
+
+async function sendClaimed(m: Email, c: Claimed, ready: Ready): Promise<EmailResult> {
   try {
     const r = await fetch(`${apiUrl()}/emails`, {
-      method: "POST", signal: AbortSignal.timeout(15_000), body: JSON.stringify(body),
-      headers: { authorization: `Bearer ${cred.secret}`, "content-type": "application/json", "idempotency-key": key, "user-agent": "Octillion/1.0" },
+      method: "POST", signal: AbortSignal.timeout(15_000), body: JSON.stringify(bodyOf(m, c, ready.replyTo)),
+      headers: { authorization: `Bearer ${ready.cred.secret}`, "content-type": "application/json", "idempotency-key": c.key, "user-agent": "Octillion/1.0" },
     });
     const j = await r.json().catch(() => ({})) as { id?: string; message?: string; name?: string };
-    if (!r.ok) return finish("failed", { error: `Resend answered ${r.status}${j.name ? ` ${j.name}` : ""}: ${String(j.message ?? "").replaceAll(cred.secret, "…").slice(0, 300)}` });
-    return finish("sent", { provider_id: j.id ?? null });
+    if (!r.ok) return c.finish("failed", { error: resendError(r, j, ready.cred.secret), retry_after_ms: retryAfter(r) });
+    return c.finish("sent", { provider_id: j.id ?? null });
   } catch (e) {
-    return finish("failed", { error: `Resend did not answer: ${(e as Error).message}` });
+    return c.finish("failed", { error: `Resend did not answer: ${(e as Error).message}` });
   }
+}
+
+/** Resend's batch endpoint takes at most 100 emails a request (https://resend.com/docs/api-reference/emails/send-batch-emails). */
+export const BATCH_MAX = 100;
+
+/** The batch request's idempotency key: names exactly this set of messages. */
+export const batchKeyOf = (keys: string[]) => `batch:${createHash("sha256").update([...keys].sort().join("\n")).digest("hex").slice(0, 48)}`;
+
+/**
+ * Several emails in one Resend request (POST /emails/batch), each still its own email_log row claimed by its own
+ * idempotency key, so a message already sent (or being sent) is dropped from the batch and never goes twice. Resend's
+ * Idempotency-Key covers the whole request (https://resend.com/docs/dashboard/emails/idempotency-keys): it is derived
+ * from the claimed messages' keys (batchKeyOf), so retrying the same set after a timeout or a 429 is answered from
+ * Resend's record of the first request instead of sending again. One message left after claiming goes through the
+ * plain endpoint with its own key. Results come back in the order given. Never throws.
+ */
+export async function sendBatch(ms: Email[]): Promise<{ results: EmailResult[]; batch_key: string | null }> {
+  if (ms.length > BATCH_MAX) throw new Error(`a Resend batch is at most ${BATCH_MAX} emails`);
+  try { return await asPlatform(() => batchAttempt(ms)); }
+  catch (e) {
+    console.error(`email batch: not recorded: ${(e as Error).message}`);
+    return { results: ms.map(() => ({ status: "failed" as const, error: (e as Error).message })), batch_key: null };
+  }
+}
+
+async function batchAttempt(ms: Email[]): Promise<{ results: EmailResult[]; batch_key: string | null }> {
+  const out: EmailResult[] = new Array(ms.length);
+  const claimed: { i: number; c: Claimed }[] = [];
+  for (const [i, m] of ms.entries()) {
+    const c = await claim(m);
+    if ("row" in c) claimed.push({ i, c }); else out[i] = c;
+  }
+  if (!claimed.length) return { results: out, batch_key: null };
+  const ready = await notReady();
+  if (typeof ready === "string") { for (const { i, c } of claimed) out[i] = await c.finish("skipped", { error: ready }); return { results: out, batch_key: null }; }
+  if (claimed.length === 1) {
+    const [{ i, c }] = claimed;
+    out[i] = await sendClaimed(ms[i], c, ready);
+    return { results: out, batch_key: null };
+  }
+  const key = batchKeyOf(claimed.map(({ c }) => c.key));
+  const fail = async (error: string, retry: number | null = null) => {
+    for (const { i, c } of claimed) out[i] = await c.finish("failed", { error, retry_after_ms: retry });
+    return { results: out, batch_key: key };
+  };
+  try {
+    const r = await fetch(`${apiUrl()}/emails/batch`, {
+      method: "POST", signal: AbortSignal.timeout(30_000), body: JSON.stringify(claimed.map(({ i, c }) => bodyOf(ms[i], c, ready.replyTo))),
+      headers: { authorization: `Bearer ${ready.cred.secret}`, "content-type": "application/json", "idempotency-key": key, "user-agent": "Octillion/1.0" },
+    });
+    const j = await r.json().catch(() => ({})) as { data?: { id?: string }[]; message?: string; name?: string };
+    if (!r.ok) return fail(resendError(r, j, ready.cred.secret), retryAfter(r));
+    // Each answer is at the index of its email in the request.
+    for (const [n, { i, c }] of claimed.entries()) {
+      const pid = j.data?.[n]?.id ?? null;
+      out[i] = pid ? await c.finish("sent", { provider_id: pid }) : await c.finish("failed", { error: "Resend did not answer: no id for this email in the batch" });
+    }
+    return { results: out, batch_key: key };
+  } catch (e) {
+    return fail(`Resend did not answer: ${(e as Error).message}`);
+  }
+}
+
+/**
+ * An inbound email Resend received (https://resend.com/docs/api-reference/emails/retrieve-received-email): the
+ * email.received webhook carries only its metadata, so the text, HTML and headers are fetched by id. Header names
+ * come back lowercased. Throws when Resend cannot be asked (the webhook answers 5xx, so Resend retries it).
+ */
+export async function receivedEmail(id: string): Promise<{ from: string; to: string[]; subject: string; text: string; html: string; headers: Record<string, string> }> {
+  const cred = await useCredential(EMAIL_PROVIDER);
+  const r = await fetch(`${apiUrl()}/emails/receiving/${encodeURIComponent(id)}`, {
+    signal: AbortSignal.timeout(15_000), headers: { authorization: `Bearer ${cred.secret}`, "user-agent": "Octillion/1.0" },
+  });
+  if (!r.ok) throw new Error(`Resend answered ${r.status} for received email ${id}`);
+  const j = await r.json() as Record<string, unknown>;
+  const headers: Record<string, string> = {};
+  // An object of name -> value, or a list of {name, value}: either way, lowercased names.
+  if (Array.isArray(j.headers)) for (const x of j.headers as { name?: string; value?: string }[]) { if (x?.name) headers[x.name.toLowerCase()] = String(x.value ?? ""); }
+  else if (j.headers && typeof j.headers === "object") for (const [k, v] of Object.entries(j.headers)) headers[k.toLowerCase()] = Array.isArray(v) ? v.join(", ") : String(v ?? "");
+  const list = (v: unknown) => (Array.isArray(v) ? v : v ? [v] : []).map((x) => String(x));
+  return { from: String(j.from ?? ""), to: list(j.to), subject: String(j.subject ?? ""), text: String(j.text ?? ""), html: String(j.html ?? ""), headers };
 }
 
 // ---------- the words ----------

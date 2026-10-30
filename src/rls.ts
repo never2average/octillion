@@ -41,7 +41,8 @@ export const SHARED_TABLES = ["developer_profiles", "developer_populations", "jo
 export const PLATFORM_READONLY = ["library_tasks", "platform_settings", "platform_harnesses", "model_prices", "schema_migrations", "journey_seed"];
 /** Tables a tenant query must never reach (checked live by the probe). */
 export const NO_ACCESS = ["vault_credentials", "vault_providers", "admin_access_log", "admin_tokens", "access_requests", "orchestrators", "email_log",
-  "gtm_campaigns", "gtm_campaign_recipients", "gtm_campaign_sends", "email_suppressions"];
+  "gtm_campaigns", "gtm_campaign_recipients", "gtm_campaign_sends", "email_suppressions",
+  "gtm_replies", "gtm_events", "gtm_event_enrolments", "gtm_org_signals", "email_consents", "email_consent_ledger"];
 
 export async function tenantTables(db: Queryable): Promise<string[]> {
   const rows = await db.query<{ table_name: string }>(

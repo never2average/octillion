@@ -24,7 +24,7 @@ export const DIRECT = "direct/unknown";
 const DAY = 86_400_000;
 
 export interface Utm { source: string; medium: string; campaign: string }
-export interface RequestRow { id: number; email: string; name: string | null; company: string; status: string; created_at: Date; decided_at: Date | null; org_id: number | null; utm: Utm }
+export interface RequestRow { id: number; email: string; name: string | null; company: string; status: string; created_at: Date; decided_at: Date | null; org_id: number | null; utm: Utm; country: string | null }
 export interface Journey {
   org: AdminOrg; plan: string; utm: Utm;
   requested_at: string | null; approved_at: string | null; created_at: string; onboarded_at: string | null; simulated_at: string | null;
@@ -39,13 +39,14 @@ const r2 = (x: number) => Math.round(x * 100) / 100;
 /** Every access request with its UTM tags (the landing page records them in source). */
 export async function requestRows(): Promise<RequestRow[]> {
   const rows = await (await getDb()).query<{ id: number; email: string; name: string | null; company: string; status: string; created_at: Date; decided_at: Date | null; org_id: number | null;
-    utm_source: string | null; utm_medium: string | null; utm_campaign: string | null }>(
+    utm_source: string | null; utm_medium: string | null; utm_campaign: string | null; country: string | null }>(
     `SELECT id, lower(email) AS email, name, company, status, created_at, decided_at, org_id,
-            source->>'utm_source' AS utm_source, source->>'utm_medium' AS utm_medium, source->>'utm_campaign' AS utm_campaign
+            source->>'utm_source' AS utm_source, source->>'utm_medium' AS utm_medium, source->>'utm_campaign' AS utm_campaign, source->>'country' AS country
        FROM access_requests ORDER BY created_at, id`);
   return rows.map((r) => ({ id: Number(r.id), email: r.email, name: r.name, company: r.company, status: r.status, created_at: new Date(r.created_at),
     decided_at: r.decided_at ? new Date(r.decided_at) : null, org_id: r.org_id == null ? null : Number(r.org_id),
-    utm: { source: clean(r.utm_source) ?? DIRECT, medium: clean(r.utm_medium) ?? "", campaign: clean(r.utm_campaign) ?? "" } }));
+    utm: { source: clean(r.utm_source) ?? DIRECT, medium: clean(r.utm_medium) ?? "", campaign: clean(r.utm_campaign) ?? "" },
+    country: typeof r.country === "string" && /^[A-Za-z]{2}$/.test(r.country) ? r.country.toUpperCase() : null }));
 }
 
 /** Stripe, once per call: each customer's first paid moment, whether it pays now and its MRR. Stripe off or down: empty, with the error. */

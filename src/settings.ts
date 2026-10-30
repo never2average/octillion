@@ -9,14 +9,17 @@ import { getDb } from "./db.js";
  * setSetting() updates this process's cache at once.
  */
 
-export type SettingGroup = "models" | "runs" | "capacity" | "research" | "reasons" | "docs" | "library" | "email" | "alerts";
+export type SettingGroup = "models" | "runs" | "capacity" | "research" | "reasons" | "docs" | "library" | "email" | "campaigns" | "alerts";
 export interface SettingDef {
   key: string; group: SettingGroup; label: string; help: string;
   kind: "text" | "int" | "number" | "choice";
   default: string | number;
   options?: string[]; min?: number; max?: number;
-  /** What a text setting holds (default: a model id). sender = "Name <address>" or an address; emails = addresses, comma-separated, or empty. */
-  format?: "model" | "sender" | "emails";
+  /**
+   * What a text setting holds (default: a model id). sender = "Name <address>" or an address; emails = addresses,
+   * comma-separated, or empty; address = one address, or empty; postal = one line of text (a postal address), or empty.
+   */
+  format?: "model" | "sender" | "emails" | "address" | "postal";
 }
 
 export const SETTING_GROUPS: { id: SettingGroup; label: string }[] = [
@@ -28,6 +31,7 @@ export const SETTING_GROUPS: { id: SettingGroup; label: string }[] = [
   { id: "docs", label: "Docs answers" },
   { id: "library", label: "Library contributions" },
   { id: "email", label: "Email" },
+  { id: "campaigns", label: "Campaigns" },
   { id: "alerts", label: "Alerts" },
 ];
 
@@ -82,6 +86,18 @@ export const SETTINGS: SettingDef[] = [
     help: "Where replies go. Empty: to the From address." },
   { key: "EMAIL_ADMIN_TO", group: "email", label: "Operator alerts to", kind: "text", format: "emails", default: "",
     help: "Who gets new access requests and library submissions, comma-separated. Empty: the platform owners (Admins)." },
+  { key: "EMAIL_POSTAL_ADDRESS", group: "campaigns", label: "Sender postal address", kind: "text", format: "postal", default: "",
+    help: "Your postal address, one line, in the footer of every campaign email. Optional; US marketing law (CAN-SPAM) expects one in commercial email." },
+  { key: "EMAIL_INBOUND_ADDRESS", group: "campaigns", label: "Replies inbox", kind: "text", format: "address", default: "",
+    help: "An address on a domain set up for receiving in Resend (e.g. replies@reply.example.com, or replies@<id>.resend.app). Each campaign email replies to replies+<token>@ that domain, so a reply stops that person's sequence and shows under Replies. Empty: replies go to Reply-to and are not tracked." },
+  { key: "CAMPAIGN_SENDS_PER_TICK", group: "campaigns", label: "Campaign emails per tick", kind: "int", default: 1000, min: 0, max: 20000,
+    help: "Most campaign emails one tick (every 5 minutes) sends. 1,000 a tick is about 12,000 an hour." },
+  { key: "CAMPAIGN_BATCH_SIZE", group: "campaigns", label: "Campaign emails per Resend request", kind: "int", default: 100, min: 1, max: 100,
+    help: "Emails sent in one call to Resend's batch endpoint (at most 100). 1 sends them one by one." },
+  { key: "CAMPAIGN_SEND_INTERVAL_MS", group: "campaigns", label: "Pause between Resend requests (ms)", kind: "int", default: 600, min: 0, max: 10000,
+    help: "Keeps campaign sending under Resend's rate limit (10 requests a second by default; a 429 also waits for its retry-after)." },
+  { key: "CAMPAIGN_TICK_SECONDS", group: "campaigns", label: "Campaign tick time budget (seconds)", kind: "int", default: 200, min: 10, max: 280,
+    help: "A tick keeps sending what is due, batch after batch, until this long has passed or the per-tick cap is reached (the Vercel function allows 300)." },
   { key: "ALERTS_ENABLED", group: "alerts", label: "Health alerts", kind: "choice", default: "on", options: ["on", "off"],
     help: "On: operators get an email (and a Slack message when the Key vault holds a Slack webhook URL) when agent sessions fail too often or wait too long. Checked every 5 minutes; at most one alert per problem an hour." },
   { key: "ALERT_FAILURE_RATE", group: "alerts", label: "Failed sessions that raise an alert (%)", kind: "number", default: 10, min: 1, max: 100,
@@ -143,6 +159,16 @@ function clean(d: SettingDef, v: unknown): { value: string | number } | { error:
     const list = s.split(",").map((x) => x.trim()).filter(Boolean);
     if (list.length > 20 || list.some((x) => !address.test(x))) return { error: `${d.label} must be email addresses, comma-separated` };
     return { value: list.join(", ") };
+  }
+  if (d.format === "address") {
+    if (s && !address.test(s)) return { error: `${d.label} must be one email address, or empty` };
+    return { value: s.toLowerCase() };
+  }
+  if (d.format === "postal") {
+    // Goes into every campaign email's footer: one line, printable, no markup.
+    const line = s.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").replace(/\s+/g, " ").trim();
+    if (line.length > 300 || /[<>]/.test(line)) return { error: `${d.label} must be one line of at most 300 characters, without < or >` };
+    return { value: line };
   }
   if (d.format === "sender") {
     const m = /^(?:([^<>"\r\n]{1,80}?)\s*<([^<>]+)>|([^<>]+))$/.exec(s);

@@ -2104,7 +2104,7 @@ try {
     const reset = () => adm("PUT", "/compute/settings", { values: Object.fromEntries(keys.map((k) => [k, null])) });
     const c0 = await json(adm("GET", "/compute"));
     const byKey = (c: any, k: string) => c.settings.find((x: any) => x.key === k);
-    assert.ok(c0.groups.length === 9 && c0.settings.length >= 24 && byKey(c0, "ALERT_FAILURE_RATE")?.value === 10 && byKey(c0, "REASONS_DAILY_MAX")?.value === 500 && byKey(c0, "DOCS_ANSWERS_DAILY_MAX")?.value === 500 && byKey(c0, "PUBLISH_DISCOUNT_TASK_USD")?.value === 10, "every setting listed, grouped");
+    assert.ok(c0.groups.length === 10 && c0.settings.length >= 24 && byKey(c0, "ALERT_FAILURE_RATE")?.value === 10 && byKey(c0, "REASONS_DAILY_MAX")?.value === 500 && byKey(c0, "DOCS_ANSWERS_DAILY_MAX")?.value === 500 && byKey(c0, "PUBLISH_DISCOUNT_TASK_USD")?.value === 10, "every setting listed, grouped");
     // Email settings (src/email.ts): defaults, and addresses checked.
     assert.ok(byKey(c0, "EMAIL_FROM")?.value === "Octillion <hello@octillion.useimmaculate.com>" && byKey(c0, "EMAILS_ENABLED")?.value === "on"
       && byKey(c0, "EMAIL_REPLY_TO")?.value === "" && byKey(c0, "EMAIL_ADMIN_TO")?.value === "", "email settings and their defaults");

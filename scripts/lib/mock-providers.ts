@@ -14,6 +14,8 @@
 // balance transactions answer 500 while down). Times are Unix seconds.
 // Resend: POST /emails (Bearer re_...; an Idempotency-Key header returns the first email's id again for the same body, 409
 // for a different one); every accepted email is in state.emails. POST /_mock/resend/outage {down} (POST /emails answers 500).
+// POST /emails/batch (state.batches), GET /emails/receiving/:id (inbound, registered by POST /_mock/resend/received),
+// POST /_mock/resend/ratelimit {count, retry_after} (the next requests answer 429 with a retry-after header).
 // Cloudflare Workers AI: POST /client/v4/accounts/:id/ai/v1/chat/completions (Bearer); state.aiRequests logs each body and
 // state.aiReply(body) decides the answer (in-process only; unset: 503).
 import express from "express";
@@ -39,6 +41,7 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     customers: new Map<string, any>(), subscriptions: new Map<string, any>(), checkouts: [] as any[], meters: [] as any[], meterEvents: [] as any[], invoices: [] as any[], balanceTxns: [] as any[], stripeDown: false,
     oauth: new Map<string, any>(), keyed: new Map<string, any>(),
     emails: [] as any[], resendKeys: new Map<string, { id: string; body: string }>(), resendDown: false,
+    batches: [] as { key: string | null; size: number }[], received: new Map<string, any>(), resendLimited: 0, resendRetryAfter: 1,
     // Cloudflare Workers AI: every chat request (its body), and how to answer one (status and/or content; unset: 503).
     aiRequests: [] as any[], aiReply: null as null | ((body: any) => { status?: number; content?: string }),
     prices: [
@@ -77,7 +80,7 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     }) as typeof res.end;
     next();
   });
-  app.use(express.json());
+  app.use(express.json({ limit: "5mb" }));
   app.use(express.urlencoded({ extended: true }));
   const page = (data: any[]) => ({ object: "list", data, list_metadata: { before: null, after: null } });
   const auth = (req: express.Request, res: express.Response, next: express.NextFunction) =>
@@ -404,6 +407,7 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
   app.post("/emails", (req, res) => {
     if (!/^Bearer re_\S+$/.test(req.get("authorization") ?? "")) return resendErr(res, 401, "missing_api_key", "Missing API key in the authorization header.");
     if (s.resendDown) return resendErr(res, 500, "application_error", "An unexpected error occurred.");
+    if (s.resendLimited > 0) { s.resendLimited--; res.set("retry-after", String(s.resendRetryAfter)); return resendErr(res, 429, "rate_limit_exceeded", "Too many requests."); }
     const b = req.body ?? {};
     const to = Array.isArray(b.to) ? b.to : b.to ? [b.to] : [];
     if (!b.from || !to.length || !b.subject || !(b.text || b.html)) return resendErr(res, 422, "validation_error", "from, to, subject and text or html are required.");
@@ -417,6 +421,39 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     if (key) s.resendKeys.set(key, { id: email.id, body });
     res.json({ id: email.id });
   });
+  // POST /emails/batch: up to 100 emails, one Idempotency-Key for the request (the same key and body answer the first
+  // request's ids again; a different body is a 409). A rate limit set by POST /_mock/resend/ratelimit {count,
+  // retry_after} answers the next `count` requests (single or batch) 429 with that retry-after.
+  app.post("/emails/batch", (req, res) => {
+    if (!/^Bearer re_\S+$/.test(req.get("authorization") ?? "")) return resendErr(res, 401, "missing_api_key", "Missing API key in the authorization header.");
+    if (s.resendDown) return resendErr(res, 500, "application_error", "An unexpected error occurred.");
+    if (s.resendLimited > 0) { s.resendLimited--; res.set("retry-after", String(s.resendRetryAfter)); return resendErr(res, 429, "rate_limit_exceeded", "Too many requests."); }
+    const list = Array.isArray(req.body) ? req.body : [];
+    if (!list.length || list.length > 100) return resendErr(res, 422, "validation_error", "Between 1 and 100 emails.");
+    if (list.some((b: any) => !b?.from || !(Array.isArray(b.to) ? b.to.length : b.to) || !b.subject || !(b.text || b.html))) return resendErr(res, 422, "validation_error", "from, to, subject and text or html are required.");
+    const key = req.get("idempotency-key") ?? null, body = JSON.stringify(list);
+    const prev = key ? s.resendKeys.get(key) : undefined;
+    if (prev) return prev.body === body ? void res.json({ data: JSON.parse(prev.id) }) : resendErr(res, 409, "invalid_idempotent_request", "Same idempotency key used with a different request payload.");
+    s.batches.push({ key, size: list.length });
+    const data = list.map((b: any) => {
+      const email = { id: randomUUID(), ...b, to: Array.isArray(b.to) ? b.to : [b.to], idempotency_key: key, batch: true, created_at: now() };
+      s.emails.push(email);
+      return { id: email.id };
+    });
+    if (key) s.resendKeys.set(key, { id: JSON.stringify(data), body });
+    res.json({ data });
+  });
+  // GET /emails/receiving/:id: an inbound email registered by POST /_mock/resend/received {id, from, to, subject, text, html?, headers?}.
+  app.get("/emails/receiving/:id", (req, res) => {
+    if (!/^Bearer re_\S+$/.test(req.get("authorization") ?? "")) return resendErr(res, 401, "missing_api_key", "Missing API key in the authorization header.");
+    const m = s.received.get(req.params.id);
+    if (!m) return resendErr(res, 404, "not_found", "Email not found.");
+    res.json({ object: "email", id: m.id, to: m.to, from: m.from, created_at: now(), subject: m.subject, html: m.html ?? null, text: m.text ?? null,
+      headers: m.headers ?? {}, bcc: [], cc: [], reply_to: [], message_id: `<${m.id}@mock>`, attachments: [] });
+  });
+  app.post("/_mock/resend/received", (req, res) => { s.received.set(String(req.body.id), req.body); res.json({ ok: true }); });
+  app.get("/_mock/resend/batches", (_req, res) => void res.json({ batches: s.batches }));
+  app.post("/_mock/resend/ratelimit", (req, res) => { s.resendLimited = Number(req.body?.count ?? 0); s.resendRetryAfter = Number(req.body?.retry_after ?? 1); res.json({ ok: true }); });
   // ---------- Cloudflare Workers AI (OpenAI-compatible chat completions): answers come from state.aiReply ----------
   app.post("/client/v4/accounts/:account/ai/v1/chat/completions", (req, res) => {
     if (!/^Bearer \S+$/.test(req.get("authorization") ?? "")) return void res.status(401).json({ success: false, errors: [{ message: "Authentication error" }] });

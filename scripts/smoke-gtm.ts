@@ -13,7 +13,8 @@ export async function gtmChecks({ db, base, adm, json, mockUrl, mockPost, sentTo
   const CAMP = `gtm-${stamp}`, day = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10);
   const range = `from=${day(7)}&to=${day(0)}`;
   const ann = `ann+${stamp}@gtm-a.dev`, bob = `bob+${stamp}@gtm-b.dev`, cara = `cara+${stamp}@gtm-c.dev`, dana = `dana+${stamp}@gtm-d.dev`;
-  const src = (campaign: string) => JSON.stringify({ utm_source: "newsletter", utm_medium: "email", utm_campaign: campaign });
+  // US requesters (Vercel's IP country): outside the countries that need a recorded opt-in, so a campaign that does not require one may write to them.
+  const src = (campaign: string) => JSON.stringify({ utm_source: "newsletter", utm_medium: "email", utm_campaign: campaign, country: "US" });
   const req = async (email: string, name: string, company: string, status: string) => (await db.query<{ id: number }>(
     `INSERT INTO access_requests (email, company, name, status, source, created_at, decided_at) VALUES ($1, $2, $3, $4, $5::jsonb, now() - interval '6 days', CASE WHEN $4 = 'approved' THEN now() - interval '5 days' END) RETURNING id`,
     [email, company, name, status, src(CAMP)]))[0].id;
@@ -96,7 +97,7 @@ export async function gtmChecks({ db, base, adm, json, mockUrl, mockPost, sentTo
   await db.query("INSERT INTO email_suppressions (email_hash, reason) VALUES ($1, 'manual')", [mail.hashAddress(bob)]);
   assert.equal((await json(adm("POST", "/gtm/audience/preview", { audience }))).suppressed, 1, "the preview counts the suppressed");
 
-  const created = await json(adm("POST", "/gtm/campaigns", { name: `Activation nudge ${stamp}`, audience, steps, conversion_days: 14 }));
+  const created = await json(adm("POST", "/gtm/campaigns", { name: `Activation nudge ${stamp}`, audience, steps, conversion_days: 14, requires_opt_in: false }));
   const id = created.campaign.id;
   assert.ok(created.campaign.status === "draft" && created.campaign.owner === "token:smoke", "a draft, owned by whoever made it");
   // Test send to an address typed in: rendered for a real match, marked as a test, with the unsubscribe headers.
@@ -201,11 +202,12 @@ export async function gtmChecks({ db, base, adm, json, mockUrl, mockPost, sentTo
   const sentFor = (cid: number) => [eve, fay].flatMap((e) => sentTo(e, "campaign")).filter((e: any) => e.tags?.some((t: any) => t.name === "campaign" && t.value === String(cid))).length;
   const waitFor = async (ok: () => boolean, what: string) => { for (let i = 0; i < 500 && !ok(); i++) await new Promise((r) => setTimeout(r, 20)); assert.ok(ok(), what); };
   const mk = async (name: string) => {
-    const cidN = (await json(adm("POST", "/gtm/campaigns", { name, audience: { include: "requests", utm_campaign: CB }, steps: [steps[0]] }))).campaign.id;
+    const cidN = (await json(adm("POST", "/gtm/campaigns", { name, audience: { include: "requests", utm_campaign: CB }, steps: [steps[0]], requires_opt_in: false }))).campaign.id;
     await json(adm("POST", `/gtm/campaigns/${cidN}/launch`, {}));
     return cidN as number;
   };
-  process.env.CAMPAIGN_SEND_INTERVAL_MS = "1500";
+  // One email per Resend request here, so a pause between two requests lands between two people.
+  process.env.CAMPAIGN_SEND_INTERVAL_MS = "1500"; process.env.CAMPAIGN_BATCH_SIZE = "1";
   const p1 = await mk(`Pause ${stamp}`);
   const batch1 = json(adm("POST", "/gtm/tick"));
   await waitFor(() => sentFor(p1) === 1, "the first email of the batch went out");
@@ -227,6 +229,7 @@ export async function gtmChecks({ db, base, adm, json, mockUrl, mockPost, sentTo
   assert.ok(sentFor(p2) === 1 && !t2.error, `deleted mid-batch: the tick carries on without error (${JSON.stringify(t2)})`);
   process.env.CAMPAIGN_SEND_INTERVAL_MS = "0";
   assert.ok(!(await json(adm("POST", "/gtm/tick"))).busy, "and gives its lease back");
+  delete process.env.CAMPAIGN_BATCH_SIZE;
 
   // Send now (the Activation nudge): this campaign's own result. A Clerk member of C gets it.
   const p3 = (await json(adm("POST", "/gtm/campaigns", { name: `Nudge ${stamp}`, audience: { include: "accounts", accounts: [slugC] }, steps: [steps[0]] }))).campaign.id;
@@ -274,4 +277,6 @@ export async function gtmChecks({ db, base, adm, json, mockUrl, mockPost, sentTo
   delete process.env.CAMPAIGN_SEND_INTERVAL_MS;
   delete process.env.CAMPAIGN_SENDS_PER_TICK;
   console.log("✓ GTM: Activation funnel (filters, medians, attention), Attribution by UTM to MRR, Campaigns (audience, test send, rate-limited idempotent sends, pause or delete mid-batch, transient retries, send now, unsubscribe, suppression, Resend webhooks, conversions)");
+  // Phase 1: replies, triggers, A/B variants, send windows, consent, the postal address, batch sending (scripts/smoke-gtm-phase1.ts).
+  await (await import("./smoke-gtm-phase1.js")).gtmPhase1Checks({ db, base, adm, json, mockUrl, mockPost, sentTo, stamp });
 }

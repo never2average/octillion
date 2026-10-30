@@ -35,6 +35,9 @@ const serverlessTick = (force = false) => { if (process.env.VERCEL) telemetry.ke
 import { startArchiver, stopArchiver } from "./archive.js";
 import * as campaignsMod from "./campaigns.js";
 import * as gtm from "./gtm.js";
+import * as gtmEvents from "./gtm-events.js";
+import * as gtmReplies from "./gtm-replies.js";
+import * as consent from "./gtm-consent.js";
 import { storageEnabled } from "./storage.js";
 import { brokerOrchestratorCredentials, brokerSessionCredentials, gatewayHandler } from "./gateway.js";
 import * as research from "./research.js";
@@ -165,6 +168,11 @@ export function createApp() {
       [email, company, productUrl || null, message || null, name || null, role || null, teamSize || null, agents, Object.keys(source).length ? JSON.stringify(source) : null,
        docsUrl || null, competitors || null, goal || null, timeline || null, heardFrom || null, subindustry || null],
     );
+    // The marketing opt-in checkbox (unticked by default): recorded by address hash, with the wording version and
+    // the country (src/gtm-consent.ts). A failure here never fails the request.
+    await consent.recordFormOptIn(email, { opt_in: req.body?.marketing_opt_in, wording_version: req.body?.marketing_wording, country: consent.cleanCountry(source.country), request_id: row.id })
+      .catch((e) => console.error("access request consent: not recorded:", (e as Error).message));
+    gtmEvents.emitLater("request_submitted", { request_id: row.id, key: String(row.id) });
     // Background research on the company for whoever reviews the request (src/prospect.ts); kept alive on Vercel.
     telemetry.keepAlive(prospect.researchRequest(row.id));
     // Email after the write, never in its way (src/email.ts): "we got it" to them, an alert to the operator.
@@ -674,6 +682,13 @@ export function createApp() {
   ob.delete("/gtm/campaigns/:id", need("campaigns"), async (req, res) => { await campaignsMod.deleteCampaign(adminActor(req, res), cid(req)); res.status(204).end(); });
   // Process what is due now instead of waiting for the 5-minute tick (the same idempotent tick).
   ob.post("/gtm/tick", need("campaigns"), async (_req, res) => void res.json(await campaignsMod.campaignTick()));
+  // A/B: one variant of a step at 100% (src/campaigns.ts pickWinner).
+  ob.post("/gtm/campaigns/:id/steps/:step/winner", need("campaigns"), async (req, res) =>
+    void res.json(await campaignsMod.pickWinner(adminActor(req, res), cid(req), req.params.step, req.body?.variant)));
+  // Replies (src/gtm-replies.ts): every campaign's inbox, or one campaign's (?campaign_id=), and marking one handled.
+  ob.get("/gtm/replies", async (req, res) => void res.json(await gtmReplies.listReplies(req.query)));
+  ob.post("/gtm/replies/:id/handled", need("campaigns"), async (req, res) =>
+    void res.json(await gtmReplies.setHandled(adminActor(req, res), Number(req.params.id), req.body?.handled !== false)));
   ob.get("/compute/sandbox", async (_req, res) => void res.json(await library.sandboxProvider()));
   ob.post("/compute/keys", need("keys"), async (req, res) => void res.status(201).json(await library.addModelKey(adminActor(req, res), req.body ?? {})));
   ob.post("/compute/keys/:id/enabled", need("keys"), async (req, res) => done(res, await library.setModelKeyEnabled(adminActor(req, res), Number(req.params.id), req.body?.enabled)));

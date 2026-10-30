@@ -23,6 +23,7 @@ import { clientCatalog } from "./connect-catalog.js";
 import { getDb } from "./db.js";
 import * as clerk from "./clerk.js";
 import * as mail from "./email.js";
+import * as gtmEvents from "./gtm-events.js";
 import { currentAdminRole } from "./admin-roles.js";
 import { accountRoleOf, clerkRoleFor, parseAccountRole, ACCOUNT_ROLE_LABELS, type AccountRole } from "./account-roles.js";
 
@@ -118,7 +119,11 @@ const ORG_FACTS = `
  * A member, keyed by Clerk user id (Clerk's membership endpoints are). Suspended = public_metadata.suspended. `role` is
  * Clerk's (admin or member); `account_role` is the Octillion role (src/account-roles.ts).
  */
-export interface Member { id: string; user_id: string; status: "active" | "inactive"; role: "admin" | "member"; account_role: AccountRole; created_at: string | null; email: string | null; name: string | null }
+export interface Member {
+  id: string; user_id: string; status: "active" | "inactive"; role: "admin" | "member"; account_role: AccountRole; created_at: string | null; email: string | null; name: string | null;
+  /** The membership's public_metadata.time_zone (IANA), when someone set it: Clerk has no time zone field (GTM send windows). */
+  time_zone: string | null;
+}
 export interface Invite { id: string; email: string; state: clerk.ClerkInvitation["status"]; role: "admin" | "member"; account_role: AccountRole; created_at: string | null; expires_at: string | null }
 interface People { members: Member[]; invitations: Invite[]; error?: string }
 
@@ -126,6 +131,7 @@ const toMember = (m: clerk.ClerkMembership): Member => ({
   id: m.public_user_data?.user_id ?? m.id, user_id: m.public_user_data?.user_id ?? "", status: clerk.isSuspended(m) ? "inactive" : "active",
   role: clerk.roleOf(m.role), account_role: accountRoleOf(m), created_at: clerk.iso(m.created_at), email: m.public_user_data?.identifier?.toLowerCase() ?? null,
   name: clerk.displayName(m.public_user_data ?? {}),
+  time_zone: typeof m.public_metadata?.time_zone === "string" ? m.public_metadata.time_zone.slice(0, 64) : null,
 });
 const toInvite = (x: clerk.ClerkInvitation): Invite => ({
   id: x.id, email: x.email_address.toLowerCase(), state: x.status, role: clerk.roleOf(x.role), account_role: accountRoleOf(x), created_at: clerk.iso(x.created_at), expires_at: clerk.iso(x.expires_at),
@@ -460,6 +466,10 @@ export async function approveRequest(actor: string, id: number, opts: { name?: s
   const out = await result(slug, r.email, { key, invitation, created });
   // A short welcome beside Clerk's invitation (Clerk sends that one); after the write, never in its way.
   mail.fire(mail.requestApproved(r, { account: out.org.name, invited: Boolean(invitation) }));
+  // GTM triggers (src/gtm-events.ts), after every write above, so whoever a campaign enrols is already linked.
+  const [{ id: orgId }] = await (await getDb()).query<{ id: number }>("SELECT id FROM organizations WHERE slug = $1", [slug]);
+  gtmEvents.emitLater("request_approved", { request_id: id, org_id: Number(orgId), key: String(id) });
+  if (created) gtmEvents.emitLater("account_created", { org_id: Number(orgId), key: String(orgId) });
   return out;
 }
 
@@ -487,6 +497,8 @@ export async function createAccount(actor: string, input: { name?: string; slug?
   const made = await newAccount(actor, String(input.name ?? ""), input.slug, email);
   let key = made.key, invitation: unknown = null;
   if (email && !key) ({ key, invitation } = await invitePerson(actor, made.slug, email, "owner"));
+  const [{ id: orgId }] = await (await getDb()).query<{ id: number }>("SELECT id FROM organizations WHERE slug = $1", [made.slug]);
+  gtmEvents.emitLater("account_created", { org_id: Number(orgId), key: String(orgId) });
   return result(made.slug, email, { key, invitation, created: true });
 }
 

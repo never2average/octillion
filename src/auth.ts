@@ -152,7 +152,9 @@ export async function orgForClerk(clerkOrgId: string): Promise<Org | null> {
     else {
       let slug = slugify(c.name);
       if ((await db.query("SELECT 1 FROM organizations WHERE slug = $1", [slug])).length) slug = `${slug.slice(0, 40)}-${randomBytes(3).toString("hex")}`;
-      await db.query("INSERT INTO organizations (slug, name, clerk_org_id) VALUES ($1, $2, $3) ON CONFLICT (clerk_org_id) DO NOTHING", [slug, c.name, clerkOrgId]);
+      const [made] = await db.query<{ id: number }>("INSERT INTO organizations (slug, name, clerk_org_id) VALUES ($1, $2, $3) ON CONFLICT (clerk_org_id) DO NOTHING RETURNING id", [slug, c.name, clerkOrgId]);
+      // A GTM trigger (src/gtm-events.ts): a self-serve account was made.
+      if (made) void import("./gtm-events.js").then((g) => g.emitLater("account_created", { org_id: Number(made.id), key: String(made.id) })).catch(() => {});
       await organizations.setMetadata(clerkOrgId, { octillion_slug: slug }).catch((err) => console.error("clerk metadata:", (err as Error).message));
     }
     row = await find();
