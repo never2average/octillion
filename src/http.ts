@@ -38,6 +38,7 @@ import * as gtm from "./gtm.js";
 import * as gtmEvents from "./gtm-events.js";
 import * as gtmReplies from "./gtm-replies.js";
 import * as consent from "./gtm-consent.js";
+import { gtmOutboundRoutes } from "./gtm-routes.js";
 import { storageEnabled } from "./storage.js";
 import { brokerOrchestratorCredentials, brokerSessionCredentials, gatewayHandler } from "./gateway.js";
 import * as research from "./research.js";
@@ -492,7 +493,9 @@ export function createApp() {
     });
     next();
   });
-  admin.use(express.json({ limit: "64kb" }));
+  // A prospects or companies CSV import (src/gtm-crm.ts, up to 5,000 mapped rows) is the one bigger body.
+  const adminJson = express.json({ limit: "64kb" }), importJson = express.json({ limit: "4mb" });
+  admin.use((req, res, next) => (/^\/onboarding\/gtm\/(prospects|companies)\/import$/.test(req.path) ? importJson : adminJson)(req, res, next));
   admin.get("/keyvault/providers", async (_req, res) => void res.json({ providers: await kv.listProviders() }));
   admin.put("/keyvault/providers/:slug", need("keys"), async (req, res) => void res.json(await kv.upsertProvider({ ...req.body, slug: String(req.params.slug) })));
   admin.get("/keyvault/credentials", async (_req, res) => void res.json({ credentials: await kv.listCredentials() }));
@@ -706,6 +709,8 @@ export function createApp() {
   ob.post("/gtm/campaigns/:id/resend-unknown", need("campaigns"), async (req, res) => void res.json(await campaignsMod.resendUnknown(adminActor(req, res), cid(req))));
   ob.post("/gtm/replies/:id/handled", need("campaigns"), async (req, res) =>
     void res.json(await gtmReplies.setHandled(adminActor(req, res), Number(req.params.id), req.body?.handled !== false)));
+  // GTM phase 2 (src/gtm-routes.ts): prospects, companies, Apollo, sender identities, reply quick actions, deals, outbound attribution.
+  gtmOutboundRoutes(ob, { need, actor: adminActor });
   ob.get("/compute/sandbox", async (_req, res) => void res.json(await library.sandboxProvider()));
   ob.post("/compute/keys", need("keys"), async (req, res) => void res.status(201).json(await library.addModelKey(adminActor(req, res), req.body ?? {})));
   ob.post("/compute/keys/:id/enabled", need("keys"), async (req, res) => done(res, await library.setModelKeyEnabled(adminActor(req, res), Number(req.params.id), req.body?.enabled)));

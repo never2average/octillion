@@ -284,4 +284,6 @@ export async function gtmChecks({ db, base, adm, json, mockUrl, mockPost, sentTo
   console.log("✓ GTM: Activation funnel (filters, medians, attention), Attribution by UTM to MRR, Campaigns (audience, test send, rate-limited idempotent sends, pause or delete mid-batch, transient retries, send now, unsubscribe, suppression, Resend webhooks, conversions)");
   // Phase 1: replies, triggers, A/B variants, send windows, consent, the postal address, batch sending (scripts/smoke-gtm-phase1.ts).
   await (await import("./smoke-gtm-phase1.js")).gtmPhase1Checks({ db, base, adm, json, mockUrl, mockPost, sentTo, stamp });
+  // Phase 2: prospects, companies, Apollo, outbound sequences, deals, outbound attribution (scripts/smoke-gtm-phase2.ts).
+  await (await import("./smoke-gtm-phase2.js")).gtmPhase2Checks({ db, base, adm, json, mockUrl, mockPost, sentTo, stamp });
 }

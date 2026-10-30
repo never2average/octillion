@@ -143,6 +143,8 @@ export async function receiveInbound(d: InboundEvent, key: Buffer): Promise<Webh
       `UPDATE gtm_campaign_recipients SET status = CASE WHEN status IN ('pending', 'active', 'done') THEN 'replied' ELSE status END,
               replied_at = coalesce(replied_at, now()), next_at = CASE WHEN status IN ('pending', 'active') THEN NULL ELSE next_at END WHERE id = $1`, [r.id]);
     capture({ distinctId: "octillion:email" }, "campaign_replied", { campaign_id: Number(r.campaign_id) });
+    // An outbound prospect moves to replied (src/gtm-outbound.ts).
+    await (await import("./gtm-outbound.js")).onReply(Number(r.id)).catch((e) => console.error(`reply: prospect not updated: ${(e as Error).message}`));
   }
   return { status: 200, body: { ok: true, matched: true, kind } };
 }

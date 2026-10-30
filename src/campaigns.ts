@@ -38,6 +38,9 @@
  *   metrics     recipients, sent, delivered / bounced / opened / clicked (Resend webhooks, POST /api/webhooks/resend,
  *               Svix-signed with the key vault's resend_webhook secret), replied, unsubscribed, and conversions within
  *               conversion_days of the first email: requested access, activated (first simulation), paid (src/gtm.ts).
+ *   outbound    an audience of prospects (src/gtm-outbound.ts, phase 2): a sender identity on the outreach subdomain
+ *               (required: never EMAIL_FROM's domain), its warm-up cap per day across campaigns, the cold-email
+ *               safety rules at enrolment and before each send, text-only email unless the campaign tracks opens.
  */
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { hostname } from "node:os";
@@ -48,10 +51,11 @@ import { DIRECT, journeys, requestRows, within, type Journey, type RequestRow } 
 import { addCredentialIfAbsent, useCredential } from "./keyvault.js";
 import { freshSettings, settingNumber, settingText } from "./settings.js";
 import { capture } from "./telemetry.js";
-import { consentOf, mayEnrol, recordConsent, type ConsentDecision } from "./gtm-consent.js";
+import { consentOf, mayEnrol, recordConsent, type ConsentDecision, type ConsentInput } from "./gtm-consent.js";
 import { DETECTED, detectSignals, EVENT_TYPES, forgetImmediate, REQUEST_EVENTS, type EventType } from "./gtm-events.js";
 import { NO_WINDOW, nextOpening, parseWindow, recipientZone, validZone, windowOpen, type SendWindow } from "./gtm-schedule.js";
 import * as replies from "./gtm-replies.js";
+import * as outbound from "./gtm-outbound.js";
 
 export const STATUSES = ["draft", "scheduled", "running", "paused", "done"] as const;
 export type CampaignStatus = (typeof STATUSES)[number];
@@ -66,12 +70,15 @@ export const VARIANT_LETTERS = ["A", "B", "C", "D"] as const;
 // ---------- the model ----------
 
 export interface Audience {
-  /** accounts: their active members (Clerk), else the account's approved requesters; requests: the requester. */
-  include: "accounts" | "requests" | "both";
+  /** accounts: their active members (Clerk), else the account's approved requesters; requests: the requester;
+   *  prospects: outbound, a filter over gtm_prospects (`prospects`; src/gtm-outbound.ts). */
+  include: "accounts" | "requests" | "both" | "prospects";
   stages: string[]; attention: string; created_from: string | null; created_to: string | null;
   utm_source: string; utm_medium: string; utm_campaign: string; plans: string[]; request_status: string[];
   /** Account slugs: a one-off nudge to named accounts (Activation's "Email a nudge"). */
   accounts: string[];
+  /** include = prospects: the saved filter over prospects. */
+  prospects?: outbound.ProspectFilter;
 }
 export interface Variant { subject: string; body: string; weight: number }
 /** subject / body are variant A's when there are variants (kept so a reader without variants still has the email). */
@@ -94,7 +101,7 @@ const fail = (msg: string): never => { throw new AdminError(msg); };
 export function parseAudience(v: unknown): Audience {
   const a = (v && typeof v === "object" ? v : {}) as Record<string, unknown>;
   const include = a.include == null || a.include === "" ? "accounts" : a.include;
-  if (include !== "accounts" && include !== "requests" && include !== "both") throw new AdminError("audience.include must be accounts, requests or both");
+  if (include !== "accounts" && include !== "requests" && include !== "both" && include !== "prospects") throw new AdminError("audience.include must be accounts, requests, both or prospects");
   const stages = strs(a.stages);
   const bad = stages.find((s) => !STAGES.some((x) => x.id === s));
   if (bad) throw new AdminError(`Unknown stage ${bad}: use ${STAGES.map((s) => s.id).join(", ")}`);
@@ -104,6 +111,7 @@ export function parseAudience(v: unknown): Audience {
     include, stages, attention: str(a.attention, 200), created_from: day(a.created_from, "audience.created_from"), created_to: day(a.created_to, "audience.created_to"),
     utm_source: str(a.utm_source, 200), utm_medium: str(a.utm_medium, 200), utm_campaign: str(a.utm_campaign, 200), plans: strs(a.plans), request_status,
     accounts: strs(a.accounts, 500),
+    ...(include === "prospects" ? { prospects: outbound.parseProspectFilter(a.prospects) } : {}),
   };
   if (out.created_from && out.created_to && out.created_to < out.created_from) throw new AdminError("audience.created_to is before created_from");
   return out;
@@ -207,15 +215,21 @@ interface CampaignRow {
   id: number; name: string; audience: Audience; steps: Step[]; status: CampaignStatus; rolling: boolean; conversion_days: number; starts_at: Date | null;
   owner: string; owner_user_id: string | null; created_at: Date; updated_at: Date; launched_at: Date | null; enrolled_at: Date | null; finished_at: Date | null;
   trigger: Trigger | null; send_window: SendWindow; requires_opt_in: boolean | null; count_auto_replies: boolean;
+  /** Outbound (migration 0010): the sender identity, open tracking (null: off for outbound), EU / EEA / UK / CH prospects allowed. */
+  sender_identity_id: number | null; track_opens: boolean | null; allow_restricted: boolean;
 }
-const COLS = "id, name, audience, steps, status, rolling, conversion_days, starts_at, owner, owner_user_id, created_at, updated_at, launched_at, enrolled_at, finished_at, trigger, send_window, requires_opt_in, count_auto_replies";
+const COLS = "id, name, audience, steps, status, rolling, conversion_days, starts_at, owner, owner_user_id, created_at, updated_at, launched_at, enrolled_at, finished_at, trigger, send_window, requires_opt_in, count_auto_replies, sender_identity_id, track_opens, allow_restricted";
 const idOf = (v: unknown) => {
   const n = Number(v);
   if (!Number.isSafeInteger(n) || n <= 0) throw new AdminError("Invalid campaign id");
   return n;
 };
 const shapeRow = (c: CampaignRow): CampaignRow => ({ ...c, id: Number(c.id), audience: parseAudienceSafe(c.audience), steps: Array.isArray(c.steps) ? c.steps : [],
-  trigger: parseTriggerSafe(c.trigger), send_window: parseWindowSafe(c.send_window) });
+  trigger: parseTriggerSafe(c.trigger), send_window: parseWindowSafe(c.send_window), sender_identity_id: c.sender_identity_id == null ? null : Number(c.sender_identity_id) });
+/** An outbound campaign: its audience is prospects (src/gtm-outbound.ts). */
+export const isOutbound = (c: Pick<CampaignRow, "audience">) => c.audience.include === "prospects";
+/** Open tracking: as set; by default on for lifecycle email (its HTML part), off for outbound (text only, no pixel). */
+const tracksOpens = (c: Pick<CampaignRow, "audience" | "track_opens">) => c.track_opens ?? !isOutbound(c);
 async function campaignById(id: number): Promise<CampaignRow> {
   const [c] = await (await getDb()).query<CampaignRow>(`SELECT ${COLS} FROM gtm_campaigns WHERE id = $1`, [idOf(id)]);
   if (!c) throw new AdminError(`No campaign ${id}`, 404);
@@ -225,10 +239,11 @@ const parseAudienceSafe = (a: unknown) => { try { return parseAudience(a); } cat
 
 /** Whether this campaign writes only to a recorded opt-in: as set, else on when it can reach access requesters. */
 export const requiresOptIn = (c: Pick<CampaignRow, "requires_opt_in" | "trigger" | "audience">) =>
-  c.requires_opt_in ?? (c.trigger ? REQUEST_EVENTS.includes(c.trigger.type) : c.audience.include !== "accounts");
+  c.audience.include === "prospects" ? false : c.requires_opt_in ?? (c.trigger ? REQUEST_EVENTS.includes(c.trigger.type) : c.audience.include !== "accounts");
 
 function fields(body: Record<string, unknown>, partial: boolean) {
-  const out: Partial<Pick<CampaignRow, "name" | "audience" | "steps" | "rolling" | "conversion_days" | "trigger" | "send_window" | "requires_opt_in" | "count_auto_replies">> = {};
+  const out: Partial<Pick<CampaignRow, "name" | "audience" | "steps" | "rolling" | "conversion_days" | "trigger" | "send_window" | "requires_opt_in" | "count_auto_replies"
+    | "sender_identity_id" | "track_opens" | "allow_restricted">> = {};
   if (!partial || body.name !== undefined) {
     const name = str(body.name, 120);
     if (!name) throw new AdminError("Give the campaign a name");
@@ -246,16 +261,40 @@ function fields(body: Record<string, unknown>, partial: boolean) {
   if (!partial || body.send_window !== undefined) out.send_window = parseWindow(body.send_window, fail);
   if (!partial || body.requires_opt_in !== undefined) out.requires_opt_in = body.requires_opt_in == null || body.requires_opt_in === "" ? null : body.requires_opt_in === true;
   if (!partial || body.count_auto_replies !== undefined) out.count_auto_replies = body.count_auto_replies === true;
+  if (!partial || body.sender_identity_id !== undefined) {
+    const n = body.sender_identity_id == null || body.sender_identity_id === "" ? null : Number(body.sender_identity_id);
+    if (n != null && (!Number.isSafeInteger(n) || n <= 0)) throw new AdminError("sender_identity_id must be a sender identity's id");
+    out.sender_identity_id = n;
+  }
+  if (!partial || body.track_opens !== undefined) out.track_opens = body.track_opens == null || body.track_opens === "" ? null : body.track_opens === true;
+  if (!partial || body.allow_restricted !== undefined) out.allow_restricted = body.allow_restricted === true;
+  if (out.audience?.include === "prospects" && out.trigger) throw new AdminError("An outbound campaign (prospects) is not triggered by events: it starts at launch or a scheduled time");
   return out;
+}
+
+/** An identity named on a campaign must exist and be fit for cold email (never the product's sender domain). */
+async function checkIdentity(id: number | null | undefined) {
+  if (id == null) return;
+  const why = await outbound.identityProblem(id);
+  if (why) throw new AdminError(why);
+}
+/** A prospects campaign may not start (launch, schedule, resume) without a valid outbound identity. */
+async function assertSendable(c: CampaignRow) {
+  if (!isOutbound(c)) return;
+  const why = await outbound.identityProblem(c.sender_identity_id);
+  if (why) throw new AdminError(why, 409);
 }
 
 export async function createCampaign(actor: string, ownerUserId: string | null, body: Record<string, unknown>) {
   const f = fields(body, false);
+  await checkIdentity(f.sender_identity_id);
   const [row] = await (await getDb()).query<{ id: number }>(
-    `INSERT INTO gtm_campaigns (name, audience, steps, rolling, conversion_days, owner, owner_user_id, trigger, send_window, requires_opt_in, count_auto_replies)
-     VALUES ($1, $2::jsonb, $3::jsonb, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11) RETURNING id`,
+    `INSERT INTO gtm_campaigns (name, audience, steps, rolling, conversion_days, owner, owner_user_id, trigger, send_window, requires_opt_in, count_auto_replies,
+                                sender_identity_id, track_opens, allow_restricted)
+     VALUES ($1, $2::jsonb, $3::jsonb, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12, $13, $14) RETURNING id`,
     [f.name, JSON.stringify(f.audience), JSON.stringify(f.steps), f.rolling, f.conversion_days, actor, ownerUserId,
-     f.trigger ? JSON.stringify(f.trigger) : null, JSON.stringify(f.send_window), f.requires_opt_in, f.count_auto_replies]);
+     f.trigger ? JSON.stringify(f.trigger) : null, JSON.stringify(f.send_window), f.requires_opt_in, f.count_auto_replies,
+     f.sender_identity_id, f.track_opens, f.allow_restricted]);
   log(actor, "campaign.create", null, { campaign_id: Number(row.id), steps: f.steps!.length, trigger: f.trigger?.type ?? null });
   return campaignDetail(Number(row.id));
 }
@@ -265,15 +304,22 @@ export async function updateCampaign(actor: string, id: number, body: Record<str
   const c = await campaignById(id);
   if (!["draft", "scheduled", "paused"].includes(c.status)) throw new AdminError(`A ${c.status} campaign cannot be edited: pause it first`, 409);
   const f = fields(body, true);
-  // The trigger column is nullable: "no trigger" is a change, so it is set explicitly when sent.
+  if ((f.audience ?? c.audience).include === "prospects" && (body.trigger !== undefined ? f.trigger : c.trigger))
+    throw new AdminError("An outbound campaign (prospects) is not triggered by events: it starts at launch or a scheduled time");
+  await checkIdentity(f.sender_identity_id);
+  // The trigger column is nullable: "no trigger" is a change, so it is set explicitly when sent (the identity and
+  // open tracking likewise).
   await (await getDb()).query(
     `UPDATE gtm_campaigns SET name = coalesce($2, name), audience = coalesce($3::jsonb, audience), steps = coalesce($4::jsonb, steps),
             rolling = coalesce($5, rolling), conversion_days = coalesce($6, conversion_days),
             trigger = CASE WHEN $7 THEN $8::jsonb ELSE trigger END, send_window = coalesce($9::jsonb, send_window),
-            requires_opt_in = CASE WHEN $10 THEN $11 ELSE requires_opt_in END, count_auto_replies = coalesce($12, count_auto_replies), updated_at = now() WHERE id = $1`,
+            requires_opt_in = CASE WHEN $10 THEN $11 ELSE requires_opt_in END, count_auto_replies = coalesce($12, count_auto_replies),
+            sender_identity_id = CASE WHEN $13 THEN $14::bigint ELSE sender_identity_id END, track_opens = CASE WHEN $15 THEN $16::boolean ELSE track_opens END,
+            allow_restricted = coalesce($17, allow_restricted), updated_at = now() WHERE id = $1`,
     [c.id, f.name ?? null, f.audience ? JSON.stringify(f.audience) : null, f.steps ? JSON.stringify(f.steps) : null, f.rolling ?? null, f.conversion_days ?? null,
      body.trigger !== undefined, f.trigger ? JSON.stringify(f.trigger) : null, f.send_window ? JSON.stringify(f.send_window) : null,
-     body.requires_opt_in !== undefined, f.requires_opt_in ?? null, f.count_auto_replies ?? null]);
+     body.requires_opt_in !== undefined, f.requires_opt_in ?? null, f.count_auto_replies ?? null,
+     body.sender_identity_id !== undefined, f.sender_identity_id ?? null, body.track_opens !== undefined, f.track_opens ?? null, f.allow_restricted ?? null]);
   forgetImmediate();
   log(actor, "campaign.update", null, { campaign_id: c.id, fields: Object.keys(f) });
   return campaignDetail(c.id);
@@ -284,6 +330,7 @@ export async function launchCampaign(actor: string, id: number, body: { at?: unk
   const c = await campaignById(id);
   if (c.status !== "draft") throw new AdminError(c.status === "paused" ? "This campaign is paused: resume it" : `This campaign is already ${c.status}`, 409);
   if (!c.steps.length) throw new AdminError("Add at least one email before launching");
+  await assertSendable(c);
   const at = body.at ? new Date(String(body.at)) : null;
   if (at && Number.isNaN(at.getTime())) throw new AdminError("at must be a date and time");
   const db = await getDb();
@@ -308,6 +355,7 @@ export async function setCampaignState(actor: string, id: number, action: "pause
   } else if (action === "resume") {
     if (c.status !== "paused") throw new AdminError("Only a paused campaign can be resumed", 409);
     if (!c.steps.length) throw new AdminError("Add at least one email before resuming");
+    await assertSendable(c);
     // Paused before it ever started: it starts now (and enrolls on this tick).
     await db.query("UPDATE gtm_campaigns SET status = 'running', launched_at = coalesce(launched_at, now()), updated_at = now() WHERE id = $1", [c.id]);
     if (!c.enrolled_at && !c.trigger) await enroll(c.id);
@@ -346,15 +394,18 @@ export async function pickWinner(actor: string, id: number, stepIn: unknown, let
 // ---------- the audience ----------
 
 export interface Candidate {
-  email: string; first_name: string | null; product: string | null; source: "account" | "request";
+  email: string; first_name: string | null; product: string | null; source: "account" | "request" | "prospect";
   org_id: number | null; org_slug: string | null; org_name: string | null; request_id: number | null;
   /** ISO country of the person's access request (the account's earliest, for a member), and a stored time zone. */
   country: string | null; time_zone: string | null;
+  /** An outbound candidate's prospect (src/gtm-outbound.ts). */
+  prospect_id?: number | null;
 }
 const firstName = (n: string | null | undefined) => n?.trim().split(/\s+/)[0] || null;
 
 /** Everyone the audience matches now, one per address (an account's member before the same person's request). */
 export async function resolveAudience(a: Audience, data?: { journeys: Journey[]; requests: RequestRow[] }): Promise<Candidate[]> {
+  if (a.include === "prospects") return outbound.resolveProspects(a.prospects ?? outbound.parseProspectFilter({}));
   const scoped = a.stages.length > 0 || !!a.attention || a.plans.length > 0 || a.accounts.length > 0;
   // Requesters only, with no account filter: the requests table is all it takes (no Clerk, no Stripe). Otherwise the
   // accounts, without Stripe's payment history (an audience never needs it; the plan comes with the account listing).
@@ -412,22 +463,41 @@ async function suppressedSet(emails: string[]): Promise<Set<string>> {
   return new Set(rows.map((r) => hashes.get(r.email_hash)!));
 }
 
-/** Each candidate's consent decision under this campaign's rule (src/gtm-consent.ts). */
-async function consentFor(people: Candidate[], optIn: boolean): Promise<Map<string, ConsentDecision>> {
-  const have = await consentOf(people.map((p) => p.email));
-  return new Map(people.map((p) => [p.email, mayEnrol(p, optIn, have.get(p.email))]));
+type Decision = ConsentDecision | { ok: true; basis: string } | { ok: false; reason: string };
+/**
+ * Each candidate's consent decision under this campaign's rule (src/gtm-consent.ts). Prospects follow the outbound
+ * rules instead (src/gtm-outbound.ts outboundBlocks): their recorded lawful basis, and never a customer, someone in
+ * another active sequence, or (unless the campaign allows them) someone in the EU / EEA / UK / CH.
+ */
+async function consentFor(people: Candidate[], optIn: boolean, c?: Pick<CampaignRow, "id" | "allow_restricted">): Promise<Map<string, Decision>> {
+  const prospects = people.filter((p) => p.source === "prospect"), others = people.filter((p) => p.source !== "prospect");
+  const have = await consentOf(others.map((p) => p.email));
+  const out = new Map<string, Decision>(others.map((p) => [p.email, mayEnrol(p as ConsentInput, optIn, have.get(p.email))]));
+  if (prospects.length) {
+    const [blocks, bases] = await Promise.all([outbound.outboundBlocks(prospects, { id: c?.id ?? 0, allow_restricted: c?.allow_restricted ?? false }),
+      outbound.basesOf(prospects.map((p) => p.email))]);
+    for (const p of prospects) {
+      const why = blocks.get(p.email);
+      out.set(p.email, why ? { ok: false, reason: why } : { ok: true, basis: bases.get(p.email) ?? "legitimate_interest" });
+    }
+  }
+  return out;
 }
 
 /** The editor's preview: how many the audience matches now, how many are suppressed or lack consent, and a sample. */
-export async function previewAudience(body: { audience?: unknown; requires_opt_in?: unknown; trigger?: unknown }) {
+export async function previewAudience(body: { audience?: unknown; requires_opt_in?: unknown; trigger?: unknown; campaign_id?: unknown; allow_restricted?: unknown }) {
   const a = parseAudience(body.audience);
   const optIn = requiresOptIn({ audience: a, trigger: parseTriggerSafe(body.trigger), requires_opt_in: typeof body.requires_opt_in === "boolean" ? body.requires_opt_in : null });
   const all = await resolveAudience(a);
-  const [suppressed, consent] = await Promise.all([suppressedSet(all.map((c) => c.email)), consentFor(all, optIn)]);
+  const cid = Number(body.campaign_id);
+  const [suppressed, consent] = await Promise.all([suppressedSet(all.map((c) => c.email)),
+    consentFor(all, optIn, { id: Number.isSafeInteger(cid) && cid > 0 ? cid : 0, allow_restricted: body.allow_restricted === true })]);
   const blocked = all.filter((c) => !suppressed.has(c.email) && !consent.get(c.email)!.ok);
   return {
     audience: a, requires_opt_in: optIn, count: all.length, suppressed: suppressed.size, no_consent: blocked.length, sendable: all.length - suppressed.size - blocked.length,
-    by_source: { account: all.filter((c) => c.source === "account").length, request: all.filter((c) => c.source === "request").length },
+    by_source: { account: all.filter((c) => c.source === "account").length, request: all.filter((c) => c.source === "request").length, prospect: all.filter((c) => c.source === "prospect").length },
+    // Outbound: why people are left out, by reason (src/gtm-outbound.ts BLOCK_TEXT).
+    blocked: Object.fromEntries([...all.reduce((m, c) => { const d = consent.get(c.email)!; if (!d.ok && !suppressed.has(c.email)) m.set(d.reason, (m.get(d.reason) ?? 0) + 1); return m; }, new Map<string, number>())]),
     sample: all.slice(0, 10).map((c) => {
       const d = consent.get(c.email)!;
       return { ...c, suppressed: suppressed.has(c.email), consent: d.ok ? d.basis : d.reason };
@@ -441,20 +511,21 @@ export async function previewAudience(body: { audience?: unknown; requires_opt_i
  * needs are not added at all (counted). The only INSERT of an email address in GTM besides a reply.
  */
 async function admit(c: CampaignRow, people: Candidate[], o: { delayDays: number; eventId?: number | null; reentryDays?: number | null } ): Promise<{ added: number; no_consent: number }> {
-  const [suppressed, consent] = await Promise.all([suppressedSet(people.map((p) => p.email)), consentFor(people, requiresOptIn(c))]);
-  const ok = people.filter((p) => suppressed.has(p.email) || consent.get(p.email)!.ok);
+  const [suppressed, consent] = await Promise.all([suppressedSet(people.map((p) => p.email)), consentFor(people, requiresOptIn(c), c)]);
+  // A prospect who may not get cold email is never added (not even as suppressed): their row would count as a sequence.
+  const ok = people.filter((p) => (suppressed.has(p.email) && p.source !== "prospect") || consent.get(p.email)!.ok);
   const rows = ok.map((p) => {
     const d = consent.get(p.email)!;
     return { email: p.email, first_name: p.first_name, product: p.product, source: p.source, org_id: p.org_id, request_id: p.request_id, suppressed: suppressed.has(p.email),
-      country: p.country, time_zone: validZone(p.time_zone) ? p.time_zone : null, basis: d.ok ? d.basis : null };
+      country: p.country, time_zone: validZone(p.time_zone) ? p.time_zone : null, basis: d.ok ? d.basis : null, prospect_id: p.prospect_id ?? null };
   });
   const db = await getDb();
   const added = rows.length ? await db.query<{ id: number; email: string; basis: string | null; round: number }>(
-    `INSERT INTO gtm_campaign_recipients AS r (campaign_id, email, first_name, product, source, org_id, request_id, status, next_at, country, time_zone, consent_basis, entered_at, event_id)
+    `INSERT INTO gtm_campaign_recipients AS r (campaign_id, email, first_name, product, source, org_id, request_id, status, next_at, country, time_zone, consent_basis, entered_at, event_id, prospect_id)
      SELECT $1, x.email, x.first_name, x.product, x.source, x.org_id, x.request_id,
             CASE WHEN x.suppressed THEN 'suppressed' ELSE 'pending' END, CASE WHEN x.suppressed THEN NULL ELSE now() + make_interval(secs => $3::float8 * 86400) END,
-            x.country, x.time_zone, x.basis, now(), $4
-       FROM jsonb_to_recordset($2::jsonb) AS x(email text, first_name text, product text, source text, org_id int, request_id int, suppressed boolean, country text, time_zone text, basis text)
+            x.country, x.time_zone, x.basis, now(), $4, x.prospect_id
+       FROM jsonb_to_recordset($2::jsonb) AS x(email text, first_name text, product text, source text, org_id int, request_id int, suppressed boolean, country text, time_zone text, basis text, prospect_id bigint)
      ON CONFLICT (campaign_id, email) DO UPDATE SET round = r.round + 1, status = excluded.status, next_step = 0, next_at = excluded.next_at, entered_at = now(),
             event_id = excluded.event_id, replied_at = NULL, first_name = excluded.first_name, product = excluded.product, country = coalesce(excluded.country, r.country),
             time_zone = coalesce(excluded.time_zone, r.time_zone), consent_basis = excluded.consent_basis
@@ -632,6 +703,7 @@ export async function unsubscribe(token: unknown): Promise<{ ok: boolean; test?:
   if (!r) return { ok: true }; // the campaign was deleted: nothing left to stop
   await suppress(r.email, "unsubscribed", Number(r.campaign_id));
   await recordConsent(r.email, "withdrawn", { source: "unsubscribe", campaign_id: Number(r.campaign_id) });
+  await outbound.onUnsubscribe(id).catch((e) => console.error(`unsubscribe: prospect not updated: ${(e as Error).message}`));
   capture({ distinctId: "octillion:email" }, "campaign_unsubscribed", { campaign_id: Number(r.campaign_id) });
   return { ok: true };
 }
@@ -668,7 +740,7 @@ h1{font-size:1.4rem}button{font:inherit;padding:.5rem 1rem;border-radius:.375rem
 // ---------- sending ----------
 
 /** The footer: why they get it, the unsubscribe link, and the sender's postal address when one is set (CAN-SPAM). */
-const footer = (source: "account" | "request", url: string, postal: string) =>
+const footer = (source: "account" | "request" | "prospect", url: string, postal: string) => source === "prospect" ? outbound.outboundFooter(url, postal) :
   `\n\n--\nYou're getting this because you ${source === "account" ? "have an Octillion account" : "asked for access to Octillion"}. Unsubscribe: ${url}${postal ? `\n${postal}` : ""}`;
 const unsubHeaders = (url: string) => ({ "List-Unsubscribe": `<${url}>`, "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" });
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -688,19 +760,23 @@ export async function testSend(actor: string, id: number, body: { to?: unknown; 
   if (!step) throw new AdminError(`This campaign has no email ${i + 1}`);
   const k = body.variant ? VARIANT_LETTERS.indexOf(String(body.variant).toUpperCase() as (typeof VARIANT_LETTERS)[number]) : -1;
   const words = k >= 0 && step.variants?.[k] ? step.variants[k] : step;
+  // Outbound: from its sender identity, text only unless it tracks opens, exactly as the real thing.
+  if (isOutbound(c)) { const why = await outbound.identityProblem(c.sender_identity_id); if (why) throw new AdminError(why); }
+  const ident = isOutbound(c) ? await outbound.identityById(c.sender_identity_id) : null;
   const sample = (await resolveAudience(c.audience).catch(() => []))[0];
   const url = unsubscribeUrl(TEST_TOKEN), postal = await postalAddress();
-  const r = await mail.send({ kind: "campaign_test", to, idempotencyKey: `campaign-test:${c.id}:${randomUUID()}`, meta: { campaign_id: c.id, step: i, variant: k >= 0 ? VARIANT_LETTERS[k] : null },
-    subject: `[Test] ${render(words.subject, sample ?? {})}`, text: render(words.body, sample ?? {}) + footer(sample?.source ?? "account", url, postal),
-    html: renderHtml(words.body + footer(sample?.source ?? "account", url, postal), sample ?? {}),
+  const src = sample?.source ?? (ident ? "prospect" : "account");
+  const r = await mail.send({ kind: ident ? "outbound_test" : "campaign_test", to, idempotencyKey: `campaign-test:${c.id}:${randomUUID()}`, meta: { campaign_id: c.id, step: i, variant: k >= 0 ? VARIANT_LETTERS[k] : null },
+    subject: `[Test] ${render(words.subject, sample ?? {})}`, text: render(words.body, sample ?? {}) + footer(src, url, postal),
+    ...(tracksOpens(c) ? { html: renderHtml(words.body + footer(src, url, postal), sample ?? {}) } : { textOnly: true }), from: ident ? outbound.senderOf(ident) : undefined,
     headers: unsubHeaders(url), tags: [{ name: "campaign", value: String(c.id) }] });
   log(actor, "campaign.test", null, { campaign_id: c.id, step: i, status: r.status, to_domain: mail.domainOf(to) });
   return { ...r, sample: sample ? { first_name: sample.first_name, product: sample.product, source: sample.source } : null, warnings: postal ? [] : [POSTAL_HINT] };
 }
 
 interface Due {
-  id: number; campaign_id: number; email: string; first_name: string | null; product: string | null; source: "account" | "request"; next_step: number; round: number;
-  time_zone: string | null; country: string | null;
+  id: number; campaign_id: number; email: string; first_name: string | null; product: string | null; source: "account" | "request" | "prospect"; next_step: number; round: number;
+  time_zone: string | null; country: string | null; prospect_id: number | null;
 }
 export interface TickResult {
   started: number; enrolled: number; sent: number; failed: number; suppressed: number; finished: number;
@@ -714,10 +790,12 @@ export interface TickResult {
   uncertain: number; unknown: number;
   /** Triggered campaigns: new events the detector found, and Resend requests made. */
   events: number; requests: number;
+  /** Outbound: over its sender identity's warm-up cap today (waits for tomorrow), and stopped by the cold-email rules. */
+  capped: number; blocked: number;
   skipped?: string; busy?: boolean; error?: string;
 }
 const emptyTick = (): TickResult => ({ started: 0, enrolled: 0, sent: 0, failed: 0, suppressed: 0, finished: 0, deferred: 0, outside_window: 0, no_consent: 0,
-  uncertain: 0, unknown: 0, events: 0, requests: 0 });
+  uncertain: 0, unknown: 0, events: 0, requests: 0, capped: 0, blocked: 0 });
 export interface TickOptions {
   /** Wall-clock time (ms) the caller must be done by: the Vercel cron passes its request start plus the function's 300 s. */
   deadline?: number;
@@ -779,7 +857,7 @@ const idempotencyKeyOf = (cid: number, rid: number, step: number, round: number)
 interface Prepared { r: Due; c: CampaignRow; claim: { id: number; attempts: number }; variant: string | null; email: mail.Email }
 /** What a send keeps from just before its request until it is sent: the email as it goes, without the address (that stays on the recipient). */
 const payloadOf = (m: mail.Email) => ({ kind: m.kind, idempotencyKey: m.idempotencyKey, subject: m.subject, text: m.text, html: m.html, headers: m.headers, tags: m.tags,
-  replyTo: m.replyTo, from: m.from, meta: m.meta });
+  replyTo: m.replyTo, from: m.from, meta: m.meta, textOnly: m.textOnly });
 /** An uncertain request is replayed this long after its first try: 5 minutes, 1, 6 and 20 hours (Resend keeps a key 24). */
 const REPLAY_AFTER_MIN = [5, 60, 360, 1200];
 const REPLAY_DUE_SQL = `s.uncertain_at + make_interval(mins => (ARRAY[${REPLAY_AFTER_MIN.join(", ")}])[least(s.replays, ${REPLAY_AFTER_MIN.length - 1}) + 1]) <= now()`;
@@ -990,6 +1068,16 @@ async function runTick(only: number | null, o: TickOptions = {}): Promise<TickRe
     const [postal, box, key] = await Promise.all([postalAddress(), replies.inbox(), unsubscribeKey()]);
     const from = settingText("EMAIL_FROM"), defaultReplyTo = settingText("EMAIL_REPLY_TO").split(",").map((x) => x.trim()).filter(mail.isEmail);
     let attempted = 0, slowDown = replay.uncertain, calls = 0;
+    // Outbound sender identities: each one's warm-up cap left today, counted over every campaign (src/gtm-outbound.ts).
+    const slots = new Map<number, { i: outbound.Identity; left: number } | null>();
+    const slotOf = async (id: number | null) => {
+      if (id == null) return null;
+      if (!slots.has(id)) {
+        const i = (await outbound.identityProblem(id)) ? null : await outbound.identityById(id);
+        slots.set(id, i ? { i, left: outbound.warmupCap(i) - ((await outbound.sentToday([id])).get(id) ?? 0) } : null);
+      }
+      return slots.get(id)!;
+    };
     // Waves: lease up to ten batches' worth, send them batch by batch, and go again while the cap and the time allow.
     while (!slowDown && attempted < cap && Date.now() < stopAt) {
       const wave = await db.query<Due>(
@@ -997,7 +1085,7 @@ async function runTick(only: number | null, o: TickOptions = {}): Promise<TickRe
           WHERE r.id IN (SELECT x.id FROM gtm_campaign_recipients x JOIN gtm_campaigns c ON c.id = x.campaign_id
                           WHERE c.status = 'running' AND x.status IN ('pending', 'active') AND x.next_at <= now() AND ($2::bigint IS NULL OR c.id = $2)
                           ORDER BY x.next_at, x.id LIMIT $1 FOR UPDATE OF x SKIP LOCKED)
-          RETURNING r.id, r.campaign_id, r.email, r.first_name, r.product, r.source, r.next_step, r.round, r.time_zone, r.country`, [Math.min(size * 10, cap - attempted), only]);
+          RETURNING r.id, r.campaign_id, r.email, r.first_name, r.product, r.source, r.next_step, r.round, r.time_zone, r.country, r.prospect_id`, [Math.min(size * 10, cap - attempted), only]);
       if (!wave.length) break;
       wave.sort((a, b) => Number(a.id) - Number(b.id));
       due.push(...wave);
@@ -1029,10 +1117,24 @@ async function runTick(only: number | null, o: TickOptions = {}): Promise<TickRe
               out.suppressed++;
               continue;
             }
-            if (!mayEnrol({ email: r.email, source: r.source, country: r.country }, requiresOptIn(c), consentNow.get(r.email)).ok) {
+            // A prospect's consent is the outbound rules' (their lawful basis, withdrawal), checked below.
+            if (r.source !== "prospect" && !mayEnrol({ email: r.email, source: r.source, country: r.country }, requiresOptIn(c), consentNow.get(r.email)).ok) {
               await db.query("UPDATE gtm_campaign_recipients SET status = 'no_consent', next_at = NULL WHERE id = $1", [r.id]);
               out.no_consent++;
               continue;
+            }
+            // Outbound: the cold-email rules again (a reply elsewhere, a new customer, another sequence first), and a
+            // sender identity that is fit to send.
+            let slot: { i: outbound.Identity; left: number } | null = null;
+            if (isOutbound(c)) {
+              const why = (await outbound.outboundBlocks([{ email: r.email, prospect_id: r.prospect_id, recipient_id: Number(r.id) }], c)).get(r.email);
+              if (why) {
+                await db.query("UPDATE gtm_campaign_recipients SET status = 'suppressed', next_at = NULL WHERE id = $1", [r.id]);
+                out.suppressed++; out.blocked++;
+                continue;
+              }
+              slot = await slotOf(c.sender_identity_id);
+              if (!slot) { await db.query("UPDATE gtm_campaign_recipients SET next_at = now() + interval '1 hour' WHERE id = $1", [r.id]); out.deferred++; continue; }
             }
             const zone = recipientZone(r.time_zone, r.country, c.send_window.time_zone);
             if (!windowOpen(c.send_window, new Date(), zone)) {
@@ -1040,18 +1142,24 @@ async function runTick(only: number | null, o: TickOptions = {}): Promise<TickRe
               out.outside_window++;
               continue;
             }
+            // The identity's cap for today is spent (warm-up): looked at again in an hour (a new UTC day, or a raised cap).
+            if (slot && slot.left <= 0) {
+              await db.query("UPDATE gtm_campaign_recipients SET next_at = now() + interval '1 hour' WHERE id = $1", [r.id]);
+              out.capped++;
+              continue;
+            }
             // Claimed once per person, round and email, and only while the campaign runs and the person still waits
             // (a reply or an unsubscribe a moment ago stops it). Taken again only after a certain failure, or when a
             // tick died before making its request (no request key yet); never while uncertain or unknown.
             const [claim] = await db.query<{ id: number; attempts: number }>(
-              `INSERT INTO gtm_campaign_sends (campaign_id, recipient_id, step, round, status)
-               SELECT $1, $2, $3, $4, 'sending' WHERE EXISTS (SELECT 1 FROM gtm_campaigns WHERE id = $1 AND status = 'running')
+              `INSERT INTO gtm_campaign_sends (campaign_id, recipient_id, step, round, status, identity_id)
+               SELECT $1, $2, $3, $4, 'sending', $5 WHERE EXISTS (SELECT 1 FROM gtm_campaigns WHERE id = $1 AND status = 'running')
                  AND EXISTS (SELECT 1 FROM gtm_campaign_recipients WHERE id = $2 AND status IN ('pending', 'active'))
-               ON CONFLICT (recipient_id, round, step) DO UPDATE SET status = 'sending', attempts = gtm_campaign_sends.attempts + 1, at = now(), error = NULL,
+               ON CONFLICT (recipient_id, round, step) DO UPDATE SET status = 'sending', attempts = gtm_campaign_sends.attempts + 1, at = now(), error = NULL, identity_id = excluded.identity_id,
                  batch_key = NULL, batch_pos = NULL
                  WHERE gtm_campaign_sends.status = 'failed'
                     OR (gtm_campaign_sends.status = 'sending' AND gtm_campaign_sends.batch_key IS NULL AND gtm_campaign_sends.at < now() - interval '10 minutes')
-               RETURNING id, attempts`, [c.id, r.id, r.next_step, r.round]);
+               RETURNING id, attempts`, [c.id, r.id, r.next_step, r.round, slot?.i.id ?? null]);
             if (!claim) {
               // Already sent (a tick that stopped before moving on): move on now. Paused this instant: back in the queue.
               // Being sent elsewhere, uncertain or unknown: out of the queue until that is resolved.
@@ -1061,14 +1169,17 @@ async function runTick(only: number | null, o: TickOptions = {}): Promise<TickRe
               else if (s.status === "uncertain" || s.status === "unknown") await db.query("UPDATE gtm_campaign_recipients SET next_at = NULL WHERE id = $1", [r.id]);
               continue;
             }
+            if (slot) slot.left--;
             const v = pickVariant(step, c.id, r.next_step, Number(r.id));
             const url = unsubscribeUrl(await unsubscribeToken(Number(r.id)));
-            // Sender and reply-to fixed now, so a replay of this email is byte for byte the same request.
+            // Sender and reply-to fixed now, so a replay of this email is byte for byte the same request. Outbound: from
+            // the identity, plain text only unless the campaign tracks opens (no HTML, so no pixel).
             const replyTo = box ? [await replies.replyAddress(Number(r.id), key, box)] : defaultReplyTo;
             chunk.push({ r, c, claim, variant: v.letter, email: {
-              kind: "campaign", to: r.email, idempotencyKey: idempotencyKeyOf(c.id, Number(r.id), r.next_step, r.round), from,
+              kind: slot ? "outbound" : "campaign", to: r.email, idempotencyKey: idempotencyKeyOf(c.id, Number(r.id), r.next_step, r.round), from: slot ? outbound.senderOf(slot.i) : from,
               meta: { campaign_id: c.id, step: r.next_step, ...(v.letter ? { variant: v.letter } : {}), ...(r.round ? { round: r.round } : {}) },
-              subject: render(v.subject, r), text: render(v.body, r) + footer(r.source, url, postal), html: renderHtml(v.body + footer(r.source, url, postal), r),
+              subject: render(v.subject, r), text: render(v.body, r) + footer(r.source, url, postal),
+              ...(tracksOpens(c) ? { html: renderHtml(v.body + footer(r.source, url, postal), r) } : { textOnly: true }),
               headers: unsubHeaders(url), tags: [{ name: "campaign", value: String(c.id) }], replyTo,
             } });
           } catch (e) {
@@ -1109,6 +1220,7 @@ async function runTick(only: number | null, o: TickOptions = {}): Promise<TickRe
             await db.query("UPDATE gtm_campaign_sends SET status = 'sent', provider_id = coalesce($2, provider_id), variant = $3, batch_key = coalesce($4, batch_key), payload = NULL, at = now() WHERE id = $1",
               [p.claim.id, res.provider_id ?? null, p.variant, sent.request_key]);
             await advance(p.r, p.c);
+            if (p.r.prospect_id != null) await outbound.onSent(Number(p.r.prospect_id), p.c.id);
             out.sent++;
           } else if (res.uncertain) {
             await db.query("UPDATE gtm_campaign_sends SET variant = $2 WHERE id = $1", [p.claim.id, p.variant]);
@@ -1248,6 +1360,8 @@ export async function resendWebhook(raw: string, h: { id?: string; timestamp?: s
       await suppress(r.email, ev.type === "email.bounced" ? "bounced" : "complained", Number(s.campaign_id));
       // A complaint is the strongest "stop": consent withdrawn too.
       if (ev.type === "email.complained") await recordConsent(r.email, "withdrawn", { source: "complaint", campaign_id: Number(s.campaign_id) });
+      // A prospect: bad_email on a hard bounce, not interested on a complaint (src/gtm-outbound.ts).
+      await outbound.onBounce(Number(s.recipient_id), ev.type === "email.bounced" ? "bounced" : "complained").catch((e) => console.error(`webhook: prospect not updated: ${(e as Error).message}`));
     }
   }
   return { status: 200, body: { ok: true, matched: true } };
@@ -1285,7 +1399,7 @@ async function metrics(ids: number[]): Promise<Map<number, Metrics>> {
 
 interface RecipientRow { id: number; campaign_id: number; email: string; first_name: string | null; product: string | null; source: string; org_id: number | null; request_id: number | null;
   status: string; next_step: number; next_at: Date | null; first_sent_at: Date | null; last_sent_at: Date | null; unsubscribed_at: Date | null; replied_at: Date | null;
-  round: number; time_zone: string | null; country: string | null; consent_basis: string | null }
+  round: number; time_zone: string | null; country: string | null; consent_basis: string | null; prospect_id?: number | null }
 
 /**
  * Conversions after the first email, within the campaign's conversion_days, from the Activation data (src/gtm.ts):
@@ -1339,6 +1453,7 @@ const shape = (c: CampaignRow, m: Metrics | undefined) => ({
   starts_at: c.starts_at, owner: c.owner, owner_user_id: c.owner_user_id, created_at: c.created_at, updated_at: c.updated_at,
   launched_at: c.launched_at, enrolled_at: c.enrolled_at, finished_at: c.finished_at, metrics: m,
   trigger: c.trigger, send_window: c.send_window, requires_opt_in: c.requires_opt_in, requires_opt_in_effective: requiresOptIn(c), count_auto_replies: c.count_auto_replies,
+  outbound: isOutbound(c), sender_identity_id: c.sender_identity_id, track_opens: c.track_opens, track_opens_effective: tracksOpens(c), allow_restricted: c.allow_restricted,
 });
 
 /** Settings the editor shows next to a campaign: the postal address hint, the replies inbox, the trigger choices. */
@@ -1373,7 +1488,7 @@ export async function campaignDetail(id: number, o: { replies?: boolean } = {}) 
     metrics([c.id]),
     db.query<RecipientRow>(
       `SELECT id, campaign_id, email, first_name, product, source, org_id, request_id, status, next_step, next_at, first_sent_at, last_sent_at, unsubscribed_at, replied_at,
-              round, time_zone, country, consent_basis
+              round, time_zone, country, consent_basis, prospect_id
          FROM gtm_campaign_recipients WHERE campaign_id = $1 ORDER BY id LIMIT 2000`, [c.id]),
     db.query<Record<string, unknown>>(
       `SELECT step, count(*) FILTER (WHERE status = 'sent') AS sent, count(*) FILTER (WHERE status = 'failed') AS failed, count(*) FILTER (WHERE delivered_at IS NOT NULL) AS delivered,
@@ -1420,7 +1535,7 @@ export async function campaignDetail(id: number, o: { replies?: boolean } = {}) 
       const s = sendBy.get(Number(r.id)), cv = conv?.per.get(Number(r.id));
       return { id: Number(r.id), email: r.email, first_name: r.first_name, product: r.product, source: r.source, status: r.status, next_step: r.next_step, next_at: r.next_at,
         first_sent_at: r.first_sent_at, last_sent_at: r.last_sent_at, unsubscribed_at: r.unsubscribed_at, replied_at: r.replied_at, round: r.round,
-        time_zone: recipientZone(r.time_zone, r.country, c.send_window.time_zone), country: r.country, consent_basis: r.consent_basis,
+        time_zone: recipientZone(r.time_zone, r.country, c.send_window.time_zone), country: r.country, consent_basis: r.consent_basis, prospect_id: r.prospect_id == null ? null : Number(r.prospect_id),
         account: r.org_id != null ? slugOf.get(Number(r.org_id)) ?? null : null,
         delivered: !!s?.delivered, bounced: !!s?.bounced, opened: !!s?.opened, clicked: !!s?.clicked,
         requested: !!cv?.requested, activated: !!cv?.activated, paid: !!cv?.paid };

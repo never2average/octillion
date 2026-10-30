@@ -17,6 +17,8 @@
 // POST /emails/batch (state.batches), GET /emails/receiving/:id (inbound, registered by POST /_mock/resend/received),
 // POST /_mock/resend/ratelimit {count, retry_after} (the next requests answer 429 with a retry-after header),
 // POST /_mock/resend/uncertain {concurrent, drop_after_accept, omit_id} (outcomes a sender cannot be sure of).
+// Apollo: POST /api/v1/mixed_people/api_search, /api/v1/people/bulk_match, /api/v1/organizations/bulk_enrich (x-api-key
+// apollo_...), over state.apolloPeople (POST /_mock/apollo/people); POST /_mock/apollo/ratelimit {count, retry_after}.
 // Cloudflare Workers AI: POST /client/v4/accounts/:id/ai/v1/chat/completions (Bearer); state.aiRequests logs each body and
 // state.aiReply(body) decides the answer (in-process only; unset: 503).
 import express from "express";
@@ -46,6 +48,7 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     // Uncertain outcomes, each for the next `n` requests: a 409 concurrent_idempotent_requests (nothing recorded); the
     // request accepted and recorded, then the connection dropped (no answer); a batch answer missing the first email's id.
     resendConcurrent: 0, resendDropAfterAccept: 0, resendOmitId: 0,
+    apolloPeople: [] as any[], apolloRequests: [] as any[], apolloLimited: 0, apolloRetryAfter: 1,
     // Cloudflare Workers AI: every chat request (its body), and how to answer one (status and/or content; unset: 503).
     aiRequests: [] as any[], aiReply: null as null | ((body: any) => { status?: number; content?: string }),
     prices: [
@@ -467,6 +470,53 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     res.json({ ok: true });
   });
   app.post("/_mock/resend/ratelimit", (req, res) => { s.resendLimited = Number(req.body?.count ?? 0); s.resendRetryAfter = Number(req.body?.retry_after ?? 1); res.json({ ok: true }); });
+  // ---------- Apollo (src/gtm-apollo.ts): people search, bulk people match, bulk organization enrich ----------
+  // x-api-key apollo_...; state.apolloPeople is the dataset (POST /_mock/apollo/people {people} adds to it); every
+  // request is logged in state.apolloRequests; POST /_mock/apollo/ratelimit {count, retry_after} answers the next
+  // `count` requests 429. Search, as the real one, returns no addresses and no company domain.
+  const apolloAuth = (req: express.Request, res: express.Response) => {
+    s.apolloRequests.push({ path: req.path, query: req.query, body: req.body });
+    if (!/^apollo_\S+$/.test(req.get("x-api-key") ?? "")) { res.status(401).json({ error: "Invalid access credentials." }); return false; }
+    res.set({ "x-minute-requests-left": "199", "x-hourly-requests-left": "5999", "x-24-hour-requests-left": "49999", "x-rate-limit-minute": "200" });
+    if (s.apolloLimited > 0) { s.apolloLimited--; res.set("retry-after", String(s.apolloRetryAfter)); res.status(429).json({ error: "rate limit", error_details: { code: "USAGE.RATE_LIMIT.API_RATE_LIMIT_EXCEEDED" } }); return false; }
+    return true;
+  };
+  const qList = (req: express.Request, k: string) => { const v = req.query[`${k}[]`] ?? req.query[k]; return (Array.isArray(v) ? v : v == null ? [] : [v]).map(String); };
+  const apolloOrg = (p: any) => ({ id: `org_${p.domain}`, name: p.company, primary_domain: p.domain, website_url: `https://www.${p.domain}`, industry: p.industry, estimated_num_employees: p.employees, country: p.org_country ?? p.country_name });
+  app.post("/api/v1/mixed_people/api_search", (req, res) => {
+    if (!apolloAuth(req, res)) return;
+    const titles = qList(req, "person_titles").map((t) => t.toLowerCase()), domains = qList(req, "q_organization_domains_list"), sen = qList(req, "person_seniorities");
+    const locs = qList(req, "person_locations").map((l) => l.toLowerCase()), inds = qList(req, "organization_industries").map((l) => l.toLowerCase());
+    const hit = s.apolloPeople.filter((p: any) => (!titles.length || titles.some((t) => p.title.toLowerCase().includes(t))) && (!domains.length || domains.includes(p.domain))
+      && (!sen.length || sen.includes(p.seniority)) && (!locs.length || locs.includes(String(p.country_name).toLowerCase())) && (!inds.length || inds.includes(String(p.industry).toLowerCase())));
+    const page = Number(req.query.page ?? 1), per = Number(req.query.per_page ?? 25);
+    res.json({ total_entries: hit.length, people: hit.slice((page - 1) * per, page * per).map((p: any) => ({ id: p.id, first_name: p.first_name, last_name_obfuscated: `${p.last_name[0]}***${p.last_name.slice(-1)}`,
+      title: p.title, last_refreshed_at: now(), has_email: true, has_city: true, has_state: false, has_country: true, has_direct_phone: false,
+      organization: { name: p.company, has_industry: true, has_phone: false, has_city: true, has_state: false, has_country: true, has_zip_code: false, has_revenue: false, has_employee_count: true } })) });
+  });
+  app.post("/api/v1/people/bulk_match", (req, res) => {
+    if (!apolloAuth(req, res)) return;
+    const details = Array.isArray(req.body?.details) ? req.body.details : [];
+    if (!details.length || details.length > 10) return void res.status(400).json({ error: "details: 1 to 10 people" });
+    const matches = details.map((d: any) => {
+      const p = s.apolloPeople.find((x: any) => (d.id && x.id === d.id) || (d.email && x.email === String(d.email).toLowerCase()) || (d.first_name && d.domain && x.first_name === d.first_name && x.domain === d.domain));
+      return p ? { id: p.id, first_name: p.first_name, last_name: p.last_name, name: `${p.first_name} ${p.last_name}`, title: p.title, seniority: p.seniority, email: p.email,
+        email_status: p.email_status, linkedin_url: `https://www.linkedin.com/in/${p.first_name.toLowerCase()}-${p.id}`, country: p.country_name, match_confidence: "high",
+        organization_id: `org_${p.domain}`, organization: apolloOrg(p) } : null;
+    });
+    const found = matches.filter(Boolean).length;
+    res.json({ status: "success", total_requested_enrichments: details.length, unique_enriched_records: found, missing_records: details.length - found, credits_consumed: found, matches });
+  });
+  app.post("/api/v1/organizations/bulk_enrich", (req, res) => {
+    if (!apolloAuth(req, res)) return;
+    const domains = qList(req, "domains");
+    if (!domains.length || domains.length > 10) return void res.status(400).json({ error: "domains: 1 to 10" });
+    const orgs = domains.map((d) => s.apolloPeople.find((p: any) => p.domain === d)).filter(Boolean).map(apolloOrg);
+    res.json({ status: "success", total_requested_domains: domains.length, unique_enriched_records: orgs.length, missing_records: domains.length - orgs.length, organizations: orgs });
+  });
+  app.post("/_mock/apollo/people", (req, res) => { s.apolloPeople.push(...(req.body?.people ?? [])); res.json({ ok: true, count: s.apolloPeople.length }); });
+  app.post("/_mock/apollo/ratelimit", (req, res) => { s.apolloLimited = Number(req.body?.count ?? 0); s.apolloRetryAfter = Number(req.body?.retry_after ?? 1); res.json({ ok: true }); });
+  app.get("/_mock/apollo/requests", (_req, res) => void res.json({ requests: s.apolloRequests }));
   // ---------- Cloudflare Workers AI (OpenAI-compatible chat completions): answers come from state.aiReply ----------
   app.post("/client/v4/accounts/:account/ai/v1/chat/completions", (req, res) => {
     if (!/^Bearer \S+$/.test(req.get("authorization") ?? "")) return void res.status(401).json({ success: false, errors: [{ message: "Authentication error" }] });

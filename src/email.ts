@@ -9,6 +9,8 @@
  *   health              agent sessions failing too often or waiting too long (operator alert, src/health-alerts.ts)
  *   campaign            GTM lifecycle campaigns (src/campaigns.ts), with an unsubscribe link and List-Unsubscribe
  *                       headers. The recipient's address lives only in gtm_campaign_recipients, never in this log.
+ *   outbound            GTM outbound sequences to prospects (src/gtm-outbound.ts): from a sender identity on the
+ *                       outreach subdomain (the message's own From), text only unless the campaign tracks opens
  *   test             the "Send test email" button on /admin/emails
  *
  * Rules:
@@ -33,7 +35,7 @@ import { accountRoleOf, type AccountRole } from "./account-roles.js";
 
 export const EMAIL_PROVIDER = "resend";
 export const EMAIL_KINDS = ["request_received", "request_alert", "request_declined", "request_approved", "submission_alert", "submission_accepted",
-  "submission_declined", "budget_80", "budget_100", "health_alert", "campaign", "campaign_test", "marketing_confirm", "test"] as const;
+  "submission_declined", "budget_80", "budget_100", "health_alert", "campaign", "campaign_test", "marketing_confirm", "outbound", "outbound_test", "test"] as const;
 export type EmailKind = (typeof EMAIL_KINDS)[number];
 
 export interface Email {
@@ -48,8 +50,11 @@ export interface Email {
   tags?: { name: string; value: string }[];
   /** This message's Reply-To instead of the setting's (campaigns: a per-recipient address, so a reply maps back). */
   replyTo?: string[];
-  /** The sender, when the caller fixed it (a campaign send keeps the From it was first sent with, for an exact replay). */
+  /** The sender, when the caller fixed it: a campaign send keeps the From it was first sent with (an exact replay);
+   *  outbound sends from a sender identity on the outreach subdomain. */
   from?: string;
+  /** No HTML part at all (outbound by default: plain text, so nothing can carry a tracking pixel). */
+  textOnly?: boolean;
 }
 export interface EmailResult {
   status: "sent" | "skipped" | "failed" | "duplicate"; id?: number; provider_id?: string | null; error?: string | null;
@@ -187,7 +192,7 @@ async function notReady(): Promise<Ready | string> {
 const bodyOf = (m: Email, c: Claimed, defaultReplyTo: string[]) => {
   const own = (m.replyTo ?? []).filter(isEmail), replyTo = own.length ? own : defaultReplyTo;
   return {
-    from: m.from || settingText("EMAIL_FROM"), to: [c.to], subject: c.subject, text: m.text, html: m.html ?? htmlOf(m.text),
+    from: m.from || settingText("EMAIL_FROM"), to: [c.to], subject: c.subject, text: m.text, ...(m.textOnly ? {} : { html: m.html ?? htmlOf(m.text) }),
     ...(replyTo.length ? { reply_to: replyTo } : {}), tags: [{ name: "kind", value: m.kind }, ...(m.tags ?? [])],
     ...(m.headers && Object.keys(m.headers).length ? { headers: m.headers } : {}),
   };

@@ -43,6 +43,9 @@ export async function emit(type: EventType, e: EmitInput): Promise<number | null
      ON CONFLICT (dedupe_key) DO NOTHING RETURNING id`,
     [type, e.org_id ?? null, e.request_id ?? null, JSON.stringify(e.data ?? {}), `${type}:${e.key}`.slice(0, 300), e.at ?? null]);
   if (r) void kick(type);
+  // A prospect (or their company) who just requested access or got an account is linked to it (src/gtm-crm.ts).
+  if (r && (type === "request_submitted" || type === "request_approved" || type === "account_created"))
+    keepAlive(import("./gtm-crm.js").then((m) => m.linkFromEvent(type, e)).catch((err) => console.error(`gtm link: ${(err as Error).message}`)));
   return r ? Number(r.id) : null;
 }
 
