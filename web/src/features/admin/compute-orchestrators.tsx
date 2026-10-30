@@ -5,7 +5,8 @@
 // in boat's sandboxes that match nothing live of ours (leaked workers, rows that are gone, other deployments). Read
 // only in v1: nothing here drains or deletes; the logs command is copied to run from a terminal.
 import { useMemo, useState, type ReactNode } from 'react';
-import { Field, RecordView, type RecordCol } from '@/components/layout/record-view';
+import { DetailMeta, DetailTable, DetailTabs, TimelineTable } from '@/components/layout/detail';
+import { RecordView, type RecordCol } from '@/components/layout/record-view';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
@@ -14,8 +15,8 @@ import { counted } from '@/lib/octillion-format';
 import { cn } from '@/lib/utils';
 import { useAdmin } from './lib';
 import { copyText, ErrorBox, Mono, Notice, Section, StatusBadge, When, type Tone } from './ui';
-import { AMBER, Chip, cents, dur, jobSessions, PeekSection, since, useComputeParams, useNow, nextPinned, useScrollTo } from './compute-common';
-import { MiniTable } from './compute-sessions';
+import { AMBER, Chip, cents, dur, jobSessions, since, useComputeParams, useNow, nextPinned, useScrollTo } from './compute-common';
+import { GATEWAY_COLS } from './compute-sessions';
 
 interface Limits { boot_minutes: number; stale_minutes: number; heartbeat_stale_s: number }
 interface Boat { ok: boolean; stale: boolean; error: string | null }
@@ -188,7 +189,7 @@ function OrchTable({ rows, loading, limits, boat, empty, open, onOpen, onJob, fi
         ...(o.job_id ? [{ label: "Show this job's sessions", icon: <Icons.search />, onSelect: () => onJob(o.job_id!) }] : []),
         { label: 'Copy id', icon: <Icons.page />, onSelect: () => copyText(o.orchestrator_id ?? o.sandbox_id ?? String(o.id), 'Id copied') }
       ]}
-      detailTitle={(o) => <span className='flex items-center gap-2'>{o.orchestrator_id ?? `row ${o.id}`}<StatusBadge tone={STATE_TONE[o.state]}>{o.state === 'deleted' ? 'ended' : o.state}</StatusBadge></span>}
+      detailTitle={() => 'Orchestrator'}
       detail={(o) => <OrchPeek id={o.id} onJob={onJob} />}
       empty={empty} />
   );
@@ -231,91 +232,94 @@ function UnmatchedTable({ rows, loading, empty, filters, summary }: { rows: Unma
   );
 }
 
-/** One orchestrator's peek: summary, boot timeline, workers now, recent sessions, tokens, events, spend, links. */
+/** One orchestrator's peek: a card with its key facts and boot timeline, then tabs for the workers it runs now, its
+ *  recent sessions, worker tokens, events, spend and gateway calls. */
 function OrchPeek({ id, onJob }: { id: number; onJob: (job: string) => void }) {
   const url = useComputeParams();
   const { data, error, isLoading } = useAdmin<OrchDetail>(`/compute/orchestrators/${id}`);
   if (isLoading) return <div className='grid gap-3'><Skeleton className='h-24' /><Skeleton className='h-40' /></div>;
   if (!data) return <ErrorBox error={error} />;
   const o = data.row;
+  const none = <span className='text-muted-foreground'>—</span>;
   const openSession = (sid: string) => url.write({ section: 'sessions', session: sid, orch: null });
   // Opened from a job's peek: back returns to it.
   const back = url.get('back');
   return (
-    <div className='grid gap-6'>
-      {back && <Button variant='ghost' size='xs' className='justify-self-start' onClick={() => url.write({ section: 'jobs', job: back, orch: null, back: null })}>← Back to <Mono>{back}</Mono></Button>}
-      <PeekSection title='Summary'>
-        <dl>
-          <Field label='State'>{o.state === 'deleted' ? 'ended' : o.state}{o.boat_state && <span className='text-muted-foreground'> · boat: {o.boat_state}</span>}</Field>
-          <Field label='Job'>{o.job_id ? <Mono>{o.job_id}</Mono> : <span className='text-muted-foreground'>shared</span>}</Field>
-          <Field label='Sandbox'>{o.sandbox_id ? <Mono>{o.sandbox_id}</Mono> : <span className='text-muted-foreground'>never created</span>}</Field>
-          <Field label='Created'><When d={o.created_at} /></Field>
-          <Field label='Ready'>{o.ready_at ? <When d={o.ready_at} /> : <span className='text-muted-foreground'>—</span>}</Field>
-          <Field label='Last seen'><When d={o.heartbeat_at} /></Field>
-          {o.deleted_at && <Field label='Ended'><When d={o.deleted_at} /></Field>}
-          <Field label='TTL left'>{o.state === 'deleted' ? 'n/a' : data.boat.ok ? dur(o.ttl_left_s) : <span className='text-muted-foreground' title={`boat.dev did not answer: ${data.boat.error}`}>—</span>}</Field>
-          <Field label='Code'>{o.code_hash ? <Mono>{o.code_hash.slice(0, 12)}</Mono> : '—'} {o.current_code ? <span className='text-muted-foreground'>· current</span> : o.code_hash && <span className='text-muted-foreground'>· older than this server&apos;s</span>}
-            {o.retiring_since && <span className={AMBER}> · retiring since <When d={o.retiring_since} /></span>}</Field>
-          <Field label='From image'>{o.from_image ? <Mono>{o.from_image}</Mono> : <span className='text-muted-foreground'>no (code upload)</span>}</Field>
-          {(o.launch_step || o.reap_reason) && <Field label='Ended because'><EndedBecause o={o} /></Field>}
-        </dl>
-      </PeekSection>
-
-      <PeekSection title='Boot'>
-        <BootTimeline o={o} timings={data.timings} />
-      </PeekSection>
-
-      <PeekSection title={`Workers now (${data.workers.length})`}>
-        {!data.boat.ok ? <p className='text-muted-foreground text-sm'>boat.dev did not answer: {data.boat.error}</p>
-          : data.workers.length ? (
-            <MiniTable head={['Agent', 'Session', 'Status', 'Heartbeat', 'boat']} rows={data.workers.map((w) => [
-              w.agent_id ?? '—',
-              w.session_id ? <button key='s' type='button' className='hover:underline' onClick={() => openSession(w.session_id!)}><Mono>{w.session_id}</Mono></button> : <span key='s' className='text-muted-foreground'>idle</span>,
-              w.status ?? '—', w.heartbeat_age_s == null ? '—' : `${dur(w.heartbeat_age_s)} ago`, w.boat_state])} />
-          ) : <p className='text-muted-foreground text-sm'>No worker sandboxes on boat for it.</p>}
-      </PeekSection>
-
-      <PeekSection title='Recent sessions on it'>
-        {data.sessions.length ? (
-          <MiniTable head={['Session', 'Agent', 'Status', 'Started', 'Error']} rows={data.sessions.map((s) => [
-            <button key='s' type='button' className='hover:underline' onClick={() => openSession(s.id)}><Mono>{s.id}</Mono></button>,
-            s.agent_id ?? '—', s.status, <When key='t' d={s.started_at} />, <span key='e' className='text-muted-foreground line-clamp-1' title={s.error_message ?? undefined}>{s.error_message ?? ''}</span>])} />
-        ) : <p className='text-muted-foreground text-sm'>No sessions.</p>}
-      </PeekSection>
-
-      {data.tokens.length > 0 && (
-        <PeekSection title='Worker tokens'>
-          <MiniTable head={['Job', 'Issued', 'Expires', 'Revoked']} rows={data.tokens.map((t) => [
-            <Mono key='j'>{t.job_id}</Mono>, <When key='c' d={t.created_at} />, <When key='x' d={t.expires_at} />,
-            t.revoked_at ? <When key='r' d={t.revoked_at} /> : <span key='r' className='text-muted-foreground'>not revoked</span>])} />
-        </PeekSection>
-      )}
-
-      <PeekSection title='Events'>
-        {data.events.length ? (
-          <MiniTable head={['When', 'What', 'Detail']} rows={data.events.map((e) => [
-            <When key='a' d={e.at} />, e.kind.replace(/_/g, ' '), <span key='d' className='text-muted-foreground'>{[e.step, e.reason, e.actor && `by ${e.actor}`].filter(Boolean).join(' · ')}</span>])} />
-        ) : <p className='text-muted-foreground text-sm'>No events recorded.</p>}
-      </PeekSection>
-
-      <PeekSection title='Spend'>
-        <dl>
-          <Field label='Orchestrator model'>{cents(o.spend.orchestrator_model_usd)}</Field>
-        </dl>
-        {data.gateway.length > 0 && (
-          <MiniTable head={['Provider', 'Requests', 'Errors', 'Tokens in / out', 'Cost']} rows={data.gateway.map((g) => [
-            <Mono key='p'>{g.provider}</Mono>, g.requests, g.errors ? <span key='e' className='text-destructive'>{g.errors}</span> : 0,
-            `${g.input_tokens.toLocaleString()} / ${g.output_tokens.toLocaleString()}`, cents(g.cost_usd)])} />
-        )}
-      </PeekSection>
-
-      <PeekSection title='Links'>
-        <div className='flex flex-wrap gap-2'>
+    <div className='flex flex-col gap-4'>
+      <DetailMeta
+        title={o.orchestrator_id ?? `row ${o.id}`}
+        badges={<>
+          <StatusBadge tone={o.state === 'deleted' && o.launch_step ? 'bad' : STATE_TONE[o.state]}>{o.state === 'deleted' ? 'ended' : o.state}</StatusBadge>
+          {o.boat_state && <span className='text-muted-foreground text-xs' title='State on boat'>boat: {o.boat_state}</span>}
+        </>}
+        actions={<>
+          {back && <Button variant='outline' size='sm' onClick={() => url.write({ section: 'jobs', job: back, orch: null, back: null })}>← Back to <Mono>{back}</Mono></Button>}
           {o.job_id && <Button variant='outline' size='sm' onClick={() => onJob(o.job_id!)}><Icons.search /> This job&apos;s sessions</Button>}
           {data.logs_command && <Button variant='outline' size='sm' onClick={() => copyLogs(o.sandbox_id!)}><Icons.code /> Copy logs command</Button>}
+        </>}
+        facts={[
+          { label: 'Job', value: o.job_id ? <Mono>{o.job_id}</Mono> : <span className='text-muted-foreground'>shared</span> },
+          { label: 'Sandbox', value: o.sandbox_id ? <Mono>{o.sandbox_id}</Mono> : <span className='text-muted-foreground'>never created</span> },
+          { label: 'Created', value: <When d={o.created_at} /> },
+          { label: 'Ready', value: o.ready_at ? <When d={o.ready_at} /> : none },
+          { label: 'Last seen', value: <When d={o.heartbeat_at} /> },
+          { label: 'Ended', value: <When d={o.deleted_at} />, hidden: !o.deleted_at },
+          { label: 'TTL left', value: o.state === 'deleted' ? 'n/a' : data.boat.ok ? dur(o.ttl_left_s) : <span className='text-muted-foreground' title={`boat.dev did not answer: ${data.boat.error}`}>—</span> },
+          { label: 'Code', value: <>{o.code_hash ? <Mono>{o.code_hash.slice(0, 12)}</Mono> : '—'} {o.current_code ? <span className='text-muted-foreground'>· current</span> : o.code_hash && <span className='text-muted-foreground'>· older than this server&apos;s</span>}
+            {o.retiring_since && <span className={AMBER}> · retiring since <When d={o.retiring_since} /></span>}</> },
+          { label: 'From image', value: o.from_image ? <Mono>{o.from_image}</Mono> : <span className='text-muted-foreground'>no (code upload)</span> },
+          { label: 'Orchestrator model spend', value: <span className='tabular-nums'>{cents(o.spend.orchestrator_model_usd)}</span>, hint: 'its lifetime, through the gateway' },
+          { label: 'Ended because', value: <EndedBecause o={o} />, wide: true, hidden: !(o.launch_step || o.reap_reason) }
+        ]}
+      >
+        <div className='grid gap-2 border-t pt-3'>
+          <span className='text-muted-foreground text-xs font-medium'>Boot</span>
+          <BootTimeline o={o} timings={data.timings} />
         </div>
         {data.logs_command && <p className='text-muted-foreground text-xs'><Mono>{data.logs_command}</Mono> · logs are lost when the sandbox is deleted.</p>}
-      </PeekSection>
+      </DetailMeta>
+
+      <DetailTabs resetKey={id} tabs={[
+        { id: 'workers', label: 'Workers now', count: data.boat.ok ? data.workers.length : null, content: (
+          <DetailTable rows={data.boat.ok ? data.workers : []} rowKey={(w) => w.sandbox_id} noun='workers'
+            empty={data.boat.ok ? 'No worker sandboxes on boat for it.' : `boat.dev did not answer: ${data.boat.error}`}
+            onRow={(w) => w.session_id && openSession(w.session_id)} cols={[
+            { key: 'agent', label: 'Agent', type: 'text', value: (w) => w.agent_id ?? '', render: (w) => w.agent_id ?? '—' },
+            { key: 'session', label: 'Session', type: 'text', value: (w) => w.session_id ?? '', render: (w) => (w.session_id ? <Mono>{w.session_id}</Mono> : <span className='text-muted-foreground'>idle</span>) },
+            { key: 'status', label: 'Status', type: 'select', value: (w) => w.status ?? '', render: (w) => w.status ?? '—' },
+            { key: 'hb', label: 'Heartbeat', type: 'number', value: (w) => w.heartbeat_age_s, render: (w) => (w.heartbeat_age_s == null ? '—' : `${dur(w.heartbeat_age_s)} ago`), className: 'tabular-nums' },
+            { key: 'boat', label: 'boat', type: 'select', value: (w) => w.boat_state, render: (w) => w.boat_state }
+          ]} />
+        ) },
+        { id: 'sessions', label: 'Recent sessions', count: data.sessions.length, content: (
+          <DetailTable rows={data.sessions} rowKey={(s) => s.id} noun='sessions' empty='No sessions.' onRow={(s) => openSession(s.id)}
+            search={(s) => `${s.id} ${s.agent_id ?? ''} ${s.status} ${s.error_message ?? ''}`} cols={[
+            { key: 'id', label: 'Session', type: 'text', value: (s) => s.id, render: (s) => <Mono>{s.id}</Mono> },
+            { key: 'agent', label: 'Agent', type: 'select', value: (s) => s.agent_id ?? '', render: (s) => s.agent_id ?? '—' },
+            { key: 'status', label: 'Status', type: 'select', value: (s) => s.status, render: (s) => s.status },
+            { key: 'started', label: 'Started', type: 'date', value: (s) => s.started_at, render: (s) => <When d={s.started_at} /> },
+            { key: 'error', label: 'Error', type: 'text', value: (s) => s.error_message ?? '', render: (s) => <span className='text-muted-foreground line-clamp-1' title={s.error_message ?? undefined}>{s.error_message ?? ''}</span>, className: 'max-w-72' }
+          ]} />
+        ) },
+        { id: 'tokens', label: 'Worker tokens', count: data.tokens.length, hidden: !data.tokens.length, content: (
+          <DetailTable rows={data.tokens} noun='tokens' empty='No worker tokens.' cols={[
+            { key: 'job', label: 'Job', type: 'text', value: (t) => t.job_id, render: (t) => <Mono>{t.job_id}</Mono> },
+            { key: 'issued', label: 'Issued', type: 'date', value: (t) => t.created_at, render: (t) => <When d={t.created_at} /> },
+            { key: 'expires', label: 'Expires', type: 'date', value: (t) => t.expires_at, render: (t) => <When d={t.expires_at} /> },
+            { key: 'revoked', label: 'Revoked', type: 'date', value: (t) => t.revoked_at, render: (t) => (t.revoked_at ? <When d={t.revoked_at} /> : <span className='text-muted-foreground'>not revoked</span>) }
+          ]} />
+        ) },
+        { id: 'events', label: 'Events', count: data.events.length, content: (
+          <TimelineTable when={(at) => <When d={at} />} empty='No events recorded.' events={data.events.map((e) => ({
+            at: e.at, event: e.kind.replace(/_/g, ' '),
+            detail: [e.step, e.reason].filter(Boolean).join(' · ') || undefined,
+            actor: e.actor ?? undefined
+          }))} />
+        ) },
+        { id: 'gateway', label: 'Gateway calls', count: data.gateway.length, hidden: !data.gateway.length, content: (
+          <DetailTable rows={data.gateway} rowKey={(g) => g.provider} noun='providers' empty='No gateway calls.' cols={GATEWAY_COLS} />
+        ) }
+      ]} />
     </div>
   );
 }

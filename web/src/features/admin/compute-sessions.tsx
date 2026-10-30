@@ -9,7 +9,8 @@ import { useMemo, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { MultiSelectFilter } from '@/components/layout/multi-select-filter';
-import { Field, RecordView, type RecordCol } from '@/components/layout/record-view';
+import { DetailMeta, DetailTable, DetailTabs, KeyValueTable, LongText } from '@/components/layout/detail';
+import { RecordView, type RecordCol } from '@/components/layout/record-view';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -21,7 +22,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { post, useAdmin, useAdminAction } from './lib';
 import { Gate, useAdminRole } from './role';
 import { copyText, ErrorBox, Mono, Notice, StatusBadge, When, type Tone } from './ui';
-import { AMBER, Chip, cents, dur, jobSessions, PeekSection, SectionLink, since, useComputeParams, useNow, nextPinned, useScrollTo } from './compute-common';
+import { AMBER, Chip, cents, dur, jobSessions, SectionLink, since, useComputeParams, useNow, nextPinned, useScrollTo } from './compute-common';
 import { SessionsStats } from './compute-stats';
 
 export interface SessionRow {
@@ -160,7 +161,7 @@ export function ComputeSessions() {
           { label: "Show this job's sessions", icon: <Icons.search />, onSelect: () => url.write(jobSessions(s.simulation_id)) },
           { label: 'Open account', icon: <Icons.externalLink />, onSelect: () => router.push(`/admin/accounts/${encodeURIComponent(s.org.slug)}`) }
         ]}
-        detailTitle={(s) => <span className='flex items-center gap-2'><Mono>{s.id}</Mono><StatusBadge tone={STATUS_TONE[s.status]}>{s.status}</StatusBadge></span>}
+        detailTitle={() => 'Session'}
         detail={(s) => <SessionPeek id={s.id} onJob={() => url.write(jobSessions(s.simulation_id))} onCancel={(x) => setCancelling(x)} cancelling={cancel.isPending} />}
         empty={shown && shown.total > rows.length ? `No match among the ${rows.length} most relevant of ${shown.total} sessions; narrow the filters.` : 'No sessions match these filters.'} compact />
       <AlertDialog open={!!cancelling} onOpenChange={(o) => !o && setCancelling(null)}>
@@ -210,102 +211,120 @@ const META_LABEL: Record<string, string> = {
   changed_files: 'Changed files', exit_code: 'Exit code', exit_signal: 'Exit signal'
 };
 
-/** One session's peek: status and the full error, timing, run, infrastructure, spend, runnability, the last events, links. */
+/** One session's peek: a card with where it is, the fix for its failure and its links, then tabs for the full error,
+ *  timing, run, infrastructure, spend, gateway calls, runnability and the last transcript events. */
 function SessionPeek({ id, onJob, onCancel, cancelling }: { id: string; onJob: () => void; onCancel: (s: SessionRow) => void; cancelling: boolean }) {
   const { data, error, isLoading } = useAdmin<SessionDetail>(`/compute/sessions/${encodeURIComponent(id)}`);
   if (isLoading) return <div className='grid gap-3'><Skeleton className='h-16' /><Skeleton className='h-40' /></div>;
   if (!data) return <ErrorBox error={error} />;
   const s = data.session, m = data.metadata;
-  const v = (k: string): ReactNode => (m[k] == null || m[k] === '' ? <span className='text-muted-foreground'>—</span> : String(m[k]));
+  const none = <span className='text-muted-foreground'>—</span>;
+  const v = (k: string): ReactNode => (m[k] == null || m[k] === '' ? none : String(m[k]));
   const wall = typeof m.wall_ms === 'number' ? dur(m.wall_ms / 1000) : null;
+  const infra = typeof m.infra_error === 'string' && m.infra_error !== s.error_message ? m.infra_error : null;
+  const orchHref = data.orchestrator ? `/admin/compute?section=orchestrators&state=all&orch=${data.orchestrator.id}` : null;
   return (
-    <div className='grid gap-6'>
-      <PeekSection title='Status'>
-        <p className='text-sm'>{statusSentence(s, m)}</p>
-        {s.error_message && <pre className='bg-muted/50 max-h-48 overflow-auto rounded-md p-3 font-mono text-xs whitespace-pre-wrap'>{s.error_message}</pre>}
-        {typeof m.infra_error === 'string' && m.infra_error !== s.error_message && (
-          <p className='text-muted-foreground text-xs'>Last infrastructure error (it was queued again): <Mono>{m.infra_error}</Mono></p>
-        )}
-        {data.hint && <Notice><SectionLink href={data.hint.href} className='hover:underline'>{data.hint.text}</SectionLink></Notice>}
-      </PeekSection>
-
-      <PeekSection title='Timing'>
-        <dl>
-          <Field label='Queued'><When d={s.queued_at} /></Field>
-          <Field label='Started'>{s.started_at ? <><When d={s.started_at} /> <span className='text-muted-foreground'>· waited {dur(waitOf(s))}</span></> : <span className='text-muted-foreground'>not yet · waiting {dur(waitOf(s))}</span>}</Field>
-          <Field label='Last heartbeat'><When d={s.heartbeat_at} /></Field>
-          <Field label='Ended'>{s.ended_at ? <><When d={s.ended_at} /> <span className='text-muted-foreground'>· ran {dur(runOf(s))}</span></> : <span className='text-muted-foreground'>—</span>}</Field>
-          {wall && <Field label='Wall time (orchestrator)'>{wall}</Field>}
-        </dl>
-      </PeekSection>
-
-      <PeekSection title='Run'>
-        <dl>
-          <Field label='Agent'>{s.agent_id ?? '—'} <span className='text-muted-foreground'>· {s.harness} · <Mono>{s.model}</Mono></span></Field>
-          <Field label='Agent turns'>{m.agent_turns != null ? <>{String(m.agent_turns)}{m.max_agent_turns != null && <span className='text-muted-foreground'> of {String(m.max_agent_turns)}</span>}</> : <span className='text-muted-foreground'>—</span>}</Field>
-          {Object.entries(META_LABEL).map(([k, label]) => <Field key={k} label={label}>{v(k)}</Field>)}
-          <Field label='Outcome'>{s.completed_reason?.replace(/_/g, ' ') ?? <span className='text-muted-foreground'>—</span>}</Field>
-        </dl>
-      </PeekSection>
-
-      <PeekSection title='Infrastructure'>
-        <dl>
-          <Field label='Infra retries'>{s.infra_retries}</Field>
-          <Field label='Orchestrator'>{data.orchestrator
-            ? <SectionLink href={`/admin/compute?section=orchestrators&state=all&orch=${data.orchestrator.id}`} className='hover:underline'><Mono>{data.orchestrator.orchestrator_id ?? `row ${data.orchestrator.id}`}</Mono></SectionLink>
-            : <Mono>{s.worker_id ?? '—'}</Mono>}</Field>
-          <Field label='boat sandbox'>{s.sandbox_id ? <><Mono>{s.sandbox_id}</Mono> <span className='text-muted-foreground'>· {String(m.boat_sandbox_type ?? 'default')}</span></> : <span className='text-muted-foreground'>—</span>}</Field>
-          <Field label='Sandbox time'>{typeof m.boat_sandbox_seconds === 'number' ? dur(m.boat_sandbox_seconds) : <span className='text-muted-foreground'>—</span>}</Field>
-        </dl>
-      </PeekSection>
-
-      <PeekSection title='Spend'>
-        <dl>
-          <Field label='Tokens in / out'><span className='tabular-nums'>{s.tokens_in.toLocaleString()} / {s.tokens_out.toLocaleString()}</span></Field>
-          <Field label='Model'>{cents(s.cost_usd)}</Field>
-        </dl>
-        {data.gateway.length > 0 && (
-          <div className='grid gap-1'>
-            <p className='text-muted-foreground text-xs'>Gateway calls (detail only: already counted in the model cost above).</p>
-            <MiniTable head={['Provider', 'Requests', 'Errors', 'Tokens in / out', 'Cost']} rows={data.gateway.map((g) => [
-              <Mono key='p'>{g.provider}</Mono>, g.requests, g.errors ? <span key='e' className='text-destructive'>{g.errors}</span> : 0,
-              `${g.input_tokens.toLocaleString()} / ${g.output_tokens.toLocaleString()}`, cents(g.cost_usd)])} />
-          </div>
-        )}
-      </PeekSection>
-
-      {data.runnable && (
-        <PeekSection title='Can this agent run?'>
-          <RunnableLine r={data.runnable} />
-        </PeekSection>
-      )}
-
-      <PeekSection title={`Transcript (last ${data.transcript.length} events)`}>
-        {data.transcript.length ? (
-          <ol className='grid gap-1.5'>
-            {data.transcript.map((e) => (
-              <li key={e.seq} className='grid grid-cols-[3rem_6rem_1fr] gap-2 text-xs'>
-                <span className='text-muted-foreground tabular-nums'>#{e.seq}</span>
-                <span className='text-muted-foreground truncate' title={new Date(e.ts).toLocaleString()}>{e.type}</span>
-                <span className='min-w-0 break-words whitespace-pre-wrap'>{e.text}</span>
-              </li>
-            ))}
-          </ol>
-        ) : <p className='text-muted-foreground text-sm'>No transcript events.</p>}
-      </PeekSection>
-
-      <PeekSection title='Links'>
-        <div className='flex flex-wrap gap-2'>
+    <div className='flex flex-col gap-4'>
+      <DetailMeta
+        title={<Mono>{s.id}</Mono>}
+        badges={<>
+          <StatusBadge tone={STATUS_TONE[s.status]}>{s.status}</StatusBadge>
+          {s.error_label && <StatusBadge tone={s.error_class === 'unclaimable' ? 'warn' : 'bad'}>{s.error_label}</StatusBadge>}
+          {s.infra_retries > 0 && <Chip tone='warn' title={`Queued again ${s.infra_retries}× after an infrastructure failure`}>infra retry</Chip>}
+        </>}
+        subtitle={statusSentence(s, m)}
+        actions={<>
           <Link href={`/admin/accounts/${encodeURIComponent(s.org.slug)}`} className={buttonVariants({ variant: 'outline', size: 'sm' })}><Icons.account /> {s.org.name}</Link>
           <Button variant='outline' size='sm' onClick={onJob}><Icons.search /> This job&apos;s sessions</Button>
-          {data.orchestrator && <SectionLink href={`/admin/compute?section=orchestrators&state=all&orch=${data.orchestrator.id}`} className={buttonVariants({ variant: 'outline', size: 'sm' })}><Icons.route /> Orchestrator</SectionLink>}
+          {orchHref && <SectionLink href={orchHref} className={buttonVariants({ variant: 'outline', size: 'sm' })}><Icons.route /> Orchestrator</SectionLink>}
           <Button variant='ghost' size='sm' onClick={() => copyText(s.id, 'Session id copied')}>Copy id</Button>
-          {OPEN.includes(s.status) && <Gate need='compute'><Button variant='outline' size='sm' className='text-destructive ml-auto' disabled={cancelling} onClick={() => onCancel(s)}><Icons.close /> Cancel session</Button></Gate>}
-        </div>
-      </PeekSection>
+          {OPEN.includes(s.status) && <Gate need='compute'><Button variant='outline' size='sm' className='text-destructive' disabled={cancelling} onClick={() => onCancel(s)}><Icons.close /> Cancel session</Button></Gate>}
+        </>}
+        facts={[
+          { label: 'Job', value: <Mono>{s.simulation_id}</Mono> },
+          { label: 'Account', value: s.org.name },
+          { label: 'Agent', value: s.agent_id ?? '—', hint: s.harness },
+          { label: 'Model', value: <Mono>{s.model}</Mono> },
+          { label: 'Attempt', value: <span className='tabular-nums'>{s.attempt}</span>, hint: 'repeat number within the run', hidden: s.attempt <= 1 },
+          { label: 'Queued', value: <When d={s.queued_at} /> },
+          { label: 'Model cost', value: <span className='tabular-nums'>{cents(s.cost_usd)}</span> }
+        ]}
+      >
+        {data.hint && <Notice><SectionLink href={data.hint.href} className='hover:underline'>{data.hint.text}</SectionLink></Notice>}
+      </DetailMeta>
+
+      <DetailTabs resetKey={id} tabs={[
+        { id: 'error', label: 'Error', hidden: !s.error_message && !infra, content: (
+          <KeyValueTable rows={[
+            { label: 'Error', value: <LongText mono>{s.error_message}</LongText>, hidden: !s.error_message },
+            { label: 'Last infrastructure error (it was queued again)', value: <LongText mono>{infra}</LongText>, hidden: !infra }
+          ]} />
+        ) },
+        { id: 'timing', label: 'Timing', content: (
+          <KeyValueTable rows={[
+            { label: 'Queued', value: <When d={s.queued_at} /> },
+            { label: 'Started', value: s.started_at ? <><When d={s.started_at} /> <span className='text-muted-foreground'>· waited {dur(waitOf(s))}</span></> : <span className='text-muted-foreground'>not yet · waiting {dur(waitOf(s))}</span> },
+            { label: 'Last heartbeat', value: <When d={s.heartbeat_at} /> },
+            { label: 'Ended', value: s.ended_at ? <><When d={s.ended_at} /> <span className='text-muted-foreground'>· ran {dur(runOf(s))}</span></> : none },
+            { label: 'Wall time (orchestrator)', value: wall, hidden: !wall }
+          ]} />
+        ) },
+        { id: 'run', label: 'Run', content: (
+          <KeyValueTable rows={[
+            { label: 'Agent', value: <>{s.agent_id ?? '—'} <span className='text-muted-foreground'>· {s.harness} · <Mono>{s.model}</Mono></span></> },
+            { label: 'Agent turns', value: m.agent_turns != null ? <>{String(m.agent_turns)}{m.max_agent_turns != null && <span className='text-muted-foreground'> of {String(m.max_agent_turns)}</span>}</> : none },
+            ...Object.entries(META_LABEL).map(([k, label]) => ({ label, value: v(k) })),
+            { label: 'Outcome', value: s.completed_reason?.replace(/_/g, ' ') ?? none }
+          ]} />
+        ) },
+        { id: 'infra', label: 'Infrastructure', content: (
+          <KeyValueTable rows={[
+            { label: 'Infra retries', value: s.infra_retries },
+            { label: 'Orchestrator', value: data.orchestrator && orchHref
+              ? <SectionLink href={orchHref} className='hover:underline'><Mono>{data.orchestrator.orchestrator_id ?? `row ${data.orchestrator.id}`}</Mono></SectionLink>
+              : <Mono>{s.worker_id ?? '—'}</Mono> },
+            { label: 'boat sandbox', value: s.sandbox_id ? <><Mono>{s.sandbox_id}</Mono> <span className='text-muted-foreground'>· {String(m.boat_sandbox_type ?? 'default')}</span></> : none },
+            { label: 'Sandbox time', value: typeof m.boat_sandbox_seconds === 'number' ? dur(m.boat_sandbox_seconds) : none }
+          ]} />
+        ) },
+        { id: 'spend', label: 'Spend', content: (
+          <KeyValueTable rows={[
+            { label: 'Tokens in / out', value: <span className='tabular-nums'>{s.tokens_in.toLocaleString()} / {s.tokens_out.toLocaleString()}</span> },
+            { label: 'Model', value: cents(s.cost_usd) }
+          ]} />
+        ) },
+        { id: 'gateway', label: 'Gateway calls', count: data.gateway.length, hidden: !data.gateway.length, content: (
+          <DetailTable rows={data.gateway} rowKey={(g) => g.provider} noun='providers' empty='No gateway calls.'
+            filters={<span className='text-muted-foreground text-xs'>Detail only: already counted in the model cost.</span>} cols={GATEWAY_COLS} />
+        ) },
+        { id: 'runnable', label: 'Can it run?', hidden: !data.runnable, content: data.runnable && (
+          <KeyValueTable rows={[
+            { label: 'Agent', value: data.runnable.agent_id },
+            { label: 'Verdict', value: <RunnableLine r={data.runnable} /> }
+          ]} />
+        ) },
+        { id: 'transcript', label: 'Transcript', count: data.transcript.length, content: (
+          <DetailTable rows={data.transcript} rowKey={(e) => String(e.seq)} noun='events' empty='No transcript events.'
+            search={(e) => `${e.type} ${e.text}`} searchPlaceholder='Search the transcript' cols={[
+            { key: 'seq', label: '#', type: 'number', value: (e) => e.seq, render: (e) => <span className='text-muted-foreground tabular-nums'>#{e.seq}</span>, className: 'w-14' },
+            { key: 'ts', label: 'When', type: 'date', value: (e) => e.ts, render: (e) => <When d={e.ts} />, className: 'w-28 whitespace-nowrap' },
+            { key: 'type', label: 'Type', type: 'select', value: (e) => e.type, render: (e) => <span className='text-muted-foreground text-xs'>{e.type}</span> },
+            { key: 'text', label: 'Text', render: (e) => <span className='text-xs break-words whitespace-pre-wrap'>{e.text}</span>, className: 'whitespace-normal' }
+          ]} />
+        ) }
+      ]} />
     </div>
   );
 }
+
+/** A gateway call breakdown by provider (a session's or an orchestrator's peek). */
+export const GATEWAY_COLS: RecordCol<{ provider: string; requests: number; errors: number; input_tokens: number; output_tokens: number; cost_usd: number }>[] = [
+  { key: 'provider', label: 'Provider', type: 'text', value: (g) => g.provider, render: (g) => <Mono>{g.provider}</Mono> },
+  { key: 'requests', label: 'Requests', type: 'number', value: (g) => g.requests, render: (g) => g.requests, className: 'text-right tabular-nums' },
+  { key: 'errors', label: 'Errors', type: 'number', value: (g) => g.errors, render: (g) => (g.errors ? <span className='text-destructive'>{g.errors}</span> : 0), className: 'text-right tabular-nums' },
+  { key: 'tokens', label: 'Tokens in / out', type: 'number', value: (g) => g.input_tokens + g.output_tokens, render: (g) => `${g.input_tokens.toLocaleString()} / ${g.output_tokens.toLocaleString()}`, className: 'text-right tabular-nums' },
+  { key: 'cost', label: 'Cost', type: 'number', value: (g) => g.cost_usd, render: (g) => cents(g.cost_usd), className: 'text-right tabular-nums' }
+];
 
 function statusSentence(s: SessionRow, m: Record<string, unknown> = {}): string {
   const agent = s.agent_id ?? s.harness;
