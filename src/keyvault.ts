@@ -67,6 +67,8 @@ export function hint(secret: string): string {
 
 /** The vault provider that holds Google Cloud service-account keys for Claude (and Gemini) on Vertex AI. */
 export const VERTEX_PROVIDER = "vertex";
+/** The generated HMAC key for unsubscribe links (src/campaigns.ts): only ever added once, never replaced. */
+export const UNSUBSCRIBE_SIGNING_PROVIDER = "email_unsubscribe";
 
 export interface ServiceAccountInfo { project_id: string; client_email: string }
 /**
@@ -179,6 +181,10 @@ async function storeCredential(provider: string, secret: string, insertOnly: boo
   if (p.mode === "direct" && provider !== "boat" && p.env_vars.length && process.env.OCTILLION_DIRECT_KEYS !== "allow")
     throw new Error(`${provider} is a direct-mode provider: its real key would be handed to agent sessions. ` +
                     "Set OCTILLION_DIRECT_KEYS=allow only once those sessions run without customer-written tasks (docs/security.md)");
+  // The unsubscribe signing key is generated once (src/campaigns.ts, addCredentialIfAbsent) and signs every unsubscribe
+  // link already sent: replacing it would break them all, so nothing replaces it (delete it to have a new one generated).
+  if (provider === UNSUBSCRIBE_SIGNING_PROVIDER && !insertOnly)
+    throw new Error("The email unsubscribe signing key cannot be replaced: every unsubscribe link already sent is signed with it. It is generated automatically; delete it only if those links may stop working");
   const s = secret.trim();
   if (s.length < 8) throw new Error("That does not look like a credential");
   // The Vertex AI key is a Google service-account key, checked in full.

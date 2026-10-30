@@ -2,9 +2,14 @@
 -- deleted, never disabled, and a provider is usable when it has a key (no provider on/off). Adding a key to a type that
 -- has one replaces it (ON CONFLICT (provider)).
 --
--- vault_credentials.label, priority and enabled stay for compatibility with older code during a rolling deploy, but
--- nothing reads them any more: label is 'default', priority 0 and enabled true on every row. vault_providers.enabled
+-- vault_credentials.label, priority and enabled stay so older code can still read keys during a rolling deploy, but
+-- nothing new reads them: label is 'default', priority 0 and enabled true on every row. vault_providers.enabled
 -- likewise stays and is true everywhere.
+--
+-- Not fully rollout-safe for writes: older code stores keys with ON CONFLICT (provider, label), and that constraint is
+-- dropped here, so a key write (add, replace, env import, the unsubscribe key's first generation) from an instance
+-- still on the old release fails with an error until it is replaced. Reads (using a key) keep working. Avoid adding
+-- or replacing keys while the deploy rolls out; the window lasts until the last old instance is gone.
 
 -- Disabled keys are gone: a key is kept or deleted.
 DELETE FROM vault_credentials WHERE NOT enabled;

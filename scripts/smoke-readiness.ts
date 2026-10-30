@@ -155,6 +155,14 @@ export async function vaultOneKeyChecks({ db, adm, json, base, ADMIN_TOKEN, stam
   await assert.rejects(db.query("INSERT INTO vault_credentials (provider, label, ciphertext, iv, tag, key_id, hint) VALUES ('anthropic', 'second', 'x', 'x', 'x', 'x', 'x')"), /unique|duplicate/i, "the database refuses a second key for a type");
   assert.equal((await adm("POST", "/compute/keys", { provider: "cursor", secret: "cursor-secret-123456" })).status, 400, "direct-mode keys still refused");
   assert.equal((await adm("POST", "/compute/keys", { provider: "anthropic", secret: "" })).status, 400);
+  // The unsubscribe signing key is never replaced (every link already sent is signed with it): only its generator adds it.
+  const unsubRows = async () => (await db.query<any>("SELECT id, hint FROM vault_credentials WHERE provider = 'email_unsubscribe'")).map((r: any) => `${r.id}:${r.hint}`).join();
+  const unsubBefore = await unsubRows();
+  const unsubPost = await adm("POST", "/compute/keys", { provider: "email_unsubscribe", secret: `unsub-${stamp}-replacement` });
+  assert.equal(unsubPost.status, 400, "the API refuses to set the unsubscribe signing key");
+  assert.match((await unsubPost.json()).error, /cannot be replaced/);
+  await assert.rejects(kv.setCredential("email_unsubscribe", `unsub-${stamp}-replacement`), /cannot be replaced/, "setCredential refuses it too");
+  assert.equal(await unsubRows(), unsubBefore, "the unsubscribe key is untouched");
   // No enable/disable anywhere: the old routes are gone (410) and change nothing.
   assert.equal((await adm("POST", `/compute/keys/${addedKey.id}/enabled`, { enabled: false })).status, 410, "no key disable");
   assert.equal((await adm("POST", "/compute/providers/anthropic/enabled", { enabled: false })).status, 410, "no provider toggle");

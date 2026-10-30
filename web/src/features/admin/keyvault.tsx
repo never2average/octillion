@@ -43,6 +43,8 @@ const TYPE: Record<string, string> = {
 };
 const TYPES = ['Inference', 'Sandbox', 'Search', 'Email', 'Alerts', 'Prospecting', 'Coding agent', 'Other'];
 const typeOf = (slug: string) => TYPE[slug] ?? 'Other';
+/** The generated unsubscribe-link signing key: never replaced or imported (every link already sent is signed with it). */
+const NO_REPLACE = new Set(['email_unsubscribe']);
 /** 12400 → "12.4k". */
 const COMPACT = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
 /** Key types grouped by category (in TYPES order), by display name within one. */
@@ -91,18 +93,20 @@ export function AdminKeyVault() {
         onImport={can('keys') && !locked ? () => setImporting(true) : undefined} importLabel='Import keys'
         primary={<Gate need='keys'><Button onClick={() => setAdding('')} disabled={locked || !providers.length}><Icons.add /> Add key</Button></Gate>}
         actions={(c) => [
-          { label: 'Replace key…', icon: <Icons.refresh />, disabled: locked, onSelect: () => setAdding(c.provider) },
-          { label: 'Delete…', icon: <Icons.trash />, destructive: true, separator: true, onSelect: () => setDel(c) }
+          ...(NO_REPLACE.has(c.provider) ? [] : [{ label: 'Replace key…', icon: <Icons.refresh />, disabled: locked, onSelect: () => setAdding(c.provider) }]),
+          { label: 'Delete…', icon: <Icons.trash />, destructive: true, separator: !NO_REPLACE.has(c.provider), onSelect: () => setDel(c) }
         ].map((a) => lock(a, 'keys'))}
         exportName='key-vault' empty='No keys yet. Add one with Add key.' />
       {importing && <ImportKeys providers={providers} onClose={() => setImporting(false)} />}
-      {adding !== null && <AddKey providers={providers} initial={adding} onClose={() => setAdding(null)} />}
+      {adding !== null && <AddKey providers={providers.filter((p) => !NO_REPLACE.has(p.slug))} initial={adding} onClose={() => setAdding(null)} />}
       <AlertDialog open={!!del} onOpenChange={(o) => !o && setDel(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Delete the {del && nameOf(del.provider)} key?</AlertDialogTitle>
             <AlertDialogDescription>
-              Calls stop using it at once, and {del && nameOf(del.provider)} has no key until one is added again. This cannot be undone.
+              {del && NO_REPLACE.has(del.provider)
+                ? 'Every unsubscribe link (and reply address) in emails already sent is signed with this key: deleting it breaks all of them for good. A new key is generated on the next send. This cannot be undone.'
+                : <>Calls stop using it at once, and {del && nameOf(del.provider)} has no key until one is added again. This cannot be undone.</>}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -189,6 +193,9 @@ function AddKey({ providers, initial, onClose }: { providers: Provider[]; initia
                 </div>
               : <Input id='ak-secret' type='password' autoComplete='new-password' spellCheck={false} required value={f.secret} onChange={(e) => setF({ ...f, secret: e.target.value })} />}
           </FormRow>
+          {replacing && f.provider === 'resend_webhook' && (
+            <p className='flex items-start gap-2 text-sm text-amber-700 dark:text-amber-400'><Icons.warning className='mt-0.5 size-4 shrink-0' />Replacing the webhook secret stops Resend events until the new secret is also set in Resend.</p>
+          )}
           {err && <p className='text-destructive text-sm'>{err}</p>}
           <DialogFooter>
             <Button type='button' variant='outline' onClick={onClose}>Cancel</Button>
@@ -266,8 +273,9 @@ function ImportKeys({ providers, onClose }: { providers: Provider[]; onClose: ()
   const read = (t: string) => { const r = parseKeys(t, slugs); setRows(r.keys); setSkipped(r.skipped); setText(''); };
   const count = (provider: string) => rows?.filter((r) => r.provider === provider).length ?? 0;
   const dupes = [...new Set((rows ?? []).filter((r) => count(r.provider) > 1).map((r) => r.provider))];
+  const refused = (rows ?? []).filter((r) => !r.status && NO_REPLACE.has(r.provider));
   const save = async () => {
-    if (!rows || dupes.length) return;
+    if (!rows || dupes.length || refused.length) return;
     setBusy(true);
     const out: Parsed[] = [];
     for (const k of rows) {
@@ -297,14 +305,14 @@ function ImportKeys({ providers, onClose }: { providers: Provider[]; onClose: ()
               <thead><tr className='text-muted-foreground border-b text-xs'><th className='px-3 py-2 text-left font-normal'>From</th><th className='px-3 py-2 text-left font-normal'>Type</th><th className='px-3 py-2 text-left font-normal'>Key</th><th className='px-3 py-2 text-left font-normal'>Status</th><th className='px-3 py-2 text-left font-normal'>Actions</th></tr></thead>
               <tbody>
                 {rows.map((r, i) => {
-                  const dupe = !r.status && count(r.provider) > 1;
+                  const dupe = !r.status && count(r.provider) > 1, no = !r.status && NO_REPLACE.has(r.provider);
                   return (
                     <tr key={i} className='border-t'>
                       <td className='px-3 py-2'><Mono>{r.source}</Mono></td>
                       <td className='px-3 py-2'>{nameOf(r.provider)}</td>
                       <td className='px-3 py-2'><Mono>{r.status ? '—' : hint(r.secret)}</Mono></td>
-                      <td className={cn('px-3 py-2', (r.status === 'failed' || dupe) && 'text-destructive')}>
-                        {r.status === 'saved' ? 'saved' : r.status === 'failed' ? r.error : dupe ? 'duplicate type' : hasKey.has(r.provider) ? 'ready, replaces the current key' : 'ready'}
+                      <td className={cn('px-3 py-2', (r.status === 'failed' || dupe || no) && 'text-destructive')}>
+                        {r.status === 'saved' ? 'saved' : r.status === 'failed' ? r.error : no ? 'not importable: generated automatically' : dupe ? 'duplicate type' : hasKey.has(r.provider) ? 'ready, replaces the current key' : 'ready'}
                       </td>
                       <td className='px-3 py-2'>{!done && <Button variant='ghost' size='xs' onClick={() => setRows(rows.filter((_, j) => j !== i))}>Remove</Button>}</td>
                     </tr>
@@ -315,12 +323,13 @@ function ImportKeys({ providers, onClose }: { providers: Provider[]; onClose: ()
             </table>
           </div>
           {dupes.length > 0 && !done && <p className='text-destructive text-sm'>Each type can have one key: {dupes.map(nameOf).join(', ')} {dupes.length === 1 ? 'appears' : 'appear'} more than once. Remove the extra rows to import.</p>}
+          {refused.length > 0 && !done && <p className='text-destructive text-sm'>The email unsubscribe signing key is generated automatically and never imported: every unsubscribe link already sent is signed with it. Remove that row to import.</p>}
           {skipped.length > 0 && <p className='text-muted-foreground text-xs'>Skipped (not a known key): {skipped.join(', ')}</p>}
         </>)}
         <DialogFooter>
           <Button variant='outline' disabled={busy} onClick={onClose}>{done ? 'Close' : 'Cancel'}</Button>
           {rows && !done && <Button variant='ghost' onClick={() => setRows(null)}>Back</Button>}
-          {rows && !done && <Gate need='keys'><Button disabled={busy || !rows.length || dupes.length > 0} onClick={() => void save()}>{busy ? 'Saving…' : `Import ${rows.length} key${rows.length === 1 ? '' : 's'}`}</Button></Gate>}
+          {rows && !done && <Gate need='keys'><Button disabled={busy || !rows.length || dupes.length > 0 || refused.length > 0} onClick={() => void save()}>{busy ? 'Saving…' : `Import ${rows.length} key${rows.length === 1 ? '' : 's'}`}</Button></Gate>}
         </DialogFooter>
       </DialogContent>
     </Dialog>

@@ -26,7 +26,9 @@ sub-agent (pod / boat VM) ──ogw_ token──▶ /gw/<provider>/… ──rea
 **One key per provider.** Each provider (key type) holds at most one key (`UNIQUE (provider)`, migration 0011).
 Adding a key to a type that has one replaces it in place (`rotated_at` is set); a key is kept or deleted, never
 disabled, and there is no provider on/off: a provider is usable when it has a key. Add, replace and delete are in the
-admin audit log (`model_key.add`, `model_key.replace`, `model_key.delete`).
+admin audit log (`model_key.add`, `model_key.replace`, `model_key.delete`). The one exception is `email_unsubscribe`,
+the generated signing key for unsubscribe links: it is never replaced or imported (every link already sent is signed
+with it), only deleted, which breaks those links.
 
 **Vault only.** Every provider key is read from the vault at runtime; no code path reads a provider key from an
 environment variable. On boot the server imports any provider key still set in its environment (Vercel) into the
