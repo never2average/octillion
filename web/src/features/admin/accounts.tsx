@@ -13,7 +13,7 @@ import { Icons } from '@/components/icons';
 import { post, useAdmin, useAdminAction, type InviteResult } from './lib';
 import { useResult } from './result-dialog';
 import { RecordView, type RecordCol, type RecordViewDef } from '@/components/layout/record-view';
-import { AccountPeek, AccountPeekActions, accountActions, dollars, useAccountActions, type Org } from './account-peek';
+import { AccountPeek, accountActions, dollars, useAccountActions, type Org } from './account-peek';
 import { copyText, StageDots, StatusBadge, SubBadge, When } from './ui';
 import { Gate } from './role';
 
@@ -135,7 +135,7 @@ export function AdminAccounts() {
         ]}
         actions={(o) => accountActions(o, ctl)}
         empty='No accounts yet. Approve an access request or create one.'
-        detailActions={(o) => <AccountPeekActions org={o} ctl={ctl} />}
+        detailTitle={() => 'Account'}
         detail={(o) => <AccountPeek org={o} ctl={ctl} />}
       />
       {creating && (

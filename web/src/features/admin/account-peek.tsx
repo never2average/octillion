@@ -2,10 +2,11 @@
 // One account in the accounts page's side peek: its problems with a fix, a short summary and four tabs, without leaving
 // the list. Its actions (the row ⋯ menu and the peek header) share one controller, so every dialog and result is
 // rendered once by the page.
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
+import { DetailMeta, DetailTable, DetailTabs } from '@/components/layout/detail';
 import { useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { ActionsMenu, Field, type RowAction } from '@/components/layout/record-view';
+import { ActionsMenu, type RowAction } from '@/components/layout/record-view';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -22,7 +23,7 @@ import { cn } from '@/lib/utils';
 import { Sparkline } from '@/components/layout/section';
 import { Dock } from '@/features/portal/memory';
 import { ACCOUNT_ROLES, accountRoleLabel, accountRoleOf, post, STAGE_LABELS, useAdmin, type InviteResult, type OrgRow } from './lib';
-import { copyText, ErrorBox, Mono, When, type Tone } from './ui';
+import { copyText, ErrorBox, Mono, StatusBadge, When, type Tone } from './ui';
 import { Gate, useAdminRole, type AdminPermission } from './role';
 
 /** A row of GET /orgs: lib.ts's OrgRow plus the fields shapeOrg (src/admin.ts) also returns. */
@@ -377,13 +378,14 @@ function planLine(s: Org['subscription'], stripeOn: boolean | undefined): ReactN
   return <>{s.plan ?? 'No plan'}{state && <><span className='text-muted-foreground'> · </span>{state}</>}</>;
 }
 
-/** Problems with their fix, a five-line summary, then People / Usage / Billing / Onboarding (fetched lazily). */
-export function AccountPeek({ org, ctl }: { org: Org; ctl: AccountCtl }) {
+/** The card (problems with their fix, the account's facts, the ⋯ menu), then a tab per list (fetched lazily). */
+export function AccountPeek({ org, ctl, actions }: { org: Org; ctl: AccountCtl; actions?: ReactNode }) {
   const path = orgPath(org.slug);
   const { data: d, error } = useAdmin<OrgDetail>(path);
   const confirm = useConfirm();
-  // "View" on a problem scrolls to its section (there are no tabs to switch).
-  const setTab = (section: string) => document.getElementById(`peek-${section}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  const [tab, setTab] = useState<string | undefined>(undefined);
+  // The next record in the peek opens on its first tab.
+  useEffect(() => setTab(undefined), [org.slug]);
 
   const member = (m: OrgDetail['members'][number]): RowAction[] => {
     const who = m.email || m.user_id;
@@ -418,155 +420,156 @@ export function AccountPeek({ org, ctl }: { org: Org; ctl: AccountCtl }) {
   const stages = Object.keys(org.reached ?? STAGE_LABELS);
   const keys = d ? [...d.keys].sort((a, b) => Number(!!a.revoked_at) - Number(!!b.revoked_at)) : [];
   const req = d?.requests[0];
-  return (
-    <div className='flex flex-col gap-6'>
-      {org.attention.length > 0 && (
-        <div>
-          {org.attention.map((a) => {
-            const fix = fixFor(a, org, d, ctl, setTab);
-            return (
-              <div key={a} className='flex items-center gap-3 border-b py-3 text-sm leading-none last:border-b-0'>
-                <Icons.warning className='size-3.5 shrink-0 text-amber-700 dark:text-amber-400' />
-                <span className='min-w-0 flex-1 truncate text-amber-700 dark:text-amber-400' title={a}>{a}</span>
-                {fix && (() => {
-                  const b = <Button variant='ghost' size='xs' className='text-muted-foreground hover:text-foreground -my-1.5' onClick={fix.onSelect}>{fix.label}</Button>;
-                  return fix.need ? <Gate need={fix.need}>{b}</Gate> : b;
-                })()}
-              </div>
-            );
-          })}
-        </div>
-      )}
+  const subState = s ? (s.cancel_at_period_end ? 'cancels' : s.status.replace(/_/g, ' ')) : null;
+  const subTone: Tone = !s ? 'neutral' : s.cancel_at_period_end ? 'warn' : s.status === 'active' ? 'ok' : s.status === 'trialing' ? 'info' : ['past_due', 'unpaid', 'incomplete'].includes(s.status) ? 'bad' : 'neutral';
+  const milestones = stages.filter((k) => org.reached?.[k]).map((k) => ({ k, at: org.reached[k] }));
+  const view = (t: string) => setTab(t === 'usage' ? 'tools' : t);
 
-      <dl>
-        <Field label='Customer'>
-          {org.stripe_customer_id ? <CopyText value={org.stripe_customer_id} ok='Customer id copied' /> : <span className='text-muted-foreground'>{stripeOn ? 'No Stripe customer yet' : 'Stripe off'}</span>}
-        </Field>
-        <Field label='Stage'>
-          <span className='block truncate' title={`${org.stage_label} · next: ${org.next_step}`}>{org.stage_label}<span className='text-muted-foreground'> · next: {org.next_step}</span></span>
-        </Field>
-        <Field label='Access'>
-          {org.members || org.pending_invites || org.active_keys ? access.filter(Boolean).join(' · ') : <span className='text-muted-foreground'>No one yet</span>}
-        </Field>
-        <Field label='Usage'>
-          {org.last_seen ? (<span className='flex items-center justify-between gap-3'><span>
-            Last seen <When d={org.last_seen} /> · <span className='tabular-nums'>{org.calls_7d}</span> calls 7d
-            {org.errors_7d > 0 && <> · <span className='text-destructive tabular-nums'>{org.errors_7d} errors</span></>}
-            {running > 0 && <> · {running} running</>}
-          </span>{d?.daily && <span title='Tool calls per day, last 30 days' className='-my-2'><Sparkline values={d.daily.calls} /></span>}</span>) : <span className='text-muted-foreground'>Never connected</span>}
-        </Field>
-        <Field label='Plan'>
-          {planLine(s, stripeOn)}
-          <span className='text-muted-foreground'> · {org.prepaid_allowed ? 'may subscribe' : 'invite-only, not allowed'}</span>
-        </Field>
-        <Field label='Allowance'>
-          {org.budget_source === 'override' ? <>{dollars(org.allowance_usd)}/month <span className='text-muted-foreground'>· set by an admin</span></>
-            : org.budget_source === 'plan' ? <>{dollars(org.budget_usd)}/month <span className='text-muted-foreground'>· from the plan</span></>
-            : <span className={amber}>$0: no runs until a plan or an allowance</span>}
-        </Field>
-        <Field label='Spend'>
-          <span className='flex items-center justify-between gap-3'>
-            <span className={cn('tabular-nums', over && amber)}>{dollars(org.month_spend_usd)} of {dollars(org.budget_usd)} this month</span>
-            {d?.daily && d.daily.spend.length > 1 && <span title='Model spend per day, this month' className='-my-2'><Sparkline values={d.daily.spend} /></span>}
-          </span>
-        </Field>
-        {org.contact && (
-          <Field label='Contact'>
-            <CopyText value={org.contact} ok='Email copied' />
-          </Field>
+  return (
+    <div className='flex flex-col gap-4'>
+      <DetailMeta
+        title={org.name}
+        badges={<>
+          <StatusBadge tone={org.stage_index >= 6 ? 'ok' : 'info'}>{org.stage_label}</StatusBadge>
+          {subState && <StatusBadge tone={subTone}>{subState}</StatusBadge>}
+          {org.attention.length > 0 && <StatusBadge tone='warn'>{`${org.attention.length} to look at`}</StatusBadge>}
+        </>}
+        actions={actions ?? <AccountPeekActions org={org} ctl={ctl} />}
+        facts={[
+          { label: 'Customer', value: org.stripe_customer_id ? <CopyText value={org.stripe_customer_id} ok='Customer id copied' /> : <span className='text-muted-foreground'>{stripeOn ? 'No Stripe customer yet' : 'Stripe off'}</span> },
+          { label: 'Stage', value: org.stage_label, hint: `next: ${org.next_step}` },
+          { label: 'Access', value: org.members || org.pending_invites || org.active_keys ? access.filter(Boolean).join(' · ') : <span className='text-muted-foreground'>No one yet</span> },
+          { label: 'Last seen', value: org.last_seen ? <When d={org.last_seen} /> : <span className='text-muted-foreground'>Never connected</span>,
+            hint: org.last_seen ? <>{org.calls_7d} calls 7d{org.errors_7d > 0 && <> · <span className='text-destructive'>{org.errors_7d} errors</span></>}{running > 0 && <> · {running} running</>}</> : undefined },
+          { label: 'Plan', value: planLine(s, stripeOn), hint: org.prepaid_allowed ? 'may subscribe' : 'invite-only, not allowed' },
+          { label: 'Allowance', value: org.budget_source === 'override' ? <>{dollars(org.allowance_usd)}/month</>
+              : org.budget_source === 'plan' ? <>{dollars(org.budget_usd)}/month</>
+              : <span className={amber}>$0: no runs until a plan or an allowance</span>,
+            hint: org.budget_source === 'override' ? 'set by an admin' : org.budget_source === 'plan' ? 'from the plan' : undefined },
+          { label: 'Spend this month', value: <span className={cn('tabular-nums', over && amber)}>{dollars(org.month_spend_usd)} of {dollars(org.budget_usd)}</span> },
+          { label: 'Contact', value: <CopyText value={org.contact ?? ''} ok='Email copied' />, hidden: !org.contact },
+          { label: 'Slug', value: <CopyText value={org.slug} ok='Slug copied' /> },
+          { label: 'Created', value: <When d={org.created_at} />, hint: req ? <>requested <When d={req.created_at} /> by {req.email}</> : undefined }
+        ]}
+      >
+        {d?.daily && (
+          <div className='text-muted-foreground flex flex-wrap gap-x-8 gap-y-2 border-t pt-3 text-xs'>
+            <span className='flex items-center gap-2' title='Tool calls per day, last 30 days'>Calls, 30 days <Sparkline values={d.daily.calls} /></span>
+            {d.daily.spend.length > 1 && <span className='flex items-center gap-2' title='Model spend per day, this month'>Spend, this month <Sparkline values={d.daily.spend} /></span>}
+          </div>
         )}
-        <Field label='Slug'><CopyText value={org.slug} ok='Slug copied' /></Field>
-        <Field label='Created'><When d={org.created_at} />{req && <span className='text-muted-foreground'> · requested <When d={req.created_at} /> by {req.email}</span>}</Field>
-      </dl>
+        {org.attention.length > 0 && (
+          <div className='border-t'>
+            {org.attention.map((a) => {
+              const fix = fixFor(a, org, d, ctl, view);
+              return (
+                <div key={a} className='flex items-center gap-3 border-b py-2.5 text-sm leading-none last:border-b-0'>
+                  <Icons.warning className='size-3.5 shrink-0 text-amber-700 dark:text-amber-400' />
+                  <span className='min-w-0 flex-1 truncate text-amber-700 dark:text-amber-400' title={a}>{a}</span>
+                  {fix && (() => {
+                    const b = <Button variant='outline' size='xs' className='-my-1.5' onClick={fix.onSelect}>{fix.label}</Button>;
+                    return fix.need ? <Gate need={fix.need}>{b}</Gate> : b;
+                  })()}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </DetailMeta>
 
       <ErrorBox error={error} />
       {!d ? (!error &&
-        <div className='grid gap-3'><Skeleton className='h-8' /><Skeleton className='h-40' /></div>
+        <div className='grid gap-3'><Skeleton className='h-8 w-80' /><Skeleton className='h-40' /></div>
       ) : (
-        // One scroll, no tabs: people, then usage, then billing and milestones; empty lists stay out of the way.
-        <div className='grid gap-8'>
-
-          <section id='peek-people' className='grid scroll-mt-4 gap-6'>
-            {org.clerk_org_id && (<>
-              <List title='Members' rows={d.members} empty='Nobody has joined yet.' actions={member} cols={[
-                ['Person', (m) => <>{m.email || m.user_id}{m.name && <span className='text-muted-foreground ml-2'>{m.name}</span>}</>],
-                ['Role', (m) => accountRoleLabel(m)],
-                ['Status', (m) => (m.status === 'inactive' ? word('bad', 'suspended') : word(m.status === 'active' || m.status === 'pending' ? 'ok' : 'info', m.status))],
-                ['Joined', (m) => <When d={m.created_at} />]
-              ]} />
-              <List title='Invitations' rows={d.invitations} actions={invitation} cols={[
-                ['Email', (x) => x.email],
-                ['Role', (x) => accountRoleLabel(x)],
-                ['State', (x) => word(x.state === 'expired' ? 'warn' : x.state === 'pending' ? 'ok' : 'info', x.state)],
-                ['Expires', (x) => (x.state === 'pending' && x.expires_at ? <When d={x.expires_at} /> : dash)]
-              ]} />
-            </>)}
-            {(!org.clerk_org_id || d.keys.length > 0) && (
-              <List title='Keys' rows={keys} empty='No keys.' actions={key} rowClassName={(k) => (k.revoked_at ? 'text-muted-foreground' : undefined)} cols={[
-                ['Label', (k) => k.label],
-                ['Key', (k) => <span className='tabular-nums'>{k.key_prefix}…</span>],
-                ['Last used', (k) => (k.revoked_at ? <>revoked <When d={k.revoked_at} /></> : <When d={k.last_used_at} />)],
-                ['Created', (k) => <When d={k.created_at} />]
-              ]} />
-            )}
-          </section>
-
-          <section id='peek-usage' className='grid scroll-mt-4 gap-6'>
-            <List title='Tools' rows={d.tools} empty='No tool calls yet.' cols={[
-              ['Tool', (t) => t.name],
-              ['Calls', (t) => count(t.calls), 'text-right tabular-nums'],
-              ['Errors', (t) => (Number(t.errors) ? <span className='text-destructive'>{t.errors}</span> : count(0)), 'text-right tabular-nums'],
-              ['Avg', (t) => (t.avg_ms != null ? `${t.avg_ms} ms` : dash), 'text-right tabular-nums'],
-              ['Last', (t) => <When d={t.last} />]
+        <DetailTabs value={tab} onValueChange={setTab} tabs={[
+          { id: 'members', label: 'Members', count: d.members.length, hidden: !org.clerk_org_id, content: (
+            <DetailTable rows={d.members} rowKey={(m) => m.id} noun='members' empty='Nobody has joined yet.' actions={member}
+              search={(m) => `${m.email ?? ''} ${m.name ?? ''} ${m.user_id}`} searchPlaceholder='Search members' cols={[
+              { key: 'person', label: 'Person', type: 'text', value: (m) => m.email || m.user_id, render: (m) => <>{m.email || m.user_id}{m.name && <span className='text-muted-foreground ml-2'>{m.name}</span>}</> },
+              { key: 'role', label: 'Role', type: 'text', value: (m) => accountRoleLabel(m), render: (m) => accountRoleLabel(m) },
+              { key: 'status', label: 'Status', type: 'select', value: (m) => m.status, render: (m) => (m.status === 'inactive' ? word('bad', 'suspended') : word(m.status === 'active' || m.status === 'pending' ? 'ok' : 'info', m.status)) },
+              { key: 'joined', label: 'Joined', type: 'date', value: (m) => m.created_at, render: (m) => <When d={m.created_at} /> }
             ]} />
-            <List title='Recent errors' rows={d.errors} cols={[
-              ['When', (e) => <When d={e.at} />],
-              ['Call', (e) => e.name || e.method],
-              ['Error', (e) => e.error, 'whitespace-normal leading-snug']
+          ) },
+          { id: 'invitations', label: 'Invitations', count: d.invitations.length, hidden: !org.clerk_org_id, content: (
+            <DetailTable rows={d.invitations} rowKey={(x) => x.id} noun='invitations' empty='No invitations.' actions={invitation} cols={[
+              { key: 'email', label: 'Email', type: 'text', value: (x) => x.email, render: (x) => x.email },
+              { key: 'role', label: 'Role', render: (x) => accountRoleLabel(x) },
+              { key: 'state', label: 'State', type: 'select', value: (x) => x.state, render: (x) => word(x.state === 'expired' ? 'warn' : x.state === 'pending' ? 'ok' : 'info', x.state) },
+              { key: 'expires', label: 'Expires', type: 'date', value: (x) => x.expires_at, render: (x) => (x.state === 'pending' && x.expires_at ? <When d={x.expires_at} /> : dash) }
             ]} />
-            <List title='Clients' rows={d.clients} cols={[
-              ['Client', (c) => c.client],
-              ['Calls', (c) => count(c.n), 'text-right tabular-nums'],
-              ['Last', (c) => <When d={c.last} />]
+          ) },
+          { id: 'keys', label: 'Keys', count: keys.length, hidden: !!org.clerk_org_id && d.keys.length === 0, content: (
+            <DetailTable rows={keys} rowKey={(k) => String(k.id)} noun='keys' empty='No keys.' actions={key} rowClassName={(k) => (k.revoked_at ? 'text-muted-foreground' : undefined)} cols={[
+              { key: 'label', label: 'Label', type: 'text', value: (k) => k.label, render: (k) => k.label },
+              { key: 'key', label: 'Key', render: (k) => <span className='tabular-nums'>{k.key_prefix}…</span> },
+              { key: 'used', label: 'Last used', type: 'date', value: (k) => k.revoked_at ?? k.last_used_at, render: (k) => (k.revoked_at ? <>revoked <When d={k.revoked_at} /></> : <When d={k.last_used_at} />) },
+              { key: 'created', label: 'Created', type: 'date', value: (k) => k.created_at, render: (k) => <When d={k.created_at} /> }
             ]} />
-            <List title='Products' rows={d.products} empty='No product yet.' cols={[
-              ['Product', (x) => x.name],
-              ['Website', (x) => (x.website_url ? <a href={x.website_url} target='_blank' rel='noopener noreferrer' className='text-muted-foreground hover:text-foreground'>{host(x.website_url)}</a> : dash)],
-              ['Added', (x) => <When d={x.created_at} />]
+          ) },
+          { id: 'tools', label: 'Tools', count: d.tools.length, content: (
+            <DetailTable rows={d.tools} rowKey={(t) => t.name} noun='tools' empty='No tool calls yet.' search={(t) => t.name} searchPlaceholder='Search tools' cols={[
+              { key: 'tool', label: 'Tool', type: 'text', value: (t) => t.name, render: (t) => t.name },
+              { key: 'calls', label: 'Calls', type: 'number', value: (t) => Number(t.calls), render: (t) => count(t.calls), className: 'text-right tabular-nums' },
+              { key: 'errors', label: 'Errors', type: 'number', value: (t) => Number(t.errors), render: (t) => (Number(t.errors) ? <span className='text-destructive'>{t.errors}</span> : count(0)), className: 'text-right tabular-nums' },
+              { key: 'avg', label: 'Avg', type: 'number', value: (t) => t.avg_ms, render: (t) => (t.avg_ms != null ? `${t.avg_ms} ms` : dash), className: 'text-right tabular-nums' },
+              { key: 'last', label: 'Last', type: 'date', value: (t) => t.last, render: (t) => <When d={t.last} /> }
             ]} />
-            <List title='Onboarding research' rows={d.research} cols={[
-              ['Product', (r) => r.product],
-              ['Status', (r) => <>{word(runTone(r.status), r.status)}{r.stage && r.status === 'running' && <span className='text-muted-foreground ml-1.5'>{r.stage}</span>}</>],
-              ['Started', (r) => <When d={r.created_at} />],
-              ...(d.research.some((r) => r.error) ? [['Detail', (r: OrgDetail['research'][number]) => (r.error ? <span className='text-destructive'>{r.error}</span> : null), 'whitespace-normal leading-snug'] as [string, (r: OrgDetail['research'][number]) => ReactNode, string]] : [])
+          ) },
+          { id: 'errors', label: 'Errors', count: d.errors.length, content: (
+            <DetailTable rows={d.errors} noun='errors' empty='No recent errors.' defaultSort={[{ key: 'at', dir: 'desc' }]} cols={[
+              { key: 'at', label: 'When', type: 'date', value: (e) => e.at, render: (e) => <When d={e.at} /> },
+              { key: 'call', label: 'Call', type: 'text', value: (e) => e.name || e.method, render: (e) => e.name || e.method },
+              { key: 'error', label: 'Error', render: (e) => e.error, className: 'whitespace-normal leading-snug' }
             ]} />
-            <List title='Simulations' rows={d.simulations} empty='No simulations yet.' cols={[
-              ['Simulation', (x) => x.name],
-              ['Status', (x) => word(runTone(x.status), x.status)],
-              ['Sessions', (x) => `${x.completed} / ${x.sessions}`, 'text-right tabular-nums'],
-              ['Started', (x) => <When d={x.created_at} />]
+          ) },
+          { id: 'clients', label: 'Clients', count: d.clients.length, content: (
+            <DetailTable rows={d.clients} rowKey={(c) => c.client} noun='clients' empty='No clients yet.' cols={[
+              { key: 'client', label: 'Client', type: 'text', value: (c) => c.client, render: (c) => c.client },
+              { key: 'n', label: 'Calls', type: 'number', value: (c) => Number(c.n), render: (c) => count(c.n), className: 'text-right tabular-nums' },
+              { key: 'last', label: 'Last', type: 'date', value: (c) => c.last, render: (c) => <When d={c.last} /> }
             ]} />
-          </section>
-
-          <section id='peek-billing' className='grid scroll-mt-4 gap-6'>
-            {d.integrations.stripe && (<>
-              <List title='Invoices' rows={d.invoices} cols={[
-                ['Invoice', (x) => x.number || x.id],
-                ['Status', (x) => word(x.status === 'paid' ? 'ok' : x.status === 'open' ? 'warn' : x.status === 'uncollectible' ? 'bad' : 'neutral', x.status)],
-                ['Total', (x) => money(x.total, x.currency), 'text-right tabular-nums'],
-                ['Date', (x) => <When d={typeof x.created === 'number' ? new Date(x.created * 1000) : x.created} />],
-                ['', (x) => (x.url ? <a href={x.url} target='_blank' rel='noopener noreferrer' aria-label='Open invoice' className='text-muted-foreground hover:text-foreground'><Icons.externalLink className='size-3.5' /></a> : null), 'w-8 text-right']
-              ]} />
-            </>)}
-          </section>
-
-          <section id='peek-onboarding' className='grid scroll-mt-4 gap-6'>
-            <List title='Milestones' empty='No milestone reached yet.' rows={stages.filter((k) => org.reached?.[k]).map((k) => ({ k, at: org.reached[k] }))} cols={[
-              ['Milestone', (m) => STAGE_LABELS[m.k] ?? m.k],
-              ['Reached', (m) => <When d={m.at} />]
+          ) },
+          { id: 'products', label: 'Products', count: d.products.length, content: (
+            <DetailTable rows={d.products} rowKey={(x) => x.slug} noun='products' empty='No product yet.' cols={[
+              { key: 'name', label: 'Product', type: 'text', value: (x) => x.name, render: (x) => x.name },
+              { key: 'site', label: 'Website', render: (x) => (x.website_url ? <a href={x.website_url} target='_blank' rel='noopener noreferrer' className='text-muted-foreground hover:text-foreground'>{host(x.website_url)}</a> : dash) },
+              { key: 'added', label: 'Added', type: 'date', value: (x) => x.created_at, render: (x) => <When d={x.created_at} /> }
             ]} />
-          </section>
-        </div>
+          ) },
+          { id: 'research', label: 'Research', count: d.research.length, content: (
+            <DetailTable rows={d.research} rowKey={(r) => String(r.id)} noun='runs' empty='No onboarding research yet.' defaultSort={[{ key: 'started', dir: 'desc' }]} cols={[
+              { key: 'product', label: 'Product', type: 'text', value: (r) => r.product, render: (r) => r.product },
+              { key: 'status', label: 'Status', type: 'select', value: (r) => r.status, render: (r) => <>{word(runTone(r.status), r.status)}{r.stage && r.status === 'running' && <span className='text-muted-foreground ml-1.5'>{r.stage}</span>}</> },
+              { key: 'started', label: 'Started', type: 'date', value: (r) => r.created_at, render: (r) => <When d={r.created_at} /> },
+              ...(d.research.some((r) => r.error) ? [{ key: 'detail', label: 'Detail', render: (r: OrgDetail['research'][number]) => (r.error ? <span className='text-destructive'>{r.error}</span> : null), className: 'whitespace-normal leading-snug' }] : [])
+            ]} />
+          ) },
+          { id: 'simulations', label: 'Simulations', count: d.simulations.length, content: (
+            <DetailTable rows={d.simulations} rowKey={(x) => String(x.id)} noun='simulations' empty='No simulations yet.' defaultSort={[{ key: 'started', dir: 'desc' }]} cols={[
+              { key: 'name', label: 'Simulation', type: 'text', value: (x) => x.name, render: (x) => x.name },
+              { key: 'status', label: 'Status', type: 'select', value: (x) => x.status, render: (x) => word(runTone(x.status), x.status) },
+              { key: 'sessions', label: 'Sessions', type: 'number', value: (x) => Number(x.sessions), render: (x) => `${x.completed} / ${x.sessions}`, className: 'text-right tabular-nums' },
+              { key: 'started', label: 'Started', type: 'date', value: (x) => x.created_at, render: (x) => <When d={x.created_at} /> }
+            ]} />
+          ) },
+          { id: 'invoices', label: 'Invoices', count: d.invoices.length, hidden: !d.integrations.stripe, content: (
+            <DetailTable rows={d.invoices} rowKey={(x) => x.id} noun='invoices' empty='No invoices yet.' defaultSort={[{ key: 'date', dir: 'desc' }]}
+              onRow={(x) => x.url && window.open(x.url, '_blank', 'noopener')} cols={[
+              { key: 'invoice', label: 'Invoice', type: 'text', value: (x) => x.number || x.id, render: (x) => x.number || x.id },
+              { key: 'status', label: 'Status', type: 'select', value: (x) => x.status, render: (x) => word(x.status === 'paid' ? 'ok' : x.status === 'open' ? 'warn' : x.status === 'uncollectible' ? 'bad' : 'neutral', x.status) },
+              { key: 'total', label: 'Total', type: 'number', value: (x) => Number(x.total), render: (x) => money(x.total, x.currency), className: 'text-right tabular-nums' },
+              { key: 'date', label: 'Date', type: 'date', value: (x) => (typeof x.created === 'number' ? new Date(x.created * 1000).toISOString() : x.created), render: (x) => <When d={typeof x.created === 'number' ? new Date(x.created * 1000) : x.created} /> },
+              { key: 'open', label: '', render: (x) => (x.url ? <a href={x.url} target='_blank' rel='noopener noreferrer' onClick={(e) => e.stopPropagation()} className='text-primary text-sm underline-offset-4 hover:underline'>View</a> : null), className: 'text-right' }
+            ]} />
+          ) },
+          { id: 'milestones', label: 'Milestones', count: milestones.length, content: (
+            <DetailTable rows={milestones} rowKey={(m) => m.k} noun='milestones' empty='No milestone reached yet.' cols={[
+              { key: 'k', label: 'Milestone', render: (m) => STAGE_LABELS[m.k] ?? m.k },
+              { key: 'at', label: 'Reached', type: 'date', value: (m) => m.at, render: (m) => <When d={m.at} /> }
+            ]} />
+          ) }
+        ]} />
       )}
 
       {confirm.dialog}

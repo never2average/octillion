@@ -125,12 +125,12 @@ function ActivationPage() {
               searchText={(o) => `${o.name} ${o.slug} ${o.contact ?? ''} ${o.stage_label} ${o.attention.join(' ')} ${utmText(o.utm)}`}
               searchPlaceholder='Search accounts, contacts or what they need'
               empty='Nobody is stuck.'
-              detailActions={(o) => (<>
+              detailTitle={() => 'Account'}
+              detail={(o) => <AccountPeek org={o} ctl={ctl} actions={<>
                 <Gate need='journeys'><Button variant='outline' size='sm' onClick={() => ctl.open('tip', o)}><Icons.chat /> Send a tip</Button></Gate>
                 <Gate need='campaigns'><Button variant='outline' size='sm' onClick={() => setNudging(o)}><Icons.mail /> Email a nudge</Button></Gate>
-                <Button variant='ghost' size='sm' onClick={() => router.push(accountHref(o.slug))}><Icons.externalLink /> Open account</Button>
-              </>)}
-              detail={(o) => <AccountPeek org={o} ctl={ctl} />}
+                <Button variant='outline' size='sm' onClick={() => router.push(accountHref(o.slug))}><Icons.externalLink /> Open account</Button>
+              </>} />}
             />
           </Section>
         </>)}
