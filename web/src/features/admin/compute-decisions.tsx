@@ -4,9 +4,10 @@
 // running sessions and live orchestrators over 1 h / 2 h / 24 h, with launch and reap markers; a stretch with no
 // autoscaler tick is a hatched band, never drawn through. Decisions (GET /compute/ticks) lists the acting ticks, newest
 // first: what the tick saw, wanted and did, its note and error, with a peek and the raw row. Read only.
-import { useMemo, useState, type ReactNode } from 'react';
+import { useMemo, type ReactNode } from 'react';
 import { CartesianGrid, Line, LineChart, ReferenceArea, ReferenceDot, XAxis, YAxis } from 'recharts';
 import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent, type ChartConfig } from '@/components/ui/chart';
+import { DetailMeta, DetailTable, DetailTabs, KeyValueTable, LongText } from '@/components/layout/detail';
 import { RecordView, useStored, type RecordCol } from '@/components/layout/record-view';
 import { Button } from '@/components/ui/button';
 import { MultiSelectFilter } from '@/components/layout/multi-select-filter';
@@ -17,7 +18,7 @@ import { counted } from '@/lib/octillion-format';
 import { cn } from '@/lib/utils';
 import { useAdmin } from './lib';
 import { copyText, Mono, Section, When } from './ui';
-import { Chip, PeekSection, useComputeParams, useScrollTo } from './compute-common';
+import { Chip, useComputeParams, useScrollTo } from './compute-common';
 
 // ---------------------------------------------------------------- Activity
 
@@ -265,100 +266,84 @@ export function ComputeDecisions({ runtime, stats }: { runtime: 'vm' | 'vercel' 
           { label: 'Copy row as JSON', icon: <Icons.page />, onSelect: () => copyText(JSON.stringify(t, null, 2), 'Tick copied') },
           ...(t.error ? [{ label: 'Copy error', icon: <Icons.warning />, onSelect: () => copyText(t.error!, 'Error copied') }] : [])
         ]}
-        detailTitle={(t) => <span className='flex items-center gap-2'>Tick <When d={t.at} />{!t.acted && <Chip>sample</Chip>}</span>}
+        detailTitle={() => 'Tick'}
         detail={(t) => <TickPeek t={t} onOrch={showOrch} />}
         empty={empty} summary={stats?.(rows)} compact />
     </div>
   );
 }
 
-/** One tick: what it saw, the jobs it served or left waiting, what it launched and reaped (linked), its note and the raw row. */
+/** One tick: a card with what it saw and wanted, then tabs for its error and note, the jobs it served or left waiting,
+ *  what it launched and reaped (each row opens the orchestrator) and the raw row. */
 function TickPeek({ t, onOrch }: { t: Tick; onOrch: (row: number) => void }) {
-  const [raw, setRaw] = useState(false);
   const waiting = t.jobs?.filter((j) => !j.served) ?? [];
   const served = t.jobs?.filter((j) => j.served) ?? [];
+  const num = (v: number | null) => <span className='tabular-nums'>{v ?? '—'}</span>;
+  const orchCell = (row: number | null, name: string) => (
+    <span className={cn('font-mono text-xs', row && 'hover:underline')} title={row ? 'Show this orchestrator' : undefined}>{name}</span>
+  );
   return (
-    <div className='grid gap-6'>
-      {t.error && (
-        <PeekSection title='Error'>
-          <pre className='bg-destructive/5 text-destructive max-h-48 overflow-auto rounded-md p-3 font-mono text-xs whitespace-pre-wrap'>{t.error}</pre>
-        </PeekSection>
-      )}
+    <div className='flex flex-col gap-4'>
+      <DetailMeta
+        title={<When d={t.at} />}
+        badges={<>
+          {!t.acted && <Chip title='A minute sample: nothing changed on this tick'>sample</Chip>}
+          {t.error && <Chip tone='bad'>error</Chip>}
+        </>}
+        actions={<>
+          <Button variant='outline' size='sm' onClick={() => copyText(JSON.stringify(t, null, 2), 'Tick copied')}><Icons.page /> Copy row as JSON</Button>
+          {t.error && <Button variant='ghost' size='sm' onClick={() => copyText(t.error!, 'Error copied')}>Copy error</Button>}
+        </>}
+        facts={[
+          { label: 'Queued', value: num(t.queued) },
+          { label: 'Running', value: num(t.running) },
+          { label: 'Research', value: num(t.research) },
+          { label: "Can't run", value: num(t.unclaimable) },
+          { label: 'Wanted', value: num(t.desired) },
+          { label: 'Limit', value: num(t.cap) },
+          { label: 'Active', value: num(t.active) },
+          { label: 'Free on boat', value: num(t.free) },
+          { label: 'Live orchestrators after the tick', value: <span className='tabular-nums'>{t.orchestrators ?? 0}</span> },
+          { label: 'Leader', value: <Mono>{t.holder ?? '—'}</Mono> }
+        ]}
+      />
 
-      <PeekSection title='Demand it saw'>
-        <dl className='grid grid-cols-4 gap-2 text-sm'>
-          {[['Queued', t.queued], ['Running', t.running], ['Research', t.research], ["Can't run", t.unclaimable]].map(([l, v]) => (
-            <div key={String(l)}><dt className='text-muted-foreground text-xs'>{l}</dt><dd className='tabular-nums'>{v ?? '—'}</dd></div>
-          ))}
-        </dl>
-        <dl className='grid grid-cols-4 gap-2 text-sm'>
-          {[['Wanted', t.desired], ['Limit', t.cap], ['Active', t.active], ['Free on boat', t.free]].map(([l, v]) => (
-            <div key={String(l)}><dt className='text-muted-foreground text-xs'>{l}</dt><dd className='tabular-nums'>{v ?? '—'}</dd></div>
-          ))}
-        </dl>
-        <p className='text-muted-foreground text-xs'>{t.orchestrators ?? 0} live orchestrator{t.orchestrators === 1 ? '' : 's'} after the tick · leader <Mono>{t.holder ?? '—'}</Mono></p>
-      </PeekSection>
-
-      {t.jobs && (
-        <PeekSection title={`Jobs: ${served.length} served, ${waiting.length} waiting`}>
-          {t.jobs.length ? (
-            <ul className='divide-y border-y text-xs'>
-              {[...waiting, ...served].map((j) => (
-                <li key={j.id} className='flex items-center justify-between gap-2 px-2 py-1.5'>
-                  <span className='flex items-center gap-1.5'><Mono>{j.id}</Mono><Chip>{j.kind}</Chip></span>
-                  <span className={cn('tabular-nums', !j.served && 'text-amber-700 dark:text-amber-400')}>{j.kind === 'simulation' ? `${j.sessions} sessions · ` : ''}{j.served ? 'served' : 'waiting'}</span>
-                </li>
-              ))}
-            </ul>
-          ) : <p className='text-muted-foreground text-sm'>No job wanted an orchestrator.</p>}
-        </PeekSection>
-      )}
-
-      <PeekSection title='Launched'>
-        {t.launched.length ? (
-          <ul className='divide-y border-y text-xs'>
-            {t.launched.map((l, i) => (
-              <li key={i} className='grid gap-0.5 px-2 py-1.5'>
-                <span className='flex flex-wrap items-center gap-1.5'><OrchRef row={l.row} onOrch={onOrch}>{launchName(l)}</OrchRef>
-                  {l.job_id && <span className='text-muted-foreground'>for <Mono>{l.job_id}</Mono></span>}
-                  {l.pods != null && <span className='text-muted-foreground'>{l.pods} pods</span>}
-                  {l.state && <Chip tone={l.launch_step ? 'bad' : undefined}>{l.launch_step ? `failed at ${l.launch_step}` : l.state === 'deleted' ? 'ended' : l.state}</Chip>}</span>
-              </li>
-            ))}
-          </ul>
-        ) : <p className='text-muted-foreground text-sm'>Nothing.</p>}
-      </PeekSection>
-
-      <PeekSection title='Reaped'>
-        {t.reaped.length ? (
-          <ul className='divide-y border-y text-xs'>
-            {t.reaped.map((r, i) => (
-              <li key={i} className='grid gap-0.5 px-2 py-1.5'>
-                <span className='flex flex-wrap items-center gap-1.5'><OrchRef row={r.row} onOrch={onOrch}>{reapName(r)}</OrchRef>{r.job_id && <span className='text-muted-foreground'>job <Mono>{r.job_id}</Mono></span>}</span>
-                <span className='text-muted-foreground'>{r.reason}</span>
-              </li>
-            ))}
-          </ul>
-        ) : <p className='text-muted-foreground text-sm'>Nothing.</p>}
-      </PeekSection>
-
-      {t.note && <PeekSection title='Note'><p className='font-mono text-xs whitespace-pre-wrap'>{t.note}</p></PeekSection>}
-
-      <PeekSection title='Raw row' action={
-        <div className='flex gap-1'>
-          <Button variant='ghost' size='xs' onClick={() => setRaw(!raw)}>{raw ? 'Hide' : 'Show'}</Button>
-          <Button variant='ghost' size='xs' onClick={() => copyText(JSON.stringify(t, null, 2), 'Tick copied')}>Copy</Button>
-        </div>
-      }>
-        {raw && <pre className='bg-muted/50 max-h-96 overflow-auto rounded-md p-3 font-mono text-xs'>{JSON.stringify(t, null, 2)}</pre>}
-      </PeekSection>
+      <DetailTabs resetKey={t.id} tabs={[
+        { id: 'note', label: t.error ? 'Error' : 'Note', hidden: !t.error && !t.note, content: (
+          <KeyValueTable rows={[
+            { label: 'Error', value: <span className='text-destructive'><LongText mono>{t.error}</LongText></span>, hidden: !t.error },
+            { label: 'Note', value: <LongText mono>{t.note}</LongText>, hidden: !t.note }
+          ]} />
+        ) },
+        { id: 'jobs', label: 'Jobs', count: t.jobs?.length, hidden: !t.jobs, content: (
+          <DetailTable rows={[...waiting, ...served]} rowKey={(j) => j.id} noun='jobs' empty='No job wanted an orchestrator.'
+            filters={<span className='text-muted-foreground text-xs'>{served.length} served, {waiting.length} waiting</span>} cols={[
+            { key: 'id', label: 'Job', type: 'text', value: (j) => j.id, render: (j) => <Mono>{j.id}</Mono> },
+            { key: 'kind', label: 'Kind', type: 'select', value: (j) => j.kind, render: (j) => <Chip>{j.kind}</Chip> },
+            { key: 'sessions', label: 'Sessions', type: 'number', value: (j) => (j.kind === 'simulation' ? j.sessions : null), render: (j) => (j.kind === 'simulation' ? j.sessions : '—'), className: 'text-right tabular-nums' },
+            { key: 'served', label: 'Served', type: 'select', value: (j) => (j.served ? 'served' : 'waiting'), render: (j) => <span className={cn(!j.served && 'text-amber-700 dark:text-amber-400')}>{j.served ? 'served' : 'waiting'}</span> }
+          ]} />
+        ) },
+        { id: 'launched', label: 'Launched', count: t.launched.length, content: (
+          <DetailTable rows={t.launched} noun='launches' empty='Nothing launched.' onRow={(l) => l.row && onOrch(l.row)} cols={[
+            { key: 'orch', label: 'Orchestrator', type: 'text', value: launchName, render: (l) => orchCell(l.row, launchName(l)) },
+            { key: 'job', label: 'Job', type: 'text', value: (l) => l.job_id ?? '', render: (l) => (l.job_id ? <Mono>{l.job_id}</Mono> : <span className='text-muted-foreground'>—</span>) },
+            { key: 'pods', label: 'Pods', type: 'number', value: (l) => l.pods, render: (l) => l.pods ?? '—', className: 'text-right tabular-nums' },
+            { key: 'state', label: 'State', type: 'text', value: (l) => (l.launch_step ? `failed at ${l.launch_step}` : l.state === 'deleted' ? 'ended' : l.state ?? ''),
+              render: (l) => (l.state ? <Chip tone={l.launch_step ? 'bad' : undefined}>{l.launch_step ? `failed at ${l.launch_step}` : l.state === 'deleted' ? 'ended' : l.state}</Chip> : null) }
+          ]} />
+        ) },
+        { id: 'reaped', label: 'Reaped', count: t.reaped.length, content: (
+          <DetailTable rows={t.reaped} noun='reaps' empty='Nothing reaped.' onRow={(r) => r.row && onOrch(r.row)} cols={[
+            { key: 'orch', label: 'Orchestrator', type: 'text', value: reapName, render: (r) => orchCell(r.row, reapName(r)) },
+            { key: 'job', label: 'Job', type: 'text', value: (r) => r.job_id ?? '', render: (r) => (r.job_id ? <Mono>{r.job_id}</Mono> : <span className='text-muted-foreground'>—</span>) },
+            { key: 'reason', label: 'Reason', type: 'text', value: (r) => r.reason, render: (r) => <span className='text-muted-foreground'>{r.reason}</span>, className: 'whitespace-normal leading-snug' }
+          ]} />
+        ) },
+        { id: 'raw', label: 'Raw row', content: (
+          <KeyValueTable rows={[{ label: 'JSON', value: <LongText mono>{JSON.stringify(t, null, 2)}</LongText> }]} />
+        ) }
+      ]} />
     </div>
   );
-}
-
-/** An orchestrator named in a tick: opens its row in the Orchestrators table when there is one. */
-function OrchRef({ row, onOrch, children }: { row: number | null; onOrch: (row: number) => void; children: ReactNode }) {
-  return row
-    ? <button type='button' onClick={() => onOrch(row)} className='font-mono text-xs hover:underline' title='Show this orchestrator'>{children}</button>
-    : <Mono>{children}</Mono>;
 }
