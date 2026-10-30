@@ -5,6 +5,8 @@
 // (src/gtm-deals.ts outboundAttribution, first touch): outbound vs inbound, and per outbound campaign and source.
 import { Suspense } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
+import { DetailMeta, DetailTable, DetailTabs } from '@/components/layout/detail';
 import PageContainer from '@/components/layout/page-container';
 import { DateRangePicker } from '@/components/layout/date-range-picker';
 import { StatStrip } from '@/components/layout/section';
@@ -83,6 +85,7 @@ const n = (x: number) => <span className={x ? 'tabular-nums' : 'text-muted-foreg
 
 function AttributionPage() {
   const p = useGtmParams();
+  const router = useRouter();
   const { data: a, error, isLoading } = useAdmin<Attribution>(`/gtm/attribution?${p.rangeOnly}`, { keep: true });
   const t = a?.totals;
   const cols: RecordCol<Row>[] = [
@@ -121,28 +124,41 @@ function AttributionPage() {
               { label: 'MRR', value: usd0(t.mrr_usd), hint: 'from Stripe, now' }
             ]} />
           )}
-          detailTitle={(r) => <span>{r.utm_source}{r.utm_medium ? ` / ${r.utm_medium}` : ''}{r.utm_campaign ? ` · ${r.utm_campaign}` : ''}</span>}
+          detailTitle={() => 'Source'}
           detail={(r) => (
             <div className='flex flex-col gap-4'>
-              <StatStrip items={[
-                { label: 'Requests', value: r.requests, hint: `${r.approved} approved` },
-                { label: 'Accounts', value: r.accounts },
-                { label: 'Activated', value: r.activated },
-                { label: 'MRR', value: usd0(r.mrr_usd), hint: `${r.paying} paying` }
+              <DetailMeta
+                title={r.utm_source}
+                subtitle={r.utm_medium || r.utm_campaign ? `${r.utm_medium || '—'} · ${r.utm_campaign || '—'}` : undefined}
+                facts={[
+                  { label: 'utm_source', value: r.utm_source },
+                  { label: 'utm_medium', value: r.utm_medium || null },
+                  { label: 'utm_campaign', value: r.utm_campaign || null },
+                  { label: 'Requests', value: r.requests, hint: `${r.approved} approved` },
+                  { label: 'Accounts', value: r.accounts },
+                  { label: 'Activated', value: r.activated, hint: `${rate(r.activated, r.accounts)} of accounts` },
+                  { label: 'Paying', value: r.paying },
+                  { label: 'MRR', value: usd0(r.mrr_usd), hint: `${r.paying} paying` }
+                ]}
+              />
+              <DetailTabs resetKey={r.key} tabs={[
+                { id: 'accounts', label: 'Accounts', count: r.account_list.length, content: (
+                  <DetailTable
+                    noun='accounts' rows={r.account_list} rowKey={(x) => x.slug}
+                    empty='No accounts yet: the requests are still pending or were declined.'
+                    search={(x) => `${x.name} ${x.slug} ${x.stage_label} ${x.plan}`} searchPlaceholder='Search accounts'
+                    defaultSort={[{ key: 'created', dir: 'desc' }]}
+                    onRow={(x) => router.push(accountHref(x.slug))}
+                    cols={[
+                      { key: 'account', label: 'Account', type: 'text', value: (x) => x.name, render: (x) => <Link className='font-medium hover:underline' href={accountHref(x.slug)} onClick={(e) => e.stopPropagation()}>{x.name}</Link> },
+                      { key: 'stage', label: 'Stage', type: 'select', value: (x) => x.stage_label, render: (x) => <StatusBadge tone={x.activated ? 'ok' : 'neutral'}>{x.stage_label}</StatusBadge> },
+                      { key: 'plan', label: 'Plan', type: 'text', value: (x) => x.plan, render: (x) => (x.paying ? <span>{x.plan} · <span className='tabular-nums'>{usd0(x.mrr_usd)}</span></span> : muted(x.plan === 'none' ? '—' : x.plan)) },
+                      { key: 'mrr', label: 'MRR', type: 'number', value: (x) => x.mrr_usd, render: (x) => <span className='tabular-nums'>{usd0(x.mrr_usd)}</span>, className: 'text-right tabular-nums' },
+                      { key: 'created', label: 'Created', type: 'date', value: (x) => x.created_at, render: (x) => <When d={x.created_at} className='text-muted-foreground text-sm' /> }
+                    ]}
+                  />
+                ) }
               ]} />
-              <div className='border'>
-                <DataList
-                  noun='accounts' minWidth={560}
-                  rows={r.account_list}
-                  empty='No accounts yet: the requests are still pending or were declined.'
-                  cols={[
-                    { label: 'Account', render: (x) => <Link className='font-medium hover:underline' href={accountHref(x.slug)}>{x.name}</Link> },
-                    { label: 'Stage', render: (x) => <StatusBadge tone={x.activated ? 'ok' : 'neutral'}>{x.stage_label}</StatusBadge> },
-                    { label: 'Plan', render: (x) => (x.paying ? <span>{x.plan} · <span className='tabular-nums'>{usd0(x.mrr_usd)}</span></span> : muted(x.plan === 'none' ? '—' : x.plan)) },
-                    { label: 'Created', render: (x) => <When d={x.created_at} className='text-muted-foreground text-sm' /> }
-                  ]}
-                />
-              </div>
             </div>
           )}
         />

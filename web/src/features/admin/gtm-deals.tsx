@@ -4,6 +4,7 @@
 // to an account shows that account's Stripe revenue now. Owners change deals; everyone reads.
 import { Suspense, useState, type DragEvent } from 'react';
 import Link from 'next/link';
+import { DetailMeta, DetailTabs, KeyValueTable } from '@/components/layout/detail';
 import PageContainer from '@/components/layout/page-container';
 import { StatStrip } from '@/components/layout/section';
 import { RecordView, type RecordCol } from '@/components/layout/record-view';
@@ -18,7 +19,7 @@ import { accountHref, post, useAdmin, useAdminAction } from './lib';
 import { ConfirmButton, ErrorBox, FormRow, Notice, Section, StatusBadge, When } from './ui';
 import { TextDialog } from './gtm-dialogs';
 import { Gate, useAdminRole } from './role';
-import { GtmTabs, usd0, useGtmParams, NeedsCampaigns } from './gtm-common';
+import { formKV, GtmTabs, usd0, useGtmParams, NeedsCampaigns } from './gtm-common';
 
 interface Stage { id: string; label: string; position: number; kind: 'open' | 'won' | 'lost' }
 interface Deal {
@@ -96,7 +97,7 @@ function DealsPage() {
               searchPlaceholder='Search deals by name, company, prospect, account, campaign or owner'
               primary={<Gate need='campaigns'><Button onClick={() => p.write({ panel: 'new' })}><Icons.add /> New deal</Button></Gate>}
               empty='No deals yet. Make one from a reply or a prospect in one click, or here.'
-              detailTitle={(d) => <span className='flex items-center gap-2'>{d.name}<StatusBadge tone={KIND_TONE[d.kind]}>{stages.find((s) => s.id === d.stage)?.label ?? d.stage}</StatusBadge></span>}
+              detailTitle={() => 'Deal'}
               detail={(d, close) => <DealEditor key={`${d.id}:${d.updated_at}`} d={d} stages={stages} onDeleted={close} />}
             />
           )}
@@ -174,34 +175,54 @@ function DealEditor({ d, stages, onDeleted }: { d: Deal; stages: Stage[]; onDele
   const save = useAdminAction(() => adminApi('PUT', `/gtm/deals/${d.id}`, { ...f, value: Number(f.value) || 0 }), { success: 'Saved' });
   const remove = useAdminAction(() => adminApi('DELETE', `/gtm/deals/${d.id}`), { success: 'Deal deleted' });
   const dis = !can('campaigns');
-  const field = (k: keyof typeof f, label: string, type = 'text', hint?: string) => (
-    <FormRow id={`d-${d.id}-${k}`} label={label} hint={hint}><Input id={`d-${d.id}-${k}`} type={type} disabled={dis} value={f[k]} onChange={(e) => setF((v) => ({ ...v, [k]: e.target.value }))} /></FormRow>
-  );
+  const field = (k: keyof typeof f, label: string, type = 'text', hint?: string, hidden?: boolean) =>
+    formKV(`d-${d.id}-${k}`, label, <Input id={`d-${d.id}-${k}`} type={type} disabled={dis} value={f[k]} onChange={(e) => setF((v) => ({ ...v, [k]: e.target.value }))} />, hint, hidden);
   const kind = stages.find((s) => s.id === f.stage)?.kind;
   return (
-    <div className='flex flex-col gap-6'>
-      <p className='text-muted-foreground text-xs'>
-        Created <When d={d.created_at} />{d.closed_at ? <> · closed <When d={d.closed_at} /></> : null}{d.campaign ? ` · from campaign ${d.campaign}` : ''}{d.source ? ` · ${d.source}` : ''}
-      </p>
-      {d.kind === 'won' && d.revenue && <Notice tone='ok'>{d.org_name ?? d.org_slug}: {d.revenue.paying ? `${usd0(d.revenue.mrr_usd)} a month on ${d.revenue.plan} (Stripe, now)` : 'not paying in Stripe yet'}.</Notice>}
-      <Section title='Deal' action={!dis && <Button size='sm' disabled={JSON.stringify(f) === JSON.stringify(init) || save.isPending} onClick={() => save.mutate()}><Icons.check /> Save changes</Button>}>
-        <div className='grid gap-4 sm:grid-cols-2'>
-          {field('name', 'Name')}
-          <FormRow id={`d-${d.id}-stage`} label='Stage'>
-            <NativeSelect id={`d-${d.id}-stage`} className='w-full' disabled={dis} value={f.stage} onChange={(e) => setF((v) => ({ ...v, stage: e.target.value }))}>
-              {stages.map((s) => <NativeSelectOption key={s.id} value={s.id}>{s.label}</NativeSelectOption>)}
-            </NativeSelect>
-          </FormRow>
-          {field('value', 'Value', 'number')}{field('currency', 'Currency', 'text', 'Three letters, e.g. USD')}
-          {field('expected_close', 'Expected close', 'date')}{field('owner', 'Owner')}
-          {field('org', 'Account (slug)', 'text', 'The Octillion account it is about; a won deal links its company’s or prospect’s account itself.')}
-          {kind === 'lost' && field('lost_reason', 'Lost reason')}
-        </div>
-      </Section>
-      <Gate need='campaigns'>
-        <ConfirmButton variant='destructive' label={<><Icons.trash /> Delete deal</>} title={`Delete ${d.name}?`} confirmLabel='Delete'
-          description='The deal goes from the pipeline and from Attribution.' onConfirm={() => remove.mutate(undefined, { onSuccess: onDeleted })} />
-      </Gate>
+    <div className='flex flex-col gap-4'>
+      <DetailMeta
+        title={d.name}
+        badges={<StatusBadge tone={KIND_TONE[d.kind]}>{stages.find((s) => s.id === d.stage)?.label ?? d.stage}</StatusBadge>}
+        actions={<>
+          {!dis && <Button size='sm' disabled={JSON.stringify(f) === JSON.stringify(init) || save.isPending} onClick={() => save.mutate()}><Icons.check /> Save changes</Button>}
+          <Gate need='campaigns'>
+            <ConfirmButton variant='destructive' label={<><Icons.trash /> Delete deal</>} title={`Delete ${d.name}?`} confirmLabel='Delete'
+              description='The deal goes from the pipeline and from Attribution.' onConfirm={() => remove.mutate(undefined, { onSuccess: onDeleted })} />
+          </Gate>
+        </>}
+        facts={[
+          { label: 'Value', value: <span className='tabular-nums'>{money(d.value, d.currency)}</span> },
+          { label: 'Company', value: d.company, hint: d.company_domain ?? undefined },
+          { label: 'Prospect', value: d.prospect_id ? <Link className='hover:underline' href={`/admin/gtm/prospects?open=${d.prospect_id}`}>{d.prospect ?? `#${d.prospect_id}`}</Link> : null },
+          { label: 'Account', value: d.org_slug ? <Link className='hover:underline' href={accountHref(d.org_slug)}>{d.org_name ?? d.org_slug}</Link> : null },
+          { label: 'MRR now', value: d.revenue ? <span className='tabular-nums'>{usd0(d.revenue.mrr_usd)}</span> : null, hint: d.revenue ? (d.revenue.paying ? `${d.revenue.plan}, Stripe` : 'not paying yet') : undefined },
+          { label: 'Campaign', value: d.campaign },
+          { label: 'Source', value: d.source },
+          { label: 'Owner', value: d.owner },
+          { label: 'Expected close', value: d.expected_close },
+          { label: 'Created', value: <When d={d.created_at} /> },
+          { label: 'Closed', value: d.closed_at ? <When d={d.closed_at} /> : null, hidden: !d.closed_at },
+          { label: 'Lost reason', value: d.lost_reason, hidden: d.kind !== 'lost' || !d.lost_reason }
+        ]}
+      >
+        {d.kind === 'won' && d.revenue && <Notice tone='ok'>{d.org_name ?? d.org_slug}: {d.revenue.paying ? `${usd0(d.revenue.mrr_usd)} a month on ${d.revenue.plan} (Stripe, now)` : 'not paying in Stripe yet'}.</Notice>}
+      </DetailMeta>
+      <DetailTabs tabs={[
+        { id: 'details', label: 'Details', content: (
+          <KeyValueTable rows={[
+            field('name', 'Name'),
+            formKV(`d-${d.id}-stage`, 'Stage', (
+              <NativeSelect id={`d-${d.id}-stage`} className='w-full' disabled={dis} value={f.stage} onChange={(e) => setF((v) => ({ ...v, stage: e.target.value }))}>
+                {stages.map((s) => <NativeSelectOption key={s.id} value={s.id}>{s.label}</NativeSelectOption>)}
+              </NativeSelect>
+            )),
+            field('value', 'Value', 'number'), field('currency', 'Currency', 'text', 'Three letters, e.g. USD'),
+            field('expected_close', 'Expected close', 'date'), field('owner', 'Owner'),
+            field('org', 'Account (slug)', 'text', 'The Octillion account it is about; a won deal links its company’s or prospect’s account itself.'),
+            field('lost_reason', 'Lost reason', 'text', undefined, kind !== 'lost')
+          ]} />
+        ) }
+      ]} />
     </div>
   );
 }

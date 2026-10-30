@@ -8,7 +8,8 @@ import { RecordView, type RecordCol, type RecordViewDef } from '@/components/lay
 import { Button } from '@/components/ui/button';
 import { Icons } from '@/components/icons';
 import { post, useAdmin, useAdminAction } from './lib';
-import { DataList, ErrorBox, Notice, StatusBadge, When } from './ui';
+import { DetailMeta, DetailTable, DetailTabs, KeyValueTable, LongText } from '@/components/layout/detail';
+import { ErrorBox, Notice, StatusBadge, When } from './ui';
 import { Gate } from './role';
 
 export interface Reply {
@@ -60,25 +61,32 @@ function KindBadge({ r }: { r: Reply }) {
   return r.handled_at ? <StatusBadge tone='ok'>handled</StatusBadge> : <StatusBadge tone='info'>open</StatusBadge>;
 }
 
-/** One reply in full: who, which email it answers, the words. */
+/** One reply in full: the card (who, which email it answers, handled, the actions), then the words. */
 export function ReplyDetail({ r }: { r: Reply }) {
   return (
     <div className='flex flex-col gap-4'>
-      <div className='flex flex-wrap items-center gap-2'>
-        <KindBadge r={r} />
-        <span className='text-muted-foreground text-sm'>Received <When d={r.received_at} />{r.handled_at && <> · handled <When d={r.handled_at} /> by {r.handled_by}</>}</span>
-        <span className='ml-auto'><HandledButton r={r} /></span>
-      </div>
-      <ReplyActions r={r} />
-      <dl className='grid grid-cols-[8rem_1fr] gap-x-4 gap-y-2 text-sm'>
-        <dt className='text-muted-foreground'>From</dt>
-        <dd>{r.from_email ?? '—'}{!r.from_matches && r.from_email && <span className='text-muted-foreground'> (not the address it was sent to: {r.email})</span>}</dd>
-        <dt className='text-muted-foreground'>Campaign</dt><dd>{r.campaign_name}</dd>
-        <dt className='text-muted-foreground'>Answers</dt><dd>{r.step != null ? `Email ${r.step + 1}${r.variant ? `, variant ${r.variant}` : ''}` : '—'}</dd>
-        <dt className='text-muted-foreground'>Subject</dt><dd>{r.subject ?? '—'}</dd>
-        {r.auto_reason && <><dt className='text-muted-foreground'>Why automatic</dt><dd>{r.auto_reason}</dd></>}
-      </dl>
-      <pre className='bg-muted/40 max-h-[28rem] overflow-auto rounded-md border p-3 font-sans text-sm whitespace-pre-wrap'>{r.body || r.snippet || '(no text)'}</pre>
+      <DetailMeta
+        title={who(r)}
+        badges={<KindBadge r={r} />}
+        actions={<><HandledButton r={r} /><ReplyActions r={r} /></>}
+        facts={[
+          { label: 'From', value: r.from_email ?? '—', hint: !r.from_matches && r.from_email ? `not the address it was sent to: ${r.email}` : undefined },
+          { label: 'Sent to', value: r.email, hidden: r.from_matches || !r.from_email },
+          { label: 'Campaign', value: r.campaign_name },
+          { label: 'Answers', value: r.step != null ? `Email ${r.step + 1}${r.variant ? `, variant ${r.variant}` : ''}` : '—' },
+          { label: 'Received', value: <When d={r.received_at} /> },
+          { label: 'Handled', value: r.handled_at ? <When d={r.handled_at} /> : <span className='text-muted-foreground'>Not yet</span>, hint: r.handled_at && r.handled_by ? `by ${r.handled_by}` : undefined },
+          { label: 'Why automatic', value: r.auto_reason, hidden: !r.auto_reason }
+        ]}
+      />
+      <DetailTabs resetKey={r.id} tabs={[
+        { id: 'message', label: 'Message', content: (
+          <KeyValueTable rows={[
+            { label: 'Subject', value: r.subject ?? '—' },
+            { label: 'Text', value: <LongText>{r.body || r.snippet || '(no text)'}</LongText> }
+          ]} />
+        ) }
+      ]} />
     </div>
   );
 }
@@ -86,16 +94,17 @@ export function ReplyDetail({ r }: { r: Reply }) {
 /** A campaign's replies in its peek: the latest, each with its snippet and Mark handled. */
 export function CampaignReplies({ replies }: { replies: Replies }) {
   return (
-    <div className='border'>
-      <DataList<Reply> noun='replies' minWidth={900} height='h-[20rem]' rows={replies.replies} empty={replies.inbox ? 'No replies yet.' : 'Replies are not tracked: set a Replies inbox in Agent configuration (Campaigns).'}
-        cols={[
-          { label: 'From', render: (r) => <span className='flex flex-col gap-0.5'><span className='font-medium'>{who(r)}</span><span className='text-muted-foreground text-xs'>{r.from_email ?? r.email}</span></span> },
-          { label: 'Reply', render: (r) => <span className='line-clamp-2 text-sm'>{r.snippet || r.subject || '—'}</span> },
-          { label: 'Status', render: (r) => <KindBadge r={r} /> },
-          { label: 'Received', render: (r) => <When d={r.received_at} className='text-muted-foreground text-sm' /> },
-          { label: '', render: (r) => (r.kind === 'reply' ? <span className='flex flex-col items-start gap-1.5'><HandledButton r={r} /><ReplyActions r={r} /></span> : null) }
-        ]} />
-    </div>
+    <DetailTable<Reply> noun='replies' rows={replies.replies} rowKey={(r) => String(r.id)}
+      empty={replies.inbox ? 'No replies yet.' : 'Replies are not tracked: set a Replies inbox in Agent configuration (Campaigns).'}
+      search={(r) => `${who(r)} ${r.email} ${r.from_email ?? ''} ${r.subject ?? ''} ${r.snippet ?? ''}`} searchPlaceholder='Search replies'
+      defaultSort={[{ key: 'received_at', dir: 'desc' }]}
+      cols={[
+        { key: 'from', label: 'From', type: 'text', value: (r) => `${who(r)} ${r.from_email ?? r.email}`, render: (r) => <span className='flex flex-col gap-0.5'><span className='font-medium'>{who(r)}</span><span className='text-muted-foreground text-xs'>{r.from_email ?? r.email}</span></span> },
+        { key: 'snippet', label: 'Reply', className: 'min-w-60 whitespace-normal', render: (r) => <span className='line-clamp-2 text-sm'>{r.snippet || r.subject || '—'}</span> },
+        { key: 'status', label: 'Status', type: 'select', value: (r) => (r.kind === 'auto_reply' ? 'automatic' : r.handled_at ? 'handled' : 'open'), render: (r) => <KindBadge r={r} /> },
+        { key: 'received_at', label: 'Received', type: 'date', value: (r) => r.received_at, render: (r) => <When d={r.received_at} className='text-muted-foreground text-sm' /> },
+        { key: 'act', label: '', render: (r) => (r.kind === 'reply' ? <span className='flex flex-col items-start gap-1.5'><HandledButton r={r} /><ReplyActions r={r} /></span> : null) }
+      ]} />
   );
 }
 
@@ -132,7 +141,7 @@ export function RepliesView({ open, setOpen }: { open: string | null; setOpen: (
             { label: 'Inbox', value: data.inbox ? 'On' : 'Off', hint: data.inbox ?? 'set Replies inbox' }
           ]} />
         )}
-        detailTitle={(r) => <span className='flex items-center gap-2'>{who(r)}<KindBadge r={r} /></span>}
+        detailTitle={() => 'Reply'}
         detail={(r) => <ReplyDetail r={r} />}
       />
     </div>

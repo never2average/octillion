@@ -4,6 +4,8 @@
 // panel and an Add form in place of the list. Owners change companies; everyone reads.
 import { Suspense, useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
+import { DetailMeta, DetailTable, DetailTabs, KeyValueTable } from '@/components/layout/detail';
 import { toast } from 'sonner';
 import PageContainer from '@/components/layout/page-container';
 import { StatStrip } from '@/components/layout/section';
@@ -15,9 +17,9 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Icons } from '@/components/icons';
 import { adminApi } from '@/lib/api-client';
 import { accountHref, post, useAdmin, useAdminAction } from './lib';
-import { ConfirmButton, DataList, ErrorBox, FormRow, Section, StatusBadge, When } from './ui';
+import { ConfirmButton, ErrorBox, FormRow, Section, StatusBadge, When } from './ui';
 import { Gate, useAdminRole } from './role';
-import { GtmTabs, usd0, useGtmParams, NeedsCampaigns } from './gtm-common';
+import { formKV, GtmTabs, usd0, useGtmParams, NeedsCampaigns } from './gtm-common';
 import { CsvImport, type ImportField, type ImportResult } from './gtm-import';
 import { personName, STATUS_LABEL, STATUS_TONE } from './gtm-prospects';
 
@@ -103,7 +105,7 @@ function CompaniesPage() {
                 { label: 'Open pipeline', value: usd0(list.reduce((t, c) => t + c.pipeline, 0)) }
               ]} />
             )}
-            detailTitle={(c) => c.name}
+            detailTitle={() => 'Company'}
             detail={(c, close) => <CompanyPeek id={c.id} sizes={data?.sizes ?? []} onDeleted={close} />}
           />
         )}
@@ -113,6 +115,7 @@ function CompaniesPage() {
 }
 
 function CompanyPeek({ id, sizes, onDeleted }: { id: number; sizes: string[]; onDeleted: () => void }) {
+  const router = useRouter();
   const { data: d, error } = useAdmin<Detail>(`/gtm/companies/${id}`);
   const remove = useAdminAction(() => adminApi('DELETE', `/gtm/companies/${id}`), { success: 'Company deleted' });
   const enrich = useAdminAction((force: boolean) => post<{ found: number; skipped_fresh: number }>('/gtm/apollo/enrich/companies', { ids: [id], force }),
@@ -121,35 +124,54 @@ function CompanyPeek({ id, sizes, onDeleted }: { id: number; sizes: string[]; on
   if (!d) return <Skeleton className='h-96 rounded-lg' />;
   const c = d.company;
   return (
-    <div className='flex flex-col gap-8'>
-      <div className='flex flex-wrap items-center gap-2'>
-        <Gate need='campaigns'><Button size='sm' variant='outline' disabled={enrich.isPending} onClick={() => enrich.mutate(false)}><Icons.sparkles /> Enrich with Apollo</Button></Gate>
-        <Gate need='campaigns'><Button size='sm' variant='ghost' disabled={enrich.isPending} onClick={() => enrich.mutate(true)}><Icons.refresh /> Enrich again</Button></Gate>
-        <Gate need='campaigns'>
-          <ConfirmButton variant='destructive' label={<><Icons.trash /> Delete</>} title={`Delete ${c.name}?`} confirmLabel='Delete'
-            description='The company goes; its prospects and deals stay, without a company.' onConfirm={() => remove.mutate(undefined, { onSuccess: onDeleted })} />
-        </Gate>
-      </div>
-      <p className='text-muted-foreground text-xs'>Added <When d={c.created_at} /> from {c.source}{c.enriched_at ? <> · enriched <When d={c.enriched_at} /></> : null}{c.org_slug ? <> · account <Link className='hover:underline' href={accountHref(c.org_slug)}>{c.org_name ?? c.org_slug}</Link></> : null}</p>
-      <CompanyEditor key={`${c.id}:${c.updated_at}`} c={c} sizes={sizes} />
-      <Section title='Prospects'>
-        <div className='border'>
-          <DataList noun='prospects' minWidth={520} rows={d.prospects} empty='Nobody from this company yet.' cols={[
-            { label: 'Person', render: (x) => <Link className='font-medium hover:underline' href={`/admin/gtm/prospects?open=${x.id}`}>{personName(x)}</Link> },
-            { label: 'Title', render: (x) => <span className='text-sm'>{x.title ?? '—'}</span> },
-            { label: 'Status', render: (x) => <StatusBadge tone={STATUS_TONE[x.status]}>{STATUS_LABEL[x.status] ?? x.status}</StatusBadge> }
-          ]} />
-        </div>
-      </Section>
-      <Section title='Deals'>
-        <div className='border'>
-          <DataList noun='deals' minWidth={420} rows={d.deals} empty='No deals.' cols={[
-            { label: 'Deal', render: (x) => <Link className='font-medium hover:underline' href={`/admin/gtm/deals?view=table&open=${x.id}`}>{x.name}</Link> },
-            { label: 'Stage', render: (x) => <StatusBadge tone={x.kind === 'won' ? 'ok' : x.kind === 'lost' ? 'neutral' : 'info'}>{x.stage_label}</StatusBadge> },
-            { label: 'Value', render: (x) => <span className='tabular-nums'>{x.value.toLocaleString()} {x.currency}</span> }
-          ]} />
-        </div>
-      </Section>
+    <div className='flex flex-col gap-4'>
+      <DetailMeta
+        title={c.name}
+        subtitle={c.domain}
+        badges={c.org_slug ? <StatusBadge tone='ok'>customer</StatusBadge> : undefined}
+        actions={<>
+          <Gate need='campaigns'><Button size='sm' variant='outline' disabled={enrich.isPending} onClick={() => enrich.mutate(false)}><Icons.sparkles /> Enrich with Apollo</Button></Gate>
+          <Gate need='campaigns'><Button size='sm' variant='ghost' disabled={enrich.isPending} onClick={() => enrich.mutate(true)}><Icons.refresh /> Enrich again</Button></Gate>
+          <Gate need='campaigns'>
+            <ConfirmButton variant='destructive' label={<><Icons.trash /> Delete</>} title={`Delete ${c.name}?`} confirmLabel='Delete'
+              description='The company goes; its prospects and deals stay, without a company.' onConfirm={() => remove.mutate(undefined, { onSuccess: onDeleted })} />
+          </Gate>
+        </>}
+        facts={[
+          { label: 'Domain', value: c.domain },
+          { label: 'Industry', value: c.industry },
+          { label: 'Size', value: c.size, hint: c.employees != null ? `${c.employees} employees` : undefined },
+          { label: 'Country', value: c.country },
+          { label: 'Owner', value: c.owner },
+          { label: 'Account', value: c.org_slug ? <Link className='hover:underline' href={accountHref(c.org_slug)}>{c.org_name ?? c.org_slug}</Link> : null, hint: c.linked_at ? <>linked <When d={c.linked_at} /></> : undefined },
+          { label: 'Prospects', value: <span className='tabular-nums'>{c.prospects}</span> },
+          { label: 'Deals', value: <span className='tabular-nums'>{c.deals}</span>, hint: c.pipeline ? `${usd0(c.pipeline)} open pipeline` : undefined },
+          { label: 'Added', value: <When d={c.created_at} />, hint: `from ${c.source}` },
+          { label: 'Enriched', value: c.enriched_at ? <When d={c.enriched_at} /> : null, hint: c.enriched_at && c.enrichment_source ? c.enrichment_source : undefined }
+        ]}
+      />
+      <DetailTabs resetKey={id} tabs={[
+        { id: 'details', label: 'Details', content: <CompanyEditor key={`${c.id}:${c.updated_at}`} c={c} sizes={sizes} /> },
+        { id: 'prospects', label: 'Prospects', count: d.prospects.length, content: (
+          <DetailTable noun='prospects' rows={d.prospects} rowKey={(x) => String(x.id)} empty='Nobody from this company yet.'
+            search={(x) => `${personName(x)} ${x.email ?? ''} ${x.title ?? ''}`} searchPlaceholder='Search prospects'
+            onRow={(x) => router.push(`/admin/gtm/prospects?open=${x.id}`)}
+            cols={[
+              { key: 'person', label: 'Person', type: 'text', value: (x) => personName(x), render: (x) => <Link className='font-medium hover:underline' href={`/admin/gtm/prospects?open=${x.id}`} onClick={(e) => e.stopPropagation()}>{personName(x)}</Link> },
+              { key: 'title', label: 'Title', type: 'text', value: (x) => x.title ?? '', render: (x) => <span className='text-sm'>{x.title ?? '—'}</span> },
+              { key: 'status', label: 'Status', type: 'select', value: (x) => STATUS_LABEL[x.status] ?? x.status, render: (x) => <StatusBadge tone={STATUS_TONE[x.status]}>{STATUS_LABEL[x.status] ?? x.status}</StatusBadge> }
+            ]} />
+        ) },
+        { id: 'deals', label: 'Deals', count: d.deals.length, content: (
+          <DetailTable noun='deals' rows={d.deals} rowKey={(x) => String(x.id)} empty='No deals.'
+            onRow={(x) => router.push(`/admin/gtm/deals?view=table&open=${x.id}`)}
+            cols={[
+              { key: 'deal', label: 'Deal', type: 'text', value: (x) => x.name, render: (x) => <Link className='font-medium hover:underline' href={`/admin/gtm/deals?view=table&open=${x.id}`} onClick={(e) => e.stopPropagation()}>{x.name}</Link> },
+              { key: 'stage', label: 'Stage', type: 'select', value: (x) => x.stage_label, render: (x) => <StatusBadge tone={x.kind === 'won' ? 'ok' : x.kind === 'lost' ? 'neutral' : 'info'}>{x.stage_label}</StatusBadge> },
+              { key: 'value', label: 'Value', type: 'number', value: (x) => x.value, className: 'text-right', render: (x) => <span className='tabular-nums'>{x.value.toLocaleString()} {x.currency}</span> }
+            ]} />
+        ) }
+      ]} />
     </div>
   );
 }
@@ -160,22 +182,26 @@ function CompanyEditor({ c, sizes }: { c: Company; sizes: string[] }) {
   const [f, setF] = useState(init);
   const save = useAdminAction(() => adminApi('PUT', `/gtm/companies/${c.id}`, f), { success: 'Saved' });
   const dis = !can('campaigns');
-  const field = (k: keyof typeof f, label: string, hint?: string) => (
-    <FormRow id={`c-${c.id}-${k}`} label={label} hint={hint}><Input id={`c-${c.id}-${k}`} disabled={dis} value={f[k]} onChange={(e) => setF((v) => ({ ...v, [k]: e.target.value }))} /></FormRow>
-  );
+  const field = (k: keyof typeof f, label: string, hint?: string) =>
+    formKV(`c-${c.id}-${k}`, label, <Input id={`c-${c.id}-${k}`} disabled={dis} value={f[k]} onChange={(e) => setF((v) => ({ ...v, [k]: e.target.value }))} />, hint);
   return (
-    <Section title='Details' action={!dis && <Button size='sm' disabled={JSON.stringify(f) === JSON.stringify(init) || save.isPending} onClick={() => save.mutate()}><Icons.check /> Save changes</Button>}>
-      <div className='grid gap-4 sm:grid-cols-2'>
-        {field('name', 'Name')}{field('domain', 'Domain')}{field('industry', 'Industry')}
-        <FormRow id={`c-${c.id}-size`} label='Size'>
+    <div className='flex flex-col gap-3'>
+      {!dis && (
+        <div className='flex justify-end'>
+          <Button size='sm' disabled={JSON.stringify(f) === JSON.stringify(init) || save.isPending} onClick={() => save.mutate()}><Icons.check /> Save changes</Button>
+        </div>
+      )}
+      <KeyValueTable rows={[
+        field('name', 'Name'), field('domain', 'Domain'), field('industry', 'Industry'),
+        formKV(`c-${c.id}-size`, 'Size', (
           <NativeSelect id={`c-${c.id}-size`} className='w-full' disabled={dis} value={f.size} onChange={(e) => setF((v) => ({ ...v, size: e.target.value }))}>
             <NativeSelectOption value=''>Unknown</NativeSelectOption>
             {sizes.map((s) => <NativeSelectOption key={s} value={s}>{s}</NativeSelectOption>)}
           </NativeSelect>
-        </FormRow>
-        {field('country', 'Country', 'Two letters, e.g. US')}{field('owner', 'Owner')}
-      </div>
-    </Section>
+        )),
+        field('country', 'Country', 'Two letters, e.g. US'), field('owner', 'Owner')
+      ]} />
+    </div>
   );
 }
 

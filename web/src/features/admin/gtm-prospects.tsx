@@ -8,7 +8,8 @@ import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 import PageContainer from '@/components/layout/page-container';
 import { StatStrip } from '@/components/layout/section';
-import { RecordView, type RecordCol, type RowAction } from '@/components/layout/record-view';
+import { ActionsMenu, RecordView, type RecordCol, type RowAction } from '@/components/layout/record-view';
+import { DetailMeta, DetailTable, DetailTabs, KeyValueTable, TimelineTable } from '@/components/layout/detail';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
@@ -22,7 +23,7 @@ import { post, useAdmin, useAdminAction } from './lib';
 import { Chips, ConfirmButton, DataList, ErrorBox, FormRow, Notice, Section, StatusBadge, When, type Tone } from './ui';
 import { ConfirmDialog, TextDialog } from './gtm-dialogs';
 import { Gate, useAdminRole } from './role';
-import { GtmTabs, useGtmParams, NeedsCampaigns } from './gtm-common';
+import { formKV, GtmTabs, useGtmParams, NeedsCampaigns } from './gtm-common';
 import { CsvImport, type ImportField, type ImportResult } from './gtm-import';
 
 export const STATUS_LABEL: Record<string, string> = { new: 'New', contacted: 'Contacted', replied: 'Replied', interested: 'Interested', not_interested: 'Not interested', customer: 'Customer', bad_email: 'Bad email' };
@@ -177,7 +178,7 @@ function ProspectsPage() {
                   { label: 'Customers', value: count('customer'), hint: 'linked to an account' }
                 ]} />
               )}
-              detailTitle={(x) => <span className='flex items-center gap-2'>{personName(x)}<StatusBadge tone={STATUS_TONE[x.status]}>{STATUS_LABEL[x.status]}</StatusBadge></span>}
+              detailTitle={() => 'Prospect'}
               detail={(x, close) => <ProspectPeek id={x.id} statuses={data?.statuses ?? []} bases={data?.bases ?? []} onDeleted={close} />}
             />
           </>)}
@@ -189,6 +190,8 @@ function ProspectsPage() {
 // ---------- one prospect ----------
 
 function ProspectPeek({ id, statuses, bases, onDeleted }: { id: number; statuses: string[]; bases: string[]; onDeleted: () => void }) {
+  const router = useRouter();
+  const { lock } = useAdminRole();
   const { data: d, error } = useAdmin<Detail>(`/gtm/prospects/${id}`);
   const setStatus = useAdminAction((status: string) => adminApi('PUT', `/gtm/prospects/${id}`, { status }), { success: 'Status changed' });
   const enrich = useAdminAction((force: boolean) => post<{ matched: number; skipped_fresh: number; credits: number }>('/gtm/apollo/enrich/prospects', { ids: [id], force }),
@@ -198,52 +201,64 @@ function ProspectPeek({ id, statuses, bases, onDeleted }: { id: number; statuses
   if (error) return <ErrorBox error={error} />;
   if (!d) return <Skeleton className='h-96 rounded-lg' />;
   const x = d.prospect;
+  // The status changes, in the ⋯ menu: owners only, like the buttons they were.
+  const statusActions: RowAction[] = statuses.filter((s) => s !== x.status)
+    .map((s) => lock({ label: `Mark ${STATUS_LABEL[s]?.toLowerCase() ?? s}`, disabled: setStatus.isPending, onSelect: () => setStatus.mutate(s) }, 'campaigns'));
   return (
-    <div className='flex flex-col gap-8'>
-      <div className='flex flex-col gap-3'>
-        {x.suppressed && <Notice>This address is on the suppression list: no campaign writes to it.</Notice>}
-        {x.restricted && <Notice tone='info'>EU / EEA / UK / CH (or no country): only outbound campaigns that allow these prospects write to them, on the recorded basis ({BASIS_LABEL[x.lawful_basis]}).</Notice>}
-        {(x.org_slug || x.company_org_id) && <Notice tone='ok'>{x.org_slug ? `Linked to the account ${x.org_name ?? x.org_slug}` : 'Their company is a customer'}: outbound never writes to them.</Notice>}
-        <div className='flex flex-wrap items-center gap-2'>
-          {statuses.filter((s) => s !== x.status).map((s) => (
-            <Gate key={s} need='campaigns'><Button size='sm' variant='outline' disabled={setStatus.isPending} onClick={() => setStatus.mutate(s)}>Mark {STATUS_LABEL[s]?.toLowerCase() ?? s}</Button></Gate>
-          ))}
-        </div>
-        <div className='flex flex-wrap items-center gap-2'>
+    <div className='flex flex-col gap-4'>
+      <DetailMeta
+        title={personName(x)}
+        subtitle={[x.title, x.company].filter(Boolean).join(' · ') || undefined}
+        badges={<>
+          <StatusBadge tone={STATUS_TONE[x.status]}>{STATUS_LABEL[x.status] ?? x.status}</StatusBadge>
+          {x.in_sequence && <StatusBadge tone='info'>in a sequence</StatusBadge>}
+          {x.suppressed && <StatusBadge tone='warn'>suppressed</StatusBadge>}
+        </>}
+        actions={<>
           <Gate need='campaigns'><Button size='sm' variant='outline' disabled={enrich.isPending} onClick={() => enrich.mutate(false)}><Icons.sparkles /> Enrich with Apollo</Button></Gate>
           <Gate need='campaigns'><Button size='sm' variant='ghost' disabled={enrich.isPending} onClick={() => enrich.mutate(true)}><Icons.refresh /> Enrich again</Button></Gate>
           <Gate need='campaigns'><Button size='sm' variant='outline' disabled={deal.isPending} onClick={() => deal.mutate()}><Icons.add /> Create deal</Button></Gate>
           <Gate need='campaigns'><ConfirmButton variant='destructive' label={<><Icons.trash /> Delete</>} title='Delete this prospect?' confirmLabel='Delete'
             description='Their timeline goes too; the suppression list keeps what it has.' onConfirm={() => remove.mutate(undefined, { onSuccess: onDeleted })} /></Gate>
-        </div>
-        <p className='text-muted-foreground text-xs'>
-          Added <When d={x.created_at} /> from {x.source}{x.enriched_at ? <> · enriched <When d={x.enriched_at} /> ({x.enrichment_source})</> : null}{x.linked_at ? <> · linked <When d={x.linked_at} /></> : null}
-        </p>
-      </div>
-      <ProspectEditor key={`${x.id}:${x.updated_at}`} x={x} bases={bases} />
-      <NoteBox id={id} />
-      {d.deals.length > 0 && (
-        <Section title='Deals'>
-          <div className='border'>
-            <DataList noun='deals' minWidth={420} rows={d.deals} empty='No deals.' cols={[
-              { label: 'Deal', render: (r) => <span className='font-medium'>{r.name}</span> },
-              { label: 'Stage', render: (r) => <StatusBadge tone={r.kind === 'won' ? 'ok' : r.kind === 'lost' ? 'neutral' : 'info'}>{r.stage_label}</StatusBadge> },
-              { label: 'Value', render: (r) => <span className='tabular-nums'>{r.value.toLocaleString()} {r.currency}</span> }
-            ]} />
+          <ActionsMenu items={statusActions} label='Change status' />
+        </>}
+        facts={[
+          { label: 'Email', value: x.email, hint: x.email ? <StatusBadge tone={EMAIL_TONE[x.email_status] ?? 'neutral'}>{x.email_status.replace(/_/g, ' ')}</StatusBadge> : undefined },
+          { label: 'Company', value: x.company, hint: [x.company_domain, x.industry, x.company_size].filter(Boolean).join(' · ') || undefined },
+          { label: 'Owner', value: x.owner },
+          { label: 'Country', value: x.country, hint: x.time_zone ?? undefined },
+          { label: 'Lawful basis', value: BASIS_LABEL[x.lawful_basis] ?? x.lawful_basis, hint: x.basis_note ?? undefined },
+          { label: 'Tags', value: <Chips items={x.tags} /> },
+          { label: 'Campaigns', value: <span className='tabular-nums'>{x.campaigns}</span>, hint: x.last_emailed_at ? <>last emailed <When d={x.last_emailed_at} /></> : undefined },
+          { label: 'Account', value: x.org_slug ? (x.org_name ?? x.org_slug) : null, hint: x.linked_at ? <>linked <When d={x.linked_at} /></> : undefined, hidden: !x.org_slug },
+          { label: 'Added', value: <When d={x.created_at} />, hint: `from ${x.source}` },
+          { label: 'Enriched', value: x.enriched_at ? <When d={x.enriched_at} /> : null, hint: x.enriched_at && x.enrichment_source ? x.enrichment_source : undefined }
+        ]}
+      >
+        {x.suppressed && <Notice>This address is on the suppression list: no campaign writes to it.</Notice>}
+        {x.restricted && <Notice tone='info'>EU / EEA / UK / CH (or no country): only outbound campaigns that allow these prospects write to them, on the recorded basis ({BASIS_LABEL[x.lawful_basis]}).</Notice>}
+        {(x.org_slug || x.company_org_id) && <Notice tone='ok'>{x.org_slug ? `Linked to the account ${x.org_name ?? x.org_slug}` : 'Their company is a customer'}: outbound never writes to them.</Notice>}
+      </DetailMeta>
+      <DetailTabs resetKey={id} tabs={[
+        { id: 'details', label: 'Details', content: <ProspectEditor key={`${x.id}:${x.updated_at}`} x={x} bases={bases} /> },
+        { id: 'timeline', label: 'Timeline', count: d.timeline.length, content: (
+          <div className='flex flex-col gap-3'>
+            <NoteBox id={id} />
+            <TimelineTable search noun='events' empty='Nothing yet.' when={(at) => <When d={at} />}
+              events={d.timeline.map((t) => ({ at: t.at, event: <span className='font-medium'>{t.text}</span>, detail: t.detail ? <span className='whitespace-pre-wrap'>{t.detail}</span> : undefined,
+                actor: t.actor ?? undefined, search: `${t.type} ${t.text} ${t.detail ?? ''} ${t.actor ?? ''}` }))} />
           </div>
-        </Section>
-      )}
-      <Section title='Timeline' description='Emails sent, opened and replied to, notes, status changes, enrichment and links to an account.'>
-        <ol className='flex flex-col gap-3'>
-          {!d.timeline.length && <li className='text-muted-foreground text-sm'>Nothing yet.</li>}
-          {d.timeline.map((t, i) => (
-            <li key={i} className='border-l-2 pl-3'>
-              <div className='flex flex-wrap items-baseline gap-x-2 text-sm'><span className='font-medium'>{t.text}</span><When d={t.at} className='text-muted-foreground text-xs' />{t.actor && <span className='text-muted-foreground text-xs'>by {t.actor}</span>}</div>
-              {t.detail && <p className='text-muted-foreground mt-0.5 text-sm whitespace-pre-wrap'>{t.detail}</p>}
-            </li>
-          ))}
-        </ol>
-      </Section>
+        ) },
+        { id: 'deals', label: 'Deals', count: d.deals.length, hidden: !d.deals.length, content: (
+          <DetailTable noun='deals' rows={d.deals} rowKey={(r) => String(r.id)} empty='No deals.'
+            onRow={(r) => router.push(`/admin/gtm/deals?view=table&open=${r.id}`)}
+            cols={[
+              { key: 'deal', label: 'Deal', type: 'text', value: (r) => r.name, render: (r) => <span className='font-medium'>{r.name}</span> },
+              { key: 'stage', label: 'Stage', type: 'select', value: (r) => r.stage_label, render: (r) => <StatusBadge tone={r.kind === 'won' ? 'ok' : r.kind === 'lost' ? 'neutral' : 'info'}>{r.stage_label}</StatusBadge> },
+              { key: 'value', label: 'Value', type: 'number', value: (r) => r.value, className: 'text-right', render: (r) => <span className='tabular-nums'>{r.value.toLocaleString()} {r.currency}</span> }
+            ]} />
+        ) }
+      ]} />
     </div>
   );
 }
@@ -255,38 +270,39 @@ function ProspectEditor({ x, bases }: { x: Detail['prospect']; bases: string[] }
   const [f, setF] = useState(init);
   const dirty = JSON.stringify(f) !== JSON.stringify(init);
   const save = useAdminAction(() => adminApi('PUT', `/gtm/prospects/${x.id}`, { ...f, tags: uncsv(f.tags) }), { success: 'Saved' });
-  const field = (k: keyof typeof f, label: string, hint?: string) => (
-    <FormRow id={`p-${x.id}-${k}`} label={label} hint={hint}><Input id={`p-${x.id}-${k}`} disabled={!can('campaigns')} value={f[k]} onChange={(e) => setF((v) => ({ ...v, [k]: e.target.value }))} /></FormRow>
-  );
+  const field = (k: keyof typeof f, label: string, hint?: string) =>
+    formKV(`p-${x.id}-${k}`, label, <Input id={`p-${x.id}-${k}`} disabled={!can('campaigns')} value={f[k]} onChange={(e) => setF((v) => ({ ...v, [k]: e.target.value }))} />, hint);
   return (
-    <Section title='Details' action={can('campaigns') && <Button size='sm' disabled={!dirty || save.isPending} onClick={() => save.mutate()}><Icons.check /> Save changes</Button>}>
-      <div className='grid gap-4 sm:grid-cols-2'>
-        {field('email', 'Email')}{field('title', 'Title')}
-        {field('first_name', 'First name')}{field('last_name', 'Last name')}
-        {field('country', 'Country', 'Two letters, e.g. DE')}{field('time_zone', 'Time zone', 'e.g. Europe/Berlin')}
-        {field('owner', 'Owner')}{field('tags', 'Tags', 'Comma-separated')}
-        {field('linkedin_url', 'LinkedIn URL', 'Kept as text; nothing visits it')}
-        <FormRow id={`p-${x.id}-basis`} label='Lawful basis'>
+    <div className='flex flex-col gap-3'>
+      {can('campaigns') && (
+        <div className='flex justify-end'><Button size='sm' disabled={!dirty || save.isPending} onClick={() => save.mutate()}><Icons.check /> Save changes</Button></div>
+      )}
+      <KeyValueTable rows={[
+        field('email', 'Email'), field('title', 'Title'),
+        field('first_name', 'First name'), field('last_name', 'Last name'),
+        field('country', 'Country', 'Two letters, e.g. DE'), field('time_zone', 'Time zone', 'e.g. Europe/Berlin'),
+        field('owner', 'Owner'), field('tags', 'Tags', 'Comma-separated'),
+        field('linkedin_url', 'LinkedIn URL', 'Kept as text; nothing visits it'),
+        formKV(`p-${x.id}-basis`, 'Lawful basis', (
           <NativeSelect id={`p-${x.id}-basis`} className='w-full' disabled={!can('campaigns')} value={f.lawful_basis} onChange={(e) => setF((v) => ({ ...v, lawful_basis: e.target.value }))}>
             {bases.map((b) => <NativeSelectOption key={b} value={b}>{BASIS_LABEL[b] ?? b}</NativeSelectOption>)}
           </NativeSelect>
-        </FormRow>
-        {field('basis_note', 'Basis note', 'Why this basis applies')}
-      </div>
-    </Section>
+        )),
+        field('basis_note', 'Basis note', 'Why this basis applies')
+      ]} />
+    </div>
   );
 }
 
+/** A note on the timeline: the form above the timeline's table. */
 function NoteBox({ id }: { id: number }) {
   const [text, setText] = useState('');
   const add = useAdminAction(() => post(`/gtm/prospects/${id}/notes`, { text }), { success: 'Note added' });
   return (
-    <Section title='Add a note'>
-      <form className='grid gap-2' onSubmit={(e) => { e.preventDefault(); add.mutate(undefined, { onSuccess: () => setText('') }); }}>
-        <Textarea aria-label='Note' rows={3} value={text} placeholder='What happened, what is next' onChange={(e) => setText(e.target.value)} />
-        <Gate need='campaigns'><Button type='submit' size='sm' variant='outline' className='self-start' disabled={!text.trim() || add.isPending}><Icons.add /> Add note</Button></Gate>
-      </form>
-    </Section>
+    <form className='flex flex-col gap-2 sm:flex-row sm:items-start' onSubmit={(e) => { e.preventDefault(); add.mutate(undefined, { onSuccess: () => setText('') }); }}>
+      <Textarea aria-label='Note' rows={2} value={text} placeholder='Add a note: what happened, what is next' onChange={(e) => setText(e.target.value)} className='min-w-0 flex-1' />
+      <Gate need='campaigns'><Button type='submit' size='sm' variant='outline' className='self-start' disabled={!text.trim() || add.isPending}><Icons.add /> Add note</Button></Gate>
+    </form>
   );
 }
 

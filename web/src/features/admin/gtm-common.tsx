@@ -12,6 +12,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { last30, rangeQuery, type DateRange } from '@/components/layout/date-range-picker';
 import { Icons } from '@/components/icons';
 import PageContainer from '@/components/layout/page-container';
+import type { KV } from '@/components/layout/detail';
 import { useAdminRole } from './role';
 import { Notice } from './ui';
 import { cn } from '@/lib/utils';
@@ -163,3 +164,12 @@ export const utmText = (u: { source?: string; medium?: string; campaign?: string
   const s = u.source ?? u.utm_source ?? DIRECT, m = u.medium ?? u.utm_medium ?? '', c = u.campaign ?? u.utm_campaign ?? '';
   return s === DIRECT && !m && !c ? DIRECT : `${s}${m ? ` / ${m}` : ''}${c ? ` · ${c}` : ''}`;
 };
+
+/** An editor's input as a KeyValueTable row (Field | Value): the label points at the input, the hint goes under it. */
+export function formKV(id: string | undefined, label: ReactNode, input: ReactNode, hint?: ReactNode, hidden?: boolean): KV {
+  return {
+    hidden,
+    label: id ? <label htmlFor={id}>{label}</label> : label,
+    value: <div className='grid min-w-0 gap-1.5'>{input}{hint && <p className='text-muted-foreground text-xs'>{hint}</p>}</div>
+  };
+}
