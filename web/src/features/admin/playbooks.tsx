@@ -2,7 +2,8 @@
 // Customer journeys: the use-case pipelines customers follow on /app Setup. The editor used by the
 // Journeys table (journeys.tsx); write journeys there and promote the ones customers see. Progress on /app comes from real tool calls (src/playbooks.ts).
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ActionsMenu } from '@/components/layout/record-view';
+import { type RowAction } from '@/components/layout/record-view';
+import { DetailMeta, DetailTable, DetailTabs, KeyValueTable } from '@/components/layout/detail';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
@@ -13,6 +14,7 @@ import { adminApi } from '@/lib/api-client';
 import { cn } from '@/lib/utils';
 import { post, useAdminAction } from './lib';
 import { Gate } from './role';
+import { StatusBadge } from './ui';
 
 export interface Stage { id?: string; title: string; why: string; prompt: string; tools: string[]; expect: string; manual?: boolean }
 export interface Playbook {
@@ -43,21 +45,22 @@ function problemsOf(d: Draft): { stage?: number; field: string; msg: string }[] 
   return out;
 }
 
-// Inputs that read as text until you touch them (Notion-like), with a red edge once a save was tried and it is missing.
-const ghost = 'border-transparent bg-transparent shadow-none hover:bg-muted/60 focus-visible:bg-background focus-visible:border-input';
+// A red edge once a save was tried and the field is missing.
 const bad = (on: boolean) => (on ? 'border-destructive/60 bg-destructive/5' : '');
 const TOKENS = ['{product}', '{competitor}'];
 
 /**
- * The journey editor: a full-height panel. Name as the title, the few journey properties as rows, then the stages as a
- * list where one is open at a time (title, prompt, what they will see, and which tools mark it done). Required fields
- * are checked before saving, and closing with unsaved changes asks first.
+ * The journey editor: a full-height panel. The card on top (name, Save / Cancel), then two tabs: Details (the journey's
+ * properties as Field | Value inputs) and Stages (a table; clicking a row opens that stage's fields below it: title,
+ * prompt, what they will see, and which tools mark it done). Required fields are checked before saving, and closing
+ * with unsaved changes asks first.
  */
 export function Editor({ draft: initial, tools, onClose }: { draft: Draft; tools: string[]; onClose: () => void }) {
   const [d, setD] = useState<Draft>(initial);
   const [open, setOpen] = useState<number | null>(initial.isNew ? 0 : null);
   const [example, setExample] = useState(Boolean(initial.example.title || initial.example.result));
   const [tried, setTried] = useState(false);
+  const [tab, setTab] = useState('details');
   const [err, setErr] = useState('');
   const problems = useMemo(() => problemsOf(d), [d]);
   const dirty = JSON.stringify(d) !== JSON.stringify(initial);
@@ -75,7 +78,12 @@ export function Editor({ draft: initial, tools, onClose }: { draft: Draft; tools
   const addStage = () => { setD((x) => ({ ...x, stages: [...x.stages, emptyStage()] })); setOpen(d.stages.length); };
   const submit = () => {
     setTried(true); setErr('');
-    if (problems.length) { const first = problems.find((p) => p.stage != null); if (first) setOpen(first.stage!); return; }
+    if (problems.length) {
+      const first = problems.find((p) => p.stage != null); if (first) setOpen(first.stage!);
+      // Show the tab with the first missing field.
+      setTab(problems.some((p) => p.stage == null) ? 'details' : 'stages');
+      return;
+    }
     save.mutate(undefined, { onSuccess: onClose, onError: (e) => setErr(e.message) });
   };
   const close = () => { if (!dirty || window.confirm('Discard your changes to this journey?')) onClose(); };
@@ -87,91 +95,104 @@ export function Editor({ draft: initial, tools, onClose }: { draft: Draft; tools
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  const stageRows = d.stages.map((st, i) => ({ st, i }));
+  const stageActions = (st: Stage, i: number): RowAction[] => [
+    { label: isOpenLabel(open === i), icon: <Icons.edit />, onSelect: () => setOpen(open === i ? null : i) },
+    { label: 'Move up', icon: <Icons.chevronUp />, separator: true, disabled: i === 0, onSelect: () => moveStage(i, -1) },
+    { label: 'Move down', icon: <Icons.chevronDown />, disabled: i === d.stages.length - 1, onSelect: () => moveStage(i, 1) },
+    { label: 'Duplicate', icon: <Icons.page />, disabled: d.stages.length >= 12, onSelect: () => { setD((x) => ({ ...x, stages: [...x.stages.slice(0, i + 1), { ...st, id: undefined, title: `${st.title} (copy)`, tools: [...st.tools] }, ...x.stages.slice(i + 1)] })); setOpen(i + 1); } },
+    { label: 'Delete stage', icon: <Icons.trash />, destructive: true, separator: true, disabled: d.stages.length === 1, onSelect: () => { set('stages', d.stages.filter((_, j) => j !== i)); setOpen(null); } },
+  ];
+  const cur = open != null ? d.stages[open] : undefined;
+
   return (
     <Sheet open onOpenChange={(o) => !o && close()}>
       <SheetContent side='right' showCloseButton={false} className='gap-0 p-0 data-[side=right]:w-full data-[side=right]:sm:max-w-3xl'>
-        <div className='flex items-center gap-2 border-b px-6 py-3'>
-          <SheetTitle className='text-muted-foreground text-sm font-normal'>{d.isNew ? 'New journey' : 'Edit journey'}</SheetTitle>
-          <SheetDescription className='sr-only'>Stages a customer follows in their AI client; a stage is done when one of its tools runs, or when the customer marks it.</SheetDescription>
-          <span className='text-muted-foreground ml-auto hidden text-xs sm:inline'>⌘↵ to save</span>
-          <Button variant='ghost' size='sm' onClick={close}>Cancel</Button>
-          <Gate need='library'><Button size='sm' onClick={submit} disabled={save.isPending}>{save.isPending ? 'Saving…' : d.isNew ? 'Create journey' : 'Save'}</Button></Gate>
-        </div>
+        <SheetTitle className='sr-only'>{d.isNew ? 'New journey' : 'Edit journey'}</SheetTitle>
+        <SheetDescription className='sr-only'>Stages a customer follows in their AI client; a stage is done when one of its tools runs, or when the customer marks it.</SheetDescription>
 
-        <div className='min-h-0 flex-1 overflow-y-auto px-6 py-6'>
-          <Input autoFocus={d.isNew} value={d.name} onChange={(e) => set('name', e.target.value)} placeholder='Journey name' aria-label='Name' maxLength={80}
-            className={cn('h-12 px-2 text-2xl font-semibold md:text-2xl', ghost, bad(missing('name')))} />
-          <Textarea value={d.outcome} onChange={(e) => set('outcome', e.target.value)} rows={2} maxLength={300} aria-label='Outcome'
-            placeholder='Outcome: what the customer knows or has at the end' className={cn('mt-1 resize-none px-2 text-sm', ghost, bad(missing('outcome')))} />
+        <div className='flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4 sm:p-6'>
+          <DetailMeta
+            title={d.name.trim() || (d.isNew ? 'New journey' : 'Untitled journey')}
+            subtitle={d.isNew ? 'New journey: not promoted until you promote it' : 'Edit journey'}
+            badges={dirty ? <StatusBadge tone='warn'>unsaved</StatusBadge> : undefined}
+            actions={<>
+              <span className='text-muted-foreground hidden text-xs sm:inline'>⌘↵ to save</span>
+              <Button variant='outline' size='sm' onClick={close}>Cancel</Button>
+              <Gate need='library'><Button size='sm' onClick={submit} disabled={save.isPending}>{save.isPending ? 'Saving…' : d.isNew ? 'Create journey' : 'Save'}</Button></Gate>
+            </>}
+            facts={[
+              { label: 'Id', value: <span className='font-mono text-xs'>{d.id}</span>, hidden: d.isNew },
+              { label: 'Stages', value: <span className='tabular-nums'>{d.stages.length}</span> },
+              { label: 'Worked example', value: d.example.title || (example ? 'Being written' : 'None') }
+            ]}
+          />
 
-          <dl className='mt-4 grid gap-0.5'>
-            <Prop label='For'><Input value={d.who} onChange={(e) => set('who', e.target.value)} placeholder='Who it is for, e.g. DevRel after the first report' maxLength={200} className={cn('h-8 px-2', ghost)} /></Prop>
-            <Prop label='Takes'><Input value={d.time} onChange={(e) => set('time', e.target.value)} placeholder='e.g. an hour, mostly waiting for agents' maxLength={80} className={cn('h-8 px-2', ghost)} /></Prop>
-            {example ? (<>
-              <Prop label='Example'><Input value={d.example.title} onChange={(e) => set('example', { ...d.example, title: e.target.value })} placeholder='A real customer, e.g. Resend inbound email' maxLength={120} className={cn('h-8 px-2', ghost)} /></Prop>
-              <Prop label='Result'><Textarea rows={2} value={d.example.result} onChange={(e) => set('example', { ...d.example, result: e.target.value })} placeholder='What happened for them' maxLength={600} className={cn('resize-none px-2 text-sm', ghost)} /></Prop>
-            </>) : (
-              <button type='button' onClick={() => setExample(true)} className='text-muted-foreground hover:text-foreground w-fit px-2 py-1.5 text-sm leading-none'>+ Add a worked example</button>
-            )}
-          </dl>
-
-          <div className='mt-8 mb-2 flex items-center justify-between'>
-            <h3 className='text-sm leading-none font-medium'>Stages <span className='text-muted-foreground font-normal tabular-nums'>{d.stages.length}</span></h3>
-            <Button size='sm' variant='ghost' disabled={d.stages.length >= 12} onClick={addStage}><Icons.add /> Add stage</Button>
-          </div>
-          <ol className='divide-y border-y'>
-            {d.stages.map((st, i) => {
-              const isOpen = open === i, stageBad = tried && problems.some((p) => p.stage === i);
-              return (
-                <li key={i}>
-                  <div className='flex items-center gap-3 py-2.5'>
-                    <button type='button' onClick={() => setOpen(isOpen ? null : i)} aria-expanded={isOpen} className='flex min-w-0 flex-1 items-center gap-3 text-left'>
-                      <span className={cn('flex size-6 shrink-0 items-center justify-center rounded-full border text-xs tabular-nums', stageBad ? 'border-destructive text-destructive' : 'text-muted-foreground')}>{i + 1}</span>
-                      <span className={cn('min-w-0 flex-1 truncate text-sm leading-none', st.title ? 'font-medium' : 'text-muted-foreground')}>{st.title || 'Untitled stage'}</span>
-                      <span className='text-muted-foreground hidden shrink-0 truncate font-mono text-xs sm:inline'>
-                        {st.tools.length ? `${st.tools[0]}${st.tools.length > 1 ? ` +${st.tools.length - 1}` : ''}` : <span className='font-sans'>marked by the customer</span>}
-                      </span>
-                      <Icons.chevronDown className={cn('text-muted-foreground size-4 shrink-0 transition-transform', isOpen && 'rotate-180')} />
-                    </button>
-                    <ActionsMenu label={`Stage ${i + 1} actions`} items={[
-                      { label: 'Move up', icon: <Icons.chevronUp />, disabled: i === 0, onSelect: () => moveStage(i, -1) },
-                      { label: 'Move down', icon: <Icons.chevronDown />, disabled: i === d.stages.length - 1, onSelect: () => moveStage(i, 1) },
-                      { label: 'Duplicate', icon: <Icons.page />, disabled: d.stages.length >= 12, onSelect: () => { setD((x) => ({ ...x, stages: [...x.stages.slice(0, i + 1), { ...st, id: undefined, title: `${st.title} (copy)`, tools: [...st.tools] }, ...x.stages.slice(i + 1)] })); setOpen(i + 1); } },
-                      { label: 'Delete stage', icon: <Icons.trash />, destructive: true, separator: true, disabled: d.stages.length === 1, onSelect: () => { set('stages', d.stages.filter((_, j) => j !== i)); setOpen(null); } },
+          <DetailTabs value={tab} onValueChange={setTab} tabs={[
+            { id: 'details', label: 'Details', content: (
+              <KeyValueTable rows={[
+                { label: 'Name', value: <Input autoFocus={d.isNew} value={d.name} onChange={(e) => set('name', e.target.value)} placeholder='Journey name' aria-label='Name' maxLength={80} className={bad(missing('name'))} /> },
+                { label: 'Outcome', value: <Textarea value={d.outcome} onChange={(e) => set('outcome', e.target.value)} rows={2} maxLength={300} aria-label='Outcome'
+                  placeholder='What the customer knows or has at the end' className={cn('resize-none text-sm', bad(missing('outcome')))} /> },
+                { label: 'For', value: <Input value={d.who} onChange={(e) => set('who', e.target.value)} placeholder='Who it is for, e.g. DevRel after the first report' maxLength={200} aria-label='For' /> },
+                { label: 'Takes', value: <Input value={d.time} onChange={(e) => set('time', e.target.value)} placeholder='e.g. an hour, mostly waiting for agents' maxLength={80} aria-label='Takes' /> },
+                ...(example ? [
+                  { label: 'Example', value: <Input value={d.example.title} onChange={(e) => set('example', { ...d.example, title: e.target.value })} placeholder='A real customer, e.g. Resend inbound email' maxLength={120} aria-label='Example' /> },
+                  { label: 'Result', value: <Textarea rows={2} value={d.example.result} onChange={(e) => set('example', { ...d.example, result: e.target.value })} placeholder='What happened for them' maxLength={600} aria-label='Result' className='resize-none text-sm' /> }
+                ] : [
+                  { label: 'Worked example', value: <Button type='button' variant='outline' size='sm' onClick={() => setExample(true)}><Icons.add /> Add a worked example</Button> }
+                ])
+              ]} />
+            ) },
+            { id: 'stages', label: 'Stages', count: d.stages.length, content: (
+              <div className='flex flex-col gap-4'>
+                <DetailTable rows={stageRows} rowKey={(r) => String(r.i)} noun='stages' empty='No stages yet.'
+                  onRow={(r) => setOpen(open === r.i ? null : r.i)} actions={(r) => stageActions(r.st, r.i)}
+                  rowClassName={(r) => (open === r.i ? 'bg-muted/50' : undefined)}
+                  primary={<Button size='sm' variant='outline' disabled={d.stages.length >= 12} onClick={addStage}><Icons.add /> Add stage</Button>}
+                  cols={[
+                    { key: 'i', label: '#', className: 'w-10', render: (r) => {
+                      const stageBad = tried && problems.some((x) => x.stage === r.i);
+                      return <span className={cn('flex size-6 items-center justify-center rounded-full border text-xs tabular-nums', stageBad ? 'border-destructive text-destructive' : 'text-muted-foreground')}>{r.i + 1}</span>;
+                    } },
+                    { key: 'title', label: 'Stage', render: (r) => <span className={cn('leading-snug', r.st.title ? 'font-medium' : 'text-muted-foreground')}>{r.st.title || 'Untitled stage'}</span>, className: 'whitespace-normal' },
+                    { key: 'tools', label: 'Done when', render: (r) => (r.st.tools.length
+                      ? <span className='font-mono text-xs'>{`${r.st.tools[0]}${r.st.tools.length > 1 ? ` +${r.st.tools.length - 1}` : ''}`}</span>
+                      : <span className='text-muted-foreground text-xs'>marked by the customer</span>) }
+                  ]} />
+                {cur && open != null && (
+                  <div className='flex flex-col gap-2'>
+                    <p className='text-sm leading-none font-medium'>Stage {open + 1}</p>
+                    <KeyValueTable rows={[
+                      { label: 'Title', value: <Input value={cur.title} onChange={(e) => setStage(open, { title: e.target.value })} placeholder='e.g. Read results by agent' aria-label='Stage title' maxLength={120} className={bad(missing('title', open))} /> },
+                      { label: 'Prompt the customer pastes into their AI client', value: (
+                        <div className='grid gap-1.5'>
+                          <span className='flex gap-1'>{TOKENS.map((t) => (
+                            <Button key={t} type='button' variant='outline' size='xs' className='font-mono' onClick={() => setStage(open, { prompt: `${cur.prompt}${cur.prompt && !cur.prompt.endsWith(' ') ? ' ' : ''}${t}` })}>Insert {t}</Button>
+                          ))}</span>
+                          <Textarea rows={3} value={cur.prompt} onChange={(e) => setStage(open, { prompt: e.target.value })} placeholder='Show my visibility report for {product}.' aria-label='Prompt' maxLength={600}
+                            className={cn('resize-none font-mono text-xs', bad(missing('prompt', open)))} />
+                        </div>
+                      ) },
+                      { label: "You'll see", value: <Input value={cur.expect} onChange={(e) => setStage(open, { expect: e.target.value })} placeholder='What comes back, e.g. Hit rate per agent with ranges' aria-label="You'll see" maxLength={500} className={bad(missing('expect', open))} /> },
+                      { label: 'Why it matters', value: <Input value={cur.why} onChange={(e) => setStage(open, { why: e.target.value })} placeholder='Optional' aria-label='Why' maxLength={500} /> },
+                      { label: 'Done when', value: (
+                        <div className='flex flex-wrap items-center gap-1.5'>
+                          {cur.tools.map((t) => (
+                            <span key={t} className='bg-muted flex items-center gap-1 rounded px-2 py-1 font-mono text-xs leading-none'>
+                              {t}<button type='button' aria-label={`Remove ${t}`} onClick={() => setStage(open, { tools: cur.tools.filter((x) => x !== t) })} className='text-muted-foreground hover:text-foreground'><Icons.close className='size-3' /></button>
+                            </span>
+                          ))}
+                          {!cur.tools.length && <span className='text-muted-foreground text-xs leading-none'>the customer marks it done</span>}
+                          <ToolPicker tools={tools} value={cur.tools} onChange={(v) => setStage(open, { tools: v })} />
+                        </div>
+                      ) }
                     ]} />
                   </div>
-                  {isOpen && (
-                    <div className='grid gap-3 pb-5 pl-9'>
-                      <Input value={st.title} onChange={(e) => setStage(i, { title: e.target.value })} placeholder='Title, e.g. Read results by agent' aria-label='Stage title' maxLength={120} className={bad(missing('title', i))} />
-                      <div className='grid gap-1.5'>
-                        <div className='flex items-center justify-between'>
-                          <span className='text-muted-foreground text-xs leading-none'>Prompt the customer pastes into their AI client</span>
-                          <span className='flex gap-1'>{TOKENS.map((t) => (
-                            <button key={t} type='button' title={`Insert ${t}`} onClick={() => setStage(i, { prompt: `${st.prompt}${st.prompt && !st.prompt.endsWith(' ') ? ' ' : ''}${t}` })}
-                              className='text-muted-foreground hover:text-foreground rounded border px-1.5 py-0.5 font-mono text-[11px] leading-none'>{t}</button>
-                          ))}</span>
-                        </div>
-                        <Textarea rows={3} value={st.prompt} onChange={(e) => setStage(i, { prompt: e.target.value })} placeholder='Show my visibility report for {product}.' aria-label='Prompt' maxLength={600}
-                          className={cn('resize-none font-mono text-xs', bad(missing('prompt', i)))} />
-                      </div>
-                      <Input value={st.expect} onChange={(e) => setStage(i, { expect: e.target.value })} placeholder="You'll see: what comes back, e.g. Hit rate per agent with ranges" aria-label="You'll see" maxLength={500} className={bad(missing('expect', i))} />
-                      <Input value={st.why} onChange={(e) => setStage(i, { why: e.target.value })} placeholder='Why it matters (optional)' aria-label='Why' maxLength={500} />
-                      <div className='flex flex-wrap items-center gap-1.5'>
-                        <span className='text-muted-foreground mr-1 text-xs leading-none'>Done when</span>
-                        {st.tools.map((t) => (
-                          <span key={t} className='bg-muted flex items-center gap-1 rounded px-2 py-1 font-mono text-xs leading-none'>
-                            {t}<button type='button' aria-label={`Remove ${t}`} onClick={() => setStage(i, { tools: st.tools.filter((x) => x !== t) })} className='text-muted-foreground hover:text-foreground'><Icons.close className='size-3' /></button>
-                          </span>
-                        ))}
-                        {!st.tools.length && <span className='text-muted-foreground text-xs leading-none'>the customer marks it done</span>}
-                        <ToolPicker tools={tools} value={st.tools} onChange={(v) => setStage(i, { tools: v })} />
-                      </div>
-                    </div>
-                  )}
-                </li>
-              );
-            })}
-          </ol>
+                )}
+              </div>
+            ) }
+          ]} />
         </div>
 
         {(err || (tried && problems.length > 0)) && (
@@ -184,14 +205,7 @@ export function Editor({ draft: initial, tools, onClose }: { draft: Draft; tools
   );
 }
 
-function Prop({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className='grid grid-cols-[6rem_1fr] items-start gap-2'>
-      <dt className='text-muted-foreground pt-2 text-sm leading-none'>{label}</dt>
-      <dd>{children}</dd>
-    </div>
-  );
-}
+const isOpenLabel = (on: boolean) => (on ? 'Close stage' : 'Edit stage');
 
 /** Add the tools whose run marks a stage done: a searchable list instead of every tool as a checkbox. */
 function ToolPicker({ tools, value, onChange }: { tools: string[]; value: string[]; onChange: (v: string[]) => void }) {
