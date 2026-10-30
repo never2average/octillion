@@ -6,7 +6,7 @@
 // A task's harnesses limit which coding agents its sessions go to (empty: the whole Harness mix; src/agents.ts).
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import PageContainer from '@/components/layout/page-container';
-import { ActionsMenu, Field, type RowAction } from '@/components/layout/record-view';
+import { ActionsMenu, type RowAction } from '@/components/layout/record-view';
 import { MultiSelectFilter, type FilterOption } from '@/components/layout/multi-select-filter';
 import { TablePager, type Paged } from '@/components/layout/table-pager';
 import { Button } from '@/components/ui/button';
@@ -17,11 +17,11 @@ import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Textarea } from '@/components/ui/textarea';
 import { Icons } from '@/components/icons';
+import { DetailMeta, DetailTable, DetailTabs, KeyValueTable, LongText } from '@/components/layout/detail';
 import { useDebounce } from '@/hooks/use-debounce';
 import { adminApi } from '@/lib/api-client';
 import { counted } from '@/lib/octillion-format';
 import { cn } from '@/lib/utils';
-import { List } from './account-peek';
 import { post, useAdmin, useAdminAction } from './lib';
 import { Gate, useAdminRole } from './role';
 import { Chips, ErrorBox, FormRow, Mono, StatusBadge, When } from './ui';
@@ -39,10 +39,6 @@ interface TaskPage { tasks: Task[]; total: number; limit: number; offset: number
 interface Draft { id?: number; title: string; prompt: string; language: string; category: string; tags: string; repo_url: string; harnesses: string[] }
 
 const NA = <span className='text-muted-foreground'>—</span>;
-const META = 'text-muted-foreground flex flex-wrap items-center gap-x-2 gap-y-1 text-xs leading-none';
-const PROMPT = 'font-mono text-xs leading-relaxed whitespace-pre-wrap border-l-2 pl-3';
-const Dot = () => <span className='text-muted-foreground/60'>·</span>;
-const Label = ({ children }: { children: ReactNode }) => <div className='text-muted-foreground mb-2 text-xs font-medium leading-none'>{children}</div>;
 /** github.com/owner/repo: the host and path, without the scheme. */
 const repoName = (u: string) => { try { const x = new URL(u); return `${x.host}${x.pathname.replace(/\/$/, '')}`; } catch { return u.replace(/^https?:\/\//, ''); } };
 const originOf = (t: Task) => (t.source === 'admin' ? 'Written here' : t.source === 'contributed' ? 'Contributed by an account' : t.edited_at ? 'Vault, edited here' : 'Vault');
@@ -209,12 +205,13 @@ export function AdminTasks() {
             <aside aria-label='Task' className='bg-card flex min-h-0 min-w-0 flex-1 flex-col rounded-xl border lg:w-[60%]'>
               <div className='flex items-center gap-2 border-b px-5 py-3'>
                 <Button variant='ghost' size='icon-sm' className='lg:hidden' aria-label='Back to the list' onClick={() => setOpen(null)}><Icons.chevronLeft /></Button>
-                <div className='min-w-0 flex-1 truncate leading-none font-semibold'>{current.title}</div>
-                <Gate need='library'><Button size='sm' variant='outline' onClick={() => setDraft(toDraft(current))}><Icons.edit /> Edit</Button></Gate>
-                <ActionsMenu items={actions(current).filter((a) => a.label !== 'Edit')} />
+                <div className='min-w-0 flex-1 truncate leading-none font-semibold'>Task</div>
                 <Button variant='ghost' size='icon-sm' aria-label='Close' onClick={() => setOpen(null)}><Icons.close /></Button>
               </div>
-              <div className='min-h-0 flex-1 overflow-y-auto p-5'><TaskBody t={current} opts={opts} /></div>
+              <div className='min-h-0 flex-1 overflow-y-auto p-5'><TaskBody t={current} opts={opts} actions={<>
+                <Gate need='library'><Button size='sm' variant='outline' onClick={() => setDraft(toDraft(current))}><Icons.edit /> Edit</Button></Gate>
+                <ActionsMenu items={actions(current).filter((a) => a.label !== 'Edit')} />
+              </>} /></div>
             </aside>
           )}
         </div>
@@ -225,43 +222,58 @@ export function AdminTasks() {
   );
 }
 
-/** The task peek: one meta line, the properties, the prompt in full, the vendor-neutral version if it differs, then the
- * rest of its attributes as a table. */
-function TaskBody({ t, opts }: { t: Task; opts: FilterOption[] }) {
+/** The task peek: the card (status, origin, id, when it last changed, the actions), then tabs: the properties, the
+ * prompt in full with the vendor-neutral version if it differs, and the rest of its attributes as a table. */
+function TaskBody({ t, opts, actions }: { t: Task; opts: FilterOption[]; actions: ReactNode }) {
   const a = t.attributes ?? {};
   const generic = typeof a.generic_prompt === 'string' && a.generic_prompt.trim() && a.generic_prompt !== t.prompt ? a.generic_prompt : null;
   const src = a.source && typeof a.source === 'object' ? (a.source as Record<string, unknown>) : null;
   const other = useMemo(() => Object.entries(a).filter(([k, v]) => !['generic_prompt', 'generic_title'].includes(k) && text(v) != null).map(([k, v]) => ({ k, v: text(v)! })), [a]);
   return (
-    <div className='flex flex-col gap-8'>
-      <div className={META}>
-        <span className={t.active ? 'text-foreground font-medium' : ''}>{t.active ? 'Active' : 'Inactive'}</span><Dot />
-        <span>{originOf(t)}</span><Dot />
-        <Mono>#{t.id} {t.slug}</Mono><Dot />
-        {t.edited_at ? <span>Edited <When d={t.edited_at} />{t.edited_by && ` by ${t.edited_by}`}</span> : <span>Synced <When d={t.synced_at} /></span>}
-      </div>
-      <dl>
-        <Field label='Language'>{t.language ?? NA}</Field>
-        <Field label='Category'>{t.category ?? NA}</Field>
-        <Field label='Platform'>{t.platform ?? NA}</Field>
-        <Field label='Repository'>
-          {t.repo_url
-            ? <a href={t.repo_url} target='_blank' rel='noopener noreferrer' className='hover:text-primary inline-flex items-center gap-1'>{repoName(t.repo_url)}<Icons.externalLink className='size-3.5' /></a>
-            : <span className='text-muted-foreground'>None: runs in the {typeof a.template === 'string' ? <Mono>{a.template}</Mono> : 'matching'} starter workspace</span>}
-        </Field>
-        <Field label='Tags'><Chips items={t.tags} /></Field>
-        <Field label='Harnesses'>{harnessWords(t.harnesses, opts) ? <Chips items={harnessWords(t.harnesses, opts)!} /> : <span className='text-muted-foreground'>Whole mix: any harness, by its share</span>}</Field>
-        {typeof a.generic_title === 'string' && a.generic_title !== t.title && <Field label='Generic title'>{a.generic_title}</Field>}
-        {src?.dataset != null && <Field label='From'>{String(src.dataset)}{src.license != null && <span className='text-muted-foreground'> · {String(src.license)}</span>}</Field>}
-      </dl>
-      <section><Label>Prompt</Label><code className={cn('block', PROMPT)}>{t.prompt}</code></section>
-      {generic && <section><Label>Generic prompt (no vendor named)</Label><code className={cn('block', PROMPT)}>{generic}</code></section>}
-      {other.length > 0 && (
-        <List title='Attributes' rows={other} cols={[
-          ['Attribute', (r) => <Mono>{r.k}</Mono>, 'w-40'],
-          ['Value', (r) => r.v, 'whitespace-normal leading-snug break-all']
-        ]} />
-      )}
+    <div className='flex flex-col gap-4'>
+      <DetailMeta
+        title={t.title}
+        badges={<StatusBadge tone={t.active ? 'ok' : 'neutral'}>{t.active ? 'active' : 'inactive'}</StatusBadge>}
+        actions={actions}
+        facts={[
+          { label: 'Origin', value: originOf(t) },
+          { label: 'Id', value: <Mono>#{t.id} {t.slug}</Mono> },
+          t.edited_at
+            ? { label: 'Edited', value: <When d={t.edited_at} />, hint: t.edited_by ? `by ${t.edited_by}` : undefined }
+            : { label: 'Synced', value: <When d={t.synced_at} /> },
+          { label: 'Language', value: t.language },
+          { label: 'Category', value: t.category },
+          { label: 'Harnesses', value: harnessWords(t.harnesses, opts)?.join(', ') ?? <span className='text-muted-foreground'>Whole mix</span> }
+        ]}
+      />
+      <DetailTabs resetKey={t.id} tabs={[
+        { id: 'task', label: 'Task', content: (
+          <KeyValueTable rows={[
+            { label: 'Language', value: t.language ?? NA },
+            { label: 'Category', value: t.category ?? NA },
+            { label: 'Platform', value: t.platform ?? NA },
+            { label: 'Repository', value: t.repo_url
+              ? <a href={t.repo_url} target='_blank' rel='noopener noreferrer' className='hover:text-primary inline-flex items-center gap-1'>{repoName(t.repo_url)}<Icons.externalLink className='size-3.5' /></a>
+              : <span className='text-muted-foreground'>None: runs in the {typeof a.template === 'string' ? <Mono>{a.template}</Mono> : 'matching'} starter workspace</span> },
+            { label: 'Tags', value: <Chips items={t.tags} /> },
+            { label: 'Harnesses', value: harnessWords(t.harnesses, opts) ? <Chips items={harnessWords(t.harnesses, opts)!} /> : <span className='text-muted-foreground'>Whole mix: any harness, by its share</span> },
+            { label: 'Generic title', hidden: !(typeof a.generic_title === 'string' && a.generic_title !== t.title), value: String(a.generic_title ?? '') },
+            { label: 'From', hidden: src?.dataset == null, value: <>{String(src?.dataset)}{src?.license != null && <span className='text-muted-foreground'> · {String(src.license)}</span>}</> }
+          ]} />
+        ) },
+        { id: 'prompt', label: 'Prompt', content: (
+          <KeyValueTable rows={[
+            { label: 'Prompt', value: <LongText mono>{t.prompt}</LongText> },
+            { label: 'Generic prompt (no vendor named)', hidden: !generic, value: <LongText mono>{generic}</LongText> }
+          ]} />
+        ) },
+        { id: 'attributes', label: 'Attributes', count: other.length, hidden: !other.length, content: (
+          <DetailTable rows={other} rowKey={(r) => r.k} noun='attributes' empty='No attributes.' search={(r) => `${r.k} ${r.v}`} cols={[
+            { key: 'k', label: 'Attribute', type: 'text', value: (r) => r.k, render: (r) => <Mono>{r.k}</Mono>, className: 'w-40' },
+            { key: 'v', label: 'Value', render: (r) => r.v, className: 'whitespace-normal leading-snug break-all' }
+          ]} />
+        ) }
+      ]} />
     </div>
   );
 }
