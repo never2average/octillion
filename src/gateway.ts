@@ -4,8 +4,8 @@ import type { Request, Response } from "express";
 import { getDb } from "./db.js";
 import { settingText } from "./settings.js";
 import { findAgent } from "./agents.js";
-import { getProvider, providersForEnv, providersWithKeys, useCredential, useVertexCredential, VERTEX_LABEL, type ProviderRow } from "./keyvault.js";
-import { adaptGeminiBody, geminiWantsThinkingLevel, rejectedBetas, toVertex, VERTEX_UNSUPPORTED_BETAS, toVertexGemini, vertexAccessToken, vertexConfig, type VertexConfig } from "./vertex.js";
+import { getProvider, providersForEnv, providersWithKeys, useCredential, useVertexCredential, type ProviderRow } from "./keyvault.js";
+import { adaptGeminiBody, geminiWantsThinkingLevel, rejectedBetas, toVertex, VERTEX_UNSUPPORTED_BETAS, toVertexGemini, vertexAccessToken, vertexConfig } from "./vertex.js";
 import { costOf, recordModelUsage } from "./usage.js";
 import { SCENARIO_ROWS } from "./queries.js";
 
@@ -135,7 +135,7 @@ export async function brokerOrchestratorCredentials(orchestratorId: string) {
   const p = await getProvider(llmProvider);
   const expiresAt = new Date(Date.now() + 12 * 3600_000);
   const boat = await useCredential("boat").then((c) => ({ api_key: c.secret })).catch(() => null);
-  const llm = p?.mode === "gateway" && p.enabled
+  const llm = p?.mode === "gateway"
     ? { provider: llmProvider, model: llmModel, base_url: `${PUBLIC_URL()}/gw/${llmProvider}${SDK_BASE_SUFFIX[llmProvider] ?? ""}`,
         api_key: await mintToken("orchestrator", [llmProvider], expiresAt, { orchestratorId }), expires_at: expiresAt.toISOString() }
     : null;
@@ -143,7 +143,7 @@ export async function brokerOrchestratorCredentials(orchestratorId: string) {
   // another provider than the orchestrator's own: its own token, scoped to that provider.
   const ap = settingText("ARCHITECT_PROVIDER") || "anthropic";
   const apr = ap === llmProvider ? p : await getProvider(ap);
-  const architect = apr?.mode === "gateway" && apr.enabled
+  const architect = apr?.mode === "gateway"
     ? { provider: ap, model: settingText("ARCHITECT_MODEL"), effort: settingText("ARCHITECT_EFFORT") || "max",
         base_url: `${PUBLIC_URL()}/gw/${ap}${SDK_BASE_SUFFIX[ap] ?? ""}`,
         api_key: await mintToken("orchestrator", [ap], expiresAt, { orchestratorId }), expires_at: expiresAt.toISOString() }
@@ -239,7 +239,7 @@ export async function gatewayHandler(req: Request, res: Response) {
   // Some CLIs (Codex) probe a WebSocket transport first; refuse fast so they fall back to HTTP immediately.
   if (req.headers.upgrade) return gwError(res, 426, "invalid_request_error", "WebSocket is not supported by the Octillion gateway; use HTTP");
   let p: ProviderRow | null = await getProvider(slug);
-  if (!p?.enabled || p.mode !== "gateway" || (!p.upstream_url && p.backend !== "vertex")) return gwError(res, 404, "not_found_error", `No gateway provider ${slug}`);
+  if (!p || p.mode !== "gateway" || (!p.upstream_url && p.backend !== "vertex")) return gwError(res, 404, "not_found_error", `No gateway provider ${slug}`);
 
   const [used] = await db.query<{ requests: number; tokens: number; cost: number }>(
     "/* tenant: by the gateway token's own hash (budget of that token) */ SELECT coalesce(sum(requests), 0) AS requests, coalesce(sum(input_tokens + output_tokens), 0) AS tokens, coalesce(sum(cost_usd), 0) AS cost FROM gateway_usage WHERE token_hash = $1", [hash]);
@@ -247,17 +247,15 @@ export async function gatewayHandler(req: Request, res: Response) {
     return gwError(res, 429, "octillion_budget_exceeded", "This session's gateway budget is used up");
 
   let cred: { id: number; secret: string };
-  // Vertex signs in with a service-account key (the Vertex AI provider's, or the provider's own "vertex" key, or
-  // backend_config.credential_provider's); project from that key and region from the VERTEX_REGION setting unless
+  // Vertex signs in with the Vertex AI provider's service-account key (one key per provider: no provider keeps a
+  // second, Vertex key of its own); project from that key and region from the VERTEX_REGION setting unless
   // backend_config sets them. Every other backend uses the provider's own key.
   try {
-    cred = p.backend === "vertex"
-      ? await useVertexCredential(slug, (p.backend_config as VertexConfig)?.credential_provider)
-      : await useCredential(slug, { excludeLabel: VERTEX_LABEL });
+    cred = p.backend === "vertex" ? await useVertexCredential() : await useCredential(slug);
   } catch (e) {
     // Claude with no Anthropic key: run it on Vertex AI when the vault holds a Vertex key (project from the key,
     // region from the VERTEX_REGION setting), so adding the Vertex key is all it takes.
-    const vertex = slug === "anthropic" && p.backend !== "vertex" ? await useVertexCredential(slug).catch(() => null) : null;
+    const vertex = slug === "anthropic" && p.backend !== "vertex" ? await useVertexCredential().catch(() => null) : null;
     if (!vertex) return gwError(res, 503, "api_error", (e as Error).message);
     cred = vertex;
     p = { ...p, backend: "vertex", backend_config: { region: "global" } }; // Claude 5 models are served from the global endpoint

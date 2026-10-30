@@ -5,7 +5,7 @@
 #   ./load-keys.sh --from-env      non-interactive: reads BOAT_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY, ... from the env
 #   ./load-keys.sh --list          show what the vault holds (hints only)
 #
-# Options: --project NAME (compose project, default octillion), --label NAME (default main),
+# Options: --project NAME (compose project, default octillion),
 #          --no-verify (skip the provider check), --force (store even if verification fails).
 #
 # Keys never touch argv, shell history, the terminal or logs: they are read silently and piped over stdin into
@@ -14,13 +14,12 @@
 # header via stdin (curl -H @-), so it is not visible in the process list either.
 set -euo pipefail
 
-PROJECT=octillion LABEL=main MODE=interactive VERIFY=1 FORCE=0
+PROJECT=octillion MODE=interactive VERIFY=1 FORCE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --from-env) MODE=env ;;
     --list) MODE=list ;;
     --project) PROJECT="$2"; shift ;;
-    --label) LABEL="$2"; shift ;;
     --no-verify) VERIFY=0 ;;
     --force) FORCE=1 ;;
     -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
@@ -86,10 +85,10 @@ store() {
          else echo "    skipped (use --force to store unverified keys)"; return 0; fi ;;
     esac
   fi
-  printf %s "$key" | vault set "$provider" --label "$LABEL" | sed 's/^/    /'
+  printf %s "$key" | vault set "$provider" | sed 's/^/    /'
 }
 
-echo "Loading keys into the '$PROJECT' key vault (label: $LABEL)."
+echo "Loading keys into the '$PROJECT' key vault (one key per provider: a provider that has one gets it replaced)."
 while IFS='|' read -r provider var what; do
   [ -n "$provider" ] || continue
   if [ "$MODE" = env ]; then
@@ -121,7 +120,7 @@ else
 fi
 if [ -n "${project:-}" ]; then
   [ -r "$safile" ] || { echo "    cannot read service-account key at '$safile'" >&2; exit 1; }
-  docker compose -p "$PROJECT" exec -T octillion node --import tsx scripts/keyvault.ts set anthropic --label vertex < "$safile" | sed 's/^/    /'
+  docker compose -p "$PROJECT" exec -T octillion node --import tsx scripts/keyvault.ts set vertex < "$safile" | sed 's/^/    /'
   docker compose -p "$PROJECT" exec -T octillion node --import tsx scripts/keyvault.ts provider anthropic --backend vertex \
     --vertex-project "$project" --vertex-region "$region" >/dev/null && echo "    anthropic now routes through Vertex AI ($project, $region)"
 fi

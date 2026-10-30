@@ -1,4 +1,4 @@
-import { createSign } from "node:crypto";
+import { createHash, createSign } from "node:crypto";
 
 /**
  * Anthropic on Google Cloud Vertex AI, behind the inference gateway.
@@ -11,20 +11,20 @@ import { createSign } from "node:crypto";
  * `model` moves from the body into the URL, `anthropic_version: "vertex-2023-10-16"` goes into the body, and
  * anthropic-beta header values move into the body's `anthropic_beta`. Current models use their first-party ids on
  * Vertex (claude-opus-5-5); `model_map` can override per model. Auth is a Google OAuth token minted from the
- * service-account JSON key stored as this provider's credential in the key vault.
+ * service-account JSON key stored as the Vertex AI provider's (vertex) one key in the key vault.
  */
 
 export interface VertexConfig {
   project_id?: string; region?: string; model_map?: Record<string, string>; endpoint?: string;
-  /** Use another provider's service-account credential (label "vertex"), e.g. google reusing anthropic's. */
-  credential_provider?: string;
 }
 interface ServiceAccount { client_email: string; private_key: string; token_uri?: string }
 
 const VERSION = "vertex-2023-10-16";
 const SCOPE = "https://www.googleapis.com/auth/cloud-platform";
 const b64url = (b: Buffer | string) => Buffer.from(b).toString("base64url");
-const cache = new Map<number, { token: string; exp: number }>();
+// Keyed by the credential and a digest of its key: a key replaced in place (same id, new secret) gets a new token.
+const cache = new Map<string, { token: string; exp: number }>();
+const cacheKey = (credentialId: number, secret: string) => `${credentialId}:${createHash("sha256").update(secret).digest("hex").slice(0, 16)}`;
 
 export function parseServiceAccount(secret: string): ServiceAccount {
   let sa: ServiceAccount;
@@ -47,7 +47,7 @@ export function vertexConfig(cfg: VertexConfig | undefined, secret: string, regi
 
 /** A Google OAuth access token for the service account, cached until a minute before it expires. */
 export async function vertexAccessToken(credentialId: number, secret: string): Promise<string> {
-  const hit = cache.get(credentialId);
+  const hit = cache.get(cacheKey(credentialId, secret));
   if (hit && hit.exp - 60_000 > Date.now()) return hit.token;
   const sa = parseServiceAccount(secret);
   const aud = sa.token_uri ?? "https://oauth2.googleapis.com/token";
@@ -62,7 +62,7 @@ export async function vertexAccessToken(credentialId: number, secret: string): P
   const body = await res.json().catch(() => ({})) as { access_token?: string; expires_in?: number; error?: string; error_description?: string };
   if (!res.ok || !body.access_token)
     throw Object.assign(new Error(`Google token exchange failed (${res.status}): ${body.error_description ?? body.error ?? "no access_token"}`), { status: 502 });
-  cache.set(credentialId, { token: body.access_token, exp: Date.now() + (body.expires_in ?? 3600) * 1000 });
+  cache.set(cacheKey(credentialId, secret), { token: body.access_token, exp: Date.now() + (body.expires_in ?? 3600) * 1000 });
   return body.access_token;
 }
 

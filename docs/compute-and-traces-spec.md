@@ -113,7 +113,7 @@ Repo: `/root/octillion-live/octillion-admin`. This spec starts from the highest-
 | 1 | red | `autoscale_off` | `!AUTOSCALE.enabled()` | "The autoscaler is off. Queued work will not get orchestrators." | §I knobs |
 | 2 | red | `kick_unconfigured` | `runtime='vercel' && !kickConfigured()` | "This deployment cannot trigger the autoscaler: PUBLIC_URL is not HTTPS or the worker token is unset." | §I knobs |
 | 3 | red | `boat_down` | `sandboxProvider()` errored | "boat.dev is not answering: {error}" | `/admin/keys` |
-| 4 | red | `no_boat_key` | no enabled boat credential | "No boat key. Add one in Key vault." | `/admin/keys` |
+| 4 | red | `no_boat_key` | no boat credential | "No boat key. Add one in Key vault." | `/admin/keys` |
 | 5 | red | `tick_error` | `last_tick.error` | "The last tick failed: {error}" | §H, `has=error` |
 | 6 | red | `tick_stale` | tick age > 10 min and queued > 0 | "{n} sessions are queued but nothing has ticked for {m} min." | Run a tick now |
 | 7 | amber | `queue_old` | oldest queued session > 15 min, or oldest queued research > 20 min | "The oldest queued session has waited {n} min." | Sessions: `status=queued`, `sort=queued_at` |

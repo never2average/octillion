@@ -306,7 +306,7 @@ interface Summary {
     sessions_per_day_ceiling: number | null; reason: string | null; binding: 'plan' | 'job_orch' | 'pods' | null; note: string | null; sandbox_prices: Record<string, number>;
   };
   settings: Setting[]; knobs: Knob[];
-  provider: { name: string; api: string; namespace: string; ok: boolean; error: string | null; has_key: boolean; key_hint: string | null; key_label: string | null; uses: number; last_used_at: string | null };
+  provider: { name: string; api: string; namespace: string; ok: boolean; error: string | null; has_key: boolean; key_hint: string | null; uses: number; last_used_at: string | null };
   links: { newrelic: string | null };
 }
 
@@ -672,8 +672,8 @@ function Environment({ s, onTest, testing }: { s: Summary; onTest: () => void; t
     { name: 'boat.dev', value: p.ok ? 'Connected' : 'Not connected', source: <span className='text-xs'>boat API</span>, sourceText: 'boat API',
       meaningText: p.ok ? `${p.api} answers with this key` : p.error ?? 'No answer', meaning: p.ok ? <>{p.api} answers with this key</> : <span className='text-destructive'>{p.error ?? 'No answer'}</span> },
     { name: 'boat key', value: p.has_key ? p.key_hint ?? 'set' : 'None', source: <span className='text-xs'>key vault</span>, sourceText: 'key vault',
-      meaningText: p.has_key ? `${p.key_label ?? 'default'} · used ${p.uses} times${p.last_used_at ? `, last ${new Date(p.last_used_at).toLocaleString()}` : ''}` : 'Add a boat key in the key vault',
-      meaning: p.has_key ? <>{p.key_label ?? 'default'} · used {p.uses} times{p.last_used_at && <>, last <When d={p.last_used_at} /></>}</> : <Link href='/admin/keys' className='text-foreground hover:underline'>Add a boat key in the key vault</Link> }
+      meaningText: p.has_key ? `Used ${p.uses} times${p.last_used_at ? `, last ${new Date(p.last_used_at).toLocaleString()}` : ''}` : 'Add a boat key in the key vault',
+      meaning: p.has_key ? <>Used {p.uses} times{p.last_used_at && <>, last <When d={p.last_used_at} /></>}</> : <Link href='/admin/keys' className='text-foreground hover:underline'>Add a boat key in the key vault</Link> }
   ];
   const rows: EnvRow[] = [
     ...boatRows,

@@ -20,13 +20,20 @@ sub-agent (pod / boat VM) ──ogw_ token──▶ /gw/<provider>/… ──rea
 | `dashscope` | gateway | https://dashscope-intl.aliyuncs.com | `Authorization: Bearer` |
 | `github_copilot`, `cursor`, `amp`, `factory` | direct | vendor-hosted | the real key is brokered to the session (no proxy possible) |
 | `boat` | direct (orchestrator only) | https://boat.dev/api/v1 | `Authorization: Bearer` |
-| `vertex` | direct (orchestrator only) | Vertex AI | Google service-account JSON key (label `vertex`); Claude/Gemini on Vertex sign in with it |
+| `vertex` | direct (orchestrator only) | Vertex AI | Google service-account JSON key; every Vertex backend (Claude/Gemini on Vertex) signs in with it |
 | `exa`, `libraries_io`, `cloudflare` | server only | search, research quick pass | never reach a session |
+
+**One key per provider.** Each provider (key type) holds at most one key (`UNIQUE (provider)`, migration 0011).
+Adding a key to a type that has one replaces it in place (`rotated_at` is set); a key is kept or deleted, never
+disabled, and there is no provider on/off: a provider is usable when it has a key. Add, replace and delete are in the
+admin audit log (`model_key.add`, `model_key.replace`, `model_key.delete`). The one exception is `email_unsubscribe`,
+the generated signing key for unsubscribe links: it is never replaced or imported (every link already sent is signed
+with it), only deleted, which breaks those links.
 
 **Vault only.** Every provider key is read from the vault at runtime; no code path reads a provider key from an
 environment variable. On boot the server imports any provider key still set in its environment (Vercel) into the
-vault once (`src/keyvault-env.ts`, label `imported from environment`, one marker per provider in `vault_env_imports`):
-only when that provider has no enabled vault key, never overwriting one, and never again after the marker. The Key
+vault once (`src/keyvault-env.ts`, one marker per provider in `vault_env_imports`):
+only when that provider has no vault key, never overwriting one, and never again after the marker. The Key
 vault page notes "Also set in the server environment — safe to delete there" for each such variable. Environment
 variables that stay: `OCTILLION_VAULT_KEY` (the vault's own master key), infra secrets (`DATABASE_URL`,
 `OCTILLION_WORKER_TOKEN`, `CRON_SECRET`, `CLERK_*`, `STRIPE_*`, `NEW_RELIC_*`, `POSTHOG_*`) and non-secret
@@ -90,7 +97,7 @@ What changes in the request:
 - **Body:** `model` moves into the URL (it stays in the body for count-tokens), `anthropic_version: "vertex-2023-10-16"` is added, and `anthropic-beta` header values move into the body's `anthropic_beta`.
 - **Model IDs:** current models use the first-party IDs (`claude-opus-5-5`, `claude-sonnet-5-5`). `backend_config.model_map` can override them.
 - **Host:** `aiplatform.googleapis.com` for `global` (recommended), `aiplatform.{us|eu}.rep.googleapis.com` for multi-region, and `{region}-aiplatform.googleapis.com` for a single region. Single regions only serve Sonnet 4.6 and older models.
-- **Auth:** a Google OAuth access token, minted from a service-account JSON key in the vault: the `vertex` provider's key (Key vault → Vertex AI: paste or upload the JSON; it must parse with `type: service_account`, `project_id`, `client_email` and `private_key`; the page shows only project and client email), or, for older setups, the `anthropic` credential with label `vertex`. It is cached for about an hour. Pods never see Google credentials.
+- **Auth:** a Google OAuth access token, minted from a service-account JSON key in the vault: the `vertex` provider's key (Key vault → Vertex AI: paste or upload the JSON; it must parse with `type: service_account`, `project_id`, `client_email` and `private_key`; the page shows only project and client email). No other provider holds a Vertex key: `anthropic` (or `google`) on `backend: vertex`, and Claude's fallback when there is no Anthropic key, all use the `vertex` provider's one key. It is cached for about an hour. Pods never see Google credentials.
 - **Project and region:** the project from the service-account key, the region from the **Vertex AI region** setting (Agent configuration, `VERTEX_REGION`, default `us-east5`); `backend_config.project_id` / `region` override them per provider. The research quick pass (src/prospect.ts) also uses Claude on Vertex when the vault has no Anthropic key.
 - **Other paths:** anything else (for example `/v1/models`) returns 404 on Vertex.
 

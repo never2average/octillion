@@ -18,7 +18,7 @@ docker compose -f docker-compose.prod.yml --env-file .env up -d --build --wait
 # load credentials into the key vault: hidden prompts, verified against each provider, stored encrypted
 ./load-keys.sh                    # or: ANTHROPIC_API_KEY=... ./load-keys.sh --from-env ; ./load-keys.sh --list
 # (manual equivalent, stdin only; values never touch argv or logs)
-docker compose -f docker-compose.prod.yml --env-file .env exec -T octillion npx tsx scripts/keyvault.ts set boat --label main < boat.env
+docker compose -f docker-compose.prod.yml --env-file .env exec -T octillion npx tsx scripts/keyvault.ts set boat < boat.env
 printf %s "$ANTHROPIC_API_KEY" | docker compose -f docker-compose.prod.yml --env-file .env exec -T octillion npx tsx scripts/keyvault.ts set anthropic
 printf %s "$OPENAI_API_KEY"    | docker compose -f docker-compose.prod.yml --env-file .env exec -T octillion npx tsx scripts/keyvault.ts set openai
 docker compose -f docker-compose.prod.yml --env-file .env exec octillion npx tsx scripts/keyvault.ts list   # hints only

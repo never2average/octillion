@@ -209,14 +209,14 @@ export const ADMIN_TOOLS = {
   },
   key_vault_status: {
     title: "Key vault", needs: "read",
-    description: "Model and sandbox provider keys: each provider (mode, enabled, keys, last use) and each credential's hint, label, priority, enabled and uses. Never a secret.",
+    description: "Model, sandbox and service keys: at most one key per provider (key type). Each provider (mode, backend, whether it has a key) and each key's hint, uses, last use and when it was added or replaced. Never a secret.",
     input: {},
     run: async () => {
       const k = await library.modelKeys();
-      return { unlocked: k.unlocked, providers: k.providers,
-        credentials: k.credentials.map((c: any) => pick(c, ["id", "provider", "label", "hint", "priority", "enabled", "uses", "last_used_at", "created_at", "rotated_at", "project_id", "client_email"])) };
+      return { unlocked: k.unlocked, providers: k.providers.map((p) => pick(p, ["slug", "mode", "backend", "has_key", "last_used_at", "env_set"])),
+        credentials: k.credentials.map((c: any) => pick(c, ["id", "provider", "hint", "uses", "last_used_at", "created_at", "rotated_at", "project_id", "client_email"])) };
     },
-    summary: (d) => `${d.unlocked ? "Unlocked" : "LOCKED (OCTILLION_VAULT_KEY unset)"}; ${d.providers.length} provider(s), ${d.credentials.length} key(s), ${d.providers.filter((p: any) => p.enabled && !p.enabled_keys).length} enabled provider(s) without a key.`,
+    summary: (d) => `${d.unlocked ? "Unlocked" : "LOCKED (OCTILLION_VAULT_KEY unset)"}; ${d.credentials.length} key(s), one per provider: ${d.credentials.map((c: any) => c.provider).join(", ") || "none"}; ${d.providers.filter((p: any) => !p.has_key).length} provider(s) without a key.`,
   },
   library_stats: {
     title: "Library", needs: "read",

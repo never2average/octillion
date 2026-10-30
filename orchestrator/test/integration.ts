@@ -200,7 +200,7 @@ async function main() {
   const orgKey = /API key \(shown once\): (\S+)/.exec(orgOut)?.[1];
   if (!orgKey) throw new Error(`could not parse org key from: ${orgOut.slice(0, 300)}`);
   run("npm", ["run", "--silent", "keyvault", "--", "provider", "anthropic", "--upstream", `http://${BRIDGE}:${UP_PORT}`]);
-  run("npm", ["run", "--silent", "keyvault", "--", "set", "anthropic", "--label", "itest-canary"], CANARY);
+  run("npm", ["run", "--silent", "keyvault", "--", "set", "anthropic"], CANARY);
   log("org created, vault: anthropic -> fake vendor, canary key stored");
 
   // Server.

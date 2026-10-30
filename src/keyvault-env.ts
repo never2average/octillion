@@ -1,10 +1,10 @@
 import { getDb } from "./db.js";
-import { addCredentialIfAbsent, ENV_IMPORT_LABEL, listProviders, VERTEX_PROVIDER, vaultUnlocked, type ProviderRow } from "./keyvault.js";
+import { addCredentialIfAbsent, listProviders, VERTEX_PROVIDER, vaultUnlocked, type ProviderRow } from "./keyvault.js";
 
 /**
  * Provider keys live in the key vault only. Keys that used to be server environment variables (Vercel) are imported
- * once, on boot, inside the server: for each provider with a key set in the environment and no enabled key in the
- * vault, the value is encrypted into the vault as "imported from environment". A row in vault_env_imports records
+ * once, on boot, inside the server: for each provider with a key set in the environment and no key in the
+ * vault, the value is encrypted into the vault as its key. A row in vault_env_imports records
  * that the provider was handled, so it runs once per provider (replicas race on the row; one wins), never overwrites
  * a vault key, and later changes to the environment variable are ignored. Only the provider and hint are logged.
  * Nothing at runtime reads these variables any more; the Key vault page notes which are still set so they can be
@@ -50,8 +50,7 @@ export async function importEnvKeys(log: (line: string) => void = console.error)
       "INSERT INTO vault_env_imports (provider, env_var) VALUES ($1, $2) ON CONFLICT (provider) DO NOTHING RETURNING provider", [p.slug, name]);
     if (!claim) continue; // handled once already (here or by another replica)
     try {
-      const [has] = await db.query<{ n: number }>("SELECT count(*)::int AS n FROM vault_credentials WHERE provider = $1 AND enabled", [p.slug]);
-      const saved = Number(has.n) ? null : await addCredentialIfAbsent(p.slug, envValue(name)!, { label: ENV_IMPORT_LABEL });
+      const saved = await addCredentialIfAbsent(p.slug, envValue(name)!); // null: the provider already has its key
       if (saved) {
         await db.query("UPDATE vault_env_imports SET outcome = 'imported', hint = $2, credential_id = $3 WHERE provider = $1", [p.slug, saved.hint, saved.id]);
         log(`keyvault: imported ${p.slug} from the environment (${saved.hint})`);

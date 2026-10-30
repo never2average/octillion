@@ -13,7 +13,7 @@ import { asPlatform } from "./tenant-scope.js";
 
 export interface ProviderRow {
   slug: string; mode: "gateway" | "direct"; upstream_url: string | null; auth_header: string; auth_prefix: string;
-  env_vars: string[]; enabled: boolean;
+  env_vars: string[];
   /** direct = forward to upstream_url; vertex = Anthropic Messages via Google Cloud Vertex AI (src/vertex.ts). */
   backend: "direct" | "vertex"; backend_config: { project_id?: string; region?: string; model_map?: Record<string, string>; endpoint?: string };
 }
@@ -67,8 +67,8 @@ export function hint(secret: string): string {
 
 /** The vault provider that holds Google Cloud service-account keys for Claude (and Gemini) on Vertex AI. */
 export const VERTEX_PROVIDER = "vertex";
-/** Label of a key imported from a server environment variable (src/keyvault-env.ts). */
-export const ENV_IMPORT_LABEL = "imported from environment";
+/** The generated HMAC key for unsubscribe links (src/campaigns.ts): only ever added once, never replaced. */
+export const UNSUBSCRIBE_SIGNING_PROVIDER = "email_unsubscribe";
 
 export interface ServiceAccountInfo { project_id: string; client_email: string }
 /**
@@ -88,24 +88,25 @@ export function checkServiceAccount(secret: string): ServiceAccountInfo {
 
 // ---------- providers ----------
 
+const PROVIDER_COLS = "slug, mode, upstream_url, auth_header, auth_prefix, env_vars, backend, backend_config";
+
 export async function listProviders(): Promise<ProviderRow[]> {
   // The vault is platform data, out of a tenant's reach (src/tenant-scope.ts): read as the platform.
-  return asPlatform(async () => {
-  return (await getDb()).query<ProviderRow>("SELECT slug, mode, upstream_url, auth_header, auth_prefix, env_vars, enabled, backend, backend_config FROM vault_providers ORDER BY slug");
-});
+  return asPlatform(async () => (await getDb()).query<ProviderRow>(`SELECT ${PROVIDER_COLS} FROM vault_providers ORDER BY slug`));
 }
 
 export async function getProvider(slug: string): Promise<ProviderRow | null> {
   // The vault is platform data, out of a tenant's reach (src/tenant-scope.ts): read as the platform.
   return asPlatform(async () => {
-  const [row] = await (await getDb()).query<ProviderRow>(
-    "SELECT slug, mode, upstream_url, auth_header, auth_prefix, env_vars, enabled, backend, backend_config FROM vault_providers WHERE slug = $1",
-    [slug],
-  );
-  return row ?? null;
-});
+    const [row] = await (await getDb()).query<ProviderRow>(`SELECT ${PROVIDER_COLS} FROM vault_providers WHERE slug = $1`, [slug]);
+    return row ?? null;
+  });
 }
 
+/**
+ * Add or change a provider's settings (upstream, auth header, backend). There is no provider on/off: a provider is
+ * usable when it has a key, so an `enabled` field is ignored.
+ */
 export async function upsertProvider(p: Partial<ProviderRow> & { slug: string }) {
   if (!/^[a-z0-9_]{2,40}$/.test(p.slug)) throw new Error("provider slug must be lowercase letters, digits or _");
   if (p.mode && !["gateway", "direct"].includes(p.mode)) throw new Error("mode must be gateway or direct");
@@ -113,20 +114,20 @@ export async function upsertProvider(p: Partial<ProviderRow> & { slug: string })
   if (p.backend && !["direct", "vertex"].includes(p.backend)) throw new Error("backend must be direct or vertex");
   if (p.backend === "vertex") {
     const c = p.backend_config ?? {};
-    // project_id and region are optional: by default the project comes from the service-account key and the region
-    // from the VERTEX_REGION setting (Agent configuration).
+    // project_id and region are optional: by default the project comes from the Vertex AI key and the region from
+    // the VERTEX_REGION setting (Agent configuration).
     if (c.project_id && !/^[a-z][a-z0-9-]{4,29}$/.test(c.project_id)) throw new Error("backend_config.project_id must be a GCP project id");
     if (c.region && !/^[a-z0-9-]{2,30}$/.test(c.region)) throw new Error("backend_config.region must be global, us, eu or a region like us-east5");
   }
   await (await getDb()).query(
-    `INSERT INTO vault_providers (slug, mode, upstream_url, auth_header, auth_prefix, env_vars, enabled, backend, backend_config)
-     VALUES ($1, coalesce($2, 'gateway'), $3, coalesce($4, 'authorization'), coalesce($5, 'Bearer '), coalesce($6::text[], '{}'), coalesce($7, true),
-             coalesce($8, 'direct'), coalesce($9::jsonb, '{}'))
+    `INSERT INTO vault_providers (slug, mode, upstream_url, auth_header, auth_prefix, env_vars, backend, backend_config)
+     VALUES ($1, coalesce($2, 'gateway'), $3, coalesce($4, 'authorization'), coalesce($5, 'Bearer '), coalesce($6::text[], '{}'),
+             coalesce($7, 'direct'), coalesce($8::jsonb, '{}'))
      ON CONFLICT (slug) DO UPDATE SET mode = coalesce($2, vault_providers.mode), upstream_url = coalesce($3, vault_providers.upstream_url),
        auth_header = coalesce($4, vault_providers.auth_header), auth_prefix = coalesce($5, vault_providers.auth_prefix),
-       env_vars = coalesce($6::text[], vault_providers.env_vars), enabled = coalesce($7, vault_providers.enabled),
-       backend = coalesce($8, vault_providers.backend), backend_config = coalesce($9::jsonb, vault_providers.backend_config), updated_at = now()`,
-    [p.slug, p.mode ?? null, p.upstream_url ?? null, p.auth_header?.toLowerCase() ?? null, p.auth_prefix ?? null, p.env_vars ?? null, p.enabled ?? null,
+       env_vars = coalesce($6::text[], vault_providers.env_vars),
+       backend = coalesce($7, vault_providers.backend), backend_config = coalesce($8::jsonb, vault_providers.backend_config), updated_at = now()`,
+    [p.slug, p.mode ?? null, p.upstream_url ?? null, p.auth_header?.toLowerCase() ?? null, p.auth_prefix ?? null, p.env_vars ?? null,
      p.backend ?? null, p.backend_config ? JSON.stringify(p.backend_config) : null],
   );
   return getProvider(p.slug);
@@ -136,46 +137,43 @@ export async function upsertProvider(p: Partial<ProviderRow> & { slug: string })
 export async function providersForEnv(envVars: string[]): Promise<ProviderRow[]> {
   // The vault is platform data, out of a tenant's reach (src/tenant-scope.ts): read as the platform.
   return asPlatform(async () => {
-  if (!envVars.length) return [];
-  return (await getDb()).query<ProviderRow>(
-    "SELECT slug, mode, upstream_url, auth_header, auth_prefix, env_vars, enabled, backend, backend_config FROM vault_providers WHERE enabled AND env_vars && $1 ORDER BY slug",
-    [envVars],
-  );
-});
+    if (!envVars.length) return [];
+    return (await getDb()).query<ProviderRow>(`SELECT ${PROVIDER_COLS} FROM vault_providers WHERE env_vars && $1 ORDER BY slug`, [envVars]);
+  });
+}
+
+/** Whether the vault holds this provider's (key type's) key. */
+export async function hasCredential(provider: string): Promise<boolean> {
+  // The vault is platform data, out of a tenant's reach (src/tenant-scope.ts): read as the platform.
+  return asPlatform(async () => (await (await getDb()).query("SELECT 1 FROM vault_credentials WHERE provider = $1", [provider])).length > 0);
 }
 
 /**
- * Of these gateway providers, the ones the gateway can serve right now: an enabled key of their own (not the "vertex"
- * label), or, on a Vertex backend or for Claude's Vertex fallback (src/gateway.ts), a Vertex service-account key. The
- * same rules as useCredential / useVertexCredential, read without using a key.
+ * Of these gateway providers, the ones the gateway can serve right now. A provider on a Vertex backend needs the
+ * Vertex AI provider's key; any other needs its own key and an upstream URL, except Claude (anthropic), which falls
+ * back to Vertex AI when the vault has a Vertex key and no Anthropic key. The same rules as the gateway, read without
+ * using a key.
  */
 export async function providersWithKeys(rows: ProviderRow[]): Promise<Set<string>> {
   if (!rows.length) return new Set();
-  const keys = await (await getDb()).query<{ provider: string; label: string }>(
-    "SELECT DISTINCT provider, label FROM vault_credentials WHERE enabled");
-  const has = (provider: string, label?: string, notLabel?: string) =>
-    keys.some((k) => k.provider === provider && (label == null || k.label === label) && (notLabel == null || k.label !== notLabel));
-  const vertexFor = (slug: string, credentialProvider?: string) =>
-    credentialProvider && credentialProvider !== VERTEX_PROVIDER ? has(credentialProvider, VERTEX_LABEL)
-      : (!credentialProvider && slug !== VERTEX_PROVIDER && has(slug, VERTEX_LABEL)) || has(VERTEX_PROVIDER);
+  const keyed = new Set((await (await getDb()).query<{ provider: string }>("SELECT provider FROM vault_credentials")).map((k) => k.provider));
   return new Set(rows.filter((p) => p.backend === "vertex"
-    ? vertexFor(p.slug, (p.backend_config as { credential_provider?: string } | null)?.credential_provider)
-    : has(p.slug, undefined, VERTEX_LABEL) || (p.slug === "anthropic" && vertexFor(p.slug))).map((p) => p.slug));
+    ? keyed.has(VERTEX_PROVIDER)
+    : (keyed.has(p.slug) && !!p.upstream_url) || (p.slug === "anthropic" && keyed.has(VERTEX_PROVIDER))).map((p) => p.slug));
 }
 
-// ---------- credentials ----------
+// ---------- credentials: one key per provider ----------
 
-export interface SavedCredential { id: number; provider: string; label: string; hint: string; project_id?: string; client_email?: string }
+export interface SavedCredential { id: number; provider: string; hint: string; replaced: boolean; project_id?: string; client_email?: string }
 
-/** Store a key (the same provider + label replaces that key). */
-export async function setCredential(provider: string, secret: string, opts: { label?: string; priority?: number } = {}): Promise<SavedCredential> {
-  return (await storeCredential(provider, secret, opts, false))!;
+/** Store a provider's key; a provider that already has one has it replaced (rotated_at is set). */
+export async function setCredential(provider: string, secret: string): Promise<SavedCredential> {
+  return (await storeCredential(provider, secret, false))!;
 }
-/** Store a key only when the provider has none under that label (never overwrites); null when one was there. */
-export const addCredentialIfAbsent = (provider: string, secret: string, opts: { label?: string; priority?: number } = {}) =>
-  storeCredential(provider, secret, opts, true);
+/** Store a key only when the provider has none (never overwrites); null when it had one. */
+export const addCredentialIfAbsent = (provider: string, secret: string) => storeCredential(provider, secret, true);
 
-async function storeCredential(provider: string, secret: string, opts: { label?: string; priority?: number }, insertOnly: boolean): Promise<SavedCredential | null> {
+async function storeCredential(provider: string, secret: string, insertOnly: boolean): Promise<SavedCredential | null> {
   const p = await getProvider(provider);
   if (!p) throw new Error(`Unknown provider ${provider}; add it first (keyvault provider ...)`);
   // A direct-mode key is handed to agent sessions as is; refuse to store one unless that is explicitly allowed.
@@ -183,91 +181,65 @@ async function storeCredential(provider: string, secret: string, opts: { label?:
   if (p.mode === "direct" && provider !== "boat" && p.env_vars.length && process.env.OCTILLION_DIRECT_KEYS !== "allow")
     throw new Error(`${provider} is a direct-mode provider: its real key would be handed to agent sessions. ` +
                     "Set OCTILLION_DIRECT_KEYS=allow only once those sessions run without customer-written tasks (docs/security.md)");
+  // The unsubscribe signing key is generated once (src/campaigns.ts, addCredentialIfAbsent) and signs every unsubscribe
+  // link already sent: replacing it would break them all, so nothing replaces it (delete it to have a new one generated).
+  if (provider === UNSUBSCRIBE_SIGNING_PROVIDER && !insertOnly)
+    throw new Error("The email unsubscribe signing key cannot be replaced: every unsubscribe link already sent is signed with it. It is generated automatically; delete it only if those links may stop working");
   const s = secret.trim();
   if (s.length < 8) throw new Error("That does not look like a credential");
-  const label = opts.label ?? (provider === VERTEX_PROVIDER ? VERTEX_LABEL : "default");
-  // Service-account keys: the Vertex provider's are checked in full; another provider's "vertex" key at least parses.
-  let meta: ServiceAccountInfo | null = null;
-  if (provider === VERTEX_PROVIDER) meta = checkServiceAccount(s);
-  else if (label === VERTEX_LABEL) {
-    let j: { client_email?: string; private_key?: string; project_id?: string };
-    try { j = JSON.parse(s); } catch { throw new Error("A key labelled vertex must be a Google service-account JSON key"); }
-    if (!j?.client_email || !j?.private_key) throw new Error("The service-account key has no client_email or private_key");
-    meta = { project_id: j.project_id ?? "", client_email: j.client_email };
-  }
+  // The Vertex AI key is a Google service-account key, checked in full.
+  const meta: ServiceAccountInfo | null = provider === VERTEX_PROVIDER ? checkServiceAccount(s) : null;
   const enc = encrypt(s);
-  const db = await getDb();
-  const [row] = await db.query<{ id: number }>(
-    `INSERT INTO vault_credentials (provider, label, ciphertext, iv, tag, key_id, hint, priority, meta)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
-     ON CONFLICT (provider, label) DO ${insertOnly ? "NOTHING" : `UPDATE SET ciphertext = excluded.ciphertext, iv = excluded.iv, tag = excluded.tag,
-       key_id = excluded.key_id, hint = excluded.hint, priority = excluded.priority, meta = excluded.meta, enabled = true, rotated_at = now()`}
-     RETURNING id`,
-    [provider, label, enc.ciphertext, enc.iv, enc.tag, enc.key_id, hint(s), opts.priority ?? 0, meta ? JSON.stringify(meta) : null],
+  const [row] = await (await getDb()).query<{ id: number; replaced: boolean }>(
+    `INSERT INTO vault_credentials (provider, ciphertext, iv, tag, key_id, hint, meta)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+     ON CONFLICT (provider) DO ${insertOnly ? "NOTHING" : `UPDATE SET ciphertext = excluded.ciphertext, iv = excluded.iv, tag = excluded.tag,
+       key_id = excluded.key_id, hint = excluded.hint, meta = excluded.meta, rotated_at = now()`}
+     RETURNING id, (xmax <> 0) AS replaced`,
+    [provider, enc.ciphertext, enc.iv, enc.tag, enc.key_id, hint(s), meta ? JSON.stringify(meta) : null],
   );
-  if (!row) return null; // insertOnly and that label already exists: left alone
-  return { id: row.id, provider, label, hint: hint(s), ...(meta ? { project_id: meta.project_id, client_email: meta.client_email } : {}) };
+  if (!row) return null; // insertOnly and the provider already has a key: left alone
+  return { id: row.id, provider, hint: hint(s), replaced: Boolean(row.replaced), ...(meta ? { project_id: meta.project_id, client_email: meta.client_email } : {}) };
 }
 
-export async function listCredentials() {
-  return (await getDb()).query(
-    `SELECT id, provider, label, hint, priority, enabled, uses, last_used_at, created_at, rotated_at, key_id, meta
-       FROM vault_credentials ORDER BY provider, priority DESC, label`,
-  );
+export interface CredentialRow {
+  id: number; provider: string; hint: string; uses: number | string; last_used_at: Date | null; created_at: Date; rotated_at: Date | null;
+  key_id: string; meta: { project_id?: string; client_email?: string } | null;
+}
+/** Every key, one per provider: hints and usage only, never a secret. */
+export async function listCredentials(): Promise<CredentialRow[]> {
+  return (await getDb()).query<CredentialRow>(
+    "SELECT id, provider, hint, uses, last_used_at, created_at, rotated_at, key_id, meta FROM vault_credentials ORDER BY provider");
 }
 
-export async function setCredentialEnabled(id: number, enabled: boolean) {
-  const [row] = await (await getDb()).query("UPDATE vault_credentials SET enabled = $2 WHERE id = $1 RETURNING id", [id, enabled]);
+/** Delete a key; returns what it was (for the audit log). */
+export async function deleteCredential(id: number): Promise<{ id: number; provider: string; hint: string }> {
+  const [row] = await (await getDb()).query<{ id: number; provider: string; hint: string }>(
+    "DELETE FROM vault_credentials WHERE id = $1 RETURNING id, provider, hint", [id]);
   if (!row) throw new Error(`No credential ${id}`);
+  return row;
 }
 
-export async function deleteCredential(id: number) {
-  const [row] = await (await getDb()).query("DELETE FROM vault_credentials WHERE id = $1 RETURNING id", [id]);
-  if (!row) throw new Error(`No credential ${id}`);
-}
-
-/**
- * The secret to use for a provider now: highest priority first, least recently used among equals (spreads load
- * and rate limits across several keys). Throws when none is configured.
- */
-/** Label of the Google service-account key a provider uses when its backend is Vertex AI. */
-export const VERTEX_LABEL = "vertex";
-
-export async function useCredential(provider: string, opts: { label?: string; excludeLabel?: string } = {}): Promise<{ id: number; secret: string }> {
+/** The provider's one key, counted as a use. Throws (status 503) when the provider has none. */
+export async function useCredential(provider: string): Promise<{ id: number; secret: string }> {
   // The vault is platform data, out of a tenant's reach (src/tenant-scope.ts): read as the platform.
   return asPlatform(async () => {
-  const db = await getDb();
-  const [row] = await db.query<{ id: number; ciphertext: string; iv: string; tag: string; key_id: string }>(
-    `UPDATE vault_credentials SET uses = uses + 1, last_used_at = now()
-      WHERE id = (SELECT id FROM vault_credentials WHERE provider = $1 AND enabled
-                     AND ($2::text IS NULL OR label = $2) AND ($3::text IS NULL OR label <> $3)
-                   ORDER BY priority DESC, last_used_at ASC NULLS FIRST, id LIMIT 1)
-      RETURNING id, ciphertext, iv, tag, key_id`,
-    [provider, opts.label ?? null, opts.excludeLabel ?? null],
-  );
-  if (!row) throw Object.assign(new Error(opts.label === VERTEX_LABEL
-    ? `No Vertex service-account key for ${provider}: store one with label "${VERTEX_LABEL}" (keyvault set ${provider} --label ${VERTEX_LABEL} < key.json)`
-    : `No ${provider} credential in the vault`), { status: 503 });
-  return { id: row.id, secret: decrypt(row) };
-});
-}
-
-/**
- * The Google service-account key a Vertex backend signs in with: backend_config.credential_provider's "vertex" key
- * when one is named, else the provider's own "vertex" key (older setups), else the vault's Vertex AI provider.
- */
-export async function useVertexCredential(slug: string, credentialProvider?: string): Promise<{ id: number; secret: string }> {
-  // The vault is platform data, out of a tenant's reach (src/tenant-scope.ts): read as the platform.
-  return asPlatform(async () => {
-  if (credentialProvider && credentialProvider !== VERTEX_PROVIDER) return useCredential(credentialProvider, { label: VERTEX_LABEL });
-  if (!credentialProvider && slug !== VERTEX_PROVIDER) {
-    const own = await useCredential(slug, { label: VERTEX_LABEL }).catch(() => null);
-    if (own) return own;
-  }
-  return useCredential(VERTEX_PROVIDER).catch(() => {
-    throw Object.assign(new Error("No Vertex service-account key in the vault: add one to the Vertex AI provider on Key vault"), { status: 503 });
+    const [row] = await (await getDb()).query<{ id: number; ciphertext: string; iv: string; tag: string; key_id: string }>(
+      `UPDATE vault_credentials SET uses = uses + 1, last_used_at = now() WHERE provider = $1
+        RETURNING id, ciphertext, iv, tag, key_id`, [provider]);
+    if (!row) throw Object.assign(new Error(`No ${provider} credential in the vault`), { status: 503 });
+    return { id: row.id, secret: decrypt(row) };
   });
-});
+}
+
+/**
+ * The Google service-account key every Vertex backend signs in with: the Vertex AI provider's key (anthropic or
+ * google on backend=vertex, and Claude's fallback when there is no Anthropic key). No other provider holds one.
+ */
+export async function useVertexCredential(): Promise<{ id: number; secret: string }> {
+  return useCredential(VERTEX_PROVIDER).catch(() => {
+    throw Object.assign(new Error("No Vertex service-account key in the vault: add a Vertex AI key on Key vault"), { status: 503 });
+  });
 }
 
 /** Re-encrypt every credential with the current master key (after rotating OCTILLION_VAULT_KEY). */

@@ -198,6 +198,42 @@ async function suite(kind: "pglite" | "postgres") {
     await db.drop();
   }
 
+  // 0011 (one key per provider) on a database at 0010 with pools, disabled keys and per-provider Vertex keys: disabled
+  // keys go, the newest "vertex"-labelled key moves to the vertex provider when it has none (others go), the most
+  // recently created or rotated key per provider stays, and UNIQUE (provider) holds afterwards. Providers are all on.
+  {
+    const db = await fresh(kind);
+    const upTo10 = path.join(tmp, `upto10-${kind}`);
+    cpSync(MIGRATIONS_DIR, upTo10, { recursive: true });
+    for (const m of await loadMigrations()) if (m.version > 10) rmSync(path.join(upTo10, `${String(m.version).padStart(4, "0")}_${m.name}.sql`));
+    await runMigrations(db, { dir: upTo10 });
+    const key = async (provider: string, label: string, enabled: boolean, createdDaysAgo: number, rotatedHoursAgo: number | null = null) =>
+      (await db.query<{ id: number }>(
+        `INSERT INTO vault_credentials (provider, label, ciphertext, iv, tag, key_id, hint, enabled, priority, created_at, rotated_at)
+         VALUES ($1, $2, 'c', 'i', 't', 'k', $1 || '/' || $2, $3, 5, now() - make_interval(days => $4), CASE WHEN $5::int IS NULL THEN NULL ELSE now() - make_interval(hours => $5::int) END)
+         RETURNING id`, [provider, label, enabled, createdDaysAgo, rotatedHoursAgo]))[0]!.id;
+    await key("anthropic", "default", true, 3);
+    const anthNewest = await key("anthropic", "second", true, 1);
+    await key("anthropic", "off", false, 0);                       // newest, but disabled: deleted
+    const anthVertex = await key("anthropic", "vertex", true, 2);  // the newest per-provider Vertex key: moves to vertex
+    await key("google", "vertex", true, 5);                        // an older one: dropped
+    const openaiRotated = await key("openai", "a", true, 9, 1);    // created long ago, rotated an hour ago: kept
+    await key("openai", "b", true, 2);
+    await key("resend", "default", false, 1);                      // only a disabled key: the provider ends with none
+    await db.query("UPDATE vault_providers SET enabled = false WHERE slug IN ('cloudflare', 'dashscope')");
+    await db.query(`UPDATE vault_providers SET backend = 'vertex', backend_config = '{"credential_provider": "anthropic", "region": "global"}' WHERE slug = 'google'`);
+    assert.deepEqual((await runMigrations(db)).applied.filter((x) => x.startsWith("0011")), ["0011_vault_one_key"], "0011 applies on a database at 0010");
+    const rows = await db.query<{ id: number; provider: string; label: string; enabled: boolean; priority: number }>("SELECT id, provider, label, enabled, priority FROM vault_credentials ORDER BY provider");
+    assert.deepEqual(rows.map((r) => [r.provider, r.id]), [["anthropic", anthNewest], ["openai", openaiRotated], ["vertex", anthVertex]], "one key per provider: the newest kept, the Vertex key moved, disabled keys gone");
+    assert.ok(rows.every((r) => r.label === "default" && r.enabled && r.priority === 0), "label, enabled and priority are inert");
+    await assert.rejects(key("anthropic", "another", true, 0), /unique|duplicate/i, "a second key for a provider is refused");
+    await assert.rejects(key("anthropic", "default", true, 0), /unique|duplicate/i, "whatever its label");
+    assert.equal((await db.query("SELECT 1 FROM vault_providers WHERE NOT enabled")).length, 0, "every provider is on");
+    const [g] = await db.query<{ backend_config: Record<string, unknown> }>("SELECT backend_config FROM vault_providers WHERE slug = 'google'");
+    assert.deepEqual(g!.backend_config, { region: "global" }, "credential_provider is gone; the rest of backend_config stays");
+    await db.drop();
+  }
+
   // A failing migration rolls back whole: nothing of it, and nothing pending with it, is recorded or left behind.
   {
     const db = await fresh(kind);

@@ -697,16 +697,15 @@ async function processEvents(only: number | null, stopAt = Infinity): Promise<{ 
 
 /**
  * HMAC key for unsubscribe links (and reply addresses): its own random secret, generated once into the key vault
- * (provider email_unsubscribe, label "generated"). Rotating the vault master key re-encrypts it and leaves the value
+ * (provider email_unsubscribe, its one key). Rotating the vault master key re-encrypts it and leaves the value
  * alone, so a link keeps working for as long as its recipient row exists, years later included. Cached in the process.
  */
-const UNSUB_LABEL = "generated";
 let unsubKey: Promise<Buffer> | null = null;
 export function unsubscribeKey(): Promise<Buffer> {
   return (unsubKey ??= (async () => {
     // Replicas race on the first one: addCredentialIfAbsent never overwrites, so they all end up with the winner's.
-    await addCredentialIfAbsent(UNSUBSCRIBE_PROVIDER, randomBytes(32).toString("base64url"), { label: UNSUB_LABEL });
-    return Buffer.from((await useCredential(UNSUBSCRIBE_PROVIDER, { label: UNSUB_LABEL })).secret);
+    await addCredentialIfAbsent(UNSUBSCRIBE_PROVIDER, randomBytes(32).toString("base64url"));
+    return Buffer.from((await useCredential(UNSUBSCRIBE_PROVIDER)).secret);
   })().catch((e) => { unsubKey = null; throw new AdminError(`Unsubscribe links need the key vault: ${(e as Error).message}`, 503); }));
 }
 const sigOf = (key: Buffer, id: number) => createHmac("sha256", key).update(`unsubscribe:${id}`).digest("base64url").slice(0, 32);
@@ -1125,7 +1124,7 @@ async function runTick(only: number | null, o: TickOptions = {}): Promise<TickRe
     } catch (e) { console.error(`campaigns: events not processed: ${(e as Error).message}`); }
     const status = await mail.emailStatus();
     if (!status.enabled || !status.connected) {
-      out.skipped = !status.connected ? "No Resend key in Key vault (or the provider is off)" : "Emails are off (Agent configuration, Send emails)";
+      out.skipped = !status.connected ? "No Resend key in Key vault" : "Emails are off (Agent configuration, Send emails)";
       return out;
     }
     // Earlier requests whose outcome is unknown come first: a killed one becomes uncertain (or unknown without its
