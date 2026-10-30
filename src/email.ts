@@ -27,7 +27,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { asPlatform } from "./tenant-scope.js";
 import { getDb } from "./db.js";
-import { getProvider, useCredential } from "./keyvault.js";
+import { hasCredential, useCredential } from "./keyvault.js";
 import { freshSettings, settingText } from "./settings.js";
 import * as telemetry from "./telemetry.js";
 import * as clerk from "./clerk.js";
@@ -83,12 +83,11 @@ const scrub = (meta: Record<string, unknown>) => Object.fromEntries(Object.entri
 /** A message's key for one recipient: the purpose plus a short hash of the address. */
 export const keyFor = (purpose: string, to: string) => `${purpose}:${hashAddress(to).slice(0, 16)}`;
 
-/** Whether email can go out now: a Resend key in the vault (provider on) and EMAILS_ENABLED on. */
+/** Whether email can go out now: a Resend key in the vault and EMAILS_ENABLED on. */
 export async function emailStatus(): Promise<{ enabled: boolean; connected: boolean; from: string; reply_to: string | null }> {
   await freshSettings();
-  const [p, [k]] = await Promise.all([getProvider(EMAIL_PROVIDER),
-    (await getDb()).query<{ n: number }>("SELECT count(*)::int AS n FROM vault_credentials WHERE provider = $1 AND enabled", [EMAIL_PROVIDER])]);
-  return { enabled: settingText("EMAILS_ENABLED") === "on", connected: Boolean(p?.enabled && Number(k?.n) > 0),
+  const connected = await hasCredential(EMAIL_PROVIDER);
+  return { enabled: settingText("EMAILS_ENABLED") === "on", connected,
            from: settingText("EMAIL_FROM"), reply_to: settingText("EMAIL_REPLY_TO") || null };
 }
 
@@ -177,12 +176,10 @@ async function claim(m: Email, stuck = true): Promise<Claimed | EmailResult> {
   return { row: id, to, key, subject, finish };
 }
 
-/** Emails on, the provider on, a key: the key and the default reply-to; else why not. */
+/** Emails on and a Resend key: the key and the default reply-to; else why not. */
 async function notReady(): Promise<Ready | string> {
   await freshSettings();
   if (settingText("EMAILS_ENABLED") !== "on") return "Emails are off (Agent configuration, Send emails)";
-  const provider = await getProvider(EMAIL_PROVIDER);
-  if (!provider?.enabled) return "The Resend provider is off in Key vault";
   const cred = await useCredential(EMAIL_PROVIDER).catch(() => null);
   if (!cred) return "No Resend key in Key vault";
   return { cred, replyTo: settingText("EMAIL_REPLY_TO").split(",").map((x) => x.trim()).filter(isEmail) };

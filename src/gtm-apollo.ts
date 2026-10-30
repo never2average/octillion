@@ -22,7 +22,7 @@
 import { createHash } from "node:crypto";
 import { getDb } from "./db.js";
 import { AdminError, log } from "./admin.js";
-import { getProvider, useCredential } from "./keyvault.js";
+import { hasCredential, useCredential } from "./keyvault.js";
 import * as mail from "./email.js";
 import { activity, stopOutbound, companyDomainOf, domainOf, importProspects, upsertCompany, type ProspectInput } from "./gtm-crm.js";
 import { cleanCountry } from "./gtm-consent.js";
@@ -41,8 +41,7 @@ const list = (v: unknown, max = 50) => [...new Set((Array.isArray(v) ? v : typeo
 /** Whether Apollo can be used now, and the latest rate-limit headers seen in this process. */
 let lastLimits: Record<string, number> = {};
 export async function apolloStatus() {
-  const [p, cred] = await Promise.all([getProvider(APOLLO_PROVIDER), useCredential(APOLLO_PROVIDER).then(() => true, () => false)]);
-  const connected = Boolean(p?.enabled && cred);
+  const connected = await hasCredential(APOLLO_PROVIDER);
   const usage = await (await getDb()).query<{ endpoint: string; requests: number; credits: number; limited: number }>(
     `SELECT endpoint, sum(requests)::int AS requests, sum(credits)::float8 AS credits, sum(limited)::int AS limited FROM gtm_apollo_usage
       WHERE day > current_date - 30 GROUP BY endpoint ORDER BY endpoint`);
@@ -75,7 +74,7 @@ async function record(endpoint: string, o: { credits?: number; limited?: boolean
 /** A call to Apollo with the vault's key. Throws an AdminError the page can show (never the key). */
 async function call<T>(method: "GET" | "POST", path: string, o: { query?: Record<string, string | number | string[] | undefined>; body?: unknown; endpoint: string }): Promise<{ json: T; credits: number }> {
   const cred = await useCredential(APOLLO_PROVIDER).catch(() => null);
-  if (!cred || !(await getProvider(APOLLO_PROVIDER))?.enabled) fail(SETUP, 409);
+  if (!cred) fail(SETUP, 409);
   const qs = new URLSearchParams();
   for (const [k, v] of Object.entries(o.query ?? {})) {
     if (v == null || v === "") continue;

@@ -133,7 +133,7 @@ async function main() {
   };
   ADMIN_TOKEN = JSON.parse(run(["scripts/admin-token.ts", "create", "--label", "ptest", "--role", "owner", "--days", "1", "--json"])).token;
   run(["scripts/keyvault.ts", "provider", "openai", "--upstream", `http://127.0.0.1:${LLM_PORT}`]);
-  run(["scripts/keyvault.ts", "set", "openai", "--label", "ptest"], CANARY);
+  run(["scripts/keyvault.ts", "set", "openai"], CANARY);
   server = spawn(TSX, ["src/http.ts"], { cwd: ROOT, env: serverEnv, stdio: ["ignore", openSync(path.join(tmp, "server.log"), "a"), openSync(path.join(tmp, "server.log"), "a")] });
   for (let i = 0; !(await fetch(`${BASE}/healthz`).then((r) => r.ok).catch(() => false)); i++) { if (i > 120) throw new Error("server did not start"); await sleep(500); }
 

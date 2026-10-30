@@ -65,6 +65,8 @@ import { freshPlatformHarnesses } from "./harnesses.js";
 const PORT = Number(process.env.PORT ?? 3333);
 const HOST = process.env.HOST ?? "127.0.0.1";
 const PUBLIC_URL = (process.env.PUBLIC_URL ?? `http://${HOST}:${PORT}`).replace(/\/$/, "");
+/** The key vault has no enable/disable: a key is kept or deleted (one per provider), a provider is usable when it has one. */
+const NO_TOGGLE = "Keys and providers are no longer switched on or off: each provider has at most one key, which is kept, replaced or deleted";
 const PUBLIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "public");
 /** The admin panel (/admin) and customer portal (/app): the Next.js app in web/, built to static files (npm run web:build). */
 const WEB_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "web", "out");
@@ -499,17 +501,16 @@ export function createApp() {
   admin.get("/keyvault/providers", async (_req, res) => void res.json({ providers: await kv.listProviders() }));
   admin.put("/keyvault/providers/:slug", need("keys"), async (req, res) => void res.json(await kv.upsertProvider({ ...req.body, slug: String(req.params.slug) })));
   admin.get("/keyvault/credentials", async (_req, res) => void res.json({ credentials: await kv.listCredentials() }));
+  // One key per provider: posting a key for a provider that has one replaces it. Keys are kept or deleted, never
+  // disabled (the old enable/disable route answers 410).
   admin.post("/keyvault/credentials", need("keys"), async (req, res) => {
-    const { provider, secret, label, priority } = req.body ?? {};
+    const { provider, secret } = req.body ?? {};
     if (typeof provider !== "string" || typeof secret !== "string") return void res.status(400).json({ error: "provider and secret are required" });
-    res.status(201).json(await kv.setCredential(provider, secret, { label, priority }));
+    res.status(201).json(await library.addModelKey(adminActor(req, res), { provider, secret }));
   });
-  admin.patch("/keyvault/credentials/:id", need("keys"), async (req, res) => {
-    await kv.setCredentialEnabled(Number(req.params.id), Boolean(req.body?.enabled));
-    res.status(204).end();
-  });
+  admin.patch("/keyvault/credentials/:id", need("keys"), (_req, res) => void res.status(410).json({ error: NO_TOGGLE }));
   admin.delete("/keyvault/credentials/:id", need("keys"), async (req, res) => {
-    await kv.deleteCredential(Number(req.params.id));
+    await library.deleteModelKey(adminActor(req, res), Number(req.params.id));
     res.status(204).end();
   });
   admin.get("/usage/models", async (req, res) => {
@@ -724,9 +725,10 @@ export function createApp() {
   gtmOutboundRoutes(ob, { need, actor: adminActor });
   ob.get("/compute/sandbox", async (_req, res) => void res.json(await library.sandboxProvider()));
   ob.post("/compute/keys", need("keys"), async (req, res) => void res.status(201).json(await library.addModelKey(adminActor(req, res), req.body ?? {})));
-  ob.post("/compute/keys/:id/enabled", need("keys"), async (req, res) => done(res, await library.setModelKeyEnabled(adminActor(req, res), Number(req.params.id), req.body?.enabled)));
   ob.delete("/compute/keys/:id", need("keys"), async (req, res) => done(res, await library.deleteModelKey(adminActor(req, res), Number(req.params.id))));
-  ob.post("/compute/providers/:slug/enabled", need("keys"), async (req, res) => done(res, await library.setProviderEnabled(adminActor(req, res), slug(req), req.body?.enabled)));
+  // Keys and providers are never switched off: a key is kept or deleted, a provider is usable when it has one.
+  ob.post("/compute/keys/:id/enabled", need("keys"), (_req, res) => void res.status(410).json({ error: NO_TOGGLE }));
+  ob.post("/compute/providers/:slug/enabled", need("keys"), (_req, res) => void res.status(410).json({ error: NO_TOGGLE }));
   // Admins and their roles (src/admin-roles.ts; Clerk user metadata): everyone reads, owners change.
   const changer = (req: Request, res: Response): roles.Changer => ({ actor: adminActor(req, res), userId: (res.locals.adminUserId as string | undefined) ?? null });
   // The Connect page (/admin/connect): the admin MCP URL and which tools each role may call.

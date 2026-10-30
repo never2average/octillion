@@ -332,58 +332,44 @@ export async function deleteHarness(actor: string, id: string) {
 }
 
 // ---------- model keys (the key vault, src/keyvault.ts) ----------
-// The vault's own admin API (/api/admin/keyvault/*) stays as it is; these wrap it for /admin/compute with the console's
-// actor and audit log. A secret is taken once and never returned: only its hint ("sk-ant…9xQ2").
+// One key per provider (key type): adding a key to a type that has one replaces it; a key is kept or deleted, never
+// disabled. These wrap the vault for /admin/keys with the console's actor and audit log. A secret is taken once and
+// never returned: only its hint ("sk-ant…9xQ2").
 
 const vaultError = (e: unknown) => (e instanceof AdminError ? e : new AdminError((e as Error).message));
 
-/** Providers (with how many keys they hold and when one was last used) and every credential, hints only. */
+/** Every provider (key type, whether it has a key) and every key, one per provider, hints only. */
 export async function modelKeys() {
   // Every key is a vault key (env keys were imported once, src/keyvault-env.ts); env_set names the variables still set
   // on the server for a provider, which nothing reads any more and can be deleted there.
-  const [providers, creds, envSet] = await Promise.all([kv.listProviders(), kv.listCredentials() as Promise<any[]>, envStillSet()]);
+  const [providers, creds, envSet] = await Promise.all([kv.listProviders(), kv.listCredentials(), envStillSet()]);
   const credentials = creds.map(({ key_id: _k, meta, ...c }) => ({ ...c, uses: Number(c.uses),
     ...(meta?.client_email ? { project_id: meta.project_id || null, client_email: meta.client_email } : {}) }));
   return {
     unlocked: kv.vaultUnlocked(),
     providers: providers.map((p) => {
-      const mine = credentials.filter((c) => c.provider === p.slug);
-      const last = mine.map((c) => c.last_used_at).filter(Boolean).sort((a, b) => +new Date(b) - +new Date(a))[0] ?? null;
-      return { slug: p.slug, mode: p.mode, backend: p.backend, enabled: p.enabled, keys: mine.length, enabled_keys: mine.filter((c) => c.enabled).length, last_used_at: last,
+      const key = credentials.find((c) => c.provider === p.slug);
+      return { slug: p.slug, mode: p.mode, backend: p.backend, has_key: !!key, credential_id: key?.id ?? null, last_used_at: key?.last_used_at ?? null,
                env_set: envSet[p.slug] ?? [] };
     }),
     credentials,
   };
 }
 
-export async function addModelKey(actor: string, body: { provider?: unknown; secret?: unknown; label?: unknown; priority?: unknown }) {
+/** Add a provider's key, or replace the one it has. */
+export async function addModelKey(actor: string, body: { provider?: unknown; secret?: unknown }) {
   const provider = str(body.provider, 40), secret = typeof body.secret === "string" ? body.secret : "";
   if (!provider || !secret) throw new AdminError("provider and secret are required");
   if (!kv.vaultUnlocked()) throw new AdminError("The key vault is locked: set OCTILLION_VAULT_KEY on the server first");
-  const label = str(body.label, 60) || undefined, priority = body.priority === undefined || body.priority === "" ? undefined : Math.trunc(Number(body.priority));
-  if (priority !== undefined && !Number.isFinite(priority)) throw new AdminError("Priority must be a whole number");
-  const saved = await kv.setCredential(provider, secret, { label, priority }).catch((e) => { throw vaultError(e); });
-  log(actor, "model_key.add", null, { provider, label: saved.label, hint: saved.hint });
-  return saved; // { id, provider, label, hint } (+ project_id, client_email for a service account): never the secret
-}
-
-export async function setModelKeyEnabled(actor: string, id: number, enabled: unknown) {
-  if (!Number.isInteger(id) || typeof enabled !== "boolean") throw new AdminError("A credential id and enabled (true or false) are required");
-  await kv.setCredentialEnabled(id, enabled).catch((e) => { throw new AdminError((e as Error).message, 404); });
-  log(actor, enabled ? "model_key.enable" : "model_key.disable", null, { credential: id });
+  const saved = await kv.setCredential(provider, secret).catch((e) => { throw vaultError(e); });
+  log(actor, saved.replaced ? "model_key.replace" : "model_key.add", null, { provider, credential: saved.id, hint: saved.hint });
+  return saved; // { id, provider, hint, replaced } (+ project_id, client_email for a service account): never the secret
 }
 
 export async function deleteModelKey(actor: string, id: number) {
   if (!Number.isInteger(id)) throw new AdminError("Bad credential id");
-  await kv.deleteCredential(id).catch((e) => { throw new AdminError((e as Error).message, 404); });
-  log(actor, "model_key.delete", null, { credential: id });
-}
-
-export async function setProviderEnabled(actor: string, slug: string, enabled: unknown) {
-  if (typeof enabled !== "boolean") throw new AdminError("enabled (true or false) is required");
-  if (!(await kv.getProvider(slug))) throw new AdminError(`No provider ${slug}`, 404); // never create one from here
-  await kv.upsertProvider({ slug, enabled }).catch((e) => { throw vaultError(e); });
-  log(actor, enabled ? "model_provider.enable" : "model_provider.disable", null, { provider: slug });
+  const gone = await kv.deleteCredential(id).catch((e) => { throw new AdminError((e as Error).message, 404); });
+  log(actor, "model_key.delete", null, { credential: id, provider: gone.provider, hint: gone.hint });
 }
 
 // ---------- sandbox provider (boat.dev) ----------
@@ -396,7 +382,7 @@ export async function setProviderEnabled(actor: string, slug: string, enabled: u
 export async function sandboxProvider() {
   const lib = await import("../orchestrator/deploy/boat-lib.js");
   const { BOAT } = await import("../orchestrator/core/config.js");
-  const creds = (await kv.listCredentials() as any[]).filter((c) => c.provider === "boat").map(({ key_id: _k, ...c }) => ({ ...c, uses: Number(c.uses) }));
+  const creds = (await kv.listCredentials()).filter((c) => c.provider === "boat").map(({ key_id: _k, ...c }) => ({ ...c, uses: Number(c.uses) }));
   const db = await getDb();
   const orchestrators = await db.query<{ state: string; n: number }>(
     "SELECT state, count(*)::int AS n FROM orchestrator_sandboxes WHERE state IN ('booting', 'running', 'draining') GROUP BY state");

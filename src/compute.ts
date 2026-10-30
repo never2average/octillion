@@ -327,9 +327,7 @@ async function buildSummary(fresh: boolean) {
   const now = Date.now();
   const runtime: "vm" | "vercel" = env.VERCEL ? "vercel" : "vm";
   const perJob = AUTOSCALE.perJob();
-  const creds = (await kv.listCredentials() as { provider: string; label: string; hint: string; enabled: boolean; uses: number; last_used_at: Date | null }[])
-    .filter((c) => c.provider === "boat");
-  const key = creds.find((c) => c.enabled) ?? null;
+  const key = (await kv.listCredentials()).find((c) => c.provider === "boat") ?? null;
 
   const [lease] = await db.query<{ holder: string; state: TickState | null }>("SELECT holder, state FROM autoscaler_lease WHERE name = 'autoscaler'");
   const tick = lease?.state ?? null;
@@ -494,7 +492,7 @@ async function buildSummary(fresh: boolean) {
     settings: await listSettings(),
     knobs: computeKnobs(runtime),
     provider: { name: "boat.dev", api: BOAT.apiUrl, namespace: lib.BOAT_NAMESPACE, ok: key ? sb.ok && !sb.stale : false, error: key ? sb.error : "No boat key in the vault",
-                has_key: !!key, key_hint: key?.hint ?? null, key_label: key?.label ?? null, uses: key ? n(key.uses) : 0, last_used_at: iso(key?.last_used_at) },
+                has_key: !!key, key_hint: key?.hint ?? null, uses: key ? n(key.uses) : 0, last_used_at: iso(key?.last_used_at) },
     links: { newrelic: env.NEW_RELIC_DASHBOARD_URL || null },
   };
 }

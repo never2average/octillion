@@ -2,12 +2,12 @@
 // out of shell history and process listings.
 //   npm run keyvault -- gen-master-key
 //   npm run keyvault -- providers
-//   printf %s "$ANTHROPIC_KEY" | npm run keyvault -- set anthropic [--label main] [--priority 10]
+//   printf %s "$ANTHROPIC_KEY" | npm run keyvault -- set anthropic        (one key per provider: replaces the one it has)
 //   npm run keyvault -- set boat --from-file /secure/boat.env      (KEY=value files: the value is used)
-//   npm run keyvault -- list | disable <id> | enable <id> | delete <id> | rekey | usage
+//   npm run keyvault -- list | delete <id> | rekey | usage
 //   npm run keyvault -- provider <slug> --mode gateway --upstream https://... --header x-api-key --prefix "" --env FOO_API_KEY
 //   npm run keyvault -- provider anthropic --backend vertex --vertex-project my-gcp-project [--vertex-region global]
-//   npm run keyvault -- set anthropic --label vertex < service-account.json     (the Vertex credential)
+//   npm run keyvault -- set vertex < service-account.json        (the Vertex AI key every Vertex backend signs in with)
 //   npm run keyvault -- provider anthropic --backend direct                     (back to api.anthropic.com)
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -44,27 +44,24 @@ async function main() {
       return;
     case "provider": {
       const env = flag("env");
+      if (rest.includes("--enable") || rest.includes("--disable")) throw new Error("Providers are not switched on or off: a provider is usable when it has a key");
       console.log(await kv.upsertProvider({
         slug: rest[0], mode: flag("mode") as "gateway" | "direct" | undefined, upstream_url: flag("upstream"),
         auth_header: flag("header"), auth_prefix: flag("prefix"), env_vars: env ? env.split(",") : undefined,
         backend: flag("backend") as "direct" | "vertex" | undefined,
-        enabled: rest.includes("--enable") ? true : rest.includes("--disable") ? false : undefined,
         backend_config: flag("vertex-project") ? { project_id: flag("vertex-project"), region: flag("vertex-region") ?? "global" } : undefined,
       }));
       return;
     }
     case "set": {
-      if (!rest[0]) throw new Error("Usage: keyvault set <provider> [--label L] [--priority N] < secret");
-      const r = await kv.setCredential(rest[0], await secretInput(), { label: flag("label"), priority: flag("priority") ? Number(flag("priority")) : undefined });
-      console.log(`Stored ${r.provider}/${r.label} (${r.hint}) as credential #${r.id}.`);
+      if (!rest[0] || rest[0].startsWith("--")) throw new Error("Usage: keyvault set <provider> < secret   (replaces the provider's key when it has one)");
+      if (rest.includes("--label") || rest.includes("--priority")) throw new Error("--label and --priority are gone: each provider has one key, and set replaces it");
+      const r = await kv.setCredential(rest[0], await secretInput());
+      console.log(`${r.replaced ? "Replaced" : "Stored"} the ${r.provider} key (${r.hint}) as credential #${r.id}.`);
       return;
     }
     case "list":
-      console.table(await kv.listCredentials());
-      return;
-    case "disable": case "enable":
-      await kv.setCredentialEnabled(Number(rest[0]), cmd === "enable");
-      console.log(`Credential #${rest[0]} ${cmd}d.`);
+      console.table((await kv.listCredentials()).map(({ key_id: _k, meta, ...c }) => ({ ...c, ...(meta?.client_email ? { client_email: meta.client_email, project_id: meta.project_id } : {}) })));
       return;
     case "delete":
       await kv.deleteCredential(Number(rest[0]));
@@ -79,7 +76,7 @@ async function main() {
            FROM gateway_usage ORDER BY last_at DESC LIMIT 50`));
       return;
     default:
-      throw new Error("Commands: gen-master-key, providers, provider, set, list, enable, disable, delete, rekey, usage");
+      throw new Error("Commands: gen-master-key, providers, provider, set, list, delete, rekey, usage");
   }
 }
 

@@ -193,7 +193,7 @@ export async function gtmChecks({ db, base, adm, json, mockUrl, mockPost, sentTo
     `variables are escaped text, never linked: ${html}`);
   assert.equal(camp.safeVars({ first_name: "Zoë-Ann Smith", product: "Line\nbreak" }).first_name, "Zoë-Ann");
   assert.equal(camp.safeVars({ product: "p".repeat(200) }).product.length, 80);
-  assert.ok((await db.query("SELECT 1 FROM vault_credentials WHERE provider = 'email_unsubscribe' AND label = 'generated'")).length === 1, "the unsubscribe key is its own vault secret");
+  assert.ok((await db.query("SELECT 1 FROM vault_credentials WHERE provider = 'email_unsubscribe'")).length === 1, "the unsubscribe key is its own vault secret");
 
   // Pause or delete mid-batch: nothing more goes out. Sends are spaced so the change lands between two.
   const CB = `${CAMP}-b`, eve = `eve+${stamp}@gtm-e.dev`, fay = `fay+${stamp}@gtm-f.dev`;

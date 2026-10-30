@@ -5,15 +5,16 @@ import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 type Db = { query: <T = any>(sql: string, params?: unknown[]) => Promise<T[]> };
 
 /** Agents no key can serve leave runs (queries.ts withKeys, gateway.ts missingAgentKeys): a gateway provider counts
- *  only with an enabled key, a direct one only when direct keys are allowed. */
+ *  only with its key, a direct one only when direct keys are allowed. */
 export async function keyChecks({ db, worker, call, fails, A, sessionId }: { db: Db; worker: (path: string, body: unknown) => Promise<Response>;
   call: (c: Client, name: string, args?: Record<string, unknown>) => Promise<any>; fails: (c: Client, name: string, args: Record<string, unknown>, re: RegExp) => Promise<void>;
   A: Client; sessionId: string }) {
   const { missingAgentKeys } = await import("../src/gateway.js");
   const cc = { id: "claude-code/sonnet", harness: "claude-code", requires_env: ["SMOKE_LLM_API_KEY", "SMOKE_VENDOR_TOKEN"] };
   assert.deepEqual((await missingAgentKeys([cc])).get(cc.id), [], "both keys present (direct keys allowed): runnable");
-  await db.query("UPDATE vault_credentials SET enabled = false WHERE provider = 'smoke_llm'");
-  assert.deepEqual((await missingAgentKeys([cc])).get(cc.id), ["SMOKE_LLM_API_KEY"], "a gateway provider with no enabled key supplies nothing");
+  // No disable: the key is taken out (and put back as it was below).
+  const [llmKey] = await db.query("DELETE FROM vault_credentials WHERE provider = 'smoke_llm' RETURNING row_to_json(vault_credentials.*) AS r");
+  assert.deepEqual((await missingAgentKeys([cc])).get(cc.id), ["SMOKE_LLM_API_KEY"], "a gateway provider with no key supplies nothing");
   const refused = await worker(`/sessions/${sessionId}/credentials`, {});
   assert.equal(refused.status, 424, "the session is refused up front, not mid-run on its first model call");
   process.env.OCTILLION_RUN_KEY_CHECK = "on";
@@ -23,7 +24,7 @@ export async function keyChecks({ db, worker, call, fails, A, sessionId }: { db:
     "a representative run leaves the keyless agent out and says so");
   await call(A, "cancel_simulation", { simulation_id: without.simulation.id });
   process.env.OCTILLION_RUN_KEY_CHECK = "off";
-  await db.query("UPDATE vault_credentials SET enabled = true WHERE provider = 'smoke_llm'");
+  await db.query("INSERT INTO vault_credentials SELECT * FROM json_populate_record(null::vault_credentials, $1::json)", [JSON.stringify(llmKey.r)]);
   console.log("✓ agents without a usable vault key: left out of runs, refused before they start");
 }
 
@@ -125,4 +126,46 @@ export async function vertexBetaChecks() {
     "inline-tools-2026-09-15, context-management-2025-06-27");
   assert.deepEqual(JSON.parse(out.body).anthropic_beta, ["context-management-2025-06-27"], "a known-unsupported beta is dropped before sending");
   console.log("✓ Vertex: beta flags it rejects are dropped (known ones up front, new ones after one retry)");
+}
+
+/** Key vault, one key per provider (src/keyvault.ts, migration 0011): a key goes in once and only its hint comes back;
+ *  a second key for the same type replaces the first (one row, rotated_at set); no enable/disable anywhere; delete. */
+export async function vaultOneKeyChecks({ db, adm, json, base, ADMIN_TOKEN, stamp }: { db: Db; adm: (method: string, path: string, body?: unknown) => Promise<Response>;
+  json: (r: Response | Promise<Response>) => Promise<any>; base: string; ADMIN_TOKEN: string; stamp: string }) {
+  const kv = await import("../src/keyvault.js");
+  const PAGE_KEY = `sk-ant-smoke-page-${stamp}-SECRETTAIL`;
+  const addedKey = await json(adm("POST", "/compute/keys", { provider: "anthropic", secret: PAGE_KEY }));
+  assert.ok(addedKey.id && addedKey.hint && !JSON.stringify(addedKey).includes(PAGE_KEY), "the add response has the hint, not the key");
+  assert.ok(!("label" in addedKey) && !("priority" in addedKey) && !("enabled" in addedKey), "no label, priority or enabled in the API");
+  const keysView = await (await adm("GET", "/compute/keys")).text();
+  assert.ok(!keysView.includes(PAGE_KEY) && !keysView.includes("ciphertext"), "the key list never carries a secret");
+  const kj = JSON.parse(keysView);
+  const listedKey = kj.credentials.find((c: any) => c.id === addedKey.id);
+  assert.ok(listedKey && listedKey.hint === addedKey.hint && !("enabled" in listedKey) && !("label" in listedKey), "the new key is listed by its hint");
+  assert.ok(kj.providers.find((p: any) => p.slug === "anthropic").has_key, "the provider has its key");
+  assert.ok(kj.providers.every((p: any) => !("enabled" in p)), "providers have no on/off");
+  // One key per type: a second Anthropic key replaces the first (same row, rotated), never a second row.
+  const PAGE_KEY_2 = `sk-ant-smoke-page-${stamp}-ROTATED2`;
+  const replacedKey = await json(adm("POST", "/compute/keys", { provider: "anthropic", secret: PAGE_KEY_2 }));
+  assert.ok(replacedKey.replaced && replacedKey.id === addedKey.id && replacedKey.hint !== addedKey.hint, "a second key for the type replaces the first");
+  const anthRows = await db.query<any>("SELECT id, hint, rotated_at FROM vault_credentials WHERE provider = 'anthropic'");
+  assert.ok(anthRows.length === 1 && anthRows[0].hint === replacedKey.hint && anthRows[0].rotated_at, "still one Anthropic row, rotated_at set");
+  assert.equal((await kv.useCredential("anthropic")).secret, PAGE_KEY_2, "the replacement is the key in use");
+  assert.equal((await json(adm("GET", "/compute/keys"))).credentials.filter((c: any) => c.provider === "anthropic").length, 1, "the page lists one Anthropic key");
+  await assert.rejects(db.query("INSERT INTO vault_credentials (provider, label, ciphertext, iv, tag, key_id, hint) VALUES ('anthropic', 'second', 'x', 'x', 'x', 'x', 'x')"), /unique|duplicate/i, "the database refuses a second key for a type");
+  assert.equal((await adm("POST", "/compute/keys", { provider: "cursor", secret: "cursor-secret-123456" })).status, 400, "direct-mode keys still refused");
+  assert.equal((await adm("POST", "/compute/keys", { provider: "anthropic", secret: "" })).status, 400);
+  // No enable/disable anywhere: the old routes are gone (410) and change nothing.
+  assert.equal((await adm("POST", `/compute/keys/${addedKey.id}/enabled`, { enabled: false })).status, 410, "no key disable");
+  assert.equal((await adm("POST", "/compute/providers/anthropic/enabled", { enabled: false })).status, 410, "no provider toggle");
+  assert.equal((await fetch(`${base}/api/admin/keyvault/credentials/${addedKey.id}`, { method: "PATCH", headers: { authorization: `Bearer ${ADMIN_TOKEN}`, "content-type": "application/json" }, body: JSON.stringify({ enabled: false }) })).status, 410, "no vault API disable");
+  await kv.upsertProvider({ slug: "anthropic", enabled: false } as any); // an old caller's enabled is ignored
+  assert.ok((await json(adm("GET", "/compute/keys"))).credentials.some((c: any) => c.id === addedKey.id), "the key is still there");
+  assert.ok((await db.query<any>("SELECT enabled FROM vault_providers WHERE slug = 'anthropic'"))[0].enabled, "the provider stays on");
+  assert.equal((await kv.useCredential("anthropic")).secret, PAGE_KEY_2, "and still in use");
+  assert.equal((await adm("DELETE", `/compute/keys/${addedKey.id}`)).status, 204);
+  assert.ok(!(await json(adm("GET", "/compute/keys"))).credentials.some((c: any) => c.id === addedKey.id), "key deleted");
+  assert.ok(!(await json(adm("GET", "/compute/keys"))).providers.find((p: any) => p.slug === "anthropic").has_key, "the type has no key after the delete");
+  assert.equal((await adm("DELETE", `/compute/keys/${addedKey.id}`)).status, 404, "deleting it again: not found");
+  console.log("✓ key vault: one key per type (a second replaces the first in place), hints only, no enable/disable (410), delete");
 }
