@@ -4,7 +4,8 @@
 // admins; everyone else reads. Adding an address nobody has used creates the Clerk user, who is an admin on first sign-in.
 import { useState } from 'react';
 import PageContainer from '@/components/layout/page-container';
-import { RecordView, type RecordCol, type RowAction } from '@/components/layout/record-view';
+import { ActionsMenu, RecordView, type RecordCol, type RowAction } from '@/components/layout/record-view';
+import { DetailMeta, DetailTabs, KeyValueTable } from '@/components/layout/detail';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
@@ -72,11 +73,33 @@ export function AdminAdmins() {
         searchPlaceholder='Search admins by email, name or role'
         primary={<Gate need='admins'><Button onClick={() => setAdding(true)}><Icons.add /> Add admin</Button></Gate>}
         empty='No admins yet.'
-        detailTitle={(a) => a.email ?? 'Admin'}
+        detailTitle={() => 'Admin'}
         detail={(a) => (
-          <div className='flex flex-col gap-3 text-sm'>
-            <p><span className='font-medium'>{a.role_label}.</span> {roles.find((r) => r.id === a.role)?.help}</p>
-            {a.source === 'environment' && <p className='text-muted-foreground'>Listed in OCTILLION_PLATFORM_ADMINS on the server, so always an owner. Change it there.</p>}
+          <div className='flex flex-col gap-4 text-sm'>
+            <DetailMeta
+              title={<>{a.email ?? a.id}{a.id && a.id === data?.me && <span className='text-muted-foreground font-normal'> (you)</span>}</>}
+              badges={<>
+                <StatusBadge tone='neutral'>{a.role_label}</StatusBadge>
+                {a.source === 'environment' && <StatusBadge tone='info' title='OCTILLION_PLATFORM_ADMINS on the server: change it there'>environment</StatusBadge>}
+              </>}
+              actions={<ActionsMenu items={actions(a)} />}
+              facts={[
+                { label: 'Name', value: a.name, hidden: !a.name },
+                { label: 'Role', value: a.role_label },
+                { label: 'Set in', value: a.source === 'environment' ? 'Environment' : 'Clerk' },
+                { label: 'Last sign-in', value: a.last_sign_in_at ? <When d={a.last_sign_in_at} /> : <span className='text-muted-foreground'>never</span> },
+                { label: 'Added', value: a.added_at ? <When d={a.added_at} /> : NA, hint: a.added_by ? `by ${a.added_by}` : undefined }
+              ]}
+            />
+            <DetailTabs resetKey={a.id ?? `env:${a.email}`} tabs={[
+              { id: 'role', label: 'Role', content: (
+                <KeyValueTable rows={[
+                  { label: 'Role', value: a.role_label },
+                  { label: 'What it can do', value: roles.find((r) => r.id === a.role)?.help },
+                  { label: 'Set in', value: a.source === 'environment' ? 'Listed in OCTILLION_PLATFORM_ADMINS on the server, so always an owner. Change it there.' : 'Clerk user metadata' }
+                ]} />
+              ) }
+            ]} />
           </div>
         )}
       />

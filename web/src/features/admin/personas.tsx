@@ -4,14 +4,14 @@
 // persona on or off) makes the row the admin's: the vault sync leaves it alone from then on (src/vault.ts).
 import { useState, type ReactNode } from 'react';
 import PageContainer from '@/components/layout/page-container';
-import { ActionsMenu, Field, RecordView, type RecordCol, type RowAction } from '@/components/layout/record-view';
+import { ActionsMenu, RecordView, type RecordCol, type RowAction } from '@/components/layout/record-view';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Icons } from '@/components/icons';
+import { DetailMeta, DetailTable, DetailTabs, KeyValueTable, LongText } from '@/components/layout/detail';
 import { adminApi } from '@/lib/api-client';
-import { List } from './account-peek';
 import { post, useAdmin, useAdminAction } from './lib';
 import { Gate, useAdminRole } from './role';
 import { Chips, ErrorBox, FormRow, Mono, StatusBadge, When } from './ui';
@@ -27,10 +27,6 @@ export interface Persona {
 interface Draft { slug?: string; name: string; summary: string; role: string; experience_years: string; company_size: string; stack: string; constraints: string; tone: string; instructions: string }
 
 const NA = <span className='text-muted-foreground'>—</span>;
-const META = 'text-muted-foreground flex flex-wrap items-center gap-x-2 gap-y-1 text-xs leading-none';
-const Dot = () => <span className='text-muted-foreground/60'>·</span>;
-const Label = ({ children }: { children: ReactNode }) => <div className='text-muted-foreground mb-2 text-xs font-medium leading-none'>{children}</div>;
-const Prose = ({ children }: { children: ReactNode }) => <div className='text-sm leading-relaxed whitespace-pre-wrap'>{children}</div>;
 // The attributes the table and form show; the rest (industry, survey, ...) are listed as they are in the peek.
 /** "100 to 499 employees" → "100 to 499"; an unknown size ("Unknown org size") is no size. */
 /** The headcount band in its standard form (companySize): "<20", "100-499", "10,000+" or "-". */
@@ -108,51 +104,68 @@ export function AdminPersonas() {
         searchPlaceholder='Search personas by name, summary or stack'
         primary={<Gate need='library'><Button onClick={() => setDraft({ d: blank() })}><Icons.add /> New persona</Button></Gate>}
         empty='No personas yet. Run the vault sync or add one.'
-        detailTitle={(p) => p.name}
-        detailActions={(p) => (<>
+        detailTitle={() => 'Persona'}
+        detail={(p) => <PersonaBody p={p} actions={<>
           <Gate need='library'><Button size='sm' variant='outline' onClick={() => setDraft({ d: toDraft(p), from: p })}><Icons.edit /> Edit</Button></Gate>
           <ActionsMenu items={actions(p).filter((a) => a.label !== 'Edit')} />
-        </>)}
-        detail={(p) => <PersonaBody p={p} />}
+        </>} />}
       />
       {draft && <PersonaEditor draft={draft.d} from={draft.from} onClose={() => setDraft(null)} />}
     </PageContainer>
   );
 }
 
-/** The persona peek: one meta line, the properties, the summary, constraints and other attributes as tables, then the
- * instructions in full (what the orchestrator follows when it answers as this developer). */
-function PersonaBody({ p }: { p: Persona }) {
+/** The persona peek: the card (status, origin, slug, when it last changed, the actions), then tabs: the properties, the
+ * summary and instructions (what the orchestrator follows when it answers as this developer), constraints and other
+ * attributes as tables. */
+function PersonaBody({ p, actions }: { p: Persona; actions: ReactNode }) {
   const a = p.attributes;
   const other = Object.entries(a).filter(([k, v]) => !SHOWN.has(k) && text(v) != null).map(([k, v]) => ({ k, v: text(v)! }));
+  const constraints = (a.constraints ?? []).map((c, i) => ({ i, c }));
   return (
-    <div className='flex flex-col gap-8'>
-      <div className={META}>
-        <span className={p.active ? 'text-foreground font-medium' : ''}>{p.active ? 'Active' : 'Inactive'}</span><Dot />
-        <span>{originOf(p)}</span><Dot />
-        <Mono>{p.slug}</Mono><Dot />
-        {p.edited_at ? <span>Edited <When d={p.edited_at} />{p.edited_by && ` by ${p.edited_by}`}</span> : <span>Synced <When d={p.synced_at} /></span>}
-      </div>
-      <dl>
-        <Field label='Role'>{a.role ?? NA}</Field>
-        <Field label='Experience'>{years(p) == null ? NA : `${years(p)} years`}</Field>
-        <Field label='Company size'>{sizeOf({ attributes: a })}</Field>
-        <Field label='Stack'><Chips items={a.stack} /></Field>
-        <Field label='Tone'>{a.tone ?? NA}</Field>
-        {p.external_id && <Field label='Vault id'><Mono>{p.external_id}</Mono></Field>}
-      </dl>
-      {p.summary && <section><Label>Summary</Label><Prose>{p.summary}</Prose></section>}
-      <List title='Constraints' rows={(a.constraints ?? []).map((c, i) => ({ i, c }))} empty='No constraints.' cols={[
-        ['#', (r) => <span className='text-muted-foreground tabular-nums'>{r.i + 1}</span>, 'w-8'],
-        ['Constraint', (r) => r.c, 'whitespace-normal leading-snug']
+    <div className='flex flex-col gap-4'>
+      <DetailMeta
+        title={p.name}
+        badges={<StatusBadge tone={p.active ? 'ok' : 'neutral'}>{p.active ? 'active' : 'inactive'}</StatusBadge>}
+        actions={actions}
+        facts={[
+          { label: 'Origin', value: originOf(p) },
+          { label: 'Slug', value: <Mono>{p.slug}</Mono> },
+          p.edited_at
+            ? { label: 'Edited', value: <When d={p.edited_at} />, hint: p.edited_by ? `by ${p.edited_by}` : undefined }
+            : { label: 'Synced', value: <When d={p.synced_at} /> },
+          { label: 'Vault id', value: <Mono>{p.external_id}</Mono>, hidden: !p.external_id }
+        ]}
+      />
+      <DetailTabs resetKey={p.slug} tabs={[
+        { id: 'persona', label: 'Persona', content: (
+          <KeyValueTable rows={[
+            { label: 'Role', value: a.role ?? NA },
+            { label: 'Experience', value: years(p) == null ? NA : `${years(p)} years` },
+            { label: 'Company size', value: sizeOf({ attributes: a }) },
+            { label: 'Stack', value: <Chips items={a.stack} /> },
+            { label: 'Tone', value: a.tone ?? NA }
+          ]} />
+        ) },
+        { id: 'prompt', label: 'Prompt', content: (
+          <KeyValueTable rows={[
+            { label: 'Summary', value: p.summary ? <LongText>{p.summary}</LongText> : <span className='text-muted-foreground'>None.</span> },
+            { label: 'Instructions', value: p.instructions ? <LongText>{p.instructions}</LongText> : <span className='text-muted-foreground'>None.</span> }
+          ]} />
+        ) },
+        { id: 'constraints', label: 'Constraints', count: constraints.length, content: (
+          <DetailTable rows={constraints} rowKey={(r) => String(r.i)} noun='constraints' empty='No constraints.' cols={[
+            { key: 'i', label: '#', type: 'number', value: (r) => r.i + 1, render: (r) => <span className='text-muted-foreground tabular-nums'>{r.i + 1}</span>, className: 'w-8' },
+            { key: 'c', label: 'Constraint', render: (r) => r.c, className: 'whitespace-normal leading-snug' }
+          ]} />
+        ) },
+        { id: 'other', label: 'Other attributes', count: other.length, hidden: !other.length, content: (
+          <DetailTable rows={other} rowKey={(r) => r.k} noun='attributes' empty='No other attributes.' search={(r) => `${r.k} ${r.v}`} cols={[
+            { key: 'k', label: 'Attribute', type: 'text', value: (r) => r.k, render: (r) => <Mono>{r.k}</Mono>, className: 'w-40' },
+            { key: 'v', label: 'Value', render: (r) => r.v, className: 'whitespace-normal leading-snug break-all' }
+          ]} />
+        ) }
       ]} />
-      <section><Label>Instructions</Label>{p.instructions ? <Prose>{p.instructions}</Prose> : <p className='text-muted-foreground text-sm leading-none'>None.</p>}</section>
-      {other.length > 0 && (
-        <List title='Other attributes' rows={other} cols={[
-          ['Attribute', (r) => <Mono>{r.k}</Mono>, 'w-40'],
-          ['Value', (r) => r.v, 'whitespace-normal leading-snug break-all']
-        ]} />
-      )}
     </div>
   );
 }

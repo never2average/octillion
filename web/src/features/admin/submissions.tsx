@@ -6,13 +6,14 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import PageContainer from '@/components/layout/page-container';
-import { ActionsMenu, Field, RecordView, type RecordCol, type RowAction } from '@/components/layout/record-view';
+import { ActionsMenu, RecordView, type RecordCol, type RowAction } from '@/components/layout/record-view';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Textarea } from '@/components/ui/textarea';
 import { Icons } from '@/components/icons';
+import { DetailMeta, DetailTable, DetailTabs, KeyValueTable, LongText } from '@/components/layout/detail';
 import { companySize, usd } from '@/lib/octillion-format';
 import { post, useAdmin, useAdminAction } from './lib';
 import { Gate, useAdminRole } from './role';
@@ -29,10 +30,6 @@ export interface Submission {
 interface Data { kind: SubmissionKind; submissions: Submission[]; default_credit_usd: number; counts: Partial<Record<Status, number>>; stripe: boolean }
 
 const NA = <span className='text-muted-foreground'>—</span>;
-const META = 'text-muted-foreground flex flex-wrap items-center gap-x-2 gap-y-1 text-xs leading-none';
-const PROMPT = 'block font-mono text-xs leading-relaxed whitespace-pre-wrap border-l-2 pl-3';
-const Dot = () => <span className='text-muted-foreground/60'>·</span>;
-const Label = ({ children }: { children: ReactNode }) => <div className='text-muted-foreground mb-2 text-xs font-medium leading-none'>{children}</div>;
 const STATUS: Record<Status, { label: string; tone: Tone }> = {
   submitted: { label: 'Waiting for review', tone: 'info' }, accepted: { label: 'Accepted', tone: 'ok' },
   declined: { label: 'Declined', tone: 'bad' }, withdrawn: { label: 'Withdrawn', tone: 'neutral' }
@@ -132,13 +129,12 @@ export function Submissions({ kind, switcher }: { kind: SubmissionKind; switcher
         searchPlaceholder={`Search submitted ${noun}s by title, content or account`}
         filters={filters}
         empty={status === 'submitted' ? `No ${noun}s waiting for review. Accounts publish their own from their ${kind === 'persona' ? 'Developer personas' : 'Programming tasks'} page or with publish_to_library.` : 'Nothing here.'}
-        detailTitle={(s) => s.title}
-        detailActions={(s) => (<>
+        detailTitle={() => 'Submission'}
+        detail={(s) => <SubmissionBody s={s} actions={<>
           {s.status === 'submitted' && <Gate need='library'><Button size='sm' onClick={() => setAccepting(s)}><Icons.check /> Accept</Button></Gate>}
           {s.status === 'accepted' && s.credit_status === 'pending' && <Gate need='library'><Button size='sm' variant='outline' disabled={retry.isPending} onClick={() => retry.mutate(s.id)}><Icons.refresh /> Retry credit</Button></Gate>}
           <ActionsMenu items={actions(s).filter((a) => !a.label.startsWith('Accept') && a.label !== 'Retry credit')} />
-        </>)}
-        detail={(s) => <SubmissionBody s={s} />}
+        </>} />}
       />
       {accepting && <AcceptDialog s={accepting} defaultCredit={data?.default_credit_usd ?? 0} stripe={!!data?.stripe} onClose={() => setAccepting(null)} />}
       {declining && <DeclineDialog s={declining} onClose={() => setDeclining(null)} />}
@@ -146,58 +142,74 @@ export function Submissions({ kind, switcher }: { kind: SubmissionKind; switcher
   );
 }
 
-/** The peek: who sent it and where it stands, then the full submitted content. */
-function SubmissionBody({ s }: { s: Submission }) {
+/** The peek: the card (who sent it, where it stands, the credit, the actions), then the submitted content as tabs. */
+function SubmissionBody({ s, actions }: { s: Submission; actions: ReactNode }) {
   const c = s.content ?? {};
   const a = (c.attributes ?? {}) as Record<string, unknown>;
+  const constraints = list(a.constraints).map((x, i) => ({ i, x }));
+  const extra = Object.entries(a).filter(([k, v]) => !['role', 'experience_years', 'company_size', 'stack', 'constraints', 'tone'].includes(k) && v != null && v !== '');
   return (
-    <div className='flex flex-col gap-8'>
-      <div className={META}>
-        <StatusBadge tone={STATUS[s.status].tone}>{STATUS[s.status].label}</StatusBadge><Dot />
-        <span>Submitted <When d={s.created_at} />{s.created_by && ` by ${s.created_by.replace(/^(customer|ai):/, '')}`}</span><Dot />
-        <Mono>{s.id}</Mono>
-      </div>
-      <dl>
-        <Field label='Account'><Link href={`/admin/accounts/${encodeURIComponent(s.org_slug)}`} className='hover:text-primary'>{s.org_name}</Link> <Mono>{s.org_slug}</Mono></Field>
-        <Field label={s.kind === 'persona' ? 'Their persona' : 'Their task'}><Mono>{s.kind === 'persona' ? s.source_ref : `#${s.source_ref}`}</Mono></Field>
-        {s.decided_at && <Field label={s.status === 'declined' ? 'Declined' : 'Accepted'}><span><When d={s.decided_at} />{s.decided_by && ` by ${s.decided_by}`}</span></Field>}
-        {s.status === 'declined' && <Field label='Reason'>{s.reason}</Field>}
-        {s.library_ref && <Field label='Library row'><Mono>{s.kind === 'persona' ? s.library_ref : `#${s.library_ref}`}</Mono></Field>}
-        {s.status === 'accepted' && (
-          <Field label='Credit'>
-            <span className='flex flex-col gap-1'>
-              <span>{usd(s.credit_usd ?? 0)} · {s.credit_status === 'credited' ? 'credited in Stripe' : s.credit_status === 'pending' ? 'pending' : 'none'}</span>
-              {s.stripe_txn_id && <Mono>{s.stripe_txn_id}</Mono>}
-              {s.credit_status === 'pending' && s.credit_error && <span className='text-muted-foreground text-xs'>{s.credit_error}</span>}
-            </span>
-          </Field>
-        )}
-      </dl>
-      {s.kind === 'persona' ? (<>
-        <dl>
-          <Field label='Name'>{c.name}</Field>
-          <Field label='Role'>{(a.role as string) ?? NA}</Field>
-          <Field label='Experience'>{typeof a.experience_years === 'number' ? `${a.experience_years} years` : NA}</Field>
-          <Field label='Company size'>{companySize(a.company_size as string | null | undefined)}</Field>
-          <Field label='Stack'><Chips items={list(a.stack)} /></Field>
-          <Field label='Tone'>{(a.tone as string) ?? NA}</Field>
-          {c.environment?.editor && <Field label='Editor'>{c.environment.editor}</Field>}
-          {!!c.environment?.tools?.length && <Field label='Tools'><Chips items={c.environment.tools} /></Field>}
-          {Object.entries(a).filter(([k, v]) => !['role', 'experience_years', 'company_size', 'stack', 'constraints', 'tone'].includes(k) && v != null && v !== '')
-            .map(([k, v]) => <Field key={k} label={k}><span className='break-all'>{typeof v === 'object' ? JSON.stringify(v) : String(v)}</span></Field>)}
-        </dl>
-        <section><Label>Summary</Label>{c.summary ? <div className='text-sm leading-relaxed whitespace-pre-wrap'>{c.summary}</div> : <p className='text-muted-foreground text-sm leading-none'>None.</p>}</section>
-        {list(a.constraints).length > 0 && <section><Label>Constraints</Label><ul className='list-disc space-y-1 pl-5 text-sm'>{list(a.constraints).map((x, i) => <li key={i}>{x}</li>)}</ul></section>}
-        <section><Label>Instructions</Label>{c.instructions ? <div className='text-sm leading-relaxed whitespace-pre-wrap'>{c.instructions}</div> : <p className='text-muted-foreground text-sm leading-none'>None.</p>}</section>
-      </>) : (<>
-        <dl>
-          <Field label='Language'>{c.language ?? NA}</Field>
-          <Field label='Platform'>{c.platform ?? NA}</Field>
-          <Field label='Repository'>{c.repo_url ? <a href={c.repo_url} target='_blank' rel='noopener noreferrer' className='hover:text-primary'>{c.repo_url}</a> : <span className='text-muted-foreground'>None: a {c.template ? <Mono>{c.template}</Mono> : 'matching'} starter workspace</span>}</Field>
-          <Field label='Tags'><Chips items={list(c.tags)} /></Field>
-        </dl>
-        <section><Label>Prompt</Label><code className={PROMPT}>{c.prompt}</code></section>
-      </>)}
+    <div className='flex flex-col gap-4'>
+      <DetailMeta
+        title={s.title}
+        badges={<>
+          <StatusBadge tone={STATUS[s.status].tone}>{STATUS[s.status].label}</StatusBadge>
+          {s.status === 'accepted' && s.credit_status === 'pending' && <StatusBadge tone='warn' title={s.credit_error ?? undefined}>credit pending</StatusBadge>}
+        </>}
+        actions={actions}
+        facts={[
+          { label: 'Account', value: <><Link href={`/admin/accounts/${encodeURIComponent(s.org_slug)}`} className='hover:text-primary'>{s.org_name}</Link> <Mono>{s.org_slug}</Mono></> },
+          { label: s.kind === 'persona' ? 'Their persona' : 'Their task', value: <Mono>{s.kind === 'persona' ? s.source_ref : `#${s.source_ref}`}</Mono> },
+          { label: 'Submitted', value: <When d={s.created_at} />, hint: s.created_by ? `by ${s.created_by.replace(/^(customer|ai):/, '')}` : undefined },
+          { label: s.status === 'declined' ? 'Declined' : 'Accepted', hidden: !s.decided_at, value: <When d={s.decided_at} />, hint: s.decided_by ? `by ${s.decided_by}` : undefined },
+          { label: 'Reason', hidden: s.status !== 'declined', value: s.reason, wide: true },
+          { label: 'Library row', hidden: !s.library_ref, value: <Mono>{s.kind === 'persona' ? s.library_ref : `#${s.library_ref}`}</Mono> },
+          { label: 'Credit', hidden: s.status !== 'accepted',
+            value: <>{usd(s.credit_usd ?? 0)} · {s.credit_status === 'credited' ? 'credited in Stripe' : s.credit_status === 'pending' ? 'pending' : 'none'}</>,
+            hint: s.stripe_txn_id || (s.credit_status === 'pending' && s.credit_error) ? <>{s.stripe_txn_id && <Mono>{s.stripe_txn_id}</Mono>}{s.credit_status === 'pending' && s.credit_error && <span className='block'>{s.credit_error}</span>}</> : undefined },
+          { label: 'Id', value: <Mono>{s.id}</Mono> }
+        ]}
+      />
+      {s.kind === 'persona' ? (
+        <DetailTabs resetKey={s.id} tabs={[
+          { id: 'persona', label: 'Persona', content: (
+            <KeyValueTable rows={[
+              { label: 'Name', value: c.name },
+              { label: 'Role', value: (a.role as string) ?? NA },
+              { label: 'Experience', value: typeof a.experience_years === 'number' ? `${a.experience_years} years` : NA },
+              { label: 'Company size', value: companySize(a.company_size as string | null | undefined) },
+              { label: 'Stack', value: <Chips items={list(a.stack)} /> },
+              { label: 'Tone', value: (a.tone as string) ?? NA },
+              { label: 'Editor', hidden: !c.environment?.editor, value: c.environment?.editor },
+              { label: 'Tools', hidden: !c.environment?.tools?.length, value: <Chips items={c.environment?.tools} /> },
+              ...extra.map(([k, v]) => ({ label: k, value: <span className='break-all'>{typeof v === 'object' ? JSON.stringify(v) : String(v)}</span> }))
+            ]} />
+          ) },
+          { id: 'prompt', label: 'Prompt', content: (
+            <KeyValueTable rows={[
+              { label: 'Summary', value: c.summary ? <LongText>{c.summary}</LongText> : <span className='text-muted-foreground'>None.</span> },
+              { label: 'Instructions', value: c.instructions ? <LongText>{c.instructions}</LongText> : <span className='text-muted-foreground'>None.</span> }
+            ]} />
+          ) },
+          { id: 'constraints', label: 'Constraints', count: constraints.length, hidden: !constraints.length, content: (
+            <DetailTable rows={constraints} rowKey={(r) => String(r.i)} noun='constraints' empty='No constraints.' cols={[
+              { key: 'x', label: 'Constraint', render: (r) => r.x, className: 'whitespace-normal leading-snug' }
+            ]} />
+          ) }
+        ]} />
+      ) : (
+        <DetailTabs resetKey={s.id} tabs={[
+          { id: 'task', label: 'Task', content: (
+            <KeyValueTable rows={[
+              { label: 'Language', value: c.language ?? NA },
+              { label: 'Platform', value: c.platform ?? NA },
+              { label: 'Repository', value: c.repo_url ? <a href={c.repo_url} target='_blank' rel='noopener noreferrer' className='hover:text-primary'>{c.repo_url}</a> : <span className='text-muted-foreground'>None: a {c.template ? <Mono>{c.template}</Mono> : 'matching'} starter workspace</span> },
+              { label: 'Tags', value: <Chips items={list(c.tags)} /> },
+              { label: 'Prompt', value: <LongText mono>{c.prompt}</LongText> }
+            ]} />
+          ) }
+        ]} />
+      )}
     </div>
   );
 }

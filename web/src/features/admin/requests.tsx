@@ -16,10 +16,11 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Icons } from '@/components/icons';
+import { DetailMeta, DetailTable, DetailTabs, KeyValueTable, LongText } from '@/components/layout/detail';
 import { cn } from '@/lib/utils';
 import { post, useAdmin, useAdminAction, type InviteResult, type OrgList, type OrgRow } from './lib';
 import { useResult } from './result-dialog';
-import { ActionsMenu, Field, RecordView, type RecordCol, type RecordViewDef, type RowAction } from '@/components/layout/record-view';
+import { ActionsMenu, RecordView, type RecordCol, type RecordViewDef, type RowAction } from '@/components/layout/record-view';
 import { copyText, ErrorBox, StatusBadge, When } from './ui';
 import { Gate, useAdminRole } from './role';
 
@@ -204,11 +205,11 @@ export function AdminRequests() {
           if (list.length) copyText(emails(list), `${list.length} emails copied`); else toast.info('No requests in this view');
         } }]}
         empty='No pending requests.'
-        detailActions={(q) => (<>
+        detailTitle={() => 'Request'}
+        detail={(q) => <RequestPeek q={q} match={matches.get(q.id) ?? null} onResearch={() => runResearch(q)} actions={<>
           {q.status === 'pending' && <Gate need='requests'><Button size='sm' onClick={() => setApproving(q)}><Icons.check /> Approve</Button></Gate>}
           <ActionsMenu items={[...statusActions(q), copyEmail(q)]} />
-        </>)}
-        detail={(q) => <RequestPeek q={q} match={matches.get(q.id) ?? null} onResearch={() => runResearch(q)} />}
+        </>} />}
       />
       {approving && (
         <ApproveDialog
@@ -336,94 +337,112 @@ function ApproveDialog({ req, onClose, onDone }: { req: Req; onClose: () => void
 const GOAL_LABEL: Record<string, string> = { baseline: 'Their APO baseline', competitor: 'Why agents pick a competitor', docs: 'Fixing docs and SDKs for agents', monitor: 'Tracking every release', other: 'Something else' };
 const TIMELINE_LABEL: Record<string, string> = { now: 'this week', month: 'this month', quarter: 'this quarter', exploring: 'just exploring' };
 
-const Label2 = ({ children }: { children: ReactNode }) => <div className='text-muted-foreground mb-2 text-xs font-medium leading-none'>{children}</div>;
 const hostOf = (u: string) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return u; } };
+const none = (s: string) => <span className='text-muted-foreground'>{s}</span>;
 
-/** What they told us, where they came from, then the AI's research on the company. */
-function RequestPeek({ q, match, onResearch }: { q: Req; match: string | null; onResearch: () => void }) {
+/** The card (who, what, where they came from, the actions), then tabs: what they told us, the AI's research, and its
+ *  starter tasks, questions and sources as tables. */
+function RequestPeek({ q, match, actions, onResearch }: { q: Req; match: string | null; actions: ReactNode; onResearch: () => void }) {
   const src = q.source ?? {};
   const came = [src.utm_source && `${src.utm_source}${src.utm_medium ? ` / ${src.utm_medium}` : ''}${src.utm_campaign ? ` · ${src.utm_campaign}` : ''}`,
     src.referrer && `via ${hostOf(src.referrer)}`, src.landing && `landed on ${src.landing}`, [src.city, src.country].filter(Boolean).join(', ')].filter(Boolean).join(' · ');
   const url = link(q);
+  const b = q.research;
+  const busy = q.research_status === 'running' || q.deep?.status === 'queued' || q.deep?.status === 'running';
+  const lines = (xs: string[]) => xs.map((x, i) => ({ i, x }));
+  const person = <>{q.name || '—'}{q.role && <span className='text-muted-foreground'> · {q.role}</span>}</>;
+  const email = <><a className='hover:underline' href={`mailto:${q.email}`}>{q.email}</a>{!isWork(q) && <span className='text-amber-600 dark:text-amber-400'> · personal</span>}</>;
+  const product = url ? <a className='text-primary hover:underline' href={url} target='_blank' rel='noopener noreferrer'>{host(q)}</a> : none('Not given');
   return (
-    <div className='flex flex-col gap-8 text-sm'>
-      <section>
-        <Label2>From them</Label2>
-        <dl>
-          <Field label='Person'>{q.name || '—'}{q.role && <span className='text-muted-foreground'> · {q.role}</span>}</Field>
-          <Field label='Email'><a className='hover:underline' href={`mailto:${q.email}`}>{q.email}</a>{!isWork(q) && <span className='text-amber-600 dark:text-amber-400'> · personal</span>}</Field>
-          <Field label='Company'>{q.company}{q.team_size && <span className='text-muted-foreground'> · {q.team_size} people</span>}</Field>
-          <Field label='Product'>{url ? <a className='text-primary hover:underline' href={url} target='_blank' rel='noopener noreferrer'>{host(q)}</a> : <span className='text-muted-foreground'>Not given</span>}</Field>
-          {q.docs_url && <Field label='Docs'><a className='text-primary hover:underline' href={q.docs_url} target='_blank' rel='noopener noreferrer'>{hostOf(q.docs_url)}</a></Field>}
-          {q.subindustry && <Field label='Sub-industry'>{q.subindustry}</Field>}
-          {q.competitors && <Field label='Competitors'>{q.competitors}</Field>}
-          {q.goal && <Field label='Wants first'>{GOAL_LABEL[q.goal] ?? q.goal}{q.timeline && <span className='text-muted-foreground'> · {TIMELINE_LABEL[q.timeline] ?? q.timeline}</span>}</Field>}
-          <Field label='Agents'>{q.agents?.length ? q.agents.join(', ') : <span className='text-muted-foreground'>Not given</span>}</Field>
-          {q.heard_from && <Field label='Heard from'>{q.heard_from}</Field>}
-          <Field label='Came from'>{came || <span className='text-muted-foreground'>Unknown</span>}</Field>
-          <Field label='Requested'><When d={q.created_at} />{q.status !== 'pending' && q.decided_at && <span className='text-muted-foreground'> · {q.status} <When d={q.decided_at} /></span>}</Field>
-          {match && <Field label='Matches'>Same domain as {match}</Field>}
-        </dl>
-        <div className='mt-4'>
-          <div className='text-muted-foreground mb-1.5 text-xs font-medium leading-none'>Message</div>
-          {q.message ? <p className='leading-relaxed whitespace-pre-wrap'>{q.message}</p> : <p className='text-muted-foreground leading-none'>No message.</p>}
-        </div>
-      </section>
-
-      <section>
-        <div className='mb-2 flex items-center justify-between gap-3'>
-          <span className='text-muted-foreground text-xs font-medium leading-none'>AI research</span>
-          <Gate need='requests'><Button size='xs' variant='ghost' disabled={q.research_status === 'running' || q.deep?.status === 'queued' || q.deep?.status === 'running'} onClick={onResearch}>
-            {q.research_status === 'running' ? <><Icons.spinner className='animate-spin' /> Researching</> : <><Icons.sparkles /> {q.research ? 'Re-run' : 'Research'}</>}
+    <div className='flex flex-col gap-4 text-sm'>
+      <DetailMeta
+        title={q.company}
+        badges={<>
+          <StatusBadge tone={TONE[q.status]}>{q.status}</StatusBadge>
+          {q.research_status === 'running' ? <StatusBadge tone='info'>researching</StatusBadge> : b && <StatusBadge tone={b.fit === 'strong' ? 'ok' : 'neutral'}>{`${b.fit} fit`}</StatusBadge>}
+        </>}
+        actions={<>
+          <Gate need='requests'><Button size='sm' variant='outline' disabled={busy} onClick={onResearch}>
+            {q.research_status === 'running' ? <><Icons.spinner className='animate-spin' /> Researching</> : <><Icons.sparkles /> {b ? 'Re-run research' : 'Research'}</>}
           </Button></Gate>
-        </div>
-        {q.research_status === 'failed' && <p className='text-destructive mb-3 leading-snug'>Research failed: {q.research_error}</p>}
-        <DeepStatus q={q} />
-        {!q.research ? (
-          q.research_status !== 'running' && <p className='text-muted-foreground leading-none'>Not researched yet.</p>
-        ) : <Research b={q.research} at={q.researched_at} />}
-      </section>
-    </div>
-  );
-}
+          {actions}
+        </>}
+        facts={[
+          { label: 'Person', value: person },
+          { label: 'Email', value: email },
+          { label: 'Product', value: product },
+          { label: 'Requested', value: <When d={q.created_at} />, hint: q.status !== 'pending' && q.decided_at ? <>{q.status} <When d={q.decided_at} /></> : undefined },
+          { label: 'Team size', value: `${q.team_size} people`, hidden: !q.team_size },
+          { label: 'Matches', value: `Same domain as ${match}`, hidden: !match }
+        ]}
+      >
+        {(q.research_status === 'failed' || q.deep) && (
+          <div className='flex flex-col gap-2 border-t pt-3 empty:hidden'>
+            {q.research_status === 'failed' && <p className='text-destructive leading-snug'>Research failed: {q.research_error}</p>}
+            <DeepStatus q={q} />
+          </div>
+        )}
+      </DetailMeta>
 
-function Research({ b, at }: { b: Brief; at: string | null }) {
-  const list = (title: string, xs: ReactNode[]) => xs.length > 0 && (
-    <div>
-      <Label2>{title}</Label2>
-      <ul className='flex flex-col gap-2'>{xs.map((x, i) => <li key={i} className='border-l-2 pl-3 leading-snug'>{x}</li>)}</ul>
-    </div>
-  );
-  return (
-    <div className='flex flex-col gap-6'>
-      {b.summary && <p className='leading-relaxed'>{b.summary}</p>}
-      <dl>
-        <Field label='Fit'><span className={FIT[b.fit]}>{b.fit}</span>{b.fit_reason && <span className='text-muted-foreground'> · {b.fit_reason}</span>}</Field>
-        {b.offering && <Field label='Sells'>{b.offering}</Field>}
-        {b.category && <Field label='Category'>{b.category}</Field>}
-        {b.audience && <Field label='Audience'>{b.audience}</Field>}
-        {b.stage && <Field label='Stage'>{b.stage}</Field>}
-        {b.packages.length > 0 && <Field label='Packages'><span className='font-mono text-xs'>{b.packages.join(', ')}</span></Field>}
-        {b.competitors.length > 0 && <Field label='Competitors'>{b.competitors.map((c, i) => (
-          <span key={c.name}>{i > 0 && ', '}{c.url ? <a className='hover:underline' href={c.url} target='_blank' rel='noopener noreferrer'>{c.name}</a> : c.name}</span>
-        ))}</Field>}
-      </dl>
-      {b.flags.length > 0 && (
-        <ul className='flex flex-col gap-1.5'>{b.flags.map((f, i) => (
-          <li key={i} className='flex items-center gap-2 leading-none text-amber-600 dark:text-amber-400'><Icons.warning className='size-3.5 shrink-0' />{f}</li>
-        ))}</ul>
-      )}
-      {list('Starter tasks', b.starter_tasks)}
-      {list('Ask on the call', b.questions)}
-      {b.sources.length > 0 && (
-        <div>
-          <Label2>Sources</Label2>
-          <ul className='flex flex-col gap-1.5 text-xs'>{b.sources.map((x) => (
-            <li key={x.url} className='truncate leading-none'><a className='text-muted-foreground hover:text-foreground hover:underline' href={x.url} target='_blank' rel='noopener noreferrer'>{x.title || hostOf(x.url)} <span className='opacity-60'>· {hostOf(x.url)}</span></a></li>
-          ))}</ul>
-        </div>
-      )}
-      <p className='text-muted-foreground text-xs leading-none'>Researched <When d={at} />{b.depth === 'harness' ? ` · deep research on the harness (${b.model})` : b.model ? ` · quick pass · ${b.model}` : ' · quick pass, no AI summary, evidence only'}</p>
+      <DetailTabs resetKey={q.id} tabs={[
+        { id: 'request', label: 'Request', content: (
+          <KeyValueTable rows={[
+            { label: 'Person', value: person },
+            { label: 'Email', value: email },
+            { label: 'Company', value: <>{q.company}{q.team_size && <span className='text-muted-foreground'> · {q.team_size} people</span>}</> },
+            { label: 'Product', value: product },
+            { label: 'Docs', hidden: !q.docs_url, value: q.docs_url && <a className='text-primary hover:underline' href={q.docs_url} target='_blank' rel='noopener noreferrer'>{hostOf(q.docs_url)}</a> },
+            { label: 'Sub-industry', hidden: !q.subindustry, value: q.subindustry },
+            { label: 'Competitors', hidden: !q.competitors, value: q.competitors },
+            { label: 'Wants first', hidden: !q.goal, value: q.goal && <>{GOAL_LABEL[q.goal] ?? q.goal}{q.timeline && <span className='text-muted-foreground'> · {TIMELINE_LABEL[q.timeline] ?? q.timeline}</span>}</> },
+            { label: 'Agents', value: q.agents?.length ? q.agents.join(', ') : none('Not given') },
+            { label: 'Heard from', hidden: !q.heard_from, value: q.heard_from },
+            { label: 'Came from', value: came || none('Unknown') },
+            { label: 'Requested', value: <><When d={q.created_at} />{q.status !== 'pending' && q.decided_at && <span className='text-muted-foreground'> · {q.status} <When d={q.decided_at} /></span>}</> },
+            { label: 'Matches', hidden: !match, value: `Same domain as ${match}` },
+            { label: 'Message', value: q.message ? <LongText>{q.message}</LongText> : none('No message.') }
+          ]} />
+        ) },
+        { id: 'research', label: 'Research', content: !b ? (
+          <KeyValueTable rows={[]} empty={q.research_status === 'running' ? 'Researching…' : 'Not researched yet.'} />
+        ) : (
+          <KeyValueTable rows={[
+            { label: 'Summary', hidden: !b.summary, value: <LongText>{b.summary}</LongText> },
+            { label: 'Fit', value: <><span className={FIT[b.fit]}>{b.fit}</span>{b.fit_reason && <span className='text-muted-foreground'> · {b.fit_reason}</span>}</> },
+            { label: 'Sells', hidden: !b.offering, value: b.offering },
+            { label: 'Category', hidden: !b.category, value: b.category },
+            { label: 'Audience', hidden: !b.audience, value: b.audience },
+            { label: 'Stage', hidden: !b.stage, value: b.stage },
+            { label: 'Packages', hidden: !b.packages.length, value: <span className='font-mono text-xs'>{b.packages.join(', ')}</span> },
+            { label: 'Competitors', hidden: !b.competitors.length, value: b.competitors.map((c, i) => (
+              <span key={c.name}>{i > 0 && ', '}{c.url ? <a className='hover:underline' href={c.url} target='_blank' rel='noopener noreferrer'>{c.name}</a> : c.name}</span>
+            )) },
+            { label: 'Flags', hidden: !b.flags.length, value: (
+              <ul className='flex flex-col gap-1.5'>{b.flags.map((f, i) => (
+                <li key={i} className='flex items-center gap-2 leading-none text-amber-600 dark:text-amber-400'><Icons.warning className='size-3.5 shrink-0' />{f}</li>
+              ))}</ul>
+            ) },
+            { label: 'Researched', value: <><When d={q.researched_at} />{b.depth === 'harness' ? ` · deep research on the harness (${b.model})` : b.model ? ` · quick pass · ${b.model}` : ' · quick pass, no AI summary, evidence only'}</> }
+          ]} />
+        ) },
+        { id: 'tasks', label: 'Starter tasks', count: b?.starter_tasks.length, hidden: !b, content: (
+          <DetailTable rows={lines(b?.starter_tasks ?? [])} rowKey={(r) => String(r.i)} noun='tasks' empty='No starter tasks.' cols={[
+            { key: 'x', label: 'Task', render: (r) => r.x, className: 'whitespace-normal leading-snug' }
+          ]} />
+        ) },
+        { id: 'questions', label: 'Ask on the call', count: b?.questions.length, hidden: !b, content: (
+          <DetailTable rows={lines(b?.questions ?? [])} rowKey={(r) => String(r.i)} noun='questions' empty='No questions.' cols={[
+            { key: 'x', label: 'Question', render: (r) => r.x, className: 'whitespace-normal leading-snug' }
+          ]} />
+        ) },
+        { id: 'sources', label: 'Sources', count: b?.sources.length, hidden: !b, content: (
+          <DetailTable rows={b?.sources ?? []} rowKey={(x) => x.url} noun='sources' empty='No sources.' search={(x) => `${x.title} ${x.url}`}
+            onRow={(x) => window.open(x.url, '_blank', 'noopener,noreferrer')} cols={[
+            { key: 'title', label: 'Source', type: 'text', value: (x) => x.title || hostOf(x.url), render: (x) => x.title || hostOf(x.url), className: 'whitespace-normal leading-snug' },
+            { key: 'host', label: 'Site', type: 'text', value: (x) => hostOf(x.url), render: (x) => <span className='text-muted-foreground'>{hostOf(x.url)}</span> }
+          ]} />
+        ) }
+      ]} />
     </div>
   );
 }
@@ -438,7 +457,7 @@ function DeepStatus({ q }: { q: Req }) {
     : null;
   if (!line) return null;
   return (
-    <p className={cn('mb-4 flex items-center gap-2 leading-snug', d.status === 'failed' ? 'text-destructive' : 'text-muted-foreground')}>
+    <p className={cn('flex items-center gap-2 leading-snug', d.status === 'failed' ? 'text-destructive' : 'text-muted-foreground')}>
       {d.status !== 'failed' && <Icons.spinner className='size-3.5 shrink-0 animate-spin' />}{line}
     </p>
   );
