@@ -599,6 +599,10 @@ footer a:hover{color:var(--ink)}
               <label for="f-msg">What do you want to learn? <span class="opt">(optional)</span></label>
               <textarea id="f-msg" name="message" maxlength="4000" placeholder="Competitors you track, scenarios you care about, models your users run…"></textarea>
             </div>
+            <div class="field">
+              <label for="f-optin" style="display:flex;gap:.5rem;align-items:flex-start;font-weight:400"><input id="f-optin" name="marketing_opt_in" type="checkbox" style="margin-top:.2rem">
+                <span>Send me occasional emails about Octillion: product updates, tips and offers. You can unsubscribe at any time. <span class="opt">(optional; we'll email you about your request either way)</span></span></label>
+            </div>
             <div class="status" id="form-status" role="alert"></div>
             <button class="btn btn-primary" type="submit" id="f-submit">Get your APO baseline <span class="arr" aria-hidden="true">→</span></button>
           </div>
@@ -681,7 +685,10 @@ footer a:hover{color:var(--ink)}
       email:fields.email.el.value.trim(),
       company:fields.company.el.value.trim(),
       product_url:normalizeUrl(fields.product_url.el.value.trim()),
-      message:document.getElementById('f-msg').value.trim()
+      message:document.getElementById('f-msg').value.trim(),
+      // The marketing opt-in (unticked by default) and the wording version shown (src/gtm-consent.ts OPT_IN_WORDING).
+      marketing_opt_in:document.getElementById('f-optin').checked,
+      marketing_wording:'2026-10-v1'
     };
     btn.disabled=true;btn.setAttribute('aria-busy','true');btn.textContent='Sending…';
     fetch('/api/access-requests',{

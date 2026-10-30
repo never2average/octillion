@@ -16,6 +16,12 @@ const GOALS = [['baseline', 'See where agents pick us today'], ['competitor', 'F
 const SUBINDUSTRIES = ['Database', 'Auth & identity', 'Payments & billing', 'Email & messaging', 'Queues & background jobs', 'Observability & logging', 'Hosting & deployment',
   'AI & LLM infrastructure', 'Search', 'Storage & CDN', 'Analytics', 'Feature flags & experimentation', 'CMS & content', 'Testing & CI', 'Security', 'Other'];
 const HEARD = ['Search', 'X / Twitter', 'LinkedIn', 'Hacker News', 'A friend or colleague', 'An AI assistant', 'Other'];
+/**
+ * The marketing opt-in: unticked by default, and only marketing (we always email about the request itself). The server
+ * records the version with the opt-in (src/gtm-consent.ts OPT_IN_WORDING holds the same words): a new wording gets a
+ * new version there and here.
+ */
+const OPT_IN = { version: '2026-10-v1', text: 'Send me occasional emails about Octillion: product updates, tips and offers. You can unsubscribe at any time.' };
 /** Where the visitor came from: the referrer, utm_* tags and the page they landed on (first page of the visit). */
 function visitSource() {
   try {
@@ -29,6 +35,7 @@ function visitSource() {
 export function AccessForm() {
   const [v, setV] = useState({ email: '', company: '', product_url: '', message: '', name: '', role: '', team_size: '', competitors: '', goal: '', heard_from: '', subindustry: '' });
   const [agents, setAgents] = useState<string[]>([]);
+  const [optIn, setOptIn] = useState(false);
   const [more, setMore] = useState(false);
   const [errs, setErrs] = useState<Record<string, string>>({});
   const [status, setStatus] = useState<'idle' | 'sending' | 'done'>('idle');
@@ -64,7 +71,8 @@ export function AccessForm() {
         method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         body: JSON.stringify({ email: v.email.trim(), company: v.company.trim(), product_url: normalizeUrl(v.product_url.trim()), message: v.message.trim(),
           name: v.name.trim(), role: v.role.trim(), team_size: v.team_size, agents, source: visitSource(),
-          competitors: v.competitors.trim(), goal: v.goal, heard_from: v.heard_from, subindustry: v.subindustry })
+          competitors: v.competitors.trim(), goal: v.goal, heard_from: v.heard_from, subindustry: v.subindustry,
+          marketing_opt_in: optIn, marketing_wording: OPT_IN.version })
       });
       const data = await res.json().catch(() => null);
       if (res.ok) return setStatus('done');
@@ -169,6 +177,10 @@ export function AccessForm() {
             </div>
           </details>
 
+          <label htmlFor='f-optin' className='text-muted-foreground flex cursor-pointer items-start gap-2 pt-3 text-sm'>
+            <input id='f-optin' name='marketing_opt_in' type='checkbox' className='accent-primary mt-0.5 size-4 shrink-0' checked={optIn} onChange={(e) => setOptIn(e.target.checked)} />
+            <span>{OPT_IN.text} <span className='text-xs'>(Optional. We&apos;ll email you about your request either way.)</span></span>
+          </label>
           {error && <p className='text-destructive text-sm' role='alert'>{error}</p>}
           <div className='pt-3'>
             <Button type='submit' size='lg' disabled={status === 'sending'} aria-busy={status === 'sending'}>
