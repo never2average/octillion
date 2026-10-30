@@ -4,14 +4,16 @@
 // help. Stuck people ask the team; a teammate picks the request up, gets where they are stuck, and closes it when done.
 // Filters: a date range (who was active in it) and people. Use cases import and export as JSON or CSV. Click a row to
 // open it beside the table: help, then stages with their prompts, what is done, and mark-done for steps without a tool.
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 import PageContainer from '@/components/layout/page-container';
 import { DateRangePicker, PRESETS, rangeQuery, type DateRange } from '@/components/layout/date-range-picker';
 import { MultiSelectFilter } from '@/components/layout/multi-select-filter';
-import { Field, RecordView, type RecordCol, type RowAction } from '@/components/layout/record-view';
+import { RecordView, type RecordCol, type RowAction } from '@/components/layout/record-view';
+import { DetailMeta, DetailTable, DetailTabs, KeyValueTable, LongText } from '@/components/layout/detail';
+import { StatusBadge } from '@/features/admin/ui';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
@@ -179,15 +181,12 @@ export function AdoptionPage() {
         </>}
         primary={primary} primaryMenu={primaryMenu}
         empty={narrowed ? 'Nobody you picked worked on a use case in this period.' : 'Nothing to show yet.'}
-        detailTitle={(r) => r.name}
+        detailTitle={(r) => (r.type === 'use case' ? 'Use case' : r.type === 'workflow' ? 'Workflow' : 'AI client')}
         actions={(r) => r.type === 'use case' ? useCaseActions(r) : r.type === 'workflow' ? (note && LAUNCH_GROUPS.includes(r.g.id) ? [] : [{ label: 'Copy prompt', icon: <Icons.page />, onSelect: () => copy(r.g.prompt) }])
           : [{ label: 'Remove from my clients', icon: <Icons.trash />, destructive: true, onSelect: () => void appApi('DELETE', `/clients/${encodeURIComponent(r.name)}`).then(() => { toast.success(`${r.name} removed`); reloadSetup(); }, fail) }]}
         detail={(r) => r.type === 'use case' ? (
-          <div className='flex flex-col gap-6'>
-            <HelpPanel r={r} me={me} onPick={(h) => pickUp(h, r.j, r.who)} onAct={helpAct} onAsk={() => setAsking(r.j)} />
-            <UseCase j={r.j} onChanged={reload} note={note} />
-          </div>
-        ) : r.type === 'workflow' ? <Workflow g={r.g} note={note && LAUNCH_GROUPS.includes(r.g.id) ? note : null} /> : <Client name={r.name} at={r.at} />}
+          <UseCase r={r} me={me} onChanged={reload} note={note} onPick={(h) => pickUp(h, r.j, r.who)} onAct={helpAct} onAsk={() => setAsking(r.j)} />
+        ) : r.type === 'workflow' ? <Workflow name={r.name} person={r.person} g={r.g} note={note && LAUNCH_GROUPS.includes(r.g.id) ? note : null} /> : <Client name={r.name} at={r.at} />}
       />
       <input ref={file} type='file' accept='.json,.csv,application/json,text/csv' className='hidden' onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) void importFile(f); }} />
       {adding && <UseCaseEditor onClose={() => setAdding(false)} onSaved={() => { setAdding(false); reload(); }} />}
@@ -283,48 +282,43 @@ function HelpCell({ r, me, onPick }: { r: Row; me: string | null; onPick: (h: He
   return <span className={cn('block max-w-48 truncate text-xs leading-none', st.tone === 'busy' ? 'text-primary' : 'text-muted-foreground')}>{st.label}</span>;
 }
 
-/** Top of an open use case: the help request, if any, with what you can do about it. */
-function HelpPanel({ r, me, onPick, onAct, onAsk }: {
+/** The help request on an open use case, if any: a status line and note for the card, and what you can do about it
+ *  as labelled buttons for the card's actions. */
+function helpParts({ r, me, onPick, onAct, onAsk }: {
   r: Extract<Row, { type: 'use case' }>; me: string | null; onPick: (h: Help) => void;
   onAct: (h: Help, action: 'pick' | 'done' | 'release' | 'cancel', ok: string) => void; onAsk: () => void;
-}) {
+}): { line: ReactNode; note?: string; buttons: ReactNode } | null {
   const h = r.help, mine = !!r.who && r.who.user_id === me;
   if (!h) {
-    if (mine && !r.who!.finished) return (
-      <div className='flex items-center justify-between gap-3 border-b pb-4 text-sm leading-none'>
-        <span className='text-muted-foreground'>Stuck{r.who!.stuck ? ` at "${r.who!.stuck}"` : ''}? Ask the team.</span>
-        <Allowed need='edit'><Button size='sm' variant='outline' onClick={onAsk}><Icons.help /> Ask for help</Button></Allowed>
-      </div>
-    );
+    if (mine && !r.who!.finished) return {
+      line: <span className='text-muted-foreground'>Stuck{r.who!.stuck ? ` at "${r.who!.stuck}"` : ''}? Ask the team.</span>,
+      buttons: <Allowed need='edit'><Button size='sm' variant='outline' onClick={onAsk}><Icons.help /> Ask for help</Button></Allowed>
+    };
     const offer = offerLink(r, me);
-    if (offer) return (
-      <div className='flex items-center justify-between gap-3 border-b pb-4 text-sm leading-none'>
-        <span className='text-muted-foreground'>You finished this; {r.who!.label} is at &ldquo;{r.who!.stuck}&rdquo;.</span>
-        <Button size='sm' variant='outline' render={<a href={offer} />}><Icons.send /> Offer help</Button>
-      </div>
-    );
+    if (offer) return {
+      line: <span className='text-muted-foreground'>You finished this; {r.who!.label} is at &ldquo;{r.who!.stuck}&rdquo;.</span>,
+      buttons: <Button size='sm' variant='outline' render={<a href={offer} />}><Icons.send /> Offer help</Button>
+    };
     return null;
   }
   const link = helpLink(h, r.j, r.who);
-  return (
-    <div className='flex flex-col gap-3 border-b pb-4'>
-      <div className='flex items-center justify-between gap-3 text-sm leading-none'>
-        <span>
-          <span className={h.status === 'open' ? 'text-amber-600 dark:text-amber-400' : 'text-primary'}>
-            {h.status === 'open' ? (mine ? 'You asked the team for help' : `${h.requester_label} asked for help`) : h.helper === me ? `You are helping ${h.requester_label}` : `${h.helper_label} is helping ${mine ? 'you' : h.requester_label}`}
-          </span>
-          <span className='text-muted-foreground'> · <When d={h.status === 'picked' && h.picked_at ? h.picked_at : h.created_at} /></span>
+  return {
+    line: (
+      <span>
+        <span className={h.status === 'open' ? 'text-amber-600 dark:text-amber-400' : 'text-primary'}>
+          {h.status === 'open' ? (mine ? 'You asked the team for help' : `${h.requester_label} asked for help`) : h.helper === me ? `You are helping ${h.requester_label}` : `${h.helper_label} is helping ${mine ? 'you' : h.requester_label}`}
         </span>
-        <span className='flex shrink-0 items-center gap-1.5'>
-          {h.status === 'open' && !mine && <Allowed need='edit'><Button size='sm' onClick={() => onPick(h)}><Icons.check /> Pick up and help</Button></Allowed>}
-          {h.status === 'picked' && h.helper === me && link && <Button size='sm' variant='outline' render={<a href={link} />}><Icons.send /> Email</Button>}
-          {h.status === 'picked' && (h.helper === me || mine) && <Allowed need='edit'><Button size='sm' variant='outline' onClick={() => onAct(h, 'done', 'Marked helped')}>Mark helped</Button></Allowed>}
-          {h.status === 'open' && mine && <Allowed need='edit'><Button size='sm' variant='ghost' onClick={() => onAct(h, 'cancel', 'Help request withdrawn')}>Withdraw</Button></Allowed>}
-        </span>
-      </div>
-      {h.note && <p className='text-muted-foreground border-l-2 pl-3 text-sm leading-relaxed whitespace-pre-wrap'>{h.note}</p>}
-    </div>
-  );
+        <span className='text-muted-foreground'> · <When d={h.status === 'picked' && h.picked_at ? h.picked_at : h.created_at} /></span>
+      </span>
+    ),
+    note: h.note || undefined,
+    buttons: (<>
+      {h.status === 'open' && !mine && <Allowed need='edit'><Button size='sm' onClick={() => onPick(h)}><Icons.check /> Pick up and help</Button></Allowed>}
+      {h.status === 'picked' && h.helper === me && link && <Button size='sm' variant='outline' render={<a href={link} />}><Icons.send /> Email</Button>}
+      {h.status === 'picked' && (h.helper === me || mine) && <Allowed need='edit'><Button size='sm' variant='outline' onClick={() => onAct(h, 'done', 'Marked helped')}>Mark helped</Button></Allowed>}
+      {h.status === 'open' && mine && <Allowed need='edit'><Button size='sm' variant='ghost' onClick={() => onAct(h, 'cancel', 'Help request withdrawn')}>Withdraw</Button></Allowed>}
+    </>)
+  };
 }
 
 /** Ask the team: an optional note on what is in the way; teammates see it on the row and can pick it up. */
@@ -363,76 +357,112 @@ function Progress({ done, total, check }: { done: number; total: number; check?:
   );
 }
 
-function UseCase({ j, onChanged, note }: { j: Journey; onChanged: () => void; note: string | null }) {
+/** The use-case peek: the card (who, progress, source, the help request and what to do about it), then its stages as a
+ *  table with each step's prompt and mark-done for steps without a tool. */
+function UseCase({ r, me, onChanged, note, onPick, onAct, onAsk }: {
+  r: Extract<Row, { type: 'use case' }>; me: string | null; onChanged: () => void; note: string | null; onPick: (h: Help) => void;
+  onAct: (h: Help, action: 'pick' | 'done' | 'release' | 'cancel', ok: string) => void; onAsk: () => void;
+}) {
+  const j = r.j;
   const [busy, setBusy] = useState<string | null>(null);
   const mark = (st: Stage) => {
     setBusy(st.id);
     appApi('POST', `/journeys/${encodeURIComponent(j.id)}/stages/${encodeURIComponent(st.id)}`, { done: !st.done })
       .then(() => { toast.success(st.done ? 'Marked not done' : 'Marked done'); onChanged(); }).catch(fail).finally(() => setBusy(null));
   };
+  const help = helpParts({ r, me, onPick, onAct, onAsk });
+  const stages = j.stages.map((st, i) => ({ st, i }));
   return (
-    <div className='flex flex-col gap-5'>
-      <dl>
-        <Field label='Outcome'>{j.outcome}</Field>
-        {j.who && <Field label='For'>{j.who}</Field>}
-        {j.time && <Field label='Takes'>{j.time}</Field>}
-        <Field label='Progress'><Progress done={j.done} total={j.total} /></Field>
-        <Field label='Source'>{j.own ? `Your account${j.added_by ? ` · added by ${j.added_by.replace(/^customer:/, '')}` : ''}` : 'Octillion'}</Field>
-      </dl>
-      <ol className='flex flex-col gap-4'>
-        {j.stages.map((st, i) => (
-          <li key={st.id} className='flex gap-3'>
-            <span className={cn('flex size-6 shrink-0 items-center justify-center rounded-full border text-xs font-semibold', st.done ? 'border-primary bg-primary text-primary-foreground' : 'text-muted-foreground')}>
-              {st.done ? <Icons.check className='size-3.5' /> : i + 1}
-            </span>
-            <div className='min-w-0 flex-1 space-y-1.5'>
-              <p className='text-sm font-medium'>{st.title}</p>
-              {st.why && <p className='text-muted-foreground text-xs'>{st.why}</p>}
-              {note && st.tools.some((t) => LAUNCH_TOOLS.includes(t)) ? <p className='text-muted-foreground text-xs'>{note}</p> : (
-                <div className='flex items-center gap-2'>
-                  <code className='bg-muted min-w-0 flex-1 truncate rounded px-2 py-1 text-xs' title={st.prompt}>{st.prompt}</code>
-                  <CopyButton text={st.prompt} />
-                </div>)}
-              <p className='text-muted-foreground text-xs'>
-                {st.manual ? 'Marked by hand.' : `Done when your AI client runs ${st.tools.join(' or ')}.`}{st.done && st.at && <> Done <When d={st.at} />.</>}
-              </p>
-              {st.manual && <Allowed need='edit'><Button size='sm' variant={st.done ? 'outline' : 'default'} disabled={busy === st.id} onClick={() => mark(st)}>{st.done ? 'Mark not done' : 'Mark done'}</Button></Allowed>}
-            </div>
-          </li>
-        ))}
-      </ol>
-    </div>
-  );
-}
-
-function Workflow({ g, note }: { g: Setup['groups'][number]; note: string | null }) {
-  return (
-    <div className='flex flex-col gap-5'>
-      <dl>
-        <Field label='Used'>{g.used} of {g.total} tools</Field>
-        <Field label='Progress'><Progress done={g.used} total={g.total} /></Field>
-      </dl>
-      <div className='space-y-2'>
-        <p className='text-sm font-medium'>{g.used ? 'Do it again' : 'Try it'}</p>
-        {note ? <p className='text-muted-foreground text-sm'>{note}</p> : (<>
-          <div className='flex items-center gap-2'>
-            <code className='bg-muted min-w-0 flex-1 rounded px-2 py-1.5 text-xs whitespace-pre-wrap'>{g.prompt}</code>
-            <CopyButton text={g.prompt} />
+    <div className='flex flex-col gap-4'>
+      <DetailMeta title={j.name} subtitle={j.outcome} actions={help?.buttons}
+        badges={<StatusBadge tone={j.total > 0 && j.done >= j.total ? 'ok' : j.done ? 'info' : 'neutral'}>{`${j.done}/${j.total} done`}</StatusBadge>}
+        facts={[
+          { label: 'Person', value: r.who?.label ?? <span className='text-muted-foreground'>Nobody yet</span> },
+          { label: 'For', value: j.who, hidden: !j.who },
+          { label: 'Takes', value: j.time, hidden: !j.time },
+          { label: 'Progress', value: <Progress done={j.done} total={j.total} /> },
+          { label: 'Source', value: j.own ? `Your account${j.added_by ? ` · added by ${j.added_by.replace(/^customer:/, '')}` : ''}` : 'Octillion' }
+        ]}>
+        {help && (
+          <div className='flex flex-col gap-2 border-t pt-3 text-sm leading-snug'>
+            {help.line}
+            {help.note && <p className='text-muted-foreground border-l-2 pl-3 text-sm leading-relaxed whitespace-pre-wrap'>{help.note}</p>}
           </div>
-          <p className='text-muted-foreground text-xs'>Paste it into your AI client with Octillion connected.</p>
-        </>)}
-      </div>
+        )}
+      </DetailMeta>
+      <DetailTabs resetKey={r.key} tabs={[
+        { id: 'stages', label: 'Stages', count: j.stages.length, content: (
+          <DetailTable rows={stages} rowKey={(x) => x.st.id} noun='stages' empty='No stages.' cols={[
+            { key: 'n', label: '#', type: 'number', value: (x) => x.i + 1, className: 'w-12', render: (x) => (
+              <span className={cn('flex size-6 shrink-0 items-center justify-center rounded-full border text-xs font-semibold', x.st.done ? 'border-primary bg-primary text-primary-foreground' : 'text-muted-foreground')}>
+                {x.st.done ? <Icons.check className='size-3.5' /> : x.i + 1}
+              </span>
+            ) },
+            { key: 'step', label: 'Step', type: 'text', value: (x) => x.st.title, className: 'min-w-48 whitespace-normal', render: (x) => (
+              <span className='flex flex-col gap-1'>
+                <span className='text-sm font-medium'>{x.st.title}</span>
+                {x.st.why && <span className='text-muted-foreground text-xs leading-snug'>{x.st.why}</span>}
+              </span>
+            ) },
+            { key: 'prompt', label: 'Prompt', className: 'min-w-56 whitespace-normal', render: (x) => (note && x.st.tools.some((t) => LAUNCH_TOOLS.includes(t))
+              ? <span className='text-muted-foreground text-xs'>{note}</span>
+              : (
+                <span className='flex items-center gap-2'>
+                  <code className='bg-muted min-w-0 flex-1 truncate rounded px-2 py-1 text-xs' title={x.st.prompt}>{x.st.prompt}</code>
+                  <CopyButton text={x.st.prompt} />
+                </span>
+              )) },
+            { key: 'done', label: 'Done', type: 'select', value: (x) => (x.st.done ? 'Done' : 'Not done'), className: 'min-w-40 whitespace-normal', render: (x) => (
+              <span className='flex flex-col items-start gap-1.5'>
+                <span className='text-muted-foreground text-xs leading-snug'>
+                  {x.st.manual ? 'Marked by hand.' : `Done when your AI client runs ${x.st.tools.join(' or ')}.`}{x.st.done && x.st.at && <> Done <When d={x.st.at} />.</>}
+                </span>
+                {x.st.manual && <Allowed need='edit'><Button size='sm' variant={x.st.done ? 'outline' : 'default'} disabled={busy === x.st.id} onClick={() => mark(x.st)}>{x.st.done ? 'Mark not done' : 'Mark done'}</Button></Allowed>}
+              </span>
+            ) }
+          ]} />
+        ) }
+      ]} />
     </div>
   );
 }
 
+/** A workflow part: the card (who, how many tools used), then the prompt to try it. */
+function Workflow({ name, person, g, note }: { name: string; person: string | null; g: Setup['groups'][number]; note: string | null }) {
+  return (
+    <div className='flex flex-col gap-4'>
+      <DetailMeta title={name} subtitle='Workflow'
+        facts={[
+          { label: 'Person', value: person ?? <span className='text-muted-foreground'>Nobody yet</span> },
+          { label: 'Used', value: `${g.used} of ${g.total} tools` },
+          { label: 'Progress', value: <Progress done={g.used} total={g.total} /> }
+        ]} />
+      <DetailTabs tabs={[
+        { id: 'try', label: g.used ? 'Do it again' : 'Try it', content: (
+          <KeyValueTable rows={note ? [{ label: 'Prompt', value: <span className='text-muted-foreground'>{note}</span> }] : [
+            { label: 'Prompt', value: (
+              <div className='flex items-start gap-2'>
+                <div className='min-w-0 flex-1'><LongText mono>{g.prompt}</LongText></div>
+                <CopyButton text={g.prompt} />
+              </div>
+            ) },
+            { label: 'Where', value: 'Paste it into your AI client with Octillion connected.' }
+          ]} />
+        ) }
+      ]} />
+    </div>
+  );
+}
+
+/** An AI client this account connected: the card only (it has no lists). */
 function Client({ name, at }: { name: string; at: string }) {
   return (
-    <dl>
-      <Field label='Client'>{name}</Field>
-      <Field label='Last connected'><When d={at} /></Field>
-      <Field label='Add another'><Link className='text-primary underline-offset-4 hover:underline' href='/app'>Connection string on Setup & training</Link></Field>
-    </dl>
+    <DetailMeta title={name} subtitle='AI client'
+      facts={[
+        { label: 'Client', value: name },
+        { label: 'Last connected', value: <When d={at} /> },
+        { label: 'Add another', value: <Link className='text-primary underline-offset-4 hover:underline' href='/app'>Connection string on Setup & training</Link> }
+      ]} />
   );
 }
 
