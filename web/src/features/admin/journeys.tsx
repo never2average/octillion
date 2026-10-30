@@ -12,8 +12,8 @@ import { Input } from '@/components/ui/input';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Textarea } from '@/components/ui/textarea';
 import { Icons } from '@/components/icons';
+import { DetailMeta, DetailTable, DetailTabs, KeyValueTable, LongText } from '@/components/layout/detail';
 import { adminApi } from '@/lib/api-client';
-import { cn } from '@/lib/utils';
 import { Dock } from '@/features/portal/memory';
 import { post, useAdmin, useAdminAction } from './lib';
 import { blank, Editor, toDraft, type Draft, type Playbook } from './playbooks';
@@ -37,16 +37,7 @@ type T = Extract<Row, { kind: 'tip' }>;
 interface Ask { title: string; description: ReactNode; label: string; run: () => void }
 
 const NA = <span className='text-muted-foreground'>—</span>;
-const Label = ({ children }: { children: ReactNode }) => <div className='text-muted-foreground mb-2 text-xs font-medium leading-none'>{children}</div>;
-/** Long prose under a plain label: Field centres its label (items-center), which floats beside multi-line values. */
-const Prose = ({ label, children }: { label: string; children: ReactNode }) => (
-  <div className='flex flex-col gap-2'><div className='text-muted-foreground text-xs font-medium leading-none'>{label}</div><div className='text-sm leading-relaxed whitespace-pre-wrap'>{children}</div></div>);
-const Dot = () => <span className='text-muted-foreground/60'>·</span>;
 const Muted = ({ children }: { children: ReactNode }) => <span className='text-muted-foreground'>{children}</span>;
-// The peek states status as a plain word (the table keeps the badge): live states in foreground, finished ones muted.
-const Status = ({ s }: { s: string }) => <span className={cn('capitalize', s === 'promoted' || s === 'shown' || s === 'waiting' ? 'text-foreground font-medium' : 'text-muted-foreground')}>{s}</span>;
-const META = 'text-muted-foreground flex flex-wrap items-center gap-x-2 gap-y-1 text-xs leading-none';
-const PROMPT = 'font-mono text-xs leading-relaxed whitespace-pre-wrap border-l-2 pl-3';
 /** queued · shown · dismissed · active for one journey/step across every account; numbers in foreground, words muted. */
 const Delivery = ({ x }: { x: StepStat }) => (
   <span className='text-sm tabular-nums'>{x.queued} <Muted>queued ·</Muted> {x.shown} <Muted>shown ·</Muted> {x.dismissed} <Muted>dismissed ·</Muted> {x.active} <Muted>active</Muted></span>);
@@ -177,13 +168,12 @@ export function AdminJourneys() {
           { label: 'PostHog setup', icon: <Icons.settings />, onSelect: () => setSetup(true) }
         ]}
         empty='No journeys or tips yet.'
-        detailTitle={(r) => r.kind === 'journey' ? r.p.name : r.t.message}
+        detailTitle={(r) => r.kind === 'journey' ? 'Journey' : 'Tip'}
         // Journeys keep Edit inline (and only there); a tip's actions all sit in ⋯.
-        detailActions={(r) => r.kind === 'journey' ? (<>
+        detail={(r) => r.kind === 'journey' ? <JourneyBody p={r.p} nj={nj} actions={<>
           <Gate need='library'><Button size='sm' variant='outline' onClick={() => setDraft(toDraft(r.p))}><Icons.edit /> Edit</Button></Gate>
           <ActionsMenu items={actions(r).filter((a) => a.label !== 'Edit')} />
-        </>) : <ActionsMenu items={actions(r)} />}
-        detail={(r) => r.kind === 'journey' ? <JourneyBody p={r.p} nj={nj} /> : <TipBody t={r.t} steps={nj?.steps ?? []} />}
+        </>} /> : <TipBody t={r.t} steps={nj?.steps ?? []} actions={<ActionsMenu items={actions(r)} />} />}
       />
       {draft && <Editor draft={draft} tools={pb?.tools ?? []} onClose={() => setDraft(null)} />}
       {tipping && <TipDock key={tipping.n} initial={tipping.v} onClose={() => setTipping(null)} />}
@@ -204,129 +194,133 @@ export function AdminJourneys() {
   );
 }
 
-/** The journey peek: one meta line, adoption, each stage as the customer runs it (with how many accounts did it), the
- * tips sent for it, then the customer copy last. Sections are split by gap only. */
-function JourneyBody({ p, nj }: { p: Playbook; nj?: Nudges }) {
+/** The journey peek: the card (status, origin, id, adoption, the actions), then tabs: each stage as the customer runs
+ * it (with how many accounts did it), the tips sent for it, delivery per step, and the customer copy. */
+function JourneyBody({ p, nj, actions }: { p: Playbook; nj?: Nudges; actions: ReactNode }) {
   const a = p.adoption, started = a?.started ?? 0, active = p.accounts_active ?? 0;
   const by = p.updated_by && p.updated_by !== 'built-in' ? p.updated_by : null;
-  const tips = (nj?.recent ?? []).filter((t) => t.journey === p.id).sort((x, y) => +new Date(y.created_at) - +new Date(x.created_at));
+  const tips = (nj?.recent ?? []).filter((t) => t.journey === p.id);
   const st = (nj?.steps ?? []).filter((x) => x.journey === p.id);
   // `recent` is the newest 50 tips across every journey, so the count comes from the per-step totals (count(*) as a string).
-  const total = Math.max(tips.length, st.reduce((n, x) => n + Number(x.queued), 0)), list = tips.slice(0, 8);
+  const total = Math.max(tips.length, st.reduce((n, x) => n + Number(x.queued), 0));
+  const stages = p.stages.map((s, k) => ({ s, k, f: a?.funnel.find((x) => x.id === s.id) ?? a?.funnel[k] }));
+  const hasCopy = !!(p.outcome || p.who || p.time || p.example.title || p.example.result);
+  const none = !a || started === 0;
   return (
-    <div className='flex flex-col gap-8'>
-      <div className={META}>
-        <Status s={p.promoted ? 'promoted' : 'hidden'} /><Dot />
-        <span>{SEEDED.has(p.id) ? 'Built-in' : 'Written by hand'}</span><Dot />
-        <Mono>{p.id}</Mono><Dot />
-        <span>Updated <When d={p.updated_at} />{by && ` by ${by}`}</span>
-      </div>
-
-      <section>
-        <Label>Adoption</Label>
-        {!a || started === 0
-          ? <p className='text-muted-foreground text-sm leading-none'>No account has started this journey yet <Dot /> {active} active accounts.</p>
-          : (
-            <dl className='tabular-nums'>
-              <Field label='Started'>{started}<Muted> of {active} active accounts · {pct(started, active)}</Muted></Field>
-              <Field label='Finished'>{a.completed}<Muted> · {pct(a.completed, started)} of starters</Muted></Field>
-              {started > a.completed && <Field label='Not finished'>{started - a.completed}<Muted> started but not finished</Muted></Field>}
-              {a.dropoff && <Field label='Most stop at'>{a.dropoff.title}<Muted> · −{a.dropoff.lost}</Muted></Field>}
-              <Field label='Median to finish'>{hours(a.median_hours_to_complete) ?? <Muted>No one has finished yet</Muted>}</Field>
-              <Field label='Last activity'><When d={a.last_activity} /></Field>
-            </dl>
-          )}
-      </section>
-
-      <section>
-        <Label>Stages<span className='tabular-nums'> {p.stages.length}</span></Label>
-        {!p.stages.length && <p className='text-muted-foreground text-sm leading-none'>No stages yet.</p>}
-        <ol>
-          {p.stages.map((s, k) => {
-            // Each stage's count is computed on its own (src/playbooks.ts), so a later stage can top an earlier one: "did this", not a funnel.
-            const f = a?.funnel.find((x) => x.id === s.id) ?? a?.funnel[k];
-            return (
-              <li key={s.id ?? k} className='grid grid-cols-[1.25rem_minmax(0,1fr)_auto] items-baseline gap-x-3 gap-y-1.5 border-b py-3 last:border-b-0'>
-                <span className='text-muted-foreground text-xs tabular-nums leading-none'>{k + 1}</span>
-                <span className='truncate text-sm font-medium leading-none' title={s.title}>{s.title}</span>
-                <span className='text-muted-foreground text-xs tabular-nums leading-none'>
-                  {started > 0 && f ? `${f.reached} did this` : '—'}
-                  {s.id && s.id === a?.dropoff?.id && <span className='text-amber-600 dark:text-amber-400'> · −{a.dropoff.lost}</span>}
-                </span>
-                {s.why && <p className='text-muted-foreground col-span-2 col-start-2 text-xs leading-snug'>{s.why}</p>}
-                <code className={cn('col-span-2 col-start-2', PROMPT)}>{s.prompt}</code>
-                <div className={cn('col-span-2 col-start-2', META)}>
-                  {s.expect && <><span>You&apos;ll see <span className='text-foreground'>{s.expect}</span></span><Dot /></>}
-                  {s.manual || !s.tools.length
-                    ? <span>Marked by the customer</span>
-                    : <span>Done by {s.tools.map((t, i) => <span key={t}>{i > 0 && ', '}<Mono>{t}</Mono></span>)}</span>}
-                </div>
-              </li>
-            );
-          })}
-        </ol>
-      </section>
-
-      <section>
-        <Label>Tips<span className='tabular-nums'> {total}</span></Label>
-        {st.length > 0 && <dl className='mb-4'>{st.map((x) => <Field key={x.step} label={<Mono>{x.step}</Mono>}><Delivery x={x} /></Field>)}</dl>}
-        {total
-          ? (<>
-            <ul>
-              {list.map((t) => (
-                <li key={t.id} className='flex items-center gap-3 border-b py-2.5 text-sm leading-none last:border-b-0'>
-                  <span className='min-w-0 flex-1 truncate' title={t.message}>{t.message}</span>
-                  <span className='text-muted-foreground flex shrink-0 items-center gap-2 text-xs'>{t.org_name}<Dot /><span className='capitalize'>{tipState(t)}</span><Dot /><When d={t.created_at} /></span>
-                </li>
-              ))}
-            </ul>
-            {/* Older tips fall outside the newest 50 loaded, so they are counted but not listed. */}
-            {!list.length ? <p className='text-muted-foreground text-sm leading-none'>None among the 50 newest tips loaded.</p>
-              : total > list.length && <p className='text-muted-foreground mt-2 text-xs leading-none tabular-nums'>{total - list.length} more{tips.length > list.length && ' in the Tips view'}</p>}
-          </>)
-          : <p className='text-muted-foreground text-sm leading-none'>No tips sent for this journey.</p>}
-      </section>
-
-      {(p.outcome || p.who || p.time || p.example.title || p.example.result) && (
-        <section>
-          <Label>Customer copy</Label>
-          <div className='flex flex-col gap-4'>
-            {p.outcome && <Prose label='Outcome'>{p.outcome}</Prose>}
-            {p.who && <Prose label='For'>{p.who}</Prose>}
-            {p.time && <Prose label='Takes'>{p.time}</Prose>}
-            {(p.example.title || p.example.result) && <Prose label='Worked example'><span className='font-medium'>{p.example.title}</span>{p.example.result && <p className='text-muted-foreground mt-1'>{p.example.result}</p>}</Prose>}
-          </div>
-        </section>
-      )}
+    <div className='flex flex-col gap-4'>
+      <DetailMeta
+        title={p.name}
+        badges={<>
+          <StatusBadge tone={TONE[p.promoted ? 'promoted' : 'hidden']}>{p.promoted ? 'promoted' : 'hidden'}</StatusBadge>
+          <StatusBadge tone='neutral'>{SEEDED.has(p.id) ? 'Built-in' : 'Written by hand'}</StatusBadge>
+        </>}
+        actions={actions}
+        facts={[
+          { label: 'Id', value: <Mono>{p.id}</Mono> },
+          { label: 'Updated', value: <When d={p.updated_at} />, hint: by ? `by ${by}` : undefined },
+          { label: 'Started', value: <span className='tabular-nums'>{started}<Muted> of {active} active accounts{!none && ` · ${pct(started, active)}`}</Muted></span>,
+            hint: none ? 'No account has started this journey yet' : undefined },
+          { label: 'Finished', hidden: none, value: <span className='tabular-nums'>{a?.completed}<Muted> · {pct(a?.completed ?? 0, started)} of starters</Muted></span>,
+            hint: started > (a?.completed ?? 0) ? `${started - (a?.completed ?? 0)} started but not finished` : undefined },
+          { label: 'Most stop at', hidden: none || !a?.dropoff, value: a?.dropoff && <>{a.dropoff.title}<Muted> · −{a.dropoff.lost}</Muted></> },
+          { label: 'Median to finish', hidden: none, value: hours(a?.median_hours_to_complete) ?? <Muted>No one has finished yet</Muted> },
+          { label: 'Last activity', hidden: none, value: <When d={a?.last_activity} /> }
+        ]}
+      />
+      <DetailTabs resetKey={p.id} tabs={[
+        { id: 'stages', label: 'Stages', count: p.stages.length, content: (
+          // Each stage's count is computed on its own (src/playbooks.ts), so a later stage can top an earlier one: "did this", not a funnel.
+          <DetailTable rows={stages} rowKey={(r) => r.s.id ?? String(r.k)} noun='stages' empty='No stages yet.'
+            search={(r) => `${r.s.title} ${r.s.why ?? ''} ${r.s.prompt} ${r.s.tools.join(' ')}`} cols={[
+            { key: 'k', label: '#', type: 'number', value: (r) => r.k + 1, render: (r) => <span className='text-muted-foreground tabular-nums'>{r.k + 1}</span>, className: 'w-8' },
+            { key: 'title', label: 'Stage', type: 'text', value: (r) => r.s.title, className: 'min-w-40 whitespace-normal', render: (r) => (
+              <span className='flex flex-col gap-1.5'><span className='font-medium leading-snug'>{r.s.title}</span>
+                {r.s.why && <span className='text-muted-foreground text-xs leading-snug'>{r.s.why}</span>}</span>
+            ) },
+            { key: 'prompt', label: 'Prompt', className: 'min-w-56 whitespace-normal', render: (r) => (
+              <span className='flex flex-col gap-1.5'><span className='font-mono text-xs leading-relaxed whitespace-pre-wrap'>{r.s.prompt}</span>
+                {r.s.expect && <span className='text-muted-foreground text-xs leading-snug'>You&apos;ll see <span className='text-foreground'>{r.s.expect}</span></span>}</span>
+            ) },
+            { key: 'done', label: 'Done by', className: 'whitespace-normal', render: (r) => (r.s.manual || !r.s.tools.length
+              ? <Muted>Marked by the customer</Muted>
+              : <span className='text-xs'>{r.s.tools.map((t, i) => <span key={t}>{i > 0 && ', '}<Mono>{t}</Mono></span>)}</span>) },
+            { key: 'reached', label: 'Did this', type: 'number', value: (r) => (started > 0 && r.f ? r.f.reached : null), className: 'w-24 text-right tabular-nums', render: (r) => (<>
+              {started > 0 && r.f ? r.f.reached : NA}
+              {r.s.id && r.s.id === a?.dropoff?.id && <span className='text-amber-600 dark:text-amber-400 block text-xs'>−{a.dropoff.lost}</span>}
+            </>) }
+          ]} />
+        ) },
+        { id: 'tips', label: 'Tips', count: total, content: (
+          // Older tips fall outside the newest 50 loaded, so they are counted but not listed.
+          <DetailTable rows={tips} rowKey={(t) => String(t.id)} noun='tips' defaultSort={[{ key: 'created_at', dir: 'desc' }]}
+            empty={total ? 'None among the 50 newest tips loaded.' : 'No tips sent for this journey.'}
+            search={(t) => `${t.message} ${t.org_name} ${t.step}`} cols={[
+            { key: 'message', label: 'Message', type: 'text', value: (t) => t.message, render: (t) => t.message, className: 'whitespace-normal leading-snug' },
+            { key: 'org', label: 'Account', type: 'text', value: (t) => t.org_name, render: (t) => t.org_name },
+            { key: 'state', label: 'State', type: 'select', value: tipState, render: (t) => <span className='capitalize'>{tipState(t)}</span> },
+            { key: 'created_at', label: 'Queued', type: 'date', value: (t) => t.created_at, render: (t) => <When d={t.created_at} /> }
+          ]} />
+        ) },
+        { id: 'delivery', label: 'Delivery', count: st.length, hidden: !st.length, content: (
+          <DetailTable rows={st} rowKey={(x) => x.step} noun='steps' empty='Nothing delivered yet.' cols={[
+            { key: 'step', label: 'Step', type: 'text', value: (x) => x.step, render: (x) => <Mono>{x.step}</Mono> },
+            { key: 'queued', label: 'Queued', type: 'number', value: (x) => Number(x.queued), render: (x) => x.queued, className: 'text-right tabular-nums' },
+            { key: 'shown', label: 'Shown', type: 'number', value: (x) => Number(x.shown), render: (x) => x.shown, className: 'text-right tabular-nums' },
+            { key: 'dismissed', label: 'Dismissed', type: 'number', value: (x) => Number(x.dismissed), render: (x) => x.dismissed, className: 'text-right tabular-nums' },
+            { key: 'active', label: 'Active', type: 'number', value: (x) => Number(x.active), render: (x) => x.active, className: 'text-right tabular-nums' },
+            { key: 'last', label: 'Last', type: 'date', value: (x) => x.last, render: (x) => <When d={x.last} /> }
+          ]} />
+        ) },
+        { id: 'copy', label: 'Customer copy', hidden: !hasCopy, content: (
+          <KeyValueTable rows={[
+            { label: 'Outcome', hidden: !p.outcome, value: <LongText>{p.outcome}</LongText> },
+            { label: 'For', hidden: !p.who, value: <LongText>{p.who}</LongText> },
+            { label: 'Takes', hidden: !p.time, value: p.time },
+            { label: 'Worked example', hidden: !(p.example.title || p.example.result), value: <><span className='font-medium'>{p.example.title}</span>{p.example.result && <p className='text-muted-foreground mt-1 whitespace-pre-wrap'>{p.example.result}</p>}</> }
+          ]} />
+        ) }
+      ]} />
     </div>
   );
 }
 
-/** The tip peek: one meta line, the full message (the title truncates it), its prompt, then delivery to its account and
- * how its journey/step is doing across every account. Never links into the customer's account. */
-function TipBody({ t, steps }: { t: Tip; steps: StepStat[] }) {
+/** The tip peek: the card (state, source, who it goes to, delivery, the actions), then the full message (the card's
+ * title truncates it) and its prompt. Never links into the customer's account. */
+function TipBody({ t, steps, actions }: { t: Tip; steps: StepStat[]; actions: ReactNode }) {
   const agg = steps.find((x) => x.journey === t.journey && x.step === t.step);
+  const state = tipState(t);
   return (
-    <div className='flex flex-col gap-8'>
-      <div className={META}>
-        <Status s={tipState(t)} /><Dot />
-        <span>{t.source === 'admin' ? 'By hand' : 'From PostHog'}</span><Dot />
-        <Mono>{t.journey} / {t.step}</Mono>
-      </div>
-      <Prose label='Message'>{t.message}</Prose>
-      {t.prompt && <section><Label>Prompt</Label><code className={cn('block', PROMPT)}>{t.prompt}</code></section>}
-      <dl>
-        <Field label='To'>
-          {t.org_name}
-          {!t.user_id ? <Muted> · everyone</Muted> : t.email ? <Muted> · {t.email}</Muted>
-            : <><Muted> · one person (email unknown) </Muted><span className='text-muted-foreground font-mono text-xs' title={t.user_id}>{t.user_id}</span></>}
-        </Field>
-        <Field label='Shown'>{t.shown_count ? <><span className='tabular-nums'>{t.shown_count}×</span>{t.last_shown_at && <Muted> · last <When d={t.last_shown_at} /></Muted>}</> : <Muted>Not yet</Muted>}</Field>
-        <Field label='Queued'>{t.created_at ? <When d={t.created_at} /> : NA}</Field>
-        <Field label='Ends'>{t.dismissed_at ? <>Dismissed <When d={t.dismissed_at} /></> : !t.expires_at ? NA
-          : new Date(t.expires_at) < new Date() ? <>Expired <When d={t.expires_at} /></> : <>Expires <When d={t.expires_at} /></>}</Field>
-        {agg && <Field label='All accounts'><Delivery x={agg} /></Field>}
-      </dl>
+    <div className='flex flex-col gap-4'>
+      <DetailMeta
+        title={t.message}
+        badges={<>
+          <StatusBadge tone={TONE[state]}>{state === 'shown' ? `shown ${t.shown_count}×` : state}</StatusBadge>
+          <StatusBadge tone='neutral'>{t.source === 'admin' ? 'By hand' : 'From PostHog'}</StatusBadge>
+        </>}
+        actions={actions}
+        facts={[
+          { label: 'Journey / step', value: <Mono>{t.journey} / {t.step}</Mono> },
+          { label: 'To', value: <>
+            {t.org_name}
+            {!t.user_id ? <Muted> · everyone</Muted> : t.email ? <Muted> · {t.email}</Muted>
+              : <><Muted> · one person (email unknown) </Muted><span className='text-muted-foreground font-mono text-xs' title={t.user_id}>{t.user_id}</span></>}
+          </> },
+          { label: 'Shown', value: t.shown_count ? <span className='tabular-nums'>{t.shown_count}×</span> : <Muted>Not yet</Muted>,
+            hint: t.shown_count && t.last_shown_at ? <>last <When d={t.last_shown_at} /></> : undefined },
+          { label: 'Queued', value: t.created_at ? <When d={t.created_at} /> : NA },
+          { label: 'Ends', value: t.dismissed_at ? <>Dismissed <When d={t.dismissed_at} /></> : !t.expires_at ? NA
+            : new Date(t.expires_at) < new Date() ? <>Expired <When d={t.expires_at} /></> : <>Expires <When d={t.expires_at} /></> },
+          { label: 'All accounts', hidden: !agg, wide: true, value: agg && <Delivery x={agg} /> }
+        ]}
+      />
+      <DetailTabs resetKey={t.id} tabs={[
+        { id: 'message', label: 'Message', content: (
+          <KeyValueTable rows={[
+            { label: 'Message', value: <LongText>{t.message}</LongText> },
+            { label: 'Prompt', hidden: !t.prompt, value: <LongText mono>{t.prompt}</LongText> }
+          ]} />
+        ) }
+      ]} />
     </div>
   );
 }
