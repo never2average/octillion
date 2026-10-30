@@ -216,7 +216,6 @@ export async function enrichProspects(actor: string, body: { ids?: unknown; forc
       }
       matched++;
       const email = typeof m.email === "string" && mail.isEmail(m.email) ? m.email.toLowerCase() : null;
-      const status = EMAIL_STATUS[String(m.email_status ?? "").toLowerCase()] ?? (email ? "unknown" : r.email_status);
       const orgDomain = domainOf(m.organization?.primary_domain ?? m.organization?.website_url) ?? (email ? companyDomainOf(email) : null);
       const companyId = orgDomain ? (await upsertCompany(orgDomain, { name: m.organization?.name, industry: m.organization?.industry, employees: m.organization?.estimated_num_employees,
         country: m.organization?.country }, "apollo")).id : null;
@@ -225,6 +224,10 @@ export async function enrichProspects(actor: string, body: { ids?: unknown; forc
       // record is scrubbed of it.
       const taken = email && email !== r.email ? (await db.query("SELECT 1 FROM gtm_prospects WHERE email = $1 AND id <> $2", [email, r.id])).length > 0 : false;
       const suppressed = email ? (await db.query("SELECT 1 FROM email_suppressions WHERE email_hash = $1", [mail.hashAddress(email)])).length > 0 : false;
+      // Apollo's email_status is about Apollo's address: it is kept only when that is the address the prospect has
+      // (theirs already, or Apollo's just taken), never put on a different one.
+      const finalEmail = r.email ?? (email && !taken && !suppressed ? email : null);
+      const status = email && finalEmail === email ? EMAIL_STATUS[String(m.email_status ?? "").toLowerCase()] ?? "unknown" : r.email_status;
       await db.query(
         `UPDATE gtm_prospects SET apollo_id = coalesce(apollo_id, $2), email = CASE WHEN $3::text IS NOT NULL THEN $3 ELSE email END,
                 email_status = $4, first_name = coalesce($5, first_name), last_name = coalesce($6, last_name), title = coalesce($7, title), seniority = coalesce($8, seniority),

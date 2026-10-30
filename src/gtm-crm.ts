@@ -20,7 +20,7 @@
  *   timeline    the prospect's own entries (notes, status changes, import, enrichment, links, deals) and, from the
  *               campaign tables, each email sent, opened, clicked, bounced and each reply.
  */
-import { getDb } from "./db.js";
+import { getDb, type Queryable } from "./db.js";
 import { AdminError, log, accountPeople } from "./admin.js";
 import * as mail from "./email.js";
 import { cleanCountry, OPT_IN_COUNTRIES } from "./gtm-consent.js";
@@ -32,7 +32,7 @@ export const BASES = ["legitimate_interest", "consent", "contract"] as const;
 export type Basis = (typeof BASES)[number];
 export const EMAIL_STATUSES = ["verified", "unverified", "likely_to_engage", "extrapolated", "unavailable", "invalid", "unknown"] as const;
 export const SIZES = ["1-10", "11-50", "51-200", "201-500", "501-1000", "1001-5000", "5001+"] as const;
-const IMPORT_MAX = 5000;
+const IMPORT_MAX = 5000, IMPORT_CHUNK = 200;
 
 /** Mail providers anyone can sign up to: their domain says nothing about a company, so it never links or dedupes one. */
 export const FREEMAIL = new Set(["gmail.com", "googlemail.com", "yahoo.com", "ymail.com", "outlook.com", "hotmail.com", "live.com", "msn.com", "icloud.com", "me.com",
@@ -75,9 +75,9 @@ export interface CompanyInput { domain?: unknown; name?: unknown; industry?: unk
  * The company for a domain: created when new, else its empty fields filled (never overwritten). Returns its id and
  * whether it was new. The one place a company is written from an import or Apollo.
  */
-export async function upsertCompany(domain: string, f: CompanyInput, source: string): Promise<{ id: number; created: boolean }> {
+export async function upsertCompany(domain: string, f: CompanyInput, source: string, q?: Queryable): Promise<{ id: number; created: boolean }> {
   const employees = f.employees == null || f.employees === "" ? null : Math.max(0, Math.trunc(Number(f.employees))) || null;
-  const [r] = await (await getDb()).query<{ id: number; created: boolean }>(
+  const [r] = await (q ?? await getDb()).query<{ id: number; created: boolean }>(
     `INSERT INTO gtm_companies (domain, name, industry, size, employees, country, source, owner) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      ON CONFLICT (domain) DO UPDATE SET name = CASE WHEN gtm_companies.name = gtm_companies.domain AND excluded.name <> excluded.domain THEN excluded.name ELSE gtm_companies.name END,
             industry = coalesce(gtm_companies.industry, excluded.industry), size = coalesce(gtm_companies.size, excluded.size),
@@ -123,7 +123,13 @@ export async function updateCompany(actor: string, id: number, body: CompanyInpu
   const set: string[] = [], vals: unknown[] = [idOf(id, "company")];
   const put = (col: string, v: unknown) => { vals.push(v); set.push(`${col} = $${vals.length}`); };
   if (body.name !== undefined) put("name", str(body.name, 200) || fail("A company needs a name"));
-  if (body.domain !== undefined) put("domain", domainOf(body.domain) ?? fail("Not a domain"));
+  if (body.domain !== undefined) {
+    const d = domainOf(body.domain) ?? fail("Not a domain");
+    // A company linked to an account keeps its domain: its people stay recognised as the customer's.
+    const [cur] = await db.query<{ domain: string; org_id: number | null }>("SELECT domain, org_id FROM gtm_companies WHERE id = $1", [id]);
+    if (cur && cur.org_id != null && cur.domain !== d) fail("This company is linked to an Octillion account: its domain cannot change", 409);
+    put("domain", d);
+  }
   if (body.industry !== undefined) put("industry", opt(body.industry, 120));
   if (body.size !== undefined) put("size", sizeOf(body.size));
   if (body.country !== undefined) put("country", cleanCountry(body.country));
@@ -168,15 +174,18 @@ export async function importCompanies(actor: string, body: { rows?: unknown; dry
 }
 
 export async function deleteCompany(actor: string, id: number) {
-  const r = await (await getDb()).query("DELETE FROM gtm_companies WHERE id = $1 RETURNING id", [idOf(id, "company")]);
-  if (!r.length) fail(`No company ${id}`, 404);
+  // Linked to an account: kept, so its people are never taken for cold prospects again.
+  const [c] = await (await getDb()).query<{ org_id: number | null }>("SELECT org_id FROM gtm_companies WHERE id = $1", [idOf(id, "company")]);
+  if (!c) fail(`No company ${id}`, 404);
+  if (c.org_id != null) fail("This company is linked to an Octillion account and cannot be deleted", 409);
+  await (await getDb()).query("DELETE FROM gtm_companies WHERE id = $1", [id]);
   log(actor, "gtm.company_delete", null, { company_id: id });
 }
 
 // ---------- prospects ----------
 
-export async function activity(prospectId: number, type: string, body: string | null, data: Record<string, unknown> = {}, actor: string | null = null) {
-  await (await getDb()).query("INSERT INTO gtm_prospect_activities (prospect_id, type, body, data, actor) VALUES ($1, $2, $3, $4::jsonb, $5)",
+export async function activity(prospectId: number, type: string, body: string | null, data: Record<string, unknown> = {}, actor: string | null = null, q?: Queryable) {
+  await (q ?? await getDb()).query("INSERT INTO gtm_prospect_activities (prospect_id, type, body, data, actor) VALUES ($1, $2, $3, $4::jsonb, $5)",
     [prospectId, type, body?.slice(0, 4000) ?? null, JSON.stringify(data), actor]);
 }
 
@@ -331,6 +340,8 @@ export async function bulkUpdate(actor: string, body: { ids?: unknown; status?: 
 export interface ImportRowResult {
   row: number; action: "create" | "update" | "skip" | "refuse"; reason: string | null; email: string | null; name: string | null; company: string | null;
   domain: string | null; country: string | null; basis: Basis | null; suppressed: boolean; prospect_id?: number;
+  /** The real run: written (its chunk committed). */
+  applied?: boolean;
 }
 
 /**
@@ -361,6 +372,8 @@ export async function importProspects(actor: string, body: { rows?: unknown; dry
   const out: ImportRowResult[] = [];
   let companiesNew = 0;
   const newDomains = new Set<string>();
+  const companyIds = [...new Set(rows.flatMap((r) => (r?.company_id != null && r.company_id !== "" ? [Number(r.company_id)] : [])).filter((n) => Number.isSafeInteger(n) && n > 0))];
+  const knownCompanies = new Set((companyIds.length ? await db.query<{ id: number }>("SELECT id FROM gtm_companies WHERE id = ANY($1::bigint[])", [companyIds]) : []).map((r) => Number(r.id)));
   for (const [i, raw] of rows.entries()) {
     const f = (raw && typeof raw === "object" ? raw : {}) as ProspectInput;
     const email = str(f.email, 254).toLowerCase() || null;
@@ -373,14 +386,20 @@ export async function importProspects(actor: string, body: { rows?: unknown; dry
     const res: ImportRowResult = { row: i + 1, action: "create", reason: null, email, name: [first, last].filter(Boolean).join(" ") || null, company: str(f.company, 200) || domain,
       domain, country, basis, suppressed: !!email && suppressed.has(email) };
     const key = email ?? (apolloId ? `apollo:${apolloId}` : `${(first ?? "").toLowerCase()} ${(last ?? "").toLowerCase()}@${domain ?? ""}`);
+    const existingId = (email && have.get(email)) || (apolloId ? haveApollo.get(apolloId) : undefined);
+    const companyId = f.company_id == null || f.company_id === "" ? null : Number(f.company_id);
     if (email && !mail.isEmail(email)) Object.assign(res, { action: "refuse", reason: "Not a valid email address" });
     else if (!email && !apolloId && !(first && domain)) Object.assign(res, { action: "refuse", reason: "No email address, and no name with a company domain" });
     else if (f.lawful_basis != null && f.lawful_basis !== "" && !own) Object.assign(res, { action: "refuse", reason: `Unknown lawful basis "${str(f.lawful_basis, 40)}": use ${BASES.join(", ")}` });
     else if (!basis) Object.assign(res, { action: "refuse", reason: "No lawful basis: add a lawful_basis column or choose one for the import" });
-    else if (country && restrictedCountry(country) && !own && !explicitRestricted) Object.assign(res, { action: "refuse", reason: `${country} is in the EU / EEA / UK / CH: give this person's lawful basis explicitly` });
+    // Someone new in the EU / EEA / UK / CH, or with no country at all, needs their basis given explicitly (an existing
+    // prospect keeps the basis they have).
+    else if (!existingId && restrictedCountry(country) && !own && !explicitRestricted)
+      Object.assign(res, { action: "refuse", reason: country ? `${country} is in the EU / EEA / UK / CH: give this person's lawful basis explicitly` : "No country: give this person's lawful basis explicitly (or a country)" });
     else if (res.suppressed) Object.assign(res, { action: "refuse", reason: "On the suppression list (unsubscribed, bounced or complained)" });
+    else if (!domain && companyId != null && !knownCompanies.has(companyId)) Object.assign(res, { action: "refuse", reason: `No company ${String(f.company_id).slice(0, 20)}` });
     else if (seen.has(key)) Object.assign(res, { action: "skip", reason: "Duplicate of an earlier row in this file" });
-    else if ((email && have.has(email)) || (apolloId && haveApollo.has(apolloId))) Object.assign(res, { action: "update", reason: "Already a prospect: empty fields are filled in", prospect_id: (email && have.get(email)) || haveApollo.get(apolloId!) });
+    else if (existingId) Object.assign(res, { action: "update", reason: "Already a prospect: empty fields are filled in", prospect_id: existingId });
     seen.add(key);
     if (domain && (res.action === "create" || res.action === "update") && !newDomains.has(domain)) newDomains.add(domain);
     out.push(res);
@@ -393,41 +412,63 @@ export async function importProspects(actor: string, body: { rows?: unknown; dry
   const summary = { rows: rows.length, create: count("create"), update: count("update"), skip: count("skip"), refuse: count("refuse"), suppressed: out.filter((r) => r.suppressed).length, companies_new: companiesNew };
   if (dry) return { dry_run: true, summary, rows: out };
 
+  // Written in transactions of IMPORT_CHUNK rows: a chunk is applied whole or not at all, and the answer says which
+  // rows were (a timeout or an error part-way leaves earlier chunks in, never half of one).
   const written: number[] = [];
-  for (const [i, res] of out.entries()) {
-    if (res.action !== "create" && res.action !== "update") continue;
-    const f = rows[i] as ProspectInput;
-    const { first, last } = nameParts(f);
-    const companyId = res.domain ? (await upsertCompany(res.domain, { name: f.company, industry: f.industry, size: f.size, country: f.company_country ?? f.country, owner }, source)).id
-      : f.company_id ? idOf(f.company_id, "company") : null;
-    const tags = [...new Set([...tagsOf(f.tags), ...extraTags])];
-    const tz = validZone(f.time_zone) ? (f.time_zone as string) : null;
-    const emailStatus = (EMAIL_STATUSES as readonly string[]).includes(String(f.email_status)) ? String(f.email_status) : "unknown";
-    const vals = [res.email, first, last, opt(f.title, 160), opt(f.seniority, 40), linkedinOf(f.linkedin_url), res.country, tz, owner, tags, source, res.basis,
-      opt(f.basis_note, 300) ?? note, companyId, opt(f.apollo_id, 80), emailStatus];
-    if (res.action === "update") {
-      await db.query(
-        `UPDATE gtm_prospects SET email = coalesce(email, $2), first_name = coalesce(first_name, $3), last_name = coalesce(last_name, $4), title = coalesce(title, $5),
-                seniority = coalesce(seniority, $6), linkedin_url = coalesce(linkedin_url, $7), country = coalesce(country, $8), time_zone = coalesce(time_zone, $9),
-                tags = coalesce((SELECT array_agg(DISTINCT t) FROM unnest(tags || $10::text[]) t), '{}'), company_id = coalesce(company_id, $11), apollo_id = coalesce(apollo_id, $12),
-                email_status = CASE WHEN email_status = 'unknown' THEN $13 ELSE email_status END, updated_at = now() WHERE id = $1`,
-        [res.prospect_id, ...vals.slice(0, 8), tags, companyId, opt(f.apollo_id, 80), emailStatus]);
-      written.push(res.prospect_id!);
-      continue;
+  const todo = out.map((res, i) => ({ res, i })).filter((x) => x.res.action === "create" || x.res.action === "update");
+  let failed: string | null = null;
+  for (let k = 0; k < todo.length && !failed; k += IMPORT_CHUNK) {
+    const chunk = todo.slice(k, k + IMPORT_CHUNK);
+    try {
+      const done = await db.transaction(async (tx) => {
+        const ids: number[] = [];
+        for (const { res, i } of chunk) {
+          const f = rows[i] as ProspectInput;
+          const { first, last } = nameParts(f);
+          const companyId = res.domain ? (await upsertCompany(res.domain, { name: f.company, industry: f.industry, size: f.size, country: f.company_country ?? f.country, owner }, source, tx)).id
+            : f.company_id != null && f.company_id !== "" ? Number(f.company_id) : null;
+          const tags = [...new Set([...tagsOf(f.tags), ...extraTags])];
+          const tz = validZone(f.time_zone) ? (f.time_zone as string) : null;
+          const emailStatus = (EMAIL_STATUSES as readonly string[]).includes(String(f.email_status)) ? String(f.email_status) : "unknown";
+          if (res.action === "update") {
+            await tx.query(
+              `UPDATE gtm_prospects SET email = coalesce(email, $2), first_name = coalesce(first_name, $3), last_name = coalesce(last_name, $4), title = coalesce(title, $5),
+                      seniority = coalesce(seniority, $6), linkedin_url = coalesce(linkedin_url, $7), country = coalesce(country, $8), time_zone = coalesce(time_zone, $9),
+                      tags = coalesce((SELECT array_agg(DISTINCT t) FROM unnest(tags || $10::text[]) t), '{}'), company_id = coalesce(company_id, $11), apollo_id = coalesce(apollo_id, $12),
+                      email_status = CASE WHEN email_status = 'unknown' THEN $13 ELSE email_status END, updated_at = now() WHERE id = $1`,
+              [res.prospect_id, res.email, first, last, opt(f.title, 160), opt(f.seniority, 40), linkedinOf(f.linkedin_url), res.country, tz, tags, companyId, opt(f.apollo_id, 80), emailStatus]);
+            ids.push(res.prospect_id!);
+            continue;
+          }
+          const [p] = await tx.query<{ id: number }>(
+            `INSERT INTO gtm_prospects (email, first_name, last_name, title, seniority, linkedin_url, country, time_zone, owner, tags, source, lawful_basis, basis_note, company_id, apollo_id, email_status)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+             ON CONFLICT DO NOTHING RETURNING id`,
+            [res.email, first, last, opt(f.title, 160), opt(f.seniority, 40), linkedinOf(f.linkedin_url), res.country, tz, owner, tags, source, res.basis,
+             opt(f.basis_note, 300) ?? note, companyId, opt(f.apollo_id, 80), emailStatus]);
+          if (!p) { res.action = "skip"; res.reason = "Added by someone else meanwhile"; continue; }
+          res.prospect_id = Number(p.id);
+          ids.push(res.prospect_id);
+          await activity(res.prospect_id, "imported", null, { source, basis: res.basis, country: res.country }, actor, tx);
+        }
+        return ids;
+      });
+      written.push(...done);
+      for (const { res } of chunk) if (res.action === "create" || res.action === "update") res.applied = true;
+    } catch (e) {
+      // This chunk was rolled back: its new prospects never existed.
+      failed = `Rows ${chunk[0].res.row} to ${chunk[chunk.length - 1].res.row} were not imported: ${(e as Error).message}`;
+      for (const { res } of chunk) if (res.action === "create") res.prospect_id = undefined;
     }
-    const [p] = await db.query<{ id: number }>(
-      `INSERT INTO gtm_prospects (email, first_name, last_name, title, seniority, linkedin_url, country, time_zone, owner, tags, source, lawful_basis, basis_note, company_id, apollo_id, email_status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
-       ON CONFLICT DO NOTHING RETURNING id`, vals);
-    if (!p) { res.action = "skip"; res.reason = "Added by someone else meanwhile"; continue; }
-    res.prospect_id = Number(p.id);
-    written.push(res.prospect_id);
-    await activity(res.prospect_id, "imported", null, { source, basis: res.basis, country: res.country }, actor);
   }
-  // Someone already a customer or a requester is linked at once (and never written to cold).
+  // Someone already a customer or a requester is linked at once (and never written to cold); Clerk down: the next
+  // tick's checks catch them before any email.
   await linkProspects(written);
-  log(actor, "gtm.prospect_import", null, { ...summary, source });
-  return { dry_run: false, summary: { ...summary, create: out.filter((r) => r.action === "create").length, skip: out.filter((r) => r.action === "skip").length }, rows: out };
+  await linkByMembers(written).catch((e) => console.error(`gtm import: customers not checked now: ${(e as Error).message}`));
+  log(actor, "gtm.prospect_import", null, { ...summary, source, applied: written.length, failed: Boolean(failed) });
+  return { dry_run: false, error: failed, applied: out.filter((r) => r.applied).map((r) => r.row),
+    summary: { ...summary, create: out.filter((r) => r.action === "create" && r.applied).length, update: out.filter((r) => r.action === "update" && r.applied).length,
+      skip: out.filter((r) => r.action === "skip").length, applied: written.length }, rows: out };
 }
 
 // ---------- linking a prospect to the account they became ----------
@@ -435,8 +476,61 @@ export async function importProspects(actor: string, body: { rows?: unknown; dry
 const EVENT_LINKS = ["request_submitted", "request_approved", "account_created"];
 
 /**
+ * Who is a customer now: every account's people, by address hash (their access requests that have the account, and
+ * their members in Clerk, suspended ones too), and the company domains those addresses are at (never a free-mail
+ * one). Cached a minute (a tick, an enrolment, an import share it). When Clerk cannot be asked for an account, `error`
+ * says so and nothing is cached: callers fail closed (no cold email this pass).
+ */
+export interface MemberIndex { byHash: Map<string, number>; domains: Map<string, number>; error: string | null; at: number }
+let members: MemberIndex | null = null;
+export const forgetMembers = () => { members = null; };
+export async function memberIndex(o: { maxAgeMs?: number } = {}): Promise<MemberIndex> {
+  if (members && Date.now() - members.at < (o.maxAgeMs ?? 60_000)) return members;
+  const db = await getDb();
+  const out: MemberIndex = { byHash: new Map(), domains: new Map(), error: null, at: Date.now() };
+  const add = (email: string, orgId: number) => {
+    const e = email.trim().toLowerCase();
+    if (!mail.isEmail(e)) return;
+    out.byHash.set(mail.hashAddress(e), orgId);
+    const d = companyDomainOf(e);
+    if (d && !out.domains.has(d)) out.domains.set(d, orgId);
+  };
+  for (const r of await db.query<{ email: string; org_id: number }>("SELECT lower(email) AS email, org_id FROM access_requests WHERE org_id IS NOT NULL")) add(r.email, Number(r.org_id));
+  for (const o2 of await db.query<{ id: number; clerk_org_id: string }>("SELECT id, clerk_org_id FROM organizations WHERE clerk_org_id IS NOT NULL ORDER BY id")) {
+    const people = await accountPeople(o2.clerk_org_id).catch((e: Error) => ({ members: [], invitations: [], error: e.message }));
+    if (people?.error) { out.error = `Clerk did not list the members of account ${o2.id}: ${people.error}`; continue; }
+    for (const m of people?.members ?? []) if (m.email) add(m.email, Number(o2.id));
+  }
+  if (!out.error) members = out;
+  return out;
+}
+
+/** Link one prospect to its request and / or account: status customer with an account, a timeline entry, one event. */
+async function markLinked(id: number, to: { request_id?: number | null; org_id?: number | null }, why: string) {
+  const db = await getDb();
+  const [cur] = await db.query<{ request_id: number | null; org_id: number | null }>("SELECT request_id, org_id FROM gtm_prospects WHERE id = $1", [id]);
+  if (!cur) return false;
+  const reqChanged = to.request_id != null && Number(cur.request_id) !== Number(to.request_id);
+  const orgChanged = to.org_id != null && Number(cur.org_id) !== Number(to.org_id);
+  if (!reqChanged && !orgChanged) return false;
+  await db.query(`UPDATE gtm_prospects SET request_id = coalesce($2, request_id), org_id = coalesce($3, org_id), linked_at = now(), updated_at = now() WHERE id = $1`,
+    [id, to.request_id ?? null, to.org_id ?? null]);
+  if (to.org_id != null) await setStatus(id, "customer", { why: "Has an Octillion account" });
+  const [touch] = await db.query<{ campaign_id: number }>(
+    "SELECT campaign_id FROM gtm_campaign_recipients WHERE prospect_id = $1 AND source = 'prospect' AND first_sent_at IS NOT NULL ORDER BY first_sent_at, id LIMIT 1", [id]);
+  const via = orgChanged ? "account" : "request";
+  await activity(id, "linked", why, { via, org_id: to.org_id ?? null, request_id: to.request_id ?? null, campaign_id: touch ? Number(touch.campaign_id) : null });
+  // The event (no address: the prospect, the request, the account, the campaign credited).
+  await db.query(
+    `INSERT INTO gtm_events (type, org_id, request_id, data, dedupe_key) VALUES ('prospect_converted', $1, $2, $3::jsonb, $4) ON CONFLICT (dedupe_key) DO NOTHING`,
+    [to.org_id ?? null, to.request_id ?? null, JSON.stringify({ prospect_id: id, via, campaign_id: touch ? Number(touch.campaign_id) : null }),
+     `prospect_converted:${id}:${via}:${via === "account" ? to.org_id : to.request_id}`]);
+  return true;
+}
+
+/**
  * Link prospects (by address) and companies (by domain) to the access request and account made with them. From
- * src/gtm-events.ts when one of those events is recorded, and after an import. Never throws.
+ * src/gtm-events.ts when one of those events is recorded. Never throws.
  */
 export async function linkFromEvent(type: string, e: { org_id?: number | null; request_id?: number | null }) {
   if (!EVENT_LINKS.includes(type)) return;
@@ -450,51 +544,79 @@ export async function linkFromEvent(type: string, e: { org_id?: number | null; r
       const [o] = await db.query<{ clerk_org_id: string | null }>("SELECT clerk_org_id FROM organizations WHERE id = $1", [e.org_id]);
       const people = o?.clerk_org_id ? await accountPeople(o.clerk_org_id).catch(() => null) : null;
       for (const m of people && !people.error ? people.members : []) if (m.email) emails.add(m.email.toLowerCase());
+      forgetMembers();
     }
     if (!emails.size) return;
     const ids = (await db.query<{ id: number }>("SELECT id FROM gtm_prospects WHERE email = ANY($1::text[])", [[...emails]])).map((r) => Number(r.id));
     await linkProspects(ids);
-    // Companies by the people's domains (never a free-mail one): the account is that company now.
-    if (e.org_id != null) {
-      const domains = [...new Set([...emails].map(companyDomainOf).filter((d): d is string => !!d))];
-      if (domains.length) await db.query("UPDATE gtm_companies SET org_id = $1, linked_at = now(), updated_at = now() WHERE domain = ANY($2::text[]) AND org_id IS NULL", [e.org_id, domains]);
-    }
+    if (e.org_id != null) for (const em of emails) await linkMember(em, e.org_id);
   } catch (err) { console.error(`gtm link (${type}): ${(err as Error).message}`); }
 }
 
 /**
+ * A person seen as a member of an account (their first portal sign-in in this process, src/app.ts; an account's
+ * members when it is created): their prospect is a customer, their company (by domain) is the account. Never throws.
+ */
+export async function linkMember(email: string | null | undefined, orgId: number) {
+  try {
+    const e = String(email ?? "").trim().toLowerCase();
+    if (!mail.isEmail(e)) return;
+    const db = await getDb();
+    for (const p of await db.query<{ id: number }>("SELECT id FROM gtm_prospects WHERE email = $1", [e])) await markLinked(Number(p.id), { org_id: orgId }, "A member of an Octillion account");
+    const d = companyDomainOf(e);
+    if (d) await db.query("UPDATE gtm_companies SET org_id = $1, linked_at = now(), updated_at = now() WHERE domain = $2 AND org_id IS NULL", [orgId, d]);
+    forgetMembers();
+  } catch (err) { console.error(`gtm link member: ${(err as Error).message}`); }
+}
+
+/**
  * For each prospect: their access request by address (the one with an account first) and its account. A colleague's
- * account does not make someone a customer (their company is linked instead, and outbound skips them). Linking sets
- * request_id / org_id, status customer when there is an account, a timeline entry and one prospect_converted event
- * (with the outbound campaign that touched them first, for Attribution).
+ * account does not make someone a customer (their company is linked instead, and outbound skips them).
  */
 export async function linkProspects(ids: number[]) {
   if (!ids.length) return 0;
-  const db = await getDb();
-  const rows = await db.query<{ id: number; request_id: number | null; org_id: number | null; new_request: number | null; new_org: number | null }>(
-    `SELECT p.id, p.request_id, p.org_id, q.id AS new_request, q.org_id AS new_org
+  const rows = await (await getDb()).query<{ id: number; new_request: number | null; new_org: number | null }>(
+    `SELECT p.id, q.id AS new_request, q.org_id AS new_org
        FROM gtm_prospects p JOIN LATERAL (SELECT id, org_id FROM access_requests a WHERE lower(a.email) = p.email ORDER BY (a.org_id IS NOT NULL) DESC, a.created_at DESC LIMIT 1) q ON true
       WHERE p.id = ANY($1::bigint[]) AND p.email IS NOT NULL`, [ids]);
   let n = 0;
-  for (const r of rows) {
-    const reqChanged = r.new_request != null && Number(r.request_id) !== Number(r.new_request);
-    const orgChanged = r.new_org != null && Number(r.org_id) !== Number(r.new_org);
-    if (!reqChanged && !orgChanged) continue;
-    await db.query(`UPDATE gtm_prospects SET request_id = coalesce($2, request_id), org_id = coalesce($3, org_id), linked_at = now(), updated_at = now() WHERE id = $1`,
-      [r.id, r.new_request, r.new_org]);
-    if (r.new_org != null) await setStatus(Number(r.id), "customer", { why: "Their account was created" });
-    const [touch] = await db.query<{ campaign_id: number }>(
-      "SELECT campaign_id FROM gtm_campaign_recipients WHERE prospect_id = $1 AND first_sent_at IS NOT NULL ORDER BY first_sent_at, id LIMIT 1", [r.id]);
-    const via = orgChanged ? "account" : "request";
-    await activity(Number(r.id), "linked", orgChanged ? "Has an Octillion account" : "Requested access", { via, org_id: r.new_org, request_id: r.new_request, campaign_id: touch ? Number(touch.campaign_id) : null });
-    // The event (no address: the prospect, the request, the account, the campaign credited).
-    await db.query(
-      `INSERT INTO gtm_events (type, org_id, request_id, data, dedupe_key) VALUES ('prospect_converted', $1, $2, $3::jsonb, $4) ON CONFLICT (dedupe_key) DO NOTHING`,
-      [r.new_org, r.new_request, JSON.stringify({ prospect_id: Number(r.id), via, campaign_id: touch ? Number(touch.campaign_id) : null }),
-       `prospect_converted:${r.id}:${via}:${via === "account" ? r.new_org : r.new_request}`]);
-    n++;
-  }
+  for (const r of rows) if (await markLinked(Number(r.id), { request_id: r.new_request, org_id: r.new_org }, r.new_org != null ? "Has an Octillion account" : "Requested access")) n++;
   return n;
+}
+
+/**
+ * Prospects (by address hash) and companies (by domain) matched against every account's people now (memberIndex).
+ * `ids`: only these prospects (an import); else all. Throws when Clerk cannot be asked (nothing is half-linked).
+ */
+export async function linkByMembers(ids?: number[]) {
+  const idx = await memberIndex({ maxAgeMs: 0 });
+  if (idx.error) throw new AdminError(`Customers could not be checked: ${idx.error}`, 503);
+  const db = await getDb();
+  const ps = await db.query<{ id: number; email: string }>(
+    "SELECT id, email FROM gtm_prospects WHERE email IS NOT NULL AND org_id IS NULL AND ($1::bigint[] IS NULL OR id = ANY($1::bigint[]))", [ids ?? null]);
+  let prospects = 0, companies = 0;
+  for (const p of ps) { const org = idx.byHash.get(mail.hashAddress(p.email)); if (org != null && await markLinked(Number(p.id), { org_id: org }, "A member of an Octillion account")) prospects++; }
+  for (const [d, org] of idx.domains) companies += (await db.query("UPDATE gtm_companies SET org_id = $1, linked_at = now(), updated_at = now() WHERE domain = $2 AND org_id IS NULL RETURNING id", [org, d])).length;
+  return { prospects, companies, requests: await linkProspects(ps.map((p) => Number(p.id))) };
+}
+
+/**
+ * The idempotent "link existing customers" action (POST /gtm/prospects/relink), also run once by the first tick
+ * (gtm_jobs customer_links): every prospect and company against every account and its members.
+ */
+export async function backfillCustomerLinks(actor: string | null = null) {
+  const r = await linkByMembers();
+  await (await getDb()).query("INSERT INTO gtm_jobs (name, result) VALUES ('customer_links', $1::jsonb) ON CONFLICT (name) DO UPDATE SET done_at = now(), result = excluded.result",
+    [JSON.stringify(r)]);
+  if (actor) log(actor, "gtm.relink_customers", null, r);
+  return r;
+}
+/** The first tick's once-per-database run of backfillCustomerLinks. Never throws (tried again next tick). */
+export async function backfillOnce() {
+  try {
+    const [done] = await (await getDb()).query("SELECT 1 FROM gtm_jobs WHERE name = 'customer_links'");
+    if (!done) await backfillCustomerLinks();
+  } catch (e) { console.error(`gtm customer links backfill: ${(e as Error).message}`); }
 }
 
 // ---------- the timeline ----------

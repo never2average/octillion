@@ -46,7 +46,7 @@ interface Campaign {
   trigger: Trigger | null; send_window: SendWindow; requires_opt_in: boolean | null; requires_opt_in_effective: boolean; count_auto_replies: boolean;
   outbound?: boolean; sender_identity_id?: number | null; track_opens?: boolean | null; track_opens_effective?: boolean; allow_restricted?: boolean;
 }
-interface Setup { postal_address_set: boolean; postal_hint: string | null; replies_inbox: string | null }
+interface Setup { postal_address_set: boolean; postal_hint: string | null; replies_inbox: string | null; outbound_postal_warning?: string | null }
 interface List { email: { enabled: boolean; connected: boolean; from: string }; setup: Setup; variables: string[]; stages: { id: string; label: string }[]; campaigns: Campaign[] }
 interface Recipient {
   id: number; email: string; first_name: string | null; product: string | null; source: 'account' | 'request'; status: string; next_step: number; next_at: string | null;
@@ -78,9 +78,10 @@ const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const LETTERS = ['A', 'B', 'C', 'D'];
 const NO_WINDOW: SendWindow = { days: [], start_hour: 9, end_hour: 17, time_zone: 'UTC' };
 const CONSENT_LABEL: Record<string, string> = { opt_in: 'opted in', legitimate_interest: 'existing customer', opt_out: 'opt-out basis', needs_opt_in: 'needs opt-in', withdrawn: 'withdrew',
-  consent: 'consent', contract: 'contract', customer: 'existing customer: never cold', in_sequence: 'in another sequence', restricted: 'EU / EEA / UK / CH: not allowed', status: 'replied or not interested', no_prospect: 'not a prospect' };
+  consent: 'consent', contract: 'contract', customer: 'existing customer: never cold', in_sequence: 'in another sequence', cooling_off: 'emailed recently by another outbound campaign', member_check: 'customers not checked yet', restricted: 'EU / EEA / UK / CH: not allowed', status: 'replied or not interested', no_prospect: 'not a prospect' };
 /** Why prospects are left out of an outbound audience (src/gtm-outbound.ts BLOCK_TEXT). */
-const BLOCK_LABEL: Record<string, string> = { customer: 'existing customers', in_sequence: 'in another active sequence', restricted: 'in the EU / EEA / UK / CH (not allowed here)',
+const BLOCK_LABEL: Record<string, string> = { customer: 'existing customers', in_sequence: 'in another active sequence', cooling_off: 'emailed by another outbound campaign in the last 30 days',
+  member_check: 'not checked against customers (Clerk did not answer): not this time', restricted: 'in the EU / EEA / UK / CH (not allowed here)',
   withdrawn: 'withdrew consent', status: 'replied, interested or not interested', no_prospect: 'no longer prospects' };
 const PROSPECT_STATUSES = [{ id: 'new', label: 'New' }, { id: 'contacted', label: 'Contacted' }];
 const EMAIL_STATUSES = ['verified', 'likely_to_engage', 'unverified', 'extrapolated', 'unknown'];
@@ -294,7 +295,9 @@ function CampaignPeek({ id, stages, onDeleted }: { id: number; stages: { id: str
         </Section>
       )}
       {d.steps.filter((s) => s.variant_stats.length).map((s) => <VariantTable key={s.index} c={c} step={s} />)}
-      {!d.setup.postal_address_set && <Notice tone='info'>{d.setup.postal_hint} (Agent configuration, Campaigns: Sender postal address). Emails still go out without it.</Notice>}
+      {c.audience.include === 'prospects' && d.setup.outbound_postal_warning
+        ? <Notice>{d.setup.outbound_postal_warning} (Agent configuration, Campaigns: Sender postal address). This never stops a send.</Notice>
+        : !d.setup.postal_address_set && <Notice tone='info'>{d.setup.postal_hint} (Agent configuration, Campaigns: Sender postal address). Emails still go out without it.</Notice>}
       <Editor key={`${c.id}:${c.updated_at}`} c={c} stages={stages} />
       <TestSend c={c} />
       <Section title='Recipients' description='Who it goes to: enrolled when the campaign starts (and as people match, when it keeps enrolling).'>
@@ -484,6 +487,7 @@ function Editor({ c, stages }: { c: Campaign; stages: { id: string; label: strin
   const toggle = (k: 'stages' | 'request_status', v: string, on: boolean) => set(k, on ? [...a[k], v] : a[k].filter((x) => x !== v));
   const setStep = (i: number, patch: Partial<Step>) => setSteps((xs) => xs.map((s, j) => (j === i ? { ...s, ...patch } : s)));
   const dis = !editable;
+  const locked = (c.metrics?.recipients ?? 0) > 0;
   return (
     <Section title='Campaign' description={editable ? 'Changes apply to whoever has not had an email yet.' : c.status === 'running' ? 'Pause the campaign to change it.' : 'Read only.'}
       action={editable && <Button size='sm' disabled={!dirty || save.isPending} onClick={() => save.mutate()}><Icons.check /> {save.isPending ? 'Saving…' : 'Save changes'}</Button>}>
@@ -545,11 +549,13 @@ function Editor({ c, stages }: { c: Campaign; stages: { id: string; label: strin
           <div className='grid gap-4 sm:grid-cols-2'>
             <FormRow id={`c-${c.id}-include`} label='Who' hint='Accounts: their active members (Clerk), else whoever asked for the account. Requesters: the person on the access request.'>
               <NativeSelect id={`c-${c.id}-include`} className='w-full' value={a.include} onChange={(e) => { set('include', e.target.value as Audience['include']); if (e.target.value === 'prospects') setTrigger(null); }}>
-                <NativeSelectOption value='accounts'>Accounts</NativeSelectOption>
-                <NativeSelectOption value='requests'>Access requesters</NativeSelectOption>
-                <NativeSelectOption value='both'>Both</NativeSelectOption>
-                <NativeSelectOption value='prospects'>Prospects (outbound)</NativeSelectOption>
+                {/* Once anyone is enrolled, cold and lifecycle email never trade places (the server refuses it too). */}
+                <NativeSelectOption value='accounts' disabled={locked && c.audience.include === 'prospects'}>Accounts</NativeSelectOption>
+                <NativeSelectOption value='requests' disabled={locked && c.audience.include === 'prospects'}>Access requesters</NativeSelectOption>
+                <NativeSelectOption value='both' disabled={locked && c.audience.include === 'prospects'}>Both</NativeSelectOption>
+                <NativeSelectOption value='prospects' disabled={locked && c.audience.include !== 'prospects'}>Prospects (outbound)</NativeSelectOption>
               </NativeSelect>
+              {locked && <span className='text-muted-foreground text-xs'>This campaign has recipients, so it stays {c.audience.include === 'prospects' ? 'outbound' : 'lifecycle'}: make a new campaign to change that.</span>}
             </FormRow>
             {!outbound && <FormRow id={`c-${c.id}-attention`} label='Needs a person for' hint='Text an attention reason contains, e.g. "no simulation" or "report never opened".'>
               <Input id={`c-${c.id}-attention`} value={a.attention} onChange={(e) => set('attention', e.target.value)} placeholder='Any' />

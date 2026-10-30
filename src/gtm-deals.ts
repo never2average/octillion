@@ -50,15 +50,20 @@ export async function setStages(actor: string, body: { stages?: unknown }) {
   });
   if (new Set(want.map((s) => s.id)).size !== want.length) fail("Two stages have the same id");
   for (const k of ["open", "won", "lost"]) if (!want.some((s) => s.kind === k)) fail(`The pipeline needs a ${k} stage`);
-  const db = await getDb();
-  const used = await db.query<{ stage: string; n: number }>("SELECT stage, count(*)::int AS n FROM gtm_deals GROUP BY stage");
-  const gone = used.filter((u) => !want.some((s) => s.id === u.stage));
-  if (gone.length) fail(`Move the deals out of ${gone.map((g) => `${g.stage} (${g.n})`).join(", ")} before removing it`, 409);
-  await db.transaction(async (tx) => {
+  // One change to the pipeline at a time (a lock held to the end of the transaction), checked and applied together:
+  // a deal moved into a stage meanwhile is never orphaned, and deals whose stage changed kind are closed or reopened.
+  await (await getDb()).transaction(async (tx) => {
+    await tx.query("LOCK TABLE gtm_deal_stages IN SHARE ROW EXCLUSIVE MODE");
+    const used = await tx.query<{ stage: string; n: number }>("SELECT stage, count(*)::int AS n FROM gtm_deals GROUP BY stage");
+    const gone = used.filter((u) => !want.some((s) => s.id === u.stage));
+    if (gone.length) fail(`Move the deals out of ${gone.map((g) => `${g.stage} (${g.n})`).join(", ")} before removing it`, 409);
     for (const s of want) await tx.query(
       "INSERT INTO gtm_deal_stages (id, label, position, kind) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO UPDATE SET label = excluded.label, position = excluded.position, kind = excluded.kind",
       [s.id, s.label, s.position, s.kind]);
     await tx.query("DELETE FROM gtm_deal_stages WHERE NOT (id = ANY($1::text[]))", [want.map((s) => s.id)]);
+    await tx.query(
+      `UPDATE gtm_deals d SET closed_at = CASE WHEN s.kind = 'open' THEN NULL ELSE coalesce(d.closed_at, now()) END, updated_at = now()
+         FROM gtm_deal_stages s WHERE s.id = d.stage AND (s.kind = 'open') <> (d.closed_at IS NULL)`);
   });
   log(actor, "gtm.deal_stages", null, { stages: want.map((s) => s.id) });
   return { stages: await stages() };
@@ -145,7 +150,7 @@ async function dealFields(b: DealInput, partial: boolean) {
 async function firstTouch(prospectId: number | null | undefined): Promise<number | null> {
   if (prospectId == null) return null;
   const [r] = await (await getDb()).query<{ campaign_id: number }>(
-    "SELECT campaign_id FROM gtm_campaign_recipients WHERE prospect_id = $1 AND first_sent_at IS NOT NULL ORDER BY first_sent_at, id LIMIT 1", [prospectId]);
+    "SELECT campaign_id FROM gtm_campaign_recipients WHERE prospect_id = $1 AND source = 'prospect' AND first_sent_at IS NOT NULL ORDER BY first_sent_at, id LIMIT 1", [prospectId]);
   return r ? Number(r.campaign_id) : null;
 }
 
@@ -171,11 +176,13 @@ export async function createDeal(actor: string, body: DealInput & { from_reply?:
   const db = await getDb();
   const b: DealInput = { ...body };
   if (body.from_reply != null) {
-    const [y] = await db.query<{ id: number; campaign_id: number; prospect_id: number | null; org_id: number | null; first_name: string | null }>(
-      `SELECT y.id, y.campaign_id, r.prospect_id, r.org_id, r.first_name FROM gtm_replies y JOIN gtm_campaign_recipients r ON r.id = y.recipient_id WHERE y.id = $1`, [idOf(body.from_reply, "reply")]);
+    const [y] = await db.query<{ id: number; campaign_id: number; prospect_id: number | null; org_id: number | null; first_name: string | null; outbound: boolean }>(
+      `SELECT y.id, y.campaign_id, r.prospect_id, r.org_id, r.first_name, (c.audience->>'include' = 'prospects' AND r.source = 'prospect') AS outbound
+         FROM gtm_replies y JOIN gtm_campaign_recipients r ON r.id = y.recipient_id JOIN gtm_campaigns c ON c.id = y.campaign_id WHERE y.id = $1`, [idOf(body.from_reply, "reply")]);
     if (!y) fail(`No reply ${body.from_reply}`, 404);
-    Object.assign(b, { reply_id: Number(y.id), prospect_id: b.prospect_id ?? y.prospect_id, campaign_id: b.campaign_id ?? Number(y.campaign_id),
-      source: b.source ?? (y.prospect_id != null ? "outbound" : "lifecycle") });
+    // Only an outbound campaign's reply credits the deal to outbound (and to that campaign).
+    Object.assign(b, { reply_id: Number(y.id), prospect_id: b.prospect_id ?? y.prospect_id, campaign_id: b.campaign_id ?? (y.outbound ? Number(y.campaign_id) : null),
+      source: b.source ?? (y.outbound ? "outbound" : "lifecycle") });
     if (y.org_id != null && b.org == null) b.org = String(y.org_id);
   }
   const pid = b.prospect_id == null || b.prospect_id === "" ? null : idOf(b.prospect_id, "prospect");
@@ -260,7 +267,7 @@ export async function outboundAttribution(q: Record<string, unknown> = {}) {
     `SELECT DISTINCT ON (r.prospect_id) r.prospect_id, r.campaign_id, r.first_sent_at, p.source, p.status, p.request_id, p.org_id,
             EXISTS (SELECT 1 FROM gtm_campaign_recipients x WHERE x.prospect_id = r.prospect_id AND x.replied_at IS NOT NULL) AS replied
        FROM gtm_campaign_recipients r JOIN gtm_prospects p ON p.id = r.prospect_id
-      WHERE r.prospect_id IS NOT NULL AND r.first_sent_at IS NOT NULL ORDER BY r.prospect_id, r.first_sent_at, r.id`);
+      WHERE r.prospect_id IS NOT NULL AND r.source = 'prospect' AND r.first_sent_at IS NOT NULL ORDER BY r.prospect_id, r.first_sent_at, r.id`);
   const campaigns = new Map((await db.query<{ id: number; name: string; status: string }>("SELECT id, name, status FROM gtm_campaigns WHERE audience->>'include' = 'prospects' OR id = ANY($1::bigint[])",
     [[...new Set(touches.map((t) => Number(t.campaign_id)))]])).map((c) => [Number(c.id), c]));
   const reqs = new Map((await db.query<{ id: number; created_at: Date }>("SELECT id, created_at FROM access_requests WHERE id = ANY($1::int[])",
@@ -270,6 +277,7 @@ export async function outboundAttribution(q: Record<string, unknown> = {}) {
   const [st, deals] = await Promise.all([stages(), db.query<{ campaign_id: number | null; prospect_id: number | null; value: number; stage: string; closed_at: Date | null; source: string | null; psource: string | null }>(
     `SELECT d.campaign_id, d.prospect_id, d.value::float8 AS value, d.stage, d.closed_at, d.source, p.source AS psource FROM gtm_deals d LEFT JOIN gtm_prospects p ON p.id = d.prospect_id`)]);
   const kind = new Map(st.map((s) => [s.id, s.kind]));
+  const outboundCampaigns = new Set((await db.query<{ id: number }>("SELECT id FROM gtm_campaigns WHERE audience->>'include' = 'prospects'")).map((r) => Number(r.id)));
   const firstBy = new Map(touches.map((t) => [Number(t.prospect_id), Number(t.campaign_id)]));
 
   type Row = { key: string; label: string; touched: number; replied: number; interested: number; requests: number; accounts: Set<number>; pipeline: number; won: number; deals_won: number };
@@ -294,7 +302,7 @@ export async function outboundAttribution(q: Record<string, unknown> = {}) {
   }
   for (const d of deals) {
     const cid = d.campaign_id != null ? Number(d.campaign_id) : d.prospect_id != null ? firstBy.get(Number(d.prospect_id)) ?? null : null;
-    if (cid == null && d.source !== "outbound") continue;
+    if (cid == null ? d.source !== "outbound" : !outboundCampaigns.has(cid)) continue;
     const rows = rowsFor(cid, d.psource);
     const k = kind.get(d.stage);
     for (const r of rows) {

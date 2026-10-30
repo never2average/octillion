@@ -180,6 +180,20 @@ CREATE TABLE IF NOT EXISTS gtm_apollo_usage (
   PRIMARY KEY (day, endpoint)
 );
 
+-- One-off GTM jobs that must run once per database (the first tick runs them): customer_links links prospects and
+-- companies to the accounts and Clerk members that exist already (src/gtm-crm.ts backfillCustomerLinks).
+CREATE TABLE IF NOT EXISTS gtm_jobs (
+  name     TEXT PRIMARY KEY,
+  done_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  result   JSONB NOT NULL DEFAULT '{}'
+);
+
+-- The consent ledger also records the lawful basis a prospect was first written to under (source prospect): consent
+-- and contract besides legitimate interest. Only the ledger: email_consents keeps the marketing-consent bases.
+ALTER TABLE email_consent_ledger DROP CONSTRAINT IF EXISTS email_consent_ledger_basis_check;
+ALTER TABLE email_consent_ledger ADD CONSTRAINT email_consent_ledger_basis_check
+  CHECK (basis IN ('opt_in', 'opt_in_pending', 'legitimate_interest', 'withdrawn', 'consent', 'contract'));
+
 -- Apollo's API key is a key vault provider: server-only (no env_vars), never handed to an agent. Add it on Key vault.
 INSERT INTO vault_providers (slug, mode, upstream_url, env_vars) VALUES ('apollo', 'direct', 'https://api.apollo.io', '{}')
 ON CONFLICT (slug) DO NOTHING;
@@ -195,5 +209,6 @@ BEGIN
   ALTER TABLE gtm_deals ENABLE ROW LEVEL SECURITY;
   ALTER TABLE gtm_apollo_cache ENABLE ROW LEVEL SECURITY;
   ALTER TABLE gtm_apollo_usage ENABLE ROW LEVEL SECURITY;
-  EXECUTE format('REVOKE ALL ON gtm_companies, gtm_prospects, gtm_prospect_activities, gtm_sender_identities, gtm_deal_stages, gtm_deals, gtm_apollo_cache, gtm_apollo_usage FROM %I', r);
+  ALTER TABLE gtm_jobs ENABLE ROW LEVEL SECURITY;
+  EXECUTE format('REVOKE ALL ON gtm_companies, gtm_prospects, gtm_prospect_activities, gtm_sender_identities, gtm_deal_stages, gtm_deals, gtm_apollo_cache, gtm_apollo_usage, gtm_jobs FROM %I', r);
 END $mig$;

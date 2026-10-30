@@ -19,6 +19,8 @@ export function gtmOutboundRoutes(ob: Router, o: { need: (p: "campaigns" | "read
   ob.get("/gtm/prospects/:id", async (req, res) => void res.json(await crm.prospectDetail(id(req))));
   ob.post("/gtm/prospects", w, async (req, res) => void res.status(201).json(await crm.createProspect(actor(req, res), req.body ?? {})));
   ob.post("/gtm/prospects/import", w, async (req, res) => void res.json(await crm.importProspects(actor(req, res), req.body ?? {})));
+  // Link every prospect and company to the customers that exist now (idempotent; the first tick runs it once too).
+  ob.post("/gtm/prospects/relink", w, async (req, res) => void res.json(await crm.backfillCustomerLinks(actor(req, res))));
   ob.post("/gtm/prospects/bulk", w, async (req, res) => void res.json(await crm.bulkUpdate(actor(req, res), req.body ?? {})));
   ob.post("/gtm/prospects/delete", w, async (req, res) => void res.json(await crm.deleteProspects(actor(req, res), req.body?.ids)));
   ob.put("/gtm/prospects/:id", w, async (req, res) => void res.json(await crm.updateProspect(actor(req, res), id(req), req.body ?? {})));

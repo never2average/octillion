@@ -56,6 +56,7 @@ import { DETECTED, detectSignals, EVENT_TYPES, forgetImmediate, REQUEST_EVENTS, 
 import { NO_WINDOW, nextOpening, parseWindow, recipientZone, validZone, windowOpen, type SendWindow } from "./gtm-schedule.js";
 import * as replies from "./gtm-replies.js";
 import * as outbound from "./gtm-outbound.js";
+import { backfillOnce, memberIndex, type MemberIndex } from "./gtm-crm.js";
 
 export const STATUSES = ["draft", "scheduled", "running", "paused", "done"] as const;
 export type CampaignStatus = (typeof STATUSES)[number];
@@ -304,6 +305,12 @@ export async function updateCampaign(actor: string, id: number, body: Record<str
   const c = await campaignById(id);
   if (!["draft", "scheduled", "paused"].includes(c.status)) throw new AdminError(`A ${c.status} campaign cannot be edited: pause it first`, 409);
   const f = fields(body, true);
+  // Cold and lifecycle email never trade places: once anyone is enrolled, the audience stays prospects (outbound, from
+  // an identity) or stays accounts / requesters (lifecycle, from EMAIL_FROM).
+  if (f.audience && (f.audience.include === "prospects") !== isOutbound(c)) {
+    const [{ n }] = await (await getDb()).query<{ n: number }>("SELECT count(*)::int AS n FROM gtm_campaign_recipients WHERE campaign_id = $1", [c.id]);
+    if (n) throw new AdminError("This campaign has recipients: its audience cannot switch between prospects (outbound) and accounts or requesters. Make a new campaign instead", 409);
+  }
   if ((f.audience ?? c.audience).include === "prospects" && (body.trigger !== undefined ? f.trigger : c.trigger))
     throw new AdminError("An outbound campaign (prospects) is not triggered by events: it starts at launch or a scheduled time");
   await checkIdentity(f.sender_identity_id);
@@ -339,7 +346,7 @@ export async function launchCampaign(actor: string, id: number, body: { at?: unk
     log(actor, "campaign.schedule", null, { campaign_id: c.id, starts_at: at.toISOString() });
   } else {
     await db.query("UPDATE gtm_campaigns SET status = 'running', starts_at = now(), launched_at = now(), updated_at = now() WHERE id = $1", [c.id]);
-    if (!c.trigger) await enroll(c.id);
+    if (!c.trigger) await enrollUnderLease(c.id);
     log(actor, "campaign.launch", null, { campaign_id: c.id, trigger: c.trigger?.type ?? null });
   }
   forgetImmediate();
@@ -358,7 +365,7 @@ export async function setCampaignState(actor: string, id: number, action: "pause
     await assertSendable(c);
     // Paused before it ever started: it starts now (and enrolls on this tick).
     await db.query("UPDATE gtm_campaigns SET status = 'running', launched_at = coalesce(launched_at, now()), updated_at = now() WHERE id = $1", [c.id]);
-    if (!c.enrolled_at && !c.trigger) await enroll(c.id);
+    if (!c.enrolled_at && !c.trigger) await enrollUnderLease(c.id);
   } else {
     if (c.status === "done") throw new AdminError("This campaign is already done", 409);
     await db.query("UPDATE gtm_campaigns SET status = 'done', finished_at = now(), updated_at = now() WHERE id = $1", [c.id]);
@@ -512,6 +519,9 @@ export async function previewAudience(body: { audience?: unknown; requires_opt_i
  */
 async function admit(c: CampaignRow, people: Candidate[], o: { delayDays: number; eventId?: number | null; reentryDays?: number | null } ): Promise<{ added: number; no_consent: number }> {
   const [suppressed, consent] = await Promise.all([suppressedSet(people.map((p) => p.email)), consentFor(people, requiresOptIn(c), c)]);
+  // Customers could not be checked (Clerk did not answer): nobody joins now; the next pass tries again.
+  if (people.some((p) => p.source === "prospect" && (consent.get(p.email) as { reason?: string }).reason === "member_check"))
+    throw new AdminError("Customers could not be checked (Clerk did not answer): outbound enrolment waits for the next pass", 503);
   // A prospect who may not get cold email is never added (not even as suppressed): their row would count as a sequence.
   const ok = people.filter((p) => (suppressed.has(p.email) && p.source !== "prospect") || consent.get(p.email)!.ok);
   const rows = ok.map((p) => {
@@ -538,7 +548,25 @@ async function admit(c: CampaignRow, people: Candidate[], o: { delayDays: number
   const have = await consentOf(added.filter((r) => r.basis === "legitimate_interest" && customer(r.email)).map((r) => r.email));
   for (const r of added.filter((x) => x.basis === "legitimate_interest" && customer(x.email) && !have.has(x.email)))
     await recordConsent(r.email, "legitimate_interest", { source: "account", campaign_id: c.id, country: rows.find((x) => x.email === r.email)?.country ?? null });
+  // A prospect first written to: the ledger records their lawful basis (source prospect), by hash.
+  const prospect = (e: string) => rows.find((x) => x.email === e)?.source === "prospect";
+  for (const r of added.filter((x) => prospect(x.email) && Number(x.round) === 0))
+    await (await getDb()).query("INSERT INTO email_consent_ledger (email_hash, basis, source, country, campaign_id) VALUES ($1, $2, 'prospect', $3, $4)",
+      [mail.hashAddress(r.email), r.basis ?? "legitimate_interest", rows.find((x) => x.email === r.email)?.country ?? null, c.id]);
   return { added: added.length, no_consent: people.length - ok.length };
+}
+
+/**
+ * Launch and resume enrol at once, under the tick's lease (one enrolment or tick at a time everywhere, so two
+ * campaigns can never both take the same prospect). The lease busy, or the enrolment failing (Clerk down for the
+ * customer check): the next tick enrols instead (enrolled_at stays empty).
+ */
+async function enrollUnderLease(id: number) {
+  await serial(async () => {
+    if (!(await takeLease(120).catch(() => false))) return;
+    try { await enroll(id); } catch (e) { console.error(`campaign ${id}: enrolment left to the next tick: ${(e as Error).message}`); }
+    finally { await releaseLease(); }
+  });
 }
 
 /** Add everyone the audience matches now (new addresses only). Not for a triggered campaign: events enrol those. */
@@ -763,15 +791,18 @@ export async function testSend(actor: string, id: number, body: { to?: unknown; 
   // Outbound: from its sender identity, text only unless it tracks opens, exactly as the real thing.
   if (isOutbound(c)) { const why = await outbound.identityProblem(c.sender_identity_id); if (why) throw new AdminError(why); }
   const ident = isOutbound(c) ? await outbound.identityById(c.sender_identity_id) : null;
+  // A test from the identity counts toward its daily cap like any other email from it.
+  if (ident && (await outbound.leftToday(ident)) <= 0) throw new AdminError(`${ident.from_address} has sent its ${outbound.warmupCap(ident)} for today (warm-up cap): try tomorrow`, 409);
   const sample = (await resolveAudience(c.audience).catch(() => []))[0];
   const url = unsubscribeUrl(TEST_TOKEN), postal = await postalAddress();
   const src = sample?.source ?? (ident ? "prospect" : "account");
-  const r = await mail.send({ kind: ident ? "outbound_test" : "campaign_test", to, idempotencyKey: `campaign-test:${c.id}:${randomUUID()}`, meta: { campaign_id: c.id, step: i, variant: k >= 0 ? VARIANT_LETTERS[k] : null },
+  const r = await mail.send({ kind: ident ? "outbound_test" : "campaign_test", to, idempotencyKey: `campaign-test:${c.id}:${randomUUID()}`,
+    meta: { campaign_id: c.id, step: i, variant: k >= 0 ? VARIANT_LETTERS[k] : null, ...(ident ? { identity_id: ident.id } : {}) },
     subject: `[Test] ${render(words.subject, sample ?? {})}`, text: render(words.body, sample ?? {}) + footer(src, url, postal),
     ...(tracksOpens(c) ? { html: renderHtml(words.body + footer(src, url, postal), sample ?? {}) } : { textOnly: true }), from: ident ? outbound.senderOf(ident) : undefined,
     headers: unsubHeaders(url), tags: [{ name: "campaign", value: String(c.id) }] });
   log(actor, "campaign.test", null, { campaign_id: c.id, step: i, status: r.status, to_domain: mail.domainOf(to) });
-  return { ...r, sample: sample ? { first_name: sample.first_name, product: sample.product, source: sample.source } : null, warnings: postal ? [] : [POSTAL_HINT] };
+  return { ...r, sample: sample ? { first_name: sample.first_name, product: sample.product, source: sample.source } : null, warnings: postal ? [] : [ident ? outbound.POSTAL_WARNING : POSTAL_HINT] };
 }
 
 interface Due {
@@ -1065,7 +1096,12 @@ async function runTick(only: number | null, o: TickOptions = {}): Promise<TickRe
     const [{ recent }] = await db.query<{ recent: boolean }>(
       "SELECT EXISTS (SELECT 1 FROM gtm_campaign_sends WHERE status = 'uncertain' AND at > now() - interval '30 minutes') AS recent");
     let probing = Boolean(recent);
+    // Prospects and companies linked to the customers that exist already: once per database (src/gtm-crm.ts).
+    await backfillOnce();
     const [postal, box, key] = await Promise.all([postalAddress(), replies.inbox(), unsubscribeKey()]);
+    // Every account's people, for the customer check before each cold email: looked up once per tick.
+    let members: Promise<MemberIndex> | null = null;
+    const memberIdx = () => (members ??= memberIndex({ maxAgeMs: 0 }));
     const from = settingText("EMAIL_FROM"), defaultReplyTo = settingText("EMAIL_REPLY_TO").split(",").map((x) => x.trim()).filter(mail.isEmail);
     let attempted = 0, slowDown = replay.uncertain, calls = 0;
     // Outbound sender identities: each one's warm-up cap left today, counted over every campaign (src/gtm-outbound.ts).
@@ -1123,11 +1159,13 @@ async function runTick(only: number | null, o: TickOptions = {}): Promise<TickRe
               out.no_consent++;
               continue;
             }
-            // Outbound: the cold-email rules again (a reply elsewhere, a new customer, another sequence first), and a
-            // sender identity that is fit to send.
+            // Outbound, decided per person (a prospect is always cold email, whatever the campaign says now): the
+            // cold-email rules again (a reply elsewhere, a new customer, another sequence first), and a sender identity
+            // fit to send; none, and nothing goes. Clerk not answering for the customer check: next time.
             let slot: { i: outbound.Identity; left: number } | null = null;
-            if (isOutbound(c)) {
-              const why = (await outbound.outboundBlocks([{ email: r.email, prospect_id: r.prospect_id, recipient_id: Number(r.id) }], c)).get(r.email);
+            if (r.source === "prospect") {
+              const why = (await outbound.outboundBlocks([{ email: r.email, prospect_id: r.prospect_id, recipient_id: Number(r.id) }], c, await memberIdx())).get(r.email);
+              if (why === "member_check") { await db.query("UPDATE gtm_campaign_recipients SET next_at = now() + interval '15 minutes' WHERE id = $1", [r.id]); out.deferred++; continue; }
               if (why) {
                 await db.query("UPDATE gtm_campaign_recipients SET status = 'suppressed', next_at = NULL WHERE id = $1", [r.id]);
                 out.suppressed++; out.blocked++;
@@ -1459,7 +1497,9 @@ const shape = (c: CampaignRow, m: Metrics | undefined) => ({
 /** Settings the editor shows next to a campaign: the postal address hint, the replies inbox, the trigger choices. */
 async function sendingSetup() {
   const [postal, box] = await Promise.all([postalAddress(), replies.inbox()]);
-  return { postal_address_set: Boolean(postal), postal_hint: postal ? null : POSTAL_HINT, replies_inbox: box ? `${box.local}@${box.domain}` : null };
+  return { postal_address_set: Boolean(postal), postal_hint: postal ? null : POSTAL_HINT, replies_inbox: box ? `${box.local}@${box.domain}` : null,
+    // Outbound: never required to send (no address is the default), but said plainly on every outbound campaign.
+    outbound_postal_warning: postal ? null : outbound.POSTAL_WARNING };
 }
 
 export async function listCampaigns() {

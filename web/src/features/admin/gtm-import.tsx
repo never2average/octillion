@@ -1,7 +1,9 @@
 'use client';
 // GTM › CSV import (Prospects and Companies): a file, each field mapped to one of its columns (guessed from the header
 // names, so a file exported from here maps itself), a dry run that says what would happen to every row, then the real
-// import. The server (src/gtm-crm.ts) decides everything: dedupe, the lawful basis, the suppression list.
+// import. The server (src/gtm-crm.ts) decides everything: dedupe, the lawful basis, the suppression list. The real
+// import sends the rows the preview would write, CHUNK at a time (each one transaction on the server), with progress;
+// a failure stops it and says which rows went in.
 import { useMemo, useRef, useState, type ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
@@ -11,8 +13,9 @@ import { DataList, Notice, Section, StatusBadge } from './ui';
 import { Gate } from './role';
 
 export interface ImportField { key: string; label: string; aliases?: string[]; required?: boolean }
-export interface ImportRow { row: number; action: 'create' | 'update' | 'skip' | 'refuse'; reason: string | null; email?: string | null; name?: string | null; company?: string | null; domain?: string | null; suppressed?: boolean }
-export interface ImportResult { dry_run: boolean; summary: Record<string, number>; rows: ImportRow[] }
+export interface ImportRow { row: number; action: 'create' | 'update' | 'skip' | 'refuse'; reason: string | null; email?: string | null; name?: string | null; company?: string | null; domain?: string | null; suppressed?: boolean; applied?: boolean }
+export interface ImportResult { dry_run: boolean; summary: Record<string, number>; rows: ImportRow[]; error?: string | null; applied?: number[] }
+const CHUNK = 200;
 
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
 const TONE = { create: 'ok', update: 'info', skip: 'neutral', refuse: 'bad' } as const;
@@ -41,6 +44,7 @@ export function CsvImport({ fields, noun, settings, run, onDone, onBack, ready =
   const [result, setResult] = useState<ImportResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const rows = useMemo(() => (file ? file.body.map((r) => Object.fromEntries(fields.flatMap((f) => (map[f.key] >= 0 && r[map[f.key]] != null && r[map[f.key]].trim() ? [[f.key, r[map[f.key]].trim()]] : [])))) : []), [file, map, fields]);
   const load = async (f: File) => {
     const all = parseCsv((await f.text()).replace(/^﻿/, ''));
@@ -50,9 +54,33 @@ export function CsvImport({ fields, noun, settings, run, onDone, onBack, ready =
   };
   const go = async (dry: boolean) => {
     setBusy(true); setError(null);
-    try { const r = await run(rows, dry); setResult(r); if (!dry) onDone(r); }
+    try {
+      if (dry) { setResult(await run(rows, true)); return; }
+      // Only the rows the preview would write, in chunks; each answer's rows numbered back to the file's.
+      const todo = (result?.rows ?? []).filter((r) => r.action === 'create' || r.action === 'update').map((r) => r.row);
+      const out: ImportRow[] = (result?.rows ?? []).filter((r) => r.action === 'skip' || r.action === 'refuse');
+      const sum: Record<string, number> = { rows: rows.length, create: 0, update: 0, skip: out.filter((r) => r.action === 'skip').length, refuse: out.filter((r) => r.action === 'refuse').length };
+      let failed: string | null = null;
+      setProgress({ done: 0, total: todo.length });
+      for (let k = 0; k < todo.length && !failed; k += CHUNK) {
+        const nums = todo.slice(k, k + CHUNK);
+        try {
+          const r = await run(nums.map((n) => rows[n - 1]), false);
+          for (const x of r.rows) out.push({ ...x, row: nums[x.row - 1] });
+          sum.create += r.rows.filter((x) => x.action === 'create' && x.applied).length;
+          sum.update += r.rows.filter((x) => x.action === 'update' && x.applied).length;
+          if (r.error) failed = r.error.replace(/Rows (\d+) to (\d+)/, (_m, a, b) => `Rows ${nums[Number(a) - 1]} to ${nums[Number(b) - 1]}`);
+        } catch (e) { failed = `Rows ${nums[0]} to ${nums[nums.length - 1]} were not imported: ${(e as Error).message}`; }
+        setProgress({ done: Math.min(k + CHUNK, todo.length), total: todo.length });
+      }
+      const applied = out.filter((r) => r.applied).map((r) => r.row).sort((a, b) => a - b);
+      const done: ImportResult = { dry_run: false, summary: sum, rows: out.sort((a, b) => a.row - b.row), error: failed, applied };
+      setResult(done);
+      if (failed) setError(`${failed}. ${applied.length} rows went in (marked applied below); run the preview again for the rest.`);
+      onDone(done);
+    }
     catch (e) { setError((e as Error).message); }
-    finally { setBusy(false); }
+    finally { setBusy(false); setProgress(null); }
   };
   const missing = fields.filter((f) => f.required && !(map[f.key] >= 0));
   const s = result?.summary;
@@ -89,6 +117,7 @@ export function CsvImport({ fields, noun, settings, run, onDone, onBack, ready =
               <Icons.check /> Import {result?.dry_run ? (s?.create ?? 0) + (s?.update ?? 0) : ''} {noun}
             </Button>
           </Gate>
+          {progress && <span className='text-muted-foreground text-sm tabular-nums' role='status'>Importing… {progress.done} of {progress.total} rows</span>}
           {missing.length > 0 && <span className='text-destructive text-sm'>Map {missing.map((f) => f.label).join(', ')} first.</span>}
           {!result && rows.length > 0 && <span className='text-muted-foreground text-sm'>Preview first: nothing is written until you import.</span>}
         </div>
@@ -100,7 +129,7 @@ export function CsvImport({ fields, noun, settings, run, onDone, onBack, ready =
             <DataList<ImportRow> noun='rows' minWidth={720} height='h-[28rem]' rows={result.rows} empty='No rows.'
               cols={[
                 { label: 'Row', className: 'w-14', render: (r) => <span className='tabular-nums'>{r.row}</span> },
-                { label: 'What happens', render: (r) => <StatusBadge tone={TONE[r.action]}>{r.action}</StatusBadge> },
+                { label: 'What happens', render: (r) => <span className='flex items-center gap-1'><StatusBadge tone={TONE[r.action]}>{r.action}</StatusBadge>{r.applied && <StatusBadge tone='ok'>applied</StatusBadge>}</span> },
                 { label: 'Who', render: (r) => <span className='flex flex-col gap-0.5'><span>{r.name ?? r.company ?? r.domain ?? '—'}</span>{r.email && <span className='text-muted-foreground text-xs'>{r.email}</span>}</span> },
                 { label: 'Company', render: (r) => <span className='text-sm'>{r.company ?? r.domain ?? '—'}</span> },
                 { label: 'Why', render: (r) => <span className='text-muted-foreground text-sm'>{r.reason ?? '—'}{r.suppressed ? ' · suppressed' : ''}</span> }

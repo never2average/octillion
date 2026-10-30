@@ -3,20 +3,25 @@
  * requesters. The engine is src/campaigns.ts's (the tick, the global lease, batch sends, claims, unsubscribe, replies);
  * this file is what is different about cold email:
  *
- *   identity    every outbound campaign sends from a sender identity (gtm_sender_identities: from name, address on
- *               the outreach subdomain, daily cap, warm-up start). One on the product sender's domain (EMAIL_FROM's)
- *               is refused, and a prospects campaign cannot launch, resume or send without a valid one. Lifecycle
- *               campaigns keep EMAIL_FROM.
+ *   identity    every outbound email (each recipient whose source is prospect) goes from a sender identity
+ *               (gtm_sender_identities: from name, address, daily cap, warm-up start). Its domain must be a proper
+ *               subdomain of its organisational root (public-suffix aware: outreach.example.co.uk, never example.co.uk)
+ *               and never EMAIL_FROM's domain or a parent of it, both compared in their ASCII form; when EMAIL_FROM's
+ *               domain cannot be read, every identity is refused (fail closed). A prospects campaign cannot launch,
+ *               resume or send without a valid one. Lifecycle campaigns keep EMAIL_FROM.
  *   warm-up     an identity's cap for a day (UTC): warmup_from (20) on warmup_start, rising in a straight line to
  *               daily_cap after warmup_days (28), then daily_cap; before warmup_start, nothing. Counted over every
- *               campaign using it (gtm_campaign_sends.identity_id, sent or being sent today); whoever is over waits
+ *               campaign using it (gtm_campaign_sends.identity_id: sent, being sent, or with an outcome not known
+ *               yet, today) and its test sends (email_log, outbound_test); whoever is over waits
  *               and is looked at again hourly (the next UTC day, or a raised cap, lets them through).
  *   audience    a saved filter over prospects: status, tags, title words, company size and industry, country, owner,
  *               email status (verified only by default). Someone a customer, replied, interested, not interested or
  *               with a bad address is never enrolled, whatever the filter says.
  *   safety      checked at enrolment and again before each send: never an existing customer (a linked prospect or
- *               company, an access request that has an account, an account's member a campaign wrote to), never
- *               someone in another active sequence (the earlier enrolment wins), never a withdrawn address; the
+ *               company, any account's people by address hash and by company domain: their access requests and their
+ *               Clerk members, src/gtm-crm.ts memberIndex; when Clerk cannot be asked, nobody is written to that pass),
+ *               never someone in another active sequence (any campaign; the earlier enrolment wins) or emailed by
+ *               another outbound campaign in the last OUTBOUND_COOLOFF_DAYS (30), never a withdrawn address; the
  *               suppression list and the unsubscribe link apply as for every campaign. EU / EEA / UK / CH prospects
  *               (and anyone with no country) only when the campaign allows them (allow_restricted) and they have
  *               a lawful basis (always required at import).
@@ -25,12 +30,14 @@
  *               actions: interested, not interested, unsubscribe.
  *   rendering   plain text only (no HTML part, so no tracking pixel) unless the campaign turns on open tracking
  */
+import { domainToASCII } from "node:url";
+import { getDomain } from "tldts";
 import { getDb } from "./db.js";
 import { AdminError, log } from "./admin.js";
 import * as mail from "./email.js";
 import { freshSettings, settingText } from "./settings.js";
 import { consentOf, recordConsent } from "./gtm-consent.js";
-import { activity, domainOf, restrictedCountry, setStatus, SIZES, PROSPECT_STATUSES, EMAIL_STATUSES, companyDomainOf } from "./gtm-crm.js";
+import { activity, domainOf, restrictedCountry, setStatus, SIZES, PROSPECT_STATUSES, EMAIL_STATUSES, companyDomainOf, memberIndex, type MemberIndex } from "./gtm-crm.js";
 import type { Candidate } from "./campaigns.js";
 
 const fail = (msg: string, status = 400): never => { throw new AdminError(msg, status); };
@@ -46,18 +53,31 @@ export interface Identity {
 }
 const ICOLS = "id, from_name, from_address, domain, daily_cap, to_char(warmup_start, 'YYYY-MM-DD') AS warmup_start, warmup_from, warmup_days, enabled, created_by, created_at, updated_at";
 
-/** The product sender's domain (EMAIL_FROM's address): outbound never sends from it. */
+/** A domain in its ASCII (punycode) form, lowercased; null when it is not one. */
+export const asciiDomain = (d: string | null | undefined) => {
+  const a = d ? domainToASCII(d.trim().toLowerCase().replace(/\.$/, "")) : "";
+  return a && domainOf(a) === a ? a : null;
+};
+/** The product sender's domain (EMAIL_FROM's address, ASCII): outbound never sends from it. Null when unreadable. */
 export async function productDomain(): Promise<string | null> {
   await freshSettings();
   const from = settingText("EMAIL_FROM");
-  return domainOf(/<([^<>]+)>/.exec(from)?.[1] ?? from);
+  const addr = (/<([^<>]+)>/.exec(from)?.[1] ?? from).trim();
+  return asciiDomain(addr.includes("@") ? addr.split("@").pop() : null);
 }
-/** "outreach.example.com" is a subdomain of example.com (the product's domain or its parent). */
-const isSubdomainOf = (d: string, product: string | null) => {
-  if (!product) return false;
-  const root = product.split(".").slice(-2).join(".");
-  return d !== product && d.endsWith(`.${root}`);
-};
+/** The organisational root (registrable domain, public-suffix aware): example.co.uk for a.b.example.co.uk. */
+export const rootOf = (d: string) => getDomain(d, { allowPrivateDomains: false }) ?? null;
+/** Why an identity's domain cannot send cold email, or null (see the top of the file). */
+export function domainProblem(d: string, product: string | null): string | null {
+  if (!product) return "The product's sender domain (EMAIL_FROM) cannot be read, so no outbound identity can be checked against it: fix EMAIL_FROM first";
+  const root = rootOf(d);
+  if (!root || d === root) return `${d} is not a subdomain: send cold email from one such as outreach.${root ?? d}`;
+  if (d === product) return `Outbound cannot send from ${d}, the product's sender domain (EMAIL_FROM): use a subdomain such as outreach.${root}`;
+  if (product.endsWith(`.${d}`)) return `${d} is a parent of the product's sender domain (${product}): use a subdomain of its own such as outreach.${root}`;
+  return null;
+}
+/** A proper subdomain of the same organisation as the product's sender (outreach.example.co.uk next to example.co.uk). */
+const isSubdomainOf = (d: string, product: string | null) => !!product && !domainProblem(d, product) && rootOf(d) === rootOf(product);
 
 /**
  * Today's cap (UTC) for an identity: before warmup_start nothing; from it, warmup_from rising in a straight line to
@@ -79,11 +99,19 @@ export const warmupPlan = (i: Pick<Identity, "daily_cap" | "warmup_start" | "war
 /** Emails sent (or being sent) today, UTC, per identity: across every campaign. */
 export async function sentToday(ids: number[]): Promise<Map<number, number>> {
   if (!ids.length) return new Map();
+  // Sends that went, are going, or may have gone (uncertain / unknown), and test sends from the identity.
   const rows = await (await getDb()).query<{ identity_id: number; n: number }>(
-    `SELECT identity_id, count(*)::int AS n FROM gtm_campaign_sends
-      WHERE identity_id = ANY($1::bigint[]) AND status IN ('sent', 'sending') AND at >= (date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') GROUP BY identity_id`, [ids]);
+    `SELECT identity_id, sum(n)::int AS n FROM (
+       SELECT identity_id, count(*) AS n FROM gtm_campaign_sends
+        WHERE identity_id = ANY($1::bigint[]) AND status IN ('sent', 'sending', 'uncertain', 'unknown') AND at >= (date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') GROUP BY identity_id
+       UNION ALL
+       SELECT (meta->>'identity_id')::bigint, count(*) FROM email_log
+        WHERE kind = 'outbound_test' AND status IN ('sent', 'sending') AND (meta->>'identity_id')::bigint = ANY($1::bigint[])
+          AND at >= (date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') GROUP BY 1) x GROUP BY identity_id`, [ids]);
   return new Map(rows.map((r) => [Number(r.identity_id), Number(r.n)]));
 }
+/** What an identity may still send today (its warm-up cap less what it sent). */
+export async function leftToday(i: Identity) { return warmupCap(i) - ((await sentToday([i.id])).get(i.id) ?? 0); }
 
 export async function listIdentities() {
   const db = await getDb();
@@ -94,19 +122,22 @@ export async function listIdentities() {
   return {
     product_domain: product,
     identities: rows.map((i) => ({ ...i, cap_today: warmupCap(i), sent_today: today.get(i.id) ?? 0, plan: warmupPlan(i),
-      on_product_domain: i.domain === product, subdomain: isSubdomainOf(i.domain, product),
+      on_product_domain: i.domain === product, problem: domainProblem(i.domain, product), subdomain: isSubdomainOf(i.domain, product),
       active_campaigns: Number(campaigns.find((c) => Number(c.sender_identity_id) === i.id)?.n ?? 0) })),
   };
 }
 
 function identityFields(b: Record<string, unknown>, product: string | null, partial: boolean) {
   const out: Record<string, unknown> = {};
-  if (!partial || b.from_name !== undefined) out.from_name = str(b.from_name, 80).replace(/[<>"\r\n]/g, "") || fail("Give the sender a name, e.g. Priya at Octillion");
+  if (!partial || b.from_name !== undefined) out.from_name = displayName(b.from_name);
   if (!partial || b.from_address !== undefined) {
     const a = str(b.from_address, 254).toLowerCase();
     if (!mail.isEmail(a)) fail("The from address must be an email address, e.g. priya@outreach.example.com");
-    const d = domainOf(a)!;
-    if (product && d === product) fail(`Outbound cannot send from ${d}, the product's sender domain (EMAIL_FROM): use a subdomain such as outreach.${d}`);
+    const raw = a.split("@").pop()!;
+    if (/[^\x00-\x7f]/.test(a)) fail(`Use the address in its ASCII form (the domain as punycode: ${asciiDomain(raw) ?? "xn--…"}), so every mail system reads it the same`);
+    const d = asciiDomain(raw) ?? fail(`${raw} is not a domain`);
+    const why = domainProblem(d, product);
+    if (why) fail(why);
     Object.assign(out, { from_address: a, domain: d });
   }
   const int = (k: string, min: number, max: number, def: number) => {
@@ -170,11 +201,20 @@ export async function identityProblem(identityId: number | null | undefined): Pr
   const i = await identityById(identityId);
   if (!i) return "Choose an outbound sender identity (Sender identities): cold email never goes from the product's sender";
   if (!i.enabled) return `The sender identity ${i.from_address} is turned off`;
-  const product = await productDomain();
-  if (product && i.domain === product) return `${i.from_address} is on the product's sender domain (${product}): outbound needs its own subdomain`;
-  return null;
+  return domainProblem(i.domain, await productDomain());
 }
-export const senderOf = (i: Identity) => `${i.from_name.replace(/[<>"]/g, "")} <${i.from_address}>`;
+/**
+ * A display name fit for a From header: control characters and < > , ; " \ removed, spaces squeezed; one with an @
+ * is refused (it would read as an address).
+ */
+export function displayName(v: unknown): string {
+  const raw = typeof v === "string" ? v : "";
+  if (raw.includes("@")) fail("The sender's name cannot contain @ (it would read as an address): e.g. Priya at Octillion");
+  const name = raw.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").replace(/[<>,;"\\]/g, "").replace(/\s+/g, " ").trim().slice(0, 80);
+  return name || fail("Give the sender a name, e.g. Priya at Octillion");
+}
+/** The From header: the name as an RFC 5322 quoted string, then the address. */
+export const senderOf = (i: Identity) => `"${i.from_name.replace(/[\u0000-\u001f\u007f@<>,;"\\]/g, "").trim()}" <${i.from_address}>`;
 
 // ---------- the audience ----------
 
@@ -225,31 +265,47 @@ export async function resolveProspects(f: ProspectFilter): Promise<Candidate[]> 
 
 // ---------- who may get cold email ----------
 
-export type Block = "customer" | "in_sequence" | "restricted" | "withdrawn" | "status" | "no_prospect";
+export type Block = "customer" | "in_sequence" | "cooling_off" | "restricted" | "withdrawn" | "status" | "no_prospect" | "member_check";
 export const BLOCK_TEXT: Record<Block, string> = {
-  customer: "an existing customer", in_sequence: "in another active sequence", restricted: "EU / EEA / UK / CH (or no country): the campaign does not allow them",
-  withdrawn: "withdrew consent", status: "replied, interested, not interested, customer or bad address", no_prospect: "no longer a prospect",
+  customer: "an existing customer", in_sequence: "in another active sequence", cooling_off: "emailed by another outbound campaign recently",
+  restricted: "EU / EEA / UK / CH (or no country): the campaign does not allow them", withdrawn: "withdrew consent",
+  status: "replied, interested, not interested, customer or bad address", no_prospect: "no longer a prospect",
+  member_check: "customers could not be checked (Clerk did not answer): not this time",
 };
+/** Days after another outbound campaign's last email before a prospect may join a new one (OUTBOUND_COOLOFF_DAYS). */
+export const cooloffDays = () => Math.max(0, Math.trunc(Number(process.env.OUTBOUND_COOLOFF_DAYS ?? 30)) || 0);
+/** The B4 hint: a postal address is never required to send (the user's decision), but US law expects one. */
+export const POSTAL_WARNING = "US law (CAN-SPAM) requires a postal address in cold email; none is set";
 
 /**
  * For each address (a prospect's), the reason a campaign may not write to them now, or null. `recipientIds`: their
  * row in this campaign, when enrolled (an earlier enrolment elsewhere wins over this one; a later one does not block).
  */
-export async function outboundBlocks(people: { email: string; prospect_id?: number | null; recipient_id?: number | null }[], c: { id: number; allow_restricted: boolean }): Promise<Map<string, Block | null>> {
+export async function outboundBlocks(people: { email: string; prospect_id?: number | null; recipient_id?: number | null }[], c: { id: number; allow_restricted: boolean },
+  members?: MemberIndex): Promise<Map<string, Block | null>> {
   const out = new Map<string, Block | null>();
   if (!people.length) return out;
   const db = await getDb();
   const emails = people.map((p) => p.email.toLowerCase());
-  const [prospects, customers, active, consent] = await Promise.all([
+  // Every account's people now (cached a minute): Clerk down means nobody is written to this pass (fail closed).
+  const idx = members ?? await memberIndex();
+  if (idx.error) { for (const e of emails) out.set(e, "member_check"); return out; }
+  const days = cooloffDays();
+  const [prospects, customers, active, recent, consent] = await Promise.all([
     db.query<{ id: number; email: string; status: string; country: string | null; org_id: number | null; company_org: number | null }>(
       `SELECT p.id, p.email, p.status, p.country, p.org_id, c.org_id AS company_org FROM gtm_prospects p LEFT JOIN gtm_companies c ON c.id = p.company_id WHERE p.email = ANY($1::text[])`, [emails]),
     // Customers: an access request that has an account, or an account member a lifecycle campaign wrote to.
     db.query<{ email: string }>(
       `SELECT lower(email) AS email FROM access_requests WHERE lower(email) = ANY($1::text[]) AND org_id IS NOT NULL
        UNION SELECT email FROM gtm_campaign_recipients WHERE email = ANY($1::text[]) AND source = 'account'`, [emails]),
+    // In another sequence: waiting for an email in any other campaign that is not over.
     db.query<{ email: string; id: number }>(
       `SELECT r.email, min(r.id)::bigint AS id FROM gtm_campaign_recipients r JOIN gtm_campaigns k ON k.id = r.campaign_id
-        WHERE r.email = ANY($1::text[]) AND r.campaign_id <> $2 AND r.status IN ('pending', 'active') AND k.status IN ('running', 'paused', 'scheduled') GROUP BY r.email`, [emails, c.id]),
+        WHERE r.email = ANY($1::text[]) AND r.campaign_id <> $2 AND r.status IN ('pending', 'active') AND k.status <> 'done' GROUP BY r.email`, [emails, c.id]),
+    // Cooling off: another outbound campaign emailed them in the last N days.
+    db.query<{ email: string }>(
+      `SELECT DISTINCT r.email FROM gtm_campaign_recipients r WHERE r.email = ANY($1::text[]) AND r.campaign_id <> $2 AND r.source = 'prospect'
+          AND r.last_sent_at > now() - make_interval(days => $3::int)`, [emails, c.id, days]),
     consentOf(emails),
   ]);
   const byEmail = new Map(prospects.map((p) => [p.email, p]));
@@ -258,16 +314,19 @@ export async function outboundBlocks(people: { email: string; prospect_id?: numb
   const linkedDomains = new Set((await db.query<{ domain: string }>("SELECT domain FROM gtm_companies WHERE org_id IS NOT NULL AND domain = ANY($1::text[])",
     [[...new Set(emails.map(companyDomainOf).filter((d): d is string => !!d))]])).map((r) => r.domain));
   const activeBy = new Map(active.map((a) => [a.email, Number(a.id)]));
+  const cooling = new Set(recent.map((r) => r.email));
   for (const person of people) {
     const e = person.email.toLowerCase(), p = byEmail.get(e);
     const d = companyDomainOf(e);
     let why: Block | null = null;
     if (!p) why = "no_prospect";
-    else if (p.org_id != null || p.company_org != null || customer.has(e) || (d && linkedDomains.has(d))) why = "customer";
+    else if (p.org_id != null || p.company_org != null || customer.has(e) || (d && linkedDomains.has(d)) || idx.byHash.has(mail.hashAddress(e)) || (d && idx.domains.has(d))) why = "customer";
     else if (NEVER.includes(p.status)) why = "status";
     else if (consent.get(e)?.basis === "withdrawn") why = "withdrawn";
     else if (restrictedCountry(p.country) && !c.allow_restricted) why = "restricted";
     else if (activeBy.has(e) && (person.recipient_id == null || activeBy.get(e)! < person.recipient_id)) why = "in_sequence";
+    // Only at enrolment: once in this campaign, its own later emails go on.
+    else if (person.recipient_id == null && cooling.has(e)) why = "cooling_off";
     out.set(e, why);
   }
   return out;

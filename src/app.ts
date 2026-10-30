@@ -9,7 +9,7 @@
  */
 import * as questions from "./questions.js";
 import express, { type NextFunction, type Request, type Response } from "express";
-import { withTenant } from "./tenant-scope.js";
+import { asPlatform, withTenant } from "./tenant-scope.js";
 import { z } from "zod";
 import * as admin from "./admin.js";
 import { orgForClerk } from "./auth.js";
@@ -24,7 +24,7 @@ import * as playbooks from "./playbooks.js";
 import { markStage, playbooksFor, PlaybookError, syncProgress } from "./playbooks.js";
 import { TOOL_NAMES } from "./server.js";
 import { dayKeys, daySeries, reportRange, sparkSpans } from "./insights.js";
-import { capture, identifyPerson } from "./telemetry.js";
+import { capture, identifyPerson, keepAlive } from "./telemetry.js";
 import * as journeys from "./journeys.js";
 import * as limits from "./limits.js";
 import * as clerk from "./clerk.js";
@@ -398,6 +398,8 @@ export function appRouter() {
       identified.add(c.userId);
       identifyPerson(c.userId, { email: s.email ?? undefined, name: clerk.displayName(user) ?? undefined, account: org.slug, account_name: org.name, role: s.accountRole });
       capture({ distinctId: c.userId, orgSlug: org.slug }, "app_signed_in", { method: "clerk" });
+      // GTM: a prospect who joined this account (an accepted invitation) is a customer now, never cold-emailed again.
+      if (s.email) keepAlive(asPlatform(() => import("./gtm-crm.js").then((g) => g.linkMember(s.email, org.orgId))).catch(() => {}));
     }
     res.locals.session = s;
     res.locals.memberships = ms;

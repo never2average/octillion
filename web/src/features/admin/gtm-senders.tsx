@@ -15,7 +15,7 @@ import { Gate, useAdminRole } from './role';
 
 export interface Identity {
   id: number; from_name: string; from_address: string; domain: string; daily_cap: number; warmup_start: string | null; warmup_from: number; warmup_days: number; enabled: boolean;
-  cap_today: number; sent_today: number; plan: { day: string; cap: number }[]; on_product_domain: boolean; subdomain: boolean; active_campaigns: number;
+  cap_today: number; sent_today: number; plan: { day: string; cap: number }[]; on_product_domain: boolean; problem: string | null; subdomain: boolean; active_campaigns: number;
 }
 export interface Identities { product_domain: string | null; identities: Identity[] }
 
@@ -29,8 +29,9 @@ export function SendersView() {
     <div className='flex min-w-0 flex-col gap-6'>
       <ErrorBox error={error} />
       <Notice tone='info'>
-        Outbound sends from a subdomain of your main domain, such as outreach.{data?.product_domain?.split('.').slice(-2).join('.') ?? 'example.com'}, verified as a sending domain in Resend (SPF, DKIM, DMARC).
-        The product&apos;s sender domain{data?.product_domain ? ` (${data.product_domain})` : ''} is refused, and lifecycle campaigns keep the product sender.
+        Outbound sends from a subdomain of your main domain, such as outreach.example.com (or outreach.example.co.uk), verified as a sending domain in Resend (SPF, DKIM, DMARC).
+        A bare domain, the product&apos;s sender domain{data?.product_domain ? ` (${data.product_domain})` : ''} and any parent of it are refused; lifecycle campaigns keep the product sender.
+        {!data?.product_domain && data && ' The product sender (EMAIL_FROM) cannot be read right now, so every identity is refused until it is fixed.'}
       </Notice>
       <StatStrip items={[
         { label: 'Identities', value: list.length, hint: `${list.filter((i) => i.enabled).length} on` },
@@ -77,7 +78,8 @@ function IdentityCard({ i }: { i: Identity }) {
   return (
     <Section title={<span className='flex flex-wrap items-center gap-2'>{i.from_name} &lt;{i.from_address}&gt;
       {!i.enabled && <StatusBadge tone='neutral'>off</StatusBadge>}{i.on_product_domain && <StatusBadge tone='bad'>product domain: refused</StatusBadge>}
-      {!i.on_product_domain && !i.subdomain && <StatusBadge tone='warn'>not a subdomain of the product&apos;s domain</StatusBadge>}</span>}
+      {i.problem && !i.on_product_domain && <StatusBadge tone='bad' title={i.problem}>refused: {i.problem}</StatusBadge>}
+      {!i.problem && !i.subdomain && <StatusBadge tone='neutral'>another organisation&apos;s domain than the product&apos;s</StatusBadge>}</span>}
       description={`${i.sent_today} of ${i.cap_today} sent today (UTC) · cap ${i.daily_cap} once warm${i.warmup_start ? ` · warm-up from ${i.warmup_start}: ${i.warmup_from} a day rising over ${i.warmup_days} days` : ' · no warm-up ramp'} · ${i.active_campaigns} active campaign${i.active_campaigns === 1 ? '' : 's'}`}
       action={<span className='flex flex-wrap items-center gap-2'>
         <label className='flex items-center gap-2 text-sm'><Switch disabled={!can('campaigns') || toggle.isPending} checked={i.enabled} onCheckedChange={(v) => toggle.mutate(v)} /> On</label>

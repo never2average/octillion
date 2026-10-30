@@ -43,7 +43,7 @@ export const PLATFORM_READONLY = ["library_tasks", "platform_settings", "platfor
 export const NO_ACCESS = ["vault_credentials", "vault_providers", "admin_access_log", "admin_tokens", "access_requests", "orchestrators", "email_log",
   "gtm_campaigns", "gtm_campaign_recipients", "gtm_campaign_sends", "email_suppressions",
   "gtm_replies", "gtm_events", "gtm_event_enrolments", "gtm_org_signals", "email_consents", "email_consent_ledger",
-  "gtm_companies", "gtm_prospects", "gtm_prospect_activities", "gtm_sender_identities", "gtm_deal_stages", "gtm_deals", "gtm_apollo_cache", "gtm_apollo_usage"];
+  "gtm_companies", "gtm_prospects", "gtm_prospect_activities", "gtm_sender_identities", "gtm_deal_stages", "gtm_deals", "gtm_apollo_cache", "gtm_apollo_usage", "gtm_jobs"];
 
 export async function tenantTables(db: Queryable): Promise<string[]> {
   const rows = await db.query<{ table_name: string }>(

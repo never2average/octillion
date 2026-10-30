@@ -48,7 +48,7 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     // Uncertain outcomes, each for the next `n` requests: a 409 concurrent_idempotent_requests (nothing recorded); the
     // request accepted and recorded, then the connection dropped (no answer); a batch answer missing the first email's id.
     resendConcurrent: 0, resendDropAfterAccept: 0, resendOmitId: 0,
-    apolloPeople: [] as any[], apolloRequests: [] as any[], apolloLimited: 0, apolloRetryAfter: 1,
+    clerkMembersDown: false, apolloPeople: [] as any[], apolloRequests: [] as any[], apolloLimited: 0, apolloRetryAfter: 1,
     // Cloudflare Workers AI: every chat request (its body), and how to answer one (status and/or content; unset: 503).
     aiRequests: [] as any[], aiReply: null as null | ((body: any) => { status?: number; content?: string }),
     prices: [
@@ -167,7 +167,7 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     if (inv.status !== "pending") return clerkErr(res, 404, "The organization invitation is not in the 'pending' status.", "resource_not_found");
     Object.assign(inv, { status: "revoked", updated_at: ms() }); res.json(inv);
   });
-  c.get("/v1/organizations/:id/memberships", (req, res) =>
+  c.get("/v1/organizations/:id/memberships", (req, res) => s.clerkMembersDown ? clerkErr(res, 500, "Clerk is having trouble (mock outage)", "internal_error") :
     void res.json(list([...s.memberships.values()].filter((m) => m.organization_id === req.params.id).map(membershipJson))));
   const mem = (req: express.Request) => s.memberships.get(`${req.params.id}:${req.params.user}`);
   c.patch("/v1/organizations/:id/memberships/:user", (req, res) => {
@@ -514,6 +514,8 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     const orgs = domains.map((d) => s.apolloPeople.find((p: any) => p.domain === d)).filter(Boolean).map(apolloOrg);
     res.json({ status: "success", total_requested_domains: domains.length, unique_enriched_records: orgs.length, missing_records: domains.length - orgs.length, organizations: orgs });
   });
+  // Clerk's organization memberships answering 500 (GTM's customer check fails closed): POST /_mock/clerk/members-outage {down}.
+  app.post("/_mock/clerk/members-outage", (req, res) => { s.clerkMembersDown = Boolean(req.body?.down); res.json({ down: s.clerkMembersDown }); });
   app.post("/_mock/apollo/people", (req, res) => { s.apolloPeople.push(...(req.body?.people ?? [])); res.json({ ok: true, count: s.apolloPeople.length }); });
   app.post("/_mock/apollo/ratelimit", (req, res) => { s.apolloLimited = Number(req.body?.count ?? 0); s.apolloRetryAfter = Number(req.body?.retry_after ?? 1); res.json({ ok: true }); });
   app.get("/_mock/apollo/requests", (_req, res) => void res.json({ requests: s.apolloRequests }));

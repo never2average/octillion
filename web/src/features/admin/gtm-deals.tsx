@@ -16,6 +16,7 @@ import { adminApi } from '@/lib/api-client';
 import { cn } from '@/lib/utils';
 import { accountHref, post, useAdmin, useAdminAction } from './lib';
 import { ConfirmButton, ErrorBox, FormRow, Notice, Section, StatusBadge, When } from './ui';
+import { TextDialog } from './gtm-dialogs';
 import { Gate, useAdminRole } from './role';
 import { GtmTabs, usd0, useGtmParams } from './gtm-common';
 
@@ -109,6 +110,7 @@ function Board({ stages, deals, onOpen }: { stages: Stage[]; deals: Deal[]; onOp
   const { can } = useAdminRole();
   const [drag, setDrag] = useState<number | null>(null);
   const [over, setOver] = useState<string | null>(null);
+  const [lost, setLost] = useState<{ id: number; stage: string; before: number | null; name: string } | null>(null);
   const move = useAdminAction((v: { id: number; stage: string; before: number | null; lost_reason?: string }) => post(`/gtm/deals/${v.id}/move`, v), { success: 'Deal moved' });
   const drop = (e: DragEvent, stage: Stage, before: number | null) => {
     e.preventDefault(); e.stopPropagation();
@@ -117,12 +119,15 @@ function Board({ stages, deals, onOpen }: { stages: Stage[]; deals: Deal[]; onOp
     if (!id) return;
     const d = deals.find((x) => x.id === id);
     if (!d || (d.stage === stage.id && before === null && deals.filter((x) => x.stage === stage.id).at(-1)?.id === id)) return;
-    let lost_reason: string | undefined;
-    if (stage.kind === 'lost' && d.stage !== stage.id) lost_reason = window.prompt(`Why was ${d.name} lost? (optional)`)?.trim() || undefined;
-    move.mutate({ id, stage: stage.id, before, lost_reason });
+    // Into a lost stage: ask why first (optional), in a dialog.
+    if (stage.kind === 'lost' && d.stage !== stage.id) { setLost({ id, stage: stage.id, before, name: d.name }); return; }
+    move.mutate({ id, stage: stage.id, before });
   };
   return (
     <div className='flex gap-3 overflow-x-auto pb-2'>
+      <TextDialog open={!!lost} title={`Why was ${lost?.name ?? 'this deal'} lost?`} description='Optional: it shows on the deal and helps the next one.' label='Lost reason'
+        placeholder='e.g. chose a competitor' submitLabel='Move to lost' onSubmit={(why) => lost && move.mutate({ id: lost.id, stage: lost.stage, before: lost.before, lost_reason: why || undefined })}
+        onClose={() => setLost(null)} />
       {stages.map((s) => {
         const col = deals.filter((d) => d.stage === s.id).sort((a, b) => a.position - b.position || a.id - b.id);
         const sum = col.reduce((t, d) => t + d.value, 0);

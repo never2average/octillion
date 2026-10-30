@@ -19,7 +19,8 @@ import { Textarea } from '@/components/ui/textarea';
 import { Icons } from '@/components/icons';
 import { adminApi } from '@/lib/api-client';
 import { post, useAdmin, useAdminAction } from './lib';
-import { Chips, DataList, ErrorBox, FormRow, Notice, Section, StatusBadge, When, type Tone } from './ui';
+import { Chips, ConfirmButton, DataList, ErrorBox, FormRow, Notice, Section, StatusBadge, When, type Tone } from './ui';
+import { ConfirmDialog, TextDialog } from './gtm-dialogs';
 import { Gate, useAdminRole } from './role';
 import { GtmTabs, useGtmParams } from './gtm-common';
 import { CsvImport, type ImportField, type ImportResult } from './gtm-import';
@@ -117,13 +118,20 @@ function ProspectsPage() {
     { key: 'updated_at', label: 'Updated', type: 'date', hidden: true, value: (x) => x.updated_at, render: (x) => <When d={x.updated_at} className='text-muted-foreground text-sm' /> }
   ];
   const back = () => p.write({ panel: null });
-  const ask = (q: string) => { const v = window.prompt(q); return v == null ? null : v.trim(); };
+  // The bulk menu's questions (a tag, an owner, delete N?): the admin's dialogs, labelled buttons only.
+  const [ask, setAsk] = useState<{ kind: 'tag' | 'owner' | 'delete'; ids: number[]; clear: () => void } | null>(null);
 
   return (
     <PageContainer>
       <div className='flex min-w-0 flex-col gap-4'>
         <GtmTabs />
         <ErrorBox error={error} />
+        <TextDialog open={ask?.kind === 'tag'} title={`Add a tag to ${ask?.ids.length ?? 0} prospects`} label='Tag' placeholder='e.g. devtools' submitLabel='Add tag' required
+          onSubmit={(t) => ask && bulk.mutate({ ids: ask.ids, add_tags: [t] }, { onSuccess: ask.clear })} onClose={() => setAsk(null)} />
+        <TextDialog open={ask?.kind === 'owner'} title={`Set the owner of ${ask?.ids.length ?? 0} prospects`} description='Empty: nobody owns them.' label='Owner' submitLabel='Set owner'
+          onSubmit={(o) => ask && bulk.mutate({ ids: ask.ids, owner: o }, { onSuccess: ask.clear })} onClose={() => setAsk(null)} />
+        <ConfirmDialog open={ask?.kind === 'delete'} title={`Delete ${ask?.ids.length ?? 0} prospects?`} description='Their timelines go too; the suppression list keeps what it has.'
+          confirmLabel='Delete' destructive onConfirm={() => ask && remove.mutate(ask.ids, { onSuccess: ask.clear })} onClose={() => setAsk(null)} />
         {panel === 'import' ? <ImportPanel onBack={back} />
           : panel === 'find' ? <FindPanel onBack={back} />
           : panel === 'new' ? <NewProspect onBack={back} onMade={(id) => p.write({ panel: null, open: String(id) })} />
@@ -153,9 +161,9 @@ function ProspectsPage() {
                   { label: 'Enrich again (ignore freshness)', onSelect: () => enrich.mutate({ ids, force: true }, { onSuccess: clear }) },
                   { label: 'Start an outbound campaign', separator: true, onSelect: () => startCampaign.mutate(ids, { onSuccess: (r) => router.push(`/admin/gtm/campaigns?open=${r.campaign.id}`) }) },
                   ...(['new', 'interested', 'not_interested'] as const).map((s, i) => ({ label: `Set status: ${STATUS_LABEL[s]}`, separator: i === 0, onSelect: () => bulk.mutate({ ids, status: s }, { onSuccess: clear }) })),
-                  { label: 'Add a tag…', onSelect: () => { const t = ask('Tag to add'); if (t) bulk.mutate({ ids, add_tags: [t] }, { onSuccess: clear }); } },
-                  { label: 'Set owner…', onSelect: () => { const o = ask('Owner (empty: nobody)'); if (o != null) bulk.mutate({ ids, owner: o }, { onSuccess: clear }); } },
-                  { label: `Delete ${ids.length}`, destructive: true, separator: true, onSelect: () => { if (window.confirm(`Delete ${ids.length} prospects? Their timelines go too; suppressions stay.`)) remove.mutate(ids, { onSuccess: clear }); } }
+                  { label: 'Add a tag…', onSelect: () => setAsk({ kind: 'tag', ids, clear }) },
+                  { label: 'Set owner…', onSelect: () => setAsk({ kind: 'owner', ids, clear }) },
+                  { label: `Delete ${ids.length}…`, destructive: true, separator: true, onSelect: () => setAsk({ kind: 'delete', ids, clear }) }
                 ];
                 return acts.map((a) => lock(a, 'campaigns'));
               }}
@@ -205,7 +213,8 @@ function ProspectPeek({ id, statuses, bases, onDeleted }: { id: number; statuses
           <Gate need='campaigns'><Button size='sm' variant='outline' disabled={enrich.isPending} onClick={() => enrich.mutate(false)}><Icons.sparkles /> Enrich with Apollo</Button></Gate>
           <Gate need='campaigns'><Button size='sm' variant='ghost' disabled={enrich.isPending} onClick={() => enrich.mutate(true)}><Icons.refresh /> Enrich again</Button></Gate>
           <Gate need='campaigns'><Button size='sm' variant='outline' disabled={deal.isPending} onClick={() => deal.mutate()}><Icons.add /> Create deal</Button></Gate>
-          <Gate need='campaigns'><Button size='sm' variant='ghost' className='text-destructive' onClick={() => { if (window.confirm('Delete this prospect and their timeline?')) remove.mutate(undefined, { onSuccess: onDeleted }); }}><Icons.trash /> Delete</Button></Gate>
+          <Gate need='campaigns'><ConfirmButton variant='destructive' label={<><Icons.trash /> Delete</>} title='Delete this prospect?' confirmLabel='Delete'
+            description='Their timeline goes too; the suppression list keeps what it has.' onConfirm={() => remove.mutate(undefined, { onSuccess: onDeleted })} /></Gate>
         </div>
         <p className='text-muted-foreground text-xs'>
           Added <When d={x.created_at} /> from {x.source}{x.enriched_at ? <> · enriched <When d={x.enriched_at} /> ({x.enrichment_source})</> : null}{x.linked_at ? <> · linked <When d={x.linked_at} /></> : null}

@@ -140,10 +140,23 @@ export async function gtmPhase2Checks({ db, base, adm, json, mockUrl, mockPost, 
   const product = await outbound.productDomain();
   const bad = await errOf(adm("POST", "/gtm/identities", { from_name: "Sales", from_address: `sales@${product}`, daily_cap: 50 }));
   assert.ok(bad.status === 400 && /product's sender domain/.test(bad.error), "an identity on the product's sender domain is refused");
-  const OUT = `outreach-${D}.dev`;
+  // B3: a proper subdomain of its own organisational root (public-suffix aware), never EMAIL_FROM's domain or a parent of
+  // it, ASCII only; nothing passes when the product's domain cannot be read.
+  const dp = outbound.domainProblem;
+  assert.ok(dp("outreach.example.co.uk", "example.co.uk") === null && /not a subdomain/.test(dp("example.co.uk", "mail.other.com")!) && /not a subdomain/.test(dp(`ob-${D}.dev`, product)!),
+    "outreach.example.co.uk is a subdomain; example.co.uk (a co.uk root) is not");
+  assert.ok(/parent/.test(dp("b.example.com", "a.b.example.com")!) && /product's sender domain/.test(dp("a.b.example.com", "a.b.example.com")!) && /cannot be read/.test(dp("outreach.example.com", null)!),
+    "never the product's domain or a parent of it; fail closed without it");
+  const root = await errOf(adm("POST", "/gtm/identities", { from_name: "Sales", from_address: `sales@ob-${D}.dev`, daily_cap: 50 }));
+  assert.ok(root.status === 400 && /not a subdomain/.test(root.error), "an identity on a bare registrable domain is refused");
+  assert.equal(await status(adm("POST", "/gtm/identities", { from_name: "Sales", from_address: `sales@outreach.bücher-${stamp}.de` })), 400, "a unicode domain is a 400 (punycode, please), not a 500");
+  const atName = await errOf(adm("POST", "/gtm/identities", { from_name: "sales@evil.example", from_address: `x@outreach.ob-${D}.dev` }));
+  assert.ok(atName.status === 400 && /@/.test(atName.error), "a display name with an @ is refused");
+  const OUT = `outreach.ob-${D}.dev`;
   const today = new Date().toISOString().slice(0, 10);
-  const ids0 = await json(adm("POST", "/gtm/identities", { from_name: "Priya at Octillion", from_address: `priya@${OUT}`, daily_cap: 10, warmup_start: today, warmup_from: 2, warmup_days: 28 }));
+  const ids0 = await json(adm("POST", "/gtm/identities", { from_name: 'Priya at Octillion, "Sales";\n', from_address: `priya@${OUT}`, daily_cap: 10, warmup_start: today, warmup_from: 2, warmup_days: 28 }));
   const ident = ids0.identities.find((i: any) => i.from_address === `priya@${OUT}`);
+  assert.ok(ident && ident.from_name === "Priya at Octillion Sales" && ident.subdomain === false && ident.problem === null, `the name is cleaned: ${JSON.stringify(ident)}`);
   assert.ok(ident && ident.cap_today === 2 && ident.sent_today === 0 && !ident.on_product_domain && ident.plan.length === 35 && ident.plan[28].cap === 10, "warm-up: 2 today, the full 10 after 28 days");
   const curve = { daily_cap: 200, warmup_from: 20, warmup_days: 28, warmup_start: "2026-01-01" };
   assert.deepEqual([outbound.warmupCap(curve, new Date("2025-12-31T12:00:00Z")), outbound.warmupCap(curve, new Date("2026-01-01T12:00:00Z")), outbound.warmupCap(curve, new Date("2026-01-15T12:00:00Z")),
@@ -151,7 +164,7 @@ export async function gtmPhase2Checks({ db, base, adm, json, mockUrl, mockPost, 
 
   // ---------- an outbound campaign: identity required, the cold-email rules, the cap, text only ----------
   // Prospects for it: A (US), Z (US, Apollo), Y (DE), X (unverified), H (US, CTO), a customer, and one in another sequence.
-  const cust = P("cust"), busy = P("busy");
+  const cust = P("cust", `custco-${D}.dev`), busy = P("busy");
   const custOrg = (await db.query<{ id: number }>("INSERT INTO organizations (slug, name) VALUES ($1, $1) RETURNING id", [`p2-cust-${stamp}`]))[0].id;
   created.orgs.push(custOrg);
   created.requests.push((await db.query<{ id: number }>("INSERT INTO access_requests (email, company, status, org_id) VALUES ($1, 'Cust', 'approved', $2) RETURNING id", [cust, custOrg]))[0].id);
@@ -193,7 +206,7 @@ export async function gtmPhase2Checks({ db, base, adm, json, mockUrl, mockPost, 
   const outMails = () => mail && [pa, ph, zed].flatMap((e) => sentTo(e, "outbound"));
   assert.ok(t1.sent === 2 && t1.capped === 1, `the warm-up cap (2 today) holds: ${JSON.stringify(t1)}`);
   const m0 = outMails()[0];
-  assert.ok(m0.from === `Priya at Octillion <priya@${OUT}>` && !m0.html && /Unsubscribe: http/.test(m0.text) && /because of your role/.test(m0.text) && m0.headers?.["List-Unsubscribe"], "from the identity, plain text only (no pixel), with the unsubscribe link");
+  assert.ok(m0.from === `"Priya at Octillion Sales" <priya@${OUT}>` && !m0.html && /Unsubscribe: http/.test(m0.text) && /because of your role/.test(m0.text) && m0.headers?.["List-Unsubscribe"], "from the identity, plain text only (no pixel), with the unsubscribe link");
   assert.ok((await db.query("SELECT 1 FROM email_log WHERE kind = 'outbound' AND to_domain = $1", [`p2-${D}.dev`])).length + (await db.query("SELECT 1 FROM email_log WHERE kind = 'outbound' AND to_domain = $1", [`zeta-${D}.dev`])).length === 2, "logged as outbound, by domain");
   const contacted = (await db.query<any>("SELECT email, status FROM gtm_prospects WHERE email = ANY($1::text[])", [[pa, ph, zed]])).filter((p: any) => p.status === "contacted");
   assert.equal(contacted.length, 2, "a first email moves new -> contacted");
@@ -256,7 +269,121 @@ export async function gtmPhase2Checks({ db, base, adm, json, mockUrl, mockPost, 
   await tick();
   assert.ok(sentTo(tp, "outbound")[0]?.html, "track_opens on: an HTML part");
   const test = await json(adm("POST", `/gtm/campaigns/${cO}/test`, { to: `t+${stamp}@p2-test.dev` }));
-  assert.ok(test.status === "sent" && sentTo(`t+${stamp}@p2-test.dev`, "outbound_test")[0].from === `Priya at Octillion <priya@${OUT}>`, "a test send goes from the identity too");
+  const sentBefore = (await json(adm("GET", "/gtm/identities"))).identities.find((i: any) => i.id === ident.id).sent_today;
+  assert.ok(test.status === "sent" && sentTo(`t+${stamp}@p2-test.dev`, "outbound_test")[0].from === `"Priya at Octillion Sales" <priya@${OUT}>`, "a test send goes from the identity too");
+  await json(adm("POST", `/gtm/campaigns/${cO}/test`, { to: `t2+${stamp}@p2-test.dev` }));
+  assert.equal((await json(adm("GET", "/gtm/identities"))).identities.find((i: any) => i.id === ident.id).sent_today, sentBefore + 1, "a test send counts toward the identity's daily cap");
+  assert.ok((await json(adm("GET", `/gtm/campaigns/${cO}`))).setup.outbound_postal_warning === outbound.POSTAL_WARNING, "no postal address: a warning on outbound campaigns, never a block");
+
+  // B1: once anyone is enrolled, a campaign never switches between prospects and accounts; and a prospect is always
+  // cold email, from a valid identity, whatever the campaign row says.
+  await json(adm("POST", `/gtm/campaigns/${cT}/pause`));
+  const sw = await errOf(adm("PUT", `/gtm/campaigns/${cT}`, { audience: { include: "accounts" } }));
+  assert.ok(sw.status === 409 && /switch/.test(sw.error), "switching a paused outbound campaign to accounts is refused");
+  await json(adm("POST", `/gtm/campaigns/${cT}/resume`));
+  const b1 = P("b1");
+  await json(adm("POST", "/gtm/prospects", { email: b1, first_name: "Bea", lawful_basis: "legitimate_interest", country: "US", tags: `${D}-b1` }));
+  await db.query("UPDATE gtm_prospects SET email_status = 'verified' WHERE email = $1", [b1]);
+  const cB1 = (await json(adm("POST", "/gtm/campaigns", { name: `B1 ${stamp}`, audience: { include: "prospects", prospects: { tags: [`${D}-b1`] } }, steps, sender_identity_id: ident.id }))).campaign.id;
+  created.campaigns.push(cB1);
+  assert.equal((await json(adm("POST", `/gtm/campaigns/${cB1}/launch`, {}))).recipients.length, 1);
+  // Forced into a lifecycle shape behind the API's back: the prospect still never gets an email from the product domain.
+  await db.query(`UPDATE gtm_campaigns SET audience = '{"include":"accounts"}'::jsonb, sender_identity_id = NULL WHERE id = $1`, [cB1]);
+  await tick();
+  assert.ok(!sentTo(b1).length, "a prospect without a valid identity gets nothing (never EMAIL_FROM)");
+  await db.query("UPDATE gtm_campaigns SET sender_identity_id = $2 WHERE id = $1", [cB1, ident.id]);
+  await db.query("UPDATE gtm_campaign_recipients SET next_at = now() WHERE campaign_id = $1", [cB1]);
+  await tick();
+  assert.ok(sentTo(b1, "outbound")[0]?.from === `"Priya at Octillion Sales" <priya@${OUT}>` && !sentTo(b1, "campaign").length, "with one, the prospect's email goes from the identity, as outbound");
+
+  // B2: account members are customers, by address hash (Clerk), at enrolment, before each send and by the relink action.
+  const memCo = `memco-${D}.dev`, mem = P("member", memCo), colleague = `col+${stamp}@${memCo}`;
+  await json(adm("POST", "/gtm/prospects", { email: mem, first_name: "Mo", lawful_basis: "legitimate_interest", country: "US", tags: `${D}-b2` }));
+  await json(adm("POST", "/gtm/prospects", { email: colleague, first_name: "Col", lawful_basis: "legitimate_interest", country: "US", tags: `${D}-b2` }));
+  await db.query("UPDATE gtm_prospects SET email_status = 'verified' WHERE email = ANY($1::text[])", [[mem, colleague]]);
+  const cB2 = (await json(adm("POST", "/gtm/campaigns", { name: `B2 ${stamp}`, audience: { include: "prospects", prospects: { tags: [`${D}-b2`] } }, steps, sender_identity_id: ident.id }))).campaign.id;
+  created.campaigns.push(cB2);
+  assert.equal((await json(adm("POST", `/gtm/campaigns/${cB2}/launch`, {}))).recipients.length, 2, "both enrolled while nobody knows them");
+  // Then each joins an existing account in Clerk (an accepted invitation): the next tick must not email them.
+  const clerkOrg = await (await fetch(`${mockUrl}/v1/organizations`, { method: "POST", headers: { authorization: "Bearer sk_test_mock", "content-type": "application/json" }, body: JSON.stringify({ name: `memorg-${stamp}` }) })).json();
+  const memOrg = (await db.query<{ id: number }>("INSERT INTO organizations (slug, name, clerk_org_id) VALUES ($1, $1, $2) RETURNING id", [`memorg-${stamp}`, clerkOrg.id]))[0].id;
+  created.orgs.push(memOrg);
+  for (const e of [mem, `boss+${stamp}@${memCo}`]) {
+    const u = await mockPost("/_mock/clerk/users", { email: e, first_name: "M" });
+    await mockPost("/_mock/clerk/memberships", { org_id: clerkOrg.id, user_id: u.id, role: "org:member" });
+  }
+  const tB2 = await tick();
+  assert.ok(!sentTo(mem).length && !sentTo(colleague).length && tB2.blocked >= 2, `a new member (and a colleague at their domain) is never cold-emailed: ${JSON.stringify(tB2)}`);
+  const rel = await json(adm("POST", "/gtm/prospects/relink"));
+  assert.ok(rel.prospects >= 1 && rel.companies >= 1 && (await prospectBy(mem)).status === "customer" && Number((await prospectBy(mem)).org_id) === Number(memOrg), `relink: ${JSON.stringify(rel)}`);
+  assert.equal(Number((await db.query<any>("SELECT org_id FROM gtm_companies WHERE domain = $1", [memCo]))[0].org_id), Number(memOrg), "their company is linked by domain");
+  assert.ok((await db.query("SELECT 1 FROM gtm_jobs WHERE name = 'customer_links'")).length, "the backfill ran once (first tick) and is recorded");
+  // A linked company keeps its domain and cannot be deleted (its people stay recognised).
+  const memCoId = Number((await db.query<any>("SELECT id FROM gtm_companies WHERE domain = $1", [memCo]))[0].id);
+  assert.equal(await status(adm("DELETE", `/gtm/companies/${memCoId}`)), 409, "a company linked to an account cannot be deleted");
+  assert.equal(await status(adm("PUT", `/gtm/companies/${memCoId}`, { domain: `other-${memCo}` })), 409, "nor change its domain");
+  // Clerk not answering: no cold email this pass (fail closed), and the relink action says so.
+  const fc = P("failclosed");
+  await json(adm("POST", "/gtm/prospects", { email: fc, first_name: "Fay", lawful_basis: "legitimate_interest", country: "US", tags: `${D}-fc` }));
+  await db.query("UPDATE gtm_prospects SET email_status = 'verified' WHERE email = $1", [fc]);
+  const cFc = (await json(adm("POST", "/gtm/campaigns", { name: `FC ${stamp}`, audience: { include: "prospects", prospects: { tags: [`${D}-fc`] } }, steps, sender_identity_id: ident.id }))).campaign.id;
+  created.campaigns.push(cFc);
+  assert.equal((await json(adm("POST", `/gtm/campaigns/${cFc}/launch`, {}))).recipients.length, 1);
+  const deadClerk = await (await fetch(`${mockUrl}/v1/organizations`, { method: "POST", headers: { authorization: "Bearer sk_test_mock", "content-type": "application/json" }, body: JSON.stringify({ name: `dead-${stamp}` }) })).json();
+  const deadOrg = (await db.query<{ id: number }>("INSERT INTO organizations (slug, name, clerk_org_id) VALUES ($1, $1, $2) RETURNING id", [`dead-${stamp}`, deadClerk.id]))[0].id;
+  created.orgs.push(deadOrg);
+  await mockPost("/_mock/clerk/members-outage", { down: true });
+  const tFc = await tick();
+  assert.ok(!sentTo(fc).length && tFc.deferred >= 1, `Clerk down: the prospect waits (${JSON.stringify(tFc)})`);
+  assert.equal((await db.query<any>("SELECT status FROM gtm_campaign_recipients WHERE campaign_id = $1", [cFc]))[0].status, "pending", "still waiting, not dropped");
+  assert.equal(await status(adm("POST", "/gtm/prospects/relink")), 503, "relink refuses to half-link without Clerk");
+  await mockPost("/_mock/clerk/members-outage", { down: false });
+  await db.query("UPDATE gtm_campaign_recipients SET next_at = now() WHERE campaign_id = $1", [cFc]);
+  await tick();
+  assert.equal(sentTo(fc, "outbound").length, 1, "Clerk back: it goes");
+  // Uncertain sends (phase 1's rules) apply to outbound: a 409 twice holds the batch as uncertain, counted toward the
+  // identity's cap; the next tick replays it exactly, still from the identity and text only, once each.
+  const [un1, un2] = [P("unc1"), P("unc2")];
+  for (const e of [un1, un2]) await json(adm("POST", "/gtm/prospects", { email: e, first_name: "Una", lawful_basis: "legitimate_interest", country: "US", tags: `${D}-unc` }));
+  await db.query("UPDATE gtm_prospects SET email_status = 'verified' WHERE email = ANY($1::text[])", [[un1, un2]]);
+  const cUn = (await json(adm("POST", "/gtm/campaigns", { name: `Unc ${stamp}`, audience: { include: "prospects", prospects: { tags: [`${D}-unc`] } }, steps, sender_identity_id: ident.id }))).campaign.id;
+  created.campaigns.push(cUn);
+  await json(adm("POST", `/gtm/campaigns/${cUn}/launch`, {}));
+  await json(adm("PUT", `/gtm/identities/${ident.id}`, { daily_cap: 100 }));
+  const sentPre = (await json(adm("GET", "/gtm/identities"))).identities.find((i: any) => i.id === ident.id).sent_today;
+  await mockPost("/_mock/resend/uncertain", { concurrent: 2 });
+  const tu = await tick();
+  const held = await db.query<any>("SELECT status, identity_id, payload FROM gtm_campaign_sends WHERE campaign_id = $1", [cUn]);
+  assert.ok(tu.uncertain >= 2 && held.length === 2 && held.every((h: any) => h.status === "uncertain" && Number(h.identity_id) === ident.id && h.payload.from === `"Priya at Octillion Sales" <priya@${OUT}>` && h.payload.textOnly === true),
+    `outbound uncertain: held with the identity's From: ${JSON.stringify({ tu, held: held.map((h: any) => [h.status, h.identity_id]) })}`);
+  assert.equal((await json(adm("GET", "/gtm/identities"))).identities.find((i: any) => i.id === ident.id).sent_today, sentPre + 2, "uncertain sends count toward the cap");
+  await tick();
+  for (const e of [un1, un2]) {
+    const got = sentTo(e);
+    assert.ok(got.length === 1 && got[0].from === `"Priya at Octillion Sales" <priya@${OUT}>` && !got[0].html && got[0].tags?.[0]?.value === "outbound", `the replay keeps the identity's From, text only, once: ${e}`);
+  }
+
+  // Minor: another outbound campaign's recent email keeps a prospect out of a new one (cool-off), the ledger records
+  // the prospect's basis, an import needs an explicit basis for someone with no country, and an unknown company id
+  // is a row error.
+  const cCool = (await json(adm("POST", "/gtm/campaigns", { name: `Cool ${stamp}`, audience: { include: "prospects", prospects: { tags: [`${D}-fc`] } }, steps, sender_identity_id: ident.id }))).campaign.id;
+  created.campaigns.push(cCool);
+  await json(adm("POST", `/gtm/campaigns/${cFc}/end`));
+  const pvCool = await json(adm("POST", "/gtm/audience/preview", { audience: { include: "prospects", prospects: { tags: [`${D}-fc`], statuses: ["new", "contacted"] } }, campaign_id: cCool }));
+  assert.ok(pvCool.blocked.cooling_off === 1 && pvCool.sendable === 0, `cool-off after another outbound campaign: ${JSON.stringify(pvCool.blocked)}`);
+  const ledger = await db.query<any>("SELECT basis, source FROM email_consent_ledger WHERE email_hash = $1", [mail.hashAddress(fc)]);
+  assert.ok(ledger.some((l: any) => l.source === "prospect" && l.basis === "legitimate_interest") && !ledger.some((l: any) => l.source === "account"), "the ledger records the prospect's basis (source prospect)");
+  const noC = await json(adm("POST", "/gtm/prospects/import", { rows: [{ email: P("nocountry"), first_name: "N" }, { first_name: "Co", last_name: "Id", company_id: 999999999, lawful_basis: "consent", country: "US" }], lawful_basis: "legitimate_interest", dry_run: true }));
+  assert.ok(noC.rows[0].action === "refuse" && /No country/.test(noC.rows[0].reason) && noC.rows[1].action === "refuse", `no country needs an explicit basis; an unknown company id is a row error: ${JSON.stringify(noC.rows)}`);
+  const chunked = await json(adm("POST", "/gtm/prospects/import", { rows: Array.from({ length: 205 }, (_, k) => ({ email: P(`bulk${k}`), first_name: "B", country: "US" })), lawful_basis: "legitimate_interest", dry_run: false }));
+  assert.ok(chunked.applied.length === 205 && chunked.summary.create === 205 && !chunked.error, "a large import is written in chunks, every row reported applied");
+  // Apollo's email status is only kept for Apollo's own address.
+  await db.query("INSERT INTO gtm_prospects (email, first_name, apollo_id, lawful_basis, country) VALUES ($1, 'Wes', $2, 'legitimate_interest', 'US')", [P("wes"), `ap_w_${stamp}`]);
+  await mockPost("/_mock/apollo/people", { people: [{ id: `ap_w_${stamp}`, first_name: "Wes", last_name: "West", title: "CTO", seniority: "c_suite", email: `other+${stamp}@zeta-${D}.dev`, email_status: "verified", country_name: "United States", company: "Zeta", domain: `zeta-${D}.dev`, industry: "Computer Software", employees: 120 }] });
+  const wId = Number((await prospectBy(P("wes"))).id);
+  await json(adm("POST", "/gtm/apollo/enrich/prospects", { ids: [wId], force: true }));
+  const W = await prospectBy(P("wes"));
+  assert.ok(W.email === P("wes") && W.email_status === "unknown", "a different Apollo address's status is never put on the prospect's own");
 
   // ---------- a prospect who signs up: linked, a gtm event, attribution ----------
   const form = await fetch(`${base}/api/access-requests`, { method: "POST",
@@ -298,6 +425,17 @@ export async function gtmPhase2Checks({ db, base, adm, json, mockUrl, mockPost, 
   const wonDeal = dl.deals.find((d: any) => d.id === d1.deal.id);
   assert.ok(wonDeal.kind === "won" && wonDeal.revenue && typeof wonDeal.revenue.mrr_usd === "number" && dl.totals.won >= 12000, "won deals show the account's Stripe revenue");
   const st = dl.stages.map((s: any) => ({ id: s.id, label: s.label, kind: s.kind }));
+  // A stage that becomes won closes its deals; back to open, they reopen.
+  await json(adm("PUT", "/gtm/deal-stages", { stages: st.map((s: any) => (s.id === "demo" ? { ...s, kind: "won" } : s)) }));
+  assert.ok((await json(adm("GET", `/gtm/deals/${d2.deal.id}`))).deal.closed_at, "a stage turned won closes its deals");
+  await json(adm("PUT", "/gtm/deal-stages", { stages: st }));
+  assert.equal((await json(adm("GET", `/gtm/deals/${d2.deal.id}`))).deal.closed_at, null, "and reopens them when it is open again");
+  // A lifecycle campaign's reply is never outbound pipeline.
+  const busyRid = Number((await db.query<{ id: number }>("SELECT id FROM gtm_campaign_recipients WHERE campaign_id = $1 AND email = $2", [other, busy]))[0].id);
+  const [lr] = await db.query<{ id: number }>("INSERT INTO gtm_replies (campaign_id, recipient_id, provider_id, kind, snippet) VALUES ($1, $2, $3, 'reply', 'hi') RETURNING id", [other, busyRid, `p2_life_${stamp}`]);
+  const dL = await json(adm("POST", "/gtm/deals", { from_reply: lr.id, name: `Life ${stamp}` }));
+  assert.ok(dL.deal.campaign_id == null && dL.deal.source === "lifecycle", "a deal from a lifecycle reply is not credited to outbound");
+  await db.query("DELETE FROM gtm_deals WHERE id = $1", [dL.deal.id]);
   assert.equal(await status(adm("PUT", "/gtm/deal-stages", { stages: st.filter((s: any) => s.id !== "demo") })), 409, "a stage with deals cannot be removed");
   const renamed = await json(adm("PUT", "/gtm/deal-stages", { stages: [...st.slice(0, 3), { label: "Security review", kind: "open" }, ...st.slice(3)].map((s: any) => (s.id === "demo" ? { ...s, label: "Demo booked" } : s)) }));
   assert.ok(renamed.stages.some((s: any) => s.id === "security_review") && renamed.stages.find((s: any) => s.id === "demo").label === "Demo booked", "stages are configurable");
@@ -318,7 +456,7 @@ export async function gtmPhase2Checks({ db, base, adm, json, mockUrl, mockPost, 
   assert.ok(yRow && yRow.pipeline === 5000, "open deals count as that campaign's pipeline");
 
   // ---------- where addresses live: gtm_prospects, recipients, replies; nowhere else ----------
-  const everyone = [pa, pb, pd, pg, ph, gmailP, zed, yan, xia, cust, busy, tp];
+  const everyone = [pa, pb, pd, pg, ph, gmailP, zed, yan, xia, cust, busy, tp, b1, mem, colleague, fc, P("wes"), un1, un2];
   const elsewhere = JSON.stringify(await db.query("SELECT * FROM gtm_companies")) + JSON.stringify(await db.query("SELECT * FROM gtm_prospect_activities"))
     + JSON.stringify(await db.query("SELECT * FROM gtm_deals")) + JSON.stringify(await db.query("SELECT * FROM gtm_deal_stages")) + JSON.stringify(await db.query("SELECT * FROM gtm_apollo_cache"))
     + JSON.stringify(await db.query("SELECT * FROM gtm_apollo_usage")) + JSON.stringify(await db.query("SELECT * FROM gtm_sender_identities")) + JSON.stringify(await db.query("SELECT * FROM gtm_events"))
@@ -331,9 +469,10 @@ export async function gtmPhase2Checks({ db, base, adm, json, mockUrl, mockPost, 
   // Clean up.
   for (const id of created.campaigns) { await adm("POST", `/gtm/campaigns/${id}/end`).catch(() => {}); await db.query("DELETE FROM gtm_campaigns WHERE id = $1", [id]); }
   await db.query("DELETE FROM gtm_deals WHERE id = ANY($1::bigint[])", [[d1.deal.id, d2.deal.id, d3.deal.id]]);
-  await db.query("DELETE FROM gtm_prospects WHERE email = ANY($1::text[]) OR apollo_id LIKE $2", [everyone, `ap_%_${stamp}`]);
+  await db.query("DELETE FROM gtm_prospects WHERE email = ANY($1::text[]) OR apollo_id LIKE $2 OR email LIKE $3", [everyone, `ap_%_${stamp}`, `bulk%+${stamp}@%`]);
   await db.query("DELETE FROM gtm_companies WHERE domain LIKE $1", [`%${D}.dev`]);
   await db.query("DELETE FROM gtm_sender_identities WHERE domain = $1", [OUT]);
+  await db.query("DELETE FROM email_consent_ledger WHERE email_hash = ANY($1::text[])", [everyone.map(mail.hashAddress)]);
   await db.query("DELETE FROM gtm_events WHERE type = 'prospect_converted' AND (data->>'prospect_id')::bigint = $1", [A.id]);
   await db.query("DELETE FROM email_suppressions WHERE email_hash = ANY($1::text[])", [[...everyone, pc].map(mail.hashAddress)]);
   await db.query("DELETE FROM email_consents WHERE email_hash = ANY($1::text[])", [[...everyone, pc].map(mail.hashAddress)]);
