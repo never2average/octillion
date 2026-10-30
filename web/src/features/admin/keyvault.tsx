@@ -25,19 +25,25 @@ interface Provider { slug: string; mode: 'gateway' | 'direct'; backend: string; 
 /** Display names for the vault's provider ids. */
 const NAME: Record<string, string> = {
   anthropic: 'Anthropic', openai: 'OpenAI', google: 'Google Gemini', cloudflare: 'Cloudflare Workers AI', dashscope: 'Alibaba DashScope',
-  vertex: 'Vertex AI (Google Cloud)', boat: 'boat.dev', exa: 'Exa', libraries_io: 'Libraries.io', resend: 'Resend', amp: 'Amp', cursor: 'Cursor', factory: 'Factory', github_copilot: 'GitHub Copilot'
+  vertex: 'Vertex AI (Google Cloud)', boat: 'boat.dev', exa: 'Exa', libraries_io: 'Libraries.io', resend: 'Resend', amp: 'Amp', cursor: 'Cursor', factory: 'Factory', github_copilot: 'GitHub Copilot',
+  apollo: 'Apollo', slack: 'Slack', resend_webhook: 'Resend Webhook', email_unsubscribe: 'Email Unsubscribe Signing'
 };
-const nameOf = (slug: string) => NAME[slug] ?? slug;
+/** Title Case for display ("imported from environment" → "Imported from Environment"); stored values stay as they are. */
+const MINOR = new Set(['a', 'an', 'and', 'as', 'at', 'by', 'for', 'from', 'in', 'of', 'on', 'or', 'the', 'to', 'via', 'with']);
+const titleCase = (s: string) => s.replace(/[_-]+/g, ' ').trim().split(/\s+/)
+  .map((w, i) => (i > 0 && MINOR.has(w.toLowerCase()) ? w.toLowerCase() : /[A-Z]/.test(w.slice(1)) ? w : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())).join(' ');
+const nameOf = (slug: string) => NAME[slug] ?? titleCase(slug);
+const labelOf = (label: string) => titleCase(label);
 interface Credential { id: number; provider: string; label: string; hint: string; enabled: boolean; uses: number; last_used_at: string | null; project_id?: string | null; client_email?: string }
 const TYPE: Record<string, string> = {
   anthropic: 'Inference', openai: 'Inference', google: 'Inference', cloudflare: 'Inference', dashscope: 'Inference', vertex: 'Inference',
-  boat: 'Sandbox', exa: 'Search', libraries_io: 'Search', resend: 'Email',
+  boat: 'Sandbox', exa: 'Search', libraries_io: 'Search', resend: 'Email', resend_webhook: 'Email', email_unsubscribe: 'Email', slack: 'Alerts', apollo: 'Prospecting',
   amp: 'Coding agent', cursor: 'Coding agent', factory: 'Coding agent', github_copilot: 'Coding agent'
 };
-const TYPES = ['Inference', 'Sandbox', 'Search', 'Email', 'Coding agent', 'Other'];
+const TYPES = ['Inference', 'Sandbox', 'Search', 'Email', 'Alerts', 'Prospecting', 'Coding agent', 'Other'];
 const typeOf = (slug: string) => TYPE[slug] ?? 'Other';
 /** Server-only keys (email) are used by the API itself; never by orchestrators or agents. */
-const SERVER_ONLY = new Set(['resend']);
+const SERVER_ONLY = new Set(['resend', 'resend_webhook', 'email_unsubscribe', 'slack', 'apollo']);
 const useOf = (p: { slug: string; mode: string }) => (SERVER_ONLY.has(p.slug) ? 'Server only' : p.mode === 'gateway' ? 'Gateway' : 'Orchestrator');
 /** 12400 → "12.4k". */
 const COMPACT = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
@@ -69,8 +75,8 @@ export function AdminKeyVault() {
           {mine.map((c) => (
             // One line per key, cut short to the column's width; the full text is on hover.
             <span key={c.id} className={cn('block truncate', !c.enabled && 'text-muted-foreground line-through')}
-              title={c.client_email ? `${c.client_email}${c.project_id ? ` · project ${c.project_id}` : ''} · ${c.label}` : `${c.hint} · ${c.label}`}>
-              <span className='font-mono text-xs'>{c.client_email ?? c.hint}</span> <span className='text-muted-foreground'>{c.label}</span>
+              title={c.client_email ? `${c.client_email}${c.project_id ? ` · project ${c.project_id}` : ''} · ${labelOf(c.label)}` : `${c.hint} · ${labelOf(c.label)}`}>
+              <span className='font-mono text-xs'>{c.client_email ?? c.hint}</span> <span className='text-muted-foreground'>{labelOf(c.label)}</span>
             </span>
           ))}
         </span>
@@ -90,7 +96,7 @@ export function AdminKeyVault() {
       <ErrorBox error={error} />
       {data && !data.unlocked && <Notice>The key vault is locked: set <Mono>OCTILLION_VAULT_KEY</Mono> on the server to add keys.</Notice>}
       <RecordView id='key-vault' rows={data?.providers ?? []} loading={isLoading} rowKey={(p) => p.slug} cols={cols} noun='providers'
-        searchText={(p) => `${p.slug} ${nameOf(p.slug)} ${typeOf(p.slug)} ${keysOf(p).map((c) => `${c.label} ${c.hint} ${c.project_id ?? ''}`).join(' ')}`}
+        searchText={(p) => `${p.slug} ${nameOf(p.slug)} ${typeOf(p.slug)} ${keysOf(p).map((c) => `${c.label} ${labelOf(c.label)} ${c.hint} ${c.project_id ?? ''}`).join(' ')}`}
         searchPlaceholder='Search providers and keys · encrypted at rest; agents get scoped gateway tokens, never these keys'
         views={[{ id: 'all', label: 'All' }, ...TYPES.slice(0, 4).map((t) => ({ id: t, label: t, match: (p: Provider) => typeOf(p.slug) === t }))]}
         defaultSort={[{ key: 'type', dir: 'asc' }]}
@@ -99,8 +105,8 @@ export function AdminKeyVault() {
         actions={(p) => [
           { label: 'Add a key…', icon: <Icons.add />, disabled: data?.unlocked === false, onSelect: () => setAdding(p.slug) },
           ...keysOf(p).flatMap((c, i) => [
-            { label: `${c.enabled ? 'Disable' : 'Enable'} ${c.label} (${c.hint})`, icon: c.enabled ? <Icons.eyeOff /> : <Icons.check />, separator: i === 0, onSelect: () => keyOn.mutate({ id: c.id, enabled: !c.enabled }) },
-            { label: `Delete ${c.label}…`, icon: <Icons.trash />, destructive: true, onSelect: () => setDel(c) }
+            { label: `${c.enabled ? 'Disable' : 'Enable'} ${labelOf(c.label)} (${c.hint})`, icon: c.enabled ? <Icons.eyeOff /> : <Icons.check />, separator: i === 0, onSelect: () => keyOn.mutate({ id: c.id, enabled: !c.enabled }) },
+            { label: `Delete ${labelOf(c.label)}…`, icon: <Icons.trash />, destructive: true, onSelect: () => setDel(c) }
           ])
         ].map((a) => lock(a, 'keys'))}
         exportName='key-vault-providers' empty='No providers.' />
@@ -109,7 +115,7 @@ export function AdminKeyVault() {
       <AlertDialog open={!!del} onOpenChange={(o) => !o && setDel(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete the {del && nameOf(del.provider)} key {del?.label}?</AlertDialogTitle>
+            <AlertDialogTitle>Delete the {del && nameOf(del.provider)} key {del && labelOf(del.label)}?</AlertDialogTitle>
             <AlertDialogDescription>Calls stop using it at once. This cannot be undone: to use it again, add it again.</AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
