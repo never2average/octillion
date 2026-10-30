@@ -1,5 +1,5 @@
 'use client';
-// Shared by the three GTM tabs (Campaigns, Activation, Attribution): the tab strip, the period and filters in the URL
+// Shared by the GTM tabs (Campaigns, Prospects, Companies, Deals, Activation, Attribution): the tab strip, the period and filters in the URL
 // (as Analytics keeps them, so a filtered view can be shared), and small formatters.
 import { useMemo, type ReactNode } from 'react';
 import Link from 'next/link';
@@ -15,12 +15,15 @@ import { cn } from '@/lib/utils';
 
 export const GTM_TABS = [
   { href: '/admin/gtm/campaigns', label: 'Campaigns' },
+  { href: '/admin/gtm/prospects', label: 'Prospects' },
+  { href: '/admin/gtm/companies', label: 'Companies' },
+  { href: '/admin/gtm/deals', label: 'Deals' },
   { href: '/admin/gtm/activation', label: 'Activation' },
   { href: '/admin/gtm/attribution', label: 'Attribution' }
 ] as const;
 export const DIRECT = 'direct/unknown';
 
-/** The GTM tabs: one route each (the sidebar's GTM group lists the same three), with the page's controls on the right. */
+/** The GTM tabs: one route each under the sidebar's single GTM entry, with the page's controls on the right. */
 export function GtmTabs({ right }: { right?: ReactNode }) {
   const path = usePathname()?.replace(/\/$/, '');
   return (

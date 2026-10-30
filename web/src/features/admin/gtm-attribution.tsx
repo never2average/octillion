@@ -1,7 +1,8 @@
 'use client';
 // GTM › Attribution: where accounts came from (src/gtm.ts attribution). One row per utm_source / utm_medium /
 // utm_campaign of the access requests made in the period, plus direct/unknown, through to paying accounts and MRR from
-// Stripe. A row opens its accounts. The period lives in the URL; the export is the table's CSV.
+// Stripe. A row opens its accounts. The period lives in the URL; the export is the table's CSV. Below it, outbound
+// (src/gtm-deals.ts outboundAttribution, first touch): outbound vs inbound, and per outbound campaign and source.
 import { Suspense } from 'react';
 import Link from 'next/link';
 import PageContainer from '@/components/layout/page-container';
@@ -10,7 +11,7 @@ import { StatStrip } from '@/components/layout/section';
 import { RecordView, type RecordCol } from '@/components/layout/record-view';
 import { Skeleton } from '@/components/ui/skeleton';
 import { accountHref, useAdmin } from './lib';
-import { DataList, ErrorBox, Notice, StatusBadge, When } from './ui';
+import { DataList, ErrorBox, Notice, Section, StatusBadge, When } from './ui';
 import { DIRECT, GtmTabs, usd0, useGtmParams } from './gtm-common';
 
 interface Row {
@@ -23,6 +24,53 @@ interface Attribution {
   stripe: { configured: boolean; error: string | null };
   rows: Row[];
   totals: { requests: number; approved: number; accounts: number; activated: number; paying: number; mrr_usd: number };
+}
+
+interface OutRow { key: string; label: string; touched: number; replied: number; interested: number; requests: number; accounts: number; activated: number; paying: number;
+  mrr_usd: number; pipeline: number; won: number; deals_won: number }
+interface Outbound {
+  model: string; model_text: string; stripe_error: string | null;
+  channels: { channel: string; label: string; requests: number; accounts: number; activated: number; paying: number; mrr_usd: number }[];
+  campaigns: OutRow[]; sources: OutRow[];
+}
+
+/** Outbound as a channel, then per campaign and per prospect source: first touch, stated on the page. */
+function OutboundSection({ query }: { query: string }) {
+  const { data: o, error } = useAdmin<Outbound>(`/gtm/attribution/outbound?${query}`, { keep: true });
+  const cols = (first: string) => [
+    { label: first, render: (r: OutRow) => <span className='font-medium'>{r.label}</span> },
+    { label: 'Touched', render: (r: OutRow) => n(r.touched) },
+    { label: 'Replied', render: (r: OutRow) => <span className='tabular-nums'>{r.replied}<span className='text-muted-foreground text-xs'> · {rate(r.replied, r.touched)}</span></span> },
+    { label: 'Interested', render: (r: OutRow) => n(r.interested) },
+    { label: 'Requests', render: (r: OutRow) => n(r.requests) },
+    { label: 'Accounts', render: (r: OutRow) => n(r.accounts) },
+    { label: 'Paying', render: (r: OutRow) => n(r.paying) },
+    { label: 'MRR', render: (r: OutRow) => <span className='tabular-nums'>{usd0(r.mrr_usd)}</span> },
+    { label: 'Pipeline', render: (r: OutRow) => <span className='tabular-nums'>{usd0(r.pipeline)}</span> },
+    { label: 'Won', render: (r: OutRow) => <span className='tabular-nums'>{usd0(r.won)}<span className='text-muted-foreground text-xs'> · {r.deals_won} deals</span></span> }
+  ];
+  return (
+    <Section title='Outbound' description={o ? `Attribution model: ${o.model_text}` : 'Attribution model: first touch.'}>
+      <div className='flex flex-col gap-4'>
+        <ErrorBox error={error} />
+        {o?.stripe_error && <Notice>Stripe: {o.stripe_error} (Paying and MRR may be short)</Notice>}
+        <div className='border'>
+          <DataList noun='channels' minWidth={560} rows={o?.channels} empty='Nothing in this period.' cols={[
+            { label: 'Channel', render: (c) => <span className='font-medium'>{c.label}</span> },
+            { label: 'Requests', render: (c) => n(c.requests) },
+            { label: 'Accounts', render: (c) => n(c.accounts) },
+            { label: 'Activated', render: (c) => n(c.activated) },
+            { label: 'Paying', render: (c) => n(c.paying) },
+            { label: 'MRR', render: (c) => <span className='tabular-nums'>{usd0(c.mrr_usd)}</span> }
+          ]} />
+        </div>
+        <h3 className='text-sm font-medium'>By outbound campaign</h3>
+        <div className='border'><DataList noun='campaigns' minWidth={960} rows={o?.campaigns} empty='No outbound email has gone out yet.' cols={cols('Campaign')} /></div>
+        <h3 className='text-sm font-medium'>By prospect source</h3>
+        <div className='border'><DataList noun='sources' minWidth={960} rows={o?.sources} empty='No outbound email has gone out yet.' cols={cols('Source')} /></div>
+      </div>
+    </Section>
+  );
 }
 
 export function AdminAttribution() {
@@ -98,6 +146,7 @@ function AttributionPage() {
             </div>
           )}
         />
+        <OutboundSection query={p.rangeOnly} />
       </div>
     </PageContainer>
   );

@@ -1,7 +1,8 @@
 'use client';
 // GTM › Campaigns › Replies (src/gtm-replies.ts): what people answered. A reply stops that person's sequence; an
 // automatic answer (out of office) is kept apart and stops nothing unless the campaign counts it. Every campaign's
-// replies here, one campaign's in its peek; owners mark them handled once someone has answered.
+// replies here, one campaign's in its peek; owners mark them handled once someone has answered, or use the quick
+// actions (interested, not interested, unsubscribe: src/gtm-outbound.ts) and make a deal from a reply in one click.
 import { StatStrip } from '@/components/layout/section';
 import { RecordView, type RecordCol, type RecordViewDef } from '@/components/layout/record-view';
 import { Button } from '@/components/ui/button';
@@ -37,6 +38,22 @@ export function HandledButton({ r }: { r: Reply }) {
   );
 }
 
+/** Interested / Not interested (the prospect's status), Unsubscribe (suppressed everywhere), Create deal: each labelled, owners only. */
+export function ReplyActions({ r }: { r: Reply }) {
+  const act = useAdminAction((action: string) => post(`/gtm/replies/${r.id}/action`, { action }),
+    { success: (x: { action: string }) => (x.action === 'unsubscribe' ? 'Unsubscribed: no campaign writes to them again' : x.action === 'interested' ? 'Marked interested' : 'Marked not interested') });
+  const deal = useAdminAction(() => post<{ deal: { name: string } }>('/gtm/deals', { from_reply: r.id }), { success: (x) => `Deal created: ${x.deal.name}` });
+  if (r.kind !== 'reply') return null;
+  return (
+    <span className='flex flex-wrap gap-1.5'>
+      <Gate need='campaigns'><Button size='sm' variant='outline' disabled={act.isPending} onClick={() => act.mutate('interested')}><Icons.circleCheck /> Interested</Button></Gate>
+      <Gate need='campaigns'><Button size='sm' variant='outline' disabled={act.isPending} onClick={() => act.mutate('not_interested')}><Icons.circleX /> Not interested</Button></Gate>
+      <Gate need='campaigns'><Button size='sm' variant='outline' disabled={act.isPending} onClick={() => act.mutate('unsubscribe')}><Icons.mail /> Unsubscribe</Button></Gate>
+      <Gate need='campaigns'><Button size='sm' variant='outline' disabled={deal.isPending} onClick={() => deal.mutate()}><Icons.add /> Create deal</Button></Gate>
+    </span>
+  );
+}
+
 /** "Reply" or "Automatic", and handled. */
 function KindBadge({ r }: { r: Reply }) {
   if (r.kind === 'auto_reply') return <StatusBadge tone='neutral' title={r.auto_reason ?? undefined}>automatic</StatusBadge>;
@@ -52,6 +69,7 @@ export function ReplyDetail({ r }: { r: Reply }) {
         <span className='text-muted-foreground text-sm'>Received <When d={r.received_at} />{r.handled_at && <> · handled <When d={r.handled_at} /> by {r.handled_by}</>}</span>
         <span className='ml-auto'><HandledButton r={r} /></span>
       </div>
+      <ReplyActions r={r} />
       <dl className='grid grid-cols-[8rem_1fr] gap-x-4 gap-y-2 text-sm'>
         <dt className='text-muted-foreground'>From</dt>
         <dd>{r.from_email ?? '—'}{!r.from_matches && r.from_email && <span className='text-muted-foreground'> (not the address it was sent to: {r.email})</span>}</dd>
@@ -69,13 +87,13 @@ export function ReplyDetail({ r }: { r: Reply }) {
 export function CampaignReplies({ replies }: { replies: Replies }) {
   return (
     <div className='border'>
-      <DataList<Reply> noun='replies' minWidth={680} height='h-[20rem]' rows={replies.replies} empty={replies.inbox ? 'No replies yet.' : 'Replies are not tracked: set a Replies inbox in Agent configuration (Campaigns).'}
+      <DataList<Reply> noun='replies' minWidth={900} height='h-[20rem]' rows={replies.replies} empty={replies.inbox ? 'No replies yet.' : 'Replies are not tracked: set a Replies inbox in Agent configuration (Campaigns).'}
         cols={[
           { label: 'From', render: (r) => <span className='flex flex-col gap-0.5'><span className='font-medium'>{who(r)}</span><span className='text-muted-foreground text-xs'>{r.from_email ?? r.email}</span></span> },
           { label: 'Reply', render: (r) => <span className='line-clamp-2 text-sm'>{r.snippet || r.subject || '—'}</span> },
           { label: 'Status', render: (r) => <KindBadge r={r} /> },
           { label: 'Received', render: (r) => <When d={r.received_at} className='text-muted-foreground text-sm' /> },
-          { label: '', render: (r) => (r.kind === 'reply' ? <HandledButton r={r} /> : null) }
+          { label: '', render: (r) => (r.kind === 'reply' ? <span className='flex flex-col items-start gap-1.5'><HandledButton r={r} /><ReplyActions r={r} /></span> : null) }
         ]} />
     </div>
   );

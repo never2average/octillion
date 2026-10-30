@@ -2,6 +2,8 @@
 // GTM › Campaigns (src/campaigns.ts): lifecycle email to people who already gave us their address (account members and
 // access requesters; never an imported list). The list, then a campaign in the peek: its numbers, the editor with an
 // audience preview, a test send to an address typed in, and who it went to. Owners change campaigns; everyone reads.
+// Outbound (src/gtm-outbound.ts): an audience of prospects, sent from a sender identity on the outreach subdomain
+// (the Senders view manages them and their warm-up), text only unless the campaign tracks opens.
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { toast } from 'sonner';
@@ -23,11 +25,13 @@ import { ConfirmButton, DataList, ErrorBox, FormRow, Notice, Section, StatusBadg
 import { Gate, useAdminRole } from './role';
 import { GtmTabs, useGtmParams } from './gtm-common';
 import { CampaignReplies, RepliesView, type Replies } from './gtm-replies';
+import { SendersView, type Identities } from './gtm-senders';
 
 type Status = 'draft' | 'scheduled' | 'running' | 'paused' | 'done';
+interface ProspectFilter { statuses: string[]; tags: string[]; titles: string[]; sizes: string[]; industries: string[]; countries: string[]; owners: string[]; email_statuses: string[]; prospect_ids: number[] }
 interface Audience {
-  include: 'accounts' | 'requests' | 'both'; stages: string[]; attention: string; created_from: string | null; created_to: string | null;
-  utm_source: string; utm_medium: string; utm_campaign: string; plans: string[]; request_status: string[]; accounts: string[];
+  include: 'accounts' | 'requests' | 'both' | 'prospects'; stages: string[]; attention: string; created_from: string | null; created_to: string | null;
+  utm_source: string; utm_medium: string; utm_campaign: string; plans: string[]; request_status: string[]; accounts: string[]; prospects?: ProspectFilter;
 }
 interface Variant { subject: string; body: string; weight: number }
 interface Step { subject: string; body: string; delay_days: number; variants?: Variant[] }
@@ -40,6 +44,7 @@ interface Campaign {
   id: number; name: string; status: Status; audience: Audience; steps: Step[]; rolling: boolean; conversion_days: number; starts_at: string | null;
   owner: string; created_at: string; updated_at: string; launched_at: string | null; finished_at: string | null; metrics?: Metrics; conversions?: Conversions | null;
   trigger: Trigger | null; send_window: SendWindow; requires_opt_in: boolean | null; requires_opt_in_effective: boolean; count_auto_replies: boolean;
+  outbound?: boolean; sender_identity_id?: number | null; track_opens?: boolean | null; track_opens_effective?: boolean; allow_restricted?: boolean;
 }
 interface Setup { postal_address_set: boolean; postal_hint: string | null; replies_inbox: string | null }
 interface List { email: { enabled: boolean; connected: boolean; from: string }; setup: Setup; variables: string[]; stages: { id: string; label: string }[]; campaigns: Campaign[] }
@@ -56,7 +61,7 @@ interface Detail {
   steps: (Step & { index: number; sent: number; failed: number; delivered: number; bounced: number; opened: number; clicked: number; variant_stats: VariantStat[] })[];
   recipients: Recipient[]; replies: Replies;
 }
-interface Preview { count: number; suppressed: number; no_consent: number; sendable: number; requires_opt_in: boolean; by_source: { account: number; request: number };
+interface Preview { count: number; suppressed: number; no_consent: number; sendable: number; requires_opt_in: boolean; by_source: { account: number; request: number; prospect?: number }; blocked?: Record<string, number>;
   sample: { email: string; first_name: string | null; product: string | null; source: string; org_name: string | null; suppressed: boolean; consent: string }[] }
 
 const TRIGGERS: { id: TriggerType; label: string; who: 'account' | 'request' }[] = [
@@ -72,7 +77,17 @@ const TRIGGERS: { id: TriggerType; label: string; who: 'account' | 'request' }[]
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const LETTERS = ['A', 'B', 'C', 'D'];
 const NO_WINDOW: SendWindow = { days: [], start_hour: 9, end_hour: 17, time_zone: 'UTC' };
-const CONSENT_LABEL: Record<string, string> = { opt_in: 'opted in', legitimate_interest: 'existing customer', opt_out: 'opt-out basis', needs_opt_in: 'needs opt-in', withdrawn: 'withdrew' };
+const CONSENT_LABEL: Record<string, string> = { opt_in: 'opted in', legitimate_interest: 'existing customer', opt_out: 'opt-out basis', needs_opt_in: 'needs opt-in', withdrawn: 'withdrew',
+  consent: 'consent', contract: 'contract', customer: 'existing customer: never cold', in_sequence: 'in another sequence', restricted: 'EU / EEA / UK / CH: not allowed', status: 'replied or not interested', no_prospect: 'not a prospect' };
+/** Why prospects are left out of an outbound audience (src/gtm-outbound.ts BLOCK_TEXT). */
+const BLOCK_LABEL: Record<string, string> = { customer: 'existing customers', in_sequence: 'in another active sequence', restricted: 'in the EU / EEA / UK / CH (not allowed here)',
+  withdrawn: 'withdrew consent', status: 'replied, interested or not interested', no_prospect: 'no longer prospects' };
+const PROSPECT_STATUSES = [{ id: 'new', label: 'New' }, { id: 'contacted', label: 'Contacted' }];
+const EMAIL_STATUSES = ['verified', 'likely_to_engage', 'unverified', 'extrapolated', 'unknown'];
+const SIZES = ['1-10', '11-50', '51-200', '201-500', '501-1000', '1001-5000', '5001+'];
+const DEFAULT_PROSPECTS: ProspectFilter = { statuses: ['new', 'contacted'], tags: [], titles: [], sizes: [], industries: [], countries: [], owners: [], email_statuses: ['verified'], prospect_ids: [] };
+/** Outbound or lifecycle, as a badge. */
+const KindBadge = ({ c }: { c: Campaign }) => (c.audience.include === 'prospects' ? <StatusBadge tone='info'>outbound</StatusBadge> : <StatusBadge tone='neutral'>lifecycle</StatusBadge>);
 
 /** "Account created, 2h later": the trigger in a few words. */
 function triggerText(t: Trigger | null, stages: { id: string; label: string }[]) {
@@ -92,6 +107,13 @@ const FIRST_STEP: Step = { subject: 'Your first simulation, {{first_name}}', bod
 
 /** "Accounts at Product onboarded, from newsletter": the audience in a few words. */
 function audienceText(a: Audience, stages: { id: string; label: string }[]) {
+  if (a.include === 'prospects') {
+    const f = a.prospects ?? DEFAULT_PROSPECTS;
+    const bits = [f.prospect_ids.length ? `${f.prospect_ids.length} chosen` : null, f.statuses.length ? f.statuses.join('/') : null, f.titles.length ? `titles ${f.titles.join(', ')}` : null,
+      f.tags.length ? `tagged ${f.tags.join(', ')}` : null, f.sizes.length ? `size ${f.sizes.join(', ')}` : null, f.industries.length ? `in ${f.industries.join(', ')}` : null,
+      f.countries.length ? `from ${f.countries.join(', ')}` : null, f.email_statuses.length ? `${f.email_statuses.join('/')} address` : null].filter(Boolean);
+    return `Prospects${bits.length ? `: ${bits.join(', ')}` : ''}`;
+  }
   const who = a.include === 'accounts' ? 'Accounts' : a.include === 'requests' ? 'Access requesters' : 'Accounts and requesters';
   const bits = [
     a.accounts.length ? `${a.accounts.length} named account${a.accounts.length === 1 ? '' : 's'}` : null,
@@ -122,6 +144,8 @@ function CampaignsPage() {
   const conv = (k: keyof Omit<Conversions, 'days'>) => list.reduce((t, c) => t + (c.conversions?.[k] ?? 0), 0);
 
   const newCampaign = () => create.mutate({ name: 'Untitled campaign', audience: EMPTY_AUDIENCE, steps: [FIRST_STEP], conversion_days: 14 }, { onSuccess: (r) => setOpen(String(r.campaign.id)) });
+  const newOutbound = () => create.mutate({ name: 'Untitled outbound campaign', audience: { ...EMPTY_AUDIENCE, stages: [], include: 'prospects', prospects: DEFAULT_PROSPECTS }, conversion_days: 30,
+    steps: [{ subject: 'A question about {{product}}', body: 'Hi {{first_name}},\n\n…', delay_days: 0 }] }, { onSuccess: (r) => setOpen(String(r.campaign.id)) });
   // Import: a campaign exported from here (JSON: name, audience, steps), saved as a new draft. Never a list of people.
   const importFile = async (f: File) => {
     try {
@@ -139,7 +163,7 @@ function CampaignsPage() {
   const cols: RecordCol<Campaign>[] = [
     { key: 'name', label: 'Campaign', title: true, keep: true, type: 'text', className: 'min-w-56', value: (c) => c.name, render: (c) => <span className='font-medium'>{c.name}</span> },
     { key: 'status', label: 'Status', type: 'select', keep: true, value: (c) => c.status, options: (['draft', 'scheduled', 'running', 'paused', 'done'] as const).map((s) => ({ value: s, label: s })),
-      render: (c) => <span className='flex flex-col gap-1'><StatusBadge tone={TONE[c.status]}>{c.status}</StatusBadge>
+      render: (c) => <span className='flex flex-col items-start gap-1'><span className='flex gap-1'><StatusBadge tone={TONE[c.status]}>{c.status}</StatusBadge><KindBadge c={c} /></span>
         {c.status === 'scheduled' && c.starts_at && <span className='text-muted-foreground text-xs'>starts <When d={c.starts_at} /></span>}</span> },
     { key: 'audience', label: 'Audience', type: 'text', value: who, render: (c) => <span className='text-muted-foreground line-clamp-2 text-sm'>{c.trigger ? <><span className='text-foreground font-medium'>Triggered:</span> {who(c)}</> : who(c)}</span> },
     { key: 'steps', label: 'Emails', type: 'number', value: (c) => c.steps.length, render: (c) => <span className='tabular-nums'>{c.steps.length}</span> },
@@ -155,7 +179,7 @@ function CampaignsPage() {
 
   // Replies are personal data: the view is the campaigns permission's (the server refuses it to anyone else).
   const { can } = useAdminRole();
-  const view = p.open('view') === 'replies' && can('campaigns') ? 'replies' : 'campaigns';
+  const view = p.open('view') === 'replies' && can('campaigns') ? 'replies' : p.open('view') === 'senders' ? 'senders' : 'campaigns';
   const openReplies = list.reduce((t, c) => t + (c.metrics?.replies_open ?? 0), 0);
   // Campaigns and Replies: two views of the Campaigns tab (labelled buttons), kept in the URL like the open peek.
   const subViews = (
@@ -166,6 +190,7 @@ function CampaignsPage() {
           <Icons.inbox /> Replies{openReplies ? ` (${openReplies} open)` : ''}
         </Button>
       )}
+      <Button size='sm' variant={view === 'senders' ? 'secondary' : 'ghost'} aria-pressed={view === 'senders'} onClick={() => p.write({ view: 'senders', open: null })}><Icons.send /> Senders</Button>
     </div>
   );
 
@@ -178,7 +203,7 @@ function CampaignsPage() {
           <Notice>Campaign emails are not going out: {!data.email.connected ? 'add a Resend key on Key vault' : 'turn on Send emails in Agent configuration'}. Drafts and previews still work.</Notice>
         )}
         <input ref={fileRef} type='file' accept='application/json,.json' className='hidden' onChange={(e) => { const f = e.target.files?.[0]; if (f) void importFile(f); e.target.value = ''; }} />
-        {view === 'replies' ? <RepliesView open={open} setOpen={setOpen} /> : <RecordView<Campaign>
+        {view === 'replies' ? <RepliesView open={open} setOpen={setOpen} /> : view === 'senders' ? <SendersView /> : <RecordView<Campaign>
           id='gtm-campaigns' noun='campaigns' exportName='campaigns' compact stacked loading={isLoading}
           rows={list} rowKey={(c) => String(c.id)} cols={cols}
           openKey={open} onOpenChange={setOpen}
@@ -186,7 +211,10 @@ function CampaignsPage() {
           searchText={(c) => `${c.name} ${c.status} ${c.owner} ${who(c)} ${c.steps.map((s) => s.subject).join(' ')}`}
           searchPlaceholder='Search campaigns by name, status, owner, audience or subject'
           onImport={() => fileRef.current?.click()} importLabel='Import campaign'
-          primary={<Gate need='campaigns'><Button disabled={create.isPending} onClick={newCampaign}><Icons.add className='size-4' /> New campaign</Button></Gate>}
+          primary={<span className='flex flex-wrap gap-2'>
+            <Gate need='campaigns'><Button variant='outline' disabled={create.isPending} onClick={newOutbound}><Icons.send className='size-4' /> New outbound campaign</Button></Gate>
+            <Gate need='campaigns'><Button disabled={create.isPending} onClick={newCampaign}><Icons.add className='size-4' /> New campaign</Button></Gate>
+          </span>}
           empty='No campaigns yet. Write one to the people who got stuck at a step.'
           summary={data && (
             <StatStrip items={[
@@ -198,7 +226,7 @@ function CampaignsPage() {
               { label: 'Unsubscribed', value: sum('unsubscribed'), hint: `${sum('suppressed')} suppressed at send` }
             ]} />
           )}
-          detailTitle={(c) => <span className='flex items-center gap-2'>{c.name}<StatusBadge tone={TONE[c.status]}>{c.status}</StatusBadge></span>}
+          detailTitle={(c) => <span className='flex items-center gap-2'>{c.name}<StatusBadge tone={TONE[c.status]}>{c.status}</StatusBadge><KindBadge c={c} /></span>}
           detail={(c, close) => <CampaignPeek id={c.id} stages={stages} onDeleted={close} />}
         />}
       </div>
@@ -369,11 +397,12 @@ function Lifecycle({ c, onDeleted }: { c: Campaign; onDeleted: () => void }) {
     { success: (r) => (r.skipped ? `Nothing sent: ${r.skipped}` : r.busy ? 'Another send is running: these go out on the next tick' : `${r.sent_now} sent, ${r.waiting} waiting`) });
   const exportJson = () => downloadJson(`campaign-${c.id}-${c.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40)}.json`,
     { name: c.name, audience: c.audience, steps: c.steps, rolling: c.rolling, conversion_days: c.conversion_days, trigger: c.trigger, send_window: c.send_window,
-      requires_opt_in: c.requires_opt_in, count_auto_replies: c.count_auto_replies });
+      requires_opt_in: c.requires_opt_in, count_auto_replies: c.count_auto_replies, track_opens: c.track_opens ?? null, allow_restricted: c.allow_restricted ?? false });
   return (
     <div className='flex flex-col gap-3'>
       <p className='text-muted-foreground text-sm'>
-        Owned by {c.owner}. {c.launched_at ? <>Started <When d={c.launched_at} />. </> : null}{c.finished_at ? <>Finished <When d={c.finished_at} />.</> : null}
+        <KindBadge c={c} /> Owned by {c.owner}. {c.launched_at ? <>Started <When d={c.launched_at} />. </> : null}{c.finished_at ? <>Finished <When d={c.finished_at} />.</> : null}
+        {c.audience.include === 'prospects' && !c.sender_identity_id ? ' Choose a sender identity before launching.' : ''}
       </p>
       <div className='flex flex-wrap items-center gap-2'>
         {c.status === 'draft' && (<>
@@ -430,12 +459,24 @@ function Editor({ c, stages }: { c: Campaign; stages: { id: string; label: strin
   const [win, setWin] = useState<SendWindow>(initWin);
   const [optIn, setOptIn] = useState<boolean | null>(c.requires_opt_in);
   const [countAuto, setCountAuto] = useState(c.count_auto_replies);
-  const audience = useMemo(() => ({ ...a, plans: uncsv(plans), accounts: uncsv(accounts) }), [a, plans, accounts]);
-  const current = { name, audience, steps, rolling, days, trigger, win, optIn, countAuto };
-  const dirty = JSON.stringify(current) !== JSON.stringify({ name: c.name, audience: c.audience, steps: c.steps, rolling: c.rolling, days: String(c.conversion_days),
-    trigger: c.trigger, win: initWin, optIn: c.requires_opt_in, countAuto: c.count_auto_replies });
-  const save = useAdminAction(() => adminApi<Detail>('PUT', path(c.id), { name, audience, steps, rolling, conversion_days: Number(days), trigger, send_window: win,
-    requires_opt_in: optIn, count_auto_replies: countAuto }), { success: 'Saved' });
+  // Outbound: the prospect filter (comma lists as typed), the sender identity, open tracking, EU / EEA / UK / CH.
+  const pf0 = c.audience.prospects ?? DEFAULT_PROSPECTS;
+  const [pf, setPf] = useState({ statuses: pf0.statuses, sizes: pf0.sizes, email_statuses: pf0.email_statuses, tags: csv(pf0.tags), titles: csv(pf0.titles), industries: csv(pf0.industries),
+    countries: csv(pf0.countries), owners: csv(pf0.owners), prospect_ids: pf0.prospect_ids });
+  const [identity, setIdentity] = useState<number | null>(c.sender_identity_id ?? null);
+  const [trackOpens, setTrackOpens] = useState<boolean | null>(c.track_opens ?? null);
+  const [allowRestricted, setAllowRestricted] = useState(c.allow_restricted ?? false);
+  const outbound = a.include === 'prospects';
+  const { data: ids } = useAdmin<Identities>(outbound ? '/gtm/identities' : null);
+  const audience = useMemo(() => ({ ...a, plans: uncsv(plans), accounts: uncsv(accounts),
+    ...(a.include === 'prospects' ? { prospects: { statuses: pf.statuses, sizes: pf.sizes, email_statuses: pf.email_statuses, tags: uncsv(pf.tags), titles: uncsv(pf.titles),
+      industries: uncsv(pf.industries), countries: uncsv(pf.countries), owners: uncsv(pf.owners), prospect_ids: pf.prospect_ids } } : { prospects: undefined }) }), [a, plans, accounts, pf]);
+  const current = { name, audience, steps, rolling, days, trigger, win, optIn, countAuto, identity, trackOpens, allowRestricted };
+  const dirty = JSON.stringify(current) !== JSON.stringify({ name: c.name, audience: { ...c.audience, prospects: c.audience.include === 'prospects' ? c.audience.prospects : undefined }, steps: c.steps, rolling: c.rolling, days: String(c.conversion_days),
+    trigger: c.trigger, win: initWin, optIn: c.requires_opt_in, countAuto: c.count_auto_replies, identity: c.sender_identity_id ?? null, trackOpens: c.track_opens ?? null, allowRestricted: c.allow_restricted ?? false });
+  const save = useAdminAction(() => adminApi<Detail>('PUT', path(c.id), { name, audience, steps, rolling, conversion_days: Number(days), trigger: outbound ? null : trigger, send_window: win,
+    requires_opt_in: optIn, count_auto_replies: countAuto, sender_identity_id: identity, track_opens: trackOpens, allow_restricted: allowRestricted }), { success: 'Saved' });
+  const togglePf = (k: 'statuses' | 'sizes' | 'email_statuses', v: string, on: boolean) => setPf((x) => ({ ...x, [k]: on ? [...x[k], v] : x[k].filter((y) => y !== v) }));
   // The default when not set: on when the campaign can reach access requesters (src/campaigns.ts requiresOptIn).
   const optInDefault = trigger ? TRIGGERS.find((t) => t.id === trigger.type)?.who === 'request' : a.include !== 'accounts';
   const setT = (patch: Partial<Trigger>) => setTrigger((t) => ({ ...(t ?? { type: 'account_created', stage: null, days: null, attention: '', delay_hours: 0, reentry: 'once', reentry_days: 30 }), ...patch }));
@@ -452,12 +493,12 @@ function Editor({ c, stages }: { c: Campaign; stages: { id: string; label: strin
         <fieldset className='grid gap-4 rounded-lg border p-4' disabled={dis}>
           <legend className='px-1 text-sm font-medium'>Who joins, and when</legend>
           <FormRow id={`c-${c.id}-start`} label='Starts' hint={trigger ? 'People join when the event happens after launch; the audience below narrows it by UTM tags and plan.' : 'Everyone the audience matches when it starts (and later, with Keep enrolling).'}>
-            <NativeSelect id={`c-${c.id}-start`} className='w-full' value={trigger ? 'trigger' : 'audience'} onChange={(e) => (e.target.value === 'trigger' ? setT({}) : setTrigger(null))}>
+            <NativeSelect id={`c-${c.id}-start`} className='w-full' value={trigger && !outbound ? 'trigger' : 'audience'} onChange={(e) => (e.target.value === 'trigger' ? setT({}) : setTrigger(null))}>
               <NativeSelectOption value='audience'>For an audience, at launch or a scheduled time</NativeSelectOption>
-              <NativeSelectOption value='trigger'>Triggered by an event</NativeSelectOption>
+              {!outbound && <NativeSelectOption value='trigger'>Triggered by an event</NativeSelectOption>}
             </NativeSelect>
           </FormRow>
-          {trigger && (
+          {trigger && !outbound && (
             <div className='grid gap-4 sm:grid-cols-2'>
               <FormRow id={`c-${c.id}-ttype`} label='When this happens'>
                 <NativeSelect id={`c-${c.id}-ttype`} className='w-full' value={trigger.type}
@@ -503,16 +544,45 @@ function Editor({ c, stages }: { c: Campaign; stages: { id: string; label: strin
           <legend className='px-1 text-sm font-medium'>Audience</legend>
           <div className='grid gap-4 sm:grid-cols-2'>
             <FormRow id={`c-${c.id}-include`} label='Who' hint='Accounts: their active members (Clerk), else whoever asked for the account. Requesters: the person on the access request.'>
-              <NativeSelect id={`c-${c.id}-include`} className='w-full' value={a.include} onChange={(e) => set('include', e.target.value as Audience['include'])}>
+              <NativeSelect id={`c-${c.id}-include`} className='w-full' value={a.include} onChange={(e) => { set('include', e.target.value as Audience['include']); if (e.target.value === 'prospects') setTrigger(null); }}>
                 <NativeSelectOption value='accounts'>Accounts</NativeSelectOption>
                 <NativeSelectOption value='requests'>Access requesters</NativeSelectOption>
                 <NativeSelectOption value='both'>Both</NativeSelectOption>
+                <NativeSelectOption value='prospects'>Prospects (outbound)</NativeSelectOption>
               </NativeSelect>
             </FormRow>
-            <FormRow id={`c-${c.id}-attention`} label='Needs a person for' hint='Text an attention reason contains, e.g. "no simulation" or "report never opened".'>
+            {!outbound && <FormRow id={`c-${c.id}-attention`} label='Needs a person for' hint='Text an attention reason contains, e.g. "no simulation" or "report never opened".'>
               <Input id={`c-${c.id}-attention`} value={a.attention} onChange={(e) => set('attention', e.target.value)} placeholder='Any' />
-            </FormRow>
+            </FormRow>}
           </div>
+          {outbound ? (<>
+            <div className='grid gap-1.5'>
+              <span className='text-sm leading-none font-medium'>Prospect status <span className='text-muted-foreground font-normal'>· customers, replied, interested, not interested and bad addresses are never enrolled</span></span>
+              <div className='flex flex-wrap gap-x-4 gap-y-2'>
+                {PROSPECT_STATUSES.map((s) => <label key={s.id} className='flex items-center gap-2 text-sm leading-none'><Checkbox disabled={dis} checked={pf.statuses.includes(s.id)} onCheckedChange={(on) => togglePf('statuses', s.id, !!on)} />{s.label}</label>)}
+              </div>
+            </div>
+            <div className='grid gap-1.5'>
+              <span className='text-sm leading-none font-medium'>Email status <span className='text-muted-foreground font-normal'>· verified only by default</span></span>
+              <div className='flex flex-wrap gap-x-4 gap-y-2'>
+                {EMAIL_STATUSES.map((s) => <label key={s} className='flex items-center gap-2 text-sm leading-none'><Checkbox disabled={dis} checked={pf.email_statuses.includes(s)} onCheckedChange={(on) => togglePf('email_statuses', s, !!on)} />{s.replace(/_/g, ' ')}</label>)}
+              </div>
+            </div>
+            <div className='grid gap-1.5'>
+              <span className='text-sm leading-none font-medium'>Company size</span>
+              <div className='flex flex-wrap gap-x-4 gap-y-2'>
+                {SIZES.map((s) => <label key={s} className='flex items-center gap-2 text-sm leading-none'><Checkbox disabled={dis} checked={pf.sizes.includes(s)} onCheckedChange={(on) => togglePf('sizes', s, !!on)} />{s}</label>)}
+              </div>
+            </div>
+            <div className='grid gap-4 sm:grid-cols-3'>
+              {(['titles', 'tags', 'industries', 'countries', 'owners'] as const).map((k) => (
+                <FormRow key={k} id={`c-${c.id}-pf-${k}`} label={{ titles: 'Title contains', tags: 'Tags', industries: 'Industry contains', countries: 'Countries', owners: 'Owners' }[k]} hint='Comma-separated; empty: any.'>
+                  <Input id={`c-${c.id}-pf-${k}`} value={pf[k]} placeholder='Any' onChange={(e) => setPf((x) => ({ ...x, [k]: e.target.value }))} />
+                </FormRow>
+              ))}
+            </div>
+            {pf.prospect_ids.length > 0 && <p className='text-muted-foreground text-xs'>Only the {pf.prospect_ids.length} prospects chosen on the Prospects page (and only those the filter above also matches). <Button size='xs' variant='ghost' onClick={() => setPf((x) => ({ ...x, prospect_ids: [] }))}>Use the filter alone</Button></p>}
+          </>) : (<>
           <div className='grid gap-1.5'>
             <span className='text-sm leading-none font-medium'>Stage (the furthest step reached)</span>
             <div className='flex flex-wrap gap-x-4 gap-y-2'>
@@ -546,8 +616,34 @@ function Editor({ c, stages }: { c: Campaign; stages: { id: string; label: strin
             <FormRow id={`c-${c.id}-plans`} label='Plans' hint='Comma-separated plan names, or none.'><Input id={`c-${c.id}-plans`} value={plans} onChange={(e) => setPlans(e.target.value)} placeholder='Any' /></FormRow>
             <FormRow id={`c-${c.id}-accounts`} label='Only these accounts' hint='Comma-separated slugs.'><Input id={`c-${c.id}-accounts`} value={accounts} onChange={(e) => setAccounts(e.target.value)} placeholder='Any' /></FormRow>
           </div>
-          {trigger ? <p className='text-muted-foreground text-xs'>Triggered: the event decides who; only the UTM tags and plans here narrow it.</p> : <AudiencePreview audience={audience} optIn={optIn} />}
+          </>)}
+          {trigger && !outbound ? <p className='text-muted-foreground text-xs'>Triggered: the event decides who; only the UTM tags and plans here narrow it.</p> : <AudiencePreview audience={audience} optIn={optIn} campaignId={c.id} allowRestricted={allowRestricted} />}
         </fieldset>
+
+        {outbound && (
+          <fieldset className='grid gap-4 rounded-lg border p-4' disabled={dis}>
+            <legend className='px-1 text-sm font-medium'>Outbound</legend>
+            <FormRow id={`c-${c.id}-identity`} label='Send from' hint={`A sender identity on the outreach subdomain (Senders view). Never the product's sender domain${ids?.product_domain ? ` (${ids.product_domain})` : ''}.`}>
+              <NativeSelect id={`c-${c.id}-identity`} className='w-full' value={identity == null ? '' : String(identity)} onChange={(e) => setIdentity(e.target.value ? Number(e.target.value) : null)}>
+                <NativeSelectOption value=''>Choose a sender identity</NativeSelectOption>
+                {(ids?.identities ?? []).map((i) => <NativeSelectOption key={i.id} value={String(i.id)} disabled={!i.enabled || i.on_product_domain}>
+                  {i.from_name} &lt;{i.from_address}&gt; · {i.sent_today}/{i.cap_today} today{!i.enabled ? ' (off)' : ''}{i.on_product_domain ? ' (product domain: refused)' : ''}
+                </NativeSelectOption>)}
+              </NativeSelect>
+            </FormRow>
+            {ids && !ids.identities.length && <Notice>No sender identity yet: add one in Senders (e.g. you@outreach.{ids.product_domain ?? 'example.com'}, verified in Resend). The campaign cannot launch without one.</Notice>}
+            <div className='grid gap-4 sm:grid-cols-2'>
+              <label htmlFor={`c-${c.id}-opens`} className='flex items-start justify-between gap-3 text-sm'>
+                <span><span className='font-medium'>Track opens</span><span className='text-muted-foreground block text-xs'>Off (the default for outbound): plain text only, no HTML part, so no tracking pixel. Better for deliverability.</span></span>
+                <Switch id={`c-${c.id}-opens`} disabled={dis} checked={trackOpens ?? false} onCheckedChange={(v) => setTrackOpens(v)} />
+              </label>
+              <label htmlFor={`c-${c.id}-restricted`} className='flex items-start justify-between gap-3 text-sm'>
+                <span><span className='font-medium'>Allow prospects in the EU / EEA / UK / CH</span><span className='text-muted-foreground block text-xs'>Off: they (and anyone with no country) are left out. On: they get it on the lawful basis recorded at import.</span></span>
+                <Switch id={`c-${c.id}-restricted`} disabled={dis} checked={allowRestricted} onCheckedChange={setAllowRestricted} />
+              </label>
+            </div>
+          </fieldset>
+        )}
 
         <fieldset className='grid gap-4' disabled={dis}>
           <legend className='mb-2 text-sm font-medium'>Emails <span className='text-muted-foreground font-normal'>· {'{{first_name}}'} and {'{{product}}'} are filled in for each person; an unsubscribe link is added at the end.</span></legend>
@@ -617,12 +713,12 @@ function Editor({ c, stages }: { c: Campaign; stages: { id: string; label: strin
         </fieldset>
 
         <fieldset className='grid gap-4 sm:grid-cols-2' disabled={dis}>
-          <label htmlFor={`c-${c.id}-optin`} className='flex items-start justify-between gap-3 text-sm'>
+          {!outbound && <label htmlFor={`c-${c.id}-optin`} className='flex items-start justify-between gap-3 text-sm'>
             <span><span className='font-medium'>Requires opt-in</span><span className='text-muted-foreground block text-xs'>
               Only people who ticked the marketing box. {optIn == null ? `Default for this audience: ${optInDefault ? 'on' : 'off'}.` : ''} Requesters from the EU, EEA, UK or Switzerland (or an unknown country) always need it.
             </span></span>
             <Switch id={`c-${c.id}-optin`} disabled={dis} checked={optIn ?? optInDefault} onCheckedChange={(v) => setOptIn(v)} />
-          </label>
+          </label>}
           <label htmlFor={`c-${c.id}-auto`} className='flex items-start justify-between gap-3 text-sm'>
             <span><span className='font-medium'>Count auto-replies as replies</span><span className='text-muted-foreground block text-xs'>Off: an out-of-office is kept but the emails go on. On: it stops them like a reply.</span></span>
             <Switch id={`c-${c.id}-auto`} disabled={dis} checked={countAuto} onCheckedChange={setCountAuto} />
@@ -663,17 +759,22 @@ function VariantsEditor({ i, variants, editable, onChange }: { i: number; varian
 }
 
 /** How many the audience matches now, how many are suppressed, and the first few. Refreshes as the filter changes. */
-function AudiencePreview({ audience, optIn }: { audience: Audience; optIn: boolean | null }) {
-  const [q, setQ] = useState({ audience, optIn });
-  useEffect(() => { const t = setTimeout(() => setQ({ audience, optIn }), 500); return () => clearTimeout(t); }, [audience, optIn]);
-  const { data, error, isFetching } = useQuery({ queryKey: ['admin', 'gtm-preview', JSON.stringify(q)], staleTime: 15_000, retry: false,
-    queryFn: () => post<Preview>('/gtm/audience/preview', { audience: q.audience, requires_opt_in: q.optIn }) });
+function AudiencePreview({ audience, optIn, campaignId, allowRestricted }: { audience: Audience; optIn: boolean | null; campaignId: number; allowRestricted: boolean }) {
+  const [q, setQ] = useState({ audience, optIn, allowRestricted });
+  useEffect(() => { const t = setTimeout(() => setQ({ audience, optIn, allowRestricted }), 500); return () => clearTimeout(t); }, [audience, optIn, allowRestricted]);
+  const { data, error, isFetching } = useQuery({ queryKey: ['admin', 'gtm-preview', campaignId, JSON.stringify(q)], staleTime: 15_000, retry: false,
+    queryFn: () => post<Preview>('/gtm/audience/preview', { audience: q.audience, requires_opt_in: q.optIn, campaign_id: campaignId, allow_restricted: q.allowRestricted }) });
   return (
     <div className='grid gap-2'>
       <div className='flex flex-wrap items-baseline gap-x-3 text-sm'>
         <span className='font-medium'>{data ? `${data.sendable} ${data.sendable === 1 ? 'person' : 'people'} would get it` : isFetching ? 'Counting…' : '—'}</span>
-        {data && <span className='text-muted-foreground'>{data.count} match: {data.by_source.account} from accounts, {data.by_source.request} from requests{data.suppressed ? `, ${data.suppressed} suppressed` : ''}{data.no_consent ? `, ${data.no_consent} without the consent it needs` : ''}</span>}
+        {data && (audience.include === 'prospects'
+          ? <span className='text-muted-foreground'>{data.count} prospects match{data.suppressed ? `, ${data.suppressed} suppressed` : ''}{data.no_consent ? `, ${data.no_consent} left out` : ''}</span>
+          : <span className='text-muted-foreground'>{data.count} match: {data.by_source.account} from accounts, {data.by_source.request} from requests{data.suppressed ? `, ${data.suppressed} suppressed` : ''}{data.no_consent ? `, ${data.no_consent} without the consent it needs` : ''}</span>)}
       </div>
+      {data?.blocked && Object.keys(data.blocked).length > 0 && audience.include === 'prospects' && (
+        <p className='text-muted-foreground text-xs'>Left out: {Object.entries(data.blocked).map(([k, v]) => `${v} ${BLOCK_LABEL[k] ?? k}`).join(', ')}.</p>
+      )}
       {error && <p className='text-destructive text-sm'>{(error as Error).message}</p>}
       {!!data?.sample.length && (
         <div className='border'>
@@ -683,7 +784,7 @@ function AudiencePreview({ audience, optIn }: { audience: Audience; optIn: boole
               { label: '{{product}}', render: (s) => s.product ?? '—' },
               { label: 'From', render: (s) => (s.org_name ?? (s.source === 'request' ? 'Access request' : '—')) },
               { label: 'Consent', render: (s) => <span className='text-muted-foreground text-xs'>{CONSENT_LABEL[s.consent] ?? s.consent}</span> },
-              { label: '', render: (s) => (s.suppressed ? <StatusBadge tone='warn'>suppressed</StatusBadge> : ['needs_opt_in', 'withdrawn'].includes(s.consent) ? <StatusBadge tone='neutral'>not sent</StatusBadge> : null) }
+              { label: '', render: (s) => (s.suppressed ? <StatusBadge tone='warn'>suppressed</StatusBadge> : ['needs_opt_in', 'withdrawn', ...Object.keys(BLOCK_LABEL)].includes(s.consent) ? <StatusBadge tone='neutral'>not sent</StatusBadge> : null) }
             ]} />
         </div>
       )}
