@@ -180,7 +180,7 @@ function CampaignsPage() {
 
   // Replies are personal data: the view is the campaigns permission's (the server refuses it to anyone else).
   const { can } = useAdminRole();
-  const view = p.open('view') === 'replies' && can('campaigns') ? 'replies' : p.open('view') === 'senders' ? 'senders' : 'campaigns';
+  const view = p.open('view') === 'replies' && can('campaigns') ? 'replies' : p.open('view') === 'senders' && can('campaigns') ? 'senders' : 'campaigns';
   const openReplies = list.reduce((t, c) => t + (c.metrics?.replies_open ?? 0), 0);
   // Campaigns and Replies: two views of the Campaigns tab (labelled buttons), kept in the URL like the open peek.
   const subViews = (
@@ -191,7 +191,7 @@ function CampaignsPage() {
           <Icons.inbox /> Replies{openReplies ? ` (${openReplies} open)` : ''}
         </Button>
       )}
-      <Button size='sm' variant={view === 'senders' ? 'secondary' : 'ghost'} aria-pressed={view === 'senders'} onClick={() => p.write({ view: 'senders', open: null })}><Icons.send /> Senders</Button>
+      {can('campaigns') && <Button size='sm' variant={view === 'senders' ? 'secondary' : 'ghost'} aria-pressed={view === 'senders'} onClick={() => p.write({ view: 'senders', open: null })}><Icons.send /> Senders</Button>}
     </div>
   );
 
@@ -470,7 +470,7 @@ function Editor({ c, stages }: { c: Campaign; stages: { id: string; label: strin
   const [trackOpens, setTrackOpens] = useState<boolean | null>(c.track_opens ?? null);
   const [allowRestricted, setAllowRestricted] = useState(c.allow_restricted ?? false);
   const outbound = a.include === 'prospects';
-  const { data: ids } = useAdmin<Identities>(outbound ? '/gtm/identities' : null);
+  const { data: ids } = useAdmin<Identities>(outbound && can('campaigns') ? '/gtm/identities' : null);
   const audience = useMemo(() => ({ ...a, plans: uncsv(plans), accounts: uncsv(accounts),
     ...(a.include === 'prospects' ? { prospects: { statuses: pf.statuses, sizes: pf.sizes, email_statuses: pf.email_statuses, tags: uncsv(pf.tags), titles: uncsv(pf.titles),
       industries: uncsv(pf.industries), countries: uncsv(pf.countries), owners: uncsv(pf.owners), prospect_ids: pf.prospect_ids } } : { prospects: undefined }) }), [a, plans, accounts, pf]);

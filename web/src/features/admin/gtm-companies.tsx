@@ -17,7 +17,7 @@ import { adminApi } from '@/lib/api-client';
 import { accountHref, post, useAdmin, useAdminAction } from './lib';
 import { ConfirmButton, DataList, ErrorBox, FormRow, Section, StatusBadge, When } from './ui';
 import { Gate, useAdminRole } from './role';
-import { GtmTabs, usd0, useGtmParams } from './gtm-common';
+import { GtmTabs, usd0, useGtmParams, NeedsCampaigns } from './gtm-common';
 import { CsvImport, type ImportField, type ImportResult } from './gtm-import';
 import { personName, STATUS_LABEL, STATUS_TONE } from './gtm-prospects';
 
@@ -44,7 +44,7 @@ const FIELDS: ImportField[] = [
 ];
 
 export function AdminCompanies() {
-  return <Suspense fallback={<PageContainer><Skeleton className='h-72 rounded-lg' /></PageContainer>}><CompaniesPage /></Suspense>;
+  return <NeedsCampaigns><Suspense fallback={<PageContainer><Skeleton className='h-72 rounded-lg' /></PageContainer>}><CompaniesPage /></Suspense></NeedsCampaigns>;
 }
 
 function CompaniesPage() {

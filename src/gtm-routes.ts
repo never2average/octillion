@@ -1,8 +1,11 @@
 /**
  * GTM phase 2's admin routes (/api/admin/onboarding/gtm/...), mounted by src/http.ts next to the campaign routes:
  * prospects and companies (src/gtm-crm.ts), Apollo (src/gtm-apollo.ts), sender identities and the reply quick
- * actions (src/gtm-outbound.ts), deals and outbound attribution (src/gtm-deals.ts). Reads are any admin's; every
- * write needs the `campaigns` permission (admin-roles.ts, a DB / Clerk role, never an allow-list).
+ * actions (src/gtm-outbound.ts), deals and outbound attribution (src/gtm-deals.ts). Every write, and every read that
+ * returns personal data (prospects and their timelines, companies with their people and owners, deals with their
+ * contacts, sender identities' addresses; Apollo search is a POST), needs the `campaigns` permission, as the replies
+ * inbox does (admin-roles.ts, a DB / Clerk role, never an allow-list). Apollo's status and the outbound attribution
+ * numbers stay open to any admin.
  */
 import type { Request, Response, Router, RequestHandler } from "express";
 import * as crm from "./gtm-crm.js";
@@ -15,8 +18,8 @@ export function gtmOutboundRoutes(ob: Router, o: { need: (p: "campaigns" | "read
   const id = (req: Request) => Number(req.params.id);
   const w = need("campaigns");
   // Prospects: the list, one with its timeline, import (dry run first), notes, bulk edits.
-  ob.get("/gtm/prospects", async (_req, res) => void res.json(await crm.listProspects()));
-  ob.get("/gtm/prospects/:id", async (req, res) => void res.json(await crm.prospectDetail(id(req))));
+  ob.get("/gtm/prospects", w, async (_req, res) => void res.json(await crm.listProspects()));
+  ob.get("/gtm/prospects/:id", w, async (req, res) => void res.json(await crm.prospectDetail(id(req))));
   ob.post("/gtm/prospects", w, async (req, res) => void res.status(201).json(await crm.createProspect(actor(req, res), req.body ?? {})));
   ob.post("/gtm/prospects/import", w, async (req, res) => void res.json(await crm.importProspects(actor(req, res), req.body ?? {})));
   // Link every prospect and company to the customers that exist now (idempotent; the first tick runs it once too).
@@ -26,8 +29,8 @@ export function gtmOutboundRoutes(ob: Router, o: { need: (p: "campaigns" | "read
   ob.put("/gtm/prospects/:id", w, async (req, res) => void res.json(await crm.updateProspect(actor(req, res), id(req), req.body ?? {})));
   ob.post("/gtm/prospects/:id/notes", w, async (req, res) => void res.status(201).json(await crm.addNote(actor(req, res), id(req), req.body?.text)));
   // Companies.
-  ob.get("/gtm/companies", async (_req, res) => void res.json(await crm.listCompanies()));
-  ob.get("/gtm/companies/:id", async (req, res) => void res.json(await crm.companyDetail(id(req))));
+  ob.get("/gtm/companies", w, async (_req, res) => void res.json(await crm.listCompanies()));
+  ob.get("/gtm/companies/:id", w, async (req, res) => void res.json(await crm.companyDetail(id(req))));
   ob.post("/gtm/companies/import", w, async (req, res) => void res.json(await crm.importCompanies(actor(req, res), req.body ?? {})));
   ob.post("/gtm/companies", w,async (req, res) => void res.status(201).json(await crm.createCompany(actor(req, res), req.body ?? {})));
   ob.put("/gtm/companies/:id", w, async (req, res) => void res.json(await crm.updateCompany(actor(req, res), id(req), req.body ?? {})));
@@ -39,15 +42,15 @@ export function gtmOutboundRoutes(ob: Router, o: { need: (p: "campaigns" | "read
   ob.post("/gtm/apollo/enrich/prospects", w, async (req, res) => void res.json(await apollo.enrichProspects(actor(req, res), req.body ?? {})));
   ob.post("/gtm/apollo/enrich/companies", w, async (req, res) => void res.json(await apollo.enrichCompanies(actor(req, res), req.body ?? {})));
   // Outbound sender identities (the outreach subdomain) and their warm-up.
-  ob.get("/gtm/identities", async (_req, res) => void res.json(await outbound.listIdentities()));
+  ob.get("/gtm/identities", w, async (_req, res) => void res.json(await outbound.listIdentities()));
   ob.post("/gtm/identities", w, async (req, res) => void res.status(201).json(await outbound.createIdentity(actor(req, res), req.body ?? {})));
   ob.put("/gtm/identities/:id", w, async (req, res) => void res.json(await outbound.updateIdentity(actor(req, res), id(req), req.body ?? {})));
   ob.delete("/gtm/identities/:id", w, async (req, res) => { await outbound.deleteIdentity(actor(req, res), id(req)); res.status(204).end(); });
   // The Replies inbox's quick actions: interested, not interested, unsubscribe.
   ob.post("/gtm/replies/:id/action", w, async (req, res) => void res.json(await outbound.replyAction(actor(req, res), id(req), req.body?.action)));
   // Deals: the pipeline's stages, the deals, the board's drag.
-  ob.get("/gtm/deals", async (_req, res) => void res.json(await deals.listDeals()));
-  ob.get("/gtm/deals/:id", async (req, res) => void res.json(await deals.dealDetail(id(req))));
+  ob.get("/gtm/deals", w, async (_req, res) => void res.json(await deals.listDeals()));
+  ob.get("/gtm/deals/:id", w, async (req, res) => void res.json(await deals.dealDetail(id(req))));
   ob.put("/gtm/deal-stages", w, async (req, res) => void res.json(await deals.setStages(actor(req, res), req.body ?? {})));
   ob.post("/gtm/deals", w, async (req, res) => void res.status(201).json(await deals.createDeal(actor(req, res), req.body ?? {})));
   ob.put("/gtm/deals/:id", w, async (req, res) => void res.json(await deals.updateDeal(actor(req, res), id(req), req.body ?? {})));

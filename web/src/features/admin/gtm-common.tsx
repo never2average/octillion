@@ -11,6 +11,9 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { last30, rangeQuery, type DateRange } from '@/components/layout/date-range-picker';
 import { Icons } from '@/components/icons';
+import PageContainer from '@/components/layout/page-container';
+import { useAdminRole } from './role';
+import { Notice } from './ui';
 import { cn } from '@/lib/utils';
 
 export const GTM_TABS = [
@@ -22,14 +25,33 @@ export const GTM_TABS = [
   { href: '/admin/gtm/attribution', label: 'Attribution' }
 ] as const;
 export const DIRECT = 'direct/unknown';
+/** The GTM tabs that show people (addresses, names, owners): only with the campaigns permission. */
+const PERSONAL: string[] = ['/admin/gtm/prospects', '/admin/gtm/companies', '/admin/gtm/deals'];
+
+/** A page of personal data opened without the campaigns permission: the tabs and a notice, nothing fetched. */
+export function NeedsCampaigns({ children }: { children: ReactNode }) {
+  const { can, needs } = useAdminRole();
+  if (can('campaigns')) return <>{children}</>;
+  return (
+    <PageContainer>
+      <div className='flex min-w-0 flex-col gap-4'>
+        <GtmTabs />
+        <Notice>This page shows people&apos;s contact details: it needs the {needs('campaigns')} role. Ask an Owner on the Admins page.</Notice>
+      </div>
+    </PageContainer>
+  );
+}
 
 /** The GTM tabs: one route each under the sidebar's single GTM entry, with the page's controls on the right. */
 export function GtmTabs({ right }: { right?: ReactNode }) {
   const path = usePathname()?.replace(/\/$/, '');
+  // Prospects, Companies and Deals hold personal data: their tabs are the campaigns permission's (the server refuses the rest).
+  const { can } = useAdminRole();
+  const tabs = GTM_TABS.filter((t) => can('campaigns') || !PERSONAL.includes(t.href));
   return (
     <div className='flex shrink-0 flex-wrap items-end gap-x-6 gap-y-2 border-b'>
       <nav className='flex gap-6 text-sm' aria-label='GTM sections'>
-        {GTM_TABS.map((t) => (
+        {tabs.map((t) => (
           <Link key={t.href} href={t.href} aria-current={path === t.href ? 'page' : undefined}
             className={cn('-mb-px border-b-2 pb-2 font-medium', path === t.href ? 'border-foreground text-foreground' : 'text-muted-foreground hover:text-foreground border-transparent')}>
             {t.label}

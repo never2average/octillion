@@ -22,7 +22,7 @@ import { post, useAdmin, useAdminAction } from './lib';
 import { Chips, ConfirmButton, DataList, ErrorBox, FormRow, Notice, Section, StatusBadge, When, type Tone } from './ui';
 import { ConfirmDialog, TextDialog } from './gtm-dialogs';
 import { Gate, useAdminRole } from './role';
-import { GtmTabs, useGtmParams } from './gtm-common';
+import { GtmTabs, useGtmParams, NeedsCampaigns } from './gtm-common';
 import { CsvImport, type ImportField, type ImportResult } from './gtm-import';
 
 export const STATUS_LABEL: Record<string, string> = { new: 'New', contacted: 'Contacted', replied: 'Replied', interested: 'Interested', not_interested: 'Not interested', customer: 'Customer', bad_email: 'Bad email' };
@@ -70,7 +70,7 @@ const IMPORT_FIELDS: ImportField[] = [
 ];
 
 export function AdminProspects() {
-  return <Suspense fallback={<PageContainer><Skeleton className='h-72 rounded-lg' /></PageContainer>}><ProspectsPage /></Suspense>;
+  return <NeedsCampaigns><Suspense fallback={<PageContainer><Skeleton className='h-72 rounded-lg' /></PageContainer>}><ProspectsPage /></Suspense></NeedsCampaigns>;
 }
 
 function ProspectsPage() {

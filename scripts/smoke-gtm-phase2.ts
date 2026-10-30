@@ -29,7 +29,10 @@ export async function gtmPhase2Checks({ db, base, adm, json, mockUrl, mockPost, 
   const viewer = (await createAdminToken({ label: `p2-viewer-${stamp}`, role: "viewer", days: 1, createdBy: "smoke" })).token;
   const asViewer = (method: string, path: string, body?: unknown) => fetch(`${base}/api/admin/onboarding${path}`, {
     method, headers: { authorization: `Bearer ${viewer}`, "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
-  assert.equal(await status(asViewer("GET", "/gtm/prospects")), 200, "a viewer reads prospects");
+  // Reads that return personal data are the campaigns permission's too (as the replies inbox); aggregates stay open.
+  for (const p of ["/gtm/prospects", "/gtm/prospects/1", "/gtm/companies", "/gtm/companies/1", "/gtm/deals", "/gtm/deals/1", "/gtm/identities"])
+    assert.equal(await status(asViewer("GET", p)), 403, `GET ${p} (personal data) needs the campaigns permission`);
+  for (const p of ["/gtm/attribution/outbound", "/gtm/apollo"]) assert.equal(await status(asViewer("GET", p)), 200, `GET ${p} (no personal data) is any admin's`);
   for (const [m, p] of [["POST", "/gtm/prospects/import"], ["POST", "/gtm/companies"], ["POST", "/gtm/deals"], ["POST", "/gtm/identities"], ["POST", "/gtm/apollo/search"], ["PUT", "/gtm/deal-stages"]])
     assert.equal(await status(asViewer(m, p, {})), 403, `${m} ${p} needs the campaigns permission`);
 

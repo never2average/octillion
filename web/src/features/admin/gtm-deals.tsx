@@ -18,7 +18,7 @@ import { accountHref, post, useAdmin, useAdminAction } from './lib';
 import { ConfirmButton, ErrorBox, FormRow, Notice, Section, StatusBadge, When } from './ui';
 import { TextDialog } from './gtm-dialogs';
 import { Gate, useAdminRole } from './role';
-import { GtmTabs, usd0, useGtmParams } from './gtm-common';
+import { GtmTabs, usd0, useGtmParams, NeedsCampaigns } from './gtm-common';
 
 interface Stage { id: string; label: string; position: number; kind: 'open' | 'won' | 'lost' }
 interface Deal {
@@ -33,7 +33,7 @@ const money = (v: number, cur: string) => v.toLocaleString('en-US', { style: 'cu
 const KIND_TONE = { open: 'info', won: 'ok', lost: 'neutral' } as const;
 
 export function AdminDeals() {
-  return <Suspense fallback={<PageContainer><Skeleton className='h-72 rounded-lg' /></PageContainer>}><DealsPage /></Suspense>;
+  return <NeedsCampaigns><Suspense fallback={<PageContainer><Skeleton className='h-72 rounded-lg' /></PageContainer>}><DealsPage /></Suspense></NeedsCampaigns>;
 }
 
 function DealsPage() {
