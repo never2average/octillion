@@ -357,6 +357,8 @@ export async function gtmPhase2Checks({ db, base, adm, json, mockUrl, mockPost, 
   assert.ok(tu.uncertain >= 2 && held.length === 2 && held.every((h: any) => h.status === "uncertain" && Number(h.identity_id) === ident.id && h.payload.from === `"Priya at Octillion Sales" <priya@${OUT}>` && h.payload.textOnly === true),
     `outbound uncertain: held with the identity's From: ${JSON.stringify({ tu, held: held.map((h: any) => [h.status, h.identity_id]) })}`);
   assert.equal((await json(adm("GET", "/gtm/identities"))).identities.find((i: any) => i.id === ident.id).sent_today, sentPre + 2, "uncertain sends count toward the cap");
+  // The replay's turn comes 5 minutes after the first try (phase 1's pacing): that time passes.
+  await db.query("UPDATE gtm_campaign_sends SET uncertain_at = now() - interval '6 minutes', at = now() - interval '6 minutes' WHERE campaign_id = $1", [cUn]);
   await tick();
   for (const e of [un1, un2]) {
     const got = sentTo(e);
@@ -482,5 +484,5 @@ export async function gtmPhase2Checks({ db, base, adm, json, mockUrl, mockPost, 
   await kvm.deleteCredential(hookCred.id);
   await kvm.deleteCredential(apolloCred.id);
   delete process.env.APOLLO_API_URL; delete process.env.APOLLO_MIN_GAP_MS; delete process.env.CAMPAIGN_SEND_INTERVAL_MS;
-  console.log("✓ GTM phase 2: companies and prospects (dedupe, CSV import with dry run, lawful basis, suppression, EU rule), Apollo (disabled without a key, search, cache, enrich, freshness, credits, 429), sender identities off the product domain, warm-up cap across campaigns, cold-email rules, text only, replies and quick actions, bounces, auto-linking sign-ups, deals (board, stages, revenue), outbound attribution (first touch), addresses only in their tables");
+  console.log("✓ GTM phase 2: companies and prospects (dedupe, CSV import with dry run, lawful basis, suppression, EU rule), Apollo (disabled without a key, search, cache, enrich, freshness, credits, 429), sender identities off the product domain, warm-up cap across campaigns, cold-email rules, text only, replies and quick actions, bounces, auto-linking sign-ups, deals (board, stages, revenue), outbound attribution (first touch), addresses only in their tables; B1 per-recipient outbound and no audience switch, B2 Clerk members as customers (relink, fail closed), B3 subdomain rules, uncertain outbound replays keep the identity From");
 }
