@@ -18,7 +18,7 @@
  *   sending     through src/email.ts (Resend), from campaignTick(): the Vercel cron (/api/cron/autoscale, every 5
  *               minutes), on a VM startCampaignTicker(), and a kick when an event a no-delay trigger waits for happens.
  *               One tick at a time everywhere (a lease row). A tick keeps going, wave after wave, until it has sent
- *               CAMPAIGN_SENDS_PER_TICK (1,000) or CAMPAIGN_TICK_SECONDS (200) are up, in Resend batch requests of
+ *               CAMPAIGN_SENDS_PER_TICK (1,000) or CAMPAIGN_TICK_SECONDS (180) are up, in Resend batch requests of
  *               CAMPAIGN_BATCH_SIZE (100) CAMPAIGN_SEND_INTERVAL_MS (600 ms) apart: about 12,000 an hour, far under
  *               Resend's 10 requests a second; a 429 waits its retry-after. Idempotent: a recipient is leased before
  *               it is sent, a (recipient, round, step) row in gtm_campaign_sends is claimed once (UNIQUE) and only
@@ -730,7 +730,7 @@ async function runTick(only: number | null): Promise<TickResult> {
   const t0 = Date.now();
   await freshSettings().catch(() => {});
   const cap = clampInt(settingNumber("CAMPAIGN_SENDS_PER_TICK"), 0, 20_000, 1000), size = clampInt(settingNumber("CAMPAIGN_BATCH_SIZE"), 1, mail.BATCH_MAX, 100);
-  const gap = clampInt(settingNumber("CAMPAIGN_SEND_INTERVAL_MS"), 0, 10_000, 600), budget = clampInt(settingNumber("CAMPAIGN_TICK_SECONDS"), 10, 280, 200) * 1000;
+  const gap = clampInt(settingNumber("CAMPAIGN_SEND_INTERVAL_MS"), 0, 10_000, 600), budget = clampInt(settingNumber("CAMPAIGN_TICK_SECONDS"), 10, 280, 180) * 1000;
   const leaseSecs = Math.ceil(budget / 1000) + 120;
   try {
     if (!(await takeLease(leaseSecs))) return { ...out, busy: true, skipped: "Another campaign tick is sending right now" };

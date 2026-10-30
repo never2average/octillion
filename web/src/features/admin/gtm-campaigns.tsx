@@ -391,13 +391,15 @@ function Editor({ c, stages }: { c: Campaign; stages: { id: string; label: strin
   const [plans, setPlans] = useState(csv(c.audience.plans));
   const [accounts, setAccounts] = useState(csv(c.audience.accounts));
   const [trigger, setTrigger] = useState<Trigger | null>(c.trigger);
-  const [win, setWin] = useState<SendWindow>(c.send_window?.days ? c.send_window : NO_WINDOW);
+  // No window yet: 9 to 17 is offered once a day is ticked (the server keeps "any time" as no days).
+  const initWin: SendWindow = c.send_window?.days?.length ? c.send_window : { ...NO_WINDOW, time_zone: c.send_window?.time_zone ?? 'UTC' };
+  const [win, setWin] = useState<SendWindow>(initWin);
   const [optIn, setOptIn] = useState<boolean | null>(c.requires_opt_in);
   const [countAuto, setCountAuto] = useState(c.count_auto_replies);
   const audience = useMemo(() => ({ ...a, plans: uncsv(plans), accounts: uncsv(accounts) }), [a, plans, accounts]);
   const current = { name, audience, steps, rolling, days, trigger, win, optIn, countAuto };
   const dirty = JSON.stringify(current) !== JSON.stringify({ name: c.name, audience: c.audience, steps: c.steps, rolling: c.rolling, days: String(c.conversion_days),
-    trigger: c.trigger, win: c.send_window?.days ? c.send_window : NO_WINDOW, optIn: c.requires_opt_in, countAuto: c.count_auto_replies });
+    trigger: c.trigger, win: initWin, optIn: c.requires_opt_in, countAuto: c.count_auto_replies });
   const save = useAdminAction(() => adminApi<Detail>('PUT', path(c.id), { name, audience, steps, rolling, conversion_days: Number(days), trigger, send_window: win,
     requires_opt_in: optIn, count_auto_replies: countAuto }), { success: 'Saved' });
   // The default when not set: on when the campaign can reach access requesters (src/campaigns.ts requiresOptIn).
