@@ -46,7 +46,8 @@ const isObj = (x: unknown): x is Record<string, unknown> => !!x && typeof x === 
 
 export function RecordView<T>({
   rows, rowKey, cols, searchText, searchPlaceholder = 'Search', filters, primary, detail, detailTitle, actions, empty, noun = 'items', loading, initialSize,
-  id, views, defaultSort, groupable, bulk, exportName, primaryMenu, properties, detailActions, compact, openKey, onOpenChange, summary, stacked, onImport, importLabel
+  id, views, defaultSort, groupable, bulk, exportName, primaryMenu, properties, detailActions, compact, openKey, onOpenChange, summary, stacked, onImport, importLabel,
+  embedded, onRow, rowClassName, noSearch
 }: {
   rows: readonly T[];
   rowKey: (row: T) => string;
@@ -93,6 +94,14 @@ export function RecordView<T>({
   /** Stacked only: a labelled Import button (e.g. a file picker). */
   onImport?: () => void;
   importLabel?: string;
+  /** A table inside a record's tab (detail.tsx's DetailTable): as tall as its rows, a full-width search, labelled
+   *  buttons, no filter or view menus; sorting stays on the typed column headers. */
+  embedded?: boolean;
+  /** A click on a row goes elsewhere (another record) instead of opening a peek. */
+  onRow?: (row: T) => void;
+  rowClassName?: (row: T) => string | undefined;
+  /** No search box (a short, fixed list). */
+  noSearch?: boolean;
 }) {
   const ns = (s: string) => (id ? `rv:${id}:${s}` : null);
   const [q, setQ] = useState('');
@@ -253,7 +262,9 @@ export function RecordView<T>({
     return () => { window.removeEventListener('resize', fit); io.disconnect(); };
   }, [compact]);
 
-  const searchBox = (
+  const clickable = !!detail || !!onRow;
+  const clickRow = (r: T, k: string) => (detail ? setOpen(open === k ? null : k) : onRow?.(r));
+  const searchBox = noSearch ? null : (
     <div className={cn('relative', stacked ? 'w-full' : 'min-w-48 flex-1')}>
       <Icons.search className='text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2' />
       <Input type='search' value={q} onChange={(e) => setQ(e.target.value)} placeholder={searchPlaceholder} aria-label={searchPlaceholder} className='h-9 pl-8' />
@@ -266,8 +277,22 @@ export function RecordView<T>({
 
   return (
     // Fills the page below the header (header 3.5–4rem plus the page's padding): the table frame never scrolls or shrinks.
-    <div ref={fitRef} style={compact && fitH ? { height: fitH } : undefined} className={cn('flex min-w-0 flex-col gap-3', compact ? 'min-h-[16rem]' : 'h-[calc(100svh-5.5rem)] min-h-[24rem]')}>
-      {stacked ? (
+    <div ref={fitRef} style={compact && fitH ? { height: fitH } : undefined} className={cn('flex min-w-0 flex-col gap-3', embedded ? '' : compact ? 'min-h-[16rem]' : 'h-[calc(100svh-5.5rem)] min-h-[24rem]')}>
+      {embedded ? ((searchBox || filters || primary || exportName || onImport) && (
+        <div className='flex shrink-0 flex-col gap-2'>
+          {searchBox}
+          {(filters || primary || exportName || onImport) && (
+            <div className='flex flex-wrap items-center gap-2'>
+              {filters}
+              <div className='ml-auto flex flex-wrap items-center justify-end gap-2'>
+                {onImport && <Button variant='outline' size='sm' onClick={onImport}><Icons.upload /> {importLabel ?? 'Import'}</Button>}
+                {exportName && <Button variant='outline' size='sm' onClick={() => exportRows(data.ordered)}><Icons.download /> Export CSV</Button>}
+                {primary}
+              </div>
+            </div>
+          )}
+        </div>
+      )) : stacked ? (
         <div className='flex shrink-0 flex-col gap-2'>
           {searchBox}
           <div className='flex flex-wrap items-center gap-2'>
@@ -364,16 +389,16 @@ export function RecordView<T>({
                       )}
                       {r && (
                         <TableRow data-state={open === k ? 'selected' : undefined}
-                          className={cn('align-top', detail && 'cursor-pointer', sel.has(k) && open !== k && 'bg-muted/40')}
-                          onClick={detail ? () => setOpen(open === k ? null : k) : undefined}
-                          onKeyDown={detail ? (e) => { if (e.key === 'Enter') setOpen(k); } : undefined}
-                          tabIndex={detail ? 0 : undefined}>
+                          className={cn('align-top', clickable && 'cursor-pointer', sel.has(k) && open !== k && 'bg-muted/40', rowClassName?.(r))}
+                          onClick={clickable ? () => clickRow(r, k) : undefined}
+                          onKeyDown={clickable ? (e) => { if (e.key === 'Enter') { if (detail) setOpen(k); else onRow?.(r); } } : undefined}
+                          tabIndex={clickable ? 0 : undefined}>
                           {bulk && (
                             <TableCell className='w-8 py-3' onClick={(e) => e.stopPropagation()}>
                               <Checkbox aria-label='Select row' checked={sel.has(k)} onCheckedChange={(on) => toggle([k], !!on)} />
                             </TableCell>
                           )}
-                          {visible.map((c) => <TableCell key={c.key} className={cn('px-3 py-3.5', narrow ? 'overflow-hidden text-ellipsis whitespace-nowrap [&>*]:truncate' : 'whitespace-normal', c.className)}>{c.render(r)}</TableCell>)}
+                          {visible.map((c) => <TableCell key={c.key} className={cn('px-3', embedded ? 'py-2.5' : 'py-3.5', narrow ? 'overflow-hidden text-ellipsis whitespace-nowrap [&>*]:truncate' : 'whitespace-normal', c.className)}>{c.render(r)}</TableCell>)}
                           {actions && <TableCell className='w-10 py-1.5 text-center' onClick={(e) => e.stopPropagation()}><ActionsMenu items={actions(r)} /></TableCell>}
                         </TableRow>
                       )}
