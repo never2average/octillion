@@ -135,7 +135,7 @@ How Octillion uses it:
     scope (every token issued before they existed, and every client that asks for no scope), has full access. Scope
     is enforced per tool, never as an HTTP 403, so the rest of a session keeps working; there is no HTTP-level scope
     failure. `offline_access` is never advertised.
-  - **The `octillion` CLI** (packages/cli, not published): `octillion login` signs in with the Device Authorization
+  - **The `octillion` CLI** (packages/cli; install with `npm install -g https://octillion.useimmaculate.com/downloads/octillion-cli.tgz`, not on npm yet; rebuild the tarball with `npm pack --pack-destination ../../public/downloads` from packages/cli): `octillion login` signs in with the Device Authorization
     Grant against Clerk (the client id from `GET /api/cli/config`, i.e. `OCTILLION_CLI_CLIENT_ID`; unset, it says
     device login is off and points to API keys; it also asks for `user:org:read` when the config's `org_claim` is true). Agents get `--non-interactive` JSON (link, code, `next_step:
     "octillion login --complete <handle>"`) automatically. Credentials: `--token`, then `OCTILLION_API_KEY`, then the
