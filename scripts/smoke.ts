@@ -246,9 +246,11 @@ try {
   }
   // The docs answers' corpus (src/docs-corpus.generated.json) is generated from the customer guide and docs/*.md: current.
   {
-    const { docsCorpus } = await import("./sync-docs-corpus.js");
-    const committed = JSON.parse(readFileSync(new URL("../src/docs-corpus.generated.json", import.meta.url), "utf8")).chunks;
+    const { docsCorpus, docsPages } = await import("./sync-docs-corpus.js");
+    const file = JSON.parse(readFileSync(new URL("../src/docs-corpus.generated.json", import.meta.url), "utf8"));
+    const committed = file.chunks;
     assert.deepEqual(committed, docsCorpus(), "src/docs-corpus.generated.json is stale: run npx tsx scripts/sync-docs-corpus.ts");
+    assert.deepEqual(file.pages, docsPages(), "src/docs-corpus.generated.json pages are stale: run npx tsx scripts/sync-docs-corpus.ts");
     assert.ok(committed.every((c: any) => (c.area === "customer") === c.href.startsWith("/app/docs/")), "customer chunks link to /app/docs, admin ones to /admin/docs");
   }
   console.log("tools:", tools.map((t) => t.name).join(", "));
@@ -2999,6 +3001,8 @@ try {
     console.log("✓ customer portal with Clerk sessions: bearer or __session cookie, v1/v2 claims, azp, fallback org, roles from Clerk, setup, team, suspension");
     // Agent auth: personal API keys, OCTILLION_API_KEY snippets, actionable /mcp errors, X-Octillion-Org, whoami.
     await (await import("./smoke-agent-auth.js")).agentAuthChecks({ base, db, mockUrl: mock.url, stamp, mockPost, clerkSession, token, appCall, adm, json });
+    // Agent auth P1/P2: the OAuth org claim and scopes, the scope challenge, the octillion CLI, agent docs, one-command connect.
+    await (await import("./smoke-agent-auth-p1.js")).agentAuthP1Checks({ base, db, mockUrl: mock.url, stamp, mockPost, clerkSession, token, appCall });
 
     // ---------- customer account roles (src/account-roles.ts): owner, billing manager, member, viewer, in Clerk ----------
     {

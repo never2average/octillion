@@ -22,7 +22,9 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { createServer, runTool, TOOL_NAMES, WIDGET_HTML, type ToolName } from "./server.js";
 import { connectorEvents, recordMcpEvent } from "./analytics.js";
 import { authenticateMcp, bearer, cronSecretOk, isWorkerToken, orgHeader, resolveKey, resolveKeyDetailed, urlKeysAllowed, type AuthFailure, type Org } from "./auth.js";
-import { clerkEnabled, ClerkError, frontendApi, mcpAudience } from "./clerk.js";
+import { advertisedScopes, clerkEnabled, ClerkError, frontendApi, mcpAudience, oauthScopesOn } from "./clerk.js";
+import { docsPageMarkdown, getStartedMd, llmsTxt } from "./agent-docs.js";
+import { clientCatalog, headlessCatalog, oneCommandCatalog } from "./connect-catalog.js";
 import { StripeError } from "./billing.js";
 import { getDb } from "./db.js";
 import { probeFromCron, rlsProbeState } from "./rls.js";
@@ -252,7 +254,8 @@ export function createApp() {
   const resourceMetadata = (_req: Request, res: Response) => {
     const as = oauthServer();
     if (!as) return void res.status(404).json({ error: "OAuth is not configured" });
-    res.json({ resource: mcpAudience(), authorization_servers: [as], bearer_methods_supported: ["header"], scopes_supported: ["profile", "email"], resource_name: "Octillion" });
+    // octillion:read / octillion:write only once they exist in Clerk (OCTILLION_OAUTH_SCOPES=on): never a scope Clerk would refuse.
+    res.json({ resource: mcpAudience(), authorization_servers: [as], bearer_methods_supported: ["header"], scopes_supported: advertisedScopes(), resource_name: "Octillion" });
   };
   app.get(["/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp"], resourceMetadata);
   // For clients that only look for authorization-server metadata on the resource's own origin (older MCP spec).
@@ -261,6 +264,37 @@ export function createApp() {
     if (!as) return void res.status(404).json({ error: "OAuth is not configured" });
     const r = await fetch(`${as}/.well-known/oauth-authorization-server`, { signal: AbortSignal.timeout(10_000) });
     res.status(r.status).type("application/json").send(await r.text());
+  });
+
+  // ---------- the octillion CLI (packages/cli) and agents: public, no secrets ----------
+  /** PUBLIC_URL as the request is served: agents and the CLI copy these addresses, so they follow the environment. */
+  const site = () => (process.env.PUBLIC_URL ?? PUBLIC_URL).replace(/\/$/, "");
+  // How `octillion login` signs in: the Device Authorization Grant (RFC 8628) against Clerk, with the CLI's public OAuth
+  // client (OCTILLION_CLI_CLIENT_ID, an OAuth application in the Clerk dashboard with the device grant on). Unset: the
+  // CLI says device login is not enabled and points to API keys. A client id is not a secret (a public client has none).
+  app.get("/api/cli/config", openCors, (_req, res) => {
+    const clientId = (process.env.OCTILLION_CLI_CLIENT_ID ?? "").trim() || null;
+    const issuer = oauthServer();
+    res.set("Cache-Control", "public, max-age=300").json({
+      client_id: issuer ? clientId : null, issuer, resource: mcpAudience(), mcp_url: `${site()}/mcp`,
+      scope: advertisedScopes().join(" "), device_login: Boolean(issuer && clientId), api_keys_url: `${site()}/app/settings/api-keys`,
+    });
+  });
+  // The connect catalog without a key in it (what the setup page shows with sign-in): `octillion mcp-config <client>`.
+  app.get("/api/connect", openCors, (_req, res) => {
+    const url = `${site()}/mcp`;
+    res.set("Cache-Control", "public, max-age=300").json({ mcp_url: url, clients: clientCatalog(url, undefined, { signInAvailable: Boolean(oauthServer()) }),
+      headless: headlessCatalog(url), one_command: oneCommandCatalog(url) });
+  });
+  // Docs for agents (src/agent-docs.ts): /llms.txt, the setup playbook, and each customer guide page as markdown.
+  const text = (res: Response, type: string, body: string) => void res.status(200).set({ "Content-Type": `${type}; charset=utf-8`, "Cache-Control": "public, max-age=300", "Access-Control-Allow-Origin": "*" }).send(body);
+  app.get("/llms.txt", (_req, res) => text(res, "text/plain", llmsTxt(site())));
+  app.get("/get-started.md", (_req, res) => text(res, "text/markdown", getStartedMd(site())));
+  app.get("/docs/:page", (req, res, next) => {
+    const m = /^([a-z0-9-]{1,80})\.md$/.exec(String(req.params.page));
+    const md = m ? docsPageMarkdown(m[1], site()) : null;
+    if (!md) return m ? void res.status(404).type("text/plain").send(`No such page. Every page is listed at ${site()}/llms.txt\n`) : next();
+    text(res, "text/markdown", md);
   });
 
   // ---------- MCP (Clerk OAuth sign-in, or a per-organization API key) ----------
@@ -298,6 +332,8 @@ export function createApp() {
   const wwwAuthenticate = (f?: Pick<AuthFailure, "error" | "description">) => {
     const q = (s: string) => s.replace(/["\\\r\n]/g, "'");
     const parts = [oauthServer() ? `resource_metadata="${PUBLIC_URL}/.well-known/oauth-protected-resource"` : 'realm="octillion"'];
+    // The scopes to ask for (MCP authorization spec: scope selection), once Octillion's own exist in Clerk.
+    if (oauthServer() && oauthScopesOn()) parts.push(`scope="${advertisedScopes().join(" ")}"`);
     if (f?.error) parts.push(`error="${f.error}"`);
     if (f?.description) parts.push(`error_description="${q(f.description)}"`);
     return `Bearer ${parts.join(", ")}`;

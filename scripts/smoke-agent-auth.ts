@@ -10,7 +10,7 @@ interface Ctx {
   base: string; db: Db; mockUrl: string; stamp: string;
   mockPost: (path: string, body?: unknown) => Promise<any>;
   clerkSession: (userId: string, orgId?: string | null, role?: string) => Promise<string>;
-  token: (claims: { user_id: string; jwt?: boolean; revoked?: boolean; expired?: boolean }) => Promise<string>;
+  token: (claims: { user_id: string; jwt?: boolean; revoked?: boolean; expired?: boolean; org_id?: string; scopes?: string[] }) => Promise<string>;
   appCall: (session: string, method: string, path: string, body?: unknown, headers?: Record<string, string>) => Promise<Response>;
   adm: (method: string, path: string, body?: unknown) => Promise<Response>;
   json: (r: Response | Promise<Response>) => Promise<any>;

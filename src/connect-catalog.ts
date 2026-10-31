@@ -14,10 +14,12 @@ export interface ClientEntry {
   method: Method;
   steps: string;              // one or two sentences
   command?: string;           // a terminal command
+  then?: string;              // a second command to run after it (e.g. sign in from the terminal)
   snippet?: string;           // config content
   file?: string;              // where the snippet goes
   install_url?: string;       // one-click install
   verified: boolean;
+  source?: string;            // the client doc the command or link was checked against
   /** Back-compat for callers that render { client, steps, snippet }. */
 }
 
@@ -35,27 +37,32 @@ export function clientCatalog(url: string, key?: string, opts: { signInAvailable
   const noHeader = opts.signInAvailable === false
     ? "This app cannot send an API key header, and this Octillion server has no sign-in set up: use a client below that takes a header (Claude Code, Cursor, Codex, VS Code and others)."
     : "This app cannot send an API key header: ask your Octillion admin for a sign-in invitation, then connect with sign-in.";
-  const cursorConfig = Buffer.from(JSON.stringify({ url })).toString("base64");
   const list: ClientEntry[] = [
     { id: "claude", client: "Claude (web & desktop)", group: "chat", method: "ui", verified: true,
       steps: key ? noHeader : `Settings → Connectors → Add custom connector, name it Octillion and paste the URL.${signIn} On Team and Enterprise plans an owner adds it under Organization settings → Connectors.` },
     { id: "chatgpt", client: "ChatGPT", group: "chat", method: "ui", verified: true,
       steps: key ? noHeader : `Turn on developer mode, add a custom MCP server with the URL and choose OAuth.${signIn} Business, Enterprise and Edu workspaces may need an admin to allow custom MCP servers.` },
 
-    { id: "claude-code", client: "Claude Code", group: "agent", method: "cli", verified: true,
-      steps: key ? `Run this in your project.` : `Run this in your project, then type /mcp in Claude Code and choose Authenticate.`,
+    { id: "claude-code", client: "Claude Code", group: "agent", method: "cli", verified: true, source: "https://code.claude.com/docs/en/mcp",
+      steps: key ? `Run this in your project.` : `Run this in your project, then sign in with the second command (it prints a link to open in any browser, so it works over SSH too), or type /mcp in Claude Code and choose Authenticate.`,
       command: key ? `claude mcp add --transport http octillion ${url} --header "Authorization: ${auth}"` : `claude mcp add --transport http octillion ${url}`,
+      ...(key ? {} : { then: "claude mcp login octillion" }),
       file: key ? ".mcp.json (keep the key out of version control)" : ".mcp.json (to share it with your team)", snippet: json({ mcpServers: { octillion: { type: "http", url, ...headers } } }) },
-    { id: "codex", client: "Codex CLI", group: "agent", method: "config", verified: false,
-      steps: `Add this to your Codex config, restart Codex${key ? "" : ", and sign in when it asks"}. Older versions need experimental_use_rmcp_client = true at the top of the file.`,
-      file: "~/.codex/config.toml", snippet: `[mcp_servers.octillion]\nurl = "${url}"${key ? `\nhttp_headers = { "Authorization" = "${auth}" }` : ""}` },
+    key
+      ? { id: "codex", client: "Codex CLI", group: "agent", method: "config", verified: false,
+        steps: `Add this to your Codex config and restart Codex. Older versions need experimental_use_rmcp_client = true at the top of the file.`,
+        file: "~/.codex/config.toml", snippet: `[mcp_servers.octillion]\nurl = "${url}"\nhttp_headers = { "Authorization" = "${auth}" }` }
+      : { id: "codex", client: "Codex CLI", group: "agent", method: "cli", verified: true, source: "https://learn.chatgpt.com/docs/extend/mcp?surface=cli",
+        steps: `Run this, then sign in with the second command. Or add the snippet to your Codex config.`,
+        command: `codex mcp add octillion --url ${url}`, then: "codex mcp login octillion",
+        file: "~/.codex/config.toml", snippet: `[mcp_servers.octillion]\nurl = "${url}"` },
     { id: "copilot", client: "GitHub Copilot CLI", group: "agent", method: "config", verified: false,
       steps: `Run /mcp add in Copilot CLI and enter the URL as an HTTP server${key ? " with an Authorization header" : ""}, or add this to its MCP config.${signIn}`,
       file: "~/.copilot/mcp-config.json", snippet: json({ mcpServers: { octillion: { type: "http", url, ...headers } } }) },
     // Cursor's one-click link carries its config in the link itself: offered only when there is no key to put in it.
-    { id: "cursor", client: "Cursor", group: "agent", method: key ? "config" : "link", verified: true,
+    { id: "cursor", client: "Cursor", group: "agent", method: key ? "config" : "link", verified: true, source: "https://cursor.com/docs/context/mcp/install-links",
       steps: key ? `Add this to Cursor's MCP config, then switch the Octillion tools on.` : `Click Add to Cursor (it opens Cursor's MCP settings with Octillion filled in), then switch the Octillion tools on.${signIn}`,
-      ...(key ? {} : { install_url: `cursor://anysphere.cursor-deeplink/mcp/install?name=octillion&config=${encodeURIComponent(cursorConfig)}` }),
+      ...(key ? {} : { install_url: cursorInstallUrl(url) }),
       file: "~/.cursor/mcp.json", snippet: json({ mcpServers: { octillion: { url, ...headers } } }) },
     { id: "opencode", client: "OpenCode", group: "agent", method: "config", verified: false,
       steps: `Add Octillion as a remote MCP server in your OpenCode config.${signIn}`,
@@ -84,9 +91,11 @@ export function clientCatalog(url: string, key?: string, opts: { signInAvailable
     { id: "pi", client: "Pi", group: "agent", method: "ui", verified: false,
       steps: `Pi has no built-in MCP client we could verify. Use Octillion from Claude, ChatGPT or another client on this list.` },
 
-    { id: "vscode", client: "VS Code (Copilot Chat)", group: "editor", method: key ? "config" : "cli", verified: false,
-      steps: key ? `Add the snippet to your workspace (keep the key out of version control), then start the server from the MCP list.` : `Run this, or add the snippet to your workspace, then start the server from the MCP list and sign in.`,
-      ...(key ? {} : { command: `code --add-mcp '${JSON.stringify({ name: "octillion", type: "http", url })}'` }),
+    // VS Code's install link carries the server's JSON (name, type, url) URL-encoded: offered only when there is no key in it.
+    { id: "vscode", client: "VS Code (Copilot Chat)", group: "editor", method: key ? "config" : "link", verified: !key,
+      ...(key ? {} : { source: "https://code.visualstudio.com/api/extension-guides/ai/mcp" }),
+      steps: key ? `Add the snippet to your workspace (keep the key out of version control), then start the server from the MCP list.` : `Click Add to VS Code, or run this, or add the snippet to your workspace; then start the server from the MCP list and sign in.`,
+      ...(key ? {} : { install_url: vscodeInstallUrl(url), command: `code --add-mcp '${JSON.stringify({ name: "octillion", type: "http", url })}'` }),
       file: ".vscode/mcp.json", snippet: json({ servers: { octillion: { type: "http", url, ...headers } } }) },
     { id: "windsurf", client: "Windsurf", group: "editor", method: "config", verified: false,
       steps: `Add Octillion to Windsurf's MCP config and refresh the server list.${signIn}`,
@@ -98,6 +107,49 @@ export function clientCatalog(url: string, key?: string, opts: { signInAvailable
   if (key) list.push({ id: "header", client: "Header-capable clients", group: "agent", method: "config", verified: true,
     steps: `POST ${url} with this header (or X-API-Key: <key>).`, snippet: `Authorization: ${auth}` });
   return list;
+}
+
+/** VS Code's MCP install link: vscode:mcp/install?<URL-encoded JSON of name + server config> (code.visualstudio.com/api/extension-guides/ai/mcp). */
+export const vscodeInstallUrl = (url: string) => `vscode:mcp/install?${encodeURIComponent(JSON.stringify({ name: "octillion", type: "http", url }))}`;
+/** Cursor's MCP install link: name, and the server's mcp.json entry as base64 (cursor.com/docs/context/mcp/install-links). */
+export const cursorInstallUrl = (url: string) =>
+  `cursor://anysphere.cursor-deeplink/mcp/install?name=octillion&config=${encodeURIComponent(Buffer.from(JSON.stringify({ url })).toString("base64"))}`;
+
+export interface OneCommand {
+  id: string;
+  label: string;
+  command?: string;
+  /** A second command to run after the first (sign in from the terminal). */
+  then?: string;
+  install_url?: string;
+  verified: boolean;
+  source?: string;
+  note?: string;
+}
+
+/**
+ * One command (or one click) to add Octillion with sign-in, for the setup page, llms.txt and the agent playbook. Each
+ * checked against the tool's own docs on 2026-10-31; anything not checked says so (`verified: false`).
+ *   add-mcp      github.com/neondatabase/add-mcp: `npx add-mcp <url>` installs a remote URL as HTTP into the agents it
+ *                finds (Claude Code, Codex, Cursor, VS Code and more; -a picks, -y skips prompts)
+ *   Claude Code  code.claude.com/docs/en/mcp: `claude mcp login <name>` runs the OAuth flow from the shell (SSH, no browser)
+ *   Codex        learn.chatgpt.com/docs/extend/mcp?surface=cli: `codex mcp add <name> --url`, `codex mcp login <name>`
+ *   Cursor       cursor.com/docs/context/mcp/install-links: base64 config ({"url"} for a remote server follows the
+ *                mcp.json shape; the page shows no remote example)
+ *   VS Code      code.visualstudio.com/api/extension-guides/ai/mcp: vscode:mcp/install?<encoded JSON>
+ */
+export function oneCommandCatalog(url: string): OneCommand[] {
+  return [
+    { id: "add-mcp", label: "Any agent (Claude Code, Codex, Cursor, VS Code and more)", verified: true, source: "https://github.com/neondatabase/add-mcp",
+      command: `npx add-mcp ${url} --name octillion`, note: "Asks which of your installed agents to add it to (-a <agent> to choose, -y to skip the questions). Then sign in from the agent." },
+    { id: "claude-code", label: "Claude Code", verified: true, source: "https://code.claude.com/docs/en/mcp",
+      command: `claude mcp add --transport http octillion ${url}`, then: "claude mcp login octillion",
+      note: "claude mcp login prints a sign-in link when there is no browser (SSH: connect with ssh -t so the paste-back works)." },
+    { id: "codex", label: "Codex CLI", verified: true, source: "https://learn.chatgpt.com/docs/extend/mcp?surface=cli",
+      command: `codex mcp add octillion --url ${url}`, then: "codex mcp login octillion" },
+    { id: "cursor", label: "Cursor", verified: true, source: "https://cursor.com/docs/context/mcp/install-links", install_url: cursorInstallUrl(url) },
+    { id: "vscode", label: "VS Code", verified: true, source: "https://code.visualstudio.com/api/extension-guides/ai/mcp", install_url: vscodeInstallUrl(url) },
+  ];
 }
 
 /** The environment variable every headless snippet reads the personal API key from. */

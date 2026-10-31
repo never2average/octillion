@@ -283,7 +283,17 @@ function audienceOk(gotRaw: string[], expected: string[], extra: { jwt: boolean;
 
 /** Why an OAuth access token was refused (never the token itself): what /mcp tells the client in error_description. */
 export type OAuthRefusal = "not_configured" | "revoked" | "expired" | "wrong_resource" | "invalid" | "unverifiable";
-export type OAuthClaims = { userId: string; scopes: string[]; clientId: string | null };
+/**
+ * What an OAuth access token says. `orgId`: the Clerk organization the person picked on the consent screen when the
+ * client asked for the user:org:read scope (Clerk puts it in the token as `org_id`: clerk.com/changelog/2026-05-14-oauth-organizations;
+ * `o.id` is read too, the session-token v2 shape). Null for every token without it, which is every token issued before.
+ */
+export type OAuthClaims = { userId: string; scopes: string[]; clientId: string | null; orgId: string | null };
+/** A Clerk organization id from a claim value, or null (anything else is ignored, never trusted as an id). */
+const orgClaim = (...vs: unknown[]): string | null => {
+  for (const v of vs) if (typeof v === "string" && /^org_[A-Za-z0-9]{1,64}$/.test(v)) return v;
+  return null;
+};
 
 /**
  * An OAuth access token Clerk issued to an MCP client for `audience` (one resource URI, or several equivalent ones):
@@ -302,14 +312,16 @@ export async function checkOAuthToken(token: string, audience: string | string[]
   if (!expected.length) return { ok: false, reason: "not_configured" };
   try {
     if (token.startsWith("oat_")) {
-      const r = await call<{ subject?: string; scopes?: string[]; client_id?: string; revoked?: boolean; expired?: boolean; aud?: unknown; audience?: unknown; resource?: unknown; resources?: unknown }>(
+      const r = await call<{ subject?: string; scopes?: string[]; client_id?: string; revoked?: boolean; expired?: boolean; aud?: unknown; audience?: unknown; resource?: unknown; resources?: unknown;
+        org_id?: unknown; o?: { id?: unknown } }>(
         "POST", "/oauth_applications/access_tokens/verify", { access_token: token });
       if (r.revoked) return { ok: false, reason: "revoked" };
       if (r.expired) return { ok: false, reason: "expired" };
       if (!r.subject) return { ok: false, reason: "invalid" };
       const got = [...audiencesOf(r.aud), ...audiencesOf(r.audience), ...audiencesOf(r.resource), ...audiencesOf(r.resources)];
       if (!audienceOk(got, expected, { jwt: false, client: r.client_id ?? null })) return { ok: false, reason: "wrong_resource" };
-      return { ok: true, claims: { userId: r.subject, scopes: r.scopes ?? [], clientId: r.client_id ?? null } };
+      // Clerk's verify response documents no org field today; read one if it is there, else the token has no org claim.
+      return { ok: true, claims: { userId: r.subject, scopes: Array.isArray(r.scopes) ? r.scopes : [], clientId: r.client_id ?? null, orgId: orgClaim(r.org_id, r.o?.id) } };
     }
     if (token.split(".").length === 3 && OAUTH_JWT_TYPES.includes(String(decodeProtectedHeader(token).typ ?? ""))) {
       const p = await verifyJwt(token);
@@ -317,7 +329,7 @@ export async function checkOAuthToken(token: string, audience: string | string[]
       const clientId = (p.client_id ?? p.azp ?? null) as string | null;
       if (!audienceOk(audiencesOf(p.aud), expected, { jwt: true, iss: p.iss, client: clientId })) return { ok: false, reason: "wrong_resource" };
       const scopes = typeof p.scp === "string" ? p.scp.split(" ") : Array.isArray(p.scp) ? p.scp : typeof p.scope === "string" ? p.scope.split(" ") : [];
-      return { ok: true, claims: { userId: p.sub, scopes, clientId } };
+      return { ok: true, claims: { userId: p.sub, scopes, clientId, orgId: orgClaim(p.org_id, p.o?.id) } };
     }
   } catch (err) {
     // jose: an expired JWT. Clerk: a 5xx or a timeout means it could not say; anything else, the token is not valid.
@@ -351,6 +363,24 @@ export const mcpAudiences = () => {
 };
 /** The customer /mcp's resource URI (what its protected-resource metadata names): the first of mcpAudiences. */
 export const mcpAudience = () => mcpAudiences()[0]!;
+
+/**
+ * Octillion's own OAuth scopes (docs/accounts.md). Optional: a token with octillion:read and not octillion:write is
+ * read-only (write tools answer with the next step, src/server.ts); a token with neither, which is every token issued
+ * before they existed and every client that asks for no scope, keeps full access.
+ */
+export const SCOPE_READ = "octillion:read";
+export const SCOPE_WRITE = "octillion:write";
+/**
+ * OCTILLION_OAUTH_SCOPES=on once octillion:read and octillion:write exist in the Clerk dashboard: only then are they
+ * advertised (protected resource metadata, the 401's scope=), since Clerk refuses a request for a scope it does not
+ * have (invalid_scope). Default off: nothing advertised, nothing changes.
+ */
+export const oauthScopesOn = () => (process.env.OCTILLION_OAUTH_SCOPES ?? "").trim().toLowerCase() === "on";
+/** The scopes /mcp advertises: profile and email always (as before), Octillion's own when they are switched on. Never offline_access. */
+export const advertisedScopes = () => ["profile", "email", ...(oauthScopesOn() ? [SCOPE_READ, SCOPE_WRITE] : [])];
+/** What a token's scopes allow: read (octillion:read without octillion:write) or full (anything else, no scope included). */
+export const oauthAccess = (scopes: string[]): "read" | "full" => (scopes.includes(SCOPE_READ) && !scopes.includes(SCOPE_WRITE) ? "read" : "full");
 
 // ---------- platform admins ----------
 

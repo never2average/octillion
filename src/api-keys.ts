@@ -130,8 +130,10 @@ export async function whoami(org: Org) {
     person,
     org: { slug: org.slug, name: org.name },
     role: org.role ?? null,
+    /** What picked the account: header (X-Octillion-Org), token (the sign-in's org claim), default (oldest membership) or key (the key's own account). */
+    org_source: c?.orgSource ?? null,
     credential: !c ? { type: "unknown" as const }
-      : c.kind === "oauth" ? { type: "oauth" as const, client_id: c.clientId ?? null }
+      : c.kind === "oauth" ? { type: "oauth" as const, client_id: c.clientId ?? null, scopes: c.scopes ?? [], access: c.access ?? "full" }
       : { type: "api_key" as const, name: c.name ?? null, prefix: c.prefix ?? null, scope: c.scope ?? "full", expires_at: c.expiresAt ?? null, personal: Boolean(c.personal) },
     api_keys_url: apiKeysUrl(),
   };

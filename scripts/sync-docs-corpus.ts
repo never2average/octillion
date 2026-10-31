@@ -1,8 +1,9 @@
 // The docs corpus behind the docs answers (src/docs-answers.ts): the customer guide (web/src/content/customer-guide.ts,
 // the text /app/docs renders) and the internal docs (docs/**/*.md, what /admin/docs renders), cut at their h2/h3
 // headings into chunks {area, title, href, heading, text}, written to src/docs-corpus.generated.json. Hrefs use the
-// pages' own slugs and heading anchors, so a citation opens the section it came from. The smoke test fails when the
-// committed file is stale.
+// pages' own slugs and heading anchors, so a citation opens the section it came from. It also holds the customer guide's
+// pages whole ({slug, title, group, markdown}): the API serves them as /docs/<slug>.md for agents (src/agent-docs.ts),
+// never the internal docs. The smoke test fails when the committed file is stale.
 //   npx tsx scripts/sync-docs-corpus.ts          write it
 //   npx tsx scripts/sync-docs-corpus.ts --check  exit 1 if it differs from the docs
 import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -17,6 +18,8 @@ const DOCS = path.join(ROOT, "docs");
 const MAX_CHARS = 1800;
 
 export interface DocsChunk { area: "customer" | "admin"; title: string; href: string; heading: string | null; text: string }
+/** A customer guide page whole, as markdown (the same text /app/docs/<slug> renders). */
+export interface DocsPage { slug: string; title: string; group: string; markdown: string }
 
 /** Markdown as excerpt text: link targets and images dropped (their text stays), blank-line runs squeezed. */
 const plain = (md: string) =>
@@ -63,7 +66,13 @@ export function docsCorpus(): DocsChunk[] {
   return [...customer, ...admin];
 }
 
-const render = () => `${JSON.stringify({ generated_by: "scripts/sync-docs-corpus.ts: do not edit, change the docs and rerun it", chunks: docsCorpus() }, null, 1)}\n`;
+/** The customer guide's pages, whole: what /docs/<slug>.md serves. Internal docs (docs/*.md) are never included. */
+export function docsPages(): DocsPage[] {
+  const catalog = JSON.parse(readFileSync(path.join(ROOT, "web/src/content/mcp-tools.generated.json"), "utf8")) as ToolCatalog;
+  return guidePages(catalog).map((p) => ({ slug: p.slug, title: p.title, group: p.group, markdown: p.body }));
+}
+
+const render = () => `${JSON.stringify({ generated_by: "scripts/sync-docs-corpus.ts: do not edit, change the docs and rerun it", chunks: docsCorpus(), pages: docsPages() }, null, 1)}\n`;
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const json = render();

@@ -1,0 +1,32 @@
+{
+  "name": "@octillion/cli",
+  "version": "0.1.0",
+  "description": "The octillion command: sign in to Octillion from a terminal or an agent (OAuth device login or OCTILLION_API_KEY), check who you are, and print MCP connect snippets.",
+  "type": "module",
+  "bin": {
+    "octillion": "bin/octillion.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/cli.test.js"
+  },
+  "octillion": {
+    "url": null
+  },
+  "keywords": [
+    "octillion",
+    "mcp",
+    "cli",
+    "oauth",
+    "device-authorization"
+  ],
+  "license": "UNLICENSED",
+  "private": false
+}

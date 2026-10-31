@@ -1,6 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { getDb, type Queryable } from "./db.js";
-import { checkOAuthToken, ClerkError, clerkEnabled, isSuspended, mcpAudiences, memberships, onMembershipChange, organizations, type ClerkMembership, type OAuthRefusal } from "./clerk.js";
+import { checkOAuthToken, ClerkError, clerkEnabled, isSuspended, mcpAudiences, memberships, oauthAccess, onMembershipChange, organizations, type ClerkMembership, type OAuthRefusal } from "./clerk.js";
 import { accountRoleOf, type AccountRole } from "./account-roles.js";
 
 /** What an API key may do: read-only tools, or every tool the person's role allows. Null (older keys) = full access. */
@@ -19,7 +19,16 @@ export interface Credential {
   expiresAt?: string | null;
   /** A personal key a person made for themselves on /app/settings/api-keys (created_via = 'portal'). */
   personal?: boolean;
+  /** OAuth: the token's scopes, and what they allow (read = octillion:read without octillion:write; full otherwise, no scope included). */
+  scopes?: string[];
+  access?: "read" | "full";
+  /**
+   * What picked the account: the X-Octillion-Org header, the OAuth token's org claim (user:org:read), the oldest
+   * membership that is not suspended (the default), or the API key's own account.
+   */
+  orgSource?: OrgSource;
 }
+export type OrgSource = "header" | "token" | "default" | "key";
 
 /** The tenant a request acts for. Every query in queries.ts is scoped by orgId. */
 export interface Org {
@@ -185,7 +194,7 @@ export async function resolveKeyDetailed(key: string | undefined | null, opts: {
   return { ok: true, org: {
     orgId: row.org_id, slug: row.slug, name: row.name, ...(row.user_id ? { userId: row.user_id } : {}), ...(role ? { role } : {}),
     credential: { kind: "api_key", keyId: Number(row.id), name: row.label, prefix: row.key_prefix, scope: row.scope ?? null,
-      expiresAt: expires ? expires.toISOString() : null, personal },
+      expiresAt: expires ? expires.toISOString() : null, personal, orgSource: "key" },
   } };
 }
 
@@ -234,7 +243,7 @@ export const urlKeysAllowed = () => (process.env.OCTILLION_URL_KEYS ?? "allow").
 
 // ---------- Clerk users on /mcp (OAuth) ----------
 
-/** Per person, per chosen organization ("" = the default): the account they act for, for a minute. */
+/** Per person, per chosen organization ("" = the default, "h:<slug>" = the header, "t:<clerk org>" = the token's claim): the account they act for, for a minute. */
 const tokenOrgs = new Map<string, Map<string, { org: Org; at: number }>>();
 onMembershipChange((userId) => tokenOrgs.delete(userId)); // a suspended person is cut off at once, not after the cache
 
@@ -255,8 +264,9 @@ const TOKEN_REFUSAL: Record<OAuthRefusal, string> = {
 };
 
 /**
- * Resolve a Clerk OAuth access token issued for /mcp (its audience is checked, src/clerk.ts) to the organization the user acts for: their oldest Clerk membership that is not
- * suspended. A Clerk organization created in the Clerk dashboard gets its Octillion row on first use.
+ * Resolve a Clerk OAuth access token issued for /mcp (its audience is checked, src/clerk.ts) to the organization the user acts for:
+ * the one its org claim names, else their oldest Clerk membership that is not suspended. A Clerk organization created
+ * in the Clerk dashboard gets its Octillion row on first use.
  */
 export async function resolveUserToken(token: string): Promise<Org | null> {
   const r = await resolveUserTokenDetailed(token);
@@ -266,8 +276,11 @@ export async function resolveUserToken(token: string): Promise<Org | null> {
 /**
  * resolveUserToken, saying why not: an invalid token is a 401 (sign in again); a valid one whose person has no
  * Octillion account, only suspended memberships, or an organization Octillion does not know is a 403 with the next step
- * (signing in again would not change it). `orgSlug` (X-Octillion-Org) picks one of the person's accounts; without it,
- * the oldest membership that is not suspended, as before.
+ * (signing in again would not change it). Which account, first match wins:
+ *   1. `orgSlug` (X-Octillion-Org): one of the person's accounts, by slug
+ *   2. the token's org claim (org_id: the organization the person picked on Clerk's consent screen, user:org:read),
+ *      checked against their memberships now: a claim for an organization they are not in is a 403
+ *   3. the oldest membership that is not suspended, as before (every token without an org claim)
  */
 export async function resolveUserTokenDetailed(token: string, orgSlug?: string): Promise<AuthResult> {
   const v = await checkOAuthToken(token, mcpAudiences()); // issued for /mcp, not another resource
@@ -275,10 +288,12 @@ export async function resolveUserTokenDetailed(token: string, orgSlug?: string):
     message: v.reason === "not_configured"
       ? `This is not an Octillion API key, and sign-in is not set up on this server. Set OCTILLION_API_KEY to a key from ${apiKeysUrl()}.`
       : `Your sign-in ${v.reason === "revoked" ? "was revoked" : v.reason === "unverifiable" ? "could not be checked just now" : "has expired or is not valid for this server"}. ${NEXT_STEP()}.` });
-  const { userId, clientId } = v.claims;
-  const credential: Credential = { kind: "oauth", clientId };
+  const { userId, clientId, scopes, orgId: claimOrg } = v.claims;
+  const source: OrgSource = orgSlug ? "header" : claimOrg ? "token" : "default";
+  const credential: Credential = { kind: "oauth", clientId, scopes, access: oauthAccess(scopes), orgSource: source };
+  const cacheKey = orgSlug ? `h:${orgSlug}` : claimOrg ? `t:${claimOrg}` : "";
   const mine = tokenOrgs.get(userId);
-  const hit = mine?.get(orgSlug ?? "");
+  const hit = mine?.get(cacheKey);
   if (hit && Date.now() - hit.at < 60_000) return { ok: true, org: { ...hit.org, credential } };
   const all = (await memberships.forUser(userId)).filter((m) => m.organization).sort((a, b) => a.created_at - b.created_at);
   const requestAccess = `request access at ${publicUrl()}`;
@@ -293,6 +308,13 @@ export async function resolveUserTokenDetailed(token: string, orgSlug?: string):
       message: `You are not a member of the Octillion workspace "${orgSlug}" (X-Octillion-Org). Remove the header to use your default workspace, or ask an owner of ${orgSlug} to invite you.` });
     if (isSuspended(m)) return refuse({ status: 403, reason: "suspended", description: `access to ${orgSlug} is suspended`,
       message: `Your access to ${m.organization!.name} is suspended; ask an owner.` });
+  } else if (claimOrg) {
+    m = all.find((x) => x.organization!.id === claimOrg);
+    // The organization picked at sign-in is not (or no longer) one of theirs: never fall back to another account.
+    if (!m) return refuse({ status: 403, reason: "not_member", description: "not a member of the organization this sign-in picked",
+      message: `This sign-in picked an organization you are not a member of. Sign in again and pick one of your workspaces, send X-Octillion-Org: <slug> to choose one, or ask an owner of that workspace for an invitation.` });
+    if (isSuspended(m)) return refuse({ status: 403, reason: "suspended", description: `access to ${m.organization!.name} is suspended`,
+      message: `Your access to ${m.organization!.name} is suspended; ask an owner, or sign in again and pick another workspace.` });
   } else {
     m = all.find((x) => !isSuspended(x));
     if (!m) return refuse({ status: 403, reason: "suspended", description: "access suspended",
@@ -303,7 +325,7 @@ export async function resolveUserTokenDetailed(token: string, orgSlug?: string):
     message: `Your organization ${m.organization!.name} is not an Octillion workspace yet; ${requestAccess}.` });
   const org: Org = { ...found, userId, role: accountRoleOf(m) };
   if (!mine) tokenOrgs.set(userId, new Map());
-  tokenOrgs.get(userId)!.set(orgSlug ?? "", { org, at: Date.now() });
+  tokenOrgs.get(userId)!.set(cacheKey, { org, at: Date.now() });
   return { ok: true, org: { ...org, credential } };
 }
 

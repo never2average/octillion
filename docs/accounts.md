@@ -60,6 +60,31 @@ subscription, or 80% of the monthly model budget used.
 5. **Domains / allowed origins:** the web app's origin (`$PUBLIC_URL`). Set `CLERK_AUTHORIZED_PARTIES` if the app is
    served from more than one origin (by default only `PUBLIC_URL`'s origin may mint session tokens Octillion accepts).
 6. No webhooks are needed: Octillion reads Clerk when it needs to (with a 30 to 60 second cache).
+7. **Agent sign-in: org picker, Octillion scopes, CLI device login.** Optional, and nothing changes until it is done:
+   tokens without these scopes or an org claim keep working exactly as before. Do these in the Clerk dashboard in this
+   order (Clerk's reference: clerk.com/docs/guides/configure/auth-strategies/oauth/how-clerk-implements-oauth):
+   1. **OAuth applications → Settings → Client onboarding:** turn on **Publish CIMD support**, and keep **Publish DCR
+      support** on for older clients. The authorization server metadata then shows `client_id_metadata_document_supported: true`.
+   2. **OAuth applications → Settings:** turn on **Require PKCE** (instance-wide; it refuses requests without PKCE
+      S256 and leaves existing codes and refresh tokens alone).
+   3. **OAuth applications → Scopes:** create the custom scopes `octillion:read` (read-only tools) and
+      `octillion:write` (tools that change things).
+   4. **Default scopes for dynamic clients** (what a client that asks for no scope gets): `profile email user:org:read
+      octillion:read octillion:write`. Clerk documents the same through its CLI:
+      `npx clerk@latest api instance/oauth_application_settings -X PATCH -d '{"default_scopes":["profile","email","user:org:read","octillion:read","octillion:write"]}'`.
+   5. **Enable `user:org:read`** (needs Organizations on): the consent screen then shows an organization picker, and
+      the token carries the picked organization as `org_id` (clerk.com/changelog/2026-05-14-oauth-organizations).
+      With the consent screen off for an application, Clerk fills `org_id` with the person's last active organization.
+   6. **Create the CLI's OAuth application:** OAuth applications → Add, name it "Octillion CLI", make it **Public**
+      (no secret), turn on the **Device Authorization Grant**, and give it the scopes `profile email user:org:read
+      octillion:read octillion:write`. Copy its Client ID and set **`OCTILLION_CLI_CLIENT_ID`** to it on the API server,
+      then redeploy. `GET $PUBLIC_URL/api/cli/config` then shows `"device_login": true`, and the authorization server
+      metadata lists `device_authorization_endpoint`.
+   7. Set **`OCTILLION_OAUTH_SCOPES=on`** on the API server and redeploy. Only now does `/mcp` advertise
+      `octillion:read` and `octillion:write` (protected resource metadata `scopes_supported`, and `scope="…"` in the
+      401's `WWW-Authenticate`); before step 3 Clerk would refuse a client asking for them (`invalid_scope`), which is
+      why it is off by default. Check: `curl -s $PUBLIC_URL/.well-known/oauth-protected-resource`, then
+      `OCTILLION_URL=$PUBLIC_URL octillion login` and `octillion whoami`.
 
 How Octillion uses it:
 - **Portal (`/api/app`):** the UI sends Clerk's session, the `__session` cookie on the same origin or a Bearer session
@@ -86,10 +111,32 @@ How Octillion uses it:
     (`/mcp/<key>`) are deprecated: served with a `Deprecation` header and logged by key prefix while
     `OCTILLION_URL_KEYS` is `allow` (the default), refused with `OCTILLION_URL_KEYS=off`; new keys are never issued as
     URLs.
-  - **Choosing an account.** A person in several accounts sends `X-Octillion-Org: <slug>` (checked against their
-    memberships); without it, the oldest membership that is not suspended. A key always acts in the account it was
-    made in. The `whoami` tool returns the person, the account, the role and the credential (OAuth, or the key's name,
-    access and expiry).
+  - **Choosing an account.** For OAuth, first match wins: the `X-Octillion-Org: <slug>` header (checked against the
+    person's memberships); then the token's org claim (`org_id`, the organization picked on Clerk's consent screen with
+    `user:org:read`; a JWT's `org_id` or `o.id`, or an `org_id` in Clerk's opaque-token verify response if it has one),
+    checked against their memberships now: a claim for an organization they are not in is a **403** `not_member`, never a
+    fall-back to another account; then the oldest membership that is not suspended (every token without a claim, as
+    before). A key always acts in the account it was made in. The `whoami` tool returns the person, the account, what
+    picked it (`org_source`: header, token, default or key), the role and the credential (OAuth with its scopes and
+    access, or the key's name, access and expiry).
+  - **OAuth scopes** (`octillion:read`, `octillion:write`; src/clerk.ts oauthAccess). A token with `octillion:read`
+    and not `octillion:write` is read-only: a write tool (src/server.ts TOOL_ACCESS) answers with a tool error saying
+    how to sign in again with write access, plus an insufficient-scope hint in the result's `_meta`
+    (`octillion/insufficient_scope`: error, scope, resource_metadata). A token with `octillion:write`, or with neither
+    scope (every token issued before they existed, and every client that asks for no scope), has full access. Scope
+    is enforced per tool, never as an HTTP 403, so the rest of a session keeps working; there is no HTTP-level scope
+    failure. `offline_access` is never advertised.
+  - **The `octillion` CLI** (packages/cli, not published): `octillion login` signs in with the Device Authorization
+    Grant against Clerk (the client id from `GET /api/cli/config`, i.e. `OCTILLION_CLI_CLIENT_ID`; unset, it says
+    device login is off and points to API keys). Agents get `--non-interactive` JSON (link, code, `next_step:
+    "octillion login --complete <handle>"`) automatically. Credentials: `--token`, then `OCTILLION_API_KEY`, then the
+    stored login (`~/.config/octillion/credentials.json`, 0600, refreshed with its refresh token). See its README.
+    `octillion keys` is not offered: the portal's key API takes a portal session, and opening it to OAuth tokens
+    would be new auth on `/api/app`.
+  - **Docs for agents** (src/agent-docs.ts), public: `/llms.txt`, `/get-started.md` (the setup playbook an agent
+    follows for its user) and each customer guide page as `/docs/<slug>.md` (from src/docs-corpus.generated.json;
+    the internal docs are never served). Every address is `PUBLIC_URL`. `GET /api/connect` is the connect catalog with
+    no key in it (`octillion mcp-config`).
   - **Refusals say what to do next** (src/auth.ts authenticateMcp; the JSON-RPC error message and `data.reason`):
     no credential is a 401 with the challenge and no error code (RFC 6750); an unknown, revoked or expired key, or a
     bad OAuth token, is a 401 `error="invalid_token"` with an `error_description` ("API key expired on 2026-01-02",

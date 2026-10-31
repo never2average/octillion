@@ -3,8 +3,10 @@
 // Not a simulator of either product: only the fields Octillion reads, with the same shapes.
 // Test hooks: POST /_mock/clerk/users {email, first_name?, verified?, platform_admin?, platform_role?}, POST /_mock/invitations/:id/accept
 // {first_name?}, POST /_mock/clerk/memberships {org_id, user_id, role?, public_metadata?}, POST /_mock/session {user_id, org_id?, org_role?,
-// azp?, expired?, v1?} -> a Clerk session token, POST /_mock/oauth {user_id, jwt?, revoked?, expired?, aud?, iss?} -> an OAuth
-// access token, GET /_mock/public-key -> {pem} for CLERK_JWT_KEY, POST /_mock/subscriptions {customer, price, status?, start_date?, trial_end?,
+// azp?, expired?, v1?} -> a Clerk session token, POST /_mock/oauth {user_id, jwt?, revoked?, expired?, aud?, iss?, org_id?, scopes?} -> an OAuth
+// access token (org_id: the user:org:read org claim; scopes: default ["profile", "email"]), the Device Authorization Grant
+// (POST /oauth/device_authorization {client_id, scope} and POST /oauth/token, device_code and refresh_token grants, for
+// clients registered with POST /_mock/oauth/clients {client_id}; POST /_mock/device/approve {user_code, user_id, deny?} approves), GET /_mock/public-key -> {pem} for CLERK_JWT_KEY, POST /_mock/subscriptions {customer, price, status?, start_date?, trial_end?,
 // ended_at?, canceled_at?, cancel_at_period_end?, current_period_end?, quantity?, invoice? (default true: one paid invoice now)},
 // POST /_mock/prices {id, unit_amount, interval, ...} (an archived price: not listed with active=true), POST /v1/products and
 // POST /v1/prices (plans made on FinOps; lookup keys unique) and POST /v1/prices/:id (active=false archives; metadata merges,
@@ -43,6 +45,8 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     orgs: new Map<string, any>(), invitations: new Map<string, any>(), memberships: new Map<string, any>(), users: new Map<string, any>(),
     customers: new Map<string, any>(), subscriptions: new Map<string, any>(), checkouts: [] as any[], meters: [] as any[], meterEvents: [] as any[], invoices: [] as any[], balanceTxns: [] as any[], stripeDown: false,
     oauth: new Map<string, any>(), keyed: new Map<string, any>(),
+    // The device grant: public clients that may use it, pending device codes, refresh tokens.
+    deviceClients: new Set<string>(), devices: new Map<string, any>(), refresh: new Map<string, any>(),
     emails: [] as any[], resendKeys: new Map<string, { id: string; body: string }>(), resendDown: false,
     batches: [] as { key: string | null; size: number }[], received: new Map<string, any>(), resendLimited: 0, resendRetryAfter: 1,
     // Uncertain outcomes, each for the next `n` requests: a 409 concurrent_idempotent_requests (nothing recorded); the
@@ -124,7 +128,55 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
   // ---------- Clerk Frontend API (the OAuth authorization server for /mcp) ----------
   app.get("/.well-known/oauth-authorization-server", (_req, res) => void res.json({
     issuer: getBase(), authorization_endpoint: `${getBase()}/oauth/authorize`, token_endpoint: `${getBase()}/oauth/token`, registration_endpoint: `${getBase()}/oauth/register`,
-    jwks_uri: `${getBase()}/.well-known/jwks.json`, code_challenge_methods_supported: ["S256"], client_id_metadata_document_supported: true }));
+    jwks_uri: `${getBase()}/.well-known/jwks.json`, code_challenge_methods_supported: ["S256"], client_id_metadata_document_supported: true,
+    device_authorization_endpoint: `${getBase()}/oauth/device_authorization`, revocation_endpoint: `${getBase()}/oauth/revoke`,
+    grant_types_supported: ["authorization_code", "refresh_token", "urn:ietf:params:oauth:grant-type:device_code"] }));
+  // RFC 8628, as Clerk serves it for a public client with the device grant on: form-encoded, JSON answers.
+  const oauthErr = (res: express.Response, status: number, error: string, desc?: string) => void res.status(status).json({ error, ...(desc ? { error_description: desc } : {}) });
+  const opaque = (userId: string, scopes: string[], orgId: string | null) => {
+    const token = `oat_${randomBytes(18).toString("hex")}`;
+    s.oauth.set(token, { id: id("oat"), user_id: userId, revoked: false, expired: false, aud: null, created_at: ms(), scopes, org_id: orgId });
+    return token;
+  };
+  app.post("/oauth/device_authorization", (req, res) => {
+    const clientId = String(req.body?.client_id ?? "");
+    if (!s.deviceClients.has(clientId)) return oauthErr(res, 401, "invalid_client", "unknown client or the device grant is off");
+    const scopes = String(req.body?.scope ?? "profile email").split(/\s+/).filter(Boolean);
+    const known = new Set(["profile", "email", "openid", "user:org:read", "octillion:read", "octillion:write"]);
+    if (scopes.some((x) => !known.has(x))) return oauthErr(res, 400, "invalid_scope");
+    const deviceCode = randomBytes(16).toString("hex"), userCode = `${randomBytes(2).toString("hex")}-${randomBytes(2).toString("hex")}`.toUpperCase();
+    s.devices.set(deviceCode, { client_id: clientId, user_code: userCode, scopes, status: "pending", user_id: null, expires: ms() + 600_000 });
+    res.json({ device_code: deviceCode, user_code: userCode, verification_uri: `${getBase()}/oauth/device`, verification_uri_complete: `${getBase()}/oauth/device?user_code=${userCode}`,
+      expires_in: 600, interval: 1 });
+  });
+  app.post("/oauth/token", (req, res) => {
+    const b = req.body ?? {};
+    if (b.grant_type === "urn:ietf:params:oauth:grant-type:device_code") {
+      const d = s.devices.get(String(b.device_code ?? ""));
+      if (!d || d.client_id !== b.client_id) return oauthErr(res, 400, "invalid_grant");
+      if (d.expires < ms()) return oauthErr(res, 400, "expired_token");
+      if (d.status === "pending") return oauthErr(res, 400, "authorization_pending");
+      if (d.status === "denied") { s.devices.delete(String(b.device_code)); return oauthErr(res, 400, "access_denied"); }
+      s.devices.delete(String(b.device_code));
+      const refresh = `ort_${randomBytes(18).toString("hex")}`;
+      s.refresh.set(refresh, { user_id: d.user_id, client_id: d.client_id, scopes: d.scopes, org_id: d.org_id ?? null });
+      return void res.json({ access_token: opaque(d.user_id, d.scopes, d.org_id ?? null), token_type: "Bearer", expires_in: 86400, refresh_token: refresh, scope: d.scopes.join(" ") });
+    }
+    if (b.grant_type === "refresh_token") {
+      const r = s.refresh.get(String(b.refresh_token ?? ""));
+      if (!r || r.client_id !== b.client_id) return oauthErr(res, 400, "invalid_grant");
+      return void res.json({ access_token: opaque(r.user_id, r.scopes, r.org_id), token_type: "Bearer", expires_in: 86400, refresh_token: b.refresh_token, scope: r.scopes.join(" ") });
+    }
+    oauthErr(res, 400, "unsupported_grant_type");
+  });
+  app.post("/oauth/revoke", (req, res) => { s.refresh.delete(String(req.body?.token ?? "")); s.oauth.delete(String(req.body?.token ?? "")); res.status(200).end(); });
+  app.post("/_mock/oauth/clients", (req, res) => { s.deviceClients.add(String(req.body?.client_id)); res.json({ ok: true }); });
+  app.post("/_mock/device/approve", (req, res) => {
+    const d = [...s.devices.values()].find((x) => x.user_code === req.body?.user_code);
+    if (!d) return void res.status(404).json({ error: "no such user code" });
+    Object.assign(d, req.body?.deny ? { status: "denied" } : { status: "approved", user_id: req.body?.user_id, org_id: req.body?.org_id ?? null });
+    res.json({ ok: true });
+  });
 
   // ---------- Clerk Backend API (/v1, Bearer secret key) ----------
   const c = express.Router();
@@ -212,8 +264,9 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
   c.post("/v1/oauth_applications/access_tokens/verify", (req, res) => {
     const t = s.oauth.get(String(req.body?.access_token ?? ""));
     if (!t) return clerkErr(res, 404, "OAuth access token not found", "resource_not_found");
-    res.json({ object: "clerk_idp_oauth_access_token", id: t.id, client_id: "mock_client", type: "oauth_token", subject: t.user_id, scopes: ["profile", "email"],
-      revoked: Boolean(t.revoked), expired: Boolean(t.expired), expiration: ms() + 3_600_000, created_at: t.created_at, updated_at: t.created_at, ...(t.aud ? { aud: t.aud } : {}) });
+    res.json({ object: "clerk_idp_oauth_access_token", id: t.id, client_id: "mock_client", type: "oauth_token", subject: t.user_id, scopes: t.scopes ?? ["profile", "email"],
+      revoked: Boolean(t.revoked), expired: Boolean(t.expired), expiration: ms() + 3_600_000, created_at: t.created_at, updated_at: t.created_at, ...(t.aud ? { aud: t.aud } : {}),
+      ...(t.org_id ? { org_id: t.org_id } : {}) });
   });
 
   // ---------- Stripe (form-encoded) ----------
@@ -359,12 +412,15 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
   app.post("/_mock/oauth", async (req, res) => {
     const b = req.body ?? {};
     if (b.jwt) {
-      const t = new SignJWT({ scp: "profile email", client_id: "mock_client", ...(b.aud ? { aud: b.aud } : {}) }).setProtectedHeader({ alg: "RS256", kid: "mock-1", typ: "at+jwt" })
+      // Like Clerk's JWT access tokens: scp, and org_id when the person picked an organization (user:org:read).
+      const t = new SignJWT({ scp: Array.isArray(b.scopes) ? b.scopes : "profile email", client_id: "mock_client", ...(b.aud ? { aud: b.aud } : {}), ...(b.org_id ? { org_id: b.org_id } : {}) })
+        .setProtectedHeader({ alg: "RS256", kid: "mock-1", typ: "at+jwt" })
         .setIssuer(b.iss ?? getBase()).setSubject(b.user_id).setIssuedAt().setExpirationTime(b.expired ? Math.floor(Date.now() / 1000) - 60 : "2h"); // outlives a whole smoke run (expiry tests ask for expired)
       return void res.json({ access_token: await t.sign(privateKey) });
     }
     const token = `oat_${randomBytes(18).toString("hex")}`;
-    s.oauth.set(token, { id: id("oat"), user_id: b.user_id, revoked: Boolean(b.revoked), expired: Boolean(b.expired), aud: b.aud ?? null, created_at: ms() });
+    s.oauth.set(token, { id: id("oat"), user_id: b.user_id, revoked: Boolean(b.revoked), expired: Boolean(b.expired), aud: b.aud ?? null, created_at: ms(),
+      ...(Array.isArray(b.scopes) ? { scopes: b.scopes } : {}), ...(b.org_id ? { org_id: b.org_id } : {}) });
     res.json({ access_token: token });
   });
   const invoice = (b: { customer: string; amount: number; status?: string; created?: number; paid_at?: number | null; subscription?: string | null; number?: string }) => {

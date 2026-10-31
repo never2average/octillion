@@ -25,15 +25,17 @@ interface Setup {
   steps: Step[]; done: number; total: number; clients: { client: string; last: string }[]; calls: number;
   groups: { id: string; label: string; prompt: string; used: number; total: number }[];
   errors: { at: string; name: string | null; error: string | null; hint: string | null }[];
-  connect: { connector_url: string; clients: Client[]; headless?: Headless[]; api_keys_url?: string };
+  connect: { connector_url: string; clients: Client[]; headless?: Headless[]; one_command?: OneCommand[]; api_keys_url?: string };
   live: { at: string; client: string | null } | null;
   /** Set for a viewer: shown where a launch prompt would be. */
   viewer_note?: string | null;
 }
 interface Client {
   id: string; client: string; group: 'chat' | 'agent' | 'editor'; method: 'ui' | 'cli' | 'config' | 'link'; steps: string;
-  command?: string; snippet?: string; file?: string; install_url?: string; verified: boolean; share: number | null;
+  command?: string; then?: string; snippet?: string; file?: string; install_url?: string; verified: boolean; source?: string; share: number | null;
 }
+/** One command (or click) that adds Octillion with sign-in (src/connect-catalog.ts oneCommandCatalog). */
+interface OneCommand { id: string; label: string; command?: string; then?: string; install_url?: string; verified: boolean; source?: string; note?: string }
 /** The API key (headless) path for one client: reads OCTILLION_API_KEY, never a literal key (src/connect-catalog.ts). */
 export interface Headless { id: string; client: string; steps: string; command?: string; snippet?: string; file?: string; verified: boolean; source?: string; note?: string }
 interface Stage { id: string; title: string; why: string; prompt: string; tools: string[]; expect: string; manual?: boolean; link?: { href: string; label: string }; done: boolean; at: string | null }
@@ -169,6 +171,7 @@ function ConnectionBox({ s, onConnected }: { s: Setup; onConnected: () => void }
                 <CopyButton text={url} label='Copy URL' variant='ghost' />
               </div>
               {c && <ClientSteps c={c} />}
+              <AnyAgent list={s.connect.one_command ?? []} />
             </div>
           </NumberedStep>
           {checkIt(3)}
@@ -244,6 +247,12 @@ function ClientSteps({ c }: { c: Client }) {
         <Button size='sm' render={<a href={c.install_url} />}><Icons.add /> Add to {c.client}</Button>
       )}
       {c.command && <CodeLine text={c.command} label='Command' />}
+      {c.then && (
+        <div className='space-y-1'>
+          <div className='text-muted-foreground text-xs'>Then sign in from the terminal</div>
+          <CodeLine text={c.then} label='Sign-in command' />
+        </div>
+      )}
       {c.snippet && (
         <div className='space-y-1'>
           {c.file && <div className='text-muted-foreground text-xs'>{c.command || c.install_url ? 'Or add to ' : 'In '}<code className='font-mono'>{c.file}</code></div>}
@@ -253,6 +262,19 @@ function ClientSteps({ c }: { c: Client }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/** "Any agent, one command": npx add-mcp adds Octillion to whichever agents are installed. */
+function AnyAgent({ list }: { list: OneCommand[] }) {
+  const a = list.find((x) => x.id === 'add-mcp');
+  if (!a?.command) return null;
+  return (
+    <div className='space-y-1 border-t pt-2'>
+      <div className='text-muted-foreground text-xs'>Or add it to any of your coding agents in one command{a.verified ? '' : ' (not yet checked against the tool’s docs)'}</div>
+      <CodeLine text={a.command} label='One command for any agent' />
+      {a.note && <p className='text-muted-foreground text-xs'>{a.note}</p>}
     </div>
   );
 }

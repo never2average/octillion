@@ -19,7 +19,7 @@ import { capture } from "./telemetry.js";
 import * as billing from "./billing.js";
 import * as experiments from "./experiments.js";
 import { parsePlanConfig, PlanConfigError } from "./plan-config.js";
-import { clientCatalog, headlessCatalog } from "./connect-catalog.js";
+import { clientCatalog, headlessCatalog, oneCommandCatalog } from "./connect-catalog.js";
 import { getDb } from "./db.js";
 import * as clerk from "./clerk.js";
 import * as mail from "./email.js";
@@ -79,7 +79,8 @@ Every other client (Copilot, OpenCode, Gemini CLI, VS Code, Windsurf and more) i
 Then type: "Get me started with Octillion."
 
 Reply to this email with anything that gets in your way.`;
-  return { connector_url: url, secret: Boolean(key), clients, headless: headlessCatalog(url), api_keys_url: `${base}/app/settings/api-keys`, email: { subject, body } };
+  return { connector_url: url, secret: Boolean(key), clients, headless: headlessCatalog(url), one_command: key ? [] : oneCommandCatalog(url),
+    api_keys_url: `${base}/app/settings/api-keys`, email: { subject, body } };
 }
 
 // ---------- local facts ----------

@@ -15,6 +15,7 @@ import { z } from "zod";
 import * as q from "./queries.js";
 import * as research from "./research.js";
 import { apiKeysUrl, type Org } from "./auth.js";
+import { SCOPE_READ, SCOPE_WRITE } from "./clerk.js";
 import { whoami } from "./api-keys.js";
 import { recordMcpEvent } from "./analytics.js";
 import * as memory from "./context.js";
@@ -201,10 +202,12 @@ function summarize(d: Data): string {
     case "whoami": {
       const who = d.person ? (d.person.email ?? d.person.name ?? d.person.user_id) : "no person (an account-wide connector key)";
       const c = d.credential;
-      const how = c.type === "oauth" ? `signed in with OAuth${c.client_id ? ` (client ${c.client_id})` : ""}`
+      const how = c.type === "oauth" ? `signed in with OAuth${c.client_id ? ` (client ${c.client_id})` : ""}${c.access === "read" ? ", read-only" : ""}`
         : c.type === "api_key" ? `using API key "${c.name}" (${c.prefix}…, ${c.scope === "read" ? "read-only" : c.scope === "write" ? "read and write" : "full access"}, ${c.expires_at ? `expires ${c.expires_at.slice(0, 10)}` : "never expires"})`
         : "credential unknown";
-      return `You are ${who} in the Octillion workspace ${d.org.name} (${d.org.slug})${d.role ? `, role ${d.role}` : ""}, ${how}. Manage API keys at ${d.api_keys_url}; pick another workspace with the X-Octillion-Org header.`;
+      const picked = d.org_source === "header" ? " (picked by the X-Octillion-Org header)" : d.org_source === "token" ? " (picked at sign-in)"
+        : d.org_source === "default" ? " (your default: oldest membership)" : "";
+      return `You are ${who} in the Octillion workspace ${d.org.name} (${d.org.slug})${picked}${d.role ? `, role ${d.role}` : ""}, ${how}. Manage API keys at ${d.api_keys_url}; pick another workspace with the X-Octillion-Org header.`;
     }
   }
 }
@@ -347,6 +350,25 @@ export const TOOL_ACCESS: Record<ToolName, "read" | "write"> = {
   publish_to_library: "write", register_harness: "write", save_to_memory: "write",
 };
 
+/**
+ * The answer to a write tool on a read-only sign-in: a tool error with the next step, and in _meta the step-up hint the
+ * MCP authorization spec describes for insufficient scope (error, the scope to ask for, the resource metadata), for
+ * clients that read it. A tool error, not an HTTP 403: the rest of the session keeps working.
+ */
+function readOnlySignIn(name: ToolName): CallToolResult {
+  const base = publicBase();
+  const text = `This sign-in is read-only (scope ${SCOPE_READ}), and ${name} changes things. Re-authorize with write access ` +
+    `(scope ${SCOPE_WRITE}): sign out of Octillion in your MCP client and sign in again, allowing write access (Claude Code: ` +
+    `claude mcp logout octillion, then claude mcp login octillion; Codex: codex mcp login octillion; Claude and ChatGPT apps: ` +
+    `disconnect and reconnect the connector; the octillion CLI: octillion login). Or use a write API key from ${apiKeysUrl()} as OCTILLION_API_KEY.`;
+  return {
+    isError: true, content: [{ type: "text", text }],
+    _meta: { "octillion/insufficient_scope": { error: "insufficient_scope", scope: `${SCOPE_READ} ${SCOPE_WRITE}`,
+      resource_metadata: `${base}/.well-known/oauth-protected-resource`, error_description: `${name} needs ${SCOPE_WRITE}` } },
+  };
+}
+const publicBase = () => (process.env.PUBLIC_URL ?? `http://${process.env.HOST ?? "127.0.0.1"}:${process.env.PORT ?? 3333}`).replace(/\/$/, "");
+
 async function runToolInner(org: Org, name: ToolName, args: Record<string, unknown>): Promise<CallToolResult> {
   const t0 = performance.now();
   // A read-only API key: write tools answer with the next step, not a crash (and not a call recorded as a failure of the tool).
@@ -354,6 +376,12 @@ async function runToolInner(org: Org, name: ToolName, args: Record<string, unkno
     const text = `This API key${org.credential.name ? ` ("${org.credential.name}")` : ""} is read-only, and ${name} changes things. Create a write key at ${apiKeysUrl()} and set OCTILLION_API_KEY to it, then try again.`;
     recordMcpEvent(org, { method: "tools/call", name, ok: false, error: "read-only API key", ms: performance.now() - t0 });
     return { isError: true, content: [{ type: "text", text }] };
+  }
+  // A read-only sign-in (octillion:read without octillion:write): the same, with how to sign in again with write access.
+  // Tokens with neither scope (every token issued before the scopes existed) are "full" and never get here.
+  if (org.credential?.kind === "oauth" && org.credential.access === "read" && TOOL_ACCESS[name] !== "read") {
+    recordMcpEvent(org, { method: "tools/call", name, ok: false, error: "read-only sign-in", ms: performance.now() - t0 });
+    return readOnlySignIn(name);
   }
   try {
     const needs = TOOL_NEEDS[name];
