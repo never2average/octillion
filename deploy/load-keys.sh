@@ -85,11 +85,23 @@ store() {
          else echo "    skipped (use --force to store unverified keys)"; return 0; fi ;;
     esac
   fi
-  # Always a new row; a key already in the vault is refused and the rest carry on.
-  { printf %s "$key" | vault add "$provider" 2>&1 || true; } | sed 's/^/    /'
+  # Never a second key by accident: a type that has keys is left alone (rotate with `replace <id>`, or add then delete).
+  local ids rc=0 out
+  ids=$(vault ids "$provider" | tr '\n' ' ')
+  if [ -n "${ids// /}" ]; then
+    echo "    skipped: $provider already has key(s) #${ids% } in the vault. To rotate: keyvault replace <id>; for another key: keyvault add $provider"
+    return 0
+  fi
+  out=$(printf %s "$key" | vault add "$provider" 2>&1) || rc=$?
+  printf '%s\n' "$out" | sed 's/^/    /'
+  case $rc in
+    0) ;;
+    3) echo "    (already in the vault: nothing added)" ;;
+    *) echo "    could not store the $provider key (exit $rc)" >&2; exit "$rc" ;;
+  esac
 }
 
-echo "Loading keys into the '$PROJECT' key vault (each key is added as its own row; one already there is refused)."
+echo "Loading keys into the '$PROJECT' key vault (a type that already has keys is skipped; rotate those with keyvault replace <id>)."
 while IFS='|' read -r provider var what; do
   [ -n "$provider" ] || continue
   if [ "$MODE" = env ]; then
@@ -121,7 +133,14 @@ else
 fi
 if [ -n "${project:-}" ]; then
   [ -r "$safile" ] || { echo "    cannot read service-account key at '$safile'" >&2; exit 1; }
-  docker compose -p "$PROJECT" exec -T octillion node --import tsx scripts/keyvault.ts add vertex < "$safile" | sed 's/^/    /'
+  vids=$(vault ids vertex | tr '\n' ' ')
+  if [ -n "${vids// /}" ]; then
+    echo "    skipped storing the key: vertex already has key(s) #${vids% }. To rotate: keyvault replace <id>; for another key: keyvault add vertex"
+  else
+    rc=0; out=$(vault add vertex < "$safile" 2>&1) || rc=$?
+    printf '%s\n' "$out" | sed 's/^/    /'
+    case $rc in 0) ;; 3) echo "    (already in the vault: nothing added)" ;; *) echo "    could not store the vertex key (exit $rc)" >&2; exit "$rc" ;; esac
+  fi
   docker compose -p "$PROJECT" exec -T octillion node --import tsx scripts/keyvault.ts provider anthropic --backend vertex \
     --vertex-project "$project" --vertex-region "$region" >/dev/null && echo "    anthropic now routes through Vertex AI ($project, $region)"
 fi

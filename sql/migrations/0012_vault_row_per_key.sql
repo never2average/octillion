@@ -11,9 +11,16 @@
 --     not a uniqueness key. 0011 set every label to 'default', which means "no name" here.
 --   * The email unsubscribe signing key stays a singleton: at most one row (partial unique index).
 --
--- Not fully rollout-safe for writes: older code stores keys with ON CONFLICT (provider), which needs the constraint
--- dropped here, so a key write from an instance still on the old release fails with an error until it is replaced.
--- Reads keep working. Avoid adding or replacing keys while the deploy rolls out.
+-- Not rollout-safe for instances still on the old release (0011's code): every key write there uses ON CONFLICT
+-- (provider), which needs the UNIQUE (provider) constraint dropped here, so on those instances, until cut-over:
+--   * adding or replacing a key (Key vault page, CLI) fails with an error;
+--   * unsubscribeKey() (src/campaigns.ts) calls addCredentialIfAbsent with ON CONFLICT (provider) the first time a
+--     process needs the key (and again after any failure), so on an old instance that has not loaded it yet
+--     building unsubscribe links fails, and with it campaign sends and unsubscribe/reply handling;
+--   * the one-time import of keys from environment variables (src/keyvault-env.ts) fails (it is retried on a later
+--     boot, on the new release).
+-- Plain key reads (gateway, broker) keep working. Cut over in one step (stop old instances, then start new ones), or
+-- pause campaigns and leave the vault alone until the last old instance is gone.
 
 ALTER TABLE vault_credentials DROP CONSTRAINT IF EXISTS vault_credentials_provider_key;
 

@@ -221,5 +221,15 @@ export async function vaultRowPerKeyChecks({ db, adm, json, base, ADMIN_TOKEN, s
   assert.equal((await adm("DELETE", `/compute/keys/${addedKey.id}`)).status, 404, "deleting it again: not found");
   assert.equal((await adm("POST", `/compute/keys/${addedKey.id}/replace`, { secret: `sk-ant-smoke-page-${stamp}-GONE` })).status, 404, "a deleted key cannot be replaced");
   assert.equal((await adm("DELETE", `/compute/keys/${second.id}`)).status, 204);
+  // An unreadable row (master key not loaded, or damaged) is skipped by the webhook check and the digest backfill, never
+  // failing them for the type's other keys.
+  const [bad] = await db.query<any>("INSERT INTO vault_credentials (provider, ciphertext, iv, tag, key_id, hint) VALUES ('resend_webhook', 'AAAA', 'AAAAAAAAAAAAAAAA', 'AAAAAAAAAAAAAAAAAAAAAA==', 'nosuchkey000', 'broken') RETURNING id");
+  const WH = `whsec_smoke_${stamp}_readable`;
+  const good = await kv.addCredential("resend_webhook", WH);
+  const secrets = await kv.credentialSecrets("resend_webhook");
+  assert.ok(secrets.some((c) => c.id === good.id && c.secret === WH) && !secrets.some((c) => c.id === bad.id), "credentialSecrets skips the unreadable row and keeps the others");
+  const bf = await kv.backfillDigests();
+  assert.ok(bf.skipped.some((x) => x.id === bad.id && x.provider === "resend_webhook"), "backfillDigests reports the unreadable row instead of stopping");
+  await db.query("DELETE FROM vault_credentials WHERE id = ANY($1)", [[bad.id, good.id]]);
   console.log("✓ key vault: one row per key (two of a type used in turn), replace on its own row, duplicates refused (409), unsubscribe key a singleton, no enable/disable (410), delete");
 }

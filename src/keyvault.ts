@@ -206,7 +206,10 @@ async function fillDigest(row: EncRow, secret: string): Promise<boolean> {
   const d = digestFor(row.key_id, secret);
   if (!d) return false;
   try {
-    const r = await (await getDb()).query("UPDATE vault_credentials SET secret_digest = $2 WHERE id = $1 AND secret_digest IS NULL RETURNING id", [row.id, d]);
+    // Only while the row is still under the master key the digest was computed with: a rekey that re-encrypted it in
+    // the meantime must not get a digest made under the old key.
+    const r = await (await getDb()).query(
+      "UPDATE vault_credentials SET secret_digest = $2 WHERE id = $1 AND secret_digest IS NULL AND key_id = $3 RETURNING id", [row.id, d, row.key_id]);
     return r.length > 0;
   } catch (e) {
     // An identical older row of the same type already has this digest: leave this one null (both still work).
@@ -380,15 +383,22 @@ export async function useCredential(provider: string): Promise<{ id: number; sec
 }
 
 /**
- * Every key of a type, not counted as a use: for checking something against each of them (a webhook signature that
- * any of the type's secrets may have made). Count the one that matched with recordUse.
+ * Every key of a type that can be decrypted (others are skipped and logged), not counted as a use: for checking
+ * something against each of them (a webhook signature that any of the type's secrets may have made). Count the one
+ * that matched with recordUse.
  */
 export async function credentialSecrets(provider: string): Promise<{ id: number; secret: string }[]> {
   // The vault is platform data, out of a tenant's reach (src/tenant-scope.ts): read as the platform.
   return asPlatform(async () => {
     const rows = await (await getDb()).query<EncRow>(
       "SELECT id, ciphertext, iv, tag, key_id, secret_digest FROM vault_credentials WHERE provider = $1 ORDER BY last_used_at DESC NULLS LAST, id", [provider]);
-    return rows.map((r) => ({ id: r.id, secret: decrypt(r) }));
+    const out: { id: number; secret: string }[] = [];
+    for (const r of rows) {
+      // One unreadable row (its master key not loaded, or damaged) must not take the type's other keys down with it.
+      try { out.push({ id: r.id, secret: decrypt(r) }); }
+      catch (e) { console.error(`keyvault: ${provider} credential #${r.id} could not be decrypted and was skipped: ${(e as Error).message.slice(0, 200)}`); }
+    }
+    return out;
   });
 }
 /** Count a use of one key (after credentialSecrets found it was the one). */
@@ -408,12 +418,21 @@ export async function useVertexCredential(): Promise<{ id: number; secret: strin
   });
 }
 
-/** Fill the digest of every key stored before migration 0012 (the duplicate check); returns how many were filled. */
-export async function backfillDigests(): Promise<number> {
-  const rows = await (await getDb()).query<EncRow>("SELECT id, ciphertext, iv, tag, key_id, secret_digest FROM vault_credentials WHERE secret_digest IS NULL ORDER BY id");
-  let n = 0;
-  for (const r of rows) if (await fillDigest(r, decrypt(r))) n++;
-  return n;
+/**
+ * Fill the digest of every key stored before migration 0012 (the duplicate check). A row that cannot be decrypted (its
+ * master key is not loaded, or it is damaged) is skipped and reported, never stopping the run.
+ */
+export async function backfillDigests(): Promise<{ filled: number; skipped: { id: number; provider: string; error: string }[] }> {
+  const rows = await (await getDb()).query<EncRow & { provider: string }>(
+    "SELECT id, provider, ciphertext, iv, tag, key_id, secret_digest FROM vault_credentials WHERE secret_digest IS NULL ORDER BY id");
+  let filled = 0;
+  const skipped: { id: number; provider: string; error: string }[] = [];
+  for (const r of rows) {
+    let plain: string;
+    try { plain = decrypt(r); } catch (e) { skipped.push({ id: r.id, provider: r.provider, error: (e as Error).message.slice(0, 200) }); continue; }
+    if (await fillDigest(r, plain)) filled++;
+  }
+  return { filled, skipped };
 }
 
 /** Re-encrypt every credential with the current master key (after rotating OCTILLION_VAULT_KEY); digests follow. */

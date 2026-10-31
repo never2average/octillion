@@ -32,7 +32,10 @@ key. The exact same secret cannot be added twice to a type: each row keeps `secr
 plaintext under a subkey of the master key that encrypted it, with a partial `UNIQUE (provider, secret_digest)`
 (migration 0012). Keys stored before 0012 get theirs at their next use, when a key is added to their type, on
 `keyvault rekey`, or with `keyvault backfill-digests`. A key's name (`label`) is optional free text, only for telling
-rows apart (default "Vertex AI key", "Vertex AI key 2", ...). Add, replace and delete are in the admin audit log
+rows apart (default "Vertex AI key", "Vertex AI key 2", ...). **Rotating a key** is `keyvault replace <id>` (or
+Replace key… on its row), or adding the new key and then deleting the old one; `keyvault add` always adds another
+key to the pool and never rotates. The old `keyvault set` refuses and lists the type's ids, and `deploy/load-keys.sh`
+skips a type that already has keys. Add, replace and delete are in the admin audit log
 (`model_key.add`, `model_key.replace`, `model_key.delete`). The one exception is `email_unsubscribe`, the generated
 signing key for unsubscribe links: a singleton (at most one row) that is never added by hand, replaced or imported
 (every link already sent is signed with it), only deleted, which breaks those links. A Resend webhook is checked

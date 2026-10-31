@@ -2,8 +2,11 @@
 // out of shell history and process listings.
 //   npm run keyvault -- gen-master-key
 //   npm run keyvault -- providers
-//   printf %s "$ANTHROPIC_KEY" | npm run keyvault -- add anthropic [--name "Team key"]   (always a new row; `set` = add)
-//   printf %s "$NEW_KEY" | npm run keyvault -- replace <id>          (that row only; rotated_at set)
+//   printf %s "$ANTHROPIC_KEY" | npm run keyvault -- add anthropic [--name "Team key"]   (always a new row)
+//   printf %s "$NEW_KEY" | npm run keyvault -- replace <id>          (rotate: that row only; rotated_at set)
+//   npm run keyvault -- ids anthropic                              (that type's credential ids, one per line)
+//   `set` is gone (it used to replace the type's key): it refuses and lists the type's ids.
+// Exit codes: 0 ok, 1 error, 3 the key is already in the vault (add / replace refused as a duplicate).
 //   npm run keyvault -- add boat --from-file /secure/boat.env      (KEY=value files: the value is used)
 //   npm run keyvault -- list | delete <id> | rekey | backfill-digests | usage
 //   npm run keyvault -- provider <slug> --mode gateway --upstream https://... --header x-api-key --prefix "" --env FOO_API_KEY
@@ -54,7 +57,18 @@ async function main() {
       }));
       return;
     }
-    case "set": // older name of add: a new row, never a replacement
+    case "set": {
+      // It used to replace the type's one key; adding instead would silently grow a pool, so it refuses.
+      const provider = rest[0] && !rest[0].startsWith("--") ? rest[0] : null;
+      const ids = provider ? (await kv.listCredentials()).filter((c) => c.provider === provider).map((c) => `#${c.id} ${c.name} (${c.hint})`) : [];
+      throw new Error("`keyvault set` is gone: use `add <provider>` for another key or `replace <id>` to rotate" +
+        (provider ? (ids.length ? `. ${provider} keys: ${ids.join(", ")}` : `. ${provider} has no keys yet`) : ""));
+    }
+    case "ids": {
+      if (!rest[0]) throw new Error("Usage: keyvault ids <provider>");
+      for (const c of await kv.listCredentials()) if (c.provider === rest[0]) console.log(c.id);
+      return;
+    }
     case "add": {
       if (!rest[0] || rest[0].startsWith("--")) throw new Error("Usage: keyvault add <provider> [--name NAME] < secret   (always adds a new key; replace one with: keyvault replace <id>)");
       if (rest.includes("--priority")) throw new Error("--priority is gone: a type's keys are used least recently used first");
@@ -79,9 +93,13 @@ async function main() {
       console.log(`Credential #${id} (${gone.provider}, ${gone.hint}) deleted.`);
       return;
     }
-    case "backfill-digests":
-      console.log(`Filled the duplicate-check digest of ${await kv.backfillDigests()} key(s) stored before migration 0012.`);
+    case "backfill-digests": {
+      const r = await kv.backfillDigests();
+      console.log(`Filled the duplicate-check digest of ${r.filled} key(s) stored before migration 0012.`);
+      for (const s of r.skipped) console.error(`Skipped credential #${s.id} (${s.provider}): ${s.error}`);
+      if (r.skipped.length) process.exitCode = 1;
       return;
+    }
     case "rekey":
       console.log(`Re-encrypted ${await kv.rekey()} credentials with the current master key.`);
       return;
@@ -91,9 +109,14 @@ async function main() {
            FROM gateway_usage ORDER BY last_at DESC LIMIT 50`));
       return;
     default:
-      throw new Error("Commands: gen-master-key, providers, provider, add (set), replace, list, delete, rekey, backfill-digests, usage");
+      throw new Error("Commands: gen-master-key, providers, provider, add, replace, ids, list, delete, rekey, backfill-digests, usage");
   }
 }
 
 try { await main(); }
+catch (e) {
+  // The message only (vault errors never quote a key); 3 = already in the vault, so scripts can tell it apart.
+  console.error((e as Error).message);
+  process.exitCode = (e as { status?: number }).status === 409 ? 3 : 1;
+}
 finally { await (await getDb()).close(); }
