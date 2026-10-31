@@ -221,7 +221,9 @@ async function cliChecks(c: Ctx, f: { kim: any; orgQ: any; P: { id: number; slug
   // Nothing to sign in with: exit 2 and the next step.
   const none = await run(["whoami", "--json"]);
   assert.ok(none.code === 2 && none.json.error === "not_signed_in" && none.json.next_step === "octillion login" && /app\/settings\/api-keys/.test(none.json.message), `no credential: ${none.out}`);
-  assert.equal((await run(["whoami"], { OCTILLION_URL: "" })).code, 1, "no server set: an error");
+  // No server set falls back to the package's default URL (packages/cli/package.json "octillion".url); a plain-http one is refused.
+  const http = await run(["whoami", "--json"], { OCTILLION_URL: "http://example.com" });
+  assert.ok(http.code === 1 && http.json.error === "bad_url", `an http server is refused: ${http.out}`);
 
   // Device login not configured on the server: says so and points to API keys.
   delete process.env.OCTILLION_CLI_CLIENT_ID;
