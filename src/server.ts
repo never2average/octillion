@@ -14,7 +14,8 @@ import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE } from "@model
 import { z } from "zod";
 import * as q from "./queries.js";
 import * as research from "./research.js";
-import type { Org } from "./auth.js";
+import { apiKeysUrl, type Org } from "./auth.js";
+import { whoami } from "./api-keys.js";
 import { recordMcpEvent } from "./analytics.js";
 import * as memory from "./context.js";
 import * as vis from "./visibility.js";
@@ -79,6 +80,7 @@ export function handlersFor(org: Org) {
     list_harnesses: (_a: Record<string, never>) => priv.listHarnesses(org),
     save_to_memory: (a: { body: string; kind?: string; scope?: memory.ToolScope; product?: string }) => memory.saveMemoryFromAI(org, a),
     search_memory: (a: { query?: string; scope?: memory.ToolScope | "all"; product?: string; limit?: number }) => memory.searchMemory(org, a),
+    whoami: (_a: Record<string, never>) => whoami(org),
   };
 }
 type Handlers = ReturnType<typeof handlersFor>;
@@ -195,6 +197,14 @@ function summarize(d: Data): string {
     case "search": {
       const r = d.results;
       return `${r.total} transcript events match "${d.query}" (${d.filters.mode}).${r.hits.length ? ` Top: ${r.hits.slice(0, 5).map((h) => `${h.session_id}#${h.seq} (${h.type}, ${h.model}): ${h.text.slice(0, 120)}`).join(" | ")}` : ""}`;
+    }
+    case "whoami": {
+      const who = d.person ? (d.person.email ?? d.person.name ?? d.person.user_id) : "no person (an account-wide connector key)";
+      const c = d.credential;
+      const how = c.type === "oauth" ? `signed in with OAuth${c.client_id ? ` (client ${c.client_id})` : ""}`
+        : c.type === "api_key" ? `using API key "${c.name}" (${c.prefix}…, ${c.scope === "read" ? "read-only" : c.scope === "write" ? "read and write" : "full access"}, ${c.expires_at ? `expires ${c.expires_at.slice(0, 10)}` : "never expires"})`
+        : "credential unknown";
+      return `You are ${who} in the Octillion workspace ${d.org.name} (${d.org.slug})${d.role ? `, role ${d.role}` : ""}, ${how}. Manage API keys at ${d.api_keys_url}; pick another workspace with the X-Octillion-Org header.`;
     }
   }
 }
@@ -321,8 +331,30 @@ export const TOOL_NEEDS: Partial<Record<ToolName, AccountPermission>> = {
   save_harness_mix: "edit", review_draft_tasks: "edit", save_to_memory: "edit",
 };
 
+/**
+ * Every tool is read or write, for API key scopes (src/api-keys.ts): a read key calls read tools only. Read tools list,
+ * get, search, report and export; write tools launch, save, answer, cancel, import, publish or register. Typed over every
+ * tool, so a new tool cannot be added without classifying it.
+ */
+export const TOOL_ACCESS: Record<ToolName, "read" | "write"> = {
+  get_started: "read", list_products: "read", get_onboarding: "read", get_product: "read", list_product_questions: "read",
+  list_simulations: "read", get_simulation: "read", get_visibility_report: "read", export_visibility_report: "read",
+  get_agent_session: "read", get_session_transcript: "read", search_transcripts: "read", list_developer_profiles: "read",
+  list_agents: "read", browse_task_library: "read", list_harness_mixes: "read", list_personas: "read", list_task_sets: "read",
+  list_harnesses: "read", search_memory: "read", whoami: "read",
+  onboard_product: "write", save_product: "write", answer_product_question: "write", save_scenarios: "write", run_simulation: "write",
+  cancel_simulation: "write", save_harness_mix: "write", review_draft_tasks: "write", save_personas: "write", import_tasks: "write",
+  publish_to_library: "write", register_harness: "write", save_to_memory: "write",
+};
+
 async function runToolInner(org: Org, name: ToolName, args: Record<string, unknown>): Promise<CallToolResult> {
   const t0 = performance.now();
+  // A read-only API key: write tools answer with the next step, not a crash (and not a call recorded as a failure of the tool).
+  if (org.credential?.kind === "api_key" && org.credential.scope === "read" && TOOL_ACCESS[name] !== "read") {
+    const text = `This API key${org.credential.name ? ` ("${org.credential.name}")` : ""} is read-only, and ${name} changes things. Create a write key at ${apiKeysUrl()} and set OCTILLION_API_KEY to it, then try again.`;
+    recordMcpEvent(org, { method: "tools/call", name, ok: false, error: "read-only API key", ms: performance.now() - t0 });
+    return { isError: true, content: [{ type: "text", text }] };
+  }
   try {
     const needs = TOOL_NEEDS[name];
     if (needs && org.role && !canAccount(org.role, needs)) throw new Error(accountRefusal(needs).message);
@@ -393,6 +425,7 @@ export const TOOL_STATUS: Record<ToolName, [string, string]> = {
   list_harness_mixes: ["Loading private harness mixes…", "Private harness mixes loaded"],
   save_to_memory: ["Saving to memory…", "Saved to memory"],
   search_memory: ["Searching memory…", "Memory searched"],
+  whoami: ["Checking who you are…", "Account and credential ready"],
 };
 
 export const TOOL_NAMES = Object.keys(handlersFor({ orgId: 0, slug: "", name: "" })) as ToolName[];
@@ -805,6 +838,13 @@ export function createServer(org: Org, context = ""): McpServer {
     },
     annotations: read, _meta: meta("search_memory"),
   }, run("search_memory"));
+
+  registerAppTool(server, "whoami", {
+    title: "Who am I",
+    description: "Who this connection acts as: the person, the Octillion workspace (account) and its role, and how it signed in " +
+      "(OAuth, or an API key with its name, access and expiry). Use it when a call is refused, to check which workspace and key are in use.",
+    inputSchema: {}, annotations: read, _meta: meta("whoami"),
+  }, run("whoami"));
 
   registerPrompts(server);
   return server;

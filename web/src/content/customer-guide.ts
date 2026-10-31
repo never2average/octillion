@@ -59,14 +59,31 @@ MCP. This portal is where your team sets up, reads the results and manages budge
 
 ## Getting started
 
-Open **Setup & training** (the first page in the sidebar). The **Connect your AI client** panel walks you through it:
+Open **Setup & training** (the first page in the sidebar). The **Connect your AI client** panel has two paths:
+**Sign in (interactive)**, for clients you use yourself, and **API key (headless, CI, claude -p)**, for agents with
+no browser to sign in with.
+
+Sign in (interactive):
 
 1. **Pick your client.** Chat apps, coding agents and editors are listed separately.
 2. **Add Octillion to it.** Copy your connection URL, then follow the steps shown for your client: a one-click
    install, a command, a config snippet (and the file it goes in), or where to paste it in the client's settings.
-   If your URL contains your key, keep it private: anyone with it can use your account.
+   Sign in when the client asks.
 3. **Check it works.** Press **Test my connection**, open a new chat and type *"Get me started with Octillion."*
    The page waits up to three minutes for your client to reach Octillion and confirms which client connected.
+
+API key (headless): for \`claude -p\`, the Claude Agent SDK, CI jobs, SSH sessions and sandboxes.
+
+1. **Create a personal API key** under **API keys** in the sidebar (Settings → API keys): a name, read or write
+   access, and when it expires (30, 90 or 365 days, or never). It is shown once and acts as you in this account,
+   with your role and limits.
+2. **Put it in \`OCTILLION_API_KEY\`** in your shell or your CI's secrets. Never commit it.
+3. **Add the snippet for your agent.** Each reads the variable, never the key itself, e.g. Claude Code:
+   \`claude mcp add --transport http octillion <URL> --header "Authorization: Bearer \${OCTILLION_API_KEY}"\`.
+
+You see and revoke your own keys on the API keys page; account owners see and revoke everyone's. In more than one
+account? Send \`X-Octillion-Org: <slug>\` to pick one, and ask *"Who am I in Octillion?"* to check the account and key
+in use.
 
 If nothing arrives, check the URL, that you signed in when your client asked, and that the Octillion tools are
 switched on in the client; then test again. Recent problems show on the same page.

@@ -79,6 +79,7 @@ export const portalNav: NavGroup[] = [
     label: 'Operational',
     items: [
       { title: 'Billing', url: '/app/billing', icon: 'billing', shortcut: ['g', 'b'], items: [] },
+      { title: 'API keys', url: '/app/settings/api-keys', icon: 'lock', items: [] },
       { title: 'Profile', url: '/app/profile', icon: 'account', items: [] }
     ]
   }

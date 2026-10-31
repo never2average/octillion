@@ -252,7 +252,7 @@ try {
     assert.ok(committed.every((c: any) => (c.area === "customer") === c.href.startsWith("/app/docs/")), "customer chunks link to /app/docs, admin ones to /admin/docs");
   }
   console.log("tools:", tools.map((t) => t.name).join(", "));
-  assert.equal(tools.length, 33); // 19 core (incl. browse_task_library, export_visibility_report) + 2 product questions + 2 memory + 10 private-asset tools incl. publish_to_library
+  assert.equal(tools.length, 34); // whoami + 19 core (incl. browse_task_library, export_visibility_report) + 2 product questions + 2 memory + 10 private-asset tools incl. publish_to_library
   assert.ok(tools.some((t) => t.name === "export_visibility_report" && t.annotations?.readOnlyHint && !t.annotations?.destructiveHint), "export_visibility_report is read-only");
   // Over MCP the public library is the customer's to browse and pick from (the portal is where it stays hidden).
   assert.ok(tools.some((t) => t.name === "browse_task_library" && t.annotations?.readOnlyHint), "browse_task_library is a read-only customer tool");
@@ -2456,7 +2456,7 @@ try {
     await (await import("./smoke-security.js")).audienceChecks({ uid: accepted.user.id, token, callWith, bad, mcpAudience, adminMcpResource });
     assert.equal(await bad(await clerkSession(accepted.user.id, rowW.clerk_org_id, "admin")), 401, "a session token is not an OAuth token");
     const loner = await mockPost("/_mock/clerk/users", { email: `loner+${stamp}@nowhere.dev` });
-    assert.equal(await bad(await token({ user_id: loner.id })), 401, "a user with no membership gets nothing");
+    assert.equal(await bad(await token({ user_id: loner.id })), 403, "a user with no membership gets a 403 (no account), not a sign-in loop");
     await settle();
     assert.equal((await orgRow(slugW)).stage, "first_call");
 
@@ -2481,7 +2481,7 @@ try {
     assert.ok(dW.clerk_dashboard && !("workos_error" in dW));
     assert.equal((await adm("POST", `/orgs/${slugW}/members/${acc2.user.id}/deactivate`)).status, 204);
     assert.equal(mock.state.memberships.get(`${rowW.clerk_org_id}:${acc2.user.id}`).public_metadata.suspended, true, "suspension is membership metadata");
-    assert.equal(await bad(await token({ user_id: acc2.user.id })), 401, "a suspended member has no account on /mcp");
+    assert.equal(await bad(await token({ user_id: acc2.user.id })), 403, "a suspended member has no account on /mcp (403: signing in again would not help)");
     assert.equal((await adm("POST", `/orgs/${slugW}/members/${acc2.user.id}/reactivate`)).status, 204);
     assert.equal((await adm("POST", `/orgs/${slugW}/members/${acc2.user.id}/role`, { role: "admin" })).status, 204);
     assert.equal(mock.state.memberships.get(`${rowW.clerk_org_id}:${acc2.user.id}`).role, "org:admin", "role changes reach Clerk");
@@ -2997,6 +2997,8 @@ try {
     assert.equal((await gone.json()).code, "suspended");
     assert.equal((await appCall(ownerC, "POST", `/team/members/${acc2.user.id}/reactivate`)).status, 204);
     console.log("✓ customer portal with Clerk sessions: bearer or __session cookie, v1/v2 claims, azp, fallback org, roles from Clerk, setup, team, suspension");
+    // Agent auth: personal API keys, OCTILLION_API_KEY snippets, actionable /mcp errors, X-Octillion-Org, whoami.
+    await (await import("./smoke-agent-auth.js")).agentAuthChecks({ base, db, mockUrl: mock.url, stamp, mockPost, clerkSession, token, appCall, adm, json });
 
     // ---------- customer account roles (src/account-roles.ts): owner, billing manager, member, viewer, in Clerk ----------
     {

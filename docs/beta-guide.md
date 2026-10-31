@@ -6,17 +6,29 @@ gets you from invite to your first report.
 
 ## 1. Connect
 
-Your invite gives you the connector URL `https://octillion.useimmaculate.com/mcp`, and either a sign-in invitation or a
-personal API key (`oct_…`). A key is your login: anyone with it can use your account, so keep it private. Your client
-sends it in a header, `Authorization: Bearer <key>`; it never goes in the URL. (Old links with the key in the URL,
-`…/mcp/oct_…`, still work for now but are being retired: move to the header.)
+Your invite gives you the connector URL `https://octillion.useimmaculate.com/mcp`. There are two ways to connect:
 
-| Client | How to connect | What you see |
-|---|---|---|
-| Claude (web or desktop) | Settings, Connectors, Add custom connector, paste the URL and sign in (these apps cannot send a key) | An interactive dashboard under each answer |
-| ChatGPT | Turn on developer mode, add a custom connector with the URL and sign in (OAuth) | The same dashboard |
-| Claude Code | `claude mcp add --transport http octillion <URL> --header "Authorization: Bearer <key>"` | Text answers |
-| Cursor and other IDEs | Add the URL with a `headers` entry (`"Authorization": "Bearer <key>"`) in the MCP settings and switch the Octillion tools on; ask in Agent chat | Text answers |
+- **Sign in (interactive).** Add the URL to your client and sign in when it asks (OAuth). Use this in Claude, ChatGPT,
+  Cursor, and Claude Code at a terminal (`/mcp`, then Authenticate).
+- **Personal API key (headless).** For agents with no browser to sign in with: `claude -p`, the Claude Agent SDK, CI
+  jobs, SSH sessions and sandboxes. Create a key on the account page under **API keys** (`/app/settings/api-keys`):
+  name it, choose read or write access and when it expires. It is shown once. Put it in the `OCTILLION_API_KEY`
+  environment variable (or your CI's secrets) and point your client at that variable. The key acts as you, so keep it
+  private; it never goes in the URL or in a file you commit.
+
+| Client | Sign in (interactive) | API key (headless, reads `OCTILLION_API_KEY`) | What you see |
+|---|---|---|---|
+| Claude (web or desktop) | Settings, Connectors, Add custom connector, paste the URL and sign in | Not supported (these apps cannot send a header) | An interactive dashboard under each answer |
+| ChatGPT | Turn on developer mode, add a custom connector with the URL and sign in (OAuth) | Not supported | The same dashboard |
+| Claude Code | `claude mcp add --transport http octillion <URL>`, then `/mcp` → Authenticate | `claude mcp add --transport http octillion <URL> --header "Authorization: Bearer ${OCTILLION_API_KEY}"`, or `.mcp.json` with `"headers": {"Authorization": "Bearer ${OCTILLION_API_KEY}"}` | Text answers |
+| Codex CLI | Add the URL in `~/.codex/config.toml` and sign in | `[mcp_servers.octillion]` with `url = "<URL>"` and `bearer_token_env_var = "OCTILLION_API_KEY"` | Text answers |
+| Cursor and other IDEs | Add the URL in the MCP settings, sign in, switch the Octillion tools on | `.cursor/mcp.json` with `"headers": {"Authorization": "Bearer ${env:OCTILLION_API_KEY}"}` | Text answers |
+
+The account page's Setup shows both paths, with the exact snippet for each client. If you are in more than one
+Octillion account, send `X-Octillion-Org: <slug>` to pick one; ask **"Who am I in Octillion?"** (the `whoami` tool) to
+see the account, your role and the key or sign-in in use. When a connection is refused, the error says what to do:
+an expired key names the date it expired, and "no Octillion workspace" means you need an invitation, not another
+sign-in. Old links with a key in the URL (`…/mcp/oct_…`) still work for now but are being retired.
 
 Then type: **"Get me started with Octillion."** The first tool, `get_started`, answers with your next step.
 

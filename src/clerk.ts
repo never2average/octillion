@@ -279,36 +279,52 @@ function audienceOk(gotRaw: string[], expected: string[], extra: { jwt: boolean;
   return false;
 }
 
+/** Why an OAuth access token was refused (never the token itself): what /mcp tells the client in error_description. */
+export type OAuthRefusal = "not_configured" | "revoked" | "expired" | "wrong_resource" | "invalid" | "unverifiable";
+export type OAuthClaims = { userId: string; scopes: string[]; clientId: string | null };
+
 /**
  * An OAuth access token Clerk issued to an MCP client for `audience` (one resource URI, or several equivalent ones):
  * opaque (oat_…, checked with the Backend API) or JWT (typ at+jwt, checked against the instance's keys). Returns the
  * user and scopes, or null (invalid, revoked, expired, or issued for another resource).
  */
-export async function verifyOAuthToken(token: string, audience: string | string[]): Promise<{ userId: string; scopes: string[]; clientId: string | null } | null> {
-  if (!clerkEnabled()) return null;
+export async function verifyOAuthToken(token: string, audience: string | string[]): Promise<OAuthClaims | null> {
+  const r = await checkOAuthToken(token, audience);
+  return r.ok ? r.claims : null;
+}
+
+/** verifyOAuthToken with the reason a token was refused, so /mcp can say what to do next. Nothing logs the token. */
+export async function checkOAuthToken(token: string, audience: string | string[]): Promise<{ ok: true; claims: OAuthClaims } | { ok: false; reason: OAuthRefusal }> {
+  if (!clerkEnabled()) return { ok: false, reason: "not_configured" };
   const expected = (Array.isArray(audience) ? audience : [audience]).filter(Boolean);
-  if (!expected.length) return null;
+  if (!expected.length) return { ok: false, reason: "not_configured" };
   try {
     if (token.startsWith("oat_")) {
       const r = await call<{ subject?: string; scopes?: string[]; client_id?: string; revoked?: boolean; expired?: boolean; aud?: unknown; audience?: unknown; resource?: unknown; resources?: unknown }>(
         "POST", "/oauth_applications/access_tokens/verify", { access_token: token });
-      if (!r.subject || r.revoked || r.expired) return null;
+      if (r.revoked) return { ok: false, reason: "revoked" };
+      if (r.expired) return { ok: false, reason: "expired" };
+      if (!r.subject) return { ok: false, reason: "invalid" };
       const got = [...audiencesOf(r.aud), ...audiencesOf(r.audience), ...audiencesOf(r.resource), ...audiencesOf(r.resources)];
-      if (!audienceOk(got, expected, { jwt: false, client: r.client_id ?? null })) return null;
-      return { userId: r.subject, scopes: r.scopes ?? [], clientId: r.client_id ?? null };
+      if (!audienceOk(got, expected, { jwt: false, client: r.client_id ?? null })) return { ok: false, reason: "wrong_resource" };
+      return { ok: true, claims: { userId: r.subject, scopes: r.scopes ?? [], clientId: r.client_id ?? null } };
     }
     if (token.split(".").length === 3 && OAUTH_JWT_TYPES.includes(String(decodeProtectedHeader(token).typ ?? ""))) {
       const p = await verifyJwt(token);
-      if (!p.sub) return null;
+      if (!p.sub) return { ok: false, reason: "invalid" };
       const clientId = (p.client_id ?? p.azp ?? null) as string | null;
-      if (!audienceOk(audiencesOf(p.aud), expected, { jwt: true, iss: p.iss, client: clientId })) return null;
+      if (!audienceOk(audiencesOf(p.aud), expected, { jwt: true, iss: p.iss, client: clientId })) return { ok: false, reason: "wrong_resource" };
       const scopes = typeof p.scp === "string" ? p.scp.split(" ") : Array.isArray(p.scp) ? p.scp : typeof p.scope === "string" ? p.scope.split(" ") : [];
-      return { userId: p.sub, scopes, clientId };
+      return { ok: true, claims: { userId: p.sub, scopes, clientId } };
     }
-  } catch {
-    return null;
+  } catch (err) {
+    // jose: an expired JWT. Clerk: a 5xx or a timeout means it could not say; anything else, the token is not valid.
+    if ((err as { code?: unknown }).code === "ERR_JWT_EXPIRED") return { ok: false, reason: "expired" };
+    if (err instanceof ClerkError && err.status >= 500) return { ok: false, reason: "unverifiable" };
+    if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) return { ok: false, reason: "unverifiable" };
+    return { ok: false, reason: "invalid" };
   }
-  return null;
+  return { ok: false, reason: "invalid" };
 }
 
 // ---------- the OAuth server for /mcp ----------

@@ -99,3 +99,54 @@ export function clientCatalog(url: string, key?: string, opts: { signInAvailable
     steps: `POST ${url} with this header (or X-API-Key: <key>).`, snippet: `Authorization: ${auth}` });
   return list;
 }
+
+/** The environment variable every headless snippet reads the personal API key from. */
+export const API_KEY_ENV = "OCTILLION_API_KEY";
+
+export interface HeadlessEntry {
+  id: string;
+  client: string;
+  steps: string;
+  command?: string;
+  snippet?: string;
+  file?: string;
+  /** Checked against the client's own docs (`source`). */
+  verified: boolean;
+  /** Where the syntax comes from. */
+  source?: string;
+  note?: string;
+}
+
+/**
+ * The API key (headless) path: agents that cannot finish a browser sign-in (claude -p, the Agent SDK, CI, SSH,
+ * sandboxes) send a personal API key from /app/settings/api-keys. Every snippet reads it from OCTILLION_API_KEY by the
+ * client's own environment interpolation, so no key is ever written into a config file or shown here.
+ * Checked against each client's docs on 2026-10-31:
+ *   Claude Code  code.claude.com/docs/en/mcp: --header on `claude mcp add`; .mcp.json expands ${VAR} in url and headers
+ *                (credential names Claude Code itself guards, e.g. ANTHROPIC_API_KEY or NPM_TOKEN, read as empty there;
+ *                OCTILLION_API_KEY is not one of them)
+ *   Codex        learn.chatgpt.com/docs/extend/mcp: bearer_token_env_var names the variable holding the bearer token
+ *   Cursor       cursor.com/docs/context/mcp: ${env:NAME} in url and headers
+ */
+export function headlessCatalog(url: string): HeadlessEntry[] {
+  const v = API_KEY_ENV;
+  return [
+    { id: "claude-code", client: "Claude Code (claude -p, Agent SDK, CI)", verified: true, source: "https://code.claude.com/docs/en/mcp",
+      steps: `Set ${v} in the environment, then add the server once. Works in claude -p and the Agent SDK with no browser.`,
+      command: `claude mcp add --transport http octillion ${url} --header "Authorization: Bearer \${${v}}"`,
+      note: `In double quotes your shell fills in the key when you run the command, and Claude Code keeps it in your local config (~/.claude.json), not in the project. To keep only the variable's name, use the .mcp.json below: Claude Code reads ${v} each time it starts.` },
+    { id: "claude-code-json", client: "Claude Code project file (.mcp.json)", verified: true, source: "https://code.claude.com/docs/en/mcp",
+      steps: `Commit this file: it holds the variable's name, never the key. Each person or CI job sets ${v}.`,
+      file: ".mcp.json", snippet: json({ mcpServers: { octillion: { type: "http", url, headers: { Authorization: `Bearer \${${v}}` } } } }) },
+    { id: "codex", client: "Codex CLI", verified: true, source: "https://learn.chatgpt.com/docs/extend/mcp",
+      steps: `Add this to your Codex config and set ${v}; Codex sends it as Authorization: Bearer.`,
+      file: "~/.codex/config.toml", snippet: `[mcp_servers.octillion]\nurl = "${url}"\nbearer_token_env_var = "${v}"` },
+    { id: "cursor", client: "Cursor", verified: true, source: "https://cursor.com/docs/context/mcp",
+      steps: `Add this to the project's MCP config (or your global ~/.cursor/mcp.json), set ${v} in the environment Cursor starts from, then switch the Octillion tools on.`,
+      file: ".cursor/mcp.json", snippet: json({ mcpServers: { octillion: { url, headers: { Authorization: `Bearer \${env:${v}}` } } } }) },
+    { id: "curl", client: "Any HTTP client (curl)", verified: true,
+      steps: `Any client that can send a header works: Authorization: Bearer, or X-API-Key. This lists the tools.`,
+      command: `curl -sS ${url} -H "Authorization: Bearer $${v}" -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`,
+      note: `A key always acts in the workspace it was made in. With sign-in (OAuth), pick one of your workspaces with -H "X-Octillion-Org: <slug>".` },
+  ];
+}

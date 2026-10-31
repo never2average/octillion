@@ -60,7 +60,7 @@ export function AdminAccountDetail({ slug }: { slug: string }) {
               { id: 'clients', label: 'Clients', count: d.clients.length, content: <Clients d={d} /> },
               { id: 'products', label: 'Research', count: d.research.length, content: <Research d={d} /> },
               { id: 'simulations', label: 'Simulations', count: d.simulations.length, content: <Simulations d={d} /> },
-              { id: 'keys', label: 'Legacy keys', count: d.keys.length, content: <Keys d={d} path={path} onResult={show} /> }
+              { id: 'keys', label: 'API keys', count: d.keys.length, content: <Keys d={d} path={path} onResult={show} /> }
             ]}
           />
         </div>
@@ -483,6 +483,9 @@ function Simulations({ d }: { d: Detail }) {
   );
 }
 
+/** Whose key it is: the member's email, else the user id, else the account's (no person). */
+const personOf = (d: Detail, k: any): string => (!k.user_id ? 'Account' : (d.members ?? []).find((m: any) => m.user_id === k.user_id)?.email ?? k.user_id);
+
 function Keys({ d, path, onResult }: { d: Detail; path: string; onResult: (r: InviteResult, t: string) => void }) {
   const [label, setLabel] = useState('');
   const issue = useAdminAction(() => post<InviteResult>(`${path}/keys`, { label: label.trim() || undefined }));
@@ -516,6 +519,11 @@ function Keys({ d, path, onResult }: { d: Detail; path: string; onResult: (r: In
       cols={[
         { key: 'label', label: 'Label', type: 'text', value: (k: any) => k.label, render: (k: any) => k.label },
         { key: 'key', label: 'Key', render: (k: any) => <Mono>{k.key_prefix}…</Mono> },
+        // Personal keys (members make them on /app/settings/api-keys) and the columns added with them (migration 0013).
+        { key: 'person', label: 'Person', type: 'text', value: (k: any) => personOf(d, k), render: (k: any) => personOf(d, k) },
+        { key: 'scope', label: 'Access', type: 'select', value: (k: any) => k.scope ?? 'full', render: (k: any) => (k.scope === 'read' ? 'Read only' : k.scope === 'write' ? 'Read and write' : 'Full') },
+        { key: 'expires', label: 'Expires', type: 'date', value: (k: any) => k.expires_at, render: (k: any) => (k.expires_at ? <When d={k.expires_at} /> : <span className='text-muted-foreground'>never</span>) },
+        { key: 'origin', label: 'Origin', type: 'select', value: (k: any) => k.created_via ?? 'before 0013', render: (k: any) => (k.created_via === 'portal' ? 'Member (portal)' : k.created_via === 'admin' ? 'Admin' : k.created_via === 'cli' ? 'CLI' : <span className='text-muted-foreground'>Legacy</span>) },
         { key: 'created', label: 'Created', type: 'date', value: (k: any) => k.created_at, render: (k: any) => <When d={k.created_at} /> },
         { key: 'used', label: 'Last used', type: 'date', value: (k: any) => k.last_used_at, render: (k: any) => <When d={k.last_used_at} /> },
         {

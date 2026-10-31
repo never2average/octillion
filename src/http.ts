@@ -21,7 +21,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createServer, runTool, TOOL_NAMES, WIDGET_HTML, type ToolName } from "./server.js";
 import { connectorEvents, recordMcpEvent } from "./analytics.js";
-import { bearer, cronSecretOk, headerCredential, isWorkerToken, resolveKey, resolveUserToken, urlKeysAllowed, type Org } from "./auth.js";
+import { authenticateMcp, bearer, cronSecretOk, isWorkerToken, orgHeader, resolveKey, resolveKeyDetailed, urlKeysAllowed, type AuthFailure, type Org } from "./auth.js";
 import { clerkEnabled, ClerkError, frontendApi, mcpAudience } from "./clerk.js";
 import { StripeError } from "./billing.js";
 import { getDb } from "./db.js";
@@ -277,7 +277,7 @@ export function createApp() {
       // On Vercel nothing ticks the autoscaler: a tool call may have queued work (onboarding, a simulation, an approval).
       if (rpc.includes("tools/call")) serverlessTick();
       const origin = req.get("origin");
-      console.error(`mcp ${req.method} ${res.statusCode} org=${res.locals.org ?? "-"} rpc=${rpc || "-"} ${Date.now() - t0}ms ua="${String(req.get("user-agent") ?? "").slice(0, 80)}"${origin ? ` origin=${JSON.stringify(origin.slice(0, 120))}` : ""}`);
+      console.error(`mcp ${req.method} ${res.statusCode} org=${res.locals.org ?? "-"}${res.locals.authFail ? ` auth=${res.locals.authFail}` : ""} rpc=${rpc || "-"} ${Date.now() - t0}ms ua="${String(req.get("user-agent") ?? "").slice(0, 80)}"${origin ? ` origin=${JSON.stringify(origin.slice(0, 120))}` : ""}`);
     });
     next();
   });
@@ -291,14 +291,28 @@ export function createApp() {
     await server.connect(transport);
     await transport.handleRequest(req, res, req.body);
   };
-  const wwwAuthenticate = () => oauthServer()
-    ? `Bearer error="unauthorized", error_description="Sign in to Octillion", resource_metadata="${PUBLIC_URL}/.well-known/oauth-protected-resource"`
-    : 'Bearer realm="octillion"';
-  const unauthorized = (res: Response) =>
-    res.status(401).set("WWW-Authenticate", wwwAuthenticate()).json({
-      jsonrpc: "2.0", id: null,
-      error: { code: -32001, message: `Sign in to Octillion (or send a valid API key). Request access at ${PUBLIC_URL}` },
-    });
+  /**
+   * The challenge on a 401 (RFC 6750 + RFC 9728): resource_metadata points OAuth clients at sign-in; `error` only when a
+   * credential was sent and refused (none for a request with no credential, per RFC 6750 §3.1); error_description says why.
+   */
+  const wwwAuthenticate = (f?: Pick<AuthFailure, "error" | "description">) => {
+    const q = (s: string) => s.replace(/["\\\r\n]/g, "'");
+    const parts = [oauthServer() ? `resource_metadata="${PUBLIC_URL}/.well-known/oauth-protected-resource"` : 'realm="octillion"'];
+    if (f?.error) parts.push(`error="${f.error}"`);
+    if (f?.description) parts.push(`error_description="${q(f.description)}"`);
+    return `Bearer ${parts.join(", ")}`;
+  };
+  /**
+   * A refused /mcp request: 401 with the challenge (sign in again, or fix the key), or 403 without one (the person is
+   * signed in but has no usable account: a challenge would send the OAuth client round the sign-in loop). The JSON-RPC
+   * error's message carries the next step; data.reason is a stable code. Never the credential.
+   */
+  const refused = (res: Response, f: AuthFailure) => {
+    res.locals.authFail = f.reason;
+    if (f.status === 401) res.set("WWW-Authenticate", wwwAuthenticate(f));
+    if (f.status === 503) res.set("Retry-After", "30");
+    res.status(f.status).json({ jsonrpc: "2.0", id: null, error: { code: f.status === 401 ? -32001 : -32003, message: f.message, data: { reason: f.reason } } });
+  };
   // One log line per legacy URL key per process and hour: enough to know who to move, without a line per request.
   const urlKeySeen = new Map<string, number>();
   const noteUrlKey = (slug: string, prefix: string) => {
@@ -311,10 +325,8 @@ export function createApp() {
     void res.status(405).json({ jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed" }, id: null });
 
   app.post("/mcp", express.json({ limit: "4mb" }), async (req, res) => {
-    const token = headerCredential(req.headers);
-    const viaBearer = Boolean(bearer(req.headers.authorization));
-    const org = token?.startsWith("oct_") ? await resolveKey(token) : token && viaBearer ? await resolveUserToken(token) : null;
-    org ? await mcp(req, res, org) : unauthorized(res);
+    const r = await authenticateMcp(req.headers);
+    r.ok ? await mcp(req, res, r.org) : refused(res, r);
   });
   // Deprecated: a key in the connector URL (see urlKeysAllowed in src/auth.ts). Logged by account and key prefix,
   // never the key, so whoever still uses one can be moved to a header or to sign-in before OCTILLION_URL_KEYS=off.
@@ -323,13 +335,12 @@ export function createApp() {
     if (!urlKeysAllowed()) {
       console.error("mcp url-key refused (OCTILLION_URL_KEYS=off)");
       // The same WWW-Authenticate as any 401, so a connector holding the old URL can fall into sign-in (OAuth).
-      return void res.status(401).set("WWW-Authenticate", wwwAuthenticate()).json({
-        jsonrpc: "2.0", id: null,
-        error: { code: -32001, message: `API keys in the connector URL are no longer accepted. Connect to ${PUBLIC_URL}/mcp and send the key in a header (Authorization: Bearer <key>), or sign in.` },
-      });
+      return void refused(res, { status: 401, error: "invalid_request", reason: "url_key_refused", description: "API keys in the URL are no longer accepted",
+        message: `API keys in the connector URL are no longer accepted. Connect to ${PUBLIC_URL}/mcp and send the key in a header (Authorization: Bearer <key>), or sign in.` });
     }
-    const org = await resolveKey(key);
-    if (!org) return unauthorized(res);
+    const r = await resolveKeyDetailed(key, { orgSlug: orgHeader(req.headers) });
+    if (!r.ok) return refused(res, r);
+    const org = r.org;
     // RFC 9745: deprecated since 2026-10-20 (a structured date); the successor is the plain /mcp with a header.
     res.set({ Deprecation: "@1792454400", Link: `<${PUBLIC_URL}/mcp>; rel="successor-version"` });
     noteUrlKey(org.slug, key.slice(0, 10));

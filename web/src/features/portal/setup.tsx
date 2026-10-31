@@ -3,6 +3,7 @@
 // tips. Main column: the selected journey. "Get set up" is the setup timeline and recent problems (workflow coverage
 // lives on /app/adoption); the other journeys (managed on /admin, src/playbooks.ts) show their stages, marked from real tool calls.
 import { useCallback, useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
 import { useQueryState } from 'nuqs';
 import { toast } from 'sonner';
 import PageContainer from '@/components/layout/page-container';
@@ -24,7 +25,7 @@ interface Setup {
   steps: Step[]; done: number; total: number; clients: { client: string; last: string }[]; calls: number;
   groups: { id: string; label: string; prompt: string; used: number; total: number }[];
   errors: { at: string; name: string | null; error: string | null; hint: string | null }[];
-  connect: { connector_url: string; secret: boolean; clients: Client[] };
+  connect: { connector_url: string; clients: Client[]; headless?: Headless[]; api_keys_url?: string };
   live: { at: string; client: string | null } | null;
   /** Set for a viewer: shown where a launch prompt would be. */
   viewer_note?: string | null;
@@ -33,6 +34,8 @@ interface Client {
   id: string; client: string; group: 'chat' | 'agent' | 'editor'; method: 'ui' | 'cli' | 'config' | 'link'; steps: string;
   command?: string; snippet?: string; file?: string; install_url?: string; verified: boolean; share: number | null;
 }
+/** The API key (headless) path for one client: reads OCTILLION_API_KEY, never a literal key (src/connect-catalog.ts). */
+export interface Headless { id: string; client: string; steps: string; command?: string; snippet?: string; file?: string; verified: boolean; source?: string; note?: string }
 interface Stage { id: string; title: string; why: string; prompt: string; tools: string[]; expect: string; manual?: boolean; link?: { href: string; label: string }; done: boolean; at: string | null }
 interface Journey {
   id: string; name: string; outcome: string; who: string; time: string; example: { title: string; result: string };
@@ -117,12 +120,38 @@ function ConnectionBox({ s, onConnected }: { s: Setup; onConnected: () => void }
   };
   const groups: [Client['group'], string][] = [['chat', 'Chat apps'], ['agent', 'Coding agents'], ['editor', 'Editors']];
   const url = s.connect.connector_url;
-  const [show, setShow] = useState(!s.connect.secret);
+  // Two ways in: sign in through the client (OAuth), or a personal API key for agents with no browser.
+  const [path, setPath] = useState<'signin' | 'key'>(() => {
+    try { return localStorage.getItem('oct_connect_path') === 'key' ? 'key' : 'signin'; } catch { return 'signin'; }
+  });
+  const choosePath = (p: 'signin' | 'key') => { setPath(p); try { localStorage.setItem('oct_connect_path', p); } catch { /* private mode */ } };
   // Already connected (a client reached us before, or the test just passed): the test button is then secondary.
   const connected = live?.kind === 'ok' || s.clients.length > 0;
-  const masked = url.replace(/([?&](?:key|token|k)=)[^&]+/i, '$1••••••••').replace(/(oct_[A-Za-z0-9]{4})[A-Za-z0-9_-]+/, '$1••••••••');
+  const checkIt = (n: number) => (
+    <NumberedStep n={n} title='Check it works'>
+      <Button className='w-full' variant={connected ? 'outline' : 'default'} onClick={test} disabled={live?.kind === 'wait'}>
+        {live?.kind === 'wait' ? <Icons.spinner className='animate-spin' /> : <Icons.plug />} {live?.kind === 'wait' ? 'Waiting for your client…' : 'Test my connection'}
+      </Button>
+      {live && (
+        <Alert variant={live.kind === 'bad' ? 'destructive' : 'default'} role='status' aria-live='polite'
+          className={cn('mt-2', live.kind === 'ok' && 'border-emerald-500/40 text-emerald-700 dark:text-emerald-400')}>
+          {live.kind === 'ok' ? <Icons.circleCheck /> : live.kind === 'wait' ? <Icons.clock /> : <Icons.warning />}
+          <AlertDescription className={cn(live.kind === 'ok' && 'text-emerald-700 dark:text-emerald-400')}>{live.text}</AlertDescription>
+        </Alert>
+      )}
+    </NumberedStep>
+  );
   return (
-    <FloatPanel title='Connect your AI client' icon={<Icons.plug />} description={s.connect.secret ? 'Your connection URL contains your key: keep it private.' : 'Octillion runs inside the AI client you already use.'}>
+    <FloatPanel title='Connect your AI client' icon={<Icons.plug />} description='Octillion runs inside the AI client you already use.'>
+      <div role='radiogroup' aria-label='How to connect' className='grid grid-cols-2 gap-1 rounded-lg border p-1'>
+        {([['signin', 'Sign in (interactive)'], ['key', 'API key (headless, CI, claude -p)']] as const).map(([id, label]) => (
+          <button key={id} type='button' role='radio' aria-checked={path === id} onClick={() => choosePath(id)}
+            className={cn('rounded-md px-2 py-1.5 text-xs leading-tight font-medium transition-colors', path === id ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted')}>
+            {label}
+          </button>
+        ))}
+      </div>
+      {path === 'key' ? <HeadlessSteps s={s} check={checkIt(4)} /> : (
       <ol className='flex flex-col gap-4'>
           <NumberedStep n={1} title='Pick your client'>
             <NativeSelect id='client-pick' aria-label='Your AI client' value={c?.id} onChange={(e) => choose(e.target.value)} className='bg-background w-full'>
@@ -136,31 +165,60 @@ function ConnectionBox({ s, onConnected }: { s: Setup; onConnected: () => void }
           <NumberedStep n={2} title={c ? `Add Octillion to ${c.client}` : 'Add Octillion'}>
             <div className='flex flex-col gap-2'>
               <div className='bg-background flex items-center gap-1 rounded-md border py-1 pr-1 pl-2.5'>
-                <code className='min-w-0 flex-1 truncate font-mono text-xs select-all' title={show ? url : undefined}>{show ? url : masked}</code>
-                {s.connect.secret && (
-                  <Button variant='ghost' size='icon-sm' onClick={() => setShow(!show)} aria-label={show ? 'Hide the URL' : 'Show the URL'} title={show ? 'Hide' : 'Show'}>
-                    {show ? <Icons.eyeOff className='size-4' /> : <Icons.eye className='size-4' />}
-                  </Button>
-                )}
+                <code className='min-w-0 flex-1 truncate font-mono text-xs select-all' title={url}>{url}</code>
                 <CopyButton text={url} label='Copy URL' variant='ghost' />
               </div>
               {c && <ClientSteps c={c} />}
             </div>
           </NumberedStep>
-          <NumberedStep n={3} title='Check it works'>
-            <Button className='w-full' variant={connected ? 'outline' : 'default'} onClick={test} disabled={live?.kind === 'wait'}>
-              {live?.kind === 'wait' ? <Icons.spinner className='animate-spin' /> : <Icons.plug />} {live?.kind === 'wait' ? 'Waiting for your client…' : 'Test my connection'}
-            </Button>
-            {live && (
-              <Alert variant={live.kind === 'bad' ? 'destructive' : 'default'} role='status' aria-live='polite'
-                className={cn('mt-2', live.kind === 'ok' && 'border-emerald-500/40 text-emerald-700 dark:text-emerald-400')}>
-                {live.kind === 'ok' ? <Icons.circleCheck /> : live.kind === 'wait' ? <Icons.clock /> : <Icons.warning />}
-                <AlertDescription className={cn(live.kind === 'ok' && 'text-emerald-700 dark:text-emerald-400')}>{live.text}</AlertDescription>
-              </Alert>
-            )}
-          </NumberedStep>
+          {checkIt(3)}
         </ol>
+      )}
     </FloatPanel>
+  );
+}
+
+/**
+ * The API key path, for agents with no browser (claude -p, the Agent SDK, CI, SSH, sandboxes): make a personal key,
+ * put it in OCTILLION_API_KEY, add the client's snippet (each reads the variable; none holds the key).
+ */
+function HeadlessSteps({ s, check }: { s: Setup; check: React.ReactNode }) {
+  const list = s.connect.headless ?? [];
+  const [pick, setPick] = useState(list[0]?.id ?? '');
+  const h = list.find((x) => x.id === pick) ?? list[0];
+  return (
+    <ol className='flex flex-col gap-4'>
+      <NumberedStep n={1} title='Create a personal API key'>
+        <p className='text-muted-foreground text-xs'>It acts as you, in this account. Choose read or write access and when it expires; it is shown once.</p>
+        <Button size='sm' variant='outline' render={<Link href='/app/settings/api-keys' />}><Icons.add /> Open API keys</Button>
+      </NumberedStep>
+      <NumberedStep n={2} title='Put it in OCTILLION_API_KEY'>
+        <CodeLine text='export OCTILLION_API_KEY=<paste the key>' label='Set the variable' />
+        <p className='text-muted-foreground text-xs'>In CI, store it as a secret with that name. Never commit it.</p>
+      </NumberedStep>
+      <NumberedStep n={3} title='Add Octillion to your agent'>
+        <NativeSelect aria-label='Your agent or client' value={h?.id} onChange={(e) => setPick(e.target.value)} className='bg-background w-full'>
+          {list.map((x) => <NativeSelectOption key={x.id} value={x.id}>{x.client}</NativeSelectOption>)}
+        </NativeSelect>
+        {h && (
+          <div className='space-y-2 text-sm'>
+            <p className='text-muted-foreground text-xs'>{h.steps}{h.verified ? '' : ' (Not yet checked against this client’s docs: check them if this differs.)'}</p>
+            {h.command && <CodeLine text={h.command} label='Command' />}
+            {h.snippet && (
+              <div className='space-y-1'>
+                {h.file && <div className='text-muted-foreground text-xs'>In <code className='font-mono'>{h.file}</code></div>}
+                <div className='relative'>
+                  <pre className='bg-background overflow-x-auto rounded-md border p-2.5 pr-20 font-mono text-xs whitespace-pre-wrap break-all'>{h.snippet}</pre>
+                  <div className='absolute top-1 right-1'><CopyButton text={h.snippet} variant='ghost' /></div>
+                </div>
+              </div>
+            )}
+            {h.note && <p className='text-muted-foreground text-xs'>{h.note}</p>}
+          </div>
+        )}
+      </NumberedStep>
+      {check}
+    </ol>
   );
 }
 

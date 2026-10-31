@@ -104,7 +104,7 @@ flowchart LR
   end
 
   subgraph VM["Octillion server (one container behind Caddy TLS)"]
-    MCP["MCP endpoint<br/>/mcp/ORG_KEY, 18 tools<br/>+ dashboard widget"]
+    MCP["MCP endpoint /mcp<br/>OAuth sign-in or OCTILLION_API_KEY,<br/>34 tools + dashboard widget"]
     Q["Products, simulations,<br/>reports, scoring"]
     WAPI["Worker API<br/>claim (fair share per org),<br/>events, complete (infra retry),<br/>fleet check-in, credential broker"]
     AS["Autoscaler<br/>one orchestrator per job,<br/>recycle on deploy"]
@@ -191,10 +191,19 @@ People live in **Clerk**, billing in **Stripe**, product analytics in **PostHog*
   enterprise SSO, whatever the Clerk instance enables).
 - `/admin` is for platform admins: Clerk users whose verified email matches `OCTILLION_PLATFORM_ADMINS` (addresses or
   `*@domain`), or with `public_metadata.platform_admin` set in Clerk.
-- With Clerk on, the connector URL is just `https://<host>/mcp`: Claude, ChatGPT, Claude Code and Cursor sign the
-  person in over OAuth, with Clerk as the authorization server.
+- With Clerk on, the connector URL is just `https://<host>/mcp`, and there are two ways in:
+  - **Sign in (interactive):** Claude, ChatGPT, Claude Code (`/mcp` → Authenticate) and Cursor sign the person in over
+    OAuth, with Clerk as the authorization server.
+  - **Personal API key (headless):** for agents with no browser (`claude -p`, the Agent SDK, CI, SSH, sandboxes). Any
+    member creates one for themselves on `/app/settings/api-keys` (read or write, expiring in 30/90/365 days or never),
+    sets `OCTILLION_API_KEY` to it, and the client sends `Authorization: Bearer ${OCTILLION_API_KEY}`, e.g.
+    `claude mcp add --transport http octillion https://<host>/mcp --header "Authorization: Bearer ${OCTILLION_API_KEY}"`.
+    The key acts as that person (role, limits, audit). `/app` → Setup shows the snippet for each client.
+  - A person in several accounts picks one with `X-Octillion-Org: <slug>`; the `whoami` tool says who, where and how.
+  - Refusals say what to do next: 401 for a missing or bad credential (`error="invalid_token"` with the reason, e.g.
+    "API key expired on 2026-01-02"), 403 when the person is signed in but has no usable account (no sign-in loop).
 
-Without Clerk (or for beta accounts), per-org API keys still work:
+Without Clerk (or for beta accounts), per-org API keys a platform admin issues still work:
 
 ```bash
 npm run vault:sync                      # pull developer profiles + task library (VAULT_URL or VAULT_DIR)
@@ -362,8 +371,10 @@ scripts/             smoke test, org:create, access:list, demo:seed, admin:demo,
 
 ## Known gaps
 
-- **Two ways in.** Clerk OAuth with per-user identity (docs/accounts.md), and the older per-org API keys in
-  the URL path or a bearer header, kept for beta accounts and header-only clients.
+- **Two ways in.** Clerk OAuth with per-user identity (interactive), and personal API keys via `OCTILLION_API_KEY`
+  (headless) (docs/accounts.md). The older per-org keys a platform admin issues still work in a header, and in the URL
+  path (`/mcp/<key>`, deprecated) until `OCTILLION_URL_KEYS=off`. Keys are not OAuth tokens: no refresh, no
+  per-client consent screen; a key's scope is read or write, not per tool.
 - **Scoring is deterministic** (names, packages, install commands, imports). An LLM judge and a "built it
   themselves" bucket are next. Partial-word and negation handling is heuristic.
 - **Billing is Stripe, scheduled re-runs are not built yet.** A plan's `monthly_budget_usd` caps model spend per month

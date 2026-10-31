@@ -477,7 +477,7 @@
   function render(d) {
     tip.style.display = "none";
     product = d.product?.slug ?? d.simulation?.product_slug ?? d.session?.product_slug ?? (typeof d.product === "string" ? d.product : product);
-    const views = { products: viewProducts, product: viewProduct, report: viewReport, simulations: viewSimulations, simulation: viewSimulation, session: viewSession, transcript: viewTranscript, search: viewSearch, memory: viewMemory, profiles: viewProfiles, agents: viewAgents, onboarding: viewOnboarding, personas: viewPersonas, task_sets: viewTaskSets, harnesses: viewHarnesses, harness_mixes: viewMixes, library_submission: viewSubmission, library: viewLibraryNote, visibility_export: viewPickRate };
+    const views = { products: viewProducts, product: viewProduct, report: viewReport, simulations: viewSimulations, simulation: viewSimulation, session: viewSession, transcript: viewTranscript, search: viewSearch, memory: viewMemory, profiles: viewProfiles, agents: viewAgents, onboarding: viewOnboarding, personas: viewPersonas, task_sets: viewTaskSets, harnesses: viewHarnesses, harness_mixes: viewMixes, library_submission: viewSubmission, library: viewLibraryNote, visibility_export: viewPickRate, whoami: viewWhoami };
     const fn = views[d.view];
     const note = d.truncated ? `<div class="warn" style="margin-bottom:12px">Result shortened to fit the host's size limit. Page through it or narrow the filters to see the rest.</div>` : "";
     app.innerHTML = nav(d.view) + note + (fn ? fn(d) : `<div class="empty">Unknown view: ${esc(d.view)}</div>`);
@@ -827,6 +827,14 @@
     return `<div class="stack"><div><h1>${esc(d.report)}</h1><div class="sub">${esc(d.account)} · ${esc(d.range.from)} to ${esc(d.range.to)}${picked.length ? ` · ${esc(picked.join(" · "))}` : ""}</div></div>
       ${d.sections.map((t) => `<div class="card"><h2>${esc(t.title)}</h2>${t.rows.length ? `<div class="table-wrap"><table><thead><tr>${t.columns.map((c) => `<th>${esc(c.replace(/_/g, " "))}</th>`).join("")}</tr></thead>
         <tbody>${t.rows.map((r) => `<tr>${r.map((v) => `<td>${cell(v)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>` : `<div class="empty">Nothing in this period.</div>`}</div>`).join("")}</div>`;
+  }
+
+  function viewWhoami({ person, org, role, credential: c }) {
+    const how = c.type === "oauth" ? "Signed in with OAuth"
+      : c.type === "api_key" ? `API key ${esc(c.name || "")} (${esc(c.prefix || "")}…) · ${c.scope === "read" ? "read-only" : c.scope === "write" ? "read and write" : "full access"} · ${c.expires_at ? `expires ${esc(c.expires_at.slice(0, 10))}` : "never expires"}`
+      : "Unknown credential";
+    return `<div class="card stack"><h1>${esc(person ? (person.email || person.name || person.user_id) : "Account-wide connector key")}</h1>
+      <div class="sub">${esc(org.name)} (${esc(org.slug)})${role ? ` · ${esc(role)}` : ""}</div><div>${how}</div></div>`;
   }
 
   function viewLibraryNote({ tasks }) {

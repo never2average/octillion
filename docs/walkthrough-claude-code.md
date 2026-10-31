@@ -17,16 +17,25 @@ behaves, it is not a benchmark of the products named.
 
 ## 1. Set up the workspace
 
-An empty directory with one file. The file holds the organization's API key (sent as a header, never in the URL), so
-keep it private and out of version control.
+Headless Claude Code (`claude -p`) has no browser to sign in with, so it uses a personal API key. Create one on the
+account page under **API keys** (`/app/settings/api-keys`; it is shown once) and put it in `OCTILLION_API_KEY`. The
+workspace is an empty directory with one file, which holds only the variable's name: Claude Code expands
+`${OCTILLION_API_KEY}` in `.mcp.json` headers when it starts, so the file is safe to commit and the key never goes in
+it or in a URL.
 
 ```bash
+export OCTILLION_API_KEY=<paste the key>   # or your CI's secret of that name
 mkdir octillion-demo && cd octillion-demo
 cat > .mcp.json <<'EOF'
-{ "mcpServers": { "octillion": { "type": "http", "url": "https://<host>/mcp", "headers": { "Authorization": "Bearer <api key>" } } } }
+{ "mcpServers": { "octillion": { "type": "http", "url": "https://<host>/mcp", "headers": { "Authorization": "Bearer ${OCTILLION_API_KEY}" } } } }
 EOF
-chmod 600 .mcp.json
 ```
+
+(The run below was recorded with an organization key written into the file, before personal keys existed; the
+variable works the same way. At an interactive terminal you can instead sign in: `claude mcp add --transport http
+octillion https://<host>/mcp`, then `/mcp` → Authenticate.) If the connection is refused, the error says why, e.g.
+"API key expired on <date>" with where to create a new one; ask "Who am I in Octillion?" (`whoami`) to see which
+account and key are in use.
 
 Each prompt below is one headless turn. `--continue` keeps the conversation, so later prompts can say "my product"
 and "my simulation":
@@ -171,6 +180,9 @@ Four of the 30 sessions also failed on platform errors, not on the agents' work.
 - **Claude and ChatGPT** render Octillion's dashboard inline for every tool result. Add `https://<host>/mcp`
   under Settings -> Connectors -> Add custom connector (Claude) or as a custom MCP server with OAuth in developer mode
   (ChatGPT) and sign in: these apps cannot send an API key header.
-- **Cursor and other IDE hosts** show the tool list and text results, no dashboard. Add the URL with a `headers` entry
-  (`"Authorization": "Bearer <api key>"`) in the MCP settings, make sure the tools are enabled, and type the first prompt in agent chat.
+- **Cursor and other IDE hosts** show the tool list and text results, no dashboard. Add the URL in the MCP settings
+  and sign in, or, without a browser, add a `headers` entry that reads the key from the environment (Cursor:
+  `"Authorization": "Bearer ${env:OCTILLION_API_KEY}"`); make sure the tools are enabled, and type the first prompt in agent chat.
+- **Codex CLI** (headless): `[mcp_servers.octillion]` with `url = "https://<host>/mcp"` and
+  `bearer_token_env_var = "OCTILLION_API_KEY"` in `~/.codex/config.toml`.
 - In every client the first prompt can be "Get me started with Octillion."

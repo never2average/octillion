@@ -8,6 +8,7 @@
  * people from Clerk and the plan from Stripe, through src/admin.ts.
  */
 import * as questions from "./questions.js";
+import * as apiKeys from "./api-keys.js";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { asPlatform, withTenant } from "./tenant-scope.js";
 import { z } from "zod";
@@ -566,6 +567,30 @@ export function appRouter() {
     await admin.setMemberRole(actor(res), S(res).slug, String(req.params.id), req.body?.role);
     res.status(204).end();
   });
+  // Personal API keys (src/api-keys.ts), Settings → API keys: anyone signed in makes and revokes their own; owners (the
+  // Team permission) see and revoke every key in the account. The key itself is in the create response only.
+  const keyPeople = async (res: Response) => can(res, "team")
+    ? (await admin.team(S(res).slug)).members.map((m) => ({ user_id: m.user_id, email: m.email, name: m.name ?? null })) : [];
+  api.get("/api-keys", async (_req, res) => {
+    const s = S(res), all = can(res, "team");
+    res.json({ keys: await apiKeys.listKeys(s.org, s.user, { all, people: await keyPeople(res) }), me: s.user, can_manage: all,
+      expiry_days: apiKeys.EXPIRY_DAYS, default_expiry_days: apiKeys.DEFAULT_EXPIRY_DAYS, connector_url: `${publicUrl()}/mcp`,
+      env: apiKeys.envInstructions(`${publicUrl()}/mcp`), headless: admin.connectInfo().headless });
+  });
+  api.post("/api-keys", async (req, res) => {
+    const s = S(res);
+    if (!s.user) throw new AppError("Sign in as a person to create an API key", 403);
+    const made = await apiKeys.createPersonalKey(s.org, s.user, req.body ?? {});
+    admin.log(actor(res), "key.create", s.slug, { user_id: s.user, key_prefix: made.row.prefix, scope: made.row.scope, expires_at: made.row.expires_at, via: "portal" });
+    capture({ distinctId: s.user, orgSlug: s.slug }, "api_key_created", { scope: made.row.scope, expires: made.row.expires_at ? "dated" : "never" });
+    res.status(201).json({ key: made.key, row: made.row, env: apiKeys.envInstructions(`${publicUrl()}/mcp`) });
+  });
+  api.post("/api-keys/:id/revoke", async (req, res) => {
+    const s = S(res);
+    const row = await apiKeys.revokeKey(s.org, Number(req.params.id), { userId: s.user, any: can(res, "team") });
+    admin.log(actor(res), "key.revoke", s.slug, { user_id: row.user_id, key_prefix: row.prefix, by: s.user, via: "portal" });
+    res.status(204).end();
+  });
   // Usage limits (src/limits.ts): owners and billing managers split the budget across teams and people, roll out
   // running, cap throughput. Everyone sees their own allowance; only they see and change everyone's.
   api.get("/limits", async (_req, res) => {
@@ -834,7 +859,7 @@ export function appRouter() {
   api.post("/billing/portal", async (_req, res) => { need(res, "billing"); res.json(await admin.portalLink(actor(res), S(res).slug, `${publicUrl()}/app#billing`)); });
   api.post("/billing/checkout", async (req, res) => { need(res, "billing"); res.json(await admin.checkoutLink(actor(res), S(res).slug, req.body?.price_id, `${publicUrl()}/app#billing`, { requireAllowed: true })); });
   api.use((err: Error & { status?: number }, _req: Request, res: Response, next: NextFunction) => {
-    if (!(err instanceof AppError || err instanceof PlaybookError || err instanceof context.ContextError || err instanceof limits.LimitError || err instanceof journeys.JourneyError || err instanceof admin.AdminError || err instanceof clerk.ClerkError || err instanceof billing.StripeError)) return next(err);
+    if (!(err instanceof AppError || err instanceof PlaybookError || err instanceof context.ContextError || err instanceof limits.LimitError || err instanceof journeys.JourneyError || err instanceof admin.AdminError || err instanceof clerk.ClerkError || err instanceof billing.StripeError || err instanceof apiKeys.ApiKeyError)) return next(err);
     // A Budget rules refusal also says which rule (code), the limit and what's left, who set it and the admins to ask.
     res.status(err.status ?? 400).json({ error: err.message, ...(err instanceof limits.LimitError || err instanceof AppError ? err.info : {}) });
   });

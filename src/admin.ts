@@ -19,7 +19,7 @@ import { capture } from "./telemetry.js";
 import * as billing from "./billing.js";
 import * as experiments from "./experiments.js";
 import { parsePlanConfig, PlanConfigError } from "./plan-config.js";
-import { clientCatalog } from "./connect-catalog.js";
+import { clientCatalog, headlessCatalog } from "./connect-catalog.js";
 import { getDb } from "./db.js";
 import * as clerk from "./clerk.js";
 import * as mail from "./email.js";
@@ -79,7 +79,7 @@ Every other client (Copilot, OpenCode, Gemini CLI, VS Code, Windsurf and more) i
 Then type: "Get me started with Octillion."
 
 Reply to this email with anything that gets in your way.`;
-  return { connector_url: url, secret: Boolean(key), clients, email: { subject, body } };
+  return { connector_url: url, secret: Boolean(key), clients, headless: headlessCatalog(url), api_keys_url: `${base}/app/settings/api-keys`, email: { subject, body } };
 }
 
 // ---------- local facts ----------
@@ -320,7 +320,7 @@ export async function orgDetail(slug: string) {
   const people = await peopleOf(org.clerk_org_id);
   const sp = sparkSpans();
   const [keys, tools, clients, errors, products, research, sims, requests, invoices, perDay] = await Promise.all([
-    db.query(`SELECT id, label, key_prefix, created_at, last_used_at, revoked_at FROM api_keys WHERE org_id = $1
+    db.query(`SELECT id, label, key_prefix, created_at, last_used_at, revoked_at, user_id, scope, expires_at, created_via FROM api_keys WHERE org_id = $1
                ORDER BY revoked_at IS NOT NULL, created_at DESC`, [org.id]),
     db.query(`SELECT name, count(*) AS calls, count(*) FILTER (WHERE NOT ok) AS errors, round(avg(ms)) AS avg_ms, max(at) AS last
                 FROM mcp_events WHERE org_id = $1 AND method = 'tools/call' GROUP BY name ORDER BY max(at) DESC`, [org.id]),
@@ -737,7 +737,7 @@ export async function issueKey(actor: string, slug: string, label?: string) {
   const l = String(label ?? "").trim().slice(0, 200) || "extra";
   // Labelled with a member's email: the key is that person's, so their calls are theirs (not "Connector key").
   const owner = l.includes("@") ? (await team(slug).catch(() => null))?.members.find((m) => (m.email ?? "").toLowerCase() === l.toLowerCase())?.user_id ?? null : null;
-  const key = await createApiKey(f.id, l, owner);
+  const key = await createApiKey(f.id, l, owner, { via: "admin" });
   log(actor, "key.create", slug, { label: l, key_prefix: key.slice(0, 10) });
   return result(slug, l.includes("@") ? l : null, { key });
 }
@@ -745,8 +745,9 @@ export async function issueKey(actor: string, slug: string, label?: string) {
 async function keyOf(slug: string, keyId: number) {
   intId(keyId);
   const f = await factsBySlug(slug);
-  const [k] = await (await getDb()).query<{ id: number; label: string; key_prefix: string; revoked_at: Date | null; user_id: string | null }>(
-    "SELECT id, label, key_prefix, revoked_at, user_id FROM api_keys WHERE id = $1 AND org_id = $2", [keyId, f.id]);
+  const [k] = await (await getDb()).query<{ id: number; label: string; key_prefix: string; revoked_at: Date | null; user_id: string | null;
+    scope: "read" | "write" | null; expires_at: Date | null; created_at: Date; created_via: "portal" | "admin" | "cli" | null }>(
+    "SELECT id, label, key_prefix, revoked_at, user_id, scope, expires_at, created_at, created_via FROM api_keys WHERE id = $1 AND org_id = $2", [keyId, f.id]);
   if (!k) throw new AdminError(`No key ${keyId} in ${slug}`, 404);
   return { f, k };
 }
@@ -758,11 +759,13 @@ export async function revokeKey(actor: string, slug: string, keyId: number) {
   log(actor, "key.revoke", slug, { label: k.label, key_prefix: k.key_prefix });
 }
 
-/** Revoke a key and issue its replacement under the same label and for the same person (a leaked link). */
+/** Revoke a key and issue its replacement under the same label and for the same person (a leaked link). The new key
+ *  keeps the old one's access and origin; a dated key gets the same lifetime again, from now. */
 export async function rotateKey(actor: string, slug: string, keyId: number) {
   const { f, k } = await keyOf(slug, keyId);
   if (!k.revoked_at) await (await getDb()).query("UPDATE api_keys SET revoked_at = now() WHERE id = $1 AND org_id = $2", [k.id, f.id]);
-  const key = await createApiKey(f.id, k.label, k.user_id);
+  const life = k.expires_at ? new Date(k.expires_at).getTime() - new Date(k.created_at).getTime() : null;
+  const key = await createApiKey(f.id, k.label, k.user_id, { scope: k.scope, via: k.created_via, expiresAt: life && life > 0 ? new Date(Date.now() + life) : null });
   log(actor, "key.rotate", slug, { label: k.label, user_id: k.user_id, old_prefix: k.key_prefix, key_prefix: key.slice(0, 10) });
   return result(slug, k.label.includes("@") ? k.label : null, { key });
 }

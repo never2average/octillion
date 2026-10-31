@@ -65,13 +65,40 @@ How Octillion uses it:
 - **Portal (`/api/app`):** the UI sends Clerk's session, the `__session` cookie on the same origin or a Bearer session
   token; the account is the session's active organization (else the person's oldest membership). Signed out is a 401
   `{error, sign_in_url: "/sign-in"}`; signed in without an account is a 403 `{code: "no_account"}`.
-- **Connectors (`/mcp`):** the plain URL `$PUBLIC_URL/mcp`. The client finds Clerk from the 401 (`resource_metadata` in
-  `WWW-Authenticate`, `/.well-known/oauth-protected-resource`, CORS-open), signs the person in and sends a Clerk OAuth
-  access token (opaque `oat_…` or a JWT); Octillion verifies it and uses the person's oldest membership that is not
-  suspended. Existing `oct_` keys work in a header (`Authorization: Bearer`, or
-  `X-API-Key`). Keys in the URL (`/mcp/<key>`) are deprecated: served with a `Deprecation` header and logged by key prefix
-  while `OCTILLION_URL_KEYS` is `allow` (the default), refused with `OCTILLION_URL_KEYS=off`; new keys are never
-  issued as URLs.
+- **Connectors (`/mcp`):** the plain URL `$PUBLIC_URL/mcp`, with two ways in:
+  - **Sign in (interactive, OAuth).** The client finds Clerk from the 401 (`resource_metadata` in `WWW-Authenticate`,
+    `/.well-known/oauth-protected-resource`, CORS-open), signs the person in and sends a Clerk OAuth access token
+    (opaque `oat_…` or a JWT); Octillion verifies it and uses the person's oldest membership that is not suspended.
+  - **Personal API key (headless).** For agents that cannot open a browser (`claude -p`, the Agent SDK, CI, SSH,
+    sandboxes). Any signed-in member creates keys for themselves on `/app/settings/api-keys` (src/api-keys.ts): a
+    name, access **write** (default: every tool their role allows) or **read** (read-only tools; a write tool answers
+    with a tool error saying how to get a write key), and an expiry of 30, 90 (default) or 365 days, or never. The key
+    is shown once with the `OCTILLION_API_KEY` instructions; only its hash and prefix are stored (api_keys, migration
+    0013: `user_id`, `scope`, `expires_at`, `created_via`, `last_used_at` written at most once a minute). A personal key
+    always acts as the person who made it (their role, Budget rules, usage and audit trail) and stops working when they
+    are suspended or leave the account. Members list and revoke their own keys; owners see and revoke every key in the
+    account. Clients read the variable, never a literal key: Claude Code `--header "Authorization: Bearer
+    ${OCTILLION_API_KEY}"` or `.mcp.json` `"headers": {"Authorization": "Bearer ${OCTILLION_API_KEY}"}`, Codex
+    `bearer_token_env_var = "OCTILLION_API_KEY"`, Cursor `${env:OCTILLION_API_KEY}` (Setup on `/app` shows each).
+  - **Older keys** keep working unchanged: account-wide connector keys and email-labelled keys a platform admin
+    issued (scope and expiry NULL: full access, never expire; a label equal to a member's email binds the key to that
+    person at issue time). They work in a header (`Authorization: Bearer`, or `X-API-Key`). Keys in the URL
+    (`/mcp/<key>`) are deprecated: served with a `Deprecation` header and logged by key prefix while
+    `OCTILLION_URL_KEYS` is `allow` (the default), refused with `OCTILLION_URL_KEYS=off`; new keys are never issued as
+    URLs.
+  - **Choosing an account.** A person in several accounts sends `X-Octillion-Org: <slug>` (checked against their
+    memberships); without it, the oldest membership that is not suspended. A key always acts in the account it was
+    made in. The `whoami` tool returns the person, the account, the role and the credential (OAuth, or the key's name,
+    access and expiry).
+  - **Refusals say what to do next** (src/auth.ts authenticateMcp; the JSON-RPC error message and `data.reason`):
+    no credential is a 401 with the challenge and no error code (RFC 6750); an unknown, revoked or expired key, or a
+    bad OAuth token, is a 401 `error="invalid_token"` with an `error_description` ("API key expired on 2026-01-02",
+    "API key revoked", "token expired or not valid for this server"; an unknown key never says whether it exists); an
+    OAuth token in `X-API-Key` is a 401 `invalid_request` saying to use `Authorization: Bearer`. A valid credential
+    whose person has no Octillion account, only suspended memberships, or an organization Octillion does not know is a
+    **403** with no challenge ("Your account has no Octillion workspace; request access at …", "Your access to <org>
+    is suspended; ask an owner"), so the OAuth client does not loop through sign-in. The access log line adds
+    `auth=<reason>` to a refused request; credentials are never logged.
 - **Origin:** browsers send an `Origin` header; on every MCP endpoint a request whose Origin is not `PUBLIC_URL`'s (or
   a `CLERK_MCP_AUDIENCE` origin, or one listed in `OCTILLION_MCP_ALLOWED_ORIGINS`, comma-separated) is refused with a
   403 and logged (`mcp origin refused … origin="…"`, once a minute per origin); the `/mcp` access line shows any Origin a
@@ -223,7 +250,7 @@ See **[docs/journeys.md](journeys.md)**: build journeys in PostHog Workflows; Oc
 - **Plans:** account → Billing → copy a checkout link, or open the Stripe portal. Customers can do both from
   `/app#billing`.
 - **Someone leaves:** their admin suspends them on `/app#team`, or you do in `/admin` (or remove them in Clerk). They
-  lose access at once. For legacy keys, revoke the key.
+  lose access at once, personal API keys included. For older keys a platform admin issued, revoke the key (`/admin` → account → API keys, or the account owner on `/app/settings/api-keys`).
 
 ## Local preview
 

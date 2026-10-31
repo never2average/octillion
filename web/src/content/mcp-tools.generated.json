@@ -197,6 +197,12 @@
       "title": "Search memory",
       "summary": "Search the account's institutional memory: the company's items, this person's own and product items, newest first.",
       "read_only": true
+    },
+    {
+      "name": "whoami",
+      "title": "Who am I",
+      "summary": "Who this connection acts as: the person, the Octillion workspace (account) and its role, and how it signed in (OAuth, or an API key with its name, access and expiry).",
+      "read_only": true
     }
   ],
   "prompts": [
