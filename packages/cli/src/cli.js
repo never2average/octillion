@@ -278,7 +278,12 @@ async function login(ctx) {
     if (!scope.includes("octillion:read")) throw new CliError("--read needs the octillion:read scope, which this server does not offer yet. Use a read-only API key instead.", { code: "no_read_scope" });
     scope = scope.filter((s) => s !== "octillion:write");
   }
-  const d = await postForm(meta.device_authorization_endpoint, { client_id: clientId, scope: scope.join(" ") });
+  let d = await postForm(meta.device_authorization_endpoint, { client_id: clientId, scope: scope.join(" ") });
+  // Some authorization servers don't let a CLI app hold the org picker: sign in without it (X-Octillion-Org still picks).
+  if (!d.ok && d.json.error === "invalid_scope" && scope.includes("user:org:read") && /user:org:read/.test(String(d.json.error_description ?? ""))) {
+    scope = scope.filter((s) => s !== "user:org:read");
+    d = await postForm(meta.device_authorization_endpoint, { client_id: clientId, scope: scope.join(" ") });
+  }
   if (!d.ok || !d.json.device_code) throw new CliError(`The authorization server refused to start a device login: ${d.json.error_description ?? d.json.error ?? d.status}.`, { code: d.json.error ?? "device_start_failed" });
   const pending = {
     base, device_code: d.json.device_code, user_code: d.json.user_code, verification_uri: d.json.verification_uri, verification_uri_complete: d.json.verification_uri_complete ?? null,
