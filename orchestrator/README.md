@@ -589,7 +589,7 @@ This runs the **real committed server** (`src/http.ts`) on a fresh PGlite, with 
 `/gw`. It also runs the **real orchestrator** (Pi, `RUNNER=pool`, server fleet mode, `POD_CAPACITY=3`) on the real Claude Code image.
 The orchestrator's environment holds only `OCTILLION_URL` and `OCTILLION_WORKER_TOKEN` as secrets.
 Only the LLM vendor is fake. The vault's `anthropic` provider points at a local Anthropic-compatible server, set up with `npm run keyvault -- provider anthropic --upstream …`.
-That server holds a random `sk-ant-canary-…` key, stored with `keyvault set`. It scripts the harness (one `Bash npm install left-pad`, then a final
+That server holds a random `sk-ant-canary-…` key, stored with `keyvault add`. It scripts the harness (one `Bash npm install left-pad`, then a final
 text, with SSE usage) and Pi (start → wait → finish).
 The org comes from `scripts/create-org.ts`. The product `left-pad` (package `left-pad`), 2 scenarios and `run_simulation`
 (explicit `claude-code/opus` + `claude-code/sonnet`, 4 sessions) go through the real MCP endpoint.

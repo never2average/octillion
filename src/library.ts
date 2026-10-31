@@ -332,44 +332,55 @@ export async function deleteHarness(actor: string, id: string) {
 }
 
 // ---------- model keys (the key vault, src/keyvault.ts) ----------
-// One key per provider (key type): adding a key to a type that has one replaces it; a key is kept or deleted, never
-// disabled. These wrap the vault for /admin/keys with the console's actor and audit log. A secret is taken once and
-// never returned: only its hint ("sk-ant…9xQ2").
+// One row per key, one type (provider) per key: a type may hold several keys, used least recently used first. Adding
+// a key always creates a row; a key is replaced on its own row or deleted, never disabled. These wrap the vault for
+// /admin/keys with the console's actor and audit log. A secret is taken once and never returned: only its hint.
 
-const vaultError = (e: unknown) => (e instanceof AdminError ? e : new AdminError((e as Error).message));
+const vaultError = (e: unknown) => (e instanceof AdminError ? e : new AdminError((e as Error).message, (e as { status?: number }).status ?? 400));
 
-/** Every provider (key type, whether it has a key) and every key, one per provider, hints only. */
+/** Every provider (key type, how many keys it has) and every key as its own row, hints only. */
 export async function modelKeys() {
   // Every key is a vault key (env keys were imported once, src/keyvault-env.ts); env_set names the variables still set
   // on the server for a provider, which nothing reads any more and can be deleted there.
   const [providers, creds, envSet] = await Promise.all([kv.listProviders(), kv.listCredentials(), envStillSet()]);
-  const credentials = creds.map(({ key_id: _k, meta, ...c }) => ({ ...c, uses: Number(c.uses),
+  const credentials = creds.map(({ key_id: _k, meta, ...c }) => ({ ...c, type_name: kv.providerName(c.provider), uses: Number(c.uses),
     ...(meta?.client_email ? { project_id: meta.project_id || null, client_email: meta.client_email } : {}) }));
   return {
     unlocked: kv.vaultUnlocked(),
     providers: providers.map((p) => {
-      const key = credentials.find((c) => c.provider === p.slug);
-      return { slug: p.slug, mode: p.mode, backend: p.backend, has_key: !!key, credential_id: key?.id ?? null, last_used_at: key?.last_used_at ?? null,
+      const keys = credentials.filter((c) => c.provider === p.slug);
+      return { slug: p.slug, name: kv.providerName(p.slug), mode: p.mode, backend: p.backend, has_key: keys.length > 0, keys: keys.length,
                env_set: envSet[p.slug] ?? [] };
     }),
     credentials,
   };
 }
 
-/** Add a provider's key, or replace the one it has. */
-export async function addModelKey(actor: string, body: { provider?: unknown; secret?: unknown }) {
+/** Add a key as a new row of its type (never replaces); the same secret twice for a type is refused (409). */
+export async function addModelKey(actor: string, body: { provider?: unknown; secret?: unknown; name?: unknown }) {
   const provider = str(body.provider, 40), secret = typeof body.secret === "string" ? body.secret : "";
   if (!provider || !secret) throw new AdminError("provider and secret are required");
   if (!kv.vaultUnlocked()) throw new AdminError("The key vault is locked: set OCTILLION_VAULT_KEY on the server first");
-  const saved = await kv.setCredential(provider, secret).catch((e) => { throw vaultError(e); });
-  log(actor, saved.replaced ? "model_key.replace" : "model_key.add", null, { provider, credential: saved.id, hint: saved.hint });
-  return saved; // { id, provider, hint, replaced } (+ project_id, client_email for a service account): never the secret
+  const saved = await kv.addCredential(provider, secret, { name: typeof body.name === "string" ? body.name : null }).catch((e) => { throw vaultError(e); });
+  log(actor, "model_key.add", null, { provider, credential: saved.id, name: saved.name, hint: saved.hint });
+  return saved; // { id, provider, name, hint } (+ project_id, client_email for a service account): never the secret
+}
+
+/** Replace one key's secret on its own row; the type's other keys are untouched. */
+export async function replaceModelKey(actor: string, id: number, body: { secret?: unknown }) {
+  if (!Number.isInteger(id)) throw new AdminError("Bad credential id");
+  const secret = typeof body.secret === "string" ? body.secret : "";
+  if (!secret) throw new AdminError("secret is required");
+  if (!kv.vaultUnlocked()) throw new AdminError("The key vault is locked: set OCTILLION_VAULT_KEY on the server first");
+  const saved = await kv.replaceCredential(id, secret).catch((e) => { throw vaultError(e); });
+  log(actor, "model_key.replace", null, { provider: saved.provider, credential: id, name: saved.name, hint: saved.hint });
+  return saved;
 }
 
 export async function deleteModelKey(actor: string, id: number) {
   if (!Number.isInteger(id)) throw new AdminError("Bad credential id");
   const gone = await kv.deleteCredential(id).catch((e) => { throw new AdminError((e as Error).message, 404); });
-  log(actor, "model_key.delete", null, { credential: id, provider: gone.provider, hint: gone.hint });
+  log(actor, "model_key.delete", null, { credential: id, provider: gone.provider, name: gone.name, hint: gone.hint });
 }
 
 // ---------- sandbox provider (boat.dev) ----------

@@ -128,41 +128,84 @@ export async function vertexBetaChecks() {
   console.log("✓ Vertex: beta flags it rejects are dropped (known ones up front, new ones after one retry)");
 }
 
-/** Key vault, one key per provider (src/keyvault.ts, migration 0011): a key goes in once and only its hint comes back;
- *  a second key for the same type replaces the first (one row, rotated_at set); no enable/disable anywhere; delete. */
-export async function vaultOneKeyChecks({ db, adm, json, base, ADMIN_TOKEN, stamp }: { db: Db; adm: (method: string, path: string, body?: unknown) => Promise<Response>;
+/** Key vault, one row per key and one type per key (src/keyvault.ts, migration 0012): a key goes in once and only its
+ *  hint comes back; two keys of one type are two rows, used in turn (least recently used first); replace changes only
+ *  its own row; the same secret twice for a type is refused; the unsubscribe key stays a singleton that nothing
+ *  replaces; no enable/disable anywhere (410); delete. */
+export async function vaultRowPerKeyChecks({ db, adm, json, base, ADMIN_TOKEN, stamp }: { db: Db; adm: (method: string, path: string, body?: unknown) => Promise<Response>;
   json: (r: Response | Promise<Response>) => Promise<any>; base: string; ADMIN_TOKEN: string; stamp: string }) {
   const kv = await import("../src/keyvault.js");
   const PAGE_KEY = `sk-ant-smoke-page-${stamp}-SECRETTAIL`;
   const addedKey = await json(adm("POST", "/compute/keys", { provider: "anthropic", secret: PAGE_KEY }));
-  assert.ok(addedKey.id && addedKey.hint && !JSON.stringify(addedKey).includes(PAGE_KEY), "the add response has the hint, not the key");
-  assert.ok(!("label" in addedKey) && !("priority" in addedKey) && !("enabled" in addedKey), "no label, priority or enabled in the API");
+  assert.ok(addedKey.id && addedKey.hint && addedKey.name && !JSON.stringify(addedKey).includes(PAGE_KEY), "the add response has the hint and a name, not the key");
+  assert.ok(!("priority" in addedKey) && !("enabled" in addedKey) && !("replaced" in addedKey), "no priority, enabled or replaced in the API");
   const keysView = await (await adm("GET", "/compute/keys")).text();
-  assert.ok(!keysView.includes(PAGE_KEY) && !keysView.includes("ciphertext"), "the key list never carries a secret");
+  assert.ok(!keysView.includes(PAGE_KEY) && !keysView.includes("ciphertext") && !keysView.includes("secret_digest"), "the key list never carries a secret or its digest");
   const kj = JSON.parse(keysView);
   const listedKey = kj.credentials.find((c: any) => c.id === addedKey.id);
-  assert.ok(listedKey && listedKey.hint === addedKey.hint && !("enabled" in listedKey) && !("label" in listedKey), "the new key is listed by its hint");
-  assert.ok(kj.providers.find((p: any) => p.slug === "anthropic").has_key, "the provider has its key");
+  assert.ok(listedKey && listedKey.hint === addedKey.hint && listedKey.name === addedKey.name && listedKey.type_name === "Anthropic" && !("enabled" in listedKey), "the new key is listed by name, type and hint");
+  assert.ok(kj.providers.find((p: any) => p.slug === "anthropic").has_key, "the provider has a key");
   assert.ok(kj.providers.every((p: any) => !("enabled" in p)), "providers have no on/off");
-  // One key per type: a second Anthropic key replaces the first (same row, rotated), never a second row.
-  const PAGE_KEY_2 = `sk-ant-smoke-page-${stamp}-ROTATED2`;
-  const replacedKey = await json(adm("POST", "/compute/keys", { provider: "anthropic", secret: PAGE_KEY_2 }));
-  assert.ok(replacedKey.replaced && replacedKey.id === addedKey.id && replacedKey.hint !== addedKey.hint, "a second key for the type replaces the first");
-  const anthRows = await db.query<any>("SELECT id, hint, rotated_at FROM vault_credentials WHERE provider = 'anthropic'");
-  assert.ok(anthRows.length === 1 && anthRows[0].hint === replacedKey.hint && anthRows[0].rotated_at, "still one Anthropic row, rotated_at set");
-  assert.equal((await kv.useCredential("anthropic")).secret, PAGE_KEY_2, "the replacement is the key in use");
-  assert.equal((await json(adm("GET", "/compute/keys"))).credentials.filter((c: any) => c.provider === "anthropic").length, 1, "the page lists one Anthropic key");
-  await assert.rejects(db.query("INSERT INTO vault_credentials (provider, label, ciphertext, iv, tag, key_id, hint) VALUES ('anthropic', 'second', 'x', 'x', 'x', 'x', 'x')"), /unique|duplicate/i, "the database refuses a second key for a type");
+
+  // Two keys of one type: two rows, both used in rotation (least recently used first).
+  const PAGE_KEY_2 = `sk-ant-smoke-page-${stamp}-SECONDKEY`;
+  const second = await json(adm("POST", "/compute/keys", { provider: "anthropic", secret: PAGE_KEY_2, name: `Team B ${stamp}` }));
+  assert.ok(second.id && second.id !== addedKey.id && second.name === `Team B ${stamp}`, "adding a second key of the type creates a new row, with the name given");
+  const anthRows = await db.query<any>("SELECT id, hint, rotated_at FROM vault_credentials WHERE provider = 'anthropic' ORDER BY id");
+  assert.ok(anthRows.some((r: any) => r.id === addedKey.id) && anthRows.some((r: any) => r.id === second.id) && anthRows.every((r: any) => !r.rotated_at), "both rows are there, neither replaced");
+  const listed = (await json(adm("GET", "/compute/keys"))).credentials.filter((c: any) => c.provider === "anthropic");
+  assert.equal(listed.length, anthRows.length, "the page lists every Anthropic key as its own row");
+  const used = new Map<number, string>();
+  for (let i = 0; i < anthRows.length; i++) { const c = await kv.useCredential("anthropic"); used.set(c.id, c.secret); }
+  assert.ok(used.size === anthRows.length && used.get(addedKey.id) === PAGE_KEY && used.get(second.id) === PAGE_KEY_2, "each key of the type is used in turn");
+  const useCounts = await db.query<any>("SELECT id, uses FROM vault_credentials WHERE id = ANY($1) ORDER BY id", [[addedKey.id, second.id]]);
+  assert.ok(useCounts.every((r: any) => Number(r.uses) === 1), `one use each (${JSON.stringify(useCounts)})`);
+
+  // Replace changes only that row.
+  const PAGE_KEY_3 = `sk-ant-smoke-page-${stamp}-ROTATED3`;
+  const replaced = await json(adm("POST", `/compute/keys/${addedKey.id}/replace`, { secret: PAGE_KEY_3 }));
+  assert.ok(replaced.id === addedKey.id && replaced.hint !== addedKey.hint && replaced.name === addedKey.name, "replace keeps the row and its name");
+  const after = await db.query<any>("SELECT id, hint, rotated_at FROM vault_credentials WHERE id = ANY($1) ORDER BY id", [[addedKey.id, second.id]]);
+  const r1 = after.find((r: any) => r.id === addedKey.id), r2 = after.find((r: any) => r.id === second.id);
+  assert.ok(r1.rotated_at && r1.hint === replaced.hint, "the replaced row is rotated");
+  assert.ok(!r2.rotated_at && r2.hint === second.hint, "the other key of the type is untouched");
+  assert.equal((await db.query<any>("SELECT count(*)::int AS n FROM vault_credentials WHERE provider = 'anthropic'"))[0].n, anthRows.length, "no row added by a replace");
+  const viaVault = await (await fetch(`${base}/api/admin/keyvault/credentials/${second.id}`, { method: "PUT", headers: { authorization: `Bearer ${ADMIN_TOKEN}`, "content-type": "application/json" },
+    body: JSON.stringify({ secret: `sk-ant-smoke-page-${stamp}-VIAPUT` }) })).json();
+  assert.ok(viaVault.id === second.id, "the vault API replaces with PUT /keyvault/credentials/:id");
+
+  // The same secret twice for a type is refused, whether added or put on another row.
+  const dupe = await adm("POST", "/compute/keys", { provider: "anthropic", secret: PAGE_KEY_3 });
+  assert.equal(dupe.status, 409, "adding a key already in the vault is refused");
+  assert.match((await dupe.json()).error, /already in the vault/);
+  assert.equal((await adm("POST", `/compute/keys/${second.id}/replace`, { secret: PAGE_KEY_3 })).status, 409, "replacing with another row's key is refused");
+  assert.equal((await adm("POST", "/compute/keys", { provider: "anthropic", secret: `  ${PAGE_KEY_3}\n` })).status, 409, "surrounding whitespace does not make it a new key");
+  // A row from before migration 0012 has no digest: the check decrypts it, refuses the duplicate and fills the digest.
+  await db.query("UPDATE vault_credentials SET secret_digest = NULL WHERE id = $1", [addedKey.id]);
+  assert.equal((await adm("POST", "/compute/keys", { provider: "anthropic", secret: PAGE_KEY_3 })).status, 409, "a duplicate of a key without a digest is refused too");
+  assert.ok((await db.query<any>("SELECT secret_digest FROM vault_credentials WHERE id = $1", [addedKey.id]))[0].secret_digest, "and its digest is filled");
+  await assert.rejects(db.query("INSERT INTO vault_credentials (provider, ciphertext, iv, tag, key_id, hint, secret_digest) SELECT provider, 'x', 'x', 'x', 'x', 'x', secret_digest FROM vault_credentials WHERE id = $1", [addedKey.id]),
+    /unique|duplicate/i, "the database refuses a second row with the same digest for a type");
   assert.equal((await adm("POST", "/compute/keys", { provider: "cursor", secret: "cursor-secret-123456" })).status, 400, "direct-mode keys still refused");
   assert.equal((await adm("POST", "/compute/keys", { provider: "anthropic", secret: "" })).status, 400);
-  // The unsubscribe signing key is never replaced (every link already sent is signed with it): only its generator adds it.
+
+  // The unsubscribe signing key is a singleton nothing replaces (every link already sent is signed with it).
   const unsubRows = async () => (await db.query<any>("SELECT id, hint FROM vault_credentials WHERE provider = 'email_unsubscribe'")).map((r: any) => `${r.id}:${r.hint}`).join();
+  await (await import("../src/campaigns.js")).unsubscribeKey(); // generated on first need (a no-op when it exists)
   const unsubBefore = await unsubRows();
+  assert.equal(unsubBefore.split(",").filter(Boolean).length, 1, "exactly one unsubscribe key (generated)");
   const unsubPost = await adm("POST", "/compute/keys", { provider: "email_unsubscribe", secret: `unsub-${stamp}-replacement` });
-  assert.equal(unsubPost.status, 400, "the API refuses to set the unsubscribe signing key");
+  assert.equal(unsubPost.status, 400, "the API refuses to add an unsubscribe signing key");
   assert.match((await unsubPost.json()).error, /cannot be replaced/);
-  await assert.rejects(kv.setCredential("email_unsubscribe", `unsub-${stamp}-replacement`), /cannot be replaced/, "setCredential refuses it too");
+  const unsubId = Number(unsubBefore.split(":")[0]);
+  assert.equal((await adm("POST", `/compute/keys/${unsubId}/replace`, { secret: `unsub-${stamp}-replacement` })).status, 400, "nor replace it");
+  await assert.rejects(kv.addCredential("email_unsubscribe", `unsub-${stamp}-replacement`), /cannot be replaced/, "addCredential refuses it too");
+  await assert.rejects(kv.replaceCredential(unsubId, `unsub-${stamp}-replacement`), /cannot be replaced/, "replaceCredential refuses it too");
+  assert.equal(await kv.addCredentialIfAbsent("email_unsubscribe", `unsub-${stamp}-generated-again`), null, "the generator never adds a second");
+  await assert.rejects(db.query("INSERT INTO vault_credentials (provider, ciphertext, iv, tag, key_id, hint) VALUES ('email_unsubscribe', 'x', 'x', 'x', 'x', 'x')"), /unique|duplicate/i,
+    "the database holds at most one unsubscribe key");
   assert.equal(await unsubRows(), unsubBefore, "the unsubscribe key is untouched");
+
   // No enable/disable anywhere: the old routes are gone (410) and change nothing.
   assert.equal((await adm("POST", `/compute/keys/${addedKey.id}/enabled`, { enabled: false })).status, 410, "no key disable");
   assert.equal((await adm("POST", "/compute/providers/anthropic/enabled", { enabled: false })).status, 410, "no provider toggle");
@@ -170,10 +213,13 @@ export async function vaultOneKeyChecks({ db, adm, json, base, ADMIN_TOKEN, stam
   await kv.upsertProvider({ slug: "anthropic", enabled: false } as any); // an old caller's enabled is ignored
   assert.ok((await json(adm("GET", "/compute/keys"))).credentials.some((c: any) => c.id === addedKey.id), "the key is still there");
   assert.ok((await db.query<any>("SELECT enabled FROM vault_providers WHERE slug = 'anthropic'"))[0].enabled, "the provider stays on");
-  assert.equal((await kv.useCredential("anthropic")).secret, PAGE_KEY_2, "and still in use");
+
+  // Delete: one row goes, the type's other key stays and is the one used.
   assert.equal((await adm("DELETE", `/compute/keys/${addedKey.id}`)).status, 204);
-  assert.ok(!(await json(adm("GET", "/compute/keys"))).credentials.some((c: any) => c.id === addedKey.id), "key deleted");
-  assert.ok(!(await json(adm("GET", "/compute/keys"))).providers.find((p: any) => p.slug === "anthropic").has_key, "the type has no key after the delete");
+  const left = (await json(adm("GET", "/compute/keys")));
+  assert.ok(!left.credentials.some((c: any) => c.id === addedKey.id) && left.credentials.some((c: any) => c.id === second.id), "only that key is deleted");
   assert.equal((await adm("DELETE", `/compute/keys/${addedKey.id}`)).status, 404, "deleting it again: not found");
-  console.log("✓ key vault: one key per type (a second replaces the first in place), hints only, no enable/disable (410), delete");
+  assert.equal((await adm("POST", `/compute/keys/${addedKey.id}/replace`, { secret: `sk-ant-smoke-page-${stamp}-GONE` })).status, 404, "a deleted key cannot be replaced");
+  assert.equal((await adm("DELETE", `/compute/keys/${second.id}`)).status, 204);
+  console.log("✓ key vault: one row per key (two of a type used in turn), replace on its own row, duplicates refused (409), unsubscribe key a singleton, no enable/disable (410), delete");
 }

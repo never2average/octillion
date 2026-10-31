@@ -96,7 +96,7 @@ export async function gtmPhase2Checks({ db, base, adm, json, mockUrl, mockPost, 
   const off = await errOf(adm("POST", "/gtm/apollo/search", { titles: ["CTO"] }));
   assert.ok(off.status === 409 && /Apollo is not connected/.test(off.error), "searching without a key explains itself");
   process.env.APOLLO_API_URL = mockUrl; process.env.APOLLO_MIN_GAP_MS = "0";
-  const apolloCred = await kvm.setCredential("apollo", `apollo_smoke_${stamp}_secret`);
+  const apolloCred = await kvm.addCredential("apollo", `apollo_smoke_${stamp}_secret`);
   const zed = `zed+${stamp}@zeta-${D}.dev`, yan = `yan+${stamp}@zeta-${D}.dev`, xia = `xia+${stamp}@zeta-${D}.dev`;
   await mockPost("/_mock/apollo/people", { people: [
     { id: `ap_z_${stamp}`, first_name: "Zed", last_name: "Zimmer", title: "CTO", seniority: "c_suite", email: zed, email_status: "verified", country_name: "United States", company: "Zeta", domain: `zeta-${D}.dev`, industry: "Computer Software", employees: 120 },
@@ -232,7 +232,7 @@ export async function gtmPhase2Checks({ db, base, adm, json, mockUrl, mockPost, 
   const INBOX = `replies@reply-${D}.octillion.test`;
   await settings.setSettings("smoke", { EMAIL_INBOUND_ADDRESS: INBOX });
   const whsec = `whsec_${randomBytes(24).toString("base64")}`;
-  const hookCred = await kvm.setCredential("resend_webhook", whsec);
+  const hookCred = await kvm.addCredential("resend_webhook", whsec);
   const hook = (body: unknown) => {
     const raw = JSON.stringify(body), sid = `msg_${randomBytes(6).toString("hex")}`, ts = String(Math.floor(Date.now() / 1000));
     const sig = createHmac("sha256", Buffer.from(whsec.replace(/^whsec_/, ""), "base64")).update(`${sid}.${ts}.${raw}`).digest("base64");

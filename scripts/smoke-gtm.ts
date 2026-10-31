@@ -162,7 +162,7 @@ export async function gtmChecks({ db, base, adm, json, mockUrl, mockPost, sentTo
   const annPid = (await db.query<{ provider_id: string }>("SELECT s.provider_id FROM gtm_campaign_sends s JOIN gtm_campaign_recipients r ON r.id = s.recipient_id WHERE r.email = $1 AND s.step = 0", [ann]))[0].provider_id;
   assert.ok(annPid, "the send keeps Resend's id");
   assert.equal((await hook({ type: "email.delivered", data: { email_id: annPid } }, whsec)).status, 503, "no secret in the vault: not set up");
-  const cred = await kvm.setCredential("resend_webhook", whsec);
+  const cred = await kvm.addCredential("resend_webhook", whsec);
   assert.equal((await hook({ type: "email.delivered", data: { email_id: annPid } }, `whsec_${randomBytes(24).toString("base64")}`)).status, 401, "a wrong signature is refused");
   assert.equal((await hook({ type: "email.delivered", data: { email_id: annPid } }, whsec, { ts: Math.floor(Date.now() / 1000) - 3600 })).status, 401, "an old timestamp is refused");
   assert.equal((await json(hook({ type: "email.delivered", created_at: new Date().toISOString(), data: { email_id: annPid } }, whsec))).matched, true);

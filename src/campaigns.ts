@@ -48,7 +48,7 @@ import { getDb } from "./db.js";
 import * as mail from "./email.js";
 import { accountPeople, AdminError, log, STAGES } from "./admin.js";
 import { DIRECT, journeys, requestRows, within, type Journey, type RequestRow } from "./gtm.js";
-import { addCredentialIfAbsent, useCredential } from "./keyvault.js";
+import { addCredentialIfAbsent, credentialSecrets, recordUse, useCredential } from "./keyvault.js";
 import { freshSettings, settingNumber, settingText } from "./settings.js";
 import { capture } from "./telemetry.js";
 import { consentOf, mayEnrol, recordConsent, type ConsentDecision, type ConsentInput } from "./gtm-consent.js";
@@ -697,7 +697,7 @@ async function processEvents(only: number | null, stopAt = Infinity): Promise<{ 
 
 /**
  * HMAC key for unsubscribe links (and reply addresses): its own random secret, generated once into the key vault
- * (provider email_unsubscribe, its one key). Rotating the vault master key re-encrypts it and leaves the value
+ * (provider email_unsubscribe, a singleton: at most one key, never replaced). Rotating the vault master key re-encrypts it and leaves the value
  * alone, so a link keeps working for as long as its recipient row exists, years later included. Cached in the process.
  */
 let unsubKey: Promise<Buffer> | null = null;
@@ -1411,9 +1411,12 @@ export function verifySvix(secret: string, raw: string, h: { id?: string; timest
  * ignored). email.received (Resend's inbound email) is a reply: src/gtm-replies.ts.
  */
 export async function resendWebhook(raw: string, h: { id?: string; timestamp?: string; signature?: string }): Promise<{ status: number; body: Record<string, unknown> }> {
-  const secret = await useCredential(WEBHOOK_PROVIDER).then((c) => c.secret, () => null);
-  if (!secret) return { status: 503, body: { error: "Resend webhooks are not set up: add the signing secret (resend_webhook) on Key vault" } };
-  if (!verifySvix(secret, raw, h)) return { status: 401, body: { error: "Invalid signature" } };
+  // The type may hold several signing secrets (one row each, e.g. during a rotation): any of them may have signed it.
+  const secrets = await credentialSecrets(WEBHOOK_PROVIDER).catch(() => []);
+  if (!secrets.length) return { status: 503, body: { error: "Resend webhooks are not set up: add the signing secret (resend_webhook) on Key vault" } };
+  const signer = secrets.find((c) => verifySvix(c.secret, raw, h));
+  if (!signer) return { status: 401, body: { error: "Invalid signature" } };
+  await recordUse(signer.id).catch(() => {});
   let ev: { type?: string; created_at?: string; data?: { email_id?: string; bounce?: { type?: string } } & replies.InboundEvent };
   try { ev = JSON.parse(raw); } catch { return { status: 400, body: { error: "Not JSON" } }; }
   if (ev.type === "email.received") return replies.receiveInbound(ev.data ?? {}, await unsubscribeKey());

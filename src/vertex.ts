@@ -11,7 +11,7 @@ import { createHash, createSign } from "node:crypto";
  * `model` moves from the body into the URL, `anthropic_version: "vertex-2023-10-16"` goes into the body, and
  * anthropic-beta header values move into the body's `anthropic_beta`. Current models use their first-party ids on
  * Vertex (claude-opus-5-5); `model_map` can override per model. Auth is a Google OAuth token minted from the
- * service-account JSON key stored as the Vertex AI provider's (vertex) one key in the key vault.
+ * service-account JSON key stored as one of the Vertex AI provider's (vertex) keys in the key vault (several are used in turn).
  */
 
 export interface VertexConfig {

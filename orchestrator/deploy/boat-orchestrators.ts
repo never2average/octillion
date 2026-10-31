@@ -46,7 +46,7 @@ function printBudget(b: lib.Budget, l: lib.BoatLimits) {
 async function boatKey(): Promise<void> {
   if (!CFG.token) throw new Error("OCTILLION_WORKER_TOKEN is required");
   const r = (await api("/api/worker/orchestrator/credentials", { json: { orchestrator_id: "launcher" } })) as { boat?: { api_key?: string } | null };
-  if (!r?.boat?.api_key) throw new Error("the credential broker returned no boat key (store one: npm run keyvault -- set boat)");
+  if (!r?.boat?.api_key) throw new Error("the credential broker returned no boat key (store one: npm run keyvault -- add boat)");
   BOAT.apiKey = r.boat.api_key;
 }
 

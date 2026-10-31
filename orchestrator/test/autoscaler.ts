@@ -87,7 +87,7 @@ const kv = await import("../../src/keyvault.js");
 const fleet = await import("../../src/fleet.js");
 const { Autoscaler, AUTOSCALE } = await import("../../src/autoscaler.js");
 const db = await getDb();
-await kv.setCredential("boat", BOAT_KEY);
+await kv.addCredential("boat", BOAT_KEY);
 const { org } = await createOrg("Autoscale Test", "astest");
 const O = org;
 await q.saveProduct(O, { name: "left-pad", packages: ["left-pad"] });

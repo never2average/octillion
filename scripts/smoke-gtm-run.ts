@@ -26,7 +26,7 @@ const token = (await createAdminToken({ label: "smoke", role: "owner", days: 1, 
 const adm = (method: string, path: string, body?: unknown) => fetch(`${base}/api/admin/onboarding${path}`, {
   method, headers: { authorization: `Bearer ${token}`, "x-admin-actor": "smoke", "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
 const json = async (r: Response | Promise<Response>) => { const x = await r; const j = await x.json(); assert.ok(x.ok, `${x.status} ${JSON.stringify(j)}`); return j; };
-await (await import("../src/keyvault.js")).setCredential("resend", `re_smoke_${stamp}_secret`);
+await (await import("../src/keyvault.js")).addCredential("resend", `re_smoke_${stamp}_secret`);
 await (await import("../src/settings.js")).setSettings("smoke", { EMAIL_ADMIN_TO: `ops+${stamp}@octillion.test` });
 const sentTo = (to: string, kind?: string) => mock.state.emails.filter((e: any) => e.to.includes(to.toLowerCase()) && (!kind || e.tags?.[0]?.value === kind));
 const mockPost = async (path: string, body: unknown = {}) => (await fetch(`${mock.url}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })).json();

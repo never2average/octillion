@@ -209,14 +209,14 @@ export const ADMIN_TOOLS = {
   },
   key_vault_status: {
     title: "Key vault", needs: "read",
-    description: "Model, sandbox and service keys: at most one key per provider (key type). Each provider (mode, backend, whether it has a key) and each key's hint, uses, last use and when it was added or replaced. Never a secret.",
+    description: "Model, sandbox and service keys, one row per key: each key has one type (provider), and a type may hold several keys, used least recently used first. Each key's id, name, type, hint (or service-account email and project), uses, last use and when it was added or rotated; each provider's mode, backend and key count. Never a secret.",
     input: {},
     run: async () => {
       const k = await library.modelKeys();
-      return { unlocked: k.unlocked, providers: k.providers.map((p) => pick(p, ["slug", "mode", "backend", "has_key", "last_used_at", "env_set"])),
-        credentials: k.credentials.map((c: any) => pick(c, ["id", "provider", "hint", "uses", "last_used_at", "created_at", "rotated_at", "project_id", "client_email"])) };
+      return { unlocked: k.unlocked, providers: k.providers.map((p) => pick(p, ["slug", "name", "mode", "backend", "has_key", "keys", "env_set"])),
+        keys: k.credentials.map((c: any) => pick(c, ["id", "name", "provider", "type_name", "hint", "uses", "last_used_at", "created_at", "rotated_at", "project_id", "client_email"])) };
     },
-    summary: (d) => `${d.unlocked ? "Unlocked" : "LOCKED (OCTILLION_VAULT_KEY unset)"}; ${d.credentials.length} key(s), one per provider: ${d.credentials.map((c: any) => c.provider).join(", ") || "none"}; ${d.providers.filter((p: any) => !p.has_key).length} provider(s) without a key.`,
+    summary: (d) => `${d.unlocked ? "Unlocked" : "LOCKED (OCTILLION_VAULT_KEY unset)"}; ${d.keys.length} key(s)${d.keys.length ? `: ${d.keys.map((c: any) => `${c.name} (${c.provider})`).join(", ")}` : ""}; ${d.providers.filter((p: any) => !p.has_key).length} provider(s) without a key.`,
   },
   library_stats: {
     title: "Library", needs: "read",

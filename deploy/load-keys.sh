@@ -9,7 +9,7 @@
 #          --no-verify (skip the provider check), --force (store even if verification fails).
 #
 # Keys never touch argv, shell history, the terminal or logs: they are read silently and piped over stdin into
-# `scripts/keyvault.ts set` inside the running server container, which encrypts them with OCTILLION_VAULT_KEY.
+# `scripts/keyvault.ts add` inside the running server container, which encrypts them with OCTILLION_VAULT_KEY.
 # Verification calls each provider's read-only "list models" (or boat's /limits) endpoint, passing the key as a
 # header via stdin (curl -H @-), so it is not visible in the process list either.
 set -euo pipefail
@@ -85,10 +85,11 @@ store() {
          else echo "    skipped (use --force to store unverified keys)"; return 0; fi ;;
     esac
   fi
-  printf %s "$key" | vault set "$provider" | sed 's/^/    /'
+  # Always a new row; a key already in the vault is refused and the rest carry on.
+  { printf %s "$key" | vault add "$provider" 2>&1 || true; } | sed 's/^/    /'
 }
 
-echo "Loading keys into the '$PROJECT' key vault (one key per provider: a provider that has one gets it replaced)."
+echo "Loading keys into the '$PROJECT' key vault (each key is added as its own row; one already there is refused)."
 while IFS='|' read -r provider var what; do
   [ -n "$provider" ] || continue
   if [ "$MODE" = env ]; then
@@ -120,7 +121,7 @@ else
 fi
 if [ -n "${project:-}" ]; then
   [ -r "$safile" ] || { echo "    cannot read service-account key at '$safile'" >&2; exit 1; }
-  docker compose -p "$PROJECT" exec -T octillion node --import tsx scripts/keyvault.ts set vertex < "$safile" | sed 's/^/    /'
+  docker compose -p "$PROJECT" exec -T octillion node --import tsx scripts/keyvault.ts add vertex < "$safile" | sed 's/^/    /'
   docker compose -p "$PROJECT" exec -T octillion node --import tsx scripts/keyvault.ts provider anthropic --backend vertex \
     --vertex-project "$project" --vertex-region "$region" >/dev/null && echo "    anthropic now routes through Vertex AI ($project, $region)"
 fi

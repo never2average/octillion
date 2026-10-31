@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes } from "node:crypto";
 import { getDb } from "./db.js";
 import { asPlatform } from "./tenant-scope.js";
 
@@ -67,7 +67,7 @@ export function hint(secret: string): string {
 
 /** The vault provider that holds Google Cloud service-account keys for Claude (and Gemini) on Vertex AI. */
 export const VERTEX_PROVIDER = "vertex";
-/** The generated HMAC key for unsubscribe links (src/campaigns.ts): only ever added once, never replaced. */
+/** The generated HMAC key for unsubscribe links (src/campaigns.ts): a singleton, only ever added once, never replaced. */
 export const UNSUBSCRIBE_SIGNING_PROVIDER = "email_unsubscribe";
 
 export interface ServiceAccountInfo { project_id: string; client_email: string }
@@ -142,15 +142,15 @@ export async function providersForEnv(envVars: string[]): Promise<ProviderRow[]>
   });
 }
 
-/** Whether the vault holds this provider's (key type's) key. */
+/** Whether the vault holds at least one key of this provider (key type). */
 export async function hasCredential(provider: string): Promise<boolean> {
   // The vault is platform data, out of a tenant's reach (src/tenant-scope.ts): read as the platform.
   return asPlatform(async () => (await (await getDb()).query("SELECT 1 FROM vault_credentials WHERE provider = $1", [provider])).length > 0);
 }
 
 /**
- * Of these gateway providers, the ones the gateway can serve right now. A provider on a Vertex backend needs the
- * Vertex AI provider's key; any other needs its own key and an upstream URL, except Claude (anthropic), which falls
+ * Of these gateway providers, the ones the gateway can serve right now. A provider on a Vertex backend needs a
+ * Vertex AI key; any other needs a key of its own and an upstream URL, except Claude (anthropic), which falls
  * back to Vertex AI when the vault has a Vertex key and no Anthropic key. The same rules as the gateway, read without
  * using a key.
  */
@@ -162,18 +162,81 @@ export async function providersWithKeys(rows: ProviderRow[]): Promise<Set<string
     : (keyed.has(p.slug) && !!p.upstream_url) || (p.slug === "anthropic" && keyed.has(VERTEX_PROVIDER))).map((p) => p.slug));
 }
 
-// ---------- credentials: one key per provider ----------
+// ---------- credentials: one row per key ----------
+// A key type (provider) may hold several keys, each its own row. Adding a key always creates a row; a key is replaced
+// on its own row or deleted, never disabled. Requests pick among a type's keys least recently used first.
 
-export interface SavedCredential { id: number; provider: string; hint: string; replaced: boolean; project_id?: string; client_email?: string }
+/** Display names for the vault's provider ids (the admin page, the CLI, automatic key names). */
+const PROVIDER_NAMES: Record<string, string> = {
+  anthropic: "Anthropic", openai: "OpenAI", google: "Google Gemini", cloudflare: "Cloudflare Workers AI", dashscope: "Alibaba DashScope",
+  vertex: "Vertex AI", boat: "boat.dev", exa: "Exa", libraries_io: "Libraries.io", resend: "Resend", amp: "Amp", cursor: "Cursor",
+  factory: "Factory", github_copilot: "GitHub Copilot", apollo: "Apollo", slack: "Slack", resend_webhook: "Resend Webhook",
+  email_unsubscribe: "Email Unsubscribe Signing",
+};
+/** A provider's display name; Title Case of the id for one the map does not know ("smoke_llm" → "Smoke Llm"). */
+export const providerName = (slug: string) => PROVIDER_NAMES[slug]
+  ?? slug.replace(/[_-]+/g, " ").trim().split(/\s+/).map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
 
-/** Store a provider's key; a provider that already has one has it replaced (rotated_at is set). */
-export async function setCredential(provider: string, secret: string): Promise<SavedCredential> {
-  return (await storeCredential(provider, secret, false))!;
+/**
+ * A digest of a key's plaintext, to refuse the same key twice for a type without decrypting every row: HMAC-SHA256
+ * under a subkey of the master key that encrypted the row, so a database dump alone cannot test guesses against it.
+ * A row's digest always uses the same master key as its ciphertext (rekey recomputes both).
+ */
+function digestWith(master: Buffer, secret: string): string {
+  const sub = createHmac("sha256", master).update("octillion-vault/secret-digest/v1").digest();
+  return createHmac("sha256", sub).update(secret).digest("hex");
 }
-/** Store a key only when the provider has none (never overwrites); null when it had one. */
-export const addCredentialIfAbsent = (provider: string, secret: string) => storeCredential(provider, secret, true);
+/** The digest for a row encrypted under master key `keyIdOf`; null when that key is not loaded. */
+function digestFor(keyIdOf: string, secret: string): string | null {
+  const k = masterKeys().byId.get(keyIdOf);
+  return k ? digestWith(k, secret) : null;
+}
+/** The digest of a secret under every loaded master key (current and previous), for the duplicate check. */
+const digestCandidates = (secret: string) => [...masterKeys().byId.values()].map((k) => digestWith(k, secret));
 
-async function storeCredential(provider: string, secret: string, insertOnly: boolean): Promise<SavedCredential | null> {
+const isUniqueViolation = (e: unknown) => (e as { code?: string })?.code === "23505" || /unique|duplicate key/i.test(String((e as Error)?.message));
+const duplicateError = (provider: string, name?: string | null) =>
+  Object.assign(new Error(`This key is already in the vault${name ? ` (${name})` : ""}: the same ${providerName(provider)} key cannot be added twice`), { status: 409 });
+
+interface EncRow { id: number; ciphertext: string; iv: string; tag: string; key_id: string; secret_digest: string | null }
+
+/** Fill a row's missing digest from its plaintext (rows stored before migration 0012). Leaves it null on a clash. */
+async function fillDigest(row: EncRow, secret: string): Promise<boolean> {
+  if (row.secret_digest) return true;
+  const d = digestFor(row.key_id, secret);
+  if (!d) return false;
+  try {
+    const r = await (await getDb()).query("UPDATE vault_credentials SET secret_digest = $2 WHERE id = $1 AND secret_digest IS NULL RETURNING id", [row.id, d]);
+    return r.length > 0;
+  } catch (e) {
+    // An identical older row of the same type already has this digest: leave this one null (both still work).
+    if (!isUniqueViolation(e)) throw e;
+    return false;
+  }
+}
+
+/** The row of this type that already holds this exact secret (other than `exceptId`), filling missing digests on the way. */
+async function findSameSecret(provider: string, secret: string, exceptId: number | null): Promise<{ id: number; label: string | null } | null> {
+  const db = await getDb();
+  // Rows without a digest yet are decrypted and compared directly (and get their digest).
+  const legacy = await db.query<EncRow & { label: string | null }>(
+    "SELECT id, ciphertext, iv, tag, key_id, secret_digest, label FROM vault_credentials WHERE provider = $1 AND secret_digest IS NULL ORDER BY id", [provider]);
+  let hit: { id: number; label: string | null } | null = null;
+  for (const r of legacy) {
+    let plain: string;
+    try { plain = decrypt(r); } catch { continue; } // encrypted with a master key no longer loaded: cannot compare
+    await fillDigest(r, plain);
+    if (plain === secret && r.id !== exceptId) hit ??= { id: r.id, label: r.label };
+  }
+  if (hit) return hit;
+  const [row] = await db.query<{ id: number; label: string | null }>(
+    "SELECT id, label FROM vault_credentials WHERE provider = $1 AND secret_digest = ANY($2::text[]) AND ($3::int IS NULL OR id <> $3) ORDER BY id LIMIT 1",
+    [provider, digestCandidates(secret), exceptId]);
+  return row ?? null;
+}
+
+/** The checks every stored key passes; returns the trimmed secret and its service-account details (Vertex AI). */
+async function checkSecret(provider: string, secret: string, generated: boolean) {
   const p = await getProvider(provider);
   if (!p) throw new Error(`Unknown provider ${provider}; add it first (keyvault provider ...)`);
   // A direct-mode key is handed to agent sessions as is; refuse to store one unless that is explicitly allowed.
@@ -182,59 +245,162 @@ async function storeCredential(provider: string, secret: string, insertOnly: boo
     throw new Error(`${provider} is a direct-mode provider: its real key would be handed to agent sessions. ` +
                     "Set OCTILLION_DIRECT_KEYS=allow only once those sessions run without customer-written tasks (docs/security.md)");
   // The unsubscribe signing key is generated once (src/campaigns.ts, addCredentialIfAbsent) and signs every unsubscribe
-  // link already sent: replacing it would break them all, so nothing replaces it (delete it to have a new one generated).
-  if (provider === UNSUBSCRIBE_SIGNING_PROVIDER && !insertOnly)
-    throw new Error("The email unsubscribe signing key cannot be replaced: every unsubscribe link already sent is signed with it. It is generated automatically; delete it only if those links may stop working");
+  // link already sent: replacing it, or adding another, would break them, so only its generator stores it.
+  if (provider === UNSUBSCRIBE_SIGNING_PROVIDER && !generated)
+    throw new Error("The email unsubscribe signing key cannot be replaced or added: every unsubscribe link already sent is signed with it. It is generated automatically; delete it only if those links may stop working");
   const s = secret.trim();
   if (s.length < 8) throw new Error("That does not look like a credential");
   // The Vertex AI key is a Google service-account key, checked in full.
   const meta: ServiceAccountInfo | null = provider === VERTEX_PROVIDER ? checkServiceAccount(s) : null;
+  return { s, meta };
+}
+
+/** An automatic name for a new key of this type: "Vertex AI key", then "Vertex AI key 2", "Vertex AI key 3", ... */
+async function autoName(provider: string): Promise<string> {
+  const base = `${providerName(provider)} key`;
+  const rows = await (await getDb()).query<{ label: string | null }>("SELECT label FROM vault_credentials WHERE provider = $1", [provider]);
+  const taken = new Set(rows.map((r) => r.label));
+  for (let n = rows.length + 1; ; n++) {
+    const name = n === 1 ? base : `${base} ${n}`;
+    if (!taken.has(name)) return name;
+  }
+}
+
+const cleanName = (name: string | null | undefined) => {
+  const n = (name ?? "").replace(/\s+/g, " ").trim();
+  if (n.length > 80) throw new Error("A key name is at most 80 characters");
+  return n || null;
+};
+
+export interface SavedCredential { id: number; provider: string; name: string; hint: string; project_id?: string; client_email?: string }
+
+const saved = (id: number, provider: string, name: string, s: string, meta: ServiceAccountInfo | null): SavedCredential =>
+  ({ id, provider, name, hint: hint(s), ...(meta ? { project_id: meta.project_id, client_email: meta.client_email } : {}) });
+
+/**
+ * Add a key as a new row of its type (never replaces another). The exact same secret already stored for the type is
+ * refused (status 409). `name` is optional; without one the key gets an automatic "<Type> key N".
+ */
+export async function addCredential(provider: string, secret: string, opts: { name?: string | null } = {}): Promise<SavedCredential> {
+  const { s, meta } = await checkSecret(provider, secret, false);
+  const name = cleanName(opts.name) ?? await autoName(provider);
+  const same = await findSameSecret(provider, s, null);
+  if (same) throw duplicateError(provider, same.label);
   const enc = encrypt(s);
-  const [row] = await (await getDb()).query<{ id: number; replaced: boolean }>(
-    `INSERT INTO vault_credentials (provider, ciphertext, iv, tag, key_id, hint, meta)
-     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
-     ON CONFLICT (provider) DO ${insertOnly ? "NOTHING" : `UPDATE SET ciphertext = excluded.ciphertext, iv = excluded.iv, tag = excluded.tag,
-       key_id = excluded.key_id, hint = excluded.hint, meta = excluded.meta, rotated_at = now()`}
-     RETURNING id, (xmax <> 0) AS replaced`,
-    [provider, enc.ciphertext, enc.iv, enc.tag, enc.key_id, hint(s), meta ? JSON.stringify(meta) : null],
-  );
-  if (!row) return null; // insertOnly and the provider already has a key: left alone
-  return { id: row.id, provider, hint: hint(s), replaced: Boolean(row.replaced), ...(meta ? { project_id: meta.project_id, client_email: meta.client_email } : {}) };
+  try {
+    const [row] = await (await getDb()).query<{ id: number }>(
+      `INSERT INTO vault_credentials (provider, label, ciphertext, iv, tag, key_id, hint, meta, secret_digest)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9) RETURNING id`,
+      [provider, name, enc.ciphertext, enc.iv, enc.tag, enc.key_id, hint(s), meta ? JSON.stringify(meta) : null, digestFor(enc.key_id, s)]);
+    return saved(row!.id, provider, name, s, meta);
+  } catch (e) {
+    if (isUniqueViolation(e)) throw duplicateError(provider); // the same key added at the same moment
+    throw e;
+  }
+}
+
+/**
+ * Store a key only when its type has none at all (never adds a second, never overwrites); null when it had one. Used
+ * by the one-time environment import and the unsubscribe key's generator (a singleton: replicas racing on the first
+ * one all end up with the winner's).
+ */
+export async function addCredentialIfAbsent(provider: string, secret: string): Promise<SavedCredential | null> {
+  const { s, meta } = await checkSecret(provider, secret, true);
+  const enc = encrypt(s);
+  const name = `${providerName(provider)} key`;
+  const [row] = await (await getDb()).query<{ id: number }>(
+    `INSERT INTO vault_credentials (provider, label, ciphertext, iv, tag, key_id, hint, meta, secret_digest)
+     SELECT $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9
+      WHERE NOT EXISTS (SELECT 1 FROM vault_credentials WHERE provider = $1)
+     ON CONFLICT DO NOTHING RETURNING id`,
+    [provider, name, enc.ciphertext, enc.iv, enc.tag, enc.key_id, hint(s), meta ? JSON.stringify(meta) : null, digestFor(enc.key_id, s)]);
+  return row ? saved(row.id, provider, name, s, meta) : null;
+}
+
+/** Replace one key's secret on its own row (rotated_at set); the type's other keys are untouched. */
+export async function replaceCredential(id: number, secret: string): Promise<SavedCredential> {
+  const db = await getDb();
+  const [cur] = await db.query<{ provider: string; label: string | null }>("SELECT provider, label FROM vault_credentials WHERE id = $1", [id]);
+  if (!cur) throw Object.assign(new Error(`No credential ${id}`), { status: 404 });
+  const { s, meta } = await checkSecret(cur.provider, secret, false);
+  const same = await findSameSecret(cur.provider, s, id);
+  if (same) throw duplicateError(cur.provider, same.label);
+  const enc = encrypt(s);
+  let row: { id: number } | undefined;
+  try {
+    [row] = await db.query<{ id: number }>(
+      `UPDATE vault_credentials SET ciphertext = $2, iv = $3, tag = $4, key_id = $5, hint = $6, meta = $7::jsonb, secret_digest = $8, rotated_at = now()
+        WHERE id = $1 RETURNING id`,
+      [id, enc.ciphertext, enc.iv, enc.tag, enc.key_id, hint(s), meta ? JSON.stringify(meta) : null, digestFor(enc.key_id, s)]);
+  } catch (e) {
+    if (isUniqueViolation(e)) throw duplicateError(cur.provider);
+    throw e;
+  }
+  if (!row) throw Object.assign(new Error(`No credential ${id}`), { status: 404 });
+  return saved(id, cur.provider, cur.label ?? `${providerName(cur.provider)} key`, s, meta);
 }
 
 export interface CredentialRow {
-  id: number; provider: string; hint: string; uses: number | string; last_used_at: Date | null; created_at: Date; rotated_at: Date | null;
+  id: number; provider: string; name: string; hint: string; uses: number | string; last_used_at: Date | null; created_at: Date; rotated_at: Date | null;
   key_id: string; meta: { project_id?: string; client_email?: string } | null;
 }
-/** Every key, one per provider: hints and usage only, never a secret. */
+/** Every key, one row each: hints and usage only, never a secret. A key without a name gets "<Type> key N" by age. */
 export async function listCredentials(): Promise<CredentialRow[]> {
-  return (await getDb()).query<CredentialRow>(
-    "SELECT id, provider, hint, uses, last_used_at, created_at, rotated_at, key_id, meta FROM vault_credentials ORDER BY provider");
+  const rows = await (await getDb()).query<Omit<CredentialRow, "name"> & { label: string | null; n: number | string }>(
+    `SELECT id, provider, label, hint, uses, last_used_at, created_at, rotated_at, key_id, meta,
+            row_number() OVER (PARTITION BY provider ORDER BY id) AS n
+       FROM vault_credentials ORDER BY provider, id`);
+  return rows.map(({ label, n, ...r }) => ({ ...r, name: label ?? `${providerName(r.provider)} key${Number(n) > 1 ? ` ${n}` : ""}` }));
 }
 
 /** Delete a key; returns what it was (for the audit log). */
-export async function deleteCredential(id: number): Promise<{ id: number; provider: string; hint: string }> {
-  const [row] = await (await getDb()).query<{ id: number; provider: string; hint: string }>(
-    "DELETE FROM vault_credentials WHERE id = $1 RETURNING id, provider, hint", [id]);
-  if (!row) throw new Error(`No credential ${id}`);
+export async function deleteCredential(id: number): Promise<{ id: number; provider: string; hint: string; name: string | null }> {
+  const [row] = await (await getDb()).query<{ id: number; provider: string; hint: string; name: string | null }>(
+    "DELETE FROM vault_credentials WHERE id = $1 RETURNING id, provider, hint, label AS name", [id]);
+  if (!row) throw Object.assign(new Error(`No credential ${id}`), { status: 404 });
   return row;
 }
 
-/** The provider's one key, counted as a use. Throws (status 503) when the provider has none. */
+/**
+ * One of the provider's keys, counted as a use: the least recently used one (never used first, then the oldest last
+ * use; ties by id), so a type's keys take turns. Throws (status 503) when the provider has none.
+ */
 export async function useCredential(provider: string): Promise<{ id: number; secret: string }> {
   // The vault is platform data, out of a tenant's reach (src/tenant-scope.ts): read as the platform.
   return asPlatform(async () => {
-    const [row] = await (await getDb()).query<{ id: number; ciphertext: string; iv: string; tag: string; key_id: string }>(
-      `UPDATE vault_credentials SET uses = uses + 1, last_used_at = now() WHERE provider = $1
-        RETURNING id, ciphertext, iv, tag, key_id`, [provider]);
+    const [row] = await (await getDb()).query<EncRow>(
+      `UPDATE vault_credentials SET uses = uses + 1, last_used_at = clock_timestamp()
+        WHERE id = (SELECT id FROM vault_credentials WHERE provider = $1 ORDER BY last_used_at ASC NULLS FIRST, id LIMIT 1)
+        RETURNING id, ciphertext, iv, tag, key_id, secret_digest`, [provider]);
     if (!row) throw Object.assign(new Error(`No ${provider} credential in the vault`), { status: 503 });
-    return { id: row.id, secret: decrypt(row) };
+    const secret = decrypt(row);
+    await fillDigest(row, secret).catch(() => false); // best effort: the key works either way
+    return { id: row.id, secret };
   });
 }
 
 /**
- * The Google service-account key every Vertex backend signs in with: the Vertex AI provider's key (anthropic or
- * google on backend=vertex, and Claude's fallback when there is no Anthropic key). No other provider holds one.
+ * Every key of a type, not counted as a use: for checking something against each of them (a webhook signature that
+ * any of the type's secrets may have made). Count the one that matched with recordUse.
+ */
+export async function credentialSecrets(provider: string): Promise<{ id: number; secret: string }[]> {
+  // The vault is platform data, out of a tenant's reach (src/tenant-scope.ts): read as the platform.
+  return asPlatform(async () => {
+    const rows = await (await getDb()).query<EncRow>(
+      "SELECT id, ciphertext, iv, tag, key_id, secret_digest FROM vault_credentials WHERE provider = $1 ORDER BY last_used_at DESC NULLS LAST, id", [provider]);
+    return rows.map((r) => ({ id: r.id, secret: decrypt(r) }));
+  });
+}
+/** Count a use of one key (after credentialSecrets found it was the one). */
+export async function recordUse(id: number): Promise<void> {
+  // The vault is platform data, out of a tenant's reach (src/tenant-scope.ts): read as the platform.
+  await asPlatform(async () => (await getDb()).query("UPDATE vault_credentials SET uses = uses + 1, last_used_at = clock_timestamp() WHERE id = $1", [id]));
+}
+
+/**
+ * The Google service-account key a Vertex backend signs in with: one of the Vertex AI provider's (vertex) keys, least
+ * recently used first like any other type (anthropic or google on backend=vertex, and Claude's fallback when there is
+ * no Anthropic key). No other provider holds one.
  */
 export async function useVertexCredential(): Promise<{ id: number; secret: string }> {
   return useCredential(VERTEX_PROVIDER).catch(() => {
@@ -242,16 +408,28 @@ export async function useVertexCredential(): Promise<{ id: number; secret: strin
   });
 }
 
-/** Re-encrypt every credential with the current master key (after rotating OCTILLION_VAULT_KEY). */
+/** Fill the digest of every key stored before migration 0012 (the duplicate check); returns how many were filled. */
+export async function backfillDigests(): Promise<number> {
+  const rows = await (await getDb()).query<EncRow>("SELECT id, ciphertext, iv, tag, key_id, secret_digest FROM vault_credentials WHERE secret_digest IS NULL ORDER BY id");
+  let n = 0;
+  for (const r of rows) if (await fillDigest(r, decrypt(r))) n++;
+  return n;
+}
+
+/** Re-encrypt every credential with the current master key (after rotating OCTILLION_VAULT_KEY); digests follow. */
 export async function rekey() {
   const db = await getDb();
   const { currentId } = masterKeys();
   const rows = await db.query<{ id: number; ciphertext: string; iv: string; tag: string; key_id: string }>(
     "SELECT id, ciphertext, iv, tag, key_id FROM vault_credentials WHERE key_id <> $1", [currentId]);
   for (const r of rows) {
-    const enc = encrypt(decrypt(r));
-    await db.query("UPDATE vault_credentials SET ciphertext = $2, iv = $3, tag = $4, key_id = $5 WHERE id = $1", [r.id, enc.ciphertext, enc.iv, enc.tag, enc.key_id]);
+    const plain = decrypt(r);
+    const enc = encrypt(plain);
+    // The digest moves to the new master key with the ciphertext; it is filled again just below.
+    await db.query("UPDATE vault_credentials SET ciphertext = $2, iv = $3, tag = $4, key_id = $5, secret_digest = NULL WHERE id = $1",
+      [r.id, enc.ciphertext, enc.iv, enc.tag, enc.key_id]);
   }
+  await backfillDigests();
   // Organizations' data keys (src/orgcrypto.ts) are wrapped by the master key too.
   await (await import("./orgcrypto.js")).rewrapOrgKeys();
   return rows.length;

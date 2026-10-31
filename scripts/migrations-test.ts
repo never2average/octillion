@@ -222,7 +222,10 @@ async function suite(kind: "pglite" | "postgres") {
     await key("resend", "default", false, 1);                      // only a disabled key: the provider ends with none
     await db.query("UPDATE vault_providers SET enabled = false WHERE slug IN ('cloudflare', 'dashscope')");
     await db.query(`UPDATE vault_providers SET backend = 'vertex', backend_config = '{"credential_provider": "anthropic", "region": "global"}' WHERE slug = 'google'`);
-    assert.deepEqual((await runMigrations(db)).applied.filter((x) => x.startsWith("0011")), ["0011_vault_one_key"], "0011 applies on a database at 0010");
+    const only11 = path.join(tmp, `only11-${kind}`); // 0012 would undo what is checked here (it has its own test below)
+    cpSync(MIGRATIONS_DIR, only11, { recursive: true });
+    for (const m of await loadMigrations()) if (m.version > 11) rmSync(path.join(only11, `${String(m.version).padStart(4, "0")}_${m.name}.sql`));
+    assert.deepEqual((await runMigrations(db, { dir: only11 })).applied.filter((x) => x.startsWith("0011")), ["0011_vault_one_key"], "0011 applies on a database at 0010");
     const rows = await db.query<{ id: number; provider: string; label: string; enabled: boolean; priority: number }>("SELECT id, provider, label, enabled, priority FROM vault_credentials ORDER BY provider");
     assert.deepEqual(rows.map((r) => [r.provider, r.id]), [["anthropic", anthNewest], ["openai", openaiRotated], ["vertex", anthVertex]], "one key per provider: the newest kept, the Vertex key moved, disabled keys gone");
     assert.ok(rows.every((r) => r.label === "default" && r.enabled && r.priority === 0), "label, enabled and priority are inert");
@@ -231,6 +234,42 @@ async function suite(kind: "pglite" | "postgres") {
     assert.equal((await db.query("SELECT 1 FROM vault_providers WHERE NOT enabled")).length, 0, "every provider is on");
     const [g] = await db.query<{ backend_config: Record<string, unknown> }>("SELECT backend_config FROM vault_providers WHERE slug = 'google'");
     assert.deepEqual(g!.backend_config, { region: "global" }, "credential_provider is gone; the rest of backend_config stays");
+    await db.drop();
+  }
+
+  // 0012 (one row per key) on a database at 0011 shaped like production: seven keys, one per provider, label 'default'.
+  // Every key stays as it was (same id, ciphertext, usage); labels become "no name"; UNIQUE (provider) is gone so a
+  // type takes a second key; the same digest twice for a type is refused; the unsubscribe key stays a singleton.
+  {
+    const db = await fresh(kind);
+    const upTo11 = path.join(tmp, `upto11-${kind}`);
+    cpSync(MIGRATIONS_DIR, upTo11, { recursive: true });
+    for (const m of await loadMigrations()) if (m.version > 11) rmSync(path.join(upTo11, `${String(m.version).padStart(4, "0")}_${m.name}.sql`));
+    await runMigrations(db, { dir: upTo11 });
+    await db.query("INSERT INTO vault_providers (slug, mode) VALUES ('email_unsubscribe', 'direct'), ('resend_webhook', 'direct') ON CONFLICT (slug) DO NOTHING");
+    const PROD = ["anthropic", "vertex", "boat", "cloudflare", "resend", "resend_webhook", "email_unsubscribe"];
+    for (const [i, provider] of PROD.entries())
+      await db.query(
+        `INSERT INTO vault_credentials (provider, ciphertext, iv, tag, key_id, hint, uses, last_used_at, created_at, meta)
+         VALUES ($1::text, 'c-' || $1::text, 'i', 't', 'k', $1::text || '…hint', $2::int, now() - make_interval(hours => $2::int), now() - make_interval(days => $2::int), $3::jsonb)`,
+        [provider, i + 1, provider === "vertex" ? JSON.stringify({ project_id: "proj", client_email: "sa@proj.iam.gserviceaccount.com" }) : null]);
+    const before = await db.query<Record<string, unknown>>("SELECT id, provider, ciphertext, hint, uses, last_used_at, created_at, rotated_at, meta FROM vault_credentials ORDER BY id");
+    assert.equal(before.length, 7);
+    await assert.rejects(db.query("INSERT INTO vault_credentials (provider, ciphertext, iv, tag, key_id, hint) VALUES ('vertex', 'x', 'x', 'x', 'x', 'x')"), /unique|duplicate/i, "at 0011 a second key for a type is refused");
+    assert.deepEqual((await runMigrations(db)).applied.filter((x) => x.startsWith("0012")), ["0012_vault_row_per_key"], "0012 applies on a database at 0011");
+    const after = await db.query<Record<string, unknown>>("SELECT id, provider, ciphertext, hint, uses, last_used_at, created_at, rotated_at, meta FROM vault_credentials ORDER BY id");
+    assert.deepEqual(after, before, "every key kept as it was: id, ciphertext, hint, usage, dates, meta");
+    const extra = await db.query<{ label: string | null; secret_digest: string | null }>("SELECT label, secret_digest FROM vault_credentials");
+    assert.ok(extra.every((r) => r.label === null && r.secret_digest === null), "labels become 'no name'; digests wait for the plaintext");
+    const [v2] = await db.query<{ id: number }>("INSERT INTO vault_credentials (provider, ciphertext, iv, tag, key_id, hint, secret_digest) VALUES ('vertex', 'x', 'x', 'x', 'x', 'x', 'd1') RETURNING id");
+    assert.ok(v2, "a second Vertex AI key is its own row");
+    await db.query("INSERT INTO vault_credentials (provider, ciphertext, iv, tag, key_id, hint, label) VALUES ('vertex', 'y', 'y', 'y', 'y', 'y', 'Vertex AI key')");
+    await db.query("INSERT INTO vault_credentials (provider, ciphertext, iv, tag, key_id, hint, label) VALUES ('vertex', 'z', 'z', 'z', 'z', 'z', 'Vertex AI key')");
+    assert.equal(Number((await db.query<{ n: number }>("SELECT count(*)::int AS n FROM vault_credentials WHERE provider = 'vertex'"))[0]!.n), 4, "names are not a uniqueness key");
+    await assert.rejects(db.query("INSERT INTO vault_credentials (provider, ciphertext, iv, tag, key_id, hint, secret_digest) VALUES ('vertex', 'x', 'x', 'x', 'x', 'x', 'd1')"), /unique|duplicate/i, "the same key twice for a type is refused");
+    await db.query("INSERT INTO vault_credentials (provider, ciphertext, iv, tag, key_id, hint, secret_digest) VALUES ('anthropic', 'x', 'x', 'x', 'x', 'x', 'd1')"); // another type: fine
+    await assert.rejects(db.query("INSERT INTO vault_credentials (provider, ciphertext, iv, tag, key_id, hint) VALUES ('email_unsubscribe', 'x', 'x', 'x', 'x', 'x')"), /unique|duplicate/i, "one unsubscribe key at most");
+    await oldBoot(db, readFileSync(path.join(MIGRATIONS_DIR, "0012_vault_row_per_key.sql"), "utf8")); // idempotent
     await db.drop();
   }
 

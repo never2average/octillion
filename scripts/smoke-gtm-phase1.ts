@@ -230,7 +230,7 @@ export async function gtmPhase1Checks({ db, base, adm, json, mockUrl, mockPost, 
   const INBOX = `replies@reply-${stamp}.octillion.test`;
   await settings.setSettings("smoke", { EMAIL_INBOUND_ADDRESS: INBOX });
   const whsec = `whsec_${randomBytes(24).toString("base64")}`;
-  const hookCred = await kvm.setCredential("resend_webhook", whsec);
+  const hookCred = await kvm.addCredential("resend_webhook", whsec);
   const hook = (body: unknown) => {
     const raw = JSON.stringify(body), sid = `msg_${randomBytes(6).toString("hex")}`, ts = String(Math.floor(Date.now() / 1000));
     const sig = createHmac("sha256", Buffer.from(whsec.replace(/^whsec_/, ""), "base64")).update(`${sid}.${ts}.${raw}`).digest("base64");

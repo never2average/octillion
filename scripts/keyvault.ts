@@ -2,12 +2,13 @@
 // out of shell history and process listings.
 //   npm run keyvault -- gen-master-key
 //   npm run keyvault -- providers
-//   printf %s "$ANTHROPIC_KEY" | npm run keyvault -- set anthropic        (one key per provider: replaces the one it has)
-//   npm run keyvault -- set boat --from-file /secure/boat.env      (KEY=value files: the value is used)
-//   npm run keyvault -- list | delete <id> | rekey | usage
+//   printf %s "$ANTHROPIC_KEY" | npm run keyvault -- add anthropic [--name "Team key"]   (always a new row; `set` = add)
+//   printf %s "$NEW_KEY" | npm run keyvault -- replace <id>          (that row only; rotated_at set)
+//   npm run keyvault -- add boat --from-file /secure/boat.env      (KEY=value files: the value is used)
+//   npm run keyvault -- list | delete <id> | rekey | backfill-digests | usage
 //   npm run keyvault -- provider <slug> --mode gateway --upstream https://... --header x-api-key --prefix "" --env FOO_API_KEY
 //   npm run keyvault -- provider anthropic --backend vertex --vertex-project my-gcp-project [--vertex-region global]
-//   npm run keyvault -- set vertex < service-account.json        (the Vertex AI key every Vertex backend signs in with)
+//   npm run keyvault -- add vertex < service-account.json        (a Vertex AI key; several are used in turn)
 //   npm run keyvault -- provider anthropic --backend direct                     (back to api.anthropic.com)
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -53,19 +54,33 @@ async function main() {
       }));
       return;
     }
-    case "set": {
-      if (!rest[0] || rest[0].startsWith("--")) throw new Error("Usage: keyvault set <provider> < secret   (replaces the provider's key when it has one)");
-      if (rest.includes("--label") || rest.includes("--priority")) throw new Error("--label and --priority are gone: each provider has one key, and set replaces it");
-      const r = await kv.setCredential(rest[0], await secretInput());
-      console.log(`${r.replaced ? "Replaced" : "Stored"} the ${r.provider} key (${r.hint}) as credential #${r.id}.`);
+    case "set": // older name of add: a new row, never a replacement
+    case "add": {
+      if (!rest[0] || rest[0].startsWith("--")) throw new Error("Usage: keyvault add <provider> [--name NAME] < secret   (always adds a new key; replace one with: keyvault replace <id>)");
+      if (rest.includes("--priority")) throw new Error("--priority is gone: a type's keys are used least recently used first");
+      const r = await kv.addCredential(rest[0], await secretInput(), { name: flag("name") ?? flag("label") });
+      console.log(`Added ${r.name} (${r.provider}, ${r.hint}) as credential #${r.id}.`);
+      return;
+    }
+    case "replace": {
+      const id = Number(rest[0]);
+      if (!Number.isInteger(id)) throw new Error("Usage: keyvault replace <id> < secret   (ids from: keyvault list)");
+      const r = await kv.replaceCredential(id, await secretInput());
+      console.log(`Replaced the secret of ${r.name} (${r.provider}, credential #${r.id}); now ${r.hint}.`);
       return;
     }
     case "list":
       console.table((await kv.listCredentials()).map(({ key_id: _k, meta, ...c }) => ({ ...c, ...(meta?.client_email ? { client_email: meta.client_email, project_id: meta.project_id } : {}) })));
       return;
-    case "delete":
-      await kv.deleteCredential(Number(rest[0]));
-      console.log(`Credential #${rest[0]} deleted.`);
+    case "delete": {
+      const id = Number(rest[0]);
+      if (!Number.isInteger(id)) throw new Error("Usage: keyvault delete <id>   (ids from: keyvault list)");
+      const gone = await kv.deleteCredential(id);
+      console.log(`Credential #${id} (${gone.provider}, ${gone.hint}) deleted.`);
+      return;
+    }
+    case "backfill-digests":
+      console.log(`Filled the duplicate-check digest of ${await kv.backfillDigests()} key(s) stored before migration 0012.`);
       return;
     case "rekey":
       console.log(`Re-encrypted ${await kv.rekey()} credentials with the current master key.`);
@@ -76,7 +91,7 @@ async function main() {
            FROM gateway_usage ORDER BY last_at DESC LIMIT 50`));
       return;
     default:
-      throw new Error("Commands: gen-master-key, providers, provider, set, list, delete, rekey, usage");
+      throw new Error("Commands: gen-master-key, providers, provider, add (set), replace, list, delete, rekey, backfill-digests, usage");
   }
 }
 

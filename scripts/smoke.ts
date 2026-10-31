@@ -544,11 +544,11 @@ try {
   await kv.upsertProvider({ slug: "smoke_llm", mode: "gateway", upstream_url: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`,
                             auth_header: "x-api-key", auth_prefix: "", env_vars: ["SMOKE_LLM_API_KEY"] });
   await kv.upsertProvider({ slug: "smoke_vendor", mode: "direct", env_vars: ["SMOKE_VENDOR_TOKEN"] });
-  await kv.setCredential("smoke_llm", REAL_LLM_KEY);
+  await kv.addCredential("smoke_llm", REAL_LLM_KEY);
   // Direct-mode lock: a real vendor key is not even stored unless explicitly allowed ...
-  await assert.rejects(kv.setCredential("smoke_vendor", REAL_VENDOR_KEY), /direct-mode provider/);
+  await assert.rejects(kv.addCredential("smoke_vendor", REAL_VENDOR_KEY), /direct-mode provider/);
   process.env.OCTILLION_DIRECT_KEYS = "allow";
-  await kv.setCredential("smoke_vendor", REAL_VENDOR_KEY);
+  await kv.addCredential("smoke_vendor", REAL_VENDOR_KEY);
   // ... and never reaches a session whose task a customer wrote (this one came from save_scenarios).
   const lockedOut = await worker(`/sessions/${jobs[0].session_id}/credentials`, {});
   assert.equal(lockedOut.status, 403, "customer-written task: no real vendor key");
@@ -662,8 +662,8 @@ try {
     const sa = { type: "service_account", client_email: "octillion@proj-test.iam.gserviceaccount.com",
                  private_key: privateKey.export({ type: "pkcs8", format: "pem" }), token_uri: `${gbase}/token` };
     await kv.upsertProvider({ slug: "smoke_llm", backend: "vertex", backend_config: { project_id: "proj-test", region: "global", endpoint: gbase } });
-    // A Vertex backend signs in with the Vertex AI provider's one key; smoke_llm keeps its own (one) key untouched.
-    await kv.setCredential("vertex", JSON.stringify({ ...sa, project_id: "proj-key" }));
+    // A Vertex backend signs in with a Vertex AI (vertex) key; smoke_llm keeps its own (one) key untouched.
+    const vfirst = await kv.addCredential("vertex", JSON.stringify({ ...sa, project_id: "proj-key" }));
     assert.equal(Number((await db.query<any>("SELECT count(*)::int AS n FROM vault_credentials WHERE provider = 'smoke_llm'"))[0].n), 1, "the provider keeps one key of its own");
     process.env.ORCHESTRATOR_PROVIDER = "smoke_llm"; // mint a gateway token scoped to smoke_llm via the orchestrator broker
     const o = await (await worker("/orchestrator/credentials", { orchestrator_id: "smoke-vertex" })).json();
@@ -702,12 +702,12 @@ try {
     assert.equal(await costOf("no-such-model", { input: 1, cached: 0, output: 1 }), null, "unknown models are not priced");
     const report = await (await fetch(`${base}/api/admin/usage/models?days=1&model=claude-opus-5-5`, { headers: { authorization: `Bearer ${ADMIN_TOKEN}` } })).json();
     assert.ok(report.totals[0]?.model === "claude-opus-5-5", "admin usage report");
-    // Replacing the Vertex AI key: still one row, rotated; with no project in backend_config the project comes from
+    // Replacing the Vertex AI key: the same row, rotated; with no project in backend_config the project comes from
     // the key's JSON and the region from the VERTEX_REGION setting (default us-east5).
     {
       await kv.upsertProvider({ slug: "smoke_llm", backend: "vertex", backend_config: { endpoint: gbase } });
-      const vsaved = await kv.setCredential("vertex", JSON.stringify({ ...sa, project_id: "proj-vault" }));
-      assert.ok(vsaved.replaced && vsaved.hint === sa.client_email && vsaved.project_id === "proj-vault", "Vertex key replaced; hint is the client email");
+      const vsaved = await kv.replaceCredential(vfirst.id, JSON.stringify({ ...sa, project_id: "proj-vault" }));
+      assert.ok(vsaved.id === vfirst.id && vsaved.hint === sa.client_email && vsaved.project_id === "proj-vault", "Vertex key replaced on its row; hint is the client email");
       const vrows = await db.query<any>("SELECT id, rotated_at, meta FROM vault_credentials WHERE provider = 'vertex'");
       assert.ok(vrows.length === 1 && vrows[0].id === vsaved.id && vrows[0].rotated_at && vrows[0].meta.project_id === "proj-vault", "one Vertex key, rotated in place");
       const viaVault = await (await vcall("/v1/messages", { model: "claude-sonnet-5-5", max_tokens: 16, messages: [{ role: "user", content: "hi" }] })).json();
@@ -718,7 +718,21 @@ try {
       await vcall("/v1/messages", { model: "claude-sonnet-5-5", max_tokens: 16, messages: [{ role: "user", content: "hi" }] });
       assert.ok(vseen.at(-1)!.path.includes("/locations/europe-west1/"), "region follows the Agent configuration setting");
       await setSettings("smoke", { VERTEX_REGION: null });
-      await db.query("DELETE FROM vault_credentials WHERE id = $1", [vsaved.id]);
+      // A second Vertex AI key is its own row; the Vertex backend uses both in turn (least recently used first), each
+      // with its own Google token (the cache is per key).
+      const sa2 = { ...sa, client_email: "octillion-2@proj-two.iam.gserviceaccount.com", project_id: "proj-two" };
+      const vsecond = await kv.addCredential("vertex", JSON.stringify(sa2));
+      assert.ok(vsecond.id !== vsaved.id && vsecond.name === "Vertex AI key 2", `a second Vertex key gets its own row (${vsecond.name})`);
+      await assert.rejects(kv.addCredential("vertex", JSON.stringify(sa2)), /already in the vault/, "the same Vertex key twice is refused");
+      const projects = new Set<string>();
+      for (let i = 0; i < 4; i++) {
+        await vcall("/v1/messages", { model: "claude-sonnet-5-5", max_tokens: 16, messages: [{ role: "user", content: "hi" }] });
+        projects.add(vseen.at(-1)!.path.split("/")[3]!);
+      }
+      assert.deepEqual([...projects].sort(), ["proj-two", "proj-vault"], "both Vertex keys are used in rotation");
+      const vuses = await db.query<any>("SELECT id, uses FROM vault_credentials WHERE provider = 'vertex' ORDER BY id");
+      assert.ok(vuses.length === 2 && vuses.every((r: any) => Number(r.uses) >= 2), `each Vertex key took turns (${JSON.stringify(vuses)})`);
+      await db.query("DELETE FROM vault_credentials WHERE id = ANY($1)", [[vsaved.id, vsecond.id]]);
       assert.equal((await vcall("/v1/messages", { model: "claude-sonnet-5-5", max_tokens: 16, messages: [{ role: "user", content: "hi" }] })).status, 503, "no Vertex key: a clear 503");
     }
     fakeGoogle.close();
@@ -2218,8 +2232,9 @@ try {
       assert.equal(registry().agents.length, fileRegistry().agents.length, "registry back to the file entries");
       console.log("✓ admin-added harnesses: variant of a registry CLI, weight 0 and off, scheduled once on, pinned on the orchestrator, no shadowing, delete leaves the mix");
     }
-    // Model keys: one per type, hint only, replace in place, no enable/disable, delete (scripts/smoke-readiness.ts).
-    await (await import("./smoke-readiness.js")).vaultOneKeyChecks({ db, adm, json, base, ADMIN_TOKEN, stamp });
+    // Model keys: one row per key, several per type used in turn, replace on its own row, duplicates refused, no
+    // enable/disable, delete (scripts/smoke-readiness.ts).
+    await (await import("./smoke-readiness.js")).vaultRowPerKeyChecks({ db, adm, json, base, ADMIN_TOKEN, stamp });
     console.log("✓ compute settings: set here > env > default, cached, reset; agent mix weights and on/off; model keys hint-only");
   }
   // ---------- provider keys from the vault only: the one-time environment import (src/keyvault-env.ts) ----------
@@ -2231,7 +2246,7 @@ try {
     const [exaImport] = await db.query<any>("SELECT env_var, outcome, hint, credential_id FROM vault_env_imports WHERE provider = 'exa'");
     assert.ok(exaImport && exaImport.env_var === "EXA_API_KEY" && exaImport.outcome === "imported", "env key imported into an empty vault on boot");
     const [exaCred] = await db.query<any>("SELECT provider, ciphertext FROM vault_credentials WHERE id = $1", [exaImport.credential_id]);
-    assert.ok(exaCred.provider === "exa" && !exaCred.ciphertext.includes("smoke-exa-key"), "imported encrypted as Exa's one key");
+    assert.ok(exaCred.provider === "exa" && !exaCred.ciphertext.includes("smoke-exa-key"), "imported encrypted as an Exa key");
     // The environment changes after the import: the vault value wins (the Exa stand-in only accepts the imported key).
     process.env.EXA_API_KEY = "changed-in-the-environment";
     const lines: string[] = [];
@@ -2251,7 +2266,7 @@ try {
     assert.equal((await kv.useCredential("smoke_envkey")).secret, ENV_SECRET, "after the import the vault value wins over a changed env value");
     // A provider that already has a vault key: the env value is never imported over it.
     const VAULT_LIB = `vault-libio-${stamp}-KEEP`;
-    const kept = await kv.setCredential("libraries_io", VAULT_LIB);
+    const kept = await kv.addCredential("libraries_io", VAULT_LIB);
     process.env.LIBRARIES_IO_API_KEY = `env-libio-${stamp}-DROP`;
     const libio = (await importEnvKeys((l) => lines.push(l))).find((r) => r.provider === "libraries_io");
     assert.equal(libio?.outcome, "vault_had_key", "existing vault key kept");
@@ -2282,7 +2297,7 @@ try {
     }
     assert.equal(Number((await db.query<any>("SELECT count(*)::int AS n FROM vault_credentials WHERE provider = 'vertex'"))[0].n), 0, "nothing stored for a bad key");
     const vk = await json(adm("POST", "/compute/keys", { provider: "vertex", secret: JSON.stringify(goodSa) }));
-    assert.ok(vk.id && !vk.replaced && vk.hint === goodSa.client_email && vk.project_id === goodSa.project_id, "good Vertex key stored; hint is the client email only");
+    assert.ok(vk.id && vk.name && vk.hint === goodSa.client_email && vk.project_id === goodSa.project_id, "good Vertex key stored; hint is the client email only");
     const vpage = await (await adm("GET", "/compute/keys")).text();
     const vrow = JSON.parse(vpage).credentials.find((c: any) => c.id === vk.id);
     assert.ok(vrow.hint === goodSa.client_email && vrow.client_email === goodSa.client_email && vrow.project_id === goodSa.project_id, "listed by project and client email");
@@ -2362,7 +2377,7 @@ try {
                         STRIPE_SECRET_KEY: "sk_test_mock", STRIPE_API_URL: mock.url, STRIPE_SPEND_METER: "octillion_model_spend", RESEND_API_URL: mock.url };
   Object.assign(process.env, providerEnv);
   // Email through the Resend mock from here on (src/email.ts): its key in the vault, operator alerts to one address.
-  const resendKey = await (await import("../src/keyvault.js")).setCredential("resend", `re_smoke_${stamp}_secret`);
+  const resendKey = await (await import("../src/keyvault.js")).addCredential("resend", `re_smoke_${stamp}_secret`);
   const OPS = `ops+${stamp}@octillion.test`;
   await (await import("../src/settings.js")).setSettings("smoke", { EMAIL_ADMIN_TO: OPS });
   /** Emails the Resend mock accepted for an address (and of a kind: the "kind" tag). */
@@ -2883,7 +2898,7 @@ try {
           const u = String(body?.messages?.find((m: any) => m.role === "user")?.content ?? "");
           return Object.entries(answers).find(([k]) => u.includes(k))?.[1] ?? { status: 500 };
         };
-        const cfKey = await kvR.setCredential("cloudflare", `cf-smoke-${stamp}-token`);
+        const cfKey = await kvR.addCredential("cloudflare", `cf-smoke-${stamp}-token`);
         Object.assign(process.env, { CLOUDFLARE_ACCOUNT_ID: "smoke-account", CLOUDFLARE_API_URL: mock.url });
         const used0 = (await R.reasonsStatus()).used_today;
         await setSettings("smoke", { REASONS_ENABLED: "on", REASONS_DAILY_MAX: used0 + 4 });
@@ -3326,7 +3341,7 @@ try {
       {
         const { setSettings } = await import("../src/settings.js");
         const kvD = await import("../src/keyvault.js");
-        const cfKey = await kvD.setCredential("cloudflare", `cf-smoke-docs-${stamp}-token`);
+        const cfKey = await kvD.addCredential("cloudflare", `cf-smoke-docs-${stamp}-token`);
         Object.assign(process.env, { CLOUDFLARE_ACCOUNT_ID: "smoke-account", CLOUDFLARE_API_URL: mock.url });
         await setSettings("smoke", { DOCS_ANSWERS_DAILY_MAX: 500, DOCS_ANSWERS_PER_MINUTE: 20 });
         const askApp = (sess: string, question: unknown) => appCall(sess, "POST", "/docs/answer", { question });
@@ -3455,7 +3470,7 @@ try {
       const accts = await viewer.callTool({ name: "list_accounts", arguments: { q: slugW } });
       assert.ok(!accts.isError && (accts.structuredContent as any).accounts.some((o: any) => o.slug === slugW), `list_accounts: ${JSON.stringify(accts.content).slice(0, 200)}`);
       const vault = await viewer.callTool({ name: "key_vault_status", arguments: {} });
-      assert.ok(!vault.isError && (vault.structuredContent as any).credentials.some((c: any) => c.provider === "resend" && c.hint), "key hints are listed");
+      assert.ok(!vault.isError && (vault.structuredContent as any).keys.some((c: any) => c.provider === "resend" && c.hint && c.name), "keys are listed as rows, by hint and name");
       assert.ok(!JSON.stringify(vault).includes(`re_smoke_${stamp}_secret`), "the secret never leaves");
       for (const n of ["health_summary", "list_settings", "library_stats", "finops_plans", "list_simulations", "model_spend", "analytics_overview", "gtm_activation", "gtm_attribution", "list_access_requests"]) {
         const r = await viewer.callTool({ name: n, arguments: {} });
@@ -5145,7 +5160,7 @@ try {
       assert.ok(nk.status === "skipped" && /No Resend key/.test(nk.error ?? ""), `no key: ${JSON.stringify(nk)}`);
       assert.equal((await json(adm("GET", "/emails"))).status.connected, false, "the page says Resend is not connected");
       assert.equal(ofKey(`smoke:${stamp}:off`).length + ofKey(`smoke:${stamp}:nokey`).length, 0, "nothing reached Resend");
-      await kvm.setCredential("resend", `re_smoke_${stamp}_secret`);
+      await kvm.addCredential("resend", `re_smoke_${stamp}_secret`);
       assert.equal((await mail.send(noKey)).status, "sent", "a skipped email goes out when triggered again");
 
       // 7. Budget: 80% and 100% of the monthly allowance, to owners and billing managers, once per threshold per month.

@@ -247,9 +247,9 @@ export async function gatewayHandler(req: Request, res: Response) {
     return gwError(res, 429, "octillion_budget_exceeded", "This session's gateway budget is used up");
 
   let cred: { id: number; secret: string };
-  // Vertex signs in with the Vertex AI provider's service-account key (one key per provider: no provider keeps a
-  // second, Vertex key of its own); project from that key and region from the VERTEX_REGION setting unless
-  // backend_config sets them. Every other backend uses the provider's own key.
+  // Vertex signs in with one of the Vertex AI (vertex) service-account keys, least recently used first (no other
+  // provider holds a Vertex key); project from that key and region from the VERTEX_REGION setting unless
+  // backend_config sets them. Every other backend uses one of the provider's own keys, picked the same way.
   try {
     cred = p.backend === "vertex" ? await useVertexCredential() : await useCredential(slug);
   } catch (e) {

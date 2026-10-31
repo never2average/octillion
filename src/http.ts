@@ -65,8 +65,8 @@ import { freshPlatformHarnesses } from "./harnesses.js";
 const PORT = Number(process.env.PORT ?? 3333);
 const HOST = process.env.HOST ?? "127.0.0.1";
 const PUBLIC_URL = (process.env.PUBLIC_URL ?? `http://${HOST}:${PORT}`).replace(/\/$/, "");
-/** The key vault has no enable/disable: a key is kept or deleted (one per provider), a provider is usable when it has one. */
-const NO_TOGGLE = "Keys and providers are no longer switched on or off: each provider has at most one key, which is kept, replaced or deleted";
+/** The key vault has no enable/disable: each key is its own row, kept, replaced or deleted; a provider is usable when it has a key. */
+const NO_TOGGLE = "Keys and providers are no longer switched on or off: each key is its own row, which is kept, replaced or deleted";
 const PUBLIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "public");
 /** The admin panel (/admin) and customer portal (/app): the Next.js app in web/, built to static files (npm run web:build). */
 const WEB_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "web", "out");
@@ -501,13 +501,16 @@ export function createApp() {
   admin.get("/keyvault/providers", async (_req, res) => void res.json({ providers: await kv.listProviders() }));
   admin.put("/keyvault/providers/:slug", need("keys"), async (req, res) => void res.json(await kv.upsertProvider({ ...req.body, slug: String(req.params.slug) })));
   admin.get("/keyvault/credentials", async (_req, res) => void res.json({ credentials: await kv.listCredentials() }));
-  // One key per provider: posting a key for a provider that has one replaces it. Keys are kept or deleted, never
-  // disabled (the old enable/disable route answers 410).
+  // One row per key: posting always adds a key (several per provider are fine; the same secret twice is refused, 409).
+  // A key is replaced on its own row (PUT, or POST .../replace) or deleted, never disabled (the old toggle answers 410).
   admin.post("/keyvault/credentials", need("keys"), async (req, res) => {
-    const { provider, secret } = req.body ?? {};
+    const { provider, secret, name } = req.body ?? {};
     if (typeof provider !== "string" || typeof secret !== "string") return void res.status(400).json({ error: "provider and secret are required" });
-    res.status(201).json(await library.addModelKey(adminActor(req, res), { provider, secret }));
+    res.status(201).json(await library.addModelKey(adminActor(req, res), { provider, secret, name }));
   });
+  const replaceVaultKey = async (req: Request, res: Response) => void res.json(await library.replaceModelKey(adminActor(req, res), Number(req.params.id), req.body ?? {}));
+  admin.put("/keyvault/credentials/:id", need("keys"), replaceVaultKey);
+  admin.post("/keyvault/credentials/:id/replace", need("keys"), replaceVaultKey);
   admin.patch("/keyvault/credentials/:id", need("keys"), (_req, res) => void res.status(410).json({ error: NO_TOGGLE }));
   admin.delete("/keyvault/credentials/:id", need("keys"), async (req, res) => {
     await library.deleteModelKey(adminActor(req, res), Number(req.params.id));
@@ -725,6 +728,8 @@ export function createApp() {
   gtmOutboundRoutes(ob, { need, actor: adminActor });
   ob.get("/compute/sandbox", async (_req, res) => void res.json(await library.sandboxProvider()));
   ob.post("/compute/keys", need("keys"), async (req, res) => void res.status(201).json(await library.addModelKey(adminActor(req, res), req.body ?? {})));
+  ob.post("/compute/keys/:id/replace", need("keys"), async (req, res) => void res.json(await library.replaceModelKey(adminActor(req, res), Number(req.params.id), req.body ?? {})));
+  ob.put("/compute/keys/:id", need("keys"), async (req, res) => void res.json(await library.replaceModelKey(adminActor(req, res), Number(req.params.id), req.body ?? {})));
   ob.delete("/compute/keys/:id", need("keys"), async (req, res) => done(res, await library.deleteModelKey(adminActor(req, res), Number(req.params.id))));
   // Keys and providers are never switched off: a key is kept or deleted, a provider is usable when it has one.
   ob.post("/compute/keys/:id/enabled", need("keys"), (_req, res) => void res.status(410).json({ error: NO_TOGGLE }));
