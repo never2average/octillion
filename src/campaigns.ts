@@ -47,7 +47,7 @@ import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from
 import { hostname } from "node:os";
 import { getDb } from "./db.js";
 import * as mail from "./email.js";
-import { composeHtml, HTML_MAX_BYTES, sanitizeEmailHtml } from "./campaign-html.js";
+import { composeHtml, HTML_MAX_BYTES, sanitizeEmailHtml, variableInAttribute } from "./campaign-html.js";
 import { accountPeople, AdminError, log, STAGES } from "./admin.js";
 import { DIRECT, journeys, requestRows, within, type Journey, type RequestRow } from "./gtm.js";
 import { addCredentialIfAbsent, credentialSecrets, recordUse, useCredential } from "./keyvault.js";
@@ -143,7 +143,11 @@ const bodyIn = (v: unknown, format: Format, what: string, warnings?: string[]) =
   const raw = typeof v === "string" ? v.trim() : "";
   if (Buffer.byteLength(raw) > HTML_MAX_BYTES) throw new AdminError(`${what}: the HTML is over ${HTML_MAX_BYTES / 1000} KB`);
   if (!raw) return "";
+  // Variables are text only: never inside a tag (a link, an image, a style), checked before and after sanitizing.
+  const inTag = (h: string) => { const t = variableInAttribute(h, VAR); if (t) throw new AdminError(`${what}: {{first_name}} and {{product}} go in the text, not inside an HTML attribute (found in ${t})`); };
+  inTag(raw);
   const s = sanitizeEmailHtml(raw);
+  inTag(s.html);
   for (const w of s.warnings) warnings?.push(`${what}: ${w}`);
   if (!s.html.replace(/<[^>]*>/g, "").trim() && !/<img\b/i.test(s.html)) throw new AdminError(`${what}: the HTML has nothing left to show once sanitized`);
   return s.html;
@@ -256,6 +260,15 @@ export function composeEmail(words: { subject: string; body: string; format?: Fo
   if (formatOf(words) === "html") { const h = composeHtml(words.body, safeVars(vars), VAR, footerText); return { subject, text: h.text, html: h.html, warnings: h.warnings }; }
   const text = render(words.body, vars) + footerText;
   return html ? { subject, text, html: renderHtml(words.body + footerText, vars), warnings: [] } : { subject, text, textOnly: true, warnings: [] };
+}
+/**
+ * What a recipient is sent: an outbound (prospect) recipient never gets an HTML step's HTML, whatever the step says
+ * (its generated text part only); otherwise composeEmail with the campaign's open tracking.
+ */
+export function sendParts(words: { subject: string; body: string; format?: Format }, vars: { first_name?: string | null; product?: string | null }, footerText: string,
+  o: { outbound: boolean; tracksOpens: boolean }) {
+  if (o.outbound && formatOf(words) === "html") { const { html: _h, ...rest } = composeEmail(words, vars, footerText, false); return { ...rest, textOnly: true as const }; }
+  return composeEmail(words, vars, footerText, o.tracksOpens);
 }
 const mailParts = (p: ReturnType<typeof composeEmail>) => ({ subject: p.subject, text: p.text, ...(p.html != null ? { html: p.html } : { textOnly: true as const }) });
 
@@ -1336,9 +1349,8 @@ async function runTick(only: number | null, o: TickOptions = {}): Promise<TickRe
             chunk.push({ r, c, claim, variant: v.letter, email: {
               kind: slot ? "outbound" : "campaign", to: r.email, idempotencyKey: idempotencyKeyOf(c.id, Number(r.id), r.next_step, r.round), from: slot ? outbound.senderOf(slot.i) : from,
               meta: { campaign_id: c.id, step: r.next_step, ...(v.letter ? { variant: v.letter } : {}), ...(r.round ? { round: r.round } : {}) },
-              // An HTML step on an outbound campaign is refused on save; were one there, it goes as its text part.
-              ...mailParts(isOutbound(c) && v.format === "html" && !tracksOpens(c) ? { ...composeEmail(v, r, footer(r.source, url, postal), false), html: undefined }
-                : composeEmail(v, r, footer(r.source, url, postal), tracksOpens(c))),
+              // An HTML step on an outbound campaign is refused on save; were one there, a prospect gets its text part only.
+              ...mailParts(sendParts(v, r, footer(r.source, url, postal), { outbound: !!slot || r.source === "prospect" || isOutbound(c), tracksOpens: tracksOpens(c) })),
               headers: unsubHeaders(url), tags: [{ name: "campaign", value: String(c.id) }], replyTo,
             } });
           } catch (e) {

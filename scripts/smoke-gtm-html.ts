@@ -123,8 +123,57 @@ export async function gtmHtmlChecks({ db, base, adm, json, mockPost, sentTo, sta
   const replayed = sentTo(hana, "campaign").filter((x: any) => x.subject === "Replay");
   assert.ok(replayed.length === 1 && replayed[0].html.includes('href="https://octillion.test/r"') && replayed[0].text.includes("here (https://octillion.test/r)"), "replayed once, with its HTML and text parts");
 
+  // ---------- B1: the footer and unsubscribe link cannot be covered or hidden ----------
+  const COVER = `<div style="position:absolute;top:0;left:0;right:0;bottom:0;z-index:999;background:#fff;width:100%;height:100%">cover</div>
+<div style="margin-top:-500px;margin:-20px 0 0 0;transform:translateY(-400px);opacity:0;visibility:hidden;clip-path:inset(0);filter:opacity(0)">pull up</div>
+<table style="display:none"><tr><td>hidden</td></tr></table><p style="color:#111;margin:0 auto">kept</p>`;
+  const cov = await json(adm("POST", "/gtm/campaigns/preview", { subject: "s", body: COVER, format: "html" }));
+  assert.ok(!/position:\s*absolute|z-index|top:\s*0|margin-top:\s*-|margin:\s*-|transform|opacity:\s*0[;"]|visibility:\s*hidden|clip-path|filter:\s*opacity|display:\s*none/i.test(cov.html.split('<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff"')[0])
+    && cov.html.includes('style="color: #111; margin: 0 auto"'), `overlay, offset, negative-margin and hiding styles are stripped: ${cov.html}`);
+  const wrapAt = cov.html.indexOf('<div style="position:relative;overflow:hidden">'), footAt = cov.html.indexOf('<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff"');
+  assert.ok(wrapAt > 0 && footAt > wrapAt && /<\/div>\s*<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff"/.test(cov.html)
+    && cov.html.slice(footAt).includes("display:block;opacity:1;visibility:visible") && cov.html.slice(footAt).includes("/api/email/unsubscribe?t=test"),
+    "the content sits in a contained box; the footer is its own visible table after it, with the unsubscribe link");
+  assert.ok(cov.warnings.some((w: string) => /position: absolute/.test(w)) && cov.warnings.some((w: string) => /negative margins/.test(w)) && cov.warnings.some((w: string) => /display: none/.test(w)), "and the editor is told");
+
+  // ---------- M1: declarations parsed with quotes and parentheses; M2: only https url() loads anything ----------
+  const { filterStyle, composeHtml } = await import("../src/campaign-html.js");
+  const css = (style: string) => { const ws: string[] = []; return { out: filterStyle(style, (x) => ws.push(x)), ws }; };
+  const m1 = css(`font-family: "Brand;Sans", Arial; background: url("https://cdn.octillion.test/a;b.png") no-repeat; color: #111`);
+  assert.equal(m1.out, `font-family: "Brand;Sans", Arial; background: url("https://cdn.octillion.test/a;b.png") no-repeat; color: #111`, "a ; inside quotes or url() does not split a declaration");
+  const m1b = css(`background: url(https://cdn.octillion.test/a.png;position:absolute`);
+  assert.ok(m1b.out === "" && m1b.ws.some((w) => /unbalanced/.test(w)), "an unbalanced style is dropped whole (no declaration smuggled after it)");
+  const m2 = css(`background-image: image-set("https://cdn.octillion.test/a.png" 1x); background: -webkit-image-set(url(https://cdn.octillion.test/a.png) 1x); src: src("https://cdn.octillion.test/f"); background: cross-fade(url(https://a.test/x.png), red); background: url(http://cdn.octillion.test/a.png); background: url(https://cdn.octillion.test/ok.png); background: linear-gradient(#fff, rgb(0, 0, 0))`);
+  assert.equal(m2.out, "background: url(https://cdn.octillion.test/ok.png); background: linear-gradient(#fff, rgb(0, 0, 0))", `image-set, src(), cross-fade and http url() are dropped; https url() and gradients stay: ${JSON.stringify(m2)}`);
+
+  // ---------- M3: variables are text only ----------
+  for (const [where, body] of [["href", '<a href="https://octillion.test/?n={{first_name}}">go</a>'], ["src", '<img src="https://cdn.octillion.test/{{product}}.png">'], ["style", '<p style="color:{{product}}">x</p>']]) {
+    const r = await errOf(adm("POST", "/gtm/campaigns", { name: `Html attr ${stamp}`, audience: { include: "requests", utm_campaign: H }, steps: [{ subject: "x", body, format: "html" }] }));
+    assert.ok(r.status === 400 && /go in the text, not inside an HTML attribute/.test(r.error), `a variable inside ${where} is refused: ${JSON.stringify(r)}`);
+  }
+  const attr = camp.composeEmail({ subject: "s", body: '<a href="https://octillion.test/?p={{product}}">go {{product}}</a>', format: "html" }, { product: "acme.dev" }, "\n\n--\nUnsubscribe: https://octillion.test/u", true);
+  assert.ok(attr.html!.includes('href="https://octillion.test/?p="') && attr.html!.includes("go acme.‌dev") && !/href="[^"]*‌/.test(attr.html!), `at render a variable is never put inside an attribute (and no zero-width character there): ${attr.html}`);
+
+  // ---------- M4: a mailto CTA keeps its subject and body, nothing else ----------
+  const mt = await json(adm("POST", "/gtm/campaigns/preview", { subject: "s", format: "html",
+    body: '<a href="mailto:sales@octillion.test?subject=Book%20a%20demo&amp;body=Hi%20team%2C%20let%27s%20talk&amp;cc=evil@x.test&amp;bcc=spy@x.test&amp;to=more@x.test">Book a demo</a>' }));
+  assert.ok(mt.html.includes('href="mailto:sales@octillion.test?subject=Book%20a%20demo&amp;body=Hi%20team%2C%20let%27s%20talk"') && !/evil@|spy@|more@/.test(mt.html)
+    && mt.warnings.some((w: string) => /cc, bcc, to/.test(w)) && mt.text.includes("Book a demo (sales@octillion.test)"), `mailto keeps subject and body only: ${JSON.stringify(mt)}`);
+
+  // ---------- M5: the footer goes in by a function: "$" in it stays literal ----------
+  const dollars = composeHtml("<p>x</p>", {}, /\{\{\s*([a-zA-Z_]+)\s*\}\}/g, "\n\n--\nUnsubscribe: https://octillion.test/u\nSuite $& $' $` $1, Main St");
+  assert.ok(dollars.html.includes("Suite $&amp; $&#39; $` $1, Main St") && (dollars.html.match(/<\/body>/g) ?? []).length === 1, `"$" patterns in the footer are literal: ${dollars.html.slice(-400)}`);
+
+  // ---------- M6: an outbound recipient never gets an HTML step's HTML, whatever the step or open tracking says ----------
+  const ob6 = camp.sendParts({ subject: "s", body: '<p>Hello <a href="https://octillion.test/x">there</a></p>', format: "html" }, {}, "\n\n--\nUnsubscribe: https://octillion.test/u", { outbound: true, tracksOpens: true });
+  assert.ok(ob6.textOnly === true && !("html" in ob6) && ob6.text.startsWith("Hello there (https://octillion.test/x)"), `outbound: text only at send time: ${JSON.stringify(ob6)}`);
+  const lc6 = camp.sendParts({ subject: "s", body: "<p>Hello</p>", format: "html" }, {}, "\n\n--\nUnsubscribe: https://octillion.test/u", { outbound: false, tracksOpens: false });
+  assert.ok(lc6.html?.includes("<p>Hello</p>") && !lc6.textOnly, "lifecycle: an HTML step always carries its HTML");
+  const tx6 = camp.sendParts({ subject: "s", body: "Hello" }, {}, "\n\n--\nUnsubscribe: https://octillion.test/u", { outbound: true, tracksOpens: true });
+  assert.ok(tx6.html, "an outbound text step keeps its open-tracking HTML part as before");
+
   await db.query("DELETE FROM gtm_campaigns WHERE id = ANY($1::bigint[])", [[id, textCamp.campaign.id, r2.campaign.id]]);
   await db.query("DELETE FROM access_requests WHERE id = ANY($1::int[])", [reqIds]);
   delete process.env.CAMPAIGN_SEND_INTERVAL_MS;
-  console.log("✓ GTM HTML emails: sanitized on save and send (scripts, handlers, javascript:/data: URLs, CSS expressions stripped), generated text part, footer and unsubscribe inside, escaped variables, text unchanged, outbound refused, preview gated, test send, replay");
+  console.log("✓ GTM HTML emails: sanitized on save and send (scripts, handlers, javascript:/data: URLs, CSS expressions stripped), generated text part, footer and unsubscribe inside, escaped variables, text unchanged, outbound refused, preview gated, test send, replay; footer cannot be covered (B1), CSS parsed (M1), only https url() (M2), variables text-only (M3), mailto subject/body only (M4), literal $ in footer (M5), outbound text-only at send (M6)");
 }
