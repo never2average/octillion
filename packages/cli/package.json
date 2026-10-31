@@ -28,5 +28,5 @@
     "device-authorization"
   ],
   "license": "UNLICENSED",
-  "private": false
+  "private": true
 }

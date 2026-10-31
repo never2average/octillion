@@ -1,6 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { getDb, type Queryable } from "./db.js";
-import { checkOAuthToken, ClerkError, clerkEnabled, isSuspended, mcpAudiences, memberships, oauthAccess, onMembershipChange, organizations, type ClerkMembership, type OAuthRefusal } from "./clerk.js";
+import { checkOAuthToken, ClerkError, clerkEnabled, isSuspended, mcpAudiences, memberships, oauthAccess, oauthOrgClaimOn, onMembershipChange, organizations, type ClerkMembership, type OAuthRefusal } from "./clerk.js";
 import { accountRoleOf, type AccountRole } from "./account-roles.js";
 
 /** What an API key may do: read-only tools, or every tool the person's role allows. Null (older keys) = full access. */
@@ -278,8 +278,9 @@ export async function resolveUserToken(token: string): Promise<Org | null> {
  * Octillion account, only suspended memberships, or an organization Octillion does not know is a 403 with the next step
  * (signing in again would not change it). Which account, first match wins:
  *   1. `orgSlug` (X-Octillion-Org): one of the person's accounts, by slug
- *   2. the token's org claim (org_id: the organization the person picked on Clerk's consent screen, user:org:read),
- *      checked against their memberships now: a claim for an organization they are not in is a 403
+ *   2. only with OCTILLION_OAUTH_ORG_CLAIM=on: the token's org claim (org_id: the organization the person picked on
+ *      Clerk's consent screen, user:org:read), checked against their memberships now: a claim for an organization
+ *      they are not in, or one that is not an Octillion workspace, is a 403 (never another account)
  *   3. the oldest membership that is not suspended, as before (every token without an org claim)
  */
 export async function resolveUserTokenDetailed(token: string, orgSlug?: string): Promise<AuthResult> {
@@ -288,7 +289,9 @@ export async function resolveUserTokenDetailed(token: string, orgSlug?: string):
     message: v.reason === "not_configured"
       ? `This is not an Octillion API key, and sign-in is not set up on this server. Set OCTILLION_API_KEY to a key from ${apiKeysUrl()}.`
       : `Your sign-in ${v.reason === "revoked" ? "was revoked" : v.reason === "unverifiable" ? "could not be checked just now" : "has expired or is not valid for this server"}. ${NEXT_STEP()}.` });
-  const { userId, clientId, scopes, orgId: claimOrg } = v.claims;
+  const { userId, clientId, scopes } = v.claims;
+  // Off (the default): the claim is ignored completely, as before it existed.
+  const claimOrg = oauthOrgClaimOn() ? v.claims.orgId : null;
   const source: OrgSource = orgSlug ? "header" : claimOrg ? "token" : "default";
   const credential: Credential = { kind: "oauth", clientId, scopes, access: oauthAccess(scopes), orgSource: source };
   const cacheKey = orgSlug ? `h:${orgSlug}` : claimOrg ? `t:${claimOrg}` : "";
@@ -312,7 +315,7 @@ export async function resolveUserTokenDetailed(token: string, orgSlug?: string):
     m = all.find((x) => x.organization!.id === claimOrg);
     // The organization picked at sign-in is not (or no longer) one of theirs: never fall back to another account.
     if (!m) return refuse({ status: 403, reason: "not_member", description: "not a member of the organization this sign-in picked",
-      message: `This sign-in picked an organization you are not a member of. Sign in again and pick one of your workspaces, send X-Octillion-Org: <slug> to choose one, or ask an owner of that workspace for an invitation.` });
+      message: `This sign-in picked an organization you are not a member of: sign in again and pick another workspace, or send X-Octillion-Org: <slug>.` });
     if (isSuspended(m)) return refuse({ status: 403, reason: "suspended", description: `access to ${m.organization!.name} is suspended`,
       message: `Your access to ${m.organization!.name} is suspended; ask an owner, or sign in again and pick another workspace.` });
   } else {
@@ -322,7 +325,9 @@ export async function resolveUserTokenDetailed(token: string, orgSlug?: string):
   }
   const found = await orgForClerk(m.organization!.id);
   if (!found) return refuse({ status: 403, reason: "not_linked", description: "organization not linked to Octillion",
-    message: `Your organization ${m.organization!.name} is not an Octillion workspace yet; ${requestAccess}.` });
+    message: source === "token"
+      ? `The organization this sign-in picked (${m.organization!.name}) is not an Octillion workspace: sign in again and pick another workspace, or send X-Octillion-Org: <slug>.`
+      : `Your organization ${m.organization!.name} is not an Octillion workspace yet; ${requestAccess}.` });
   const org: Org = { ...found, userId, role: accountRoleOf(m) };
   if (!mine) tokenOrgs.set(userId, new Map());
   tokenOrgs.get(userId)!.set(cacheKey, { org, at: Date.now() });

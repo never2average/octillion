@@ -379,6 +379,12 @@ export const SCOPE_WRITE = "octillion:write";
 export const oauthScopesOn = () => (process.env.OCTILLION_OAUTH_SCOPES ?? "").trim().toLowerCase() === "on";
 /** The scopes /mcp advertises: profile and email always (as before), Octillion's own when they are switched on. Never offline_access. */
 export const advertisedScopes = () => ["profile", "email", ...(oauthScopesOn() ? [SCOPE_READ, SCOPE_WRITE] : [])];
+/**
+ * OCTILLION_OAUTH_ORG_CLAIM=on: a token's org claim (org_id, user:org:read) picks the account. Default off: the claim
+ * is ignored completely and every token gets the oldest membership as before, since tokens already in use may carry an
+ * org_id that nobody chose for Octillion (Clerk fills it from the last active organization when consent is off).
+ */
+export const oauthOrgClaimOn = () => (process.env.OCTILLION_OAUTH_ORG_CLAIM ?? "").trim().toLowerCase() === "on";
 /** What a token's scopes allow: read (octillion:read without octillion:write) or full (anything else, no scope included). */
 export const oauthAccess = (scopes: string[]): "read" | "full" => (scopes.includes(SCOPE_READ) && !scopes.includes(SCOPE_WRITE) ? "read" : "full");
 

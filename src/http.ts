@@ -22,7 +22,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { createServer, runTool, TOOL_NAMES, WIDGET_HTML, type ToolName } from "./server.js";
 import { connectorEvents, recordMcpEvent } from "./analytics.js";
 import { authenticateMcp, bearer, cronSecretOk, isWorkerToken, orgHeader, resolveKey, resolveKeyDetailed, urlKeysAllowed, type AuthFailure, type Org } from "./auth.js";
-import { advertisedScopes, clerkEnabled, ClerkError, frontendApi, mcpAudience, oauthScopesOn } from "./clerk.js";
+import { advertisedScopes, clerkEnabled, ClerkError, frontendApi, mcpAudience, oauthOrgClaimOn, oauthScopesOn } from "./clerk.js";
 import { docsPageMarkdown, getStartedMd, llmsTxt } from "./agent-docs.js";
 import { clientCatalog, headlessCatalog, oneCommandCatalog } from "./connect-catalog.js";
 import { StripeError } from "./billing.js";
@@ -277,7 +277,8 @@ export function createApp() {
     const issuer = oauthServer();
     res.set("Cache-Control", "public, max-age=300").json({
       client_id: issuer ? clientId : null, issuer, resource: mcpAudience(), mcp_url: `${site()}/mcp`,
-      scope: advertisedScopes().join(" "), device_login: Boolean(issuer && clientId), api_keys_url: `${site()}/app/settings/api-keys`,
+      // org_claim: the sign-in's picked organization is honoured (OCTILLION_OAUTH_ORG_CLAIM), so the CLI asks for user:org:read.
+      scope: advertisedScopes().join(" "), org_claim: oauthOrgClaimOn(), device_login: Boolean(issuer && clientId), api_keys_url: `${site()}/app/settings/api-keys`,
     });
   });
   // The connect catalog without a key in it (what the setup page shows with sign-in): `octillion mcp-config <client>`.

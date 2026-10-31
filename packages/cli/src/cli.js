@@ -11,7 +11,7 @@
 // Output: --json on every command. Exit codes: 0 ok, 1 error, 2 needs the user (sign in, approve, create a key).
 // Plain ESM with no dependencies (Node 20+): nothing here needs require(), so it loads with --no-experimental-require-module.
 import { randomBytes } from "node:crypto";
-import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, readdir, readFile, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -68,11 +68,36 @@ const pendingFile = (env, handle) => path.join(configDir(env), "pending", `${han
 async function readJson(file) {
   try { return JSON.parse(await readFile(file, "utf8")); } catch (e) { if (e.code === "ENOENT") return null; throw new CliError(`Could not read ${file}: ${e.message}`); }
 }
-/** Written 0600 in a 0700 directory: only this user can read a token. */
-async function writeSecret(file, data) {
-  await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-  await writeFile(file, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
-  await chmod(file, 0o600); // writeFile's mode applies only to a new file
+/**
+ * Written atomically, 0600 in a 0700 directory: a new temp file (wx: never an existing file or a planted symlink) in the
+ * same directory, fsync'd, then renamed over the real one. A crash leaves the old file or the new one, never half of one.
+ */
+export async function writeSecret(file, data) {
+  const dir = path.dirname(file);
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  await chmod(dir, 0o700).catch(() => {});
+  const tmp = path.join(dir, `.${path.basename(file)}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
+  const fh = await open(tmp, "wx", 0o600);
+  try {
+    await fh.writeFile(`${JSON.stringify(data, null, 2)}\n`);
+    await fh.sync();
+  } finally {
+    await fh.close();
+  }
+  try { await rename(tmp, file); } catch (e) { await rm(tmp, { force: true }); throw e; }
+}
+
+/** Pending device logins past their expiry (or unreadable) are deleted on every run: a device code outlives nothing. */
+export async function cleanPending(env) {
+  const dir = path.join(configDir(env), "pending");
+  let names = [];
+  try { names = await readdir(dir); } catch { return; }
+  await Promise.all(names.filter((n) => n.endsWith(".json")).map(async (n) => {
+    const f = path.join(dir, n);
+    let exp = NaN;
+    try { exp = Date.parse(JSON.parse(await readFile(f, "utf8")).expires_at); } catch { /* unreadable: remove */ }
+    if (!(exp > Date.now())) await rm(f, { force: true }).catch(() => {});
+  }));
 }
 
 async function packageDefaultUrl() {
@@ -89,22 +114,38 @@ export async function baseUrl(flags, env = process.env) {
     { code: "no_url", next_step: "export OCTILLION_URL=<your Octillion address>" });
   let u;
   try { u = new URL(raw); } catch { throw new CliError(`OCTILLION_URL is not a URL: ${raw}`, { code: "bad_url" }); }
-  if (u.protocol !== "https:" && !["127.0.0.1", "localhost", "[::1]"].includes(u.hostname)) throw new CliError(`OCTILLION_URL must use https (got ${u.origin}).`, { code: "bad_url" });
+  if (u.protocol !== "https:" && !LOOPBACK.includes(u.hostname)) throw new CliError(`OCTILLION_URL must use https (got ${u.origin}).`, { code: "bad_url" });
   return `${u.origin}${u.pathname.replace(/\/+$/, "")}`;
 }
 
 // ---------- HTTP ----------
 
+/** `secret`: the request carries a token, device code or refresh token, so a redirect is refused, never followed. */
 async function request(url, init = {}) {
+  let r;
   try {
-    return await fetch(url, { ...init, signal: AbortSignal.timeout(init.timeoutMs ?? 20_000) });
+    r = await fetch(url, { ...init, ...(init.secret ? { redirect: "manual" } : {}), signal: AbortSignal.timeout(init.timeoutMs ?? 20_000) });
   } catch (e) {
     throw new CliError(`Could not reach ${new URL(url).origin}: ${e.cause?.code ?? e.message}. Check OCTILLION_URL and your network.`, { code: "network" });
   }
+  if (init.secret && (r.type === "opaqueredirect" || (r.status >= 300 && r.status < 400))) {
+    throw new CliError(`${new URL(url).origin} answered with a redirect${r.headers.get("location") ? ` to ${r.headers.get("location")}` : ""}; a credential is never sent on to another address. Check OCTILLION_URL (use the final address).`, { code: "redirect" });
+  }
+  return r;
+}
+const LOOPBACK = ["127.0.0.1", "localhost", "[::1]"];
+/** An endpoint from the authorization server's metadata that tokens go to: https, or a loopback address. */
+export function secureEndpoint(raw, what) {
+  let u;
+  try { u = new URL(raw); } catch { throw new CliError(`The authorization server's ${what} is not a URL.`, { code: "insecure_endpoint" }); }
+  if (u.protocol !== "https:" && !(u.protocol === "http:" && LOOPBACK.includes(u.hostname))) {
+    throw new CliError(`The authorization server's ${what} (${u.origin}) is not https; refusing to send credentials to it.`, { code: "insecure_endpoint" });
+  }
+  return u.href;
 }
 const form = (o) => new URLSearchParams(Object.entries(o).filter(([, v]) => v != null && v !== ""));
 async function postForm(url, body) {
-  const r = await request(url, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" }, body: form(body) });
+  const r = await request(secureEndpoint(url, "endpoint"), { method: "POST", secret: true, headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" }, body: form(body) });
   const text = await r.text();
   let json = {};
   try { json = text ? JSON.parse(text) : {}; } catch { json = { error: "invalid_response", error_description: text.slice(0, 200) }; }
@@ -180,7 +221,7 @@ export function rpcMessage(contentType, text) {
 export async function callTool(base, cred, name, args = {}, { org } = {}) {
   const headers = { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": "2025-06-18", authorization: `Bearer ${cred.token}` };
   if (org) headers["x-octillion-org"] = org;
-  const r = await request(`${base}/mcp`, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }) });
+  const r = await request(`${base}/mcp`, { method: "POST", secret: true, headers, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }) });
   const text = await r.text();
   const msg = rpcMessage(r.headers.get("content-type"), text);
   const via = `(credential: ${describeSource(cred.source)})`;
@@ -227,7 +268,12 @@ async function login(ctx) {
   if (!clientId) throw disabled(base, cfg ? "the server has no CLI OAuth client configured" : "the server does not offer CLI sign-in");
   const meta = await asMetadata(base);
   if (!meta?.device_authorization_endpoint || !meta?.token_endpoint) throw disabled(base, "the authorization server does not offer the device grant");
+  secureEndpoint(meta.device_authorization_endpoint, "device authorization endpoint");
+  secureEndpoint(meta.token_endpoint, "token endpoint");
+  if (meta.revocation_endpoint) secureEndpoint(meta.revocation_endpoint, "revocation endpoint");
   let scope = (cfg?.scope || "profile email").split(/\s+/).filter(Boolean);
+  // The server honours the sign-in's picked organization: ask for the org picker.
+  if (cfg?.org_claim && !scope.includes("user:org:read")) scope.push("user:org:read");
   if (flags.read) {
     if (!scope.includes("octillion:read")) throw new CliError("--read needs the octillion:read scope, which this server does not offer yet. Use a read-only API key instead.", { code: "no_read_scope" });
     scope = scope.filter((s) => s !== "octillion:write");
@@ -462,6 +508,7 @@ export async function main(argv, io = {}) {
     }
     const run = commands[cmd];
     if (!run) throw new CliError(`Unknown command ${cmd}. Run octillion --help.`, { code: "usage" });
+    await cleanPending(env);
     const base = await baseUrl(parsed.flags, env);
     return await run({ flags: parsed.flags, args, env, base, out, json: wantsJson });
   } catch (e) {

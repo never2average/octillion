@@ -4,7 +4,7 @@
 // section, right after the P0 checks. First, proof that a token with no org claim and no Octillion scope is unchanged.
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -67,7 +67,23 @@ export async function agentAuthP1Checks(c: Ctx) {
   }
   console.log("✓ agent auth P1, nothing broken: an OAuth token with no org claim and no octillion scope keeps the oldest membership and full access (opaque and JWT)");
 
-  // ---------- the org claim ----------
+  // ---------- the org claim: OCTILLION_OAUTH_ORG_CLAIM off (default) = ignored completely ----------
+  const claimWas = process.env.OCTILLION_OAUTH_ORG_CLAIM;
+  delete process.env.OCTILLION_OAUTH_ORG_CLAIM;
+  for (const jwt of [false, true]) {
+    const w = await who(bearer(await token({ user_id: kim.id, jwt, org_id: orgQ.id })));
+    assert.ok(w.data.org.slug === P.slug && w.data.org_source === "default", `${jwt ? "JWT" : "opaque"}, flag off: the claim is ignored, oldest membership as before`);
+    const r = await who(bearer(await token({ user_id: kim.id, jwt, org_id: orgR.id })));
+    assert.equal(r.data.org.slug, P.slug, "flag off: even a claim for an account the person is not in is ignored (no 403)");
+  }
+  assert.equal((await who({ ...bearer(await token({ user_id: kim.id, org_id: orgP.id })), "x-octillion-org": Q.slug })).data.org_source, "header", "flag off: the header still picks");
+  assert.equal((await (await fetch(`${base}/api/cli/config`)).json()).org_claim, false, "the CLI config says the claim is off");
+  console.log("✓ OCTILLION_OAUTH_ORG_CLAIM off (default): a token's org_id is ignored completely (oldest membership, no 403), X-Octillion-Org unchanged");
+
+  // ---------- the org claim: on ----------
+  process.env.OCTILLION_OAUTH_ORG_CLAIM = "on";
+  try {
+  assert.equal((await (await fetch(`${base}/api/cli/config`)).json()).org_claim, true);
   for (const jwt of [false, true]) {
     const w = await who(bearer(await token({ user_id: kim.id, jwt, org_id: orgQ.id })));
     assert.ok(w.data.org.slug === Q.slug && w.data.org_source === "token" && w.data.role === "member", `${jwt ? "JWT" : "opaque"}: the token's org claim picks the account`);
@@ -76,7 +92,7 @@ export async function agentAuthP1Checks(c: Ctx) {
     assert.equal(notMine.status, 403, "an org claim for an account the person is not in is a 403");
     assert.equal(notMine.headers.get("www-authenticate"), null, "with no sign-in challenge");
     const nb = await notMine.json();
-    assert.ok(nb.error.data.reason === "not_member" && /picked an organization you are not a member of/.test(nb.error.message), nb.error.message);
+    assert.ok(nb.error.data.reason === "not_member" && /sign in again and pick another workspace, or send X-Octillion-Org: <slug>/.test(nb.error.message), nb.error.message);
   }
   const claimQ = await token({ user_id: kim.id, org_id: orgQ.id });
   const hdr = await who({ ...bearer(claimQ), "x-octillion-org": P.slug });
@@ -84,6 +100,9 @@ export async function agentAuthP1Checks(c: Ctx) {
   assert.match(hdr.text, /picked by the X-Octillion-Org header/);
   // A claim naming the account by id is cached per claim: the default stays the default on the next token.
   assert.equal((await who(bearer(await token({ user_id: kim.id })))).data.org.slug, P.slug, "a claimless token after a claimed one still gets the default");
+  } finally {
+    if (claimWas === undefined) delete process.env.OCTILLION_OAUTH_ORG_CLAIM; else process.env.OCTILLION_OAUTH_ORG_CLAIM = claimWas;
+  }
   console.log("✓ OAuth org claim (org_id): picks that account (opaque and JWT), 403 not_member for an account the person is not in, X-Octillion-Org still wins, whoami says what picked it");
 
   // ---------- Octillion's scopes ----------
@@ -162,7 +181,11 @@ export async function agentAuthP1Checks(c: Ctx) {
   assert.ok(vs.install_url.startsWith("vscode:mcp/install?") && connect.clients.find((x: any) => x.id === "claude-code").then === "claude mcp login octillion", "the setup page's catalog has them too");
   console.log("✓ one-command connect: npx add-mcp, claude mcp add + login, codex mcp add + login, Cursor and VS Code install links (each with its doc)");
 
-  await cliChecks(c, { kim, orgQ, P, Q });
+  // The CLI with the org claim honoured: it asks for user:org:read, and a sign-in's picked org is used.
+  process.env.OCTILLION_OAUTH_ORG_CLAIM = "on";
+  try { await cliChecks(c, { kim, orgQ, P, Q }); } finally {
+    if (claimWas === undefined) delete process.env.OCTILLION_OAUTH_ORG_CLAIM; else process.env.OCTILLION_OAUTH_ORG_CLAIM = claimWas;
+  }
   await db.query("DELETE FROM organizations WHERE id = ANY($1)", [[P.id, Q.id, R.id]]);
 }
 
@@ -244,6 +267,8 @@ async function cliChecks(c: Ctx, f: { kim: any; orgQ: any; P: { id: number; slug
     await mockPost("/_mock/device/approve", { user_code: start.json.user_code, user_id: f.kim.id, org_id: f.orgQ.id });
     const done = await run(["login", "--complete", handle, "--json"]);
     assert.ok(done.code === 0 && done.json.status === "signed_in" && done.json.source === "login", `completed: ${done.out}${done.err}`);
+    assert.ok(done.json.scope.split(" ").includes("user:org:read"), `with the org claim on, the CLI asks for user:org:read: ${done.json.scope}`);
+    assert.deepEqual((await readdir(cfgDir)).filter((n) => n.endsWith(".tmp") || n.startsWith(".")), [], "atomic writes leave no temp files");
     const credFile = path.join(cfgDir, "credentials.json");
     assert.equal((await stat(credFile)).mode & 0o777, 0o600, "credentials.json is 0600");
     assert.equal((await run(["login", "--complete", handle, "--json"])).json.error, "no_pending", "a handle finishes once");

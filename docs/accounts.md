@@ -75,12 +75,20 @@ subscription, or 80% of the monthly model budget used.
    5. **Enable `user:org:read`** (needs Organizations on): the consent screen then shows an organization picker, and
       the token carries the picked organization as `org_id` (clerk.com/changelog/2026-05-14-oauth-organizations).
       With the consent screen off for an application, Clerk fills `org_id` with the person's last active organization.
-   6. **Create the CLI's OAuth application:** OAuth applications → Add, name it "Octillion CLI", make it **Public**
+      Octillion ignores the claim until the next step.
+   6. Set **`OCTILLION_OAUTH_ORG_CLAIM=on`** on the API server and redeploy, so a token's `org_id` picks the account
+      (default off: the claim is ignored completely and everyone gets their oldest membership, as before).
+      **Warning:** `user:org:read` plus this flag changes which workspace existing users act in on their next
+      sign-in: the organization they pick on the consent screen (or, with consent off, their last active one in
+      Clerk) instead of their oldest membership; a pick that is not an Octillion workspace, or not theirs, is a 403
+      telling them to sign in again and pick another workspace or send `X-Octillion-Org`. Tell people in more than one
+      workspace before turning it on. `X-Octillion-Org` still wins either way.
+   7. **Create the CLI's OAuth application:** OAuth applications → Add, name it "Octillion CLI", make it **Public**
       (no secret), turn on the **Device Authorization Grant**, and give it the scopes `profile email user:org:read
       octillion:read octillion:write`. Copy its Client ID and set **`OCTILLION_CLI_CLIENT_ID`** to it on the API server,
       then redeploy. `GET $PUBLIC_URL/api/cli/config` then shows `"device_login": true`, and the authorization server
       metadata lists `device_authorization_endpoint`.
-   7. Set **`OCTILLION_OAUTH_SCOPES=on`** on the API server and redeploy. Only now does `/mcp` advertise
+   8. Set **`OCTILLION_OAUTH_SCOPES=on`** on the API server and redeploy. Only now does `/mcp` advertise
       `octillion:read` and `octillion:write` (protected resource metadata `scopes_supported`, and `scope="…"` in the
       401's `WWW-Authenticate`); before step 3 Clerk would refuse a client asking for them (`invalid_scope`), which is
       why it is off by default. Check: `curl -s $PUBLIC_URL/.well-known/oauth-protected-resource`, then
@@ -112,10 +120,11 @@ How Octillion uses it:
     `OCTILLION_URL_KEYS` is `allow` (the default), refused with `OCTILLION_URL_KEYS=off`; new keys are never issued as
     URLs.
   - **Choosing an account.** For OAuth, first match wins: the `X-Octillion-Org: <slug>` header (checked against the
-    person's memberships); then the token's org claim (`org_id`, the organization picked on Clerk's consent screen with
-    `user:org:read`; a JWT's `org_id` or `o.id`, or an `org_id` in Clerk's opaque-token verify response if it has one),
-    checked against their memberships now: a claim for an organization they are not in is a **403** `not_member`, never a
-    fall-back to another account; then the oldest membership that is not suspended (every token without a claim, as
+    person's memberships); then, only with `OCTILLION_OAUTH_ORG_CLAIM=on` (default off: the claim is ignored completely), the
+    token's org claim (`org_id`, the organization picked on Clerk's consent screen with `user:org:read`; a JWT's `org_id` or `o.id`, or an `org_id` in Clerk's opaque-token verify response if it has one),
+    checked against their memberships now: a claim for an organization they are not in (`not_member`), or one that is
+    not an Octillion workspace (`not_linked`), is a **403** saying to sign in again and pick another workspace or send
+    `X-Octillion-Org`, never a fall-back to another account; then the oldest membership that is not suspended (every token without a claim, as
     before). A key always acts in the account it was made in. The `whoami` tool returns the person, the account, what
     picked it (`org_source`: header, token, default or key), the role and the credential (OAuth with its scopes and
     access, or the key's name, access and expiry).
@@ -128,7 +137,7 @@ How Octillion uses it:
     failure. `offline_access` is never advertised.
   - **The `octillion` CLI** (packages/cli, not published): `octillion login` signs in with the Device Authorization
     Grant against Clerk (the client id from `GET /api/cli/config`, i.e. `OCTILLION_CLI_CLIENT_ID`; unset, it says
-    device login is off and points to API keys). Agents get `--non-interactive` JSON (link, code, `next_step:
+    device login is off and points to API keys; it also asks for `user:org:read` when the config's `org_claim` is true). Agents get `--non-interactive` JSON (link, code, `next_step:
     "octillion login --complete <handle>"`) automatically. Credentials: `--token`, then `OCTILLION_API_KEY`, then the
     stored login (`~/.config/octillion/credentials.json`, 0600, refreshed with its refresh token). See its README.
     `octillion keys` is not offered: the portal's key API takes a portal session, and opening it to OAuth tokens

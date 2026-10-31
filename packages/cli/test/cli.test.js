@@ -3,15 +3,15 @@
 // The end-to-end run against the real server and the mock Clerk is scripts/smoke-agent-auth-p1.ts.
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtemp, readFile, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { main, parseArgs, pickSnippet, builtinConnect, rpcMessage, isAgent } from "../src/cli.js";
+import { main, parseArgs, pickSnippet, builtinConnect, rpcMessage, isAgent, writeSecret, cleanPending, secureEndpoint } from "../src/cli.js";
 
 /** A fake Octillion + AS on one port. `opts.clientId` null = device login not configured. */
 async function fakeServer(opts = {}) {
-  const state = { approved: false, denied: false, polls: 0, refreshes: 0, lastAuth: null, lastOrg: null };
+  const state = { approved: false, denied: false, polls: 0, refreshes: 0, lastAuth: null, lastOrg: null, deviceScope: null };
   const srv = createServer(async (req, res) => {
     const chunks = [];
     for await (const ch of req) chunks.push(ch);
@@ -19,8 +19,10 @@ async function fakeServer(opts = {}) {
     const base = `http://127.0.0.1:${srv.address().port}`;
     const json = (status, o) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(o)); };
     const f = new URLSearchParams(body);
-    if (req.url === "/api/cli/config") return json(200, { client_id: opts.clientId ?? null, issuer: base, resource: `${base}/mcp`, scope: "profile email", device_login: Boolean(opts.clientId) });
-    if (req.url === "/.well-known/oauth-authorization-server") return json(200, { issuer: base, token_endpoint: `${base}/token`, ...(opts.noDevice ? {} : { device_authorization_endpoint: `${base}/device` }) });
+    if (req.url === "/api/cli/config") return json(200, { client_id: opts.clientId ?? null, issuer: base, resource: `${base}/mcp`, scope: "profile email", org_claim: Boolean(opts.orgClaim), device_login: Boolean(opts.clientId) });
+    if (req.url === "/.well-known/oauth-authorization-server") return json(200, { issuer: base, token_endpoint: opts.httpToken ? "http://as.example/token" : `${base}/token`, ...(opts.noDevice ? {} : { device_authorization_endpoint: `${base}/device` }) });
+    if (opts.redirectMcp && req.url === "/mcp") { res.writeHead(307, { location: "https://elsewhere.example/mcp" }); return res.end(); }
+    if (req.url === "/device") state.deviceScope = f.get("scope");
     if (req.url === "/device") return json(200, { device_code: "dc1", user_code: "ABCD-EFGH", verification_uri: `${base}/activate`, verification_uri_complete: `${base}/activate?code=ABCD-EFGH`, expires_in: 600, interval: 1 });
     if (req.url === "/token") {
       if (f.get("grant_type") === "refresh_token") { state.refreshes++; return json(200, { access_token: `at_refreshed_${state.refreshes}`, expires_in: 3600, refresh_token: "rt1" }); }
@@ -158,4 +160,61 @@ test("declined login is an error", async () => {
     assert.equal(r.code, 1);
     assert.equal(r.json.error, "access_denied");
   } finally { await s.close(); }
+});
+
+test("org claim on: login asks for user:org:read; off: it does not", async () => {
+  for (const orgClaim of [true, false]) {
+    const s = await fakeServer({ clientId: "cli_public", orgClaim });
+    try {
+      const dir = await mkdtemp(path.join(tmpdir(), "oct-cli-"));
+      assert.equal((await run(["login", "--non-interactive"], { OCTILLION_CONFIG_DIR: dir, OCTILLION_URL: s.url })).code, 0);
+      assert.equal(s.state.deviceScope, orgClaim ? "profile email user:org:read" : "profile email");
+    } finally { await s.close(); }
+  }
+});
+
+test("a token request never follows a redirect", async () => {
+  const s = await fakeServer({ redirectMcp: true });
+  try {
+    const dir = await mkdtemp(path.join(tmpdir(), "oct-cli-"));
+    const r = await run(["whoami", "--json", "--token", "t"], { OCTILLION_CONFIG_DIR: dir, OCTILLION_URL: s.url });
+    assert.equal(r.code, 1);
+    assert.equal(r.json.error, "redirect");
+    assert.match(r.json.message, /never sent on/);
+  } finally { await s.close(); }
+});
+
+test("non-https token endpoint is refused (loopback allowed)", async () => {
+  assert.throws(() => secureEndpoint("http://as.example/token", "token endpoint"), /not https/);
+  assert.equal(secureEndpoint("http://127.0.0.1:9/token", "x"), "http://127.0.0.1:9/token");
+  assert.equal(secureEndpoint("https://as.example/token", "x"), "https://as.example/token");
+  const s = await fakeServer({ clientId: "cli_public", httpToken: true });
+  try {
+    const dir = await mkdtemp(path.join(tmpdir(), "oct-cli-"));
+    const r = await run(["login", "--non-interactive", "--json"], { OCTILLION_CONFIG_DIR: dir, OCTILLION_URL: s.url });
+    assert.equal(r.code, 1);
+    assert.equal(r.json.error, "insecure_endpoint");
+  } finally { await s.close(); }
+});
+
+test("atomic 0600 writes leave no temp files; expired pending logins are cleaned", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "oct-cli-"));
+  const file = path.join(dir, "credentials.json");
+  await writeSecret(file, { a: 1 });
+  await writeSecret(file, { a: 2 });
+  assert.deepEqual(JSON.parse(await readFile(file, "utf8")), { a: 2 });
+  assert.equal((await stat(file)).mode & 0o777, 0o600);
+  assert.equal((await stat(dir)).mode & 0o777, 0o700);
+  assert.deepEqual(await readdir(dir), ["credentials.json"], "no temp file left behind");
+  const pend = path.join(dir, "pending");
+  await mkdir(pend);
+  await writeFile(path.join(pend, "old.json"), JSON.stringify({ expires_at: new Date(Date.now() - 1000).toISOString() }));
+  await writeFile(path.join(pend, "junk.json"), "{not json");
+  await writeFile(path.join(pend, "live.json"), JSON.stringify({ expires_at: new Date(Date.now() + 60_000).toISOString() }));
+  await cleanPending({ OCTILLION_CONFIG_DIR: dir });
+  assert.deepEqual(await readdir(pend), ["live.json"]);
+  // And on every run (any command, even one that fails early).
+  await writeFile(path.join(pend, "old2.json"), JSON.stringify({ expires_at: "2020-01-01T00:00:00Z" }));
+  await run(["whoami"], { OCTILLION_CONFIG_DIR: dir });
+  assert.deepEqual(await readdir(pend), ["live.json"]);
 });

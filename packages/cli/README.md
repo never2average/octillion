@@ -15,7 +15,7 @@ curl -H "Authorization: Bearer $(octillion token)" "$OCTILLION_URL/mcp" ...
 
 | Command | What it does |
 |---|---|
-| `octillion login` | OAuth 2.0 Device Authorization Grant (RFC 8628) against Octillion's authorization server (Clerk). Shows the verification link and code, polls until you approve, stores the tokens. |
+| `octillion login` | OAuth 2.0 Device Authorization Grant (RFC 8628) against Octillion's authorization server (Clerk). Shows the verification link and code, polls until you approve, stores the tokens. Asks for `user:org:read` (the org picker) when the server honours the picked organization (`org_claim` in `/api/cli/config`). |
 | `octillion login --non-interactive` | Prints `{verification_uri_complete, user_code, expires_in, next_step}` as JSON and exits 0. Automatic when stdin is not a TTY or an agent is detected (`AI_AGENT`, `CLAUDECODE`, `CURSOR_AGENT`, `CODEX_SANDBOX`, `GEMINI_CLI`, ...). `--interactive` forces the waiting mode. |
 | `octillion login --complete <handle>` | Finishes a non-interactive login: polls until approved, declined or expired, then stores the tokens. `--timeout <seconds>` returns exit 2 while still pending. |
 | `octillion login --read` | Asks for read-only access (`octillion:read`), when the server offers Octillion's scopes. |
@@ -58,6 +58,14 @@ npm test                                              # node --test, fake server
 node --no-experimental-require-module bin/octillion.js --help
 npm pack                                              # the tarball to publish (publishing is a separate, manual step)
 ```
+
+`package.json` has `"private": true` so nothing publishes it by accident: flip it to `false` (and choose a license)
+when you are ready to publish.
+
+Credentials are written atomically (a new 0600 temp file in the 0700 config directory, fsync'd, renamed over the old
+one); pending device logins past their expiry are removed on every run. Requests that carry a token never follow a
+redirect, and the token, device and revocation endpoints from the authorization server's metadata must be https
+(loopback excepted).
 
 The end-to-end run against the real server and a mock Clerk with the device grant is `scripts/smoke-agent-auth-p1.ts`,
 part of `scripts/smoke.ts`.
