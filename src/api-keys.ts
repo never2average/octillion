@@ -81,12 +81,17 @@ export function parseCreate(body: Record<string, unknown>): { name: string; scop
 export async function createPersonalKey(orgId: number, userId: string, body: Record<string, unknown>): Promise<{ key: string; row: KeyRow }> {
   const { name, scope, days } = parseCreate(body);
   const db = await getDb();
-  const [{ n }] = await db.query<{ n: number }>(
-    "SELECT count(*)::int AS n FROM api_keys WHERE org_id = $1 AND user_id = $2 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())", [orgId, userId]);
-  if (Number(n) >= MAX_ACTIVE_KEYS) throw new ApiKeyError(`You have ${MAX_ACTIVE_KEYS} active keys in this account: revoke one you no longer use first`, 409);
   const expiresAt = days === null ? null : new Date(Date.now() + days * 86_400_000);
-  // Tenant work may not write api_keys (0003): issuing is the platform's, for this organization and person only.
-  const made = await asPlatform(() => insertApiKey(orgId, name, userId, { scope, expiresAt, via: "portal" }));
+  // Tenant work may not write api_keys (0003): issuing is the platform's, for this organization and person only. The
+  // count and the insert share one transaction holding a lock on this person's keys in this account (released at
+  // COMMIT), so two creates at the same moment can't both pass the limit.
+  const made = await asPlatform(() => db.transaction(async (tx) => {
+    await tx.query("SELECT pg_advisory_xact_lock($1, hashtext($2))", [orgId, `api_keys:${userId}`]);
+    const [{ n }] = await tx.query<{ n: number }>(
+      "SELECT count(*)::int AS n FROM api_keys WHERE org_id = $1 AND user_id = $2 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())", [orgId, userId]);
+    if (Number(n) >= MAX_ACTIVE_KEYS) throw new ApiKeyError(`You have ${MAX_ACTIVE_KEYS} active keys in this account: revoke one you no longer use first`, 409);
+    return insertApiKey(orgId, name, userId, { scope, expiresAt, via: "portal" }, tx);
+  }));
   const [raw] = await db.query<Raw>(`SELECT ${COLS} FROM api_keys WHERE org_id = $1 AND id = $2`, [orgId, made.id]);
   return { key: made.key, row: shape(raw, userId, new Map()) };
 }

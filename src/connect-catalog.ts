@@ -137,6 +137,7 @@ export function headlessCatalog(url: string): HeadlessEntry[] {
       note: `In double quotes your shell fills in the key when you run the command, and Claude Code keeps it in your local config (~/.claude.json), not in the project. To keep only the variable's name, use the .mcp.json below: Claude Code reads ${v} each time it starts.` },
     { id: "claude-code-json", client: "Claude Code project file (.mcp.json)", verified: true, source: "https://code.claude.com/docs/en/mcp",
       steps: `Commit this file: it holds the variable's name, never the key. Each person or CI job sets ${v}.`,
+      note: `If ${v} is not set when Claude Code starts, it warns in claude mcp list and /mcp, and sends the unexpanded \${${v}} text, which Octillion refuses with a 401 saying the variable is not set: set it and restart.`,
       file: ".mcp.json", snippet: json({ mcpServers: { octillion: { type: "http", url, headers: { Authorization: `Bearer \${${v}}` } } } }) },
     { id: "codex", client: "Codex CLI", verified: true, source: "https://learn.chatgpt.com/docs/extend/mcp",
       steps: `Add this to your Codex config and set ${v}; Codex sends it as Authorization: Bearer.`,

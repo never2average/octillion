@@ -205,8 +205,10 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     u.public_metadata = md; res.json(userJson(u));
   });
   c.get("/v1/users/:id", (req, res) => { const u = s.users.get(req.params.id); u ? res.json(userJson(u)) : clerkErr(res, 404, "User not found", "resource_not_found"); });
-  c.get("/v1/users/:id/organization_memberships", (req, res) =>
-    void res.json(list([...s.memberships.values()].filter((m) => m.user_id === req.params.id).map(membershipJson))));
+  // Like Clerk: a user that does not exist (deleted) is a 404, not an empty list.
+  c.get("/v1/users/:id/organization_memberships", (req, res) => s.users.has(req.params.id)
+    ? void res.json(list([...s.memberships.values()].filter((m) => m.user_id === req.params.id).map(membershipJson)))
+    : clerkErr(res, 404, "User not found", "resource_not_found"));
   c.post("/v1/oauth_applications/access_tokens/verify", (req, res) => {
     const t = s.oauth.get(String(req.body?.access_token ?? ""));
     if (!t) return clerkErr(res, 404, "OAuth access token not found", "resource_not_found");

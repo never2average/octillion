@@ -112,6 +112,8 @@ export const invitations = {
 const userMemberships = new Map<string, { at: number; list: ClerkMembership[] }>();
 const changeListeners: ((userId: string) => void)[] = [];
 export const onMembershipChange = (fn: (userId: string) => void) => void changeListeners.push(fn);
+/** Drop the cached membership lists without notifying anyone (tests: force the next read to reach Clerk). */
+export const forgetMembershipCache = () => userMemberships.clear();
 const changed = <T>(userId: string, r: T) => { userMemberships.delete(userId); for (const fn of changeListeners) fn(userId); return r; };
 
 export const memberships = {

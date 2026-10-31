@@ -97,8 +97,16 @@ How Octillion uses it:
     OAuth token in `X-API-Key` is a 401 `invalid_request` saying to use `Authorization: Bearer`. A valid credential
     whose person has no Octillion account, only suspended memberships, or an organization Octillion does not know is a
     **403** with no challenge ("Your account has no Octillion workspace; request access at …", "Your access to <org>
-    is suspended; ask an owner"), so the OAuth client does not loop through sign-in. The access log line adds
+    is suspended; ask an owner"), so the OAuth client does not loop through sign-in. A malformed `X-Octillion-Org` is a
+    400 `invalid_request`. A personal key whose Clerk user was deleted is a 403 (`not_member`). The access log line adds
     `auth=<reason>` to a refused request; credentials are never logged.
+  - **Clerk outages.** A personal key's membership check serves the last membership Clerk returned for that person
+    and account for up to 10 minutes while Clerk errors (per instance); with nothing that recent it is a 503 with
+    `Retry-After`. Suspending or removing someone through Octillion clears that memory at once.
+  - **Rolling back past migration 0013.** Older releases ignore scope, expiry and the owner's membership, so a
+    read-only, expired or suspended person's portal key would get full access there. After rolling back to a release
+    before 0013, revoke portal keys:
+    `UPDATE api_keys SET revoked_at = now() WHERE created_via = 'portal' AND revoked_at IS NULL;`
 - **Origin:** browsers send an `Origin` header; on every MCP endpoint a request whose Origin is not `PUBLIC_URL`'s (or
   a `CLERK_MCP_AUDIENCE` origin, or one listed in `OCTILLION_MCP_ALLOWED_ORIGINS`, comma-separated) is refused with a
   403 and logged (`mcp origin refused … origin="…"`, once a minute per origin); the `/mcp` access line shows any Origin a

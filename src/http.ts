@@ -311,7 +311,7 @@ export function createApp() {
     res.locals.authFail = f.reason;
     if (f.status === 401) res.set("WWW-Authenticate", wwwAuthenticate(f));
     if (f.status === 503) res.set("Retry-After", "30");
-    res.status(f.status).json({ jsonrpc: "2.0", id: null, error: { code: f.status === 401 ? -32001 : -32003, message: f.message, data: { reason: f.reason } } });
+    res.status(f.status).json({ jsonrpc: "2.0", id: null, error: { code: f.status === 401 ? -32001 : f.status === 400 ? -32600 : -32003, message: f.message, data: { reason: f.reason } } });
   };
   // One log line per legacy URL key per process and hour: enough to know who to move, without a line per request.
   const urlKeySeen = new Map<string, number>();

@@ -1,6 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { getDb } from "./db.js";
-import { checkOAuthToken, clerkEnabled, isSuspended, mcpAudiences, memberships, onMembershipChange, organizations, type ClerkMembership, type OAuthRefusal } from "./clerk.js";
+import { getDb, type Queryable } from "./db.js";
+import { checkOAuthToken, ClerkError, clerkEnabled, isSuspended, mcpAudiences, memberships, onMembershipChange, organizations, type ClerkMembership, type OAuthRefusal } from "./clerk.js";
 import { accountRoleOf, type AccountRole } from "./account-roles.js";
 
 /** What an API key may do: read-only tools, or every tool the person's role allows. Null (older keys) = full access. */
@@ -44,7 +44,7 @@ export const apiKeysUrl = () => `${publicUrl()}/app/settings/api-keys`;
  * again would not help (no WWW-Authenticate challenge, which would send an OAuth client round the sign-in loop).
  */
 export interface AuthFailure {
-  status: 401 | 403 | 503;
+  status: 400 | 401 | 403 | 503;
   /** RFC 6750 error code for the WWW-Authenticate challenge; absent when no credential was sent at all. */
   error?: "invalid_request" | "invalid_token";
   /** A short reason for error_description (no secrets, no token). */
@@ -87,10 +87,10 @@ export async function createApiKey(orgId: number, label = "default", userId: str
 }
 
 /** createApiKey with the new row's id and prefix (the portal shows the row right away). */
-export async function insertApiKey(orgId: number, label: string, userId: string | null, opts: KeyOptions = {}): Promise<{ key: string; id: number; prefix: string }> {
+export async function insertApiKey(orgId: number, label: string, userId: string | null, opts: KeyOptions = {}, q?: Queryable): Promise<{ key: string; id: number; prefix: string }> {
   const key = randomId(KEY_PREFIX, 24);
   const prefix = key.slice(0, KEY_PREFIX.length + 6);
-  const db = await getDb();
+  const db = q ?? await getDb();
   const [row] = await db.query<{ id: number }>(
     "INSERT INTO api_keys (org_id, label, key_prefix, key_hash, user_id, scope, expires_at, created_via) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
     [orgId, label, prefix, sha256(key), userId, opts.scope ?? null, opts.expiresAt ?? null, opts.via ?? null],
@@ -116,6 +116,17 @@ function touchKey(id: number) {
     "/* tenant: the key row just resolved by its hash */ UPDATE api_keys SET last_used_at = now() WHERE id = $1 AND (last_used_at IS NULL OR last_used_at < now() - interval '1 minute')",
     [id])).catch(() => {});
 }
+
+/**
+ * The last membership Clerk returned for a personal key's person in its organization (null = not a member), per
+ * instance, keyed by user and Clerk organization. Used only when Clerk errors (stale-if-error), for at most
+ * KEY_MEMBERSHIP_STALE_MS; a membership change made through Octillion (suspend, remove, role) clears the person at once.
+ */
+const KEY_MEMBERSHIP_STALE_MS = 10 * 60_000;
+const keyMemberships = new Map<string, { m: ClerkMembership | null; at: number }>();
+onMembershipChange((userId) => { for (const k of keyMemberships.keys()) if (k.startsWith(`${userId}|`)) keyMemberships.delete(k); });
+/** Forget every remembered membership (tests). */
+export const forgetKeyMemberships = () => keyMemberships.clear();
 
 /**
  * Resolve an API key, or say why not. Unknown keys all read the same ("not recognised"), so nothing tells whether a
@@ -148,12 +159,23 @@ export async function resolveKeyDetailed(key: string | undefined | null, opts: {
   const personal = row.created_via === "portal" && Boolean(row.user_id);
   let role: AccountRole | undefined;
   if (personal && clerkEnabled() && row.clerk_org_id) {
-    let ms: ClerkMembership[];
-    try { ms = await memberships.forUser(row.user_id!); }
-    catch { return refuse({ status: 503, reason: "unverifiable", description: "could not check your membership", message: "Octillion could not check your account membership just now. Try again in a minute." }); }
-    const m = ms.find((x) => x.organization?.id === row.clerk_org_id);
-    if (!m) return refuse({ status: 403, reason: "not_member", description: `not a member of ${row.slug}`,
+    const notMember = () => refuse({ status: 403, reason: "not_member", description: `not a member of ${row.slug}`,
       message: `This API key's owner is no longer a member of ${row.name}, so the key no longer works. Ask an owner of ${row.name} for an invitation.` });
+    const ck = `${row.user_id}|${row.clerk_org_id}`;
+    let m: ClerkMembership | null;
+    try {
+      m = (await memberships.forUser(row.user_id!)).find((x) => x.organization?.id === row.clerk_org_id) ?? null;
+      keyMemberships.set(ck, { m, at: Date.now() });
+    } catch (err) {
+      // A deleted Clerk user: the key's owner is gone for good.
+      if (err instanceof ClerkError && err.status === 404) { keyMemberships.set(ck, { m: null, at: Date.now() }); return notMember(); }
+      // Clerk is down: serve the last known membership for a while (stale-if-error), else say so.
+      const hit = keyMemberships.get(ck);
+      if (!hit || Date.now() - hit.at > KEY_MEMBERSHIP_STALE_MS) return refuse({ status: 503, reason: "unverifiable", description: "could not check your membership",
+        message: "Octillion could not check your account membership just now. Try again in a minute." });
+      m = hit.m;
+    }
+    if (!m) return notMember();
     if (isSuspended(m)) return refuse({ status: 403, reason: "suspended", description: `access to ${row.slug} is suspended`,
       message: `Your access to ${row.name} is suspended; ask an owner.` });
     role = accountRoleOf(m);
@@ -291,7 +313,7 @@ export async function resolveUserTokenDetailed(token: string, orgSlug?: string):
  */
 export async function authenticateMcp(headers: Record<string, string | string[] | undefined>): Promise<AuthResult> {
   const slug = orgHeader(headers);
-  if (slug !== undefined && !/^[a-z0-9][a-z0-9-]{0,63}$/.test(slug)) return refuse({ status: 403, reason: "not_member", description: "X-Octillion-Org is not a workspace slug",
+  if (slug !== undefined && !/^[a-z0-9][a-z0-9-]{0,63}$/.test(slug)) return refuse({ status: 400, error: "invalid_request", reason: "bad_org_header", description: "X-Octillion-Org is not a workspace slug",
     message: `X-Octillion-Org must be a workspace slug (letters, digits and dashes). Remove the header to use your default workspace.` });
   const authz = typeof headers.authorization === "string" ? headers.authorization.trim() : "";
   const viaBearer = bearer(authz);
@@ -300,6 +322,10 @@ export async function authenticateMcp(headers: Record<string, string | string[] 
   if (!viaBearer && authz && !xKey) return refuse({ status: 401, error: "invalid_request", reason: "malformed", description: "use Authorization: Bearer <token>",
     message: `The Authorization header must be "Bearer <token>". ${NEXT_STEP()}.` });
   if (!viaBearer && !xKey) return refuse({ status: 401, reason: "missing", description: "authentication required", message: `${NEXT_STEP()}.` });
+  // A client that sends its config's placeholder unexpanded (Claude Code does when the variable is unset).
+  const placeholder = /^\$\{?(?:env:)?([A-Za-z_][A-Za-z0-9_]*)(?::-[^}]*)?\}?$/.exec(viaBearer ?? xKey!);
+  if (placeholder) return refuse({ status: 401, error: "invalid_request", reason: "env_unset", description: `${placeholder[1]} is not set`,
+    message: `The client sent the text "${placeholder[0]}" instead of a key: ${placeholder[1]} is not set in its environment. Set it to a key from ${apiKeysUrl()} and restart the client.` });
   if (viaBearer) return viaBearer.startsWith(KEY_PREFIX) ? resolveKeyDetailed(viaBearer, { orgSlug: slug }) : resolveUserTokenDetailed(viaBearer, slug);
   // X-API-Key carries Octillion API keys only.
   if (!/^\S+$/.test(xKey!) || !xKey!.startsWith(KEY_PREFIX)) return refuse({ status: 401, error: "invalid_request", reason: "malformed",

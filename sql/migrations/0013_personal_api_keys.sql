@@ -11,6 +11,11 @@
 --
 -- Rollout-safe: the previous release ignores the new columns, and its resolveKey still refuses revoked keys; it does
 -- not know about expiry, so a personal key that has expired would keep working on an old instance until it is gone.
+--
+-- ROLLBACK RUNBOOK: releases before 0013 ignore scope, expiry and the owner's membership, so on them a read-only,
+-- expired or suspended person's portal key would act with full access. If a deploy is rolled back to such a release,
+-- revoke the portal keys (people make new ones once the newer release is back):
+--   UPDATE api_keys SET revoked_at = now() WHERE created_via = 'portal' AND revoked_at IS NULL;
 -- Row-level security is unchanged: tenant work still reads its own organization's keys and may not insert or revoke
 -- any (0003); the portal issues and revokes personal keys as the platform, filtered by organization and person.
 

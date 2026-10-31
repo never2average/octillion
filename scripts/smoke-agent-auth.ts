@@ -200,6 +200,48 @@ export async function agentAuthChecks(c: Ctx) {
     assert.equal(await raw(bearer(await token({ user_id: mo.id }))).then((r) => r.status), 403, "an OAuth token too");
     assert.equal((await appCall(patC, "POST", `/team/members/${moId}/reactivate`)).status, 204);
     assert.ok(!(await tool(bearer(moRead), "list_products")).isError, "restored");
+    // An unset variable the client sent as its placeholder text.
+    const unset = await raw(bearer("${OCTILLION_API_KEY}"));
+    assert.equal(unset.status, 401);
+    assert.match((await unset.json()).error.message, /OCTILLION_API_KEY is not set in its environment/, "an unexpanded placeholder says the variable is unset");
+
+    // ---------- Clerk outage: stale-if-error for a personal key's membership ----------
+    const { forgetMembershipCache } = await import("../src/clerk.js");
+    const { forgetKeyMemberships } = await import("../src/auth.js");
+    const clerkUrl = process.env.CLERK_API_URL;
+    const outage = async <T>(fn: () => Promise<T>) => {
+      forgetMembershipCache(); // the next membership read goes to Clerk, which is down
+      process.env.CLERK_API_URL = "http://127.0.0.1:9";
+      try { return await fn(); } finally { process.env.CLERK_API_URL = clerkUrl; }
+    };
+    assert.ok(!(await tool(bearer(moRead), "list_products")).isError, "Clerk up: membership read and remembered");
+    assert.equal(await outage(() => raw(bearer(moRead)).then(async (r) => { await r.text(); return r.status; })), 200, "Clerk down: the last known membership is served");
+    forgetKeyMemberships();
+    const down = await outage(() => raw(bearer(moRead)));
+    assert.equal(down.status, 503, "Clerk down with nothing remembered: 503");
+    assert.equal(down.headers.get("retry-after"), "30");
+    assert.equal((await down.json()).error.data.reason, "unverifiable");
+    // A suspension through Octillion clears the remembered membership at once: during an outage that follows, the
+    // key is not served on the old (active) membership.
+    assert.ok(!(await tool(bearer(moRead), "list_products")).isError, "remembered again");
+    assert.equal((await appCall(patC, "POST", `/team/members/${moId}/deactivate`)).status, 204);
+    assert.equal(await outage(() => raw(bearer(moRead)).then(async (r) => { await r.text(); return r.status; })), 503, "a suspended member's key is never served from before the suspension");
+    assert.equal((await appCall(patC, "POST", `/team/members/${moId}/reactivate`)).status, 204);
+    assert.ok(!(await tool(bearer(moRead), "list_products")).isError, "Clerk back: works");
+    // A deleted Clerk user (Clerk answers 404): 403 not_member, not a 503.
+    const { insertApiKey } = await import("../src/auth.js");
+    const ghost = (await insertApiKey(rowP.id, "ghost", `user_deleted_${stamp}`, { scope: "write", via: "portal" })).key;
+    const gone = await raw(bearer(ghost));
+    assert.equal(gone.status, 403, "a deleted owner's key is a 403");
+    const goneBody = await gone.json();
+    assert.ok(goneBody.error.data.reason === "not_member" && /owner is no longer a member/.test(goneBody.error.message), "not_member");
+    // The 25-key limit holds under concurrent creates.
+    const active = async () => (await json(appCall(moC, "GET", "/api-keys"))).keys.filter((k: any) => k.status === "active").length;
+    const before = await active();
+    const burst = await Promise.all(Array.from({ length: 30 - before }, (_, i) => appCall(moC, "POST", "/api-keys", { name: `burst ${i}` }).then((r) => r.status)));
+    assert.equal(await active(), 25, "never more than 25 active keys");
+    assert.ok(burst.filter((s) => s === 201).length === 25 - before && burst.every((s) => s === 201 || s === 409), `the rest are 409: ${burst.join(",")}`);
+    console.log("✓ Clerk outage: last known membership served (10 min), 503 without one, cleared by a suspension; deleted owner 403 not_member; 25-key limit race-safe; unset env var named");
     console.log("✓ /mcp errors: missing 401 (no error code) with the next step, expired 401 invalid_token with the date, revoked 401, unknown 401, OAuth in X-API-Key 401 invalid_request, no account 403, suspended 403; read key on a write tool = isError with the next step; last_used_at");
 
     // ---------- X-Octillion-Org ----------
@@ -211,7 +253,11 @@ export async function agentAuthChecks(c: Ctx) {
     const notMine = await raw({ ...bearer(patTok2), "x-octillion-org": `nobody-${stamp}` });
     assert.equal(notMine.status, 403, "an account you're not in is refused");
     assert.match((await notMine.json()).error.message, new RegExp(`not a member of the Octillion workspace "nobody-${stamp}"`));
-    assert.equal((await raw({ ...bearer(patTok2), "x-octillion-org": "Not A Slug!" })).status, 403, "a malformed slug too");
+    const malformed = await raw({ ...bearer(patTok2), "x-octillion-org": "Not A Slug!" });
+    assert.equal(malformed.status, 400, "a malformed slug is a 400");
+    assert.equal(malformed.headers.get("www-authenticate"), null, "with no sign-in challenge");
+    const malBody = await malformed.json();
+    assert.ok(malBody.error.data.reason === "bad_org_header" && /workspace slug/.test(malBody.error.message), "invalid_request: says what a slug is");
     const mism = await raw({ ...bearer(patKey), "x-octillion-org": rowQ.slug });
     assert.equal(mism.status, 403, "a key acts only in its own account");
     assert.match((await mism.json()).error.message, new RegExp(`belongs to .*\\(${slugP}\\), not ${rowQ.slug}`));
