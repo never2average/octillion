@@ -182,7 +182,7 @@ export const ADMIN_TOOLS = {
     description: "GTM › Activation: the activation funnel for a period (access requested, account created, first product onboarded, first simulation, report opened, paid) with counts, conversion and median time between steps, and the accounts that need a person now. Filter by plan, utm_source, utm_campaign (comma lists; 'direct/unknown' for untagged). With experiment (a pricing experiment key, as on FinOps › Experiments) the funnel is also split by variant (experiment.split, one funnel per variant): accounts sit under the variant they were first shown on Billing, accounts never shown it under 'none' (Not shown pricing), and Paid under the variant the subscription bought. variant keeps only those variants (comma list of price ids, or 'none').",
     input: { ...range, plan: z.string().optional(), utm_source: z.string().optional(), utm_campaign: z.string().optional(),
       experiment: z.string().max(100).optional().describe("A pricing experiment key: split the funnel by its variants"),
-      variant: z.string().optional().describe("With experiment: only these variants (comma list of price ids; 'none' = not shown pricing)") },
+      variant: z.string().max(100).optional().describe("With experiment: only these variants (comma list of price ids; 'none' = not shown pricing)") },
     run: async (a) => {
       const { facets: _f, cohort: _c, ...d } = await (await import("./gtm.js")).activation(a);
       const strip = <T extends { accounts?: unknown }>(steps: T[]) => steps.map(({ accounts: _x, ...s }) => s);

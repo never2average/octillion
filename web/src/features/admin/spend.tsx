@@ -618,10 +618,16 @@ function GtmLinks({ experiment, size = 'sm', stacked }: { experiment: string; si
  * in points, marked when its interval excludes 0. Revenue per account shown is the number to compare prices on.
  */
 function ExperimentsTab({ data, loading, bar }: TabProps<Experiments>) {
-  const t = data?.totals;
   const only = useSearchParams().get('experiment')?.trim() || null;
   const router = useRouter();
   const rows = only ? (data?.variants ?? []).filter((v) => v.experiment === only) : data?.variants ?? [];
+  // One experiment shown: the cards are its own (an account has one exposure per experiment, so exposed adds up).
+  const t = only && data?.totals ? (() => {
+    const daily = (k: 'daily_exposed' | 'daily_converted' | 'daily_collected') => sumAt(rows.map((v) => v[k]), data.range.days.length);
+    return { running: rows.filter((v) => v.live).length >= 2 ? 1 : 0, experiments: rows.length ? 1 : 0, accounts: total(rows.map((v) => v.exposed)),
+      checkouts: total(rows.map((v) => v.checkouts)), converted: total(rows.map((v) => v.converted)), collected_usd: total(rows.map((v) => v.collected_usd)),
+      daily_exposed: daily('daily_exposed'), daily_converted: daily('daily_converted'), daily_collected: daily('daily_collected') };
+  })() : data?.totals;
   const share = (v: Variant) => {
     const live = data?.variants.filter((x) => x.experiment === v.experiment && x.live) ?? [];
     const w = live.reduce((n, x) => n + x.weight, 0);
@@ -664,7 +670,7 @@ function ExperimentsTab({ data, loading, bar }: TabProps<Experiments>) {
     { key: 'spend', label: 'Model spend', hidden: true, className: 'text-right', type: 'number', value: (v) => v.model_spend_usd, render: (v) => num(cents(v.model_spend_usd), 'Metered model spend of the accounts that subscribed, in the range') },
     { key: 'margin', label: 'Margin', hidden: true, className: 'text-right', type: 'number', value: (v) => v.margin_usd, render: (v) => num(cents(v.margin_usd)) },
     { key: 'churned', label: 'Churned', hidden: true, className: 'text-right', type: 'number', value: (v) => v.churned, render: (v) => num(v.churned.toLocaleString()) },
-    { key: 'gtm', label: 'GTM', className: 'text-right', type: 'text', value: (v) => v.experiment, render: (v) => <GtmLinks experiment={v.experiment} size='xs' stacked /> }
+    { key: 'gtm', label: 'GTM', hidden: true, className: 'text-right', type: 'text', value: (v) => v.experiment, render: (v) => <GtmLinks experiment={v.experiment} size='xs' stacked /> }
   ];
   const variantActions = (v: Variant): RowAction[] => [
     { label: 'Open in GTM Activation', icon: <Icons.externalLink />, onSelect: () => router.push(gtmHref('activation', v.experiment)) },

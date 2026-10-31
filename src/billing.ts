@@ -53,12 +53,23 @@ async function call<T>(method: "GET" | "POST", path: string, body?: Record<strin
   return json as T;
 }
 
-async function all<T extends { id: string }>(path: string): Promise<T[]> {
+/** The most a paged list call reads (50 pages of 100). A list that has more is read as its first LIST_CAP items. */
+export const LIST_CAP = 5000;
+/** List paths (as passed to all()) whose last read stopped at LIST_CAP with more left: what was read is incomplete. */
+const truncated = new Set<string>();
+/** Whether the last read of a list path stopped at the cap (its result is incomplete; callers that must not guess check this). */
+export const listTruncated = (path: string) => truncated.has(path);
+/** Thrown by a paged read that ran past its deadline (o.deadline, ms): nothing it read is returned. */
+export class StripeDeadline extends Error {}
+
+async function all<T extends { id: string }>(path: string, o: { deadline?: number } = {}): Promise<T[]> {
   const out: T[] = [];
   for (let after: string | undefined; ;) {
+    if (o.deadline != null && Date.now() >= o.deadline) throw new StripeDeadline(`Stripe: out of time reading ${path.split("?")[0]} (${out.length} read)`);
     const page = await call<{ data: T[]; has_more: boolean }>("GET", `${path}${path.includes("?") ? "&" : "?"}limit=100${after ? `&starting_after=${after}` : ""}`);
     out.push(...page.data);
-    if (!page.has_more || !page.data.length || out.length >= 5000) return out;
+    if (!page.has_more || !page.data.length) { truncated.delete(path); return out; }
+    if (out.length >= LIST_CAP) { truncated.add(path); return out; }
     after = page.data[page.data.length - 1].id;
   }
 }
@@ -260,10 +271,11 @@ export type SubscriptionSummary = NonNullable<ReturnType<typeof shapeSub>>;
 export interface PaidSpan { customer: string; from: number; to: number | null }
 let subsCache: { at: number; byCustomer: Map<string, SubscriptionSummary>; spans: PaidSpan[]; raw: Subscription[] } | null = null;
 /** Every customer's current subscription in one paged list call, cached for a minute. */
-export async function subscriptionsByCustomer(fresh = false): Promise<Map<string, SubscriptionSummary>> {
+export const SUBSCRIPTIONS_PATH = "/v1/subscriptions?status=all";
+export async function subscriptionsByCustomer(fresh = false, deadline?: number): Promise<Map<string, SubscriptionSummary>> {
   if (!fresh && subsCache && Date.now() - subsCache.at < 60_000) return subsCache.byCustomer;
   // Stripe expands at most 4 levels (data.items.data.price.product is 5): products come from their own list instead.
-  const [subs, plans, products] = await Promise.all([all<Subscription>("/v1/subscriptions?status=all"), listPlans(), all<{ id: string; name?: string; metadata?: Record<string, string> }>("/v1/products")]);
+  const [subs, plans, products] = await Promise.all([all<Subscription>(SUBSCRIPTIONS_PATH, { deadline }), listPlans(), all<{ id: string; name?: string; metadata?: Record<string, string> }>("/v1/products", { deadline })]);
   const productById = new Map(products.map((p) => [p.id, p]));
   for (const s of subs) for (const it of s.items.data) if (typeof it.price.product === "string") it.price.product = productById.get(it.price.product) ?? it.price.product;
   const grouped = new Map<string, Subscription[]>();
@@ -275,9 +287,9 @@ export async function subscriptionsByCustomer(fresh = false): Promise<Map<string
   return byCustomer;
 }
 /** Every subscription as Stripe lists it (every status), with each customer's current one: the same cached list call (FinOps Revenue). */
-export async function allSubscriptions(fresh = false): Promise<{ raw: Subscription[]; byCustomer: Map<string, SubscriptionSummary> }> {
-  const byCustomer = await subscriptionsByCustomer(fresh);
-  return { raw: subsCache?.raw ?? [], byCustomer };
+export async function allSubscriptions(fresh = false, deadline?: number): Promise<{ raw: Subscription[]; byCustomer: Map<string, SubscriptionSummary>; truncated: boolean }> {
+  const byCustomer = await subscriptionsByCustomer(fresh, deadline);
+  return { raw: subsCache?.raw ?? [], byCustomer, truncated: listTruncated(SUBSCRIPTIONS_PATH) };
 }
 /** Every subscription's paid span, from the same cached list call (the Onboarding page's Paying sparkline). */
 export async function paidSpans(): Promise<PaidSpan[]> {
@@ -334,11 +346,30 @@ export async function checkoutUrl(customer: string, priceId: string, returnUrl: 
 export interface CheckoutSession { id: string; created: number; status: string | null; customer: string | null; subscription?: string | { id: string } | null; metadata?: Record<string, string> }
 let checkoutsCache: { at: number; sessions: CheckoutSession[] } | null = null;
 /** Every checkout session (paged, at most 5,000), cached a minute: the started side of a pricing experiment. */
+export const CHECKOUTS_PATH = "/v1/checkout/sessions";
 export async function allCheckoutSessions(fresh = false): Promise<CheckoutSession[]> {
   if (!fresh && checkoutsCache && Date.now() - checkoutsCache.at < 60_000) return checkoutsCache.sessions;
-  const sessions = await all<CheckoutSession>("/v1/checkout/sessions");
+  const sessions = await all<CheckoutSession>(CHECKOUTS_PATH);
   checkoutsCache = { at: Date.now(), sessions };
   return sessions;
+}
+/** Whether the last full read of the checkout sessions stopped at LIST_CAP (incomplete). */
+export const checkoutsTruncated = () => listTruncated(CHECKOUTS_PATH);
+/**
+ * Checkout sessions created at or after `since` (Unix seconds; Stripe's created[gte]), fresh (no cache), within a
+ * deadline. `truncated`: more than LIST_CAP, so the list is incomplete.
+ */
+export async function checkoutSessionsSince(since: number, deadline?: number): Promise<{ sessions: CheckoutSession[]; truncated: boolean }> {
+  const path = `${CHECKOUTS_PATH}?created%5Bgte%5D=${Math.max(0, Math.floor(since))}`;
+  const sessions = await all<CheckoutSession>(path, { deadline });
+  return { sessions: sessions.filter((x) => x.created >= since), truncated: listTruncated(path) };
+}
+/** One customer's subscriptions (every status) and checkout sessions, read fresh from Stripe (no cache): checks right before an action. */
+export async function customerPurchases(customer: string): Promise<{ subscriptions: Subscription[]; sessions: CheckoutSession[] }> {
+  const c = encodeURIComponent(customer);
+  const [subscriptions, sessions] = await Promise.all([all<Subscription>(`/v1/subscriptions?status=all&customer=${c}`), all<CheckoutSession>(`${CHECKOUTS_PATH}?customer=${c}`)]);
+  // Filtered here too: a list that ignores the filter never mixes customers up.
+  return { subscriptions: subscriptions.filter((x) => x.customer === customer), sessions: sessions.filter((x) => x.customer === customer) };
 }
 export const invalidateCheckouts = () => { checkoutsCache = null; };
 

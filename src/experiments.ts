@@ -297,27 +297,45 @@ export async function experimentCatalog(): Promise<CatalogExperiment[]> {
 
 export interface Bought { variant: string; paying: boolean; mrr_usd: number }
 export interface ExperimentOutcomes {
-  configured: boolean; error: string | null;
+  configured: boolean;
+  /** Stripe failing, a list cut at billing.LIST_CAP (incomplete: "unknown"), or out of time: callers that must not guess check it. */
+  error: string | null;
   /** Stripe customer → experiment → what it bought: the variant of its earliest tagged subscription that ever paid or
    *  trialed (not incomplete), and whether its tagged subscriptions pay now (revenue.ts payingAt) and their MRR. */
   bought: Map<string, Map<string, Bought>>;
   /** `${customer}\u0000${experiment}` of every completed checkout session tagged with the experiment. */
   completed: Set<string>;
+  /** Customers holding any subscription that is not incomplete / incomplete_expired (active, trialing, past due,
+   *  unpaid, paused, or canceled after it started), tagged or not: they are customers already. */
+  subscribers: Set<string>;
+  /** Customer → when each of its completed checkout sessions was created (Unix seconds), tagged or not. */
+  completedAt: Map<string, number[]>;
 }
 /**
- * What accounts did with an experiment, read back from Stripe's tags (the same cached list calls as experimentsReport).
- * Stripe off: empty and configured false. Stripe failing: empty with the error (callers that must not guess check it).
+ * What accounts did with experiments (and with Stripe at all), read back from Stripe: the same cached list calls as
+ * experimentsReport, unless `sessionsSince` (Unix seconds) asks for a fresh, created[gte]-filtered read of the
+ * checkout sessions. `deadline` (ms) bounds the paging. Stripe off: empty and configured false. Stripe failing, a list
+ * cut at the cap, or out of time: the error, and nothing a caller should act on.
  */
-export async function experimentOutcomes(now = Date.now()): Promise<ExperimentOutcomes> {
-  const out: ExperimentOutcomes = { configured: billing.stripeEnabled(), error: null, bought: new Map(), completed: new Set() };
+export async function experimentOutcomes(now = Date.now(), o: { sessionsSince?: number; deadline?: number } = {}): Promise<ExperimentOutcomes> {
+  const out: ExperimentOutcomes = { configured: billing.stripeEnabled(), error: null, bought: new Map(), completed: new Set(), subscribers: new Set(), completedAt: new Map() };
   if (!out.configured) return out;
   let subs: billing.Subscription[], sessions: billing.CheckoutSession[];
-  try { [{ raw: subs }, sessions] = await Promise.all([billing.allSubscriptions(), billing.allCheckoutSessions()]); }
-  catch (e) { return { ...out, error: (e as Error).message }; }
+  try {
+    const [s, c] = await Promise.all([billing.allSubscriptions(false, o.deadline),
+      o.sessionsSince != null ? billing.checkoutSessionsSince(o.sessionsSince, o.deadline) : billing.allCheckoutSessions().then((x) => ({ sessions: x, truncated: billing.checkoutsTruncated() }))]);
+    if (s.truncated || c.truncated)
+      return { ...out, error: `Stripe lists more than ${billing.LIST_CAP} ${s.truncated ? "subscriptions" : "checkout sessions"}: the rest is unknown` };
+    if (o.deadline != null && Date.now() >= o.deadline) return { ...out, error: "Stripe: out of time" };
+    subs = s.raw; sessions = c.sessions;
+  } catch (e) { return { ...out, error: (e as Error).message }; }
   for (const s of sessions) {
+    if (!s.customer || s.status !== "complete") continue;
     const m = s.metadata ?? {};
-    if (s.customer && s.status === "complete" && m.octillion_experiment) out.completed.add(`${s.customer}\u0000${m.octillion_experiment}`);
+    if (m.octillion_experiment) out.completed.add(`${s.customer}\u0000${m.octillion_experiment}`);
+    out.completedAt.set(s.customer, [...(out.completedAt.get(s.customer) ?? []), s.created]);
   }
+  for (const s of subs) if (!NEVER_PAID.has(s.status)) out.subscribers.add(s.customer);
   const tagged = subs.filter((s) => s.metadata?.octillion_experiment && s.metadata.octillion_variant && !NEVER_PAID.has(s.status))
     .sort((a, b) => (a.start_date ?? a.created ?? 0) - (b.start_date ?? b.created ?? 0) || a.id.localeCompare(b.id));
   for (const s of tagged) {
@@ -330,6 +348,26 @@ export async function experimentOutcomes(now = Date.now()): Promise<ExperimentOu
   }
   return out;
 }
-/** Whether a customer completed a checkout or holds a subscription tagged with the experiment (any variant). */
-export const checkedOut = (o: ExperimentOutcomes, customer: string | null | undefined, experiment: string) =>
-  !!customer && (o.completed.has(`${customer}\u0000${experiment}`) || !!o.bought.get(customer)?.has(experiment));
+
+/**
+ * Whether an account counts as having bought, for "Saw pricing, didn't check out" (never write to a buyer): its Stripe
+ * customer holds ANY subscription that is not incomplete / incomplete_expired (tagged or not: subscribers from before
+ * the experiment, a plan outside it, another variant, an admin's checkout link, a checkout under another experiment),
+ * or completed a checkout tagged with this experiment, or completed ANY checkout created at or after the exposure.
+ */
+export function hasBought(o: Pick<ExperimentOutcomes, "subscribers" | "completed" | "completedAt">, customer: string | null | undefined, experiment: string, exposedAtMs: number) {
+  if (!customer) return false;
+  return o.subscribers.has(customer) || o.completed.has(`${customer}\u0000${experiment}`) || (o.completedAt.get(customer) ?? []).some((t) => t * 1000 >= exposedAtMs - 1000);
+}
+
+/** hasBought, from a fresh read of that one customer (billing.customerPurchases, no cache): right before an email goes. Throws when Stripe can't be read. */
+export async function hasBoughtNow(customer: string | null | undefined, experiment: string, exposedAtMs: number): Promise<boolean> {
+  if (!customer || !billing.stripeEnabled()) return false;
+  const { subscriptions, sessions } = await billing.customerPurchases(customer);
+  const done = sessions.filter((s) => s.status === "complete");
+  return hasBought({
+    subscribers: new Set(subscriptions.some((s) => !NEVER_PAID.has(s.status)) ? [customer] : []),
+    completed: new Set(done.flatMap((s) => (s.metadata?.octillion_experiment ? [`${customer}\u0000${s.metadata.octillion_experiment}`] : []))),
+    completedAt: new Map([[customer, done.map((s) => s.created)]]),
+  }, customer, experiment, exposedAtMs);
+}

@@ -60,7 +60,7 @@ import { freshSettings, settingNumber, settingText } from "./settings.js";
 import { capture } from "./telemetry.js";
 import { consentOf, mayEnrol, recordConsent, type ConsentDecision, type ConsentInput } from "./gtm-consent.js";
 import { DETECTED, detectPricingNoCheckout, detectSignals, EVENT_TYPES, forgetImmediate, REQUEST_EVENTS, type EventType } from "./gtm-events.js";
-import { accountExposures, checkedOut, experimentCatalog, experimentOutcomes } from "./experiments.js";
+import { accountExposures, experimentCatalog, hasBoughtNow } from "./experiments.js";
 import { NO_WINDOW, nextOpening, parseWindow, recipientZone, validZone, windowOpen, type SendWindow } from "./gtm-schedule.js";
 import * as replies from "./gtm-replies.js";
 import * as outbound from "./gtm-outbound.js";
@@ -761,7 +761,8 @@ async function processEvents(only: number | null, stopAt = Infinity): Promise<{ 
         const exp = c.trigger!.experiment || null, k = `${exp ?? ""}\u0000${c.trigger!.days}`, since = new Date(c.launched_at ?? Date.now()).getTime() - 2 * 86_400_000;
         pricing.set(k, { experiment: exp, days: c.trigger!.days!, since: Math.min(since, pricing.get(k)?.since ?? Infinity) });
       }
-      if (pricing.size) events += await detectPricingNoCheckout([...pricing.values()], { maxAgeHours });
+      // Within the tick's time: paging Stripe past it emits nothing this time.
+      if (pricing.size) events += await detectPricingNoCheckout([...pricing.values()], { maxAgeHours, deadline: stopAt - 15_000 });
     }
   }
   for (const c of cs) {
@@ -797,9 +798,9 @@ async function processEvents(only: number | null, stopAt = Infinity): Promise<{ 
       continue;
     }
     try {
-      // Saw pricing, didn't check out: checked again when due (the trigger's delay may have passed): a checkout or a
-      // tagged subscription since then means nobody is written to. Stripe failing throws: the next tick tries again.
-      if (e.type === "pricing_no_checkout" && await checkedOutSince(e)) {
+      // Saw pricing, didn't check out: checked again when due, from a fresh read (the trigger's delay may have
+      // passed): bought anything since means nobody is written to. Stripe failing throws: the next tick tries again.
+      if (e.type === "pricing_no_checkout" && await boughtSince(e.org_id, e.data)) {
         await db.query("UPDATE gtm_event_enrolments SET processed_at = now(), enrolled = 0, note = $3 WHERE campaign_id = $1 AND event_id = $2",
           [e.campaign_id, e.event_id, "Checked out since: not enrolled"]);
         continue;
@@ -815,12 +816,16 @@ async function processEvents(only: number | null, stopAt = Infinity): Promise<{ 
   return { events, enrolled };
 }
 
-/** Whether a pricing_no_checkout event's account has checked out for its experiment since (Stripe; throws when unreadable). */
-async function checkedOutSince(e: DueEvent): Promise<boolean> {
-  const out = await experimentOutcomes();
-  if (out.error) throw new Error(`Stripe could not be read: ${out.error}`);
-  const [o] = await (await getDb()).query<{ stripe_customer_id: string | null }>("SELECT stripe_customer_id FROM organizations WHERE id = $1", [e.org_id]);
-  return checkedOut(out, o?.stripe_customer_id, String(e.data.experiment ?? ""));
+/**
+ * Whether the account of a pricing_no_checkout event has bought since (src/experiments.ts hasBought: any subscription,
+ * a checkout tagged with the experiment, or any checkout since the exposure), from a fresh Stripe read of that one
+ * customer (no cache). Throws when Stripe can't be read: the caller tries again later, never sends on a guess.
+ */
+async function boughtSince(orgId: number | null, data: Record<string, unknown>): Promise<boolean> {
+  if (orgId == null) return false;
+  const [o] = await (await getDb()).query<{ stripe_customer_id: string | null }>("SELECT stripe_customer_id FROM organizations WHERE id = $1", [orgId]);
+  const exposed = Date.parse(String(data.exposed_at ?? ""));
+  return hasBoughtNow(o?.stripe_customer_id, String(data.experiment ?? ""), Number.isFinite(exposed) ? exposed : 0);
 }
 
 // ---------- unsubscribe links ----------
@@ -965,6 +970,8 @@ export async function previewEmail(body: { subject?: unknown; body?: unknown; fo
 interface Due {
   id: number; campaign_id: number; email: string; first_name: string | null; product: string | null; source: "account" | "request" | "prospect"; next_step: number; round: number;
   time_zone: string | null; country: string | null; prospect_id: number | null;
+  /** The event that enrolled it (a triggered campaign), else null. */
+  event_id: number | null;
 }
 export interface TickResult {
   started: number; enrolled: number; sent: number; failed: number; suppressed: number; finished: number;
@@ -1034,6 +1041,12 @@ export async function sendNow(actor: string, id: number) {
   log(actor, "campaign.send_now", null, { campaign_id: c.id, sent: tick.sent, waiting: m.waiting });
   return { campaign_id: c.id, sent_now: tick.sent, sent: m.sent, suppressed: m.suppressed, waiting: m.waiting, failed: m.failed, outside_window: tick.outside_window,
     uncertain: m.uncertain, unknown: m.unknown, skipped: tick.skipped ?? null, busy: Boolean(tick.busy) };
+}
+
+/** Whether a pricing_no_checkout recipient has bought since its event (boughtSince, fresh). Throws when Stripe can't be read. */
+async function pricingStop(eventId: number): Promise<boolean> {
+  const [e] = await (await getDb()).query<{ type: string; org_id: number | null; data: Record<string, unknown> }>("SELECT type, org_id, data FROM gtm_events WHERE id = $1", [eventId]);
+  return !!e && e.type === "pricing_no_checkout" && boughtSince(e.org_id == null ? null : Number(e.org_id), e.data);
 }
 
 /** Transient: Resend rate-limited, or email is switched off for now. Retried later, never counted as an attempt. */
@@ -1315,7 +1328,7 @@ async function runTick(only: number | null, o: TickOptions = {}): Promise<TickRe
           WHERE r.id IN (SELECT x.id FROM gtm_campaign_recipients x JOIN gtm_campaigns c ON c.id = x.campaign_id
                           WHERE c.status = 'running' AND x.status IN ('pending', 'active') AND x.next_at <= now() AND ($2::bigint IS NULL OR c.id = $2)
                           ORDER BY x.next_at, x.id LIMIT $1 FOR UPDATE OF x SKIP LOCKED)
-          RETURNING r.id, r.campaign_id, r.email, r.first_name, r.product, r.source, r.next_step, r.round, r.time_zone, r.country, r.prospect_id`, [Math.min(size * 10, cap - attempted), only]);
+          RETURNING r.id, r.campaign_id, r.email, r.first_name, r.product, r.source, r.next_step, r.round, r.time_zone, r.country, r.prospect_id, r.event_id`, [Math.min(size * 10, cap - attempted), only]);
       if (!wave.length) break;
       wave.sort((a, b) => Number(a.id) - Number(b.id));
       due.push(...wave);
@@ -1375,6 +1388,19 @@ async function runTick(only: number | null, o: TickOptions = {}): Promise<TickRe
               await db.query("UPDATE gtm_campaign_recipients SET next_at = $2 WHERE id = $1", [r.id, nextOpening(c.send_window, new Date(), zone)]);
               out.outside_window++;
               continue;
+            }
+            // Saw pricing, didn't check out: before EVERY email (the first included: it may have waited for the window),
+            // a fresh Stripe read of the account; bought anything since the exposure, and it stops here, done. Stripe
+            // not answering: looked at again in 15 minutes, never sent on a guess.
+            if (r.event_id != null) {
+              const stop = await pricingStop(Number(r.event_id)).catch((e: Error) => { console.error(`campaign ${c.id}: purchase check failed, deferred: ${e.message}`); return null; });
+              if (stop == null) { await db.query("UPDATE gtm_campaign_recipients SET next_at = now() + interval '15 minutes' WHERE id = $1", [r.id]); out.deferred++; continue; }
+              if (stop) {
+                await db.query("UPDATE gtm_campaign_recipients SET status = 'done', next_at = NULL WHERE id = $1 AND status IN ('pending', 'active')", [r.id]);
+                await db.query("UPDATE gtm_event_enrolments SET note = $3 WHERE campaign_id = $1 AND event_id = $2",
+                  [c.id, r.event_id, `Checked out before email ${r.next_step + 1}: stopped`]);
+                continue;
+              }
             }
             // The identity's cap for today is spent (warm-up): looked at again in an hour (a new UTC day, or a raised cap).
             if (slot && slot.left <= 0) {

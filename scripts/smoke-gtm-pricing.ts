@@ -36,6 +36,8 @@ export async function gtmPricingChecks({ db, adm, json, mockPost, sentTo, stamp 
     "INSERT INTO plan_exposures (org_id, experiment, price_id, plan_name, first_seen_at) VALUES ($1, $2, $3, $4, now() - $5::interval)", [orgId, EXP, price, name, ago]);
   const tagged = (customer: string, variant: string, price: string) => mockPost("/_mock/subscriptions", { customer, price, start_date: Math.floor(Date.now() / 1000) - 2 * 86_400,
     invoice: false, metadata: { octillion_slug: "x", octillion_experiment: EXP, octillion_variant: variant } });
+  // An untagged subscription (a plan outside any experiment, an admin checkout link, a subscriber from before).
+  const untagged = (customer: string, daysAgo: number) => mockPost("/_mock/subscriptions", { customer, price: A, start_date: Math.floor(Date.now() / 1000) - daysAgo * 86_400, invoice: false });
   const fresh = () => { billing.invalidateSubscriptions(); billing.invalidateCheckouts(); };
 
   // X: shown A, never checks out. Y: shown A, reached a report and BOUGHT B (a tagged subscription). Z: never opened
@@ -133,9 +135,34 @@ export async function gtmPricingChecks({ db, adm, json, mockPost, sentTo, stamp 
   await expose(oW, A, "Px A", "3 days 1 hour"); await expose(oU, A, "Px A", "3 days 1 hour"); await expose(oT, B, "Px B", "1 day");
   await expose(oV, B, "Px B", "7 days 1 hour"); await expose(oW2, A, "Px A", "3 days 1 hour");
   await tagged(cusU, A, A);
+  // Customers already, every way that is not "a checkout tagged with this experiment": S1 subscribed a month before
+  // the experiment (untagged), S2 took an untagged plan after being shown it (an admin checkout link), S3 bought the
+  // other variant, S4 checked out under another experiment. Each is shown A 3 days and an hour ago: never mailed.
+  const sCus = [1, 2, 3, 4].map((i) => `cus_px_s${i}_${stamp}`);
+  const sOrg: number[] = [], sMail: string[] = [];
+  for (const [i, cus] of sCus.entries()) {
+    const o = await org(`px-s${i + 1}-${stamp}`, { ago: "40 days", customer: cus });
+    sOrg.push(o); sMail.push(`px-s${i + 1}+${stamp}@px.dev`);
+    await request(sMail[i], C3, { org_id: o });
+    await expose(o, A, "Px A", "3 days 1 hour");
+  }
+  await untagged(sCus[0], 30);
+  await untagged(sCus[1], 1);
+  await tagged(sCus[2], B, B);
+  const s4 = await billing.createCustomer({ name: "S4", slug: `px-s4-${stamp}` });
+  await db.query("UPDATE organizations SET stripe_customer_id = $2 WHERE id = $1", [sOrg[3], s4.id]);
+  await billing.checkoutUrl(s4.id, A, "https://octillion.test/billing", { octillion_slug: `px-s4-${stamp}`, octillion_experiment: `other-${EXP}`, octillion_variant: A });
+  const s4cs = (await billing.allCheckoutSessions(true)).find((x) => x.customer === s4.id)!;
+  await mockPost(`/_mock/checkout/${s4cs.id}/complete`, {});
+  // B2: M1 gets email 1, then subscribes: no email 2. M2 waits for the send window, subscribes meanwhile: no email 1.
+  const CM = `pxm-${stamp}`, CW = `pxw-${stamp}`, cusM1 = `cus_px_m1_${stamp}`, cusM2 = `cus_px_m2_${stamp}`;
+  const oM1 = await org(`px-m1-${stamp}`, { ago: "4 days", customer: cusM1 }), oM2 = await org(`px-m2-${stamp}`, { ago: "4 days", customer: cusM2 });
+  const em1 = `px-m1+${stamp}@px.dev`, em2 = `px-m2+${stamp}@px.dev`;
+  await request(em1, CM, { org_id: oM1 }); await request(em2, CW, { org_id: oM2 });
+  await expose(oM1, A, "Px A", "3 days 1 hour"); await expose(oM2, A, "Px A", "3 days 1 hour");
   fresh();
-  const create = async (name: string, campaign: string, trigger: Record<string, unknown>) => {
-    const id = (await json(adm("POST", "/gtm/campaigns", { name, audience: { include: "accounts", utm_campaign: campaign }, steps: step, conversion_days: 14, trigger }))).campaign.id as number;
+  const create = async (name: string, campaign: string, trigger: Record<string, unknown>, extra: Record<string, unknown> = {}) => {
+    const id = (await json(adm("POST", "/gtm/campaigns", { name, audience: { include: "accounts", utm_campaign: campaign }, steps: step, conversion_days: 14, trigger, ...extra }))).campaign.id as number;
     campaigns.push(id);
     await json(adm("POST", `/gtm/campaigns/${id}/launch`, {}));
     // Launched three days ago: W's exposure (3 days 1 hour ago) is within the 2 days before launch allowed.
@@ -157,6 +184,10 @@ export async function gtmPricingChecks({ db, adm, json, mockPost, sentTo, stamp 
     `one event, idempotent, no address in it: ${JSON.stringify(evW)}`);
   assert.equal(await ev.detectPricingNoCheckout([{ experiment: EXP, days: 3, since: Date.now() - 5 * 86_400_000 }]), 0, "the detector again: nothing new (idempotent keys)");
   assert.equal((await db.query("SELECT 1 FROM gtm_events WHERE org_id = ANY($1::int[]) AND type = 'pricing_no_checkout'", [[oU, oT]])).length, 0, "no event for U (checked out) or T (too soon)");
+  for (const [i, why] of ["a subscription from before the experiment (untagged)", "an untagged subscription after the exposure", "a purchase of the other variant", "a checkout under another experiment"].entries()) {
+    assert.equal(sentTo(sMail[i], "campaign").length, 0, `never mailed: ${why}`);
+    assert.equal((await db.query("SELECT 1 FROM gtm_events WHERE org_id = $1 AND type = 'pricing_no_checkout'", [sOrg[i]])).length, 0, `no event: ${why}`);
+  }
   // V: shown before the 7-day campaign launched (less 2 days): never news, at the detector and at the queue.
   await json(adm("POST", `/gtm/campaigns/${c7}/send-now`));
   assert.equal(sentTo(evv, "campaign").length, 0, "an exposure from before the launch never fires");
@@ -177,11 +208,41 @@ export async function gtmPricingChecks({ db, adm, json, mockPost, sentTo, stamp 
   const [done] = await db.query<any>("SELECT ee.processed_at, ee.note, ee.enrolled FROM gtm_event_enrolments ee JOIN gtm_events e ON e.id = ee.event_id WHERE ee.campaign_id = $1 AND e.org_id = $2", [cd, oW2]);
   assert.ok(done.processed_at && /Checked out/.test(done.note) && done.enrolled === 0 && sentTo(ew2, "campaign").length === 0, `checked out during the delay: not enrolled: ${JSON.stringify(done)}`);
 
+  // B2: before every email, a fresh purchase check. Bought after email 1: no email 2.
+  const twoSteps = [step[0], { subject: "One more thing about plans", body: "Hi {{first_name}}, still here if you have questions.", delay_days: 1 }];
+  const cm = await create(`Px two emails ${stamp}`, CM, { type: "pricing_no_checkout", experiment: EXP, days: 3 }, { steps: twoSteps });
+  await json(adm("POST", `/gtm/campaigns/${cm}/send-now`));
+  assert.equal(sentTo(em1, "campaign").filter(camp(cm)).length, 1, "email 1 goes");
+  await untagged(cusM1, 0);
+  await db.query("UPDATE gtm_campaign_recipients SET next_at = now() WHERE campaign_id = $1", [cm]);
+  await json(adm("POST", `/gtm/campaigns/${cm}/send-now`));
+  const [rm] = await db.query<any>("SELECT status, next_at FROM gtm_campaign_recipients WHERE campaign_id = $1", [cm]);
+  const [nm] = await db.query<any>("SELECT ee.note FROM gtm_event_enrolments ee JOIN gtm_events e ON e.id = ee.event_id WHERE ee.campaign_id = $1 AND e.org_id = $2", [cm, oM1]);
+  assert.ok(sentTo(em1, "campaign").filter(camp(cm)).length === 1 && rm.status === "done" && rm.next_at == null && /Checked out before email 2/.test(nm?.note ?? ""),
+    `subscribed after email 1 (read fresh, not from the cache): no email 2: ${JSON.stringify({ rm, nm })}`);
+  // Waiting for the send window when the account subscribes: no email 1. The window: one weekday three days from today (closed in every zone).
+  const isoToday = ((new Date().getUTCDay() + 6) % 7) + 1, closed = ((isoToday + 2) % 7) + 1;
+  const cw = await create(`Px window ${stamp}`, CW, { type: "pricing_no_checkout", experiment: EXP, days: 3 }, { send_window: { days: [closed], start_hour: 0, end_hour: 24, time_zone: "UTC" } });
+  await json(adm("POST", `/gtm/campaigns/${cw}/send-now`));
+  const [rw0] = await db.query<any>("SELECT status, next_at > now() + interval '1 hour' AS later FROM gtm_campaign_recipients WHERE campaign_id = $1", [cw]);
+  assert.ok(rw0 && rw0.status === "pending" && rw0.later && sentTo(em2, "campaign").length === 0, `enrolled, waiting for the window: ${JSON.stringify(rw0)}`);
+  await untagged(cusM2, 0);
+  await db.query(`UPDATE gtm_campaigns SET send_window = '{"days":[],"start_hour":0,"end_hour":24,"time_zone":"UTC"}'::jsonb WHERE id = $1`, [cw]);
+  await db.query("UPDATE gtm_campaign_recipients SET next_at = now() WHERE campaign_id = $1", [cw]);
+  await json(adm("POST", `/gtm/campaigns/${cw}/send-now`));
+  const [rw] = await db.query<any>("SELECT status FROM gtm_campaign_recipients WHERE campaign_id = $1", [cw]);
+  assert.ok(rw.status === "done" && sentTo(em2, "campaign").length === 0, `subscribed while waiting for the window: no email 1: ${JSON.stringify(rw)}`);
+
+  // Stripe lists cut at the cap are unknown: experimentOutcomes reports it, and the detector emits nothing (src/billing.ts LIST_CAP).
+  assert.equal(billing.LIST_CAP, 5000);
+  const E = await import("../src/experiments.js");
+  assert.equal((await E.experimentOutcomes(Date.now(), { deadline: Date.now() - 1 })).error !== null || !billing.stripeEnabled(), true, "out of time: an error, nothing to act on");
+
   // ---------- deep links: FinOps › Experiments -> GTM, and GTM -> FinOps ----------
   const spend = readFileSync("web/src/features/admin/spend.tsx", "utf8"), common = readFileSync("web/src/features/admin/gtm-common.tsx", "utf8");
   assert.ok(spend.includes("`/admin/gtm/${tab}?experiment=${encodeURIComponent(experiment)}`") && /Open in GTM Activation/.test(spend) && /Open in GTM Attribution/.test(spend),
     "each experiment row and its peek link to GTM Activation and Attribution with the experiment chosen");
-  assert.ok(/<GtmLinks experiment=\{v\.experiment\} \/>/.test(spend) && /key: 'gtm', label: 'GTM'/.test(spend), "labelled buttons in the row and in the peek's card");
+  assert.ok(/<GtmLinks experiment=\{v\.experiment\} \/>/.test(spend) && /key: 'gtm', label: 'GTM', hidden: true/.test(spend), "labelled buttons in the peek's card, the row's menu, and a GTM column (hidden by default)");
   assert.ok(/get\('experiment'\)/.test(spend), "FinOps › Experiments reads the experiment GTM links to");
   assert.ok(common.includes("`/admin/finops?section=experiments&experiment=${encodeURIComponent(experiment)}`") && /Open in FinOps/.test(common) && /p\.get\('experiment'\)/.test(common),
     "GTM keeps the experiment in the URL and links back to FinOps");
@@ -192,5 +253,5 @@ export async function gtmPricingChecks({ db, adm, json, mockPost, sentTo, stamp 
   await db.query("DELETE FROM access_requests WHERE id = ANY($1::int[])", [requests]);
   await db.query("DELETE FROM organizations WHERE id = ANY($1::int[])", [orgs]);
   fresh();
-  console.log("✓ GTM × pricing experiments: Activation split by variant (not shown pricing column, Paid on the variant bought), Attribution per variant, Saw pricing variant audience, Saw pricing / no checkout trigger (N days, launch, max age, checkout, delay re-check, idempotent), FinOps <-> GTM links, defaults unchanged");
+  console.log("✓ GTM × pricing experiments: Activation split by variant (not shown pricing column, Paid on the variant bought), Attribution per variant, Saw pricing variant audience, Saw pricing / no checkout trigger (N days, launch, max age, any purchase blocks it: untagged, pre-existing, other variant, other experiment; fresh re-check when due and before every email incl. after the window; idempotent), FinOps <-> GTM links, defaults unchanged");
 }

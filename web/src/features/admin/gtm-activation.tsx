@@ -165,6 +165,7 @@ function VariantFunnel({ e }: { e: NonNullable<Activation['experiment']> }) {
   return (
     <Section title={`Funnel by variant: ${e.id}`} description={e.rule}>
       <div className='flex flex-col gap-3'>
+        {e.variant.length > 0 && <Notice tone='info'>Variant filter on: Paid counts the variant bought, so an account shown one variant that bought another is under Paid only where it bought, and a variant&apos;s Paid can exceed its earlier steps (over 100%).</Notice>}
         {!e.known && <Notice tone='info'>No account has been shown {e.id} yet, and no live plan is in it: every account is under Not shown pricing.</Notice>}
         {e.stripe_error && <Notice>Stripe: {e.stripe_error} (Paid uses the variant shown where the subscription could not be read)</Notice>}
         <div className='overflow-x-auto rounded-lg border'>
