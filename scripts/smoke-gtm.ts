@@ -286,4 +286,6 @@ export async function gtmChecks({ db, base, adm, json, mockUrl, mockPost, sentTo
   await (await import("./smoke-gtm-phase1.js")).gtmPhase1Checks({ db, base, adm, json, mockUrl, mockPost, sentTo, stamp });
   // Phase 2: prospects, companies, Apollo, outbound sequences, deals, outbound attribution (scripts/smoke-gtm-phase2.ts).
   await (await import("./smoke-gtm-phase2.js")).gtmPhase2Checks({ db, base, adm, json, mockUrl, mockPost, sentTo, stamp });
+  // HTML emails: sanitized format "html" steps, the preview, outbound refused (scripts/smoke-gtm-html.ts).
+  await (await import("./smoke-gtm-html.js")).gtmHtmlChecks({ db, base, adm, json, mockUrl, mockPost, sentTo, stamp });
 }

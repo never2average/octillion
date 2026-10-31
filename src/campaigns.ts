@@ -6,7 +6,8 @@
  *   model       gtm_campaigns (migrations 0008, 0009): name, audience, steps [{subject, body, delay_days, variants?}]
  *               with {{first_name}} and {{product}}, status draft -> scheduled -> running <-> paused -> done, rolling
  *               enrolment, the owner; a trigger (instead of a schedule), a send window, requires_opt_in,
- *               count_auto_replies
+ *               count_auto_replies. A step (or variant) may be format "html": its body sanitized on save and at render
+ *               (src/campaign-html.ts), a text part generated from it, never on an outbound (prospects) campaign.
  *   recipients  enrolled when a campaign starts (and on every tick while it runs, when rolling), or, for a triggered
  *               campaign, from events (src/gtm-events.ts) once the trigger's delay is up, with its re-entry rule (once
  *               ever, or again after N days: a new round). One row per address. gtm_campaign_recipients and
@@ -46,6 +47,7 @@ import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from
 import { hostname } from "node:os";
 import { getDb } from "./db.js";
 import * as mail from "./email.js";
+import { composeHtml, HTML_MAX_BYTES, sanitizeEmailHtml } from "./campaign-html.js";
 import { accountPeople, AdminError, log, STAGES } from "./admin.js";
 import { DIRECT, journeys, requestRows, within, type Journey, type RequestRow } from "./gtm.js";
 import { addCredentialIfAbsent, credentialSecrets, recordUse, useCredential } from "./keyvault.js";
@@ -81,9 +83,16 @@ export interface Audience {
   /** include = prospects: the saved filter over prospects. */
   prospects?: outbound.ProspectFilter;
 }
-export interface Variant { subject: string; body: string; weight: number }
-/** subject / body are variant A's when there are variants (kept so a reader without variants still has the email). */
-export interface Step { subject: string; body: string; delay_days: number; variants?: Variant[] }
+/** A body's format: plain text (the default: paragraphs and auto-links) or sanitized HTML (src/campaign-html.ts). */
+export const FORMATS = ["text", "html"] as const;
+export type Format = (typeof FORMATS)[number];
+/** format is stored only when "html" (absent: text), so campaigns from before HTML read exactly as they did. */
+export interface Variant { subject: string; body: string; weight: number; format?: "html" }
+/** subject / body / format are variant A's when there are variants (kept so a reader without variants still has the email). */
+export interface Step { subject: string; body: string; delay_days: number; variants?: Variant[]; format?: "html" }
+export const formatOf = (x: { format?: unknown } | null | undefined): Format => (x?.format === "html" ? "html" : "text");
+export const hasHtml = (steps: Step[]) => steps.some((s) => formatOf(s) === "html" || (s.variants ?? []).some((v) => formatOf(v) === "html"));
+export const HTML_OUTBOUND_REFUSED = "HTML emails are for lifecycle campaigns (accounts and requesters): an outbound campaign (prospects) stays plain text. Switch the step's format to Plain text";
 /**
  * Enrol on an event instead of an audience at launch. stage: for stage_reached and stuck; days: for stuck; attention:
  * text the reason contains (empty: any). delay_hours after the event. reentry: once ever, or again every reentry_days.
@@ -123,7 +132,25 @@ const checkVars = (text: string, what: string) => {
   for (const m of text.matchAll(VAR))
     if (!(VARIABLES as readonly string[]).includes(m[1])) throw new AdminError(`${what}: unknown variable {{${m[1]}}}; use ${VARIABLES.map((x) => `{{${x}}}`).join(" or ")}`);
 };
-export function parseSteps(v: unknown): Step[] {
+const parseFormat = (v: unknown, fallback: Format, what: string): Format => {
+  if (v == null || v === "") return fallback;
+  if (!(FORMATS as readonly string[]).includes(String(v))) throw new AdminError(`${what}: format is text or html`);
+  return v as Format;
+};
+/** A body: text trimmed to 20,000 characters; HTML at most 100 KB (refused, not cut) and sanitized, what was stripped in warnings. */
+const bodyIn = (v: unknown, format: Format, what: string, warnings?: string[]) => {
+  if (format === "text") return str(v, 20_000);
+  const raw = typeof v === "string" ? v.trim() : "";
+  if (Buffer.byteLength(raw) > HTML_MAX_BYTES) throw new AdminError(`${what}: the HTML is over ${HTML_MAX_BYTES / 1000} KB`);
+  if (!raw) return "";
+  const s = sanitizeEmailHtml(raw);
+  for (const w of s.warnings) warnings?.push(`${what}: ${w}`);
+  if (!s.html.replace(/<[^>]*>/g, "").trim() && !/<img\b/i.test(s.html)) throw new AdminError(`${what}: the HTML has nothing left to show once sanitized`);
+  return s.html;
+};
+const fmt = (f: Format) => (f === "html" ? { format: "html" as const } : {});
+/** The steps, validated; HTML bodies sanitized. `warnings` (optional) collects what the sanitizer stripped. */
+export function parseSteps(v: unknown, warnings?: string[]): Step[] {
   if (v == null) return [];
   if (!Array.isArray(v)) throw new AdminError("steps must be a list");
   if (v.length > MAX_STEPS) throw new AdminError(`At most ${MAX_STEPS} steps`);
@@ -136,34 +163,41 @@ export function parseSteps(v: unknown): Step[] {
       if (raw.length < 2 || raw.length > VARIANT_LETTERS.length) throw new AdminError(`Step ${i + 1}: 2 to ${VARIANT_LETTERS.length} variants, or none`);
       // A variant's empty subject or body is variant A's: test just the subject, or just the body.
       const base = (raw[0] ?? {}) as Record<string, unknown>;
-      const subjectA = str(base.subject ?? s.subject, 200).replace(/[\r\n]+/g, " "), bodyA = str(base.body ?? s.body, 20_000);
+      const stepFormat = parseFormat(s.format, "text", `Step ${i + 1}`);
+      const formatA = parseFormat(base.format, stepFormat, `Step ${i + 1}, variant A`);
+      const subjectA = str(base.subject ?? s.subject, 200).replace(/[\r\n]+/g, " "), bodyA = bodyIn(base.body ?? s.body, formatA, `Step ${i + 1}, variant A`, warnings);
       if (!subjectA || !bodyA) throw new AdminError(`Step ${i + 1}: variant A needs a subject and a body`);
       const variants = raw.map((y, k) => {
         const o = (y && typeof y === "object" ? y : {}) as Record<string, unknown>;
         const w = o.weight == null || o.weight === "" ? 50 : Number(o.weight);
         if (!Number.isInteger(w) || w < 0 || w > 100) throw new AdminError(`Step ${i + 1}, variant ${VARIANT_LETTERS[k]}: weight is a whole number, 0 to 100`);
-        const subject = str(o.subject, 200).replace(/[\r\n]+/g, " ") || subjectA, body = str(o.body, 20_000) || bodyA;
+        // An empty body is variant A's, in A's format; a body of its own is in its format (else the step's).
+        const own = typeof o.body === "string" && o.body.trim() !== "";
+        const format = k === 0 ? formatA : own ? parseFormat(o.format, stepFormat, `Step ${i + 1}, variant ${VARIANT_LETTERS[k]}`) : formatA;
+        const subject = str(o.subject, 200).replace(/[\r\n]+/g, " ") || subjectA;
+        const body = k === 0 ? bodyA : (own ? bodyIn(o.body, format, `Step ${i + 1}, variant ${VARIANT_LETTERS[k]}`, warnings) : "") || bodyA;
         checkVars(`${subject}\n${body}`, `Step ${i + 1}, variant ${VARIANT_LETTERS[k]}`);
-        return { subject, body, weight: w };
+        return { subject, body, weight: w, ...fmt(format) };
       });
       if (!variants.some((y) => y.weight > 0)) throw new AdminError(`Step ${i + 1}: at least one variant needs a weight above 0`);
-      return { subject: variants[0].subject, body: variants[0].body, delay_days: delay, variants };
+      return { subject: variants[0].subject, body: variants[0].body, delay_days: delay, variants, ...fmt(formatA) };
     }
-    const subject = str(s.subject, 200).replace(/[\r\n]+/g, " "), body = str(s.body, 20_000);
+    const format = parseFormat(s.format, "text", `Step ${i + 1}`);
+    const subject = str(s.subject, 200).replace(/[\r\n]+/g, " "), body = bodyIn(s.body, format, `Step ${i + 1}`, warnings);
     if (!subject || !body) throw new AdminError(`Step ${i + 1} needs a subject and a body`);
     checkVars(`${subject}\n${body}`, `Step ${i + 1}`);
-    return { subject, body, delay_days: delay };
+    return { subject, body, delay_days: delay, ...fmt(format) };
   });
 }
 
 /** The variant a person gets for a step: the same every time (a hash of campaign, step and person over the weights). */
-export function pickVariant(step: Step, campaignId: number, index: number, recipientId: number): { letter: string | null; subject: string; body: string } {
+export function pickVariant(step: Step, campaignId: number, index: number, recipientId: number): { letter: string | null; subject: string; body: string; format: Format } {
   const vs = step.variants ?? [];
   const total = vs.reduce((t, v) => t + v.weight, 0);
-  if (vs.length < 2 || total <= 0) return { letter: null, subject: step.subject, body: step.body };
+  if (vs.length < 2 || total <= 0) return { letter: null, subject: step.subject, body: step.body, format: formatOf(step) };
   let x = parseInt(createHash("sha256").update(`${campaignId}:${index}:${recipientId}`).digest("hex").slice(0, 12), 16) % total;
-  for (const [k, v] of vs.entries()) { if (x < v.weight) return { letter: VARIANT_LETTERS[k], subject: v.subject, body: v.body }; x -= v.weight; }
-  return { letter: VARIANT_LETTERS[0], subject: vs[0].subject, body: vs[0].body };
+  for (const [k, v] of vs.entries()) { if (x < v.weight) return { letter: VARIANT_LETTERS[k], subject: v.subject, body: v.body, format: formatOf(v) }; x -= v.weight; }
+  return { letter: VARIANT_LETTERS[0], subject: vs[0].subject, body: vs[0].body, format: formatOf(vs[0]) };
 }
 
 export function parseTrigger(v: unknown): Trigger | null {
@@ -211,6 +245,19 @@ export function renderHtml(t: string, vars: { first_name?: string | null; produc
   // A zero-width non-joiner after each dot keeps mail clients from auto-linking a value that reads like a domain.
   return mail.htmlOf(marked).replace(/\u0001(\d+)\u0001/g, (_m, i: string) => esc(used[Number(i)] ?? "").replace(/\./g, ".&#8204;"));
 }
+/**
+ * One email's parts. text: the words plus the footer, and an HTML part from them when `html` is on (else text only).
+ * html: the stored body sanitized again (src/campaign-html.ts), variables escaped in, the footer inside before
+ * </body>, and a text part generated from it; always sent with its HTML part.
+ */
+export function composeEmail(words: { subject: string; body: string; format?: Format }, vars: { first_name?: string | null; product?: string | null }, footerText: string, html: boolean):
+  { subject: string; text: string; html?: string; textOnly?: true; warnings: string[] } {
+  const subject = render(words.subject, vars);
+  if (formatOf(words) === "html") { const h = composeHtml(words.body, safeVars(vars), VAR, footerText); return { subject, text: h.text, html: h.html, warnings: h.warnings }; }
+  const text = render(words.body, vars) + footerText;
+  return html ? { subject, text, html: renderHtml(words.body + footerText, vars), warnings: [] } : { subject, text, textOnly: true, warnings: [] };
+}
+const mailParts = (p: ReturnType<typeof composeEmail>) => ({ subject: p.subject, text: p.text, ...(p.html != null ? { html: p.html } : { textOnly: true as const }) });
 
 interface CampaignRow {
   id: number; name: string; audience: Audience; steps: Step[]; status: CampaignStatus; rolling: boolean; conversion_days: number; starts_at: Date | null;
@@ -242,7 +289,7 @@ const parseAudienceSafe = (a: unknown) => { try { return parseAudience(a); } cat
 export const requiresOptIn = (c: Pick<CampaignRow, "requires_opt_in" | "trigger" | "audience">) =>
   c.audience.include === "prospects" ? false : c.requires_opt_in ?? (c.trigger ? REQUEST_EVENTS.includes(c.trigger.type) : c.audience.include !== "accounts");
 
-function fields(body: Record<string, unknown>, partial: boolean) {
+function fields(body: Record<string, unknown>, partial: boolean, warnings?: string[]) {
   const out: Partial<Pick<CampaignRow, "name" | "audience" | "steps" | "rolling" | "conversion_days" | "trigger" | "send_window" | "requires_opt_in" | "count_auto_replies"
     | "sender_identity_id" | "track_opens" | "allow_restricted">> = {};
   if (!partial || body.name !== undefined) {
@@ -251,7 +298,7 @@ function fields(body: Record<string, unknown>, partial: boolean) {
     out.name = name;
   }
   if (!partial || body.audience !== undefined) out.audience = parseAudience(body.audience);
-  if (!partial || body.steps !== undefined) out.steps = parseSteps(body.steps);
+  if (!partial || body.steps !== undefined) out.steps = parseSteps(body.steps, warnings);
   if (!partial || body.rolling !== undefined) out.rolling = body.rolling === true;
   if (!partial || body.conversion_days !== undefined) {
     const n = body.conversion_days == null || body.conversion_days === "" ? 14 : Number(body.conversion_days);
@@ -270,6 +317,7 @@ function fields(body: Record<string, unknown>, partial: boolean) {
   if (!partial || body.track_opens !== undefined) out.track_opens = body.track_opens == null || body.track_opens === "" ? null : body.track_opens === true;
   if (!partial || body.allow_restricted !== undefined) out.allow_restricted = body.allow_restricted === true;
   if (out.audience?.include === "prospects" && out.trigger) throw new AdminError("An outbound campaign (prospects) is not triggered by events: it starts at launch or a scheduled time");
+  if (out.audience?.include === "prospects" && out.steps && hasHtml(out.steps)) throw new AdminError(HTML_OUTBOUND_REFUSED);
   return out;
 }
 
@@ -287,7 +335,8 @@ async function assertSendable(c: CampaignRow) {
 }
 
 export async function createCampaign(actor: string, ownerUserId: string | null, body: Record<string, unknown>) {
-  const f = fields(body, false);
+  const warnings: string[] = [];
+  const f = fields(body, false, warnings);
   await checkIdentity(f.sender_identity_id);
   const [row] = await (await getDb()).query<{ id: number }>(
     `INSERT INTO gtm_campaigns (name, audience, steps, rolling, conversion_days, owner, owner_user_id, trigger, send_window, requires_opt_in, count_auto_replies,
@@ -297,14 +346,19 @@ export async function createCampaign(actor: string, ownerUserId: string | null, 
      f.trigger ? JSON.stringify(f.trigger) : null, JSON.stringify(f.send_window), f.requires_opt_in, f.count_auto_replies,
      f.sender_identity_id, f.track_opens, f.allow_restricted]);
   log(actor, "campaign.create", null, { campaign_id: Number(row.id), steps: f.steps!.length, trigger: f.trigger?.type ?? null });
-  return campaignDetail(Number(row.id));
+  return withWarnings(await campaignDetail(Number(row.id)), warnings);
 }
+
+/** What the sanitizer stripped from HTML bodies on this save, alongside the campaign (only when there is any). */
+const withWarnings = <T extends object>(d: T, warnings: string[]) => (warnings.length ? { ...d, html_warnings: warnings } : d);
 
 /** Edits: a draft, a scheduled one before it starts, or a paused one (its steps change for whoever has not had them yet). */
 export async function updateCampaign(actor: string, id: number, body: Record<string, unknown>) {
   const c = await campaignById(id);
   if (!["draft", "scheduled", "paused"].includes(c.status)) throw new AdminError(`A ${c.status} campaign cannot be edited: pause it first`, 409);
-  const f = fields(body, true);
+  const warnings: string[] = [];
+  const f = fields(body, true, warnings);
+  if ((f.audience ?? c.audience).include === "prospects" && hasHtml(f.steps ?? c.steps)) throw new AdminError(HTML_OUTBOUND_REFUSED);
   // Cold and lifecycle email never trade places: once anyone is enrolled, the audience stays prospects (outbound, from
   // an identity) or stays accounts / requesters (lifecycle, from EMAIL_FROM).
   const switching = !!f.audience && (f.audience.include === "prospects") !== isOutbound(c);
@@ -334,7 +388,7 @@ export async function updateCampaign(actor: string, id: number, body: Record<str
   });
   forgetImmediate();
   log(actor, "campaign.update", null, { campaign_id: c.id, fields: Object.keys(f) });
-  return campaignDetail(c.id);
+  return withWarnings(await campaignDetail(c.id), warnings);
 }
 
 /** Start now, or at `at` (ISO time) when it is in the future. Enrolment happens when it starts (a triggered one: from events after). */
@@ -782,16 +836,18 @@ export const postalAddress = async () => { await freshSettings(); return setting
 export const POSTAL_HINT = "No postal address set; US marketing law (CAN-SPAM) expects one";
 
 /** A test of one step to an address typed in: rendered for the first person the audience matches (or placeholders). */
-export async function testSend(actor: string, id: number, body: { to?: unknown; step?: unknown; subject?: unknown; body?: unknown; variant?: unknown }) {
+export async function testSend(actor: string, id: number, body: { to?: unknown; step?: unknown; subject?: unknown; body?: unknown; variant?: unknown; format?: unknown }) {
   const to = String(body.to ?? "").trim().toLowerCase();
   if (!mail.isEmail(to)) throw new AdminError("Enter a valid email address");
   const c = await campaignById(id);
   const i = body.step == null || body.step === "" ? 0 : Number(body.step);
   // Unsaved edits from the editor can be tried before saving.
-  const [step] = body.subject !== undefined || body.body !== undefined ? parseSteps([{ subject: body.subject, body: body.body }]) : [c.steps[i]];
+  const stripped: string[] = [];
+  const [step] = body.subject !== undefined || body.body !== undefined ? parseSteps([{ subject: body.subject, body: body.body, format: body.format }], stripped) : [c.steps[i]];
   if (!step) throw new AdminError(`This campaign has no email ${i + 1}`);
   const k = body.variant ? VARIANT_LETTERS.indexOf(String(body.variant).toUpperCase() as (typeof VARIANT_LETTERS)[number]) : -1;
   const words = k >= 0 && step.variants?.[k] ? step.variants[k] : step;
+  if (isOutbound(c) && formatOf(words) === "html") throw new AdminError(HTML_OUTBOUND_REFUSED);
   // Outbound: from its sender identity, text only unless it tracks opens, exactly as the real thing.
   if (isOutbound(c)) { const why = await outbound.identityProblem(c.sender_identity_id); if (why) throw new AdminError(why); }
   const ident = isOutbound(c) ? await outbound.identityById(c.sender_identity_id) : null;
@@ -801,13 +857,33 @@ export async function testSend(actor: string, id: number, body: { to?: unknown; 
   const sample = (await resolveAudience(c.audience).catch(() => []))[0];
   const url = unsubscribeUrl(TEST_TOKEN), postal = await postalAddress();
   const src = sample?.source ?? (ident ? "prospect" : "account");
+  const parts = composeEmail(words, sample ?? {}, footer(src, url, postal), tracksOpens(c));
   const r = await mail.send({ kind: ident ? "outbound_test" : "campaign_test", to, idempotencyKey: testKey,
     meta: { campaign_id: c.id, step: i, variant: k >= 0 ? VARIANT_LETTERS[k] : null, ...(ident ? { identity_id: ident.id } : {}) },
-    subject: `[Test] ${render(words.subject, sample ?? {})}`, text: render(words.body, sample ?? {}) + footer(src, url, postal),
-    ...(tracksOpens(c) ? { html: renderHtml(words.body + footer(src, url, postal), sample ?? {}) } : { textOnly: true }), from: ident ? outbound.senderOf(ident) : undefined,
+    ...mailParts(parts), subject: `[Test] ${parts.subject}`, from: ident ? outbound.senderOf(ident) : undefined,
     headers: unsubHeaders(url), tags: [{ name: "campaign", value: String(c.id) }] });
   log(actor, "campaign.test", null, { campaign_id: c.id, step: i, status: r.status, to_domain: mail.domainOf(to) });
-  return { ...r, sample: sample ? { first_name: sample.first_name, product: sample.product, source: sample.source } : null, warnings: postal ? [] : [ident ? outbound.POSTAL_WARNING : POSTAL_HINT] };
+  return { ...r, sample: sample ? { first_name: sample.first_name, product: sample.product, source: sample.source } : null,
+    warnings: [...(postal ? [] : [ident ? outbound.POSTAL_WARNING : POSTAL_HINT]), ...stripped.map((w) => w.replace(/^Step 1: /, "")), ...parts.warnings] };
+}
+
+/**
+ * The editor's preview: one email rendered exactly as it would go (sanitized, variables in, the footer with a test
+ * unsubscribe link), with sample variables. Nothing is saved or sent. { subject, html, text, warnings }.
+ */
+export async function previewEmail(body: { subject?: unknown; body?: unknown; format?: unknown; vars?: unknown; source?: unknown; audience?: unknown }) {
+  const format = body.format == null || body.format === "" ? "text" : String(body.format);
+  if (!(FORMATS as readonly string[]).includes(format)) throw new AdminError("format is text or html");
+  const audience = body.audience == null ? null : parseAudience(body.audience);
+  if (audience?.include === "prospects" && format === "html") throw new AdminError(HTML_OUTBOUND_REFUSED);
+  const warnings: string[] = [];
+  const subjectIn = typeof body.subject === "string" && body.subject.trim() ? body.subject : "(no subject)";
+  const [step] = parseSteps([{ subject: subjectIn, body: body.body, format }], warnings);
+  const v = (body.vars && typeof body.vars === "object" ? body.vars : {}) as Record<string, unknown>;
+  const vars = { first_name: v.first_name == null ? "Ada" : String(v.first_name), product: v.product == null ? "Acme CLI" : String(v.product) };
+  const source = audience?.include === "prospects" || body.source === "prospect" ? "prospect" : body.source === "request" ? "request" : "account";
+  const parts = composeEmail(step, vars, footer(source, unsubscribeUrl(TEST_TOKEN), await postalAddress()), true);
+  return { subject: parts.subject, html: parts.html ?? "", text: parts.text, warnings: warnings.map((w) => w.replace(/^Step 1: /, "")) };
 }
 
 interface Due {
@@ -1260,8 +1336,9 @@ async function runTick(only: number | null, o: TickOptions = {}): Promise<TickRe
             chunk.push({ r, c, claim, variant: v.letter, email: {
               kind: slot ? "outbound" : "campaign", to: r.email, idempotencyKey: idempotencyKeyOf(c.id, Number(r.id), r.next_step, r.round), from: slot ? outbound.senderOf(slot.i) : from,
               meta: { campaign_id: c.id, step: r.next_step, ...(v.letter ? { variant: v.letter } : {}), ...(r.round ? { round: r.round } : {}) },
-              subject: render(v.subject, r), text: render(v.body, r) + footer(r.source, url, postal),
-              ...(tracksOpens(c) ? { html: renderHtml(v.body + footer(r.source, url, postal), r) } : { textOnly: true }),
+              // An HTML step on an outbound campaign is refused on save; were one there, it goes as its text part.
+              ...mailParts(isOutbound(c) && v.format === "html" && !tracksOpens(c) ? { ...composeEmail(v, r, footer(r.source, url, postal), false), html: undefined }
+                : composeEmail(v, r, footer(r.source, url, postal), tracksOpens(c))),
               headers: unsubHeaders(url), tags: [{ name: "campaign", value: String(c.id) }], replyTo,
             } });
           } catch (e) {

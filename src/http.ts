@@ -495,9 +495,11 @@ export function createApp() {
     });
     next();
   });
-  // A prospects or companies CSV import (src/gtm-crm.ts, up to 5,000 mapped rows) is the one bigger body.
+  // A prospects or companies CSV import (src/gtm-crm.ts, up to 5,000 mapped rows) and a campaign's emails (HTML bodies
+  // up to 100 KB each: create, edit, preview, test send) are the bigger bodies.
   const adminJson = express.json({ limit: "64kb" }), importJson = express.json({ limit: "4mb" });
-  admin.use((req, res, next) => (/^\/onboarding\/gtm\/(prospects|companies)\/import$/.test(req.path) ? importJson : adminJson)(req, res, next));
+  const bigBody = /^\/onboarding\/gtm\/(?:(?:prospects|companies)\/import|campaigns(?:\/preview|\/\d+(?:\/test)?)?)$/;
+  admin.use((req, res, next) => (bigBody.test(req.path) ? importJson : adminJson)(req, res, next));
   admin.get("/keyvault/providers", async (_req, res) => void res.json({ providers: await kv.listProviders() }));
   admin.put("/keyvault/providers/:slug", need("keys"), async (req, res) => void res.json(await kv.upsertProvider({ ...req.body, slug: String(req.params.slug) })));
   admin.get("/keyvault/credentials", async (_req, res) => void res.json({ credentials: await kv.listCredentials() }));
@@ -703,6 +705,8 @@ export function createApp() {
     const p = await campaignsMod.previewAudience(req.body ?? {});
     res.json(mayCampaigns(res) ? p : { ...p, addresses_hidden: true, sample: p.sample.map((x) => ({ ...x, email: "" })) });
   });
+  // The editor's email preview (sanitized HTML and the text part, sample variables): nothing saved or sent.
+  ob.post("/gtm/campaigns/preview", need("campaigns"), async (req, res) => void res.json(await campaignsMod.previewEmail(req.body ?? {})));
   ob.post("/gtm/campaigns", need("campaigns"), async (req, res) =>
     void res.status(201).json(await campaignsMod.createCampaign(adminActor(req, res), (res.locals.adminUserId as string | undefined) ?? null, req.body ?? {})));
   ob.put("/gtm/campaigns/:id", need("campaigns"), async (req, res) => void res.json(await campaignsMod.updateCampaign(adminActor(req, res), cid(req), req.body ?? {})));

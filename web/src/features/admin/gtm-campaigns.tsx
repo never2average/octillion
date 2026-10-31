@@ -34,8 +34,23 @@ interface Audience {
   include: 'accounts' | 'requests' | 'both' | 'prospects'; stages: string[]; attention: string; created_from: string | null; created_to: string | null;
   utm_source: string; utm_medium: string; utm_campaign: string; plans: string[]; request_status: string[]; accounts: string[]; prospects?: ProspectFilter;
 }
-interface Variant { subject: string; body: string; weight: number }
-interface Step { subject: string; body: string; delay_days: number; variants?: Variant[] }
+/** A body's format: absent is plain text (as stored); 'html' is sanitized HTML (src/campaign-html.ts). */
+type Format = 'text' | 'html';
+interface Variant { subject: string; body: string; weight: number; format?: Format }
+interface Step { subject: string; body: string; delay_days: number; variants?: Variant[]; format?: Format }
+/** Stored only when HTML, so a plain-text step compares equal to what the server keeps. */
+const fmtPatch = (f: Format) => ({ format: f === 'html' ? ('html' as const) : undefined });
+/** On save, each variant says its format (a variant without one would otherwise take the step's). */
+const stepsForSave = (steps: Step[]) => steps.map((s) => (s.variants?.length ? { ...s, variants: s.variants.map((v) => ({ ...v, format: v.format ?? 'text' })) } : s));
+const HTML_STARTER = `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" bgcolor="#f3f4f6">
+  <tr><td align="center" style="padding: 24px">
+    <table role="presentation" width="560" cellpadding="0" cellspacing="0" bgcolor="#ffffff" style="border-radius: 8px; font-family: Helvetica, Arial, sans-serif; color: #111827">
+      <tr><td style="padding: 24px 24px 8px"><h1 style="margin: 0; font-size: 22px">Hi {{first_name}},</h1></td></tr>
+      <tr><td style="padding: 8px 24px; font-size: 15px; line-height: 1.55">{{product}} is set up on Octillion. Run a simulation to see how coding agents pick it.</td></tr>
+      <tr><td style="padding: 16px 24px 24px"><a href="https://octillion.dev" style="display: inline-block; background: #2563eb; color: #ffffff; padding: 10px 18px; border-radius: 6px; text-decoration: none; font-weight: 600">Run a simulation</a></td></tr>
+    </table>
+  </td></tr>
+</table>`;
 type TriggerType = 'account_created' | 'request_submitted' | 'request_approved' | 'stage_reached' | 'stuck' | 'report_opened' | 'first_payment' | 'attention';
 interface Trigger { type: TriggerType; stage: string | null; days: number | null; attention: string; delay_hours: number; reentry: 'once' | 'every'; reentry_days: number }
 interface SendWindow { days: number[]; start_hour: number; end_hour: number; time_zone: string }
@@ -503,8 +518,9 @@ function CampaignEditor({ c, stages, tab, setTab, before, after, card }: {
   const current = { name, audience, steps, rolling, days, trigger, win, optIn, countAuto, identity, trackOpens, allowRestricted };
   const dirty = JSON.stringify(current) !== JSON.stringify({ name: c.name, audience: { ...c.audience, prospects: c.audience.include === 'prospects' ? c.audience.prospects : undefined }, steps: c.steps, rolling: c.rolling, days: String(c.conversion_days),
     trigger: c.trigger, win: initWin, optIn: c.requires_opt_in, countAuto: c.count_auto_replies, identity: c.sender_identity_id ?? null, trackOpens: c.track_opens ?? null, allowRestricted: c.allow_restricted ?? false });
-  const save = useAdminAction(() => adminApi<Detail>('PUT', path(c.id), { name, audience, steps, rolling, conversion_days: Number(days), trigger: outbound ? null : trigger, send_window: win,
-    requires_opt_in: optIn, count_auto_replies: countAuto, sender_identity_id: identity, track_opens: trackOpens, allow_restricted: allowRestricted }), { success: 'Saved' });
+  const save = useAdminAction(() => adminApi<Detail & { html_warnings?: string[] }>('PUT', path(c.id), { name, audience, steps: stepsForSave(steps), rolling, conversion_days: Number(days), trigger: outbound ? null : trigger, send_window: win,
+    requires_opt_in: optIn, count_auto_replies: countAuto, sender_identity_id: identity, track_opens: trackOpens, allow_restricted: allowRestricted }),
+    { success: (r) => (r.html_warnings?.length ? `Saved. The HTML sanitizer removed: ${r.html_warnings.join('; ')}` : 'Saved') });
   const togglePf = (k: 'statuses' | 'sizes' | 'email_statuses', v: string, on: boolean) => setPf((x) => ({ ...x, [k]: on ? [...x[k], v] : x[k].filter((y) => y !== v) }));
   // The default when not set: on when the campaign can reach access requesters (src/campaigns.ts requiresOptIn).
   const optInDefault = trigger ? TRIGGERS.find((t) => t.id === trigger.type)?.who === 'request' : a.include !== 'accounts';
@@ -646,18 +662,20 @@ function CampaignEditor({ c, stages, tab, setTab, before, after, card }: {
         </div>
         {!s.variants?.length ? (<>
           <Input aria-label={`Subject of email ${i + 1}`} placeholder='Subject' value={s.subject} onChange={(e) => setStep(i, { subject: e.target.value })} />
-          <Textarea aria-label={`Body of email ${i + 1}`} rows={7} placeholder='Plain text' value={s.body} onChange={(e) => setStep(i, { body: e.target.value })} />
-          {editable && <Button size='sm' variant='outline' className='self-start' onClick={() => setStep(i, { variants: [{ subject: s.subject, body: s.body, weight: 50 }, { subject: s.subject, body: '', weight: 50 }] })}>
+          <BodyEditor label={`email ${i + 1}`} campaignId={c.id} subject={s.subject} body={s.body} format={s.format ?? 'text'} outbound={outbound} editable={editable}
+            onBody={(body) => setStep(i, { body })} onFormat={(f) => setStep(i, { ...fmtPatch(f), ...(f === 'html' && !s.body.trim().startsWith('<') ? { body: HTML_STARTER } : {}) })} />
+          {editable && <Button size='sm' variant='outline' className='self-start' onClick={() => setStep(i, { variants: [{ subject: s.subject, body: s.body, weight: 50, ...fmtPatch(s.format ?? 'text') }, { subject: s.subject, body: '', weight: 50, ...fmtPatch(s.format ?? 'text') }] })}>
             <Icons.add /> Add A/B variants</Button>}
         </>) : (
-          <VariantsEditor i={i} variants={s.variants} editable={editable}
-            onChange={(vs) => setStep(i, vs.length < 2 ? { variants: undefined, subject: vs[0]?.subject ?? s.subject, body: vs[0]?.body ?? s.body } : { variants: vs, subject: vs[0].subject, body: vs[0].body })} />
+          <VariantsEditor i={i} variants={s.variants} editable={editable} campaignId={c.id} outbound={outbound}
+            onChange={(vs) => setStep(i, vs.length < 2 ? { variants: undefined, subject: vs[0]?.subject ?? s.subject, body: vs[0]?.body ?? s.body, ...fmtPatch(vs[0]?.format ?? s.format ?? 'text') }
+              : { variants: vs, subject: vs[0].subject, body: vs[0].body, ...fmtPatch(vs[0].format ?? 'text') })} />
         )}
       </div>
     )
   })), (
     <div className='flex flex-wrap items-center justify-between gap-2'>
-      <span className='text-muted-foreground text-xs'>{'{{first_name}}'} and {'{{product}}'} are filled in for each person; an unsubscribe link is added at the end.</span>
+      <span className='text-muted-foreground text-xs'>{'{{first_name}}'} and {'{{product}}'} are filled in for each person; an unsubscribe link is added at the end.{outbound ? ' Outbound email is plain text.' : ' Plain text or HTML, per email.'}</span>
       {editable && steps.length < 10 && (
         <Button size='sm' variant='outline' onClick={() => setSteps((xs) => [...xs, { subject: '', body: '', delay_days: 3 }])}><Icons.add /> Add an email</Button>
       )}
@@ -695,7 +713,7 @@ function CampaignEditor({ c, stages, tab, setTab, before, after, card }: {
 }
 
 /** A step's 2 to 4 variants: subject and body each (empty: variant A's), and a weight. Fewer than two: a plain email again. */
-function VariantsEditor({ i, variants, editable, onChange }: { i: number; variants: Variant[]; editable: boolean; onChange: (vs: Variant[]) => void }) {
+function VariantsEditor({ i, variants, editable, campaignId, outbound, onChange }: { i: number; variants: Variant[]; editable: boolean; campaignId: number; outbound: boolean; onChange: (vs: Variant[]) => void }) {
   const set = (k: number, patch: Partial<Variant>) => onChange(variants.map((v, n) => (n === k ? { ...v, ...patch } : v)));
   const total = variants.reduce((t, v) => t + (v.weight || 0), 0);
   return (
@@ -713,12 +731,86 @@ function VariantsEditor({ i, variants, editable, onChange }: { i: number; varian
             {editable && <Button size='sm' variant='ghost' className='text-destructive ml-auto' onClick={() => onChange(variants.filter((_, n) => n !== k))}><Icons.trash /> Remove variant</Button>}
           </div>
           <Input aria-label={`Subject of email ${i + 1}, variant ${LETTERS[k]}`} placeholder={k ? "Subject (empty: variant A's)" : 'Subject'} value={v.subject} onChange={(e) => set(k, { subject: e.target.value })} />
-          <Textarea aria-label={`Body of email ${i + 1}, variant ${LETTERS[k]}`} rows={k ? 4 : 7} placeholder={k ? "Plain text (empty: variant A's)" : 'Plain text'} value={v.body} onChange={(e) => set(k, { body: e.target.value })} />
+          <BodyEditor label={`email ${i + 1}, variant ${LETTERS[k]}`} campaignId={campaignId} subject={v.subject || variants[0].subject} body={v.body} format={v.format ?? 'text'} outbound={outbound} editable={editable}
+            rows={k ? 4 : 7} placeholderSuffix={k ? " (empty: variant A's)" : ''} onBody={(body) => set(k, { body })} onFormat={(f) => set(k, fmtPatch(f))} />
         </div>
       ))}
       {editable && variants.length < 4 && (
         <Button size='sm' variant='outline' className='self-start' onClick={() => onChange([...variants, { subject: '', body: '', weight: 50 }])}><Icons.add /> Add variant {LETTERS[variants.length]}</Button>
       )}
+    </div>
+  );
+}
+
+/** Plain text | HTML, as labelled segmented buttons. Outbound campaigns stay plain text. */
+function FormatToggle({ label, value, onChange, outbound, disabled }: { label: string; value: Format; onChange: (f: Format) => void; outbound: boolean; disabled: boolean }) {
+  const opts: { id: Format; label: string }[] = [{ id: 'text', label: 'Plain text' }, { id: 'html', label: 'HTML' }];
+  return (
+    <div className='flex flex-wrap items-center gap-2'>
+      <span className='text-muted-foreground text-sm'>Format</span>
+      <div role='group' aria-label={`Format of ${label}`} className='inline-flex rounded-md border p-0.5'>
+        {opts.map((o) => (
+          <Button key={o.id} type='button' size='xs' variant={value === o.id ? 'secondary' : 'ghost'} aria-pressed={value === o.id}
+            disabled={disabled || (o.id === 'html' && outbound && value !== 'html')} onClick={() => onChange(o.id)}>{o.label}</Button>
+        ))}
+      </div>
+      {outbound && <span className='text-muted-foreground text-xs'>Outbound (prospects) email stays plain text.</span>}
+    </div>
+  );
+}
+
+type EmailPreview = { subject: string; html: string; text: string; warnings: string[] };
+
+/** A body: a plain-text textarea, or for HTML a code textarea, a sandboxed live preview (the server's sanitized render), its warnings and a test send. */
+function BodyEditor({ label, campaignId, subject, body, format, outbound, editable, onBody, onFormat, rows = 7, placeholderSuffix = '' }: {
+  label: string; campaignId: number; subject: string; body: string; format: Format; outbound: boolean; editable: boolean;
+  onBody: (b: string) => void; onFormat: (f: Format) => void; rows?: number; placeholderSuffix?: string;
+}) {
+  return (
+    <div className='grid min-w-0 gap-2'>
+      <FormatToggle label={label} value={format} onChange={onFormat} outbound={outbound} disabled={!editable} />
+      {format === 'html' ? (
+        <HtmlBody label={label} campaignId={campaignId} subject={subject} body={body} outbound={outbound} onBody={onBody} rows={rows} placeholderSuffix={placeholderSuffix} />
+      ) : (
+        <Textarea aria-label={`Body of ${label}`} rows={rows} placeholder={`Plain text${placeholderSuffix}`} value={body} onChange={(e) => onBody(e.target.value)} />
+      )}
+    </div>
+  );
+}
+
+function HtmlBody({ label, campaignId, subject, body, outbound, onBody, rows, placeholderSuffix }: {
+  label: string; campaignId: number; subject: string; body: string; outbound: boolean; onBody: (b: string) => void; rows: number; placeholderSuffix: string;
+}) {
+  const [q, setQ] = useState({ subject, body });
+  useEffect(() => { const t = setTimeout(() => setQ({ subject, body }), 500); return () => clearTimeout(t); }, [subject, body]);
+  const { data, error, isFetching } = useQuery({ queryKey: ['admin', 'gtm-email-preview', campaignId, JSON.stringify(q)], staleTime: 60_000, retry: false, enabled: !!q.body.trim() && !outbound,
+    queryFn: () => post<EmailPreview>('/gtm/campaigns/preview', { subject: q.subject, body: q.body, format: 'html', vars: { first_name: 'Ada', product: 'Acme CLI' } }) });
+  const [to, setTo] = useState('');
+  const send = useAdminAction(() => post<{ status: string; error?: string | null; warnings?: string[] }>(`${path(campaignId)}/test`, { to: to.trim(), subject, body, format: 'html' }),
+    { success: (r) => (r.status === 'sent' ? `Test sent to ${to.trim()}${r.warnings?.length ? `. ${r.warnings.join('. ')}` : ''}` : `Not sent: ${r.error ?? r.status}`) });
+  return (
+    <div className='grid min-w-0 gap-2'>
+      <Textarea aria-label={`HTML body of ${label}`} rows={Math.max(rows, 10)} spellCheck={false} className='font-mono text-xs' placeholder={`HTML: tables, inline styles, https links and images${placeholderSuffix}`}
+        value={body} onChange={(e) => onBody(e.target.value)} />
+      <div className='grid gap-1'>
+        <div className='flex flex-wrap items-center justify-between gap-2'>
+          <span className='text-muted-foreground text-xs'>Preview: sanitized as it will be sent, for Ada at Acme CLI, with the footer.{isFetching ? ' Updating…' : ''}</span>
+        </div>
+        {error && <p className='text-destructive text-sm'>{(error as Error).message}</p>}
+        {data?.warnings.length ? (
+          <div className='rounded-md border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200'>
+            <p className='font-medium'>Removed by the sanitizer (it will not be sent):</p>
+            <ul className='list-disc pl-4'>{data.warnings.map((w) => <li key={w}>{w}</li>)}</ul>
+          </div>
+        ) : null}
+        {/* sandbox with no allow-scripts and no allow-same-origin: the preview can run nothing and reach nothing. */}
+        <iframe title={`Preview of ${label}`} sandbox='' srcDoc={data?.html ?? ''} className='h-[420px] w-full rounded-md border bg-white' referrerPolicy='no-referrer' />
+      </div>
+      <div className='flex flex-wrap items-center gap-2'>
+        <Input type='email' aria-label={`Send a test of ${label} to`} placeholder='you@octillion.dev' className='h-8 max-w-xs' value={to} onChange={(e) => setTo(e.target.value)} />
+        <Gate need='campaigns'><Button type='button' size='sm' variant='outline' disabled={!to.trim() || !body.trim() || !subject.trim() || send.isPending} onClick={() => send.mutate()}><Icons.send /> Send test</Button></Gate>
+        <span className='text-muted-foreground text-xs'>Sends this unsaved version, marked [Test].</span>
+      </div>
     </div>
   );
 }

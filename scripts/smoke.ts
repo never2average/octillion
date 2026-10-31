@@ -3276,6 +3276,7 @@ try {
         ["GET", "/gtm/campaigns", undefined, "viewer"],
         ["POST", "/gtm/audience/preview", { audience: { include: "nope" } }, "viewer"],
         ["POST", "/gtm/campaigns", {}, "owner"],
+        ["POST", "/gtm/campaigns/preview", { body: "<p>x</p>", format: "html" }, "owner"],
         ["POST", "/gtm/campaigns/999999/launch", {}, "owner"],
         ["DELETE", "/gtm/campaigns/999999", undefined, "owner"],
         ["DELETE", "/compute/harnesses/nope", undefined, "owner"],
