@@ -248,3 +248,88 @@ export async function experimentsReport(q: { from?: unknown; to?: unknown } = {}
   };
 }
 export type ExperimentsReport = Awaited<ReturnType<typeof experimentsReport>>;
+
+// ---------- the read side for GTM (src/gtm.ts Activation / Attribution, src/campaigns.ts audiences, src/gtm-events.ts) ----------
+// Nothing here assigns, exposes or attributes: it reads what offeredPlans recorded (plan_exposures) and what checkout
+// tagged in Stripe (octillion_experiment / octillion_variant), with the same cached Stripe list calls as the report above.
+
+/** The variant key of an account never shown an experiment's pricing (GTM's "Not shown pricing"). */
+export const NOT_SHOWN = "none";
+
+export interface AccountExposure { org_id: number; experiment: string; price_id: string; plan_name: string | null; first_seen_at: Date; visitor_id: string | null }
+
+/** Accounts' first exposures (plan_exposures: one per account and experiment), of one experiment or of all. */
+export async function accountExposures(experiment?: string | null): Promise<AccountExposure[]> {
+  const rows = await (await getDb()).query<AccountExposure>(
+    `/* tenant: internal: admin GTM, every account's plan exposures */ SELECT org_id, experiment, price_id, plan_name, first_seen_at, visitor_id
+       FROM plan_exposures WHERE ($1::text IS NULL OR experiment = $1) ORDER BY first_seen_at, org_id`, [experiment || null]);
+  return rows.map((r) => ({ ...r, org_id: Number(r.org_id), first_seen_at: new Date(r.first_seen_at) }));
+}
+
+export interface CatalogVariant { price_id: string; name: string; live: boolean; accounts: number }
+export interface CatalogExperiment { experiment: string; live: boolean; accounts: number; variants: CatalogVariant[] }
+/**
+ * Every experiment with its variants, for GTM's selectors: the live plans in an experiment (Stripe, when configured and
+ * answering) and every variant an account was shown (plan_exposures, so an ended experiment stays selectable). Live
+ * variants first, in the order Stripe created them (the control first, as on FinOps), then the ended ones.
+ */
+export async function experimentCatalog(): Promise<CatalogExperiment[]> {
+  const [exposures, plans] = await Promise.all([
+    (await getDb()).query<{ experiment: string; price_id: string; plan_name: string | null; accounts: number }>(
+      `/* tenant: internal: admin GTM, exposure counts per variant */ SELECT experiment, price_id, max(plan_name) AS plan_name, count(*)::int AS accounts
+         FROM plan_exposures GROUP BY experiment, price_id`),
+    billing.stripeEnabled() ? billing.listPlans().catch(() => [] as billing.Plan[]) : Promise.resolve([] as billing.Plan[]),
+  ]);
+  const by = new Map<string, Map<string, CatalogVariant & { created: number }>>();
+  const at = (exp: string) => { let m = by.get(exp); if (!m) by.set(exp, m = new Map()); return m; };
+  for (const p of plans) if (p.experiment) at(p.experiment).set(p.price_id, { price_id: p.price_id, name: p.name, live: true, accounts: 0, created: p.created ?? 0 });
+  for (const e of exposures) {
+    const m = at(e.experiment), x = m.get(e.price_id);
+    if (x) x.accounts = Number(e.accounts);
+    else m.set(e.price_id, { price_id: e.price_id, name: e.plan_name ?? e.price_id, live: false, accounts: Number(e.accounts), created: Infinity });
+  }
+  return [...by].map(([experiment, m]) => {
+    const variants = [...m.values()].sort((a, b) => Number(b.live) - Number(a.live) || a.created - b.created || a.price_id.localeCompare(b.price_id))
+      .map(({ created: _c, ...v }) => v);
+    return { experiment, live: variants.some((v) => v.live), accounts: sum(variants.map((v) => v.accounts)), variants };
+  }).sort((a, b) => Number(b.live) - Number(a.live) || a.experiment.localeCompare(b.experiment));
+}
+
+export interface Bought { variant: string; paying: boolean; mrr_usd: number }
+export interface ExperimentOutcomes {
+  configured: boolean; error: string | null;
+  /** Stripe customer → experiment → what it bought: the variant of its earliest tagged subscription that ever paid or
+   *  trialed (not incomplete), and whether its tagged subscriptions pay now (revenue.ts payingAt) and their MRR. */
+  bought: Map<string, Map<string, Bought>>;
+  /** `${customer}\u0000${experiment}` of every completed checkout session tagged with the experiment. */
+  completed: Set<string>;
+}
+/**
+ * What accounts did with an experiment, read back from Stripe's tags (the same cached list calls as experimentsReport).
+ * Stripe off: empty and configured false. Stripe failing: empty with the error (callers that must not guess check it).
+ */
+export async function experimentOutcomes(now = Date.now()): Promise<ExperimentOutcomes> {
+  const out: ExperimentOutcomes = { configured: billing.stripeEnabled(), error: null, bought: new Map(), completed: new Set() };
+  if (!out.configured) return out;
+  let subs: billing.Subscription[], sessions: billing.CheckoutSession[];
+  try { [{ raw: subs }, sessions] = await Promise.all([billing.allSubscriptions(), billing.allCheckoutSessions()]); }
+  catch (e) { return { ...out, error: (e as Error).message }; }
+  for (const s of sessions) {
+    const m = s.metadata ?? {};
+    if (s.customer && s.status === "complete" && m.octillion_experiment) out.completed.add(`${s.customer}\u0000${m.octillion_experiment}`);
+  }
+  const tagged = subs.filter((s) => s.metadata?.octillion_experiment && s.metadata.octillion_variant && !NEVER_PAID.has(s.status))
+    .sort((a, b) => (a.start_date ?? a.created ?? 0) - (b.start_date ?? b.created ?? 0) || a.id.localeCompare(b.id));
+  for (const s of tagged) {
+    const exp = s.metadata!.octillion_experiment!;
+    let m = out.bought.get(s.customer);
+    if (!m) out.bought.set(s.customer, m = new Map());
+    const x = m.get(exp) ?? { variant: s.metadata!.octillion_variant!, paying: false, mrr_usd: 0 };
+    if (payingAt(s, now)) { x.paying = true; x.mrr_usd = r2(x.mrr_usd + subMonthly(s)); }
+    m.set(exp, x);
+  }
+  return out;
+}
+/** Whether a customer completed a checkout or holds a subscription tagged with the experiment (any variant). */
+export const checkedOut = (o: ExperimentOutcomes, customer: string | null | undefined, experiment: string) =>
+  !!customer && (o.completed.has(`${customer}\u0000${experiment}`) || !!o.bought.get(customer)?.has(experiment));

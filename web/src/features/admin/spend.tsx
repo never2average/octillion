@@ -19,7 +19,8 @@ import { ActionsMenu, RecordView, type RecordCol, type RowAction } from '@/compo
 import { DetailMeta, DetailTable, DetailTabs, type Fact } from '@/components/layout/detail';
 import { StatStrip } from '@/components/layout/section';
 import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent, type ChartConfig } from '@/components/ui/chart';
-import { Button } from '@/components/ui/button';
+import Link from 'next/link';
+import { Button, buttonVariants } from '@/components/ui/button';
 import { ButtonGroup } from '@/components/ui/button-group';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -598,13 +599,29 @@ interface Experiments {
   experiments: string[]; running: string[]; variants: Variant[];
 }
 
+/** GTM with this pricing experiment chosen: Activation split by variant, Attribution with the per-variant breakdown. */
+const gtmHref = (tab: 'activation' | 'attribution', experiment: string) => `/admin/gtm/${tab}?experiment=${encodeURIComponent(experiment)}`;
+/** The labelled deep links into GTM for an experiment (row cell and peek). */
+function GtmLinks({ experiment, size = 'sm', stacked }: { experiment: string; size?: 'xs' | 'sm'; stacked?: boolean }) {
+  const cls = buttonVariants({ variant: 'outline', size });
+  return (
+    <span className={cn('flex gap-1.5', stacked ? 'flex-col items-end' : 'flex-wrap items-center')} onClick={(e) => e.stopPropagation()}>
+      <Link href={gtmHref('activation', experiment)} className={cls}><Icons.externalLink /> Open in GTM Activation</Link>
+      <Link href={gtmHref('attribution', experiment)} className={cls}><Icons.externalLink /> Open in GTM Attribution</Link>
+    </span>
+  );
+}
+
 /**
  * Experiments (GET /spend/experiments, src/experiments.ts): every variant of every pricing experiment, its control
- * first. Conversion = accounts that subscribed / accounts shown it, with its 95% interval; lift is against the control
+ * first. `experiment` in the URL (GTM's "Open in FinOps") shows that experiment only, with a chip to show them all. Conversion = accounts that subscribed / accounts shown it, with its 95% interval; lift is against the control
  * in points, marked when its interval excludes 0. Revenue per account shown is the number to compare prices on.
  */
 function ExperimentsTab({ data, loading, bar }: TabProps<Experiments>) {
   const t = data?.totals;
+  const only = useSearchParams().get('experiment')?.trim() || null;
+  const router = useRouter();
+  const rows = only ? (data?.variants ?? []).filter((v) => v.experiment === only) : data?.variants ?? [];
   const share = (v: Variant) => {
     const live = data?.variants.filter((x) => x.experiment === v.experiment && x.live) ?? [];
     const w = live.reduce((n, x) => n + x.weight, 0);
@@ -646,14 +663,27 @@ function ExperimentsTab({ data, loading, bar }: TabProps<Experiments>) {
     { key: 'collected', label: 'Collected', hidden: true, className: 'text-right', type: 'number', value: (v) => v.collected_usd, render: (v) => num(cents(v.collected_usd)) },
     { key: 'spend', label: 'Model spend', hidden: true, className: 'text-right', type: 'number', value: (v) => v.model_spend_usd, render: (v) => num(cents(v.model_spend_usd), 'Metered model spend of the accounts that subscribed, in the range') },
     { key: 'margin', label: 'Margin', hidden: true, className: 'text-right', type: 'number', value: (v) => v.margin_usd, render: (v) => num(cents(v.margin_usd)) },
-    { key: 'churned', label: 'Churned', hidden: true, className: 'text-right', type: 'number', value: (v) => v.churned, render: (v) => num(v.churned.toLocaleString()) }
+    { key: 'churned', label: 'Churned', hidden: true, className: 'text-right', type: 'number', value: (v) => v.churned, render: (v) => num(v.churned.toLocaleString()) },
+    { key: 'gtm', label: 'GTM', className: 'text-right', type: 'text', value: (v) => v.experiment, render: (v) => <GtmLinks experiment={v.experiment} size='xs' stacked /> }
   ];
-  const variantActions = (v: Variant): RowAction[] => [{ label: 'Copy price ID', icon: <Icons.page />, onSelect: () => copyText(v.price_id, 'Price ID copied') }];
+  const variantActions = (v: Variant): RowAction[] => [
+    { label: 'Open in GTM Activation', icon: <Icons.externalLink />, onSelect: () => router.push(gtmHref('activation', v.experiment)) },
+    { label: 'Open in GTM Attribution', icon: <Icons.externalLink />, onSelect: () => router.push(gtmHref('attribution', v.experiment)) },
+    { label: 'Copy price ID', icon: <Icons.page />, onSelect: () => copyText(v.price_id, 'Price ID copied') }
+  ];
   const empty = data && !data.stripe.configured ? 'Stripe is not configured (STRIPE_SECRET_KEY in the server environment on Vercel).'
     : data?.stripe.error ? `Could not read Stripe: ${data.stripe.error}`
     : 'No experiments yet. On Plans, create two plans with the same experiment name (or ⋯ › Add to experiment on existing ones).';
+  const chip = only && (
+    <span className='border-primary/40 bg-primary/10 text-primary flex h-7 items-center gap-1 self-start rounded-full border pr-1 pl-2.5 text-xs leading-none'>
+      <span className='max-w-72 truncate'><span className='font-medium'>Experiment:</span> {only}</span>
+      <Button variant='ghost' size='xs' className='h-5 px-1.5 text-xs' onClick={() => router.replace('/admin/finops?section=experiments', { scroll: false })}>
+        <Icons.close className='size-3' /> Show all experiments
+      </Button>
+    </span>
+  );
   return (
-    <RecordView id='finops-experiments' rows={data?.variants ?? []} loading={loading} rowKey={(v) => `${v.experiment}:${v.price_id}`} cols={cols} noun='variants' initialSize={50} compact summary={cards}
+    <RecordView id='finops-experiments' rows={rows} loading={loading} rowKey={(v) => `${v.experiment}:${v.price_id}`} cols={cols} noun='variants' initialSize={50} compact summary={chip ? <div className='flex flex-col gap-3'>{cards}{chip}</div> : cards}
       searchText={(v) => `${v.name} ${v.experiment} ${v.price_id}`} searchPlaceholder='Search experiments, variants' filters={bar} groupable
       exportName={exportName('experiments', 'variant', data?.range)}
       actions={variantActions}
@@ -675,7 +705,7 @@ function VariantPeek({ v, days, share, actions }: { v: Variant; days: string[]; 
           {v.significant && !v.control && <StatusBadge tone={v.lift_pts != null && v.lift_pts > 0 ? 'ok' : 'bad'}>significant</StatusBadge>}
         </>}
         subtitle={<><Mono>{v.experiment}</Mono> · {v.amount_usd == null ? 'usage' : `$${v.amount_usd.toLocaleString()}/${v.interval === 'year' ? 'yr' : 'mo'}`}</>}
-        actions={peekMenu(actions)}
+        actions={<span className='flex flex-wrap items-center gap-1.5'><GtmLinks experiment={v.experiment} />{peekMenu(actions)}</span>}
         facts={[
           { label: 'Traffic', value: share == null ? NA : `${share}%`, hint: `Weight ${v.weight} (shown on the Plans tab)` },
           { label: 'Visitors', value: num((v.visitors ?? 0).toLocaleString()), hint: v.visitors_in_range ? `${v.visitors_in_range} new` : undefined },

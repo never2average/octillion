@@ -33,7 +33,11 @@ interface ProspectFilter { statuses: string[]; tags: string[]; titles: string[];
 interface Audience {
   include: 'accounts' | 'requests' | 'both' | 'prospects'; stages: string[]; attention: string; created_from: string | null; created_to: string | null;
   utm_source: string; utm_medium: string; utm_campaign: string; plans: string[]; request_status: string[]; accounts: string[]; prospects?: ProspectFilter;
+  /** Saw pricing variant (accounts only): the experiment and a variant's price id ('' = any variant). */
+  pricing?: { experiment: string; variant: string };
 }
+/** The pricing experiments and their variants (GET /gtm/campaigns, src/experiments.ts experimentCatalog). */
+interface PricingExperiment { experiment: string; live: boolean; variants: { price_id: string; name: string; live: boolean }[] }
 /** A body's format: absent is plain text (as stored); 'html' is sanitized HTML (src/campaign-html.ts). */
 type Format = 'text' | 'html';
 interface Variant { subject: string; body: string; weight: number; format?: Format }
@@ -51,8 +55,8 @@ const HTML_STARTER = `<table role="presentation" width="100%" cellpadding="0" ce
     </table>
   </td></tr>
 </table>`;
-type TriggerType = 'account_created' | 'request_submitted' | 'request_approved' | 'stage_reached' | 'stuck' | 'report_opened' | 'first_payment' | 'attention';
-interface Trigger { type: TriggerType; stage: string | null; days: number | null; attention: string; delay_hours: number; reentry: 'once' | 'every'; reentry_days: number }
+type TriggerType = 'account_created' | 'request_submitted' | 'request_approved' | 'stage_reached' | 'stuck' | 'report_opened' | 'first_payment' | 'attention' | 'pricing_no_checkout';
+interface Trigger { type: TriggerType; stage: string | null; days: number | null; attention: string; delay_hours: number; reentry: 'once' | 'every'; reentry_days: number; experiment?: string }
 interface SendWindow { days: number[]; start_hour: number; end_hour: number; time_zone: string }
 interface Metrics { recipients: number; suppressed: number; unsubscribed: number; failed: number; waiting: number; reached: number; replied: number; replies_open: number; no_consent: number; uncertain: number; unknown: number; sent: number; delivered: number; bounced: number; complained: number; opened: number; clicked: number }
 interface Conversions { days: number; requested: number; activated: number; paid: number }
@@ -63,7 +67,7 @@ interface Campaign {
   outbound?: boolean; sender_identity_id?: number | null; track_opens?: boolean | null; track_opens_effective?: boolean; allow_restricted?: boolean;
 }
 interface Setup { postal_address_set: boolean; postal_hint: string | null; replies_inbox: string | null; outbound_postal_warning?: string | null }
-interface List { email: { enabled: boolean; connected: boolean; from: string }; setup: Setup; variables: string[]; stages: { id: string; label: string }[]; campaigns: Campaign[] }
+interface List { email: { enabled: boolean; connected: boolean; from: string }; setup: Setup; variables: string[]; stages: { id: string; label: string }[]; campaigns: Campaign[]; experiments?: PricingExperiment[] }
 interface Recipient {
   id: number; email: string; first_name: string | null; product: string | null; source: 'account' | 'request'; status: string; next_step: number; next_at: string | null;
   first_sent_at: string | null; last_sent_at: string | null; replied_at: string | null; round: number; time_zone: string; country: string | null; consent_basis: string | null;
@@ -88,7 +92,8 @@ const TRIGGERS: { id: TriggerType; label: string; who: 'account' | 'request' }[]
   { id: 'stuck', label: 'Stuck at a stage', who: 'account' },
   { id: 'report_opened', label: 'Report opened', who: 'account' },
   { id: 'first_payment', label: 'First payment', who: 'account' },
-  { id: 'attention', label: 'Needs attention (a reason appears)', who: 'account' }
+  { id: 'attention', label: 'Needs attention (a reason appears)', who: 'account' },
+  { id: 'pricing_no_checkout', label: "Saw pricing, didn't check out within N days", who: 'account' }
 ];
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const LETTERS = ['A', 'B', 'C', 'D'];
@@ -111,6 +116,7 @@ function triggerText(t: Trigger | null, stages: { id: string; label: string }[])
   if (!t) return null;
   const stage = t.stage ? stages.find((s) => s.id === t.stage)?.label ?? t.stage : null;
   const what = t.type === 'stage_reached' ? `Reached ${stage}` : t.type === 'stuck' ? `Stuck at ${stage} for ${t.days}d` : t.type === 'attention' && t.attention ? `Needs attention: "${t.attention}"`
+    : t.type === 'pricing_no_checkout' ? `Saw pricing${t.experiment ? ` (${t.experiment})` : ''}, no checkout in ${t.days}d`
     : TRIGGERS.find((x) => x.id === t.type)?.label ?? t.type;
   return `${what}${t.delay_hours ? `, ${t.delay_hours}h later` : ''}${t.reentry === 'every' ? `, again after ${t.reentry_days}d` : ''}`;
 }
@@ -139,6 +145,7 @@ function audienceText(a: Audience, stages: { id: string; label: string }[]) {
     a.request_status.length && a.include !== 'accounts' ? `requests ${a.request_status.join('/')}` : null,
     a.utm_campaign ? `campaign ${a.utm_campaign}` : null, a.utm_source ? `from ${a.utm_source}` : null, a.utm_medium ? `via ${a.utm_medium}` : null,
     a.plans.length ? `on ${a.plans.join(', ')}` : null,
+    a.pricing ? `shown ${a.pricing.variant ? `variant ${a.pricing.variant}` : 'any variant'} of ${a.pricing.experiment}` : null,
     a.created_from || a.created_to ? `created ${a.created_from ?? '…'} to ${a.created_to ?? '…'}` : null
   ].filter(Boolean);
   return `${who}${bits.length ? ` ${bits.join(', ')}` : ''}`;
@@ -512,6 +519,10 @@ function CampaignEditor({ c, stages, tab, setTab, before, after, card }: {
   const [allowRestricted, setAllowRestricted] = useState(c.allow_restricted ?? false);
   const outbound = a.include === 'prospects';
   const { data: ids } = useAdmin<Identities>(outbound && can('campaigns') ? '/gtm/identities' : null);
+  // The pricing experiments (the list's own query: already cached by the page).
+  const { data: listData } = useAdmin<List>('/gtm/campaigns', { refetchInterval: 30_000 });
+  const experiments = listData?.experiments ?? [];
+  const variantsOf = (e: string | undefined) => experiments.find((x) => x.experiment === e)?.variants ?? [];
   const audience = useMemo(() => ({ ...a, plans: uncsv(plans), accounts: uncsv(accounts),
     ...(a.include === 'prospects' ? { prospects: { statuses: pf.statuses, sizes: pf.sizes, email_statuses: pf.email_statuses, tags: uncsv(pf.tags), titles: uncsv(pf.titles),
       industries: uncsv(pf.industries), countries: uncsv(pf.countries), owners: uncsv(pf.owners), prospect_ids: pf.prospect_ids } } : { prospects: undefined }) }), [a, plans, accounts, pf]);
@@ -551,7 +562,8 @@ function CampaignEditor({ c, stages, tab, setTab, before, after, card }: {
     ), trigger ? 'People join when the event happens after launch; the audience narrows it by UTM tags and plan.' : 'Everyone the audience matches when it starts (and later, with Keep enrolling).'),
     formKV(`c-${c.id}-ttype`, 'When this happens', trigger && (
       <NativeSelect id={`c-${c.id}-ttype`} className='w-full' value={trigger.type}
-        onChange={(e) => { const type = e.target.value as TriggerType; setT({ type, stage: type === 'stage_reached' || type === 'stuck' ? trigger.stage ?? stages[5]?.id ?? 'onboarded' : null, days: type === 'stuck' ? trigger.days ?? 3 : null }); }}>
+        onChange={(e) => { const type = e.target.value as TriggerType; setT({ type, stage: type === 'stage_reached' || type === 'stuck' ? trigger.stage ?? stages[5]?.id ?? 'onboarded' : null,
+          days: type === 'stuck' || type === 'pricing_no_checkout' ? trigger.days ?? 3 : null, experiment: type === 'pricing_no_checkout' ? trigger.experiment ?? '' : undefined }); }}>
         {TRIGGERS.map((t) => <NativeSelectOption key={t.id} value={t.id}>{t.label}</NativeSelectOption>)}
       </NativeSelect>
     ), undefined, !triggered),
@@ -563,6 +575,16 @@ function CampaignEditor({ c, stages, tab, setTab, before, after, card }: {
     formKV(`c-${c.id}-tdays`, 'Stuck for (days)', trigger && (
       <Input id={`c-${c.id}-tdays`} type='number' min={1} max={365} value={trigger.days ?? 3} onChange={(e) => setT({ days: Math.max(1, Math.trunc(Number(e.target.value) || 1)) })} />
     ), undefined, !triggered || trigger?.type !== 'stuck'),
+    formKV(`c-${c.id}-texp`, 'Pricing experiment', trigger && (
+      <NativeSelect id={`c-${c.id}-texp`} className='w-full' value={trigger.experiment ?? ''} onChange={(e) => setT({ experiment: e.target.value })}>
+        <NativeSelectOption value=''>Any experiment</NativeSelectOption>
+        {experiments.map((x) => <NativeSelectOption key={x.experiment} value={x.experiment}>{x.experiment}{x.live ? '' : ' (ended)'}</NativeSelectOption>)}
+        {trigger.experiment && !experiments.some((x) => x.experiment === trigger.experiment) && <NativeSelectOption value={trigger.experiment}>{trigger.experiment}</NativeSelectOption>}
+      </NativeSelect>
+    ), 'Accounts first shown this experiment on Billing after launch (or up to 2 days before) with no completed checkout or subscription for it.', !triggered || trigger?.type !== 'pricing_no_checkout'),
+    formKV(`c-${c.id}-tpdays`, "Didn't check out within (days)", trigger && (
+      <Input id={`c-${c.id}-tpdays`} type='number' min={1} max={90} value={trigger.days ?? 3} onChange={(e) => setT({ days: Math.max(1, Math.min(90, Math.trunc(Number(e.target.value) || 1))) })} />
+    ), 'Accounts only (lifecycle): anonymous /pricing visitors are never written to.', !triggered || trigger?.type !== 'pricing_no_checkout'),
     formKV(`c-${c.id}-tatt`, 'Reason contains', trigger && (
       <Input id={`c-${c.id}-tatt`} value={trigger.attention} placeholder='e.g. no simulation' onChange={(e) => setT({ attention: e.target.value })} />
     ), 'Empty: any new reason.', !triggered || trigger?.type !== 'attention'),
@@ -645,7 +667,24 @@ function CampaignEditor({ c, stages, tab, setTab, before, after, card }: {
     formKV(`c-${c.id}-to`, 'Created to', <Input id={`c-${c.id}-to`} type='date' value={a.created_to ?? ''} onChange={(e) => set('created_to', e.target.value || null)} />, undefined, outbound),
     formKV(`c-${c.id}-plans`, 'Plans', <Input id={`c-${c.id}-plans`} value={plans} onChange={(e) => setPlans(e.target.value)} placeholder='Any' />, 'Comma-separated plan names, or none.', outbound),
     formKV(`c-${c.id}-accounts`, 'Only these accounts', <Input id={`c-${c.id}-accounts`} value={accounts} onChange={(e) => setAccounts(e.target.value)} placeholder='Any' />, 'Comma-separated slugs.', outbound),
-    { label: 'Triggered', value: <span className='text-muted-foreground text-xs'>The event decides who; only the UTM tags and plans here narrow it.</span>, hidden: !triggered }
+    formKV(`c-${c.id}-pexp`, 'Saw pricing variant', (
+      <span className='flex flex-wrap items-center gap-2'>
+        <NativeSelect id={`c-${c.id}-pexp`} className='min-w-48' value={a.pricing?.experiment ?? ''}
+          onChange={(e) => set('pricing', e.target.value ? { experiment: e.target.value, variant: '' } : undefined)}>
+          <NativeSelectOption value=''>Any (no pricing filter)</NativeSelectOption>
+          {experiments.map((x) => <NativeSelectOption key={x.experiment} value={x.experiment}>{x.experiment}{x.live ? '' : ' (ended)'}</NativeSelectOption>)}
+          {a.pricing && !experiments.some((x) => x.experiment === a.pricing!.experiment) && <NativeSelectOption value={a.pricing.experiment}>{a.pricing.experiment}</NativeSelectOption>}
+        </NativeSelect>
+        {a.pricing && (
+          <NativeSelect aria-label='Variant' className='min-w-48' value={a.pricing.variant} onChange={(e) => set('pricing', { experiment: a.pricing!.experiment, variant: e.target.value })}>
+            <NativeSelectOption value=''>Any variant</NativeSelectOption>
+            {variantsOf(a.pricing.experiment).map((v) => <NativeSelectOption key={v.price_id} value={v.price_id}>{v.name}{v.live ? '' : ' (ended)'}</NativeSelectOption>)}
+            {a.pricing.variant && !variantsOf(a.pricing.experiment).some((v) => v.price_id === a.pricing!.variant) && <NativeSelectOption value={a.pricing.variant}>{a.pricing.variant}</NativeSelectOption>}
+          </NativeSelect>
+        )}
+      </span>
+    ), a.include === 'accounts' ? 'Accounts first shown this variant on Billing (FinOps › Experiments).' : 'Accounts only: set Who to Accounts to use it (anonymous /pricing visitors are never written to).', outbound),
+    { label: 'Triggered', value: <span className='text-muted-foreground text-xs'>The event decides who; only the UTM tags, plans and pricing variant here narrow it.</span>, hidden: !triggered }
   ]);
 
   const emailsTab = part(steps.map((s, i) => ({

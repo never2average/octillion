@@ -288,4 +288,6 @@ export async function gtmChecks({ db, base, adm, json, mockUrl, mockPost, sentTo
   await (await import("./smoke-gtm-phase2.js")).gtmPhase2Checks({ db, base, adm, json, mockUrl, mockPost, sentTo, stamp });
   // HTML emails: sanitized format "html" steps, the preview, outbound refused (scripts/smoke-gtm-html.ts).
   await (await import("./smoke-gtm-html.js")).gtmHtmlChecks({ db, base, adm, json, mockUrl, mockPost, sentTo, stamp });
+  // Pricing experiments in GTM: Activation by variant, Attribution per variant, the audience filter and the trigger (scripts/smoke-gtm-pricing.ts).
+  await (await import("./smoke-gtm-pricing.js")).gtmPricingChecks({ db, adm, json, mockPost, sentTo, stamp });
 }

@@ -19,6 +19,7 @@ import { getDb } from "./db.js";
 import { reportRange } from "./insights.js";
 import * as billing from "./billing.js";
 import { listOrgs, STAGES, type AdminOrg } from "./admin.js";
+import { accountExposures, experimentCatalog, experimentOutcomes, NOT_SHOWN, type AccountExposure } from "./experiments.js";
 
 export const DIRECT = "direct/unknown";
 const DAY = 86_400_000;
@@ -99,6 +100,11 @@ export function gtmFilters(q: Record<string, unknown>) {
   return { plan: list(q.plan), utm_source: list(q.utm_source), utm_campaign: list(q.utm_campaign) };
 }
 type Filters = ReturnType<typeof gtmFilters>;
+/** The pricing experiment a view is split by (`experiment`, one key) and the variants it keeps (`variant`: price ids, "none" for not shown). */
+export function experimentFilter(q: Record<string, unknown>) {
+  const experiment = typeof q.experiment === "string" && q.experiment.trim() ? q.experiment.trim().slice(0, 100) : null;
+  return experiment ? { experiment, variant: list(q.variant) } : null;
+}
 const utmOk = (u: Utm, f: Filters) => (!f.utm_source.length || f.utm_source.includes(u.source)) && (!f.utm_campaign.length || f.utm_campaign.includes(u.campaign || DIRECT));
 
 const median = (xs: number[]) => {
@@ -123,6 +129,52 @@ export const ACTIVATION_STEPS = [
   { id: "paid", label: "Paid (after opening a report)" },
 ] as const;
 
+const pct = (a: number, b: number) => (b ? Math.round((a / b) * 1000) / 10 : null);
+/** The funnel's steps for some requests and a cohort; `paid` is given (the accounts counted at the Paid step). */
+function funnelSteps(reqs: RequestRow[], cohort: Journey[], paid: Journey[]) {
+  const reachedStage = (id: string) => cohort.filter((j) => j.org.stage_index >= stageAt(id));
+  const counts: Record<string, Journey[] | null> = {
+    requested: null, created: cohort, onboarded: reachedStage("onboarded"), simulated: reachedStage("simulated"), reported: reachedStage("reported"), paid,
+  };
+  const timing: Record<string, ReturnType<typeof medianHours>> = {
+    requested: { median_hours: null, measured: 0 },
+    created: medianHours(cohort.map((j) => [j.requested_at, j.created_at])),
+    onboarded: medianHours(cohort.map((j) => [j.created_at, j.onboarded_at])),
+    simulated: medianHours(cohort.map((j) => [j.onboarded_at, j.simulated_at])),
+    reported: medianHours(cohort.map((j) => [j.simulated_at, j.reported_at])),
+    paid: medianHours(paid.map((j) => [j.reported_at, j.paid_at])),
+  };
+  const reached = ACTIVATION_STEPS.map((s) => (s.id === "requested" ? reqs.length : counts[s.id]!.length));
+  return ACTIVATION_STEPS.map((s, i) => ({
+    ...s, reached: reached[i], pct_of_previous: i ? pct(reached[i], reached[i - 1]) : null, pct_of_first: i ? pct(reached[i], reached[0]) : null,
+    ...timing[s.id], accounts: s.id === "requested" ? undefined : counts[s.id]!.map((j) => j.org.slug),
+  }));
+}
+
+/**
+ * An account's variants of one experiment, for GTM's splits (read-side only: src/experiments.ts):
+ *   shown   plan_exposures: the variant its Billing page first showed it (offeredPlans), else NOT_SHOWN ("none")
+ *   bought  Stripe: the octillion_variant of its tagged subscription (what it actually bought), else null
+ *   paid    the Paid step's variant: bought where present, else shown
+ */
+async function variantsOf(experiment: string, all: Journey[]) {
+  const [exposures, outcomes, catalog] = await Promise.all([accountExposures(experiment), experimentOutcomes(), experimentCatalog()]);
+  const shownBy = new Map<number, AccountExposure>(exposures.map((e) => [e.org_id, e]));
+  const boughtOf = (j: Journey) => (j.org.stripe_customer_id ? outcomes.bought.get(j.org.stripe_customer_id)?.get(experiment) ?? null : null);
+  const shown = (j: Journey) => shownBy.get(Number(j.org.id))?.price_id ?? NOT_SHOWN;
+  const paid = (j: Journey) => boughtOf(j)?.variant ?? shown(j);
+  // The variants in order: the catalog's (live first, control first), then any only seen in exposures or Stripe tags.
+  const names = new Map<string, { name: string; live: boolean }>();
+  for (const v of catalog.find((c) => c.experiment === experiment)?.variants ?? []) names.set(v.price_id, { name: v.name, live: v.live });
+  for (const e of exposures) if (!names.has(e.price_id)) names.set(e.price_id, { name: e.plan_name ?? e.price_id, live: false });
+  for (const j of all) { const b = boughtOf(j); if (b && !names.has(b.variant)) names.set(b.variant, { name: b.variant, live: false }); }
+  const variants = [...[...names].map(([key, v]) => ({ key, ...v })), { key: NOT_SHOWN, name: "Not shown pricing", live: false }];
+  return { variants, shown, paid, boughtOf, outcomes, exposures, shownBy, known: catalog.some((c) => c.experiment === experiment) || exposures.length > 0 };
+}
+
+/** Said in the UI and the API: how Activation splits by variant (see activation below). */
+export const SPLIT_RULE = "Each account sits under the variant its Billing page first showed it. Accounts never shown this experiment's pricing (requests and accounts that never reached Billing) are their own column, Not shown pricing, so the columns add up to the whole funnel. Paid counts under the variant actually bought (the subscription's octillion_variant), else the one shown.";
+
 /**
  * The Activation tab (GET /gtm/activation). For the period (from/to, default the last 30 days):
  *   requested   access requests made in it
@@ -133,50 +185,68 @@ export const ACTIVATION_STEPS = [
  * both happened). Filters: plan (current plan name, or "none"), utm_source, utm_campaign ("direct/unknown" for none);
  * a request's plan is its account's. `attention`: every account that needs a person now (admin's own reasons), under
  * the same plan and UTM filters but not the period: someone stuck since last quarter still needs a person.
+ *
+ * Pricing experiment (`experiment`, optional; `variant`: keep only these variants, a comma list of price ids and/or
+ * "none"): the same funnel split by variant, one column each (`experiment.split`). Read-side only.
+ *   DECISION, accounts never shown the experiment: requested and created come before any Billing exposure, so an
+ *   account that never opened Billing has no variant. Such accounts (and requests with no account yet) are NOT dropped:
+ *   they are their own column, "Not shown pricing" (variant key "none"), so the columns always add up to the unsplit
+ *   funnel and a variant's column holds only accounts that were actually shown it. A request is its account's.
+ *   The variant is the account's FIRST exposure to the experiment (plan_exposures is one row per account and experiment).
+ *   DECISION, the Paid step: an account counts under its tagged subscription's octillion_variant (what it actually
+ *   bought, src/experiments.ts experimentOutcomes), and only where there is none under the variant it was shown.
+ * Without `experiment` the response is what it always was (no `experiment` key; facets list the experiments).
  */
 export async function activation(q: Record<string, unknown> = {}) {
   const range = reportRange(q);
   const f = gtmFilters(q);
+  const ex = experimentFilter(q);
   const { journeys: all, requests, stripe_error } = await journeys();
   const orgPlan = new Map(all.map((j) => [Number(j.org.id), j.plan]));
+  const byId = new Map(all.map((j) => [Number(j.org.id), j]));
   const inRange = (d: Date | string) => { const t = new Date(d).getTime(); return t >= range.start.getTime() && t < range.end.getTime(); };
   const planOk = (p: string) => !f.plan.length || f.plan.includes(p);
   const matches = (j: Journey) => planOk(j.plan) && utmOk(j.utm, f);
-  const reqs = requests.filter((r) => inRange(r.created_at) && utmOk(r.utm, f) && planOk(r.org_id != null ? orgPlan.get(r.org_id) ?? "none" : "none"));
-  const cohort = all.filter((j) => inRange(j.created_at) && matches(j));
-  const reachedStage = (id: string) => cohort.filter((j) => j.org.stage_index >= stageAt(id));
-  const counts: Record<string, Journey[] | null> = {
-    requested: null, created: cohort, onboarded: reachedStage("onboarded"), simulated: reachedStage("simulated"), reported: reachedStage("reported"),
-    // Nested: paid counts only accounts that also opened a report, so every step is a subset of the one before.
-    paid: reachedStage("reported").filter((j) => j.paid_at),
-  };
-  const timing: Record<string, ReturnType<typeof medianHours>> = {
-    requested: { median_hours: null, measured: 0 },
-    created: medianHours(cohort.map((j) => [j.requested_at, j.created_at])),
-    onboarded: medianHours(cohort.map((j) => [j.created_at, j.onboarded_at])),
-    simulated: medianHours(cohort.map((j) => [j.onboarded_at, j.simulated_at])),
-    reported: medianHours(cohort.map((j) => [j.simulated_at, j.reported_at])),
-    paid: medianHours(reachedStage("reported").map((j) => [j.reported_at, j.paid_at])),
-  };
-  const reached = ACTIVATION_STEPS.map((s) => (s.id === "requested" ? reqs.length : counts[s.id]!.length));
-  const pct = (a: number, b: number) => (b ? Math.round((a / b) * 1000) / 10 : null);
-  const steps = ACTIVATION_STEPS.map((s, i) => ({
-    ...s, reached: reached[i], pct_of_previous: i ? pct(reached[i], reached[i - 1]) : null, pct_of_first: i ? pct(reached[i], reached[0]) : null,
-    ...timing[s.id], accounts: s.id === "requested" ? undefined : counts[s.id]!.map((j) => j.org.slug),
-  }));
+  let reqs = requests.filter((r) => inRange(r.created_at) && utmOk(r.utm, f) && planOk(r.org_id != null ? orgPlan.get(r.org_id) ?? "none" : "none"));
+  let cohort = all.filter((j) => inRange(j.created_at) && matches(j));
+  // Nested: paid counts only accounts that also opened a report, so every step is a subset of the one before.
+  let paid = cohort.filter((j) => j.org.stage_index >= stageAt("reported") && j.paid_at);
+  const v = ex ? await variantsOf(ex.experiment, all) : null;
+  const reqVariant = (r: RequestRow) => { const j = r.org_id != null ? byId.get(r.org_id) : undefined; return j ? v!.shown(j) : NOT_SHOWN; };
+  let attentionOk = matches;
+  if (v && ex!.variant.length) {
+    const keep = new Set(ex!.variant);
+    paid = paid.filter((j) => keep.has(v.paid(j)));
+    reqs = reqs.filter((r) => keep.has(reqVariant(r)));
+    cohort = cohort.filter((j) => keep.has(v.shown(j)));
+    attentionOk = (j) => matches(j) && keep.has(v.shown(j));
+  }
+  const steps = funnelSteps(reqs, cohort, paid);
   const tally = (xs: string[]) => Object.fromEntries([...xs.reduce((m, x) => m.set(x, (m.get(x) ?? 0) + 1), new Map<string, number>())].sort((a, b) => b[1] - a[1]));
+  const catalog = await experimentCatalog().catch(() => []);
+  const experiment = v && ex ? {
+    id: ex.experiment, known: v.known, variant: ex.variant, rule: SPLIT_RULE, stripe_error: v.outcomes.error,
+    variants: v.variants.map((x) => ({ ...x, accounts: x.key === NOT_SHOWN ? all.filter((j) => !v.shownBy.has(Number(j.org.id))).length : v.exposures.filter((e) => e.price_id === x.key).length })),
+    split: v.variants.filter((x) => !ex.variant.length || ex.variant.includes(x.key)).map((c) => ({ key: c.key, name: c.name, live: c.live,
+      steps: funnelSteps(reqs.filter((r) => reqVariant(r) === c.key), cohort.filter((j) => v.shown(j) === c.key), paid.filter((j) => v.paid(j) === c.key)) })),
+  } : null;
   return {
     range: { from: range.from, to: range.to, days: range.days }, filters: f, stripe_error,
     steps, paid_any: cohort.filter((j) => j.paid_at).length,
-    attention: all.filter((j) => j.org.attention.length && matches(j)).map((j) => ({ ...j.org, utm: j.utm, plan: j.plan })),
+    attention: all.filter((j) => j.org.attention.length && attentionOk(j)).map((j) => ({ ...j.org, utm: j.utm, plan: j.plan })),
     cohort: cohort.map((j) => ({ slug: j.org.slug, name: j.org.name, stage: j.org.stage, stage_label: j.org.stage_label, plan: j.plan, utm: j.utm,
-      requested_at: j.requested_at, created_at: j.created_at, onboarded_at: j.onboarded_at, simulated_at: j.simulated_at, reported_at: j.reported_at, paid_at: j.paid_at })),
+      requested_at: j.requested_at, created_at: j.created_at, onboarded_at: j.onboarded_at, simulated_at: j.simulated_at, reported_at: j.reported_at, paid_at: j.paid_at,
+      ...(v ? { variant: v.shown(j), paid_variant: j.paid_at ? v.paid(j) : null } : {}) })),
     // What the filters offer (the whole history, so a shared link's values always show), with how many accounts and requests have each.
     facets: {
       plans: tally(all.map((j) => j.plan)),
       utm_sources: tally([...requests.map((r) => r.utm.source), ...all.filter((j) => !j.requested_at).map(() => DIRECT)]),
       utm_campaigns: tally(requests.map((r) => r.utm.campaign || DIRECT)),
+      // The pricing experiments (accounts shown each); with one chosen, accounts per variant shown ("none": not shown).
+      experiments: Object.fromEntries(catalog.map((c) => [c.experiment, c.accounts])) as Record<string, number>,
+      ...(v ? { variants: tally(all.map((j) => v.shown(j))) } : {}),
     },
+    ...(experiment ? { experiment } : {}),
   };
 }
 
@@ -187,9 +257,15 @@ export async function activation(q: Record<string, unknown> = {}) {
  *   accounts                accounts created in the period, each once, under its earliest request's tags (as Activation)
  *   activated, paying, MRR  of those accounts: reached a first simulation; Stripe now (USD a month, no discounts or usage)
  * Each row carries its accounts, so a click opens them.
+ *
+ * Pricing experiment (`experiment`, optional): each row also gets `variants`, one per variant of that experiment over
+ * the row's accounts: exposed (first shown it on Billing, plan_exposures), converted (holds a subscription tagged with
+ * it that ever paid or trialed: what it bought), paying and MRR (those tagged subscriptions paying now, revenue.ts);
+ * and `not_shown`, the row's accounts never shown the experiment. Without `experiment` the rows are what they were.
  */
 export async function attribution(q: Record<string, unknown> = {}) {
   const range = reportRange(q);
+  const ex = experimentFilter(q);
   const { journeys: all, requests, stripe_error } = await journeys();
   const byOrg = new Map(all.map((j) => [Number(j.org.id), j]));
   const inRange = (d: Date | string) => { const t = new Date(d).getTime(); return t >= range.start.getTime() && t < range.end.getTime(); };
@@ -211,6 +287,14 @@ export async function attribution(q: Record<string, unknown> = {}) {
   }
   for (const j of all) if (inRange(j.created_at)) rowOf(j.utm).orgs.add(Number(j.org.id));
   const simulated = stageAt("simulated");
+  const v = ex ? await variantsOf(ex.experiment, all) : null;
+  const variantCols = v ? v.variants.filter((x) => x.key !== NOT_SHOWN) : [];
+  const breakdown = (js: Journey[]) => variantCols.map((c) => {
+    const bought = js.flatMap((j) => { const b = v!.boughtOf(j); return b && b.variant === c.key ? [b] : []; });
+    const paying = bought.filter((b) => b.paying);
+    return { key: c.key, name: c.name, live: c.live, exposed: js.filter((j) => v!.shown(j) === c.key).length, converted: bought.length, paying: paying.length,
+      mrr_usd: r2(paying.reduce((t, b) => t + b.mrr_usd, 0)) };
+  });
   const shaped = [...rows.values()].map((r) => {
     const js = [...r.orgs].map((id) => byOrg.get(id)!);
     const paying = js.filter((j) => j.paying);
@@ -219,14 +303,22 @@ export async function attribution(q: Record<string, unknown> = {}) {
       requests: r.requests, approved: r.approved, accounts: js.length,
       activated: js.filter((j) => j.org.stage_index >= simulated).length, paying: paying.length, mrr_usd: r2(paying.reduce((t, j) => t + j.mrr_usd, 0)),
       account_list: js.map((j) => ({ slug: j.org.slug, name: j.org.name, stage_label: j.org.stage_label, created_at: j.created_at,
-        activated: j.org.stage_index >= simulated, paying: j.paying, plan: j.plan, mrr_usd: j.mrr_usd })),
+        activated: j.org.stage_index >= simulated, paying: j.paying, plan: j.plan, mrr_usd: j.mrr_usd,
+        ...(v ? { variant: v.shown(j), bought: v.boughtOf(j)?.variant ?? null } : {}) })),
+      ...(v ? { variants: breakdown(js), not_shown: js.filter((j) => v.shown(j) === NOT_SHOWN).length } : {}),
     };
   }).sort((a, b) => b.mrr_usd - a.mrr_usd || b.accounts - a.accounts || b.requests - a.requests || a.key.localeCompare(b.key));
   const sum = (k: "requests" | "approved" | "accounts" | "activated" | "paying" | "mrr_usd") => r2(shaped.reduce((t, r) => t + r[k], 0));
+  const catalog = await experimentCatalog().catch(() => []);
+  const inPeriod = all.filter((j) => inRange(j.created_at));
   return {
     range: { from: range.from, to: range.to, days: range.days }, stripe: { configured: billing.stripeEnabled(), error: stripe_error ?? null },
     rows: shaped,
     totals: { requests: sum("requests"), approved: sum("approved"), accounts: sum("accounts"), activated: sum("activated"), paying: sum("paying"), mrr_usd: sum("mrr_usd") },
+    /** The selector's choices: every pricing experiment, with how many accounts were shown it. */
+    experiments: Object.fromEntries(catalog.map((c) => [c.experiment, c.accounts])) as Record<string, number>,
+    ...(v && ex ? { experiment: { id: ex.experiment, known: v.known, stripe_error: v.outcomes.error, variants: variantCols.map(({ key, name, live }) => ({ key, name, live })),
+      totals: breakdown(inPeriod), not_shown: inPeriod.filter((j) => v.shown(j) === NOT_SHOWN).length } } : {}),
   };
 }
 

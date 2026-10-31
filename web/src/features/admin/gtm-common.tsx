@@ -6,8 +6,9 @@ import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { IconFilter } from '@tabler/icons-react';
 import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
+import { Button, buttonVariants } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
+import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { last30, rangeQuery, type DateRange } from '@/components/layout/date-range-picker';
 import { Icons } from '@/components/icons';
@@ -64,7 +65,10 @@ export function GtmTabs({ right }: { right?: ReactNode }) {
   );
 }
 
-const LISTS = [{ key: 'plan', label: 'Plan' }, { key: 'utm_source', label: 'UTM source' }, { key: 'utm_campaign', label: 'UTM campaign' }] as const;
+// variant: a pricing experiment's variants (price ids, "none" for not shown pricing); offered only with an experiment chosen.
+const LISTS = [{ key: 'plan', label: 'Plan' }, { key: 'utm_source', label: 'UTM source' }, { key: 'utm_campaign', label: 'UTM campaign' }, { key: 'variant', label: 'Variant' }] as const;
+/** The variant key of accounts never shown an experiment's pricing (src/experiments.ts NOT_SHOWN). */
+export const NOT_SHOWN = 'none';
 export type GtmListKey = (typeof LISTS)[number]['key'];
 const split = (v: string | null) => (v ? v.split(',').map((x) => x.trim()).filter(Boolean) : []);
 
@@ -72,12 +76,15 @@ const split = (v: string | null) => (v ? v.split(',').map((x) => x.trim()).filte
 export function useGtmParams() {
   const params = useSearchParams(), router = useRouter(), pathname = usePathname();
   const s = params.toString();
-  const { range, filters } = useMemo(() => {
+  const { range, filters, experiment } = useMemo(() => {
     const p = new URLSearchParams(s);
     const from = p.get('from'), to = p.get('to');
     const range: DateRange = from && to && /^\d{4}-\d{2}-\d{2}$/.test(from) && /^\d{4}-\d{2}-\d{2}$/.test(to) ? { from, to } : last30();
     const filters = Object.fromEntries(LISTS.map((l) => [l.key, split(p.get(l.key))])) as Record<GtmListKey, string[]>;
-    return { range, filters };
+    // A pricing experiment to split by (one key); its variant filter means nothing without it.
+    const experiment = p.get('experiment')?.trim() || null;
+    if (!experiment) filters.variant = [];
+    return { range, filters, experiment };
   }, [s]);
   const write = (patch: Record<string, string | null>) => {
     const p = new URLSearchParams(s);
@@ -87,22 +94,26 @@ export function useGtmParams() {
   };
   const setList = (k: GtmListKey, v: string[]) => write({ [k]: v.length ? v.join(',') : null });
   const setRange = (r: DateRange) => write({ from: r.from, to: r.to });
+  /** Choose a pricing experiment (null: none); the variant filter is the old experiment's, so it goes. */
+  const setExperiment = (e: string | null) => write({ experiment: e, variant: null });
   const clear = () => write(Object.fromEntries(LISTS.map((l) => [l.key, null])));
   const active = LISTS.reduce((n, l) => n + filters[l.key].length, 0);
-  const query = rangeQuery(range) + LISTS.filter((l) => filters[l.key].length).map((l) => `&${l.key}=${encodeURIComponent(filters[l.key].join(','))}`).join('');
-  return { range, filters, setList, setRange, clear, active, query, rangeOnly: rangeQuery(range), open: (k: string) => params.get(k), write };
+  const exp = experiment ? `&experiment=${encodeURIComponent(experiment)}` : '';
+  const query = rangeQuery(range) + LISTS.filter((l) => filters[l.key].length).map((l) => `&${l.key}=${encodeURIComponent(filters[l.key].join(','))}`).join('') + exp;
+  return { range, filters, experiment, setExperiment, setList, setRange, clear, active, query, rangeOnly: rangeQuery(range), rangeAndExperiment: rangeQuery(range) + exp,
+    open: (k: string) => params.get(k), write };
 }
 export type GtmParams = ReturnType<typeof useGtmParams>;
 
 /** The Filters popover: plan, UTM source and campaign, each value with how many accounts and requests have it. */
-export function GtmFilters({ p, facets }: { p: GtmParams; facets: Record<GtmListKey, Record<string, number>> | undefined }) {
+export function GtmFilters({ p, facets, labels }: { p: GtmParams; facets: Partial<Record<GtmListKey, Record<string, number>>> | undefined; labels?: Partial<Record<GtmListKey, Record<string, string>>> }) {
   return (
     <Popover>
       <PopoverTrigger render={<Button variant='outline' className={cn(p.active && 'text-primary')} />}>
         <IconFilter /> Filters {p.active > 0 && <Badge className='h-5 min-w-5 px-1.5 text-xs leading-none'>{p.active}</Badge>}
       </PopoverTrigger>
       <PopoverContent align='end' className='flex max-h-[75svh] w-80 flex-col gap-4 overflow-y-auto'>
-        {LISTS.map((l) => {
+        {LISTS.filter((l) => l.key !== 'variant' || p.experiment).map((l) => {
           const counts = facets?.[l.key] ?? {}, value = p.filters[l.key];
           const options = [...Object.keys(counts), ...value.filter((v) => !(v in counts))];
           return (
@@ -117,7 +128,7 @@ export function GtmFilters({ p, facets }: { p: GtmParams; facets: Record<GtmList
                   <li key={o}>
                     <label className='hover:bg-muted flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm leading-none'>
                       <Checkbox checked={value.includes(o)} onCheckedChange={(c) => p.setList(l.key, c ? [...value, o] : value.filter((v) => v !== o))} />
-                      <span className='min-w-0 flex-1 truncate'>{o}</span>
+                      <span className='min-w-0 flex-1 truncate' title={o}>{labels?.[l.key]?.[o] ?? o}</span>
                       {counts[o] != null && <span className='text-muted-foreground shrink-0 text-xs tabular-nums'>{counts[o]}</span>}
                     </label>
                   </li>
@@ -133,13 +144,13 @@ export function GtmFilters({ p, facets }: { p: GtmParams; facets: Record<GtmList
 }
 
 /** One chip per active filter value, each with a labelled Remove; then Clear all. Nothing when no filter is on. */
-export function GtmChips({ p }: { p: GtmParams }) {
+export function GtmChips({ p, labels }: { p: GtmParams; labels?: Partial<Record<GtmListKey, Record<string, string>>> }) {
   if (!p.active) return null;
   return (
     <div className='flex min-h-8 shrink-0 flex-wrap items-center gap-1.5'>
       {LISTS.flatMap((l) => p.filters[l.key].map((v) => (
         <span key={`${l.key}:${v}`} className='border-primary/40 bg-primary/10 text-primary flex h-7 items-center gap-1 rounded-full border pr-1 pl-2.5 text-xs leading-none'>
-          <span className='max-w-72 truncate'><span className='font-medium'>{l.label}:</span> {v}</span>
+          <span className='max-w-72 truncate'><span className='font-medium'>{l.label}:</span> {labels?.[l.key]?.[v] ?? v}</span>
           <Button variant='ghost' size='xs' className='h-5 px-1.5 text-xs' onClick={() => p.setList(l.key, p.filters[l.key].filter((x) => x !== v))}>
             <Icons.close className='size-3' /> Remove
           </Button>
@@ -147,6 +158,27 @@ export function GtmChips({ p }: { p: GtmParams }) {
       )))}
       <Button variant='ghost' size='xs' className='text-muted-foreground' onClick={p.clear}>Clear all</Button>
     </div>
+  );
+}
+
+/** FinOps › Experiments with one experiment shown (spend.tsx reads `experiment`). */
+export const finopsExperimentHref = (experiment: string) => `/admin/finops?section=experiments&experiment=${encodeURIComponent(experiment)}`;
+
+/**
+ * The "Pricing experiment" selector (FinOps › Experiments' experiments, with accounts shown each) and, with one chosen,
+ * a labelled "Open in FinOps" link. The choice lives in the URL (`experiment`), like the filters.
+ */
+export function ExperimentPicker({ p, experiments }: { p: GtmParams; experiments: Record<string, number> | undefined }) {
+  const names = [...Object.keys(experiments ?? {}), ...(p.experiment && !(p.experiment in (experiments ?? {})) ? [p.experiment] : [])];
+  return (
+    <span className='flex flex-wrap items-center gap-2'>
+      <label htmlFor='gtm-experiment' className='text-muted-foreground text-sm whitespace-nowrap'>Pricing experiment</label>
+      <NativeSelect id='gtm-experiment' className='max-w-56' value={p.experiment ?? ''} onChange={(e) => p.setExperiment(e.target.value || null)}>
+        <NativeSelectOption value=''>None</NativeSelectOption>
+        {names.map((n) => <NativeSelectOption key={n} value={n}>{n}{experiments?.[n] != null ? ` (${experiments[n]} shown)` : ''}</NativeSelectOption>)}
+      </NativeSelect>
+      {p.experiment && <Link href={finopsExperimentHref(p.experiment)} className={buttonVariants({ variant: 'outline', size: 'sm' })}><Icons.externalLink /> Open in FinOps</Link>}
+    </span>
   );
 }
 

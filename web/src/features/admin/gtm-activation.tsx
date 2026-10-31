@@ -1,7 +1,8 @@
 'use client';
 // GTM › Activation: the one activation funnel (src/gtm.ts activation) for accounts created in a period, with the time
 // each step takes, and every account that needs a person now, with the account peek and a nudge (a tip in their AI
-// client, or a one-off email through Campaigns). Period and filters live in the URL.
+// client, or a one-off email through Campaigns). Period and filters live in the URL. With a pricing experiment chosen
+// (FinOps › Experiments; `experiment` and `variant` in the URL) the funnel is also shown split by variant, side by side.
 import { Suspense, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
@@ -22,7 +23,7 @@ import { useResult } from './result-dialog';
 import { AccountPeek, useAccountActions, type Org } from './account-peek';
 import { ErrorBox, FormRow, LoadingCards, Notice, Section, StatusBadge, When } from './ui';
 import { Gate } from './role';
-import { GtmChips, GtmFilters, GtmTabs, hours, pctText, useGtmParams, utmText } from './gtm-common';
+import { ExperimentPicker, GtmChips, GtmFilters, GtmTabs, hours, NOT_SHOWN, pctText, useGtmParams, utmText } from './gtm-common';
 
 type Utm = { source: string; medium: string; campaign: string };
 interface Step { id: string; label: string; reached: number; pct_of_previous: number | null; pct_of_first: number | null; median_hours: number | null; measured: number }
@@ -35,7 +36,13 @@ interface Activation {
   steps: Step[];
   attention: AttentionOrg[];
   cohort: { slug: string; name: string; stage_label: string; plan: string; utm: Utm }[];
-  facets: { plans: Record<string, number>; utm_sources: Record<string, number>; utm_campaigns: Record<string, number> };
+  facets: { plans: Record<string, number>; utm_sources: Record<string, number>; utm_campaigns: Record<string, number>; experiments?: Record<string, number>; variants?: Record<string, number> };
+  /** Only with a pricing experiment chosen (src/gtm.ts activation). */
+  experiment?: {
+    id: string; known: boolean; variant: string[]; rule: string; stripe_error: string | null;
+    variants: { key: string; name: string; live: boolean; accounts: number }[];
+    split: { key: string; name: string; live: boolean; steps: Step[] }[];
+  };
 }
 
 export function AdminActivation() {
@@ -54,7 +61,8 @@ function ActivationPage() {
   const [nudging, setNudging] = useState<AttentionOrg | null>(null);
   const [open, setOpen] = useState<string | null>(null);
   const router = useRouter();
-  const facets = a && { plan: a.facets.plans, utm_source: a.facets.utm_sources, utm_campaign: a.facets.utm_campaigns };
+  const facets = a && { plan: a.facets.plans, utm_source: a.facets.utm_sources, utm_campaign: a.facets.utm_campaigns, variant: a.facets.variants ?? {} };
+  const variantLabels = a?.experiment && { variant: Object.fromEntries(a.experiment.variants.map((v) => [v.key, v.name])) };
   const step = (id: string) => a?.steps.find((s) => s.id === id);
   const max = Math.max(1, ...(a?.steps ?? []).map((s) => s.reached));
 
@@ -79,8 +87,11 @@ function ActivationPage() {
   return (
     <PageContainer>
       <div className='flex min-w-0 flex-col gap-6'>
-        <GtmTabs right={<div className='flex flex-wrap items-center justify-end gap-2'><GtmFilters p={p} facets={facets} /><DateRangePicker value={p.range} onChange={p.setRange} /></div>} />
-        <GtmChips p={p} />
+        <GtmTabs right={<div className='flex flex-wrap items-center justify-end gap-2'>
+          <ExperimentPicker p={p} experiments={a?.facets.experiments} />
+          <GtmFilters p={p} facets={facets} labels={variantLabels || undefined} /><DateRangePicker value={p.range} onChange={p.setRange} />
+        </div>} />
+        <GtmChips p={p} labels={variantLabels || undefined} />
         <ErrorBox error={error} />
         {a?.stripe_error && <Notice>Stripe: {a.stripe_error} (Paid shows what could be read)</Notice>}
         {isLoading || !a ? <LoadingCards count={4} /> : (<>
@@ -116,6 +127,8 @@ function ActivationPage() {
             </div>
           </Section>
 
+          {a.experiment && <VariantFunnel e={a.experiment} />}
+
           <Section title='Needs a person' description='Accounts where someone should step in now, with the reasons from Accounts. Plan and UTM filters apply; the period does not.'>
             <RecordView<AttentionOrg>
               id='gtm-activation-attention' noun='accounts' exportName='needs-a-person' compact stacked
@@ -139,6 +152,54 @@ function ActivationPage() {
       {ctl.dialogs}
       {result.dialog}
     </PageContainer>
+  );
+}
+
+/**
+ * The funnel split by a pricing experiment's variants, side by side: one column per variant (count, % of the step
+ * before), the not-shown column last. The rule for accounts never shown the pricing, and for Paid, is the server's
+ * (src/gtm.ts SPLIT_RULE), stated under the title.
+ */
+function VariantFunnel({ e }: { e: NonNullable<Activation['experiment']> }) {
+  const cols = e.split;
+  return (
+    <Section title={`Funnel by variant: ${e.id}`} description={e.rule}>
+      <div className='flex flex-col gap-3'>
+        {!e.known && <Notice tone='info'>No account has been shown {e.id} yet, and no live plan is in it: every account is under Not shown pricing.</Notice>}
+        {e.stripe_error && <Notice>Stripe: {e.stripe_error} (Paid uses the variant shown where the subscription could not be read)</Notice>}
+        <div className='overflow-x-auto rounded-lg border'>
+          <table className='w-full min-w-[40rem] text-sm' aria-label={`Activation funnel by variant of ${e.id}`}>
+            <thead>
+              <tr className='text-muted-foreground border-b text-xs'>
+                <th className='px-3 py-2 text-left font-medium'>Step</th>
+                {cols.map((c) => (
+                  <th key={c.key} className='px-3 py-2 text-right font-medium' title={c.key === NOT_SHOWN ? 'Accounts never shown this experiment on Billing' : c.key}>
+                    <span className={c.key === NOT_SHOWN ? 'italic' : 'text-foreground'}>{c.name}</span>
+                    {c.key !== NOT_SHOWN && !c.live && <span className='ml-1 font-normal'>(ended)</span>}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {(cols[0]?.steps ?? []).map((s, i) => (
+                <tr key={s.id} className='border-b last:border-0'>
+                  <td className='px-3 py-2'>{s.label}</td>
+                  {cols.map((c) => {
+                    const x = c.steps[i];
+                    return (
+                      <td key={c.key} className='px-3 py-2 text-right tabular-nums'>
+                        <span className='font-medium'>{x.reached}</span>
+                        {i > 0 && <span className='text-muted-foreground ml-1.5 text-xs'>{pctText(x.pct_of_previous)}</span>}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </Section>
   );
 }
 

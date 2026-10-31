@@ -14,6 +14,8 @@
  *     stuck               at a stage for N days (only the stage / days pairs a running campaign asks for)
  *     attention           an attention reason that was not there last time (numbers in it ignored: "3d ago")
  *     first_payment       Stripe's first paid moment appeared
+ *     pricing_no_checkout an account first shown an experiment's pricing N days ago with no completed checkout or
+ *                         subscription tagged with that experiment (detectPricingNoCheckout; src/experiments.ts)
  *   An account the detector sees for the first time is recorded silently unless it is under two days old, so turning
  *   a trigger on never mails the whole back catalogue.
  *
@@ -26,13 +28,13 @@ import { asPlatform } from "./tenant-scope.js";
 import { keepAlive } from "./telemetry.js";
 import type { Journey } from "./gtm.js";
 
-export const EVENT_TYPES = ["account_created", "request_submitted", "request_approved", "stage_reached", "stuck", "report_opened", "first_payment", "attention"] as const;
+export const EVENT_TYPES = ["account_created", "request_submitted", "request_approved", "stage_reached", "stuck", "report_opened", "first_payment", "attention", "pricing_no_checkout"] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 /** Events about an account (written to its people) and about an access request (written to the requester). */
-export const ACCOUNT_EVENTS: readonly EventType[] = ["account_created", "stage_reached", "stuck", "report_opened", "first_payment", "attention"];
+export const ACCOUNT_EVENTS: readonly EventType[] = ["account_created", "stage_reached", "stuck", "report_opened", "first_payment", "attention", "pricing_no_checkout"];
 export const REQUEST_EVENTS: readonly EventType[] = ["request_submitted", "request_approved"];
 /** The ones only the detector finds. */
-export const DETECTED: readonly EventType[] = ["stage_reached", "stuck", "first_payment", "attention"];
+export const DETECTED: readonly EventType[] = ["stage_reached", "stuck", "first_payment", "attention", "pricing_no_checkout"];
 
 export interface EmitInput { org_id?: number | null; request_id?: number | null; data?: Record<string, unknown>; key: string; at?: Date }
 
@@ -148,6 +150,47 @@ export async function detectSignals(js: Journey[], o: { stuck: { stage: string; 
       `INSERT INTO gtm_org_signals (org_id, stage, attention, paid, seen_at) VALUES ($1, $2, $3::text[], $4, now())
        ON CONFLICT (org_id) DO UPDATE SET stage = excluded.stage, attention = excluded.attention, paid = excluded.paid OR (NOT $5 AND gtm_org_signals.paid), seen_at = now()`,
       [orgId, j.org.stage, attention, paid, o.payments]);
+  }
+  return n;
+}
+
+/**
+ * "Saw pricing, didn't check out within N days" (pricing_no_checkout): for each experiment / days pair a running
+ * campaign asks for, every account whose FIRST exposure to the experiment (plan_exposures) is N days old and that has
+ * no completed checkout session and no subscription tagged with that experiment in Stripe (src/experiments.ts
+ * experimentOutcomes / checkedOut, the same cached reads as FinOps). Stateless: plan_exposures and Stripe are the
+ * state, gtm_events the record. The same back-catalogue protections as the other detected events:
+ *   - only exposures at or after `since` (the earliest asking campaign's launch, less 2 days), like stuck's reached_at;
+ *   - only when the N days ran out within the last `maxAgeHours` (24): an exposure from months ago is never news;
+ *   - the event's `at` is when the N days ran out and data.after the same, so processEvents also requires it after
+ *     the campaign's launch; data.exposed_at is checked there against the launch less 2 days;
+ *   - one event per account, experiment and N (its dedupe key), so a second look or a second replica adds nothing;
+ *     re-entry is the campaign's rule (admit).
+ * Stripe failing: nothing is emitted (a checkout we cannot see may exist), the next pass looks again.
+ * Returns how many events were new.
+ */
+export async function detectPricingNoCheckout(asks: { experiment: string | null; days: number; since: number }[], o: { now?: number; maxAgeHours?: number } = {}): Promise<number> {
+  if (!asks.length) return 0;
+  const now = o.now ?? Date.now(), maxAge = (o.maxAgeHours ?? 24) * 3_600_000;
+  const { accountExposures, experimentOutcomes, checkedOut } = await import("./experiments.js");
+  const outcomes = await experimentOutcomes(now);
+  if (outcomes.error) { console.error(`gtm pricing_no_checkout: Stripe could not be read, nothing emitted: ${outcomes.error}`); return 0; }
+  const [exposures, orgs] = await Promise.all([accountExposures(),
+    (await getDb()).query<{ id: number; stripe_customer_id: string | null }>("SELECT id, stripe_customer_id FROM organizations")]);
+  const customer = new Map(orgs.map((r) => [Number(r.id), r.stripe_customer_id]));
+  let n = 0;
+  for (const a of asks) {
+    for (const e of exposures) {
+      if (a.experiment && e.experiment !== a.experiment) continue;
+      const seen = e.first_seen_at.getTime();
+      if (seen < a.since) continue;
+      const due = seen + a.days * 86_400_000;
+      if (due > now || now - due > maxAge) continue;
+      if (checkedOut(outcomes, customer.get(e.org_id), e.experiment)) continue;
+      const at = new Date(due);
+      if (await emit("pricing_no_checkout", { org_id: e.org_id, key: `${e.org_id}:${hash(e.experiment)}:${a.days}`, at,
+        data: { experiment: e.experiment, variant: e.price_id, plan_name: e.plan_name, days: a.days, exposed_at: e.first_seen_at.toISOString(), after: at.toISOString() } })) n++;
+    }
   }
   return n;
 }

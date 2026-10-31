@@ -179,18 +179,21 @@ export const ADMIN_TOOLS = {
   },
   gtm_activation: {
     title: "Activation funnel", needs: "read",
-    description: "GTM › Activation: the activation funnel for a period (access requested, account created, first product onboarded, first simulation, report opened, paid) with counts, conversion and median time between steps, and the accounts that need a person now. Filter by plan, utm_source, utm_campaign (comma lists; 'direct/unknown' for untagged).",
-    input: { ...range, plan: z.string().optional(), utm_source: z.string().optional(), utm_campaign: z.string().optional() },
+    description: "GTM › Activation: the activation funnel for a period (access requested, account created, first product onboarded, first simulation, report opened, paid) with counts, conversion and median time between steps, and the accounts that need a person now. Filter by plan, utm_source, utm_campaign (comma lists; 'direct/unknown' for untagged). With experiment (a pricing experiment key, as on FinOps › Experiments) the funnel is also split by variant (experiment.split, one funnel per variant): accounts sit under the variant they were first shown on Billing, accounts never shown it under 'none' (Not shown pricing), and Paid under the variant the subscription bought. variant keeps only those variants (comma list of price ids, or 'none').",
+    input: { ...range, plan: z.string().optional(), utm_source: z.string().optional(), utm_campaign: z.string().optional(),
+      experiment: z.string().max(100).optional().describe("A pricing experiment key: split the funnel by its variants"),
+      variant: z.string().optional().describe("With experiment: only these variants (comma list of price ids; 'none' = not shown pricing)") },
     run: async (a) => {
       const { facets: _f, cohort: _c, ...d } = await (await import("./gtm.js")).activation(a);
-      return { ...d, steps: d.steps.map(({ accounts: _x, ...s }) => s), attention: d.attention.slice(0, 50).map((o) => ({ slug: o.slug, name: o.name, stage_label: o.stage_label, attention: o.attention, contact: o.contact, plan: o.plan, utm: o.utm })) };
+      const strip = <T extends { accounts?: unknown }>(steps: T[]) => steps.map(({ accounts: _x, ...s }) => s);
+      return { ...d, steps: strip(d.steps), ...(d.experiment ? { experiment: { ...d.experiment, split: d.experiment.split.map((c) => ({ ...c, steps: strip(c.steps) })) } } : {}), attention: d.attention.slice(0, 50).map((o) => ({ slug: o.slug, name: o.name, stage_label: o.stage_label, attention: o.attention, contact: o.contact, plan: o.plan, utm: o.utm })) };
     },
     summary: (d) => d.steps.map((s: { label: string; reached: number }) => `${s.label} ${s.reached}`).join(" -> ") + `; ${d.attention.length} need a person.`,
   },
   gtm_attribution: {
     title: "Attribution", needs: "read",
-    description: "GTM › Attribution: for a period, access requests by utm_source / utm_medium / utm_campaign (plus direct/unknown) through approved, accounts, activated (first simulation), paying and MRR from Stripe.",
-    input: { ...range },
+    description: "GTM › Attribution: for a period, access requests by utm_source / utm_medium / utm_campaign (plus direct/unknown) through approved, accounts, activated (first simulation), paying and MRR from Stripe. With experiment (a pricing experiment key) each row also has variants: per variant exposed, converted, paying and MRR, plus not_shown.",
+    input: { ...range, experiment: z.string().max(100).optional().describe("A pricing experiment key: add a per-variant breakdown to each row") },
     run: async (a) => {
       const d = await (await import("./gtm.js")).attribution(a);
       return { ...d, rows: d.rows.map(({ account_list, ...r }) => ({ ...r, accounts_sample: account_list.slice(0, 10).map((x) => x.slug) })) };

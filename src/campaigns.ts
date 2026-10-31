@@ -39,6 +39,11 @@
  *   metrics     recipients, sent, delivered / bounced / opened / clicked (Resend webhooks, POST /api/webhooks/resend,
  *               Svix-signed with the key vault's resend_webhook secret), replied, unsubscribed, and conversions within
  *               conversion_days of the first email: requested access, activated (first simulation), paid (src/gtm.ts).
+ *   pricing     "Saw pricing variant" (audience.pricing: an experiment and a variant, or any): accounts whose first
+ *               exposure to the experiment (plan_exposures, src/experiments.ts) was that variant. Accounts only:
+ *               anonymous /pricing visitors are never addressable (a visitor counts only through the account exposure
+ *               their visitor id led to, which is that account's row). The trigger pricing_no_checkout ("Saw
+ *               pricing, didn't check out within N days", src/gtm-events.ts detectPricingNoCheckout) is lifecycle only.
  *   outbound    an audience of prospects (src/gtm-outbound.ts, phase 2): a sender identity on the outreach subdomain
  *               (required: never EMAIL_FROM's domain), its warm-up cap per day across campaigns, the cold-email
  *               safety rules at enrolment and before each send, text-only email unless the campaign tracks opens.
@@ -54,7 +59,8 @@ import { addCredentialIfAbsent, credentialSecrets, recordUse, useCredential } fr
 import { freshSettings, settingNumber, settingText } from "./settings.js";
 import { capture } from "./telemetry.js";
 import { consentOf, mayEnrol, recordConsent, type ConsentDecision, type ConsentInput } from "./gtm-consent.js";
-import { DETECTED, detectSignals, EVENT_TYPES, forgetImmediate, REQUEST_EVENTS, type EventType } from "./gtm-events.js";
+import { DETECTED, detectPricingNoCheckout, detectSignals, EVENT_TYPES, forgetImmediate, REQUEST_EVENTS, type EventType } from "./gtm-events.js";
+import { accountExposures, checkedOut, experimentCatalog, experimentOutcomes } from "./experiments.js";
 import { NO_WINDOW, nextOpening, parseWindow, recipientZone, validZone, windowOpen, type SendWindow } from "./gtm-schedule.js";
 import * as replies from "./gtm-replies.js";
 import * as outbound from "./gtm-outbound.js";
@@ -82,7 +88,11 @@ export interface Audience {
   accounts: string[];
   /** include = prospects: the saved filter over prospects. */
   prospects?: outbound.ProspectFilter;
+  /** "Saw pricing variant": accounts first shown this experiment's variant (price id; "" = any variant). Stored only when
+   *  set, so audiences from before read exactly as they did. Accounts only (include = accounts). */
+  pricing?: PricingFilter;
 }
+export interface PricingFilter { experiment: string; variant: string }
 /** A body's format: plain text (the default: paragraphs and auto-links) or sanitized HTML (src/campaign-html.ts). */
 export const FORMATS = ["text", "html"] as const;
 export type Format = (typeof FORMATS)[number];
@@ -96,8 +106,10 @@ export const HTML_OUTBOUND_REFUSED = "HTML emails are for lifecycle campaigns (a
 /**
  * Enrol on an event instead of an audience at launch. stage: for stage_reached and stuck; days: for stuck; attention:
  * text the reason contains (empty: any). delay_hours after the event. reentry: once ever, or again every reentry_days.
+ * pricing_no_checkout: days = N (1 to 90) after the first exposure; experiment = the experiment ("" = any), stored only
+ * for that type.
  */
-export interface Trigger { type: EventType; stage: string | null; days: number | null; attention: string; delay_hours: number; reentry: "once" | "every"; reentry_days: number }
+export interface Trigger { type: EventType; stage: string | null; days: number | null; attention: string; delay_hours: number; reentry: "once" | "every"; reentry_days: number; experiment?: string }
 
 const str = (v: unknown, max: number) => (typeof v === "string" ? v.trim().slice(0, max) : "");
 const strs = (v: unknown, max = 200) => [...new Set((Array.isArray(v) ? v : v == null || v === "" ? [] : [v]).map((x) => String(x).trim()).filter(Boolean))].slice(0, max);
@@ -123,8 +135,26 @@ export function parseAudience(v: unknown): Audience {
     accounts: strs(a.accounts, 500),
     ...(include === "prospects" ? { prospects: outbound.parseProspectFilter(a.prospects) } : {}),
   };
+  const pricing = parsePricing(a.pricing);
+  if (pricing && include !== "accounts")
+    throw new AdminError("audience.pricing (Saw pricing variant) targets accounts only: set include to accounts (anonymous /pricing visitors are never addressable)");
+  if (pricing) out.pricing = pricing;
   if (out.created_from && out.created_to && out.created_to < out.created_from) throw new AdminError("audience.created_to is before created_from");
   return out;
+}
+
+/** audience.pricing: null when no experiment is named. */
+function parsePricing(v: unknown): PricingFilter | null {
+  if (v == null || v === "" || typeof v !== "object") return null;
+  const p = v as Record<string, unknown>;
+  const experiment = str(p.experiment, 100);
+  if (!experiment) return null;
+  return { experiment, variant: str(p.variant, 200) };
+}
+/** The accounts an audience's pricing filter keeps (by id), or null when it has none. */
+async function pricingAccounts(f: PricingFilter | undefined): Promise<Set<number> | null> {
+  if (!f) return null;
+  return new Set((await accountExposures(f.experiment)).filter((e) => !f.variant || e.price_id === f.variant).map((e) => e.org_id));
 }
 
 const VAR = /\{\{\s*([a-zA-Z_]+)\s*\}\}/g;
@@ -212,14 +242,17 @@ export function parseTrigger(v: unknown): Trigger | null {
   const type = t.type as EventType;
   const stage = type === "stage_reached" || type === "stuck" ? str(t.stage, 40) : "";
   if ((type === "stage_reached" || type === "stuck") && !STAGES.some((s) => s.id === stage)) throw new AdminError(`trigger.stage must be one of ${STAGES.map((s) => s.id).join(", ")}`);
-  const days = type === "stuck" ? Number(t.days ?? 3) : null;
-  if (days != null && (!Number.isInteger(days) || days < 1 || days > 365)) throw new AdminError("trigger.days (stuck for) is 1 to 365");
+  const pricing = type === "pricing_no_checkout";
+  const days = type === "stuck" || pricing ? Number(t.days ?? 3) : null;
+  if (days != null && (!Number.isInteger(days) || days < 1 || days > (pricing ? 90 : 365)))
+    throw new AdminError(pricing ? "trigger.days (didn't check out within) is 1 to 90" : "trigger.days (stuck for) is 1 to 365");
   const delay = t.delay_hours == null || t.delay_hours === "" ? 0 : Number(t.delay_hours);
   if (!Number.isFinite(delay) || delay < 0 || delay > 24 * 90) throw new AdminError("trigger.delay_hours is 0 to 2160 (90 days)");
   const reentry = t.reentry === "every" ? "every" : "once";
   const rd = t.reentry_days == null || t.reentry_days === "" ? 30 : Number(t.reentry_days);
   if (reentry === "every" && (!Number.isInteger(rd) || rd < 1 || rd > 3650)) throw new AdminError("trigger.reentry_days is 1 to 3650");
-  return { type, stage: stage || null, days, attention: type === "attention" ? str(t.attention, 200) : "", delay_hours: Math.round(delay * 100) / 100, reentry, reentry_days: reentry === "every" ? rd : 0 };
+  return { type, stage: stage || null, days, attention: type === "attention" ? str(t.attention, 200) : "", delay_hours: Math.round(delay * 100) / 100, reentry, reentry_days: reentry === "every" ? rd : 0,
+    ...(pricing ? { experiment: str(t.experiment, 100) } : {}) };
 }
 const parseTriggerSafe = (t: unknown) => { try { return parseTrigger(t); } catch { return null; } };
 const parseWindowSafe = (w: unknown) => { try { return parseWindow(w, fail); } catch { return NO_WINDOW; } };
@@ -485,7 +518,7 @@ const firstName = (n: string | null | undefined) => n?.trim().split(/\s+/)[0] ||
 /** Everyone the audience matches now, one per address (an account's member before the same person's request). */
 export async function resolveAudience(a: Audience, data?: { journeys: Journey[]; requests: RequestRow[] }): Promise<Candidate[]> {
   if (a.include === "prospects") return outbound.resolveProspects(a.prospects ?? outbound.parseProspectFilter({}));
-  const scoped = a.stages.length > 0 || !!a.attention || a.plans.length > 0 || a.accounts.length > 0;
+  const scoped = a.stages.length > 0 || !!a.attention || a.plans.length > 0 || a.accounts.length > 0 || !!a.pricing;
   // Requesters only, with no account filter: the requests table is all it takes (no Clerk, no Stripe). Otherwise the
   // accounts, without Stripe's payment history (an audience never needs it; the plan comes with the account listing).
   const { journeys: js, requests } = data ?? (a.include === "requests" && !scoped
@@ -494,9 +527,12 @@ export async function resolveAudience(a: Audience, data?: { journeys: Journey[];
   const dated = (d: Date | string) => { const t = new Date(d).getTime(); return (fromT == null || t >= fromT) && (toT == null || t < toT); };
   const eq = (want: string, have: string) => !want || want.toLowerCase() === (have || DIRECT).toLowerCase();
   const utmOk = (u: Journey["utm"]) => eq(a.utm_source, u.source) && eq(a.utm_medium, u.medium) && eq(a.utm_campaign, u.campaign);
-  const accountScoped = a.stages.length > 0 || !!a.attention || a.plans.length > 0 || a.accounts.length > 0;
+  const accountScoped = a.stages.length > 0 || !!a.attention || a.plans.length > 0 || a.accounts.length > 0 || !!a.pricing;
+  // Saw pricing variant: accounts whose first exposure to the experiment was that variant (any, with no variant).
+  const sawPricing = await pricingAccounts(a.pricing);
   const accountOk = (j: Journey | undefined) => !!j && (!a.accounts.length || a.accounts.includes(j.org.slug)) && (!a.stages.length || a.stages.includes(j.org.stage))
-    && (!a.attention || j.org.attention.some((x) => x.toLowerCase().includes(a.attention.toLowerCase()))) && (!a.plans.length || a.plans.includes(j.plan));
+    && (!a.attention || j.org.attention.some((x) => x.toLowerCase().includes(a.attention.toLowerCase()))) && (!a.plans.length || a.plans.includes(j.plan))
+    && (!sawPricing || sawPricing.has(Number(j.org.id)));
   const out = new Map<string, Candidate>();
   const add = (c: Candidate) => { const e = c.email.trim().toLowerCase(); if (mail.isEmail(e) && !out.has(e)) out.set(e, { ...c, email: e }); };
   const byId = new Map(js.map((j) => [Number(j.org.id), j]));
@@ -663,13 +699,16 @@ interface DueEvent { campaign_id: number; event_id: number; type: EventType; org
  */
 async function eventPeople(c: CampaignRow, e: DueEvent, data: { journeys: Journey[]; requests: RequestRow[] }): Promise<Candidate[]> {
   const a = c.audience;
-  const filters = { ...parseAudience({}), utm_source: a.utm_source, utm_medium: a.utm_medium, utm_campaign: a.utm_campaign, plans: a.plans };
+  const filters: Audience = { ...parseAudience({}), utm_source: a.utm_source, utm_medium: a.utm_medium, utm_campaign: a.utm_campaign, plans: a.plans,
+    ...(a.pricing ? { pricing: a.pricing } : {}) };
   if (REQUEST_EVENTS.includes(e.type)) {
     const r = data.requests.find((q) => q.id === Number(e.request_id));
     return r ? resolveAudience({ ...filters, include: "requests" }, { journeys: data.journeys, requests: [r] }) : [];
   }
   const j = data.journeys.find((x) => Number(x.org.id) === Number(e.org_id));
   if (!j) return [];
+  // Saw pricing variant narrows a triggered campaign too: an account outside it gets nothing (nor do its requesters).
+  if (filters.pricing && !(await pricingAccounts(filters.pricing))!.has(Number(j.org.id))) return [];
   const people = await resolveAudience({ ...filters, include: "accounts", accounts: [j.org.slug] }, { journeys: [j], requests: data.requests });
   if (people.length || (filters.plans.length && !filters.plans.includes(j.plan))) return people;
   return resolveAudience({ ...filters, include: "requests", request_status: ["approved"] }, { journeys: [j], requests: data.requests.filter((q) => q.org_id === Number(j.org.id)) });
@@ -700,6 +739,7 @@ async function processEvents(only: number | null, stopAt = Infinity): Promise<{ 
     return data;
   };
   let events = 0;
+  const maxAgeHours = clampInt(Number(process.env.CAMPAIGN_EVENT_MAX_AGE_HOURS ?? 24), 1, 24 * 90, 24);
   const detected = cs.filter((c) => DETECTED.includes(c.trigger!.type));
   if (detected.length) {
     const mins = Math.max(0, Math.round(Number(process.env.CAMPAIGN_SIGNAL_INTERVAL_MIN ?? 10)));
@@ -715,9 +755,15 @@ async function processEvents(only: number | null, stopAt = Infinity): Promise<{ 
         stuck.set(k, { stage: c.trigger!.stage!, days: c.trigger!.days!, since: Math.min(since, stuck.get(k)?.since ?? Infinity) });
       }
       events += await detectSignals(d.journeys, { stuck: [...stuck.values()], payments });
+      // Saw pricing, didn't check out: only exposures at most 2 days before the earliest campaign asking launched.
+      const pricing = new Map<string, { experiment: string | null; days: number; since: number }>();
+      for (const c of detected.filter((x) => x.trigger!.type === "pricing_no_checkout")) {
+        const exp = c.trigger!.experiment || null, k = `${exp ?? ""}\u0000${c.trigger!.days}`, since = new Date(c.launched_at ?? Date.now()).getTime() - 2 * 86_400_000;
+        pricing.set(k, { experiment: exp, days: c.trigger!.days!, since: Math.min(since, pricing.get(k)?.since ?? Infinity) });
+      }
+      if (pricing.size) events += await detectPricingNoCheckout([...pricing.values()], { maxAgeHours });
     }
   }
-  const maxAgeHours = clampInt(Number(process.env.CAMPAIGN_EVENT_MAX_AGE_HOURS ?? 24), 1, 24 * 90, 24);
   for (const c of cs) {
     const t = c.trigger!;
     await db.query(
@@ -726,11 +772,13 @@ async function processEvents(only: number | null, stopAt = Infinity): Promise<{ 
         WHERE e.type = $2 AND e.at >= coalesce($4::timestamptz, now()) - interval '1 minute'
           AND coalesce((e.data->>'after')::timestamptz, e.at) >= coalesce($4::timestamptz, now()) - interval '1 minute'
           AND (e.type <> 'stuck' OR (e.data->>'reached_at')::timestamptz >= coalesce($4::timestamptz, now()) - interval '2 days')
+          AND (e.type <> 'pricing_no_checkout' OR (e.data->>'exposed_at')::timestamptz >= coalesce($4::timestamptz, now()) - interval '2 days')
+          AND ($9::text IS NULL OR e.data->>'experiment' = $9)
           AND e.at >= now() - make_interval(hours => $8::int)
           AND ($5::text IS NULL OR e.data->>'stage' = $5) AND ($6::int IS NULL OR (e.data->>'days')::int = $6)
           AND ($7 = '' OR strpos(lower(e.data->>'reason'), lower($7)) > 0)
        ON CONFLICT (campaign_id, event_id) DO NOTHING`,
-      [c.id, t.type, t.delay_hours, c.launched_at, t.stage, t.days, t.attention, maxAgeHours]);
+      [c.id, t.type, t.delay_hours, c.launched_at, t.stage, t.days, t.attention, maxAgeHours, t.type === "pricing_no_checkout" && t.experiment ? t.experiment : null]);
   }
   // Queued ones too: one whose delay ran out more than the max age ago (the campaign was paused meanwhile, or no tick
   // ran) is skipped, not enrolled late.
@@ -749,6 +797,13 @@ async function processEvents(only: number | null, stopAt = Infinity): Promise<{ 
       continue;
     }
     try {
+      // Saw pricing, didn't check out: checked again when due (the trigger's delay may have passed): a checkout or a
+      // tagged subscription since then means nobody is written to. Stripe failing throws: the next tick tries again.
+      if (e.type === "pricing_no_checkout" && await checkedOutSince(e)) {
+        await db.query("UPDATE gtm_event_enrolments SET processed_at = now(), enrolled = 0, note = $3 WHERE campaign_id = $1 AND event_id = $2",
+          [e.campaign_id, e.event_id, "Checked out since: not enrolled"]);
+        continue;
+      }
       const people = await eventPeople(c, e, await load(false, Number(e.event_id)));
       const r = people.length ? await admit(c, people, { delayDays: c.steps[0]?.delay_days ?? 0, eventId: Number(e.event_id), reentryDays: c.trigger!.reentry === "every" ? c.trigger!.reentry_days : null })
         : { added: 0, no_consent: 0 };
@@ -758,6 +813,14 @@ async function processEvents(only: number | null, stopAt = Infinity): Promise<{ 
     } catch (err) { console.error(`campaign ${c.id}: event ${e.event_id} not enrolled yet: ${(err as Error).message}`); }
   }
   return { events, enrolled };
+}
+
+/** Whether a pricing_no_checkout event's account has checked out for its experiment since (Stripe; throws when unreadable). */
+async function checkedOutSince(e: DueEvent): Promise<boolean> {
+  const out = await experimentOutcomes();
+  if (out.error) throw new Error(`Stripe could not be read: ${out.error}`);
+  const [o] = await (await getDb()).query<{ stripe_customer_id: string | null }>("SELECT stripe_customer_id FROM organizations WHERE id = $1", [e.org_id]);
+  return checkedOut(out, o?.stripe_customer_id, String(e.data.experiment ?? ""));
 }
 
 // ---------- unsubscribe links ----------
@@ -1651,6 +1714,8 @@ export async function listCampaigns() {
   return {
     email: { enabled: status.enabled, connected: status.connected, from: status.from }, setup: await sendingSetup(),
     variables: VARIABLES, stages: STAGES.map((s) => ({ id: s.id, label: s.label })), trigger_types: EVENT_TYPES,
+    // The pricing experiments and their variants, for "Saw pricing variant" and the pricing trigger.
+    experiments: (await experimentCatalog().catch(() => [])).map((x) => ({ experiment: x.experiment, live: x.live, variants: x.variants.map((v) => ({ price_id: v.price_id, name: v.name, live: v.live })) })),
     campaigns: rows.map((c) => ({ ...shape(c, m.get(c.id)),
       conversions: data ? conversions(recips.filter((r) => Number(r.campaign_id) === c.id), c.conversion_days, data).totals : null })),
   };
