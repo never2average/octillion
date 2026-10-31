@@ -1,5 +1,5 @@
 {
-  "name": "@octillion/cli",
+  "name": "octillion",
   "version": "0.1.0",
   "description": "The octillion command: sign in to Octillion from a terminal or an agent (OAuth device login or OCTILLION_API_KEY), check who you are, and print MCP connect snippets.",
   "type": "module",
@@ -18,7 +18,7 @@
     "test": "node --test test/cli.test.js"
   },
   "octillion": {
-    "url": null
+    "url": "https://octillion.useimmaculate.com"
   },
   "keywords": [
     "octillion",
@@ -27,6 +27,7 @@
     "oauth",
     "device-authorization"
   ],
-  "license": "UNLICENSED",
-  "private": true
+  "license": "MIT",
+  "private": false,
+  "homepage": "https://octillion.useimmaculate.com/get-started.md"
 }

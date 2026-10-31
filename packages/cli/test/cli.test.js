@@ -82,9 +82,12 @@ test("mcp-config snippets: sign-in has no secret, key mode reads OCTILLION_API_K
   assert.deepEqual(JSON.parse(pickSnippet(cat, "json", "signin").snippet), { mcpServers: { octillion: { type: "http", url: "https://o.example/mcp" } } });
 });
 
-test("no server set, https required", async () => {
+test("default server needs a sign-in; https required", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "oct-cli-"));
-  assert.equal((await run(["whoami"], { OCTILLION_CONFIG_DIR: dir })).code, 1);
+  // The package's default server (package.json "octillion".url) is used when nothing else is set: no credential yet.
+  const d = await run(["whoami", "--json"], { OCTILLION_CONFIG_DIR: dir });
+  assert.notEqual(d.code, 0);
+  assert.equal(d.json.error, "not_signed_in");
   const r = await run(["whoami", "--json"], { OCTILLION_CONFIG_DIR: dir, OCTILLION_URL: "http://example.com" });
   assert.equal(r.json.error, "bad_url");
 });

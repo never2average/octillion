@@ -1,10 +1,10 @@
 # octillion (CLI)
 
 Sign in to Octillion from a terminal or an agent, check who you are, and print MCP connect snippets. No dependencies,
-Node 20 or later, plain ESM.
+Node 20 or later, plain ESM. It talks to https://octillion.useimmaculate.com unless `OCTILLION_URL` or `--url` says otherwise.
 
 ```sh
-export OCTILLION_URL=https://<your Octillion address>
+npm install -g octillion   # or run any command with npx octillion …
 octillion login          # opens nothing: shows a link and a code, then waits for you to approve
 octillion whoami         # person, workspace (and what picked it), credential
 octillion mcp-config claude-code
@@ -56,11 +56,10 @@ and points to API keys: create one at `$OCTILLION_URL/app/settings/api-keys` and
 ```sh
 npm test                                              # node --test, fake server and authorization server
 node --no-experimental-require-module bin/octillion.js --help
-npm pack                                              # the tarball to publish (publishing is a separate, manual step)
+npm pack                                              # the tarball (npm publish to release a new version)
 ```
 
-`package.json` has `"private": true` so nothing publishes it by accident: flip it to `false` (and choose a license)
-when you are ready to publish.
+Published on npm as `octillion` (MIT).
 
 Credentials are written atomically (a new 0600 temp file in the 0700 config directory, fsync'd, renamed over the old
 one); pending device logins past their expiry are removed on every run. Requests that carry a token never follow a
