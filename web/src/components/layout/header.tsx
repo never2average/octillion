@@ -3,7 +3,8 @@ import { SidebarTrigger } from '../ui/sidebar';
 import { Separator } from '../ui/separator';
 import { Breadcrumbs } from '../breadcrumbs';
 import SearchInput from '../search-input';
-import { DocsButton, McpButton } from './docs-button';
+import { DocsButton, McpButton, PortalOnly } from './docs-button';
+import { QuickKeyButton } from '@/features/portal/api-keys';
 
 export default function Header() {
   return (
@@ -19,6 +20,7 @@ export default function Header() {
           <SearchInput />
         </div>
         <McpButton />
+        <PortalOnly><QuickKeyButton /></PortalOnly>
         <DocsButton />
       </div>
     </header>

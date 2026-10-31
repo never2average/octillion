@@ -1,4 +1,5 @@
 'use client';
+import type React from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { Button } from '@/components/ui/button';
@@ -31,4 +32,10 @@ export function McpButton() {
       <Icons.plug /> MCP
     </Button>
   );
+}
+
+/** Renders its children only in the customer portal (/app), never in /admin. */
+export function PortalOnly({ children }: { children: React.ReactNode }) {
+  const { area } = useNav();
+  return area === 'admin' ? null : <>{children}</>;
 }

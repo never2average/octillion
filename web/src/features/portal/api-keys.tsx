@@ -194,6 +194,26 @@ function CreateDialog({ data, onClose, onMade }: { data: KeysResponse; onClose: 
   );
 }
 
+/** Top right, beside Docs (portal only): create a key in two clicks without leaving the page. */
+export function QuickKeyButton() {
+  const [data, setData] = useState<KeysResponse | null>(null);
+  const [made, setMade] = useState<{ key: string; row: ApiKeyRow } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const open = () => {
+    setBusy(true);
+    appApi<KeysResponse>('GET', '/api-keys').then(setData).catch(fail).finally(() => setBusy(false));
+  };
+  return (
+    <>
+      <Button variant='outline' size='sm' className='gap-1.5' disabled={busy} onClick={open} aria-label='Create an API key'>
+        <Icons.key /> API key
+      </Button>
+      {data && !made && <CreateDialog data={data} onClose={() => setData(null)} onMade={setMade} />}
+      {data && made && <ShownOnce made={made} data={data} onClose={() => { setMade(null); setData(null); }} />}
+    </>
+  );
+}
+
 /** The new key, once: copy it, set OCTILLION_API_KEY, pick a client. */
 function ShownOnce({ made, data, onClose }: { made: { key: string; row: ApiKeyRow }; data: KeysResponse; onClose: () => void }) {
   const exportLine = `export ${data.env.variable}=${made.key}`;

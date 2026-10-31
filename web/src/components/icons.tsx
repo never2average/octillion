@@ -52,6 +52,7 @@ import {
   IconLayoutKanban,
   IconLayoutSidebar,
   IconLoader2,
+  IconKey,
   IconLock,
   IconLogin,
   IconLogout,
@@ -222,6 +223,7 @@ export const Icons = {
   exclusive: IconStar,
   sparkles: IconSparkles,
   badgeCheck: IconRosetteDiscountCheck,
+  key: IconKey,
   lock: IconLock,
 
   // Data / Charts
