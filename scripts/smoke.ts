@@ -2393,6 +2393,8 @@ try {
   const mockPost = async (path: string, body: unknown = {}) => (await fetch(`${mock.url}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })).json();
   // The sandbox reliability probe (src/sandbox-probe.ts) against the mock boat.dev and Vercel Sandbox.
   await (await import("./smoke-sandbox-probe.js")).sandboxProbeChecks({ db, base, mockUrl: mock.url, mockState: mock.state, adm, json, stamp });
+  // The worker sandbox broker (src/worker-sandboxes.ts): Vercel Sandbox workers, ownership checks, against the mock.
+  await (await import("./smoke-worker-sandboxes.js")).workerSandboxChecks({ db, base, mockUrl: mock.url, mockState: mock.state, workerToken: WORKER_TOKEN! });
   /** A Clerk session token (what the UI sends): v2 claims with the active organization, unless told otherwise. */
   const clerkSession = async (userId: string, orgId?: string | null, role = "member", extra: Record<string, unknown> = {}) =>
     (await mockPost("/_mock/session", { user_id: userId, org_id: orgId ?? undefined, org_role: role, ...extra })).token as string;

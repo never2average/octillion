@@ -65,7 +65,7 @@ const ORCH_IV = `oiv AS (
 const SES_IV = `siv AS (
     SELECT * FROM (
       SELECT s.id, s.org_id, s.simulation_id AS job_id, sim.name AS job_name, coalesce(s.agent_id, s.harness || '/' || s.model) AS agent,
-             coalesce(s.metadata->>'runner', 'boat') AS runner, s.metadata->>'boat_sandbox_type' AS sandbox_type, s.started_at AS t0,
+             coalesce(s.metadata->>'runner', 'boat') AS runner, coalesce(s.metadata->>'sandbox_type', s.metadata->>'boat_sandbox_type') AS sandbox_type, s.started_at AS t0,
              greatest(s.started_at, coalesce(s.ended_at, CASE WHEN s.status = 'running' THEN now() ELSE coalesce(s.heartbeat_at, s.started_at) END)) AS t1
         FROM agent_sessions s LEFT JOIN simulations sim ON sim.id = s.simulation_id
        WHERE s.started_at IS NOT NULL AND s.started_at < $2) x
@@ -73,8 +73,8 @@ const SES_IV = `siv AS (
 const OVERLAP = "extract(epoch FROM least(t1, d1) - greatest(t0, d0))";
 const DAY_OF = "to_char(d0 AT TIME ZONE 'UTC', 'YYYY-MM-DD')";
 
-/** Where a runner's sandboxes run (orchestrator/core/runners.ts: boat, docker, local; pool = pods in an orchestrator on boat). */
-const PROVIDERS: Record<string, string> = { boat: "boat.dev", pool: "boat.dev", docker: "Docker", local: "Local machine" };
+/** Where a runner's sandboxes run (orchestrator/core/runners.ts: boat, vercel, docker, local; pool = pods in an orchestrator on boat). */
+const PROVIDERS: Record<string, string> = { boat: "boat.dev", vercel: "Vercel Sandbox", pool: "boat.dev", docker: "Docker", local: "Local machine" };
 const providerOf = (runner: string) => PROVIDERS[runner] ?? runner;
 
 export async function computeReport(q: { from?: unknown; to?: unknown } = {}, now = Date.now()) {

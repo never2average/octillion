@@ -148,7 +148,10 @@ export async function brokerOrchestratorCredentials(orchestratorId: string) {
         base_url: `${PUBLIC_URL()}/gw/${ap}${SDK_BASE_SUFFIX[ap] ?? ""}`,
         api_key: await mintToken("orchestrator", [ap], expiresAt, { orchestratorId }), expires_at: expiresAt.toISOString() }
     : null;
-  return { boat, llm, architect };
+  // Where orchestrators put their worker sandboxes (orchestrator/core/runners.ts selectRunner): boat unless this deployment
+  // says vercel. Read when an orchestrator starts: flipping it affects orchestrators launched after the change.
+  const sandbox_provider = (process.env.OCTILLION_SANDBOX_PROVIDER ?? "").trim().toLowerCase() === "vercel" ? "vercel" : "boat";
+  return { boat, llm, architect, sandbox_provider };
 }
 
 export async function revokeSessionTokens(sessionId: string) {

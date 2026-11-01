@@ -44,7 +44,7 @@ export async function computeTrends(q: { hours?: unknown } = {}) {
     db.query<{ h: unknown; v: unknown; starts: unknown }>(
       `/* tenant: internal: admin Health trends across all orgs */
        SELECT ${hour("started_at")} AS h, percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM started_at - queued_at)) AS v,
-              count(*) FILTER (WHERE sandbox_id IS NOT NULL) AS starts
+              count(*) FILTER (WHERE sandbox_id IS NOT NULL AND sandbox_id NOT LIKE 'vercel:%') AS starts
          FROM agent_sessions WHERE started_at >= $1 GROUP BY 1`, [from]),
     // Each orchestrator row once: launched in the window (by created_at) and/or ended in it (by deleted_at).
     db.query<{ created_h: unknown; deleted_h: unknown; state: string; launch_step: string | null; launch_error: string | null; reap_reason: string | null; error: string | null; ready_at: Date | null; at: Date }>(

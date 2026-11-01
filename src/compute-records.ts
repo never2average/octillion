@@ -80,7 +80,8 @@ interface SessionDb {
 const SESSION_COLS = `s.id, s.simulation_id, o.slug AS org_slug, o.name AS org_name, s.agent_id, s.harness, s.model, s.status, s.attempt,
   s.metadata->>'infra_retries' AS infra_retries, s.metadata->>'infra_error' AS infra_error, s.queued_at, s.started_at, s.heartbeat_at,
   s.ended_at, s.completed_reason, s.error_message, s.worker_id, s.sandbox_id, s.cost_usd,
-  CASE WHEN jsonb_typeof(s.metadata->'boat_est_cost_usd') = 'number' THEN s.metadata->>'boat_est_cost_usd' END AS sandbox_est`;
+  coalesce(CASE WHEN jsonb_typeof(s.metadata->'sandbox_est_cost_usd') = 'number' THEN s.metadata->>'sandbox_est_cost_usd' END,
+           CASE WHEN jsonb_typeof(s.metadata->'boat_est_cost_usd') = 'number' THEN s.metadata->>'boat_est_cost_usd' END) AS sandbox_est`;
 
 function sessionRow(r: SessionDb, scheduled: Set<string> | null) {
   const c = classifySession({ ...r, metadata: { infra_error: r.infra_error } }, { scheduled: scheduled ?? undefined });
@@ -184,7 +185,7 @@ async function sessionFacets(f: { base: string; params: unknown[]; status: strin
 /** Metadata keys the session peek shows; everything else (environment, adapter internals) stays out. */
 const SESSION_META = ["wall_ms", "harness_runs", "agent_turns", "max_agent_turns", "simulated_user_turns", "max_user_turns", "developer_nudges",
   "done_reason", "changed_files", "exit_code", "exit_signal", "infra_retries", "infra_error", "boat_sandbox_id", "boat_sandbox_type",
-  "boat_sandbox_seconds", "boat_est_cost_usd", "runner", "orchestrator_status", "orchestrator_note", "cancelled_by", "cancelled_at", "cancelled_from"] as const;
+  "boat_sandbox_seconds", "boat_est_cost_usd", "sandbox_provider", "sandbox_vm_id", "sandbox_type", "sandbox_seconds", "sandbox_est_cost_usd", "runner", "orchestrator_status", "orchestrator_note", "cancelled_by", "cancelled_at", "cancelled_from"] as const;
 
 /** One session for its peek: the row, timing and run metadata, gateway rows, a fix hint, runnability and the last 20 events. */
 export async function sessionDetail(id: string) {

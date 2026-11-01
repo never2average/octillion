@@ -210,7 +210,7 @@ async function ourBoatStartsToday(): Promise<number> {
   const [r] = await (await getDb()).query<{ n: unknown }>(
     `/* tenant: internal: the sandbox probe counts boat starts across all orgs, ids only */
      SELECT (SELECT count(*) FROM orchestrator_sandboxes WHERE created_at > now() - interval '1 day')
-          + (SELECT count(*) FROM agent_sessions WHERE sandbox_id IS NOT NULL AND started_at > now() - interval '1 day')
+          + (SELECT count(*) FROM agent_sessions WHERE sandbox_id IS NOT NULL AND sandbox_id NOT LIKE 'vercel:%' AND started_at > now() - interval '1 day')
           + (SELECT count(*) FROM sandbox_probes WHERE provider = 'boat' AND sandbox_id IS NOT NULL AND started_at > now() - interval '1 day') AS n`);
   return n(r?.n);
 }

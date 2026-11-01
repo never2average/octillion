@@ -347,11 +347,11 @@ async function buildSummary(fresh: boolean) {
             percentile_cont(0.95) WITHIN GROUP (ORDER BY extract(epoch FROM started_at - queued_at)) FILTER (WHERE started_at > now() - interval '1 hour') AS wait_p95,
             count(*) FILTER (WHERE started_at > now() - interval '1 hour') AS wait_n,
             coalesce(sum(cost_usd) FILTER (WHERE ended_at >= current_date), 0) AS model_today,
-            coalesce(sum(CASE WHEN jsonb_typeof(metadata->'boat_est_cost_usd') = 'number' THEN (metadata->>'boat_est_cost_usd')::numeric END)
+            coalesce(sum(coalesce(CASE WHEN jsonb_typeof(metadata->'sandbox_est_cost_usd') = 'number' THEN (metadata->>'sandbox_est_cost_usd')::numeric END, CASE WHEN jsonb_typeof(metadata->'boat_est_cost_usd') = 'number' THEN (metadata->>'boat_est_cost_usd')::numeric END))
                      FILTER (WHERE ended_at >= current_date), 0) AS sandbox_today,
-            count(*) FILTER (WHERE sandbox_id IS NOT NULL AND started_at > now() - interval '1 minute') AS starts_minute,
-            count(*) FILTER (WHERE sandbox_id IS NOT NULL AND started_at > now() - interval '1 hour') AS starts_hour,
-            count(*) FILTER (WHERE sandbox_id IS NOT NULL AND started_at > now() - interval '1 day') AS starts_day
+            count(*) FILTER (WHERE sandbox_id IS NOT NULL AND sandbox_id NOT LIKE 'vercel:%' AND started_at > now() - interval '1 minute') AS starts_minute,
+            count(*) FILTER (WHERE sandbox_id IS NOT NULL AND sandbox_id NOT LIKE 'vercel:%' AND started_at > now() - interval '1 hour') AS starts_hour,
+            count(*) FILTER (WHERE sandbox_id IS NOT NULL AND sandbox_id NOT LIKE 'vercel:%' AND started_at > now() - interval '1 day') AS starts_day
        FROM agent_sessions
       WHERE status IN ('queued', 'running') OR ended_at > now() - interval '24 hours' OR started_at > now() - interval '24 hours'`);
   const [rsh] = await db.query<Record<string, unknown>>(

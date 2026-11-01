@@ -32,6 +32,7 @@ import { parseJsonl, transcripts, type RawEvent } from "./transcripts.js";
 import { appendEvents, claimJobs, completeSession, heartbeat } from "./worker.js";
 import { fleetCheckin, fleetLeave, fleetStatus } from "./fleet.js";
 import { autoscalerStatus, kickAutoscaler, startAutoscaler, stopAutoscaler } from "./autoscaler.js";
+import { reapWorkerSandboxes, workerSandboxRouter } from "./worker-sandboxes.js";
 /** On Vercel, orchestrator traffic drives the autoscaler (no ticking loop there); elsewhere the loop does. */
 const serverlessTick = (force = false) => { if (process.env.VERCEL) telemetry.keepAlive(kickAutoscaler({ force }).catch((e) => console.error("autoscaler kick:", (e as Error).message))); };
 import { startArchiver, stopArchiver } from "./archive.js";
@@ -125,7 +126,10 @@ export function createApp() {
     const health = await (await import("./health-alerts.js")).checkHealth().then((h) => ({ alerts: h.alerts, emailed: h.emailed, slack: h.slack, error: h.error }));
     // GTM campaigns (src/campaigns.ts): start scheduled ones, enroll, send what is due (idempotent, rate-limited). Never throws.
     const campaigns = await campaignsMod.campaignTick({ deadline });
-    res.json({ tick, pruned, reasons, rls, health, campaigns });
+    // Vercel Sandbox worker sandboxes left behind (src/worker-sandboxes.ts): no Vercel call unless we have any. Never throws.
+    const oidc = req.headers["x-vercel-oidc-token"];
+    const workerSandboxes = await reapWorkerSandboxes({ oidcToken: typeof oidc === "string" ? oidc : null, deadline });
+    res.json({ tick, pruned, reasons, rls, health, campaigns, worker_sandboxes: workerSandboxes });
   });
 
   // Sandbox reliability probe (src/sandbox-probe.ts): boat.dev and Vercel Sandbox side by side, from this deployment.
@@ -540,6 +544,9 @@ export function createApp() {
     res.json(await brokerOrchestratorCredentials(id));
   });
   worker.post("/sessions/:id/credentials", async (req, res) => void res.json(await brokerSessionCredentials(String(req.params.id))));
+  // Worker sandbox broker (src/worker-sandboxes.ts): Vercel Sandbox workers for orchestrators on boat, with the
+  // function's OIDC token kept here. Each sandbox is usable only by the token kind / job that created it.
+  worker.use("/sandboxes", workerSandboxRouter(authOf));
   app.use("/api/worker", worker);
 
   // ---------- platform admin API: /admin console, key vault, populations (src/admin-auth.ts) ----------

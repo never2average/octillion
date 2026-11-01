@@ -24,7 +24,8 @@
 // Cloudflare Workers AI: POST /client/v4/accounts/:id/ai/v1/chat/completions (Bearer); state.aiRequests logs each body and
 // state.aiReply(body) decides the answer (in-process only; unset: 503).
 // boat.dev under /boat/api/v1 (create, get, rename, commands, delete, list; Bearer boat_...) and Vercel Sandbox under
-// /vercel-sandbox (/v2/sandboxes and session commands, ND-JSON; Bearer + teamId), for the sandbox probe (state.boatStartsPerDay
+// /vercel-sandbox (/v2/sandboxes and session commands, ND-JSON; Bearer + teamId; detached commands with status / logs / kill,
+// fs/write tar.gz and network-policy for worker sandboxes: state.vsbExec scripts what a command does), for the sandbox probe (state.boatStartsPerDay
 // is what boat's /limits reports as the daily start limit): POST
 // /_mock/boat/drop {id} and /_mock/vercel/drop {name} make a sandbox vanish or stop early; /_mock/{boat,vercel}/fail
 // {kind: create|exec|get|delete|list (boat), n} makes the next n such calls answer 502. A boat sandbox answers only the key
@@ -32,9 +33,12 @@
 import express from "express";
 import { randomBytes, randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
+import { gunzipSync } from "node:zlib";
 import { exportJWK, exportSPKI, generateKeyPair, importJWK, SignJWT } from "jose";
 
 export interface MockPersistence { load(): Promise<string | null>; save(state: string): Promise<void> }
+/** What a mock Vercel Sandbox detached command does (state.vsbExec). */
+export interface VsbResult { exitCode?: number; stdout?: string; stderr?: string; durationMs?: number }
 
 const id = (p: string) => `${p}_${randomBytes(10).toString("hex").toUpperCase()}`;
 const now = () => new Date().toISOString();
@@ -65,6 +69,10 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     // (method and path), and failures to inject (the next `n` calls of a kind answer 502).
     boatSandboxes: new Map<string, any>(), boatRequests: [] as string[], boatStartsPerDay: 200, boatFail: { create: 0, exec: 0, get: 0, delete: 0, list: 0 } as Record<string, number>,
     vsbSandboxes: new Map<string, any>(), vsbRequests: [] as string[], vsbFail: { create: 0, exec: 0, get: 0, delete: 0 } as Record<string, number>,
+    // Worker sandboxes (src/worker-sandboxes.ts): detached commands, their logs, files (fs/write tar.gz) and network policies.
+    // vsbExec decides what a detached command does (in-process only; unset: exit 0, no output, done at once).
+    vsbCmds: new Map<string, any>(), vsbFiles: new Map<string, Map<string, Buffer>>(), vsbPolicies: new Map<string, any>(),
+    vsbExec: null as null | ((ctx: { sandbox: string; script: string; files: Map<string, Buffer> }) => VsbResult | Promise<VsbResult>),
     prices: [
       { id: "price_mock_starter", object: "price", active: true, lookup_key: "octillion_starter", unit_amount: 49900, currency: "usd", recurring: { interval: "month" },
         nickname: "Starter", metadata: { monthly_budget_usd: "300" }, product: { id: "prod_mock_1", name: "Octillion", metadata: {} } },
@@ -680,14 +688,81 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     s.vsbSandboxes.delete(x.name);
     res.json(vsb({ ...x, status: "stopped" }));
   });
-  v.post("/v2/sandboxes/sessions/:sid/cmd", (req, res) => {
+  const vsbSession = (req: express.Request, res: express.Response) => {
     const x = [...s.vsbSandboxes.values()].find((y) => y.session === req.params.sid);
-    if (!x) return void res.status(404).json({ error: { code: "not_found", message: "Session not found" } });
-    if (x.status !== "running") return void res.status(410).json({ error: { code: "gone", message: "Session stopped" } });
+    if (!x) { res.status(404).json({ error: { code: "not_found", message: "Session not found" } }); return null; }
+    if (x.status !== "running") { res.status(410).json({ error: { code: "gone", message: "Session stopped" } }); return null; }
+    return x;
+  };
+  const cmdJson = (c: any) => ({ id: c.id, name: c.name, args: c.args, cwd: "/vercel/sandbox", sessionId: c.sessionId, startedAt: c.startedAt, exitCode: c.done ? c.exitCode : null });
+  const settle = (c: any) => { if (!c.done && Date.now() >= c.endsAt) c.done = true; return c; };
+  const untilDone = async (c: any, abort?: () => boolean) => { while (!settle(c).done && !abort?.()) await new Promise((r) => setTimeout(r, 20)); };
+  v.post("/v2/sandboxes/sessions/:sid/cmd", async (req, res) => {
+    const x = vsbSession(req, res);
+    if (!x) return;
     if (failing(s.vsbFail, "exec")) return void res.status(502).json({ error: { code: "bad_gateway" } });
     const cmd = { id: `cmd_${randomBytes(6).toString("hex")}`, name: req.body?.command, args: req.body?.args ?? [], cwd: "/vercel/sandbox", sessionId: x.session, startedAt: Date.now() };
+    if (req.body?.wait === false) {
+      // Detached (what the worker sandbox broker uses): the hook says what it prints, how it exits and how long it runs.
+      const script = cmd.name === "bash" && cmd.args[0] === "-c" ? String(cmd.args[1] ?? "") : [cmd.name, ...cmd.args].join(" ");
+      if (!s.vsbFiles.has(x.name)) s.vsbFiles.set(x.name, new Map());
+      const r = (await s.vsbExec?.({ sandbox: x.name, script, files: s.vsbFiles.get(x.name)! })) ?? {};
+      const c = { ...cmd, script, sandbox: x.name, exitCode: r.exitCode ?? 0, stdout: r.stdout ?? "", stderr: r.stderr ?? "", endsAt: Date.now() + (r.durationMs ?? 0), done: false, killed: false };
+      s.vsbCmds.set(c.id, c);
+      return void res.json({ command: cmdJson(c) });
+    }
     res.setHeader("content-type", "application/x-ndjson");
     res.end(`${JSON.stringify({ command: { ...cmd, exitCode: null } })}\n${JSON.stringify({ command: { ...cmd, exitCode: 0, durationMs: 3 } })}\n`);
+  });
+  v.get("/v2/sandboxes/sessions/:sid/cmd/:cmd", async (req, res) => {
+    const c = s.vsbCmds.get(req.params.cmd);
+    if (!c || c.sessionId !== req.params.sid) return void res.status(404).json({ error: { code: "not_found", message: "Command not found" } });
+    if (req.query.wait === "true") await untilDone(c, () => res.destroyed);
+    res.json({ command: cmdJson(settle(c)) });
+  });
+  // Logs: the whole output once the command is done (or killed), then the stream ends; a client that leaves stops waiting.
+  v.get("/v2/sandboxes/sessions/:sid/cmd/:cmd/logs", async (req, res) => {
+    const c = s.vsbCmds.get(req.params.cmd);
+    if (!c || c.sessionId !== req.params.sid) return void res.status(404).json({ error: { code: "not_found", message: "Command not found" } });
+    res.setHeader("content-type", "application/x-ndjson");
+    res.flushHeaders();
+    let gone = false;
+    res.on("close", () => { gone = true; });
+    await untilDone(c, () => gone);
+    if (gone) return;
+    if (!c.killed) {
+      if (c.stdout) res.write(JSON.stringify({ stream: "stdout", data: c.stdout }) + "\n");
+      if (c.stderr) res.write(JSON.stringify({ stream: "stderr", data: c.stderr }) + "\n");
+    }
+    res.end();
+  });
+  v.post("/v2/sandboxes/sessions/:sid/cmd/:cmd/kill", (req, res) => {
+    const c = s.vsbCmds.get(req.params.cmd);
+    if (!c || c.sessionId !== req.params.sid) return void res.status(404).json({ error: { code: "not_found", message: "Command not found" } });
+    if (!settle(c).done) Object.assign(c, { done: true, killed: true, exitCode: 128 + Number(req.body?.signal ?? 15) });
+    res.json({ command: cmdJson(c) });
+  });
+  // fs/write: a gzipped tar, extracted under the x-cwd header (ustar entries; what src/vercel-sandbox.ts tarOne writes).
+  v.post("/v2/sandboxes/sessions/:sid/fs/write", express.raw({ type: "application/gzip", limit: "20mb" }), (req, res) => {
+    const x = vsbSession(req, res);
+    if (!x) return;
+    const tar = gunzipSync(req.body as Buffer), cwd = String(req.get("x-cwd") ?? "/vercel/sandbox").replace(/\/+$/, "");
+    if (!s.vsbFiles.has(x.name)) s.vsbFiles.set(x.name, new Map());
+    for (let off = 0; off + 512 <= tar.length; ) {
+      const h = tar.subarray(off, off + 512);
+      if (h.every((b) => b === 0)) break;
+      const str = (a: number, n: number) => h.subarray(a, a + n).toString("utf8").replace(/\0.*$/s, "");
+      const size = parseInt(str(124, 12).trim(), 8) || 0, prefix = str(345, 155), name = prefix ? `${prefix}/${str(0, 100)}` : str(0, 100);
+      s.vsbFiles.get(x.name)!.set(`${cwd}/${name}`.replace(/\/+/g, "/"), Buffer.from(tar.subarray(off + 512, off + 512 + size)));
+      off += 512 + Math.ceil(size / 512) * 512;
+    }
+    res.status(200).end();
+  });
+  v.post("/v2/sandboxes/sessions/:sid/network-policy", (req, res) => {
+    const x = vsbSession(req, res);
+    if (!x) return;
+    s.vsbPolicies.set(x.name, req.body);
+    res.json({ session: { id: x.session, status: x.status, networkPolicy: { mode: "custom", allowedDomains: req.body?.allow ?? [] } } });
   });
   app.use("/vercel-sandbox", v);
   app.post("/_mock/vercel/drop", (req, res) => { const x = s.vsbSandboxes.get(String(req.body?.name)); if (x) x.status = "stopped"; res.json({ ok: !!x }); });

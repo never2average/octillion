@@ -139,7 +139,7 @@ async function buildRows(jobs: JobDb[]) {
             count(*) FILTER (WHERE status = 'timeout') AS timeout, count(*) FILTER (WHERE status = 'cancelled') AS cancelled,
             count(*) FILTER (WHERE status = 'queued' AND (agent_id IS NULL OR cardinality($2::text[]) = 0 OR agent_id = ANY($2))) AS claimable,
             min(queued_at) FILTER (WHERE status = 'queued') AS oldest_queued, coalesce(sum(cost_usd), 0) AS model_usd,
-            coalesce(sum(CASE WHEN jsonb_typeof(metadata->'boat_est_cost_usd') = 'number' THEN (metadata->>'boat_est_cost_usd')::numeric END), 0) AS sandbox_usd
+            coalesce(sum(coalesce(CASE WHEN jsonb_typeof(metadata->'sandbox_est_cost_usd') = 'number' THEN (metadata->>'sandbox_est_cost_usd')::numeric END, CASE WHEN jsonb_typeof(metadata->'boat_est_cost_usd') = 'number' THEN (metadata->>'boat_est_cost_usd')::numeric END)), 0) AS sandbox_usd
        FROM agent_sessions WHERE simulation_id = ANY($1) GROUP BY simulation_id`, [simIds, agents]) : []).map((r) => [r.simulation_id, r]));
   // Failures per simulation and the most common class (the shared classifier, src/error-classes.ts).
   const fails = new Map<string, Map<string, { label: string; count: number }>>();
