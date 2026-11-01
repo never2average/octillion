@@ -30,8 +30,12 @@ import { pinVercelScopeFromCron, vercelAuth, VERCEL_REGION } from "./sandbox-pro
 export class VercelSandboxError extends Error { constructor(public status: number, msg: string) { super(msg); } }
 export const isGone = (e: unknown) => e instanceof VercelSandboxError && (e.status === 404 || e.status === 410);
 
-/** Private, loopback, link-local (metadata) and CGNAT ranges: never reachable from a locked-down worker sandbox. */
-export const DENY_SUBNETS = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16", "127.0.0.0/8", "0.0.0.0/8", "fc00::/7", "fe80::/10"];
+/**
+ * Private, loopback, link-local (metadata) and CGNAT ranges: never reachable from a locked-down worker sandbox.
+ * IPv4 only: Vercel's network policy refuses IPv6 CIDRs (400 "Invalid CIDR \"fc00::/7\"", seen live 2026-11-01); the
+ * domain allow-list still applies to IPv6 traffic.
+ */
+export const DENY_SUBNETS = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16", "127.0.0.0/8", "0.0.0.0/8"];
 
 export interface VercelClient {
   teamId: string; projectId: string; via: string; region: string;

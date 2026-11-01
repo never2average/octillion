@@ -733,6 +733,9 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
   v.post("/v2/sandboxes/sessions/:sid/network-policy", (req, res) => {
     const x = vsbSession(req, res);
     if (!x) return;
+    // Like the real API: IPv6 CIDRs in subnets are refused.
+    const v6 = (req.body?.subnets?.deny ?? []).concat(req.body?.subnets?.allow ?? []).find((c: string) => String(c).includes(":"));
+    if (v6) return void res.status(400).json({ error: { code: "bad_request", message: `Invalid CIDR "${v6}".` } });
     s.vsbPolicies.set(x.name, req.body);
     res.json({ session: { id: x.session, status: x.status, networkPolicy: { mode: "custom", allowedDomains: req.body?.allow ?? [] } } });
   });
