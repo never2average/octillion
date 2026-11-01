@@ -31,7 +31,7 @@ export function installOrchestratorVm(mock: { url: string; state: any }) {
     if (/in-sandbox\.ts guard/.test(script)) {
       const env = envOf(files);
       const vercelFiles = o.vmLike ? [] : [VERCEL_PROXY_CA[0]!, "/vercel/runtimes", "/vercel/sandbox"];
-      const g = checkHost(env.RUNNER ?? "boat", { env, exists: (p) => vercelFiles.includes(p), read: (p) => (p === MARKER_PATH ? markers.get(sandbox) ?? null : null) });
+      const g = checkHost(env.RUNNER ?? "vercel", { env, exists: (p) => vercelFiles.includes(p), read: (p) => (p === MARKER_PATH ? markers.get(sandbox) ?? null : null) });
       guards.set(sandbox, g);
       return { stdout: JSON.stringify({ ok: g.ok, dev: g.dev, problems: g.problems, provider: g.provider }) + "\n", exitCode: g.ok ? 0 : 3 };
     }

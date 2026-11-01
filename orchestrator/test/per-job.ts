@@ -1,84 +1,38 @@
 /**
  * Hermetic test of one orchestrator per job (src/autoscaler.ts per-job mode, src/fleet.ts jobFleetStatus, claim
- * filters, per-persona developer environments): real server modules on a temp PGlite + a mock boat API. Then the switch
- * to orchestrators on Vercel Sandbox (OCTILLION_SANDBOX_PROVIDER=vercel) against a mock Vercel Sandbox (vercel-orch-mock.ts).
+ * filters, per-persona developer environments): real server modules on a temp PGlite + a mock Vercel Sandbox scripted as
+ * an orchestrator VM (vercel-orch-mock.ts). Then Vercel specifics: the supervisor, the guard inside the sandbox, listing
+ * lag, relaunch before the timeout, a stopped sandbox, capacity and rate cap, the snapshot image, accounting labels.
  *
  *   npx tsx orchestrator/test/per-job.ts
  */
 import { randomBytes } from "node:crypto";
-import http from "node:http";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 const tmp = mkdtempSync(path.join(tmpdir(), "octillion-pjtest-"));
-const BOAT_PORT = Number(process.env.PJTEST_BOAT_PORT ?? 3406);
-let planLimit = 100;
-const BOAT_KEY = `boat_mock_${randomBytes(6).toString("hex")}`;
 Object.assign(process.env, {
   PGLITE_DIR: path.join(tmp, "pglite"), OCTILLION_VAULT_KEY: randomBytes(32).toString("base64"), OCTILLION_WORKER_TOKEN: `wt_${randomBytes(8).toString("hex")}`,
-  PUBLIC_URL: "https://octi.example", BOAT_API_URL: `http://127.0.0.1:${BOAT_PORT}/api/v1`, OCTILLION_POD_CAPACITY: "3", OCTILLION_MAX_ORCHESTRATORS: "2",
-  OCTILLION_AUTOSCALE_TICK_SECONDS: "15", OCTILLION_ORCH_IDLE_MINUTES: "10", BOAT_STARTS_PER_MINUTE: "100", OCTILLION_ORCH_SNAPSHOT: "off", OCTILLION_JOB_POD_CAPACITY: "4", OCTILLION_MAX_JOB_ORCHESTRATORS: "4", OCTILLION_ORCH_LAUNCHES_PER_TICK: "4",
+  PUBLIC_URL: "https://octi.example", OCTILLION_POD_CAPACITY: "3", OCTILLION_MAX_ORCHESTRATORS: "2",
+  OCTILLION_AUTOSCALE_TICK_SECONDS: "15", OCTILLION_ORCH_IDLE_MINUTES: "10", OCTILLION_ORCH_SNAPSHOT: "off", OCTILLION_JOB_POD_CAPACITY: "4", OCTILLION_MAX_JOB_ORCHESTRATORS: "4", OCTILLION_ORCH_LAUNCHES_PER_TICK: "4",
   OCTILLION_ORG_MONTHLY_BUDGET_USD: "1000", // accounts without a plan get $0 (prepaid, invite-only)
 });
-delete process.env.DATABASE_URL; delete process.env.CLICKHOUSE_URL;
+delete process.env.DATABASE_URL; delete process.env.CLICKHOUSE_URL; delete process.env.OCTILLION_SANDBOX_PROVIDER; delete process.env.VERCEL;
+delete process.env.VERCEL_ENV; delete process.env.OCTILLION_SANDBOX_NAMESPACE; delete process.env.OCTILLION_WORKER_SANDBOX_NAMESPACE;
 
 const results: { name: string; ok: boolean; detail: string }[] = [];
 const log = (...a: unknown[]) => console.log(`[pjtest ${new Date().toISOString().slice(11, 19)}]`, ...a);
 const check = (name: string, ok: boolean, detail = "") => { results.push({ name, ok, detail }); log(`${ok ? "PASS" : "FAIL"} ${name}${detail ? ` - ${detail}` : ""}`); };
 
-// ---------------------------------------------------------------- mock boat
-interface Sb { id: string; name: string; state: string; from?: string; createdAt: string; files: Map<string, string> }
-const sbs = new Map<string, Sb>();
-const hidden = new Set<string>(); // listing lag: sandboxes boat's listing leaves out (GET /sandboxes/:id still answers)
-const snaps = new Map<string, { status: string; at: number }>();
-let creates = 0, fromImageCreates = 0, deletes = 0;
-const workerTokenInFiles: string[] = [];
-const json = (res: http.ServerResponse, s: number, b: unknown) => { res.writeHead(s, { "content-type": "application/json" }); res.end(JSON.stringify(b)); };
-const boat = http.createServer((req, res) => {
-  let raw = "";
-  req.on("data", (c) => (raw += c));
-  req.on("end", () => {
-    if (req.headers.authorization !== `Bearer ${BOAT_KEY}`) return json(res, 401, { ok: false, code: "unauthorized" });
-    const b = raw ? JSON.parse(raw) : {};
-    const u = String(req.url).replace(/^\/api\/v1/, "").split("?")[0]!;
-    if (u === "/limits") return json(res, 200, { ok: true, currentLimits: { activeSandboxes: planLimit }, startLimits: { perMinute: 12, perHour: 60, perDay: 200 }, activeSandboxes: [...sbs.values()].filter((s) => s.state === "ready").length });
-    if (u === "/sandboxes" && req.method === "GET") return json(res, 200, { ok: true, sandboxes: [...sbs.values()].filter((s) => !hidden.has(s.id)).map(({ files: _f, ...s }) => s), pageInfo: { nextCursor: null } });
-    if (u === "/sandboxes" && req.method === "POST") {
-      const id = `bx_${randomBytes(4).toString("hex")}`;
-      creates++; if (b.from) fromImageCreates++;
-      sbs.set(id, { id, name: "", state: "ready", from: b.from, createdAt: new Date().toISOString(), files: new Map() });
-      return json(res, 202, { ok: true, sandbox: { id, state: "provisioning" } });
-    }
-    if (u === "/named-snapshots" && req.method === "POST") { snaps.set(b.name, { status: "saving", at: Date.now() }); return json(res, 202, { ok: true, snapshot: { name: b.name, status: "saving" } }); }
-    if (u === "/named-snapshots" && req.method === "GET") return json(res, 200, { ok: true, snapshots: [...snaps.keys()].map((name) => ({ name })) });
-    const ns = /^\/named-snapshots\/(.+)$/.exec(u);
-    if (ns) {
-      const s = snaps.get(decodeURIComponent(ns[1]!));
-      if (req.method === "DELETE") { snaps.delete(decodeURIComponent(ns[1]!)); return json(res, 200, { ok: true }); }
-      if (!s) return json(res, 404, { ok: false, code: "not_found" });
-      if (Date.now() - s.at > 300) s.status = "ready";
-      return json(res, 200, { ok: true, snapshot: { name: ns[1], status: s.status } });
-    }
-    const m = /^\/sandboxes\/(bx_\w+)(\/.*)?$/.exec(u);
-    const sb = m ? sbs.get(m[1]!) : undefined;
-    if (!sb) return json(res, 404, { ok: false, code: "not_found" });
-    const rest = m![2] ?? "";
-    if (req.method === "GET" && rest === "") return json(res, 200, { ok: true, sandbox: { id: sb.id, state: sb.state, name: sb.name } });
-    if (req.method === "PATCH") { if (b.name) sb.name = b.name; return json(res, 200, { ok: true }); }
-    if (req.method === "DELETE") { if (sb.state !== "deleted") deletes++; sbs.delete(sb.id); return json(res, 202, { ok: true, type: "sandbox.deleting" }); }
-    if (req.method === "PUT" && rest === "/files") { sb.files.set(b.path, b.content); if (String(b.content).includes(process.env.OCTILLION_WORKER_TOKEN!)) workerTokenInFiles.push(`${sb.name || sb.id}:${b.path}`); return json(res, 200, { ok: true }); }
-    if (req.method === "POST" && rest === "/commands") {
-      const cmd = String(b.command);
-      const stdout = /in-sandbox\.ts preflight/.test(cmd) ? '{"ok":true,"reason":"reachable"}'
-        : /test -x .*tsx/.test(cmd) ? (sb.from ? "yes" : "no") : /systemctl (enable|is-active)/.test(cmd) ? "active" : "";
-      return json(res, 200, { ok: true, exitCode: 0, stdout, stderr: "" });
-    }
-    json(res, 404, { ok: false, code: "not_found" });
-  });
-});
-await new Promise<void>((r) => boat.listen(BOAT_PORT, "127.0.0.1", () => r()));
-
+// ---------------------------------------------------------------- mock Vercel Sandbox (an orchestrator VM)
+const { startVercelOrchMock, MOCK_OIDC } = await import("./vercel-orch-mock.js");
+const vo = await startVercelOrchMock();
+Object.assign(process.env, vo.env);
+const has = (name: string) => vo.state.vsbSandboxes.has(name);
+/** Files holding the worker (or a job's) token, other than an orchestrator's env file. */
+const tokenOutsideEnv = (token: string) => ([...vo.state.vsbFiles.entries()] as [string, Map<string, Buffer>][]).flatMap(([n, f]) => [...f.entries()]
+  .filter(([p, b]) => p !== "/tmp/octi-orchestrator.env.new" && b.toString("latin1").includes(token)).map(([p]) => `${n}:${p}`));
 
 // ---------------------------------------------------------------- server modules (after env)
 const { getDb } = await import("../../src/db.js");
@@ -89,9 +43,7 @@ const fleet = await import("../../src/fleet.js");
 const worker = await import("../../src/worker.js");
 const research = await import("../../src/research.js");
 const { Autoscaler, AUTOSCALE } = await import("../../src/autoscaler.js");
-const { startVercelOrchMock, MOCK_OIDC } = await import("./vercel-orch-mock.js");
 const db = await getDb();
-await kv.addCredential("boat", BOAT_KEY);
 await kv.addCredential("openai", `sk-mock-${randomBytes(8).toString("hex")}`); // runs of codex/default need a vault key for their agent
 const { org: O } = await createOrg("Per Job Test", "pjtest");
 const { org: O2 } = await createOrg("Per Job Other", "pjother");
@@ -102,7 +54,7 @@ const run = async (org: typeof O, product: string, tasks: number, repeats: numbe
   return (await q.runSimulation(org, { product, agents: ["codex/default"], repeats })).simulation.id as string;
 };
 const rows = async () => db.query<any>("SELECT * FROM orchestrator_sandboxes WHERE state <> 'deleted' ORDER BY id");
-const envOf = (sandboxId: string) => sbs.get(sandboxId)?.files.get([...sbs.get(sandboxId)!.files.keys()].find((k) => /orchestrator\.env/.test(k)) ?? "") ?? "";
+const envOf = (sandboxId: string) => vo.state.vsbFiles.get(sandboxId)?.get("/tmp/octi-orchestrator.env.new")?.toString("utf8") ?? "";
 const quiet: string[] = [];
 const a1 = new Autoscaler({ log: (m) => quiet.push(`a1 ${m}`) });
 const tickSettle = async (a = a1) => { const st = await a.tick(); await a.settle(); return st; };
@@ -122,7 +74,7 @@ try {
   check("each queued research gets its own orchestrator", r.length === 2 && !!rA && !!rB && rA.pods === 0, JSON.stringify(st.launched));
   check("...launched with ORCHESTRATOR_JOB and POD_CAPACITY=1", /ORCHESTRATOR_JOB=rsh_pjA\n/.test(envOf(rA.sandbox_id)) && /POD_CAPACITY=1\n/.test(envOf(rA.sandbox_id)),
     envOf(rA.sandbox_id).split("\n").filter((l) => /JOB|POD/.test(l)).join(" "));
-  check("worker token only in orchestrator env files", workerTokenInFiles.every((f) => /orchestrator\.env/.test(f)), workerTokenInFiles.join(","));
+  check("worker tokens only in orchestrator env files", [rA, rB].every((x: any) => { const t = /^OCTILLION_WORKER_TOKEN=(.+)$/m.exec(envOf(x.sandbox_id))?.[1]; return !!t && !tokenOutsideEnv(t).length; }), "");
   st = await tickSettle();
   check("a served job is not launched twice", (await rows()).length === 2 && st.launched?.length === 0, JSON.stringify(st.jobs));
 
@@ -139,7 +91,7 @@ try {
   check("...job.done once the research completed", ck2.job?.done === true && ck2.job.status === "completed", JSON.stringify(ck2.job));
   await fleet.fleetLeave(rB.orchestrator_id);
   st = await tickSettle();
-  check("...leaves, is reaped, and is not relaunched", !sbs.has(rB.sandbox_id) && !(await rows()).some((x: any) => x.job_id === "rsh_pjB"),
+  check("...leaves, is reaped, and is not relaunched", !has(rB.sandbox_id) && !(await rows()).some((x: any) => x.job_id === "rsh_pjB"),
     JSON.stringify(st.reaped));
   await db.query("UPDATE product_research SET status = 'failed', finished_at = now() WHERE id = 'rsh_pjA'");
   await fleet.fleetLeave(rA.orchestrator_id);
@@ -452,26 +404,26 @@ try {
   check("run orchestrator: job.done when the run completed, empty assignment", dA.job?.done === true && dA.assignment.length === 0, JSON.stringify(dA.job));
   await fleet.fleetLeave(oA.orchestrator_id);
   st = await tickSettle();
-  check("...leaves and is reaped; the other run keeps its orchestrator", !sbs.has(oA.sandbox_id) && sbs.has(oB.sandbox_id) && (await rows()).length === 1, JSON.stringify(st.reaped));
+  check("...leaves and is reaped; the other run keeps its orchestrator", !has(oA.sandbox_id) && has(oB.sandbox_id) && (await rows()).length === 1, JSON.stringify(st.reaped));
 
   // backstop: a run that ended 3+ min ago whose orchestrator never left is deleted when idle
   await fleet.fleetCheckin(oB.orchestrator_id, 2, { worker_id: "w-B" });
   await db.query("UPDATE agent_sessions SET status = 'cancelled' WHERE simulation_id = $1", [simB]);
   await db.query("UPDATE simulations SET status = 'cancelled', finished_at = now() - interval '4 minutes' WHERE id = $1", [simB]);
   st = await tickSettle();
-  check("backstop: an orchestrator whose job ended > 3 min ago is reaped", !sbs.has(oB.sandbox_id) && st.reaped?.some((x) => /is cancelled/.test(x.reason)) === true, JSON.stringify(st.reaped));
+  check("backstop: an orchestrator whose job ended > 3 min ago is reaped", !has(oB.sandbox_id) && st.reaped?.some((x) => /is cancelled/.test(x.reason)) === true, JSON.stringify(st.reaped));
 
-  // boat plan: launches fit what is free (1 + pods each); the rest wait
-  planLimit = 8;
+  // capacity: launches fit what is free (1 + pods each) under the configured limit; the rest wait
+  process.env.OCTILLION_VERCEL_MAX_CONCURRENT = "8";
   await a1.release();
   const a2 = new Autoscaler({ log: (m) => quiet.push(`a2 ${m}`) });
   const s1 = await run(O, "quillmail", 3, 2), s2 = await run(O2, "left-pad", 3, 2), s3 = await run(O2, "left-pad", 1, 1);
   st = await tickSettle(a2);
   r = await rows();
   const pods = Object.fromEntries(r.map((x: any) => [x.job_id, x.pods]));
-  check("boat plan: first run gets 4 pods, second the 2 left (1 + 4 + 1 + 2 = 8), third waits",
-    pods[s1] === 4 && pods[s2] === 2 && !(s3 in pods) && /waits for (boat plan|sandbox) capacity/.test(st.note ?? ""), `${JSON.stringify(pods)} note ${st.note}`);
-  planLimit = 100;
+  check("capacity: first run gets 4 pods, second the 2 left (1 + 4 + 1 + 2 = 8), third waits",
+    pods[s1] === 4 && pods[s2] === 2 && !(s3 in pods) && new RegExp(`${s3} waits for sandbox capacity on Vercel Sandbox`).test(st.note ?? ""), `${JSON.stringify(pods)} note ${st.note}`);
+  delete process.env.OCTILLION_VERCEL_MAX_CONCURRENT;
   await a2.release();
   const a3 = new Autoscaler({ log: (m) => quiet.push(`a3 ${m}`) });
   st = await tickSettle(a3);
@@ -508,46 +460,21 @@ try {
   await db.query("UPDATE simulations SET status = 'cancelled', finished_at = now() - interval '10 minutes' WHERE status IN ('queued', 'running')");
   for (const x of await rows()) await fleet.fleetLeave(x.orchestrator_id).catch(() => {});
   await tickSettle(a3);
-  check("nothing of ours left on boat", ![...sbs.values()].some((s) => s.name.startsWith("octi-orch-")), [...sbs.values()].map((s) => s.name).join(","));
+  check("nothing of ours left at Vercel", ![...vo.state.vsbSandboxes.keys()].some((n: string) => n.startsWith("octi-vo-")), [...vo.state.vsbSandboxes.keys()].join(","));
 
-  // ---------------------------------------------------------------- orchestrators on Vercel Sandbox (mock Vercel)
-  // A boat orchestrator serves a run; OCTILLION_SANDBOX_PROVIDER=vercel switches new orchestrators to Vercel Sandbox (the
-  // boat one finishes its run there); launch with the supervisor, the guard inside the sandbox, a check-in, listing lag,
-  // relaunch before the sandbox timeout, a stopped sandbox, capacity and rate cap, the snapshot image, accounting labels.
-  const vo = await startVercelOrchMock();
-  Object.assign(process.env, vo.env);
+  // ---------------------------------------------------------------- Vercel Sandbox specifics (mock Vercel)
+  // A run's orchestrator: launch with the supervisor, the guard inside the sandbox, a check-in, listing lag, relaunch
+  // before the sandbox timeout, a stopped sandbox, capacity and rate cap, the snapshot image, accounting labels.
   await a3.release();
   const av = new Autoscaler({ log: (m) => quiet.push(`av ${m}`) });
   const vtick = async () => { const s = await av.tick(); await av.settle(); return s; };
   const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
-  const sD = await run(O2, "left-pad", 1, 1);
-  await vtick();
-  const boatD = (await rows()).find((x: any) => x.job_id === sD);
-  check("vercel: before the switch the run's orchestrator is on boat", boatD?.provider === "boat" && sbs.has(boatD.sandbox_id) && boatD.expires_at === null, JSON.stringify(boatD && { p: boatD.provider, s: boatD.sandbox_id }));
-  await fleet.fleetCheckin(boatD.orchestrator_id, 1, { worker_id: "w-D" });
-  await db.query("UPDATE agent_sessions SET status = 'running', worker_id = 'w-D' WHERE simulation_id = $1", [sD]);
 
-  // Orchestrators on Vercel, workers still on boat (the override alone): a run's pods must fit boat's plan.
-  process.env.OCTILLION_ORCHESTRATOR_PROVIDER = "vercel";
-  planLimit = 2; // boatD holds 1 + 1 pod of it
-  await av.release();
-  const avGap = new Autoscaler({ log: (m) => quiet.push(`avGap ${m}`) });
-  const sGap = await run(O2, "left-pad", 1, 1);
-  st = await avGap.tick(); await avGap.settle();
-  check("budget: Vercel orchestrators with boat workers wait for boat's plan, not Vercel's", !(await rows()).some((x: any) => x.job_id === sGap) &&
-    new RegExp(`${sGap} waits for sandbox capacity on boat\\.dev \\(0 free\\)`).test(st.note ?? ""), st.note ?? "");
-  planLimit = 100;
-  await avGap.release();
-  await db.query("UPDATE simulations SET status = 'cancelled', finished_at = now() - interval '10 minutes' WHERE id = $1", [sGap]);
-  await db.query("UPDATE agent_sessions SET status = 'cancelled' WHERE simulation_id = $1", [sGap]);
-  delete process.env.OCTILLION_ORCHESTRATOR_PROVIDER;
-
-  process.env.OCTILLION_SANDBOX_PROVIDER = "vercel";
   const sE = await run(O2, "left-pad", 2, 1);
   st = await vtick();
   let vE = (await rows()).find((x: any) => x.job_id === sE);
   const vx = vE ? vo.state.vsbSandboxes.get(vE.sandbox_id) : null;
-  check("vercel: after the switch a new run's orchestrator starts on Vercel Sandbox", st.provider === "vercel" && vE?.provider === "vercel" && vE.state === "running" &&
+  check("vercel: a new run's orchestrator starts on Vercel Sandbox", st.provider === "vercel" && vE?.provider === "vercel" && vE.state === "running" &&
     /^octi-vo-local-v[0-9a-f]{10}$/.test(vE.sandbox_id) && vE.orchestrator_id === `orch-${vE.sandbox_id.slice("octi-vo-local-".length)}` && !!vE.expires_at,
     JSON.stringify(vE && { p: vE.provider, s: vE.sandbox_id, o: vE.orchestrator_id, state: vE.state, err: vE.error }) + ` ${JSON.stringify(st.launched)} ${st.note ?? ""} ${st.error ?? ""}`);
   check("vercel: created non-persistent on node24, 1 vCPU / 2 GB, with the default 6 h timeout recorded as expires_at", vx?.persistent === false && vx?.runtime === "node24" &&
@@ -562,9 +489,9 @@ try {
     vo.supervisors.has(vE.sandbox_id) && vscripts.some((x) => /^exec sudo -n -u octi env -i PATH='\/vercel\/runtimes\/node24\/bin:/.test(x)) &&
     vscripts.some((x) => /install -m 600 -o octi .*orchestrator\.env/.test(x)) && vscripts.some((x) => /npm ci --omit=dev/.test(x)) &&
     [...vfiles.keys()].some((k) => /^\/tmp\/octi-stage\/code\.tgz\.part000$/.test(k)), `${vscripts.length} scripts, files ${[...vfiles.keys()].join(",")}`);
-  check("vercel: the env file names the host role, its sandbox and its job; RUNNER=boat lets the server pick the workers",
+  check("vercel: the env file names the host role, its sandbox and its job, RUNNER=vercel and the sandbox namespace",
     /^OCTILLION_HOST_ROLE=vercel-orchestrator$/m.test(venv) && new RegExp(`^OCTILLION_SANDBOX_ID=${vE.sandbox_id}$`, "m").test(venv) && new RegExp(`^ORCHESTRATOR_JOB=${sE}$`, "m").test(venv) &&
-    /^RUNNER=boat$/m.test(venv) && /^OCTILLION_URL=https:\/\/octi\.example$/m.test(venv), venv.split("\n").filter((l) => !/TOKEN/.test(l)).join(" "));
+    /^RUNNER=vercel$/m.test(venv) && /^OCTILLION_SANDBOX_NAMESPACE=octi$/m.test(venv) && !/BOAT/.test(venv) && /^OCTILLION_URL=https:\/\/octi\.example$/m.test(venv), venv.split("\n").filter((l) => !/TOKEN/.test(l)).join(" "));
   const jobToken = /^OCTILLION_WORKER_TOKEN=(.+)$/m.exec(venv)?.[1] ?? "";
   const vAll = vo.everything(vE.sandbox_id);
   check("vercel: no Vercel credential enters the sandbox; the job token only in the env file", !!jobToken && !vAll.includes(MOCK_OIDC) && !vAll.includes(MOCK_OIDC.split(".")[1]!) &&
@@ -575,8 +502,6 @@ try {
     JSON.parse(vo.markers.get(vE.sandbox_id) ?? "{}").role === "vercel-orchestrator", JSON.stringify(vg));
   const ckE = await fleet.fleetCheckin(vE.orchestrator_id, 2, { worker_id: "w-E", host: "vercel" }) as any;
   check("vercel: the orchestrator's check-in from the Vercel host gets its run's pods", ckE.job?.id === sE && ckE.assignment.length === 1 && ckE.assignment[0].pods === 2, JSON.stringify(ckE.assignment));
-  check("draining: the boat orchestrator keeps its run (not retired, not relaunched)", sbs.has(boatD.sandbox_id) &&
-    (await rows()).filter((x: any) => x.job_id === sD).length === 1 && !(await fleet.staleOrchestratorIds()).has(boatD.orchestrator_id), "");
 
   // listing lag: missing from the listing, live by get -> kept; gone by get -> reaped
   vo.state.vsbHideFromList.add(vE.sandbox_id);
@@ -584,11 +509,6 @@ try {
   check("vercel: listing lag (absent from the listing, live by get) never reaps a live orchestrator", vo.state.vsbSandboxes.has(vE.sandbox_id) &&
     (await rows()).some((x: any) => x.id === vE.id) && !(st.reaped ?? []).some((x) => x.sandbox_id === vE.sandbox_id), JSON.stringify(st.reaped));
   vo.state.vsbHideFromList.clear();
-  // boat too: a listing that drops a live boat sandbox does not reap it (boat's GET /sandboxes/:id answers)
-  hidden.add(boatD.sandbox_id);
-  st = await vtick();
-  check("boat: listing lag never reaps a live orchestrator either", sbs.has(boatD.sandbox_id) && !(st.reaped ?? []).some((x) => x.sandbox_id === boatD.sandbox_id), JSON.stringify(st.reaped));
-  hidden.clear();
 
   // get keeps failing for an unlisted sandbox: kept for 2 ticks, ended (without a delete call) on the 3rd
   vo.state.vsbHideFromList.add(vE.sandbox_id);
@@ -669,46 +589,52 @@ try {
     JSON.stringify({ snaps: snaps.map((x) => x.name), from: vH?.from_image, err: vH?.error }));
   process.env.OCTILLION_ORCH_SNAPSHOT = "off";
 
-  // accounting: each row names its provider and is priced at its rate; the summary says where things run
+  // accounting: each row names its provider and is priced at its rate (a row from before boat.dev's retirement keeps its
+  // label and estimate); the summary says where things run
+  await db.query(`INSERT INTO orchestrator_sandboxes (sandbox_id, orchestrator_id, state, created_at, ready_at, deleted_at, provider, reap_reason)
+    VALUES ('bx_hist1', 'orch-hist1', 'deleted', now() - interval '2 hours', now() - interval '2 hours', now() - interval '1 hour', 'boat', 'drained (idle exit)')`);
   const records = await import("../../src/compute-records.js");
   const lo = await records.listOrchestrators({ state: "all", limit: "200" });
   const vrow = lo.rows.find((x: any) => x.provider === "vercel") as any, brow = lo.rows.find((x: any) => x.provider === "boat") as any;
   const { vercelOrchCostUsd } = await import("../deploy/orchestrator-host.js");
   const vHours = (Date.parse(vrow?.deleted_at ?? new Date().toISOString()) - Date.parse(vrow?.created_at)) / 1000;
-  check("accounting: rows name their provider (boat.dev / Vercel Sandbox), Vercel rows priced at the Vercel Sandbox rate, TTL from expires_at",
-    vrow?.provider_label === "Vercel Sandbox" && brow?.provider_label === "boat.dev" && vrow.boat_state === null &&
+  check("accounting: rows name their provider (Vercel Sandbox, boat.dev (retired) for history), Vercel rows priced at the Vercel Sandbox rate, TTL from expires_at",
+    vrow?.provider_label === "Vercel Sandbox" && brow?.provider_label === "boat.dev (retired)" && brow.spend.sandbox_est_usd > 0 && !("boat_state" in vrow) &&
     Math.abs(vrow.spend.sandbox_est_usd - Math.round(vercelOrchCostUsd(vHours) * 10_000) / 10_000) < 0.0002, JSON.stringify({ v: vrow && { l: vrow.provider_label, usd: vrow.spend, ttl: vrow.ttl_left_s }, b: brow?.provider_label }));
   const liveV = (await rows()).find((x: any) => x.provider === "vercel");
   const det = await records.orchestratorDetail(liveV.id);
-  check("accounting: a Vercel orchestrator's peek has no boat CLI logs command, says where its log is", det.logs_command === null && /orchestrator\.log/.test(det.logs_where ?? "") &&
-    typeof det.row.ttl_left_s === "number" && det.row.ttl_left_s > 0, `${det.logs_command} ${det.logs_where} ttl ${det.row.ttl_left_s}`);
+  check("accounting: an orchestrator's peek says where its log is", !("logs_command" in det) && /orchestrator\.log/.test(det.logs_where ?? "") &&
+    typeof det.row.ttl_left_s === "number" && det.row.ttl_left_s > 0, `${det.logs_where} ttl ${det.row.ttl_left_s}`);
   const { computeSummary } = await import("../../src/compute.js");
   const sum = await computeSummary({ fresh: true }) as any;
-  check("accounting: the summary says orchestrators and workers run on Vercel Sandbox, with boat ones still live", sum.hosting?.orchestrators.label === "Vercel Sandbox" &&
-    sum.hosting.workers.label === "Vercel Sandbox" && sum.hosting.live.boat >= 1 && sum.hosting.live.vercel >= 1, JSON.stringify(sum.hosting));
+  check("accounting: the summary says orchestrators and workers run on Vercel Sandbox", sum.hosting?.orchestrators.label === "Vercel Sandbox" &&
+    sum.hosting.workers.label === "Vercel Sandbox" && sum.hosting.live.vercel >= 1 && !("boat" in sum.hosting.live), JSON.stringify(sum.hosting));
 
-  // the boat orchestrator finishes its run, leaves and is reaped on boat
-  await db.query("UPDATE agent_sessions SET status = 'completed' WHERE simulation_id = $1", [sD]);
-  await db.query("UPDATE simulations SET status = 'completed', finished_at = now() WHERE id = $1", [sD]);
-  await fleet.fleetLeave(boatD.orchestrator_id);
+  // A per-job orchestrator that exited cleanly once its job ended leaves no fleet row behind: reaped as "job over", not stale.
+  const vX = (await rows()).find((x: any) => x.provider === "vercel" && x.job_id === sH);
+  await fleet.fleetCheckin(vX.orchestrator_id, 1, { worker_id: "w-X" });
+  await av3.tick(); // records its check-in on the row (last_seen)
+  await db.query("UPDATE agent_sessions SET status = 'completed' WHERE simulation_id = $1", [sH]);
+  await db.query("UPDATE simulations SET status = 'completed', finished_at = now() WHERE id = $1", [sH]);
+  await db.query("DELETE FROM orchestrators WHERE id = $1", [vX.orchestrator_id]); // it exited: no fleet row
+  await db.query("UPDATE orchestrator_sandboxes SET last_seen = now() - interval '6 minutes', ready_at = now() - interval '30 minutes' WHERE id = $1", [vX.id]);
   st = await av3.tick(); await av3.settle();
-  check("draining: the boat orchestrator, its run done, is deleted on boat; only Vercel orchestrators remain", !sbs.has(boatD.sandbox_id) &&
-    (await rows()).every((x: any) => x.provider === "vercel"), JSON.stringify(st.reaped));
+  const over = (st.reaped ?? []).find((x) => x.sandbox_id === vX.sandbox_id);
+  check("a per-job orchestrator that exited after its job ended is reaped as 'job over', not 'stale'", !has(vX.sandbox_id) &&
+    over?.reason === `job over: orchestrator exited (job ${sH} is completed)`, over?.reason ?? JSON.stringify(st.reaped));
 
-  delete process.env.OCTILLION_SANDBOX_PROVIDER;
   await db.query("UPDATE agent_sessions SET status = 'cancelled' WHERE status IN ('queued', 'running')");
   await db.query("UPDATE simulations SET status = 'cancelled', finished_at = now() - interval '10 minutes' WHERE status IN ('queued', 'running')");
   for (const x of await rows()) await fleet.fleetLeave(x.orchestrator_id).catch(() => {});
   st = await av3.tick(); await av3.settle();
-  check("vercel: every orchestrator sandbox is deleted at Vercel after the switch back", ![...vo.state.vsbSandboxes.keys()].some((n) => n.startsWith("octi-vo-")) && (await rows()).length === 0,
+  check("vercel: every orchestrator sandbox is deleted at Vercel at the end", ![...vo.state.vsbSandboxes.keys()].some((n) => n.startsWith("octi-vo-")) && (await rows()).length === 0,
     [...vo.state.vsbSandboxes.keys()].join(","));
   await av3.release();
-  await vo.close();
 } catch (e) {
   check("no exception", false, String((e as Error).stack ?? e));
 }
 if (results.some((r) => !r.ok)) console.log(quiet.slice(-30).join("\n"));
-boat.close();
+await vo.close();
 await db.close();
 rmSync(tmp, { recursive: true, force: true });
 const pass = results.every((r) => r.ok);

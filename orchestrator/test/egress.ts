@@ -1,7 +1,8 @@
 /**
  * Egress lockdown pieces (orchestrator/core/egress.ts), tested on this host: the generated proxy really runs, lets an
  * allowlisted host through and refuses everything else; the policy is built from the gateway and repo hosts; the
- * setup script fails closed. The firewall rules themselves are exercised by the in-VM probe on a real boat VM.
+ * setup script fails closed. The firewall rules themselves are exercised by the in-VM probe on a real VM. (Vercel
+ * Sandbox uses its native network policy instead, with its own probe: orchestrator/test/vercel-workers.ts.)
  *   npx tsx orchestrator/test/egress.ts
  */
 import { spawn } from "node:child_process";

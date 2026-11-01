@@ -2,10 +2,10 @@
  * Hermetic test of Vercel Sandbox worker sandboxes (orchestrator/core/sandbox-provider.ts vercelProvider + vmRunner,
  * src/worker-sandboxes.ts broker, src/vercel-sandbox.ts client) end to end:
  *
- *   real worker.ts (RUNNER=boat, no provider in its env) --worker token--> broker routes (real module, temp PGlite)
+ *   real worker.ts (no RUNNER, no provider in its env) --worker token--> broker routes (real module, temp PGlite)
  *     --OIDC-shaped token--> mock Vercel Sandbox (scripts/lib/mock-providers.ts, a scripted VM: state.vsbExec)
  *
- *  - the server's choice (orchestrator credentials sandbox_provider: "vercel") switches the workers to Vercel Sandbox
+ *  - with nothing set, the workers run on Vercel Sandbox (the only provider; RUNNER=boat is a clear error)
  *  - full sessions complete: harness ensured, prepare, detached launch, log follow, final drain, exit status, diff
  *  - commands longer than one broker call (setup, prepare: 600 s) run detached and are polled
  *  - files reach the VM through fs/write (tar.gz); env files hold only the session's ogw_ gateway token, never the
@@ -114,7 +114,7 @@ app.use("/api/worker", (req, res, next) => {
   }, next);
 });
 app.use("/api/worker/sandboxes", workerSandboxRouter((res) => res.locals.worker));
-app.post("/api/worker/orchestrator/credentials", (_req, res) => void res.json({ boat: null, llm: null, sandbox_provider: "vercel" }));
+app.post("/api/worker/orchestrator/credentials", (_req, res) => void res.json({ llm: null, sandbox_provider: "vercel" }));
 app.post("/api/worker/fleet", async (req, res) => {
   // The check-in row the broker reads (a fleet orchestrator must have one; its capacity sizes the cap), as src/fleet.ts writes it.
   await db.query(`INSERT INTO orchestrators (id, capacity, meta) VALUES ($1, $2, '{}') ON CONFLICT (id) DO UPDATE SET capacity = EXCLUDED.capacity, last_seen = now()`,
@@ -140,7 +140,7 @@ const OCTI = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
 // ---------------------------------------------------------------- the real worker
 const worker = spawn(TSX, ["orchestrator/worker.ts"], {
   cwd: ROOT, stdio: ["ignore", "pipe", "pipe"],
-  env: { PATH: process.env.PATH, HOME: process.env.HOME, OCTILLION_URL: OCTI, OCTILLION_WORKER_TOKEN: WORKER_TOKEN, RUNNER: "boat", POD_CAPACITY: "2",
+  env: { PATH: process.env.PATH, HOME: process.env.HOME, OCTILLION_URL: OCTI, OCTILLION_WORKER_TOKEN: WORKER_TOKEN, POD_CAPACITY: "2",
     ORCHESTRATOR_ID: "vwtest", OCTILLION_DEV_ALLOW_LOCAL: "1", POLL_INTERVAL_SECONDS: "1", HEARTBEAT_SECONDS: "30", OCTILLION_EGRESS: "private",
     OCTILLION_VERCEL_EXEC_MAX_SECONDS: "60", OCTILLION_REGISTRY: process.env.OCTILLION_REGISTRY! },
 });
@@ -153,7 +153,7 @@ await new Promise((r) => { worker.once("exit", r); setTimeout(r, 15_000); });
 
 const st = mock.state;
 const statuses = [...completed.values()].map((c) => c.status);
-check("server's choice (sandbox_provider: vercel) puts the workers on Vercel Sandbox", /runner=vercel/.test(wlog) && /vercel sandbox broker OK/.test(wlog),
+check("by default the workers run on Vercel Sandbox (no RUNNER, no provider set)", /runner=vercel/.test(wlog) && /vercel sandbox broker OK/.test(wlog),
   wlog.split("\n").find((l) => /runner=/.test(l))?.slice(0, 160) ?? "");
 check(`all ${sessions.length} sessions completed through Vercel worker sandboxes`, completed.size === sessions.length && statuses.every((s) => s === "completed"),
   `${completed.size} completed: ${[...new Set(statuses)].join(",")} ${[...completed.values()].map((c) => c.error_message).filter(Boolean).join(" | ").slice(0, 300)}`);
@@ -164,7 +164,7 @@ check("one Vercel sandbox per session, owned by this fleet orchestrator (fleet:v
 check("sessions map to their own sandbox", new Set(rows.map((r) => r.session_id)).size === sessions.length);
 check("the diff was taken in every sandbox (streamed through the broker)", scripts.filter((s) => /bash \/tmp\/octi\/diff\.sh/.test(s)).length >= sessions.length);
 const meta = [...completed.values()].map((c) => c.metadata ?? {});
-check("metadata: provider-neutral sandbox_* keys (vercel, size, seconds, est. cost); no boat_* keys",
+check("metadata: provider-neutral sandbox_* keys (vercel, size, seconds, est. cost); none of the older boat_* keys",
   meta.every((m) => m.sandbox_provider === "vercel" && m.sandbox_type === "default" && typeof m.sandbox_seconds === "number" && m.sandbox_est_cost_usd > 0 && m.boat_est_cost_usd === undefined && m.runner === "vercel"),
   JSON.stringify(meta[0] ? { p: meta[0].sandbox_provider, t: meta[0].sandbox_type, s: meta[0].sandbox_seconds, c: meta[0].sandbox_est_cost_usd, r: meta[0].runner } : null));
 check("commands longer than one broker call ran detached and were read back", scripts.some((s) => /timeout -k 10 600 bash \/tmp\/\.octi-x\//.test(s)) && scripts.some((s) => /prepare\.sh/.test(s)));
@@ -217,13 +217,17 @@ check("a stuck setup step fails after its timeout with a clear error", /setup st
   `${stuck} after ${Math.round((Date.now() - t0) / 1000)}s`);
 await vp.delete(sbx);
 
-// Selection rules (orchestrator/core/runners.ts selectRunner): boat unless told otherwise; this process's env wins.
+// Selection rules (orchestrator/core/runners.ts selectRunner): Vercel Sandbox, or a test runner; boat.dev is a clear error.
 const rn = await import("../core/runners.js");
-check("selection: boat by default; the server's vercel switches RUNNER=boat; env overrides either way; docker/local untouched",
-  rn.selectRunner("boat", undefined, null) === rn.boatRunner && rn.selectRunner("boat", "boat", null) === rn.boatRunner
-  && rn.selectRunner("boat", "vercel", null) === rn.vercelRunner && rn.selectRunner("boat", "vercel", "boat") === rn.boatRunner
-  && rn.selectRunner("boat", null, "vercel") === rn.vercelRunner && rn.selectRunner("vercel", null, null) === rn.vercelRunner
-  && rn.selectRunner("docker", "vercel", null)?.name === "docker" && rn.selectRunner("local", "vercel", "vercel")?.name === "local");
+const thrown = (f: () => unknown) => { try { f(); return ""; } catch (e) { return String((e as Error).message); } };
+const savedProvider = process.env.OCTILLION_SANDBOX_PROVIDER;
+process.env.OCTILLION_SANDBOX_PROVIDER = "boat";
+const providerBoat = thrown(() => rn.selectRunner("vercel"));
+if (savedProvider == null) delete process.env.OCTILLION_SANDBOX_PROVIDER; else process.env.OCTILLION_SANDBOX_PROVIDER = savedProvider;
+check("selection: vercel by default; docker/local untouched; RUNNER=boat and OCTILLION_SANDBOX_PROVIDER=boat throw a clear error",
+  rn.selectRunner("vercel") === rn.vercelRunner && rn.selectRunner(CFG.runner) === rn.vercelRunner && rn.selectRunner("docker")?.name === "docker"
+  && rn.selectRunner("local")?.name === "local" && /^RUNNER=boat: boat\.dev was retired on 2026-11-01/.test(thrown(() => rn.selectRunner("boat")))
+  && /^OCTILLION_SANDBOX_PROVIDER=boat: boat\.dev was retired/.test(providerBoat) && !("boat" in rn.RUNNERS), `${thrown(() => rn.selectRunner("boat"))} | ${providerBoat}`);
 
 server.close(); await mock.close();
 if (results.some((r) => !r.ok)) console.log("--- worker log tail\n" + wlog.split("\n").slice(-40).join("\n"));

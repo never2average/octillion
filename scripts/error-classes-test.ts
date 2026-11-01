@@ -14,7 +14,7 @@ check("missing provider key, new 424 and old 503 rows", () => {
   assert.equal(failed("No anthropic credential in the vault"), "credentials");
   assert.deepEqual(FIX_LINKS[classifySession({ status: "failed", error_message: "No vault provider supplies X" })!.fix!], { label: "Key vault", href: "/admin/keys" });
 });
-check("harness install, gateway token, sandbox provider key and capacity (boat and Vercel)", () => {
+check("harness install, gateway token, sandbox provider key and capacity (older boat.dev messages too)", () => {
   assert.equal(failed("harness qwen-code not available in the sandbox (npm install failed)"), "harness_install");
   assert.equal(failed("upstream said: Gateway token is invalid, expired or revoked"), "gateway_token");
   assert.equal(failed("boat runner: 403 api_key_action_forbidden"), "sandbox_permission");
@@ -67,7 +67,12 @@ check("orchestrator: reap reasons normalized, routine ones marked", () => {
   assert.equal(reap("stale: no fleet check-in for 5 min")?.key, "reap:stale");
   assert.equal(reap("stuck booting > 10 min")?.key, "reap:stuck_booting");
   assert.equal(reap("TTL about to expire")?.key, "reap:ttl");
-  assert.equal(reap("sandbox gone from boat")?.key, "reap:sandbox_gone");
+  assert.equal(reap("sandbox gone from boat")?.key, "reap:sandbox_gone", "an older reason");
+  assert.equal(reap("sandbox gone from Vercel Sandbox")?.key, "reap:sandbox_gone");
+  assert.deepEqual([reap("job over: orchestrator exited (job sim_x is completed)")?.key, reap("job over: orchestrator exited (job sim_x is completed)")?.routine], ["reap:job_ended", true],
+    "a clean exit after the job ended is the job ending, not staleness");
+  assert.deepEqual([reap("orchestrator exited: left the fleet")?.key, reap("orchestrator exited: left the fleet")?.routine], ["reap:exited", true]);
+  assert.equal(reap("boat.dev (retired): row closed without a provider call")?.key, "reap:retired");
   assert.equal(reap("sandbox is archived")?.key, "reap:sandbox_gone");
   assert.equal(reap("launch never created a sandbox")?.key, "reap:never_created");
   for (const [r, k] of [["drained (idle exit)", "idle_drain"], ["drained (job sim_1 over or idle)", "job_drain"],

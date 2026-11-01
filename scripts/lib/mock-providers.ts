@@ -23,13 +23,11 @@
 // apollo_...), over state.apolloPeople (POST /_mock/apollo/people); POST /_mock/apollo/ratelimit {count, retry_after}.
 // Cloudflare Workers AI: POST /client/v4/accounts/:id/ai/v1/chat/completions (Bearer); state.aiRequests logs each body and
 // state.aiReply(body) decides the answer (in-process only; unset: 503).
-// boat.dev under /boat/api/v1 (create, get, rename, commands, delete, list; Bearer boat_...) and Vercel Sandbox under
-// /vercel-sandbox (/v2/sandboxes and session commands, ND-JSON; Bearer + teamId; detached commands with status / logs / kill,
-// fs/write tar.gz and network-policy for worker sandboxes: state.vsbExec scripts what a command does), for the sandbox probe (state.boatStartsPerDay
-// is what boat's /limits reports as the daily start limit): POST
-// /_mock/boat/drop {id} and /_mock/vercel/drop {name} make a sandbox vanish or stop early; /_mock/{boat,vercel}/fail
-// {kind: create|exec|get|delete|list (boat), n} makes the next n such calls answer 502. A boat sandbox answers only the key
-// that made it (each key is an account); the Vercel list wants `project`, its get and delete `projectId` (as documented).
+// Vercel Sandbox under /vercel-sandbox (/v2/sandboxes and session commands, ND-JSON; Bearer + teamId; detached commands
+// with status / logs / kill, fs/write tar.gz and network-policy for worker sandboxes: state.vsbExec scripts what a command
+// does), for the sandbox probe, the worker sandbox broker and orchestrators: POST /_mock/vercel/drop {name} stops a
+// sandbox early; /_mock/vercel/fail {kind: create|exec|get|delete|list, n} makes the next n such calls answer 502. The
+// list wants `project`, get and delete `projectId` (as documented).
 import express from "express";
 import { randomBytes, randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
@@ -65,10 +63,9 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     clerkMembersDown: false, apolloPeople: [] as any[], apolloRequests: [] as any[], apolloLimited: 0, apolloRetryAfter: 1,
     // Cloudflare Workers AI: every chat request (its body), and how to answer one (status and/or content; unset: 503).
     aiRequests: [] as any[], aiReply: null as null | ((body: any) => { status?: number; content?: string }),
-    // boat.dev (under /boat/api/v1) and Vercel Sandbox (under /vercel-sandbox): the sandboxes each holds, every request
-    // (method and path), and failures to inject (the next `n` calls of a kind answer 502).
-    boatSandboxes: new Map<string, any>(), boatRequests: [] as string[], boatStartsPerDay: 200, boatFail: { create: 0, exec: 0, get: 0, delete: 0, list: 0 } as Record<string, number>,
-    vsbSandboxes: new Map<string, any>(), vsbRequests: [] as string[], vsbFail: { create: 0, exec: 0, get: 0, delete: 0 } as Record<string, number>,
+    // Vercel Sandbox (under /vercel-sandbox): the sandboxes it holds, every request (method and path), and failures to
+    // inject (the next `n` calls of a kind answer 502).
+    vsbSandboxes: new Map<string, any>(), vsbRequests: [] as string[], vsbFail: { create: 0, exec: 0, get: 0, delete: 0, list: 0 } as Record<string, number>,
     // Worker sandboxes (src/worker-sandboxes.ts): detached commands, their logs, files (fs/write tar.gz) and network policies.
     // vsbExec decides what a detached command does (in-process only; unset: exit 0, no output, done at once).
     vsbCmds: new Map<string, any>(), vsbFiles: new Map<string, Map<string, Buffer>>(), vsbPolicies: new Map<string, any>(),
@@ -609,49 +606,7 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     res.json({ id: id("chatcmpl"), object: "chat.completion", model: req.body?.model, choices: [{ index: 0, message: { role: "assistant", content: r.content ?? "" }, finish_reason: "stop" }],
       usage: { prompt_tokens: Math.ceil(JSON.stringify(req.body?.messages ?? []).length / 4), completion_tokens: Math.ceil((r.content ?? "").length / 4) } });
   });
-  // ---------- boat.dev v1 (the fields the sandbox probe and the autoscaler read), Bearer boat_... ----------
-  // POST /_mock/boat/drop {id} makes a sandbox vanish (as boat did to orchestrators); /_mock/boat/fail {kind, n}.
   const failing = (f: Record<string, number>, kind: string) => (f[kind]! > 0 ? (f[kind]!--, true) : false);
-  const b = express.Router();
-  b.use((req, res, next) => {
-    s.boatRequests.push(`${req.method} ${req.path}`);
-    /^Bearer boat_\S+$/.test(req.get("authorization") ?? "") ? next() : void res.status(401).json({ ok: false, code: "unauthorized", message: "bad key" });
-  });
-  const boatSb = (x: any) => ({ id: x.id, name: x.name, state: x.state, type: x.type, createdAt: x.createdAt, archiveAfter: x.archiveAfter });
-  b.get("/limits", (_req, res) => void res.json({ ok: true, currentLimits: { activeSandboxes: 100 }, startLimits: { perMinute: 12, perHour: 60, perDay: s.boatStartsPerDay },
-    activeSandboxes: [...s.boatSandboxes.values()].length }));
-  // Each key is its own account: a sandbox is listed and reachable only with the key that made it (owner; unset: any key).
-  const keyOf = (req: express.Request) => (req.get("authorization") ?? "").slice(7);
-  const mine = (req: express.Request, x: any) => !x.owner || x.owner === keyOf(req);
-  b.get("/sandboxes", (req, res) => failing(s.boatFail, "list") ? void res.status(502).json({ ok: false, code: "upstream" })
-    : void res.json({ ok: true, sandboxes: [...s.boatSandboxes.values()].filter((x) => mine(req, x)).map(boatSb), pageInfo: { nextCursor: null } }));
-  b.post("/sandboxes", (req, res) => {
-    if (failing(s.boatFail, "create")) return void res.status(502).json({ ok: false, code: "upstream", message: "mock: create failed" });
-    const sid = `bx_${randomBytes(5).toString("hex")}`;
-    s.boatSandboxes.set(sid, { id: sid, name: "", state: "ready", owner: keyOf(req), type: req.body?.type, ttlSeconds: req.body?.ttlSeconds, createdAt: now(),
-      archiveAfter: new Date(Date.now() + Number(req.body?.ttlSeconds ?? 3600) * 1000).toISOString() });
-    res.status(202).json({ ok: true, sandbox: { id: sid, state: "provisioning" } });
-  });
-  b.all("/sandboxes/:id{/*rest}", (req, res) => {
-    const found = s.boatSandboxes.get(req.params.id), x = found && mine(req, found) ? found : null;
-    const rest = req.path.slice(`/sandboxes/${req.params.id}`.length);
-    if (!x) return void res.status(404).json({ ok: false, code: "not_found", message: "sandbox not found" });
-    if (req.method === "GET" && !rest) return failing(s.boatFail, "get") ? void res.status(502).json({ ok: false, code: "upstream" }) : void res.json({ ok: true, sandbox: boatSb(x) });
-    if (req.method === "PATCH" && !rest) { if (req.body?.name) x.name = req.body.name; return void res.json({ ok: true }); }
-    if (req.method === "DELETE" && !rest) {
-      if (failing(s.boatFail, "delete")) return void res.status(502).json({ ok: false, code: "upstream" });
-      if (req.get("x-ascii-confirm-delete") !== x.id) return void res.status(400).json({ ok: false, code: "confirm_required" });
-      s.boatSandboxes.delete(x.id); return void res.status(202).json({ ok: true });
-    }
-    if (req.method === "POST" && rest === "/commands") {
-      if (failing(s.boatFail, "exec")) return void res.status(502).json({ ok: false, code: "sandbox_direct_failed", message: "Socket is closed" });
-      return void res.json({ ok: true, exitCode: 0, stdout: "ok\n 10:00:00 up 1 min,  load average: 0.00", stderr: "" });
-    }
-    res.status(404).json({ ok: false, code: "not_found" });
-  });
-  app.use("/boat/api/v1", b);
-  app.post("/_mock/boat/drop", (req, res) => { s.boatSandboxes.delete(String(req.body?.id)); res.json({ ok: true }); });
-  app.post("/_mock/boat/fail", (req, res) => { s.boatFail[String(req.body?.kind)] = Number(req.body?.n ?? 1); res.json({ ok: true }); });
 
   // ---------- Vercel Sandbox v2 (named sandboxes, one session each), Bearer + teamId ----------
   // POST /_mock/vercel/drop {name} stops a sandbox early (status stopped); /_mock/vercel/fail {kind, n}.
@@ -666,6 +621,7 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     persistent: x.persistent, timeout: x.timeout, statusUpdatedAt: x.createdAt, updatedAt: x.createdAt }, session: { id: x.session, status: x.status, region: x.region } });
   v.get("/v2/sandboxes", (req, res) => {
     if (!req.query.project) return void res.status(400).json({ error: { code: "bad_request", message: "project is required" } });
+    if (failing(s.vsbFail, "list")) return void res.status(502).json({ error: { code: "bad_gateway" } });
     const prefix = String(req.query.namePrefix ?? "");
     res.json({ sandboxes: [...s.vsbSandboxes.values()].filter((x) => x.name.startsWith(prefix) && !s.vsbHideFromList.has(x.name)).map((x) => vsb(x).sandbox), pagination: { count: s.vsbSandboxes.size, next: null } });
   });

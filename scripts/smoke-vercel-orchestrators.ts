@@ -1,6 +1,6 @@
 // Orchestrators on Vercel Sandbox, for scripts/smoke.ts (orchestrator/deploy/orchestrator-host.ts, vercel-orch.ts), against
 // the mock Vercel Sandbox in scripts/lib/mock-providers.ts scripted as an orchestrator VM (orchestrator/test/vercel-orch-mock.ts):
-// which provider is selected; a launch with the supervisor that the real host guard accepts inside the sandbox, with no
+// a retired provider is a clear config error; a launch with the supervisor that the real host guard accepts inside the sandbox, with no
 // Vercel credential in it; get by id (live, then gone) and the listing; the orphan rules per provider (never a worker or a
 // probe); the capacity note old and new; accounting labels and prices. The autoscaler around it: orchestrator/test/per-job.ts.
 // Then the OIDC scope: a request from outside cannot plant its token, and a token of another team or project is refused
@@ -20,15 +20,16 @@ export async function vercelOrchestratorChecks({ base, mockUrl, mockState, worke
   const tokenFor = (team: string, project: string) => `${b64({ alg: "RS256" })}.${b64({ owner_id: team, project_id: project, iss: "https://oidc.vercel.com/x" })}.c2ln`;
   const MOCK_OIDC = tokenFor("team_smoke", "prj_smoke"); // this deployment's team and project (smoke.ts sets them)
   const EVIL = tokenFor("team_attacker", "prj_attacker");
-  const { BOAT_PRICE_PER_HOUR, vercelEstCostUsd } = await import("../orchestrator/core/config.js");
+  const { sandboxConfigError, vercelEstCostUsd } = await import("../orchestrator/core/config.js");
   const savedExec = mockState.vsbExec;
   try {
-    // ---- selection: one switch, an orchestrator-only override, boat by default ----
-    assert.equal(host.orchestratorProvider({}), "boat");
-    assert.equal(host.orchestratorProvider({ OCTILLION_SANDBOX_PROVIDER: "vercel" }), "vercel");
-    assert.equal(host.orchestratorProvider({ OCTILLION_SANDBOX_PROVIDER: "vercel", OCTILLION_ORCHESTRATOR_PROVIDER: "boat" }), "boat");
-    assert.equal(host.orchestratorProvider({ OCTILLION_ORCHESTRATOR_PROVIDER: "vercel" }), "vercel");
-    assert.equal(host.workerProvider({ OCTILLION_ORCHESTRATOR_PROVIDER: "vercel" }), "boat", "the override moves orchestrators only");
+    // ---- selection: Vercel Sandbox only; the retired boat.dev is a clear config error, not a silent fallback ----
+    assert.equal(sandboxConfigError({}), null, "nothing to set: Vercel Sandbox is the default");
+    assert.equal(sandboxConfigError({ OCTILLION_SANDBOX_PROVIDER: "vercel", OCTILLION_ORCHESTRATOR_PROVIDER: "vercel" }), null);
+    assert.match(sandboxConfigError({ OCTILLION_SANDBOX_PROVIDER: "boat" }) ?? "", /^OCTILLION_SANDBOX_PROVIDER=boat: boat\.dev was retired on 2026-11-01/);
+    assert.match(sandboxConfigError({ OCTILLION_ORCHESTRATOR_PROVIDER: "boat" }) ?? "", /OCTILLION_ORCHESTRATOR_PROVIDER=boat: boat\.dev was retired/);
+    assert.match(sandboxConfigError({ OCTILLION_SANDBOX_PROVIDER: "modal" }) ?? "", /unknown sandbox provider/);
+    assert.match(sandboxConfigError({ RUNNER: "boat" }) ?? "", /RUNNER=boat: boat\.dev was retired/);
 
     // ---- a launch through the host, on the mock ----
     const vm = installOrchestratorVm({ url: mockUrl, state: mockState });
@@ -83,7 +84,7 @@ export async function vercelOrchestratorChecks({ base, mockUrl, mockState, worke
     assert.equal(orphanKind({ name: "octs-vimg-smoke-0123456789abcdef", createdAt: old }, Date.now(), false, h), "image_builder");
     assert.equal(orphanKind({ name: "octs-vimg-smoke-0123456789abcdef", createdAt: old }, Date.now(), true, h), null, "not while a build runs");
 
-    // ---- the capacity note, old boat wording and new ----
+    // ---- the capacity note, the older wording (boat's plan) and the current one ----
     const note = capacityNote("sim_a", "vercel", -2);
     assert.equal(note, "sim_a waits for sandbox capacity on Vercel Sandbox (0 free)");
     assert.deepEqual([...(CAPACITY_NOTE.exec(note) ?? [])].slice(1), ["sim_a", "Vercel Sandbox", "0"]);
@@ -91,9 +92,9 @@ export async function vercelOrchestratorChecks({ base, mockUrl, mockState, worke
 
     // ---- accounting labels and prices ----
     assert.equal(host.providerLabel("vercel"), "Vercel Sandbox");
-    assert.equal(host.providerLabel("boat"), "boat.dev");
-    assert.equal(host.providerLabel(null), "boat.dev", "rows from before migration 0017 are boat");
-    assert.equal(host.orchSandboxCostUsd("boat", 3600), BOAT_PRICE_PER_HOUR.small);
+    assert.equal(host.providerLabel("boat"), "boat.dev (retired)", "rows from before the retirement stay readable");
+    assert.equal(host.providerLabel(null), "boat.dev (retired)", "rows from before migration 0017 ran on boat.dev");
+    assert.equal(host.orchSandboxCostUsd("boat", 3600), host.RETIRED_BOAT_SMALL_PER_HOUR, "old boat rows keep their estimate");
     assert.equal(host.orchSandboxCostUsd("vercel", 3600), vercelEstCostUsd("small", 3600));
     assert.ok(host.orchSandboxCostUsd("vercel", 3600) > 0.02 && host.orchSandboxCostUsd("vercel", 3600) < 0.2, "1 vCPU / 2 GB for an hour: memory plus a share of active CPU");
     // ---- OIDC scope: configured (OCTILLION_VERCEL_TEAM_ID / _PROJECT_ID) ----

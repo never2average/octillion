@@ -7,7 +7,7 @@
 //   npm run keyvault -- ids anthropic                              (that type's credential ids, one per line)
 //   `set` is gone (it used to replace the type's key): it refuses and lists the type's ids.
 // Exit codes: 0 ok, 1 error, 3 the key is already in the vault (add / replace refused as a duplicate).
-//   npm run keyvault -- add boat --from-file /secure/boat.env      (KEY=value files: the value is used)
+//   npm run keyvault -- add exa --from-file /secure/exa.env        (KEY=value files: the value is used)
 //   npm run keyvault -- list | delete <id> | rekey | backfill-digests | usage
 //   npm run keyvault -- provider <slug> --mode gateway --upstream https://... --header x-api-key --prefix "" --env FOO_API_KEY
 //   npm run keyvault -- provider anthropic --backend vertex --vertex-project my-gcp-project [--vertex-region global]

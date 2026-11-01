@@ -83,7 +83,7 @@ export async function workerSandboxChecks({ db, base, mockUrl, mockState, worker
     mockState.vsbExec = ({ script }: { script: string }) => (script === "echo hi" ? { stdout: "hi\n", stderr: "warn\n", exitCode: 3 } : {});
     assert.deepEqual(await json(call("POST", `${one}/exec`, tokA, { command: "echo hi", timeout_sec: 30 })), { exitCode: 3, stdout: "hi\n", stderr: "warn\n" }, "sync exec: output and exit code");
     const streamed = (await (await call("POST", `${one}/exec`, tokA, { command: "echo hi", timeout_sec: 30, stream: true })).text()).trim().split("\n").map((l) => JSON.parse(l));
-    assert.deepEqual(streamed, [{ type: "started" }, { type: "stdout", data: "hi\n" }, { type: "stderr", data: "warn\n" }, { type: "exit", exitCode: 3 }], "streamed exec: boat's frame shape");
+    assert.deepEqual(streamed, [{ type: "started" }, { type: "stdout", data: "hi\n" }, { type: "stderr", data: "warn\n" }, { type: "exit", exitCode: 3 }], "streamed exec: the runner's frame shape");
     mockState.vsbExec = () => ({ stdout: "x".repeat(ws.MAX_OUTPUT + 1024) });
     const big = await json(call("POST", `${one}/exec`, tokA, { command: "big", timeout_sec: 30 }));
     assert.ok(big.truncated === true && big.stdout.length < ws.MAX_OUTPUT + 200 && /truncated by the sandbox broker/.test(big.stdout.slice(-80)), "buffered output is capped at 16 MiB, with a marker");
@@ -149,7 +149,7 @@ export async function workerSandboxChecks({ db, base, mockUrl, mockState, worker
     assert.ok([401, 403].includes((await fetch(`${base}/api/admin/onboarding/compute/sandbox-logs?session=${A!.id}`, { headers: { authorization: `Bearer ${workerToken}` } })).status), "not with a worker token");
     assert.equal((await adm("GET", "/compute/sandbox-logs")).status, 400);
     assert.equal((await adm("GET", "/compute/sandbox-logs?session=nosuch")).status, 404);
-    // An orchestrator on Vercel: its log; a boat orchestrator is refused (the boat CLI reads those).
+    // An orchestrator on Vercel: its log; a row from before boat.dev's retirement is refused (nothing to read).
     const orchName = `${ws.workerPrefix().replace("-vw-", "-vo-")}diag`;
     await fetch(`${mockUrl}/vercel-sandbox/v2/sandboxes?teamId=team_smoke`, { method: "POST", headers: { authorization: "Bearer x", "content-type": "application/json" }, body: JSON.stringify({ name: orchName }) });
     const [vo] = await db.query<any>("INSERT INTO orchestrator_sandboxes (sandbox_id, orchestrator_id, state, provider) VALUES ($1, 'orch-diag-v', 'running', 'vercel') RETURNING id", [orchName]);
@@ -159,7 +159,7 @@ export async function workerSandboxChecks({ db, base, mockUrl, mockState, worker
     const olj = await ol.json();
     assert.ok(ol.status === 200 && olj.kind === "orchestrator" && /claim failed/.test(olj.output) && !/abcdefghijklmnop/.test(olj.output) && /\/var\/lib\/octi\/orchestrator\.log/.test(diagScript),
       `the orchestrator log, redacted: ${JSON.stringify(olj).slice(0, 300)}`);
-    assert.equal((await adm("GET", `/compute/sandbox-logs?orchestrator=${bo.id}`)).status, 400, "boat orchestrators are not read here");
+    assert.equal((await adm("GET", `/compute/sandbox-logs?orchestrator=${bo.id}`)).status, 400, "old boat.dev orchestrators are not read here");
     await db.query("DELETE FROM orchestrator_sandboxes WHERE id = ANY($1)", [[vo.id, bo.id]]);
     mockState.vsbSandboxes.delete(orchName);
     mockState.vsbExec = null;

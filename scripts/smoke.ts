@@ -516,7 +516,7 @@ try {
   const [soloIndie] = await db.query<any>("SELECT summary FROM developer_profiles WHERE slug = 'example-solo-indie'");
   assert.ok(asCustomer.profile === jobs[0].profile.name && asCustomer.profile_slug === "example-solo-indie" && asCustomer.profile_summary === soloIndie.summary && asCustomer.prompt,
     "a shared persona in a run result over MCP: name, slug and summary; the task with its prompt");
-  assert.ok(jobs.every((j) => j.agent_id === "claude-code/sonnet" && j.agent?.image?.boat_snapshot), "jobs carry the worker agent and its image");
+  assert.ok(jobs.every((j) => j.agent_id === "claude-code/sonnet" && j.agent?.image?.docker), "jobs carry the worker agent and its image");
   assert.ok(jobs.every((j) => j.exec_mode === "plan"), "jobs carry their execution mode (plan then execute by default)");
   // ---------- key vault + inference gateway ----------
   const kv = await import("../src/keyvault.js");
@@ -1004,7 +1004,7 @@ try {
   const sessionRow = async (id: string) => (await db.query<any>("SELECT status, events, error_message, metadata FROM agent_sessions WHERE id = $1", [id]))[0];
   const flaky = fair[0].session_id, broken = fair[1].session_id;
   await worker(`/sessions/${flaky}/events`, { events: [{ type: "assistant", content: "half-finished work of the failed attempt" }] });
-  await worker(`/sessions/${flaky}/complete`, { status: "failed", error_message: "boat runner: boat command stream error: ECONNRESET: The socket connection was closed unexpectedly." });
+  await worker(`/sessions/${flaky}/complete`, { status: "failed", error_message: "vercel runner: sandbox command stream error: ECONNRESET: The socket connection was closed unexpectedly." });
   let row = await sessionRow(flaky);
   assert.equal(row.status, "queued", "an infrastructure failure puts the session back in the queue");
   assert.equal(row.metadata.infra_retries, 1);
@@ -1012,7 +1012,7 @@ try {
   assert.equal((await (await import("../src/transcripts.js")).transcripts().read(fair[0].org_id, flaky, 0, 10)).total, 0, "the failed attempt's transcript is cleared");
   const again = (await (await worker("/claim", { worker_id: "smoke-fair", limit: 10, models: ["claude-sonnet-5-5"] })).json()).jobs;
   assert.ok(again.some((j: any) => j.session_id === flaky), "the retried session is claimable again");
-  await worker(`/sessions/${flaky}/complete`, { status: "failed", error_message: "boat runner: ECONNRESET" });
+  await worker(`/sessions/${flaky}/complete`, { status: "failed", error_message: "vercel runner: ECONNRESET" });
   row = await sessionRow(flaky);
   assert.equal(row.status, "failed", "a second infrastructure failure is final (one retry)");
   await worker(`/sessions/${broken}/complete`, { status: "failed", error_message: "/v1/chat/completions is not available on Vertex AI (only /v1/messages and /v1/messages/count_tokens)" });
@@ -1254,13 +1254,13 @@ try {
     console.log("✓ persona and task libraries: list, search, page, edit, deactivate; the vault sync keeps admin edits");
   }
 
-  // ---------- Compute page summary (src/compute.ts): verdict, limits, boat listing cache ----------
+  // ---------- Compute page summary (src/compute.ts): verdict, limits, the sandbox listing from rows ----------
   {
-    const { computeVerdict, bindingLimit, classifySandboxNames, cachedFetch, resetComputeCaches, sandboxUsage } = await import("../src/compute.js");
+    const { computeVerdict, bindingLimit, cachedFetch, resetComputeCaches, sandboxUsage } = await import("../src/compute.js");
     const { kickConfigured } = await import("../src/autoscaler.js");
     // The verdict rules, worst first; none true is one green line.
     const facts = {
-      enabled: true, runtime: "vm" as const, kick_configured: false, has_boat_key: true, boat_error: null,
+      enabled: true, runtime: "vm" as const, kick_configured: false, config_error: null,
       tick: { age_s: 12, error: null, note: null }, queue: { sessions: 0, research: 0, oldest_session_age_s: null, oldest_research_age_s: null, unclaimable: 0 },
       running: { sessions: 3, orchestrators: 1 }, others: 0, free: 50, per_job: true, job_orch_live: 1, job_orch_cap: 12, not_checking_in: 0,
       launch_failures_1h: { count: 0, step: null, message: null }, missing_keys: [], leaked_workers: 0, orphan_deletes_24h: 0, namespace: "octi", idle_orchestrators: 0,
@@ -1269,26 +1269,23 @@ try {
     assert.deepEqual(ok.map((v) => v.code), ["ok"]);
     assert.equal(ok[0]!.text, "Compute is healthy. 3 sessions running on 1 orchestrator, queue 0.");
     assert.deepEqual(computeVerdict({ ...facts, runtime: "vercel" }).map((v) => v.code), ["kick_unconfigured"], "Vercel needs the kick; a VM ticks on its own");
-    const bad = computeVerdict({ ...facts, enabled: true, has_boat_key: false, boat_error: "ignored without a key",
+    const bad = computeVerdict({ ...facts, enabled: true, config_error: "OCTILLION_SANDBOX_PROVIDER=boat: boat.dev was retired on 2026-11-01. Vercel Sandbox is the only provider: unset OCTILLION_SANDBOX_PROVIDER (or set it to \"vercel\").",
       tick: { age_s: 47 * 60, error: null, note: "sim_x waits for boat plan capacity (3 free); cooldown: sim_y's orchestrator idled out with its sessions still queued" },
       queue: { sessions: 4, research: 0, oldest_session_age_s: 20 * 60, oldest_research_age_s: null, unclaimable: 2 }, others: 7, job_orch_live: 12,
       missing_keys: [{ agent_id: "codex/gpt", missing_env: ["CODEX_API_KEY"] }, { agent_id: "claude-code/sonnet", missing_env: [] }], leaked_workers: 1 });
-    assert.deepEqual(bad.map((v) => v.code), ["no_boat_key", "tick_stale", "queue_old", "unclaimable", "plan_capacity", "at_cap", "cooldown", "missing_keys", "leaked_workers"]);
+    assert.deepEqual(bad.map((v) => v.code), ["sandbox_config", "tick_stale", "queue_old", "unclaimable", "plan_capacity", "at_cap", "cooldown", "missing_keys", "leaked_workers"]);
     assert.equal(bad.find((v) => v.code === "tick_stale")!.text, "4 sessions are queued but nothing has ticked for 47 min.");
-    // Old ticks' boat wording still reads; new notes name the provider.
-    assert.equal(bad.find((v) => v.code === "plan_capacity")!.text, "sim_x waits for sandbox capacity on boat.dev: 3 free, other deployments use 7.");
+    assert.match(bad[0]!.text, /^OCTILLION_SANDBOX_PROVIDER=boat: boat\.dev was retired/, "a retired provider setting is a red line saying so");
+    // Old ticks' wording (boat's plan) still reads; new notes name the provider.
+    assert.equal(bad.find((v) => v.code === "plan_capacity")!.text, "sim_x waits for sandbox capacity on boat.dev (retired): 3 free.");
     const vercelCap = computeVerdict({ ...facts, tick: { ...facts.tick, note: "sim_v waits for sandbox capacity on Vercel Sandbox (0 free); launch rate cap: 120 Vercel orchestrators per hour (OCTILLION_VERCEL_ORCH_STARTS_PER_HOUR)" } });
     assert.equal(vercelCap.find((v) => v.code === "plan_capacity")!.text, "sim_v waits for sandbox capacity on Vercel Sandbox: 0 free.");
     assert.ok(vercelCap.some((v) => v.code === "rate_cap"), "the Vercel launch rate cap is a verdict line");
-    // With everything on Vercel Sandbox and no boat orchestrator left, a missing boat key is not red.
-    assert.deepEqual(computeVerdict({ ...facts, has_boat_key: false, boat_needed: false }).map((v) => v.code), ["ok"]);
-    assert.deepEqual(computeVerdict({ ...facts, has_boat_key: false }).map((v) => v.code), ["no_boat_key"], "boat still needed by default");
     assert.equal(bad.find((v) => v.code === "missing_keys")!.text, "codex/gpt cannot run: no vault key for CODEX_API_KEY.");
     assert.ok(bad.every((v) => v.level !== "green") && bad[0]!.level === "red" && bad.at(-1)!.level === "amber");
     assert.deepEqual(computeVerdict({ ...facts, enabled: false }).map((v) => v.code), ["autoscale_off"]);
-    assert.deepEqual(computeVerdict({ ...facts, boat_error: "fetch failed" }).map((v) => v.code), ["boat_down"]);
     assert.deepEqual(computeVerdict({ ...facts, launch_failures_1h: { count: 1, step: "ready", message: "x" } }).map((v) => v.code), ["ok"], "one failed launch is not a pattern");
-    // Which limit binds: the tick's note first, then boat's budget, then the caps while work waits.
+    // Which limit binds: the tick's note first, then the sandbox budget, then the caps while work waits.
     const lim = { note: null, budget_reason: undefined, queued: 5, per_job: true, free: 30, job_orch_live: 2, job_orch_cap: 12, pods_max_reserved: 10, pods_cap: 40 };
     assert.equal(bindingLimit(lim), null);
     assert.equal(bindingLimit({ ...lim, note: "at OCTILLION_MAX_JOB_ORCHESTRATORS (12)" }), "job_orch");
@@ -1302,34 +1299,28 @@ try {
     assert.equal(bindingLimit({ ...lim, job_orch_live: 12 }), "job_orch");
     assert.equal(bindingLimit({ ...lim, job_orch_live: 12, queued: 0 }), null, "a full cap with nothing queued binds nothing");
     assert.equal(bindingLimit({ ...lim, pods_max_reserved: 40 }), "pods");
-    // boat's sandboxes sorted by name: ours (orchestrators, workers with their parent, the image builder) and others'.
-    const sbs = classifySandboxNames([
-      { id: "bx_a", name: "octi-orch-a", state: "running" }, { id: "bx_w1", name: "octi-w-orch-a-claude-code-sonnet", state: "running" },
-      { id: "bx_w2", name: "octi-w-orch-zz-codex", state: "running" }, { id: "bx_w3", name: "octi-w-my-orch-1-codex", state: "running" },
-      { id: "bx_i", name: "octi-img-build", state: "running" }, { id: "bx_m", name: "octi-orch-img-abc", state: "ready" },
-      { id: "bx_o", name: "octv-orch-b", state: "running" }, { id: "bx_n", state: "archived" },
-    ], "octi", ["orch-a", "my-orch-1"]);
-    assert.deepEqual(sbs.map((s) => [s.kind, s.parent_orchestrator_id, s.prefix]), [
-      ["orchestrator", null, null], ["worker", "orch-a", null], ["worker", "orch-zz", null], ["worker", "my-orch-1", null],
-      ["image_builder", null, null], ["image", null, null], ["other", null, "octv"], ["other", null, "(unnamed)"]]);
-    assert.equal(sbs.at(-1)!.live, false);
-    // Usage from the one listing: the image builder and images are ours, not other deployments'; boat's (older)
-    // activeNow is not used while the listing answers.
+    // Usage from the listing (our rows): orchestrators, workers, images and probes are ours; without a listing, the
+    // limits' activeNow less what our rows hold.
+    const sbs = [
+      { id: "octs-vo-smoke-va", kind: "orchestrator", live: true, parent_orchestrator_id: null, prefix: null, state: "running" },
+      { id: "octs-vw-smoke-1", kind: "worker", live: true, parent_orchestrator_id: "orch-va", prefix: null, state: "ready" },
+      { id: "octs-vw-smoke-2", kind: "worker", live: true, parent_orchestrator_id: "orch-gone", prefix: null, state: "starting" },
+    ] as any[];
     assert.deepEqual(sandboxUsage({ ok: true, sandboxes: sbs }, 99, 0),
-      { active_now: 7, ours_orch: 1, ours_workers: 3, ours_images: 2, ours_probes: 0, others: 1, other_prefixes: ["octv"] });
+      { active_now: 3, ours_orch: 1, ours_workers: 2, ours_images: 0, ours_probes: 0, others: 0, other_prefixes: [] });
     assert.deepEqual(sandboxUsage({ ok: false, sandboxes: [] }, 30, 12), { active_now: 30, ours_orch: 0, ours_workers: 0, ours_images: 0, ours_probes: 0, others: 18, other_prefixes: [] },
-      "no listing: boat's activeNow less what our rows hold");
+      "no listing: activeNow less what our rows hold");
     // The cache: one call per TTL, a failure serves the last good value marked stale, a hung call times out.
     {
       let calls = 0, mode: "ok" | "fail" | "hang" = "ok";
-      const get = cachedFetch(async () => { calls++; if (mode === "fail") throw new Error("boat 500"); if (mode === "hang") await new Promise(() => {}); return calls; },
+      const get = cachedFetch(async () => { calls++; if (mode === "fail") throw new Error("provider 500"); if (mode === "hang") await new Promise(() => {}); return calls; },
         { ttlMs: 60_000, timeoutMs: 50 });
       const a = await get(), b = await get();
       assert.ok(a.ok && !a.stale && a.value === 1 && b.value === 1 && calls === 1, "a fresh value is reused within the TTL");
       mode = "fail";
       const c = await get(true);
-      assert.ok(c.ok && c.stale && c.value === 1 && c.error === "boat 500", "a failure falls back to the last good value, marked stale");
-      assert.equal((await get()).stale, true, "and the failure is remembered for the TTL (boat is not asked again)");
+      assert.ok(c.ok && c.stale && c.value === 1 && c.error === "provider 500", "a failure falls back to the last good value, marked stale");
+      assert.equal((await get()).stale, true, "and the failure is remembered for the TTL (the provider is not asked again)");
       assert.equal(calls, 2);
       mode = "hang";
       const d = await get(true);
@@ -1354,11 +1345,19 @@ try {
     assert.equal((await fetch(`${base}/api/admin/onboarding/compute/summary`)).status, 401, "the summary needs the admin token");
     const sum = await json(adm("GET", "/compute/summary?fresh=1"));
     const codes = sum.verdict.map((v: any) => v.code);
-    for (const c of ["no_boat_key", "not_checking_in", "launch_failures", "namespace_collision"]) assert.ok(codes.includes(c), `verdict has ${c}: ${codes}`);
-    assert.ok(!codes.includes("boat_down") && !codes.includes("ok"), "no key: boat is not asked, so not 'down'");
+    for (const c of ["not_checking_in", "launch_failures", "namespace_collision"]) assert.ok(codes.includes(c), `verdict has ${c}: ${codes}`);
+    assert.ok(!codes.includes("ok") && !codes.includes("sandbox_config"), "no sandbox key is needed: Vercel Sandbox is the default");
     assert.match(sum.verdict.find((v: any) => v.code === "launch_failures").text, /^2 orchestrator launches failed in the last hour \(latest: ready: bx not ready after 240s #\d\)\.$/);
     assert.ok(sum.running.orchestrators.booting >= 1 && sum.failures_24h.launches >= 2 && sum.limits.our_starts.day >= 3, "orchestrators, launch failures and our starts counted");
-    assert.ok(sum.limits.ok === false && sum.limits.plan === null && sum.provider.has_key === false, "boat-derived limits are empty without a key");
+    assert.ok(sum.limits.ok === true && sum.limits.plan > 0 && sum.limits.active_now >= 2 && sum.limits.ours_orch >= 2 && !("provider" in sum),
+      `the limits are the configured Vercel ones, the listing our live rows; no boat key panel: ${JSON.stringify(sum.limits)}`);
+    assert.ok(sum.hosting.orchestrators.provider === "vercel" && sum.hosting.workers.provider === "vercel" && sum.hosting.config_error === null, "everything on Vercel Sandbox");
+    assert.ok(!sum.knobs.some((k: any) => /^BOAT_|BOAT_NAMESPACE/.test(k.name)) && sum.knobs.some((k: any) => k.name === "OCTILLION_SANDBOX_NAMESPACE"), "no boat knobs");
+    // A setting that still names boat: a red verdict saying so, not silent breakage.
+    process.env.OCTILLION_SANDBOX_PROVIDER = "boat";
+    const sumBoat = await json(adm("GET", "/compute/summary?fresh=1"));
+    delete process.env.OCTILLION_SANDBOX_PROVIDER;
+    assert.match(sumBoat.verdict[0].code === "sandbox_config" ? sumBoat.verdict[0].text : "", /boat\.dev was retired/, `OCTILLION_SANDBOX_PROVIDER=boat: ${JSON.stringify(sumBoat.verdict[0])}`);
     const [jobRows] = await db.query<any>("SELECT count(*) FILTER (WHERE state IN ('booting', 'running')) AS active FROM orchestrator_sandboxes WHERE job_id IS NOT NULL");
     assert.ok(sum.limits.job_orch_draining >= 1 && sum.limits.job_orch_live === Number(jobRows.active), `draining is shown apart, not counted: ${sum.limits.job_orch_live}/${sum.limits.job_orch_draining}`);
     assert.ok(["vm", "vercel"].includes(sum.runtime) && sum.tick.tick_seconds > 0 && typeof sum.spend_today.total_usd === "number" && sum.wait_1h.n >= 0);
@@ -1367,7 +1366,7 @@ try {
     await db.query("DELETE FROM orchestrator_sandboxes WHERE sandbox_id LIKE 'smoke-cs-%'");
     await db.query("DELETE FROM compute_events WHERE sandbox_id LIKE 'smoke-cs-%'");
     resetComputeCaches();
-    console.log("✓ compute summary: verdict rules, binding limit, boat listing classified and cached (timeout, stale fallback)");
+    console.log("✓ compute summary: verdict rules (a retired provider setting is red), binding limit, the listing from our rows, Vercel limits, the fetch cache (timeout, stale fallback)");
   }
 
   // ---------- budget rules: allocate() (src/limits.ts), pure; the page, launches and adaptive runs all use it ----------
@@ -1529,24 +1528,24 @@ try {
   // ---------- Compute record tables (src/compute-records.ts): sessions, orchestrators, unmatched sandboxes, runnability ----------
   {
     const { readdirSync } = await import("node:fs");
-    const { BOAT_SETUP_HARNESSES } = await import("../src/harness-setup.js");
+    const { SETUP_HARNESSES } = await import("../src/harness-setup.js");
     const { unmatchedSandboxes, sessionHint } = await import("../src/compute-records.js");
-    const { classifySandboxNames, resetComputeCaches } = await import("../src/compute.js");
+    const { resetComputeCaches } = await import("../src/compute.js");
     // The constant is what the directory holds (Vercel does not ship orchestrator/images, so the server cannot read it).
-    const scripts = readdirSync(new URL("../orchestrator/images/boat-setup/", import.meta.url)).filter((f) => f.endsWith(".sh") && f !== "_common.sh").map((f) => f.slice(0, -3)).sort();
-    assert.deepEqual([...BOAT_SETUP_HARNESSES].sort(), scripts, "BOAT_SETUP_HARNESSES matches orchestrator/images/boat-setup/*.sh");
+    const scripts = readdirSync(new URL("../orchestrator/images/setup/", import.meta.url)).filter((f) => f.endsWith(".sh") && f !== "_common.sh").map((f) => f.slice(0, -3)).sort();
+    assert.deepEqual([...SETUP_HARNESSES].sort(), scripts, "SETUP_HARNESSES matches orchestrator/images/setup/*.sh");
 
-    // Unmatched on boat: a worker whose orchestrator is gone, an orchestrator-named sandbox with no row, the image
-    // builder and another deployment's sandbox; our live orchestrator, its worker, snapshot images and archived ones are not.
-    const sbs = classifySandboxNames([
-      { id: "bx_a", name: "octi-orch-a", state: "running", archiveAfter: new Date(Date.now() + 3_600_000).toISOString() },
-      { id: "bx_w1", name: "octi-w-orch-a-codex", state: "running" }, { id: "bx_w2", name: "octi-w-orch-gone-codex", state: "running", createdAt: new Date().toISOString() },
-      { id: "bx_x", name: "octi-orch-x", state: "running" }, { id: "bx_i", name: "octi-img-build", state: "running" }, { id: "bx_m", name: "octi-orch-img-abc", state: "ready" },
-      { id: "bx_o", name: "octv-orch-b", state: "running" }, { id: "bx_old", name: "octi-w-orch-gone-pi", state: "archived" },
-    ], "octi", ["orch-a"]);
-    const um = unmatchedSandboxes(sbs, [{ sandbox_id: "bx_a", orchestrator_id: "orch-a" }]);
-    assert.deepEqual(um.map((u) => [u.sandbox_id, u.kind, u.parent_orchestrator_id]), [
-      ["bx_w2", "worker_no_parent", "orch-gone"], ["bx_x", "orch_no_row", null], ["bx_i", "image_builder", null], ["bx_o", "other_prefix", null]]);
+    // Unmatched: a worker sandbox whose orchestrator is gone, an orchestrator sandbox with no live row; our live
+    // orchestrator, its worker and dead sandboxes are not.
+    const sbs = [
+      { id: "octs-vo-a", kind: "orchestrator", live: true, parent_orchestrator_id: null, prefix: null, state: "running" },
+      { id: "octs-vw-1", kind: "worker", live: true, parent_orchestrator_id: "orch-a", prefix: null, state: "ready" },
+      { id: "octs-vw-2", kind: "worker", live: true, parent_orchestrator_id: "orch-gone", prefix: null, state: "ready", createdAt: new Date().toISOString() },
+      { id: "octs-vo-x", kind: "orchestrator", live: true, parent_orchestrator_id: null, prefix: null, state: "running" },
+      { id: "octs-vw-old", kind: "worker", live: false, parent_orchestrator_id: "orch-gone", prefix: null, state: "stopped" },
+    ] as any[];
+    const um = unmatchedSandboxes(sbs, [{ sandbox_id: "octs-vo-a", orchestrator_id: "orch-a" }]);
+    assert.deepEqual(um.map((u) => [u.sandbox_id, u.kind, u.parent_orchestrator_id]), [["octs-vw-2", "worker_no_parent", "orch-gone"], ["octs-vo-x", "orch_no_row", null]]);
     // Fix hints: the missing env var is read out of the broker's error, old and new.
     const ses = { error_class: "credentials", agent_id: "qwen-code/qwen3", harness: "qwen-code" };
     assert.deepEqual(sessionHint(ses, 'credentials: POST /api/worker/sessions/x/credentials -> 424: {"error":"No vault provider supplies DASHSCOPE_API_KEY","code":"missing_credential","env":"DASHSCOPE_API_KEY"}'),
@@ -1612,30 +1611,35 @@ try {
     const orchIds = (r: any) => r.rows.map((x: any) => x.sandbox_id);
     const liveList = await json(adm("GET", "/compute/orchestrators"));
     assert.ok(orchIds(liveList).includes("smoke-cr-live") && !orchIds(liveList).includes("smoke-cr-fail"), "Live by default");
-    assert.ok(liveList.boat.ok === false && liveList.limits.heartbeat_stale_s === 90, "no boat key: boat columns empty, the page still renders");
+    assert.ok(liveList.sandboxes.ok === true && liveList.limits.heartbeat_stale_s === 90, "the listing comes from our rows, no provider call");
     const o = liveList.rows.find((x: any) => x.sandbox_id === "smoke-cr-live");
     assert.deepEqual([o.running_by_agent, o.running, o.pods, o.boot_ms, o.job_id, o.spend.orchestrator_model_usd], [{ "codex/gpt": 2 }, 2, 8, 60_000, "sim_smoke_cr", 0.25]);
-    assert.ok(o.spend.sandbox_est_usd > 0 && o.ttl_left_s === null && o.end_class === null);
+    assert.ok(o.spend.sandbox_est_usd > 0 && o.ttl_left_s === null && o.end_class === null && o.provider === "vercel" && !("boat_state" in o), "a new row is on Vercel Sandbox (migration 0018's default)");
     assert.ok(orchIds(await json(adm("GET", "/compute/orchestrators?state=stale"))).includes("smoke-cr-live"), "running with a 3-minute-old check-in is stale");
     const fl = await json(adm("GET", "/compute/orchestrators?state=failed_launch"));
     assert.ok(fl.rows.some((x: any) => x.sandbox_id === "smoke-cr-fail" && x.launch_step === "ready" && x.launch_error === "sandbox bx not ready after 240s"));
     const ended = (await json(adm("GET", "/compute/orchestrators?state=ended"))).rows.find((x: any) => x.sandbox_id === "smoke-cr-ended");
     assert.deepEqual([ended.reap_reason, ended.end_class.key, ended.end_class.routine], ["drained (idle 10 min)", "reap:idle_drain", true]);
     assert.equal((await json(adm("GET", `/compute/orchestrators?state=booting&include=${failedLaunch.id}`))).rows[0].id, failedLaunch.id);
-    assert.deepEqual((await json(adm("GET", "/compute/orchestrators?state=unmatched"))).rows, [], "no boat listing: nothing unmatched");
-    { const all = await json(adm("GET", "/compute/orchestrators?state=all")); assert.ok(all.facets.all === all.total && all.facets.failed_launch === fl.total && all.facets.unmatched === 0, "orchestrator state facets"); }
+    // A worker sandbox row whose orchestrator is gone is unmatched (the broker's reaper deletes it); our live one's is not.
+    await db.query(`INSERT INTO worker_sandboxes (sandbox_id, owner, session_id, orchestrator_id, vcpus, memory_mb, timeout_sec)
+      VALUES ('smoke-cr-w-gone', 'fleet:orch-smoke-cr-gone', 'ses_smoke_cr_x', 'orch-smoke-cr-gone', 2, 4096, 600), ('smoke-cr-w-live', 'job:sim_smoke_cr', 'ses_smoke_cr_key', 'orch-smoke-cr', 2, 4096, 600)`);
+    const unm = await json(adm("GET", "/compute/orchestrators?state=unmatched"));
+    assert.ok(unm.rows.some((u: any) => u.sandbox_id === "smoke-cr-w-gone" && u.kind === "worker_no_parent") && !unm.rows.some((u: any) => u.sandbox_id === "smoke-cr-w-live"), `unmatched: ${JSON.stringify(unm.rows)}`);
+    { const all = await json(adm("GET", "/compute/orchestrators?state=all")); assert.ok(all.facets.all === all.total && all.facets.failed_launch === fl.total && all.facets.unmatched === unm.total, "orchestrator state facets"); }
     assert.equal((await adm("GET", "/compute/orchestrators?state=bogus")).status, 400);
     const op = await json(adm("GET", `/compute/orchestrators/${live.id}`));
-    assert.ok(op.row.sandbox_id === "smoke-cr-live" && op.timings.started === 8200 && op.logs_command === "npm run boat-orchestrators -- logs smoke-cr-live");
+    assert.ok(op.row.sandbox_id === "smoke-cr-live" && op.timings.started === 8200 && !("logs_command" in op) && /orchestrator\.log/.test(op.logs_where ?? ""));
+    assert.deepEqual(op.workers.map((w: any) => [w.sandbox_id, w.session_id, w.status]), [["smoke-cr-w-live", "ses_smoke_cr_key", "failed"]], "workers now: its live worker sandbox rows, with their session");
     assert.deepEqual(op.sessions.map((x: any) => x.id).sort(), ["ses_smoke_cr_key", "ses_smoke_cr_stuck"], "recent sessions: claimed by its worker id");
-    assert.ok(op.gateway.length === 1 && op.gateway[0].cost_usd === 0.25 && Array.isArray(op.workers) && Array.isArray(op.tokens));
+    assert.ok(op.gateway.length === 1 && op.gateway[0].cost_usd === 0.25 && Array.isArray(op.tokens));
     assert.equal((await json(adm("GET", `/compute/orchestrators/${failedLaunch.id}`))).events[0].kind, "launch_failed");
     assert.equal((await adm("GET", "/compute/orchestrators/999999")).status, 404);
 
     const run = await json(adm("GET", "/compute/agents/runnable"));
     assert.ok(Array.isArray(run.rows));
     for (const r of run.rows) {
-      assert.equal(r.has_setup_script, BOAT_SETUP_HARNESSES.includes(r.harness));
+      assert.equal(r.has_setup_script, SETUP_HARNESSES.includes(r.harness));
       assert.equal(r.runnable, r.missing_env.length === 0);
       if (r.runnable && !r.has_setup_script) assert.match(r.reason, /^No setup script/);
     }
@@ -1643,10 +1647,11 @@ try {
     await db.query("/* tenant: smoke fixture */ DELETE FROM gateway_usage WHERE token_hash LIKE 'smoke-cr-%'");
     await db.query("/* tenant: smoke fixture */ DELETE FROM agent_sessions WHERE id LIKE 'ses_smoke_cr_%'");
     await db.query("DELETE FROM orchestrator_sandboxes WHERE sandbox_id LIKE 'smoke-cr-%'");
+    await db.query("DELETE FROM worker_sandboxes WHERE sandbox_id LIKE 'smoke-cr-%'");
     await db.query("DELETE FROM orchestrators WHERE id = 'orch-smoke-cr'");
     await db.query("DELETE FROM compute_events WHERE sandbox_id LIKE 'smoke-cr-%'");
     resetComputeCaches();
-    console.log("✓ compute records: sessions (filters, class, include, peek with hint), orchestrators (chips, peek), unmatched on boat, runnability, BOAT_SETUP_HARNESSES");
+    console.log("✓ compute records: sessions (filters, class, include, peek with hint), orchestrators (chips, peek, workers from the broker's rows), unmatched sandboxes, runnability, SETUP_HARNESSES");
   }
 
   // ---------- Compute jobs and failures by reason (src/compute-jobs.ts) ----------
@@ -1671,7 +1676,7 @@ try {
              { id: "sim_c", kind: "simulation", sessions: 1, served: false }, { id: "sim_d", kind: "simulation", sessions: 1, served: false }] };
     const sim = (id: string, unfinished = 1) => ({ id, kind: "simulation" as const, unfinished, unclaimable: false });
     assert.equal(whyWaiting(sim("sim_a"), tick, o), null, "served: nothing to explain");
-    assert.deepEqual(whyWaiting(sim("sim_b", 60), tick, o), { text: "Waiting for sandbox capacity on boat.dev (3 free, needs 41)", note: "sim_b waits for boat plan capacity (3 free)", free: 3, needed: 41, cap: 4 });
+    assert.deepEqual(whyWaiting(sim("sim_b", 60), tick, o), { text: "Waiting for sandbox capacity on boat.dev (retired) (3 free, needs 41)", note: "sim_b waits for boat plan capacity (3 free)", free: 3, needed: 41, cap: 4 });
     assert.equal(whyWaiting(sim("sim_v", 2), { ...tick, note: "sim_v waits for sandbox capacity on Vercel Sandbox (0 free)", jobs: [{ id: "sim_v", kind: "simulation", sessions: 2, served: false }] }, o)?.text,
       "Waiting for sandbox capacity on Vercel Sandbox (0 free, needs 3)");
     assert.match(whyWaiting(sim("sim_c"), tick, o)!.text, /^Relaunch cooldown/);
@@ -1734,7 +1739,7 @@ try {
     assert.ok(sj.spend.session_model_usd === 0.5 && sj.spend.orchestrator_model_usd === 0.2 && sj.spend.sandbox_est_usd > 0.01
       && Math.abs(sj.spend.total_usd - (0.7 + sj.spend.sandbox_est_usd)) < 0.001, "spend: sessions + orchestrator gateway + sandbox est.");
     assert.ok(sj.waiting_since && sj.running_since && sj.org?.slug);
-    assert.deepEqual([rj.state, rj.kind, rj.why_waiting, rj.note], ["waiting", "research", "Waiting for sandbox capacity on boat.dev (0 free, needs 1)", "rsh_smoke_cj waits for boat plan capacity (0 free)"]);
+    assert.deepEqual([rj.state, rj.kind, rj.why_waiting, rj.note], ["waiting", "research", "Waiting for sandbox capacity on boat.dev (retired) (0 free, needs 1)", "rsh_smoke_cj waits for boat plan capacity (0 free)"]);
     assert.ok(list.rows.findIndex((x: any) => x.id === "rsh_smoke_cj") < list.rows.findIndex((x: any) => x.id === "sim_smoke_cj"), "waiting before running");
     assert.deepEqual((await json(adm("GET", "/compute/jobs?state=waiting&kind=research&limit=500"))).rows.map((x: any) => x.state).filter((s: string) => s !== "waiting"), []);
     assert.ok(!(await json(adm("GET", "/compute/jobs?kind=simulation&limit=500"))).rows.some((x: any) => x.id === "rsh_smoke_cj"));
@@ -1771,7 +1776,7 @@ try {
     await db.query("DELETE FROM orchestrators WHERE id = 'orch-smoke-cj'");
     await db.query("DELETE FROM compute_events WHERE sandbox_id LIKE 'smoke-cj-%'");
     resetComputeCaches();
-    console.log("✓ compute jobs: state rules, why waiting (boat capacity, cap, cooldown, unscheduled), spend, filters, peek; failures by reason (launches, reaps, unattended, session classes)");
+    console.log("✓ compute jobs: state rules, why waiting (sandbox capacity, older wording included, cap, cooldown, unscheduled), spend, filters, peek; failures by reason (launches, reaps, unattended, session classes)");
   }
 
   // ---------- Spend (src/spend.ts): metered model spend by account, model and day; unattributed orchestrator spend is shared ----------
@@ -1872,11 +1877,12 @@ try {
     await fx.ses(`ses_hours_x1_${stamp}`, "claude-code/sonnet", "2019-06-01T23:00:00Z", "2019-06-02T01:00:00Z", { runner: "boat", boat_sandbox_type: "default" }, 10); // 1 h + 1 h
     await fx.ses(`ses_hours_x2_${stamp}`, "codex/gpt", "2019-06-02T00:30:00Z", "2019-06-02T01:00:00Z", { runner: "docker" }, 0);                   // 0.5 h, on Docker
     await fy.ses(`ses_hours_y1_${stamp}`, "claude-code/sonnet", "2019-06-02T12:00:00Z", "2019-06-03T12:00:00Z", {}, 5);                           // 24 h, 12 in range
-    await db.query(`INSERT INTO orchestrator_sandboxes (sandbox_id, orchestrator_id, state, created_at, deleted_at, last_seen, job_id) VALUES
-      ('smoke-st-o1', 'orch-st-1', 'deleted', '2019-06-01T20:00:00Z', '2019-06-02T04:00:00Z', NULL, $1),
-      ('smoke-st-o2', 'orch-st-2', 'deleted', '2019-06-02T10:00:00Z', '2019-06-02T11:30:00Z', NULL, NULL),
-      ('smoke-st-o3', 'orch-st-3', 'deleted', '2019-05-31T22:00:00Z', '2019-06-01T01:00:00Z', NULL, $2),
-      ('smoke-st-o4', 'orch-st-4', 'deleted', '2019-06-02T22:00:00Z', NULL, '2019-06-02T23:00:00Z', 'job-nope')`, [simX, simY]);
+    // History from before boat.dev's retirement: orchestrator rows with provider 'boat', sessions with runner boat (or none).
+    await db.query(`INSERT INTO orchestrator_sandboxes (sandbox_id, orchestrator_id, state, created_at, deleted_at, last_seen, job_id, provider) VALUES
+      ('smoke-st-o1', 'orch-st-1', 'deleted', '2019-06-01T20:00:00Z', '2019-06-02T04:00:00Z', NULL, $1, 'boat'),
+      ('smoke-st-o2', 'orch-st-2', 'deleted', '2019-06-02T10:00:00Z', '2019-06-02T11:30:00Z', NULL, NULL, 'boat'),
+      ('smoke-st-o3', 'orch-st-3', 'deleted', '2019-05-31T22:00:00Z', '2019-06-01T01:00:00Z', NULL, $2, 'boat'),
+      ('smoke-st-o4', 'orch-st-4', 'deleted', '2019-06-02T22:00:00Z', NULL, '2019-06-02T23:00:00Z', 'job-nope', 'boat')`, [simX, simY]);
     const near = (x: number, y: number, what: string) => assert.ok(Math.abs(x - y) < 1e-3, `${what}: ${x} != ${y}`);
     const q = "from=2019-06-01&to=2019-06-02";
     const ch = await json(adm("GET", `/spend/compute?${q}`));
@@ -1893,8 +1899,9 @@ try {
     assert.deepEqual([ch.totals.orchestrator_hours, ch.totals.agent_hours, ch.totals.total_hours], [11.5, 14.5, 26]);
     near(ch.accounts.reduce((t: number, a: any) => t + a.total_hours, 0), ch.totals.total_hours, "accounts add up");
     assert.deepEqual([ch.totals.daily_peak, ch.totals.peak_running, ch.totals.peak_source], [[2, 3], 3, "intervals"], "most running at once, per day");
-    // Grouped by sandbox provider: boat.dev runs the orchestrators and the boat (and default) sessions; Docker the other.
-    const boat = acc(ch.providers, "boat.dev"), docker = acc(ch.providers, "Docker");
+    // Grouped by sandbox provider: the retired boat.dev ran these orchestrators and the boat (and unrecorded) sessions, still
+    // shown as history under its label; Docker the other.
+    const boat = acc(ch.providers, "boat.dev (retired)"), docker = acc(ch.providers, "Docker");
     assert.deepEqual([boat.orchestrator_hours, boat.agent_hours, boat.sessions, boat.orchestrators, docker.agent_hours, docker.sessions], [11.5, 14, 2, 3, 0.5, 1]);
     near(boat.sandbox_types.reduce((t: number, x: any) => t + x.hours, 0), boat.total_hours, "sandbox types add up");
     assert.equal(boat.sandbox_types.find((x: any) => x.kind === "Orchestrator").hours, 11.5);
@@ -1947,7 +1954,7 @@ try {
     assert.equal(tickWrite(st(SAMPLE_MS), prev(0)), "sample");
     assert.equal(tickWrite(st(15_000, { launched: ["row 2"] }), prev(0)), "acted");
     assert.equal(tickWrite(st(15_000, { reaped: [{ sandbox_id: "x", reason: "drained" }] }), prev(0)), "acted");
-    assert.equal(tickWrite(st(15_000, { note: "sim_a waits for boat plan capacity (0 free)" }), prev(0)), "acted", "a new note");
+    assert.equal(tickWrite(st(15_000, { note: "sim_a waits for sandbox capacity on Vercel Sandbox (0 free)" }), prev(0)), "acted", "a new note");
     assert.equal(tickWrite(st(30_000, { note: "same" }), prev(15_000, "same")), null, "the same note again");
     assert.equal(tickWrite(st(30_000, { error: "boom" }), prev(15_000, null, "boom")), null, "the same error again");
     assert.equal(tickWrite(st(30_000), prev(15_000, null, "boom")), "acted", "the error cleared");
@@ -1971,7 +1978,7 @@ try {
     await recordTick(live(15_000));
     await recordTick(live(30_000, { launched: [`row ${orch.id} (sim_smoke_at, 3 pods)`], launches: [{ row: Number(orch.id), job_id: "sim_smoke_at", pods: 3, label: "x" }],
       reaped: [{ sandbox_id: "smoke-at-old", reason: "drained (idle exit)" }], jobs: [{ id: "sim_smoke_at", kind: "simulation", sessions: 9, served: true }] }));
-    await recordTick(live(45_000, { error: "boat.dev 500", note: "sim_x waits for boat plan capacity (0 free)" }));
+    await recordTick(live(45_000, { error: "Vercel Sandbox 500", note: "sim_x waits for sandbox capacity on Vercel Sandbox (0 free)" }));
     await recordTick(live(60_000, { leader: false, launched: ["row 99"] }));
     const rows = await db.query<any>("SELECT acted, queued, running, research, unclaimable, orchestrators, free FROM autoscaler_ticks ORDER BY at");
     assert.deepEqual(rows.map((r) => r.acted), [false, true, true], "a sample, then two acting ticks; the repeat and the follower wrote nothing");
@@ -1980,7 +1987,7 @@ try {
 
     assert.equal((await fetch(`${base}/api/admin/onboarding/compute/ticks`)).status, 401, "ticks need the admin token");
     const acted = await json(adm("GET", "/compute/ticks"));
-    assert.deepEqual([acted.total, acted.rows[0].error], [2, "boat.dev 500"], "acting ticks only, newest first");
+    assert.deepEqual([acted.total, acted.rows[0].error], [2, "Vercel Sandbox 500"], "acting ticks only, newest first");
     assert.deepEqual([acted.facets.samples[""], acted.facets.samples["1"], acted.facets.has.error], [2, 3, 1], "tick facets: acted, with samples, has error");
     const l = acted.rows[1].launched[0], r = acted.rows[1].reaped[0];
     assert.deepEqual([l.row, l.orchestrator_id, l.job_id, l.pods, l.state], [Number(orch.id), "orch-smoke-at", "sim_smoke_at", 3, "running"], "a launch is linked to its orchestrator row");
@@ -1989,7 +1996,7 @@ try {
     assert.equal((await json(adm("GET", "/compute/ticks?has=error"))).total, 1);
     assert.equal((await json(adm("GET", "/compute/ticks?has=launch,reap"))).total, 1);
     assert.equal((await json(adm("GET", "/compute/ticks?has=error,launch"))).total, 0, "has filters all hold");
-    assert.equal((await json(adm("GET", "/compute/ticks?q=plan%20capacity"))).total, 1, "note contains");
+    assert.equal((await json(adm("GET", "/compute/ticks?q=sandbox%20capacity"))).total, 1, "note contains");
     assert.equal((await json(adm("GET", "/compute/ticks?q=100%25"))).total, 0, "% is matched literally");
     assert.equal((await adm("GET", "/compute/ticks?has=bogus")).status, 400);
 
@@ -2046,9 +2053,9 @@ try {
     const realError = console.error;
     console.error = (...a: unknown[]) => { const line = a.map(String).join(" "); if (line.startsWith("admin ")) audit.push(line); else realError(...a); };
     try {
-      assert.equal(tickMessage({ leader: true, launched: ["row 7 (sim_x, 4 pods)"], reaped: [], note: "rsh_y waits for boat plan capacity (0 free)" }),
-        "Tick ran: launched 1, reaped 0. rsh_y waits for boat plan capacity (0 free)");
-      assert.equal(tickMessage({ leader: true, error: "boat 401" }), "The tick failed: boat 401");
+      assert.equal(tickMessage({ leader: true, launched: ["row 7 (sim_x, 4 pods)"], reaped: [], note: "rsh_y waits for sandbox capacity on Vercel Sandbox (0 free)" }),
+        "Tick ran: launched 1, reaped 0. rsh_y waits for sandbox capacity on Vercel Sandbox (0 free)");
+      assert.equal(tickMessage({ leader: true, error: "vercel 401" }), "The tick failed: vercel 401");
       assert.match(tickMessage({ leader: false }), /Another server holds the autoscaler lease/);
 
       // Run a tick now: refused when autoscaling is off; with another server holding the lease it ticks as a follower.
@@ -2129,7 +2136,7 @@ try {
     const { config } = await import("../src/queries.js");
     const { AUTOSCALE } = await import("../src/autoscaler.js");
     const { refreshSettings } = await import("../src/settings.js");
-    const keys = ["OCTILLION_MAX_JOB_ORCHESTRATORS", "OCTILLION_MAX_SAMPLES", "OCTILLION_DEFAULT_SAMPLES", "BOAT_SANDBOX_SIZE", "ORCHESTRATOR_MODEL", "OCTILLION_JOB_POD_CAPACITY"];
+    const keys = ["OCTILLION_MAX_JOB_ORCHESTRATORS", "OCTILLION_MAX_SAMPLES", "OCTILLION_DEFAULT_SAMPLES", "ARCHITECT_EFFORT", "ORCHESTRATOR_MODEL", "OCTILLION_JOB_POD_CAPACITY"];
     const reset = () => adm("PUT", "/compute/settings", { values: Object.fromEntries(keys.map((k) => [k, null])) });
     const c0 = await json(adm("GET", "/compute"));
     const byKey = (c: any, k: string) => c.settings.find((x: any) => x.key === k);
@@ -2146,7 +2153,7 @@ try {
     assert.equal(AUTOSCALE.maxJobOrchestrators(), 7, "the environment applies when nothing is set here");
     assert.equal(byKey(await json(adm("GET", "/compute")), "OCTILLION_MAX_JOB_ORCHESTRATORS").source, "env");
     const c1 = await json(adm("PUT", "/compute/settings", { values: { OCTILLION_MAX_JOB_ORCHESTRATORS: 3, OCTILLION_MAX_SAMPLES: "33", OCTILLION_DEFAULT_SAMPLES: 4,
-      OCTILLION_JOB_POD_CAPACITY: 9, BOAT_SANDBOX_SIZE: "large", ORCHESTRATOR_MODEL: "gpt-smoke-1" } }));
+      OCTILLION_JOB_POD_CAPACITY: 9, ARCHITECT_EFFORT: "high", ORCHESTRATOR_MODEL: "gpt-smoke-1" } }));
     assert.ok(byKey(c1, "OCTILLION_MAX_JOB_ORCHESTRATORS").source === "set" && byKey(c1, "OCTILLION_MAX_JOB_ORCHESTRATORS").updated_by === "token:smoke");
     assert.equal(AUTOSCALE.maxJobOrchestrators(), 3, "a setting wins over the environment");
     assert.equal(AUTOSCALE.jobPodCapacity(), 9);
@@ -2154,7 +2161,8 @@ try {
     assert.equal(config.defaultSamples(), 4);
     const brain = await (await worker("/orchestrator/credentials", { orchestrator_id: "smoke-orch" })).json();
     assert.equal(brain.llm?.model, "gpt-smoke-1", "the broker hands orchestrators the model set here");
-    assert.equal((await adm("PUT", "/compute/settings", { values: { BOAT_SANDBOX_SIZE: "huge" } })).status, 400, "choices are checked");
+    assert.equal((await adm("PUT", "/compute/settings", { values: { ARCHITECT_EFFORT: "huge" } })).status, 400, "choices are checked");
+    assert.equal((await adm("PUT", "/compute/settings", { values: { BOAT_SANDBOX_SIZE: "large" } })).status, 400, "the retired boat.dev size setting is gone");
     assert.equal((await adm("PUT", "/compute/settings", { values: { OCTILLION_MAX_SAMPLES: 2.5 } })).status, 400, "whole numbers are checked");
     assert.equal((await adm("PUT", "/compute/settings", { values: { NOT_A_SETTING: 1 } })).status, 400);
     assert.equal(config.maxSamples(), 33, "a refused save changes nothing");
@@ -2403,7 +2411,7 @@ try {
   const mockPost = async (path: string, body: unknown = {}) => (await fetch(`${mock.url}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })).json();
   // Vercel's team and project for this deployment: OIDC tokens must carry these claims (src/sandbox-probe.ts vercelScope).
   Object.assign(process.env, { OCTILLION_VERCEL_TEAM_ID: "team_smoke", OCTILLION_VERCEL_PROJECT_ID: "prj_smoke" });
-  // The sandbox reliability probe (src/sandbox-probe.ts) against the mock boat.dev and Vercel Sandbox.
+  // The sandbox reliability probe (src/sandbox-probe.ts) against the mock Vercel Sandbox.
   await (await import("./smoke-sandbox-probe.js")).sandboxProbeChecks({ db, base, mockUrl: mock.url, mockState: mock.state, adm, json, stamp });
   // The worker sandbox broker (src/worker-sandboxes.ts): Vercel Sandbox workers, ownership checks, against the mock.
   await (await import("./smoke-worker-sandboxes.js")).workerSandboxChecks({ db, base, mockUrl: mock.url, mockState: mock.state, workerToken: WORKER_TOKEN!, adm });
