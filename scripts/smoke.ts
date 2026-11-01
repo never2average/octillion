@@ -1275,7 +1275,14 @@ try {
       missing_keys: [{ agent_id: "codex/gpt", missing_env: ["CODEX_API_KEY"] }, { agent_id: "claude-code/sonnet", missing_env: [] }], leaked_workers: 1 });
     assert.deepEqual(bad.map((v) => v.code), ["no_boat_key", "tick_stale", "queue_old", "unclaimable", "plan_capacity", "at_cap", "cooldown", "missing_keys", "leaked_workers"]);
     assert.equal(bad.find((v) => v.code === "tick_stale")!.text, "4 sessions are queued but nothing has ticked for 47 min.");
-    assert.equal(bad.find((v) => v.code === "plan_capacity")!.text, "sim_x waits for boat capacity: 3 free, other deployments use 7.");
+    // Old ticks' boat wording still reads; new notes name the provider.
+    assert.equal(bad.find((v) => v.code === "plan_capacity")!.text, "sim_x waits for sandbox capacity on boat.dev: 3 free, other deployments use 7.");
+    const vercelCap = computeVerdict({ ...facts, tick: { ...facts.tick, note: "sim_v waits for sandbox capacity on Vercel Sandbox (0 free); launch rate cap: 120 Vercel orchestrators per hour (OCTILLION_VERCEL_ORCH_STARTS_PER_HOUR)" } });
+    assert.equal(vercelCap.find((v) => v.code === "plan_capacity")!.text, "sim_v waits for sandbox capacity on Vercel Sandbox: 0 free.");
+    assert.ok(vercelCap.some((v) => v.code === "rate_cap"), "the Vercel launch rate cap is a verdict line");
+    // With everything on Vercel Sandbox and no boat orchestrator left, a missing boat key is not red.
+    assert.deepEqual(computeVerdict({ ...facts, has_boat_key: false, boat_needed: false }).map((v) => v.code), ["ok"]);
+    assert.deepEqual(computeVerdict({ ...facts, has_boat_key: false }).map((v) => v.code), ["no_boat_key"], "boat still needed by default");
     assert.equal(bad.find((v) => v.code === "missing_keys")!.text, "codex/gpt cannot run: no vault key for CODEX_API_KEY.");
     assert.ok(bad.every((v) => v.level !== "green") && bad[0]!.level === "red" && bad.at(-1)!.level === "amber");
     assert.deepEqual(computeVerdict({ ...facts, enabled: false }).map((v) => v.code), ["autoscale_off"]);
@@ -1286,6 +1293,7 @@ try {
     assert.equal(bindingLimit(lim), null);
     assert.equal(bindingLimit({ ...lim, note: "at OCTILLION_MAX_JOB_ORCHESTRATORS (12)" }), "job_orch");
     assert.equal(bindingLimit({ ...lim, note: "rsh_1 waits for boat plan capacity (0 free)" }), "plan");
+    assert.equal(bindingLimit({ ...lim, note: "rsh_1 waits for sandbox capacity on Vercel Sandbox (0 free)" }), "plan");
     const over = "2 orchestrators x (1 + 40) = 82 sandboxes > 50 available";
     assert.equal(bindingLimit({ ...lim, per_job: false, budget_reason: over }), "plan", "shared fleet: the whole fleet at full pods does not fit");
     assert.equal(bindingLimit({ ...lim, budget_reason: over }), null, "per job: each orchestrator reserves only its own pods, so a full-pods budget says nothing");
@@ -1663,7 +1671,9 @@ try {
              { id: "sim_c", kind: "simulation", sessions: 1, served: false }, { id: "sim_d", kind: "simulation", sessions: 1, served: false }] };
     const sim = (id: string, unfinished = 1) => ({ id, kind: "simulation" as const, unfinished, unclaimable: false });
     assert.equal(whyWaiting(sim("sim_a"), tick, o), null, "served: nothing to explain");
-    assert.deepEqual(whyWaiting(sim("sim_b", 60), tick, o), { text: "Waiting for boat capacity (3 free, needs 41)", note: "sim_b waits for boat plan capacity (3 free)", free: 3, needed: 41, cap: 4 });
+    assert.deepEqual(whyWaiting(sim("sim_b", 60), tick, o), { text: "Waiting for sandbox capacity on boat.dev (3 free, needs 41)", note: "sim_b waits for boat plan capacity (3 free)", free: 3, needed: 41, cap: 4 });
+    assert.equal(whyWaiting(sim("sim_v", 2), { ...tick, note: "sim_v waits for sandbox capacity on Vercel Sandbox (0 free)", jobs: [{ id: "sim_v", kind: "simulation", sessions: 2, served: false }] }, o)?.text,
+      "Waiting for sandbox capacity on Vercel Sandbox (0 free, needs 3)");
     assert.match(whyWaiting(sim("sim_c"), tick, o)!.text, /^Relaunch cooldown/);
     assert.match(whyWaiting(sim("sim_d"), tick, o)!.text, /^At the orchestrator limit \(4 /);
     assert.equal(whyWaiting(sim("sim_e"), { ...tick, note: undefined }, o)!.text, "No orchestrator yet");
@@ -1724,7 +1734,7 @@ try {
     assert.ok(sj.spend.session_model_usd === 0.5 && sj.spend.orchestrator_model_usd === 0.2 && sj.spend.sandbox_est_usd > 0.01
       && Math.abs(sj.spend.total_usd - (0.7 + sj.spend.sandbox_est_usd)) < 0.001, "spend: sessions + orchestrator gateway + sandbox est.");
     assert.ok(sj.waiting_since && sj.running_since && sj.org?.slug);
-    assert.deepEqual([rj.state, rj.kind, rj.why_waiting, rj.note], ["waiting", "research", "Waiting for boat capacity (0 free, needs 1)", "rsh_smoke_cj waits for boat plan capacity (0 free)"]);
+    assert.deepEqual([rj.state, rj.kind, rj.why_waiting, rj.note], ["waiting", "research", "Waiting for sandbox capacity on boat.dev (0 free, needs 1)", "rsh_smoke_cj waits for boat plan capacity (0 free)"]);
     assert.ok(list.rows.findIndex((x: any) => x.id === "rsh_smoke_cj") < list.rows.findIndex((x: any) => x.id === "sim_smoke_cj"), "waiting before running");
     assert.deepEqual((await json(adm("GET", "/compute/jobs?state=waiting&kind=research&limit=500"))).rows.map((x: any) => x.state).filter((s: string) => s !== "waiting"), []);
     assert.ok(!(await json(adm("GET", "/compute/jobs?kind=simulation&limit=500"))).rows.some((x: any) => x.id === "rsh_smoke_cj"));
@@ -2395,6 +2405,7 @@ try {
   await (await import("./smoke-sandbox-probe.js")).sandboxProbeChecks({ db, base, mockUrl: mock.url, mockState: mock.state, adm, json, stamp });
   // The worker sandbox broker (src/worker-sandboxes.ts): Vercel Sandbox workers, ownership checks, against the mock.
   await (await import("./smoke-worker-sandboxes.js")).workerSandboxChecks({ db, base, mockUrl: mock.url, mockState: mock.state, workerToken: WORKER_TOKEN! });
+  await (await import("./smoke-vercel-orchestrators.js")).vercelOrchestratorChecks({ db, mockUrl: mock.url, mockState: mock.state });
   /** A Clerk session token (what the UI sends): v2 claims with the active organization, unless told otherwise. */
   const clerkSession = async (userId: string, orgId?: string | null, role = "member", extra: Record<string, unknown> = {}) =>
     (await mockPost("/_mock/session", { user_id: userId, org_id: orgId ?? undefined, org_role: role, ...extra })).token as string;

@@ -51,6 +51,25 @@ check("guard refuses when BOAT_ID does not match the launcher marker", !g5.ok &&
 check("guard refuses a boat VM without the launcher's markers", !g6.ok && /HOST_ROLE|marker/.test(g6.problems.join()), "");
 const g7 = checkHost("boat", probe({ ...boatEnv, BOAT_AGENT_USER: "user" }, boatFiles));
 check("guard refuses running the coding agent as the sudo-capable boat user", !g7.ok && /BOAT_AGENT_USER=user/.test(g7.problems.join()), g7.problems.join());
+// Vercel Sandbox orchestrators (deploy/vercel-orch.ts): their env role, the marker, and Vercel's own indicators.
+const vName = "octi-vo-prod-v0a1b2c3d4e";
+const vEnv = { OCTILLION_HOST_ROLE: "vercel-orchestrator", OCTILLION_SANDBOX_ID: vName };
+const vMarker = JSON.stringify({ role: "vercel-orchestrator", provider: "vercel", sandbox_id: vName, orchestrator_id: "orch-v0a1b2c3d4e" });
+const vFiles = { "/etc/pki/ca-trust/source/anchors/vercel-proxy-ca.pem": true as const, "/vercel/runtimes": true as const, "/etc/octillion/host-role": vMarker };
+const v1 = checkHost("boat", probe(vEnv, vFiles)), v1r = checkHost("vercel", probe(vEnv, vFiles));
+const v2 = checkHost("boat", probe(vEnv, { "/etc/octillion/host-role": vMarker })); // our VM with a copied env file and marker
+const v3 = checkHost("boat", probe({ ...vEnv, OCTILLION_SANDBOX_ID: "octi-vo-prod-vffffffffff" }, vFiles));
+const v4 = checkHost("boat", probe(vEnv, { ...vFiles, "/etc/octillion/host-role": '{"role":"boat-orchestrator"}' }));
+const v5 = checkHost("boat", probe({ ...vEnv, VERCEL_REGION: "iad1" }, vFiles));
+const v6 = checkHost("boat", probe({ OCTILLION_HOST_ROLE: "vercel-orchestrator" }, vFiles));
+const v7 = checkHost("boat", probe({ ...boatEnv, OCTILLION_HOST_ROLE: "vercel-orchestrator", OCTILLION_SANDBOX_ID: vName }, { ...boatFiles }));
+check("guard accepts a Vercel orchestrator sandbox (env role + marker + proxy CA + /vercel), RUNNER boat or vercel", v1.ok && v1.provider === "vercel" && v1r.ok, [...v1.problems, ...v1r.problems].join());
+check("guard refuses a non-sandbox host claiming Vercel (no proxy CA, no /vercel): our VM", !v2.ok && /proxy CA/.test(v2.problems.join()) && /\/vercel\/runtimes/.test(v2.problems.join()), v2.problems.join(" | "));
+check("guard refuses when OCTILLION_SANDBOX_ID does not match the marker", !v3.ok && /does not match/.test(v3.problems.join()), v3.problems.join());
+check("guard refuses a boat marker under a Vercel env role", !v4.ok && /marker/.test(v4.problems.join()), v4.problems.join());
+check("guard refuses a Vercel function (the API never runs orchestrators)", !v5.ok && /Vercel function/.test(v5.problems.join()), v5.problems.join());
+check("guard refuses a Vercel env file without its sandbox id", !v6.ok && /OCTILLION_SANDBOX_ID/.test(v6.problems.join()), v6.problems.join());
+check("guard refuses a boat VM whose env claims Vercel (boat's indicators do not stand in for Vercel's)", !v7.ok && /proxy CA/.test(v7.problems.join()), v7.problems.join());
 const real = spawnSync(TSX, ["orchestrator/worker.ts"], { cwd: ROOT, encoding: "utf8", timeout: 60_000,
   env: { PATH: process.env.PATH, HOME: process.env.HOME, OCTILLION_URL: "http://127.0.0.1:1", OCTILLION_WORKER_TOKEN: "x", RUNNER: "local" } });
 check("the real entry point refuses to start on this machine", real.status !== 0 && /Refusing to start/.test(real.stderr + real.stdout),

@@ -2,7 +2,8 @@
  * Hermetic test of the server's on-demand orchestrator autoscaler (src/autoscaler.ts): real server modules on a
  * temp PGlite + a mock boat API. Covers: kill switch; no demand -> nothing; queued work -> exactly one launch even
  * with two autoscaler instances (lease); named snapshot image built once, then used for launches; the cap; idle ->
- * drain -> sandbox deleted (+ cooldown, no relaunch loop); stale and stuck-booting sandboxes reaped; orphans deleted.
+ * drain -> sandbox deleted (+ cooldown, no relaunch loop); stale and stuck-booting sandboxes reaped; orphans deleted;
+ * a switch to Vercel Sandbox orchestrators retires the shared boat orchestrator (mock Vercel, vercel-orch-mock.ts).
  *
  *   npx tsx orchestrator/test/autoscaler.ts
  */
@@ -86,6 +87,7 @@ const q = await import("../../src/queries.js");
 const kv = await import("../../src/keyvault.js");
 const fleet = await import("../../src/fleet.js");
 const { Autoscaler, AUTOSCALE } = await import("../../src/autoscaler.js");
+const { startVercelOrchMock } = await import("./vercel-orch-mock.js");
 const db = await getDb();
 await kv.addCredential("boat", BOAT_KEY);
 await kv.addCredential("openai", `sk-mock-${randomBytes(8).toString("hex")}`); // runs of codex/default need a vault key for their agent
@@ -227,6 +229,34 @@ try {
   await a1.tick(); await a1.settle();
   check("an orchestrator on the current code is kept (restart or other replica), whatever its age",
     sbs.has(same) && !(await fleet.staleOrchestratorIds()).has("orch-same1"), (a1.last?.reaped ?? []).map((r) => r.reason).join(","));
+
+  // provider switch, shared fleet: OCTILLION_SANDBOX_PROVIDER=vercel retires a shared boat orchestrator (it claims
+  // nothing new and is deleted once idle) and launches its replacement on Vercel Sandbox (mock Vercel)
+  const vo = await startVercelOrchMock();
+  Object.assign(process.env, vo.env);
+  for (const r of await rows()) { await fleet.fleetLeave(r.orchestrator_id).catch(() => {}); }
+  await a1.tick();
+  const shb = mk("octi-orch-shb1");
+  await db.query("INSERT INTO orchestrator_sandboxes (sandbox_id, orchestrator_id, state, created_at, ready_at, code_hash) VALUES ($1, 'orch-shb1', 'running', now() - interval '1 hour', now() - interval '1 hour', $2)", [shb, fleet.currentCodeHash()]);
+  await fleet.fleetCheckin("orch-shb1", 3, { worker_id: "w-shb1", running: {} });
+  await queue(2);
+  process.env.OCTILLION_SANDBOX_PROVIDER = "vercel";
+  const sw = await fleet.fleetCheckin("orch-shb1", 3, { worker_id: "w-shb1", running: {} }) as any;
+  await a1.tick(); await a1.settle();
+  const vrows = (await rows()).filter((r: any) => r.provider === "vercel");
+  check("provider switch (shared fleet): the boat orchestrator gets no pods, a Vercel one is launched in its place", Array.isArray(sw.assignment) && sw.assignment.length === 0 &&
+    vrows.length >= 1 && vrows.every((r: any) => r.state === "running" && vo.supervisors.has(r.sandbox_id)) && sbs.has(shb), `${JSON.stringify(sw.assignment)} ${JSON.stringify(vrows.map((r: any) => r.sandbox_id))} ${a1.last?.note ?? ""}`);
+  await new Promise((r) => setTimeout(r, 20));
+  await fleet.fleetCheckin("orch-shb1", 3, { worker_id: "w-shb1", running: {} });
+  await a1.tick(); await a1.settle();
+  const moved = (a1.last?.reaped ?? []).find((r) => r.sandbox_id === shb);
+  check("...and the boat one is deleted once it runs nothing (retired: orchestrators moved)", !sbs.has(shb) && /^retired: orchestrators moved to Vercel Sandbox/.test(moved?.reason ?? ""), moved?.reason ?? JSON.stringify(a1.last?.reaped));
+  await db.query("UPDATE agent_sessions SET status = 'cancelled' WHERE status IN ('queued', 'running')");
+  for (const r of await rows()) { await fleet.fleetLeave(r.orchestrator_id).catch(() => {}); }
+  await a1.tick();
+  check("provider switch: the Vercel orchestrator, idle, is deleted at Vercel", ![...vo.state.vsbSandboxes.keys()].some((n) => n.startsWith("octi-vo-")), [...vo.state.vsbSandboxes.keys()].join(","));
+  delete process.env.OCTILLION_SANDBOX_PROVIDER;
+  await vo.close();
   for (const r of await rows()) { await fleet.fleetLeave(r.orchestrator_id).catch(() => {}); }
   await a1.tick();
   check("nothing of ours left on boat", ![...sbs.values()].some((s) => s.name.startsWith("octi-orch-")), [...sbs.values()].map((s) => s.name).join(","));

@@ -73,6 +73,9 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     // vsbExec decides what a detached command does (in-process only; unset: exit 0, no output, done at once).
     vsbCmds: new Map<string, any>(), vsbFiles: new Map<string, Map<string, Buffer>>(), vsbPolicies: new Map<string, any>(),
     vsbExec: null as null | ((ctx: { sandbox: string; script: string; files: Map<string, Buffer> }) => VsbResult | Promise<VsbResult>),
+    // Orchestrator sandboxes (orchestrator/deploy/vercel-orch.ts): names the listing leaves out (listing lag; get still
+    // finds them), and snapshots (POST .../snapshot stops the session; GET /v2/sandboxes/snapshots?name=).
+    vsbHideFromList: new Set<string>(), vsbSnapshots: new Map<string, { id: string; name: string; status: string; createdAt: number }>(),
     prices: [
       { id: "price_mock_starter", object: "price", active: true, lookup_key: "octillion_starter", unit_amount: 49900, currency: "usd", recurring: { interval: "month" },
         nickname: "Starter", metadata: { monthly_budget_usd: "300" }, product: { id: "prod_mock_1", name: "Octillion", metadata: {} } },
@@ -662,18 +665,21 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
   v.get("/v2/sandboxes", (req, res) => {
     if (!req.query.project) return void res.status(400).json({ error: { code: "bad_request", message: "project is required" } });
     const prefix = String(req.query.namePrefix ?? "");
-    res.json({ sandboxes: [...s.vsbSandboxes.values()].filter((x) => x.name.startsWith(prefix)).map((x) => vsb(x).sandbox), pagination: { count: s.vsbSandboxes.size, next: null } });
+    res.json({ sandboxes: [...s.vsbSandboxes.values()].filter((x) => x.name.startsWith(prefix) && !s.vsbHideFromList.has(x.name)).map((x) => vsb(x).sandbox), pagination: { count: s.vsbSandboxes.size, next: null } });
   });
   v.post("/v2/sandboxes", (req, res) => {
     if (failing(s.vsbFail, "create")) return void res.status(502).json({ error: { code: "bad_gateway", message: "mock: create failed" } });
     const name = String(req.body?.name ?? `sbx-${randomBytes(4).toString("hex")}`);
     if (s.vsbSandboxes.has(name)) return void res.status(409).json({ error: { code: "conflict", message: "name taken" } });
     const x = { name, status: "running", session: `sbx_${randomBytes(8).toString("hex")}`, createdAt: Date.now(), region: req.body?.region ?? "iad1",
-      vcpus: req.body?.resources?.vcpus, memory: req.body?.resources?.memory, persistent: req.body?.persistent, timeout: req.body?.timeout, projectId: req.body?.projectId };
+      vcpus: req.body?.resources?.vcpus, memory: req.body?.resources?.memory, persistent: req.body?.persistent, timeout: req.body?.timeout, projectId: req.body?.projectId,
+      runtime: req.body?.runtime ?? null, snapshotId: req.body?.source?.type === "snapshot" ? req.body.source.snapshotId : null, tags: req.body?.tags ?? {} };
+    if (x.snapshotId && s.vsbSnapshots.get(x.snapshotId)?.status !== "created") return void res.status(404).json({ error: { code: "not_found", message: "Snapshot not found" } });
     s.vsbSandboxes.set(name, x);
     res.json({ routes: [], ...vsb(x) });
   });
-  v.get("/v2/sandboxes/:name", (req, res) => {
+  v.get("/v2/sandboxes/:name", (req, res, next) => {
+    if (req.params.name === "snapshots") return next(); // GET /v2/sandboxes/snapshots (below)
     if (!req.query.projectId) return void res.status(400).json({ error: { code: "bad_request", message: "projectId is required" } });
     const x = s.vsbSandboxes.get(req.params.name);
     if (!x) return void res.status(404).json({ error: { code: "not_found", message: "Sandbox not found" } });
@@ -763,6 +769,24 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     if (!x) return;
     s.vsbPolicies.set(x.name, req.body);
     res.json({ session: { id: x.session, status: x.status, networkPolicy: { mode: "custom", allowedDomains: req.body?.allow ?? [] } } });
+  });
+  v.post("/v2/sandboxes/sessions/:sid/snapshot", (req, res) => {
+    const x = vsbSession(req, res);
+    if (!x) return;
+    const snap = { id: `snap_${randomBytes(6).toString("hex")}`, name: x.name, status: "created", createdAt: Date.now() };
+    s.vsbSnapshots.set(snap.id, snap);
+    x.status = "stopped"; // Vercel stops the session after a snapshot
+    res.status(201).json({ session: { id: x.session, status: "stopped" }, snapshot: { ...snap, sourceSessionId: x.session, sizeBytes: 1, lastUsedAt: snap.createdAt, updatedAt: snap.createdAt } });
+  });
+  v.get("/v2/sandboxes/snapshots", (req, res) => {
+    const name = String(req.query.name ?? "");
+    res.json({ snapshots: [...s.vsbSnapshots.values()].filter((x) => !name || x.name === name).reverse(), pagination: { count: s.vsbSnapshots.size, next: null } });
+  });
+  v.delete("/v2/sandboxes/snapshots/:id", (req, res) => {
+    const x = s.vsbSnapshots.get(req.params.id);
+    if (!x) return void res.status(404).json({ error: { code: "not_found" } });
+    x.status = "deleted";
+    res.json({ snapshot: x });
   });
   app.use("/vercel-sandbox", v);
   app.post("/_mock/vercel/drop", (req, res) => { const x = s.vsbSandboxes.get(String(req.body?.name)); if (x) x.status = "stopped"; res.json({ ok: !!x }); });
