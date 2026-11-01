@@ -240,7 +240,8 @@ export function vercelProvider(): SandboxProvider {
         await sleep(3000);
       }
       const r = await withRetry(() => brokerJson(`${one(id)}/exec`, { method: "POST", timeoutMs: 120_000,
-        json: { command: `cat ${f}.out 2>/dev/null; cat ${f}.err >&2 2>/dev/null; rc=$(cat ${f}.rc 2>/dev/null || echo 124); rm -f ${shq(f)}.*; exit "$rc"`, timeout_sec: 60 } }), 3);
+        // Each stream read back at most 16 MiB (the broker buffers it), with a marker when cut.
+        json: { command: `o() { s=$(stat -c %s "$1" 2>/dev/null || echo 0); head -c 16777216 "$1" 2>/dev/null; [ "$s" -le 16777216 ] || printf "\\n[output truncated at 16 MiB]\\n"; }; o ${f}.out; o ${f}.err >&2; rc=$(cat ${f}.rc 2>/dev/null || echo 124); rm -f ${shq(f)}.*; exit "$rc"`, timeout_sec: 60 } }), 3);
       return { exitCode: r?.exitCode ?? null, stdout: r?.stdout ?? "", stderr: r?.stderr ?? "" };
     },
     async execStream(id, command, o) {

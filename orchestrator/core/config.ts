@@ -78,7 +78,7 @@ export const SANDBOX = {
   /** Vercel size: small 1 vCPU / 2 GB, default 2 / 4, large 4 / 8, xlarge 8 / 16 (2 GB per vCPU, as Vercel allocates). */
   vercelSize: env.OCTILLION_VERCEL_WORKER_SIZE ?? "default",
   /** Longest single broker call (s): the API function stops at 300 s, so execs and log follows stay well under it. */
-  vercelExecMaxSeconds: Math.max(30, Math.min(270, num(env.OCTILLION_VERCEL_EXEC_MAX_SECONDS, 240))),
+  vercelExecMaxSeconds: Math.max(30, Math.min(250, num(env.OCTILLION_VERCEL_EXEC_MAX_SECONDS, 240))),
   /** Share of the provisioned vCPUs assumed busy, for the cost estimate (agents mostly wait on the model). */
   vercelCpuActiveShare: Math.max(0, Math.min(1, num(env.OCTILLION_VERCEL_CPU_ACTIVE_SHARE, 0.3))),
 };

@@ -34,7 +34,8 @@ export interface VercelClient {
   create(o: { name: string; vcpus: number; memoryMb: number; timeoutMs: number; tags?: Record<string, string> }): Promise<{ name: string; session: string | null }>;
   get(name: string): Promise<{ status: string; session: string | null; sessionStatus: string }>;
   remove(name: string): Promise<void>;
-  list(prefix: string): Promise<{ name: string; createdAt: number | null; status: string }[]>;
+  /** Pages until done, or until `deadline` (ms epoch) is near: then what was listed so far. */
+  list(prefix: string, deadline?: number): Promise<{ name: string; createdAt: number | null; status: string }[]>;
   run(session: string, script: string): Promise<string>;
   status(session: string, cmd: string, wait?: boolean, timeoutMs?: number): Promise<{ exitCode: number | null }>;
   logs(session: string, cmd: string, signal: AbortSignal): AsyncGenerator<{ stream: string; data: string }>;
@@ -86,10 +87,10 @@ export function vercelClient(o: { oidcToken?: string | null; baseUrl?: string } 
       await call(`${one(name)}${q({ projectId: auth.projectId })}`, { method: "DELETE", timeoutMs: 30_000 }, "DELETE /v2/sandboxes/:name")
         .catch((e) => { if (!isGone(e)) throw e; });
     },
-    async list(prefix) {
+    async list(prefix, deadline) {
       const out: { name: string; createdAt: number | null; status: string }[] = [];
       let cursor: string | null = null;
-      for (let i = 0; i < 20; i++) {
+      for (let i = 0; i < 20 && !(deadline && Date.now() > deadline - 15_000); i++) {
         // The list endpoint names the project `project`; get and delete take `projectId` (as the probe found).
         const r = await json(await call(`/v2/sandboxes${q({ project: auth.projectId, sortBy: "name", namePrefix: prefix, limit: "50", ...(cursor ? { cursor } : {}) })}`,
           { timeoutMs: 20_000 }, "GET /v2/sandboxes"));

@@ -63,7 +63,7 @@ const vm = (sb: string, script: string, files: Map<string, Buffer>): { exitCode?
     files.set(`${f}.out`, Buffer.from(r.stdout ?? "")); files.set(`${f}.err`, Buffer.from(r.stderr ?? "")); files.set(`${f}.rc`, Buffer.from(String(r.exitCode ?? 0)));
     return { durationMs: Math.min(r.durationMs ?? 0, 500) + 300 };
   }
-  if ((m = /cat (\/tmp\/\.octi-x\/\w+)\.out/.exec(script)))
+  if ((m = /o (\/tmp\/\.octi-x\/\w+)\.out/.exec(script)))
     return { stdout: files.get(`${m[1]}.out`)?.toString() ?? "", stderr: files.get(`${m[1]}.err`)?.toString() ?? "", exitCode: Number(files.get(`${m[1]}.rc`)?.toString() ?? 1) };
   if (/cur=/.test(script)) return { stdout: "harness claude-code: preinstalled (2.1.296)\n" };
   if ((m = /launch-(\d+)\.sh/.exec(script))) { runs.set(`${sb}:${m[1]}`, Date.now() + RUN_MS); return { durationMs: RUN_MS }; }
@@ -110,8 +110,13 @@ app.use("/api/worker", (req, res, next) => {
 });
 app.use("/api/worker/sandboxes", workerSandboxRouter((res) => res.locals.worker));
 app.post("/api/worker/orchestrator/credentials", (_req, res) => void res.json({ boat: null, llm: null, sandbox_provider: "vercel" }));
-app.post("/api/worker/fleet", (req, res) => void res.json({ orchestrator_id: req.body?.orchestrator_id, next_checkin_seconds: 30,
-  assignment: [{ agent_id: "claude-code/sonnet", harness: "claude-code", model: "claude-sonnet-5-5", pods: 2 }] }));
+app.post("/api/worker/fleet", async (req, res) => {
+  // The check-in row the broker reads (a fleet orchestrator must have one; its capacity sizes the cap), as src/fleet.ts writes it.
+  await db.query(`INSERT INTO orchestrators (id, capacity, meta) VALUES ($1, $2, '{}') ON CONFLICT (id) DO UPDATE SET capacity = EXCLUDED.capacity, last_seen = now()`,
+    [String(req.body?.orchestrator_id), Number(req.body?.capacity ?? 1)]);
+  res.json({ orchestrator_id: req.body?.orchestrator_id, next_checkin_seconds: 30,
+    assignment: [{ agent_id: "claude-code/sonnet", harness: "claude-code", model: "claude-sonnet-5-5", pods: 2 }] });
+});
 app.delete("/api/worker/fleet/:id", (_req, res) => void res.status(204).end());
 app.post("/api/worker/claim", (req, res) => {
   const jobs = [];
@@ -148,8 +153,8 @@ check("server's choice (sandbox_provider: vercel) puts the workers on Vercel San
 check(`all ${sessions.length} sessions completed through Vercel worker sandboxes`, completed.size === sessions.length && statuses.every((s) => s === "completed"),
   `${completed.size} completed: ${[...new Set(statuses)].join(",")} ${[...completed.values()].map((c) => c.error_message).filter(Boolean).join(" | ").slice(0, 300)}`);
 const rows = await db.query<any>("SELECT * FROM worker_sandboxes ORDER BY id");
-check("one Vercel sandbox per session, owned by the fleet token, all deleted by the orchestrator",
-  rows.length === sessions.length && rows.every((r) => r.owner === "fleet" && r.deleted_at && r.delete_reason === "orchestrator") && st.vsbSandboxes.size === 0,
+check("one Vercel sandbox per session, owned by this fleet orchestrator (fleet:vwtest), all deleted by the orchestrator",
+  rows.length === sessions.length && rows.every((r) => r.owner === "fleet:vwtest" && r.orchestrator_id === "vwtest" && r.deleted_at && r.delete_reason === "orchestrator") && st.vsbSandboxes.size === 0,
   `${rows.length} rows, ${rows.filter((r) => !r.deleted_at).length} live, ${st.vsbSandboxes.size} left at Vercel`);
 check("sessions map to their own sandbox", new Set(rows.map((r) => r.session_id)).size === sessions.length);
 check("the diff was taken in every sandbox (streamed through the broker)", scripts.filter((s) => /bash \/tmp\/octi\/diff\.sh/.test(s)).length >= sessions.length);

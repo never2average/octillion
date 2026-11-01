@@ -283,8 +283,9 @@ function SessionPeek({ id, onJob, onCancel, cancelling }: { id: string; onJob: (
             { label: 'Orchestrator', value: data.orchestrator && orchHref
               ? <SectionLink href={orchHref} className='hover:underline'><Mono>{data.orchestrator.orchestrator_id ?? `row ${data.orchestrator.id}`}</Mono></SectionLink>
               : <Mono>{s.worker_id ?? '—'}</Mono> },
-            { label: 'boat sandbox', value: s.sandbox_id ? <><Mono>{s.sandbox_id}</Mono> <span className='text-muted-foreground'>· {String(m.boat_sandbox_type ?? 'default')}</span></> : none },
-            { label: 'Sandbox time', value: typeof m.boat_sandbox_seconds === 'number' ? dur(m.boat_sandbox_seconds) : none }
+            // Provider-neutral sandbox_* keys first (boat and Vercel Sandbox), the older boat_* keys for sessions before them.
+            { label: 'Worker sandbox', value: s.sandbox_id ? <><Mono>{s.sandbox_id}</Mono> <span className='text-muted-foreground'>· {sandboxProvider(m, s.sandbox_id)} · {String(m.sandbox_type ?? m.boat_sandbox_type ?? 'default')}</span></> : none },
+            { label: 'Sandbox time', value: typeof (m.sandbox_seconds ?? m.boat_sandbox_seconds) === 'number' ? dur(Number(m.sandbox_seconds ?? m.boat_sandbox_seconds)) : none }
           ]} />
         ) },
         { id: 'spend', label: 'Spend', content: (
@@ -325,6 +326,12 @@ export const GATEWAY_COLS: RecordCol<{ provider: string; requests: number; error
   { key: 'tokens', label: 'Tokens in / out', type: 'number', value: (g) => g.input_tokens + g.output_tokens, render: (g) => `${g.input_tokens.toLocaleString()} / ${g.output_tokens.toLocaleString()}`, className: 'text-right tabular-nums' },
   { key: 'cost', label: 'Cost', type: 'number', value: (g) => g.cost_usd, render: (g) => cents(g.cost_usd), className: 'text-right tabular-nums' }
 ];
+
+/** Where the worker sandbox ran: metadata.sandbox_provider, else the sandbox id's prefix (boat:… / vercel:…). */
+function sandboxProvider(m: Record<string, unknown>, sandboxId: string): string {
+  const p = String(m.sandbox_provider ?? sandboxId.split(':')[0] ?? '')
+  return p === 'vercel' ? 'Vercel Sandbox' : p === 'boat' ? 'boat.dev' : p || 'unknown'
+}
 
 function statusSentence(s: SessionRow, m: Record<string, unknown> = {}): string {
   const agent = s.agent_id ?? s.harness;

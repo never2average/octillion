@@ -30,23 +30,35 @@ The orchestrator asks the API instead, with its job-scoped worker token, under `
 | `POST /:id/network-policy` `{allow: [hosts]}` | The session's egress lockdown |
 | `DELETE /:id`, `GET /?prefix=` | Delete; this caller's live sandboxes |
 
-**Ownership.** Every sandbox gets a row recording its owner: `job:<sim_…>` for a per-job orchestrator's token, or
-`fleet` for the shared orchestrators' token.
-- Every route loads the row by id. Another owner gets 403, an unknown id 404, and a deleted sandbox 410.
-- A create also needs `canActOnSession` (a job token: only its own simulation's sessions), and the session must exist and be `running`.
-- At most 2 live sandboxes per session (`OCTILLION_WORKER_SANDBOX_MAX_PER_SESSION`) and 60 per owner (`…_MAX_PER_OWNER`).
+**Ownership.** Every sandbox gets a row recording its owner:
+- `job:<sim_…>` for a per-job orchestrator's token;
+- `fleet:<orchestrator id>` for the shared orchestrators' fleet token, which must name its orchestrator in `X-Octillion-Orchestrator`. The fleet token may act as any orchestrator anyway (`canActAsOrchestrator`), so this keeps the checks equivalent while giving each orchestrator its own cap.
+
+Rules:
+- Every route loads the row by id. Another owner gets 403, an unknown id 404, and a deleted sandbox 410. A gateway (`ogw_`) token gets 401.
+- A create also needs `canActOnSession` (a job token: only its own simulation's sessions), and the session must exist and be `running`. A fleet orchestrator must have checked in within 5 minutes.
+- Caps are counted and the row inserted in one transaction under an advisory lock on the owner, so they hold under concurrent creates:
+  - at most 2 live sandboxes per session (`OCTILLION_WORKER_SANDBOX_MAX_PER_SESSION`);
+  - per owner, its orchestrator's pod capacity plus `OCTILLION_WORKER_SANDBOX_CAP_MARGIN` (4), never more than `…_MAX_PER_OWNER` (60).
+- Live sandboxes of the same session held by another orchestrator (the session was re-claimed) are deleted on create.
 
 **Function limits.** One broker call stays under the function's 300 s:
-- An exec or a log stream is cut at `OCTILLION_WORKER_SANDBOX_EXEC_MAX_SECONDS` (280 s), and the command is killed.
+- An exec or a log stream is cut at `OCTILLION_WORKER_SANDBOX_EXEC_MAX_SECONDS` (at most 250 s), and the command is killed. The exit-status wait gets only what is left of a 280 s budget.
 - The orchestrator keeps its own calls at `OCTILLION_VERCEL_EXEC_MAX_SECONDS` (240 s).
 - The harness follow loop reconnects every 200 s and resumes by line number.
 - Setup scripts allowed up to 600 s (harness install, prepare, developer tools) run detached under `timeout`. The orchestrator polls them and reads their output back from files.
+- Buffered output of a non-streamed exec, and the long-command read-back, is capped at 16 MiB per stream, with a truncation marker. Streams wait for the socket to drain.
 
-**Reaper.** The 5-minute autoscale cron deletes, at Vercel:
-- sandboxes whose session ended;
-- sandboxes past their timeout plus 10 minutes;
-- listings with our prefix (`<namespace>-vw-`) and no live row, older than 30 minutes.
+**Names.** Worker sandboxes are named `<namespace>-vw-<environment>-…`. The environment is `prod`, `prev` or `dev` from `VERCEL_ENV`, or `OCTILLION_WORKER_SANDBOX_NAMESPACE`. Production and previews share one Vercel project, and this keeps one deployment's stray sweep away from another's sandboxes.
 
+**Reaper.** The 5-minute autoscale cron deletes, at Vercel, sandboxes:
+- whose session ended;
+- that are past their timeout plus 10 minutes;
+- that a newer sandbox of the same session from another orchestrator replaced;
+- whose orchestrator is gone: a fleet orchestrator with no check-in for 5 minutes, or a job with no live worker token.
+
+It then deletes listings under this environment's prefix that have no live row and are older than 30 minutes. It checks
+the cron's deadline between steps, list pages and deletes, and stops cleanly (`stopped: "deadline"`) when time runs out.
 It makes no Vercel call when there are no rows. Vercel also stops every worker sandbox at its own timeout (`persistent: false`).
 
 ## The sandbox
