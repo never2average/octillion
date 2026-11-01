@@ -2,19 +2,19 @@
  * Orchestrators on Vercel Sandbox (the `vercel` OrchestratorHost, deploy/orchestrator-host.ts). Driven only by the
  * API's autoscaler, through the API's Vercel REST client (src/vercel-sandbox.ts, the function's OIDC token). The token
  * never enters a sandbox: the orchestrator gets its job's worker token in a 0600 env file, and asks the API's broker for
- * its worker sandboxes (/api/worker/sandboxes, phase 1).
+ * its worker sandboxes (/api/worker/sandboxes).
  *
- * Lifecycle (the boat steps, by the same names, so launch errors classify the same way):
+ * Lifecycle (these step names are what launch errors classify by):
  *   create      POST /v2/sandboxes, named `<ns>-vo-<env>-v<hex>` (non-persistent, node24, OCTILLION_VERCEL_ORCH_TIMEOUT_MINUTES),
  *               or from the current code's snapshot (OCTILLION_ORCH_SNAPSHOT=on). The name is the sandbox id we record.
  *   ready       the session runs; find Node (/vercel/runtimes/node*\/bin)
- *   code upload the boat tarball (deploy/boat-lib.ts tarball()) in chunks through fs/write, then `npm ci` under /opt/octillion
+ *   code upload the code tarball (deploy/orch-lib.ts tarball()) in chunks through fs/write, then `npm ci` under /opt/octillion
  *   configure   the service user `octi` (no sudo), the 0600 env file it owns, the supervisor script and the root-owned
  *               marker /etc/octillion/host-role {"role":"vercel-orchestrator",...}; optional network policy
  *   preflight   as `octi` with its env: the host guard passes here, and OCTILLION_URL/healthz answers
  *   start       the supervisor as a detached Vercel command (Vercel Sandbox has no systemd)
  *
- * The supervisor (SUPERVISOR below) is what the boat unit's Restart=on-failure does: it restarts a crashed orchestrator
+ * The supervisor (SUPERVISOR below) does what a unit's Restart=on-failure would: it restarts a crashed orchestrator
  * after 10 s (60 s while it keeps dying within a minute), stays down after a clean exit (the idle / job-over exit 0), and
  * forwards SIGTERM for a graceful stop. It logs to /var/lib/octi/orchestrator.log.
  *
@@ -25,7 +25,7 @@
 import { randomBytes } from "node:crypto";
 import { VERCEL_SIZES, vercelEstCostUsd } from "../core/config.js";
 import { sleep } from "../core/util.js";
-import * as lib from "./boat-lib.js";
+import * as lib from "./orch-lib.js";
 import type { HostLaunchOpts, HostLaunchResult, HostLimits, HostSandbox, OrchestratorHost } from "./orchestrator-host.js";
 
 /** The subset of the API's Vercel client (src/vercel-sandbox.ts VercelClient) a host needs. Structural: no import of src/. */
@@ -197,7 +197,7 @@ export function vercelHost(o: VercelHostOptions): OrchestratorHost {
   }
   const pathOf = (node: string) => `${node}:/usr/local/bin:/usr/bin:/bin`;
 
-  /** The code: boat's tarball through fs/write in chunks, assembled and installed as root under /opt/octillion. */
+  /** The code: the tarball through fs/write in chunks, assembled and installed as root under /opt/octillion. */
   async function uploadCode(session: string, node: string, root?: string): Promise<number> {
     const tgz = lib.tarball(root);
     let r = await run(session, `rm -rf ${STAGE} && install -d -m 700 ${STAGE}`, 30);
@@ -221,8 +221,7 @@ cd ${VHOME}; sudo -n rm -rf app.old; if [ -d app ]; then sudo -n mv app app.old;
     const tuning = Object.entries(ctx.tuning ?? {}).filter(([k, v]) => (lib.TUNING_VARS as readonly string[]).includes(k) && /^[A-Za-z0-9._-]{1,32}$/.test(v)).map(([k, v]) => `${k}=${v}`);
     const envBody = [
       `OCTILLION_URL=${ctx.url}`, `OCTILLION_WORKER_TOKEN=${token}`, `ORCHESTRATOR_ID=${orchId}`,
-      // RUNNER=boat: the server's choice picks the workers (OCTILLION_SANDBOX_PROVIDER), as on boat orchestrators.
-      "RUNNER=boat", `POD_CAPACITY=${ctx.podCapacity}`, "OCTILLION_HOST_ROLE=vercel-orchestrator", `OCTILLION_SANDBOX_ID=${name}`, ...tuning, "",
+      "RUNNER=vercel", `POD_CAPACITY=${ctx.podCapacity}`, "OCTILLION_HOST_ROLE=vercel-orchestrator", `OCTILLION_SANDBOX_ID=${name}`, ...tuning, "",
     ].join("\n");
     await write(session, `/tmp/octi-orchestrator.env.new`, envBody);
     await write(session, `/tmp/octi-supervisor.sh`, SUPERVISOR);
@@ -263,12 +262,6 @@ sudo -n chown root:root /etc/octillion/host-role; sudo -n chmod 644 /etc/octilli
     return r.stdout.trim().split("\n").pop() ?? "";
   }
 
-  const launchErr = (e: unknown, step: string, t0: number): lib.LaunchError => {
-    const err = e instanceof Error ? e : new Error(String(e));
-    const raw = err.message;
-    return Object.assign(err, { message: `${step} (${Math.round((Date.now() - t0) / 1000)}s): ${raw}`, launchStep: step, launchError: raw });
-  };
-
   const host: OrchestratorHost = {
     provider: "vercel", label: "Vercel Sandbox", orchPrefix,
     orchIdOf: (id) => `orch-${id.startsWith(orchPrefix) ? id.slice(orchPrefix.length) : id}`,
@@ -307,7 +300,7 @@ sudo -n chown root:root /etc/octillion/host-role; sudo -n chmod 644 /etc/octilli
         checkDeadline();
         created = await c.create({ name, vcpus: size.vcpus, memoryMb: size.memoryMb, timeoutMs, snapshotId: opts.image ?? null,
           tags: { octillion: "orchestrator", orchestrator: orchId } });
-      } catch (e) { throw launchErr(e, step, t0); }
+      } catch (e) { throw lib.launchError(e, step, t0); }
       const expiresAt = t0 + timeoutMs;
       if (created.session) sessions.set(name, created.session);
       try {
@@ -339,7 +332,7 @@ sudo -n chown root:root /etc/octillion/host-role; sudo -n chmod 644 /etc/octilli
         return { sandboxId: name, orchId, fromImage, timings, preflight: { ok: pf.ok, reason: pf.reason }, expiresAt };
       } catch (e) {
         await host.delete(name).catch(() => {});
-        throw launchErr(e, step, t0);
+        throw lib.launchError(e, step, t0);
       }
     },
     async stop(id) {

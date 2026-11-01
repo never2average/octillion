@@ -2,7 +2,7 @@
  * Sandbox runners. A sandbox lives for the whole session and can run the harness several times
  * (launch, then resumes with the simulated developer's replies) in the same workdir.
  *
- *  - boat:   one boat.dev VM per session over its REST API (default).
+ *  - vercel: one Vercel Sandbox VM per session through the API's broker (default; vmRunner).
  *  - docker: one long-lived container per session (`docker exec` per turn).
  *  - local:  host CLI in a temp dir. DEV ONLY, no isolation.
  *
@@ -22,11 +22,10 @@ import type { HarnessAdapter } from "../harnesses/adapters.js";
 import { seedBase, seedScript, type TemplateId } from "./workspaces.js";
 import type { SessionEnvironment } from "./environment.js";
 import { envInstallScript, harnessWiringScript, parseEnvLines, toolsFor } from "./env-install.js";
-import { BOAT, CFG, SANDBOX } from "./config.js";
+import { CFG, SANDBOX, sandboxConfigError } from "./config.js";
 import { log, sh, shq, sleep, withRetry } from "./util.js";
 import { EGRESS_DIR, proxyEnv, proxySource, probeSource, policyProbeSource, diagnosticsScript as egressDiagnostics, setupScript as egressSetupScript, type EgressPolicy } from "./egress.js";
-import { boatApi } from "./boat.js";
-import { boatProvider, vercelBrokerConfig, vercelProvider, type SandboxProvider } from "./sandbox-provider.js";
+import { vercelBrokerConfig, vercelProvider, type SandboxProvider } from "./sandbox-provider.js";
 
 export interface RunExit { code: number | null; signal: string | null; error?: string }
 
@@ -62,7 +61,7 @@ export interface Sandbox {
   /** Free resources (idempotent). */
   cleanup(): Promise<void>;
   meta(): Record<string, unknown>;
-  /** What the developer environment step did (boat runner); undefined when the session had none. */
+  /** What the developer environment step did (VM runner); undefined when the session had none. */
   environment?: EnvironmentResult;
 }
 
@@ -91,11 +90,11 @@ export interface OpenSpec {
   /** Registry agent id (pool group) and the job's model; the pool asserts the group's model matches. */
   agentId?: string;
   model?: string;
-  /** The persona's developer environment (CLI tools, language servers), installed and wired before the first run (boat only). */
+  /** The persona's developer environment (CLI tools, language servers), installed and wired before the first run (VM runner only). */
   environment?: SessionEnvironment | null;
   /**
-   * Network lockdown for the agent (core/egress.ts; boat only): after setup, the agent reaches only these hosts through
-   * an in-VM proxy, verified by a probe; the open fails if it cannot be enforced. Set for private runs.
+   * Network lockdown for the agent (core/egress.ts; VM runner only): after setup, the agent reaches only these hosts
+   * (the provider's network policy), verified by a probe; the open fails if it cannot be enforced. Set for private runs.
    */
   egress?: EgressPolicy | null;
 }
@@ -105,7 +104,7 @@ export interface Runner {
   open(spec: OpenSpec): Promise<Sandbox>;
 }
 
-export const AGENT_HOME = "/home/agent"; // same layout in boat and docker
+export const AGENT_HOME = "/home/agent"; // same layout in the VM and docker
 export const AGENT_WORKDIR = `${AGENT_HOME}/work`;
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
@@ -158,7 +157,7 @@ $G diff --cached --no-color --no-ext-diff "$B" -- . ${LOCK_EXCLUDE} ':(exclude,g
 $G diff --cached --name-only "$B" -- ${LOCK_ONLY} | sed 's/^/# lockfile changed (content omitted): /'`;
 
 export function capDiff(d: string): string {
-  return d.length > BOAT.diffMaxBytes ? d.slice(0, BOAT.diffMaxBytes) + "\n[diff truncated by worker]\n" : d;
+  return d.length > SANDBOX.diffMaxBytes ? d.slice(0, SANDBOX.diffMaxBytes) + "\n[diff truncated by worker]\n" : d;
 }
 
 /** Image env minus anything OCTILLION_* (blindness), for `env -i` at exec time. */
@@ -317,29 +316,18 @@ export const localRunner: Runner = {
   },
 };
 
-// ---------------------------------------------------------------- VM runner (boat.dev, Vercel Sandbox)
+// ---------------------------------------------------------------- VM runner (Vercel Sandbox)
 //
-// One fresh VM per session, driven over a provider's REST API (core/sandbox-provider.ts). On boat.dev
-// (https://docs.boat.dev/api/v1):
-//   POST /sandboxes {type, ttlSeconds, noEnv:true, snapshots:false} (Idempotency-Key); poll GET until ready
-//   PUT  /files: env + scripts + per-turn input -> /tmp/octi (mode 700, Boat's user; the agent user can't read it)
-//   POST /commands: prepare (sync); per turn: launch (detached) + follow its JSONL (stream:true); diff (stream)
-//   GET  /commands/{processId}: is the turn still running?
-//   DELETE /sandboxes/{id} + X-Ascii-Confirm-Delete: force-stop + permanent delete (cleanup / kill)
-//
-// We don't use Boat's managed POST /prompt + GET /events: Boat injects its own system prompt, `boat` skill and
-// `computer` MCP server into managed harnesses (breaks blindness), and its events are a normalized format without
-// Claude's `result` usage/cost. We exec the stock preinstalled CLI as an isolated user under `env -i`.
-//
-// On Vercel Sandbox the same scripts run through Octillion's broker (src/worker-sandboxes.ts): files, sync / streamed /
-// detached commands, network policy and delete map one to one; the image is Amazon Linux 2023 (user vercel-sandbox with
-// sudo, Node from /vercel/runtimes), which the setup scripts detect.
+// One fresh VM per session, driven over a provider's API (core/sandbox-provider.ts), on Vercel Sandbox through
+// Octillion's broker (src/worker-sandboxes.ts): files, sync / streamed / detached commands, network policy and delete.
+//   files:    env + scripts + per-turn input -> /tmp/octi (mode 700, the image's user; the agent user can't read it)
+//   commands: prepare (sync); per turn: launch (detached) + follow its JSONL (streamed); diff (streamed)
+// The image is Amazon Linux 2023 (user vercel-sandbox with sudo, Node from /vercel/runtimes), which the setup scripts
+// detect. We exec the stock CLI as the unprivileged `agent` user under `env -i`.
 
-const BOAT_DIR = "/tmp/octi";
-
-function boatRunAs(): string {
-  return BOAT.agentUser === "agent" ? "sudo -n -u agent -H" : "";
-}
+const VM_DIR = "/tmp/octi";
+/** The coding agent always runs as the unprivileged `agent` user (no sudo; docs/security.md). */
+const RUN_AS = "sudo -n -u agent -H";
 
 /**
  * Developer environment (core/environment.ts): install the persona's CLI tools and language servers system-wide, then
@@ -351,21 +339,21 @@ async function vmEnvironment(p: SandboxProvider, id: string, put: (path: string,
   let tools = toolsFor(harness, env);
   // Zed over ACP needs the client file; without it the session runs as a CLI rather than failing.
   if (tools.some((t) => t.id === "acp/client")) {
-    try { await put(`${BOAT_DIR}/acp-client.mjs`, readFileSync(ACP_CLIENT_SRC, "utf8")); }
+    try { await put(`${VM_DIR}/acp-client.mjs`, readFileSync(ACP_CLIENT_SRC, "utf8")); }
     catch (e) { log(`[${p.name} ${id}] ACP client unavailable (${String(e).slice(0, 200)}); running as a CLI`); tools = tools.filter((t) => !t.id.startsWith("acp/")); }
   }
-  await put(`${BOAT_DIR}/env-install.sh`, envInstallScript(tools));
-  // One call per tool: boat caps a command at 600s, and a slow install (a JDK) must not take the others with it.
+  await put(`${VM_DIR}/env-install.sh`, envInstallScript(tools));
+  // One call per tool (each allowed 600 s): a slow install (a JDK) must not take the others with it.
   const inst = { exitCode: 0, stdout: "", stderr: "" };
   for (let i = 0; i < tools.length; i++) {
-    const r = await p.exec(id, `ACP_CLIENT_SRC=${BOAT_DIR}/acp-client.mjs bash ${BOAT_DIR}/env-install.sh ${i}`, { timeoutSec: 600 })
+    const r = await p.exec(id, `ACP_CLIENT_SRC=${VM_DIR}/acp-client.mjs bash ${VM_DIR}/env-install.sh ${i}`, { timeoutSec: 600 })
       .catch((e) => ({ exitCode: -1, stdout: `ENV ${tools[i]!.id} fail 0\n`, stderr: String(e) }));
     inst.stdout += r.stdout;
     if (r.exitCode !== 0) { inst.exitCode = r.exitCode ?? -1; inst.stderr += `${tools[i]!.id}: ${r.stderr.slice(-300)}\n`; }
   }
   const wiring = harnessWiringScript(harness, tools, env);
-  await put(`${BOAT_DIR}/env-wire.sh`, wiring.script);
-  const wire = await p.exec(id, `cd / && ${boatRunAs()} env -i HOME=${AGENT_HOME} PATH="$(cat ${BOAT_DIR}/path)" bash -s < ${BOAT_DIR}/env-wire.sh`, { timeoutSec: 300 })
+  await put(`${VM_DIR}/env-wire.sh`, wiring.script);
+  const wire = await p.exec(id, `cd / && ${RUN_AS} env -i HOME=${AGENT_HOME} PATH="$(cat ${VM_DIR}/path)" bash -s < ${VM_DIR}/env-wire.sh`, { timeoutSec: 300 })
     .catch((e) => ({ exitCode: -1, stdout: "", stderr: String(e) }));
   const r = parseEnvLines(`${inst.stdout}\n${wire.stdout}`);
   if (r.failed.length || inst.exitCode !== 0 || wire.exitCode !== 0)
@@ -377,8 +365,8 @@ async function vmEnvironment(p: SandboxProvider, id: string, put: (path: string,
            dropped: env.dropped ?? [], skills: (env.skills ?? []).map((s) => s.name), agent_rules: !!env.agent_rules, wired: r.wired, wiring: wiring.summary, seconds: Math.round((Date.now() - t0) / 1000) };
 }
 
-function boatPrepareScript(bin: string, repoUrl: string | null, seed = false): string {
-  // Seed: the template script is read by this (Boat) user's shell and piped to the agent user's bash.
+function prepareScript(bin: string, repoUrl: string | null, seed = false): string {
+  // Seed: the template script is read by this (image) user's shell and piped to the agent user's bash.
   const repo = repoUrl ? parseRepoUrl(repoUrl) : null;
   const clone = repo
     ? `$RUN env URL=${shq(repo.url)} REF=${shq(repo.ref ?? "")} W="$W" bash -c ${shq(CLONE_SCRIPT)} </dev/null | tail -n 1 > "$O/base"\ntest -s "$O/base"`
@@ -387,16 +375,11 @@ function boatPrepareScript(bin: string, repoUrl: string | null, seed = false): s
       : ":";
   return `set -euo pipefail
 cd /
-O=${BOAT_DIR}; AH=${AGENT_HOME}; W=${AGENT_WORKDIR}
-if [ ${shq(BOAT.agentUser)} = agent ]; then
-  id -u agent >/dev/null 2>&1 || sudo -n useradd -m -s /bin/bash agent
-  OWNER=agent
-else
-  sudo -n mkdir -p "$AH"; sudo -n chown "$(id -un):" "$AH"
-  OWNER=$(id -un)
-fi
-RUN="${boatRunAs()}"
-# Agent PATH: system dirs + wherever the preinstalled tools live, never Boat's own home dir.
+O=${VM_DIR}; AH=${AGENT_HOME}; W=${AGENT_WORKDIR}
+id -u agent >/dev/null 2>&1 || sudo -n useradd -m -s /bin/bash agent
+OWNER=agent
+RUN="${RUN_AS}"
+# Agent PATH: system dirs + wherever the preinstalled tools live, never the image user's own home dir.
 P=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 for b in claude codex node npm npx git python3 pip3 uv; do
   d=$(bash -lc "command -v $b" 2>/dev/null | head -n1 || true)
@@ -408,19 +391,19 @@ echo "$AH/.npm-global/bin:$AH/.local/bin:$P" > "$O/path"
 $RUN mkdir -p "$W" "$AH/.npm-global" "$AH/.codex"
 echo "$OWNER" > "$O/owner"
 ${clone}
-$RUN env -i HOME="$AH" PATH="$(cat "$O/path")" bash -c 'command -v ${bin}' >/dev/null || { echo "${bin} is not on the agent PATH ($(cat "$O/path")); try BOAT_AGENT_USER=user" >&2; exit 127; }
+$RUN env -i HOME="$AH" PATH="$(cat "$O/path")" bash -c 'command -v ${bin}' >/dev/null || { echo "${bin} is not on the agent PATH ($(cat "$O/path"))" >&2; exit 127; }
 `;
 }
 
 /** `pidFile`: the launcher records its own pid (providers that don't report one: the follower's `tail --pid`). */
-function boatLaunchScript(n: number, argv: string[], pidFile = false): string {
+function launchScript(n: number, argv: string[], pidFile = false): string {
   const hardLimit = Math.ceil(CFG.maxSessionMs / 1000) + 60; // the worker kills first; belt and braces
   return `cd /
-${pidFile ? `echo $$ > ${BOAT_DIR}/pid-${n}\n` : ""}O=${BOAT_DIR}; AH=${AGENT_HOME}
-U=${BOAT.agentUser === "agent" ? "agent" : "$(id -un)"}
+${pidFile ? `echo $$ > ${VM_DIR}/pid-${n}\n` : ""}O=${VM_DIR}; AH=${AGENT_HOME}
+U=agent
 # This run's credentials: handed to the agent user (0600), sourced and deleted before the harness execs.
 sudo -n install -o "$(cat "$O/owner")" -m 600 "$O/env-${n}" "$AH/.octi-env-${n}" && rm -f "$O/env-${n}"
-${boatRunAs()} env -i HOME="$AH" USER="$U" LOGNAME="$U" SHELL=/bin/bash LANG=C.UTF-8 TERM=dumb PATH="$(cat "$O/path")" \\
+${RUN_AS} env -i HOME="$AH" USER="$U" LOGNAME="$U" SHELL=/bin/bash LANG=C.UTF-8 TERM=dumb PATH="$(cat "$O/path")" \\
   bash -c 'set -a; . "$HOME/.octi-env-${n}"; set +a; rm -f "$HOME/.octi-env-${n}"; cd "$HOME/work" && exec timeout -k 30 ${hardLimit} "$@"' octi ${argv.map(shq).join(" ")} \\
   < "$O/in-${n}.txt" > "$O/out-${n}.jsonl" 2> "$O/err-${n}.log"
 c=$?
@@ -429,15 +412,15 @@ exit "$c"
 `;
 }
 
-function boatDiffScript(): string {
+function diffScript(): string {
   return `cd /
-${boatRunAs()} env -i HOME=${AGENT_HOME} PATH="$(cat ${BOAT_DIR}/path)" WORK=${AGENT_WORKDIR} SNAP=/tmp/.octi-snap.git BASE="$(cat ${BOAT_DIR}/base 2>/dev/null)" bash -c ${shq(DIFF_SCRIPT)} | head -c ${BOAT.diffMaxBytes + 1}
+${RUN_AS} env -i HOME=${AGENT_HOME} PATH="$(cat ${VM_DIR}/path)" WORK=${AGENT_WORKDIR} SNAP=/tmp/.octi-snap.git BASE="$(cat ${VM_DIR}/base 2>/dev/null)" bash -c ${shq(DIFF_SCRIPT)} | head -c ${SANDBOX.diffMaxBytes + 1}
 `;
 }
 
-/** Worker sandbox name: lets `boat-orchestrators status` attribute worker sandboxes to their orchestrator. */
+/** Worker sandbox name hint: attributes a worker sandbox to its orchestrator (the broker adds its own prefix). */
 export function workerSandboxName(agentId: string): string {
-  return `${(process.env.OCTILLION_BOAT_NAMESPACE || "octi").toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 8) || "octi"}-w-${CFG.orchestratorId}-${agentId}`.toLowerCase().replace(/[^a-z0-9-]+/g, "-").slice(0, 60);
+  return `${(process.env.OCTILLION_SANDBOX_NAMESPACE || "octi").toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 8) || "octi"}-w-${CFG.orchestratorId}-${agentId}`.toLowerCase().replace(/[^a-z0-9-]+/g, "-").slice(0, 60);
 }
 
 /** Pinned harness version from the registry (by agent id, else the first agent of that harness). */
@@ -448,25 +431,25 @@ export function harnessPin(agentId: string | undefined, harness: string): string
   } catch { return null; }
 }
 
-const SETUP_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "images", "boat-setup");
+const SETUP_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "images", "setup");
 const ACP_CLIENT_SRC = join(dirname(fileURLToPath(import.meta.url)), "..", "harnesses", "acp-client.mjs");
 
-/** orchestrator/images/boat-setup/<harness>.sh + _common.sh, if this harness has one. */
-export function boatSetupScripts(harness: string): { common: string; script: string } | null {
+/** orchestrator/images/setup/<harness>.sh + _common.sh, if this harness has one. */
+export function setupScripts(harness: string): { common: string; script: string } | null {
   try { return { common: readFileSync(join(SETUP_DIR, "_common.sh"), "utf8"), script: readFileSync(join(SETUP_DIR, `${harness}.sh`), "utf8") }; }
   catch { return null; }
 }
 
 /**
- * Keep the preinstalled CLI if it reports the pinned version; else install it with its boat-setup script. If the pinned
+ * Keep the preinstalled CLI if it reports the pinned version; else install it with its setup script. If the pinned
  * version can't be had (no setup script, or its install fails) but a working CLI is preinstalled, the session runs on
  * that one instead of failing: it prints `harness <id>: drift <found> (pinned <pin>)`, which the runner records on the
  * session (metadata.harness_drift) and the failure-rate alert reports. Only a missing CLI fails the session.
  */
-export function boatEnsureHarnessScript(harness: string, bin: string, pin: string | null, hasSetup: boolean): string {
+export function ensureHarnessScript(harness: string, bin: string, pin: string | null, hasSetup: boolean): string {
   return `set -uo pipefail
-# Boat VMs ship /usr/local/bin/node as a symlink into /home/user/.nvm (0750): the agent user would fall back to
-# /usr/bin/node v20 (breaks pi, cline warns). Make it a real, world-executable copy first.
+# An image may ship /usr/local/bin/node as a symlink into a private home (an nvm tree): the agent user would fall back
+# to an older system node (breaks pi, cline warns). Make it a real, world-executable copy first.
 real="$(readlink -f /usr/local/bin/node 2>/dev/null || true)"
 case "$real" in /home/*|/root/*) sudo -n cp --remove-destination "$real" /usr/local/bin/node && sudo -n chmod 0755 /usr/local/bin/node ;; esac
 cur="$( (sudo -n -u nobody env -i HOME=/tmp PATH=/usr/local/bin:/usr/bin:/bin ${shq(bin)} --version 2>/dev/null || true) | grep -v -i -E '^(warning|\\[|\\(node)' | head -n1)"
@@ -474,28 +457,28 @@ pin=${shq(pin ?? "")}
 if [ -n "$cur" ] && { [ -z "$pin" ] || printf '%s' "$cur" | grep -qF -- "$pin"; }; then echo "harness ${harness}: preinstalled ($cur)"; exit 0; fi
 ${hasSetup
     ? `echo "harness ${harness}: installing pinned \${pin:-latest} (found: \${cur:-none})" >&2
-bash ${BOAT_DIR}/setup/${harness}.sh "$pin" >&2 || echo "harness ${harness}: install of $pin failed" >&2
+bash ${VM_DIR}/setup/${harness}.sh "$pin" >&2 || echo "harness ${harness}: install of $pin failed" >&2
 now="$( (sudo -n -u nobody env -i HOME=/tmp PATH=/usr/local/bin:/usr/bin:/bin ${shq(bin)} --version 2>/dev/null || true) | grep -v -i -E '^(warning|\\[|\\(node)' | head -n1)"
 if printf '%s' "$now" | grep -qF -- "$pin"; then echo "harness ${harness}: installed ($now)"; exit 0; fi
 [ -n "$now" ] || { echo "harness ${harness}: after install, unprivileged --version reports nothing, expected $pin" >&2; exit 1; }
 echo "harness ${harness}: drift $now (pinned $pin)"`
-    : `[ -n "$cur" ] || { echo "harness ${harness}: ${bin} is missing, expected \${pin:-any}, and there is no boat-setup script" >&2; exit 1; }
-echo "harness ${harness}: drift $cur (pinned $pin; no boat-setup script)"`}
+    : `[ -n "$cur" ] || { echo "harness ${harness}: ${bin} is missing, expected \${pin:-any}, and there is no setup script" >&2; exit 1; }
+echo "harness ${harness}: drift $cur (pinned $pin; no setup script)"`}
 `;
 }
 
 /** Runners whose sandboxes are provider VMs (fleet assignment, egress lockdown). */
-export const isVmRunner = (r: { name: string }) => r.name === "boat" || r.name === "vercel";
+export const isVmRunner = (r: { name: string }) => r.name === "vercel";
 
 /**
  * One VM per session on `p`: create, prepare (harness pinned, workdir, repo or template), optional developer environment
- * and egress lockdown, then turns as detached launches followed by line number. boatRunner = vmRunner(boatProvider).
+ * and egress lockdown, then turns as detached launches followed by line number. vercelRunner = vmRunner(vercelProvider()).
  */
 export function vmRunner(p: SandboxProvider): Runner {
   return {
     name: p.name,
     async open(spec) {
-      const id = await p.create({ size: p.size, timeoutSec: BOAT.ttlSeconds, name: workerSandboxName(spec.agentId ?? spec.adapter.id), sessionId: spec.jobKey });
+      const id = await p.create({ size: p.size, timeoutSec: SANDBOX.ttlSeconds, name: workerSandboxName(spec.agentId ?? spec.adapter.id), sessionId: spec.jobKey });
       let envResult: EnvironmentResult | undefined;
       let harnessDrift: { found: string; pinned: string } | null = null;
       let egressReport: { hosts: number; probe: unknown } | undefined;
@@ -515,47 +498,46 @@ export function vmRunner(p: SandboxProvider): Runner {
       const exec = (command: string, timeoutSec: number) => p.exec(id, command, { timeoutSec });
 
       try {
-        await p.waitReady(id, BOAT.readyTimeoutMs);
-        const mk = await exec(`install -d -m 700 ${BOAT_DIR}`, 30);
-        if (mk.exitCode !== 0) throw new Error(`mkdir ${BOAT_DIR} failed: ${mk.stderr.slice(-300)}`);
+        await p.waitReady(id, SANDBOX.readyTimeoutMs);
+        const mk = await exec(`install -d -m 700 ${VM_DIR}`, 30);
+        if (mk.exitCode !== 0) throw new Error(`mkdir ${VM_DIR} failed: ${mk.stderr.slice(-300)}`);
         // Harness pinned by the registry: keep the preinstalled CLI when it is the pinned version, otherwise
-        // install it system-wide with orchestrator/images/boat-setup/<harness>.sh (which verifies `--version`).
+        // install it system-wide with orchestrator/images/setup/<harness>.sh (which verifies `--version`).
         const pin = harnessPin(spec.agentId, spec.adapter.id);
-        const setup = boatSetupScripts(spec.adapter.id);
+        const setup = setupScripts(spec.adapter.id);
         if (setup) {
-          await put(`${BOAT_DIR}/setup/_common.sh`, setup.common);
-          await put(`${BOAT_DIR}/setup/${spec.adapter.id}.sh`, setup.script);
+          await put(`${VM_DIR}/setup/_common.sh`, setup.common);
+          await put(`${VM_DIR}/setup/${spec.adapter.id}.sh`, setup.script);
         }
-        const ensure = await exec(boatEnsureHarnessScript(spec.adapter.id, spec.adapter.bin, pin, !!setup), 600);
+        const ensure = await exec(ensureHarnessScript(spec.adapter.id, spec.adapter.bin, pin, !!setup), 600);
         if (ensure.exitCode !== 0) throw new Error(`harness ${spec.adapter.id}${pin ? `@${pin}` : ""} not available: ${(ensure.stderr || ensure.stdout).slice(-800)}`);
-        // Ran on another version than the pin (see boatEnsureHarnessScript): kept on the session, not a failure.
+        // Ran on another version than the pin (see ensureHarnessScript): kept on the session, not a failure.
         const drift = /harness \S+: drift (.+?) \(pinned ([^;)]+)/.exec(ensure.stdout);
         harnessDrift = drift ? { found: drift[1]!.trim().slice(0, 80), pinned: drift[2]!.trim() } : null;
         if (harnessDrift) log(`${tag} ${spec.adapter.id} runs ${harnessDrift.found}, pinned ${harnessDrift.pinned}`);
         const seed = !spec.repoUrl && !!spec.template;
-        if (seed) await put(`${BOAT_DIR}/seed.sh`, seedScript(spec.template!));
-        await put(`${BOAT_DIR}/prepare.sh`, boatPrepareScript(spec.adapter.bin, spec.repoUrl, seed));
-        await put(`${BOAT_DIR}/diff.sh`, boatDiffScript());
-        const prep = await exec(`bash ${BOAT_DIR}/prepare.sh`, 600);
+        if (seed) await put(`${VM_DIR}/seed.sh`, seedScript(spec.template!));
+        await put(`${VM_DIR}/prepare.sh`, prepareScript(spec.adapter.bin, spec.repoUrl, seed));
+        await put(`${VM_DIR}/diff.sh`, diffScript());
+        const prep = await exec(`bash ${VM_DIR}/prepare.sh`, 600);
         if (prep.exitCode !== 0) throw new Error(`sandbox prepare failed (exit ${prep.exitCode}): ${(prep.stderr || prep.stdout).slice(-800)}`);
         if (spec.environment) envResult = await vmEnvironment(p, id, put, spec.adapter.id, spec.environment);
         // Last step before the agent's first turn: everything that needs the network (harness, repo, tools) is done.
         if (spec.egress) {
-          if (BOAT.agentUser !== "agent") throw new Error("egress lockdown needs the unprivileged agent user (BOAT_AGENT_USER)");
           let probeCmd: string;
           if (p.lockdown) {
             // Native allow-list (Vercel network policy): the whole VM reaches only these hosts, enforced outside the VM.
             await p.lockdown(id, spec.egress.hosts);
-            await put(`${BOAT_DIR}/egress-probe.mjs`, policyProbeSource(spec.egress.gatewayHost));
-            probeCmd = `cd / && NODE="$(command -v node)" && ${boatRunAs()} env -i HOME=${AGENT_HOME} PATH="$(cat ${BOAT_DIR}/path)" "$NODE" ${BOAT_DIR}/egress-probe.mjs`;
+            await put(`${VM_DIR}/egress-probe.mjs`, policyProbeSource(spec.egress.gatewayHost));
+            probeCmd = `cd / && NODE="$(command -v node)" && ${RUN_AS} env -i HOME=${AGENT_HOME} PATH="$(cat ${VM_DIR}/path)" "$NODE" ${VM_DIR}/egress-probe.mjs`;
           } else {
-            await put(`${BOAT_DIR}/egress-proxy.mjs`, proxySource());
-            await put(`${BOAT_DIR}/egress-allow.json`, JSON.stringify({ hosts: spec.egress.hosts }));
-            await put(`${BOAT_DIR}/egress-probe.mjs`, probeSource(spec.egress.gatewayHost));
-            await put(`${BOAT_DIR}/egress-setup.sh`, egressSetupScript(BOAT_DIR));
-            const lock = await exec(`bash ${BOAT_DIR}/egress-setup.sh`, 120);
+            await put(`${VM_DIR}/egress-proxy.mjs`, proxySource());
+            await put(`${VM_DIR}/egress-allow.json`, JSON.stringify({ hosts: spec.egress.hosts }));
+            await put(`${VM_DIR}/egress-probe.mjs`, probeSource(spec.egress.gatewayHost));
+            await put(`${VM_DIR}/egress-setup.sh`, egressSetupScript(VM_DIR));
+            const lock = await exec(`bash ${VM_DIR}/egress-setup.sh`, 120);
             if (lock.exitCode !== 0) throw new Error(`egress lockdown failed (exit ${lock.exitCode}): ${(lock.stderr || lock.stdout).slice(-600)}`);
-            probeCmd = `cd / && NODE="$(command -v node)" && ${boatRunAs()} env -i HOME=${AGENT_HOME} PATH="$(cat ${BOAT_DIR}/path)" "$NODE" ${EGRESS_DIR}/probe.mjs`;
+            probeCmd = `cd / && NODE="$(command -v node)" && ${RUN_AS} env -i HOME=${AGENT_HOME} PATH="$(cat ${VM_DIR}/path)" "$NODE" ${EGRESS_DIR}/probe.mjs`;
           }
           const probe = await exec(probeCmd, 120);
           const last = probe.stdout.trim().split("\n").pop() ?? "";
@@ -587,13 +569,13 @@ export function vmRunner(p: SandboxProvider): Runner {
           if (spec.egress && !p.lockdown) env = { ...env, ...proxyEnv() }; // HTTP clients go through the in-VM proxy
           argv = [...argv];
           argv[0] = argv[0]!.split("/").pop()!; // host bin overrides don't apply in the VM
-          await put(`${BOAT_DIR}/env-${n}`, Object.entries(env).map(([k, v]) => `${k}=${shq(v)}`).join("\n") + "\n");
-          await put(`${BOAT_DIR}/in-${n}.txt`, input); // byte-for-byte; fed to the CLI on stdin
-          await put(`${BOAT_DIR}/launch-${n}.sh`, boatLaunchScript(n, argv, p.name !== "boat"));
-          const started = await p.execDetached(id, `bash ${BOAT_DIR}/launch-${n}.sh`);
+          await put(`${VM_DIR}/env-${n}`, Object.entries(env).map(([k, v]) => `${k}=${shq(v)}`).join("\n") + "\n");
+          await put(`${VM_DIR}/in-${n}.txt`, input); // byte-for-byte; fed to the CLI on stdin
+          await put(`${VM_DIR}/launch-${n}.sh`, launchScript(n, argv, true));
+          const started = await p.execDetached(id, `bash ${VM_DIR}/launch-${n}.sh`);
           const launchedAt = Date.now(), followUntil = launchedAt + (Math.ceil(CFG.maxSessionMs / 1000) + 60 + 300) * 1000;
           const pidArg = started.pid != null && Number.isFinite(started.pid) ? `--pid=${started.pid}` : `\${P:+--pid=$P}`;
-          const pidRead = started.pid != null && Number.isFinite(started.pid) ? "" : `for i in 1 2 3 4 5; do P=$(cat ${BOAT_DIR}/pid-${n} 2>/dev/null); [ -n "$P" ] && break; sleep 1; done; `;
+          const pidRead = started.pid != null && Number.isFinite(started.pid) ? "" : `for i in 1 2 3 4 5; do P=$(cat ${VM_DIR}/pid-${n} 2>/dev/null); [ -n "$P" ] && break; sleep 1; done; `;
 
           const stdout = new PassThrough();
           const stderr = new PassThrough();
@@ -609,7 +591,7 @@ export function vmRunner(p: SandboxProvider): Runner {
             resolveExit(x);
           };
           finishCurrent = finish;
-          const out = `${BOAT_DIR}/out-${n}.jsonl`;
+          const out = `${VM_DIR}/out-${n}.jsonl`;
 
           // Follow out-N.jsonl by line number, reconnecting every tailSeconds; `tail --pid` returns once the launcher exits.
           void (async () => {
@@ -644,7 +626,7 @@ export function vmRunner(p: SandboxProvider): Runner {
                 // No provider pid (Vercel): the launcher's own exit file is the ground truth; the provider's status is a
                 // second opinion (a stale "running" once kept a finished launch polled for 52 minutes).
                 if (started.pid == null) {
-                  const ex = await exec(`test -e ${BOAT_DIR}/exit-${n} && echo exited || true`, 30).catch(() => ({ stdout: "" }));
+                  const ex = await exec(`test -e ${VM_DIR}/exit-${n} && echo exited || true`, 30).catch(() => ({ stdout: "" }));
                   if (/exited/.test(ex.stdout)) break;
                 }
                 if (!(await p.running(id, started.handle, abort.signal))) break;
@@ -670,7 +652,7 @@ export function vmRunner(p: SandboxProvider): Runner {
               });
               if (partial.trim()) { stdout.write(partial + "\n"); partial = ""; }
               const fin = await afterExit("exit status read", () =>
-                exec(`cat ${BOAT_DIR}/exit-${n} 2>/dev/null; tail -c 8000 ${BOAT_DIR}/err-${n}.log >&2 2>/dev/null; true`, 60));
+                exec(`cat ${VM_DIR}/exit-${n} 2>/dev/null; tail -c 8000 ${VM_DIR}/err-${n}.log >&2 2>/dev/null; true`, 60));
               if (fin.stderr) stderr.write(fin.stderr);
               const code = /^\s*(\d+)/.exec(fin.stdout)?.[1];
               finish({ code: code !== undefined ? Number(code) : null, signal: null });
@@ -687,7 +669,7 @@ export function vmRunner(p: SandboxProvider): Runner {
           if (abort.signal.aborted) return null;
           let d = "";
           try {
-            await p.execStream(id, `bash ${BOAT_DIR}/diff.sh`, { timeoutSec: 300, onStdout: (s) => { if (d.length <= BOAT.diffMaxBytes) d += s; }, onStderr: () => {}, signal: abort.signal });
+            await p.execStream(id, `bash ${VM_DIR}/diff.sh`, { timeoutSec: 300, onStdout: (s) => { if (d.length <= SANDBOX.diffMaxBytes) d += s; }, onStderr: () => {}, signal: abort.signal });
           } catch (e) {
             log(`${tag} diff failed:`, String(e));
             return null;
@@ -706,13 +688,10 @@ export function vmRunner(p: SandboxProvider): Runner {
         async cleanup() { await destroy(); },
         meta() {
           const secs = ((destroyedAt ?? Date.now()) - createdAt) / 1000;
-          const cost = p.estCostUsd(secs); // estimate; boat's exact meter: GET /sandboxes/{id}/usage
+          const cost = p.estCostUsd(secs); // estimate from the provider's price table
           return {
             ...(spec.template && !spec.repoUrl ? { workspace_template: spec.template } : {}),
-            // boat_* keys: what the compute pages always read (boat only); sandbox_*: provider-neutral, every provider.
-            ...(p.name === "boat" ? { boat_sandbox_id: id } : {}),
             ...(harnessDrift ? { harness_drift: harnessDrift } : {}),
-            ...(p.name === "boat" ? { boat_sandbox_type: p.size, boat_sandbox_seconds: Math.round(secs), boat_est_cost_usd: cost } : {}),
             sandbox_provider: p.name,
             sandbox_vm_id: id,
             sandbox_type: p.size,
@@ -725,36 +704,28 @@ export function vmRunner(p: SandboxProvider): Runner {
   };
 }
 
-export const boatRunner: Runner = vmRunner(boatProvider);
 /** Vercel Sandbox workers through the API's broker (created lazily: it reads CFG at open time). */
 export const vercelRunner: Runner = vmRunner(vercelProvider());
 
-export const RUNNERS: Record<string, Runner> = { boat: boatRunner, vercel: vercelRunner, docker: dockerRunner, local: localRunner };
+export const RUNNERS: Record<string, Runner> = { vercel: vercelRunner, docker: dockerRunner, local: localRunner };
 
 /**
- * The worker runner for this orchestrator: RUNNER=vercel or OCTILLION_SANDBOX_PROVIDER in this env, else the server's
- * choice (orchestrator credentials `sandbox_provider`), else RUNNER. Only RUNNER=boat is redirected; docker/local/pool stay.
+ * The worker runner for this orchestrator: RUNNER (default vercel; docker / local / pool are for tests and development).
+ * A retired provider (RUNNER=boat, OCTILLION_SANDBOX_PROVIDER=boat) throws a clear error instead of falling back.
  */
-export function selectRunner(runnerName: string, serverProvider: string | null | undefined, envProvider: "boat" | "vercel" | null): Runner | undefined {
-  if (runnerName === "boat" || runnerName === "vercel") {
-    const want = envProvider ?? (runnerName === "vercel" ? "vercel" : serverProvider === "vercel" ? "vercel" : "boat");
-    return want === "vercel" ? vercelRunner : boatRunner;
-  }
+export function selectRunner(runnerName: string): Runner | undefined {
+  const bad = sandboxConfigError({ RUNNER: runnerName, OCTILLION_SANDBOX_PROVIDER: process.env.OCTILLION_SANDBOX_PROVIDER });
+  if (bad) throw new Error(bad);
   return RUNNERS[runnerName];
 }
 
 /** Startup checks for the selected runner. */
 export async function checkRunner(runner: Runner): Promise<void> {
-  if (runner.name === "boat") {
-    if (!BOAT.apiKey) throw new Error("BOAT_API_KEY is required for RUNNER=boat (create one with `boat api-key create octillion-worker --preset ci --ttl 90d`)");
-    const me = await boatApi("/me").catch((e) => { throw new Error(`boat.dev auth check failed: ${String(e)}`); });
-    log(`boat.dev OK as ${me?.user?.login ?? me?.login ?? "?"}; size=${BOAT.size} ttl=${BOAT.ttlSeconds}s agentUser=${BOAT.agentUser} onFinish=${BOAT.onFinish}`);
-  }
   if (runner.name === "vercel") {
     // Vercel Sandbox is reached only through the API's broker: it must be configured there (the function's OIDC token).
     const c = await vercelBrokerConfig().catch((e) => { throw new Error(`Vercel Sandbox broker check failed: ${String(e)}`); });
     if (!c?.configured) throw new Error(`Vercel Sandbox is not configured on the Octillion API: ${c?.reason ?? "unknown"}`);
-    log(`vercel sandbox broker OK (${c.via ?? "?"}, ${c.region ?? "?"}); size=${SANDBOX.vercelSize} timeout=${BOAT.ttlSeconds}s agentUser=${BOAT.agentUser}`);
+    log(`vercel sandbox broker OK (${c.via ?? "?"}, ${c.region ?? "?"}); size=${SANDBOX.vercelSize} timeout=${SANDBOX.ttlSeconds}s`);
   }
   if (runner.name === "docker") {
     const r = await sh("docker", ["image", "inspect", CFG.dockerImage]);

@@ -1,16 +1,13 @@
-# Shared helpers for boat-setup/<harness>.sh. Sourced, not executed.
+# Shared helpers for setup/<harness>.sh. Sourced, not executed.
 #
-# These scripts run INSIDE a fresh boat.dev VM (Ubuntu 24.04, default user `user` with passwordless sudo,
-# Node 24 via nvm in /home/user/.nvm). They install one pinned harness SYSTEM-WIDE (/usr/local, /opt), so the
-# unprivileged `agent` user the worker creates per session can run it, and so the install is captured by a
-# named snapshot (boat snapshots capture changes under /usr, /opt, /etc, /root, /srv and /home/user).
+# These scripts run INSIDE a fresh Vercel Sandbox worker sandbox (orchestrator/core/runners.ts vmRunner): Amazon Linux
+# 2023, default user `vercel-sandbox` with sudo, Node 22/24 under /vercel/runtimes/node*/bin, dnf. They install one pinned
+# harness SYSTEM-WIDE (/usr/local, /opt), so the unprivileged `agent` user the worker creates per session can run it.
 #
-# The same scripts run in Vercel Sandbox worker sandboxes (orchestrator/core/sandbox-provider.ts): Amazon Linux 2023,
-# default user `vercel-sandbox` with sudo, Node 22/24 under /vercel/runtimes/node*/bin, dnf. Nothing below assumes a user
-# name or a package manager: Node is found under nvm (boat), then /vercel/runtimes (Vercel; OCTI_NODE_DIRS overrides
-# both), then PATH, and is copied to /usr/local/bin either way.
+# Nothing below assumes a user name or a package manager: Node is found under an nvm tree if there is one, then
+# /vercel/runtimes (OCTI_NODE_DIRS overrides both), then PATH, and is copied to /usr/local/bin either way.
 #
-# Nothing here writes API keys, config files, rules files or MCP servers: the snapshot must stay neutral.
+# Nothing here writes API keys, config files, rules files or MCP servers: the install must stay neutral.
 set -euo pipefail
 
 log() { printf '[octillion-setup] %s\n' "$*" >&2; }
@@ -36,12 +33,12 @@ ensure_node() {
     done
   fi
   [ -n "$cand" ] || cand="$(dirname "$(command -v node 2>/dev/null || echo /nonexistent/node)")"
-  [ -x "$cand/node" ] || die "no node found (expected nvm node on boat VMs, /vercel/runtimes on Vercel Sandbox)"
+  [ -x "$cand/node" ] || die "no node found (expected /vercel/runtimes on Vercel Sandbox, or an nvm tree)"
   local major; major="$("$cand/node" -p 'process.versions.node.split(".")[0]')"
   [ "$major" -ge 22 ] || die "node $("$cand/node" --version) at $cand is < 22"
   NODE_DIR="$cand"
-  # Boat VMs ship /usr/local/bin/node as a SYMLINK into /home/user/.nvm (seen 2026-10-10). /home/user is 0750, so for
-  # every other user (the worker's `agent`, `nobody` in verify) node resolves to /usr/bin/node v20 instead, which
+  # An image may ship /usr/local/bin/node as a SYMLINK into a private home (an nvm tree under a 0750 home): for every
+  # other user (the worker's `agent`, `nobody` in verify) node would resolve to an older system node instead, which
   # breaks pi and makes cline warn. Replace the symlink with a real, world-executable copy.
   local real; real="$(readlink -f /usr/local/bin/node 2>/dev/null || true)"
   case "$real" in /home/*|/root/*)
@@ -58,7 +55,7 @@ ensure_node() {
 }
 
 # npm_pin <package> <version>: install a pinned npm package globally into /usr/local (bins in /usr/local/bin).
-# --force replaces a preinstalled bin of the same name (boat ships some harnesses preinstalled).
+# --force replaces a preinstalled bin of the same name.
 # Newer npm skips a package's install scripts unless they are approved (allowScripts), and some harnesses fetch their
 # native binary there (claude-code: install.cjs): so the pinned package's own install / postinstall run explicitly
 # afterwards (`npm run` is not subject to that), only for the package we pinned, never for its dependencies.
@@ -112,7 +109,7 @@ verify() {
   log "OK $harness: $path -> $out"
 }
 
-# Leave nothing session-specific in the snapshot.
+# Leave nothing session-specific behind (npm caches).
 cleanup() {
   $SUDO npm cache clean --force >/dev/null 2>&1 || true
   rm -rf "$HOME/.npm/_cacache" "$HOME/.cache" 2>/dev/null || true

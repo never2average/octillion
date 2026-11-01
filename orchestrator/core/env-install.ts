@@ -25,7 +25,7 @@ const PRELUDE = String.raw`
 SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo -n"
 export DEBIAN_FRONTEND=noninteractive
 export PATH="/usr/local/bin:$PATH"
-# apt-get update once per sandbox (each tool is its own call: boat caps a command at 600s). Vercel Sandbox (Amazon Linux
+# apt-get update once per sandbox (each tool is its own call, allowed 600 s). Vercel Sandbox (Amazon Linux
 # 2023) has dnf instead: the Debian package names that differ there are mapped, the rest are asked for as they are.
 apt_install() {
   if command -v apt-get >/dev/null 2>&1; then
@@ -72,10 +72,10 @@ ensure_dart() {
 `;
 
 /**
- * Install script: only the tools this session needs, and only those not already on the sandbox (preinstalled by boat
- * or baked into a worker image): a tool whose binary is on PATH is kept as is. One subshell per tool, so one failure
+ * Install script: only the tools this session needs, and only those not already on the sandbox (preinstalled in
+ * the image or baked into a worker image): a tool whose binary is on PATH is kept as is. One subshell per tool, so one failure
  * never stops the rest or the session. Prints `ENV <id> present|ok|fail <seconds>` per tool (logs go to stderr).
- * `bash env-install.sh <n>` runs only tool n (0-based): the runner calls it once per tool, each under boat's 600s cap.
+ * `bash env-install.sh <n>` runs only tool n (0-based): the runner calls it once per tool, each allowed 600 s.
  */
 export function envInstallScript(tools: EnvTool[]): string {
   const steps = tools.map((t, i) => `[ -z "\${1:-}" ] || [ "$1" = ${i} ] && {

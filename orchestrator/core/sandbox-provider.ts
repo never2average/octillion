@@ -1,9 +1,6 @@
 /**
- * Worker sandbox providers: what the VM runner (core/runners.ts vmRunner) needs from a sandbox service, and nothing more.
+ * The worker sandbox provider: what the VM runner (core/runners.ts vmRunner) needs from a sandbox service, and nothing more.
  *
- *  - boat:   boat.dev over its v1 REST API with the boat key from the broker (core/boat.ts). Exactly the calls the boat
- *            runner always made: create (start gate, Idempotency-Key), PATCH name, poll until ready, sync / streamed /
- *            detached commands, PUT files, DELETE (or stop) with a stop fallback.
  *  - vercel: Vercel Sandbox through Octillion's own broker (POST /api/worker/sandboxes..., src/worker-sandboxes.ts). The
  *            Vercel credentials are the API function's OIDC token, which exists only inside our Vercel functions: this
  *            process never holds them. It authenticates with its worker token, and the server lets it use only the
@@ -13,16 +10,15 @@
  * BLINDNESS is unchanged: a worker sandbox receives files and commands from this process, never its worker token.
  */
 import { randomBytes } from "node:crypto";
-import { BOAT, CFG, SANDBOX, VERCEL_SIZES, vercelEstCostUsd, BOAT_PRICE_PER_HOUR } from "./config.js";
-import { boatApi, boatCommandRetry, boatCreate, boatExec, boatExecStream, boatSandboxPath, BoatError } from "./boat.js";
+import { CFG, SANDBOX, VERCEL_SIZES, vercelEstCostUsd } from "./config.js";
 import { HttpError, log, shq, sleep, withRetry } from "./util.js";
 
 export interface ExecResult { exitCode: number | null; stdout: string; stderr: string }
 export type VmState = "ready" | "starting" | "stopped" | "gone";
 
 export interface SandboxProvider {
-  name: "boat" | "vercel";
-  /** Size label recorded on the session (boat: small|default|large|xlarge; Vercel: the same names, see VERCEL_SIZES). */
+  name: "vercel";
+  /** Size label recorded on the session (small|default|large|xlarge, see VERCEL_SIZES). */
   size: string;
   /** Seconds one streamed log follow may last before the runner reconnects (it resumes by line number). */
   tailSeconds: number;
@@ -33,7 +29,7 @@ export interface SandboxProvider {
   exec(id: string, command: string, o: { timeoutSec: number }): Promise<ExecResult>;
   /** Streamed stdout / stderr frames, then the exit code. */
   execStream(id: string, command: string, o: { timeoutSec: number; onStdout: (s: string) => void; onStderr: (s: string) => void; signal?: AbortSignal }): Promise<{ exitCode: number | null }>;
-  /** Start without waiting. `pid` is the launcher's pid in the VM when the provider reports it (boat), else null. */
+  /** Start without waiting. `pid` is the launcher's pid in the VM when the provider reports it, else null (Vercel). */
   execDetached(id: string, command: string): Promise<{ handle: string; pid: number | null }>;
   running(id: string, handle: string, signal?: AbortSignal): Promise<boolean>;
   writeFile(id: string, path: string, content: string | { base64: string }): Promise<void>;
@@ -43,98 +39,12 @@ export interface SandboxProvider {
   list(prefix: string): Promise<{ id: string; name: string; createdAt: string | null }[]>;
   /**
    * Native egress allow-list (Vercel network policy). When present the runner uses it for the session lockdown instead
-   * of the in-VM proxy + nftables (boat). Throws when it cannot be applied: the open then fails (fail closed).
+   * of the in-VM proxy + nftables (core/egress.ts). Throws when it cannot be applied: the open then fails (fail closed).
    */
   lockdown?(id: string, hosts: string[]): Promise<void>;
   /** Provider-neutral cost estimate for `seconds` of this size. */
   estCostUsd(seconds: number): number;
 }
-
-// ---------------------------------------------------------------- boat
-
-/** boat.dev: wraps core/boat.ts exactly as the boat runner always called it. */
-export const boatProvider: SandboxProvider = {
-  name: "boat",
-  get size() { return BOAT.size; },
-  tailSeconds: 540, // each streamed tail call stays under boat's 600s command cap, then reconnects
-  async create(o) {
-    // Start gate + 429/503 backoff, same Idempotency-Key on retries (a lost response never creates a second VM).
-    let created: any;
-    try {
-      created = await boatCreate(
-        { type: o.size, ttlSeconds: o.timeoutSec, noEnv: true, snapshots: false, ...(BOAT.org ? { org: BOAT.org } : {}) },
-        { onBackoff: (ms, e) => log(`boat create backing off ${Math.round(ms / 1000)}s (${e.status} ${e.code})`) });
-    } catch (e) {
-      // Seen live (2026-10-10): a key scoped without sandbox.create gets 403 api_key_action_forbidden.
-      if (e instanceof BoatError && e.code === "api_key_action_forbidden")
-        throw new Error(`boat key is not allowed to create sandboxes (${e.message}). Store a key with the ci preset (sandbox.create + delete-own + exec + files) in the vault.`);
-      throw e;
-    }
-    const id: string = created?.sandbox?.id;
-    if (!id) throw new Error(`boat create returned no sandbox id: ${JSON.stringify(created).slice(0, 300)}`);
-    // A recognisable name, so `status` / cleanup can attribute worker sandboxes (best effort).
-    void boatApi(boatSandboxPath(id), { method: "PATCH", json: { name: o.name } }).catch(() => {});
-    return id;
-  },
-  async get(id) {
-    try {
-      const g = await boatApi(boatSandboxPath(id));
-      const st = String(g?.sandbox?.state ?? "");
-      if (st === "ready" || st === "idle" || st === "running") return { state: "ready" };
-      if (st === "error" || st === "cancelled" || st === "archived" || st === "archiving") return { state: "stopped", detail: `${st}: ${g?.sandbox?.error ?? ""}` };
-      return { state: "starting", detail: st };
-    } catch (e) {
-      if (e instanceof HttpError && e.status === 404) return { state: "gone" };
-      throw e;
-    }
-  },
-  async waitReady(id, timeoutMs) {
-    const until = Date.now() + timeoutMs;
-    for (;;) {
-      const g = await withRetry(() => boatApi(boatSandboxPath(id)), 3);
-      const st = g?.sandbox?.state;
-      if (st === "ready" || st === "idle" || st === "running") break;
-      if (st === "error" || st === "cancelled" || st === "archived" || st === "archiving") throw new Error(`boat sandbox ${id} is ${st}: ${g?.sandbox?.error ?? ""}`);
-      if (Date.now() > until) throw new Error(`boat sandbox ${id} not ready after ${timeoutMs / 1000}s (state ${st})`);
-      await sleep(2000);
-    }
-  },
-  exec: (id, command, o) => boatExec(id, command, o.timeoutSec),
-  execStream: (id, command, o) => boatExecStream(id, command, o.timeoutSec, o.onStdout, o.onStderr, o.signal),
-  async execDetached(id, command) {
-    const started = await boatCommandRetry(() => boatApi(`${boatSandboxPath(id)}/commands`, { method: "POST", json: { command, detached: true } }));
-    const processId = Number(started?.processId);
-    const pid = Number(started?.pid ?? started?.processId);
-    if (!Number.isFinite(processId)) throw new Error(`boat detached start returned no processId: ${JSON.stringify(started).slice(0, 300)}`);
-    return { handle: String(processId), pid };
-  },
-  async running(id, handle, signal) {
-    const st = await withRetry(() => boatApi(`${boatSandboxPath(id)}/commands/${handle}?tailBytes=2000`, { signal }), 3);
-    return !!st?.running;
-  },
-  async writeFile(id, path, content) {
-    if (typeof content !== "string") throw new Error("boat writeFile takes text content");
-    await boatApi(`${boatSandboxPath(id)}/files`, { method: "PUT", json: { path, content } });
-  },
-  async delete(id) {
-    try {
-      if (BOAT.onFinish === "stop") await withRetry(() => boatApi(`${boatSandboxPath(id)}/stop`, { method: "POST", json: {} }), 3);
-      else await withRetry(() => boatApi(boatSandboxPath(id), { method: "DELETE", headers: { "X-Ascii-Confirm-Delete": id } }), 3);
-    } catch (e) {
-      if (!(e instanceof HttpError && e.status === 404)) {
-        log(`[boat ${id}] ${BOAT.onFinish} failed, falling back to stop:`, String(e));
-        await boatApi(`${boatSandboxPath(id)}/stop`, { method: "POST", json: { force: true } }).catch((e2) =>
-          log(`[boat ${id}] stop failed too; it auto-stops at its TTL (${BOAT.ttlSeconds}s after create):`, String(e2)));
-      }
-    }
-  },
-  async list(prefix) {
-    const r = await withRetry(() => boatApi("/sandboxes"), 3);
-    return ((r?.sandboxes ?? []) as any[]).filter((s) => typeof s?.name === "string" && s.name.startsWith(prefix))
-      .map((s) => ({ id: String(s.id), name: String(s.name), createdAt: s.createdAt ?? null }));
-  },
-  estCostUsd: (seconds) => Number(((seconds / 3600) * (BOAT_PRICE_PER_HOUR[BOAT.size] ?? 0.036)).toFixed(5)),
-};
 
 // ---------------------------------------------------------------- vercel (through the broker)
 
@@ -159,7 +69,7 @@ const brokerJson = async (path: string, init: Parameters<typeof broker>[1] = {})
 };
 const one = (id: string) => `/${encodeURIComponent(id)}`;
 
-/** Reads the broker's ND-JSON command stream (same frames as boat's: stdout / stderr / exit / error). */
+/** Reads the broker's ND-JSON command stream (frames: stdout / stderr / exit / error). */
 export async function readCommandFrames(res: Response, onStdout: (s: string) => void, onStderr: (s: string) => void): Promise<{ exitCode: number | null }> {
   const reader = res.body!.getReader();
   const dec = new TextDecoder();

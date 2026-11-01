@@ -3,7 +3,7 @@
  *
  * Tools (thin wrappers over orchestrator/core):
  *   claim_jobs(limit)                    claim queued jobs (manager mode only)
- *   start_worker(job_id)                 boat VM + harness running headless with the task prompt
+ *   start_worker(job_id)                 worker VM + harness running headless with the task prompt
  *   wait_for_turn(session)               wait for the harness run to end; last text, commands, files, exit
  *   reply_as_developer(session, text)    emit `simulated_user` and resume the same harness conversation
  *   finish_session(session, status)      git diff event, /complete, delete the VM
@@ -144,7 +144,7 @@ export function createOctillionExtension(reg: OctillionRegistry, opts: { allowCl
 
 /** Default export for `pi -e ./orchestrator/pi-octillion`: manager mode with claim_jobs. */
 export default function octillion(pi: ExtensionAPI) {
-  assertOrchestratorHost(CFG.runner); // manual Pi CLI use is agent work too: boat orchestrator sandboxes only
+  assertOrchestratorHost(CFG.runner); // manual Pi CLI use is agent work too: orchestrator sandboxes only
   const runner = RUNNERS[CFG.runner];
   if (!runner) throw new Error(`RUNNER must be one of ${Object.keys(RUNNERS).join(", ")}`);
   return createOctillionExtension(new OctillionRegistry(runner), { allowClaim: true })(pi);

@@ -268,7 +268,7 @@ process.exit(bad ? 1 : 0);
 }
 
 /**
- * Root-side setup (runs as the boat user with sudo): proxy user and files, start the proxy, firewall rules for the
+ * Root-side setup (runs as the image user with sudo): proxy user and files, start the proxy, firewall rules for the
  * agent uid. Exits non-zero (fail closed) when node or a firewall tool is missing or the proxy does not come up.
  */
 export function setupScript(dir: string): string {

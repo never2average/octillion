@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# boat.dev setup: install OpenAI Codex CLI (pinned version) system-wide in a fresh boat VM, ready to snapshot.
-# Boat preinstalls this harness, but at whatever version the image ships; we pin our own copy over it.
+# Sandbox setup: install OpenAI Codex CLI (pinned version) system-wide in a fresh worker sandbox.
+# A preinstalled copy, if any, is replaced by our pinned one.
 # Usage (inside the VM):  bash codex.sh [version]      default version = harnesses/registry.json pin
-# Normally driven by ../boat-snapshot.sh, which uploads this + _common.sh, runs it and saves the named snapshot.
+# Normally uploaded with _common.sh and run by the VM runner (orchestrator/core/runners.ts) when the pin is missing.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=_common.sh
 . "$HERE/_common.sh"

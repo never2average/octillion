@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 
 export interface RegistryAgent {
   id: string; harness: string; label: string; model: string; weight: number; enabled?: boolean;
-  harness_version?: string; image?: { docker?: string; boat_snapshot?: string }; requires_env?: string[];
+  harness_version?: string; image?: { docker?: string }; requires_env?: string[];
 }
 export interface PodGroup {
   agent_id: string; harness: string; model: string; weight: number; pods: number;

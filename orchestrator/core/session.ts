@@ -47,7 +47,7 @@ export interface Job {
   agent_id?: string | null;
   /** The agent's registry spec from the server (src/worker.ts): how admin-added harnesses reach this orchestrator. */
   agent?: { id?: string; harness?: string; model?: string; label?: string; harness_version?: string; requires_env?: string[];
-            image?: { docker?: string; boat_snapshot?: string }; origin?: string; base_agent?: string } | null;
+            image?: { docker?: string }; origin?: string; base_agent?: string } | null;
   attempt: number;
   prompt: string;
   repo_url: string | null;
@@ -257,15 +257,15 @@ export class WorkerSession {
       s.creds = await sessionCredentials(job.session_id).catch((e) => { throw new Error(`credentials: ${redact(String(e instanceof Error ? e.message : e))}`); });
       harnessCredentials(adapter, s.creds.providers, job.model); // validate the mapping before paying for a sandbox
       // Private runs (customer-written tasks or personas): the agent may only reach the gateway, registries and the
-      // task's git host (core/egress.ts). Opt-in until the transparent HTTPS path is verified on boat VMs:
+      // task's git host (core/egress.ts). Opt-in until verified at scale on Vercel Sandbox:
       // OCTILLION_EGRESS=private (private runs) or =all (every run); unset = no lockdown.
       const lockdown = process.env.OCTILLION_EGRESS === "all" || (job.private && process.env.OCTILLION_EGRESS === "private");
-      const vm = runner.name === "boat" || runner.name === "vercel"; // VM runners (core/runners.ts isVmRunner)
+      const vm = runner.name === "vercel"; // VM runners (core/runners.ts isVmRunner)
       const egress = lockdown && vm
         ? egressPolicy({ gatewayUrls: Object.values(s.creds.providers).map((p) => p.base_url).filter((u): u is string => !!u), repoUrl: job.repo_url })
         : null;
       if (lockdown && !vm && process.env.OCTILLION_DEV_ALLOW_LOCAL !== "1")
-        throw new Error(`private runs need a VM runner (boat or vercel) for network lockdown (RUNNER=${runner.name})`);
+        throw new Error(`private runs need the VM runner (vercel) for network lockdown (RUNNER=${runner.name})`);
       s.sandbox = await runner.open({ adapter, harness: job.harness, jobKey: job.session_id, agentId: job.agent_id ?? undefined, model: job.model, repoUrl: job.repo_url, template: s.template,
                                        environment: job.environment ?? null, egress });
       if (s.sandbox.egress) s.sink.push({ type: "environment", egress: s.sandbox.egress });

@@ -1,7 +1,7 @@
 /**
  * Octillion deterministic worker (no orchestrator LLM).
  *
- * Claims jobs, runs the harness in a sandbox (boat.dev by default), streams its JSONL and, while the agent stops
+ * Claims jobs, runs the harness in a sandbox (Vercel Sandbox by default), streams its JSONL and, while the agent stops
  * before it is done (core/progress.ts), resumes it with neutral canned developer nudges (core/session.ts
  * driveToDone) up to MAX_AGENT_TURNS. Then finishes: git diff event, /complete, sandbox deleted. The Pi
  * orchestrator (pi-octillion/main.ts) adds the in-character simulated developer and falls back to this driver.
@@ -9,7 +9,7 @@
  * Run: `npx tsx orchestrator/worker.ts`
  */
 import { getAdapter } from "./harnesses/adapters.js";
-import { CFG, SANDBOX } from "./core/config.js";
+import { CFG } from "./core/config.js";
 import { PodPool, POOL } from "./core/pool.js";
 import { RUNNERS, checkRunner, isVmRunner, selectRunner, type Runner } from "./core/runners.js";
 import { activeSessions, adapterFor, claimJobs, driveToDone, markShuttingDown, WorkerSession, type Job } from "./core/session.js";
@@ -34,12 +34,12 @@ export async function runDeterministic(job: Job, runner: Runner, orchestrator: R
  * Other runners: claims up to WORKER_CONCURRENCY free slots.
  */
 export async function claimLoop(runJob: (job: Job, runner: Runner) => Promise<void>, label: string): Promise<void> {
-  // Production: only inside a boat orchestrator sandbox, only RUNNER=boat (OCTILLION_DEV_ALLOW_LOCAL=1: tests).
+  // Production: only inside a Vercel Sandbox orchestrator sandbox, only RUNNER=vercel (OCTILLION_DEV_ALLOW_LOCAL=1: tests).
   assertOrchestratorHost(CFG.runner);
   if (!CFG.token) throw new Error("OCTILLION_WORKER_TOKEN is required");
-  // Broker mode: the boat key and the orchestrator LLM token come from the server (docs/credentials.md).
-  const creds = await orchestratorCredentials().catch((e) => {
-    if (CREDENTIALS_MODE === "broker" && (CFG.runner === "boat" || CFG.runner === "vercel")) throw new Error(`orchestrator credentials: ${redact(String(e))}`);
+  // Broker mode: the orchestrator LLM token comes from the server (docs/credentials.md).
+  await orchestratorCredentials().catch((e) => {
+    if (CREDENTIALS_MODE === "broker" && CFG.runner === "vercel") throw new Error(`orchestrator credentials: ${redact(String(e))}`);
     log("orchestrator credentials unavailable:", redact(String(e)));
     return null;
   });
@@ -51,8 +51,8 @@ export async function claimLoop(runJob: (job: Job, runner: Runner) => Promise<vo
     await pool.start();
     runner = pool.runner();
   } else {
-    // Worker sandboxes on boat (default) or Vercel Sandbox: RUNNER / OCTILLION_SANDBOX_PROVIDER here, else the server's choice.
-    const r = selectRunner(CFG.runner, creds?.sandbox_provider, SANDBOX.provider);
+    // Worker sandboxes on Vercel Sandbox (RUNNER=vercel, the default); a retired provider throws a clear error.
+    const r = selectRunner(CFG.runner);
     if (!r) throw new Error(`RUNNER must be one of ${[...Object.keys(RUNNERS), "pool"].join(", ")}`);
     await checkRunner(r);
     runner = r;
@@ -92,7 +92,7 @@ export async function claimLoop(runJob: (job: Job, runner: Runner) => Promise<vo
   const runnable = (h: string) => { try { adapterFor({ harness: h }); return true; } catch { return false; } };
   const skippedLogged = new Set<string>();
 
-  const groupOf = new Map<string, string>(); // session_id -> agent group holding a boat slot
+  const groupOf = new Map<string, string>(); // session_id -> agent group holding a worker sandbox slot
   const claim = async (): Promise<Job[]> => {
     if (fleet) {
       const out: Job[] = [];

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# boat.dev setup: install Pi coding agent (pinned version) system-wide in a fresh boat VM, ready to snapshot.
-# Boat preinstalls this harness, but at whatever version the image ships; we pin our own copy over it. Package is @earendil-works/pi-coding-agent (the @mariozechner name is deprecated).
+# Sandbox setup: install Pi coding agent (pinned version) system-wide in a fresh worker sandbox.
+# A preinstalled copy, if any, is replaced by our pinned one. Package is @earendil-works/pi-coding-agent (the @mariozechner name is deprecated).
 # Usage (inside the VM):  bash pi.sh [version]      default version = harnesses/registry.json pin
-# Normally driven by ../boat-snapshot.sh, which uploads this + _common.sh, runs it and saves the named snapshot.
+# Normally uploaded with _common.sh and run by the VM runner (orchestrator/core/runners.ts) when the pin is missing.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=_common.sh
 . "$HERE/_common.sh"

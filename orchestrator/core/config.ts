@@ -4,7 +4,7 @@ import { hostname } from "node:os";
 export const env = process.env;
 export const num = (v: string | undefined, d: number) => (v && Number.isFinite(Number(v)) ? Number(v) : d);
 
-export type RunnerName = "boat" | "vercel" | "docker" | "local" | "pool";
+export type RunnerName = "vercel" | "docker" | "local" | "pool";
 export type SinkMode = "api" | "clickhouse" | "both";
 
 export const CFG = {
@@ -16,7 +16,7 @@ export const CFG = {
   /** Per-job orchestrator (set by the autoscaler): the one simulation (sim_...) or research (rsh_...) it serves. */
   job: /^(sim|rsh)_[A-Za-z0-9_-]{1,40}$/.test(env.ORCHESTRATOR_JOB ?? "") ? env.ORCHESTRATOR_JOB! : null,
   concurrency: Math.max(1, num(env.WORKER_CONCURRENCY, 2)),
-  runner: (env.RUNNER ?? "boat") as RunnerName,
+  runner: (env.RUNNER ?? "vercel") as RunnerName,
   maxSessionMs: num(env.MAX_SESSION_MINUTES, 45) * 60_000,
   pollMs: num(env.POLL_INTERVAL_SECONDS, 5) * 1000,
   flushMs: num(env.FLUSH_INTERVAL_MS, 2000),
@@ -48,39 +48,40 @@ export const SINK = {
   chDatabase: env.CLICKHOUSE_DATABASE ?? "octillion",
 };
 
-/** boat.dev (https://docs.boat.dev/api/v1). Only used by RUNNER=boat. */
-export const BOAT = {
-  apiUrl: (env.BOAT_API_URL ?? "https://boat.dev/api/v1").replace(/\/+$/, ""),
-  apiKey: env.BOAT_API_KEY ?? "",
-  size: env.BOAT_SANDBOX_SIZE ?? "default", // small | default | large | xlarge
-  org: env.BOAT_ORG || undefined,
-  // Auto-stop TTL counts from creation and is NOT extended by exec'd work: cover setup + all turns + LLM time.
-  ttlSeconds: Math.round(CFG.maxSessionMs / 1000) + num(env.BOAT_TTL_MARGIN_MINUTES, 15) * 60,
-  readyTimeoutMs: num(env.BOAT_READY_TIMEOUT_SECONDS, 300) * 1000,
-  agentUser: (env.BOAT_AGENT_USER === "user" ? "user" : "agent") as "agent" | "user",
-  onFinish: (env.BOAT_ON_FINISH === "stop" ? "stop" : "delete") as "delete" | "stop",
-  diffMaxBytes: num(env.BOAT_DIFF_MAX_BYTES, 2_000_000),
-};
-/** $/hour per size, from https://docs.boat.dev/pricing (2026-10). Estimate for /complete metadata only. */
-export const BOAT_PRICE_PER_HOUR: Record<string, number> = { small: 0.018, default: 0.036, large: 0.072, xlarge: 0.2 };
+/**
+ * Sandbox providers that are gone, with what to do instead. boat.dev was retired on 2026-11-01: Vercel Sandbox is the only
+ * sandbox provider. A setting that still names boat is a clear error (startup, Compute), never a silent fallback.
+ */
+export const RETIRED_PROVIDERS: Record<string, string> = { boat: "boat.dev was retired on 2026-11-01" };
+/** Why this env's sandbox settings cannot work (a retired or unknown provider, a retired runner), else null. */
+export function sandboxConfigError(e: Record<string, string | undefined> = env): string | null {
+  for (const k of ["OCTILLION_SANDBOX_PROVIDER", "OCTILLION_ORCHESTRATOR_PROVIDER"]) {
+    const v = (e[k] ?? "").trim().toLowerCase();
+    if (!v || v === "vercel") continue;
+    return `${k}=${v}: ${RETIRED_PROVIDERS[v] ?? "unknown sandbox provider"}. Vercel Sandbox is the only provider: unset ${k} (or set it to "vercel").`;
+  }
+  const r = (e.RUNNER ?? "").trim().toLowerCase();
+  if (RETIRED_PROVIDERS[r]) return `RUNNER=${r}: ${RETIRED_PROVIDERS[r]}. Use RUNNER=vercel (the default).`;
+  return null;
+}
 
 /**
- * Worker sandbox provider (core/sandbox-provider.ts). The orchestrator itself still runs on boat; only the per-session
- * worker sandboxes move. Selected by, in order: RUNNER=vercel, OCTILLION_SANDBOX_PROVIDER here, else the server's choice in
- * the orchestrator credentials answer (`sandbox_provider`, from OCTILLION_SANDBOX_PROVIDER on the API). Default boat.
- *
- * vercel: Vercel Sandbox, reached only through the API's broker (/api/worker/sandboxes, src/worker-sandboxes.ts): the
- * Vercel credentials (the function's OIDC token) never leave our functions; this process uses its worker token.
+ * Worker sandboxes (core/runners.ts vmRunner, core/sandbox-provider.ts): Vercel Sandbox, reached only through the API's
+ * broker (/api/worker/sandboxes, src/worker-sandboxes.ts). The Vercel credentials (the function's OIDC token) never leave
+ * our functions; this process uses its worker token.
  */
 export const SANDBOX = {
-  /** Explicit choice in this process's env; null = take the server's. */
-  provider: (env.RUNNER === "vercel" ? "vercel" : env.OCTILLION_SANDBOX_PROVIDER === "vercel" ? "vercel" : env.OCTILLION_SANDBOX_PROVIDER === "boat" ? "boat" : null) as "boat" | "vercel" | null,
   /** Vercel size: small 1 vCPU / 2 GB, default 2 / 4, large 4 / 8, xlarge 8 / 16 (2 GB per vCPU, as Vercel allocates). */
   vercelSize: env.OCTILLION_VERCEL_WORKER_SIZE ?? "default",
   /** Longest single broker call (s): the API function stops at 300 s, so execs and log follows stay well under it. */
   vercelExecMaxSeconds: Math.max(30, Math.min(250, num(env.OCTILLION_VERCEL_EXEC_MAX_SECONDS, 240))),
   /** Share of the provisioned vCPUs assumed busy, for the cost estimate (agents mostly wait on the model). */
   vercelCpuActiveShare: Math.max(0, Math.min(1, num(env.OCTILLION_VERCEL_CPU_ACTIVE_SHARE, 0.3))),
+  /** A worker sandbox's timeout: setup + all turns + LLM time, so the session plus a margin (the broker caps it). */
+  ttlSeconds: Math.round(CFG.maxSessionMs / 1000) + num(env.OCTILLION_SANDBOX_TTL_MARGIN_MINUTES, 15) * 60,
+  readyTimeoutMs: num(env.OCTILLION_SANDBOX_READY_TIMEOUT_SECONDS, 300) * 1000,
+  /** The session diff kept (bytes); a longer one is cut with a marker. */
+  diffMaxBytes: num(env.OCTILLION_DIFF_MAX_BYTES, 2_000_000),
 };
 export const VERCEL_SIZES: Record<string, { vcpus: number; memoryMb: number }> = {
   small: { vcpus: 1, memoryMb: 2048 }, default: { vcpus: 2, memoryMb: 4096 }, large: { vcpus: 4, memoryMb: 8192 }, xlarge: { vcpus: 8, memoryMb: 16384 },

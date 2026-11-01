@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# boat.dev setup: install Cline CLI (pinned version) system-wide in a fresh boat VM, ready to snapshot.
-# Not preinstalled on boat VMs (see https://docs.boat.dev/machines).
+# Sandbox setup: install Cline CLI (pinned version) system-wide in a fresh worker sandbox.
+# Not preinstalled in the sandbox image.
 # Usage (inside the VM):  bash cline.sh [version]      default version = harnesses/registry.json pin
-# Normally driven by ../boat-snapshot.sh, which uploads this + _common.sh, runs it and saves the named snapshot.
+# Normally uploaded with _common.sh and run by the VM runner (orchestrator/core/runners.ts) when the pin is missing.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=_common.sh
 . "$HERE/_common.sh"

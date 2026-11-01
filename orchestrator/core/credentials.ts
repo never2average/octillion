@@ -1,25 +1,23 @@
 /**
  * Credential broker client (docs/credentials.md). The orchestrator host holds only OCTILLION_URL and
  * OCTILLION_WORKER_TOKEN; everything else comes from the server:
- *   POST /api/worker/orchestrator/credentials {orchestrator_id} -> boat key + the orchestrator LLM's gateway access
+ *   POST /api/worker/orchestrator/credentials {orchestrator_id} -> the orchestrator LLM's gateway access
  *   POST /api/worker/sessions/:id/credentials                    -> per-session providers (gateway ogw_ tokens / direct keys)
  *
  * CREDENTIALS_MODE=env is a dev fallback that reads provider keys from this process's env instead.
  */
-import { BOAT, CFG, ORCH, env } from "./config.js";
+import { CFG, ORCH, env } from "./config.js";
 import { api, HttpError, log, withRetry } from "./util.js";
-import { onBoatUnauthorized } from "./boat.js";
 import { providersFromEnv, type Providers } from "../harnesses/credentials.js";
 
 export const CREDENTIALS_MODE = (env.CREDENTIALS_MODE === "env" ? "env" : "broker") as "broker" | "env";
 
 export interface OrchestratorCreds {
-  boat: { api_key: string } | null;
   llm: { provider: string; model?: string; base_url: string; api_key: string; expires_at?: string } | null;
   /** Research's architecture review: the strongest model, possibly another provider (pi-octillion/architect.ts). */
   architect?: { provider: string; model: string; effort?: string; base_url: string; api_key: string; expires_at?: string } | null;
-  /** The server's worker sandbox provider (OCTILLION_SANDBOX_PROVIDER on the API); absent = boat. */
-  sandbox_provider?: "boat" | "vercel";
+  /** The server's worker sandbox provider: always "vercel" (still sent for orchestrators launched by older code). */
+  sandbox_provider?: "vercel";
 }
 
 export interface SessionCreds { providers: Providers; expires_at: string | null }
@@ -31,13 +29,12 @@ let orchFetching: Promise<OrchestratorCreds> | null = null;
 const expiresSoon = (iso: string | null | undefined, ms = REFRESH_BEFORE_MS) => !!iso && Date.parse(iso) - Date.now() < ms;
 
 /** Redact secrets for logs. */
-export const redact = (s: string) => s.replace(/\b(boat_|ogw_|sk-ant-|sk-|gho_|ghp_)[A-Za-z0-9_\-]{4,}/g, "$1***");
+export const redact = (s: string) => s.replace(/\b(ogw_|sk-ant-|sk-|gho_|ghp_)[A-Za-z0-9_\-]{4,}/g, "$1***");
 
-/** Orchestrator credentials (cached; refetched near expiry or when `force`). Sets BOAT.apiKey. */
+/** Orchestrator credentials (cached; refetched near expiry or when `force`). */
 export async function orchestratorCredentials(force = false): Promise<OrchestratorCreds> {
   if (CREDENTIALS_MODE === "env") {
     return {
-      boat: BOAT.apiKey ? { api_key: BOAT.apiKey } : null,
       llm: ORCH.apiKey ? { provider: ORCH.provider, model: ORCH.model, base_url: ORCH.apiUrl ?? "", api_key: ORCH.apiKey } : null,
     };
   }
@@ -45,9 +42,8 @@ export async function orchestratorCredentials(force = false): Promise<Orchestrat
   orchFetching ??= (async () => {
     try {
       const r = (await withRetry(() => api("/api/worker/orchestrator/credentials", { json: { orchestrator_id: CFG.orchestratorId } }), 4)) as OrchestratorCreds;
-      orch = { boat: r?.boat ?? null, llm: r?.llm ?? null, architect: r?.architect ?? null, sandbox_provider: r?.sandbox_provider === "vercel" ? "vercel" : "boat" };
-      if (orch.boat?.api_key) BOAT.apiKey = orch.boat.api_key;
-      log(`credentials: orchestrator ${CFG.orchestratorId}: boat=${orch.boat ? "yes" : "no"} llm=${orch.llm ? `${orch.llm.provider}/${orch.llm.model ?? "?"} via gateway (expires ${orch.llm.expires_at ?? "?"})` : "none"}`);
+      orch = { llm: r?.llm ?? null, architect: r?.architect ?? null, sandbox_provider: "vercel" };
+      log(`credentials: orchestrator ${CFG.orchestratorId}: llm=${orch.llm ? `${orch.llm.provider}/${orch.llm.model ?? "?"} via gateway (expires ${orch.llm.expires_at ?? "?"})` : "none"}`);
       return orch;
     } finally { orchFetching = null; }
   })();
@@ -64,11 +60,3 @@ export async function sessionCredentials(sessionId: string): Promise<SessionCred
 }
 
 export const sessionCredsExpiring = (c: SessionCreds) => expiresSoon(c.expires_at, 5 * 60_000);
-
-// A boat 401 means the vault rotated the key: refetch once and retry (core/boat.ts).
-onBoatUnauthorized(async () => {
-  if (CREDENTIALS_MODE !== "broker") return false;
-  const before = BOAT.apiKey;
-  await orchestratorCredentials(true);
-  return !!BOAT.apiKey && BOAT.apiKey !== before;
-});

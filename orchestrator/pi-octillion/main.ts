@@ -188,7 +188,7 @@ if (process.argv[1] && /pi-octillion[\\/]main\.(ts|js)$/.test(process.argv[1])) 
     }
     // ORCHESTRATOR_MODE=research: a research-only worker (never claims coding-agent sessions).
     if (env.ORCHESTRATOR_MODE === "research") {
-      assertOrchestratorHost(CFG.runner); // research is agent work too: boat orchestrator sandboxes only
+      assertOrchestratorHost(CFG.runner); // research is agent work too: orchestrator sandboxes only
       const stop = () => { if (isShuttingDown()) process.exit(1); markShuttingDown(); log("stopping research worker"); };
       process.on("SIGINT", stop); process.on("SIGTERM", stop);
       log("research-only mode");

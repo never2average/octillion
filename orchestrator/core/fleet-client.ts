@@ -1,6 +1,6 @@
 /**
- * Fleet membership for RUNNER=boat: the server's per-agent assignment (`pods`) is the MAX number of concurrent
- * worker sandboxes per agent group on this orchestrator. Sandboxes are ephemeral: one fresh boat VM per session,
+ * Fleet membership for RUNNER=vercel: the server's per-agent assignment (`pods`) is the MAX number of concurrent
+ * worker sandboxes per agent group on this orchestrator. Sandboxes are ephemeral: one fresh VM per session,
  * deleted when it ends, so nothing is paid for while no agent runs.
  *
  *  - server (default): POST /api/worker/fleet {orchestrator_id, capacity} at start and every next_checkin_seconds;
@@ -50,7 +50,7 @@ export class FleetMembership {
       } else {
         const r = (await api("/api/worker/fleet", {
           json: { orchestrator_id: this.orchestratorId, capacity: this.capacity,
-                  meta: { worker_id: CFG.workerId, runner: this.opts.runner ?? "boat", running: Object.fromEntries(this.running), ...(CFG.job ? { job: CFG.job } : {}), user: serviceUser(),
+                  meta: { worker_id: CFG.workerId, runner: this.opts.runner ?? "vercel", running: Object.fromEntries(this.running), ...(CFG.job ? { job: CFG.job } : {}), user: serviceUser(),
                           // Which provider hosts this orchestrator (its env file's role): the Compute page shows it.
                           host: claimedProvider(process.env) } },
         })) as { assignment?: GroupTarget[]; next_checkin_seconds?: number; job?: FleetMembership["job"] };

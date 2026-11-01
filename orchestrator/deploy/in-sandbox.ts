@@ -1,20 +1,18 @@
 /**
- * Helpers the launcher runs INSIDE an orchestrator sandbox, boat.dev or Vercel Sandbox (never on the main VM):
+ * Helpers the launcher runs INSIDE an orchestrator sandbox on Vercel Sandbox (never on the main VM):
  *   tsx deploy/in-sandbox.ts guard                      host-guard verdict as JSON (production rules, RUNNER from env)
  *   tsx deploy/in-sandbox.ts preflight                  can this sandbox reach $OCTILLION_URL/healthz over HTTPS?
- *   tsx deploy/in-sandbox.ts nested <boat-key-file>     selftest: create + exec + delete ONE worker sandbox from here
  */
-import { readFileSync, rmSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { checkHost } from "../core/host-guard.js";
 
-const [cmd, arg] = process.argv.slice(2);
+const [cmd] = process.argv.slice(2);
 
 if (cmd === "guard") {
-  const r = checkHost(process.env.RUNNER ?? "boat");
-  const boatId = process.env.BOAT_ID ?? process.env.BOX_ID ?? "";
+  const r = checkHost(process.env.RUNNER ?? "vercel");
   let marker: any = null;
   try { marker = JSON.parse(readFileSync("/etc/octillion/host-role", "utf8")); } catch { /* none */ }
-  console.log(JSON.stringify({ ok: r.ok, dev: r.dev, problems: r.problems, provider: r.provider ?? null, boat_id_matches_marker: !!marker?.sandbox_id && boatId === marker.sandbox_id, boat_id_shape: boatId.replace(/[a-z0-9]/g, "x"),
+  console.log(JSON.stringify({ ok: r.ok, dev: r.dev, problems: r.problems, provider: r.provider ?? null,
     sandbox_id_matches_marker: !!marker?.sandbox_id && process.env.OCTILLION_SANDBOX_ID === marker.sandbox_id }));
   process.exit(r.ok ? 0 : 3);
 }
@@ -37,38 +35,5 @@ if (cmd === "preflight") {
   }
 }
 
-if (cmd === "nested") {
-  // Selftest only: the boat key is passed in a 0600 file for this one check and deleted right after reading.
-  const key = readFileSync(arg!, "utf8").trim();
-  rmSync(arg!, { force: true });
-  const { BOAT } = await import("../core/config.js");
-  BOAT.apiKey = key;
-  const { boatApi, boatCreate, boatExec } = await import("../core/boat.js");
-  let id = "";
-  const out: Record<string, unknown> = { from_sandbox: process.env.BOAT_ID ?? process.env.BOX_ID ?? null };
-  try {
-    const c = await boatCreate({ type: "small", ttlSeconds: 600, noEnv: true, snapshots: false });
-    id = c.sandbox.id;
-    out.worker_sandbox = id;
-    await boatApi(`/sandboxes/${id}`, { method: "PATCH", json: { name: "octi-w-selftest" } }).catch(() => {});
-    for (let i = 0; i < 90; i++) {
-      const s = (await boatApi(`/sandboxes/${id}`)).sandbox.state;
-      if (["ready", "idle", "running"].includes(s)) break;
-      await new Promise((r) => setTimeout(r, 2000));
-    }
-    const r = await boatExec(id, "echo ok; claude --version | head -1; env | grep -c OCTILLION_ || true", 60);
-    out.exec = r.stdout.trim().split("\n");
-  } catch (e) {
-    out.error = String(e).replace(key, "<boat key>");
-  } finally {
-    if (id) {
-      const d = await boatApi(`/sandboxes/${id}`, { method: "DELETE", headers: { "X-Ascii-Confirm-Delete": id } }).catch((e: unknown) => ({ error: String(e) }));
-      out.deleted = (d as any)?.type ?? d;
-    }
-  }
-  console.log(JSON.stringify(out));
-  process.exit(out.error ? 5 : 0);
-}
-
-console.error("usage: tsx deploy/in-sandbox.ts guard | preflight | nested <boat-key-file>");
+console.error("usage: tsx deploy/in-sandbox.ts guard | preflight");
 process.exit(2);
