@@ -211,19 +211,38 @@ echo "--- resolver"; grep -v '^#' /etc/resolv.conf 2>/dev/null | head -3`;
  * metadata IP must not. Same output shape as probeSource; exit 1 on any unexpected result (the open then fails).
  */
 export function policyProbeSource(gatewayHost: string): string {
-  return `import net from "node:net"; import tls from "node:tls";
+  return `import net from "node:net"; import tls from "node:tls"; import dgram from "node:dgram";
 const T = 6000;
 const tcp = (host, port) => new Promise((r) => { const s = net.connect({ host, port, timeout: T }); s.on("connect", () => { s.destroy(); r(true); }); s.on("timeout", () => { s.destroy(); r(false); }); s.on("error", () => r(false)); });
 const tlsOk = (host, servername) => new Promise((r) => {
   const s = tls.connect({ host, port: 443, servername, timeout: T, rejectUnauthorized: false }, () => { s.destroy(); r(true); });
   s.on("timeout", () => { s.destroy(); r(false); }); s.on("error", () => r(false)); s.on("close", () => r(false));
 });
+// The provider policy is enforced by an interceptor that may accept the TCP handshake and only then decide on the
+// Host header / SNI, so a completed connect proves nothing. These checks count as reachable only when the real
+// upstream answers: Cloudflare's HTTP server on 1.1.1.1, or a DNS reply to our query id.
+const httpUpstream = (ip, host) => new Promise((r) => {
+  let buf = ""; const s = net.connect({ host: ip, port: 80, timeout: T }, () => s.write("GET / HTTP/1.1\\r\\nHost: " + host + "\\r\\nConnection: close\\r\\n\\r\\n"));
+  const done = () => { s.destroy(); r(/^HTTP\\/1\\.[01] \\d{3}/.test(buf) && /\\r\\nserver: *cloudflare/i.test(buf)); };
+  s.on("data", (d) => { buf += d; if (buf.includes("\\r\\n\\r\\n")) done(); }); s.on("end", done); s.on("timeout", done); s.on("error", () => r(false));
+});
+const query = (id) => { const name = Buffer.concat([Buffer.from([7]), Buffer.from("example"), Buffer.from([3]), Buffer.from("com"), Buffer.from([0])]);
+  const h = Buffer.alloc(12); h.writeUInt16BE(id, 0); h.writeUInt16BE(0x0100, 2); h.writeUInt16BE(1, 4); return Buffer.concat([h, name, Buffer.from([0, 1, 0, 1])]); };
+const isReply = (b, id) => b.length >= 12 && b.readUInt16BE(0) === id && (b[2] & 0x80) !== 0;
+const dnsUdp = (ip) => new Promise((r) => { const id = 0x5a17, s = dgram.createSocket("udp4"); const t = setTimeout(() => { s.close(); r(false); }, T);
+  s.on("message", (m) => { if (isReply(m, id)) { clearTimeout(t); s.close(); r(true); } }); s.on("error", () => { clearTimeout(t); try { s.close(); } catch {} r(false); });
+  s.send(query(id), 53, ip); });
+const dnsTcp = (ip) => new Promise((r) => { const id = 0x5a18, q = query(id), len = Buffer.alloc(2); len.writeUInt16BE(q.length);
+  let buf = Buffer.alloc(0); const s = net.connect({ host: ip, port: 53, timeout: T }, () => s.write(Buffer.concat([len, q])));
+  s.on("data", (d) => { buf = Buffer.concat([buf, d]); if (buf.length >= 14) { s.destroy(); r(isReply(buf.subarray(2), id)); } });
+  s.on("timeout", () => { s.destroy(); r(false); }); s.on("end", () => r(false)); s.on("error", () => r(false)); });
 const checks = [
   ["gateway", true, () => tlsOk(${JSON.stringify(gatewayHost)}, ${JSON.stringify(gatewayHost)})],
   ["unlisted host", false, () => tlsOk("example.com", "example.com")],
-  ["HTTPS to an unlisted host by IP", false, () => tlsOk("93.184.215.14", "example.com")],
-  ["plain HTTP directly", false, () => tcp("93.184.215.14", 80)],
-  ["public DNS directly", false, () => tcp("1.1.1.1", 53)],
+  ["HTTPS to an unlisted host by IP", false, () => tlsOk("1.1.1.1", "example.com")],
+  ["plain HTTP directly", false, () => httpUpstream("1.1.1.1", "one.one.one.one")],
+  ["public DNS directly (UDP)", false, () => dnsUdp("1.1.1.1")],
+  ["public DNS directly (TCP)", false, () => dnsTcp("1.1.1.1")],
   ["metadata IP directly", false, () => tcp("169.254.169.254", 80)],
 ];
 const out = []; let bad = 0;
