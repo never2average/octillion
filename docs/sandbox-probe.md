@@ -85,7 +85,8 @@ this order:
 1. **The function's OIDC token (recommended).** Vercel sends it on every invocation in the `x-vercel-oidc-token` header (with `VERCEL_OIDC_TOKEN` as a fallback). Its `owner_id` and `project_id` claims name the team and the project the sandboxes belong to.
    - Needs OIDC Federation ("Secure backend access with OIDC federation") turned on in the project's settings. It is on by default for new projects.
    - Needs Vercel Sandbox available to the team. Sandboxes are billed to that project.
-2. **An access token.** Set `OCTILLION_VERCEL_SANDBOX_TOKEN` (a Vercel access token with access to the team), plus `OCTILLION_VERCEL_TEAM_ID` and `OCTILLION_VERCEL_PROJECT_ID`.
+   - The token's team and project must match `OCTILLION_VERCEL_TEAM_ID` and `OCTILLION_VERCEL_PROJECT_ID` (required in production), else the first cron request's; any other token is refused (docs/vercel-sandbox-workers.md, "The OIDC scope").
+2. **An access token.** It takes precedence over any OIDC token. Set `OCTILLION_VERCEL_SANDBOX_TOKEN` (a Vercel access token with access to the team), plus `OCTILLION_VERCEL_TEAM_ID` and `OCTILLION_VERCEL_PROJECT_ID`.
 
 If neither is available, every start slot records a `not_configured` row, the page says what is missing, and boat is
 still probed.

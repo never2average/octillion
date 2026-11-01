@@ -19,14 +19,14 @@ export function installOrchestratorVm(mock: { url: string; state: any }) {
   const guards = new Map<string, GuardResult>();
   const supervisors = new Set<string>();
   const scripts: { sandbox: string; script: string }[] = [];
-  const o = { vmLike: false };
+  const o = { vmLike: false, slowNodeMs: 0 };
   const envOf = (files: Map<string, Buffer>) => Object.fromEntries((files.get("/tmp/octi-orchestrator.env.new")?.toString("utf8") ?? "")
     .split("\n").filter((l) => l.includes("=")).map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)]));
   mock.state.vsbExec = ({ sandbox, script, files }: { sandbox: string; script: string; files: Map<string, Buffer> }) => {
     scripts.push({ sandbox, script });
     const m = /printf '%s' '([^']*)' \| sudo -n tee \/etc\/octillion\/host-role/.exec(script);
     if (m) markers.set(sandbox, m[1]!);
-    if (/ls -d \/vercel\/runtimes\/node/.test(script)) return { stdout: "/vercel/runtimes/node24/bin\n" };
+    if (/ls -d \/vercel\/runtimes\/node/.test(script)) return { stdout: "/vercel/runtimes/node24/bin\n", durationMs: o.slowNodeMs };
     if (/test -x .*node_modules\/\.bin\/tsx/.test(script)) return { stdout: mock.state.vsbSandboxes.get(sandbox)?.snapshotId ? "yes\n" : "no\n" };
     if (/in-sandbox\.ts guard/.test(script)) {
       const env = envOf(files);

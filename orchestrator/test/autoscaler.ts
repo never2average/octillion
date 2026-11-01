@@ -165,8 +165,9 @@ try {
 
   // stale + stuck booting + orphan
   await db.query("UPDATE agent_sessions SET status = 'cancelled' WHERE status IN ('queued', 'running')");
-  const mk = (name: string) => { const id = `bx_${randomBytes(4).toString("hex")}`; sbs.set(id, { id, name, state: "ready", createdAt: new Date().toISOString(), files: new Map() }); return id; };
-  const stale = mk("octi-orch-stale1"), stuck = mk("octi-orch-stuck1"), orphan = mk("octi-orch-orphan1");
+  const mk = (name: string, ageMs = 0) => { const id = `bx_${randomBytes(4).toString("hex")}`; sbs.set(id, { id, name, state: "ready", createdAt: new Date(Date.now() - ageMs).toISOString(), files: new Map() }); return id; };
+  const stale = mk("octi-orch-stale1"), stuck = mk("octi-orch-stuck1"), orphan = mk("octi-orch-orphan1", 5 * 60_000);
+  const youngOrphan = mk("octi-orch-young1"); // created moments ago: its launch may not have recorded it yet
   const staleWorker = mk("octi-w-orch-stale1-codex-default"), otherWorker = mk("octi-w-orch-stale10-codex-default");
   // The sandbox reliability probe's sandboxes (src/sandbox-probe.ts) have no row either: the reaper leaves them alone.
   const probe = mk("octi-probe-0a1b2c3d4e");
@@ -178,6 +179,8 @@ try {
   check("stale (no fleet check-in 5 min) reaped", !sbs.has(stale) && /stale/.test(reasons[stale] ?? ""), reasons[stale] ?? "");
   check("stuck booting (> 10 min) reaped", !sbs.has(stuck) && /stuck booting/.test(reasons[stuck] ?? ""), reasons[stuck] ?? "");
   check("orphan orchestrator sandbox (no row) deleted", !sbs.has(orphan) && /orphan/.test(reasons[orphan] ?? ""), reasons[orphan] ?? "");
+  check("an orchestrator sandbox under 2 minutes old with no row is spared", sbs.has(youngOrphan) && !reasons[youngOrphan], reasons[youngOrphan] ?? "");
+  sbs.delete(youngOrphan);
   check("workers of a reaped orchestrator deleted (exact prefix only)", !sbs.has(staleWorker) && sbs.has(otherWorker), reasons[staleWorker] ?? "");
   check("probe sandbox (octi-probe-…) left alone by the orphan reaper", sbs.has(probe) && !reasons[probe], reasons[probe] ?? "");
   sbs.delete(otherWorker); sbs.delete(probe);

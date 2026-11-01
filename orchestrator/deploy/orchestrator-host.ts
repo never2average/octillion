@@ -51,6 +51,8 @@ export interface HostLimits {
 
 export interface HostLaunchOpts {
   image?: string | null; ttlSeconds?: number; requirePreflight?: boolean;
+  /** Epoch ms the launch must be done by (a 300 s function); past it the launch fails and its sandbox is deleted. Vercel host only. */
+  deadline?: number;
   onCreated?: (sandboxId: string, orchId: string, info?: { expiresAt?: Date | null }) => Promise<void> | void;
 }
 export interface HostLaunchResult extends lib.LaunchResult { expiresAt?: number | null }

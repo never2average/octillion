@@ -124,11 +124,30 @@ done before the policy is applied.
 
 ### Who launches them
 
-Only the API, from the autoscaler (the 5-minute cron and event kicks on Vercel). It uses the function's OIDC token: the
-latest request's `x-vercel-oidc-token`, kept in memory (`rememberOidcToken`, at most 30 minutes old), else
-`VERCEL_OIDC_TOKEN`, else an access token (`OCTILLION_VERCEL_SANDBOX_TOKEN`). The token never enters a sandbox. The
-orchestrator gets its job's worker token in a 0600 env file, and asks the broker (phase 1) for its worker sandboxes. The
-boat CLI cannot launch Vercel orchestrators and says so.
+Only the API, from the autoscaler (the 5-minute cron and event kicks on Vercel). It authenticates, in order, with:
+1. a configured access token (`OCTILLION_VERCEL_SANDBOX_TOKEN` + `OCTILLION_VERCEL_TEAM_ID` + `OCTILLION_VERCEL_PROJECT_ID`), which wins over any token a request carries;
+2. the function's OIDC token as the latest **cron** request carried it (`rememberCronOidcToken`, called only after
+   `CRON_SECRET` was checked, kept in memory for at most 30 minutes);
+3. `VERCEL_OIDC_TOKEN` in the process environment.
+
+The token never enters a sandbox. The orchestrator gets its job's worker token in a 0600 env file, and asks the broker
+(phase 1) for its worker sandboxes. The boat CLI cannot launch Vercel orchestrators and says so.
+
+### The OIDC scope (which team and project)
+
+Any request can carry an `x-vercel-oidc-token` header, and the API does not verify a token's signature (Vercel does).
+A token's `owner_id` / `project_id` claims decide which team and project a call goes to, so a planted token would send
+our sandboxes, and the worker token in an orchestrator's env file, to someone else's project. So every OIDC token,
+whoever passes it (the launch, the worker sandbox broker, the worker reaper, the probe), must match this deployment's
+scope (`vercelScope` in `src/sandbox-probe.ts`), and a mismatch is refused (`refused a Vercel OIDC token for another team
+or project`):
+- **Configured:** `OCTILLION_VERCEL_TEAM_ID` and `OCTILLION_VERCEL_PROJECT_ID` (not secrets). **Required in production**
+  (`VERCEL_ENV=production`): without them every OIDC token is refused there and the function logs a loud banner.
+- **Otherwise pinned:** to the claims of the first token from a trusted source on that instance: a cron request that
+  passed `CRON_SECRET`, or the process's own `VERCEL_OIDC_TOKEN`. Until then a request's token is refused (the broker
+  answers "no trusted Vercel team/project yet"). Set the two variables on previews too, so a fresh instance needs no cron first.
+
+No other request can remember a token: the old middleware that remembered every request's header is gone.
 
 ### The launch
 
@@ -159,7 +178,13 @@ Vercel Sandbox has no systemd. `supervisor.sh` is the boat unit's `Restart=on-fa
 ### Lifetime and relaunch
 
 A Vercel session stops at its timeout: at most 24 hours on Pro and Enterprise, 45 minutes on Hobby
-(vercel.com/docs/sandbox/pricing). The default timeout is the Pro maximum, 1440 minutes.
+(vercel.com/docs/sandbox/pricing). The default timeout is 360 minutes (6 hours); longer jobs are handed to a fresh
+orchestrator by the relaunch below. `OCTILLION_VERCEL_ORCH_TIMEOUT_MINUTES` sets it (10 to 1440).
+
+**Launch time budget.** A launch from the cron (or an event kick, or Run a tick now) runs inside a 300 s function. It gets
+a deadline (the function's end minus 45 s for the cron's other work), checked between launch steps and capping each
+command's wait. Past it the launch fails (`launch deadline reached`) and its half-launched sandbox is deleted at once.
+A kick waits out another instance's lease only when that still leaves a launch 150 s.
 
 Per-job orchestrators usually end with their job long before that. For one that does not, the autoscaler acts on
 `expires_at`:
@@ -174,12 +199,14 @@ Per-job orchestrators usually end with their job long before that. For one that 
 
 Each row is reconciled against its own provider. A sandbox missing from the provider's listing (or listed as stopped) is
 reaped only after the provider's get by id says so: 404 (`sandbox gone from …`) or a stopped status (`sandbox is …`). If
-the get fails, the row is kept and asked again next tick. This applies to boat too, whose listing has dropped live
-sandboxes before (docs/sandbox-probe.md).
+the get fails, the row is kept, and the boot, TTL and stale checks still apply to it; after 3 ticks in a row it is ended
+without a delete call (`sandbox gone from …: not listed and its get failed 3 ticks in a row`). This applies to boat too,
+whose listing has dropped live sandboxes before (docs/sandbox-probe.md).
 
 Orphans (a live sandbox under our prefix with no row) are deleted per provider: on Vercel, `<ns>-vo-<env>-…` names and
 image builders `<ns>-vimg-<env>-…` older than 30 minutes. Never `-vw-` worker sandboxes (the broker's reaper deletes
-those once the orchestrator's token is revoked) and never another environment's names.
+those once the orchestrator's token is revoked) and never another environment's names. An orchestrator sandbox under 2
+minutes old is spared (on boat too): its launch records it right after the create call.
 
 ### Capacity and launch rate
 
@@ -187,6 +214,10 @@ Vercel has no limits API. The autoscaler uses static limits:
 - `OCTILLION_VERCEL_MAX_CONCURRENT` (10,000, the Pro concurrency) replaces boat's plan concurrency in the per-job and shared-fleet budgets;
 - `OCTILLION_VERCEL_ORCH_STARTS_PER_HOUR` (120) caps orchestrator launches per hour, counted from `orchestrator_sandboxes`,
   against a runaway launch loop. Vercel's own vCPU allocation rate (Pro: 150 vCPUs a minute at first, up to 5,000) is far above it.
+
+With orchestrators on Vercel and workers on boat (`OCTILLION_ORCHESTRATOR_PROVIDER=vercel` alone), a run's pods also
+have to fit boat's plan (from `/limits`, as before): every live orchestrator's pods and the boat-hosted orchestrators
+count there, and a run that does not fit waits with `… waits for sandbox capacity on boat.dev (<n> free)`.
 
 A job that does not fit waits with `<job> waits for sandbox capacity on Vercel Sandbox (<n> free)`; the rate cap reads
 `launch rate cap: …`. Ticks from before this change read `waits for boat plan capacity`, and the Compute pages read both.
@@ -270,6 +301,13 @@ launched after the change start on Vercel, and the boat ones drain as described 
 orchestrators start on boat, and the Vercel ones finish their jobs (or are retired, for shared ones). To try Vercel
 orchestrators alone, set `OCTILLION_ORCHESTRATOR_PROVIDER=vercel` and leave the workers on boat, or the reverse.
 
+**Rolling back the code.** A release from before this change does not know the `provider` column: it would treat a
+Vercel orchestrator's row as a boat sandbox that boat's listing lacks and end it, and it cannot delete it at Vercel. So:
+1. switch the provider back to boat (unset `OCTILLION_SANDBOX_PROVIDER` and `OCTILLION_ORCHESTRATOR_PROVIDER`) and redeploy the same code;
+2. let the Vercel orchestrators drain: Compute → Orchestrators, filter "Runs on" Vercel Sandbox, until none is live
+   (each ends with its job, or at its timeout, at most `OCTILLION_VERCEL_ORCH_TIMEOUT_MINUTES`);
+3. then roll back the code. Migration 0017's columns stay; older releases ignore them.
+
 ## What only a live run can confirm
 
 The mocks follow the official SDK's REST calls, but these have not been seen live yet:
@@ -285,7 +323,8 @@ For orchestrators:
 - The guard's indicators: that the proxy CA file and `/vercel/runtimes` exist and are visible to `octi` (a launch whose guard refuses fails at `preflight` with the problems listed, and nothing is left running).
 - `useradd -r` and `install -o` on the node24 image; files written by `fs/write` readable through `sudo cat`.
 - How long the code upload and `npm ci` take from a cron function (the launch must finish within the function's 300 s; `OCTILLION_ORCH_SNAPSHOT=on` skips both).
-- That a 1440-minute timeout is accepted on the team's plan (Hobby: 45 minutes; set `OCTILLION_VERCEL_ORCH_TIMEOUT_MINUTES` lower if create answers 400).
+- That the 360-minute timeout is accepted on the team's plan (Hobby: 45 minutes; set `OCTILLION_VERCEL_ORCH_TIMEOUT_MINUTES` lower if create answers 400).
+- That the OIDC token's `owner_id` / `project_id` claims equal the team and project ids set in `OCTILLION_VERCEL_TEAM_ID` / `_PROJECT_ID` (the probe page shows "refused … another team or project" if not).
 - The snapshot calls (`POST …/snapshot` with `expiration`, `GET /v2/sandboxes/snapshots?name=`, `source: {type: "snapshot"}`), taken from the REST reference, not seen yet.
 - The network policy for an orchestrator, if `OCTILLION_VERCEL_ORCH_EGRESS=locked` is used.
 
@@ -301,7 +340,7 @@ For orchestrators:
 ### Orchestrators
 
 On a preview deployment (`VERCEL_ENV=preview`: names `<ns>-vo-prev-…`, apart from production's), never production first:
-1. Leave `OCTILLION_SANDBOX_PROVIDER` unset and set `OCTILLION_ORCHESTRATOR_PROVIDER=vercel`, `OCTILLION_MAX_JOB_ORCHESTRATORS=1`
+1. Leave `OCTILLION_SANDBOX_PROVIDER` unset and set `OCTILLION_VERCEL_TEAM_ID` and `OCTILLION_VERCEL_PROJECT_ID` (the OIDC scope), `OCTILLION_ORCHESTRATOR_PROVIDER=vercel`, `OCTILLION_MAX_JOB_ORCHESTRATORS=1`
    and `OCTILLION_VERCEL_ORCH_TIMEOUT_MINUTES=60` (a stray sandbox stops within the hour), and redeploy the preview.
 2. Queue one small onboarding research or a one-session run in a test account and run a tick (Compute → Run a tick now).
 3. Compute → Orchestrators: the row says `Vercel Sandbox` and goes `booting` → `running`. If it ends instead, its

@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { gzipSync } from "node:zlib";
-import { vercelAuth, VERCEL_REGION } from "./sandbox-probe.js";
+import { pinVercelScopeFromCron, vercelAuth, VERCEL_REGION } from "./sandbox-probe.js";
 
 /**
  * Vercel Sandbox v2 REST client for worker sandboxes (src/worker-sandboxes.ts). fetch only: no @vercel/sandbox in the API
@@ -54,12 +54,20 @@ export interface VercelClient {
 }
 
 /**
- * The function's OIDC token, as the latest request carried it (x-vercel-oidc-token; src/http.ts remembers it). The same
- * token for every request of this deployment; it lets work that is not tied to one request (the autoscaler's launches)
- * reach Vercel. Kept in memory only, for 30 minutes.
+ * The function's OIDC token, as the latest cron request carried it (x-vercel-oidc-token). It lets work that is not tied
+ * to one request (the autoscaler's launches) reach Vercel. Remembered ONLY by handlers that passed cronSecretOk (never
+ * from an arbitrary request, which could carry another project's token), and only when its team and project match our
+ * scope (src/sandbox-probe.ts vercelScope; this also pins the scope when it is not configured). Memory only, 30 minutes.
  */
 let lastOidc: { token: string; at: number } | null = null;
-export function rememberOidcToken(token: unknown): void { if (typeof token === "string" && token.length > 20) lastOidc = { token, at: Date.now() }; }
+export function rememberCronOidcToken(token: unknown): void {
+  if (typeof token !== "string" || token.length < 20) return;
+  pinVercelScopeFromCron(token);
+  const a = vercelAuth(token);
+  if (!("not_configured" in a) && a.via === "oidc") lastOidc = { token, at: Date.now() };
+}
+/** Tests only. */
+export function forgetOidcTokenForTests(): void { lastOidc = null; }
 const rememberedOidc = () => (lastOidc && Date.now() - lastOidc.at < 30 * 60_000 ? lastOidc.token : null);
 
 /** A Vercel client from the request's OIDC token (or the latest request's, or the env), or why there is none. */

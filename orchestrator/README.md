@@ -71,7 +71,7 @@ API's REST client (`src/vercel-sandbox.ts`): the token never enters a sandbox. T
 |---|---|---|
 | Name (= sandbox id) | `<ns>-orch-<bx id>` | `<ns>-vo-<env>-v<10 hex>` (`<env>`: prod, prev, dev from `VERCEL_ENV`) |
 | Machine | `small` | `OCTILLION_VERCEL_ORCH_SIZE` (`small`: 1 vCPU, 2 GB), node24, non-persistent |
-| Lifetime | 30-day TTL | `OCTILLION_VERCEL_ORCH_TIMEOUT_MINUTES` (default and maximum 1440: Vercel's 24 h on Pro; Hobby allows 45) |
+| Lifetime | 30-day TTL | `OCTILLION_VERCEL_ORCH_TIMEOUT_MINUTES` (default 360, at most 1440: Vercel's 24 h on Pro; Hobby allows 45); relaunched before it |
 | Service | systemd unit, `Restart=on-failure` | `/opt/octillion/supervisor.sh`, a bash loop started as a detached command |
 | Code | tarball in chunks + `npm ci` under `/home/user/octillion` | the same tarball in chunks through `fs/write` + `npm ci` under `/opt/octillion` |
 | Fast start | named snapshot `<ns>-orch-img-<hash>` | snapshot of the builder sandbox `<ns>-vimg-<env>-<hash>` (both `OCTILLION_ORCH_SNAPSHOT=on`) |

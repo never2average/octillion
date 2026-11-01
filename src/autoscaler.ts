@@ -96,7 +96,9 @@ export interface Row {
  */
 export function orphanKind(sb: Pick<lib.Sb, "name" | "createdAt">, now: number, building: boolean,
   host: Pick<OrchestratorHost, "orchPrefix" | "isImageBuilder"> = { orchPrefix: lib.ORCH_PREFIX, isImageBuilder: (n) => n === lib.IMAGE_BUILDER_NAME }): "orchestrator" | "image_builder" | null {
-  if (sb.name?.startsWith(host.orchPrefix)) return "orchestrator";
+  // Spared while younger than 2 minutes: a launch records its sandbox right after the create call, and a listing can
+  // show it in between (a launch of another tick, or another replica's).
+  if (sb.name?.startsWith(host.orchPrefix)) return sb.createdAt && now - Date.parse(sb.createdAt) < 2 * 60_000 ? null : "orchestrator";
   if (host.isImageBuilder(sb.name) && !building && sb.createdAt && now - Date.parse(sb.createdAt) > 30 * 60_000) return "image_builder";
   return null;
 }
@@ -170,9 +172,16 @@ export interface TickState {
 }
 export interface Launch { row: number; job_id: string | null; pods: number | null; label: string }
 
+/** Ticks a row may stay unlisted with a failing get before it is ended (should-fix: never kept forever). */
+const GET_FAILURES = 3;
+
 export class Autoscaler {
   readonly holder = `${hostname()}-${process.pid}-${randomBytes(3).toString("hex")}`;
   private inflight = new Map<number, Promise<void>>();
+  /** Rows whose sandbox the listing lacks and whose get keeps failing: consecutive failed ticks. */
+  private getFailures = new Map<number, number>();
+  /** When the current tick's launches must be done by (the cron function's limit); null on a VM. */
+  private launchDeadline: number | null = null;
   private imageBuild: Promise<unknown> | null = null;
   private keyAt = 0;
   private limits = new Map<HostProvider, { at: number; v: HostLimits }>();
@@ -275,7 +284,8 @@ export class Autoscaler {
 
   /** One tick. A tick asked for while one runs (the loop and "Run a tick now" in the same process) shares that tick
    * rather than starting a second one beside it, which could launch the same job's orchestrator twice. */
-  tick(): Promise<TickState> {
+  tick(opts: { launchDeadline?: number | null } = {}): Promise<TickState> {
+    if (!this.ticking) this.launchDeadline = opts.launchDeadline ?? null;
     return (this.ticking ??= this.tickOnce().finally(() => { this.ticking = null; }));
   }
   private ticking: Promise<TickState> | null = null;
@@ -352,14 +362,26 @@ export class Autoscaler {
         if (!sb || !sb.live) {
           if (inflight && age < 2 * min) continue; // listing can lag a fresh create
           // A listing can lag or drop a live sandbox: only the provider's own get by id may say it is gone.
-          let got: HostSandbox | null;
-          try { got = await h.get(row.sandbox_id); }
-          catch (e) { this.log(`get ${row.sandbox_id}: ${(e as Error).message} (kept; asked again next tick)`); continue; }
-          if (!got || !got.live) {
+          let got: HostSandbox | null | undefined;
+          try { got = await h.get(row.sandbox_id); this.getFailures.delete(row.id); }
+          catch (e) {
+            // The provider could not tell. Keep the row, but not forever: after GET_FAILURES ticks in a row it is ended
+            // (without a delete call, which would fail the same way); meanwhile the boot, TTL and stale checks below apply.
+            const n = (this.getFailures.get(row.id) ?? 0) + 1;
+            this.getFailures.set(row.id, n);
+            this.log(`get ${row.sandbox_id}: ${(e as Error).message} (${n}/${GET_FAILURES})`);
+            if (n >= GET_FAILURES) {
+              this.getFailures.delete(row.id);
+              await reap(row, `sandbox gone from ${prov === "boat" ? "boat" : PROVIDER_LABEL[prov]}: not listed and its get failed ${n} ticks in a row (${(e as Error).message.slice(0, 120)})`, false);
+              continue;
+            }
+            got = undefined;
+          }
+          if (got === null || (got && !got.live)) {
             await reap(row, got ? `sandbox is ${got.state}` : `sandbox gone from ${prov === "boat" ? "boat" : PROVIDER_LABEL[prov]}`, !!got);
             continue;
           }
-          this.log(`${row.sandbox_id} is live although ${sb ? `listed as ${sb.state}` : "not listed"} (listing lag): kept`);
+          if (got) this.log(`${row.sandbox_id} is live although ${sb ? `listed as ${sb.state}` : "not listed"} (listing lag): kept`);
           sb = got;
         }
         if (row.state === "draining") {
@@ -368,7 +390,7 @@ export class Autoscaler {
           await reap(row, row.job_id ? `drained (job ${row.job_id} over or idle)` : "drained (idle exit)");
           continue;
         }
-        const expires = sb.expiresAt ?? (row.expires_at ? new Date(row.expires_at).getTime() : null);
+        const expires = sb?.expiresAt ?? (row.expires_at ? new Date(row.expires_at).getTime() : null);
         if (expires && expires < now + 5 * min) { await reap(row, prov === "boat" ? "TTL about to expire" : "TTL about to expire (sandbox timeout)"); continue; }
         if (row.state === "booting") {
           if (!inflight && age > AUTOSCALE.bootMinutes() * min) await reap(row, `stuck booting > ${AUTOSCALE.bootMinutes()} min`);
@@ -422,7 +444,7 @@ export class Autoscaler {
 
       // 2. scale up within the caps
       if (AUTOSCALE.perJob()) {
-        await this.scaleJobs(st, staleIds, host, listing, now);
+        await this.scaleJobs(st, staleIds, host, listing, now, listings.get("boat") ?? null);
       } else {
         // Retiring (pre-deploy) orchestrators claim nothing new, so they do not count as capacity for the demand.
         const active = (await db.query<Row>("SELECT * FROM orchestrator_sandboxes WHERE state IN ('booting', 'running')"))
@@ -484,7 +506,7 @@ export class Autoscaler {
    * min(JOB_POD_CAPACITY, its unfinished sessions, what is free). A job whose orchestrator just idled out with nothing
    * new queued waits out the idle period (no relaunch loop on work it cannot claim).
    */
-  private async scaleJobs(st: TickState, staleIds: Set<string>, host: OrchestratorHost, listing: HostSandbox[], now: number): Promise<void> {
+  private async scaleJobs(st: TickState, staleIds: Set<string>, host: OrchestratorHost, listing: HostSandbox[], now: number, boatListing: HostSandbox[] | null = null): Promise<void> {
     const db = await getDb();
     const min = 60_000, FRESH_MS = 2 * min;
     const jobs = await computeJobDemand();
@@ -501,6 +523,16 @@ export class Autoscaler {
     const reserved = here.reduce((n, r) => n + 1 + (r.pods != null && !isRetiring(r) ? r.pods : r.orchestrator_id ? workersOf(r.orchestrator_id) : 0), 0);
     let free = limits.activeSandboxes - Math.max(0, limits.activeNow - oursActive) - reserved;
     let active = live.filter((r) => !isRetiring(r)).length;
+    // Orchestrators on Vercel with workers on boat (OCTILLION_ORCHESTRATOR_PROVIDER=vercel alone): the workers still need
+    // boat's plan. Every live orchestrator's pods (or the boat workers it runs) and boat-hosted orchestrators count there.
+    let boatFree = Infinity;
+    if (host.provider !== "boat" && workerProvider() === "boat" && boatListing) {
+      const bh = this.host("boat"), bl = await this.hostLimits(bh);
+      const boatWorkersOf = (orchId: string) => boatListing.filter((s) => s.live && s.name?.startsWith(`${lib.workerPrefixOf(orchId)}-`)).length;
+      const reservedBoat = live.reduce((n, r) => n + ((r.provider ?? "boat") === "boat" ? 1 : 0) +
+        (r.pods != null && !isRetiring(r) ? r.pods : r.orchestrator_id ? boatWorkersOf(r.orchestrator_id) : 0), 0);
+      boatFree = bl.activeSandboxes - Math.max(0, bl.activeNow - Autoscaler.oursActive(bh, boatListing)) - reservedBoat;
+    }
     const image = AUTOSCALE.snapshots() ? await this.readyImage(host) : null;
     const notes: string[] = [];
     st.launched = []; st.launches = [];
@@ -516,12 +548,16 @@ export class Autoscaler {
         notes.push(`cooldown: ${j.id}'s orchestrator idled out with its sessions still queued`);
         continue;
       }
-      const pods = j.kind === "research" ? 0 : Math.min(AUTOSCALE.jobPodCapacity(), j.sessions, free - 1);
-      if (free < 1 || (j.kind === "simulation" && pods < 1)) { notes.push(capacityNote(j.id, host.provider, free)); continue; }
+      const pods = j.kind === "research" ? 0 : Math.min(AUTOSCALE.jobPodCapacity(), j.sessions, free - 1, boatFree);
+      if (free < 1 || (j.kind === "simulation" && pods < 1)) {
+        notes.push(free >= 1 && boatFree < 1 ? capacityNote(j.id, "boat", boatFree) : capacityNote(j.id, host.provider, free));
+        continue;
+      }
       const l = await this.launch(host, image, { id: j.id, pods });
       st.launched.push(l.label); st.launches.push(l);
       served.add(j.id);
       free -= 1 + pods;
+      boatFree -= pods;
       active++;
     }
     st.jobs = jobs.map((j) => ({ id: j.id, kind: j.kind, sessions: j.sessions, served: served.has(j.id) }));
@@ -545,7 +581,7 @@ export class Autoscaler {
     tuning.OCTILLION_BOAT_NAMESPACE = lib.BOAT_NAMESPACE; // its worker sandboxes carry this deployment's prefix
     const p = host.launch(
       { url: AUTOSCALE.publicUrl(), workerToken, podCapacity: job ? Math.max(1, job.pods) : AUTOSCALE.podCapacity(), tuning, root: this.opts.root, log: (m) => this.log(m) },
-      { image, onCreated: async (sandboxId, orchId, info) => {
+      { image, deadline: this.launchDeadline ?? undefined, onCreated: async (sandboxId, orchId, info) => {
         await db.query("UPDATE orchestrator_sandboxes SET sandbox_id = $2, orchestrator_id = $3, expires_at = $4 WHERE id = $1", [id, sandboxId, orchId, info?.expiresAt ?? null]);
       } },
     ).then(async (r) => {
@@ -577,21 +613,31 @@ let lastKick = 0;
 /** Can this deployment kick the autoscaler at all: on, an HTTPS URL orchestrators reach, and a worker token. A null
  * from kickAutoscaler means this is false, or the kick was debounced. */
 export const kickConfigured = (): boolean => AUTOSCALE.enabled() && /^https:\/\//.test(AUTOSCALE.publicUrl()) && !!env.OCTILLION_WORKER_TOKEN;
-export async function kickAutoscaler(opts: { force?: boolean } = {}): Promise<TickState | null> {
+/**
+ * Launch time budget on Vercel: a function stops at 300 s (vercel.json maxDuration). Launches started by a kick get a
+ * deadline (`deadline` - LAUNCH_RESERVE_MS, the work the cron does after the tick), checked between launch steps; a
+ * launch that runs out deletes its half-launched sandbox. A lease wait is skipped when it would leave a launch less
+ * than LAUNCH_MIN_MS.
+ */
+const LAUNCH_RESERVE_MS = 45_000, LAUNCH_MIN_MS = 150_000;
+export async function kickAutoscaler(opts: { force?: boolean; deadline?: number } = {}): Promise<TickState | null> {
   // Cross-tenant by design: demand across every organization (src/tenant-scope.ts).
   return asPlatform(async () => {
   if (!kickConfigured()) return null;
   if (!opts.force && Date.now() - lastKick < 10_000) return null;
   lastKick = Date.now();
   singleton ??= new Autoscaler();
-  let st = await singleton.tick();
+  const fnDeadline = opts.deadline ?? (process.env.VERCEL ? Date.now() + 300_000 : null);
+  const launchDeadline = fnDeadline ? fnDeadline - LAUNCH_RESERVE_MS : null;
+  let st = await singleton.tick({ launchDeadline });
   // Another instance holds the lease (it ticked moments ago): wait for it to lapse, then tick here, so work that only
   // this event announces (an orchestrator that just left) is not left for the next cron.
   if (!st.leader && st.enabled) {
     const db = await getDb();
     const [l] = await db.query<{ expires_at: Date }>("SELECT expires_at FROM autoscaler_lease WHERE name = 'autoscaler'");
     const wait = l ? new Date(l.expires_at).getTime() - Date.now() + 1000 : 0;
-    if (wait > 0 && wait < 120_000) { await new Promise((r) => setTimeout(r, wait)); st = await singleton.tick(); }
+    const room = launchDeadline ? launchDeadline - Date.now() - wait : Infinity;
+    if (wait > 0 && wait < 120_000 && room >= LAUNCH_MIN_MS) { await new Promise((r) => setTimeout(r, wait)); st = await singleton.tick({ launchDeadline }); }
   }
   await singleton.settle();
   return st;
@@ -610,12 +656,13 @@ export async function runTickNow(): Promise<TickState> {
   if (vercel && !kickConfigured()) throw Object.assign(new Error("This deployment cannot trigger the autoscaler: PUBLIC_URL is not HTTPS or the worker token is unset."), { status: 409 });
   lastKick = Date.now();
   singleton ??= new Autoscaler();
-  let st = await singleton.tick();
+  const launchDeadline = vercel ? Date.now() + 300_000 - LAUNCH_RESERVE_MS : null;
+  let st = await singleton.tick({ launchDeadline });
   if (vercel && !st.leader && st.enabled) {
     const db = await getDb();
     const [l] = await db.query<{ expires_at: Date }>("SELECT expires_at FROM autoscaler_lease WHERE name = 'autoscaler'");
     const wait = l ? new Date(l.expires_at).getTime() - Date.now() + 1000 : 0;
-    if (wait > 0 && wait < 60_000) { await new Promise((r) => setTimeout(r, wait)); st = await singleton.tick(); }
+    if (wait > 0 && wait < 60_000 && launchDeadline! - Date.now() - wait >= LAUNCH_MIN_MS) { await new Promise((r) => setTimeout(r, wait)); st = await singleton.tick({ launchDeadline }); }
   }
   keepAlive(singleton.settle());
   return st;

@@ -14,7 +14,7 @@
  *     - vercel (docs: vercel.com/docs/sandbox/concepts, "Proxy CA certificates"; the node24 image): the per-sandbox proxy
  *       CA Vercel mounts in every sandbox (/etc/pki/ca-trust/source/anchors/vercel-proxy-ca.pem or
  *       /usr/local/share/ca-certificates/vercel-proxy-ca.pem) and the /vercel tree (/vercel/runtimes, /vercel/sandbox);
- *       OCTILLION_SANDBOX_ID (the env file) matches the marker's sandbox; and none of the hosting markers of a Vercel
+ *       OCTILLION_SANDBOX_ID (the env file) matches the marker's sandbox_id (required); and none of the hosting markers of a Vercel
  *       *function* (VERCEL_REGION, AWS_LAMBDA_FUNCTION_NAME): the API itself never runs agents
  * and RUNNER is `boat` or `vercel`.
  *
@@ -81,7 +81,8 @@ export function checkHost(runner: string, probe: HostProbe = realProbe): GuardRe
     if (env.VERCEL_REGION || env.AWS_LAMBDA_FUNCTION_NAME) problems.push("this is a Vercel function, not a Vercel Sandbox: the API never runs orchestrators");
     const sid = env.OCTILLION_SANDBOX_ID;
     if (!sid) problems.push("no OCTILLION_SANDBOX_ID in the environment (set by the launcher's env file)");
-    else if (marker?.sandbox_id && sid !== marker.sandbox_id) problems.push(`OCTILLION_SANDBOX_ID ${sid} does not match the launcher marker's sandbox ${marker.sandbox_id}`);
+    else if (!marker?.sandbox_id) problems.push(`launcher marker ${MARKER_PATH} names no sandbox_id`);
+    else if (sid !== marker.sandbox_id) problems.push(`OCTILLION_SANDBOX_ID ${sid} does not match the launcher marker's sandbox ${marker.sandbox_id}`);
   } else {
     // boat (also what an env file without a role is checked against): unchanged since 2026-10-10.
     const boatId = env.BOAT_ID ?? env.BOX_ID;

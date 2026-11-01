@@ -2401,11 +2401,13 @@ try {
   };
   const { mcpAudience } = await import("../src/clerk.js");
   const mockPost = async (path: string, body: unknown = {}) => (await fetch(`${mock.url}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })).json();
+  // Vercel's team and project for this deployment: OIDC tokens must carry these claims (src/sandbox-probe.ts vercelScope).
+  Object.assign(process.env, { OCTILLION_VERCEL_TEAM_ID: "team_smoke", OCTILLION_VERCEL_PROJECT_ID: "prj_smoke" });
   // The sandbox reliability probe (src/sandbox-probe.ts) against the mock boat.dev and Vercel Sandbox.
   await (await import("./smoke-sandbox-probe.js")).sandboxProbeChecks({ db, base, mockUrl: mock.url, mockState: mock.state, adm, json, stamp });
   // The worker sandbox broker (src/worker-sandboxes.ts): Vercel Sandbox workers, ownership checks, against the mock.
   await (await import("./smoke-worker-sandboxes.js")).workerSandboxChecks({ db, base, mockUrl: mock.url, mockState: mock.state, workerToken: WORKER_TOKEN! });
-  await (await import("./smoke-vercel-orchestrators.js")).vercelOrchestratorChecks({ db, mockUrl: mock.url, mockState: mock.state });
+  await (await import("./smoke-vercel-orchestrators.js")).vercelOrchestratorChecks({ db, base, mockUrl: mock.url, mockState: mock.state, workerToken: WORKER_TOKEN! });
   /** A Clerk session token (what the UI sends): v2 claims with the active organization, unless told otherwise. */
   const clerkSession = async (userId: string, orgId?: string | null, role = "member", extra: Record<string, unknown> = {}) =>
     (await mockPost("/_mock/session", { user_id: userId, org_id: orgId ?? undefined, org_role: role, ...extra })).token as string;

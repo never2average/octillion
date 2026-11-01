@@ -62,6 +62,8 @@ const v3 = checkHost("boat", probe({ ...vEnv, OCTILLION_SANDBOX_ID: "octi-vo-pro
 const v4 = checkHost("boat", probe(vEnv, { ...vFiles, "/etc/octillion/host-role": '{"role":"boat-orchestrator"}' }));
 const v5 = checkHost("boat", probe({ ...vEnv, VERCEL_REGION: "iad1" }, vFiles));
 const v6 = checkHost("boat", probe({ OCTILLION_HOST_ROLE: "vercel-orchestrator" }, vFiles));
+const v8 = checkHost("boat", probe(vEnv, { ...vFiles, "/etc/octillion/host-role": '{"role":"vercel-orchestrator","provider":"vercel"}' }));
+check("guard refuses a Vercel marker without sandbox_id", !v8.ok && /names no sandbox_id/.test(v8.problems.join()), v8.problems.join());
 const v7 = checkHost("boat", probe({ ...boatEnv, OCTILLION_HOST_ROLE: "vercel-orchestrator", OCTILLION_SANDBOX_ID: vName }, { ...boatFiles }));
 check("guard accepts a Vercel orchestrator sandbox (env role + marker + proxy CA + /vercel), RUNNER boat or vercel", v1.ok && v1.provider === "vercel" && v1r.ok, [...v1.problems, ...v1r.problems].join());
 check("guard refuses a non-sandbox host claiming Vercel (no proxy CA, no /vercel): our VM", !v2.ok && /proxy CA/.test(v2.problems.join()) && /\/vercel\/runtimes/.test(v2.problems.join()), v2.problems.join(" | "));

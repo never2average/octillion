@@ -527,6 +527,21 @@ try {
   await fleet.fleetCheckin(boatD.orchestrator_id, 1, { worker_id: "w-D" });
   await db.query("UPDATE agent_sessions SET status = 'running', worker_id = 'w-D' WHERE simulation_id = $1", [sD]);
 
+  // Orchestrators on Vercel, workers still on boat (the override alone): a run's pods must fit boat's plan.
+  process.env.OCTILLION_ORCHESTRATOR_PROVIDER = "vercel";
+  planLimit = 2; // boatD holds 1 + 1 pod of it
+  await av.release();
+  const avGap = new Autoscaler({ log: (m) => quiet.push(`avGap ${m}`) });
+  const sGap = await run(O2, "left-pad", 1, 1);
+  st = await avGap.tick(); await avGap.settle();
+  check("budget: Vercel orchestrators with boat workers wait for boat's plan, not Vercel's", !(await rows()).some((x: any) => x.job_id === sGap) &&
+    new RegExp(`${sGap} waits for sandbox capacity on boat\\.dev \\(0 free\\)`).test(st.note ?? ""), st.note ?? "");
+  planLimit = 100;
+  await avGap.release();
+  await db.query("UPDATE simulations SET status = 'cancelled', finished_at = now() - interval '10 minutes' WHERE id = $1", [sGap]);
+  await db.query("UPDATE agent_sessions SET status = 'cancelled' WHERE simulation_id = $1", [sGap]);
+  delete process.env.OCTILLION_ORCHESTRATOR_PROVIDER;
+
   process.env.OCTILLION_SANDBOX_PROVIDER = "vercel";
   const sE = await run(O2, "left-pad", 2, 1);
   st = await vtick();
@@ -535,8 +550,8 @@ try {
   check("vercel: after the switch a new run's orchestrator starts on Vercel Sandbox", st.provider === "vercel" && vE?.provider === "vercel" && vE.state === "running" &&
     /^octi-vo-local-v[0-9a-f]{10}$/.test(vE.sandbox_id) && vE.orchestrator_id === `orch-${vE.sandbox_id.slice("octi-vo-local-".length)}` && !!vE.expires_at,
     JSON.stringify(vE && { p: vE.provider, s: vE.sandbox_id, o: vE.orchestrator_id, state: vE.state, err: vE.error }) + ` ${JSON.stringify(st.launched)} ${st.note ?? ""} ${st.error ?? ""}`);
-  check("vercel: created non-persistent on node24, 1 vCPU / 2 GB, with the maximum 24 h timeout recorded as expires_at", vx?.persistent === false && vx?.runtime === "node24" &&
-    vx?.vcpus === 1 && vx?.memory === 2048 && vx?.timeout === 1440 * 60_000 && Math.abs(new Date(vE.expires_at).getTime() - (Date.parse(vE.created_at) + 1440 * 60_000)) < 120_000 &&
+  check("vercel: created non-persistent on node24, 1 vCPU / 2 GB, with the default 6 h timeout recorded as expires_at", vx?.persistent === false && vx?.runtime === "node24" &&
+    vx?.vcpus === 1 && vx?.memory === 2048 && vx?.timeout === 360 * 60_000 && Math.abs(new Date(vE.expires_at).getTime() - (Date.parse(vE.created_at) + 360 * 60_000)) < 120_000 &&
     vx?.tags?.octillion === "orchestrator", JSON.stringify(vx && { persistent: vx.persistent, runtime: vx.runtime, vcpus: vx.vcpus, memory: vx.memory, timeout: vx.timeout, tags: vx.tags }));
   const vfiles = vo.state.vsbFiles.get(vE.sandbox_id) ?? new Map();
   const venv = vfiles.get("/tmp/octi-orchestrator.env.new")?.toString("utf8") ?? "";
@@ -574,6 +589,22 @@ try {
   st = await vtick();
   check("boat: listing lag never reaps a live orchestrator either", sbs.has(boatD.sandbox_id) && !(st.reaped ?? []).some((x) => x.sandbox_id === boatD.sandbox_id), JSON.stringify(st.reaped));
   hidden.clear();
+
+  // get keeps failing for an unlisted sandbox: kept for 2 ticks, ended (without a delete call) on the 3rd
+  vo.state.vsbHideFromList.add(vE.sandbox_id);
+  vo.state.vsbFail.get = 1000;
+  const keptGet: boolean[] = [];
+  for (let i = 0; i < 2; i++) { await fleet.fleetCheckin(vE.orchestrator_id, 2, { worker_id: "w-E" }); st = await vtick(); keptGet.push((await rows()).some((x: any) => x.id === vE.id)); }
+  st = await vtick();
+  const ended3 = (st.reaped ?? []).find((x) => x.sandbox_id === vE.sandbox_id);
+  vo.state.vsbFail.get = 0;
+  vo.state.vsbHideFromList.clear();
+  check("get failing: an unlisted orchestrator is kept 2 ticks, then ended without a delete call", keptGet.every(Boolean) && /get failed 3 ticks in a row/.test(ended3?.reason ?? "") &&
+    vo.state.vsbSandboxes.has(vE.sandbox_id), `${keptGet} ${ended3?.reason ?? JSON.stringify(st.reaped)}`);
+  vo.state.vsbSandboxes.delete(vE.sandbox_id);
+  st = await vtick(); // the run gets a fresh orchestrator
+  vE = (await rows()).find((x: any) => x.job_id === sE);
+  await fleet.fleetCheckin(vE.orchestrator_id, 2, { worker_id: "w-E" });
 
   // relaunch before the timeout: inside OCTILLION_VERCEL_ORCH_RELAUNCH_MINUTES it is retired, a fresh one takes the run
   await db.query("UPDATE orchestrator_sandboxes SET expires_at = now() + interval '20 minutes' WHERE id = $1", [vE.id]);

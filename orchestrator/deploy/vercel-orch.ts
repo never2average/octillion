@@ -18,7 +18,7 @@
  * after 10 s (60 s while it keeps dying within a minute), stays down after a clean exit (the idle / job-over exit 0), and
  * forwards SIGTERM for a graceful stop. It logs to /var/lib/octi/orchestrator.log.
  *
- * Lifetime: Vercel stops a session at its timeout (at most 24 h on Pro, 45 min on Hobby). The launch records when, and
+ * Lifetime: Vercel stops a session at its timeout (default 6 h; at most 24 h on Pro, 45 min on Hobby). The launch records when, and
  * the autoscaler retires the orchestrator OCTILLION_VERCEL_ORCH_RELAUNCH_MINUTES before that (claims nothing new, a fresh
  * orchestrator takes over the job, the old one is deleted once its sessions finish).
  */
@@ -50,8 +50,11 @@ const num = (v: string | undefined, d: number) => (v !== undefined && v !== "" &
 
 /** Tuning (environment variables on the API; read at call time). */
 export const VERCEL_ORCH = {
-  /** Session timeout. Vercel's maximum: 24 h on Pro and Enterprise, 45 min on Hobby (vercel.com/docs/sandbox/pricing). */
-  timeoutMinutes: () => Math.max(10, Math.min(1440, num(env.OCTILLION_VERCEL_ORCH_TIMEOUT_MINUTES, 1440))),
+  /**
+   * Session timeout: 6 h by default (relaunch hands longer jobs to a fresh orchestrator), at most Vercel's maximum: 24 h
+   * on Pro and Enterprise, 45 min on Hobby (vercel.com/docs/sandbox/pricing).
+   */
+  timeoutMinutes: () => Math.max(10, Math.min(1440, num(env.OCTILLION_VERCEL_ORCH_TIMEOUT_MINUTES, 360))),
   /**
    * Retire and replace an orchestrator this long before its timeout: one session's limit plus a margin, so the sessions
    * it still runs finish first. Never more than half the timeout (a short timeout must not retire it on launch).
@@ -167,7 +170,14 @@ export function vercelHost(o: VercelHostOptions): OrchestratorHost {
     return g.session;
   };
   const write = (session: string, path: string, body: Buffer | string) => c.writeFile(session, path, Buffer.isBuffer(body) ? body : Buffer.from(body));
-  const run = async (session: string, script: string, timeoutSec = 60) => vexec(c, session, script, Math.min(timeoutSec, VERCEL_ORCH.execMaxSeconds()));
+  // The current launch's deadline (one launch at a time per host object is not assumed: it is passed down per call).
+  let deadline: number | null = null;
+  const timeLeft = () => (deadline ? Math.floor((deadline - Date.now()) / 1000) : Infinity);
+  const checkDeadline = () => { if (timeLeft() < 5) throw new Error("launch deadline reached (the function's 300 s): the half-launched sandbox is deleted"); };
+  const run = async (session: string, script: string, timeoutSec = 60) => {
+    checkDeadline();
+    return vexec(c, session, script, Math.max(5, Math.min(timeoutSec, VERCEL_ORCH.execMaxSeconds(), timeLeft() - 3)));
+  };
 
   async function waitRunning(name: string, timeoutMs = 120_000): Promise<string> {
     for (const t0 = Date.now(); Date.now() - t0 < timeoutMs; await sleep(1500)) {
@@ -284,8 +294,9 @@ sudo -n chown root:root /etc/octillion/host-role; sudo -n chmod 644 /etc/octilli
     },
     async launch(ctx: lib.LaunchContext, opts: HostLaunchOpts = {}): Promise<HostLaunchResult> {
       const t0 = Date.now();
+      deadline = opts.deadline ?? null;
       const timings: Record<string, number> = {};
-      const mark = (k: string) => { timings[k] = Date.now() - t0; };
+      const mark = (k: string) => { timings[k] = Date.now() - t0; checkDeadline(); };
       let step = "create";
       const suffix = `v${randomBytes(5).toString("hex")}`;
       const name = `${orchPrefix}${suffix}`, orchId = `orch-${suffix}`;
@@ -293,15 +304,16 @@ sudo -n chown root:root /etc/octillion/host-role; sudo -n chmod 644 /etc/octilli
       const timeoutMs = (opts.ttlSeconds ? Math.min(opts.ttlSeconds / 60, VERCEL_ORCH.timeoutMinutes()) : VERCEL_ORCH.timeoutMinutes()) * 60_000;
       let created: { name: string; session: string | null };
       try {
+        checkDeadline();
         created = await c.create({ name, vcpus: size.vcpus, memoryMb: size.memoryMb, timeoutMs, snapshotId: opts.image ?? null,
           tags: { octillion: "orchestrator", orchestrator: orchId } });
       } catch (e) { throw launchErr(e, step, t0); }
       const expiresAt = t0 + timeoutMs;
       if (created.session) sessions.set(name, created.session);
-      mark("created");
       try {
         step = "name"; // Vercel names at create; this step only records the sandbox
         await opts.onCreated?.(name, orchId, { expiresAt: new Date(expiresAt) });
+        mark("created"); // past the deadline from here on, the sandbox is deleted below
         step = "ready";
         const session = await waitRunning(name);
         const node = await nodeDir(session);

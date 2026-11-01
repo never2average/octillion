@@ -225,18 +225,56 @@ export function oidcClaims(token: string): { teamId: string; projectId: string }
   } catch { return null; }
 }
 
+/**
+ * Which Vercel team and project our sandboxes belong to. A token's claims are not verified here (Vercel verifies the
+ * signature), and a request header can carry anyone's token: so a token is used only when its owner_id / project_id
+ * match this scope, never to decide it. The scope is, in order:
+ *  - config: OCTILLION_VERCEL_TEAM_ID + OCTILLION_VERCEL_PROJECT_ID (required in production, VERCEL_ENV=production);
+ *  - pinned: the claims of the first token from a trusted source on this instance: a cron request that passed
+ *    CRON_SECRET (pinVercelScopeFromCron) or this process's own VERCEL_OIDC_TOKEN. Anything else is refused until then.
+ */
+let pinnedScope: { teamId: string; projectId: string } | null = null;
+let warnedNoConfig = false;
+export function vercelScope(): { teamId: string; projectId: string; source: "config" | "pinned" } | null {
+  const teamId = env("OCTILLION_VERCEL_TEAM_ID"), projectId = env("OCTILLION_VERCEL_PROJECT_ID");
+  if (teamId && projectId) return { teamId, projectId, source: "config" };
+  return pinnedScope ? { ...pinnedScope, source: "pinned" } : null;
+}
+const productionWithoutScope = () => {
+  if (env("VERCEL_ENV") !== "production" || (env("OCTILLION_VERCEL_TEAM_ID") && env("OCTILLION_VERCEL_PROJECT_ID"))) return false;
+  if (!warnedNoConfig) {
+    warnedNoConfig = true;
+    console.error("#".repeat(78) + "\n# Vercel Sandbox: OCTILLION_VERCEL_TEAM_ID and OCTILLION_VERCEL_PROJECT_ID are not set in production.\n" +
+      "# OIDC tokens are refused until they are (a token's team/project claims must match them).\n" + "#".repeat(78));
+  }
+  return true;
+};
+/** Called ONLY by handlers that passed cronSecretOk: pins this instance's scope to that token's claims (no config). */
+export function pinVercelScopeFromCron(token: unknown): void {
+  if (typeof token !== "string" || pinnedScope || vercelScope()?.source === "config") return;
+  const c = oidcClaims(token);
+  if (c) pinnedScope = c;
+}
+/** Tests only: forget the pinned scope. */
+export function resetVercelScopeForTests(): void { pinnedScope = null; warnedNoConfig = false; }
+
 /** How Vercel Sandbox would be authenticated right now, without a secret in the answer. */
 export function vercelAuth(oidcToken?: string | null): { token: string; teamId: string; projectId: string; via: "oidc" | "access_token" } | { not_configured: string } {
-  const oidc = oidcToken || env("VERCEL_OIDC_TOKEN");
-  if (oidc) {
-    const c = oidcClaims(oidc);
-    if (c) return { token: oidc, ...c, via: "oidc" };
-  }
+  // A configured access token wins over any token a request carried.
   const token = env("OCTILLION_VERCEL_SANDBOX_TOKEN"), teamId = env("OCTILLION_VERCEL_TEAM_ID"), projectId = env("OCTILLION_VERCEL_PROJECT_ID");
   if (token && teamId && projectId) return { token, teamId, projectId, via: "access_token" };
-  return { not_configured: oidc
-    ? "the Vercel OIDC token has no owner_id / project_id claims"
-    : "no Vercel OIDC token (turn on OIDC Federation for the project) and no OCTILLION_VERCEL_SANDBOX_TOKEN + OCTILLION_VERCEL_TEAM_ID + OCTILLION_VERCEL_PROJECT_ID" };
+  const own = env("VERCEL_OIDC_TOKEN");
+  const oidc = oidcToken || own;
+  if (!oidc) return { not_configured: "no Vercel OIDC token (turn on OIDC Federation for the project) and no OCTILLION_VERCEL_SANDBOX_TOKEN + OCTILLION_VERCEL_TEAM_ID + OCTILLION_VERCEL_PROJECT_ID" };
+  const c = oidcClaims(oidc);
+  if (!c) return { not_configured: "the Vercel OIDC token has no owner_id / project_id claims" };
+  if (productionWithoutScope()) return { not_configured: "production needs OCTILLION_VERCEL_TEAM_ID and OCTILLION_VERCEL_PROJECT_ID: an OIDC token's team and project are checked against them" };
+  let scope = vercelScope();
+  if (!scope && oidc === own) { pinnedScope = c; scope = { ...c, source: "pinned" }; } // this process's own env: trusted
+  if (!scope) return { not_configured: "no trusted Vercel team/project yet: set OCTILLION_VERCEL_TEAM_ID and OCTILLION_VERCEL_PROJECT_ID, or wait for the next cron request" };
+  if (c.teamId !== scope.teamId || c.projectId !== scope.projectId)
+    return { not_configured: `refused a Vercel OIDC token for another team or project (${c.teamId} / ${c.projectId}; expected ${scope.teamId} / ${scope.projectId}, ${scope.source})` };
+  return { token: oidc, ...c, via: "oidc" };
 }
 
 /** Vercel Sandbox (Firecracker microVMs): its v2 REST API, named sandboxes, one session each. */

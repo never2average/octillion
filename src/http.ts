@@ -33,7 +33,7 @@ import { appendEvents, claimJobs, completeSession, heartbeat } from "./worker.js
 import { fleetCheckin, fleetLeave, fleetStatus } from "./fleet.js";
 import { autoscalerStatus, kickAutoscaler, startAutoscaler, stopAutoscaler } from "./autoscaler.js";
 import { reapWorkerSandboxes, workerSandboxRouter } from "./worker-sandboxes.js";
-import { rememberOidcToken } from "./vercel-sandbox.js";
+import { rememberCronOidcToken } from "./vercel-sandbox.js";
 /** On Vercel, orchestrator traffic drives the autoscaler (no ticking loop there); elsewhere the loop does. */
 const serverlessTick = (force = false) => { if (process.env.VERCEL) telemetry.keepAlive(kickAutoscaler({ force }).catch((e) => console.error("autoscaler kick:", (e as Error).message))); };
 import { startArchiver, stopArchiver } from "./archive.js";
@@ -109,9 +109,6 @@ export function createApp() {
   // Global settings (src/settings.ts) and admin-added harnesses (src/harnesses.ts, merged into registry()) are read
   // synchronously from caches: load them, and keep them at most 30s old.
   app.use((_req, _res, next) => void Promise.all([freshSettings(), freshPlatformHarnesses()]).then(() => next()));
-  // The function's OIDC token (Vercel sends it on every request): the autoscaler launches Vercel orchestrators with it
-  // outside any one request (src/vercel-sandbox.ts rememberOidcToken). Memory only; it never leaves our functions.
-  app.use((req, _res, next) => { rememberOidcToken(req.headers["x-vercel-oidc-token"]); next(); });
 
   // 5-minute backstop for the event-driven autoscaler on Vercel (vercel.json crons; Vercel sends CRON_SECRET as a
   // bearer). It also prunes the autoscaler's history (src/autoscaler-ticks.ts), which a VM does from its ticking loop.
@@ -120,7 +117,9 @@ export function createApp() {
     const deadline = Date.now() + 300_000;
     // CRON_SECRET only (Vercel sends it): no fallback to an admin credential.
     if (!cronSecretOk(req.headers.authorization)) return void res.status(401).json({ error: "unauthorized" });
-    const tick = await kickAutoscaler();
+    // Only here, past CRON_SECRET: the function's OIDC token for the autoscaler's Vercel launches (src/vercel-sandbox.ts).
+    rememberCronOidcToken(req.headers["x-vercel-oidc-token"]);
+    const tick = await kickAutoscaler({ deadline });
     const pruned = await pruneComputeHistory().catch((e) => ({ error: (e as Error).message }));
     // Loss reasons queued while nothing drained them (src/reasons.ts): a short batch, within the daily cap.
     const reasons = await (await import("./reasons.js")).drainReasons(30).catch((e) => ({ error: (e as Error).message }));
@@ -142,6 +141,7 @@ export function createApp() {
   app.get("/api/cron/sandbox-probe", async (req, res) => {
     const deadline = Date.now() + 300_000;
     if (!cronSecretOk(req.headers.authorization)) return void res.status(401).json({ error: "unauthorized" });
+    rememberCronOidcToken(req.headers["x-vercel-oidc-token"]);
     try {
       const oidc = req.headers["x-vercel-oidc-token"];
       const probe = await (await import("./sandbox-probe.js")).probeTick({ deadline, oidcToken: typeof oidc === "string" ? oidc : null });
