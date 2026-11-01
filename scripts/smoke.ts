@@ -4586,6 +4586,18 @@ try {
         assert.ok(g.accounts_daily.every((d: any, i: number, xs: any[]) => !i || d.total >= xs[i - 1].total), "cumulative never falls");
         assert.ok(g.weekly.length >= 12 && g.weekly.every((w: any) => new Date(`${w.week}T00:00:00Z`).getUTCDay() === 1), "12+ ISO weeks, Monday first");
         assert.equal(g.weekly.at(-1).partial, true, "this week is to date");
+        // The rule on a fixed clock (src/insights.ts weekPartial): any day of the week, Sunday and the boundaries included.
+        {
+          const { weekPartial } = await import("../src/insights.js");
+          const D = 86_400_000, mon = Date.parse("2026-10-26T00:00:00Z"), sunNight = mon + 7 * D; // Monday, and the Monday 00:00 after
+          for (let day = 0; day < 7; day++) for (const at of [mon + day * D, mon + day * D + D - 1]) {
+            const rangeEnd = Math.floor(at / D) * D + D; // a range ending today ends at midnight after today
+            assert.equal(weekPartial(mon, rangeEnd, at), true, `the current week is to date on ${new Date(at).toISOString()}`);
+          }
+          assert.equal(weekPartial(mon, sunNight, sunNight), false, "at Monday 00:00 the week before is whole");
+          assert.equal(weekPartial(mon, sunNight, sunNight + 3 * D), false, "a past range ending on a Sunday: its last week is whole");
+          assert.equal(weekPartial(mon, mon + 3 * D, sunNight + 3 * D), true, "a past range ending mid-week: its last week is cut short");
+        }
         const since = `${g.weekly[0].week}T00:00:00Z`;
         const [{ n: callsSince }] = await db.query<{ n: number }>("SELECT count(*)::int AS n FROM mcp_events WHERE method = 'tools/call' AND at >= $1", [since]);
         assert.equal(sum(g.weekly.map((w: any) => w.calls)), callsSince, "weekly calls add up to the connector log");

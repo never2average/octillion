@@ -137,11 +137,17 @@ const WEEK = 7 * DAY;
 const mondayOf = (t: number) => { const d = Math.floor(t / DAY) * DAY; return d - ((new Date(d).getUTCDay() + 6) % 7) * DAY; };
 const isoOf = (t: number) => new Date(t).toISOString().slice(0, 10);
 const CLIENT_TOP = 5;
+/**
+ * Pure: is the ISO week starting at `weekStart` cut short, by the range or by the clock? A range is whole days and
+ * ends at midnight after its last day, so a range ending today ends in the future: on a Sunday it reaches the week's
+ * end, yet the week is still to date until Monday 00:00 UTC. Compare with the earlier of the range end and now.
+ */
+export const weekPartial = (weekStart: number, rangeEnd: number, now = Date.now()) => weekStart + WEEK > Math.min(rangeEnd, now);
 
 /**
  * The Growth block of Analytics (usage only, no money), in six queries plus the accounts listing the page already
  * loads. Weekly series cover the last 12 ISO weeks (Monday to Sunday, UTC) to the range's last day, or the whole range
- * when it is longer; the last week is `partial` when the range ends before it does. Every filter applies unless noted.
+ * when it is longer; the last week is `partial` when the range (or the clock) ends before it does. Every filter applies unless noted.
  *   accounts_daily  accounts created up to the end of each day of the range (account and product filters only)
  *   weekly          per week: accounts and people with a tool call, tool calls, calls per active person, and the %
  *                   change in calls vs the week before
@@ -205,7 +211,7 @@ async function growth(range: ReturnType<typeof reportRange>, { sql }: Awaited<Re
     const t = Date.parse(`${week}T00:00:00Z`), cur = wkBy.get(week), c = cur?.calls ?? 0, p = wkBy.get(isoOf(t - WEEK))?.calls ?? 0;
     return { week, accounts: cur?.accounts ?? 0, people: cur?.people ?? 0, calls: c,
       calls_per_person: cur?.people ? Math.round((c / cur.people) * 10) / 10 : null,
-      change_pct: p ? Math.round(((c - p) / p) * 1000) / 10 : null, partial: t + WEEK > endMs };
+      change_pct: p ? Math.round(((c - p) / p) * 1000) / 10 : null, partial: weekPartial(t, endMs) };
   });
 
   const stBy = new Map(sticky.map((r) => [r.day, r]));
