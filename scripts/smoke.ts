@@ -1308,8 +1308,8 @@ try {
     // Usage from the one listing: the image builder and images are ours, not other deployments'; boat's (older)
     // activeNow is not used while the listing answers.
     assert.deepEqual(sandboxUsage({ ok: true, sandboxes: sbs }, 99, 0),
-      { active_now: 7, ours_orch: 1, ours_workers: 3, ours_images: 2, others: 1, other_prefixes: ["octv"] });
-    assert.deepEqual(sandboxUsage({ ok: false, sandboxes: [] }, 30, 12), { active_now: 30, ours_orch: 0, ours_workers: 0, ours_images: 0, others: 18, other_prefixes: [] },
+      { active_now: 7, ours_orch: 1, ours_workers: 3, ours_images: 2, ours_probes: 0, others: 1, other_prefixes: ["octv"] });
+    assert.deepEqual(sandboxUsage({ ok: false, sandboxes: [] }, 30, 12), { active_now: 30, ours_orch: 0, ours_workers: 0, ours_images: 0, ours_probes: 0, others: 18, other_prefixes: [] },
       "no listing: boat's activeNow less what our rows hold");
     // The cache: one call per TTL, a failure serves the last good value marked stale, a hung call times out.
     {
@@ -2391,6 +2391,8 @@ try {
   };
   const { mcpAudience } = await import("../src/clerk.js");
   const mockPost = async (path: string, body: unknown = {}) => (await fetch(`${mock.url}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })).json();
+  // The sandbox reliability probe (src/sandbox-probe.ts) against the mock boat.dev and Vercel Sandbox.
+  await (await import("./smoke-sandbox-probe.js")).sandboxProbeChecks({ db, base, mockUrl: mock.url, mockState: mock.state, adm, json, stamp });
   /** A Clerk session token (what the UI sends): v2 claims with the active organization, unless told otherwise. */
   const clerkSession = async (userId: string, orgId?: string | null, role = "member", extra: Record<string, unknown> = {}) =>
     (await mockPost("/_mock/session", { user_id: userId, org_id: orgId ?? undefined, org_role: role, ...extra })).token as string;
@@ -3479,7 +3481,7 @@ try {
       const vault = await viewer.callTool({ name: "key_vault_status", arguments: {} });
       assert.ok(!vault.isError && (vault.structuredContent as any).keys.some((c: any) => c.provider === "resend" && c.hint && c.name), "keys are listed as rows, by hint and name");
       assert.ok(!JSON.stringify(vault).includes(`re_smoke_${stamp}_secret`), "the secret never leaves");
-      for (const n of ["health_summary", "list_settings", "library_stats", "finops_plans", "list_simulations", "model_spend", "analytics_overview", "gtm_activation", "gtm_attribution", "list_access_requests"]) {
+      for (const n of ["health_summary", "sandbox_probe_summary", "list_settings", "library_stats", "finops_plans", "list_simulations", "model_spend", "analytics_overview", "gtm_activation", "gtm_attribution", "list_access_requests"]) {
         const r = await viewer.callTool({ name: n, arguments: {} });
         assert.ok(!r.isError, `${n}: ${JSON.stringify(r.content).slice(0, 300)}`);
       }

@@ -23,6 +23,10 @@
 // apollo_...), over state.apolloPeople (POST /_mock/apollo/people); POST /_mock/apollo/ratelimit {count, retry_after}.
 // Cloudflare Workers AI: POST /client/v4/accounts/:id/ai/v1/chat/completions (Bearer); state.aiRequests logs each body and
 // state.aiReply(body) decides the answer (in-process only; unset: 503).
+// boat.dev under /boat/api/v1 (create, get, rename, commands, delete, list; Bearer boat_...) and Vercel Sandbox under
+// /vercel-sandbox (/v2/sandboxes and session commands, ND-JSON; Bearer + teamId), for the sandbox probe: POST
+// /_mock/boat/drop {id} and /_mock/vercel/drop {name} make a sandbox vanish or stop early; /_mock/{boat,vercel}/fail
+// {kind: create|exec|get|delete, n} makes the next n such calls answer 502.
 import express from "express";
 import { randomBytes, randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
@@ -55,6 +59,10 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     clerkMembersDown: false, apolloPeople: [] as any[], apolloRequests: [] as any[], apolloLimited: 0, apolloRetryAfter: 1,
     // Cloudflare Workers AI: every chat request (its body), and how to answer one (status and/or content; unset: 503).
     aiRequests: [] as any[], aiReply: null as null | ((body: any) => { status?: number; content?: string }),
+    // boat.dev (under /boat/api/v1) and Vercel Sandbox (under /vercel-sandbox): the sandboxes each holds, every request
+    // (method and path), and failures to inject (the next `n` calls of a kind answer 502).
+    boatSandboxes: new Map<string, any>(), boatRequests: [] as string[], boatFail: { create: 0, exec: 0, get: 0, delete: 0 } as Record<string, number>,
+    vsbSandboxes: new Map<string, any>(), vsbRequests: [] as string[], vsbFail: { create: 0, exec: 0, get: 0, delete: 0 } as Record<string, number>,
     prices: [
       { id: "price_mock_starter", object: "price", active: true, lookup_key: "octillion_starter", unit_amount: 49900, currency: "usd", recurring: { interval: "month" },
         nickname: "Starter", metadata: { monthly_budget_usd: "300" }, product: { id: "prod_mock_1", name: "Octillion", metadata: {} } },
@@ -586,6 +594,94 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     res.json({ id: id("chatcmpl"), object: "chat.completion", model: req.body?.model, choices: [{ index: 0, message: { role: "assistant", content: r.content ?? "" }, finish_reason: "stop" }],
       usage: { prompt_tokens: Math.ceil(JSON.stringify(req.body?.messages ?? []).length / 4), completion_tokens: Math.ceil((r.content ?? "").length / 4) } });
   });
+  // ---------- boat.dev v1 (the fields the sandbox probe and the autoscaler read), Bearer boat_... ----------
+  // POST /_mock/boat/drop {id} makes a sandbox vanish (as boat did to orchestrators); /_mock/boat/fail {kind, n}.
+  const failing = (f: Record<string, number>, kind: string) => (f[kind]! > 0 ? (f[kind]!--, true) : false);
+  const b = express.Router();
+  b.use((req, res, next) => {
+    s.boatRequests.push(`${req.method} ${req.path}`);
+    /^Bearer boat_\S+$/.test(req.get("authorization") ?? "") ? next() : void res.status(401).json({ ok: false, code: "unauthorized", message: "bad key" });
+  });
+  const boatSb = (x: any) => ({ id: x.id, name: x.name, state: x.state, type: x.type, createdAt: x.createdAt, archiveAfter: x.archiveAfter });
+  b.get("/sandboxes", (_req, res) => void res.json({ ok: true, sandboxes: [...s.boatSandboxes.values()].map(boatSb), pageInfo: { nextCursor: null } }));
+  b.post("/sandboxes", (req, res) => {
+    if (failing(s.boatFail, "create")) return void res.status(502).json({ ok: false, code: "upstream", message: "mock: create failed" });
+    const sid = `bx_${randomBytes(5).toString("hex")}`;
+    s.boatSandboxes.set(sid, { id: sid, name: "", state: "ready", type: req.body?.type, ttlSeconds: req.body?.ttlSeconds, createdAt: now(),
+      archiveAfter: new Date(Date.now() + Number(req.body?.ttlSeconds ?? 3600) * 1000).toISOString() });
+    res.status(202).json({ ok: true, sandbox: { id: sid, state: "provisioning" } });
+  });
+  b.all("/sandboxes/:id{/*rest}", (req, res) => {
+    const x = s.boatSandboxes.get(req.params.id);
+    const rest = req.path.slice(`/sandboxes/${req.params.id}`.length);
+    if (!x) return void res.status(404).json({ ok: false, code: "not_found", message: "sandbox not found" });
+    if (req.method === "GET" && !rest) return failing(s.boatFail, "get") ? void res.status(502).json({ ok: false, code: "upstream" }) : void res.json({ ok: true, sandbox: boatSb(x) });
+    if (req.method === "PATCH" && !rest) { if (req.body?.name) x.name = req.body.name; return void res.json({ ok: true }); }
+    if (req.method === "DELETE" && !rest) {
+      if (failing(s.boatFail, "delete")) return void res.status(502).json({ ok: false, code: "upstream" });
+      if (req.get("x-ascii-confirm-delete") !== x.id) return void res.status(400).json({ ok: false, code: "confirm_required" });
+      s.boatSandboxes.delete(x.id); return void res.status(202).json({ ok: true });
+    }
+    if (req.method === "POST" && rest === "/commands") {
+      if (failing(s.boatFail, "exec")) return void res.status(502).json({ ok: false, code: "sandbox_direct_failed", message: "Socket is closed" });
+      return void res.json({ ok: true, exitCode: 0, stdout: "ok\n 10:00:00 up 1 min,  load average: 0.00", stderr: "" });
+    }
+    res.status(404).json({ ok: false, code: "not_found" });
+  });
+  app.use("/boat/api/v1", b);
+  app.post("/_mock/boat/drop", (req, res) => { s.boatSandboxes.delete(String(req.body?.id)); res.json({ ok: true }); });
+  app.post("/_mock/boat/fail", (req, res) => { s.boatFail[String(req.body?.kind)] = Number(req.body?.n ?? 1); res.json({ ok: true }); });
+
+  // ---------- Vercel Sandbox v2 (named sandboxes, one session each), Bearer + teamId ----------
+  // POST /_mock/vercel/drop {name} stops a sandbox early (status stopped); /_mock/vercel/fail {kind, n}.
+  const v = express.Router();
+  v.use((req, res, next) => {
+    s.vsbRequests.push(`${req.method} ${req.path}`);
+    if (!/^Bearer \S+$/.test(req.get("authorization") ?? "")) return void res.status(401).json({ error: { code: "forbidden", message: "Not authorized" } });
+    if (!req.query.teamId) return void res.status(400).json({ error: { code: "bad_request", message: "teamId is required" } });
+    next();
+  });
+  const vsb = (x: any) => ({ sandbox: { name: x.name, status: x.status, currentSessionId: x.session, createdAt: x.createdAt, region: x.region, vcpus: x.vcpus, memory: x.memory,
+    persistent: x.persistent, timeout: x.timeout, statusUpdatedAt: x.createdAt, updatedAt: x.createdAt }, session: { id: x.session, status: x.status, region: x.region } });
+  v.get("/v2/sandboxes", (req, res) => {
+    const prefix = String(req.query.namePrefix ?? "");
+    res.json({ sandboxes: [...s.vsbSandboxes.values()].filter((x) => x.name.startsWith(prefix)).map((x) => vsb(x).sandbox), pagination: { count: s.vsbSandboxes.size, next: null } });
+  });
+  v.post("/v2/sandboxes", (req, res) => {
+    if (failing(s.vsbFail, "create")) return void res.status(502).json({ error: { code: "bad_gateway", message: "mock: create failed" } });
+    const name = String(req.body?.name ?? `sbx-${randomBytes(4).toString("hex")}`);
+    if (s.vsbSandboxes.has(name)) return void res.status(409).json({ error: { code: "conflict", message: "name taken" } });
+    const x = { name, status: "running", session: `sbx_${randomBytes(8).toString("hex")}`, createdAt: Date.now(), region: req.body?.region ?? "iad1",
+      vcpus: req.body?.resources?.vcpus, memory: req.body?.resources?.memory, persistent: req.body?.persistent, timeout: req.body?.timeout, projectId: req.body?.projectId };
+    s.vsbSandboxes.set(name, x);
+    res.json({ routes: [], ...vsb(x) });
+  });
+  v.get("/v2/sandboxes/:name", (req, res) => {
+    const x = s.vsbSandboxes.get(req.params.name);
+    if (!x) return void res.status(404).json({ error: { code: "not_found", message: "Sandbox not found" } });
+    if (failing(s.vsbFail, "get")) return void res.status(502).json({ error: { code: "bad_gateway" } });
+    res.json({ resumed: false, routes: [], ...vsb(x) });
+  });
+  v.delete("/v2/sandboxes/:name", (req, res) => {
+    const x = s.vsbSandboxes.get(req.params.name);
+    if (!x) return void res.status(404).json({ error: { code: "not_found", message: "Sandbox not found" } });
+    if (failing(s.vsbFail, "delete")) return void res.status(502).json({ error: { code: "bad_gateway" } });
+    s.vsbSandboxes.delete(x.name);
+    res.json(vsb({ ...x, status: "stopped" }));
+  });
+  v.post("/v2/sandboxes/sessions/:sid/cmd", (req, res) => {
+    const x = [...s.vsbSandboxes.values()].find((y) => y.session === req.params.sid);
+    if (!x) return void res.status(404).json({ error: { code: "not_found", message: "Session not found" } });
+    if (x.status !== "running") return void res.status(410).json({ error: { code: "gone", message: "Session stopped" } });
+    if (failing(s.vsbFail, "exec")) return void res.status(502).json({ error: { code: "bad_gateway" } });
+    const cmd = { id: `cmd_${randomBytes(6).toString("hex")}`, name: req.body?.command, args: req.body?.args ?? [], cwd: "/vercel/sandbox", sessionId: x.session, startedAt: Date.now() };
+    res.setHeader("content-type", "application/x-ndjson");
+    res.end(`${JSON.stringify({ command: { ...cmd, exitCode: null } })}\n${JSON.stringify({ command: { ...cmd, exitCode: 0, durationMs: 3 } })}\n`);
+  });
+  app.use("/vercel-sandbox", v);
+  app.post("/_mock/vercel/drop", (req, res) => { const x = s.vsbSandboxes.get(String(req.body?.name)); if (x) x.status = "stopped"; res.json({ ok: !!x }); });
+  app.post("/_mock/vercel/fail", (req, res) => { s.vsbFail[String(req.body?.kind)] = Number(req.body?.n ?? 1); res.json({ ok: true }); });
+
   app.post("/_mock/resend/outage", (req, res) => { s.resendDown = Boolean(req.body?.down); res.json({ down: s.resendDown }); });
   app.use(c);
   app.use(st);

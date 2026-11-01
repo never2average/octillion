@@ -18,6 +18,10 @@
     {
       "path": "/api/cron/autoscale",
       "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/sandbox-probe",
+      "schedule": "*/5 * * * *"
     }
   ]
 }

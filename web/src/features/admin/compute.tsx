@@ -3,7 +3,7 @@
 // limits), Harness mix (the coding-agent mix and admin-added harnesses) and Compute (/admin/compute: the on-call
 // console over GET /compute/summary, src/compute.ts, with the capacity settings in its Limits table, its Orchestrators
 // table in compute-orchestrators.tsx (Jobs and Sessions are tabs on Health), its Activity chart and Autoscaler
-// decisions in compute-decisions.tsx). Each setting
+// decisions in compute-decisions.tsx, and the boat.dev vs Vercel Sandbox reliability probe in compute-probes.tsx). Each setting
 // shows the value in force and where it comes from: set here, the server's environment, or the built-in default.
 // Saving writes platform_settings (every server picks it up within 30s) and an audit log line. Model keys are the key
 // vault's credentials: a key is typed once and never shown again, only its hint.
@@ -36,6 +36,7 @@ import { ComputeOrchestrators } from './compute-orchestrators';
 import { ComputeFailures, type Failures } from './compute-failures';
 import { AdminEmails } from './emails';
 import { ComputeDecisions, type Tick } from './compute-decisions';
+import { ComputeProbes } from './compute-probes';
 
 interface Setting {
   key: string; group: string; label: string; help: string; kind: 'text' | 'int' | 'number' | 'choice'; default: string | number;
@@ -299,7 +300,7 @@ interface Summary {
   failures_24h: { sessions: number; launches: number; ended: number; rate: number; top: { key: string; label: string; count: number } | null };
   spend_today: { session_model_usd: number; orchestrator_model_usd: number; sandbox_est_usd: number; total_usd: number };
   limits: {
-    ok: boolean; error: string | null; stale: boolean; plan: number | null; active_now: number | null; ours_orch: number; ours_workers: number; ours_images: number; others: number; other_prefixes: string[];
+    ok: boolean; error: string | null; stale: boolean; plan: number | null; active_now: number | null; ours_orch: number; ours_workers: number; ours_images: number; ours_probes?: number; others: number; other_prefixes: string[];
     our_starts: { minute: number; hour: number; day: number }; starts: { per_minute: number; per_hour: number; per_day: number } | null;
     job_orch_live: number; job_orch_draining: number; job_orch_cap: number; shared_orch_live: number; shared_orch_cap: number; per_job_mode: boolean;
     pods_max_reserved: number; pods_avg_running: number; pods_cap: number; available: number | null; per_orchestrator: number;
@@ -391,17 +392,18 @@ function ComputePage() {
         {tab === 'limits' && (isLoading ? <Skeleton className='h-72 rounded-lg' /> : s && <Limits s={s} onEditing={setEdit} />)}
         {tab === 'environment' && (isLoading ? <Skeleton className='h-72 rounded-lg' /> : s && <Environment s={s} onTest={() => void refresh()} testing={refreshing} />)}
         {tab === 'emails' && <AdminEmails embedded />}
+        {tab === 'probes' && <ComputeProbes />}
       </div>
     </PageContainer>
   );
 }
 
-const TABS = [['orchestrators', 'Orchestrators'], ['failures', 'Failures'], ['decisions', 'Autoscaler decisions'], ['limits', 'Limits'], ['environment', 'Environment'], ['emails', 'Emails']] as const;
+const TABS = [['orchestrators', 'Orchestrators'], ['failures', 'Failures'], ['decisions', 'Autoscaler decisions'], ['limits', 'Limits'], ['environment', 'Environment'], ['emails', 'Emails'], ['probes', 'Sandbox probes']] as const;
 
-/** Tells the page whether a record peek is open (?session, ?orch, ?job or ?tick), so the summary stops refreshing. */
+/** Tells the page whether a record peek is open (?session, ?orch, ?job, ?tick or ?probe), so the summary stops refreshing. */
 function PeekWatch({ onChange }: { onChange: (open: boolean) => void }) {
   const url = useComputeParams();
-  const open = ['session', 'orch', 'job', 'tick'].some((k) => url.has(k));
+  const open = ['session', 'orch', 'job', 'tick', 'probe'].some((k) => url.has(k));
   useEffect(() => { onChange(open); }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
   return null;
 }
@@ -552,15 +554,16 @@ function Limits({ s, onEditing }: { s: Summary; onEditing: (key: string, on: boo
   const set = (k: string) => s.settings.find((x) => x.key === k);
   const boatDown = l.plan == null ? `boat.dev did not answer: ${l.error ?? 'no answer'}` : null;
   const startsNote = 'boat does not report used starts; other deployments\' starts are not counted.';
-  const free = l.plan == null || l.active_now == null ? 0 : Math.max(0, l.plan - l.ours_orch - l.ours_workers - l.ours_images - l.others);
+  const free = l.plan == null || l.active_now == null ? 0 : Math.max(0, l.plan - l.ours_orch - l.ours_workers - l.ours_images - (l.ours_probes ?? 0) - l.others);
   const size = set('BOAT_SANDBOX_SIZE');
   const rows: LimitRow[] = [
     { key: 'plan', label: 'boat sandboxes at once', used: l.active_now, limit: l.plan, unavailable: boatDown,
-      sub: l.plan != null && <>ours {l.ours_orch} orchestrators · {l.ours_workers} workers{l.ours_images > 0 && <> · image builder {l.ours_images}</>} · other deployments {l.others} · free {free}</>,
+      sub: l.plan != null && <>ours {l.ours_orch} orchestrators · {l.ours_workers} workers{l.ours_images > 0 && <> · image builder {l.ours_images}</>}{(l.ours_probes ?? 0) > 0 && <> · reliability probes {l.ours_probes}</>} · other deployments {l.others} · free {free}</>,
       parts: [
         { label: 'Our orchestrators', n: l.ours_orch, className: 'bg-primary' },
         { label: 'Our workers', n: l.ours_workers, className: 'bg-primary/55' },
         { label: 'Our image builder and images', n: l.ours_images, className: 'bg-primary/30' },
+        { label: 'Our reliability probes', n: l.ours_probes ?? 0, className: 'bg-primary/15' },
         { label: 'Other deployments', n: l.others, className: 'bg-amber-500/70' }
       ],
       status: statusOf(l.active_now, l.plan, l.binding === 'plan'), source: <span className='text-muted-foreground'>boat plan</span> },

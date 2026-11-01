@@ -86,7 +86,7 @@ const limits = cachedFetch(async () => { await boatKey(); return lib.boatLimits(
 
 // ---------------------------------------------------------------- the boat listing, classified
 
-export type SandboxKind = "orchestrator" | "worker" | "image_builder" | "image" | "other";
+export type SandboxKind = "orchestrator" | "worker" | "image_builder" | "image" | "probe" | "other";
 export interface ClassifiedSandbox extends lib.Sb {
   kind: SandboxKind;
   live: boolean;
@@ -98,8 +98,8 @@ export interface ClassifiedSandbox extends lib.Sb {
 
 /**
  * Sort boat's sandboxes by name: ours are `${ns}-orch-…` (orchestrators), `${ns}-orch-img-…` (snapshot images),
- * `${ns}-img-build` (the image builder) and `${ns}-w-<orchId>-<agent>` (workers); everything else belongs to another
- * deployment on the same boat account. A worker's parent is matched against the orchestrator ids we know first (ids
+ * `${ns}-img-build` (the image builder), `${ns}-w-<orchId>-<agent>` (workers) and `${ns}-probe-…` (the sandbox
+ * reliability probe, src/sandbox-probe.ts); everything else belongs to another deployment on the same boat account. A worker's parent is matched against the orchestrator ids we know first (ids
  * may hold dashes), then read from the name.
  */
 export function classifySandboxNames(list: lib.Sb[], ns: string = lib.BOAT_NAMESPACE, orchestratorIds: string[] = []): ClassifiedSandbox[] {
@@ -112,6 +112,7 @@ export function classifySandboxNames(list: lib.Sb[], ns: string = lib.BOAT_NAMES
     if (name.startsWith(imagePrefix)) return { ...base, kind: "image" as const };
     if (name.startsWith(orchPrefix)) return { ...base, kind: "orchestrator" as const };
     if (name === builder) return { ...base, kind: "image_builder" as const };
+    if (name.startsWith(`${ns}-probe-`)) return { ...base, kind: "probe" as const };
     if (name.startsWith(workerPrefix)) {
       const parent = known.find((k) => name.startsWith(k.prefix))?.id ?? /^[^-]+-w-(orch-[a-z0-9]+)-/.exec(name)?.[1] ?? null;
       return { ...base, kind: "worker" as const, parent_orchestrator_id: parent };
@@ -260,7 +261,8 @@ export function bindingLimit(x: { note: string | null; budget_reason: string | u
 /**
  * What is active on the boat account and whose, all from the one sandbox listing (30 s), never mixed with the plan
  * limits' activeNow (cached 5 min): a launch or reap since then would show up as other deployments. Ours is every
- * sandbox named with our namespace: orchestrators, workers, the image builder and images. Without a listing, boat's
+ * sandbox named with our namespace: orchestrators, workers, the image builder and images, and the reliability probe's
+ * sandboxes (ours_probes: they hold plan capacity orchestrators cannot use). Without a listing, boat's
  * activeNow less what our rows say we hold (`oursHeld`: live orchestrators plus their running workers).
  */
 export function sandboxUsage(sb: { ok: boolean; sandboxes: ClassifiedSandbox[] }, limitsActiveNow: number | null, oursHeld: number) {
@@ -269,7 +271,7 @@ export function sandboxUsage(sb: { ok: boolean; sandboxes: ClassifiedSandbox[] }
   const others = live.filter((s) => s.kind === "other");
   return {
     active_now: sb.ok ? live.length : limitsActiveNow,
-    ours_orch: count("orchestrator"), ours_workers: count("worker"), ours_images: count("image_builder", "image"),
+    ours_orch: count("orchestrator"), ours_workers: count("worker"), ours_images: count("image_builder", "image"), ours_probes: count("probe"),
     others: sb.ok ? others.length : limitsActiveNow != null ? Math.max(0, limitsActiveNow - oursHeld) : 0,
     other_prefixes: [...new Set(others.map((s) => s.prefix!))].sort(),
   };
@@ -436,12 +438,14 @@ async function buildSummary(fresh: boolean) {
   const L = lim.value;
   const use = sandboxUsage(sb, L?.activeNow ?? null, live.length + podsUsed);
   const { active_now: activeNow, ours_orch: oursOrch, ours_workers: oursWorkers, others, other_prefixes: otherPrefixes } = use;
+  // Plan capacity orchestrators cannot use: other deployments' sandboxes and our reliability probes.
+  const held = others + use.ours_probes;
 
   const jobCap = AUTOSCALE.maxJobOrchestrators(), podsCap = AUTOSCALE.jobPodCapacity();
   const podCapacity = perJob ? podsCap : AUTOSCALE.podCapacity();
-  const budget = L ? lib.computeBudget(L, live.length, podCapacity, L.activeNow - others) /* its other-active is `others` */ : null;
+  const budget = L ? lib.computeBudget(L, live.length, podCapacity, L.activeNow - held) /* its other-active is `held` */ : null;
   // free: what the last per-job tick left, else the same formula (plan - other deployments - ours reserved) here.
-  const free = typeof tick?.free === "number" ? tick.free : L ? L.activeSandboxes - others - live.reduce((a, r) => a + 1 + podsOf(r), 0) : null;
+  const free = typeof tick?.free === "number" ? tick.free : L ? L.activeSandboxes - held - live.reduce((a, r) => a + 1 + podsOf(r), 0) : null;
   const perOrchestrator = 1 + podCapacity;
   const queuedAll = n(ses?.queued) + n(rsh?.queued);
   const podsMax = jobLive.reduce((a, r) => Math.max(a, r.pods ?? 0), 0);
@@ -480,7 +484,7 @@ async function buildSummary(fresh: boolean) {
     spend_today: { ...spend, total_usd: usd(spend.session_model_usd + spend.orchestrator_model_usd + spend.sandbox_est_usd) },
     limits: {
       ok: !!L && sb.ok, error: lim.error ?? sb.error, stale: lim.stale || sb.stale,
-      plan: L?.activeSandboxes ?? null, active_now: activeNow, ours_orch: oursOrch, ours_workers: oursWorkers, ours_images: use.ours_images, others, other_prefixes: otherPrefixes,
+      plan: L?.activeSandboxes ?? null, active_now: activeNow, ours_orch: oursOrch, ours_workers: oursWorkers, ours_images: use.ours_images, ours_probes: use.ours_probes, others, other_prefixes: otherPrefixes,
       our_starts: { minute: n(orch?.starts_minute) + n(ses?.starts_minute), hour: n(orch?.starts_hour) + n(ses?.starts_hour), day: n(orch?.starts_day) + n(ses?.starts_day) },
       starts: L ? { per_minute: L.startsPerMinute, per_hour: L.startsPerHour, per_day: L.startsPerDay } : null,
       job_orch_live: jobActive.length, job_orch_draining: jobLive.length - jobActive.length, job_orch_cap: jobCap, shared_orch_live: live.length - jobLive.length, shared_orch_cap: AUTOSCALE.maxOrchestrators(), per_job_mode: perJob,

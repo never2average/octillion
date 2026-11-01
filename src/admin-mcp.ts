@@ -119,6 +119,13 @@ export const ADMIN_TOOLS = {
     },
     summary: (d) => `${d.verdict.map((v: any) => `${v.level}: ${v.text}`).join(" | ") || "No verdict."} Queue ${d.queue.sessions} session(s); running ${d.running.sessions}; failures 24h ${d.failures_24h.sessions}.`,
   },
+  sandbox_probe_summary: {
+    title: "Sandbox reliability probe", needs: "read",
+    description: "boat.dev and Vercel Sandbox side by side, from the deployment's probe cron (Compute › Sandbox probes): per provider over 24 hours (or 7 days), probes started, create success, ready time, how many survived their 15 minutes, how many vanished early and at what age, exec success and latency, delete success, and the estimated daily cost.",
+    input: { hours: z.union([z.literal(24), z.literal(168)]).optional().describe("24 (default) or 168 (7 days)") },
+    run: async (a) => (await import("./sandbox-probe.js")).probeSummary({ hours: a.hours ?? 24 }),
+    summary: (d) => d.providers.map((p: any) => `${p.provider}: ${p.configured ? `${p.started} started, ${p.gone_early} gone early, survived ${p.survived_pct ?? "—"}%, execs ok ${p.exec_ok_pct ?? "—"}%` : `not configured (${p.not_configured_reason})`}`).join("; ") + ".",
+  },
   list_simulations: {
     title: "Simulations (all accounts)", needs: "read",
     description: "Recent and active jobs across every account (simulations by default; research too with kind), waiting first then running then finished, each with why it waits, progress, failures and spend. Same as Compute › Jobs.",

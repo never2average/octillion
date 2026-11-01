@@ -77,6 +77,17 @@ export interface Row {
   launch_step?: string | null; launch_error?: string | null; reap_reason?: string | null;
 }
 
+/**
+ * Pure: whether the orphan reaper deletes a live sandbox that no row of ours knows. Only our orchestrator names
+ * (`${ns}-orch-`) and an image builder left over 30 minutes; never workers (their orchestrator's reap deletes them),
+ * never the sandbox reliability probe's `${ns}-probe-` sandboxes (src/sandbox-probe.ts deletes its own), never others'.
+ */
+export function orphanKind(sb: Pick<lib.Sb, "name" | "createdAt">, now: number, building: boolean): "orchestrator" | "image_builder" | null {
+  if (sb.name?.startsWith(lib.ORCH_PREFIX)) return "orchestrator";
+  if (sb.name === lib.IMAGE_BUILDER_NAME && !building && sb.createdAt && now - Date.parse(sb.createdAt) > 30 * 60_000) return "image_builder";
+  return null;
+}
+
 /** Pure: how many orchestrators the demand needs (before caps). */
 export function desiredOrchestrators(d: Demand, podCapacity: number): number {
   const s = d.sessions > 0 ? Math.ceil(d.sessions / podCapacity) : 0;
@@ -310,9 +321,9 @@ export class Autoscaler {
       const reapedIds = new Set(reaped.map((r) => r.sandbox_id)); // the listing predates this tick's reaping
       for (const sb of listing) {
         if (!lib.isLive(sb) || known.has(sb.id) || reapedIds.has(sb.id)) continue;
-        const isOrch = sb.name?.startsWith(lib.ORCH_PREFIX);
-        const isStaleBuilder = sb.name === lib.IMAGE_BUILDER_NAME && !this.imageBuild && sb.createdAt && now - Date.parse(sb.createdAt) > 30 * min;
-        if (isOrch || isStaleBuilder) {
+        const kind = orphanKind(sb, now, !!this.imageBuild);
+        const isOrch = kind === "orchestrator";
+        if (kind) {
           await lib.deleteSandbox(sb.id).catch(() => {});
           const reason = isOrch ? "orphan orchestrator sandbox (no row)" : "stale image builder";
           reaped.push({ sandbox_id: sb.id, reason });

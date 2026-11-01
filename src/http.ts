@@ -128,6 +128,21 @@ export function createApp() {
     res.json({ tick, pruned, reasons, rls, health, campaigns });
   });
 
+  // Sandbox reliability probe (src/sandbox-probe.ts): boat.dev and Vercel Sandbox side by side, from this deployment.
+  // Its own cron (vercel.json, every 5 minutes) so it never slows or breaks the autoscaler's; same CRON_SECRET rule.
+  // OCTILLION_SANDBOX_PROBE=off stops it. Vercel passes the function's OIDC token in x-vercel-oidc-token.
+  app.get("/api/cron/sandbox-probe", async (req, res) => {
+    const deadline = Date.now() + 300_000;
+    if (!cronSecretOk(req.headers.authorization)) return void res.status(401).json({ error: "unauthorized" });
+    try {
+      const oidc = req.headers["x-vercel-oidc-token"];
+      const probe = await (await import("./sandbox-probe.js")).probeTick({ deadline, oidcToken: typeof oidc === "string" ? oidc : null });
+      res.json(probe);
+    } catch (e) {
+      res.status(500).json({ error: (e as Error).message });
+    }
+  });
+
   // The public /pricing page (web/src/features/site/pricing.tsx): the live plans, with this visitor's variant of each
   // pricing experiment (src/experiments.ts visitorPlans). The visitor id is a random first-party cookie set here; it
   // carries the variant into the account's Billing page. Nothing about the visitor but that id is kept.
@@ -703,7 +718,9 @@ export function createApp() {
   // The autoscaler's history (src/autoscaler-ticks.ts): its decisions log and the Activity chart. Read only.
   ob.get("/compute/ticks", async (req, res) => void res.json(await ticks.listTicks(req.query as Record<string, unknown>)));
   ob.get("/compute/activity", async (req, res) => void res.json(await ticks.computeActivity(req.query as Record<string, unknown>)));
-  ob.get("/compute/trends", async (req, res) => void res.json(await (await import("./compute-trends.js")).computeTrends(req.query)));
+  ob.get("/compute/probes", async (req, res) => void res.json(await (await import("./sandbox-probe.js")).listProbes(req.query as Record<string, unknown>)));
+  ob.get("/compute/probes/:id", async (req, res) => void res.json(await (await import("./sandbox-probe.js")).probeDetail(Number(req.params.id))));
+  ob.get("/compute/trends",async (req, res) => void res.json(await (await import("./compute-trends.js")).computeTrends(req.query)));
   // Spend (src/spend.ts, src/spend-usage.ts): metered model spend by account and provider, compute hours, data and storage, and one account's
   // breakdown. Read only (GETs: any admin role).
   ob.get("/spend", async (req, res) => void res.json(await spend.spendReport(req.query)));

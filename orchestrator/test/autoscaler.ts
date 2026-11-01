@@ -165,6 +165,8 @@ try {
   const mk = (name: string) => { const id = `bx_${randomBytes(4).toString("hex")}`; sbs.set(id, { id, name, state: "ready", createdAt: new Date().toISOString(), files: new Map() }); return id; };
   const stale = mk("octi-orch-stale1"), stuck = mk("octi-orch-stuck1"), orphan = mk("octi-orch-orphan1");
   const staleWorker = mk("octi-w-orch-stale1-codex-default"), otherWorker = mk("octi-w-orch-stale10-codex-default");
+  // The sandbox reliability probe's sandboxes (src/sandbox-probe.ts) have no row either: the reaper leaves them alone.
+  const probe = mk("octi-probe-0a1b2c3d4e");
   await db.query("INSERT INTO orchestrator_sandboxes (sandbox_id, orchestrator_id, state, ready_at) VALUES ($1, 'orch-stale1', 'running', now() - interval '20 minutes')", [stale]);
   await db.query("INSERT INTO orchestrators (id, capacity, last_seen) VALUES ('orch-stale1', 3, now() - interval '6 minutes')");
   await db.query("INSERT INTO orchestrator_sandboxes (sandbox_id, orchestrator_id, state, created_at) VALUES ($1, 'orch-stuck1', 'booting', now() - interval '11 minutes')", [stuck]);
@@ -174,7 +176,8 @@ try {
   check("stuck booting (> 10 min) reaped", !sbs.has(stuck) && /stuck booting/.test(reasons[stuck] ?? ""), reasons[stuck] ?? "");
   check("orphan orchestrator sandbox (no row) deleted", !sbs.has(orphan) && /orphan/.test(reasons[orphan] ?? ""), reasons[orphan] ?? "");
   check("workers of a reaped orchestrator deleted (exact prefix only)", !sbs.has(staleWorker) && sbs.has(otherWorker), reasons[staleWorker] ?? "");
-  sbs.delete(otherWorker);
+  check("probe sandbox (octi-probe-…) left alone by the orphan reaper", sbs.has(probe) && !reasons[probe], reasons[probe] ?? "");
+  sbs.delete(otherWorker); sbs.delete(probe);
   // The reap reason has its own column, and every delete is in compute_events (workers and orphans have no row).
   const ended = Object.fromEntries((await db.query<any>("SELECT sandbox_id, reap_reason, launch_step FROM orchestrator_sandboxes WHERE sandbox_id = ANY($1)", [[stale, stuck]])).map((r) => [r.sandbox_id, r]));
   check("reap reason recorded apart from launch errors", /^stale/.test(ended[stale]?.reap_reason ?? "") && /^stuck booting/.test(ended[stuck]?.reap_reason ?? "") && !ended[stale]?.launch_step, JSON.stringify(ended));
