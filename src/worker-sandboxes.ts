@@ -7,7 +7,7 @@ import * as lib from "../orchestrator/deploy/orch-lib.js";
 import { VERCEL_SIZES } from "../orchestrator/core/config.js";
 
 /**
- * Worker sandbox broker (docs/vercel-sandbox-workers.md, sql/migrations/0016_worker_sandboxes.sql). Orchestrators get
+ * Worker sandbox broker (docs/sandboxes.md, sql/migrations/0016_worker_sandboxes.sql). Orchestrators get
  * their per-session worker sandboxes on Vercel Sandbox through these routes, under /api/worker/sandboxes with their worker token (and, with the fleet token, their
  * orchestrator id in X-Octillion-Orchestrator):
  *

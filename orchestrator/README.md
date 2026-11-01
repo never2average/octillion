@@ -15,73 +15,66 @@ Two entry points share the same deterministic core:
 ```
 orchestrator/
   pi-octillion/   Pi extension package: index.ts (tools), prompt.ts (system prompts), main.ts (host), research*.ts, skills/
-  core/           config, sessions, runners (boat; docker/local/pool for tests), host guard, fleet client, sink, boat client
+  core/           config, sessions, runners (vercel; docker/local/pool for tests), sandbox provider, host guard, fleet client, sink
   harnesses/      adapters.ts + credentials.ts: per-harness argv, resume, digest, credential mapping
   fleet/          plan.ts (standalone per-agent plan), status.ts (pods per group)
-  deploy/         orchestrator-host.ts (where orchestrators run: boat or Vercel Sandbox), boat-lib.ts + vercel-orch.ts (the two
-                  hosts), boat-orchestrators.ts (boat launcher, runs on the main VM or a laptop), in-sandbox.ts (helpers it runs inside)
-  images/         Dockerfile.<harness> (tests) and boat-setup/<harness>.sh (pinned installs on boat VMs)
-  test/           integration.ts, research.ts, boat-fleet.ts
+  deploy/         orchestrator-host.ts (the host interface), vercel-orch.ts (the Vercel Sandbox host), orch-lib.ts (code
+                  tarball, code hash, tuning knobs, launch budget), in-sandbox.ts (helpers it runs inside)
+  images/         Dockerfile.<harness> (tests) and setup/<harness>.sh (pinned installs in worker sandboxes)
+  test/           integration.ts, research.ts, fleet-guard.ts, autoscaler.ts, per-job.ts, vercel-workers.ts
   worker.ts       claim loop + deterministic run
   .pi-upstream/   Pi source clone, for reference only (gitignored)
 ```
 
-## Production topology: everything agent-related runs in provider sandboxes (boat.dev, or Vercel Sandbox)
+## Production topology: everything agent-related runs in Vercel Sandbox
 
-Orchestrators run on boat.dev by default. With `OCTILLION_SANDBOX_PROVIDER=vercel` on the API (or
-`OCTILLION_ORCHESTRATOR_PROVIDER=vercel`, an override for orchestrators only) the autoscaler launches new orchestrators as
-Vercel Sandboxes instead, and boat ones finish their jobs where they are. The table below is the boat layout; the Vercel
-one is under "Orchestrators on Vercel Sandbox" and in `docs/vercel-sandbox-workers.md`.
+The API's autoscaler launches orchestrators as Vercel Sandboxes, and each orchestrator gets its worker sandboxes through
+the API's broker. Details, limits and the live-test plan are in `docs/sandboxes.md`.
 
 | where | what runs there |
 |---|---|
-| **Main VM** | Only the server stack: Postgres, ClickHouse, the Octillion server and Caddy. It may run the launcher (`npm run boat-orchestrators -- …`), which only calls APIs. **No orchestrator, Pi, harness or pod.** |
-| **Orchestrator sandboxes** (boat, `small`, 30-day TTL, `octi-orch-*`) | One orchestrator each (Pi brain + claim loop + research loop) under systemd (`Restart=on-failure`; a clean idle exit is final). The env file (0600) holds only `OCTILLION_URL`, `OCTILLION_WORKER_TOKEN`, `ORCHESTRATOR_ID`, `RUNNER=boat`, `POD_CAPACITY`, `OCTILLION_HOST_ROLE` and boat's own `BOAT_ID`. The boat key and the GPT brain come from the broker at runtime. |
-| **Worker sandboxes** (boat, `default`, ephemeral, `octi-w-<orchestrator>-<agent>`) | One fresh VM per agent session, created **from inside** the orchestrator sandbox and deleted when the session ends. Resume and simulated-developer turns stay in it. It holds only per-session gateway tokens, **never the worker token**. |
+| **Main VM / Vercel functions** | Only the server stack: Postgres, ClickHouse, the Octillion server and Caddy, or the API on Vercel. **No orchestrator, Pi, harness or pod.** |
+| **Orchestrator sandboxes** (Vercel Sandbox, `OCTILLION_VERCEL_ORCH_SIZE`, `<ns>-vo-<env>-v<10 hex>`) | One orchestrator each (Pi brain + claim loop + research loop) under `/opt/octillion/supervisor.sh`, as the unprivileged `octi` user. The env file (0600) holds only `OCTILLION_URL`, `OCTILLION_WORKER_TOKEN`, `ORCHESTRATOR_ID`, `RUNNER=vercel`, `POD_CAPACITY`, `OCTILLION_HOST_ROLE=vercel-orchestrator`, `OCTILLION_SANDBOX_ID` and non-secret tuning knobs. The GPT brain comes from the broker at runtime. |
+| **Worker sandboxes** (Vercel Sandbox, `OCTILLION_VERCEL_WORKER_SIZE`, `<ns>-vw-<env>-…`) | One fresh sandbox per agent session, created through the API's broker (`/api/worker/sandboxes`) and deleted when the session ends. Resume and simulated-developer turns stay in it. It holds only per-session gateway tokens, **never the worker token**. |
 
 - **Host guard** (`core/host-guard.ts`). The orchestrator refuses to start unless all of the following hold:
-  - `OCTILLION_HOST_ROLE` is `boat-orchestrator` or `vercel-orchestrator`;
-  - the launcher's root-owned marker `/etc/octillion/host-role` names the same role;
-  - that provider's own indicators are present:
-    - boat: `BOAT_ID`/`BOX_ID` and `/etc/ascii` + `/home/user/.ascii` (seen on live boat VMs), and `BOAT_ID` equals the marker's sandbox id;
-    - Vercel: the per-sandbox proxy CA Vercel mounts (`/etc/pki/ca-trust/source/anchors/vercel-proxy-ca.pem` or
-      `/usr/local/share/ca-certificates/vercel-proxy-ca.pem`), the `/vercel` tree (`/vercel/runtimes` or `/vercel/sandbox`),
-      `OCTILLION_SANDBOX_ID` equal to the marker's sandbox, and none of a Vercel *function*'s markers (`VERCEL_REGION`, `AWS_LAMBDA_FUNCTION_NAME`);
-  - `RUNNER` is `boat` or `vercel` (the worker sandboxes; the host is checked above).
-  
+  - `OCTILLION_HOST_ROLE` is `vercel-orchestrator`;
+  - the launcher's root-owned marker `/etc/octillion/host-role` names the same role and the same sandbox;
+  - Vercel's own indicators are present: the per-sandbox proxy CA Vercel mounts (`/etc/pki/ca-trust/source/anchors/vercel-proxy-ca.pem` or
+    `/usr/local/share/ca-certificates/vercel-proxy-ca.pem`), the `/vercel` tree (`/vercel/runtimes` or `/vercel/sandbox`),
+    `OCTILLION_SANDBOX_ID` equal to the marker's sandbox, and none of a Vercel *function*'s markers (`VERCEL_REGION`, `AWS_LAMBDA_FUNCTION_NAME`);
+  - `RUNNER` is `vercel`.
+
   `pool`, `docker` and `local` need `OCTILLION_DEV_ALLOW_LOCAL=1`. That flag is for tests only and prints a loud banner. The check runs before any credential is fetched, in the claim loop, in research-only mode and in the Pi CLI extension.
-- **Fleet semantics on boat.** The server's per-agent assignment (`pods`, for example 8/5/3/1/1/1/1 of 20) is the **maximum number of concurrent worker sandboxes per agent group**.
+- **Fleet semantics.** The server's per-agent assignment (`pods`, for example 8/5/3/1/1/1/1 of 20) is the **maximum number of concurrent worker sandboxes per agent group**.
   - Each group claims with `{agent_ids:[id]}`, limited by its free slots.
   - SIGTERM kills the running sessions (deleting their worker sandboxes) and leaves the fleet (`DELETE /api/worker/fleet/:id`).
-- **Harness pins** (registry `harness_version`). Boat preinstalls claude 2.1.296, codex 0.162.1, opencode 1.18.35 and pi 1.1.0, which are kept when they match the pin.
-  - cline and kilo (and any mismatched pin) are installed at sandbox start with `images/boat-setup/<harness>.sh` (cline about 29s, kilo about 10s).
+- **Harness pins** (registry `harness_version`). A CLI already in the sandbox is kept when it matches the pin.
+  - Otherwise the VM runner uploads `images/setup/<harness>.sh` with `_common.sh` and installs the pinned version system-wide.
   - Each harness is verified with `--version` as an **unprivileged `env -i` user**, the way the agent runs it.
-  - **Boat VM gotcha (fixed).** `/usr/local/bin/node` is a symlink into `/home/user/.nvm`, which other users can't read, so they fell back to `/usr/bin/node` v20. That broke pi and made cline warn. The runner and `_common.sh` replace it with a real copy.
-  - **Next:** named boat snapshots per harness (`images/boat-snapshot.sh`) would make cline/kilo sandboxes start without the install step.
-- **Start rate.** Every create goes through a client-side gate (`BOAT_STARTS_PER_MINUTE` 10, `BOAT_STARTS_PER_HOUR` 50 per orchestrator) and backs off on 429/503 (Retry-After, else 5s → 2min), keeping the same Idempotency-Key.
 
-### Orchestrators on Vercel Sandbox (`OCTILLION_SANDBOX_PROVIDER=vercel`)
+### Orchestrators on Vercel Sandbox
 
-`deploy/orchestrator-host.ts` is the interface the autoscaler (and the boat launcher below) drive: launch, list, get by id,
-delete, stop, logs, limits, cost and an optional image. `boatHost()` is `deploy/boat-lib.ts` unchanged. `vercelHost()`
-(`deploy/vercel-orch.ts`) launches orchestrators from the API's autoscaler with the function's OIDC token, through the
-API's REST client (`src/vercel-sandbox.ts`): the token never enters a sandbox. The CLI launcher cannot launch them.
+`deploy/orchestrator-host.ts` is the interface the autoscaler drives: launch, list, get by id, delete, stop, limits, cost
+and an optional image. `vercelHost()` (`deploy/vercel-orch.ts`) launches orchestrators from the API's autoscaler with the
+function's OIDC token, through the API's REST client (`src/vercel-sandbox.ts`): the token never enters a sandbox. There
+is no manual launcher.
 
-| | boat | Vercel Sandbox |
-|---|---|---|
-| Name (= sandbox id) | `<ns>-orch-<bx id>` | `<ns>-vo-<env>-v<10 hex>` (`<env>`: prod, prev, dev from `VERCEL_ENV`) |
-| Machine | `small` | `OCTILLION_VERCEL_ORCH_SIZE` (`small`: 1 vCPU, 2 GB), node24, non-persistent |
-| Lifetime | 30-day TTL | `OCTILLION_VERCEL_ORCH_TIMEOUT_MINUTES` (default 360, at most 1440: Vercel's 24 h on Pro; Hobby allows 45); relaunched before it |
-| Service | systemd unit, `Restart=on-failure` | `/opt/octillion/supervisor.sh`, a bash loop started as a detached command |
-| Code | tarball in chunks + `npm ci` under `/home/user/octillion` | the same tarball in chunks through `fs/write` + `npm ci` under `/opt/octillion` |
-| Fast start | named snapshot `<ns>-orch-img-<hash>` | snapshot of the builder sandbox `<ns>-vimg-<env>-<hash>` (both `OCTILLION_ORCH_SNAPSHOT=on`) |
-| Limits | boat's `/limits` | static: `OCTILLION_VERCEL_MAX_CONCURRENT` (10,000) and our cap `OCTILLION_VERCEL_ORCH_STARTS_PER_HOUR` (120) |
-| Logs | `npm run boat-orchestrators -- logs <id>` (journal) | `/var/lib/octi/orchestrator.log` in the sandbox |
+| | Vercel Sandbox |
+|---|---|
+| Name (= sandbox id) | `<ns>-vo-<env>-v<10 hex>` (`<ns>`: `OCTILLION_SANDBOX_NAMESPACE`; `<env>`: prod, prev, dev from `VERCEL_ENV`) |
+| Machine | `OCTILLION_VERCEL_ORCH_SIZE` (`small`: 1 vCPU, 2 GB), node24, non-persistent |
+| Lifetime | `OCTILLION_VERCEL_ORCH_TIMEOUT_MINUTES` (default 360, at most 1440: Vercel's 24 h on Pro; Hobby allows 45); relaunched before it |
+| Service | `/opt/octillion/supervisor.sh`, a bash loop started as a detached command |
+| Code | the code tarball in chunks through `fs/write` + `npm ci` under `/opt/octillion` |
+| Fast start | snapshot of the builder sandbox `<ns>-vimg-<env>-<hash>` (`OCTILLION_ORCH_SNAPSHOT=on`) |
+| Limits | static: `OCTILLION_VERCEL_MAX_CONCURRENT` (10,000) and our cap `OCTILLION_VERCEL_ORCH_STARTS_PER_HOUR` (120) |
+| Logs | `/var/lib/octi/orchestrator.log` in the sandbox (Compute reads it on demand) |
 
 **The supervisor.** It runs as the service user `octi` (no sudo), with only `PATH` and `HOME`, and reads the 0600 env file
 (owned by `octi`) in a subshell on each start. It restarts a crashed orchestrator after 10 s, or 60 s once it has died
-within a minute more than five times. A clean exit (exit 0: idle, or the job is over) is final, as with systemd's
-`Restart=on-failure`. SIGTERM is forwarded and the supervisor waits for the graceful stop.
+within a minute more than five times. A clean exit (exit 0: idle, or the job is over) is final. SIGTERM is forwarded and
+the supervisor waits for the graceful stop.
 
 **Lifetime.** The launch records `expires_at` (create time plus the timeout). From `OCTILLION_VERCEL_ORCH_RELAUNCH_MINUTES`
 before it (default `MAX_SESSION_MINUTES` + 15, at most half the timeout), the orchestrator is retired the way an
@@ -93,41 +86,20 @@ old-code orchestrator is: an empty assignment, a fresh orchestrator for its job,
 by default. `OCTILLION_VERCEL_ORCH_EGRESS=locked` applies a Vercel network policy (that host, `registry.npmjs.org` and
 `OCTILLION_VERCEL_ORCH_EGRESS_HOSTS`, private subnets denied) after `npm ci`; it breaks research on other sites.
 
-### Launcher (`npm run boat-orchestrators -- <cmd>`, from `orchestrator/`)
-
-It needs only `OCTILLION_URL` (the **public** server URL) and `OCTILLION_WORKER_TOKEN`. The boat key comes from the broker.
-
-| command | what it does |
-|---|---|
-| `budget [n]` | plan limits vs `n` orchestrators |
-| `up <n> [--skip-preflight]` | Prints the budget and refuses if it's exceeded. Then it creates the missing orchestrator sandboxes (small, 30-day TTL, the maximum), uploads the code as a tarball through the files API (130 KB, chunked under 5 MiB, no node_modules), runs `npm ci`, writes the env file, marker and systemd unit, and runs the **preflight** (from inside the sandbox: `GET $OCTILLION_URL/healthz` over public HTTPS; it fails clearly otherwise). Then it starts the service |
-| `status` | per orchestrator: sandbox, service state, uptime, TTL left, fleet check-in and assignment, live worker sandboxes |
-| `logs <id> [n]` | orchestrator journal, secrets redacted |
-| `renew` | resets every orchestrator's TTL to 30 days |
-| `update` | redeploys the code and restarts gracefully |
-| `down <id>\|--all` | `systemctl stop` (SIGTERM: leaves the fleet and deletes its workers), deletes leftover workers, deletes the sandbox |
-| `selftest` | Live check (below). Everything it creates is deleted, and the final listing is verified |
-
-**Budget** (live `GET /limits`, $20 plan):
-- 100 concurrent sandboxes; 12/60/200 starts per minute/hour/day.
-- Each orchestrator needs 1 + `POD_CAPACITY` (20) = 21, so **at most 4 orchestrators** (84 sandboxes). `up 5` is refused (105 > 100).
-- **Throughput ceiling: ~196 agent sessions/day.** Every session is one fresh worker sandbox, which counts as one boat start, against 200 starts/day.
-- The $100 plan gives 300 concurrent and 840 starts/day.
-
 ### On-demand orchestrators (server autoscaler, `src/autoscaler.ts`)
 
-In production nobody runs `up`. The server starts orchestrators when there is work and they go away when idle. The launcher shares its code with the autoscaler through `deploy/boat-lib.ts`.
+The server starts orchestrators when there is work and they go away when idle. The autoscaler shares the code tarball, code hash and tuning knobs with the host through `deploy/orch-lib.ts`.
 
 **One orchestrator per job (`OCTILLION_ORCH_PER_JOB=on`, the default).**
 
 - Every onboarding research and every simulation with claimable queued sessions gets its own orchestrator, launched with `ORCHESTRATOR_JOB=<rsh_… | sim_…>` (row: `orchestrator_sandboxes.job_id`, `pods`).
-- A research orchestrator runs that one research (one sandbox, no workers). A run orchestrator runs only that simulation's sessions on up to `OCTILLION_JOB_POD_CAPACITY` (40) worker sandboxes: `min(40, its unfinished sessions, what the boat plan has free)`.
+- A research orchestrator runs that one research (one sandbox, no workers). A run orchestrator runs only that simulation's sessions on up to `OCTILLION_JOB_POD_CAPACITY` (40) worker sandboxes: `min(40, its unfinished sessions, the free Vercel Sandbox capacity)`.
 - Isolation is server-side: claims carry `simulation_id` / `research_id`, and a bound orchestrator's fleet check-in returns pod groups built from its own run's queued and running sessions (per agent, never above demand). Bound orchestrators are left out of the shared fleet plan.
 - Exit: the check-in returns `job.done` once the run completes or is cancelled, or the research completes or fails. The orchestrator then takes the graceful path (leave → `draining` → deleted next tick). Backstop: a bound orchestrator whose job ended over 3 minutes ago and runs nothing is deleted. The idle exit still applies.
-- Launch order: research first (a customer is waiting), then runs, oldest first. Each launch reserves 1 + its pods on the boat plan; a run that does not fit waits for the next tick. At most `OCTILLION_MAX_JOB_ORCHESTRATORS` (12), 2 launches per tick. A run whose orchestrator idled out with sessions still queued is not relaunched for `OCTILLION_ORCH_IDLE_MINUTES` unless new sessions are queued (adaptive batches are).
+- Launch order: research first (a customer is waiting), then runs, oldest first. Each launch reserves 1 + its pods against `OCTILLION_VERCEL_MAX_CONCURRENT`; a run that does not fit waits for the next tick. At most `OCTILLION_MAX_JOB_ORCHESTRATORS` (12), 2 launches per tick. A run whose orchestrator idled out with sessions still queued is not relaunched for `OCTILLION_ORCH_IDLE_MINUTES` unless new sessions are queued (adaptive batches are).
 - Recycle on deploy works per job: an old-code orchestrator gets no pods, a fresh one is launched for its job, and the old one is deleted once idle.
 - Context between the two kinds goes only through the database, never directly: research writes the product profile, the personas (each with a developer environment, see below) and the problems, each also phrased in every persona's own words; `simulations.research_id` records which research a run came from.
-- Tests: `npx tsx orchestrator/test/per-job.ts` (PGlite + mock boat).
+- Tests: `npx tsx orchestrator/test/per-job.ts` (PGlite + the mock Vercel Sandbox).
 
 `OCTILLION_ORCH_PER_JOB=off` restores the shared fleet described below.
 
@@ -151,7 +123,7 @@ No GUI toolchains are installed.
   - Anything that names the product or a competitor is withheld and listed in `dropped`.
   - Without a persona environment: VS Code defaults.
   - `OCTILLION_DEV_ENV=off` disables environments.
-- **Install** (boat worker sandbox, before the first run): only what the session needs. A tool already on the sandbox is kept (`present`), so nothing is reinstalled. Pinned and system-wide; a tool that fails is reported and the session runs without it.
+- **Install** (worker sandbox, before the first run): only what the session needs. A tool already on the sandbox is kept (`present`), so nothing is reinstalled. Pinned and system-wide; a tool that fails is reported and the session runs without it.
 - **Wiring:**
   - Claude Code: official LSP plugins (`claude-plugins-official`), or a local `.lsp.json` plugin.
   - OpenCode and Kilo: the `lsp` user config.
@@ -169,25 +141,22 @@ No GUI toolchains are installed.
 - **Leader.** One server instance acts at a time, via a lease row in `autoscaler_lease` (renewed every tick, expires after 3 ticks). An advisory lock wouldn't work: session locks are per connection, and xact locks can't span a launch.
 - **Demand, every `OCTILLION_AUTOSCALE_TICK_SECONDS` (15).** Counts queued and running `agent_sessions` (only agents the fleet schedules) plus queued and running `product_research`.
   - With no demand, desired = 0. Otherwise desired = `ceil(sessions / OCTILLION_POD_CAPACITY)`, and at least 1 if there is research.
-  - Desired is clamped to `OCTILLION_MAX_ORCHESTRATORS` (4) and to the live boat budget (`(1 + capacity) × n ≤ plan concurrency`), with at most 2 launches per tick.
-- **Launch.** Uses the vault boat key (`useCredential("boat")`). A `booting` row is written in `orchestrator_sandboxes` first, so a crash can't double-launch. The launch path is the same as `up`: code tarball, `npm ci`, env file, marker, unit and preflight. The worker token goes only into that sandbox's 0600 env file.
-- **Scale down.** An orchestrator with no claimable work for `OCTILLION_ORCH_IDLE_MINUTES` (10) SIGTERMs itself. It leaves the fleet (the row becomes `draining`) and exits 0, so systemd doesn't restart it. The next tick deletes the sandbox.
-- **Reaping, each tick, against boat's listing by the `octi-orch-` prefix:**
-  - sandbox gone or draining → delete;
+  - Desired is clamped to `OCTILLION_MAX_ORCHESTRATORS` (4) and to the Vercel budget (`(1 + capacity) × n ≤ OCTILLION_VERCEL_MAX_CONCURRENT`, and the launch rate cap), with at most 2 launches per tick.
+- **Launch.** Uses the function's OIDC token (or a configured Vercel access token). A `booting` row is written in `orchestrator_sandboxes` first, so a crash can't double-launch. The launch path: code tarball, `npm ci`, env file, marker, supervisor and preflight (`docs/sandboxes.md`, "The launch"). The worker token goes only into that sandbox's 0600 env file.
+- **Scale down.** An orchestrator with no claimable work for `OCTILLION_ORCH_IDLE_MINUTES` (10) SIGTERMs itself. It leaves the fleet (the row becomes `draining`) and exits 0, so the supervisor doesn't restart it. The next tick deletes the sandbox.
+- **Reaping, each tick, against Vercel's listing by this deployment's `<ns>-vo-<env>-` prefix:**
+  - sandbox gone (confirmed by a get by id) or draining → delete;
+  - checked in before, fleet row gone (it left and exited) → delete, as `job over: orchestrator exited (job <id> is <status>)` when its job is done, else `orchestrator exited: left the fleet`;
   - no fleet check-in for `OCTILLION_ORCH_STALE_MINUTES` (5) → delete;
   - stuck booting for more than `OCTILLION_ORCH_BOOT_MINUTES` (10) → delete;
-  - TTL nearly expired → delete;
-  - `octi-orch-*` sandboxes with no row (orphans) → delete;
-  - leftover `octi-w-<orch>-*` workers of reaped orchestrators → delete.
-- **Cold start (measured live 2026-10-10).**
-  - Code upload + `npm ci`: service active in **~8s** (create 0.5s, ready 0.7s, code 3.7s).
-  - From a named snapshot (`OCTILLION_ORCH_SNAPSHOT=on`): **~22s**, because restoring the image is slower than this small install, plus ~170s per build.
-  - Snapshots are therefore opt-in. The first session additionally waits for its worker sandbox.
+  - sandbox timeout nearly reached → delete;
+  - `<ns>-vo-<env>-*` sandboxes with no row (orphans, older than 30 minutes) → delete.
+  - Worker sandboxes of reaped orchestrators are deleted by the broker's reaper (`src/worker-sandboxes.ts`).
 - **Visibility.**
   - `get_simulation` / `get_onboarding` return `capacity` (e.g. "starting orchestrator…") while work is queued.
   - `GET /api/admin/autoscaler` and `npm run fleet:status` show the knobs, demand, the last tick and the sandbox table.
 - **Kill switch.** `OCTILLION_AUTOSCALE=off` stops all launches and deletes. Running orchestrators still idle out. The autoscaler also stays off unless `PUBLIC_URL` is https and `OCTILLION_WORKER_TOKEN` is set.
-- **Tests.** `npx tsx orchestrator/test/autoscaler.ts` (PGlite + mock boat, 15 checks) covers:
+- **Tests.** `npx tsx orchestrator/test/autoscaler.ts` (PGlite + the mock Vercel Sandbox, `orchestrator/test/vercel-orch-mock.ts`) covers:
   - launch on queue;
   - no double launch with two instances;
   - idle → drain → delete;
@@ -196,7 +165,7 @@ No GUI toolchains are installed.
   - the cap;
   - the kill switch.
 
-**Go-live needs a public HTTPS URL for the server** (domain + Caddy TLS). Orchestrator and worker sandboxes reach `/api/worker/*` and `/gw/*` over the internet. Until then, `up` stops at preflight.
+**Go-live needs a public HTTPS URL for the server** (domain + Caddy TLS, or the Vercel deployment). Orchestrator and worker sandboxes reach `/api/worker/*` and `/gw/*` over the internet. Until then, a launch stops at preflight.
 
 ## Architecture
 
@@ -205,7 +174,7 @@ flowchart LR
   S[(Octillion server)] -- "POST /claim (per harness, limit = idle pods)" --> L[claim loop]
   L -- job --> P["Pi session (1 per job)<br/>profile + task only"]
   P -- start_worker --> W[WorkerSession]
-  W -- create/lease --> V["sandbox: boat VM / pool pod / container<br/>harness CLI, env -i, own key only"]
+  W -- create/lease --> V["sandbox: Vercel Sandbox / pool pod / container<br/>harness CLI, env -i, own key only"]
   V -- "native JSONL (stream-json / exec --json)" --> W
   P -- wait_for_turn --> W
   W -- "last text + commands + files" --> P
@@ -217,12 +186,12 @@ flowchart LR
   W -. "Pi or LLM failure: deterministic finish" .-> S
 ```
 
-Per job: claim → open a sandbox (boat VM, or a leased pool pod) → launch the harness with the scenario prompt,
+Per job: claim → open a sandbox (a Vercel Sandbox, or a leased pool pod) → launch the harness with the scenario prompt,
 verbatim on stdin → stream its JSONL → **simulated-developer loop**: Pi reads the sub-agent's last message. If the
 sub-agent is waiting on the user (a question, a choice, a confirmation, or "should I proceed?"), Pi writes the developer's
 reply. The reply is emitted as `{"type":"simulated_user","turn":n,"content":...}`, and the same harness conversation
 resumes with it, in the same sandbox and workdir. This repeats up to `job.max_user_turns` (default 5) →
-`{"type":"file_edit","name":"git diff","content":...}` → `/complete` → the sandbox is deleted (boat) or recycled (pool).
+`{"type":"file_edit","name":"git diff","content":...}` → `/complete` → the sandbox is deleted (Vercel) or recycled (pool).
 
 ### Pi embedding: SDK in-process, one Pi session per job
 
@@ -312,9 +281,7 @@ The flags were checked against the installed CLIs (claude 2.1.296 `--help`, code
   Kilo, Pi and Cline get the Anthropic key, because the registry models for them are `anthropic/...`.
 - **Usage accounting** below still understands only the Claude and Codex formats. Token counts for the other harnesses stay
   in their raw events.
-- **Boat:** only `claude`, `codex`, `pi`, `opencode` and `cursor-agent` are preinstalled on boat VMs. The others need the
-  per-harness named snapshots (`orchestrator/images/boat-snapshot.sh`) wired into sandbox creation. Until then, run them with
-  `RUNNER=pool` or `RUNNER=docker`.
+- **Vercel Sandbox:** the image has no harness preinstalled; each one is installed at its pin by `orchestrator/images/setup/<harness>.sh`.
 
 Usage: Claude's `result` events are **summed across runs**, because each resume reports its own usage and cost. Codex sums
 `turn.completed.usage` and reports no cost.
@@ -323,99 +290,55 @@ Usage: Claude's `result` events are **summed across runs**, because each resume 
 
 | runner | sandbox | notes |
 |---|---|---|
-| `boat` (default) | one fresh [boat.dev](https://docs.boat.dev) VM per session | REST API, see below |
-| `vercel` | one fresh Vercel Sandbox per session, through the API broker | same VM runner; see "Vercel Sandbox worker sandboxes" |
-| `pool` | warm per-harness Docker pods, sized from the server's global fleet plan | see "Warm pod pool" |
-| `docker` | one long-lived container per session from `SANDBOX_IMAGE` | `docker exec` per run |
+| `vercel` (default, production) | one fresh Vercel Sandbox per session, through the API broker | see "Vercel Sandbox worker sandboxes" |
+| `pool` | warm per-harness Docker pods, sized from the server's global fleet plan | tests and dev; see "Warm pod pool" |
+| `docker` | one long-lived container per session from `SANDBOX_IMAGE` | tests and dev; `docker exec` per run |
 | `local` | host CLI in a temp dir | dev only, no isolation |
 
 Every runner exposes the same `Sandbox` interface: `runTurn(argv, stdin)`, `diff()`, `kill()` and `cleanup()`.
 Resumes run in the same sandbox. Docker and pool runs use `docker exec -u agent ... env -i <image env without OCTILLION_*> <KEY>="$KEY"`.
 Key values travel as `docker exec -e NAME`, so they never appear in argv or the container env.
 
-### boat.dev runner
+### Vercel Sandbox worker sandboxes
 
-Base URL `https://boat.dev/api/v1`, `Authorization: Bearer $BOAT_API_KEY` ([API v1](https://docs.boat.dev/api/v1)).
+The runner is `vmRunner(vercelProvider())` (`core/runners.ts`, `core/sandbox-provider.ts`).
 
-1. `POST /sandboxes {type, ttlSeconds, noEnv: true, snapshots: false}` with an `Idempotency-Key`. `noEnv` keeps account
-   secrets off the VM ([create](https://docs.boat.dev/api/reference/sandboxes/create-sandbox)). Then poll `GET /sandboxes/{id}` until the state is `ready`, `idle` or `running`.
-2. `PUT /files`: the env file and scripts go into `/tmp/octi` (mode 700). `prepare.sh` (a sync exec) creates an unprivileged `agent` user,
-   builds a PATH to the preinstalled CLIs, installs the harness env file at `/home/agent/.octi-env` (mode 600), and
-   optionally clones the repo into `/home/agent/work`.
-3. Each run writes `in-N.txt` and `launch-N.sh`, then `POST /commands {detached: true}` (sync exec caps at 600s). The run is
-   `env -i` as `agent`, and its stdout goes to `out-N.jsonl`. The worker follows it with `POST /commands {stream: true}` running
-   `timeout 540 tail -n +<line> -F --pid=<pid>`, as NDJSON frames `{"type":"stdout","data":...}`. It reconnects by line number,
-   and `GET /commands/{processId}` reports when the run has exited ([exec](https://docs.boat.dev/api/reference/agent/execute-sandbox-command)).
-4. Finish: `DELETE /sandboxes/{id}` with `X-Ascii-Confirm-Delete` force-stops the VM and deletes it. If that fails, the worker falls back to `POST /stop {force:true}`.
-   The TTL is `MAX_SESSION_MINUTES + BOAT_TTL_MARGIN_MINUTES`, and exec'd work does not extend it.
+1. Create through the broker, then wait until the sandbox is ready (`OCTILLION_SANDBOX_READY_TIMEOUT_SECONDS`, 300).
+2. Write the scripts into `/tmp/octi` (mode 700). The harness is checked against its pin and installed with
+   `images/setup/<harness>.sh` when missing. `prepare.sh` creates the unprivileged `agent` user, builds a PATH to the
+   CLIs, and clones the repo (or writes a starter template) into `/home/agent/work`.
+3. Each run writes `in-N.txt`, `launch-N.sh` and a 0600 env file, then starts a detached command. The run is `env -i` as
+   `agent`, and its stdout goes to `out-N.jsonl`. The worker follows it with `tail -n +<line> -F --pid=<pid>`,
+   reconnecting by line number, and knows the run is over when its exit file exists.
+4. Finish: the diff (at most `OCTILLION_DIFF_MAX_BYTES`, 2,000,000), then the sandbox is deleted. Its timeout is
+   `MAX_SESSION_MINUTES + OCTILLION_SANDBOX_TTL_MARGIN_MINUTES` (15).
 
-### Vercel Sandbox worker sandboxes (`OCTILLION_SANDBOX_PROVIDER=vercel`)
+The orchestrator never holds Vercel credentials. Every call goes through the API's broker (`/api/worker/sandboxes`,
+`src/worker-sandboxes.ts`) with its worker token, and a sandbox is usable only by the job (or fleet) token that created
+it. Private runs (`OCTILLION_EGRESS`) are locked down with Vercel's network policy and a probe, and fail closed.
 
-The boat runner is `vmRunner(boatProvider)` (`core/sandbox-provider.ts`). With `OCTILLION_SANDBOX_PROVIDER=vercel` on the API
-(read by each orchestrator at start from its credentials), or `OCTILLION_SANDBOX_PROVIDER=vercel` / `RUNNER=vercel` in an
-orchestrator's own env, the same runner and scripts drive **Vercel Sandbox** worker sandboxes instead. The orchestrator
-still runs on boat.
-
-It never holds Vercel credentials. Every call goes through the API's broker (`/api/worker/sandboxes`, `src/worker-sandboxes.ts`)
-with its worker token, and a sandbox is usable only by the job (or fleet) token that created it. Private runs are locked
-down with Vercel's network policy instead of nftables, and fail closed.
-
-To switch or roll back, set or unset the variable on the API. Details, limits and the live-test plan are in
-`docs/vercel-sandbox-workers.md`. Test: `npx tsx orchestrator/test/vercel-workers.ts`.
-
-**Why not Boat's managed `boat prompt` / `POST /prompt` + `GET /events`.**
-Boat injects its own system prompt, a `boat` skill and a `computer` MCP server into managed harnesses
-([integrated agents](https://docs.boat.dev/integrated-agents)), which breaks blindness. Its events are also a
-normalized format, `{type: "prompt"|"response", data: {content, is_streaming, tools: [{use, result}]}}`, with no
-Claude `result` usage or cost. We run the stock preinstalled CLI as an isolated user and keep the native stream.
-
-**Costs and limits** ([pricing](https://docs.boat.dev/pricing), 2026-10):
-
-| size | $/hour |
-|---|---|
-| `small` | 0.018 |
-| `default` | 0.036 |
-| `large` | 0.072 |
-| `xlarge` | 0.20 |
-
-- Billing is per second, and only while running. A 45-minute `default` session costs about $0.03 of VM time.
-- The $20/mo plan gives 100 concurrent VMs and 12/60/200 starts per minute/hour/day.
-- The trial allows 2 concurrent VMs, and its TTL is at most 2h.
-- VMs run in the EU.
-
-Use a `ci`-preset key: `boat api-key create octillion-worker --preset ci --ttl 90d`.
-
-**Live findings (2026-10-10, one smoke).** The orchestrator's boat key (`/root/octillion-live/secrets/boat.env`) authenticates.
-- `GET /me` returns `{ok, type:"user.info", user:{id, login, email, ...}}`.
-- `GET /limits` returns `{currentLimits:{activeSandboxes, creationRatePerMinute/PerHour/PerDay}, sandboxPlanKey, creditBalanceHours, startLimits, starts:{minute,hour,day}, ...}`.
-  The account is on the **$20 plan (`box_20`)**. It has paid history, so it is not on the trial with its 2h TTL cap. Limits: **100 active sandboxes**, **12/60/200 starts per minute/hour/day**, 555.6 credit hours.
-  The maximum TTL is 30 days ([long-running tasks](https://docs.boat.dev/long-running-tasks)).
-- **`POST /sandboxes` returned `403 api_key_action_forbidden`: "This API key cannot perform sandbox.create."**
-  The stored key is scoped without `sandbox.create`, so no sandbox was created, and the exec/version checks could not run.
-  The runner now turns this error into a clear message. **Store a `ci`-preset key in the vault.**
-  The remaining runner behaviour (create shape, exec, stream, detached, delete) is verified only against the documented API through the mock.
+Details, limits and the live-test plan are in `docs/sandboxes.md`. Test: `npx tsx orchestrator/test/vercel-workers.ts`.
 
 ## Credentials (key vault, broker, gateway)
 
 The contract is in `docs/credentials.md`. The orchestrator host holds **only `OCTILLION_URL` and `OCTILLION_WORKER_TOKEN`** (`CREDENTIALS_MODE=broker`, the default).
 
 ```
-startup / 401 / near expiry ── POST /api/worker/orchestrator/credentials {orchestrator_id} ─▶ boat key + Pi's LLM {provider, base_url (gateway), ogw_ token}
+startup / 401 / near expiry ── POST /api/worker/orchestrator/credentials {orchestrator_id} ─▶ Pi's LLM {provider, base_url (gateway), ogw_ token}
 per session (after claim, before every harness run when the token is close to expiry)
                            ── POST /api/worker/sessions/:id/credentials ─▶ providers {anthropic|openai|google|dashscope: gateway, copilot|cursor|amp|factory: direct}
 harness adapter (harnesses/credentials.ts) maps providers ─▶ env (secrets) + a setup snippet (config files, no secret values) + an optional argv rewrite
-runner injects env only at exec time: docker/pool `docker exec -e NAME … env -i …`; boat a per-run 0600 file that is sourced and deleted before exec
+runner injects env only at exec time: docker/pool `docker exec -e NAME … env -i …`; vercel a per-run 0600 file that is sourced and deleted before exec
 ```
 
 - **Orchestrator side.**
   - Pi's anthropic provider gets `baseUrl` from the gateway and its key from the broker's `ogw_` token. The token is refreshed before each job when it is close to expiry, and after a 401.
-  - The boat key is set from the broker. A boat 401 triggers one refetch and a retry, which covers rotated keys.
   - No provider key exists on the host.
 - **Sandbox side.**
   - Session tokens are `ogw_` gateway tokens, scoped to that session and short-lived.
   - Real keys reach a sandbox only for the direct-mode, vendor-hosted harnesses.
   - The adapter's neutral env has every `*KEY`/`*TOKEN`/`*SECRET`/`*_BASE_URL` var stripped before the credentials are applied, so a stray host env var can never leak in.
-- **`CREDENTIALS_MODE=env` (dev only).** Providers are built from this process's env: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `DASHSCOPE_API_KEY`, `COPILOT_GITHUB_TOKEN`, `CURSOR_API_KEY`, `AMP_API_KEY`, `FACTORY_API_KEY`, and optional `*_BASE_URL`s. Pi uses `ORCHESTRATOR_*` and the boat runner uses `BOAT_API_KEY`.
+- **`CREDENTIALS_MODE=env` (dev only).** Providers are built from this process's env: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `DASHSCOPE_API_KEY`, `COPILOT_GITHUB_TOKEN`, `CURSOR_API_KEY`, `AMP_API_KEY`, `FACTORY_API_KEY`, and optional `*_BASE_URL`s. Pi uses `ORCHESTRATOR_*`.
 
 ### Per-harness credential mapping (verified 2026-10-10 against the pinned images)
 
@@ -463,7 +386,6 @@ Each orchestrator runs up to `POD_CAPACITY` (≤ 20) warm Docker pods. N orchest
 - **SIGTERM.** `DELETE /api/worker/fleet/:id`, then drain and remove every pod this orchestrator owns.
 - **Status.** `npx tsx orchestrator/fleet/status.ts [--owner ID] [--json]` shows idle and busy pods per group, against the server's global plan
   (with `OCTILLION_URL` and the token set) or the standalone plan.
-- **Boat parity (next).** The same semantics on boat would mean N warm VMs per group, forked from per-harness named snapshots (the registry's `image.boat_snapshot`).
 
 ## Run until done (starter workspaces, done check, 100-turn cap)
 
@@ -513,7 +435,7 @@ Heartbeats and `/complete` always go to the API. The server recounts events from
 
 - Orchestrator LLM calls per session: at most `max_user_turns + 1` decisions. Each decision is 1-2 small requests of about 2-6k tokens.
   A session with no question costs about 4 requests; a session with 5 replies costs about 13. The cost is recorded as `orchestrator_cost_usd`.
-- Boat: $0.018/h (`small`) and $0.036/h (`default`). Pool pods cost whatever the Docker host costs.
+- Vercel Sandbox: priced at Pro iad1 rates (active CPU, memory, creations; `docs/sandboxes.md`, "Accounting"). Pool pods cost whatever the Docker host costs.
 - All harness and Pi LLM traffic is metered per session by the gateway.
 
 ## Env vars
@@ -522,15 +444,14 @@ Heartbeats and `/complete` always go to the API. The server recounts events from
 |---|---|---|
 | `OCTILLION_URL`, `OCTILLION_WORKER_TOKEN` | `http://localhost:3000`, - | **The only secrets on the host.** The token never enters a sandbox or pod |
 | `CREDENTIALS_MODE` | `broker` | `broker` (vault + gateway through the server) or `env` (dev: provider keys from this env, see Credentials) |
-| `RUNNER` | `boat` | **Production: `boat` only.** `pool`, `docker` and `local` need `OCTILLION_DEV_ALLOW_LOCAL=1` (tests only; loud banner) |
-| `OCTILLION_HOST_ROLE` | - | `boat-orchestrator` or `vercel-orchestrator`. Written by the launcher; the host guard requires it together with the root-owned marker and that provider's indicators |
+| `RUNNER` | `vercel` | **Production: `vercel` only.** `pool`, `docker` and `local` need `OCTILLION_DEV_ALLOW_LOCAL=1` (tests only; loud banner). Any other value is a clear error |
+| `OCTILLION_HOST_ROLE` | - | `vercel-orchestrator`. Written by the launcher; the host guard requires it together with the root-owned marker and Vercel's indicators |
 | `OCTILLION_SANDBOX_ID` | - | Vercel orchestrators: their sandbox name, written by the launcher; must match the marker |
 | `OCTILLION_DEV_ALLOW_LOCAL` | - | `1` bypasses the host guard. **Tests and local development only** |
 | `ORCHESTRATOR_MODE` | - | `research`: a research-only worker that never claims coding-agent sessions |
-| `FLEET_MODE` | `server` | `server` or `standalone`. For `RUNNER=boat`, `off` means plain `WORKER_CONCURRENCY` with no per-group caps |
-| `BOAT_STARTS_PER_MINUTE` / `BOAT_STARTS_PER_HOUR` | `10` / `50` | client-side start gate per orchestrator (plan: 12/60/200 per minute/hour/day). 429s back off |
-| launcher tuning | | The launcher forwards only these non-secret knobs from its own env into orchestrator env files: `MAX_SESSION_MINUTES`, `MAX_BUDGET_USD`, `MAX_USER_TURNS`, `MAX_AGENT_TURNS`, `GIVE_UP_RUNS`, `ORCHESTRATOR_THINKING`, `BOAT_SANDBOX_SIZE`, `RESEARCH_MAX_COST_USD`, `OCTILLION_ORCH_IDLE_MINUTES` (the autoscaler forwards the server's values) |
-| `WORKER_CONCURRENCY` | `2` | parallel sessions for boat, docker and local. For the pool, capacity is the pod count |
+| `FLEET_MODE` | `server` | `server` or `standalone`. For `RUNNER=vercel`, `off` means plain `WORKER_CONCURRENCY` with no per-group caps |
+| launcher tuning | | The autoscaler forwards only these non-secret knobs (`TUNING_VARS` in `deploy/orch-lib.ts`) into orchestrator env files, with the server's values: `ORCHESTRATOR_MODEL`, `MAX_SESSION_MINUTES`, `MAX_BUDGET_USD`, `MAX_USER_TURNS`, `MAX_AGENT_TURNS`, `GIVE_UP_RUNS`, `ORCHESTRATOR_THINKING`, `RESEARCH_MAX_COST_USD`, `OCTILLION_ORCH_IDLE_MINUTES`, `ORCHESTRATOR_JOB`, `OCTILLION_ZED_ACP`, `OCTILLION_EGRESS`, `OCTILLION_SANDBOX_NAMESPACE` |
+| `WORKER_CONCURRENCY` | `2` | parallel sessions for vercel, docker and local. For the pool, capacity is the pod count |
 | `MAX_SESSION_MINUTES` (45), `MAX_USER_TURNS` (5) | | hard kill, then `timeout`; default reply cap |
 | `MAX_AGENT_TURNS` (100), `GIVE_UP_RUNS` (3) | | agent-turn cap per session (summed over resumes; Claude gets `--max-turns`); nudged runs without any workspace change before `agent_gave_up` |
 | `WORKER_ID`, `WORKER_MODELS`, `WORKER_HARNESS`, `MAX_BUDGET_USD` | | claim filters; `MAX_BUDGET_USD` applies per Claude run |
@@ -544,8 +465,8 @@ Heartbeats and `/complete` always go to the API. The server recounts events from
 | `TRANSCRIPT_SINK` (`api`), `CLICKHOUSE_URL`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`, `CLICKHOUSE_DATABASE` (`octillion`) | | |
 | **pool** | | |
 | `FLEET_MODE` (`server`), `POD_CAPACITY` (20, ≤ 20; `FLEET_SIZE` is a legacy alias), `OCTILLION_REGISTRY`, `POOL_IMAGE_OVERRIDE` (dev/test) | | |
-| **boat** | | |
-| `BOAT_API_URL`, `BOAT_SANDBOX_SIZE` (`default`), `BOAT_TTL_MARGIN_MINUTES` (15), `BOAT_READY_TIMEOUT_SECONDS` (300), `BOAT_ORG`, `BOAT_AGENT_USER` (`agent`), `BOAT_ON_FINISH` (`delete`), `BOAT_DIFF_MAX_BYTES` | | the key comes from the broker (`BOAT_API_KEY` in env mode only) |
+| **vercel** | | |
+| `OCTILLION_VERCEL_WORKER_SIZE`, `OCTILLION_SANDBOX_TTL_MARGIN_MINUTES` (15), `OCTILLION_SANDBOX_READY_TIMEOUT_SECONDS` (300), `OCTILLION_DIFF_MAX_BYTES` (2,000,000), `OCTILLION_VERCEL_EXEC_MAX_SECONDS` (240), `OCTILLION_SANDBOX_NAMESPACE` | | no Vercel credentials here: every call goes through the API's broker. The coding agent always runs as `agent` |
 | **docker / local** | | |
 | `SANDBOX_IMAGE` (`octillion-sandbox:latest`), `DOCKER_NETWORK`, `DOCKER_CPUS` (2), `DOCKER_MEMORY` (4g) | | docker and pool limits |
 | `CLAUDE_BIN`, `CODEX_BIN` | | local runner only |
@@ -556,13 +477,13 @@ Heartbeats and `/complete` always go to the API. The server recounts events from
 cd orchestrator && npm install && cd ..       # Pi SDK (orchestrator/package.json)
 export OCTILLION_URL=https://octillion.example.com OCTILLION_WORKER_TOKEN=...   # nothing else secret
 
-npx tsx orchestrator/pi-octillion/main.ts                                         # boat.dev (key from the broker)
+npx tsx orchestrator/pi-octillion/main.ts                                         # Vercel Sandbox (only inside an orchestrator sandbox)
 RUNNER=pool ORCHESTRATOR_ID=orch-eu-1 npx tsx orchestrator/pi-octillion/main.ts   # warm pod pool, server-planned
 npx tsx orchestrator/fleet/status.ts --owner orch-eu-1
 npx tsx orchestrator/worker.ts                                                    # no LLM: one run per job
 
 # dev without a vault
-CREDENTIALS_MODE=env ANTHROPIC_API_KEY=... BOAT_API_KEY=... npx tsx orchestrator/pi-octillion/main.ts
+OCTILLION_DEV_ALLOW_LOCAL=1 RUNNER=docker CREDENTIALS_MODE=env ANTHROPIC_API_KEY=... npx tsx orchestrator/pi-octillion/main.ts
 ```
 
 SIGINT/SIGTERM kills running sandboxes, which are reported as `failed`. In pool mode it also leaves the fleet and removes the pods. A repeated
@@ -573,10 +494,10 @@ signal within 3s is ignored, because npx and tsx both forward it. A 404 or 409 f
 - **Blindness.** A sandbox receives the prompt and replies on stdin, the optional repo, and this session's harness credentials
   (gateway `ogw_` tokens; real keys only for direct-mode vendor-hosted harnesses), plus neutral env.
   - It never receives Octillion ids, the worker token, the orchestrator's token, customer names, or `OCTILLION_*` image env.
-  - Boat runs as a separate `agent` user under `env -i`, with none of Boat's tokens, skills or MCP.
+  - Vercel Sandbox runs it as a separate `agent` user under `env -i`.
   - Docker and pool runs use `env -i` with the image's neutral env.
 - **Credential lifetime in a sandbox.** Docker and pool: env at exec time only, nothing on disk.
-  Boat: a per-run 0600 file, deleted before the harness execs.
+  Vercel Sandbox: a per-run 0600 file, deleted before the harness execs.
   Some harnesses persist their key themselves: cline saves `-k` into `~/.cline/data/settings/providers.json`, inside the session's own pod.
   That is acceptable because it is a short-lived gateway token and the pod or VM is destroyed afterwards.
 - **Network.** Agents need egress. They run with skip-permissions flags, which are safe only because the VM, pod or container is the sandbox.
@@ -610,30 +531,23 @@ Each job gets a dedicated Pi session on the same broker brain (`openai/gpt-6.1-s
 - **Guards.** `RESEARCH_MAX_COST_USD` (default 2) aborts a job above that spend. Also `RESEARCH_MAX_MINUTES` (20), `RESEARCH_MAX_FETCHES` (25) and `RESEARCH_CONCURRENCY` (1).
 - **Hermetic test.** `npx tsx orchestrator/test/research.ts` (about 30s). It uses the real server on PGlite, the real orchestrator, a fake product site (`RESEARCH_TEST_DNS` / `RESEARCH_TRUST_PRIVATE_HOSTS`, tests only), and a fake OpenAI Responses endpoint as the vault upstream, scripted to call every tool. It asserts the allowlist, blocking of private, metadata, off-allowlist and redirect targets, validate → 422 → revise → accepted, the saved profile, personas and scenarios, the LLM-unavailable failure, and that the brain went through the gateway.
 
-## Boat topology tests
+## Topology tests
 
-- **Hermetic** (`npx tsx orchestrator/test/boat-fleet.ts`, about 30s, 18 assertions). The real worker (`RUNNER=boat`) runs against a mock boat API and a mock Octillion server. It checks:
-  - **Guard:** non-boat host, `RUNNER=local` without the flag, the dev flag banner, a marker/`BOAT_ID` mismatch, and that the real entry point refuses on this machine.
-  - **Fleet caps:** per-group concurrent worker sandboxes are capped by the fleet assignment (opus 2, sonnet 1), and the caps are actually reached.
+- **Hermetic** (`npx tsx orchestrator/test/fleet-guard.ts`). The real worker runs against a mock worker sandbox broker and a mock Octillion server. It checks:
+  - **Guard:** a non-sandbox host, `RUNNER=pool|docker|local` without the flag, the dev flag banner, the retired runner and host role, a Vercel Sandbox with the launcher's markers, and that the real entry point refuses on this machine.
+  - **Fleet caps:** per-group concurrent worker sandboxes are capped by the fleet assignment, and the caps are actually reached.
   - **Claims and lifecycle:** claims carry `{agent_ids:[group]}` with limit ≤ free slots; one fresh worker sandbox per session, all deleted.
-  - **Start rate:** 429s are backed off and retried with no failed session.
-  - **Budget math:** the launcher's budget calculations.
-  - **Secrets:** the worker token and the boat key never appear in any worker sandbox file or command, and env files hold only harness credentials.
-- **Live** (`npm run boat-orchestrators -- selftest`, 2026-10-10). This ran with the server not public. The orchestrator's env file held a placeholder token for the selftest.
-  - **Guard:** orchestrator sandbox `bx_cq4wz87k` passed the guard under production rules, with `BOAT_ID` matching the marker. `RUNNER=local` was refused.
-  - **Preflight** failed clearly: `cannot reach https://localhost:8443/healthz from this boat sandbox (ECONNREFUSED)`.
-  - **Nested worker:** `bx_pemydpw9` was created **from inside** `bx_cq4wz87k`. It ran `echo ok` and Claude Code 2.1.296, had 0 `OCTILLION_*` env vars, and was deleted.
-  - **Teardown:** both were deleted, and the final `GET /sandboxes` showed no sandbox of ours (0 active).
-  - **Harness check** (`bx_4byem2zr`, deleted): all six harnesses behind the 7 scheduled agents passed `--version` as an unprivileged user at their pins.
+  - **Network drops** after a run exited (final drain, exit status) are retried, not failed sessions.
+  - **Secrets:** the worker token never appears in any worker sandbox file or command, and env files hold only harness credentials.
 
-- **Live end-to-end on the public server** (`https://octillion.useimmaculate.com`, 2026-10-10, about 1 minute per run).
-  - **Setup:** `up 1` (POD_CAPACITY=3, MAX_SESSION_MINUTES=12, MAX_BUDGET_USD=1.5) gave orchestrator sandbox `bx_jnmcb8mm`; preflight OK; systemd active.
+- **Live end-to-end on the public server** (`https://octillion.useimmaculate.com`, 2026-10-10, about 1 minute per run, on the sandbox provider used before Vercel Sandbox).
+  - **Setup:** one orchestrator sandbox (POD_CAPACITY=3, MAX_SESSION_MINUTES=12, MAX_BUDGET_USD=1.5); preflight OK.
   - **Fleet:** the orchestrator checked in with assignment `{opus 1, codex 1, sonnet 1}`.
-  - **Simulation:** a throwaway org ran an explicit simulation (`claude-code/sonnet` + `codex/default`, repeats 1). The worker sandboxes `bx_5xtnq2zj` and `bx_zry64uc9` were created **from inside** the orchestrator sandbox and deleted after their sessions.
+  - **Simulation:** a throwaway org ran an explicit simulation (`claude-code/sonnet` + `codex/default`, repeats 1). The two worker sandboxes were created from the orchestrator and deleted after their sessions.
   - **Sessions:** both completed with verdict `none` (both agents used `padStart` rather than left-pad). Claude used 69,296 input / 571 output tokens ($0.18). Codex used 40,271 input / 365 output. Pi (GPT, via the gateway) used about 11k input tokens per orchestrator (about $0.005 per session).
   - **Transcripts** are in ClickHouse (10 and 13 events). `gateway_usage` is metered per session.
   - **Token check:** a zero-knowledge scan in each worker sandbox (only `sha256(worker token)` was sent; 0.67M and 0.87M strings checked) found no worker token and no `OCTILLION_*` env.
-  - **Teardown:** `down --all`, a final listing with none of ours, and the throwaway org deleted.
+  - **Teardown:** a final listing with none of ours, and the throwaway org deleted.
   - **A first run found a real problem:** Claude Code failed with `400 context_management: Extra inputs are not permitted`. The gateway's Claude upstream is Vertex, which rejects Claude Code's beta body fields. The claude-code mapping now sets `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` in gateway mode; this was verified to drop the field.
 
 ## Integration test (real server, `orchestrator/test/integration.ts`)
@@ -677,15 +591,18 @@ Local mocks, no live spend:
   - Each of the 5 sessions ran on its own group's pod with the right `--model`. Pods were recycled with the 2+1 split kept.
   - All 10 harness LLM requests carried the session `ogw_` token. Pi's requests carried the orchestrator `ogw_` token.
   - SIGTERM drained the pool.
-- **Boat runner with per-run credential files.** Checked against the mock (`CREDENTIALS_MODE=env`). No env file was left on the VM.
+- **VM runner with per-run credential files.** Checked against the mock Vercel Sandbox (`orchestrator/test/vercel-workers.ts`). No env file was left in the sandbox.
 - **`scripts/smoke.ts` passes.** The adapter argv is unchanged; credential rewrites happen only in the session.
-
-Live: one boat smoke. `/me` and `/limits` OK; create failed with `403 api_key_action_forbidden` (see boat.dev runner).
 
 ## Open questions
 
-1. **Boat key scope.** The vault needs a `ci`-preset boat key (sandbox.create + delete-own). The current key can't create sandboxes.
+1. **Vercel Sandbox live checks.** What only a live run can confirm is listed in `docs/sandboxes.md`.
 2. **Gateway WebSocket.** Codex 0.162 tries a WebSocket upgrade on `/gw/openai/v1/responses` before HTTP. Should the gateway proxy WebSockets or reject them fast?
 3. **Gateway paths.** Cline in gateway mode uses Anthropic's OpenAI-compatible `/gw/anthropic/v1/chat/completions`. The gateway must forward that path and meter its usage format.
 4. **DashScope base URL.** The adapter appends `/compatible-mode/v1` unless the broker's base URL already ends in `/v1`. Please confirm the broker's exact shape.
 5. **Earlier open items.** Thinking level, a deterministic reply guard, failed resumed runs, and the `OCTILLION_HARNESS` image env.
+
+## History
+
+boat.dev hosted the orchestrators and worker sandboxes until it was retired on 2026-11-01. Its CLI launcher, runner and
+settings are gone, and `RUNNER=boat` is a clear error. Old rows and `boat_*` session metadata stay readable, labelled "boat.dev (retired)".

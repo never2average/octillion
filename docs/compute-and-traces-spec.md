@@ -5,7 +5,7 @@ Repo: `/root/octillion-live/octillion-admin`. This spec starts from the highest-
 - **Admin routes that exist:** `/admin/{accounts, agents, analytics, compute, configuration, health, journeys, keys, personas, profile, requests, tasks}`.
   - Key vault is `/admin/keys`, not `/admin/key-vault`.
   - There is no `/admin/usage` page.
-- **Exports:** `computeDemand` and `computeJobDemand` are already exported (`src/autoscaler.ts:78,101`). `computeBudget`, `boatLimits` and `listSandboxes` live in `orchestrator/deploy/boat-lib.ts:63,77,90`, not in the autoscaler.
+- **Exports:** `computeDemand` and `computeJobDemand` are already exported (`src/autoscaler.ts:78,101`). `computeBudget` lives in `orchestrator/deploy/orch-lib.ts`, not in the autoscaler. The sandbox listing (`classifiedSandboxes`) and the limits (`vercelLimits`) live in `src/compute.ts`.
 - **Session cancel already works end to end.**
   - `heartbeat()` (`src/worker.ts:153-156`) throws 409 once a session's status is no longer `running`.
   - The orchestrator turns 409 or 404 into `serverRejected` (`orchestrator/core/session.ts:228,264`), which kills the sandbox and skips `/complete` (`:476`).
@@ -25,10 +25,10 @@ Repo: `/root/octillion-live/octillion-admin`. This spec starts from the highest-
   3. KPI tiles.
   4. A limits table, with the editable settings on the row of the limit each one changes.
   5. An activity chart.
-  6. Three paged RecordViews: Jobs, Sessions and Orchestrators (Orchestrators also lists unmatched boat sandboxes).
+  6. Three paged RecordViews: Jobs, Sessions and Orchestrators (Orchestrators also lists unmatched sandboxes).
   7. Failures by reason.
   8. An autoscaler decisions log.
-  9. Read-only environment knobs and the boat account.
+  9. Read-only environment knobs.
 
   Every number links to the records behind it. Key vault, Harness mix and Agent configuration are linked to, never copied.
 - **Traces (Health).** Traces are built inside the app from Octillion's own tables. New Relic keeps the raw OTel spans and is reached by a deep link.
@@ -40,7 +40,7 @@ Repo: `/root/octillion-live/octillion-admin`. This spec starts from the highest-
   - `orchestrator_sandboxes.error` is split into a launch error and a reap reason.
 - **Scope rules for v1:**
   - Mutating actions are limited to *Run a tick now*, *Cancel session* (a verified path) and editing settings (already audited).
-  - Drain, delete, sandbox delete, requeue, log tailing and metered boat cost are listed under "Not in v1".
+  - Drain, delete, sandbox delete, requeue, log tailing and metered sandbox cost are listed under "Not in v1".
 
 ---
 
@@ -52,17 +52,17 @@ Repo: `/root/octillion-live/octillion-admin`. This spec starts from the highest-
   - `web/src/features/admin/compute.tsx`: page shell (sections A–D and I).
   - New files: `compute-jobs.tsx`, `compute-sessions.tsx`, `compute-orchestrators.tsx`, `compute-failures.tsx`, `compute-decisions.tsx`.
   - Tables use `RecordView` (`web/src/components/layout/record-view.tsx`) with `detail` (peek), `actions`, `properties` and `exportName`. They are outlined and paged.
-- **API:** every route below lives under `/api/admin/onboarding/compute/*` on the `ob` router, so `useAdmin('/compute/...')` works. Errors return `{ error }`. Every mutation calls `admin.log(actor, 'compute.<action>', {...})`. The existing `GET /compute`, `PUT /compute/settings` and `GET /compute/sandbox` stay unchanged. `GET /api/admin/autoscaler` stays as it is for the CLI.
+- **API:** every route below lives under `/api/admin/onboarding/compute/*` on the `ob` router, so `useAdmin('/compute/...')` works. Errors return `{ error }`. Every mutation calls `admin.log(actor, 'compute.<action>', {...})`. The existing `GET /compute` and `PUT /compute/settings` stay unchanged. `GET /api/admin/autoscaler` stays as it is for the CLI.
 - **URL state:** `?job=<id>`, `?session=<id>` and `?orch=<row id>` open the matching peek. `?section=sessions&status=queued&...` applies filters and scrolls. Health and other pages deep-link through these.
 - **Refresh:**
   - Summary every 15 s; tables every 30 s; chart every 60 s.
   - Refresh pauses while `document.hidden` is true, while a peek is open, or while a settings field has unsaved edits. A "Paused" chip offers Resume. A Refresh button refetches everything.
 - **States:**
   - Each section loads and fails on its own, with an `ErrorBox` and a Retry button. Loading shows skeletons.
-  - If the boat listing or limits are unavailable, boat-derived cells show "—" with the tooltip "boat.dev did not answer: {error}". Sections backed by the database still render.
+  - The sandbox listing is read from our own rows (live `orchestrator_sandboxes` with provider `vercel`, and live `worker_sandboxes`), and the limits are the configured Vercel ones, so neither waits on a provider call.
 - **Formatting:**
   - Times are relative ("4 min ago") with the absolute time on hover. Durations look like "2.1 min". Ids are in `Mono`.
-  - Every sandbox dollar figure is labelled **"est."**, with the tooltip "Estimate from the boat price table (BOAT_PRICE_PER_HOUR), not boat's billing meter."
+  - Every sandbox dollar figure is labelled **"est."**, with the tooltip "Estimate from the Vercel Sandbox price table, not Vercel's billing meter."
   - Copy is plain English. Environment variable names appear only in the knobs list and in fix hints.
 - **Link targets:**
 
@@ -83,19 +83,18 @@ Repo: `/root/octillion-live/octillion-admin`. This spec starts from the highest-
 - **Orchestrator model $, per job or per orchestrator** (rows, peeks): `gateway_usage.cost_usd WHERE orchestrator_id = <orch id>`. This is a lifetime running total, which is correct because a job orchestrator lives exactly as long as its job.
   - It is the only spend source for research jobs, because `product_research` has no cost column.
   - It is never used for windowed totals.
-- **Worker sandbox $ (est.):** `metadata->>'boat_est_cost_usd'`.
-- **Orchestrator sandbox $ (est.):** `(coalesce(deleted_at, now()) − created_at) × BOAT_PRICE_PER_HOUR.small`.
-  - Orchestrators are always launched with `type:"small"`, so a named constant `ORCH_SANDBOX_TYPE = "small"` lives next to `launchOrchestrator`. No column is added.
-- **Boat starts:**
-  - The meter is labelled **"Our starts"**: `count(orchestrator_sandboxes.created_at)` plus `count(agent_sessions.started_at WHERE sandbox_id IS NOT NULL)` in the window.
-  - It is shown against boat's account-wide limit, with the note "boat does not report used starts; other deployments' starts are not counted."
+- **Worker sandbox $ (est.):** `metadata->>'sandbox_est_cost_usd'` (sessions from before boat.dev's retirement: `boat_est_cost_usd`).
+- **Orchestrator sandbox $ (est.):** `(coalesce(deleted_at, now()) − created_at)` at the Vercel rate for `OCTILLION_VERCEL_ORCH_SIZE` (`orchSandboxCostUsd`). No column is added.
+- **Starts:**
+  - The meter is labelled **"Our starts"**: Vercel orchestrator rows created, plus sessions on a Vercel worker sandbox started, plus sandbox probe creates, in the window.
+  - It is shown against the configured `OCTILLION_VERCEL_ORCH_STARTS_PER_HOUR` (Vercel has no limits API).
   - It is never marked "binding" on its own.
 
 ### 2.2 Sections, top to bottom
 
 #### A. Header and freshness
 
-- **Title:** "Compute". **Subtitle:** "Orchestrators and agent sandboxes on boat.dev: what is running, what is waiting, and why."
+- **Title:** "Compute". **Subtitle:** "Orchestrators and agent sandboxes on Vercel Sandbox: what is running, what is waiting, and why."
 - **Freshness label:** `Last autoscaler tick 12 s ago · runtime VM | Vercel · data as of 14:03:21`.
   - Tick age is `now − last_tick.at`.
   - It turns amber above `3 × tick_seconds` and red above 10 min.
@@ -112,13 +111,13 @@ Repo: `/root/octillion-live/octillion-admin`. This spec starts from the highest-
 |---|---|---|---|---|---|
 | 1 | red | `autoscale_off` | `!AUTOSCALE.enabled()` | "The autoscaler is off. Queued work will not get orchestrators." | §I knobs |
 | 2 | red | `kick_unconfigured` | `runtime='vercel' && !kickConfigured()` | "This deployment cannot trigger the autoscaler: PUBLIC_URL is not HTTPS or the worker token is unset." | §I knobs |
-| 3 | red | `boat_down` | `sandboxProvider()` errored | "boat.dev is not answering: {error}" | `/admin/keys` |
-| 4 | red | `no_boat_key` | no boat credential | "No boat key. Add one in Key vault." | `/admin/keys` |
-| 5 | red | `tick_error` | `last_tick.error` | "The last tick failed: {error}" | §H, `has=error` |
-| 6 | red | `tick_stale` | tick age > 10 min and queued > 0 | "{n} sessions are queued but nothing has ticked for {m} min." | Run a tick now |
-| 7 | amber | `queue_old` | oldest queued session > 15 min, or oldest queued research > 20 min | "The oldest queued session has waited {n} min." | Sessions: `status=queued`, `sort=queued_at` |
-| 8 | amber | `unclaimable` | `demand.unclaimable_sessions > 0` | "{n} sessions can never run: their agent is not in the scheduled population." | Sessions: `class=unclaimable` |
-| 9 | amber | `plan_capacity` | `last_tick.note` matches `waits for boat plan capacity` | "{job} waits for boat capacity: {free} free, other deployments use {others}." | §D |
+| 3 | red | `sandbox_config` | `sandboxConfigError()` returns a message (a sandbox setting other than `vercel`) | "{message}" | §I knobs |
+| 4 | red | `tick_error` | `last_tick.error` | "The last tick failed: {error}" | §H, `has=error` |
+| 5 | red | `tick_stale` | tick age > 10 min and queued > 0 | "{n} sessions are queued but nothing has ticked for {m} min." | Run a tick now |
+| 6 | amber | `queue_old` | oldest queued session > 15 min, or oldest queued research > 20 min | "The oldest queued session has waited {n} min." | Sessions: `status=queued`, `sort=queued_at` |
+| 7 | amber | `unclaimable` | `demand.unclaimable_sessions > 0` | "{n} sessions can never run: their agent is not in the scheduled population." | Sessions: `class=unclaimable` |
+| 8 | amber | `plan_capacity` | `last_tick.note` matches `waits for sandbox capacity on …` (old notes `waits for boat plan capacity` still parse) | "{job} waits for sandbox capacity on Vercel Sandbox: {free} free." | §D |
+| 9 | amber | `rate_cap` | note contains `launch rate cap:` | "Orchestrator launches are paused by the launch rate cap: …" | §D |
 | 10 | amber | `at_cap` | job orchestrators live ≥ `OCTILLION_MAX_JOB_ORCHESTRATORS` and queued > 0 | "At the orchestrator limit ({n}). Raise it in Limits or wait." | §D |
 | 11 | amber | `not_checking_in` | a booting row is older than `boot_minutes`, or a running row has heartbeat age > 90 s | "{n} orchestrators are not checking in." | Orchestrators: `state=stale` |
 | 12 | amber | `launch_failures` | ≥ 2 rows with `launch_step IS NOT NULL` in the last hour | "{n} orchestrator launches failed in the last hour (latest: {step}: {msg})." | §G |
@@ -161,19 +160,17 @@ An outlined table, one row per limit. Columns:
 
 | Row | Used | Limit | Editable | Source |
 |---|---|---|---|---|
-| boat sandboxes at once | `activeNow`, stacked: our orchestrators · our workers · other deployments · free | `limits.activeSandboxes` | no ("Set by your boat plan") | `boatLimits()` and the classified `listSandboxes()` |
-| Our starts: minute / hour / day (3 rows) | §2.1 | `startsPerMinute / Hour / Day` | no | boat `/limits` and the DB |
+| Sandboxes at once | `activeNow`, stacked: our orchestrators · our workers · free | `OCTILLION_VERCEL_MAX_CONCURRENT` | no ("Set in the deployment environment") | `vercelLimits()` and `classifiedSandboxes()` |
+| Our starts | §2.1 | `OCTILLION_VERCEL_ORCH_STARTS_PER_HOUR` | no | configuration and the DB |
 | Job orchestrators | live rows with `job_id IS NOT NULL` | `OCTILLION_MAX_JOB_ORCHESTRATORS` | yes | DB, settings |
 | Worker pods per job orchestrator | max `pods` on live job orchestrators (sub line: "avg running 23") | `OCTILLION_JOB_POD_CAPACITY` (max 50) | yes | DB, settings |
-| Worker sandbox size | none | `BOAT_SANDBOX_SIZE`, with its $/h | yes (select) | settings, price table |
 | Shared orchestrators | live rows with `job_id IS NULL` | `OCTILLION_MAX_ORCHESTRATORS` | yes | Shown only when `OCTILLION_ORCH_PER_JOB` is off; otherwise collapsed into a muted line "Shared orchestrators: not used in per-job mode (limit 4)" |
 
 - **Binding rule (server):**
   - Use the row named by `computeBudget(limits, n, pods, oursActive).reason`.
-  - Override it with the latest `last_tick.note` when the note matches `at OCTILLION_MAX_JOB_ORCHESTRATORS` (Job orchestrators row) or `waits for boat plan capacity` (boat sandboxes row).
+  - Override it with the latest `last_tick.note` when the note matches `at OCTILLION_MAX_JOB_ORCHESTRATORS` (Job orchestrators row) or `waits for sandbox capacity on …` (Sandboxes row).
 - **Line under the table:** "Room for {available} more orchestrators of {1+pods} sandboxes; about {sessionsPerDayCeiling} sessions a day. Autoscaler says: "{note}"" (the note is quoted verbatim).
-- **When `others > 0`:** "Other deployments on this boat account ({prefixes}) use {others} sandboxes. They share the plan."
-- **Free capacity:** `free = plan − (activeNow − ours) − Σ(1 + pods)`. This is the same formula as `scaleJobs`. `scaleJobs` writes `free` into `TickState`, and the summary reads it from there rather than computing it again.
+- **Free capacity:** `free = limit − (activeNow − ours) − Σ(1 + pods)` (every listed sandbox is ours, so `activeNow − ours` is 0). This is the same formula as `scaleJobs`. `scaleJobs` writes `free` into `TickState`, and the summary reads it from there rather than computing it again.
 
 #### E. Activity, last 2 hours (1 h / 2 h / 24 h picker, choice kept in localStorage)
 
@@ -207,7 +204,7 @@ An outlined table, one row per limit. Columns:
 |---|---|
 | Job (id + kind chip; second line shows account · product) | `simulations` / `product_research`, joined to orgs and products |
 | State | rules above |
-| Why waiting (blank when the job is served) | Matching `last_tick.jobs[].served=false`, plus the note mapped to plain English: "Waiting for boat capacity (3 free, needs 41)", "At the orchestrator limit", "Relaunch cooldown", "No orchestrator yet", "Agents not scheduled" (unclaimable) |
+| Why waiting (blank when the job is served) | Matching `last_tick.jobs[].served=false`, plus the note mapped to plain English: "Waiting for sandbox capacity on Vercel Sandbox (3 free, needs 41)", "At the orchestrator limit", "Relaunch cooldown", "No orchestrator yet", "Agents not scheduled" (unclaimable) |
 | Work | Simulation: sessions done / failed / running / queued as a mini stacked bar. Research: `stage` plus "attempt n" |
 | Orchestrator | `orchestrator_id` with a state chip, or "2 (1 failed launch)" |
 | Pods: running / reserved | Σ `meta.running` / `pods` |
@@ -222,7 +219,7 @@ An outlined table, one row per limit. Columns:
   - Open trace (`/admin/health/traces/<id>`, always available because the slice-1 trace is keyed by job id).
   - Copy id.
 - **Peek** (no tabs, sections stacked in this order):
-  1. **Status sentence:** "Running 38 of 40 pods on orch-212. 12 sessions queued; the oldest has waited 3 min." Or "Waiting: boat has 3 free sandboxes, needs 41."
+  1. **Status sentence:** "Running 38 of 40 pods on orch-212. 12 sessions queued; the oldest has waited 3 min." Or "Waiting: 3 free sandboxes, needs 41."
   2. **Why it is waiting:** the full note plus the numbers compared (free, needed, cap).
   3. **Sessions by agent:** agent, queued, running, done, failed, $. An agent that cannot run is flagged with its runnability reason and a link (§2.3).
   4. **Orchestrators for this job:** a compact list of id, state, boot, lifetime, end reason. Clicking a row opens the §F3 peek (it replaces this peek; there is a "← Back" link).
@@ -257,7 +254,7 @@ An outlined table, one row per limit. Columns:
 | Outcome | `completed_reason`, or the error class chip |
 | Error (one line) | `error_message` |
 | Orchestrator / sandbox | `worker_id`, `sandbox_id` |
-| Cost | `cost_usd` + `boat_est_cost_usd` (est.) |
+| Cost | `cost_usd` + `sandbox_est_cost_usd` (est.) |
 
 - **Error classes:** computed in the shared `src/error-classes.ts` (§2.3).
 - **Row actions:**
@@ -268,7 +265,7 @@ An outlined table, one row per limit. Columns:
   1. **Status line and the full error in mono.** It adds a hint per class, for example `credentials`: "Missing key {ENV}. Add it in Key vault" (env parsed from `No vault provider supplies (\S+)`).
   2. **Timing:** queued, started, last heartbeat, ended, `metadata.wall_ms`.
   3. **Run:** harness_runs, agent_turns / max_agent_turns, simulated_user_turns, developer_nudges, done_reason, changed_files count, exit_code and exit_signal.
-  4. **Infra:** infra_retries, infra_error, boat sandbox id and type, sandbox seconds.
+  4. **Infra:** infra_retries, infra_error, sandbox provider, id and type, sandbox seconds.
   5. **Spend:** tokens in and out, model $, and `gateway_usage` rows for this session (shown as detail only, never added to totals).
   6. **Runnability of this agent** (§2.3): shown when the class is `unclaimable`, `harness_install` or `credentials`.
   7. **Transcript preview:** the last 20 `transcript_events`, with a link to the full transcript page (section 3.5).
@@ -285,7 +282,7 @@ An outlined table, one row per limit. Columns:
   - Stale: booting older than `boot_minutes`, or heartbeat age > 90 s.
   - Failed launches: `launch_step` not null.
   - Ended (24 h).
-  - Unmatched on boat.
+  - Unmatched sandboxes.
   - All.
 
 | Column | Source |
@@ -297,27 +294,27 @@ An outlined table, one row per limit. Columns:
 | Pods used / reserved | Σ `meta.running` / `pods` |
 | Heartbeat | `orchestrators.last_seen`, falling back to `orchestrator_sandboxes.last_seen`. Amber > 90 s, red > `stale_minutes` |
 | Boot (with an "image" chip when `from_image`; hover shows the phases) | `ready_at − created_at`, `timings` |
-| TTL left | live listing `archiveAfter − now`; "n/a" once deleted |
+| TTL left | `expires_at − now`; "n/a" once deleted |
 | Code | short `code_hash`, with a "retiring" chip when `retiring_since` is set |
 | Ended because | `reap_reason`, or `launch_step: launch_error` in red |
 | Spend | sandbox est. + orchestrator model $ |
 
-- **"Unmatched on boat" chip:** swaps in the live-listing rows that match no live `orchestrator_sandboxes` row and no live parent.
-  - Columns: name, kind (worker without a live orchestrator / orchestrator name with no row / image builder / other prefix), parent orchestrator (parsed from `${ns}-w-<orchId>-<agent>`), age, boat state, TTL left.
+- **"Unmatched sandboxes" chip:** swaps in our live sandboxes with no live owner: a worker sandbox whose orchestrator is gone, or an orchestrator sandbox with no live row.
+  - Columns: name, kind (worker without a live orchestrator / orchestrator with no row), parent orchestrator (the broker's `worker_sandboxes.orchestrator_id`), age, sandbox state.
   - These rows are read only in v1.
 - **Row actions:**
-  - "Copy logs command": `npm run boat-orchestrators -- logs <sandbox_id>`, with the note "Logs are lost when the sandbox is deleted."
   - Open job.
   - Open trace.
 - **Peek** (no tabs):
   1. **Summary fields:** state, job, sandbox, created, ready, last seen, TTL, code hash, from image.
   2. **Boot timeline:** bars for create → ready → code → configured → preflight → started, each with its ms from `timings`. A failed launch shows one red segment, `launch_step` ({N} s), with `launch_error`.
-  3. **Workers now:** from the live listing joined to `agent_sessions.sandbox_id`: agent, session (opens the §F2 peek), status, heartbeat age, boat state.
+  3. **Workers now:** from live `worker_sandboxes` rows joined to their sessions: agent, session (opens the §F2 peek), status, heartbeat age, sandbox state.
   4. **Recent sessions on it:** up to 10, where `worker_id = meta.worker_id`.
   5. **Worker tokens:** `worker_tokens` rows by `sandbox_row_id`, showing expires_at and revoked_at.
   6. **Events:** `compute_events` for this `sandbox_id`.
   7. **Spend.**
-  8. **Links:** job, trace, copy logs command.
+  8. **Logs:** the orchestrator writes `/var/lib/octi/orchestrator.log` in its sandbox; the "Orchestrator log" button reads its tail on demand (`docs/sandboxes.md`, "Diagnostics"). Logs are lost when the sandbox is deleted.
+  9. **Links:** job, trace.
 - **Empty (Live):** "No orchestrators running. One launches when a job queues work." If rule 1 or rule 2 is true, show that rule's copy instead.
 
 #### G. Failures by reason (24 h; 24 h / 7 d picker)
@@ -327,9 +324,9 @@ Two outlined lists side by side; they stack on mobile.
 - **Orchestrator launches and reaps.**
   - Groups:
     - Launch failures by `launch_step`.
-    - Reaps by normalized `reap_reason`. Normalizing strips ids and numbers, giving: stale, stuck booting, TTL, idle drain, job drain, retired, job ended, sandbox gone, never created.
+    - Reaps by normalized `reap_reason`. Normalizing strips ids and numbers, giving: stale, exited, stuck booting, TTL, idle drain, job drain, retired, job ended, sandbox gone, never created. An orchestrator that checked in before and whose fleet row is gone is reaped as `job over: orchestrator exited (job <id> is <status>)` (job ended) when its job is done, else `orchestrator exited: left the fleet` (exited); `stale: no fleet check-in for 5 min` is left for one that never checked in.
     - Unattended deletes from `compute_events`: worker deleted with its orchestrator, orphan orchestrator deleted, stale image builder.
-  - Routine reasons (idle drain, job drain, retired, job ended) are shown muted below a divider and counted separately from "failures".
+  - Routine reasons (idle drain, job drain, retired, job ended, exited) are shown muted below a divider and counted separately from "failures".
   - Columns: reason, count, last seen, latest message.
   - Clicking a row sets Orchestrators to Ended (24 h) with that reason.
 - **Session failures.**
@@ -359,7 +356,7 @@ Two outlined lists side by side; they stack on mobile.
   - Raw JSON in a collapsed block with a copy button.
 - **Empty:** "No decisions in this window. Only ticks that changed something are recorded." On Vercel it adds: "Ticks run only on events and at the daily 06:00 UTC cron."
 
-#### I. Environment and boat account (muted, read-only)
+#### I. Environment (muted, read-only)
 
 - **Knobs table** (name, value, source, meaning): `autoscalerStatus().knobs` plus:
   - `OCTILLION_AUTOSCALE`
@@ -370,15 +367,14 @@ Two outlined lists side by side; they stack on mobile.
   - `OCTILLION_SESSION_INFRA_RETRIES`
   - `OCTILLION_LEASE_MINUTES`
   - `MAX_SESSION_MINUTES`
-  - `BOAT_TTL_MARGIN_MINUTES`
-  - `BOAT_READY_TIMEOUT_SECONDS`
-  - `OCTILLION_BOAT_NAMESPACE` (effective value)
+  - `OCTILLION_SANDBOX_TTL_MARGIN_MINUTES`
+  - `OCTILLION_SANDBOX_READY_TIMEOUT_SECONDS`
+  - `OCTILLION_SANDBOX_NAMESPACE` (effective value)
   - Runtime (VM / Vercel)
   - Kick configured (yes/no)
 
   Footer: "Change these in the deployment environment."
 - **Related settings, read only with links:** `ORCHESTRATOR_MODEL`, `OCTILLION_MAX_SESSIONS_PER_RUN` and `RESEARCH_MAX_COST_USD`, each linking to its page.
-- **Boat account:** the existing `SandboxProvider` block, compacted: API, namespace, key hint, uses, last used, a "Test connection" button, and a link to Key vault. Plan and running counts move up to §D.
 
 ### 2.3 Shared server logic
 
@@ -406,21 +402,17 @@ Two outlined lists side by side; they stack on mobile.
 **Runnability (`GET /compute/agents/runnable`).** This replaces the invented "pin matches" check.
 
 - For each scheduled agent:
-  - `has_setup_script`: whether the harness is in `BOAT_SETUP_HARNESSES`.
+  - `has_setup_script`: whether the harness is in `SETUP_HARNESSES`.
   - `missing_env`: `requires_env` / `HARNESS_ENV[harness]` minus `providersForEnv` coverage in the vault.
   - `runnable = missing_env.length === 0`.
   - `reason`: plain English.
-- `BOAT_SETUP_HARNESSES` is a constant in `src/harness-setup.ts`. A unit test asserts it equals the file names in `orchestrator/images/boat-setup/*.sh`. This works on Vercel without shipping that directory.
-- With no setup script, the UI says: "No setup script: runs only if boat's preinstalled CLI matches the pin (checked inside the sandbox at run time)." The server cannot know boat's preinstalled CLI version, so it does not claim to.
+- `SETUP_HARNESSES` is a constant in `src/harness-setup.ts`. A unit test asserts it equals the file names in `orchestrator/images/setup/*.sh`. This works on Vercel without shipping that directory.
+- With no setup script, the UI says: "No setup script: runs only if a preinstalled CLI matches the pin (checked inside the sandbox at run time)." The server cannot know which CLI version a sandbox has, so it does not claim to.
 
-**Boat listing.**
+**Sandbox listing.**
 
-- `classifiedSandboxes()` lives in a new `src/compute.ts`. It wraps `listSandboxes()` with:
-  - A 30 s in-process cache.
-  - An 8 s timeout.
-  - A fallback to the last good value with `stale: true`, or to `{ error }`.
-- Names are classified by the prefixes `${ns}-orch-`, `${ns}-w-<orchId>-<agent>`, `${ns}-orch-img-`, `${ns}-img-build`, and "other".
-- `boatLimits()` keeps its existing 5-minute cache.
+- `classifiedSandboxes()` in `src/compute.ts` reads our own rows, with no provider call: live `orchestrator_sandboxes` with provider `vercel` (kind orchestrator) and live `worker_sandboxes` (kind worker, with the orchestrator that owns it and its session).
+- `vercelLimits()` returns the configured limits (`OCTILLION_VERCEL_MAX_CONCURRENT`, `OCTILLION_VERCEL_ORCH_STARTS_PER_HOUR`) with what is active now.
 
 **Kick configured.** Export `kickConfigured(): boolean` from `src/autoscaler.ts`. It holds the first-line condition of `kickAutoscaler`, and `kickAutoscaler` calls it. This separates "not configured" from "debounced".
 
@@ -435,8 +427,8 @@ Two outlined lists side by side; they stack on mobile.
 | `GET /sessions?status&agent&harness&model&reason&class&job_id&since&stale_heartbeat&sort=queued_at\|wait\|ended_at&offset&limit=50` | `{ total, rows:[{id, simulation_id, agent_id, harness, model, status, attempt, infra_retries, queued_at, started_at, heartbeat_at, ended_at, completed_reason, error_class, error_label, error_message, worker_id, sandbox_id, cost_usd, sandbox_est_usd}] }` |
 | `GET /sessions/:id` | `{ session:<row>, metadata:<whitelisted keys>, gateway:[{provider, requests, errors, input_tokens, output_tokens, cost_usd, last_at}], hint:{text, href}\|null, runnable:{…}\|null, transcript:[{seq, ts, type, text}] }`. Transcript is the last 20 events, text truncated to 300 chars. |
 | `POST /sessions/:id/cancel` | `{ ok, status }`. Calls `completeSession(id, {status:'cancelled', error_message:'Cancelled by <actor>'})`, which keeps the simulation-finish bookkeeping. 409 if the session is already final. |
-| `GET /orchestrators?state=live\|booting\|running\|draining\|stale\|failed_launch\|ended\|unmatched\|all&job_id&reason&offset&limit=25` | `{ total, boat:{ok, stale, error}, rows:[{id, sandbox_id, orchestrator_id, job_id, state, boat_state, state_since, running_by_agent:{[agent]:n}, pods, heartbeat_at, boot_ms, from_image, ttl_left_s, code_hash, current_code, retiring_since, launch_step, launch_error, reap_reason, created_at, ready_at, deleted_at, spend:{orchestrator_model_usd, sandbox_est_usd}}] }`. For `state=unmatched`, rows are `[{sandbox_id, name, kind:'worker_no_parent'\|'orch_no_row'\|'image_builder'\|'other_prefix', parent_orchestrator_id, created_at, boat_state, ttl_left_s}]`. |
-| `GET /orchestrators/:id` | `{ row, timings, workers:[{sandbox_id, agent_id, session_id, status, heartbeat_age_s, boat_state}], sessions:[…≤10], tokens:[{job_id, expires_at, revoked_at}], events:[compute_events], gateway:[{provider, requests, errors, input_tokens, output_tokens, cost_usd}], logs_command }` |
+| `GET /orchestrators?state=live\|booting\|running\|draining\|stale\|failed_launch\|ended\|unmatched\|all&job_id&reason&offset&limit=25` | `{ total, sandboxes:{ok, stale, error}, rows:[{id, sandbox_id, orchestrator_id, job_id, state, sandbox_state, state_since, running_by_agent:{[agent]:n}, pods, heartbeat_at, boot_ms, from_image, ttl_left_s, code_hash, current_code, retiring_since, launch_step, launch_error, reap_reason, created_at, ready_at, deleted_at, spend:{orchestrator_model_usd, sandbox_est_usd}}] }`. For `state=unmatched`, rows are `[{sandbox_id, name, kind:'worker_no_parent'\|'orch_no_row', parent_orchestrator_id, created_at, sandbox_state}]`. |
+| `GET /orchestrators/:id` | `{ row, timings, workers:[{sandbox_id, agent_id, session_id, status, heartbeat_age_s, sandbox_state}], sessions:[…≤10], tokens:[{job_id, expires_at, revoked_at}], events:[compute_events], gateway:[{provider, requests, errors, input_tokens, output_tokens, cost_usd}], sandboxes:{ok, stale, error}, logs_where, limits }` |
 | `GET /failures?hours=24\|168` | `{ launches:[{step, count, last_at, message}], reaps:[{reason, routine:boolean, count, last_at, message}], unattended:[{kind, count, last_at}], sessions:[{key, label, count, share, jobs, top_agent, last_at, fix:{text, href}\|null}] }` |
 | `GET /ticks?acted=1&has=error\|launch\|reap&q&offset&limit=25` | `{ total, rows:[autoscaler_ticks row] }` |
 | `GET /agents/runnable` | `{ rows:[{agent_id, harness, has_setup_script, missing_env:string[], runnable, reason}] }` |
@@ -553,7 +545,7 @@ Within that decision:
 |---|---|---|---|
 | MCP tool call (`src/server.ts:261`) | none (not linked) | `mcp_events.trace_id`, `span_id` | `runTool` passes `{trace_id, span_id}` into job creation |
 | Simulation / research (`src/queries.ts:437`, `src/research.ts`) | `sim_…` / `rsh_…` | `simulations.trace_id`, `origin_span_id`; same columns on `product_research` | research ↔ simulation through `product_research.simulation_id` / `simulations.research_id` |
-| Orchestrator launch (`src/autoscaler.ts:387`) | `orchestrator_sandboxes.job_id` | `orchestrator_sandboxes.trace_id` = the job's trace (a shared orchestrator gets its own) | `OCTILLION_TRACEPARENT` in the sandbox env (`boat-lib.ts launchOrchestrator`) |
+| Orchestrator launch (`src/autoscaler.ts:387`) | `orchestrator_sandboxes.job_id` | `orchestrator_sandboxes.trace_id` = the job's trace (a shared orchestrator gets its own) | `OCTILLION_TRACEPARENT` in the sandbox env (the launch in `vercel-orch.ts`) |
 | Session claim (`src/worker.ts:46`) | `agent_sessions.simulation_id`, `worker_id`, `sandbox_id` | `agent_sessions.trace_id`, `span_id` (columns, so they can be indexed) | `traceparent` returned per job and session in the `/claim` and `/research/claim` responses; `orchestrator/core/util.ts:37 api()` sends it back as a header; worker routes parent their spans to it |
 | Gateway model call (`src/gateway.ts:199`) | `gateway_usage.session_id` / `orchestrator_id` (one aggregate span per session) | `trace_spans` row, layer `llm` | server-side: the `ogw_` token resolves to `gateway_tokens.session_id` / `orchestrator_id`, which gives the session span. The harness sends no header. |
 | Autoscaler tick | none | `autoscaler_ticks.trace_id`, `compute_events.trace_id` | its own short trace; the launch span is also linked from the job's orchestrator span |
@@ -694,7 +686,7 @@ Synthetic span ids are deterministic: `job:<id>`, `orch:<row id>`, `step:<row id
 ### 3.8 Server OTel fixes (ship with slice 1)
 
 - **Wrap in `span()` with `recordException` and ERROR status:**
-  - `Autoscaler.tick` (`src/autoscaler.ts:191`). On the VM loop (`:148`) it is an explicit root span, so pg and boat calls nest under it instead of starting a new root trace every 15 s.
+  - `Autoscaler.tick` (`src/autoscaler.ts:191`). On the VM loop (`:148`) it is an explicit root span, so pg and sandbox provider calls nest under it instead of starting a new root trace every 15 s.
   - `launch` (`:387`), with child spans per step from `timings`.
   - reap.
   - `claimJobs` (`src/worker.ts:46`).
@@ -715,7 +707,7 @@ Synthetic span ids are deterministic: `job:<id>`, `orch:<row id>`, `step:<row id
    - The settings rows inside Limits.
    - Section I.
    - `classifiedSandboxes()` with cache and timeout.
-4. **Orchestrators RecordView** with peek and the Unmatched chip, and **Sessions RecordView** with peek, runnability (`BOAT_SETUP_HARNESSES` and its test) and the §2.5 indexes.
+4. **Orchestrators RecordView** with peek and the Unmatched chip, and **Sessions RecordView** with peek, runnability (`SETUP_HARNESSES` and its test) and the §2.5 indexes.
 5. **Jobs RecordView** with peek, plus Failures by reason.
 6. **`autoscaler_ticks`** (leader-only, acted or once a minute), `free` in `TickState`, pruning, then the Decisions log and the Activity chart.
 7. **Actions:** `POST /compute/tick` and `POST /compute/sessions/:id/cancel`, both audited, with confirm dialogs.
@@ -730,11 +722,10 @@ Synthetic span ids are deterministic: `job:<id>`, `orch:<row id>`, `step:<row id
 - Drain or delete orchestrator.
 - Delete leaked or unknown sandbox.
 - Requeue sessions.
-- Tailing orchestrator logs from the server (copy the CLI command instead).
-- Metered cost from boat `/sandboxes/{id}/usage`.
+- Live tailing of orchestrator logs (the peek reads the last 64 KB on demand).
+- Metered sandbox cost from the provider's billing.
 - CPU and RAM metrics.
 - A spend-alert setting.
-- A boat-backoff worker events endpoint.
 - Research stage history (`stage_log`).
 - Harness install timing (`install_ms`).
 
@@ -744,7 +735,7 @@ Synthetic span ids are deterministic: `job:<id>`, `orch:<row id>`, `step:<row id
 
 1. **Destructive actions in phase 2.** Should drain, delete orchestrator and delete leaked sandbox follow right after v1 (with server-side re-checks and audit), or wait until the read-only page has been used for a while?
 2. **OTel in production.** Is OTel export actually on in prod (`OTEL_EXPORTER_OTLP_ENDPOINT`)? And what is the New Relic distributed-tracing URL format for this account, to put in `NEW_RELIC_TRACE_URL`?
-3. **Namespaces.** Should each deployment get a unique `OCTILLION_BOAT_NAMESPACE` (for example per Vercel environment), so namespace collisions are prevented rather than only detected after orphan reaps?
+3. **Namespaces.** Sandbox names already carry the environment (`<ns>-vo-prod-…`, `-prev-`, `-dev-`). Should each deployment that shares a Vercel project with another of the same environment set its own `OCTILLION_SANDBOX_NAMESPACE`, so collisions are prevented rather than only detected after orphan reaps?
 4. **Vercel ticking.** Should a more frequent Vercel cron (for example every 5 min) replace "event-only plus 06:00 UTC", or is the freshness banner plus "Run a tick now" enough?
 5. **Link targets.** Confirm that Harness mix is `/admin/configuration` and Agent configuration is `/admin/agents`. Should those pages accept `?harness=` / `?agent=` deep links?
 
@@ -761,4 +752,4 @@ Synthetic span ids are deterministic: `job:<id>`, `orch:<row id>`, `step:<row id
   - `web/src/app/admin/health/sessions/[sessionId]/page.tsx`
 - **Server, edited:** `/root/octillion-live/octillion-admin/src/http.ts`, `src/autoscaler.ts`, `src/worker.ts`, `src/gateway.ts`, `src/insights.ts`, `src/telemetry.ts`, `src/server.ts`, `src/prospect.ts`, `src/library.ts`, `sql/schema.sql`.
 - **Server, new:** `src/compute.ts`, `src/error-classes.ts`, `src/harness-setup.ts`, `src/traces.ts`, `src/tracing.ts` (slice 2).
-- **Orchestrator:** `/root/octillion-live/octillion-admin/orchestrator/core/util.ts`, `orchestrator/deploy/boat-lib.ts` (slice 2b only).
+- **Orchestrator:** `/root/octillion-live/octillion-admin/orchestrator/core/util.ts`, `orchestrator/deploy/vercel-orch.ts` (slice 2b only).

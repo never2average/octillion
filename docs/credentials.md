@@ -5,9 +5,9 @@ hold a real key. Orchestrator hosts hold only `OCTILLION_URL` and `OCTILLION_WOR
 
 ```
 operator ──vault CLI / admin API──▶ vault (Postgres, AES-256-GCM, master key OCTILLION_VAULT_KEY)
-orchestrator ──POST /api/worker/orchestrator/credentials──▶ boat key + its own LLM access (gateway token)
+orchestrator ──POST /api/worker/orchestrator/credentials──▶ its own LLM access (gateway token)
 orchestrator ──POST /api/worker/sessions/:id/credentials──▶ per-session env for the harness
-sub-agent (pod / boat VM) ──ogw_ token──▶ /gw/<provider>/… ──real key from vault──▶ provider API
+sub-agent (pod / Vercel Sandbox) ──ogw_ token──▶ /gw/<provider>/… ──real key from vault──▶ provider API
 ```
 
 ## Providers
@@ -19,7 +19,6 @@ sub-agent (pod / boat VM) ──ogw_ token──▶ /gw/<provider>/… ──rea
 | `google` | gateway | https://generativelanguage.googleapis.com | `x-goog-api-key` |
 | `dashscope` | gateway | https://dashscope-intl.aliyuncs.com | `Authorization: Bearer` |
 | `github_copilot`, `cursor`, `amp`, `factory` | direct | vendor-hosted | the real key is brokered to the session (no proxy possible) |
-| `boat` | direct (orchestrator only) | https://boat.dev/api/v1 | `Authorization: Bearer` |
 | `vertex` | direct (orchestrator only) | Vertex AI | Google service-account JSON key; every Vertex backend (Claude/Gemini on Vertex) signs in with it |
 | `exa`, `libraries_io`, `cloudflare` | server only | search, research quick pass | never reach a session |
 
@@ -61,9 +60,14 @@ side. Use it only for vendor-hosted agents that can't take a custom base URL.
 
 `POST /api/worker/orchestrator/credentials` `{orchestrator_id}` →
 ```json
-{ "boat": {"api_key": "boat_…"} | null,
-  "llm": {"provider": "openai", "model": "gpt-6.1-sol", "base_url": "https://host/gw/openai/v1", "api_key": "ogw_…", "expires_at": "…"} }
+{ "llm": {"provider": "openai", "model": "gpt-6.1-sol", "base_url": "https://host/gw/openai/v1", "api_key": "ogw_…", "expires_at": "…"},
+  "architect": {"provider": "anthropic", "model": "…", "effort": "max", "base_url": "…", "api_key": "ogw_…", "expires_at": "…"} | null,
+  "sandbox_provider": "vercel" }
 ```
+`sandbox_provider` is always `vercel`; it is still sent for orchestrators launched by older code. The orchestrator gets
+no sandbox key: worker sandboxes come from the API's broker (docs/sandboxes.md). The retired `boat` key type (boat.dev,
+retired on 2026-11-01) can no longer be added and is never brokered; an existing one is listed as retired in Key vault
+and can be deleted there.
 The server chooses the orchestrators' brain with `ORCHESTRATOR_PROVIDER` / `ORCHESTRATOR_MODEL` (default
 `openai` / `gpt-6.1-sol`). `base_url` already includes the path SDKs expect: `/v1` for OpenAI.
 The token is valid for 12h; refetch on 401 or near expiry.

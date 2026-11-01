@@ -166,19 +166,17 @@ Per agent:
 | field | meaning |
 |---|---|
 | `id` | `<harness>/<model-slot>`; stable, used in results |
-| `harness` | harness id; must match `orchestrator/images/Dockerfile.<harness>` and `boat-setup/<harness>.sh` |
+| `harness` | harness id; must match `orchestrator/images/Dockerfile.<harness>` and `orchestrator/images/setup/<harness>.sh` |
 | `cli` | binary the worker execs (`docker exec -u agent <pod> <cli> ...`) |
 | `model`, `model_verified` | model passed to the CLI. `auto` or `default` means the harness's own default (omit the flag) |
-| `harness_version` | pinned CLI version; the image tag and snapshot name derive from it |
+| `harness_version` | pinned CLI version; the image tag derives from it, and the setup script installs it |
 | `weight` | sampling weight; sums to 1 over enabled agents |
 | `usage_share` | estimated share of all agentic usage, before renormalization |
 | `weight_source` | ids into `sources` |
 | `headless` | verified non-interactive command line (`<model>`, `<prompt>`, `<workdir>` are placeholders) |
 | `event_format` | id of the JSONL dialect the event parser needs |
 | `image.docker` | `octillion/agent-<harness>:<harness_version>`, the tag `orchestrator/images/build.sh` produces |
-| `image.boat_snapshot` | boat named snapshot `octillion-<harness>-<version with . → ->`. Boat names must match `^[a-z0-9][a-z0-9-]{0,62}$` |
 | `requires_env` | API key / token env names passed at exec time; never baked into images |
-| `boat_preinstalled` | whether boat VMs ship this CLI (we still pin our own copy) |
 | `worker_adapter` | `supported` if `orchestrator/harnesses/adapters.ts` can drive it; `todo` if image and command are ready but no adapter exists |
 | `resume` | whether the adapter can resume the conversation headlessly (needed for simulated-developer replies) |
 | `adapter_evidence` | `production`, `captured-fixture` or `synthesized-fixture` (see `orchestrator/harnesses/fixtures/README.md`) |
@@ -218,7 +216,7 @@ and auto-approval rules all change. Claude Code ships several releases a week, a
 model three times in 2026. A customer's adoption rate measured on `claude 2.1.296` is not comparable to one
 measured on next month's build unless we know which version ran.
 
-So each agent pins `harness_version`. The Docker image and boat snapshot are named after it, and the worker
+So each agent pins `harness_version`. The Docker image is named after it, the setup script installs it, and the worker
 records the version with every session. Bump versions deliberately (below), never via auto-update. The images set
 `DISABLE_AUTOUPDATER=1`, `COPILOT_AUTO_UPDATE=false` and `OPENCODE_DISABLE_AUTOUPDATE=true`, and the Cursor and
 Antigravity binaries are pinned by build id.
@@ -242,8 +240,7 @@ around Aug–Oct, and Pragmatic Engineer around Feb–Mar.
    - Antigravity: the manifest URL in `Dockerfile.antigravity`, which holds both build id and sha512
 
    Update `harness_version` and the `ARG HARNESS_VERSION` default in `orchestrator/images/Dockerfile.<harness>`.
-   Update the defaults in `boat-setup/<harness>.sh` too. `image.docker` and `image.boat_snapshot` follow from the
-   version.
+   Update the defaults in `orchestrator/images/setup/<harness>.sh` too. `image.docker` follows from the version.
 6. **Models.** Check each harness's default model in its `--help`, bundled catalog or docs. Re-split Claude Code
    Opus/Sonnet from the latest Amplifying.ai model mix. Set `model_verified` honestly.
 7. **Recompute weights.** Divide each share by the runnable total and round to 4 dp, with the sum exactly 1 by
@@ -251,12 +248,11 @@ around Aug–Oct, and Pragmatic Engineer around Feb–Mar.
    and `next_review`.
 8. **Build and verify.**
    - Run `orchestrator/images/build.sh`. It builds every image and runs a warm-pod exec smoke test.
-   - Run `orchestrator/images/boat-snapshot.sh` to re-bake the boat snapshots.
    - Run `npx tsx orchestrator/fleet/plan.ts 10` to check the pod split.
 9. **Calibration run.** Run a few scenarios on both old and new versions and note any adoption-rate shift in the
    changelog. Version bumps are a known source of drift.
 10. **Validate.** Enabled weights sum to 1 (±1e-6). Every `weight_source` id exists in `sources`. Every enabled
-    harness has a Dockerfile and a boat-setup script. Snapshot names match the boat pattern.
+    harness has a Dockerfile and a setup script.
 
 ## Verification
 
@@ -267,6 +263,6 @@ Done on 2026-10-10:
   pinned version. The healthcheck reported `healthy`, `/home/agent/work` is owned by `agent`, and no key-like env
   is baked in.
 - Headless flags were checked against each pinned CLI's own `--help` (all but amp's `-x`, which came from docs).
-- The boat-setup scripts for claude-code, cursor, antigravity, opencode and pi ran in an Ubuntu 24.04 container
-  that approximates a boat VM. They have not yet run against a real boat VM.
+- The setup scripts run in Vercel Sandbox worker sandboxes (Amazon Linux 2023) when a session needs the pinned version;
+  `orchestrator/test/vercel-workers.ts` covers that path against a mock Vercel Sandbox.
 - No agent was run end-to-end with real API keys.

@@ -118,7 +118,7 @@ flowchart LR
     BK["pg-backup<br/>daily dumps, newest 10<br/>copied to Cloudflare R2"]
   end
 
-  subgraph Boat["boat.dev sandboxes"]
+  subgraph Sandboxes["Vercel Sandbox"]
     ORCH["Orchestrator (Pi), one per job<br/>an onboarding research, or<br/>the sessions of one run (up to 40),<br/>answers as the developer"]
     WS["Worker sandbox, one per session<br/>Claude Code, Codex, OpenCode,<br/>Pi, Cline or Kilo<br/>on a starter or a pinned repo"]
   end
@@ -284,7 +284,7 @@ Jobs carry only the task. The sub-agent never learns which company is asking. Ev
 `seq`/`ts` filled in when missing. The scorer understands Claude Code / Amp / Cursor stream-json, Codex
 `exec --json`, Gemini CLI, OpenCode, and a plain `{type: "assistant_message" | "tool_call" | "file_edit", ...}`
 format. Send a post-run `git diff` as a `file_edit` event, because Codex's stream doesn't include file contents.
-Sessions with no heartbeat for `OCTILLION_LEASE_MINUTES` (30) are timed out. A reference worker using boat.dev
+Sessions with no heartbeat for `OCTILLION_LEASE_MINUTES` (30) are timed out. A reference worker using Vercel Sandbox
 sandboxes lives in [`orchestrator/`](orchestrator/README.md).
 
 ## Developer populations
@@ -363,7 +363,7 @@ src/vault.ts         sync developer profiles + task library from the vault
 src/ui/widget.html   the dashboard (single file, no build step)
 public/index.html    landing page
 web/                 admin panel (/admin) and customer portal (/app): Next.js, built to static files the server serves
-orchestrator/        Pi-based orchestrator agent + boat.dev worker runtime
+orchestrator/        Pi-based orchestrator agent + Vercel Sandbox worker runtime
 harnesses/           worker-agent registry (versions, images, adoption weights + sources)
 vault/               vault format + example
 scripts/             smoke test, org:create, access:list, demo:seed, admin:demo, mock:providers, db:reset
