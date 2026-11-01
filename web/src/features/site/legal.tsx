@@ -8,7 +8,7 @@ export const COMPANY = '[Company legal name]';
 export const ADDRESS = '[Registered address]';
 export const LAW = '[Governing law and courts]';
 export const CONTACT = 'hello@octillion.useimmaculate.com';
-export const UPDATED = '22 October 2026';
+export const UPDATED = '1 November 2026';
 
 export interface LegalSection { title: string; body: ReactNode[] }
 
@@ -104,7 +104,7 @@ export const PRIVACY: { intro: ReactNode; sections: LegalSection[] } = {
     { title: 'Who processes it for us', body: [
       'We use these subprocessors, each bound by a data processing agreement:',
       <ul key='p'>
-        <li>Vercel (hosting), Neon (database), Cloudflare (file storage and some AI models), ClickHouse (transcript storage), boat.dev (agent sandboxes).</li>
+        <li>Vercel (hosting and agent sandboxes), Neon (database), Cloudflare (file storage and some AI models), ClickHouse (transcript storage).</li>
         <li>Clerk (sign-in), Stripe (payments), Resend (email), PostHog (product analytics).</li>
         <li>AI model and coding-agent providers that simulations and research run on, including Anthropic, OpenAI, Google and Alibaba Cloud. They receive task prompts and the code the agents work on, through our gateway, never your account details.</li>
       </ul>,

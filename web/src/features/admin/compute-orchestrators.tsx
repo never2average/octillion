@@ -1,9 +1,9 @@
 'use client';
 // Compute › Orchestrators (GET /compute/orchestrators, src/compute-records.ts): every orchestrator sandbox the
-// autoscaler launched, by state chip, with boat's live state and TTL beside our row, and a peek with its boot
-// timeline, the workers it runs now, its recent sessions, worker tokens, events and spend. "Unmatched on boat" swaps
-// in boat's sandboxes that match nothing live of ours (leaked workers, rows that are gone, other deployments). Read
-// only in v1: nothing here drains or deletes; the logs command is copied to run from a terminal.
+// autoscaler launched, by state chip, with its TTL beside our row, and a peek with its boot timeline, the workers it
+// runs now, its recent sessions, worker tokens, events and spend. "Unmatched" swaps in our live sandboxes that match
+// nothing live of ours (worker sandboxes whose orchestrator is gone, rows that are gone). Read only: nothing here
+// drains or deletes; an orchestrator's log is read on demand.
 import { useMemo, useState, type ReactNode } from 'react';
 import { DetailMeta, DetailTable, DetailTabs, TimelineTable } from '@/components/layout/detail';
 import { RecordView, type RecordCol } from '@/components/layout/record-view';
@@ -20,11 +20,11 @@ import { AMBER, Chip, cents, dur, jobSessions, since, useComputeParams, useNow, 
 import { GATEWAY_COLS } from './compute-sessions';
 
 interface Limits { boot_minutes: number; stale_minutes: number; heartbeat_stale_s: number }
-interface Boat { ok: boolean; stale: boolean; error: string | null }
+interface Listing { ok: boolean; stale: boolean; error: string | null }
 export interface OrchRow {
-  id: number; sandbox_id: string | null; orchestrator_id: string | null; job_id: string | null; state: string; boat_state: string | null; state_since: string | null;
-  /** Where it runs: 'boat' (boat.dev) or 'vercel' (Vercel Sandbox); older servers send neither (boat). */
-  provider?: 'boat' | 'vercel'; provider_label?: string; sandbox_state?: string | null;
+  id: number; sandbox_id: string | null; orchestrator_id: string | null; job_id: string | null; state: string; state_since: string | null;
+  /** Where it runs: 'vercel' (Vercel Sandbox), or 'boat' for rows from before boat.dev's retirement (2026-11-01). */
+  provider?: 'boat' | 'vercel'; provider_label?: string;
   running_by_agent: Record<string, number>; running: number; pods: number; heartbeat_at: string | null; boot_ms: number | null; from_image: string | null;
   timings: Record<string, number> | null; ttl_left_s: number | null; code_hash: string | null; current_code: boolean; retiring_since: string | null;
   launch_step: string | null; launch_error: string | null; reap_reason: string | null; end_class: { key: string; label: string; routine: boolean } | null;
@@ -33,11 +33,11 @@ export interface OrchRow {
 }
 interface Unmatched {
   sandbox_id: string; name: string | null; kind: 'worker_no_parent' | 'orch_no_row' | 'image_builder' | 'other_prefix';
-  parent_orchestrator_id: string | null; created_at: string | null; boat_state: string; ttl_left_s: number | null;
+  parent_orchestrator_id: string | null; created_at: string | null; sandbox_state: string;
 }
 interface OrchDetail {
-  row: OrchRow; timings: Record<string, number>; boat: Boat; logs_command: string | null; logs_where?: string | null; limits: Limits;
-  workers: { sandbox_id: string; name: string | null; agent_id: string | null; session_id: string | null; status: string | null; heartbeat_age_s: number | null; boat_state: string }[];
+  row: OrchRow; timings: Record<string, number>; sandboxes: Listing; logs_where?: string | null; limits: Limits;
+  workers: { sandbox_id: string; name: string | null; agent_id: string | null; session_id: string | null; status: string | null; heartbeat_age_s: number | null; sandbox_state: string }[];
   sessions: { id: string; agent_id: string | null; status: string; queued_at: string; started_at: string | null; ended_at: string | null; error_message: string | null }[];
   tokens: { job_id: string; created_at: string; expires_at: string; revoked_at: string | null }[];
   events: { at: string; kind: string; sandbox_id: string | null; step: string | null; reason: string | null; actor: string | null }[];
@@ -48,21 +48,19 @@ interface Verdict { level: string; code: string; text: string }
 const CHIPS: { id: string; label: string }[] = [
   { id: 'live', label: 'Live' }, { id: 'booting', label: 'Booting' }, { id: 'running', label: 'Running' }, { id: 'draining', label: 'Draining' },
   { id: 'stale', label: 'Stale' }, { id: 'failed_launch', label: 'Failed launches' }, { id: 'ended', label: 'Ended (24 h)' },
-  { id: 'unmatched', label: 'Unmatched on boat' }, { id: 'all', label: 'All' }
+  { id: 'unmatched', label: 'Unmatched sandboxes' }, { id: 'all', label: 'All' }
 ];
 const STATE_TONE: Record<string, Tone> = { booting: 'info', running: 'ok', draining: 'warn', deleted: 'neutral' };
 const UNMATCHED_KIND: Record<Unmatched['kind'], string> = {
   worker_no_parent: 'Worker without a live orchestrator', orch_no_row: 'Orchestrator name with no row', image_builder: 'Image builder', other_prefix: 'Another deployment'
 };
-/** Boot phases in launch order, as launchOrchestrator marks them (ms since the create call). */
+/** Boot phases in launch order, as the host's launch marks them (ms since the create call). */
 const PHASES: { key: string; label: string }[] = [
   { key: 'created', label: 'Create' }, { key: 'ready', label: 'Ready' }, { key: 'code', label: 'Code' },
   { key: 'configured', label: 'Configured' }, { key: 'preflight', label: 'Preflight' }, { key: 'started', label: 'Started' }
 ];
 const LIMIT = 200;
 
-const logsCommand = (id: string) => `npm run boat-orchestrators -- logs ${id}`;
-const copyLogs = (id: string) => copyText(logsCommand(id), 'Logs command copied. Logs are lost when the sandbox is deleted.');
 const hbAge = (o: OrchRow) => (o.state === 'deleted' ? null : since(o.heartbeat_at));
 /** Why an ended row ended, as the Ended because cell words it: the failed launch step and error, else the reap reason. */
 const endedText = (o: OrchRow) => (o.launch_step ? `${o.launch_step}: ${o.launch_error ?? ''}` : o.reap_reason ?? '');
@@ -82,7 +80,7 @@ export function ComputeOrchestrators({ verdict, summary }: { verdict: Verdict[];
   const qs = new URLSearchParams({ state, limit: String(LIMIT), ...(job && !unmatched ? { job_id: job } : {}), ...(reason && !unmatched ? { reason } : {}) });
   const [pinned, setPinned] = useState<string | null>(null);
   if (pinned) qs.set('include', pinned);
-  const { data, error, isLoading, refetch } = useAdmin<{ total: number; boat: Boat; limits: Limits; facets?: Record<string, number>; rows: (OrchRow | Unmatched)[] }>(
+  const { data, error, isLoading, refetch } = useAdmin<{ total: number; sandboxes: Listing; limits: Limits; facets?: Record<string, number>; rows: (OrchRow | Unmatched)[] }>(
     `/compute/orchestrators?${qs}`, { refetchInterval: open ? undefined : 30_000, keep: true });
   // `keep` shows the last chip's rows while the next loads: only use rows of the shape this chip asks for.
   const fits = !!data && (data.rows.length === 0 || ('kind' in data.rows[0]) === unmatched);
@@ -97,7 +95,7 @@ export function ComputeOrchestrators({ verdict, summary }: { verdict: Verdict[];
   const filtered = !unmatched && !!(job || reason);
   const empty = filtered ? 'No orchestrators match these filters.'
     : state === 'live' ? (off ? off.text : 'No orchestrators running. One launches when a job queues work.')
-    : unmatched ? (data?.boat.ok === false ? `boat.dev did not answer: ${data.boat.error}` : 'Every sandbox on boat matches a live orchestrator of ours.')
+    : unmatched ? (data?.sandboxes.ok === false ? `Sandboxes could not be listed: ${data.sandboxes.error}` : 'Every live sandbox of ours matches a live orchestrator.')
     : 'No orchestrators in this state.';
 
   // State, and the job or reason a link narrowed to (shown only when set), sit on the search row.
@@ -108,9 +106,6 @@ export function ComputeOrchestrators({ verdict, summary }: { verdict: Verdict[];
       </NativeSelect>
       {job && !unmatched && <Button variant='outline' onClick={() => url.write({ ojob: null })} title='Show every job'><Mono>{job}</Mono><Icons.close /></Button>}
       {reason && !unmatched && <Button variant='outline' onClick={() => url.write({ oreason: null })} title='Show every reason'>{reason.replace(/^(launch|reap):/, '$1: ').replace(/_/g, ' ')}<Icons.close /></Button>}
-      {data && (!data.boat.ok || data.boat.stale) && (
-        <span className={cn('text-xs', AMBER)} title={data.boat.error ?? undefined}>{data.boat.ok ? 'boat.dev is slow: last answer shown' : 'boat.dev did not answer'}</span>
-      )}
     </>
   );
   return (
@@ -123,17 +118,16 @@ export function ComputeOrchestrators({ verdict, summary }: { verdict: Verdict[];
       )}
       {unmatched
         ? <UnmatchedTable rows={rows as Unmatched[]} loading={isLoading || !fits} empty={empty} filters={filters} summary={summary} />
-        : <OrchTable rows={rows as OrchRow[]} loading={(isLoading && !data) || !fits} limits={limits} boat={data?.boat ?? null} empty={empty} filters={filters} summary={summary}
+        : <OrchTable rows={rows as OrchRow[]} loading={(isLoading && !data) || !fits} limits={limits} empty={empty} filters={filters} summary={summary}
             open={open} onOpen={(k) => url.write({ orch: k, ...(k ? {} : { back: null }) })} onJob={(j) => url.write({ ...jobSessions(j), orch: null })} />}
     </div>
   );
 }
 
-function OrchTable({ rows, loading, limits, boat, empty, open, onOpen, onJob, filters, summary }: {
-  rows: OrchRow[]; loading: boolean; limits: Limits; boat: Boat | null; empty: string; open: string | null; onOpen: (k: string | null) => void; onJob: (job: string) => void;
+function OrchTable({ rows, loading, limits, empty, open, onOpen, onJob, filters, summary }: {
+  rows: OrchRow[]; loading: boolean; limits: Limits; empty: string; open: string | null; onOpen: (k: string | null) => void; onJob: (job: string) => void;
   filters: ReactNode; summary?: ReactNode;
 }) {
-  const boatNA = (v: ReactNode) => (boat && !boat.ok ? <span className='text-muted-foreground' title={`boat.dev did not answer: ${boat.error}`}>—</span> : v);
   const cols: RecordCol<OrchRow>[] = [
     { key: 'orch', label: 'Orchestrator', title: true, keep: true, type: 'text', value: (o) => o.orchestrator_id ?? `row ${o.id}`,
       // The sandbox id moves to a tooltip once there is an orchestrator id; rows without one (failed launches, 'row N') keep it as a line.
@@ -149,8 +143,7 @@ function OrchTable({ rows, loading, limits, boat, empty, open, onOpen, onJob, fi
       return (
         <span className='flex min-w-0 flex-col gap-1'>
           <span className='flex items-center gap-1.5'><StatusBadge tone={o.state === 'deleted' && o.launch_step ? 'bad' : STATE_TONE[o.state]}>{o.state === 'deleted' ? 'ended' : o.state}</StatusBadge>
-            {o.boat_state && o.state !== 'deleted' && <span className='text-muted-foreground text-xs' title='State on boat'>boat: {o.boat_state}</span>}
-            {o.provider === 'vercel' && <span className='text-muted-foreground text-xs' title='Runs on Vercel Sandbox'>Vercel</span>}</span>
+            {o.provider === 'boat' && <span className='text-muted-foreground text-xs' title='Ran on boat.dev, retired on 2026-11-01'>boat.dev (retired)</span>}</span>
           <span className={cn('truncate text-xs', late ? AMBER : 'text-muted-foreground')} title={ended && why ? [at, why].filter(Boolean).join(' · ') : at}>
             {ended ? 'ended ' : 'for '}{dur(since(o.state_since))}{ended ? ' ago' : ''}
             {ended && why && <> · <span className={cn(o.launch_step && 'text-destructive')}>{why}</span></>}
@@ -160,7 +153,7 @@ function OrchTable({ rows, loading, limits, boat, empty, open, onOpen, onJob, fi
     } },
     { key: 'job', label: 'Job', type: 'text', value: (o) => o.job_id ?? 'shared', render: (o) => (o.job_id ? <Mono>{o.job_id}</Mono> : <span className='text-muted-foreground'>shared</span>) },
     // Off by default; for filtering by where orchestrators run while a provider switch drains.
-    { key: 'provider', label: 'Runs on', hidden: true, type: 'select', value: (o) => o.provider_label ?? 'boat.dev', render: (o) => o.provider_label ?? 'boat.dev' },
+    { key: 'provider', label: 'Runs on', hidden: true, type: 'select', value: (o) => o.provider_label ?? 'boat.dev (retired)', render: (o) => o.provider_label ?? 'boat.dev (retired)' },
     // Off by default (the reason is State's second line); kept for its end-reason filter.
     { key: 'ended', label: 'Ended because', hidden: true, className: 'max-w-72', type: 'text', value: (o) => o.end_class?.label ?? '', render: (o) => <EndedBecause o={o} /> },
     { key: 'pods', label: 'Pods', className: 'text-right', type: 'number', value: (o) => o.running, render: (o) => (
@@ -190,7 +183,6 @@ function OrchTable({ rows, loading, limits, boat, empty, open, onOpen, onJob, fi
       searchPlaceholder='Search orchestrators, sandboxes, jobs, reasons' exportName='compute-orchestrators' filters={filters} summary={summary} compact
       openKey={open} onOpenChange={onOpen}
       actions={(o) => [
-        ...(o.sandbox_id ? [{ label: 'Copy logs command', icon: <Icons.code />, onSelect: () => copyLogs(o.sandbox_id!) }] : []),
         ...(o.sandbox_id ? [{ label: 'Copy sandbox id', icon: <Icons.page />, onSelect: () => copyText(o.sandbox_id!, 'Sandbox id copied') }] : []),
         ...(o.job_id ? [{ label: "Show this job's sessions", icon: <Icons.search />, onSelect: () => onJob(o.job_id!) }] : []),
         { label: 'Copy id', icon: <Icons.page />, onSelect: () => copyText(o.orchestrator_id ?? o.sandbox_id ?? String(o.id), 'Id copied') }
@@ -210,7 +202,7 @@ function EndedBecause({ o }: { o: OrchRow }) {
 const phasesText = (t: Record<string, number> | null) =>
   t ? PHASES.filter((p) => t[p.key] != null).map((p) => `${p.label} ${dur(t[p.key] / 1000)}`).join(' → ') : undefined;
 
-/** Unmatched on boat: boat's live sandboxes that match no live orchestrator row of ours. Read only. */
+/** Unmatched sandboxes: our live sandboxes that match no live orchestrator row. Read only. */
 function UnmatchedTable({ rows, loading, empty, filters, summary }: { rows: Unmatched[]; loading: boolean; empty: string; filters: ReactNode; summary?: ReactNode }) {
   const cols: RecordCol<Unmatched>[] = [
     { key: 'name', label: 'Name', title: true, keep: true, type: 'text', value: (u) => u.name ?? '',
@@ -222,17 +214,14 @@ function UnmatchedTable({ rows, loading, empty, filters, summary }: { rows: Unma
     { key: 'age', label: 'Age', className: 'text-right', type: 'number', value: (u) => since(u.created_at), render: (u) => (
       <span className='flex flex-col items-end gap-1'>
         <span className='tabular-nums'>{dur(since(u.created_at))}</span>
-        <span className='text-muted-foreground text-xs tabular-nums'>{dur(u.ttl_left_s)} left</span>
       </span>
     ) },
-    // Off by default; kept for filtering and grouping by boat's state.
-    { key: 'boat', label: 'boat state', hidden: true, type: 'select', value: (u) => u.boat_state, render: (u) => u.boat_state },
-    // Off by default (Age's second line); kept for sorting by time left.
-    { key: 'ttl', label: 'TTL left', hidden: true, className: 'text-right', type: 'number', value: (u) => u.ttl_left_s, render: (u) => <span className='tabular-nums'>{dur(u.ttl_left_s)}</span> }
+    // Off by default; kept for filtering and grouping by state.
+    { key: 'state', label: 'State', hidden: true, type: 'select', value: (u) => u.sandbox_state, render: (u) => u.sandbox_state }
   ];
   return (
     <RecordView id='compute-unmatched' rows={rows} loading={loading} rowKey={(u) => u.sandbox_id} cols={cols} noun='sandboxes' initialSize={25}
-      searchText={(u) => `${u.name ?? ''} ${u.sandbox_id} ${UNMATCHED_KIND[u.kind]} ${u.parent_orchestrator_id ?? ''}`} searchPlaceholder='Search sandboxes on boat'
+      searchText={(u) => `${u.name ?? ''} ${u.sandbox_id} ${UNMATCHED_KIND[u.kind]} ${u.parent_orchestrator_id ?? ''}`} searchPlaceholder='Search sandboxes'
       actions={(u) => [{ label: 'Copy id', icon: <Icons.page />, onSelect: () => copyText(u.sandbox_id, 'Sandbox id copied') }]}
       exportName='compute-unmatched' empty={empty} filters={filters} summary={summary} compact />
   );
@@ -256,22 +245,21 @@ function OrchPeek({ id, onJob }: { id: number; onJob: (job: string) => void }) {
         title={o.orchestrator_id ?? `row ${o.id}`}
         badges={<>
           <StatusBadge tone={o.state === 'deleted' && o.launch_step ? 'bad' : STATE_TONE[o.state]}>{o.state === 'deleted' ? 'ended' : o.state}</StatusBadge>
-          {o.boat_state && <span className='text-muted-foreground text-xs' title='State on boat'>boat: {o.boat_state}</span>}
+          {o.provider === 'boat' && <span className='text-muted-foreground text-xs' title='Ran on boat.dev, retired on 2026-11-01'>boat.dev (retired)</span>}
         </>}
         actions={<>
           {back && <Button variant='outline' size='sm' onClick={() => url.write({ section: 'jobs', job: back, orch: null, back: null })}>← Back to <Mono>{back}</Mono></Button>}
           {o.job_id && <Button variant='outline' size='sm' onClick={() => onJob(o.job_id!)}><Icons.search /> This job&apos;s sessions</Button>}
-          {data.logs_command && <Button variant='outline' size='sm' onClick={() => copyLogs(o.sandbox_id!)}><Icons.code /> Copy logs command</Button>}
           {o.provider === 'vercel' && o.sandbox_id && o.state !== 'deleted' && <SandboxLogsButton orchestrator={o.id} label='Orchestrator log' />}
         </>}
         facts={[
           { label: 'Job', value: o.job_id ? <Mono>{o.job_id}</Mono> : <span className='text-muted-foreground'>shared</span> },
-          { label: 'Sandbox', value: o.sandbox_id ? <><Mono>{o.sandbox_id}</Mono> <span className='text-muted-foreground'>· {o.provider_label ?? 'boat.dev'}</span></> : <span className='text-muted-foreground'>never created</span> },
+          { label: 'Sandbox', value: o.sandbox_id ? <><Mono>{o.sandbox_id}</Mono> <span className='text-muted-foreground'>· {o.provider_label ?? 'boat.dev (retired)'}</span></> : <span className='text-muted-foreground'>never created</span> },
           { label: 'Created', value: <When d={o.created_at} /> },
           { label: 'Ready', value: o.ready_at ? <When d={o.ready_at} /> : none },
           { label: 'Last seen', value: <When d={o.heartbeat_at} /> },
           { label: 'Ended', value: <When d={o.deleted_at} />, hidden: !o.deleted_at },
-          { label: 'TTL left', value: o.state === 'deleted' ? 'n/a' : o.provider === 'vercel' || data.boat.ok ? dur(o.ttl_left_s) : <span className='text-muted-foreground' title={`boat.dev did not answer: ${data.boat.error}`}>—</span>,
+          { label: 'TTL left', value: o.state === 'deleted' ? 'n/a' : dur(o.ttl_left_s),
             hint: o.provider === 'vercel' ? 'until Vercel stops the sandbox; a fresh orchestrator takes over before then' : undefined },
           { label: 'Code', value: <>{o.code_hash ? <Mono>{o.code_hash.slice(0, 12)}</Mono> : '—'} {o.current_code ? <span className='text-muted-foreground'>· current</span> : o.code_hash && <span className='text-muted-foreground'>· older than this server&apos;s</span>}
             {o.retiring_since && <span className={AMBER}> · retiring since <When d={o.retiring_since} /></span>}</> },
@@ -284,20 +272,19 @@ function OrchPeek({ id, onJob }: { id: number; onJob: (job: string) => void }) {
           <span className='text-muted-foreground text-xs font-medium'>Boot</span>
           <BootTimeline o={o} timings={data.timings} />
         </div>
-        {data.logs_command && <p className='text-muted-foreground text-xs'><Mono>{data.logs_command}</Mono> · logs are lost when the sandbox is deleted.</p>}
         {data.logs_where && <p className='text-muted-foreground text-xs'>Logs: {data.logs_where} · lost when the sandbox is deleted.</p>}
       </DetailMeta>
 
       <DetailTabs resetKey={id} tabs={[
-        { id: 'workers', label: 'Workers now', count: data.boat.ok ? data.workers.length : null, content: (
-          <DetailTable rows={data.boat.ok ? data.workers : []} rowKey={(w) => w.sandbox_id} noun='workers'
-            empty={data.boat.ok ? 'No worker sandboxes on boat for it.' : `boat.dev did not answer: ${data.boat.error}`}
+        { id: 'workers', label: 'Workers now', count: data.sandboxes.ok ? data.workers.length : null, content: (
+          <DetailTable rows={data.sandboxes.ok ? data.workers : []} rowKey={(w) => w.sandbox_id} noun='workers'
+            empty={data.sandboxes.ok ? 'No live worker sandboxes for it.' : `Sandboxes could not be listed: ${data.sandboxes.error}`}
             onRow={(w) => w.session_id && openSession(w.session_id)} rowClickable={(w) => !!w.session_id} cols={[
             { key: 'agent', label: 'Agent', type: 'text', value: (w) => w.agent_id ?? '', render: (w) => w.agent_id ?? '—' },
             { key: 'session', label: 'Session', type: 'text', value: (w) => w.session_id ?? '', render: (w) => (w.session_id ? <Mono>{w.session_id}</Mono> : <span className='text-muted-foreground'>idle</span>) },
             { key: 'status', label: 'Status', type: 'select', value: (w) => w.status ?? '', render: (w) => w.status ?? '—' },
             { key: 'hb', label: 'Heartbeat', type: 'number', value: (w) => w.heartbeat_age_s, render: (w) => (w.heartbeat_age_s == null ? '—' : `${dur(w.heartbeat_age_s)} ago`), className: 'tabular-nums' },
-            { key: 'boat', label: 'boat', type: 'select', value: (w) => w.boat_state, render: (w) => w.boat_state }
+            { key: 'state', label: 'Sandbox', type: 'select', value: (w) => w.sandbox_state, render: (w) => w.sandbox_state }
           ]} />
         ) },
         { id: 'sessions', label: 'Recent sessions', count: data.sessions.length, content: (

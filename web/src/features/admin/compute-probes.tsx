@@ -1,6 +1,6 @@
 'use client';
-// Compute › Sandbox probes (GET /compute/probes, src/sandbox-probe.ts): boat.dev and Vercel Sandbox side by side,
-// measured by the deployment's own probe cron. On top, the two providers compared over the last 24 h (or 7 days):
+// Compute › Sandbox probes (GET /compute/probes, src/sandbox-probe.ts): an ongoing reliability monitor of Vercel Sandbox,
+// measured by the deployment's own probe cron. On top, its figures over the last 24 h (or 7 days):
 // create success, ready time, how many probes lived their full lifetime (15 minutes), how many vanished early and at what age,
 // exec success and latency, delete success, plus what the probe costs a day. Below, one row per probe with a peek: its
 // facts, then its execs and checks, and every error it met. Read only: the cron starts and deletes probes.
@@ -17,14 +17,15 @@ import { useAdmin } from './lib';
 import { copyText, ErrorBox, Mono, Notice, StatusBadge, When, type Tone } from './ui';
 import { AMBER, dur, money, since, useComputeParams } from './compute-common';
 
-type Provider = 'boat' | 'vercel';
+/** 'boat': a probe from before boat.dev's retirement (2026-11-01), only reached by its id now. */
+type Provider = 'vercel' | 'boat';
 interface ProviderSummary {
   provider: Provider; configured: boolean; not_configured_reason: string | null; started: number; created: number; create_ok_pct: number | null;
   ready_p50_ms: number | null; ready_p95_ms: number | null; finished: number; survived: number; survived_pct: number | null;
   gone_early: number; gone_median_age_s: number | null; execs: number; exec_ok_pct: number | null; exec_p50_ms: number | null; exec_p95_ms: number | null;
   checks: number; check_ok_pct: number | null; deletes: number; delete_ok_pct: number | null; delete_failed: number; live: number; last_started_at: string | null; last_error: string | null;
 }
-interface Cost { probes_per_day: number; minutes_each: number; boat_usd_day: number; vercel_usd_day: number; total_usd_day: number; boat_starts_per_day: number; note: string }
+interface Cost { probes_per_day: number; minutes_each: number; vercel_usd_day: number; total_usd_day: number; note: string }
 export interface ProbeRow {
   id: number; provider: Provider; sandbox_id: string | null; name: string | null; state: string; region: string | null; started_at: string;
   create_ms: number | null; ready_ms: number | null; create_error: string | null; gone_at: string | null; gone_reason: string | null; gone_age_s: number | null;
@@ -38,7 +39,7 @@ interface Detail {
   errors: { at: string; step: string; error: string }[];
 }
 
-const LABEL: Record<Provider, string> = { boat: 'boat.dev', vercel: 'Vercel Sandbox' };
+const LABEL: Record<Provider, string> = { vercel: 'Vercel Sandbox', boat: 'boat.dev (retired)' };
 const STATE: Record<string, { label: string; tone: Tone }> = {
   starting: { label: 'starting', tone: 'info' }, live: { label: 'live', tone: 'ok' }, deleted: { label: 'lived its time', tone: 'neutral' },
   gone: { label: 'gone early', tone: 'bad' }, failed: { label: 'create failed', tone: 'bad' }, not_configured: { label: 'not configured', tone: 'warn' },
@@ -51,7 +52,7 @@ const stateOf = (r: ProbeRow) => STATE[r.state] ?? { label: r.state, tone: 'neut
 /** What went wrong with a probe, in one line: the create, its disappearance, the delete, else its last exec error. */
 const problemOf = (r: ProbeRow) => r.create_error ?? r.gone_reason ?? r.delete_error ?? r.last_error;
 
-/** The Sandbox probes tab: the providers compared, then every probe. The window (24 h / 7 d) is on the search row. */
+/** The Sandbox probes tab: Vercel Sandbox's figures, then every probe. The window (24 h / 7 d) is on the search row. */
 export function ComputeProbes() {
   const url = useComputeParams();
   const hours = url.get('phours') === '168' ? 168 : 24;
@@ -127,10 +128,9 @@ export function ComputeProbes() {
   );
 }
 
-/** The two providers, metric by metric, with the daily cost under them. */
+/** Vercel Sandbox, metric by metric, with the daily cost under it. */
 function Comparison({ d }: { d: Probes }) {
-  const by = (p: Provider) => d.providers.find((x) => x.provider === p)!;
-  const b = by('boat'), v = by('vercel');
+  const v = d.providers.find((x) => x.provider === 'vercel');
   const line = (label: ReactNode, f: (s: ProviderSummary) => ReactNode, hint?: string) => ({ label, f, hint });
   const lines = [
     line('Probes started', (s) => s.started),
@@ -147,10 +147,11 @@ function Comparison({ d }: { d: Probes }) {
   const cell = (s: ProviderSummary, f: (s: ProviderSummary) => ReactNode) =>
     s.configured || s.started ? f(s) : <span className='text-muted-foreground'>—</span>;
   const c = d.cost;
+  if (!v) return null;
   return (
     <div className='flex flex-col gap-3 pb-3'>
       {!d.enabled && <Notice tone='info'>The probe is off (OCTILLION_SANDBOX_PROBE=off): no new probes start. Past probes are shown.</Notice>}
-      {[b, v].filter((s) => !s.configured).map((s) => (
+      {[v].filter((s) => !s.configured).map((s) => (
         <Notice key={s.provider}>{LABEL[s.provider]} is not configured, so it is not probed: {s.not_configured_reason ?? 'no credentials'}. See docs/sandbox-probe.md.</Notice>
       ))}
       <div className='overflow-x-auto rounded-lg border'>
@@ -158,7 +159,6 @@ function Comparison({ d }: { d: Probes }) {
           <TableHeader>
             <TableRow>
               <TableHead className='w-64'>Last {d.hours === 24 ? '24 hours' : '7 days'}</TableHead>
-              <TableHead className='text-right'>{LABEL.boat}</TableHead>
               <TableHead className='text-right'>{LABEL.vercel} <span className='text-muted-foreground font-normal'>· iad1</span></TableHead>
             </TableRow>
           </TableHeader>
@@ -166,19 +166,17 @@ function Comparison({ d }: { d: Probes }) {
             {lines.map((l, i) => (
               <TableRow key={i}>
                 <TableCell><span className='flex flex-col gap-0.5'><span>{l.label}</span>{l.hint && <span className='text-muted-foreground text-xs'>{l.hint}</span>}</span></TableCell>
-                <TableCell className='text-right tabular-nums'>{cell(b, l.f)}</TableCell>
                 <TableCell className='text-right tabular-nums'>{cell(v, l.f)}</TableCell>
               </TableRow>
             ))}
             <TableRow>
-              <TableCell><span className='flex flex-col gap-0.5'><span>Estimated cost a day</span><span className='text-muted-foreground text-xs'>{c.probes_per_day} probes a provider a day, ~{c.minutes_each} min each, smallest size</span></span></TableCell>
-              <TableCell className='text-right tabular-nums'>{money(c.boat_usd_day)} <span className={cn('text-xs', AMBER)} title='boat counts every create as a start against the account limit'>· {c.boat_starts_per_day} starts</span></TableCell>
+              <TableCell><span className='flex flex-col gap-0.5'><span>Estimated cost a day</span><span className='text-muted-foreground text-xs'>{c.probes_per_day} probes a day, ~{c.minutes_each} min each, smallest size</span></span></TableCell>
               <TableCell className='text-right tabular-nums'>{money(c.vercel_usd_day)}</TableCell>
             </TableRow>
           </TableBody>
         </Table>
       </div>
-      <p className='text-muted-foreground text-xs'>{c.note} Total about {money(c.total_usd_day)} a day.</p>
+      <p className='text-muted-foreground text-xs'>{c.note}</p>
     </div>
   );
 }

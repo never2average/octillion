@@ -3,7 +3,7 @@
 // Six tabs in ?section=: Revenue (the default; GET /spend/revenue, Stripe subscriptions and invoices against metered model
 // spend, by account), Plans (the same read by Stripe price: New plan, Experiment, Archive plan), Experiments (pricing A/B
 // tests: GET /spend/experiments, src/experiments.ts), Model spend (GET /spend, metered model cost), Compute hours (GET /spend/compute, sandbox time measured from
-// timestamps) and Data & storage (GET /spend/storage, sizes and rows). Measured figures only, never the boat price-table
+// timestamps) and Data & storage (GET /spend/storage, sizes and rows). Measured figures only, never the sandbox price-table
 // estimate; prepaid allowances are spending caps, never revenue. Each tab is one row of four headline numbers with a
 // daily sparkline and one table, grouped by account or by provider (Revenue and Plans: no switch). The range (UTC days) and the
 // grouping are page state, so switching tabs keeps them. Read only, except plans: on Plans an Owner adds a

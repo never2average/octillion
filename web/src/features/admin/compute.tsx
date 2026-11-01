@@ -3,7 +3,7 @@
 // limits), Harness mix (the coding-agent mix and admin-added harnesses) and Compute (/admin/compute: the on-call
 // console over GET /compute/summary, src/compute.ts, with the capacity settings in its Limits table, its Orchestrators
 // table in compute-orchestrators.tsx (Jobs and Sessions are tabs on Health), its Activity chart and Autoscaler
-// decisions in compute-decisions.tsx, and the boat.dev vs Vercel Sandbox reliability probe in compute-probes.tsx). Each setting
+// decisions in compute-decisions.tsx, and the Vercel Sandbox reliability probe in compute-probes.tsx). Each setting
 // shows the value in force and where it comes from: set here, the server's environment, or the built-in default.
 // Saving writes platform_settings (every server picks it up within 30s) and an audit log line. Model keys are the key
 // vault's credentials: a key is typed once and never shown again, only its hint.
@@ -307,11 +307,10 @@ interface Summary {
     sessions_per_day_ceiling: number | null; reason: string | null; binding: 'plan' | 'job_orch' | 'pods' | null; note: string | null; sandbox_prices: Record<string, number>;
   };
   settings: Setting[]; knobs: Knob[];
-  provider: { name: string; api: string; namespace: string; ok: boolean; error: string | null; has_key: boolean; key_hint: string | null; uses: number; last_used_at: string | null };
-  /** Where orchestrators and worker sandboxes run (boat.dev or Vercel Sandbox); older servers send none. */
+  /** Where orchestrators and worker sandboxes run (Vercel Sandbox, the only provider since boat.dev's retirement). */
   hosting?: {
-    orchestrators: { provider: 'boat' | 'vercel'; label: string }; workers: { provider: 'boat' | 'vercel'; label: string };
-    live: { boat: number; vercel: number };
+    orchestrators: { provider: 'vercel'; label: string }; workers: { provider: 'vercel'; label: string };
+    live: { vercel: number }; config_error?: string | null;
     vercel: { starts_hour: number; starts_per_hour_cap: number; max_concurrent: number; timeout_minutes: number; relaunch_minutes: number; size: string; egress: string };
   };
   links: { newrelic: string | null };
@@ -346,7 +345,7 @@ function ComputePage() {
   const paused = (editing || peeking) && !resumed;
   const { data, error, isLoading, refetch } = useAdmin<Summary>(SUMMARY, { refetchInterval: paused ? undefined : 15_000 });
   const [refreshing, setRefreshing] = useState(false);
-  // Refresh asks boat again (past its 30 s listing cache): the same call as "Test connection".
+  // Refresh skips the summary's 5 s cache.
   const refresh = async () => {
     setRefreshing(true);
     try {
@@ -379,7 +378,7 @@ function ComputePage() {
             <div className='flex flex-wrap items-center gap-2'>
               {data && <Freshness s={data} />}
               {paused && <Button variant='outline' size='sm' onClick={() => setResumed(true)} title={editing ? 'Refresh is paused while a setting has an unsaved edit' : 'Refresh is paused while a record is open'}><Icons.clock /> Paused · Resume</Button>}
-              <Button variant='outline' size='sm' disabled={refreshing} onClick={() => void refresh()} title='Ask boat.dev again and reload every figure'>{refreshing ? <Icons.spinner className='animate-spin' /> : <Icons.refresh />} Refresh</Button>
+              <Button variant='outline' size='sm' disabled={refreshing} onClick={() => void refresh()} title='Reload every figure'>{refreshing ? <Icons.spinner className='animate-spin' /> : <Icons.refresh />} Refresh</Button>
               {data && <RunTick s={data} />}
               {data?.links.newrelic && <ActionsMenu label='More' items={[{ label: 'Open in New Relic', icon: <Icons.externalLink />, onSelect: () => window.open(data.links.newrelic!, '_blank', 'noopener') }]} />}
             </div>
@@ -396,7 +395,7 @@ function ComputePage() {
         {tab === 'failures' && <ComputeFailures stats={(f, hours) => <FailureCards f={f} hours={hours} />} />}
         {tab === 'decisions' && <ComputeDecisions runtime={data?.runtime ?? null} stats={(rows) => <DecisionCards s={s} rows={rows} />} />}
         {tab === 'limits' && (isLoading ? <Skeleton className='h-72 rounded-lg' /> : s && <Limits s={s} onEditing={setEdit} />)}
-        {tab === 'environment' && (isLoading ? <Skeleton className='h-72 rounded-lg' /> : s && <Environment s={s} onTest={() => void refresh()} testing={refreshing} />)}
+        {tab === 'environment' && (isLoading ? <Skeleton className='h-72 rounded-lg' /> : s && <Environment s={s} />)}
         {tab === 'emails' && <AdminEmails embedded />}
         {tab === 'probes' && <ComputeProbes />}
       </div>
@@ -516,7 +515,7 @@ type Status = 'ok' | 'near' | 'binding';
 interface LimitRow {
   key: string; label: string; help?: string;
   used: number | null; limit: number | null; sub?: ReactNode;
-  /** Stacked meter parts (boat sandboxes): label, count, colour class. */
+  /** Stacked meter parts (our sandboxes): label, count, colour class. */
   parts?: { label: string; n: number; className: string }[];
   status: Status | null; source: ReactNode; setting?: Setting; fixed?: string; unavailable?: string | null; noBinding?: boolean;
 }
@@ -549,7 +548,8 @@ function SourceOf({ s }: { s: Setting }) {
 
 /**
  * Which ceiling binds, one row per limit, with the capacity settings edited on the row they change (saved through
- * PUT /compute/settings, so the audit log is the same). boat's figures show "—" when boat did not answer.
+ * PUT /compute/settings, so the audit log is the same). The sandbox limit and the start rate are the configured Vercel
+ * ones (OCTILLION_VERCEL_MAX_CONCURRENT, OCTILLION_VERCEL_ORCH_STARTS_PER_HOUR; Vercel has no limits API).
  */
 function Limits({ s, onEditing }: { s: Summary; onEditing: (key: string, on: boolean) => void }) {
   const save = useAdminAction((v: Record<string, string | null>) => adminApi('PUT', '/compute/settings', { values: v }), { success: 'Setting saved' });
@@ -558,26 +558,25 @@ function Limits({ s, onEditing }: { s: Summary; onEditing: (key: string, on: boo
   // A rejected save (say, over the setting's max) puts the field back to the saved value: its key changes.
   const [rejected, setRejected] = useState(0);
   const set = (k: string) => s.settings.find((x) => x.key === k);
-  const boatDown = l.plan == null ? `boat.dev did not answer: ${l.error ?? 'no answer'}` : null;
-  const startsNote = 'boat does not report used starts; other deployments\' starts are not counted.';
+  const down = l.plan == null ? `no limits: ${l.error ?? 'no answer'}` : null;
+  const startsNote = 'Orchestrator launches, worker sandboxes and reliability probes, from the database.';
   const free = l.plan == null || l.active_now == null ? 0 : Math.max(0, l.plan - l.ours_orch - l.ours_workers - l.ours_images - (l.ours_probes ?? 0) - l.others);
-  const size = set('BOAT_SANDBOX_SIZE');
   const rows: LimitRow[] = [
-    { key: 'plan', label: 'boat sandboxes at once', used: l.active_now, limit: l.plan, unavailable: boatDown,
-      sub: l.plan != null && <>ours {l.ours_orch} orchestrators · {l.ours_workers} workers{l.ours_images > 0 && <> · image builder {l.ours_images}</>}{(l.ours_probes ?? 0) > 0 && <> · reliability probes {l.ours_probes}</>} · other deployments {l.others} · free {free}</>,
+    { key: 'plan', label: 'Sandboxes at once', used: l.active_now, limit: l.plan, unavailable: down,
+      sub: l.plan != null && <>{l.ours_orch} orchestrators · {l.ours_workers} workers{l.ours_images > 0 && <> · image builder {l.ours_images}</>}{(l.ours_probes ?? 0) > 0 && <> · reliability probes {l.ours_probes}</>}{l.others > 0 && <> · others {l.others}</>} · free {free}</>,
       parts: [
         { label: 'Our orchestrators', n: l.ours_orch, className: 'bg-primary' },
         { label: 'Our workers', n: l.ours_workers, className: 'bg-primary/55' },
         { label: 'Our image builder and images', n: l.ours_images, className: 'bg-primary/30' },
         { label: 'Our reliability probes', n: l.ours_probes ?? 0, className: 'bg-primary/15' },
-        { label: 'Other deployments', n: l.others, className: 'bg-amber-500/70' }
+        { label: 'Others', n: l.others, className: 'bg-amber-500/70' }
       ],
-      status: statusOf(l.active_now, l.plan, l.binding === 'plan'), source: <span className='text-muted-foreground'>boat plan</span> },
+      status: statusOf(l.active_now, l.plan, l.binding === 'plan'), source: <span className='text-muted-foreground'>Vercel Sandbox (configured)</span> },
     ...(['minute', 'hour', 'day'] as const).map((w): LimitRow => {
       const limit = l.starts ? l.starts[w === 'minute' ? 'per_minute' : w === 'hour' ? 'per_hour' : 'per_day'] : null;
-      return { key: `starts-${w}`, label: `Our starts: per ${w}`, help: startsNote, used: l.our_starts[w], limit, unavailable: limit == null ? boatDown : null,
+      return { key: `starts-${w}`, label: `Our starts: per ${w}`, help: startsNote, used: l.our_starts[w], limit, unavailable: limit == null ? down : null,
         sub: w === 'day' && l.sessions_per_day_ceiling != null && <>sessions a day, at most {l.sessions_per_day_ceiling}{l.reason && <> · {l.reason}</>}</>,
-        status: statusOf(l.our_starts[w], limit, false, false), source: <span className='text-muted-foreground'>boat plan · database</span>, noBinding: true };
+        status: statusOf(l.our_starts[w], limit, false, false), source: <span className='text-muted-foreground'>configured · database</span>, noBinding: true };
     }),
     ...(l.per_job_mode ? [
       { key: 'job_orch', label: 'Job orchestrators', used: l.job_orch_live, limit: l.job_orch_cap, setting: set('OCTILLION_MAX_JOB_ORCHESTRATORS'),
@@ -588,8 +587,7 @@ function Limits({ s, onEditing }: { s: Summary; onEditing: (key: string, on: boo
     ] : [
       { key: 'shared', label: 'Shared orchestrators', used: l.shared_orch_live, limit: l.shared_orch_cap, setting: set('OCTILLION_MAX_ORCHESTRATORS'),
         status: statusOf(l.shared_orch_live, l.shared_orch_cap, false), source: null }
-    ]),
-    { key: 'size', label: 'Worker sandbox size', used: null, limit: null, setting: size, status: null, source: null }
+    ])
   ];
   const cols: RecordCol<LimitRow>[] = [
     { key: 'limit', label: 'Limit', title: true, keep: true, type: 'text', value: (r) => r.label, render: (r) => (
@@ -608,7 +606,7 @@ function Limits({ s, onEditing }: { s: Summary; onEditing: (key: string, on: boo
         ) : r.setting ? <Mono>{String(r.setting.value)}</Mono> : <span className='text-muted-foreground'>—</span>
     ) },
     { key: 'status', label: 'Status', type: 'select', value: (r) => (r.unavailable || !r.status ? '' : r.status), render: (r) => (
-      <span title={r.noBinding ? 'Never marked binding on its own: other deployments share the account\'s starts.' : undefined}>
+      <span title={r.noBinding ? 'Never marked binding on its own: the autoscaler paces launches by its own rate cap.' : undefined}>
         {r.unavailable || !r.status ? <span className='text-muted-foreground'>—</span> : STATUS[r.status]}
       </span>
     ) },
@@ -631,7 +629,7 @@ function Limits({ s, onEditing }: { s: Summary; onEditing: (key: string, on: boo
       ) : <span className='text-muted-foreground text-xs'>{r.fixed ?? r.source ?? '—'}</span>
     ) }
   ];
-  // The fixed facts live in the table: the boat plan and other deployments on its first row, the session-a-day
+  // The fixed facts live in the table: the sandbox limit on its first row, the session-a-day
   // ceiling under "Our starts: per day", and which limit binds in the Status column.
   const cards = <Cards items={[
       { label: 'Our sandboxes in use', spark: t('in_use'), value: l.ok ? l.ours_orch + l.ours_workers + l.ours_images : '—' },
@@ -670,28 +668,18 @@ const RELATED: { key: string; page: string; href: string }[] = [
   { key: 'RESEARCH_MAX_COST_USD', page: 'Agent configuration', href: '/admin/configuration' }
 ];
 
-/** The environment the autoscaler runs with (read only), settings changed elsewhere, and the boat account in the cards. */
+/** The environment the autoscaler runs with (read only), and settings changed elsewhere. */
 interface EnvRow { name: string; value: string; source: ReactNode; sourceText: string; meaning: ReactNode; meaningText: string }
-function Environment({ s, onTest, testing }: { s: Summary; onTest: () => void; testing: boolean }) {
-  const p = s.provider;
+function Environment({ s }: { s: Summary }) {
   const t = useTrend();
-  // The boat account's facts are rows here (the runtime and OCTILLION_AUTOSCALE are knobs); the cards are what the
-  // environment did in the last 24 hours.
-  const boatRows: EnvRow[] = [
-    { name: 'boat.dev', value: p.ok ? 'Connected' : 'Not connected', source: <span className='text-xs'>boat API</span>, sourceText: 'boat API',
-      meaningText: p.ok ? `${p.api} answers with this key` : p.error ?? 'No answer', meaning: p.ok ? <>{p.api} answers with this key</> : <span className='text-destructive'>{p.error ?? 'No answer'}</span> },
-    { name: 'boat key', value: p.has_key ? p.key_hint ?? 'set' : 'None', source: <span className='text-xs'>key vault</span>, sourceText: 'key vault',
-      meaningText: p.has_key ? `Used ${p.uses} times${p.last_used_at ? `, last ${new Date(p.last_used_at).toLocaleString()}` : ''}` : 'Add a boat key in the key vault',
-      meaning: p.has_key ? <>Used {p.uses} times{p.last_used_at && <>, last <When d={p.last_used_at} /></>}</> : <Link href='/admin/keys' className='text-foreground hover:underline'>Add a boat key in the key vault</Link> }
-  ];
   const h = s.hosting;
-  // Where things run: one switch (OCTILLION_SANDBOX_PROVIDER) and an orchestrator-only override.
+  // Where things run: Vercel Sandbox, the only provider (boat.dev was retired on 2026-11-01).
   const hostRows: EnvRow[] = h ? [
-    { name: 'Orchestrators run on', value: h.orchestrators.label, source: <span className='text-xs'>env</span>, sourceText: 'env',
-      meaningText: `OCTILLION_ORCHESTRATOR_PROVIDER, else OCTILLION_SANDBOX_PROVIDER. Live now: ${h.live.boat} on boat.dev, ${h.live.vercel} on Vercel Sandbox`,
-      meaning: <>OCTILLION_ORCHESTRATOR_PROVIDER, else OCTILLION_SANDBOX_PROVIDER. Live now: {h.live.boat} on boat.dev, {h.live.vercel} on Vercel Sandbox{h.orchestrators.provider === 'vercel' && h.live.boat > 0 ? ' (the boat ones finish their jobs there)' : ''}</> },
-    { name: 'Worker sandboxes run on', value: h.workers.label, source: <span className='text-xs'>env</span>, sourceText: 'env',
-      meaningText: 'OCTILLION_SANDBOX_PROVIDER: where each session\'s coding agent runs', meaning: <>OCTILLION_SANDBOX_PROVIDER: where each session&apos;s coding agent runs</> },
+    { name: 'Orchestrators run on', value: h.orchestrators.label, source: <span className='text-xs'>built in</span>, sourceText: 'built in',
+      meaningText: `Live now: ${h.live.vercel}${h.config_error ? `. ${h.config_error}` : ''}`,
+      meaning: <>Live now: {h.live.vercel}{h.config_error && <span className='text-destructive'>. {h.config_error}</span>}</> },
+    { name: 'Worker sandboxes run on', value: h.workers.label, source: <span className='text-xs'>built in</span>, sourceText: 'built in',
+      meaningText: 'Where each session\'s coding agent runs', meaning: <>Where each session&apos;s coding agent runs</> },
     ...(h.orchestrators.provider === 'vercel' ? [{
       name: 'Vercel orchestrators', value: `${h.vercel.starts_hour} / ${h.vercel.starts_per_hour_cap} launches this hour`, source: <span className='text-xs'>env</span>, sourceText: 'env',
       meaningText: `Size ${h.vercel.size}, timeout ${h.vercel.timeout_minutes} min, replaced ${h.vercel.relaunch_minutes} min before it, egress ${h.vercel.egress}, at most ${h.vercel.max_concurrent} sandboxes`,
@@ -699,7 +687,6 @@ function Environment({ s, onTest, testing }: { s: Summary; onTest: () => void; t
   ] : [];
   const rows: EnvRow[] = [
     ...hostRows,
-    ...boatRows,
     ...s.knobs.map((k) => ({ name: k.name, value: k.value, source: k.source, sourceText: k.source, meaning: k.meaning, meaningText: k.meaning })),
     ...RELATED.map((r) => ({ ...r, s: s.settings.find((x) => x.key === r.key) })).filter((r) => r.s).map((r) => ({
       name: r.key, value: String(r.s!.value), source: <SourceOf s={r.s!} />, sourceText: r.s!.source, meaningText: `${r.s!.label}. Change it in ${r.page}`,
@@ -721,7 +708,6 @@ function Environment({ s, onTest, testing }: { s: Summary; onTest: () => void; t
   return (
     <RecordView id='compute-environment' rows={rows} rowKey={(r) => r.name} cols={cols} noun='settings' initialSize={50} compact summary={cards}
       searchText={(r) => `${r.name} ${r.value} ${r.sourceText} ${r.meaningText}`} searchPlaceholder='Search settings'
-      filters={<Button variant='outline' disabled={testing} onClick={onTest}>{testing ? <Icons.spinner className='animate-spin' /> : <Icons.plug />} Test connection</Button>}
       empty='No settings.' />
   );
 }
