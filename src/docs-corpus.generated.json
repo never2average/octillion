@@ -1382,6 +1382,55 @@
   },
   {
    "area": "admin",
+   "title": "Worker sandboxes on Vercel Sandbox",
+   "href": "/admin/docs/vercel-sandbox-workers",
+   "heading": null,
+   "text": "Phase 1 of moving off boat.dev: the per-session **worker** sandboxes (where the coding agent runs) can run on Vercel\nSandbox. The orchestrators still run on boat. Nothing changes until `OCTILLION_SANDBOX_PROVIDER=vercel` is set on the API.\n\n- **Orchestrator code:** `orchestrator/core/sandbox-provider.ts` (the `SandboxProvider` interface, the `boat` and\n  `vercel` providers) and `orchestrator/core/runners.ts` (`vmRunner(provider)`; `boatRunner = vmRunner(boatProvider)`)\n- **Server code:** `src/worker-sandboxes.ts` (the broker routes, ownership, the reaper) and `src/vercel-sandbox.ts` (the\n  Vercel Sandbox REST client, fetch only)\n- **Table:** `worker_sandboxes` (migration `0016_worker_sandboxes.sql`)\n- **Tests:** `npx tsx orchestrator/test/vercel-workers.ts` (full sessions through `vmRunner(vercel)`, the broker and a\n  mock Vercel Sandbox) and the smoke test's worker sandbox broker checks (`scripts/smoke-worker-sandboxes.ts`)"
+  },
+  {
+   "area": "admin",
+   "title": "Worker sandboxes on Vercel Sandbox",
+   "href": "/admin/docs/vercel-sandbox-workers#who-creates-worker-sandboxes",
+   "heading": "Who creates worker sandboxes",
+   "text": "Vercel Sandbox is authenticated with the project's OIDC token or a team access token. Either one can do anything to\nevery sandbox in the project, and Vercel has no token scoped to a single sandbox. The OIDC token exists only inside our\nVercel functions, so it stays there.\n\nThe orchestrator asks the API instead, with its job-scoped worker token, under `/api/worker/sandboxes`:\n\n| Route | What it does |\n|---|---|\n| `GET /config` | Is Vercel Sandbox configured on this deployment (no secret in the answer) |\n| `POST /` `{session_id, size, timeout_sec, name}` | Create one for a running session this token may act on. Answers `{id}` |\n| `GET /:id` | `ready`, `starting`, `stopped` or `gone` |\n| `POST /:id/exec` `{command, timeout_sec, stream?}` | Run `bash -c <command>`; JSON, or ND-JSON frames in boat's shape |\n| `POST /:id/commands` `{command}`, `GET /:id/commands/:cid` | A detached command, and whether it is still running |\n| `PUT /:id/files` `{path, content \\| content_base64}` | Write a file (Vercel's `fs/write`, a one-entry tar.gz, mode 0600) |\n| `POST /:id/network-policy` `{allow: [hosts]}` | The session's egress lockdown |\n| `DELETE /:id`, `GET /?prefix=` | Delete; this caller's live sandboxes |\n\n**Ownership.** Every sandbox gets a row recording its owner: `job:<sim_…>` for a per-job orchestrator's token, or\n`fleet` for the shared orchestrators' token.\n- Every route loads the row by id. Another owner gets 403, an unknown id 404, and a deleted sandbox 410.\n- A create also needs `canActOnSession` (a job token: only its own simulation's sessions), and the session must exist and be `running`.\n- At most 2 live sandboxes per session (`OCTILLION_WORKER_SANDBOX_MAX_PER_SESSION`) and 60 per owner (`…_MAX_PER_OWNER`)."
+  },
+  {
+   "area": "admin",
+   "title": "Worker sandboxes on Vercel Sandbox",
+   "href": "/admin/docs/vercel-sandbox-workers#who-creates-worker-sandboxes",
+   "heading": "Who creates worker sandboxes",
+   "text": "**Function limits.** One broker call stays under the function's 300 s:\n- An exec or a log stream is cut at `OCTILLION_WORKER_SANDBOX_EXEC_MAX_SECONDS` (280 s), and the command is killed.\n- The orchestrator keeps its own calls at `OCTILLION_VERCEL_EXEC_MAX_SECONDS` (240 s).\n- The harness follow loop reconnects every 200 s and resumes by line number.\n- Setup scripts allowed up to 600 s (harness install, prepare, developer tools) run detached under `timeout`. The orchestrator polls them and reads their output back from files.\n\n**Reaper.** The 5-minute autoscale cron deletes, at Vercel:\n- sandboxes whose session ended;\n- sandboxes past their timeout plus 10 minutes;\n- listings with our prefix (`<namespace>-vw-`) and no live row, older than 30 minutes.\n\nIt makes no Vercel call when there are no rows. Vercel also stops every worker sandbox at its own timeout (`persistent: false`)."
+  },
+  {
+   "area": "admin",
+   "title": "Worker sandboxes on Vercel Sandbox",
+   "href": "/admin/docs/vercel-sandbox-workers#the-sandbox",
+   "heading": "The sandbox",
+   "text": "Sandboxes are created with `runtime: node24` in `iad1`, the same as the probe. The image is Amazon Linux 2023, with\nthe default user `vercel-sandbox` (which has sudo), Node under `/vercel/runtimes`, git, and `dnf`.\n\nSizes (`OCTILLION_VERCEL_WORKER_SIZE`):\n\n| Size | vCPUs | Memory |\n|---|---|---|\n| `small` | 1 | 2 GB |\n| `default` | 2 | 4 GB |\n| `large` | 4 | 8 GB |\n| `xlarge` | 8 | 16 GB |\n\nThe timeout is `MAX_SESSION_MINUTES` plus a margin, capped at `OCTILLION_VERCEL_MAX_TIMEOUT_MINUTES` (300).\n\nThe boat scripts run unchanged:\n- `prepare.sh` creates the unprivileged `agent` user.\n- The harness is installed system-wide by `images/boat-setup/<harness>.sh`.\n- `_common.sh` and the environment step find Node under nvm (boat) or `/vercel/runtimes` (Vercel), and use `apt-get` or `dnf`, whichever exists. A few Debian package names are mapped.\n\nVercel reports no pid for a detached command, so the launch script writes its own pid for the follower's `tail --pid`."
+  },
+  {
+   "area": "admin",
+   "title": "Worker sandboxes on Vercel Sandbox",
+   "href": "/admin/docs/vercel-sandbox-workers#egress-lockdown",
+   "heading": "Egress lockdown",
+   "text": "Vercel Sandbox has a native network policy (an allow-list of domains, enforced outside the VM by SNI). For private runs\n(`OCTILLION_EGRESS`), the runner applies the session's allow-list through `POST /:id/network-policy`. The allow-list\nholds the gateway host, the package registries and the task's git host. Private, loopback, link-local (metadata) and\nCGNAT subnets are denied.\n\nA probe then runs as the agent. The gateway must answer a TLS handshake. An unlisted host, an IP literal, plain HTTP,\npublic DNS servers and the metadata IP must all fail. Any other result fails the open, so it fails closed, exactly as\nboat's nftables lockdown does.\n\nThe policy covers the whole VM, not only the agent's uid. Everything that needs the network (harness, repo, tools) is\ndone before the policy is applied."
+  },
+  {
+   "area": "admin",
+   "title": "Worker sandboxes on Vercel Sandbox",
+   "href": "/admin/docs/vercel-sandbox-workers#accounting",
+   "heading": "Accounting",
+   "text": "Session metadata gets provider-neutral keys:\n- `sandbox_provider`;\n- `sandbox_vm_id`;\n- `sandbox_type`;\n- `sandbox_seconds`;\n- `sandbox_est_cost_usd`.\n\nboat sessions also keep writing the old `boat_*` keys with the same values. The Compute and spend pages read\n`sandbox_est_cost_usd` first and fall back to `boat_est_cost_usd`. The boat start counters ignore `vercel:` sessions.\n\nThe Vercel estimate uses Pro iad1 rates:\n- **Active CPU:** $0.128 per vCPU-hour, multiplied by an assumed busy share (`OCTILLION_VERCEL_CPU_ACTIVE_SHARE`, 0.3).\n- **Memory:** $0.0212 per GB-hour, with a 1-minute minimum.\n- **Creations:** $0.60 per million."
+  },
+  {
+   "area": "admin",
+   "title": "Worker sandboxes on Vercel Sandbox",
+   "href": "/admin/docs/vercel-sandbox-workers#switching-and-rolling-back",
+   "heading": "Switching and rolling back",
+   "text": "1. Make sure the Vercel deployment can make sandboxes. Compute → Sandbox probes should show Vercel probes as configured and healthy. That proves the OIDC token works.\n2. Set `OCTILLION_SANDBOX_PROVIDER=vercel` on the API (Vercel environment variables) and redeploy.\n   - Orchestrators read it from their credentials when they **start**, so orchestrators launched after the change use Vercel workers.\n   - Running ones keep boat until they exit. A per-job orchestrator exits when its run ends.\n3. **Roll back:** remove the variable (or set it to `boat`) and redeploy. New orchestrators use boat again.\n   - Sessions already on Vercel finish there, and the reaper cleans up what is left.\n4. **For one orchestrator only** (testing): `OCTILLION_SANDBOX_PROVIDER=vercel` (or `RUNNER=vercel`) in its own env overrides the server's choice either way.\n\nWithout a Vercel token on the API, an orchestrator told to use Vercel refuses to start. It reports \"Vercel Sandbox is not configured on the Octillion API\" and does not silently fall back to boat."
+  },
+  {
+   "area": "admin",
    "title": "Walkthrough: first visibility report from headless Claude Code",
    "href": "/admin/docs/walkthrough-claude-code",
    "heading": null,

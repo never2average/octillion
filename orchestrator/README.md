@@ -282,6 +282,7 @@ Usage: Claude's `result` events are **summed across runs**, because each resume 
 | runner | sandbox | notes |
 |---|---|---|
 | `boat` (default) | one fresh [boat.dev](https://docs.boat.dev) VM per session | REST API, see below |
+| `vercel` | one fresh Vercel Sandbox per session, through the API broker | same VM runner; see "Vercel Sandbox worker sandboxes" |
 | `pool` | warm per-harness Docker pods, sized from the server's global fleet plan | see "Warm pod pool" |
 | `docker` | one long-lived container per session from `SANDBOX_IMAGE` | `docker exec` per run |
 | `local` | host CLI in a temp dir | dev only, no isolation |
@@ -305,6 +306,20 @@ Base URL `https://boat.dev/api/v1`, `Authorization: Bearer $BOAT_API_KEY` ([API 
    and `GET /commands/{processId}` reports when the run has exited ([exec](https://docs.boat.dev/api/reference/agent/execute-sandbox-command)).
 4. Finish: `DELETE /sandboxes/{id}` with `X-Ascii-Confirm-Delete` force-stops the VM and deletes it. If that fails, the worker falls back to `POST /stop {force:true}`.
    The TTL is `MAX_SESSION_MINUTES + BOAT_TTL_MARGIN_MINUTES`, and exec'd work does not extend it.
+
+### Vercel Sandbox worker sandboxes (`OCTILLION_SANDBOX_PROVIDER=vercel`)
+
+The boat runner is `vmRunner(boatProvider)` (`core/sandbox-provider.ts`). With `OCTILLION_SANDBOX_PROVIDER=vercel` on the API
+(read by each orchestrator at start from its credentials), or `OCTILLION_SANDBOX_PROVIDER=vercel` / `RUNNER=vercel` in an
+orchestrator's own env, the same runner and scripts drive **Vercel Sandbox** worker sandboxes instead. The orchestrator
+still runs on boat.
+
+It never holds Vercel credentials. Every call goes through the API's broker (`/api/worker/sandboxes`, `src/worker-sandboxes.ts`)
+with its worker token, and a sandbox is usable only by the job (or fleet) token that created it. Private runs are locked
+down with Vercel's network policy instead of nftables, and fail closed.
+
+To switch or roll back, set or unset the variable on the API. Details, limits and the live-test plan are in
+`docs/vercel-sandbox-workers.md`. Test: `npx tsx orchestrator/test/vercel-workers.ts`.
 
 **Why not Boat's managed `boat prompt` / `POST /prompt` + `GET /events`.**
 Boat injects its own system prompt, a `boat` skill and a `computer` MCP server into managed harnesses
