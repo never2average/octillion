@@ -118,7 +118,7 @@ done before the policy is applied.
   and `expires_at` (migration `0017_orchestrator_host_provider.sql`)
 - **Tests:** `orchestrator/test/per-job.ts` and `autoscaler.ts` (the autoscaler against a mock Vercel Sandbox,
   `orchestrator/test/vercel-orch-mock.ts`), `fleet-guard.ts` (the host guard and fleet semantics through a mock worker
-  sandbox broker), and the smoke test's `scripts/smoke-vercel-orchestrators.ts`
+  sandbox broker), `budget.ts` (the launch budget, pure), and the smoke test's `scripts/smoke-vercel-orchestrators.ts`
 
 ### Who launches them
 

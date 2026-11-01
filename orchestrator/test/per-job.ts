@@ -147,8 +147,10 @@ try {
     options: [{ kind: "product" }, { kind: "competitor", name: "Postbox" }, { kind: "build", name: "own SMTP relay" }],
     why_intrinsic: "Getting mail delivered reliably from a new domain cannot be done well without choosing how it is sent.",
     evidence_url: "https://quillmail.example.com/docs/sending" };
+  // Research always states who may use the product (src/audience.ts, docs/onboarding.md): global, from the pages it read.
+  const audience = { scope: "global", checked: "the sign-up, pricing and terms pages: anyone may create an account, no eligibility rules", source: "research" };
   const base = { product: { name: "Quillmail", packages: ["quillmail"], category_terms: ["transactional email service", "email API"], platforms: ["backend"],
-                            competitors: [{ name: "Postbox" }, { name: "Mailcrate" }, { name: "Vercel Mail" }] },
+                            competitors: [{ name: "Postbox" }, { name: "Mailcrate" }, { name: "Vercel Mail" }], audience },
     sources: [{ url: "https://quillmail.example.com/docs/sending" }],
     scenarios: [1, 2, 3].map((i) => ({ prompt: `Task ${i}: we need password reset emails in this Express service, with templates.`, decision, language: "typescript",
                                         library_task_id: 100 + i })),
@@ -348,11 +350,22 @@ try {
   // allocation uses real usage shares (not the pod mix, which already lifts small agents) + cancel stops running sessions
   const pops = await import("../../src/populations.js");
   const agentsMod = await import("../../src/agents.js");
-  await db.query(`UPDATE developer_population_agents a SET market_share = v.share, paused = false
-                    FROM developer_populations p, (VALUES ('claude-code/opus', 0.4039), ('claude-code/sonnet', 0), ('codex/default', 0.1965),
+  // These are production agents (harnesses/registry.json): read the population against that registry whatever
+  // OCTILLION_REGISTRY this test runs with (the smoke fixture has none of them), and set exactly these shares
+  // (upsert, every other agent 0), so the check never depends on which agents the default population was seeded with.
+  // The mix is put back afterwards for the checks below.
+  const prevRegistry = process.env.OCTILLION_REGISTRY;
+  process.env.OCTILLION_REGISTRY = "harnesses/registry.json";
+  const [{ id: defaultPop }] = await db.query<any>("SELECT id FROM developer_populations WHERE is_default");
+  const savedMix = await db.query<any>("SELECT agent_id, market_share, paused, paused_reason, notes FROM developer_population_agents WHERE population_id = $1", [defaultPop]);
+  await db.query("UPDATE developer_population_agents SET market_share = 0 WHERE population_id = $1", [defaultPop]);
+  await db.query(`INSERT INTO developer_population_agents (population_id, agent_id, market_share, paused)
+                  SELECT $1::int, v.id, v.share, false
+                    FROM (VALUES ('claude-code/opus', 0.4039), ('claude-code/sonnet', 0), ('codex/default', 0.1965),
                       ('opencode/sonnet', 0.0546), ('antigravity/default', 0.0491), ('pi/gpt', 0.0164), ('cline/gpt', 0.0109), ('kilo/sonnet', 0.0054)) AS v(id, share)
-                   WHERE p.id = a.population_id AND p.is_default AND a.agent_id = v.id`);
+                  ON CONFLICT (population_id, agent_id) DO UPDATE SET market_share = EXCLUDED.market_share, paused = false`, [defaultPop]);
   const livePop = await pops.getPopulation();
+  if (prevRegistry === undefined) delete process.env.OCTILLION_REGISTRY; else process.env.OCTILLION_REGISTRY = prevRegistry;
   const shares = agentsMod.schedulingShares(livePop);
   const prodPlan = agentsMod.planFirstBatch(4, 2, shares);
   const want = { "claude-code/opus": 10, "codex/default": 6, "opencode/sonnet": 2, "antigravity/default": 2, "pi/gpt": 2, "cline/gpt": 1, "kilo/sonnet": 1 };
@@ -361,6 +374,10 @@ try {
   const podPlan = agentsMod.planFirstBatch(4, 2, agentsMod.scheduledAgents(livePop));
   check("the pod-mix weights would have boosted small agents twice (why allocation no longer uses them)",
     (podPlan.counts["claude-code/opus"] ?? 0) < 10 || (podPlan.counts["kilo/sonnet"] ?? 0) > 1, JSON.stringify(podPlan.counts));
+  await db.query("DELETE FROM developer_population_agents WHERE population_id = $1", [defaultPop]);
+  for (const m of savedMix)
+    await db.query("INSERT INTO developer_population_agents (population_id, agent_id, market_share, paused, paused_reason, notes) VALUES ($1, $2, $3, $4, $5, $6)",
+                   [defaultPop, m.agent_id, m.market_share, m.paused, m.paused_reason, m.notes]);
   const cancelSim = await run(O2, "left-pad", 1, 2);
   await db.query("UPDATE agent_sessions SET status = 'running', worker_id = 'w-c', started_at = now() WHERE simulation_id = $1", [cancelSim]);
   await db.query("UPDATE simulations SET status = 'running' WHERE id = $1", [cancelSim]);

@@ -21,7 +21,7 @@ orchestrator/
   deploy/         orchestrator-host.ts (the host interface), vercel-orch.ts (the Vercel Sandbox host), orch-lib.ts (code
                   tarball, code hash, tuning knobs, launch budget), in-sandbox.ts (helpers it runs inside)
   images/         Dockerfile.<harness> (tests) and setup/<harness>.sh (pinned installs in worker sandboxes)
-  test/           integration.ts, research.ts, fleet-guard.ts, autoscaler.ts, per-job.ts, vercel-workers.ts
+  test/           integration.ts, research.ts, fleet-guard.ts, autoscaler.ts, per-job.ts, vercel-workers.ts, budget.ts
   worker.ts       claim loop + deterministic run
   .pi-upstream/   Pi source clone, for reference only (gitignored)
 ```
@@ -539,6 +539,8 @@ Each job gets a dedicated Pi session on the same broker brain (`openai/gpt-6.1-s
   - **Claims and lifecycle:** claims carry `{agent_ids:[group]}` with limit ≤ free slots; one fresh worker sandbox per session, all deleted.
   - **Network drops** after a run exited (final drain, exit status) are retried, not failed sessions.
   - **Secrets:** the worker token never appears in any worker sandbox file or command, and env files hold only harness credentials.
+
+- **Launch budget** (`npx tsx orchestrator/test/budget.ts`, pure). `computeBudget` (`orchestrator/deploy/orch-lib.ts`), used by the shared-fleet cap and the Compute page: orchestrators x (1 + pod capacity) against the limit minus other active sandboxes, our own sandboxes not counted twice, and the throughput ceiling (starts/day minus orchestrator starts).
 
 - **Live end-to-end on the public server** (`https://octillion.useimmaculate.com`, 2026-10-10, about 1 minute per run, on the sandbox provider used before Vercel Sandbox).
   - **Setup:** one orchestrator sandbox (POD_CAPACITY=3, MAX_SESSION_MINUTES=12, MAX_BUDGET_USD=1.5); preflight OK.
