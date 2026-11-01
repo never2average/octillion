@@ -5,6 +5,11 @@
 # unprivileged `agent` user the worker creates per session can run it, and so the install is captured by a
 # named snapshot (boat snapshots capture changes under /usr, /opt, /etc, /root, /srv and /home/user).
 #
+# The same scripts run in Vercel Sandbox worker sandboxes (orchestrator/core/sandbox-provider.ts): Amazon Linux 2023,
+# default user `vercel-sandbox` with sudo, Node 22/24 under /vercel/runtimes/node*/bin, dnf. Nothing below assumes a user
+# name or a package manager: Node is found under nvm (boat), then /vercel/runtimes (Vercel; OCTI_NODE_DIRS overrides
+# both), then PATH, and is copied to /usr/local/bin either way.
+#
 # Nothing here writes API keys, config files, rules files or MCP servers: the snapshot must stay neutral.
 set -euo pipefail
 
@@ -21,11 +26,17 @@ fi
 # CLIs start with `#!/usr/bin/env node` and the agent user runs them under `env -i` with a minimal PATH.
 ensure_node() {
   local cand="" d
-  for d in $(ls -d /home/*/.nvm/versions/node/v*/bin /root/.nvm/versions/node/v*/bin 2>/dev/null | sort -V -r); do
+  for d in ${OCTI_NODE_DIRS:-} $(ls -d /home/*/.nvm/versions/node/v*/bin /root/.nvm/versions/node/v*/bin 2>/dev/null | sort -V -r); do
     [ -x "$d/node" ] && { cand="$d"; break; }
   done
+  # Vercel Sandbox (no nvm): its runtimes, newest first (node26, node24, node22).
+  if [ -z "$cand" ]; then
+    for d in $(ls -d /vercel/runtimes/node*/bin 2>/dev/null | sort -V -r); do
+      [ -x "$d/node" ] && { cand="$d"; break; }
+    done
+  fi
   [ -n "$cand" ] || cand="$(dirname "$(command -v node 2>/dev/null || echo /nonexistent/node)")"
-  [ -x "$cand/node" ] || die "no node found (expected nvm node on boat VMs)"
+  [ -x "$cand/node" ] || die "no node found (expected nvm node on boat VMs, /vercel/runtimes on Vercel Sandbox)"
   local major; major="$("$cand/node" -p 'process.versions.node.split(".")[0]')"
   [ "$major" -ge 22 ] || die "node $("$cand/node" --version) at $cand is < 22"
   NODE_DIR="$cand"

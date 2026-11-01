@@ -260,11 +260,12 @@ export class WorkerSession {
       // task's git host (core/egress.ts). Opt-in until the transparent HTTPS path is verified on boat VMs:
       // OCTILLION_EGRESS=private (private runs) or =all (every run); unset = no lockdown.
       const lockdown = process.env.OCTILLION_EGRESS === "all" || (job.private && process.env.OCTILLION_EGRESS === "private");
-      const egress = lockdown && runner.name === "boat"
+      const vm = runner.name === "boat" || runner.name === "vercel"; // VM runners (core/runners.ts isVmRunner)
+      const egress = lockdown && vm
         ? egressPolicy({ gatewayUrls: Object.values(s.creds.providers).map((p) => p.base_url).filter((u): u is string => !!u), repoUrl: job.repo_url })
         : null;
-      if (lockdown && runner.name !== "boat" && process.env.OCTILLION_DEV_ALLOW_LOCAL !== "1")
-        throw new Error(`private runs need the boat runner for network lockdown (RUNNER=${runner.name})`);
+      if (lockdown && !vm && process.env.OCTILLION_DEV_ALLOW_LOCAL !== "1")
+        throw new Error(`private runs need a VM runner (boat or vercel) for network lockdown (RUNNER=${runner.name})`);
       s.sandbox = await runner.open({ adapter, harness: job.harness, jobKey: job.session_id, agentId: job.agent_id ?? undefined, model: job.model, repoUrl: job.repo_url, template: s.template,
                                        environment: job.environment ?? null, egress });
       if (s.sandbox.egress) s.sink.push({ type: "environment", egress: s.sandbox.egress });

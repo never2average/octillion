@@ -9,9 +9,9 @@
  * Run: `npx tsx orchestrator/worker.ts`
  */
 import { getAdapter } from "./harnesses/adapters.js";
-import { CFG } from "./core/config.js";
+import { CFG, SANDBOX } from "./core/config.js";
 import { PodPool, POOL } from "./core/pool.js";
-import { RUNNERS, checkRunner, type Runner } from "./core/runners.js";
+import { RUNNERS, checkRunner, isVmRunner, selectRunner, type Runner } from "./core/runners.js";
 import { activeSessions, adapterFor, claimJobs, driveToDone, markShuttingDown, WorkerSession, type Job } from "./core/session.js";
 import { log, sleep } from "./core/util.js";
 import { CREDENTIALS_MODE, orchestratorCredentials, redact } from "./core/credentials.js";
@@ -38,9 +38,10 @@ export async function claimLoop(runJob: (job: Job, runner: Runner) => Promise<vo
   assertOrchestratorHost(CFG.runner);
   if (!CFG.token) throw new Error("OCTILLION_WORKER_TOKEN is required");
   // Broker mode: the boat key and the orchestrator LLM token come from the server (docs/credentials.md).
-  await orchestratorCredentials().catch((e) => {
-    if (CREDENTIALS_MODE === "broker" && CFG.runner === "boat") throw new Error(`orchestrator credentials: ${redact(String(e))}`);
+  const creds = await orchestratorCredentials().catch((e) => {
+    if (CREDENTIALS_MODE === "broker" && (CFG.runner === "boat" || CFG.runner === "vercel")) throw new Error(`orchestrator credentials: ${redact(String(e))}`);
     log("orchestrator credentials unavailable:", redact(String(e)));
+    return null;
   });
   let pool: PodPool | null = null;
   let fleet: FleetMembership | null = null;
@@ -50,12 +51,13 @@ export async function claimLoop(runJob: (job: Job, runner: Runner) => Promise<vo
     await pool.start();
     runner = pool.runner();
   } else {
-    const r = RUNNERS[CFG.runner];
+    // Worker sandboxes on boat (default) or Vercel Sandbox: RUNNER / OCTILLION_SANDBOX_PROVIDER here, else the server's choice.
+    const r = selectRunner(CFG.runner, creds?.sandbox_provider, SANDBOX.provider);
     if (!r) throw new Error(`RUNNER must be one of ${[...Object.keys(RUNNERS), "pool"].join(", ")}`);
     await checkRunner(r);
     runner = r;
-    // RUNNER=boat: the fleet assignment caps concurrent (ephemeral) worker sandboxes per agent group.
-    if (r.name === "boat" && FLEET.mode !== "off") { fleet = new FleetMembership(); await fleet.start(); }
+    // VM runners: the fleet assignment caps concurrent (ephemeral) worker sandboxes per agent group.
+    if (isVmRunner(r) && FLEET.mode !== "off") { fleet = new FleetMembership({ runner: r.name }); await fleet.start(); }
   }
   if (CFG.job) log(`${label} bound to ${CFG.job}: claims only its sessions and exits when it is over`);
   const capacity = pool ? POOL.capacity : fleet ? fleet.capacity : CFG.concurrency;

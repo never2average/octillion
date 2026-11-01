@@ -4,7 +4,7 @@ import { hostname } from "node:os";
 export const env = process.env;
 export const num = (v: string | undefined, d: number) => (v && Number.isFinite(Number(v)) ? Number(v) : d);
 
-export type RunnerName = "boat" | "docker" | "local" | "pool";
+export type RunnerName = "boat" | "vercel" | "docker" | "local" | "pool";
 export type SinkMode = "api" | "clickhouse" | "both";
 
 export const CFG = {
@@ -63,6 +63,38 @@ export const BOAT = {
 };
 /** $/hour per size, from https://docs.boat.dev/pricing (2026-10). Estimate for /complete metadata only. */
 export const BOAT_PRICE_PER_HOUR: Record<string, number> = { small: 0.018, default: 0.036, large: 0.072, xlarge: 0.2 };
+
+/**
+ * Worker sandbox provider (core/sandbox-provider.ts). The orchestrator itself still runs on boat; only the per-session
+ * worker sandboxes move. Selected by, in order: RUNNER=vercel, OCTILLION_SANDBOX_PROVIDER here, else the server's choice in
+ * the orchestrator credentials answer (`sandbox_provider`, from OCTILLION_SANDBOX_PROVIDER on the API). Default boat.
+ *
+ * vercel: Vercel Sandbox, reached only through the API's broker (/api/worker/sandboxes, src/worker-sandboxes.ts): the
+ * Vercel credentials (the function's OIDC token) never leave our functions; this process uses its worker token.
+ */
+export const SANDBOX = {
+  /** Explicit choice in this process's env; null = take the server's. */
+  provider: (env.RUNNER === "vercel" ? "vercel" : env.OCTILLION_SANDBOX_PROVIDER === "vercel" ? "vercel" : env.OCTILLION_SANDBOX_PROVIDER === "boat" ? "boat" : null) as "boat" | "vercel" | null,
+  /** Vercel size: small 1 vCPU / 2 GB, default 2 / 4, large 4 / 8, xlarge 8 / 16 (2 GB per vCPU, as Vercel allocates). */
+  vercelSize: env.OCTILLION_VERCEL_WORKER_SIZE ?? "default",
+  /** Longest single broker call (s): the API function stops at 300 s, so execs and log follows stay well under it. */
+  vercelExecMaxSeconds: Math.max(30, Math.min(270, num(env.OCTILLION_VERCEL_EXEC_MAX_SECONDS, 240))),
+  /** Share of the provisioned vCPUs assumed busy, for the cost estimate (agents mostly wait on the model). */
+  vercelCpuActiveShare: Math.max(0, Math.min(1, num(env.OCTILLION_VERCEL_CPU_ACTIVE_SHARE, 0.3))),
+};
+export const VERCEL_SIZES: Record<string, { vcpus: number; memoryMb: number }> = {
+  small: { vcpus: 1, memoryMb: 2048 }, default: { vcpus: 2, memoryMb: 4096 }, large: { vcpus: 4, memoryMb: 8192 }, xlarge: { vcpus: 8, memoryMb: 16384 },
+};
+/**
+ * Vercel Sandbox prices (Pro, iad1; https://vercel.com/docs/sandbox/pricing, 2026-11): active CPU per vCPU-hour, provisioned
+ * memory per GB-hour (1-minute minimum), creations. Estimate for /complete metadata only (src/sandbox-probe.ts: same rates).
+ */
+export const VERCEL_SANDBOX_PRICE = { cpuHour: 0.128, memGbHour: 0.0212, creation: 0.6 / 1e6 };
+export function vercelEstCostUsd(size: string, seconds: number, cpuShare = SANDBOX.vercelCpuActiveShare): number {
+  const s = VERCEL_SIZES[size] ?? VERCEL_SIZES.default!;
+  const h = seconds / 3600, memH = Math.max(seconds, 60) / 3600;
+  return Number((s.vcpus * cpuShare * h * VERCEL_SANDBOX_PRICE.cpuHour + (s.memoryMb / 1024) * memH * VERCEL_SANDBOX_PRICE.memGbHour + VERCEL_SANDBOX_PRICE.creation).toFixed(5));
+}
 
 /** The orchestrator brain (Pi). Its key is used only in this process and never reaches a sandbox. */
 export const ORCH = {

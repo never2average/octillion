@@ -22,10 +22,11 @@ import type { HarnessAdapter } from "../harnesses/adapters.js";
 import { seedBase, seedScript, type TemplateId } from "./workspaces.js";
 import type { SessionEnvironment } from "./environment.js";
 import { envInstallScript, harnessWiringScript, parseEnvLines, toolsFor } from "./env-install.js";
-import { BOAT, BOAT_PRICE_PER_HOUR, CFG } from "./config.js";
-import { HttpError, log, sh, shq, sleep, withRetry } from "./util.js";
-import { EGRESS_DIR, proxyEnv, proxySource, probeSource, diagnosticsScript as egressDiagnostics, setupScript as egressSetupScript, type EgressPolicy } from "./egress.js";
-import { boatApi, boatCommandRetry, boatCreate, boatExec, boatExecStream, boatSandboxPath, BoatError } from "./boat.js";
+import { BOAT, CFG, SANDBOX } from "./config.js";
+import { log, sh, shq, sleep, withRetry } from "./util.js";
+import { EGRESS_DIR, proxyEnv, proxySource, probeSource, policyProbeSource, diagnosticsScript as egressDiagnostics, setupScript as egressSetupScript, type EgressPolicy } from "./egress.js";
+import { boatApi } from "./boat.js";
+import { boatProvider, vercelBrokerConfig, vercelProvider, type SandboxProvider } from "./sandbox-provider.js";
 
 export interface RunExit { code: number | null; signal: string | null; error?: string }
 
@@ -316,9 +317,10 @@ export const localRunner: Runner = {
   },
 };
 
-// ---------------------------------------------------------------- boat.dev
+// ---------------------------------------------------------------- VM runner (boat.dev, Vercel Sandbox)
 //
-// One fresh VM per session, driven over the REST API (https://docs.boat.dev/api/v1):
+// One fresh VM per session, driven over a provider's REST API (core/sandbox-provider.ts). On boat.dev
+// (https://docs.boat.dev/api/v1):
 //   POST /sandboxes {type, ttlSeconds, noEnv:true, snapshots:false} (Idempotency-Key); poll GET until ready
 //   PUT  /files: env + scripts + per-turn input -> /tmp/octi (mode 700, Boat's user; the agent user can't read it)
 //   POST /commands: prepare (sync); per turn: launch (detached) + follow its JSONL (stream:true); diff (stream)
@@ -328,9 +330,12 @@ export const localRunner: Runner = {
 // We don't use Boat's managed POST /prompt + GET /events: Boat injects its own system prompt, `boat` skill and
 // `computer` MCP server into managed harnesses (breaks blindness), and its events are a normalized format without
 // Claude's `result` usage/cost. We exec the stock preinstalled CLI as an isolated user under `env -i`.
+//
+// On Vercel Sandbox the same scripts run through Octillion's broker (src/worker-sandboxes.ts): files, sync / streamed /
+// detached commands, network policy and delete map one to one; the image is Amazon Linux 2023 (user vercel-sandbox with
+// sudo, Node from /vercel/runtimes), which the setup scripts detect.
 
 const BOAT_DIR = "/tmp/octi";
-const TAIL_SECONDS = 540; // each streamed tail call stays under the 600s command cap, then reconnects
 
 function boatRunAs(): string {
   return BOAT.agentUser === "agent" ? "sudo -n -u agent -H" : "";
@@ -341,30 +346,30 @@ function boatRunAs(): string {
  * wire them into the harness as the agent user (config under its HOME only). Never fails the session: a tool that does
  * not install is reported, and the agent runs without it.
  */
-async function boatEnvironment(id: string, put: (path: string, content: string) => Promise<unknown>, harness: string, env: SessionEnvironment): Promise<EnvironmentResult> {
+async function vmEnvironment(p: SandboxProvider, id: string, put: (path: string, content: string) => Promise<unknown>, harness: string, env: SessionEnvironment): Promise<EnvironmentResult> {
   const t0 = Date.now();
   let tools = toolsFor(harness, env);
   // Zed over ACP needs the client file; without it the session runs as a CLI rather than failing.
   if (tools.some((t) => t.id === "acp/client")) {
     try { await put(`${BOAT_DIR}/acp-client.mjs`, readFileSync(ACP_CLIENT_SRC, "utf8")); }
-    catch (e) { log(`[boat ${id}] ACP client unavailable (${String(e).slice(0, 200)}); running as a CLI`); tools = tools.filter((t) => !t.id.startsWith("acp/")); }
+    catch (e) { log(`[${p.name} ${id}] ACP client unavailable (${String(e).slice(0, 200)}); running as a CLI`); tools = tools.filter((t) => !t.id.startsWith("acp/")); }
   }
   await put(`${BOAT_DIR}/env-install.sh`, envInstallScript(tools));
   // One call per tool: boat caps a command at 600s, and a slow install (a JDK) must not take the others with it.
   const inst = { exitCode: 0, stdout: "", stderr: "" };
   for (let i = 0; i < tools.length; i++) {
-    const r = await boatExec(id, `ACP_CLIENT_SRC=${BOAT_DIR}/acp-client.mjs bash ${BOAT_DIR}/env-install.sh ${i}`, 600)
+    const r = await p.exec(id, `ACP_CLIENT_SRC=${BOAT_DIR}/acp-client.mjs bash ${BOAT_DIR}/env-install.sh ${i}`, { timeoutSec: 600 })
       .catch((e) => ({ exitCode: -1, stdout: `ENV ${tools[i]!.id} fail 0\n`, stderr: String(e) }));
     inst.stdout += r.stdout;
     if (r.exitCode !== 0) { inst.exitCode = r.exitCode ?? -1; inst.stderr += `${tools[i]!.id}: ${r.stderr.slice(-300)}\n`; }
   }
   const wiring = harnessWiringScript(harness, tools, env);
   await put(`${BOAT_DIR}/env-wire.sh`, wiring.script);
-  const wire = await boatExec(id, `cd / && ${boatRunAs()} env -i HOME=${AGENT_HOME} PATH="$(cat ${BOAT_DIR}/path)" bash -s < ${BOAT_DIR}/env-wire.sh`, 300)
+  const wire = await p.exec(id, `cd / && ${boatRunAs()} env -i HOME=${AGENT_HOME} PATH="$(cat ${BOAT_DIR}/path)" bash -s < ${BOAT_DIR}/env-wire.sh`, { timeoutSec: 300 })
     .catch((e) => ({ exitCode: -1, stdout: "", stderr: String(e) }));
   const r = parseEnvLines(`${inst.stdout}\n${wire.stdout}`);
   if (r.failed.length || inst.exitCode !== 0 || wire.exitCode !== 0)
-    log(`[boat ${id}] environment: failed ${r.failed.join(", ") || "-"}: ${(inst.stderr || "").slice(-400)} ${wire.exitCode !== 0 ? `wiring: ${(wire.stderr || "").slice(-300)}` : ""}`);
+    log(`[${p.name} ${id}] environment: failed ${r.failed.join(", ") || "-"}: ${(inst.stderr || "").slice(-400)} ${wire.exitCode !== 0 ? `wiring: ${(wire.stderr || "").slice(-300)}` : ""}`);
   // ACP only when its pieces are really there (installed now or already present), never on silence.
   const have = new Set([...r.installed, ...r.present]);
   const acpOk = tools.filter((t) => t.id.startsWith("acp/")).every((t) => have.has(t.id)) && tools.some((t) => t.id === "acp/client");
@@ -407,10 +412,11 @@ $RUN env -i HOME="$AH" PATH="$(cat "$O/path")" bash -c 'command -v ${bin}' >/dev
 `;
 }
 
-function boatLaunchScript(n: number, argv: string[]): string {
+/** `pidFile`: the launcher records its own pid (providers that don't report one: the follower's `tail --pid`). */
+function boatLaunchScript(n: number, argv: string[], pidFile = false): string {
   const hardLimit = Math.ceil(CFG.maxSessionMs / 1000) + 60; // the worker kills first; belt and braces
   return `cd /
-O=${BOAT_DIR}; AH=${AGENT_HOME}
+${pidFile ? `echo $$ > ${BOAT_DIR}/pid-${n}\n` : ""}O=${BOAT_DIR}; AH=${AGENT_HOME}
 U=${BOAT.agentUser === "agent" ? "agent" : "$(id -un)"}
 # This run's credentials: handed to the agent user (0600), sourced and deleted before the harness execs.
 sudo -n install -o "$(cat "$O/owner")" -m 600 "$O/env-${n}" "$AH/.octi-env-${n}" && rm -f "$O/env-${n}"
@@ -478,251 +484,255 @@ echo "harness ${harness}: drift $cur (pinned $pin; no boat-setup script)"`}
 `;
 }
 
-export const boatRunner: Runner = {
-  name: "boat",
-  async open(spec) {
-    // Start gate + 429/503 backoff, same Idempotency-Key on retries (a lost response never creates a second VM).
-    let created: any;
-    try {
-      created = await boatCreate(
-        { type: BOAT.size, ttlSeconds: BOAT.ttlSeconds, noEnv: true, snapshots: false, ...(BOAT.org ? { org: BOAT.org } : {}) },
-        { onBackoff: (ms, e) => log(`boat create backing off ${Math.round(ms / 1000)}s (${e.status} ${e.code})`) });
-    } catch (e) {
-      // Seen live (2026-10-10): a key scoped without sandbox.create gets 403 api_key_action_forbidden.
-      if (e instanceof BoatError && e.code === "api_key_action_forbidden")
-        throw new Error(`boat key is not allowed to create sandboxes (${e.message}). Store a key with the ci preset (sandbox.create + delete-own + exec + files) in the vault.`);
-      throw e;
-    }
-    const id: string = created?.sandbox?.id;
-    let envResult: EnvironmentResult | undefined;
-    let harnessDrift: { found: string; pinned: string } | null = null;
-    let egressReport: { hosts: number; probe: unknown } | undefined;
-    if (!id) throw new Error(`boat create returned no sandbox id: ${JSON.stringify(created).slice(0, 300)}`);
-    // A recognisable name, so `status` / cleanup can attribute worker sandboxes (best effort).
-    void boatApi(boatSandboxPath(id), { method: "PATCH", json: { name: workerSandboxName(spec.agentId ?? spec.adapter.id) } }).catch(() => {});
-    const createdAt = Date.now();
-    let destroyedAt: number | null = null;
-    let destroying: Promise<void> | null = null;
-    const abort = new AbortController();
+/** Runners whose sandboxes are provider VMs (fleet assignment, egress lockdown). */
+export const isVmRunner = (r: { name: string }) => r.name === "boat" || r.name === "vercel";
 
-    const destroy = () => (destroying ??= (async () => {
-      abort.abort();
+/**
+ * One VM per session on `p`: create, prepare (harness pinned, workdir, repo or template), optional developer environment
+ * and egress lockdown, then turns as detached launches followed by line number. boatRunner = vmRunner(boatProvider).
+ */
+export function vmRunner(p: SandboxProvider): Runner {
+  return {
+    name: p.name,
+    async open(spec) {
+      const id = await p.create({ size: p.size, timeoutSec: BOAT.ttlSeconds, name: workerSandboxName(spec.agentId ?? spec.adapter.id), sessionId: spec.jobKey });
+      let envResult: EnvironmentResult | undefined;
+      let harnessDrift: { found: string; pinned: string } | null = null;
+      let egressReport: { hosts: number; probe: unknown } | undefined;
+      const createdAt = Date.now();
+      let destroyedAt: number | null = null;
+      let destroying: Promise<void> | null = null;
+      const abort = new AbortController();
+      const tag = `[${p.name} ${id}]`;
+
+      const destroy = () => (destroying ??= (async () => {
+        abort.abort();
+        await p.delete(id);
+        destroyedAt = Date.now();
+      })());
+
+      const put = (path: string, content: string) => withRetry(() => p.writeFile(id, path, content), 3);
+      const exec = (command: string, timeoutSec: number) => p.exec(id, command, { timeoutSec });
+
       try {
-        if (BOAT.onFinish === "stop") await withRetry(() => boatApi(`${boatSandboxPath(id)}/stop`, { method: "POST", json: {} }), 3);
-        else await withRetry(() => boatApi(boatSandboxPath(id), { method: "DELETE", headers: { "X-Ascii-Confirm-Delete": id } }), 3);
+        await p.waitReady(id, BOAT.readyTimeoutMs);
+        const mk = await exec(`install -d -m 700 ${BOAT_DIR}`, 30);
+        if (mk.exitCode !== 0) throw new Error(`mkdir ${BOAT_DIR} failed: ${mk.stderr.slice(-300)}`);
+        // Harness pinned by the registry: keep the preinstalled CLI when it is the pinned version, otherwise
+        // install it system-wide with orchestrator/images/boat-setup/<harness>.sh (which verifies `--version`).
+        const pin = harnessPin(spec.agentId, spec.adapter.id);
+        const setup = boatSetupScripts(spec.adapter.id);
+        if (setup) {
+          await put(`${BOAT_DIR}/setup/_common.sh`, setup.common);
+          await put(`${BOAT_DIR}/setup/${spec.adapter.id}.sh`, setup.script);
+        }
+        const ensure = await exec(boatEnsureHarnessScript(spec.adapter.id, spec.adapter.bin, pin, !!setup), 600);
+        if (ensure.exitCode !== 0) throw new Error(`harness ${spec.adapter.id}${pin ? `@${pin}` : ""} not available: ${(ensure.stderr || ensure.stdout).slice(-800)}`);
+        // Ran on another version than the pin (see boatEnsureHarnessScript): kept on the session, not a failure.
+        const drift = /harness \S+: drift (.+?) \(pinned ([^;)]+)/.exec(ensure.stdout);
+        harnessDrift = drift ? { found: drift[1]!.trim().slice(0, 80), pinned: drift[2]!.trim() } : null;
+        if (harnessDrift) log(`${tag} ${spec.adapter.id} runs ${harnessDrift.found}, pinned ${harnessDrift.pinned}`);
+        const seed = !spec.repoUrl && !!spec.template;
+        if (seed) await put(`${BOAT_DIR}/seed.sh`, seedScript(spec.template!));
+        await put(`${BOAT_DIR}/prepare.sh`, boatPrepareScript(spec.adapter.bin, spec.repoUrl, seed));
+        await put(`${BOAT_DIR}/diff.sh`, boatDiffScript());
+        const prep = await exec(`bash ${BOAT_DIR}/prepare.sh`, 600);
+        if (prep.exitCode !== 0) throw new Error(`sandbox prepare failed (exit ${prep.exitCode}): ${(prep.stderr || prep.stdout).slice(-800)}`);
+        if (spec.environment) envResult = await vmEnvironment(p, id, put, spec.adapter.id, spec.environment);
+        // Last step before the agent's first turn: everything that needs the network (harness, repo, tools) is done.
+        if (spec.egress) {
+          if (BOAT.agentUser !== "agent") throw new Error("egress lockdown needs the unprivileged agent user (BOAT_AGENT_USER)");
+          let probeCmd: string;
+          if (p.lockdown) {
+            // Native allow-list (Vercel network policy): the whole VM reaches only these hosts, enforced outside the VM.
+            await p.lockdown(id, spec.egress.hosts);
+            await put(`${BOAT_DIR}/egress-probe.mjs`, policyProbeSource(spec.egress.gatewayHost));
+            probeCmd = `cd / && NODE="$(command -v node)" && ${boatRunAs()} env -i HOME=${AGENT_HOME} PATH="$(cat ${BOAT_DIR}/path)" "$NODE" ${BOAT_DIR}/egress-probe.mjs`;
+          } else {
+            await put(`${BOAT_DIR}/egress-proxy.mjs`, proxySource());
+            await put(`${BOAT_DIR}/egress-allow.json`, JSON.stringify({ hosts: spec.egress.hosts }));
+            await put(`${BOAT_DIR}/egress-probe.mjs`, probeSource(spec.egress.gatewayHost));
+            await put(`${BOAT_DIR}/egress-setup.sh`, egressSetupScript(BOAT_DIR));
+            const lock = await exec(`bash ${BOAT_DIR}/egress-setup.sh`, 120);
+            if (lock.exitCode !== 0) throw new Error(`egress lockdown failed (exit ${lock.exitCode}): ${(lock.stderr || lock.stdout).slice(-600)}`);
+            probeCmd = `cd / && NODE="$(command -v node)" && ${boatRunAs()} env -i HOME=${AGENT_HOME} PATH="$(cat ${BOAT_DIR}/path)" "$NODE" ${EGRESS_DIR}/probe.mjs`;
+          }
+          const probe = await exec(probeCmd, 120);
+          const last = probe.stdout.trim().split("\n").pop() ?? "";
+          if (probe.exitCode !== 0) {
+            // The VM is destroyed right after this: collect what the proxy and firewall look like first.
+            const diag = p.lockdown ? "" : await exec(egressDiagnostics(), 60).then((d) => d.stdout.trim().slice(-1400), () => "(diagnostics unavailable)");
+            let failedChecks = last.slice(0, 300);
+            try { failedChecks = JSON.parse(last).checks.filter((c: { want: boolean; got: boolean }) => c.want !== c.got).map((c: { name: string }) => c.name).join("; "); } catch { /* keep raw */ }
+            throw new Error(`egress probe failed, refusing to run the agent. Unexpected: ${failedChecks || probe.stderr.slice(-300)}\n${diag}`);
+          }
+          egressReport = { hosts: spec.egress.hosts.length, probe: JSON.parse(last) };
+          log(`${tag} egress locked down${p.lockdown ? " (network policy)" : ""}: ${spec.egress.hosts.length} allowed hosts, probe ok`);
+        }
       } catch (e) {
-        if (!(e instanceof HttpError && e.status === 404)) {
-          log(`[boat ${id}] ${BOAT.onFinish} failed, falling back to stop:`, String(e));
-          await boatApi(`${boatSandboxPath(id)}/stop`, { method: "POST", json: { force: true } }).catch((e2) =>
-            log(`[boat ${id}] stop failed too; it auto-stops at its TTL (${BOAT.ttlSeconds}s after create):`, String(e2)));
-        }
+        await destroy();
+        throw e;
       }
-      destroyedAt = Date.now();
-    })());
 
-    const put = (path: string, content: string) =>
-      withRetry(() => boatApi(`${boatSandboxPath(id)}/files`, { method: "PUT", json: { path, content } }), 3);
+      let turnNo = 0;
+      let finishCurrent: ((x: RunExit) => void) | null = null;
 
-    try {
-      const until = Date.now() + BOAT.readyTimeoutMs;
-      for (;;) {
-        const g = await withRetry(() => boatApi(boatSandboxPath(id)), 3);
-        const st = g?.sandbox?.state;
-        if (st === "ready" || st === "idle" || st === "running") break;
-        if (st === "error" || st === "cancelled" || st === "archived" || st === "archiving") throw new Error(`boat sandbox ${id} is ${st}: ${g?.sandbox?.error ?? ""}`);
-        if (Date.now() > until) throw new Error(`boat sandbox ${id} not ready after ${BOAT.readyTimeoutMs / 1000}s (state ${st})`);
-        await sleep(2000);
-      }
-      const mk = await boatExec(id, `install -d -m 700 ${BOAT_DIR}`, 30);
-      if (mk.exitCode !== 0) throw new Error(`mkdir ${BOAT_DIR} failed: ${mk.stderr.slice(-300)}`);
-      // Harness pinned by the registry: keep boat's preinstalled CLI when it is the pinned version, otherwise
-      // install it system-wide with orchestrator/images/boat-setup/<harness>.sh (which verifies `--version`).
-      const pin = harnessPin(spec.agentId, spec.adapter.id);
-      const setup = boatSetupScripts(spec.adapter.id);
-      if (setup) {
-        await put(`${BOAT_DIR}/setup/_common.sh`, setup.common);
-        await put(`${BOAT_DIR}/setup/${spec.adapter.id}.sh`, setup.script);
-      }
-      const ensure = await boatExec(id, boatEnsureHarnessScript(spec.adapter.id, spec.adapter.bin, pin, !!setup), 600);
-      if (ensure.exitCode !== 0) throw new Error(`harness ${spec.adapter.id}${pin ? `@${pin}` : ""} not available: ${(ensure.stderr || ensure.stdout).slice(-800)}`);
-      // Ran on another version than the pin (see boatEnsureHarnessScript): kept on the session, not a failure.
-      const drift = /harness \S+: drift (.+?) \(pinned ([^;)]+)/.exec(ensure.stdout);
-      harnessDrift = drift ? { found: drift[1]!.trim().slice(0, 80), pinned: drift[2]!.trim() } : null;
-      if (harnessDrift) log(`[boat ${id}] ${spec.adapter.id} runs ${harnessDrift.found}, pinned ${harnessDrift.pinned}`);
-      const seed = !spec.repoUrl && !!spec.template;
-      if (seed) await put(`${BOAT_DIR}/seed.sh`, seedScript(spec.template!));
-      await put(`${BOAT_DIR}/prepare.sh`, boatPrepareScript(spec.adapter.bin, spec.repoUrl, seed));
-      await put(`${BOAT_DIR}/diff.sh`, boatDiffScript());
-      const prep = await boatExec(id, `bash ${BOAT_DIR}/prepare.sh`, 600);
-      if (prep.exitCode !== 0) throw new Error(`sandbox prepare failed (exit ${prep.exitCode}): ${(prep.stderr || prep.stdout).slice(-800)}`);
-      if (spec.environment) envResult = await boatEnvironment(id, put, spec.adapter.id, spec.environment);
-      // Last step before the agent's first turn: everything that needs the network (harness, repo, tools) is done.
-      if (spec.egress) {
-        if (BOAT.agentUser !== "agent") throw new Error("egress lockdown needs the unprivileged agent user (BOAT_AGENT_USER)");
-        await put(`${BOAT_DIR}/egress-proxy.mjs`, proxySource());
-        await put(`${BOAT_DIR}/egress-allow.json`, JSON.stringify({ hosts: spec.egress.hosts }));
-        await put(`${BOAT_DIR}/egress-probe.mjs`, probeSource(spec.egress.gatewayHost));
-        await put(`${BOAT_DIR}/egress-setup.sh`, egressSetupScript(BOAT_DIR));
-        const lock = await boatExec(id, `bash ${BOAT_DIR}/egress-setup.sh`, 120);
-        if (lock.exitCode !== 0) throw new Error(`egress lockdown failed (exit ${lock.exitCode}): ${(lock.stderr || lock.stdout).slice(-600)}`);
-        const probe = await boatExec(id, `cd / && NODE="$(command -v node)" && ${boatRunAs()} env -i HOME=${AGENT_HOME} PATH="$(cat ${BOAT_DIR}/path)" "$NODE" ${EGRESS_DIR}/probe.mjs`, 120);
-        const last = probe.stdout.trim().split("\n").pop() ?? "";
-        if (probe.exitCode !== 0) {
-          // The VM is destroyed right after this: collect what the proxy and firewall look like first.
-          const diag = await boatExec(id, egressDiagnostics(), 60).then((d) => d.stdout.trim().slice(-1400), () => "(diagnostics unavailable)");
-          let failedChecks = last.slice(0, 300);
-          try { failedChecks = JSON.parse(last).checks.filter((c: { want: boolean; got: boolean }) => c.want !== c.got).map((c: { name: string }) => c.name).join("; "); } catch { /* keep raw */ }
-          throw new Error(`egress probe failed, refusing to run the agent. Unexpected: ${failedChecks || probe.stderr.slice(-300)}\n${diag}`);
-        }
-        egressReport = { hosts: spec.egress.hosts.length, probe: JSON.parse(last) };
-        log(`[boat ${id}] egress locked down: ${spec.egress.hosts.length} allowed hosts, probe ok`);
-      }
-    } catch (e) {
-      await destroy();
-      throw e;
-    }
+      return {
+        id: `${p.name}:${id}`,
+        workdir: AGENT_WORKDIR,
+        environment: envResult,
+        egress: egressReport,
+        async runTurn(argv, input, env) {
+          const n = ++turnNo;
+          if (spec.egress && !p.lockdown) env = { ...env, ...proxyEnv() }; // HTTP clients go through the in-VM proxy
+          argv = [...argv];
+          argv[0] = argv[0]!.split("/").pop()!; // host bin overrides don't apply in the VM
+          await put(`${BOAT_DIR}/env-${n}`, Object.entries(env).map(([k, v]) => `${k}=${shq(v)}`).join("\n") + "\n");
+          await put(`${BOAT_DIR}/in-${n}.txt`, input); // byte-for-byte; fed to the CLI on stdin
+          await put(`${BOAT_DIR}/launch-${n}.sh`, boatLaunchScript(n, argv, p.name !== "boat"));
+          const started = await p.execDetached(id, `bash ${BOAT_DIR}/launch-${n}.sh`);
+          const pidArg = started.pid != null && Number.isFinite(started.pid) ? `--pid=${started.pid}` : `\${P:+--pid=$P}`;
+          const pidRead = started.pid != null && Number.isFinite(started.pid) ? "" : `for i in 1 2 3 4 5; do P=$(cat ${BOAT_DIR}/pid-${n} 2>/dev/null); [ -n "$P" ] && break; sleep 1; done; `;
 
-    let turnNo = 0;
-    let finishCurrent: ((x: RunExit) => void) | null = null;
-
-    return {
-      id: `boat:${id}`,
-      workdir: AGENT_WORKDIR,
-      environment: envResult,
-      egress: egressReport,
-      async runTurn(argv, input, env) {
-        const n = ++turnNo;
-        if (spec.egress) env = { ...env, ...proxyEnv() }; // HTTP clients go through the in-VM proxy
-        argv = [...argv];
-        argv[0] = argv[0]!.split("/").pop()!; // host bin overrides don't apply in the VM
-        await put(`${BOAT_DIR}/env-${n}`, Object.entries(env).map(([k, v]) => `${k}=${shq(v)}`).join("\n") + "\n");
-        await put(`${BOAT_DIR}/in-${n}.txt`, input); // byte-for-byte; fed to the CLI on stdin
-        await put(`${BOAT_DIR}/launch-${n}.sh`, boatLaunchScript(n, argv));
-        const started = await boatCommandRetry(() => boatApi(`${boatSandboxPath(id)}/commands`, {
-          method: "POST", json: { command: `bash ${BOAT_DIR}/launch-${n}.sh`, detached: true },
-        }));
-        const processId = Number(started?.processId);
-        const pid = Number(started?.pid ?? started?.processId);
-        if (!Number.isFinite(processId)) throw new Error(`boat detached start returned no processId: ${JSON.stringify(started).slice(0, 300)}`);
-
-        const stdout = new PassThrough();
-        const stderr = new PassThrough();
-        let finished = false;
-        let resolveExit!: (x: RunExit) => void;
-        const exited = new Promise<RunExit>((r) => (resolveExit = r));
-        const finish = (x: RunExit) => {
-          if (finished) return;
-          finished = true;
-          finishCurrent = null;
-          stdout.end();
-          stderr.end();
-          resolveExit(x);
-        };
-        finishCurrent = finish;
-        const out = `${BOAT_DIR}/out-${n}.jsonl`;
-
-        // Follow out-N.jsonl by line number, reconnecting every TAIL_SECONDS; `tail --pid` returns once the launcher exits.
-        void (async () => {
-          let lines = 0;
-          let partial = "";
-          const onOut = (d: string) => {
-            partial += d;
-            let i: number;
-            while ((i = partial.indexOf("\n")) >= 0) {
-              const line = partial.slice(0, i);
-              partial = partial.slice(i + 1);
-              lines++;
-              stdout.write(line + "\n");
-            }
+          const stdout = new PassThrough();
+          const stderr = new PassThrough();
+          let finished = false;
+          let resolveExit!: (x: RunExit) => void;
+          const exited = new Promise<RunExit>((r) => (resolveExit = r));
+          const finish = (x: RunExit) => {
+            if (finished) return;
+            finished = true;
+            finishCurrent = null;
+            stdout.end();
+            stderr.end();
+            resolveExit(x);
           };
-          const noop = () => {};
-          let failures = 0;
-          try {
-            for (;;) {
-              if (abort.signal.aborted) return;
-              const t0 = Date.now();
-              partial = ""; // a torn last line is re-read from its start by the next call
-              try {
-                await boatExecStream(id, `timeout ${TAIL_SECONDS} tail -n +${lines + 1} -F --pid=${pid} ${out} 2>/dev/null; true`,
-                  TAIL_SECONDS + 30, onOut, noop, abort.signal);
-                failures = 0;
-              } catch (e) {
-                if (abort.signal.aborted) return;
-                if (++failures > 10) throw e;
-                log(`[boat ${id}] tail stream failed (${failures}), reconnecting:`, String(e));
-              }
-              const st = await withRetry(() => boatApi(`${boatSandboxPath(id)}/commands/${processId}?tailBytes=2000`, { signal: abort.signal }), 3);
-              if (!st?.running) break;
-              if (Date.now() - t0 < 5000) await sleep(3000); // don't hot-loop if tail returns early
-            }
-            // The run has exited and its output is on disk: a dropped connection here (ECONNRESET mid-stream) must not
-            // fail a finished session. Both reads are idempotent; the drain resumes after the last complete line.
-            const afterExit = async <T>(what: string, fn: () => Promise<T>): Promise<T> => {
-              for (let attempt = 1; ; attempt++) {
-                try { return await fn(); }
-                catch (e) {
-                  if (abort.signal.aborted || attempt >= 6) throw e;
-                  log(`[boat ${id}] ${what} failed (${attempt}), retrying:`, String(e));
-                  await sleep(Math.min(2000 * attempt, 10_000));
-                }
+          finishCurrent = finish;
+          const out = `${BOAT_DIR}/out-${n}.jsonl`;
+
+          // Follow out-N.jsonl by line number, reconnecting every tailSeconds; `tail --pid` returns once the launcher exits.
+          void (async () => {
+            let lines = 0;
+            let partial = "";
+            const onOut = (d: string) => {
+              partial += d;
+              let i: number;
+              while ((i = partial.indexOf("\n")) >= 0) {
+                const line = partial.slice(0, i);
+                partial = partial.slice(i + 1);
+                lines++;
+                stdout.write(line + "\n");
               }
             };
-            await afterExit("final output drain", () => {
-              partial = ""; // a torn last line is re-read from its start
-              return boatExecStream(id, `tail -n +${lines + 1} ${out} 2>/dev/null; true`, 120, onOut, noop, abort.signal);
-            });
-            if (partial.trim()) { stdout.write(partial + "\n"); partial = ""; }
-            const fin = await afterExit("exit status read", () =>
-              boatExec(id, `cat ${BOAT_DIR}/exit-${n} 2>/dev/null; tail -c 8000 ${BOAT_DIR}/err-${n}.log >&2 2>/dev/null; true`, 60));
-            if (fin.stderr) stderr.write(fin.stderr);
-            const code = /^\s*(\d+)/.exec(fin.stdout)?.[1];
-            finish({ code: code !== undefined ? Number(code) : null, signal: null });
+            const noop = () => {};
+            let failures = 0;
+            try {
+              for (;;) {
+                if (abort.signal.aborted) return;
+                const t0 = Date.now();
+                partial = ""; // a torn last line is re-read from its start by the next call
+                try {
+                  await p.execStream(id, `${pidRead}timeout ${p.tailSeconds} tail -n +${lines + 1} -F ${pidArg} ${out} 2>/dev/null; true`,
+                    { timeoutSec: p.tailSeconds + 30, onStdout: onOut, onStderr: noop, signal: abort.signal });
+                  failures = 0;
+                } catch (e) {
+                  if (abort.signal.aborted) return;
+                  if (++failures > 10) throw e;
+                  log(`${tag} tail stream failed (${failures}), reconnecting:`, String(e));
+                }
+                if (!(await p.running(id, started.handle, abort.signal))) break;
+                if (Date.now() - t0 < 5000) await sleep(3000); // don't hot-loop if tail returns early
+              }
+              // The run has exited and its output is on disk: a dropped connection here (ECONNRESET mid-stream) must not
+              // fail a finished session. Both reads are idempotent; the drain resumes after the last complete line.
+              const afterExit = async <T>(what: string, fn: () => Promise<T>): Promise<T> => {
+                for (let attempt = 1; ; attempt++) {
+                  try { return await fn(); }
+                  catch (e) {
+                    if (abort.signal.aborted || attempt >= 6) throw e;
+                    log(`${tag} ${what} failed (${attempt}), retrying:`, String(e));
+                    await sleep(Math.min(2000 * attempt, 10_000));
+                  }
+                }
+              };
+              await afterExit("final output drain", () => {
+                partial = ""; // a torn last line is re-read from its start
+                return p.execStream(id, `tail -n +${lines + 1} ${out} 2>/dev/null; true`, { timeoutSec: 120, onStdout: onOut, onStderr: noop, signal: abort.signal });
+              });
+              if (partial.trim()) { stdout.write(partial + "\n"); partial = ""; }
+              const fin = await afterExit("exit status read", () =>
+                exec(`cat ${BOAT_DIR}/exit-${n} 2>/dev/null; tail -c 8000 ${BOAT_DIR}/err-${n}.log >&2 2>/dev/null; true`, 60));
+              if (fin.stderr) stderr.write(fin.stderr);
+              const code = /^\s*(\d+)/.exec(fin.stdout)?.[1];
+              finish({ code: code !== undefined ? Number(code) : null, signal: null });
+            } catch (e) {
+              if (abort.signal.aborted) finish({ code: null, signal: "SIGKILL" });
+              else finish({ code: null, signal: null, error: `${p.name} runner: ${String(e instanceof Error ? e.message : e)}` });
+            } finally {
+              if (abort.signal.aborted) finish({ code: null, signal: "SIGKILL" });
+            }
+          })();
+          return { stdout, stderr, exited };
+        },
+        async diff() {
+          if (abort.signal.aborted) return null;
+          let d = "";
+          try {
+            await p.execStream(id, `bash ${BOAT_DIR}/diff.sh`, { timeoutSec: 300, onStdout: (s) => { if (d.length <= BOAT.diffMaxBytes) d += s; }, onStderr: () => {}, signal: abort.signal });
           } catch (e) {
-            if (abort.signal.aborted) finish({ code: null, signal: "SIGKILL" });
-            else finish({ code: null, signal: null, error: `boat runner: ${String(e instanceof Error ? e.message : e)}` });
-          } finally {
-            if (abort.signal.aborted) finish({ code: null, signal: "SIGKILL" });
+            log(`${tag} diff failed:`, String(e));
+            return null;
           }
-        })();
-        return { stdout, stderr, exited };
-      },
-      async diff() {
-        if (abort.signal.aborted) return null;
-        let d = "";
-        try {
-          await boatExecStream(id, `bash ${BOAT_DIR}/diff.sh`, 300, (s) => { if (d.length <= BOAT.diffMaxBytes) d += s; }, () => {}, abort.signal);
-        } catch (e) {
-          log(`[boat ${id}] diff failed:`, String(e));
-          return null;
-        }
-        return capDiff(d);
-      },
-      async stopTurn() {
-        // The harness runs under `timeout -k 30 <limit>`; GNU timeout forwards SIGTERM to the CLI.
-        if (abort.signal.aborted) return;
-        await boatExec(id, "sudo -n pkill -TERM -f '^timeout -k 30 ' || pkill -TERM -f '^timeout -k 30 ' || true", 30).catch(() => {});
-      },
-      async kill() {
-        await destroy(); // DELETE force-stops the VM; aborting ends any follower
-        finishCurrent?.({ code: null, signal: "SIGKILL" });
-      },
-      async cleanup() { await destroy(); },
-      meta() {
-        const secs = ((destroyedAt ?? Date.now()) - createdAt) / 1000;
-        return {
-          ...(spec.template && !spec.repoUrl ? { workspace_template: spec.template } : {}),
-          boat_sandbox_id: id,
-          ...(harnessDrift ? { harness_drift: harnessDrift } : {}),
-          boat_sandbox_type: BOAT.size,
-          boat_sandbox_seconds: Math.round(secs),
-          boat_est_cost_usd: Number(((secs / 3600) * (BOAT_PRICE_PER_HOUR[BOAT.size] ?? 0.036)).toFixed(5)), // exact meter: GET /sandboxes/{id}/usage
-        };
-      },
-    };
-  },
-};
+          return capDiff(d);
+        },
+        async stopTurn() {
+          // The harness runs under `timeout -k 30 <limit>`; GNU timeout forwards SIGTERM to the CLI.
+          if (abort.signal.aborted) return;
+          await exec("sudo -n pkill -TERM -f '^timeout -k 30 ' || pkill -TERM -f '^timeout -k 30 ' || true", 30).catch(() => {});
+        },
+        async kill() {
+          await destroy(); // DELETE force-stops the VM; aborting ends any follower
+          finishCurrent?.({ code: null, signal: "SIGKILL" });
+        },
+        async cleanup() { await destroy(); },
+        meta() {
+          const secs = ((destroyedAt ?? Date.now()) - createdAt) / 1000;
+          const cost = p.estCostUsd(secs); // estimate; boat's exact meter: GET /sandboxes/{id}/usage
+          return {
+            ...(spec.template && !spec.repoUrl ? { workspace_template: spec.template } : {}),
+            // boat_* keys: what the compute pages always read (boat only); sandbox_*: provider-neutral, every provider.
+            ...(p.name === "boat" ? { boat_sandbox_id: id } : {}),
+            ...(harnessDrift ? { harness_drift: harnessDrift } : {}),
+            ...(p.name === "boat" ? { boat_sandbox_type: p.size, boat_sandbox_seconds: Math.round(secs), boat_est_cost_usd: cost } : {}),
+            sandbox_provider: p.name,
+            sandbox_vm_id: id,
+            sandbox_type: p.size,
+            sandbox_seconds: Math.round(secs),
+            sandbox_est_cost_usd: cost,
+          };
+        },
+      };
+    },
+  };
+}
 
-export const RUNNERS: Record<string, Runner> = { boat: boatRunner, docker: dockerRunner, local: localRunner };
+export const boatRunner: Runner = vmRunner(boatProvider);
+/** Vercel Sandbox workers through the API's broker (created lazily: it reads CFG at open time). */
+export const vercelRunner: Runner = vmRunner(vercelProvider());
+
+export const RUNNERS: Record<string, Runner> = { boat: boatRunner, vercel: vercelRunner, docker: dockerRunner, local: localRunner };
+
+/**
+ * The worker runner for this orchestrator: RUNNER=vercel or OCTILLION_SANDBOX_PROVIDER in this env, else the server's
+ * choice (orchestrator credentials `sandbox_provider`), else RUNNER. Only RUNNER=boat is redirected; docker/local/pool stay.
+ */
+export function selectRunner(runnerName: string, serverProvider: string | null | undefined, envProvider: "boat" | "vercel" | null): Runner | undefined {
+  if (runnerName === "boat" || runnerName === "vercel") {
+    const want = envProvider ?? (runnerName === "vercel" ? "vercel" : serverProvider === "vercel" ? "vercel" : "boat");
+    return want === "vercel" ? vercelRunner : boatRunner;
+  }
+  return RUNNERS[runnerName];
+}
 
 /** Startup checks for the selected runner. */
 export async function checkRunner(runner: Runner): Promise<void> {
@@ -730,6 +740,12 @@ export async function checkRunner(runner: Runner): Promise<void> {
     if (!BOAT.apiKey) throw new Error("BOAT_API_KEY is required for RUNNER=boat (create one with `boat api-key create octillion-worker --preset ci --ttl 90d`)");
     const me = await boatApi("/me").catch((e) => { throw new Error(`boat.dev auth check failed: ${String(e)}`); });
     log(`boat.dev OK as ${me?.user?.login ?? me?.login ?? "?"}; size=${BOAT.size} ttl=${BOAT.ttlSeconds}s agentUser=${BOAT.agentUser} onFinish=${BOAT.onFinish}`);
+  }
+  if (runner.name === "vercel") {
+    // Vercel Sandbox is reached only through the API's broker: it must be configured there (the function's OIDC token).
+    const c = await vercelBrokerConfig().catch((e) => { throw new Error(`Vercel Sandbox broker check failed: ${String(e)}`); });
+    if (!c?.configured) throw new Error(`Vercel Sandbox is not configured on the Octillion API: ${c?.reason ?? "unknown"}`);
+    log(`vercel sandbox broker OK (${c.via ?? "?"}, ${c.region ?? "?"}); size=${SANDBOX.vercelSize} timeout=${BOAT.ttlSeconds}s agentUser=${BOAT.agentUser}`);
   }
   if (runner.name === "docker") {
     const r = await sh("docker", ["image", "inspect", CFG.dockerImage]);

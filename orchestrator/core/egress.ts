@@ -205,6 +205,34 @@ echo "--- resolver"; grep -v '^#' /etc/resolv.conf 2>/dev/null | head -3`;
 }
 
 /** Probe program run as the agent after lockdown; prints JSON results and exits 1 on any unexpected outcome. */
+/**
+ * Probe for a provider-enforced allow-list (Vercel Sandbox network policy, applied outside the VM to all of it): run as
+ * the agent, the gateway must answer a TLS handshake and an unlisted host, plain HTTP, public DNS servers and the
+ * metadata IP must not. Same output shape as probeSource; exit 1 on any unexpected result (the open then fails).
+ */
+export function policyProbeSource(gatewayHost: string): string {
+  return `import net from "node:net"; import tls from "node:tls";
+const T = 6000;
+const tcp = (host, port) => new Promise((r) => { const s = net.connect({ host, port, timeout: T }); s.on("connect", () => { s.destroy(); r(true); }); s.on("timeout", () => { s.destroy(); r(false); }); s.on("error", () => r(false)); });
+const tlsOk = (host, servername) => new Promise((r) => {
+  const s = tls.connect({ host, port: 443, servername, timeout: T, rejectUnauthorized: false }, () => { s.destroy(); r(true); });
+  s.on("timeout", () => { s.destroy(); r(false); }); s.on("error", () => r(false)); s.on("close", () => r(false));
+});
+const checks = [
+  ["gateway", true, () => tlsOk(${JSON.stringify(gatewayHost)}, ${JSON.stringify(gatewayHost)})],
+  ["unlisted host", false, () => tlsOk("example.com", "example.com")],
+  ["HTTPS to an unlisted host by IP", false, () => tlsOk("93.184.215.14", "example.com")],
+  ["plain HTTP directly", false, () => tcp("93.184.215.14", 80)],
+  ["public DNS directly", false, () => tcp("1.1.1.1", 53)],
+  ["metadata IP directly", false, () => tcp("169.254.169.254", 80)],
+];
+const out = []; let bad = 0;
+for (const [name, want, f] of checks) { const got = await f(); out.push({ name, want, got }); if (got !== want) bad++; }
+console.log(JSON.stringify({ ok: bad === 0, checks: out }));
+process.exit(bad ? 1 : 0);
+`;
+}
+
 export function probeSource(gatewayHost: string): string {
   return `import net from "node:net"; import tls from "node:tls"; import dns from "node:dns/promises";
 const T = 6000;

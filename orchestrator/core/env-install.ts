@@ -25,12 +25,25 @@ const PRELUDE = String.raw`
 SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo -n"
 export DEBIAN_FRONTEND=noninteractive
 export PATH="/usr/local/bin:$PATH"
-# apt-get update once per sandbox (each tool is its own call: boat caps a command at 600s).
-apt_install() { [ -e /tmp/.apt-updated ] || { $SUDO apt-get update -qq >&2 && touch /tmp/.apt-updated; }; $SUDO apt-get install -y -qq --no-install-recommends "$@" >&2; }
+# apt-get update once per sandbox (each tool is its own call: boat caps a command at 600s). Vercel Sandbox (Amazon Linux
+# 2023) has dnf instead: the Debian package names that differ there are mapped, the rest are asked for as they are.
+apt_install() {
+  if command -v apt-get >/dev/null 2>&1; then
+    [ -e /tmp/.apt-updated ] || { $SUDO apt-get update -qq >&2 && touch /tmp/.apt-updated; }; $SUDO apt-get install -y -qq --no-install-recommends "$@" >&2
+  else
+    local p out=()
+    for p in "$@"; do case "$p" in
+      openjdk-21-jdk-headless) out+=(java-21-amazon-corretto-devel);; clangd) out+=(clang-tools-extra);; postgresql-client) out+=(postgresql16);;
+      redis-tools) out+=(redis6);; sqlite3) out+=(sqlite);; *) out+=("$p");;
+    esac; done
+    $SUDO dnf install -y -q "${"$"}{out[@]}" >&2
+  fi
+}
 fetch() { curl -fsSL --retry 3 --retry-delay 2 -o "$2" "$1"; }
 ensure_node() {
   if [ -x /usr/local/bin/node ] && [ "$(/usr/local/bin/node -p 'process.versions.node.split(".")[0]')" -ge 22 ]; then return 0; fi
   local d; d="$(ls -d /home/*/.nvm/versions/node/v*/bin 2>/dev/null | sort -V -r | head -n1)"
+  [ -n "$d" ] || d="$(ls -d /vercel/runtimes/node*/bin 2>/dev/null | sort -V -r | head -n1)" # Vercel Sandbox
   [ -n "$d" ] && $SUDO install -m 0755 "$d/node" /usr/local/bin/node && $SUDO ln -sf "$d/../lib/node_modules/npm/bin/npm-cli.js" /usr/local/bin/npm
 }
 npm_g() { ensure_node; $SUDO env "PATH=$PATH" npm install -g --prefix /usr/local --no-fund --no-audit --force "$@" >&2; }

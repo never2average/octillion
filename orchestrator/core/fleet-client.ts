@@ -30,7 +30,7 @@ export class FleetMembership {
   private timer: NodeJS.Timeout | null = null;
   private left = false;
 
-  constructor(readonly opts: { capacity?: number; mode?: "server" | "standalone"; orchestratorId?: string } = {}) {}
+  constructor(readonly opts: { capacity?: number; mode?: "server" | "standalone"; orchestratorId?: string; runner?: string } = {}) {}
   get capacity() { return this.opts.capacity ?? FLEET.capacity; }
   get mode() { return this.opts.mode ?? (FLEET.mode === "standalone" ? "standalone" : "server"); }
   get orchestratorId() { return this.opts.orchestratorId ?? CFG.orchestratorId; }
@@ -49,7 +49,7 @@ export class FleetMembership {
       } else {
         const r = (await api("/api/worker/fleet", {
           json: { orchestrator_id: this.orchestratorId, capacity: this.capacity,
-                  meta: { worker_id: CFG.workerId, runner: "boat", running: Object.fromEntries(this.running), ...(CFG.job ? { job: CFG.job } : {}), user: serviceUser() } },
+                  meta: { worker_id: CFG.workerId, runner: this.opts.runner ?? "boat", running: Object.fromEntries(this.running), ...(CFG.job ? { job: CFG.job } : {}), user: serviceUser() } },
         })) as { assignment?: GroupTarget[]; next_checkin_seconds?: number; job?: FleetMembership["job"] };
         this.set((r.assignment ?? []).map((a) => ({ agent_id: a.agent_id, harness: a.harness, model: a.model, pods: a.pods,
                                                     ...(Array.isArray(a.agents) ? { agents: a.agents } : {}) })));
