@@ -14,12 +14,14 @@ check("missing provider key, new 424 and old 503 rows", () => {
   assert.equal(failed("No anthropic credential in the vault"), "credentials");
   assert.deepEqual(FIX_LINKS[classifySession({ status: "failed", error_message: "No vault provider supplies X" })!.fix!], { label: "Key vault", href: "/admin/keys" });
 });
-check("harness install, gateway token, boat key and capacity", () => {
+check("harness install, gateway token, sandbox provider key and capacity (boat and Vercel)", () => {
   assert.equal(failed("harness qwen-code not available in the sandbox (npm install failed)"), "harness_install");
   assert.equal(failed("upstream said: Gateway token is invalid, expired or revoked"), "gateway_token");
-  assert.equal(failed("boat runner: 403 api_key_action_forbidden"), "boat_permission");
-  assert.equal(failed("boat runner: POST /sandboxes -> 429: rate_limited"), "boat_capacity");
-  assert.equal(failed("boat runner: no_ready_machine"), "boat_capacity");
+  assert.equal(failed("boat runner: 403 api_key_action_forbidden"), "sandbox_permission");
+  assert.equal(failed("boat runner: POST /sandboxes -> 429: rate_limited"), "sandbox_capacity");
+  assert.equal(failed("boat runner: no_ready_machine"), "sandbox_capacity");
+  assert.equal(failed("vercel runner: broker: vercel POST /v2/sandboxes -> 402: payment required"), "sandbox_permission");
+  assert.equal(failed("vercel runner: broker: vercel POST /v2/sandboxes -> 429: too many requests"), "sandbox_capacity");
 });
 check("sandbox boot and prepare", () => {
   assert.equal(failed("boat runner: sandbox sb_1 not ready after 240s"), "sandbox_boot");

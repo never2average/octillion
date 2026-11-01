@@ -14,7 +14,7 @@ export const FIX_LINKS: Record<FixPage, { label: string; href: string }> = {
 };
 
 export type SessionErrorKey =
-  | "unclaimable" | "credentials" | "harness_install" | "gateway_token" | "boat_permission" | "boat_capacity"
+  | "unclaimable" | "credentials" | "harness_install" | "gateway_token" | "sandbox_permission" | "sandbox_capacity"
   | "sandbox_boot" | "sandbox_prepare" | "heartbeat" | "time_cap" | "shutdown" | "agent" | "other";
 
 export interface ErrorClass<K extends string = string> { key: K; label: string; fix: FixPage | null }
@@ -36,14 +36,19 @@ const SESSION_RULES: { key: SessionErrorKey; label: string; fix: FixPage | null;
     re: /missing_credential|No vault provider supplies|No .+ credential in the vault|\/credentials -> 503/ },
   { key: "harness_install", label: "Harness install failed", fix: "harness_mix", re: /^harness \S+ not available/m },
   { key: "gateway_token", label: "Gateway token expired", fix: null, re: /Gateway token is invalid, expired or revoked/ },
-  { key: "boat_permission", label: "boat key not allowed", fix: "key_vault", re: /api_key_action_forbidden|not allowed to create sandboxes/ },
-  { key: "boat_capacity", label: "boat rate limit or capacity", fix: null, re: /rate_limited|limit_reached|no_ready_machine|\b429\b/ },
+  // Provider-neutral since orchestrators and workers can run on Vercel Sandbox (these were boat_permission / boat_capacity:
+  // OLD_SESSION_KEYS maps the old keys, e.g. in a bookmarked filter link).
+  { key: "sandbox_permission", label: "Sandbox provider refused", fix: "key_vault",
+    re: /api_key_action_forbidden|not allowed to create sandboxes|vercel POST \/v2\/sandboxes -> 40[123]\b|Vercel Sandbox is not configured/ },
+  { key: "sandbox_capacity", label: "Sandbox rate limit or capacity", fix: null, re: /rate_limited|limit_reached|no_ready_machine|\b429\b/ },
   { key: "sandbox_boot", label: "Sandbox not ready", fix: null, re: /not ready after \d+s/ },
   { key: "sandbox_prepare", label: "Sandbox setup failed", fix: null, re: /sandbox prepare failed|egress lockdown failed/ },
   { key: "heartbeat", label: "Lost heartbeat", fix: null, re: /No heartbeat for/ },
   { key: "time_cap", label: "Hit time limit", fix: "environment", re: /Exceeded MAX_SESSION_MINUTES/ },
   { key: "shutdown", label: "Worker shut down", fix: null, re: /Worker shut down/ },
 ];
+/** Session class keys renamed when they became provider-neutral: old key -> new key. */
+export const OLD_SESSION_KEYS: Record<string, SessionErrorKey> = { boat_permission: "sandbox_permission", boat_capacity: "sandbox_capacity" };
 const AGENT_STOPPED = new Set(["agent_gave_up", "turn_cap", "time_cap", "error"]);
 
 const cls = <K extends string>(key: K, label: string, fix: FixPage | null): ErrorClass<K> => ({ key, label, fix });

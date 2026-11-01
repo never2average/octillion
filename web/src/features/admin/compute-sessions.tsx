@@ -49,7 +49,7 @@ const STATUS_OPTS = ['queued', 'running', 'completed', 'failed', 'timeout', 'can
 const STATUS_TONE: Record<string, Tone> = { queued: 'info', running: 'ok', completed: 'neutral', failed: 'bad', timeout: 'warn', cancelled: 'neutral' };
 const CLASSES: { key: string; label: string }[] = [
   { key: 'unclaimable', label: 'Agent not scheduled' }, { key: 'credentials', label: 'Missing provider key' }, { key: 'harness_install', label: 'Harness install failed' },
-  { key: 'gateway_token', label: 'Gateway token expired' }, { key: 'boat_permission', label: 'boat key not allowed' }, { key: 'boat_capacity', label: 'boat rate limit or capacity' },
+  { key: 'gateway_token', label: 'Gateway token expired' }, { key: 'sandbox_permission', label: 'Sandbox provider refused' }, { key: 'sandbox_capacity', label: 'Sandbox rate limit or capacity' },
   { key: 'sandbox_boot', label: 'Sandbox not ready' }, { key: 'sandbox_prepare', label: 'Sandbox setup failed' }, { key: 'heartbeat', label: 'Lost heartbeat' },
   { key: 'time_cap', label: 'Hit time limit' }, { key: 'shutdown', label: 'Worker shut down' }, { key: 'agent', label: 'Agent stopped' }, { key: 'other', label: 'Other' }
 ];

@@ -265,7 +265,7 @@ function JobPeek({ id, onSessions, onOrch }: { id: string; onSessions: () => voi
         { id: 'why', label: 'Why it waits', hidden: !w, content: w && (
           <KeyValueTable rows={[
             { label: 'Reason', value: `${w.text}.` },
-            { label: 'Free on boat', value: <span className='tabular-nums'>{w.free ?? '—'}</span> },
+            { label: 'Free sandboxes', value: <span className='tabular-nums'>{w.free ?? '—'}</span> },
             { label: 'Needs (1 + pods)', value: <span className='tabular-nums'>{w.needed ?? '—'}</span> },
             { label: 'Orchestrator limit', value: <span className='tabular-nums'>{w.cap ?? '—'}</span> },
             { label: 'Autoscaler note', value: <Mono>{w.note}</Mono>, hidden: !w.note }

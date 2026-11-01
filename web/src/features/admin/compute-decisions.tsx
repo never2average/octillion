@@ -302,7 +302,7 @@ function TickPeek({ t, onOrch }: { t: Tick; onOrch: (row: number) => void }) {
           { label: 'Wanted', value: num(t.desired) },
           { label: 'Limit', value: num(t.cap) },
           { label: 'Active', value: num(t.active) },
-          { label: 'Free on boat', value: num(t.free) },
+          { label: 'Free sandboxes', value: num(t.free) },
           { label: 'Live orchestrators after the tick', value: <span className='tabular-nums'>{t.orchestrators ?? 0}</span> },
           { label: 'Leader', value: <Mono>{t.holder ?? '—'}</Mono> }
         ]}

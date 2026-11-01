@@ -4,10 +4,10 @@ import { scheduledAgents, variantsOf } from "./agents.js";
 import { getPopulation } from "./populations.js";
 import { currentCodeHash } from "./fleet.js";
 import { agentKeyCoverage, classifiedSandboxes, type ClassifiedSandbox } from "./compute.js";
-import { classifyOrchestrator, classifySession, FIX_LINKS, type SessionErrorKey } from "./error-classes.js";
+import { classifyOrchestrator, classifySession, FIX_LINKS, OLD_SESSION_KEYS, type SessionErrorKey } from "./error-classes.js";
 import { BOAT_SETUP_HARNESSES } from "./harness-setup.js";
-import { BOAT_PRICE_PER_HOUR } from "../orchestrator/core/config.js";
 import * as lib from "../orchestrator/deploy/boat-lib.js";
+import { orchSandboxCostUsd, providerLabel } from "../orchestrator/deploy/orchestrator-host.js";
 
 /**
  * The Compute page's record tables (docs/compute-and-traces-spec.md §2.2 F2, F3): agent sessions and orchestrators,
@@ -16,7 +16,7 @@ import * as lib from "../orchestrator/deploy/boat-lib.js";
  *
  * Spend follows §2.1: a session's model $ is its own cost_usd (gateway rows are shown as detail, never added), a
  * worker sandbox's is the estimate the orchestrator wrote, an orchestrator's model $ is its gateway total and its
- * sandbox $ is its lifetime on boat's small machine at the price table's rate.
+ * sandbox $ is its lifetime on its provider's machine at the price table's rate (boat small, or the Vercel Sandbox size).
  */
 
 const n = (v: unknown) => Number(v ?? 0) || 0;
@@ -125,7 +125,7 @@ export async function listSessions(q: Record<string, unknown>) {
   const include = str(q.include);
   const incP = include ? p(include) : null;
   const match = incP ? `((${cond}) OR s.id = ${incP})` : cond;
-  const cls = str(q.class) as SessionErrorKey | null;
+  const cls = ((c) => (c && OLD_SESSION_KEYS[c]) || c)(str(q.class)) as SessionErrorKey | null;
   const scheduled = await scheduledIds();
   const from = `${SESSION_FROM} WHERE ${match}`;
   const facets = await sessionFacets({ base, params: params.slice(0, nBase), status, stale, cls, scheduled });
@@ -224,7 +224,7 @@ export function sessionHint(s: { error_class: string | null; agent_id: string | 
   const env = /No vault provider supplies ([A-Z][A-Z0-9_]*(?:, [A-Z][A-Z0-9_]*)*)/.exec(message)?.[1];
   switch (s.error_class) {
     case "credentials": return { text: env ? `Missing key ${env}. Add it in Key vault.` : "A provider key is missing. Add it in Key vault.", href: FIX_LINKS.key_vault.href };
-    case "boat_permission": return { text: "The boat key may not create sandboxes. Replace it in Key vault.", href: FIX_LINKS.key_vault.href };
+    case "sandbox_permission": return { text: "The sandbox provider refused to create sandboxes: the boat key in Key vault, or Vercel Sandbox access (OIDC) for the project.", href: FIX_LINKS.key_vault.href };
     case "unclaimable": return { text: `${s.agent_id ?? "This agent"} is not in the scheduled population, so no orchestrator claims it. Turn it on in Harness mix.`, href: FIX_LINKS.harness_mix.href };
     case "harness_install": return { text: `The ${s.harness} CLI could not be installed in the sandbox. Check its pin in Harness mix.`, href: FIX_LINKS.harness_mix.href };
     case "time_cap": return { text: "It ran past the session time limit (MAX_SESSION_MINUTES). It is set in the deployment environment, shown in Compute › Environment.", href: FIX_LINKS.environment.href };
@@ -243,10 +243,11 @@ interface OrchDb {
   created_at: Date; ready_at: Date | null; last_seen: Date | null; deleted_at: Date | null; retiring_since: Date | null; code_hash: string | null;
   from_image: string | null; timings: Record<string, number> | null; error: string | null; launch_step: string | null; launch_error: string | null;
   reap_reason: string | null; fleet_seen: Date | null; meta: { running?: Record<string, number>; worker_id?: string } | null; model_usd: unknown;
+  provider?: string | null; expires_at?: Date | null;
 }
 
 const ORCH_COLS = `o.id, o.sandbox_id, o.orchestrator_id, o.job_id, o.state, o.pods, o.created_at, o.ready_at, o.last_seen, o.deleted_at, o.retiring_since,
-  o.code_hash, o.from_image, o.timings, o.error, o.launch_step, o.launch_error, o.reap_reason, f.last_seen AS fleet_seen, f.meta,
+  o.code_hash, o.from_image, o.timings, o.error, o.launch_step, o.launch_error, o.reap_reason, o.provider, o.expires_at, f.last_seen AS fleet_seen, f.meta,
   (SELECT /* tenant: internal: admin Compute page, gateway spend summed per orchestrator id */ coalesce(sum(g.cost_usd), 0)
      FROM gateway_usage g WHERE g.orchestrator_id = o.orchestrator_id) AS model_usd`;
 const ORCH_FROM = "FROM orchestrator_sandboxes o LEFT JOIN orchestrators f ON f.id = o.orchestrator_id";
@@ -277,17 +278,22 @@ function orchRow(r: OrchDb, sb: Map<string, ClassifiedSandbox>, now: number, cur
   const heartbeat = r.fleet_seen ?? r.last_seen;
   const hours = ((r.deleted_at ? new Date(r.deleted_at).getTime() : now) - new Date(r.created_at).getTime()) / 3_600_000;
   const why = classifyOrchestrator(r);
+  const provider = r.provider === "vercel" ? "vercel" : "boat";
+  // The provider's live state: boat's listing (Vercel orchestrators are not in it: their state is our row's).
+  const sandboxState = provider === "boat" ? s?.state ?? null : null;
+  const ttl = ended ? null : provider === "boat" ? ttlOf(s, now) : r.expires_at ? Math.round((new Date(r.expires_at).getTime() - now) / 1000) : null;
   return {
-    id: r.id, sandbox_id: r.sandbox_id, orchestrator_id: r.orchestrator_id, job_id: r.job_id, state: r.state, boat_state: s?.state ?? null,
+    id: r.id, sandbox_id: r.sandbox_id, orchestrator_id: r.orchestrator_id, job_id: r.job_id, state: r.state,
+    provider, provider_label: providerLabel(provider), sandbox_state: sandboxState, boat_state: sandboxState,
     state_since: iso(ended ? r.deleted_at : r.state === "booting" ? r.created_at : r.state === "draining" ? r.retiring_since ?? r.ready_at : r.ready_at ?? r.created_at),
     running_by_agent: running, running: Object.values(running).reduce((a: number, b) => a + (b as number), 0),
     pods: r.pods ?? (r.job_id ? 0 : AUTOSCALE.podCapacity()), heartbeat_at: iso(heartbeat),
     boot_ms: r.ready_at ? new Date(r.ready_at).getTime() - new Date(r.created_at).getTime() : null, from_image: r.from_image, timings: r.timings,
-    ttl_left_s: ended ? null : ttlOf(s, now), code_hash: r.code_hash, current_code: !!current && r.code_hash === current, retiring_since: iso(r.retiring_since),
+    ttl_left_s: ttl, code_hash: r.code_hash, current_code: !!current && r.code_hash === current, retiring_since: iso(r.retiring_since),
     launch_step: why?.key.startsWith("launch:") ? why.key.slice(7) : null, launch_error: why?.key.startsWith("launch:") ? why.message : null,
     reap_reason: why?.key.startsWith("reap:") ? why.message : null, end_class: why ? { key: why.key, label: why.label, routine: why.routine } : null,
     created_at: iso(r.created_at), ready_at: iso(r.ready_at), deleted_at: iso(r.deleted_at), worker_id: r.meta?.worker_id ?? null,
-    spend: { orchestrator_model_usd: usd(n(r.model_usd)), sandbox_est_usd: usd(Math.max(0, hours) * (BOAT_PRICE_PER_HOUR[lib.ORCH_SANDBOX_TYPE] ?? 0)) },
+    spend: { orchestrator_model_usd: usd(n(r.model_usd)), sandbox_est_usd: usd(orchSandboxCostUsd(provider, Math.max(0, hours) * 3600)) },
   };
 }
 export type OrchRow = ReturnType<typeof orchRow>;
@@ -434,7 +440,9 @@ export async function orchestratorDetail(id: number) {
   return {
     row, timings: r.timings ?? {}, workers, sessions, tokens, events, gateway,
     boat: { ok: listing.ok, stale: listing.stale, error: listing.error },
-    logs_command: r.sandbox_id ? `npm run boat-orchestrators -- logs ${r.sandbox_id}` : null,
+    // Vercel orchestrators log to /var/lib/octi/orchestrator.log in their sandbox (no CLI: the API holds the Vercel credential).
+    logs_command: r.sandbox_id && r.provider !== "vercel" ? `npm run boat-orchestrators -- logs ${r.sandbox_id}` : null,
+    logs_where: r.provider === "vercel" ? "/var/lib/octi/orchestrator.log inside the Vercel sandbox (Vercel dashboard: Observability > Sandboxes)" : null,
     limits: recordLimits(),
   };
 }

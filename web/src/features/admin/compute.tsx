@@ -308,6 +308,12 @@ interface Summary {
   };
   settings: Setting[]; knobs: Knob[];
   provider: { name: string; api: string; namespace: string; ok: boolean; error: string | null; has_key: boolean; key_hint: string | null; uses: number; last_used_at: string | null };
+  /** Where orchestrators and worker sandboxes run (boat.dev or Vercel Sandbox); older servers send none. */
+  hosting?: {
+    orchestrators: { provider: 'boat' | 'vercel'; label: string }; workers: { provider: 'boat' | 'vercel'; label: string };
+    live: { boat: number; vercel: number };
+    vercel: { starts_hour: number; starts_per_hour_cap: number; max_concurrent: number; timeout_minutes: number; relaunch_minutes: number; size: string; egress: string };
+  };
   links: { newrelic: string | null };
 }
 
@@ -678,7 +684,21 @@ function Environment({ s, onTest, testing }: { s: Summary; onTest: () => void; t
       meaningText: p.has_key ? `Used ${p.uses} times${p.last_used_at ? `, last ${new Date(p.last_used_at).toLocaleString()}` : ''}` : 'Add a boat key in the key vault',
       meaning: p.has_key ? <>Used {p.uses} times{p.last_used_at && <>, last <When d={p.last_used_at} /></>}</> : <Link href='/admin/keys' className='text-foreground hover:underline'>Add a boat key in the key vault</Link> }
   ];
+  const h = s.hosting;
+  // Where things run: one switch (OCTILLION_SANDBOX_PROVIDER) and an orchestrator-only override.
+  const hostRows: EnvRow[] = h ? [
+    { name: 'Orchestrators run on', value: h.orchestrators.label, source: <span className='text-xs'>env</span>, sourceText: 'env',
+      meaningText: `OCTILLION_ORCHESTRATOR_PROVIDER, else OCTILLION_SANDBOX_PROVIDER. Live now: ${h.live.boat} on boat.dev, ${h.live.vercel} on Vercel Sandbox`,
+      meaning: <>OCTILLION_ORCHESTRATOR_PROVIDER, else OCTILLION_SANDBOX_PROVIDER. Live now: {h.live.boat} on boat.dev, {h.live.vercel} on Vercel Sandbox{h.orchestrators.provider === 'vercel' && h.live.boat > 0 ? ' (the boat ones finish their jobs there)' : ''}</> },
+    { name: 'Worker sandboxes run on', value: h.workers.label, source: <span className='text-xs'>env</span>, sourceText: 'env',
+      meaningText: 'OCTILLION_SANDBOX_PROVIDER: where each session\'s coding agent runs', meaning: <>OCTILLION_SANDBOX_PROVIDER: where each session&apos;s coding agent runs</> },
+    ...(h.orchestrators.provider === 'vercel' ? [{
+      name: 'Vercel orchestrators', value: `${h.vercel.starts_hour} / ${h.vercel.starts_per_hour_cap} launches this hour`, source: <span className='text-xs'>env</span>, sourceText: 'env',
+      meaningText: `Size ${h.vercel.size}, timeout ${h.vercel.timeout_minutes} min, replaced ${h.vercel.relaunch_minutes} min before it, egress ${h.vercel.egress}, at most ${h.vercel.max_concurrent} sandboxes`,
+      meaning: <>Size {h.vercel.size}, timeout {h.vercel.timeout_minutes} min, replaced {h.vercel.relaunch_minutes} min before it, egress {h.vercel.egress}, at most {h.vercel.max_concurrent} sandboxes</> }] : [])
+  ] : [];
   const rows: EnvRow[] = [
+    ...hostRows,
     ...boatRows,
     ...s.knobs.map((k) => ({ name: k.name, value: k.value, source: k.source, sourceText: k.source, meaning: k.meaning, meaningText: k.meaning })),
     ...RELATED.map((r) => ({ ...r, s: s.settings.find((x) => x.key === r.key) })).filter((r) => r.s).map((r) => ({

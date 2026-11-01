@@ -22,6 +22,8 @@ interface Limits { boot_minutes: number; stale_minutes: number; heartbeat_stale_
 interface Boat { ok: boolean; stale: boolean; error: string | null }
 export interface OrchRow {
   id: number; sandbox_id: string | null; orchestrator_id: string | null; job_id: string | null; state: string; boat_state: string | null; state_since: string | null;
+  /** Where it runs: 'boat' (boat.dev) or 'vercel' (Vercel Sandbox); older servers send neither (boat). */
+  provider?: 'boat' | 'vercel'; provider_label?: string; sandbox_state?: string | null;
   running_by_agent: Record<string, number>; running: number; pods: number; heartbeat_at: string | null; boot_ms: number | null; from_image: string | null;
   timings: Record<string, number> | null; ttl_left_s: number | null; code_hash: string | null; current_code: boolean; retiring_since: string | null;
   launch_step: string | null; launch_error: string | null; reap_reason: string | null; end_class: { key: string; label: string; routine: boolean } | null;
@@ -33,7 +35,7 @@ interface Unmatched {
   parent_orchestrator_id: string | null; created_at: string | null; boat_state: string; ttl_left_s: number | null;
 }
 interface OrchDetail {
-  row: OrchRow; timings: Record<string, number>; boat: Boat; logs_command: string | null; limits: Limits;
+  row: OrchRow; timings: Record<string, number>; boat: Boat; logs_command: string | null; logs_where?: string | null; limits: Limits;
   workers: { sandbox_id: string; name: string | null; agent_id: string | null; session_id: string | null; status: string | null; heartbeat_age_s: number | null; boat_state: string }[];
   sessions: { id: string; agent_id: string | null; status: string; queued_at: string; started_at: string | null; ended_at: string | null; error_message: string | null }[];
   tokens: { job_id: string; created_at: string; expires_at: string; revoked_at: string | null }[];
@@ -146,7 +148,8 @@ function OrchTable({ rows, loading, limits, boat, empty, open, onOpen, onJob, fi
       return (
         <span className='flex min-w-0 flex-col gap-1'>
           <span className='flex items-center gap-1.5'><StatusBadge tone={o.state === 'deleted' && o.launch_step ? 'bad' : STATE_TONE[o.state]}>{o.state === 'deleted' ? 'ended' : o.state}</StatusBadge>
-            {o.boat_state && o.state !== 'deleted' && <span className='text-muted-foreground text-xs' title='State on boat'>boat: {o.boat_state}</span>}</span>
+            {o.boat_state && o.state !== 'deleted' && <span className='text-muted-foreground text-xs' title='State on boat'>boat: {o.boat_state}</span>}
+            {o.provider === 'vercel' && <span className='text-muted-foreground text-xs' title='Runs on Vercel Sandbox'>Vercel</span>}</span>
           <span className={cn('truncate text-xs', late ? AMBER : 'text-muted-foreground')} title={ended && why ? [at, why].filter(Boolean).join(' · ') : at}>
             {ended ? 'ended ' : 'for '}{dur(since(o.state_since))}{ended ? ' ago' : ''}
             {ended && why && <> · <span className={cn(o.launch_step && 'text-destructive')}>{why}</span></>}
@@ -155,6 +158,8 @@ function OrchTable({ rows, loading, limits, boat, empty, open, onOpen, onJob, fi
       );
     } },
     { key: 'job', label: 'Job', type: 'text', value: (o) => o.job_id ?? 'shared', render: (o) => (o.job_id ? <Mono>{o.job_id}</Mono> : <span className='text-muted-foreground'>shared</span>) },
+    // Off by default; for filtering by where orchestrators run while a provider switch drains.
+    { key: 'provider', label: 'Runs on', hidden: true, type: 'select', value: (o) => o.provider_label ?? 'boat.dev', render: (o) => o.provider_label ?? 'boat.dev' },
     // Off by default (the reason is State's second line); kept for its end-reason filter.
     { key: 'ended', label: 'Ended because', hidden: true, className: 'max-w-72', type: 'text', value: (o) => o.end_class?.label ?? '', render: (o) => <EndedBecause o={o} /> },
     { key: 'pods', label: 'Pods', className: 'text-right', type: 'number', value: (o) => o.running, render: (o) => (
@@ -259,12 +264,13 @@ function OrchPeek({ id, onJob }: { id: number; onJob: (job: string) => void }) {
         </>}
         facts={[
           { label: 'Job', value: o.job_id ? <Mono>{o.job_id}</Mono> : <span className='text-muted-foreground'>shared</span> },
-          { label: 'Sandbox', value: o.sandbox_id ? <Mono>{o.sandbox_id}</Mono> : <span className='text-muted-foreground'>never created</span> },
+          { label: 'Sandbox', value: o.sandbox_id ? <><Mono>{o.sandbox_id}</Mono> <span className='text-muted-foreground'>· {o.provider_label ?? 'boat.dev'}</span></> : <span className='text-muted-foreground'>never created</span> },
           { label: 'Created', value: <When d={o.created_at} /> },
           { label: 'Ready', value: o.ready_at ? <When d={o.ready_at} /> : none },
           { label: 'Last seen', value: <When d={o.heartbeat_at} /> },
           { label: 'Ended', value: <When d={o.deleted_at} />, hidden: !o.deleted_at },
-          { label: 'TTL left', value: o.state === 'deleted' ? 'n/a' : data.boat.ok ? dur(o.ttl_left_s) : <span className='text-muted-foreground' title={`boat.dev did not answer: ${data.boat.error}`}>—</span> },
+          { label: 'TTL left', value: o.state === 'deleted' ? 'n/a' : o.provider === 'vercel' || data.boat.ok ? dur(o.ttl_left_s) : <span className='text-muted-foreground' title={`boat.dev did not answer: ${data.boat.error}`}>—</span>,
+            hint: o.provider === 'vercel' ? 'until Vercel stops the sandbox; a fresh orchestrator takes over before then' : undefined },
           { label: 'Code', value: <>{o.code_hash ? <Mono>{o.code_hash.slice(0, 12)}</Mono> : '—'} {o.current_code ? <span className='text-muted-foreground'>· current</span> : o.code_hash && <span className='text-muted-foreground'>· older than this server&apos;s</span>}
             {o.retiring_since && <span className={AMBER}> · retiring since <When d={o.retiring_since} /></span>}</> },
           { label: 'From image', value: o.from_image ? <Mono>{o.from_image}</Mono> : <span className='text-muted-foreground'>no (code upload)</span> },
@@ -277,6 +283,7 @@ function OrchPeek({ id, onJob }: { id: number; onJob: (job: string) => void }) {
           <BootTimeline o={o} timings={data.timings} />
         </div>
         {data.logs_command && <p className='text-muted-foreground text-xs'><Mono>{data.logs_command}</Mono> · logs are lost when the sandbox is deleted.</p>}
+        {data.logs_where && <p className='text-muted-foreground text-xs'>Logs: {data.logs_where} · lost when the sandbox is deleted.</p>}
       </DetailMeta>
 
       <DetailTabs resetKey={id} tabs={[

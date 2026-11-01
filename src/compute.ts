@@ -1,6 +1,6 @@
 import { getDb } from "./db.js";
 import * as kv from "./keyvault.js";
-import { AUTOSCALE, computeDemand, kickConfigured, type TickState } from "./autoscaler.js";
+import { AUTOSCALE, CAPACITY_NOTE, computeDemand, kickConfigured, type TickState } from "./autoscaler.js";
 import { scheduledAgents, variantsOf } from "./agents.js";
 import { getPopulation } from "./populations.js";
 import { listSettings } from "./settings.js";
@@ -8,6 +8,7 @@ import { classifySession } from "./error-classes.js";
 import { missingAgentKeys } from "./gateway.js";
 import { BOAT, BOAT_PRICE_PER_HOUR } from "../orchestrator/core/config.js";
 import * as lib from "../orchestrator/deploy/boat-lib.js";
+import { orchestratorProvider, orchSandboxCostUsd, PROVIDER_LABEL, VERCEL_ORCH, workerProvider } from "../orchestrator/deploy/orchestrator-host.js";
 
 /**
  * The admin Compute page's server side (docs/compute-and-traces-spec.md §2): one summary that answers "is compute
@@ -162,6 +163,8 @@ export interface Verdict { level: Level; code: string; text: string; href: strin
 export interface VerdictFacts {
   enabled: boolean; runtime: "vm" | "vercel"; kick_configured: boolean;
   has_boat_key: boolean; boat_error: string | null;
+  /** Whether anything still runs on boat (new orchestrators, workers, or live boat orchestrators); default true. */
+  boat_needed?: boolean;
   tick: { age_s: number | null; error: string | null; note: string | null };
   queue: { sessions: number; research: number; oldest_session_age_s: number | null; oldest_research_age_s: number | null; unclaimable: number };
   running: { sessions: number; orchestrators: number };
@@ -192,8 +195,10 @@ export function computeVerdict(f: VerdictFacts): Verdict[] {
   if (f.runtime === "vercel" && f.enabled && !f.kick_configured)
     add("red", "kick_unconfigured", "This deployment cannot trigger the autoscaler: PUBLIC_URL is not HTTPS or the worker token is unset.", "#environment");
   // Without a key boat is never asked, so "not answering" would only repeat the missing key.
-  if (f.has_boat_key && f.boat_error) add("red", "boat_down", `boat.dev is not answering: ${f.boat_error}`, "/admin/keys");
-  if (!f.has_boat_key) add("red", "no_boat_key", "No boat key. Add one in Key vault.", "/admin/keys");
+  // With everything on Vercel Sandbox (OCTILLION_SANDBOX_PROVIDER=vercel) and no boat orchestrator left, boat is not needed.
+  const boatNeeded = f.boat_needed !== false;
+  if (boatNeeded && f.has_boat_key && f.boat_error) add("red", "boat_down", `boat.dev is not answering: ${f.boat_error}`, "/admin/keys");
+  if (boatNeeded && !f.has_boat_key) add("red", "no_boat_key", "No boat key. Add one in Key vault.", "/admin/keys");
   if (f.tick.error) add("red", "tick_error", `The last tick failed: ${f.tick.error}`, "/admin/compute?section=decisions&has=error");
   if (f.enabled && queued > 0 && (f.tick.age_s == null || f.tick.age_s > 600)) {
     const what = [f.queue.sessions && plural(f.queue.sessions, "session"), f.queue.research && plural(f.queue.research, "research job")].filter(Boolean).join(" and ");
@@ -206,8 +211,13 @@ export function computeVerdict(f: VerdictFacts): Verdict[] {
   if (f.queue.unclaimable > 0)
     add("amber", "unclaimable", `${plural(f.queue.unclaimable, "session")} can never run: ${f.queue.unclaimable === 1 ? "its" : "their"} agent is not in the scheduled population.`,
       "/admin/health?section=sessions&class=unclaimable");
-  const plan = /(\S+) waits for boat plan capacity \((\d+) free\)/.exec(note);
-  if (plan) add("amber", "plan_capacity", `${plan[1]} waits for boat capacity: ${plan[2]} free, other deployments use ${f.others}.`, "#limits");
+  const plan = CAPACITY_NOTE.exec(note);
+  if (plan) {
+    const where = plan[2]?.trim() || "boat.dev";
+    add("amber", "plan_capacity", `${plan[1]} waits for sandbox capacity on ${where}: ${Math.max(0, Number(plan[3]))} free${where === "boat.dev" ? `, other deployments use ${f.others}` : ""}.`, "#limits");
+  }
+  const rate = /launch rate cap: [^;]*/.exec(note);
+  if (rate) add("amber", "rate_cap", `Orchestrator launches are paused by the ${rate[0]}.`, "#limits");
   if (f.per_job && f.job_orch_live >= f.job_orch_cap && queued > 0)
     add("amber", "at_cap", `At the orchestrator limit (${f.job_orch_cap}). Raise it in Limits or wait.`, "#limits");
   if (f.not_checking_in > 0)
@@ -248,7 +258,7 @@ export type Binding = "plan" | "job_orch" | "pods" | null;
 export function bindingLimit(x: { note: string | null; budget_reason: string | undefined; queued: number; per_job: boolean; free: number | null;
   job_orch_live: number; job_orch_cap: number; pods_max_reserved: number; pods_cap: number }): Binding {
   if (x.note && /at OCTILLION_MAX_JOB_ORCHESTRATORS/.test(x.note)) return "job_orch";
-  if (x.note && /waits for boat plan capacity/.test(x.note)) return "plan";
+  if (x.note && CAPACITY_NOTE.test(x.note)) return "plan";
   // Shared fleet: the whole fleet at full pods does not fit the plan. Per job: each orchestrator reserves only its own
   // pods, so the plan binds only when work waits and not one more sandbox is free.
   if (!x.per_job && x.budget_reason) return "plan";
@@ -330,6 +340,7 @@ async function buildSummary(fresh: boolean) {
   const runtime: "vm" | "vercel" = env.VERCEL ? "vercel" : "vm";
   const perJob = AUTOSCALE.perJob();
   const key = (await kv.listCredentials()).find((c) => c.provider === "boat") ?? null;
+  const orchProvider = orchestratorProvider(), wProvider = workerProvider();
 
   const [lease] = await db.query<{ holder: string; state: TickState | null }>("SELECT holder, state FROM autoscaler_lease WHERE name = 'autoscaler'");
   const tick = lease?.state ?? null;
@@ -400,11 +411,16 @@ async function buildSummary(fresh: boolean) {
   const [orch] = await db.query<Record<string, unknown>>(
     `SELECT count(*) FILTER (WHERE launch_step IS NOT NULL AND created_at > now() - interval '1 hour') AS failed_1h,
             count(*) FILTER (WHERE launch_step IS NOT NULL AND created_at > now() - interval '24 hours') AS failed_24h,
-            count(*) FILTER (WHERE created_at > now() - interval '1 minute') AS starts_minute,
-            count(*) FILTER (WHERE created_at > now() - interval '1 hour') AS starts_hour,
-            count(*) FILTER (WHERE created_at > now() - interval '1 day') AS starts_day,
+            count(*) FILTER (WHERE provider = 'boat' AND created_at > now() - interval '1 minute') AS starts_minute,
+            count(*) FILTER (WHERE provider = 'boat' AND created_at > now() - interval '1 hour') AS starts_hour,
+            count(*) FILTER (WHERE provider = 'boat' AND created_at > now() - interval '1 day') AS starts_day,
+            count(*) FILTER (WHERE provider = 'vercel' AND created_at > now() - interval '1 hour') AS vercel_starts_hour,
+            count(*) FILTER (WHERE provider = 'vercel' AND state <> 'deleted') AS vercel_live,
+            count(*) FILTER (WHERE provider = 'boat' AND state <> 'deleted') AS boat_live,
             coalesce(sum(extract(epoch FROM coalesce(deleted_at, now()) - greatest(created_at, current_date::timestamptz)))
-                     FILTER (WHERE coalesce(deleted_at, now()) > current_date::timestamptz), 0) AS seconds_today
+                     FILTER (WHERE provider = 'boat' AND coalesce(deleted_at, now()) > current_date::timestamptz), 0) AS seconds_today,
+            coalesce(sum(extract(epoch FROM coalesce(deleted_at, now()) - greatest(created_at, current_date::timestamptz)))
+                     FILTER (WHERE provider = 'vercel' AND coalesce(deleted_at, now()) > current_date::timestamptz), 0) AS vercel_seconds_today
        FROM orchestrator_sandboxes WHERE created_at > now() - interval '1 day' OR state <> 'deleted' OR deleted_at >= current_date`);
   // The sandbox reliability probe's boat creates (src/sandbox-probe.ts) are starts on the same account too.
   const [probeStarts] = await db.query<Record<string, unknown>>(
@@ -468,9 +484,10 @@ async function buildSummary(fresh: boolean) {
     others, free, per_job: perJob, job_orch_live: jobActive.length, job_orch_cap: jobCap, not_checking_in: notCheckingIn,
     launch_failures_1h: { count: n(orch?.failed_1h), step: lastFail?.launch_step ?? null, message: lastFail?.launch_error?.slice(0, 160) ?? null },
     missing_keys: missingKeys, leaked_workers: leaked, orphan_deletes_24h: n(orphans?.n), namespace: lib.BOAT_NAMESPACE, idle_orchestrators: idle,
+    boat_needed: orchProvider === "boat" || wProvider === "boat" || n(orch?.boat_live) > 0,
   };
 
-  const orchSandboxUsd = (n(orch?.seconds_today) / 3600) * (BOAT_PRICE_PER_HOUR[lib.ORCH_SANDBOX_TYPE] ?? 0);
+  const orchSandboxUsd = orchSandboxCostUsd("boat", n(orch?.seconds_today)) + orchSandboxCostUsd("vercel", n(orch?.vercel_seconds_today));
   const spend = { session_model_usd: usd(n(ses?.model_today)), orchestrator_model_usd: usd(n(orchSpend?.usd)), sandbox_est_usd: usd(n(ses?.sandbox_today) + orchSandboxUsd) };
   const ended = n(ses?.ended_24h), failedN = n(ses?.failed_24h);
 
@@ -501,6 +518,14 @@ async function buildSummary(fresh: boolean) {
     },
     settings: await listSettings(),
     knobs: computeKnobs(runtime),
+    // Where orchestrators and worker sandboxes run (OCTILLION_SANDBOX_PROVIDER, OCTILLION_ORCHESTRATOR_PROVIDER), and
+    // how many orchestrators are on each: boat ones launched before a switch finish their jobs there.
+    hosting: {
+      orchestrators: { provider: orchProvider, label: PROVIDER_LABEL[orchProvider] }, workers: { provider: wProvider, label: PROVIDER_LABEL[wProvider] },
+      live: { boat: n(orch?.boat_live), vercel: n(orch?.vercel_live) },
+      vercel: { starts_hour: n(orch?.vercel_starts_hour), starts_per_hour_cap: VERCEL_ORCH.startsPerHour(), max_concurrent: VERCEL_ORCH.maxConcurrent(),
+                timeout_minutes: VERCEL_ORCH.timeoutMinutes(), relaunch_minutes: VERCEL_ORCH.relaunchMinutes(), size: VERCEL_ORCH.size(), egress: VERCEL_ORCH.egress() },
+    },
     provider: { name: "boat.dev", api: BOAT.apiUrl, namespace: lib.BOAT_NAMESPACE, ok: key ? sb.ok && !sb.stale : false, error: key ? sb.error : "No boat key in the vault",
                 has_key: !!key, key_hint: key?.hint ?? null, uses: key ? n(key.uses) : 0, last_used_at: iso(key?.last_used_at) },
     links: { newrelic: env.NEW_RELIC_DASHBOARD_URL || null },

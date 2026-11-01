@@ -1,9 +1,8 @@
 import { getDb } from "./db.js";
-import { AUTOSCALE, type TickState } from "./autoscaler.js";
+import { AUTOSCALE, CAPACITY_NOTE, type TickState } from "./autoscaler.js";
 import { agentRunnability, scheduledIds } from "./compute-records.js";
 import { classifyOrchestrator, classifySession, FIX_LINKS, ROUTINE_REAPS, reapKind, type ReapKind, type SessionErrorKey } from "./error-classes.js";
-import { BOAT_PRICE_PER_HOUR } from "../orchestrator/core/config.js";
-import * as lib from "../orchestrator/deploy/boat-lib.js";
+import { orchSandboxCostUsd } from "../orchestrator/deploy/orchestrator-host.js";
 
 /**
  * The Compute page's Jobs table and Failures by reason (docs/compute-and-traces-spec.md §2.2 F, G). A job is a
@@ -71,11 +70,13 @@ export function whyWaiting(job: { id: string; kind: "simulation" | "research"; u
   if (entry?.served) return null;
   const notes = (tick?.note ?? "").split("; ").filter(Boolean);
   const own = notes.find((x) => x.includes(job.id));
-  const boat = own && /waits for boat plan capacity \((-?\d+) free\)/.exec(own);
-  if (boat) {
-    const free = Math.max(0, Number(boat[1]));
-    return { text: `Waiting for boat capacity (${free} free, needs ${needed})`, note: own!, ...base, free };
+  const capacity = own && CAPACITY_NOTE.exec(own);
+  if (capacity) {
+    const free = Math.max(0, Number(capacity[3]));
+    return { text: `Waiting for sandbox capacity on ${capacity[2]?.trim() || "boat.dev"} (${free} free, needs ${needed})`, note: own!, ...base, free };
   }
+  const rate = notes.find((x) => x.startsWith("launch rate cap:"));
+  if (rate && entry) return { text: "Waiting: orchestrator launch rate cap reached", note: rate, ...base };
   if (own?.startsWith("cooldown:")) return { text: "Relaunch cooldown: its orchestrator idled out with sessions it could not claim", note: own, ...base };
   const cap = entry && notes.find((x) => x.startsWith("at OCTILLION_MAX_JOB_ORCHESTRATORS"));
   if (cap) return { text: `At the orchestrator limit (${tick?.cap ?? "?"} per-job orchestrators)`, note: cap, ...base };
@@ -92,7 +93,7 @@ interface JobDb {
 interface OrchDb {
   id: number; orchestrator_id: string | null; sandbox_id: string | null; job_id: string | null; state: string; pods: number | null;
   created_at: Date; ready_at: Date | null; deleted_at: Date | null; error: string | null; launch_step: string | null; launch_error: string | null;
-  reap_reason: string | null; meta: { running?: Record<string, number> } | null; model_usd: unknown;
+  reap_reason: string | null; meta: { running?: Record<string, number> } | null; model_usd: unknown; provider?: string | null;
 }
 interface SesAgg {
   simulation_id: string; queued: unknown; running: unknown; completed: unknown; failed: unknown; timeout: unknown; cancelled: unknown;
@@ -119,7 +120,7 @@ async function lastTick(): Promise<TickState | null> {
 }
 
 const orchHours = (o: OrchDb, now: number) => Math.max(0, ((ms(o.deleted_at) ?? now) - new Date(o.created_at).getTime()) / 3_600_000);
-const orchSandboxUsd = (o: OrchDb, now: number) => orchHours(o, now) * (BOAT_PRICE_PER_HOUR[lib.ORCH_SANDBOX_TYPE] ?? 0);
+const orchSandboxUsd = (o: OrchDb, now: number) => orchSandboxCostUsd(o.provider, orchHours(o, now) * 3600);
 const runningOf = (o: OrchDb) => Object.values(o.meta?.running ?? {}).reduce((a, b) => a + n(b), 0);
 
 /**
@@ -158,7 +159,7 @@ async function buildRows(jobs: JobDb[]) {
   }
   const orchs = ids.length ? await db.query<OrchDb>(
     `SELECT o.id, o.orchestrator_id, o.sandbox_id, o.job_id, o.state, o.pods, o.created_at, o.ready_at, o.deleted_at, o.error, o.launch_step,
-            o.launch_error, o.reap_reason, f.meta,
+            o.launch_error, o.reap_reason, o.provider, f.meta,
             (SELECT /* tenant: internal: admin Compute page, gateway spend summed per orchestrator id */ coalesce(sum(g.cost_usd), 0)
                FROM gateway_usage g WHERE g.orchestrator_id = o.orchestrator_id) AS model_usd
        FROM orchestrator_sandboxes o LEFT JOIN orchestrators f ON f.id = o.orchestrator_id
