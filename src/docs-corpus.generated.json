@@ -1431,6 +1431,20 @@
   },
   {
    "area": "admin",
+   "title": "Worker sandboxes on Vercel Sandbox",
+   "href": "/admin/docs/vercel-sandbox-workers#what-only-a-live-run-can-confirm",
+   "heading": "What only a live run can confirm",
+   "text": "The mocks follow the official SDK's REST calls, but these have not been seen live yet:\n\n- The `fs/write` archive format and the owner of the files it writes. If extracted files are not readable by the commands' user, set `OCTILLION_VERCEL_WRITE_VIA=exec` (base64 chunks through commands).\n- Whether the logs stream of a finished command still returns its whole output, and whether `GET …/cmd/{id}` reports `exitCode: null` while running.\n- `sudo -n -u agent`, `useradd`, GNU `timeout` and `tail --pid` on the `node24` image.\n- The network policy body (`allow` plus `subnets.deny`) being accepted, and the probe results under it.\n- How long the harness installs take on Amazon Linux 2023."
+  },
+  {
+   "area": "admin",
+   "title": "Worker sandboxes on Vercel Sandbox",
+   "href": "/admin/docs/vercel-sandbox-workers#live-test-plan",
+   "heading": "Live test plan",
+   "text": "1. In a test account, on a preview deployment with OIDC, set `OCTILLION_SANDBOX_PROVIDER=vercel` and `OCTILLION_MAX_JOB_ORCHESTRATORS=1`.\n2. Run one small simulation: one task, `claude-code/sonnet`, one repeat.\n3. Watch the orchestrator log for `runner=vercel` and `vercel sandbox broker OK`, then the session to completion. Check that `worker_sandboxes` has its row deleted by the orchestrator and that the session metadata has `sandbox_provider: vercel`.\n4. Repeat with `OCTILLION_EGRESS=all` to see the network policy and its probe pass.\n5. Repeat once per harness (codex, opencode, cline, kilo, pi, cursor) to record install times and failures.\n6. Unset the variable afterwards; the next orchestrator is on boat again."
+  },
+  {
+   "area": "admin",
    "title": "Walkthrough: first visibility report from headless Claude Code",
    "href": "/admin/docs/walkthrough-claude-code",
    "heading": null,

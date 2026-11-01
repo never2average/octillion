@@ -114,3 +114,22 @@ The Vercel estimate uses Pro iad1 rates:
 4. **For one orchestrator only** (testing): `OCTILLION_SANDBOX_PROVIDER=vercel` (or `RUNNER=vercel`) in its own env overrides the server's choice either way.
 
 Without a Vercel token on the API, an orchestrator told to use Vercel refuses to start. It reports "Vercel Sandbox is not configured on the Octillion API" and does not silently fall back to boat.
+
+## What only a live run can confirm
+
+The mocks follow the official SDK's REST calls, but these have not been seen live yet:
+
+- The `fs/write` archive format and the owner of the files it writes. If extracted files are not readable by the commands' user, set `OCTILLION_VERCEL_WRITE_VIA=exec` (base64 chunks through commands).
+- Whether the logs stream of a finished command still returns its whole output, and whether `GET …/cmd/{id}` reports `exitCode: null` while running.
+- `sudo -n -u agent`, `useradd`, GNU `timeout` and `tail --pid` on the `node24` image.
+- The network policy body (`allow` plus `subnets.deny`) being accepted, and the probe results under it.
+- How long the harness installs take on Amazon Linux 2023.
+
+## Live test plan
+
+1. In a test account, on a preview deployment with OIDC, set `OCTILLION_SANDBOX_PROVIDER=vercel` and `OCTILLION_MAX_JOB_ORCHESTRATORS=1`.
+2. Run one small simulation: one task, `claude-code/sonnet`, one repeat.
+3. Watch the orchestrator log for `runner=vercel` and `vercel sandbox broker OK`, then the session to completion. Check that `worker_sandboxes` has its row deleted by the orchestrator and that the session metadata has `sandbox_provider: vercel`.
+4. Repeat with `OCTILLION_EGRESS=all` to see the network policy and its probe pass.
+5. Repeat once per harness (codex, opencode, cline, kilo, pi, cursor) to record install times and failures.
+6. Unset the variable afterwards; the next orchestrator is on boat again.
