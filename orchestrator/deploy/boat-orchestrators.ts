@@ -13,7 +13,9 @@
  *   npm run boat-orchestrators -- image                      build the named snapshot image for the current code
  *   npm run boat-orchestrators -- selftest                   live check: boot one orchestrator sandbox, guard, preflight,
  *                                                            nested worker create/delete, tear down, verify nothing left
- * The shared logic lives in deploy/boat-lib.ts.
+ * The shared logic lives in deploy/boat-lib.ts; up / status / logs / down / budget / image go through the provider-neutral
+ * OrchestratorHost (deploy/orchestrator-host.ts), here always boat. Vercel Sandbox orchestrators are launched only by
+ * the API's autoscaler: the Vercel credential (the function's OIDC token) never leaves the API, so this CLI has none.
  */
 import path from "node:path";
 import { readFileSync } from "node:fs";
@@ -22,6 +24,7 @@ import { BOAT, CFG } from "../core/config.js";
 import { boatApi } from "../core/boat.js";
 import { api, sleep } from "../core/util.js";
 import * as lib from "./boat-lib.js";
+import { boatHost, orchestratorProvider, type HostSandbox } from "./orchestrator-host.js";
 
 export { computeBudget, TUNING_VARS, ORCH_PREFIX, WORKER_PREFIX, MAX_TTL_SECONDS } from "./boat-lib.js";
 export type { Budget, BoatLimits } from "./boat-lib.js";
@@ -50,38 +53,38 @@ async function boatKey(): Promise<void> {
   BOAT.apiKey = r.boat.api_key;
 }
 
-const orchestrators = async () => (await lib.listSandboxes()).filter((s) => s.name?.startsWith(lib.ORCH_PREFIX) && lib.isLive(s));
-const workersOf = (all: lib.Sb[], orchId: string) => all.filter((s) => s.name?.startsWith(lib.workerPrefixOf(orchId)) && lib.isLive(s));
+const host = boatHost();
+const orchestrators = async () => (await host.list()).filter((s) => s.name?.startsWith(host.orchPrefix) && s.live);
+const workersOf = (all: HostSandbox[], orchId: string) => all.filter((s) => s.name?.startsWith(lib.workerPrefixOf(orchId)) && s.live);
 
 async function currentImage(): Promise<string | null> {
-  const name = lib.imageName(lib.codeHash());
-  return (await lib.imageStatus(name)) === "ready" ? name : null;
+  return (await host.image?.ready(lib.codeHash())) ?? null;
 }
 
 async function cmdUp(n: number, skipPreflight: boolean) {
   const existing = await orchestrators();
-  const all = await lib.listSandboxes();
-  const ours = all.filter((s) => (s.name?.startsWith(lib.ORCH_PREFIX) || s.name?.startsWith(lib.WORKER_PREFIX)) && lib.isLive(s)).length;
-  const limits = await lib.boatLimits();
+  const all = await host.list();
+  const ours = all.filter((s) => (s.name?.startsWith(lib.ORCH_PREFIX) || s.name?.startsWith(lib.WORKER_PREFIX)) && s.live).length;
+  const limits = await host.limits();
   const b = lib.computeBudget(limits, n, POD_CAPACITY, ours);
   printBudget(b, limits);
   if (!b.ok) throw new Error(`refusing: ${b.reason}`);
   out(`${existing.length} orchestrator sandbox(es) exist; target ${n}`);
   const image = await currentImage();
   for (let i = existing.length; i < n; i++) {
-    const r = await lib.launchOrchestrator(ctx(), { image, requirePreflight: !skipPreflight });
+    const r = await host.launch(ctx(), { image, requirePreflight: !skipPreflight });
     out(`${r.sandboxId} (${r.orchId}) started${r.fromImage ? " from image" : ""}; preflight ${r.preflight.ok ? "OK" : `SKIPPED (${r.preflight.reason})`}; timings ${JSON.stringify(r.timings)}`);
   }
   if (existing.length > n) out(`note: ${existing.length - n} more orchestrator(s) than requested; use \`down <id>\` to remove`);
 }
 
 async function cmdStatus() {
-  const all = await lib.listSandboxes();
-  const orchs = all.filter((s) => s.name?.startsWith(lib.ORCH_PREFIX) && lib.isLive(s));
+  const all = await host.list();
+  const orchs = all.filter((s) => s.name?.startsWith(host.orchPrefix) && s.live);
   const fleet = (await api("/api/worker/fleet", { method: "GET" }).catch(() => null)) as any;
   out(`fleet: ${fleet?.orchestrators ?? "?"} orchestrator(s) checked in, ${fleet?.total_pods ?? "?"} worker slots planned, queue ${JSON.stringify(fleet?.queue ?? {})}`);
   for (const s of orchs) {
-    const orchId = lib.orchIdOf(s.id);
+    const orchId = host.orchIdOf(s.id);
     const svc = await lib.run(s.id, `systemctl is-active ${lib.UNIT}; systemctl show ${lib.UNIT} -p ActiveEnterTimestamp --value`, 30).catch((e) => ({ code: 1, stdout: "", stderr: String(e) }));
     const [active, since] = svc.stdout.trim().split("\n");
     const ttlLeft = s.archiveAfter ? Math.round((Date.parse(s.archiveAfter) - Date.now()) / 3600_000) : null;
@@ -92,8 +95,7 @@ async function cmdStatus() {
 }
 
 async function cmdLogs(id: string, lines = 200) {
-  const r = await lib.run(id, `journalctl -u ${lib.UNIT} -n ${lines} --no-pager 2>&1 | tail -n ${lines}`, 60);
-  out(r.stdout || r.stderr);
+  out(await host.logs(id, lines));
 }
 
 async function cmdRenew() {
@@ -118,10 +120,10 @@ async function cmdDown(target: string) {
   const victims = target === "--all" ? orchs : orchs.filter((s) => s.id === target);
   if (!victims.length) throw new Error(target === "--all" ? "no orchestrator sandboxes" : `no orchestrator sandbox ${target}`);
   for (const s of victims) {
-    const svc = await lib.stopService(s.id);
-    const left = workersOf(await lib.listSandboxes(), lib.orchIdOf(s.id));
-    for (const w of left) await lib.deleteSandbox(w.id);
-    await lib.deleteSandbox(s.id);
+    const svc = await host.stop(s.id);
+    const left = workersOf(await host.list(), host.orchIdOf(s.id));
+    for (const w of left) await host.delete(w.id);
+    await host.delete(s.id);
     out(`${s.id}: service ${svc}, ${left.length} leftover worker(s) deleted, sandbox deleted`);
   }
 }
@@ -171,15 +173,18 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
       console.error(readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n").filter((l) => l.startsWith(" *   npm run")).join("\n"));
       process.exit(2);
     }
+    if (orchestratorProvider() === "vercel")
+      throw new Error("orchestrators are set to Vercel Sandbox (OCTILLION_SANDBOX_PROVIDER / OCTILLION_ORCHESTRATOR_PROVIDER): the API's autoscaler launches them, " +
+        "this CLI manages boat.dev orchestrators only (unset the variable here to manage boat ones)");
     await boatKey();
-    if (cmd === "budget") { const l = await lib.boatLimits(); printBudget(lib.computeBudget(l, Number(a ?? 1), POD_CAPACITY), l); }
+    if (cmd === "budget") { const l = await host.limits(); printBudget(lib.computeBudget(l, Number(a ?? 1), POD_CAPACITY), l); }
     if (cmd === "up") await cmdUp(Number(a ?? 1), process.argv.includes("--skip-preflight"));
     if (cmd === "status") await cmdStatus();
     if (cmd === "logs") await cmdLogs(a!, Number(b ?? 200));
     if (cmd === "renew") await cmdRenew();
     if (cmd === "update") await cmdUpdate();
     if (cmd === "down") await cmdDown(a ?? "");
-    if (cmd === "image") out(await lib.buildImage({ log: (m) => out(m) }));
+    if (cmd === "image") out(await host.image!.build({ log: (m) => out(m) }));
     if (cmd === "selftest") await cmdSelftest();
   })().catch((e) => { console.error(redact(String(e instanceof Error ? e.message : e))); process.exit(1); });
 }

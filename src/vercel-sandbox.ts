@@ -19,6 +19,10 @@ import { vercelAuth, VERCEL_REGION } from "./sandbox-probe.js";
  *   POST   /v2/sandboxes/sessions/{sid}/cmd/{cmd}/kill     {signal}
  *   POST   /v2/sandboxes/sessions/{sid}/fs/write           gzipped tar, x-cwd header
  *   POST   /v2/sandboxes/sessions/{sid}/network-policy     {allow:[domains], subnets:{deny:[cidrs]}} (applied live)
+ *   POST   /v2/sandboxes/sessions/{sid}/snapshot           {expiration} -> {snapshot:{id,status}}; stops the session
+ *   GET    /v2/sandboxes/snapshots?project=&name=          list (by source sandbox name); DELETE /v2/sandboxes/snapshots/{id}
+ *
+ * Orchestrator sandboxes (orchestrator/deploy/orchestrator-host.ts vercelHost) use the same client from the autoscaler.
  *
  * Every command runs as `bash -c <script>` as the image's default user (vercel-sandbox, which has sudo), like boat's.
  */
@@ -31,7 +35,7 @@ export const DENY_SUBNETS = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "1
 
 export interface VercelClient {
   teamId: string; projectId: string; via: string; region: string;
-  create(o: { name: string; vcpus: number; memoryMb: number; timeoutMs: number; tags?: Record<string, string> }): Promise<{ name: string; session: string | null }>;
+  create(o: { name: string; vcpus: number; memoryMb: number; timeoutMs: number; tags?: Record<string, string>; snapshotId?: string | null }): Promise<{ name: string; session: string | null }>;
   get(name: string): Promise<{ status: string; session: string | null; sessionStatus: string }>;
   remove(name: string): Promise<void>;
   /** Pages until done, or until `deadline` (ms epoch) is near: then what was listed so far. */
@@ -42,11 +46,25 @@ export interface VercelClient {
   kill(session: string, cmd: string, signal?: number): Promise<void>;
   writeFile(session: string, path: string, content: Buffer): Promise<void>;
   networkPolicy(session: string, allow: string[]): Promise<void>;
+  /** Snapshot a running session (Vercel stops it afterwards); `expirationMs` 0 = never expires. */
+  snapshot(session: string, expirationMs: number): Promise<{ id: string; status: string }>;
+  /** Snapshots taken from sandboxes named `name` (newest first). */
+  listSnapshots(name: string): Promise<{ id: string; status: string; createdAt: number | null }[]>;
+  deleteSnapshot(id: string): Promise<void>;
 }
 
-/** A Vercel client from the request's OIDC token (or the env), or why there is none. */
+/**
+ * The function's OIDC token, as the latest request carried it (x-vercel-oidc-token; src/http.ts remembers it). The same
+ * token for every request of this deployment; it lets work that is not tied to one request (the autoscaler's launches)
+ * reach Vercel. Kept in memory only, for 30 minutes.
+ */
+let lastOidc: { token: string; at: number } | null = null;
+export function rememberOidcToken(token: unknown): void { if (typeof token === "string" && token.length > 20) lastOidc = { token, at: Date.now() }; }
+const rememberedOidc = () => (lastOidc && Date.now() - lastOidc.at < 30 * 60_000 ? lastOidc.token : null);
+
+/** A Vercel client from the request's OIDC token (or the latest request's, or the env), or why there is none. */
 export function vercelClient(o: { oidcToken?: string | null; baseUrl?: string } = {}): VercelClient | { not_configured: string } {
-  const auth = vercelAuth(o.oidcToken);
+  const auth = vercelAuth(o.oidcToken || rememberedOidc());
   if ("not_configured" in auth) return auth;
   const base = (o.baseUrl ?? process.env.OCTILLION_VERCEL_SANDBOX_API_URL?.trim() ?? "https://vercel.com/api").replace(/\/+$/, "");
   const h = { authorization: `Bearer ${auth.token}` };
@@ -75,7 +93,8 @@ export function vercelClient(o: { oidcToken?: string | null; baseUrl?: string } 
     async create(c) {
       // No snapshot on stop (persistent: false); Vercel stops it at `timeout` whatever happens to us.
       const r = await json(await call(`/v2/sandboxes${q()}`, { method: "POST", timeoutMs: 90_000, json: {
-        name: c.name, projectId: auth.projectId, runtime: "node24", resources: { vcpus: c.vcpus, memory: c.memoryMb }, timeout: c.timeoutMs,
+        name: c.name, projectId: auth.projectId, ...(c.snapshotId ? { source: { type: "snapshot", snapshotId: c.snapshotId } } : { runtime: "node24" }),
+        resources: { vcpus: c.vcpus, memory: c.memoryMb }, timeout: c.timeoutMs,
         persistent: false, region: VERCEL_REGION, tags: { octillion: "worker", ...(c.tags ?? {}) } } }, "POST /v2/sandboxes"));
       return { name: String(r?.sandbox?.name ?? c.name), session: r?.sandbox?.currentSessionId ?? r?.session?.id ?? null };
     },
@@ -146,6 +165,20 @@ export function vercelClient(o: { oidcToken?: string | null; baseUrl?: string } 
     },
     async networkPolicy(session, allow) {
       await call(`${ses(session)}/network-policy${q()}`, { method: "POST", timeoutMs: 30_000, json: { allow, subnets: { deny: DENY_SUBNETS } } }, "POST network-policy");
+    },
+    async snapshot(session, expirationMs) {
+      const r = await json(await call(`${ses(session)}/snapshot${q()}`, { method: "POST", timeoutMs: 120_000, json: { expiration: expirationMs } }, "POST snapshot"));
+      if (!r?.snapshot?.id) throw new VercelSandboxError(502, `vercel POST snapshot returned no snapshot id: ${JSON.stringify(r).slice(0, 200)}`);
+      return { id: String(r.snapshot.id), status: String(r.snapshot.status ?? "") };
+    },
+    async listSnapshots(name) {
+      const r = await json(await call(`/v2/sandboxes/snapshots${q({ project: auth.projectId, name, limit: "50" })}`, { timeoutMs: 20_000 }, "GET /v2/sandboxes/snapshots"));
+      return (r?.snapshots ?? []).filter((x: any) => typeof x?.id === "string")
+        .map((x: any) => ({ id: String(x.id), status: String(x.status ?? ""), createdAt: Number(x.createdAt) || null }));
+    },
+    async deleteSnapshot(id) {
+      await call(`/v2/sandboxes/snapshots/${encodeURIComponent(id)}${q()}`, { method: "DELETE", timeoutMs: 30_000 }, "DELETE /v2/sandboxes/snapshots/:id")
+        .catch((e) => { if (!isGone(e)) throw e; });
     },
   };
   return client;

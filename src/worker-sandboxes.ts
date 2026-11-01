@@ -73,9 +73,12 @@ const ORCH_FRESH = "interval '5 minutes'";
  * so one deployment's stray sweep never deletes another's. OCTILLION_WORKER_SANDBOX_NAMESPACE overrides the environment tag.
  */
 export function workerPrefix(): string {
+  return `${lib.BOAT_NAMESPACE}-vw-${environmentTag()}-`;
+}
+/** `prod`, `prev`, `dev` (VERCEL_ENV) or OCTILLION_WORKER_SANDBOX_NAMESPACE: also in Vercel orchestrator names (`<ns>-vo-<tag>-`). */
+export function environmentTag(): string {
   const tags: Record<string, string> = { production: "prod", preview: "prev", development: "dev" };
-  const tag = (env("OCTILLION_WORKER_SANDBOX_NAMESPACE") ?? tags[env("VERCEL_ENV") ?? ""] ?? "local").toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 8) || "local";
-  return `${lib.BOAT_NAMESPACE}-vw-${tag}-`;
+  return (env("OCTILLION_WORKER_SANDBOX_NAMESPACE") ?? tags[env("VERCEL_ENV") ?? ""] ?? "local").toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 8) || "local";
 }
 
 const orchHeader = (req: Request) => { const h = String(req.headers["x-octillion-orchestrator"] ?? ""); return ORCH_RE.test(h) ? h : null; };

@@ -2,6 +2,7 @@ import { getDb } from "./db.js";
 import { settingNumber } from "./settings.js";
 import { apportion, findAgent, scheduledAgents, variantsOf } from "./agents.js";
 import { codeHash } from "../orchestrator/deploy/boat-lib.js";
+import { orchestratorProvider, providerLabel, VERCEL_ORCH } from "../orchestrator/deploy/orchestrator-host.js";
 
 /** Agent ids a pod group claims: the agent itself plus its model_variants. */
 export function claimIds(agentId: string): string[] {
@@ -139,17 +140,33 @@ let currentHash: string | undefined;
 export const setCurrentCodeHash = (hash: string) => { currentHash = hash; };
 export const currentCodeHash = () => (currentHash ??= codeHash());
 
-/** Autoscaler-launched orchestrators running other code than this server ships (manually run ones are never retired). */
+/**
+ * Autoscaler-launched orchestrators to retire (manually run ones are never retired), for any of:
+ *  - code: running other code than this server ships (OCTILLION_RECYCLE_ON_DEPLOY=off turns only this one off);
+ *  - timeout: their sandbox stops by itself within OCTILLION_VERCEL_ORCH_RELAUNCH_MINUTES (Vercel's session timeout,
+ *    expires_at): a fresh orchestrator takes over the job while this one finishes the sessions it runs;
+ *  - provider: a shared (job-less) orchestrator on another provider than new orchestrators start on. A per-job one is
+ *    not retired for that: it finishes its job where it is, and the next job starts on the new provider.
+ */
 export async function staleOrchestratorIds(): Promise<Set<string>> {
-  if ((process.env.OCTILLION_RECYCLE_ON_DEPLOY ?? "on").toLowerCase() === "off") return new Set();
+  const recycle = (process.env.OCTILLION_RECYCLE_ON_DEPLOY ?? "on").toLowerCase() !== "off";
   const db = await getDb();
   // Rows from before code_hash existed have none: those are stale when they predate this server process.
   const rows = await db.query<{ orchestrator_id: string }>(
     `SELECT orchestrator_id FROM orchestrator_sandboxes
       WHERE state IN ('booting', 'running') AND orchestrator_id IS NOT NULL
-        AND ((code_hash IS NOT NULL AND code_hash <> $1) OR (code_hash IS NULL AND created_at < $2))`,
-    [currentCodeHash(), SERVER_STARTED_AT]);
+        AND (($3 AND ((code_hash IS NOT NULL AND code_hash <> $1) OR (code_hash IS NULL AND created_at < $2)))
+             OR (expires_at IS NOT NULL AND expires_at < now() + make_interval(mins => $4))
+             OR (job_id IS NULL AND provider <> $5))`,
+    [currentCodeHash(), SERVER_STARTED_AT, recycle, VERCEL_ORCH.relaunchMinutes(), orchestratorProvider()]);
   return new Set(rows.map((r) => r.orchestrator_id));
+}
+
+/** Why staleOrchestratorIds retires this row (the reap reason): the timeout first, then the provider, then the code. */
+export function retireReason(r: { code_hash: string | null; expires_at?: Date | string | null; provider?: string | null; job_id: string | null }, now = Date.now()): string {
+  if (r.expires_at && new Date(r.expires_at).getTime() < now + VERCEL_ORCH.relaunchMinutes() * 60_000) return "retired: sandbox timeout near (a fresh orchestrator took over)";
+  if (!r.job_id && (r.provider ?? "boat") !== orchestratorProvider()) return `retired: orchestrators moved to ${providerLabel(orchestratorProvider())}`;
+  return "retired: launched before this deploy (old code)";
 }
 
 /** Whether an orchestrator still has agent sessions or product research running (by the worker id it checks in with). */

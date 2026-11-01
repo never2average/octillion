@@ -33,6 +33,7 @@ import { appendEvents, claimJobs, completeSession, heartbeat } from "./worker.js
 import { fleetCheckin, fleetLeave, fleetStatus } from "./fleet.js";
 import { autoscalerStatus, kickAutoscaler, startAutoscaler, stopAutoscaler } from "./autoscaler.js";
 import { reapWorkerSandboxes, workerSandboxRouter } from "./worker-sandboxes.js";
+import { rememberOidcToken } from "./vercel-sandbox.js";
 /** On Vercel, orchestrator traffic drives the autoscaler (no ticking loop there); elsewhere the loop does. */
 const serverlessTick = (force = false) => { if (process.env.VERCEL) telemetry.keepAlive(kickAutoscaler({ force }).catch((e) => console.error("autoscaler kick:", (e as Error).message))); };
 import { startArchiver, stopArchiver } from "./archive.js";
@@ -108,6 +109,9 @@ export function createApp() {
   // Global settings (src/settings.ts) and admin-added harnesses (src/harnesses.ts, merged into registry()) are read
   // synchronously from caches: load them, and keep them at most 30s old.
   app.use((_req, _res, next) => void Promise.all([freshSettings(), freshPlatformHarnesses()]).then(() => next()));
+  // The function's OIDC token (Vercel sends it on every request): the autoscaler launches Vercel orchestrators with it
+  // outside any one request (src/vercel-sandbox.ts rememberOidcToken). Memory only; it never leaves our functions.
+  app.use((req, _res, next) => { rememberOidcToken(req.headers["x-vercel-oidc-token"]); next(); });
 
   // 5-minute backstop for the event-driven autoscaler on Vercel (vercel.json crons; Vercel sends CRON_SECRET as a
   // bearer). It also prunes the autoscaler's history (src/autoscaler-ticks.ts), which a VM does from its ticking loop.

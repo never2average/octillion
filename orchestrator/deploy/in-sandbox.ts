@@ -1,5 +1,5 @@
 /**
- * Helpers the launcher runs INSIDE an orchestrator sandbox (never on the main VM):
+ * Helpers the launcher runs INSIDE an orchestrator sandbox, boat.dev or Vercel Sandbox (never on the main VM):
  *   tsx deploy/in-sandbox.ts guard                      host-guard verdict as JSON (production rules, RUNNER from env)
  *   tsx deploy/in-sandbox.ts preflight                  can this sandbox reach $OCTILLION_URL/healthz over HTTPS?
  *   tsx deploy/in-sandbox.ts nested <boat-key-file>     selftest: create + exec + delete ONE worker sandbox from here
@@ -14,7 +14,8 @@ if (cmd === "guard") {
   const boatId = process.env.BOAT_ID ?? process.env.BOX_ID ?? "";
   let marker: any = null;
   try { marker = JSON.parse(readFileSync("/etc/octillion/host-role", "utf8")); } catch { /* none */ }
-  console.log(JSON.stringify({ ok: r.ok, dev: r.dev, problems: r.problems, boat_id_matches_marker: !!marker?.sandbox_id && boatId === marker.sandbox_id, boat_id_shape: boatId.replace(/[a-z0-9]/g, "x") }));
+  console.log(JSON.stringify({ ok: r.ok, dev: r.dev, problems: r.problems, provider: r.provider ?? null, boat_id_matches_marker: !!marker?.sandbox_id && boatId === marker.sandbox_id, boat_id_shape: boatId.replace(/[a-z0-9]/g, "x"),
+    sandbox_id_matches_marker: !!marker?.sandbox_id && process.env.OCTILLION_SANDBOX_ID === marker.sandbox_id }));
   process.exit(r.ok ? 0 : 3);
 }
 
@@ -31,7 +32,7 @@ if (cmd === "preflight") {
     process.exit(ok ? 0 : 4);
   } catch (e) {
     const cause = (e as { cause?: { code?: string } }).cause?.code ?? (e as Error).message;
-    console.log(JSON.stringify({ ok: false, reason: `cannot reach ${url}/healthz from this boat sandbox (${cause}). The server must be on a public HTTPS URL that boat VMs can reach.` }));
+    console.log(JSON.stringify({ ok: false, reason: `cannot reach ${url}/healthz from this sandbox (${cause}). The server must be on a public HTTPS URL that sandbox VMs can reach.` }));
     process.exit(4);
   }
 }
