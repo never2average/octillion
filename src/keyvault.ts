@@ -3,7 +3,7 @@ import { getDb } from "./db.js";
 import { asPlatform } from "./tenant-scope.js";
 
 /**
- * Key vault: provider credentials (Anthropic, OpenAI, boat.dev, ...) encrypted at rest with AES-256-GCM.
+ * Key vault: provider credentials (Anthropic, OpenAI, Exa, ...) encrypted at rest with AES-256-GCM.
  *
  * The master key comes from OCTILLION_VAULT_KEY (32 bytes, base64 or hex; generate with
  * `openssl rand -base64 32`). Only ciphertext, IV, auth tag, the master key's id and a display hint are stored.
@@ -169,10 +169,15 @@ export async function providersWithKeys(rows: ProviderRow[]): Promise<Set<string
 /** Display names for the vault's provider ids (the admin page, the CLI, automatic key names). */
 const PROVIDER_NAMES: Record<string, string> = {
   anthropic: "Anthropic", openai: "OpenAI", google: "Google Gemini", cloudflare: "Cloudflare Workers AI", dashscope: "Alibaba DashScope",
-  vertex: "Vertex AI", boat: "boat.dev", exa: "Exa", libraries_io: "Libraries.io", resend: "Resend", amp: "Amp", cursor: "Cursor",
+  vertex: "Vertex AI", boat: "boat.dev (retired)", exa: "Exa", libraries_io: "Libraries.io", resend: "Resend", amp: "Amp", cursor: "Cursor",
   factory: "Factory", github_copilot: "GitHub Copilot", apollo: "Apollo", slack: "Slack", resend_webhook: "Resend Webhook",
   email_unsubscribe: "Email Unsubscribe Signing",
 };
+/**
+ * Key types of retired services: an existing key stays listed (so it can be deleted from Key vault) but is never read,
+ * brokered or added again. boat.dev was retired on 2026-11-01.
+ */
+export const RETIRED_KEY_TYPES: ReadonlySet<string> = new Set(["boat"]);
 /** A provider's display name; Title Case of the id for one the map does not know ("smoke_llm" → "Smoke Llm"). */
 export const providerName = (slug: string) => PROVIDER_NAMES[slug]
   ?? slug.replace(/[_-]+/g, " ").trim().split(/\s+/).map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
@@ -242,9 +247,10 @@ async function findSameSecret(provider: string, secret: string, exceptId: number
 async function checkSecret(provider: string, secret: string, generated: boolean) {
   const p = await getProvider(provider);
   if (!p) throw new Error(`Unknown provider ${provider}; add it first (keyvault provider ...)`);
+  if (RETIRED_KEY_TYPES.has(provider)) throw new Error(`${providerName(provider)}: this service is no longer used, so its keys cannot be added or replaced (delete the old one)`);
   // A direct-mode key is handed to agent sessions as is; refuse to store one unless that is explicitly allowed.
-  // Orchestrator-only keys (boat, vertex; search providers with no env_vars) never reach a session, so they are always fine.
-  if (p.mode === "direct" && provider !== "boat" && p.env_vars.length && process.env.OCTILLION_DIRECT_KEYS !== "allow")
+  // Orchestrator-only keys (vertex; search providers with no env_vars) never reach a session, so they are always fine.
+  if (p.mode === "direct" && p.env_vars.length && process.env.OCTILLION_DIRECT_KEYS !== "allow")
     throw new Error(`${provider} is a direct-mode provider: its real key would be handed to agent sessions. ` +
                     "Set OCTILLION_DIRECT_KEYS=allow only once those sessions run without customer-written tasks (docs/security.md)");
   // The unsubscribe signing key is generated once (src/campaigns.ts, addCredentialIfAbsent) and signs every unsubscribe

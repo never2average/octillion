@@ -5,8 +5,7 @@ import { getPopulation } from "./populations.js";
 import { currentCodeHash } from "./fleet.js";
 import { agentKeyCoverage, classifiedSandboxes, type ClassifiedSandbox } from "./compute.js";
 import { classifyOrchestrator, classifySession, FIX_LINKS, OLD_SESSION_KEYS, type SessionErrorKey } from "./error-classes.js";
-import { BOAT_SETUP_HARNESSES } from "./harness-setup.js";
-import * as lib from "../orchestrator/deploy/boat-lib.js";
+import { SETUP_HARNESSES } from "./harness-setup.js";
 import { orchSandboxCostUsd, providerLabel } from "../orchestrator/deploy/orchestrator-host.js";
 
 /**
@@ -16,7 +15,7 @@ import { orchSandboxCostUsd, providerLabel } from "../orchestrator/deploy/orches
  *
  * Spend follows §2.1: a session's model $ is its own cost_usd (gateway rows are shown as detail, never added), a
  * worker sandbox's is the estimate the orchestrator wrote, an orchestrator's model $ is its gateway total and its
- * sandbox $ is its lifetime on its provider's machine at the price table's rate (boat small, or the Vercel Sandbox size).
+ * sandbox $ is its lifetime on its provider's machine at the price table's rate (the Vercel Sandbox size; boat small for rows from before its retirement).
  */
 
 const n = (v: unknown) => Number(v ?? 0) || 0;
@@ -42,16 +41,16 @@ export async function scheduledIds(): Promise<Set<string> | null> {
 
 export interface Runnable { agent_id: string; harness: string; has_setup_script: boolean; missing_env: string[]; runnable: boolean; reason: string }
 
-const NO_SETUP = "No setup script: runs only if boat's preinstalled CLI matches the pin (checked inside the sandbox at run time).";
+const NO_SETUP = "No setup script: runs only if a preinstalled CLI matches the pin (checked inside the sandbox at run time).";
 
 /**
- * For each scheduled agent: whether its harness has a boat setup script, and which of the env vars its sessions need
+ * For each scheduled agent: whether its harness has a setup script, and which of the env vars its sessions need
  * no vault key covers (the same rule the credentials broker applies). Runnable means nothing is missing; without a
- * setup script it still runs if boat's preinstalled CLI happens to match, which only the sandbox can tell.
+ * setup script it still runs if a preinstalled CLI happens to match, which only the sandbox can tell.
  */
 export async function agentRunnability(): Promise<{ rows: Runnable[] }> {
   const rows = (await agentKeyCoverage()).map((a): Runnable => {
-    const has = BOAT_SETUP_HARNESSES.includes(a.harness);
+    const has = SETUP_HARNESSES.includes(a.harness);
     const runnable = a.missing_env.length === 0;
     const reason = !runnable ? `No vault key for ${a.missing_env.join(", ")}. Add it in Key vault.` : has ? "Ready to run." : NO_SETUP;
     return { agent_id: a.agent_id, harness: a.harness, has_setup_script: has, missing_env: a.missing_env, runnable, reason };
@@ -184,8 +183,9 @@ async function sessionFacets(f: { base: string; params: unknown[]; status: strin
 
 /** Metadata keys the session peek shows; everything else (environment, adapter internals) stays out. */
 const SESSION_META = ["wall_ms", "harness_runs", "agent_turns", "max_agent_turns", "simulated_user_turns", "max_user_turns", "developer_nudges",
-  "done_reason", "changed_files", "exit_code", "exit_signal", "infra_retries", "infra_error", "boat_sandbox_id", "boat_sandbox_type",
-  "boat_sandbox_seconds", "boat_est_cost_usd", "sandbox_provider", "sandbox_vm_id", "sandbox_type", "sandbox_seconds", "sandbox_est_cost_usd", "runner", "orchestrator_status", "orchestrator_note", "cancelled_by", "cancelled_at", "cancelled_from"] as const;
+  "done_reason", "changed_files", "exit_code", "exit_signal", "infra_retries", "infra_error",
+  // boat_*: what sessions from before boat.dev's retirement recorded (history); sandbox_*: every session since.
+  "boat_sandbox_id", "boat_sandbox_type", "boat_sandbox_seconds", "boat_est_cost_usd", "sandbox_provider", "sandbox_vm_id", "sandbox_type", "sandbox_seconds", "sandbox_est_cost_usd", "runner", "orchestrator_status", "orchestrator_note", "cancelled_by", "cancelled_at", "cancelled_from"] as const;
 
 /** One session for its peek: the row, timing and run metadata, gateway rows, a fix hint, runnability and the last 20 events. */
 export async function sessionDetail(id: string) {
@@ -224,7 +224,7 @@ export function sessionHint(s: { error_class: string | null; agent_id: string | 
   const env = /No vault provider supplies ([A-Z][A-Z0-9_]*(?:, [A-Z][A-Z0-9_]*)*)/.exec(message)?.[1];
   switch (s.error_class) {
     case "credentials": return { text: env ? `Missing key ${env}. Add it in Key vault.` : "A provider key is missing. Add it in Key vault.", href: FIX_LINKS.key_vault.href };
-    case "sandbox_permission": return { text: "The sandbox provider refused to create sandboxes: the boat key in Key vault, or Vercel Sandbox access (OIDC) for the project.", href: FIX_LINKS.key_vault.href };
+    case "sandbox_permission": return { text: "The sandbox provider refused to create sandboxes: check Vercel Sandbox access (OIDC, or the access token) for the project.", href: FIX_LINKS.key_vault.href };
     case "unclaimable": return { text: `${s.agent_id ?? "This agent"} is not in the scheduled population, so no orchestrator claims it. Turn it on in Harness mix.`, href: FIX_LINKS.harness_mix.href };
     case "harness_install": return { text: `The ${s.harness} CLI could not be installed in the sandbox. Check its pin in Harness mix.`, href: FIX_LINKS.harness_mix.href };
     case "time_cap": return { text: "It ran past the session time limit (MAX_SESSION_MINUTES). It is set in the deployment environment, shown in Compute › Environment.", href: FIX_LINKS.environment.href };
@@ -269,22 +269,17 @@ function stateWhere(state: OrchState): string {
 /** The thresholds the page colours by (amber heartbeat, stuck boot), so the table and the server agree. */
 const recordLimits = () => ({ boot_minutes: AUTOSCALE.bootMinutes(), stale_minutes: AUTOSCALE.staleMinutes(), heartbeat_stale_s: HEARTBEAT_STALE_S });
 
-const ttlOf = (s: ClassifiedSandbox | undefined, now: number) => (s?.archiveAfter ? Math.round((Date.parse(s.archiveAfter) - now) / 1000) : null);
-
-function orchRow(r: OrchDb, sb: Map<string, ClassifiedSandbox>, now: number, current: string | null) {
-  const s = r.sandbox_id ? sb.get(r.sandbox_id) : undefined;
+function orchRow(r: OrchDb, now: number, current: string | null) {
   const ended = r.state === "deleted";
   const running = Object.fromEntries(Object.entries(r.meta?.running ?? {}).map(([k, v]) => [k, n(v)]).filter(([, v]) => (v as number) > 0));
   const heartbeat = r.fleet_seen ?? r.last_seen;
   const hours = ((r.deleted_at ? new Date(r.deleted_at).getTime() : now) - new Date(r.created_at).getTime()) / 3_600_000;
   const why = classifyOrchestrator(r);
-  const provider = r.provider === "vercel" ? "vercel" : "boat";
-  // The provider's live state: boat's listing (Vercel orchestrators are not in it: their state is our row's).
-  const sandboxState = provider === "boat" ? s?.state ?? null : null;
-  const ttl = ended ? null : provider === "boat" ? ttlOf(s, now) : r.expires_at ? Math.round((new Date(r.expires_at).getTime() - now) / 1000) : null;
+  const provider = r.provider === "vercel" ? "vercel" : "boat"; // boat: a row from before boat.dev's retirement
+  const ttl = ended || !r.expires_at ? null : Math.round((new Date(r.expires_at).getTime() - now) / 1000);
   return {
     id: r.id, sandbox_id: r.sandbox_id, orchestrator_id: r.orchestrator_id, job_id: r.job_id, state: r.state,
-    provider, provider_label: providerLabel(provider), sandbox_state: sandboxState, boat_state: sandboxState,
+    provider, provider_label: providerLabel(provider),
     state_since: iso(ended ? r.deleted_at : r.state === "booting" ? r.created_at : r.state === "draining" ? r.retiring_since ?? r.ready_at : r.ready_at ?? r.created_at),
     running_by_agent: running, running: Object.values(running).reduce((a: number, b) => a + (b as number), 0),
     pods: r.pods ?? (r.job_id ? 0 : AUTOSCALE.podCapacity()), heartbeat_at: iso(heartbeat),
@@ -300,11 +295,11 @@ export type OrchRow = ReturnType<typeof orchRow>;
 
 export type UnmatchedKind = "worker_no_parent" | "orch_no_row" | "image_builder" | "other_prefix";
 /**
- * boat sandboxes that match nothing of ours that is live: a worker whose orchestrator is gone, an orchestrator-named
- * sandbox with no row, the image builder, and other deployments' sandboxes on the same account. Snapshot images are
+ * Live sandboxes that match nothing of ours that is live: a worker sandbox whose orchestrator is gone (the broker's
+ * reaper deletes it), an orchestrator sandbox with no live row, the image builder, and anyone else's. Snapshot images are
  * kept on purpose and are not listed. Pure; smoke-tested.
  */
-export function unmatchedSandboxes(sbs: ClassifiedSandbox[], live: { sandbox_id: string | null; orchestrator_id: string | null }[], now = Date.now()) {
+export function unmatchedSandboxes(sbs: ClassifiedSandbox[], live: { sandbox_id: string | null; orchestrator_id: string | null }[]) {
   const ids = new Set(live.map((r) => r.sandbox_id).filter(Boolean)), orchIds = new Set(live.map((r) => r.orchestrator_id).filter(Boolean));
   const kindOf = (s: ClassifiedSandbox): UnmatchedKind | null =>
     s.kind === "worker" ? (s.parent_orchestrator_id && orchIds.has(s.parent_orchestrator_id) ? null : "worker_no_parent")
@@ -313,13 +308,13 @@ export function unmatchedSandboxes(sbs: ClassifiedSandbox[], live: { sandbox_id:
   return sbs.filter((s) => s.live).flatMap((s) => {
     const kind = kindOf(s);
     return kind ? [{ sandbox_id: s.id, name: s.name ?? null, kind, parent_orchestrator_id: s.parent_orchestrator_id, created_at: s.createdAt ?? null,
-      boat_state: s.state, ttl_left_s: ttlOf(s, now) }] : [];
+      sandbox_state: s.state }] : [];
   });
 }
 
 /**
- * Orchestrators for a state chip, newest first, each with boat's live state and TTL when boat answered. "unmatched"
- * swaps in boat's sandboxes that match no live row instead. `include` adds one row whatever the chip (a deep link).
+ * Orchestrators for a state chip, newest first, each with its TTL. "unmatched" swaps in our live sandboxes that match
+ * no live row instead. `include` adds one row whatever the chip (a deep link).
  */
 export async function listOrchestrators(q: Record<string, unknown>) {
   const db = await getDb();
@@ -327,12 +322,12 @@ export async function listOrchestrators(q: Record<string, unknown>) {
   const state = (str(q.state) ?? "live") as OrchState;
   if (!ORCH_STATES.includes(state)) throw badRequest(`state must be one of ${ORCH_STATES.join(", ")}`);
   const listing = await classifiedSandboxes();
-  const boat = { ok: listing.ok, stale: listing.stale, error: listing.error };
+  const sandboxes = { ok: listing.ok, stale: listing.stale, error: listing.error };
   const now = Date.now();
   if (state === "unmatched") {
     const live = await db.query<{ sandbox_id: string | null; orchestrator_id: string | null }>("SELECT sandbox_id, orchestrator_id FROM orchestrator_sandboxes WHERE state <> 'deleted'");
-    const rows = unmatchedSandboxes(listing.sandboxes, live, now);
-    return { total: rows.length, boat, limits: recordLimits(), facets: await orchFacets([], [], null, listing.sandboxes, now), rows: rows.slice(offset, offset + limit) };
+    const rows = unmatchedSandboxes(listing.sandboxes, live);
+    return { total: rows.length, sandboxes, limits: recordLimits(), facets: await orchFacets([], [], null, listing.sandboxes), rows: rows.slice(offset, offset + limit) };
   }
   const params: unknown[] = [];
   const where = [stateWhere(state)];
@@ -343,10 +338,9 @@ export async function listOrchestrators(q: Record<string, unknown>) {
   const byClass = reason && /^(launch|reap):/.test(reason) ? reason : null;
   if (reason && !byClass) { params.push(reason); where.push(`(o.launch_step = $${params.length} OR o.reap_reason ILIKE $${params.length} || '%')`); }
   const include = Number(q.include);
-  const facets = await orchFacets(where.slice(1), [...params], byClass, listing.sandboxes, now);
+  const facets = await orchFacets(where.slice(1), [...params], byClass, listing.sandboxes);
   let match = where.join(" AND ");
   if (Number.isInteger(include) && include > 0) { params.push(include); match = `((${match}) OR o.id = $${params.length})`; }
-  const sb = new Map(listing.sandboxes.map((s) => [s.id, s]));
   let current: string | null = null;
   try { current = currentCodeHash(); } catch { /* no code on this deployment: "current" is unknown */ }
   if (byClass) {
@@ -354,22 +348,22 @@ export async function listOrchestrators(q: Record<string, unknown>) {
       SELECT ${ORCH_COLS} ${ORCH_FROM} WHERE ${match} ORDER BY o.id DESC LIMIT 5000`, params))
       .filter((r) => classifyOrchestrator(r)?.key === byClass || (Number.isInteger(include) && r.id === include));
     if (Number.isInteger(include) && include > 0) all.sort((a, b) => Number(b.id === include) - Number(a.id === include));
-    return { total: all.length, boat, limits: recordLimits(), facets, rows: all.slice(offset, offset + limit).map((r) => orchRow(r, sb, now, current)) };
+    return { total: all.length, sandboxes, limits: recordLimits(), facets, rows: all.slice(offset, offset + limit).map((r) => orchRow(r, now, current)) };
   }
   const [{ total }] = await db.query<{ total: unknown }>(`SELECT count(*) AS total ${ORCH_FROM} WHERE ${match}`, params);
   const rows = await db.query<OrchDb>(
     `/* tenant: internal: admin Compute page, gateway spend summed per orchestrator id */
      SELECT ${ORCH_COLS} ${ORCH_FROM} WHERE ${match}
       ORDER BY ${Number.isInteger(include) && include > 0 ? `(o.id = $${params.length}) DESC, ` : ""}o.id DESC LIMIT ${limit} OFFSET ${offset}`, params);
-  return { total: n(total), boat, limits: recordLimits(), facets, rows: rows.map((r) => orchRow(r, sb, now, current)) };
+  return { total: n(total), sandboxes, limits: recordLimits(), facets, rows: rows.map((r) => orchRow(r, now, current)) };
 }
 
 /**
  * Orchestrators each state choice matches under the job and reason filters (the `include` row aside); `where` holds
  * those filters. A reason that is a failure class is matched per row, over at most 5,000 rows as the list does.
- * Unmatched counts boat's sandboxes that match no live row (the job and reason filters do not apply to it).
+ * Unmatched counts our live sandboxes that match no live row (the job and reason filters do not apply to it).
  */
-async function orchFacets(where: string[], params: unknown[], byClass: string | null, sandboxes: ClassifiedSandbox[], now: number) {
+async function orchFacets(where: string[], params: unknown[], byClass: string | null, sandboxes: ClassifiedSandbox[]) {
   const db = await getDb();
   const states = ORCH_STATES.filter((s) => s !== "unmatched");
   const flags = states.map((s, i) => `(${stateWhere(s)}) AS f${i}`).join(", ");
@@ -384,7 +378,7 @@ async function orchFacets(where: string[], params: unknown[], byClass: string | 
     states.forEach((s, i) => { out[s] = n(r?.[`f${i}`]); });
   }
   const live = await db.query<{ sandbox_id: string | null; orchestrator_id: string | null }>("SELECT sandbox_id, orchestrator_id FROM orchestrator_sandboxes WHERE state <> 'deleted'");
-  out.unmatched = unmatchedSandboxes(sandboxes, live, now).length;
+  out.unmatched = unmatchedSandboxes(sandboxes, live).length;
   return out;
 }
 
@@ -398,19 +392,18 @@ export async function orchestratorDetail(id: number) {
   const now = Date.now();
   let current: string | null = null;
   try { current = currentCodeHash(); } catch { /* unknown */ }
-  const row = orchRow(r, new Map(listing.sandboxes.map((s) => [s.id, s])), now, current);
+  const row = orchRow(r, now, current);
 
-  // Workers now: boat's worker sandboxes named for this orchestrator, with the session running in each.
+  // Workers now: its live worker sandboxes (the broker's rows), with the session each was created for.
   const mine = r.orchestrator_id ? listing.sandboxes.filter((s) => s.kind === "worker" && s.live && s.parent_orchestrator_id === r.orchestrator_id) : [];
-  const bySandbox = new Map((mine.length ? await db.query<{ id: string; agent_id: string | null; status: string; heartbeat_at: Date | null; sandbox_id: string }>(
-    `/* tenant: internal: admin Compute page, sessions by worker sandbox id */
-     SELECT DISTINCT ON (sandbox_id) id, agent_id, status, heartbeat_at, sandbox_id FROM agent_sessions WHERE sandbox_id = ANY($1) ORDER BY sandbox_id, queued_at DESC`,
-    [mine.map((s) => s.id)]) : []).map((x) => [x.sandbox_id, x]));
-  const prefix = r.orchestrator_id ? `${lib.workerPrefixOf(r.orchestrator_id)}-` : "";
+  const ids = mine.map((s) => s.session_id).filter((x): x is string => !!x);
+  const bySession = new Map((ids.length ? await db.query<{ id: string; agent_id: string | null; status: string; heartbeat_at: Date | null }>(
+    `/* tenant: internal: admin Compute page, sessions by id (of live worker sandboxes) */
+     SELECT id, agent_id, status, heartbeat_at FROM agent_sessions WHERE id = ANY($1)`, [ids]) : []).map((x) => [x.id, x]));
   const workers = mine.map((s) => {
-    const ses = bySandbox.get(s.id);
-    return { sandbox_id: s.id, name: s.name ?? null, agent_id: ses?.agent_id ?? (s.name?.startsWith(prefix) ? s.name.slice(prefix.length) : null), session_id: ses?.id ?? null,
-      status: ses?.status ?? null, heartbeat_age_s: ses?.heartbeat_at ? Math.round((now - new Date(ses.heartbeat_at).getTime()) / 1000) : null, boat_state: s.state };
+    const ses = s.session_id ? bySession.get(s.session_id) : undefined;
+    return { sandbox_id: s.id, name: s.name ?? null, agent_id: ses?.agent_id ?? null, session_id: ses?.id ?? s.session_id ?? null,
+      status: ses?.status ?? null, heartbeat_age_s: ses?.heartbeat_at ? Math.round((now - new Date(ses.heartbeat_at).getTime()) / 1000) : null, sandbox_state: s.state };
   });
 
   // Recent sessions on it: claimed by its worker id; once its fleet row is gone, the job's sessions started in its lifetime.
@@ -439,9 +432,8 @@ export async function orchestratorDetail(id: number) {
 
   return {
     row, timings: r.timings ?? {}, workers, sessions, tokens, events, gateway,
-    boat: { ok: listing.ok, stale: listing.stale, error: listing.error },
-    // Vercel orchestrators log to /var/lib/octi/orchestrator.log in their sandbox (no CLI: the API holds the Vercel credential).
-    logs_command: r.sandbox_id && r.provider !== "vercel" ? `npm run boat-orchestrators -- logs ${r.sandbox_id}` : null,
+    sandboxes: { ok: listing.ok, stale: listing.stale, error: listing.error },
+    // Orchestrators log to /var/lib/octi/orchestrator.log in their sandbox (no CLI: the API holds the Vercel credential).
     logs_where: r.provider === "vercel" ? "/var/lib/octi/orchestrator.log inside the Vercel sandbox (Vercel dashboard: Observability > Sandboxes)" : null,
     limits: recordLimits(),
   };

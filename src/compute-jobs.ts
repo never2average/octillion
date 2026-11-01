@@ -11,7 +11,8 @@ import { orchSandboxCostUsd } from "../orchestrator/deploy/orchestrator-host.js"
  * the server agree. Read only: nothing here cancels, drains or requeues.
  *
  * Spend follows §2.1: sessions' own cost_usd, the job's orchestrators' gateway totals (the only spend a research job
- * has), and the sandbox estimate (workers' boat_est_cost_usd plus each orchestrator's lifetime on boat's small machine).
+ * has), and the sandbox estimate (workers' sandbox_est_cost_usd, or boat_est_cost_usd from before boat.dev's retirement, plus
+ * each orchestrator's lifetime on its provider's machine).
  */
 
 const n = (v: unknown) => Number(v ?? 0) || 0;
@@ -73,7 +74,7 @@ export function whyWaiting(job: { id: string; kind: "simulation" | "research"; u
   const capacity = own && CAPACITY_NOTE.exec(own);
   if (capacity) {
     const free = Math.max(0, Number(capacity[3]));
-    return { text: `Waiting for sandbox capacity on ${capacity[2]?.trim() || "boat.dev"} (${free} free, needs ${needed})`, note: own!, ...base, free };
+    return { text: `Waiting for sandbox capacity on ${capacity[2]?.trim() || "boat.dev (retired)"} (${free} free, needs ${needed})`, note: own!, ...base, free };
   }
   const rate = notes.find((x) => x.startsWith("launch rate cap:"));
   if (rate && entry) return { text: "Waiting: orchestrator launch rate cap reached", note: rate, ...base };

@@ -12,7 +12,7 @@ import path from "node:path";
 export interface AgentSpec {
   id: string; harness: string; label: string; model: string; weight: number; enabled: boolean;
   vendor?: string; harness_version?: string; event_format?: string;
-  image?: { docker?: string; boat_snapshot?: string }; requires_env?: string[]; notes?: string;
+  image?: { docker?: string }; requires_env?: string[]; notes?: string;
   worker_adapter?: "supported" | "todo" | string;  // whether orchestrator workers can run this harness yet
   paused?: boolean; paused_reason?: string;          // operator switch: keep the agent defined but don't sample or pod it
   /**
@@ -25,7 +25,7 @@ export interface AgentSpec {
   origin?: "registry" | "admin";
   /** For an admin-added harness: the registry.json entry it inherits its CLI spec (and gateway routing) from. */
   base_agent?: string;
-  cli?: string; headless?: string | null; boat_preinstalled?: boolean; resume?: boolean;
+  cli?: string; headless?: string | null; resume?: boolean;
 }
 export interface Registry { version: number; as_of?: string; unrepresented_share?: number; sources?: unknown[]; agents: AgentSpec[] }
 
@@ -109,8 +109,8 @@ export function platformAgent(row: PlatformHarness, fileAgents: AgentSpec[]): Ag
     ...(inherited as Partial<AgentSpec>),
     id: row.id, harness: row.harness, label: row.label, model: row.model, harness_version: version, weight: 0, enabled: row.enabled !== false,
     ...(row.notes ? { notes: row.notes } : {}),
-    // Another pin: the base's image / snapshot are for its version; workers install the pin with boat-setup/<harness>.sh.
-    ...(repinned ? { image: { docker: `octillion/agent-${row.harness}:${version}` }, boat_preinstalled: false } : {}),
+    // Another pin: the base's image is for its version; workers install the pin with images/setup/<harness>.sh.
+    ...(repinned ? { image: { docker: `octillion/agent-${row.harness}:${version}` } } : {}),
     origin: "admin", base_agent: template.id,
   };
 }

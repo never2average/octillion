@@ -354,7 +354,7 @@ function sanitizeBrief(b: Record<string, any>): Partial<ProspectBrief> {
 
 // ---------- deep research on the research harness ----------
 // The quick pass above fits in a request; the deep pass runs on the same harness as product onboarding research
-// (orchestrator/pi-octillion, a Pi session on a boat orchestrator, launched on demand by the autoscaler): up to
+// (orchestrator/pi-octillion, a Pi session on an orchestrator sandbox, launched on demand by the autoscaler): up to
 // RESEARCH_MAX_MINUTES, its own fetch and search budgets, and it replaces the quick brief when it is accepted.
 
 const harnessOn = () => process.env.OCTILLION_PROSPECT_HARNESS !== "off";
@@ -362,7 +362,7 @@ const harnessOn = () => process.env.OCTILLION_PROSPECT_HARNESS !== "off";
 const kick = () => { if (process.env.VERCEL) keepAlive(kickAutoscaler().catch((e) => console.error("autoscaler kick:", (e as Error).message))); };
 
 /** Queue a deep research job for a request, unless one is already queued or running. Returns its id, or null. */
-/** Requests from the landing form queue at most this many deep jobs a day (each starts a boat sandbox); an admin's
+/** Requests from the landing form queue at most this many deep jobs a day (each starts a sandbox); an admin's
  *  Research button is never capped. */
 const DAILY_LIMIT = () => settingNumber("PROSPECT_DAILY_LIMIT"); // global setting (/admin/compute), else env
 

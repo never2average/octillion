@@ -4,7 +4,7 @@ import type { Request, Response } from "express";
 import { getDb } from "./db.js";
 import { settingText } from "./settings.js";
 import { findAgent } from "./agents.js";
-import { getProvider, providersForEnv, providersWithKeys, useCredential, useVertexCredential, type ProviderRow } from "./keyvault.js";
+import { getProvider, providersForEnv, providersWithKeys, RETIRED_KEY_TYPES, useCredential, useVertexCredential, type ProviderRow } from "./keyvault.js";
 import { adaptGeminiBody, geminiWantsThinkingLevel, rejectedBetas, toVertex, VERTEX_UNSUPPORTED_BETAS, toVertexGemini, vertexAccessToken, vertexConfig } from "./vertex.js";
 import { costOf, recordModelUsage } from "./usage.js";
 import { SCENARIO_ROWS } from "./queries.js";
@@ -120,8 +120,8 @@ export const orchestratorBrain = () => ({
 /** Path SDKs expect after the provider's host (OpenAI-style clients append /responses, /chat/completions to .../v1). */
 const SDK_BASE_SUFFIX: Record<string, string> = { openai: "/v1", dashscope: "/compatible-mode/v1" };
 
-/** Direct-mode providers whose key only the orchestrator uses; never brokered to an agent session. */
-export const ORCHESTRATOR_ONLY_PROVIDERS = new Set(["boat", "vertex"]);
+/** Direct-mode providers whose key only the orchestrator uses, and retired ones (RETIRED_KEY_TYPES); never brokered to an agent session. */
+export const ORCHESTRATOR_ONLY_PROVIDERS = new Set(["vertex", ...RETIRED_KEY_TYPES]);
 /** Real vendor keys in agent sessions are off unless OCTILLION_DIRECT_KEYS=allow (see docs/security.md). */
 export const directKeysAllowed = () => process.env.OCTILLION_DIRECT_KEYS === "allow";
 function directKeyAllowed(provider: string, taskSource: string | null): boolean {
@@ -129,12 +129,11 @@ function directKeyAllowed(provider: string, taskSource: string | null): boolean 
   return taskSource === "library" || taskSource === "generated"; // curated or research-written, never customer-written
 }
 
-/** The orchestrator's own access: boat.dev key (if in the vault) and gateway access for its LLM. */
+/** The orchestrator's own access: gateway access for its LLM. */
 export async function brokerOrchestratorCredentials(orchestratorId: string) {
   const { provider: llmProvider, model: llmModel } = orchestratorBrain();
   const p = await getProvider(llmProvider);
   const expiresAt = new Date(Date.now() + 12 * 3600_000);
-  const boat = await useCredential("boat").then((c) => ({ api_key: c.secret })).catch(() => null);
   const llm = p?.mode === "gateway"
     ? { provider: llmProvider, model: llmModel, base_url: `${PUBLIC_URL()}/gw/${llmProvider}${SDK_BASE_SUFFIX[llmProvider] ?? ""}`,
         api_key: await mintToken("orchestrator", [llmProvider], expiresAt, { orchestratorId }), expires_at: expiresAt.toISOString() }
@@ -148,10 +147,8 @@ export async function brokerOrchestratorCredentials(orchestratorId: string) {
         base_url: `${PUBLIC_URL()}/gw/${ap}${SDK_BASE_SUFFIX[ap] ?? ""}`,
         api_key: await mintToken("orchestrator", [ap], expiresAt, { orchestratorId }), expires_at: expiresAt.toISOString() }
     : null;
-  // Where orchestrators put their worker sandboxes (orchestrator/core/runners.ts selectRunner): boat unless this deployment
-  // says vercel. Read when an orchestrator starts: flipping it affects orchestrators launched after the change.
-  const sandbox_provider = (process.env.OCTILLION_SANDBOX_PROVIDER ?? "").trim().toLowerCase() === "vercel" ? "vercel" : "boat";
-  return { boat, llm, architect, sandbox_provider };
+  // Always Vercel Sandbox. Still sent: orchestrators launched by older code pick their worker sandboxes from it.
+  return { llm, architect, sandbox_provider: "vercel" as const };
 }
 
 export async function revokeSessionTokens(sessionId: string) {

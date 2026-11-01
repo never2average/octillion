@@ -32,6 +32,7 @@ import { parseJsonl, transcripts, type RawEvent } from "./transcripts.js";
 import { appendEvents, claimJobs, completeSession, heartbeat } from "./worker.js";
 import { fleetCheckin, fleetLeave, fleetStatus } from "./fleet.js";
 import { autoscalerStatus, kickAutoscaler, startAutoscaler, stopAutoscaler } from "./autoscaler.js";
+import { sandboxConfigError } from "../orchestrator/core/config.js";
 import { reapWorkerSandboxes, workerSandboxRouter } from "./worker-sandboxes.js";
 import { rememberCronOidcToken } from "./vercel-sandbox.js";
 /** On Vercel, orchestrator traffic drives the autoscaler (no ticking loop there); elsewhere the loop does. */
@@ -79,6 +80,9 @@ const WEB_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..",
 let draining = false;
 
 export function createApp() {
+  // A setting that still names the retired boat.dev: say so loudly at startup (the autoscaler refuses to tick on it too).
+  const sandboxBad = sandboxConfigError();
+  if (sandboxBad) console.error(`${"#".repeat(78)}\n# ${sandboxBad}\n${"#".repeat(78)}`);
   const app = express();
   app.set("trust proxy", true);
   app.disable("x-powered-by");
@@ -135,7 +139,7 @@ export function createApp() {
     res.json({ tick, pruned, reasons, rls, health, campaigns, worker_sandboxes: workerSandboxes });
   });
 
-  // Sandbox reliability probe (src/sandbox-probe.ts): boat.dev and Vercel Sandbox side by side, from this deployment.
+  // Sandbox reliability probe (src/sandbox-probe.ts): Vercel Sandbox, measured from this deployment.
   // Its own cron (vercel.json, every 5 minutes) so it never slows or breaks the autoscaler's; same CRON_SECRET rule.
   // OCTILLION_SANDBOX_PROBE=off stops it. Vercel passes the function's OIDC token in x-vercel-oidc-token.
   app.get("/api/cron/sandbox-probe", async (req, res) => {
@@ -548,7 +552,7 @@ export function createApp() {
     res.json(await brokerOrchestratorCredentials(id));
   });
   worker.post("/sessions/:id/credentials", async (req, res) => void res.json(await brokerSessionCredentials(String(req.params.id))));
-  // Worker sandbox broker (src/worker-sandboxes.ts): Vercel Sandbox workers for orchestrators on boat, with the
+  // Worker sandbox broker (src/worker-sandboxes.ts): Vercel Sandbox workers for orchestrators, with the
   // function's OIDC token kept here. Each sandbox is usable only by the token kind / job that created it.
   worker.use("/sandboxes", workerSandboxRouter(authOf));
   app.use("/api/worker", worker);
@@ -714,7 +718,7 @@ export function createApp() {
   ob.put("/compute/settings", need("compute"), async (req, res) => void res.json(await library.saveSettings(adminActor(req, res), req.body?.values)));
   // Loss reasons (src/reasons.ts): the queue and today's cap. Past losses are queued by every drain, no button.
   ob.get("/compute/reasons", async (_req, res) => void res.json(await reasons.reasonsStatus()));
-  // The Compute page (src/compute.ts): verdict, tick freshness, tiles, limits, environment. Read only; ?fresh=1 asks boat again.
+  // The Compute page (src/compute.ts): verdict, tick freshness, tiles, limits, environment. Read only; ?fresh=1 skips the cached provider limits.
   ob.get("/compute/summary", async (req, res) => void res.json(await computeSummary({ fresh: req.query.fresh === "1" })));
   // Its record tables (src/compute-records.ts): sessions and orchestrators with their peeks, and which agents can run. Read only.
   ob.get("/compute/sessions", async (req, res) => void res.json(await records.listSessions(req.query as Record<string, unknown>)));
@@ -817,7 +821,6 @@ export function createApp() {
     void res.json(await gtmReplies.setHandled(adminActor(req, res), Number(req.params.id), req.body?.handled !== false)));
   // GTM phase 2 (src/gtm-routes.ts): prospects, companies, Apollo, sender identities, reply quick actions, deals, outbound attribution.
   gtmOutboundRoutes(ob, { need, actor: adminActor });
-  ob.get("/compute/sandbox", async (_req, res) => void res.json(await library.sandboxProvider()));
   ob.post("/compute/keys", need("keys"), async (req, res) => void res.status(201).json(await library.addModelKey(adminActor(req, res), req.body ?? {})));
   ob.post("/compute/keys/:id/replace", need("keys"), async (req, res) => void res.json(await library.replaceModelKey(adminActor(req, res), Number(req.params.id), req.body ?? {})));
   ob.put("/compute/keys/:id", need("keys"), async (req, res) => void res.json(await library.replaceModelKey(adminActor(req, res), Number(req.params.id), req.body ?? {})));
@@ -911,8 +914,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     console.error(`  landing page  ${PUBLIC_URL}/`);
     console.error(`  MCP endpoint  ${PUBLIC_URL}/mcp   (sign in, or send Authorization: Bearer <api key>)`);
     console.error(`  worker API    ${PUBLIC_URL}/api/worker/*${process.env.OCTILLION_WORKER_TOKEN ? "" : "   (disabled: set OCTILLION_WORKER_TOKEN)"}`);
-    // On-demand orchestrators (boat sandboxes launched/reaped by the server). Needs the public https URL the
-    // sandboxes reach us on, the worker token and a boat key in the vault. OCTILLION_AUTOSCALE=off disables it.
+    // On-demand orchestrators (Vercel Sandbox, launched/reaped by the server). Needs the public https URL the
+    // sandboxes reach us on and the worker token. OCTILLION_AUTOSCALE=off disables it.
     const autoscale = (process.env.OCTILLION_AUTOSCALE ?? "on").toLowerCase() !== "off";
     if (autoscale && /^https:\/\//.test(PUBLIC_URL) && process.env.OCTILLION_WORKER_TOKEN) {
       startAutoscaler();

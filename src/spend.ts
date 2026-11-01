@@ -4,7 +4,7 @@ import { team } from "./admin.js";
 
 /**
  * The admin FinOps page's Model spend tab (/admin/finops?section=spend, GET /api/admin/onboarding/spend): what Octillion spends on models across every
- * account, from metered data only. The boat sandbox price-table estimate is never counted here.
+ * account, from metered data only. The sandbox price-table estimate is never counted here.
  *
  * Where each dollar comes from, and the day it lands on (UTC):
  *   - Session spend, per session: GREATEST(agent_sessions.cost_usd, sum of its gateway_usage.cost_usd), the figure

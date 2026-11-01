@@ -60,8 +60,6 @@ export const SETTINGS: SettingDef[] = [
     help: "Most one-job orchestrators (one per simulation or research job) running at once." },
   { key: "OCTILLION_JOB_POD_CAPACITY", group: "capacity", label: "Worker sandboxes per job", kind: "int", default: 40, min: 1, max: 50,
     help: "Worker sandboxes one per-job orchestrator runs at once." },
-  { key: "BOAT_SANDBOX_SIZE", group: "capacity", label: "Sandbox size", kind: "choice", default: "default", options: ["small", "default", "large", "xlarge"],
-    help: "boat.dev machine size for orchestrators started after the change and their worker sandboxes." },
   { key: "RESEARCH_MAX_COST_USD", group: "research", label: "Most spend per research job (USD)", kind: "number", default: 2, min: 0, max: 1000,
     help: "A deep research job stops once its model spend reaches this." },
   { key: "PROSPECT_DAILY_LIMIT", group: "research", label: "Deep research jobs a day from the landing form", kind: "int", default: 20, min: 0, max: 10000,

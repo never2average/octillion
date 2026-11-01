@@ -24,7 +24,7 @@ import { pinVercelScopeFromCron, vercelAuth, VERCEL_REGION } from "./sandbox-pro
  *
  * Orchestrator sandboxes (orchestrator/deploy/orchestrator-host.ts vercelHost) use the same client from the autoscaler.
  *
- * Every command runs as `bash -c <script>` as the image's default user (vercel-sandbox, which has sudo), like boat's.
+ * Every command runs as `bash -c <script>` as the image's default user (vercel-sandbox, which has sudo).
  */
 
 export class VercelSandboxError extends Error { constructor(public status: number, msg: string) { super(msg); } }

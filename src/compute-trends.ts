@@ -1,6 +1,6 @@
 /**
  * The last 24 hours (or `?hours=168`, a week), hour by hour, for the sparklines on Health › Jobs and Sessions and on
- * every Compute tab (GET /compute/trends). Queue, running, orchestrators, our sandboxes in use and free boat sandboxes
+ * every Compute tab (GET /compute/trends). Queue, running, orchestrators, our sandboxes in use and free sandboxes
  * are the autoscaler's samples averaged per hour (autoscaler_ticks), with its ticks, tick errors and the orchestrators
  * it launched and reaped counted per hour; the rest are counted from the records by the hour they happened: sessions
  * by when they ended (failed, the window's top failure class, model spend) or started (wait, sandbox starts),
@@ -83,7 +83,7 @@ export async function computeTrends(q: { hours?: unknown } = {}) {
   put("launches_failed", tally(launchedIn.filter((r) => r.launch_step != null).map((r) => ({ h: r.created_h }))));
   put("reaps", tally(orch.filter((r) => r.state === "deleted" && r.deleted_h != null && Number(r.deleted_h) >= start)
     .filter((r) => groupOrchestratorEnds([{ ...r, deleted: true }]).reaps.some((g) => !g.routine)).map((r) => ({ h: r.deleted_h }))));
-  // Our boat sandbox starts: orchestrators launched plus worker sandboxes for sessions that started.
+  // Our sandbox starts: orchestrators launched plus worker sandboxes for sessions that started.
   const sessionStarts = new Map(waits.map((r) => [Number(r.h), Number(r.starts ?? 0)]));
   put("starts", [...new Set([...sessionStarts.keys(), ...launchedIn.map((r) => Number(r.created_h))])].map((h) => ({
     h, v: (sessionStarts.get(h) ?? 0) + launchedIn.filter((r) => Number(r.created_h) === h).length })));

@@ -1,24 +1,23 @@
 import { getDb } from "./db.js";
-import * as kv from "./keyvault.js";
 import { AUTOSCALE, CAPACITY_NOTE, computeDemand, kickConfigured, type TickState } from "./autoscaler.js";
 import { scheduledAgents, variantsOf } from "./agents.js";
 import { getPopulation } from "./populations.js";
 import { listSettings } from "./settings.js";
 import { classifySession } from "./error-classes.js";
 import { missingAgentKeys } from "./gateway.js";
-import { BOAT, BOAT_PRICE_PER_HOUR } from "../orchestrator/core/config.js";
-import * as lib from "../orchestrator/deploy/boat-lib.js";
-import { orchestratorProvider, orchSandboxCostUsd, PROVIDER_LABEL, VERCEL_ORCH, workerProvider } from "../orchestrator/deploy/orchestrator-host.js";
+import { sandboxConfigError, VERCEL_SANDBOX_PRICE } from "../orchestrator/core/config.js";
+import * as lib from "../orchestrator/deploy/orch-lib.js";
+import { orchSandboxCostUsd, PROVIDER_LABEL, VERCEL_ORCH } from "../orchestrator/deploy/orchestrator-host.js";
 
 /**
  * The admin Compute page's server side (docs/compute-and-traces-spec.md §2): one summary that answers "is compute
  * healthy, is work flowing, what is stuck, and why" from what already exists: the last autoscaler tick (its lease row),
- * orchestrator_sandboxes, agent_sessions, product_research, gateway spend, compute_events and boat's own listing.
+ * orchestrator_sandboxes, worker_sandboxes, agent_sessions, product_research, gateway spend and compute_events.
  * Read only: nothing here launches, deletes or changes anything.
  *
- * boat.dev is asked through two caches, so a page refreshing every 15 s does not hammer it: the sandbox listing for
- * 30 s and the plan limits for 5 min, each with an 8 s timeout. When boat does not answer, the last good value is
- * served marked stale (or just the error), and everything backed by the database still renders.
+ * Our sandboxes are Vercel Sandbox's, and every one of them has a row (the autoscaler's orchestrator_sandboxes, the
+ * broker's worker_sandboxes): the listing below is read from those rows, and the limits are the configured Vercel ones
+ * (Vercel has no limits API). Rows from before boat.dev's retirement stay readable as history.
  */
 
 const env = process.env;
@@ -27,7 +26,7 @@ const n = (v: unknown) => Number(v ?? 0) || 0;
 const iso = (d: unknown) => (d ? new Date(d as string).toISOString() : null);
 const usd = (x: number) => Math.round(x * 10_000) / 10_000;
 
-// ---------------------------------------------------------------- cached boat calls
+// ---------------------------------------------------------------- cached provider calls
 
 export interface Fetched<T> {
   /** A value is there (fresh, or the last good one when `stale`). */
@@ -39,8 +38,8 @@ export interface Fetched<T> {
   value: T | null;
 }
 
-/** Reject after `ms` with a plain-English error, so a hung boat call never holds the page. */
-export function withTimeout<T>(p: Promise<T>, ms: number, what = "boat.dev"): Promise<T> {
+/** Reject after `ms` with a plain-English error, so a hung provider call never holds the page. */
+export function withTimeout<T>(p: Promise<T>, ms: number, what = "the provider"): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const t = setTimeout(() => reject(new Error(`${what} did not answer within ${Math.round(ms / 1000)} s`)), ms);
     t.unref?.();
@@ -50,7 +49,7 @@ export function withTimeout<T>(p: Promise<T>, ms: number, what = "boat.dev"): Pr
 
 /**
  * A fetch with an in-process cache and a timeout. A fresh value is reused for `ttlMs`; a failure is remembered for
- * `ttlMs` too (a down boat is not asked again on every refresh), and serves the last good value marked stale.
+ * `ttlMs` too (a down provider is not asked again on every refresh), and serves the last good value marked stale.
  * Concurrent callers share one call. `force` skips both caches (the page's "Test connection").
  */
 export function cachedFetch<T>(fetch: () => Promise<T>, opts: { ttlMs: number; timeoutMs: number; what?: string }) {
@@ -74,68 +73,49 @@ export function cachedFetch<T>(fetch: () => Promise<T>, opts: { ttlMs: number; t
   return Object.assign(get, { reset: () => { good = null; failed = null; } });
 }
 
-// The boat key from the vault, re-read every 10 minutes (as the autoscaler does). No key: boat is not asked at all.
-let keyAt = 0;
-async function boatKey() {
-  if (BOAT.apiKey && Date.now() - keyAt < 10 * MIN) return;
-  BOAT.apiKey = (await kv.useCredential("boat")).secret;
-  keyAt = Date.now();
-}
-
-const listing = cachedFetch(async () => { await boatKey(); return lib.listSandboxes(); }, { ttlMs: 30_000, timeoutMs: 8_000 });
-const limits = cachedFetch(async () => { await boatKey(); return lib.boatLimits(); }, { ttlMs: 5 * MIN, timeoutMs: 8_000 });
-
-// ---------------------------------------------------------------- the boat listing, classified
+// ---------------------------------------------------------------- our live sandboxes, from their rows
 
 export type SandboxKind = "orchestrator" | "worker" | "image_builder" | "image" | "probe" | "other";
-export interface ClassifiedSandbox extends lib.Sb {
+export interface ClassifiedSandbox {
+  id: string; name?: string; state: string; createdAt?: string;
   kind: SandboxKind;
   live: boolean;
-  /** Workers: the orchestrator the name says it belongs to (`${ns}-w-<orchId>-<agent>`). */
-  parent_orchestrator_id: string | null;
-  /** Other deployments' sandboxes: the first part of the name ("octv"), or "(unnamed)". */
+  /** Workers: the orchestrator that owns it (the broker records it), and the agent session it was created for. */
+  parent_orchestrator_id: string | null; session_id?: string | null;
+  /** Other deployments' sandboxes: the first part of the name; none are listed (every sandbox here is ours). */
   prefix: string | null;
-}
-
-/**
- * Sort boat's sandboxes by name: ours are `${ns}-orch-…` (orchestrators), `${ns}-orch-img-…` (snapshot images),
- * `${ns}-img-build` (the image builder), `${ns}-w-<orchId>-<agent>` (workers) and `${ns}-probe-…` (the sandbox
- * reliability probe, src/sandbox-probe.ts); everything else belongs to another deployment on the same boat account. A worker's parent is matched against the orchestrator ids we know first (ids
- * may hold dashes), then read from the name.
- */
-export function classifySandboxNames(list: lib.Sb[], ns: string = lib.BOAT_NAMESPACE, orchestratorIds: string[] = []): ClassifiedSandbox[] {
-  const orchPrefix = `${ns}-orch-`, imagePrefix = `${ns}-orch-img-`, builder = `${ns}-img-build`, workerPrefix = `${ns}-w-`;
-  const workerOf = (id: string) => `${workerPrefix}${id}`.toLowerCase().replace(/[^a-z0-9-]+/g, "-");
-  const known = orchestratorIds.map((id) => ({ id, prefix: `${workerOf(id)}-` }));
-  return list.map((s) => {
-    const name = s.name ?? "";
-    const base = { ...s, live: lib.isLive(s), parent_orchestrator_id: null, prefix: null };
-    if (name.startsWith(imagePrefix)) return { ...base, kind: "image" as const };
-    if (name.startsWith(orchPrefix)) return { ...base, kind: "orchestrator" as const };
-    if (name === builder) return { ...base, kind: "image_builder" as const };
-    if (name.startsWith(`${ns}-probe-`)) return { ...base, kind: "probe" as const };
-    if (name.startsWith(workerPrefix)) {
-      const parent = known.find((k) => name.startsWith(k.prefix))?.id ?? /^[^-]+-w-(orch-[a-z0-9]+)-/.exec(name)?.[1] ?? null;
-      return { ...base, kind: "worker" as const, parent_orchestrator_id: parent };
-    }
-    return { ...base, kind: "other" as const, prefix: name ? name.split("-")[0]! : "(unnamed)" };
-  });
 }
 
 export interface SandboxListing { ok: boolean; stale: boolean; error: string | null; at: string | null; sandboxes: ClassifiedSandbox[] }
 
-/** boat's live listing (30 s cache, 8 s timeout), each sandbox classified against our live orchestrator rows. */
-export async function classifiedSandboxes(opts: { force?: boolean } = {}): Promise<SandboxListing> {
-  const [r, rows] = await Promise.all([
-    listing(opts.force),
-    getDb().then((db) => db.query<{ orchestrator_id: string }>("SELECT orchestrator_id FROM orchestrator_sandboxes WHERE state <> 'deleted' AND orchestrator_id IS NOT NULL")),
+/**
+ * Our live Vercel sandboxes: orchestrators (the autoscaler's live rows) and worker sandboxes (the broker's rows not yet
+ * deleted, each with the orchestrator that owns it). A sandbox exists only through a row, so this is the listing.
+ */
+export async function classifiedSandboxes(_opts: { force?: boolean } = {}): Promise<SandboxListing> {
+  const db = await getDb();
+  const [orch, workers] = await Promise.all([
+    db.query<{ sandbox_id: string; state: string; created_at: Date }>(
+      "SELECT sandbox_id, state, created_at FROM orchestrator_sandboxes WHERE state <> 'deleted' AND sandbox_id IS NOT NULL AND provider = 'vercel' ORDER BY id"),
+    db.query<{ sandbox_id: string; orchestrator_id: string | null; session_id: string; created_at: Date; ready_at: Date | null }>(
+      "SELECT sandbox_id, orchestrator_id, session_id, created_at, ready_at FROM worker_sandboxes WHERE deleted_at IS NULL ORDER BY id"),
   ]);
-  return { ok: r.ok, stale: r.stale, error: r.error, at: r.at,
-    sandboxes: classifySandboxNames(r.value ?? [], lib.BOAT_NAMESPACE, rows.map((x) => x.orchestrator_id)) };
+  const at = new Date().toISOString();
+  return { ok: true, stale: false, error: null, at, sandboxes: [
+    ...orch.map((r) => ({ id: r.sandbox_id, name: r.sandbox_id, state: r.state, createdAt: iso(r.created_at) ?? undefined, kind: "orchestrator" as const, live: true, parent_orchestrator_id: null, prefix: null })),
+    ...workers.map((w) => ({ id: w.sandbox_id, name: w.sandbox_id, state: w.ready_at ? "ready" : "starting", createdAt: iso(w.created_at) ?? undefined, kind: "worker" as const, live: true,
+      parent_orchestrator_id: w.orchestrator_id, session_id: w.session_id, prefix: null })),
+  ] };
 }
 
-/** For tests: forget what boat said. */
-export function resetComputeCaches() { listing.reset(); limits.reset(); summaryCache = null; keyAt = 0; }
+/** The configured Vercel Sandbox limits, with what is active now (VERCEL_ORCH; Vercel has no limits API). */
+export function vercelLimits(activeNow: number) {
+  const perHour = VERCEL_ORCH.startsPerHour();
+  return { activeSandboxes: VERCEL_ORCH.maxConcurrent(), startsPerMinute: perHour, startsPerHour: perHour, startsPerDay: perHour * 24, activeNow };
+}
+
+/** For tests: forget the cached summary. */
+export function resetComputeCaches() { summaryCache = null; }
 
 // ---------------------------------------------------------------- which agents lack a key
 
@@ -162,9 +142,8 @@ export interface Verdict { level: Level; code: string; text: string; href: strin
 /** Everything the verdict rules read, gathered by computeSummary. */
 export interface VerdictFacts {
   enabled: boolean; runtime: "vm" | "vercel"; kick_configured: boolean;
-  has_boat_key: boolean; boat_error: string | null;
-  /** Whether anything still runs on boat (new orchestrators, workers, or live boat orchestrators); default true. */
-  boat_needed?: boolean;
+  /** A sandbox setting that cannot work (sandboxConfigError: e.g. OCTILLION_SANDBOX_PROVIDER=boat, retired), else null. */
+  config_error?: string | null;
   tick: { age_s: number | null; error: string | null; note: string | null };
   queue: { sessions: number; research: number; oldest_session_age_s: number | null; oldest_research_age_s: number | null; unclaimable: number };
   running: { sessions: number; orchestrators: number };
@@ -194,11 +173,7 @@ export function computeVerdict(f: VerdictFacts): Verdict[] {
   if (!f.enabled) add("red", "autoscale_off", "The autoscaler is off. Queued work will not get orchestrators.", "#environment");
   if (f.runtime === "vercel" && f.enabled && !f.kick_configured)
     add("red", "kick_unconfigured", "This deployment cannot trigger the autoscaler: PUBLIC_URL is not HTTPS or the worker token is unset.", "#environment");
-  // Without a key boat is never asked, so "not answering" would only repeat the missing key.
-  // With everything on Vercel Sandbox (OCTILLION_SANDBOX_PROVIDER=vercel) and no boat orchestrator left, boat is not needed.
-  const boatNeeded = f.boat_needed !== false;
-  if (boatNeeded && f.has_boat_key && f.boat_error) add("red", "boat_down", `boat.dev is not answering: ${f.boat_error}`, "/admin/keys");
-  if (boatNeeded && !f.has_boat_key) add("red", "no_boat_key", "No boat key. Add one in Key vault.", "/admin/keys");
+  if (f.config_error) add("red", "sandbox_config", f.config_error, "#environment");
   if (f.tick.error) add("red", "tick_error", `The last tick failed: ${f.tick.error}`, "/admin/compute?section=decisions&has=error");
   if (f.enabled && queued > 0 && (f.tick.age_s == null || f.tick.age_s > 600)) {
     const what = [f.queue.sessions && plural(f.queue.sessions, "session"), f.queue.research && plural(f.queue.research, "research job")].filter(Boolean).join(" and ");
@@ -213,8 +188,8 @@ export function computeVerdict(f: VerdictFacts): Verdict[] {
       "/admin/health?section=sessions&class=unclaimable");
   const plan = CAPACITY_NOTE.exec(note);
   if (plan) {
-    const where = plan[2]?.trim() || "boat.dev";
-    add("amber", "plan_capacity", `${plan[1]} waits for sandbox capacity on ${where}: ${Math.max(0, Number(plan[3]))} free${where === "boat.dev" ? `, other deployments use ${f.others}` : ""}.`, "#limits");
+    const where = plan[2]?.trim() || PROVIDER_LABEL.boat; // the older wording named no provider: it was boat's plan
+    add("amber", "plan_capacity", `${plan[1]} waits for sandbox capacity on ${where}: ${Math.max(0, Number(plan[3]))} free.`, "#limits");
   }
   const rate = /launch rate cap: [^;]*/.exec(note);
   if (rate) add("amber", "rate_cap", `Orchestrator launches are paused by the ${rate[0]}.`, "#limits");
@@ -252,15 +227,15 @@ export type Binding = "plan" | "job_orch" | "pods" | null;
 
 /**
  * Which ceiling binds. The latest tick's note wins: it names the cap that actually held a job back. Otherwise the
- * boat plan (shared fleet: computeBudget's reason; per job: nothing free while work waits), then the job-orchestrator cap, then pods per orchestrator, each only while
+ * sandbox limit (shared fleet: computeBudget's reason; per job: nothing free while work waits), then the job-orchestrator cap, then pods per orchestrator, each only while
  * work is queued (a full cap with nothing waiting holds nothing back).
  */
 export function bindingLimit(x: { note: string | null; budget_reason: string | undefined; queued: number; per_job: boolean; free: number | null;
   job_orch_live: number; job_orch_cap: number; pods_max_reserved: number; pods_cap: number }): Binding {
   if (x.note && /at OCTILLION_MAX_JOB_ORCHESTRATORS/.test(x.note)) return "job_orch";
   if (x.note && CAPACITY_NOTE.test(x.note)) return "plan";
-  // Shared fleet: the whole fleet at full pods does not fit the plan. Per job: each orchestrator reserves only its own
-  // pods, so the plan binds only when work waits and not one more sandbox is free.
+  // Shared fleet: the whole fleet at full pods does not fit the limit. Per job: each orchestrator reserves only its own
+  // pods, so the limit binds only when work waits and not one more sandbox is free.
   if (!x.per_job && x.budget_reason) return "plan";
   if (x.per_job && x.queued > 0 && x.free != null && x.free < 1) return "plan";
   if (x.queued > 0 && x.per_job && x.job_orch_live >= x.job_orch_cap) return "job_orch";
@@ -269,10 +244,8 @@ export function bindingLimit(x: { note: string | null; budget_reason: string | u
 }
 
 /**
- * What is active on the boat account and whose, all from the one sandbox listing (30 s), never mixed with the plan
- * limits' activeNow (cached 5 min): a launch or reap since then would show up as other deployments. Ours is every
- * sandbox named with our namespace: orchestrators, workers, the image builder and images, and the reliability probe's
- * sandboxes (ours_probes: they hold plan capacity orchestrators cannot use). Without a listing, boat's
+ * What is active and whose, from the listing (classifiedSandboxes): orchestrators, workers, images and probes are ours;
+ * `others` are anyone else's (none on Vercel, where every sandbox listed is ours). Without a listing, the limits'
  * activeNow less what our rows say we hold (`oursHeld`: live orchestrators plus their running workers).
  */
 export function sandboxUsage(sb: { ok: boolean; sandboxes: ClassifiedSandbox[] }, limitsActiveNow: number | null, oursHeld: number) {
@@ -297,22 +270,22 @@ const KNOBS: { name: string; def: string; meaning: string }[] = [
   { name: "OCTILLION_ORCH_IDLE_MINUTES", def: "10", meaning: "An orchestrator with nothing to claim this long drains and exits." },
   { name: "OCTILLION_ORCH_STALE_MINUTES", def: "5", meaning: "A running orchestrator with no check-in this long is deleted." },
   { name: "OCTILLION_ORCH_BOOT_MINUTES", def: "10", meaning: "An orchestrator still booting after this long is deleted." },
-  { name: "OCTILLION_ORCH_SNAPSHOT", def: "off", meaning: "Boot orchestrators from a snapshot image (measured slower than a code upload)." },
+  { name: "OCTILLION_ORCH_SNAPSHOT", def: "off", meaning: "Boot orchestrators from a snapshot image of the current code." },
   { name: "OCTILLION_POD_CAPACITY", def: "20", meaning: "Worker sandboxes per shared orchestrator (per-job mode uses the Limits setting)." },
   { name: "OCTILLION_FLEET_STALE_SECONDS", def: "90", meaning: "An orchestrator not seen this long no longer counts as live in the fleet." },
   { name: "OCTILLION_RESEARCH_STALE_MINUTES", def: "20", meaning: "Running research with no heartbeat this long gets a new orchestrator." },
   { name: "OCTILLION_SESSION_INFRA_RETRIES", def: "1", meaning: "Times a session that failed on infrastructure is queued again." },
   { name: "OCTILLION_LEASE_MINUTES", def: "30", meaning: "How long a claimed session is held before it can be claimed again." },
   { name: "MAX_SESSION_MINUTES", def: "45", meaning: "Longest an agent session may run before it is stopped as timed out." },
-  { name: "BOAT_TTL_MARGIN_MINUTES", def: "15", meaning: "Extra lifetime a worker sandbox gets beyond the session limit." },
-  { name: "BOAT_READY_TIMEOUT_SECONDS", def: "300", meaning: "How long a new sandbox may take to become ready." },
+  { name: "OCTILLION_SANDBOX_TTL_MARGIN_MINUTES", def: "15", meaning: "Extra lifetime a worker sandbox gets beyond the session limit." },
+  { name: "OCTILLION_SANDBOX_READY_TIMEOUT_SECONDS", def: "300", meaning: "How long a new sandbox may take to become ready." },
 ];
 
 export function computeKnobs(runtime: "vm" | "vercel") {
   const set = (k: string) => env[k] !== undefined && env[k] !== "";
   return [
     ...KNOBS.map((k) => ({ name: k.name, value: set(k.name) ? String(env[k.name]) : k.def, source: set(k.name) ? "env" as const : "default" as const, meaning: k.meaning })),
-    { name: "OCTILLION_BOAT_NAMESPACE", value: lib.BOAT_NAMESPACE, source: set("OCTILLION_BOAT_NAMESPACE") ? "env" as const : "default" as const,
+    { name: "OCTILLION_SANDBOX_NAMESPACE", value: lib.SANDBOX_NAMESPACE, source: set("OCTILLION_SANDBOX_NAMESPACE") ? "env" as const : "default" as const,
       meaning: "Name prefix of this deployment's sandboxes; it only ever touches sandboxes named with it." },
     { name: "Runtime", value: runtime === "vercel" ? "Vercel" : "VM", source: set("VERCEL") ? "env" as const : "default" as const,
       meaning: runtime === "vercel" ? "Serverless: the autoscaler ticks on events and a cron every 5 minutes." : "A long-running server: the autoscaler ticks on a timer." },
@@ -326,7 +299,7 @@ export function computeKnobs(runtime: "vm" | "vercel") {
 const HEARTBEAT_STALE_S = 90;
 let summaryCache: { at: number; value: Awaited<ReturnType<typeof buildSummary>> } | null = null;
 
-/** GET /compute/summary: cached 5 s; `fresh` asks boat again (the page's Refresh and Test connection). */
+/** GET /compute/summary: cached 5 s; `fresh` skips the cache (the page's Refresh). */
 export async function computeSummary(opts: { fresh?: boolean } = {}) {
   if (!opts.fresh && summaryCache && Date.now() - summaryCache.at < 5_000) return summaryCache.value;
   const value = await buildSummary(!!opts.fresh);
@@ -339,8 +312,7 @@ async function buildSummary(fresh: boolean) {
   const now = Date.now();
   const runtime: "vm" | "vercel" = env.VERCEL ? "vercel" : "vm";
   const perJob = AUTOSCALE.perJob();
-  const key = (await kv.listCredentials()).find((c) => c.provider === "boat") ?? null;
-  const orchProvider = orchestratorProvider(), wProvider = workerProvider();
+  const configError = sandboxConfigError();
 
   const [lease] = await db.query<{ holder: string; state: TickState | null }>("SELECT holder, state FROM autoscaler_lease WHERE name = 'autoscaler'");
   const tick = lease?.state ?? null;
@@ -360,9 +332,9 @@ async function buildSummary(fresh: boolean) {
             coalesce(sum(cost_usd) FILTER (WHERE ended_at >= current_date), 0) AS model_today,
             coalesce(sum(coalesce(CASE WHEN jsonb_typeof(metadata->'sandbox_est_cost_usd') = 'number' THEN (metadata->>'sandbox_est_cost_usd')::numeric END, CASE WHEN jsonb_typeof(metadata->'boat_est_cost_usd') = 'number' THEN (metadata->>'boat_est_cost_usd')::numeric END))
                      FILTER (WHERE ended_at >= current_date), 0) AS sandbox_today,
-            count(*) FILTER (WHERE sandbox_id IS NOT NULL AND sandbox_id NOT LIKE 'vercel:%' AND started_at > now() - interval '1 minute') AS starts_minute,
-            count(*) FILTER (WHERE sandbox_id IS NOT NULL AND sandbox_id NOT LIKE 'vercel:%' AND started_at > now() - interval '1 hour') AS starts_hour,
-            count(*) FILTER (WHERE sandbox_id IS NOT NULL AND sandbox_id NOT LIKE 'vercel:%' AND started_at > now() - interval '1 day') AS starts_day
+            count(*) FILTER (WHERE sandbox_id LIKE 'vercel:%' AND started_at > now() - interval '1 minute') AS starts_minute,
+            count(*) FILTER (WHERE sandbox_id LIKE 'vercel:%' AND started_at > now() - interval '1 hour') AS starts_hour,
+            count(*) FILTER (WHERE sandbox_id LIKE 'vercel:%' AND started_at > now() - interval '1 day') AS starts_day
        FROM agent_sessions
       WHERE status IN ('queued', 'running') OR ended_at > now() - interval '24 hours' OR started_at > now() - interval '24 hours'`);
   const [rsh] = await db.query<Record<string, unknown>>(
@@ -411,22 +383,18 @@ async function buildSummary(fresh: boolean) {
   const [orch] = await db.query<Record<string, unknown>>(
     `SELECT count(*) FILTER (WHERE launch_step IS NOT NULL AND created_at > now() - interval '1 hour') AS failed_1h,
             count(*) FILTER (WHERE launch_step IS NOT NULL AND created_at > now() - interval '24 hours') AS failed_24h,
-            count(*) FILTER (WHERE provider = 'boat' AND created_at > now() - interval '1 minute') AS starts_minute,
-            count(*) FILTER (WHERE provider = 'boat' AND created_at > now() - interval '1 hour') AS starts_hour,
-            count(*) FILTER (WHERE provider = 'boat' AND created_at > now() - interval '1 day') AS starts_day,
-            count(*) FILTER (WHERE provider = 'vercel' AND created_at > now() - interval '1 hour') AS vercel_starts_hour,
+            count(*) FILTER (WHERE provider = 'vercel' AND created_at > now() - interval '1 minute') AS starts_minute,
+            count(*) FILTER (WHERE provider = 'vercel' AND created_at > now() - interval '1 hour') AS starts_hour,
+            count(*) FILTER (WHERE provider = 'vercel' AND created_at > now() - interval '1 day') AS starts_day,
             count(*) FILTER (WHERE provider = 'vercel' AND state <> 'deleted') AS vercel_live,
-            count(*) FILTER (WHERE provider = 'boat' AND state <> 'deleted') AS boat_live,
-            coalesce(sum(extract(epoch FROM coalesce(deleted_at, now()) - greatest(created_at, current_date::timestamptz)))
-                     FILTER (WHERE provider = 'boat' AND coalesce(deleted_at, now()) > current_date::timestamptz), 0) AS seconds_today,
             coalesce(sum(extract(epoch FROM coalesce(deleted_at, now()) - greatest(created_at, current_date::timestamptz)))
                      FILTER (WHERE provider = 'vercel' AND coalesce(deleted_at, now()) > current_date::timestamptz), 0) AS vercel_seconds_today
        FROM orchestrator_sandboxes WHERE created_at > now() - interval '1 day' OR state <> 'deleted' OR deleted_at >= current_date`);
-  // The sandbox reliability probe's boat creates (src/sandbox-probe.ts) are starts on the same account too.
+  // The sandbox reliability probe's creates (src/sandbox-probe.ts) are starts in the same project too.
   const [probeStarts] = await db.query<Record<string, unknown>>(
     `SELECT count(*) FILTER (WHERE started_at > now() - interval '1 minute') AS starts_minute,
             count(*) FILTER (WHERE started_at > now() - interval '1 hour') AS starts_hour, count(*) AS starts_day
-       FROM sandbox_probes WHERE provider = 'boat' AND sandbox_id IS NOT NULL AND started_at > now() - interval '1 day'`);
+       FROM sandbox_probes WHERE provider = 'vercel' AND sandbox_id IS NOT NULL AND started_at > now() - interval '1 day'`);
   const [lastFail] = await db.query<{ launch_step: string; launch_error: string | null }>(
     "SELECT launch_step, launch_error FROM orchestrator_sandboxes WHERE launch_step IS NOT NULL AND created_at > now() - interval '1 hour' ORDER BY created_at DESC LIMIT 1");
   const [orchSpend] = await db.query<{ usd: unknown }>("SELECT coalesce(sum(cost_usd), 0) AS usd FROM gateway_model_usage WHERE consumer = 'orchestrator' AND day = current_date");
@@ -449,24 +417,22 @@ async function buildSummary(fresh: boolean) {
   const demand = await computeDemand().catch(() => null);
   const missingKeys = await agentKeyCoverage().catch(() => []);
 
-  // boat: the plan limits and the classified listing. No key: boat is not asked.
-  const sb: SandboxListing = key ? await classifiedSandboxes({ force: fresh })
-    : { ok: false, stale: false, error: "No boat key in the vault", at: null, sandboxes: [] };
-  const lim = key ? await limits(fresh) : { ok: false, stale: false, error: "No boat key in the vault", at: null, value: null };
+  // Our live sandboxes (their rows) and the configured Vercel limits.
+  const sb = await classifiedSandboxes({ force: fresh });
   const liveSb = sb.sandboxes.filter((s) => s.live);
+  const L = vercelLimits(liveSb.length);
   const liveOrchIds = new Set(live.map((r) => r.orchestrator_id).filter(Boolean));
   const leaked = liveSb.filter((s) => s.kind === "worker" && !(s.parent_orchestrator_id && liveOrchIds.has(s.parent_orchestrator_id))).length;
-  const L = lim.value;
-  const use = sandboxUsage(sb, L?.activeNow ?? null, live.length + podsUsed);
+  const use = sandboxUsage(sb, L.activeNow, live.length + podsUsed);
   const { active_now: activeNow, ours_orch: oursOrch, ours_workers: oursWorkers, others, other_prefixes: otherPrefixes } = use;
-  // Plan capacity orchestrators cannot use: other deployments' sandboxes and our reliability probes.
+  // Capacity orchestrators cannot use: other deployments' sandboxes and our reliability probes.
   const held = others + use.ours_probes;
 
   const jobCap = AUTOSCALE.maxJobOrchestrators(), podsCap = AUTOSCALE.jobPodCapacity();
   const podCapacity = perJob ? podsCap : AUTOSCALE.podCapacity();
-  const budget = L ? lib.computeBudget(L, live.length, podCapacity, L.activeNow - held) /* its other-active is `held` */ : null;
-  // free: what the last per-job tick left, else the same formula (plan - other deployments - ours reserved) here.
-  const free = typeof tick?.free === "number" ? tick.free : L ? L.activeSandboxes - held - live.reduce((a, r) => a + 1 + podsOf(r), 0) : null;
+  const budget = lib.computeBudget(L, live.length, podCapacity, L.activeNow - held) /* its other-active is `held` */;
+  // free: what the last per-job tick left, else the same formula (limit - others - ours reserved) here.
+  const free = typeof tick?.free === "number" ? tick.free : L.activeSandboxes - held - live.reduce((a, r) => a + 1 + podsOf(r), 0);
   const perOrchestrator = 1 + podCapacity;
   const queuedAll = n(ses?.queued) + n(rsh?.queued);
   const podsMax = jobLive.reduce((a, r) => Math.max(a, r.pods ?? 0), 0);
@@ -476,18 +442,17 @@ async function buildSummary(fresh: boolean) {
   const oldestSession = iso(ses?.oldest_queued), oldestResearch = iso(rsh?.oldest);
   const ageOf = (d: string | null) => (d ? Math.max(0, (now - Date.parse(d)) / 1000) : null);
   const facts: VerdictFacts = {
-    enabled: AUTOSCALE.enabled(), runtime, kick_configured: kickConfigured(), has_boat_key: !!key, boat_error: key ? sb.error ?? lim.error : null,
+    enabled: AUTOSCALE.enabled(), runtime, kick_configured: kickConfigured(), config_error: configError,
     tick: { age_s: tickAge, error: tick?.error ?? null, note: tick?.note ?? null },
     queue: { sessions: n(ses?.queued), research: n(rsh?.queued), oldest_session_age_s: ageOf(oldestSession), oldest_research_age_s: ageOf(oldestResearch),
              unclaimable: demand?.unclaimable_sessions ?? 0 },
     running: { sessions: n(ses?.running), orchestrators: live.length },
     others, free, per_job: perJob, job_orch_live: jobActive.length, job_orch_cap: jobCap, not_checking_in: notCheckingIn,
     launch_failures_1h: { count: n(orch?.failed_1h), step: lastFail?.launch_step ?? null, message: lastFail?.launch_error?.slice(0, 160) ?? null },
-    missing_keys: missingKeys, leaked_workers: leaked, orphan_deletes_24h: n(orphans?.n), namespace: lib.BOAT_NAMESPACE, idle_orchestrators: idle,
-    boat_needed: orchProvider === "boat" || wProvider === "boat" || n(orch?.boat_live) > 0,
+    missing_keys: missingKeys, leaked_workers: leaked, orphan_deletes_24h: n(orphans?.n), namespace: lib.SANDBOX_NAMESPACE, idle_orchestrators: idle,
   };
 
-  const orchSandboxUsd = orchSandboxCostUsd("boat", n(orch?.seconds_today)) + orchSandboxCostUsd("vercel", n(orch?.vercel_seconds_today));
+  const orchSandboxUsd = orchSandboxCostUsd("vercel", n(orch?.vercel_seconds_today));
   const spend = { session_model_usd: usd(n(ses?.model_today)), orchestrator_model_usd: usd(n(orchSpend?.usd)), sandbox_est_usd: usd(n(ses?.sandbox_today) + orchSandboxUsd) };
   const ended = n(ses?.ended_24h), failedN = n(ses?.failed_24h);
 
@@ -505,29 +470,26 @@ async function buildSummary(fresh: boolean) {
     failures_24h: { sessions: failedN, launches: n(orch?.failed_24h), ended, rate: ended ? failedN / ended : 0, top },
     spend_today: { ...spend, total_usd: usd(spend.session_model_usd + spend.orchestrator_model_usd + spend.sandbox_est_usd) },
     limits: {
-      ok: !!L && sb.ok, error: lim.error ?? sb.error, stale: lim.stale || sb.stale,
-      plan: L?.activeSandboxes ?? null, active_now: activeNow, ours_orch: oursOrch, ours_workers: oursWorkers, ours_images: use.ours_images, ours_probes: use.ours_probes, others, other_prefixes: otherPrefixes,
+      ok: sb.ok, error: sb.error, stale: sb.stale,
+      plan: L.activeSandboxes, active_now: activeNow, ours_orch: oursOrch, ours_workers: oursWorkers, ours_images: use.ours_images, ours_probes: use.ours_probes, others, other_prefixes: otherPrefixes,
       our_starts: { minute: n(orch?.starts_minute) + n(ses?.starts_minute) + n(probeStarts?.starts_minute), hour: n(orch?.starts_hour) + n(ses?.starts_hour) + n(probeStarts?.starts_hour),
                     day: n(orch?.starts_day) + n(ses?.starts_day) + n(probeStarts?.starts_day) },
-      starts: L ? { per_minute: L.startsPerMinute, per_hour: L.startsPerHour, per_day: L.startsPerDay } : null,
+      starts: { per_minute: L.startsPerMinute, per_hour: L.startsPerHour, per_day: L.startsPerDay },
       job_orch_live: jobActive.length, job_orch_draining: jobLive.length - jobActive.length, job_orch_cap: jobCap, shared_orch_live: live.length - jobLive.length, shared_orch_cap: AUTOSCALE.maxOrchestrators(), per_job_mode: perJob,
       pods_max_reserved: podsMax, pods_avg_running: jobLive.length ? Math.round(jobLive.reduce((a, r) => a + runningOf(r), 0) / jobLive.length) : 0, pods_cap: podsCap,
       available: free == null ? null : Math.max(0, Math.floor(free / perOrchestrator)), per_orchestrator: perOrchestrator,
       sessions_per_day_ceiling: budget?.sessionsPerDayCeiling ?? null, reason: budget?.reason ?? null, binding, note: tick?.note ?? null,
-      sandbox_prices: BOAT_PRICE_PER_HOUR,
+      sandbox_prices: { vercel_cpu_hour: VERCEL_SANDBOX_PRICE.cpuHour, vercel_memory_gb_hour: VERCEL_SANDBOX_PRICE.memGbHour },
     },
     settings: await listSettings(),
     knobs: computeKnobs(runtime),
-    // Where orchestrators and worker sandboxes run (OCTILLION_SANDBOX_PROVIDER, OCTILLION_ORCHESTRATOR_PROVIDER), and
-    // how many orchestrators are on each: boat ones launched before a switch finish their jobs there.
+    // Where orchestrators and worker sandboxes run: Vercel Sandbox, the only provider (boat.dev was retired on 2026-11-01).
     hosting: {
-      orchestrators: { provider: orchProvider, label: PROVIDER_LABEL[orchProvider] }, workers: { provider: wProvider, label: PROVIDER_LABEL[wProvider] },
-      live: { boat: n(orch?.boat_live), vercel: n(orch?.vercel_live) },
-      vercel: { starts_hour: n(orch?.vercel_starts_hour), starts_per_hour_cap: VERCEL_ORCH.startsPerHour(), max_concurrent: VERCEL_ORCH.maxConcurrent(),
+      orchestrators: { provider: "vercel" as const, label: PROVIDER_LABEL.vercel }, workers: { provider: "vercel" as const, label: PROVIDER_LABEL.vercel },
+      live: { vercel: n(orch?.vercel_live) }, config_error: configError,
+      vercel: { starts_hour: n(orch?.starts_hour), starts_per_hour_cap: VERCEL_ORCH.startsPerHour(), max_concurrent: VERCEL_ORCH.maxConcurrent(),
                 timeout_minutes: VERCEL_ORCH.timeoutMinutes(), relaunch_minutes: VERCEL_ORCH.relaunchMinutes(), size: VERCEL_ORCH.size(), egress: VERCEL_ORCH.egress() },
     },
-    provider: { name: "boat.dev", api: BOAT.apiUrl, namespace: lib.BOAT_NAMESPACE, ok: key ? sb.ok && !sb.stale : false, error: key ? sb.error : "No boat key in the vault",
-                has_key: !!key, key_hint: key?.hint ?? null, uses: key ? n(key.uses) : 0, last_used_at: iso(key?.last_used_at) },
     links: { newrelic: env.NEW_RELIC_DASHBOARD_URL || null },
   };
 }

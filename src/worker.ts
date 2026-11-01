@@ -36,8 +36,8 @@ export interface Job {
    * The session's registry agent spec. Orchestrators add it to their registry view (orchestrator/fleet/plan.ts
    * rememberAgents), which is how they learn harnesses added on /admin/agents (not in their registry.json copy).
    */
-  agent: { id: string; harness: string; model: string; label: string; harness_version?: string; event_format?: string; image?: { docker?: string; boat_snapshot?: string };
-           requires_env?: string[]; cli?: string; worker_adapter?: string; boat_preinstalled?: boolean; resume?: boolean; origin?: string; base_agent?: string } | null;
+  agent: { id: string; harness: string; model: string; label: string; harness_version?: string; event_format?: string; image?: { docker?: string };
+           requires_env?: string[]; cli?: string; worker_adapter?: string; resume?: boolean; origin?: string; base_agent?: string } | null;
   prompt: string; repo_url: string | null; language: string | null; max_user_turns: number;
   /** How the agent works (sql/migrations/0001_baseline.sql exec_mode): plan first and implement once approved, or execute directly. */
   exec_mode: "plan" | "direct";
@@ -118,7 +118,7 @@ export async function claimJobs(workerId: string, opts: { limit?: number; models
       const spec = r.agent_id ? findAgent(r.agent_id) : undefined;
       const agent: Job["agent"] = spec ? {
         id: spec.id, harness: spec.harness, model: spec.model, label: spec.label, harness_version: spec.harness_version, event_format: spec.event_format,
-        image: spec.image, requires_env: spec.requires_env, cli: spec.cli, worker_adapter: spec.worker_adapter, boat_preinstalled: spec.boat_preinstalled,
+        image: spec.image, requires_env: spec.requires_env, cli: spec.cli, worker_adapter: spec.worker_adapter,
         resume: spec.resume, origin: spec.origin, base_agent: spec.base_agent,
       } : null;
       const linked = links.find((l) => l.profile_id === profile_id && l.product_id === r.product_id)?.environment;
@@ -193,7 +193,7 @@ async function allEvents(orgId: number, sessionId: string): Promise<StoredEvent[
  * agent's own work. Config and request errors (400s, a harness the gateway cannot serve, a spent budget) are not here:
  * retrying those only fails again and spends twice.
  */
-const INFRA_FAILURE = /boat runner:|boat command stream error|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up|socket connection was closed|fetch failed|No heartbeat for \d+ minutes|\b(502|503|504|529)\b|overloaded/i;
+const INFRA_FAILURE = /ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up|socket connection was closed|fetch failed|No heartbeat for \d+ minutes|\b(502|503|504|529)\b|overloaded/i;
 /** Config errors that can carry an infrastructure-looking number (a status, an id): a spent budget, a missing vault key. */
 const NOT_INFRA = /budget is used up|missing_credential|No vault provider supplies/i;
 const INFRA_RETRIES = () => Math.max(0, Number(process.env.OCTILLION_SESSION_INFRA_RETRIES ?? 1));

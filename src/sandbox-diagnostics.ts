@@ -13,14 +13,14 @@ import { VLOG, VPID } from "../orchestrator/deploy/vercel-orch.js";
  */
 
 export const LOG_KB_MAX = 256;
-/** The worker runner's setup log and run files (orchestrator/core/sandbox-provider.ts LONG_DIR, runners.ts BOAT_DIR). */
+/** The worker runner's setup log and run files (orchestrator/core/sandbox-provider.ts LONG_DIR, runners.ts VM_DIR). */
 const WORKER_SETUP_LOG = "/tmp/.octi-x/setup.log";
 const WORKER_DIR = "/tmp/octi";
 
 /** Token-shaped values out: our own (ogw_, owk_, wt_), providers' keys, bearer and basic credentials, KEY=value secrets, JWTs. */
 export function redactSecrets(s: string): string {
   return s
-    .replace(/\b(ogw_|owk_|wt_|boat_|sk-ant-|sk-proj-|sk-|gho_|ghp_|ghs_|github_pat_|xox[abpr]-|AKIA|AIza|re_|vcp_)[A-Za-z0-9_\-]{6,}/g, "$1***")
+    .replace(/\b(ogw_|owk_|wt_|sk-ant-|sk-proj-|sk-|gho_|ghp_|ghs_|github_pat_|xox[abpr]-|AKIA|AIza|re_|vcp_)[A-Za-z0-9_\-]{6,}/g, "$1***")
     .replace(/\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}(\.[A-Za-z0-9_\-]*)?/g, "eyJ***")
     .replace(/\b(Bearer|Basic|token)\s+[A-Za-z0-9._~+\/\-]{8,}=*/gi, "$1 ***")
     .replace(/\b([A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?)[A-Z0-9_]*)\s*[=:]\s*("[^"]*"|'[^']*'|\S+)/g, "$1=***")
@@ -56,7 +56,7 @@ export class DiagnosticsError extends Error { constructor(public status: number,
 
 /**
  * The last `kb` KB of an orchestrator's log (orchestrator_sandboxes row id), or of a worker session's setup and run logs
- * (agent session id: its newest worker sandbox). Vercel sandboxes only; boat ones have the boat CLI.
+ * (agent session id: its newest worker sandbox). Vercel sandboxes only (sessions from before boat.dev's retirement have none).
  */
 export async function sandboxLogs(q: { orchestrator?: unknown; session?: unknown; kb?: unknown }, o: { oidcToken?: string | null; client?: VercelClient | { not_configured: string } } = {}) {
   const kb = Math.max(1, Math.min(LOG_KB_MAX, Math.round(Number(q.kb) || 64)));
@@ -70,10 +70,10 @@ export async function sandboxLogs(q: { orchestrator?: unknown; session?: unknown
   } else if (typeof q.session === "string" && q.session) {
     const [r] = await db.query<{ sandbox_id: string; deleted_at: Date | null }>(
       "/* tenant: admin-only (platform admins): a session's newest worker sandbox */ SELECT sandbox_id, deleted_at FROM worker_sandboxes WHERE session_id = $1 ORDER BY (deleted_at IS NULL) DESC, id DESC LIMIT 1", [q.session]);
-    if (!r) throw new DiagnosticsError(404, "This session has no Vercel worker sandbox (boat sessions: use the boat CLI)");
+    if (!r) throw new DiagnosticsError(404, "This session has no Vercel worker sandbox (sessions from before boat.dev's retirement have none)");
     target = { kind: "session", name: r.sandbox_id, provider: "vercel", live: !r.deleted_at };
   } else throw new DiagnosticsError(400, "orchestrator (row id) or session (session id) is required");
-  if (target.provider !== "vercel") throw new DiagnosticsError(400, `Only Vercel sandboxes are read here; this one is on ${target.provider} (use the boat CLI)`);
+  if (target.provider !== "vercel") throw new DiagnosticsError(400, `Only Vercel sandboxes are read here; this one is on ${target.provider}`);
   if (!target.live) throw new DiagnosticsError(410, `${target.name} was deleted: there is nothing left to read`);
   const c = o.client ?? vercelClient({ oidcToken: o.oidcToken });
   if ("not_configured" in c) throw new DiagnosticsError(503, `Vercel Sandbox is not configured on this deployment: ${c.not_configured}`);

@@ -1,5 +1,5 @@
 import { getDb } from "./db.js";
-import { addCredentialIfAbsent, listProviders, VERTEX_PROVIDER, vaultUnlocked, type ProviderRow } from "./keyvault.js";
+import { addCredentialIfAbsent, listProviders, RETIRED_KEY_TYPES, VERTEX_PROVIDER, vaultUnlocked, type ProviderRow } from "./keyvault.js";
 
 /**
  * Provider keys live in the key vault only. Keys that used to be server environment variables (Vercel) are imported
@@ -44,6 +44,7 @@ export async function importEnvKeys(log: (line: string) => void = console.error)
   const db = await getDb();
   const out: EnvImport[] = [];
   for (const p of await listProviders()) {
+    if (RETIRED_KEY_TYPES.has(p.slug)) continue; // a retired service's key (BOAT_API_KEY) is never imported
     const name = envNamesFor(p).find((n) => envValue(n));
     if (!name) continue;
     const [claim] = await db.query<{ provider: string }>(
@@ -74,11 +75,6 @@ export async function importEnvKeys(log: (line: string) => void = console.error)
 let once: Promise<unknown> | null = null;
 /** importEnvKeys once per process (retried on the next call if it failed as a whole, e.g. the database was down). */
 export function importEnvKeysOnce(): Promise<unknown> {
-  once ??= importEnvKeys().then(async (r) => {
-    // The boat key is read from the vault (compute, autoscaler); drop the copy orchestrator/core/config took from env.
-    const { BOAT } = await import("../orchestrator/core/config.js");
-    BOAT.apiKey = "";
-    return r;
-  }).catch((e) => { once = null; console.error("keyvault: environment import failed:", (e as Error).message); });
+  once ??= importEnvKeys().catch((e) => { once = null; console.error("keyvault: environment import failed:", (e as Error).message); });
   return once;
 }

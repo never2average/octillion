@@ -3,18 +3,17 @@ import { hostname } from "node:os";
 import { asPlatform } from "./tenant-scope.js";
 import { randomBytes } from "node:crypto";
 import { getDb } from "./db.js";
-import { useCredential } from "./keyvault.js";
 import { scheduledAgents, variantsOf } from "./agents.js";
 import { getPopulation } from "./populations.js";
 import { JOB_POD_CAPACITY, jobState, orchestratorBusy, retireReason, setCurrentCodeHash, staleOrchestratorIds } from "./fleet.js";
-import { BOAT } from "../orchestrator/core/config.js";
+import { sandboxConfigError } from "../orchestrator/core/config.js";
 import { freshSettings, setting, settingNumber } from "./settings.js";
 import { freshPlatformHarnesses } from "./harnesses.js";
 import { launchFailure, recordComputeEvent } from "./compute-events.js";
 import { pruneComputeHistory, recordTick } from "./autoscaler-ticks.js";
 import { keepAlive } from "./telemetry.js";
-import * as lib from "../orchestrator/deploy/boat-lib.js";
-import { boatHost, orchestratorProvider, PROVIDER_LABEL, vercelHost, VERCEL_ORCH, workerProvider,
+import * as lib from "../orchestrator/deploy/orch-lib.js";
+import { PROVIDER_LABEL, vercelHost, VERCEL_ORCH,
   type HostLimits, type HostProvider, type HostSandbox, type OrchestratorHost } from "../orchestrator/deploy/orchestrator-host.js";
 import { vercelClient } from "./vercel-sandbox.js";
 import { environmentTag } from "./worker-sandboxes.js";
@@ -25,14 +24,11 @@ import { environmentTag } from "./worker-sandboxes.js";
  * Every OCTILLION_AUTOSCALE_TICK_SECONDS (15) the leader (a lease row in Postgres, so several server replicas never
  * double-launch) computes demand: claimable queued+running agent sessions and queued+running product research.
  *   desired = 0 without demand, else max(ceil(sessions / pod capacity), research ? 1 : 0),
- * clamped to OCTILLION_MAX_ORCHESTRATORS and to the provider's capacity (boat: orchestrators + their workers <= plan
- * concurrency; Vercel Sandbox: static limits and a launch rate cap).
+ * clamped to OCTILLION_MAX_ORCHESTRATORS and to the provider's capacity (Vercel Sandbox: static limits and a launch rate cap).
  *
- * Where orchestrators run (orchestrator/deploy/orchestrator-host.ts): boat.dev by default (the boat key from the vault,
- * deploy/boat-lib.ts), or Vercel Sandbox with OCTILLION_SANDBOX_PROVIDER=vercel (or OCTILLION_ORCHESTRATOR_PROVIDER, an
- * override for orchestrators only), launched with this function's OIDC token (deploy/vercel-orch.ts). Every row records
- * its provider and is reconciled, reaped and priced there, so orchestrators launched before a switch finish their jobs.
- * Optionally from a snapshot image (OCTILLION_ORCH_SNAPSHOT=on; on boat measured slower than a fresh `npm ci`, ~22s vs ~8s).
+ * Where orchestrators run (orchestrator/deploy/orchestrator-host.ts): Vercel Sandbox, launched with this function's OIDC
+ * token (deploy/vercel-orch.ts). Every row records its provider; a leftover row of the retired boat.dev is closed without
+ * a provider call. Optionally from a snapshot image (OCTILLION_ORCH_SNAPSHOT=on).
  *
  * Scale down: an orchestrator with no claimable work for OCTILLION_ORCH_IDLE_MINUTES (10) drains, leaves the fleet
  * (DELETE /api/worker/fleet/:id marks its row `draining`) and exits; the next tick deletes its sandbox. The tick also
@@ -46,7 +42,7 @@ import { environmentTag } from "./worker-sandboxes.js";
  * every onboarding research and every simulation with claimable sessions gets its own orchestrator, launched with
  * ORCHESTRATOR_JOB=<id>. It claims only that job (claims filtered by simulation_id / research_id), runs a simulation's
  * sessions on up to OCTILLION_JOB_POD_CAPACITY (40) worker sandboxes, and exits when its check-in says the job is
- * over. Launches fit the boat plan: each reserves 1 + its pods; a job that does not fit waits for the next tick. At
+ * over. Launches fit the provider's limits: each reserves 1 + its pods; a job that does not fit waits for the next tick. At
  * most OCTILLION_MAX_JOB_ORCHESTRATORS (12) at once. Context passes between the two kinds only through the database
  * (research writes personas with their developer environment and the problems in each persona's words; jobs carry them).
  */
@@ -61,8 +57,7 @@ export const AUTOSCALE = {
   idleMinutes: () => num(env.OCTILLION_ORCH_IDLE_MINUTES, 10),
   staleMinutes: () => num(env.OCTILLION_ORCH_STALE_MINUTES, 5),
   bootMinutes: () => num(env.OCTILLION_ORCH_BOOT_MINUTES, 10),
-  // Measured live 2026-10-10: code upload + `npm ci` boots in ~8s; booting from the named snapshot took ~22s (lazy
-  // disk hydration) and each image costs a ~170s build per code change. So the image path is opt-in.
+  // Each image costs a build per code change, and a fresh code upload + `npm ci` boots fast enough: the image path is opt-in.
   snapshots: () => (env.OCTILLION_ORCH_SNAPSHOT ?? "off").toLowerCase() === "on",
   maxLaunchesPerTick: () => Math.max(1, num(env.OCTILLION_ORCH_LAUNCHES_PER_TICK, 2)),
   perJob: () => (env.OCTILLION_ORCH_PER_JOB ?? "on").toLowerCase() !== "off",
@@ -83,8 +78,8 @@ export interface Row {
   id: number; sandbox_id: string | null; orchestrator_id: string | null; state: "booting" | "running" | "draining" | "deleted";
   created_at: Date; ready_at: Date | null; last_seen: Date | null; error: string | null; from_image: string | null;
   code_hash: string | null; retiring_since: Date | null; job_id: string | null; pods: number | null;
-  /** Which provider hosts it (migration 0017; 'boat' for every older row), and when that provider stops it by itself. */
-  provider?: HostProvider | null; expires_at?: Date | null;
+  /** Which provider hosts it (migration 0017; 'boat', the retired boat.dev, for every older row), and when it stops by itself. */
+  provider?: string | null; expires_at?: Date | null;
   /** Why it ended: the launch step that failed and its error, or the reap reason (`error` holds either, as before). */
   launch_step?: string | null; launch_error?: string | null; reap_reason?: string | null;
 }
@@ -94,8 +89,8 @@ export interface Row {
  * (`${ns}-orch-`) and an image builder left over 30 minutes; never workers (their orchestrator's reap deletes them),
  * never the sandbox reliability probe's `${ns}-probe-` sandboxes (src/sandbox-probe.ts deletes its own), never others'.
  */
-export function orphanKind(sb: Pick<lib.Sb, "name" | "createdAt">, now: number, building: boolean,
-  host: Pick<OrchestratorHost, "orchPrefix" | "isImageBuilder"> = { orchPrefix: lib.ORCH_PREFIX, isImageBuilder: (n) => n === lib.IMAGE_BUILDER_NAME }): "orchestrator" | "image_builder" | null {
+export function orphanKind(sb: Pick<HostSandbox, "name" | "createdAt">, now: number, building: boolean,
+  host: Pick<OrchestratorHost, "orchPrefix" | "isImageBuilder">): "orchestrator" | "image_builder" | null {
   // Spared while younger than 2 minutes: a launch records its sandbox right after the create call, and a listing can
   // show it in between (a launch of another tick, or another replica's).
   if (sb.name?.startsWith(host.orchPrefix)) return sb.createdAt && now - Date.parse(sb.createdAt) < 2 * 60_000 ? null : "orchestrator";
@@ -103,7 +98,7 @@ export function orphanKind(sb: Pick<lib.Sb, "name" | "createdAt">, now: number, 
   return null;
 }
 
-/** The capacity note a job gets when it cannot launch. Compute pages parse it (CAPACITY_NOTE), old boat wording included. */
+/** The capacity note a job gets when it cannot launch. Compute pages parse it (CAPACITY_NOTE), older wording included. */
 export const capacityNote = (job: string, provider: HostProvider, free: number) => `${job} waits for sandbox capacity on ${PROVIDER_LABEL[provider]} (${Math.max(0, free)} free)`;
 export const CAPACITY_NOTE = /(\S+) waits for (?:boat plan capacity|sandbox capacity on ([^(]+?)) \((-?\d+) free\)/;
 
@@ -165,7 +160,7 @@ export interface TickState {
   jobs?: { id: string; kind: string; sessions: number; served: boolean }[];
   /** Per-job mode: sandboxes left on the provider after this tick's launches (plan - other deployments - ours reserved). */
   free?: number;
-  /** Where new orchestrators start (boat or vercel), and where worker sandboxes run. */
+  /** Where new orchestrators start, and where worker sandboxes run (always vercel now). */
   provider?: HostProvider; worker_provider?: HostProvider;
   /** What `launched` names, as data: the orchestrator row inserted, and its job and pods (per-job mode). */
   launches?: Launch[];
@@ -183,9 +178,7 @@ export class Autoscaler {
   /** When the current tick's launches must be done by (the cron function's limit); null on a VM. */
   private launchDeadline: number | null = null;
   private imageBuild: Promise<unknown> | null = null;
-  private keyAt = 0;
   private limits = new Map<HostProvider, { at: number; v: HostLimits }>();
-  private hostCache: Partial<Record<HostProvider, OrchestratorHost>> = {};
   private lastDrainAt = 0;
   /** Per-job mode: when each job's orchestrator last idled out (cooldown against relaunch loops). */
   private jobDrainAt = new Map<string, number>();
@@ -235,23 +228,16 @@ export class Autoscaler {
     return rows[0]?.holder === this.holder;
   }
 
-  private async boatKey() {
-    if (BOAT.apiKey && Date.now() - this.keyAt < 10 * 60_000) return;
-    BOAT.apiKey = (await useCredential("boat")).secret;
-    this.keyAt = Date.now();
-  }
-
   /**
-   * The host for a provider. boat: deploy/boat-lib.ts with the vault key. vercel: this function's OIDC token (the latest
-   * request's), built again on every call so a rotated token is picked up; never handed to an orchestrator.
+   * The host: this function's OIDC token (the latest request's), built again on every call so a rotated token is picked
+   * up; never handed to an orchestrator.
    */
   host(p: HostProvider): OrchestratorHost {
     const given = this.opts.hosts?.[p];
     if (given) return given;
-    if (p === "boat") return (this.hostCache.boat ??= boatHost());
     const c = vercelClient();
     if ("not_configured" in c) throw new Error(`Vercel Sandbox is not configured on this deployment: ${c.not_configured}`);
-    return vercelHost({ client: c, namespace: lib.BOAT_NAMESPACE, envTag: environmentTag() });
+    return vercelHost({ client: c, namespace: lib.SANDBOX_NAMESPACE, envTag: environmentTag() });
   }
 
   private async hostLimits(h: OrchestratorHost): Promise<HostLimits> {
@@ -262,9 +248,8 @@ export class Autoscaler {
     return v;
   }
 
-  /** Sandboxes of ours a listing holds (boat: orchestrators and workers on the account; Vercel: our orchestrators). */
+  /** Sandboxes of ours a listing holds (our orchestrators). */
   private static oursActive(h: OrchestratorHost, listing: HostSandbox[]): number {
-    if (h.provider === "boat") return listing.filter((s) => s.live && (s.name?.startsWith(lib.ORCH_PREFIX) || s.name?.startsWith(lib.WORKER_PREFIX))).length;
     return listing.filter((s) => s.live && s.name?.startsWith(h.orchPrefix)).length;
   }
 
@@ -273,9 +258,8 @@ export class Autoscaler {
     return Math.max(0, Math.min(AUTOSCALE.maxOrchestrators(), b.maxOrchestrators));
   }
 
-  /** Vercel: orchestrator launches in the last hour against OCTILLION_VERCEL_ORCH_STARTS_PER_HOUR (boat's plan limits pace boat). */
-  private async rateCapped(p: HostProvider): Promise<string | null> {
-    if (p !== "vercel") return null;
+  /** Orchestrator launches in the last hour against OCTILLION_VERCEL_ORCH_STARTS_PER_HOUR. */
+  private async rateCapped(): Promise<string | null> {
     const [r] = await (await getDb()).query<{ n: number }>(
       "SELECT count(*) AS n FROM orchestrator_sandboxes WHERE provider = 'vercel' AND created_at > now() - interval '1 hour'");
     const cap = VERCEL_ORCH.startsPerHour();
@@ -299,30 +283,21 @@ export class Autoscaler {
     st.leader = true;
     const db = await getDb();
     try {
-      const current = orchestratorProvider();
-      st.provider = current; st.worker_provider = workerProvider();
+      // A setting that still names the retired boat.dev (or anything but vercel) is a clear error, never a silent fallback.
+      const bad = sandboxConfigError();
+      if (bad) throw new Error(bad);
+      const current: HostProvider = "vercel";
+      st.provider = current; st.worker_provider = current;
       const rowsAll = await db.query<Row>("SELECT * FROM orchestrator_sandboxes WHERE state <> 'deleted' ORDER BY id");
-      // The providers this tick talks to: where new orchestrators start, and wherever a live row still is. boat also for
-      // its worker sandboxes (the workers of a reaped orchestrator). No boat key is needed when nothing is on boat.
-      const providers = new Set<HostProvider>([current, ...rowsAll.map((r) => (r.provider ?? "boat") as HostProvider)]);
-      if (st.worker_provider === "boat") providers.add("boat");
-      if (providers.has("boat")) await this.boatKey();
       // Sessions queued in the last FRESH_MS before an idle exit (or after it) were never ignored by a live orchestrator,
       // so they are new work, not stuck work: they must not wait out the relaunch cooldown below.
       const FRESH_MS = 2 * 60_000;
       const demand = await computeDemand(this.lastDrainAt ? new Date(this.lastDrainAt - FRESH_MS) : undefined);
       st.demand = demand;
-      // Each provider's listing. The current provider's failure fails the tick, as before; another's only skips its rows.
-      const hosts = new Map<HostProvider, OrchestratorHost>();
-      const listings = new Map<HostProvider, HostSandbox[]>();
-      const skipped: string[] = [];
-      for (const p of providers) {
-        try { const h = this.host(p); hosts.set(p, h); listings.set(p, await h.list()); }
-        catch (e) { if (p === current) throw e; skipped.push(`${PROVIDER_LABEL[p]} not listed (${(e as Error).message.slice(0, 160)}): its orchestrators wait for the next tick`); }
-      }
-      const listing = listings.get(current) ?? [];
-      const byId = new Map([...listings.values()].flat().map((s) => [s.id, s]));
-      const boatListing = listings.get("boat") ?? [];
+      // The provider's listing: a failure fails the tick.
+      const host = this.host(current);
+      const listing = await host.list();
+      const byId = new Map(listing.map((s) => [s.id, s]));
       const rows = rowsAll;
       const seen = new Map((await db.query<{ id: string; last_seen: Date }>("SELECT id, last_seen FROM orchestrators")).map((o) => [o.id, new Date(o.last_seen)]));
       const now = Date.now(), min = 60_000;
@@ -330,21 +305,14 @@ export class Autoscaler {
       const staleIds = await staleOrchestratorIds();
       const reaped: { sandbox_id: string; reason: string }[] = [];
       const reap = async (row: Row, reason: string, deleteIt = true) => {
-        const h = hosts.get((row.provider ?? "boat") as HostProvider);
+        const h = row.provider === current ? host : null; // a retired provider's row: no call there
         if (row.sandbox_id && deleteIt && h) await h.delete(row.sandbox_id).catch((e) => this.log(`delete ${row.sandbox_id}: ${(e as Error).message}`));
         await db.query("UPDATE orchestrator_sandboxes SET state = 'deleted', deleted_at = now(), error = coalesce(error, $2), reap_reason = coalesce(reap_reason, $2) WHERE id = $1", [row.id, reason]);
         await recordComputeEvent({ kind: "reaped", sandbox_id: row.sandbox_id, orchestrator_id: row.orchestrator_id, job_id: row.job_id, reason });
         await revokeSandboxWorkerTokens(row.id);
         if (row.orchestrator_id) {
           await db.query("DELETE FROM orchestrators WHERE id = $1", [row.orchestrator_id]);
-          // boat worker sandboxes a crashed/stale orchestrator could not clean up itself (octi-w-<orch>-<agent>). Vercel
-          // worker sandboxes belong to the API's broker, whose reaper deletes them once this orchestrator's token is revoked.
-          const wp = `${lib.workerPrefixOf(row.orchestrator_id)}-`;
-          for (const w of boatListing.filter((s) => s.live && s.name?.startsWith(wp))) {
-            await lib.deleteSandbox(w.id).catch(() => {});
-            reaped.push({ sandbox_id: w.id, reason: `worker of reaped ${row.orchestrator_id}` });
-            await recordComputeEvent({ kind: "worker_deleted", sandbox_id: w.id, orchestrator_id: row.orchestrator_id, job_id: row.job_id, reason: `worker of reaped ${row.orchestrator_id} (${reason})` });
-          }
+          // Its worker sandboxes belong to the API's broker, whose reaper deletes them once this orchestrator's token is revoked.
         }
         reaped.push({ sandbox_id: row.sandbox_id ?? "(none)", reason });
         this.log(`reaped ${row.sandbox_id ?? `row ${row.id}`}: ${reason}`);
@@ -354,9 +322,9 @@ export class Autoscaler {
       for (const row of rows) {
         const age = now - new Date(row.created_at).getTime();
         const inflight = this.inflight.has(row.id);
-        const prov = (row.provider ?? "boat") as HostProvider;
-        const h = hosts.get(prov);
-        if (!h || !listings.has(prov)) continue; // its provider did not answer this tick
+        // A row left from the retired boat.dev (its sandboxes are gone with the account): closed, nothing is called there.
+        if ((row.provider ?? "boat") !== current) { await reap(row, `${PROVIDER_LABEL.boat}: row closed without a provider call`, false); continue; }
+        const h = host;
         if (!row.sandbox_id) { if (!inflight && age > AUTOSCALE.bootMinutes() * min) await reap(row, "launch never created a sandbox", false); continue; }
         let sb = byId.get(row.sandbox_id);
         if (!sb || !sb.live) {
@@ -372,13 +340,13 @@ export class Autoscaler {
             this.log(`get ${row.sandbox_id}: ${(e as Error).message} (${n}/${GET_FAILURES})`);
             if (n >= GET_FAILURES) {
               this.getFailures.delete(row.id);
-              await reap(row, `sandbox gone from ${prov === "boat" ? "boat" : PROVIDER_LABEL[prov]}: not listed and its get failed ${n} ticks in a row (${(e as Error).message.slice(0, 120)})`, false);
+              await reap(row, `sandbox gone from ${host.label}: not listed and its get failed ${n} ticks in a row (${(e as Error).message.slice(0, 120)})`, false);
               continue;
             }
             got = undefined;
           }
           if (got === null || (got && !got.live)) {
-            await reap(row, got ? `sandbox is ${got.state}` : `sandbox gone from ${prov === "boat" ? "boat" : PROVIDER_LABEL[prov]}`, !!got);
+            await reap(row, got ? `sandbox is ${got.state}` : `sandbox gone from ${host.label}`, !!got);
             continue;
           }
           if (got) this.log(`${row.sandbox_id} is live although ${sb ? `listed as ${sb.state}` : "not listed"} (listing lag): kept`);
@@ -391,7 +359,7 @@ export class Autoscaler {
           continue;
         }
         const expires = sb?.expiresAt ?? (row.expires_at ? new Date(row.expires_at).getTime() : null);
-        if (expires && expires < now + 5 * min) { await reap(row, prov === "boat" ? "TTL about to expire" : "TTL about to expire (sandbox timeout)"); continue; }
+        if (expires && expires < now + 5 * min) { await reap(row, "TTL about to expire (sandbox timeout)"); continue; }
         if (row.state === "booting") {
           if (!inflight && age > AUTOSCALE.bootMinutes() * min) await reap(row, `stuck booting > ${AUTOSCALE.bootMinutes()} min`);
           continue;
@@ -418,14 +386,14 @@ export class Autoscaler {
           }
         }
         const since = checkIn?.getTime() ?? (row.ready_at ? new Date(row.ready_at).getTime() : new Date(row.created_at).getTime());
-        if (now - since > AUTOSCALE.staleMinutes() * min) await reap(row, `stale: no fleet check-in for ${AUTOSCALE.staleMinutes()} min`);
+        if (now - since > AUTOSCALE.staleMinutes() * min) await reap(row, await this.staleReason(row, !!checkIn));
       }
       // orphans: our name prefix on a provider but no live row (e.g. a launch interrupted by a server restart)
       const known = new Set((await db.query<{ sandbox_id: string }>("SELECT sandbox_id FROM orchestrator_sandboxes WHERE state <> 'deleted' AND sandbox_id IS NOT NULL")).map((r) => r.sandbox_id));
       const reapedIds = new Set(reaped.map((r) => r.sandbox_id)); // the listing predates this tick's reaping
-      for (const [p, list] of listings) {
-        const h = hosts.get(p)!;
-        for (const sb of list) {
+      {
+        const h = host;
+        for (const sb of listing) {
           if (!sb.live || known.has(sb.id) || reapedIds.has(sb.id)) continue;
           const kind = orphanKind(sb, now, !!this.imageBuild, h);
           const isOrch = kind === "orchestrator";
@@ -440,11 +408,10 @@ export class Autoscaler {
         }
       }
       st.reaped = reaped;
-      const host = hosts.get(current)!;
 
       // 2. scale up within the caps
       if (AUTOSCALE.perJob()) {
-        await this.scaleJobs(st, staleIds, host, listing, now, listings.get("boat") ?? null);
+        await this.scaleJobs(st, staleIds, host, listing, now);
       } else {
         // Retiring (pre-deploy) orchestrators claim nothing new, so they do not count as capacity for the demand.
         const active = (await db.query<Row>("SELECT * FROM orchestrator_sandboxes WHERE state IN ('booting', 'running')"))
@@ -452,7 +419,7 @@ export class Autoscaler {
         const cap = await this.cap(host, Autoscaler.oursActive(host, listing));
         let desired = Math.min(desiredOrchestrators(demand, AUTOSCALE.podCapacity()), cap);
         // An orchestrator just idled out while sessions are still "queued": they are not claimable by it; don't relaunch
-        // in a loop (each launch is a boat start). Research or freshly queued sessions launch right away.
+        // in a loop (each launch is a sandbox start). Research or freshly queued sessions launch right away.
         if (demand.research === 0 && demand.sessions > 0 && !demand.fresh_queued_sessions && active === 0 &&
             now - this.lastDrainAt < AUTOSCALE.idleMinutes() * min) {
           st.note = "cooldown: the last orchestrator idled out with these sessions still queued";
@@ -463,13 +430,12 @@ export class Autoscaler {
         const image = AUTOSCALE.snapshots() ? await this.readyImage(host) : null;
         st.image = image;
         for (let i = 0; i < Math.min(desired - active, AUTOSCALE.maxLaunchesPerTick()); i++) {
-          const capped = await this.rateCapped(current);
+          const capped = await this.rateCapped();
           if (capped) { st.note = [st.note, capped].filter(Boolean).join("; "); break; }
           const l = await this.launch(host, image);
           st.launched.push(l.label); st.launches.push(l);
         }
       }
-      if (skipped.length) st.note = [st.note, ...skipped].filter(Boolean).join("; ");
 
       // 3. keep the image current (built in the background, once per code hash)
       if (AUTOSCALE.snapshots() && !st.image && !this.imageBuild && host.image) {
@@ -506,33 +472,22 @@ export class Autoscaler {
    * min(JOB_POD_CAPACITY, its unfinished sessions, what is free). A job whose orchestrator just idled out with nothing
    * new queued waits out the idle period (no relaunch loop on work it cannot claim).
    */
-  private async scaleJobs(st: TickState, staleIds: Set<string>, host: OrchestratorHost, listing: HostSandbox[], now: number, boatListing: HostSandbox[] | null = null): Promise<void> {
+  private async scaleJobs(st: TickState, staleIds: Set<string>, host: OrchestratorHost, listing: HostSandbox[], now: number): Promise<void> {
     const db = await getDb();
     const min = 60_000, FRESH_MS = 2 * min;
     const jobs = await computeJobDemand();
     const live = await db.query<Row>("SELECT * FROM orchestrator_sandboxes WHERE state IN ('booting', 'running')");
     const isRetiring = (r: Row) => !!(r.orchestrator_id && staleIds.has(r.orchestrator_id));
     const served = new Set(live.filter((r) => r.job_id && !isRetiring(r)).map((r) => r.job_id!));
-    const workersOf = (orchId: string) => listing.filter((s) => s.live && s.name?.startsWith(`${lib.workerPrefixOf(orchId)}-`)).length;
     // The provider's capacity: what others use, plus what each live orchestrator of ours there holds or has reserved. A
-    // retiring one only holds the workers it still runs (it claims nothing new); a shared one counts the workers it has.
-    // boat: the plan from /limits. Vercel: static limits (OCTILLION_VERCEL_MAX_CONCURRENT), nobody else's sandboxes.
+    // retiring or shared one reserves only itself: its worker sandboxes are the broker's (capped per owner there).
+    // Vercel: static limits (OCTILLION_VERCEL_MAX_CONCURRENT), nobody else's sandboxes.
     const limits = await this.hostLimits(host);
     const oursActive = Autoscaler.oursActive(host, listing);
-    const here = live.filter((r) => (r.provider ?? "boat") === host.provider);
-    const reserved = here.reduce((n, r) => n + 1 + (r.pods != null && !isRetiring(r) ? r.pods : r.orchestrator_id ? workersOf(r.orchestrator_id) : 0), 0);
+    const here = live.filter((r) => r.provider === host.provider);
+    const reserved = here.reduce((n, r) => n + 1 + (r.pods != null && !isRetiring(r) ? r.pods : 0), 0);
     let free = limits.activeSandboxes - Math.max(0, limits.activeNow - oursActive) - reserved;
     let active = live.filter((r) => !isRetiring(r)).length;
-    // Orchestrators on Vercel with workers on boat (OCTILLION_ORCHESTRATOR_PROVIDER=vercel alone): the workers still need
-    // boat's plan. Every live orchestrator's pods (or the boat workers it runs) and boat-hosted orchestrators count there.
-    let boatFree = Infinity;
-    if (host.provider !== "boat" && workerProvider() === "boat" && boatListing) {
-      const bh = this.host("boat"), bl = await this.hostLimits(bh);
-      const boatWorkersOf = (orchId: string) => boatListing.filter((s) => s.live && s.name?.startsWith(`${lib.workerPrefixOf(orchId)}-`)).length;
-      const reservedBoat = live.reduce((n, r) => n + ((r.provider ?? "boat") === "boat" ? 1 : 0) +
-        (r.pods != null && !isRetiring(r) ? r.pods : r.orchestrator_id ? boatWorkersOf(r.orchestrator_id) : 0), 0);
-      boatFree = bl.activeSandboxes - Math.max(0, bl.activeNow - Autoscaler.oursActive(bh, boatListing)) - reservedBoat;
-    }
     const image = AUTOSCALE.snapshots() ? await this.readyImage(host) : null;
     const notes: string[] = [];
     st.launched = []; st.launches = [];
@@ -541,28 +496,41 @@ export class Autoscaler {
       if (served.has(j.id)) continue;
       if (st.launched.length >= AUTOSCALE.maxLaunchesPerTick()) break;
       if (active >= AUTOSCALE.maxJobOrchestrators()) { notes.push(`at OCTILLION_MAX_JOB_ORCHESTRATORS (${AUTOSCALE.maxJobOrchestrators()})`); break; }
-      const capped = await this.rateCapped(host.provider); // counted again per launch: each inserts its row first
+      const capped = await this.rateCapped(); // counted again per launch: each inserts its row first
       if (capped) { notes.push(capped); break; }
       const drained = this.jobDrainAt.get(j.id);
       if (drained && now - drained < AUTOSCALE.idleMinutes() * min && !(j.last_queued && j.last_queued.getTime() > drained - FRESH_MS)) {
         notes.push(`cooldown: ${j.id}'s orchestrator idled out with its sessions still queued`);
         continue;
       }
-      const pods = j.kind === "research" ? 0 : Math.min(AUTOSCALE.jobPodCapacity(), j.sessions, free - 1, boatFree);
+      const pods = j.kind === "research" ? 0 : Math.min(AUTOSCALE.jobPodCapacity(), j.sessions, free - 1);
       if (free < 1 || (j.kind === "simulation" && pods < 1)) {
-        notes.push(free >= 1 && boatFree < 1 ? capacityNote(j.id, "boat", boatFree) : capacityNote(j.id, host.provider, free));
+        notes.push(capacityNote(j.id, host.provider, free));
         continue;
       }
       const l = await this.launch(host, image, { id: j.id, pods });
       st.launched.push(l.label); st.launches.push(l);
       served.add(j.id);
       free -= 1 + pods;
-      boatFree -= pods;
       active++;
     }
     st.jobs = jobs.map((j) => ({ id: j.id, kind: j.kind, sessions: j.sessions, served: served.has(j.id) }));
     st.active = active; st.cap = AUTOSCALE.maxJobOrchestrators(); st.desired = jobs.length; st.free = free;
     if (notes.length) st.note = notes.join("; ");
+  }
+
+  /**
+   * Why a running row with no recent fleet check-in is reaped. An orchestrator that checked in before and whose fleet row
+   * is gone has left the fleet and exited (a clean exit after its job ended leaves no row behind): that is the cause, not
+   * staleness. Otherwise it went quiet (crashed, hung or unreachable).
+   */
+  private async staleReason(row: Row, hasFleetRow: boolean): Promise<string> {
+    if (row.orchestrator_id && !hasFleetRow && row.last_seen) {
+      const js = row.job_id ? await jobState(row.job_id).catch(() => null) : null;
+      if (js?.done) return `job over: orchestrator exited (job ${row.job_id} is ${js.status ?? "gone"})`;
+      return "orchestrator exited: left the fleet";
+    }
+    return `stale: no fleet check-in for ${AUTOSCALE.staleMinutes()} min`;
   }
 
   /** Insert the row first (counts toward `active` at once), then create + configure + start in the background. */
@@ -575,10 +543,10 @@ export class Autoscaler {
     // A per-job orchestrator gets a token bound to its job, never the fleet token (docs/security.md, phase 0b).
     const workerToken = job ? await mintJobWorkerToken(job.id, id) : env.OCTILLION_WORKER_TOKEN ?? "";
     const tuning: Record<string, string> = { OCTILLION_ORCH_IDLE_MINUTES: String(AUTOSCALE.idleMinutes()) };
-    // Global settings (/admin/compute) win over this server's env: e.g. BOAT_SANDBOX_SIZE, RESEARCH_MAX_COST_USD, ORCHESTRATOR_MODEL.
+    // Global settings (/admin/compute) win over this server's env: e.g. RESEARCH_MAX_COST_USD, ORCHESTRATOR_MODEL.
     for (const k of lib.TUNING_VARS) { const v = setting(k) ?? env[k]; if (v != null && v !== "") tuning[k] = String(v); }
     if (job) tuning.ORCHESTRATOR_JOB = job.id;
-    tuning.OCTILLION_BOAT_NAMESPACE = lib.BOAT_NAMESPACE; // its worker sandboxes carry this deployment's prefix
+    tuning.OCTILLION_SANDBOX_NAMESPACE = lib.SANDBOX_NAMESPACE; // its worker sandbox name hints carry this deployment's prefix
     const p = host.launch(
       { url: AUTOSCALE.publicUrl(), workerToken, podCapacity: job ? Math.max(1, job.pods) : AUTOSCALE.podCapacity(), tuning, root: this.opts.root, log: (m) => this.log(m) },
       { image, deadline: this.launchDeadline ?? undefined, onCreated: async (sandboxId, orchId, info) => {
@@ -606,7 +574,7 @@ let singleton: Autoscaler | null = null;
 
 /**
  * Serverless (Vercel) has no ticking loop, so the autoscaler runs on events instead: a deep research job queued, an
- * orchestrator checking in or leaving, and a cron every 5 minutes (vercel.json). One tick, then wait for its launches (boat create + code
+ * orchestrator checking in or leaving, and a cron every 5 minutes (vercel.json). One tick, then wait for its launches (create + code
  * upload + start) so the function is not frozen mid-launch. At most one kick per instance every 10 seconds.
  */
 let lastKick = 0;
@@ -700,7 +668,7 @@ export async function autoscalerStatus() {
   const [lease] = await db.query<{ holder: string; expires_at: Date; state: TickState }>("SELECT holder, expires_at, state FROM autoscaler_lease WHERE name = 'autoscaler'");
   const rows = await db.query("SELECT id, sandbox_id, orchestrator_id, job_id, pods, state, provider, expires_at, created_at, ready_at, last_seen, error, launch_step, launch_error, reap_reason, from_image, timings FROM orchestrator_sandboxes ORDER BY id DESC LIMIT 50");
   return { enabled: AUTOSCALE.enabled(), knobs: {
-      orchestrator_provider: orchestratorProvider(), worker_provider: workerProvider(),
+      orchestrator_provider: "vercel", worker_provider: "vercel",
       per_job: AUTOSCALE.perJob(), job_pod_capacity: AUTOSCALE.jobPodCapacity(), max_job_orchestrators: AUTOSCALE.maxJobOrchestrators(),
       pod_capacity: AUTOSCALE.podCapacity(), max_orchestrators: AUTOSCALE.maxOrchestrators(), idle_minutes: AUTOSCALE.idleMinutes(),
       stale_minutes: AUTOSCALE.staleMinutes(), boot_minutes: AUTOSCALE.bootMinutes(), snapshots: AUTOSCALE.snapshots(), tick_seconds: AUTOSCALE.tickMs() / 1000 },

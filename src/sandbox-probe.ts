@@ -1,39 +1,38 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { getDb } from "./db.js";
-import { credentialSecrets, useCredential } from "./keyvault.js";
-import { BOAT, BOAT_PRICE_PER_HOUR } from "../orchestrator/core/config.js";
-import * as lib from "../orchestrator/deploy/boat-lib.js";
+import * as lib from "../orchestrator/deploy/orch-lib.js";
 
 /**
- * Sandbox reliability probe (docs/sandbox-probe.md, sql/migrations/0015_sandbox_probes.sql): boat.dev and Vercel Sandbox
- * side by side, measured from the deployment itself by its own cron (/api/cron/sandbox-probe, every 5 minutes; a VM
- * never runs it). One function call cannot wait 15 minutes, so each probe is a small state machine across ticks:
+ * Sandbox reliability probe (docs/sandbox-probe.md, sql/migrations/0015_sandbox_probes.sql): an ongoing reliability
+ * monitor of Vercel Sandbox, measured from the deployment itself by its own cron (/api/cron/sandbox-probe, every 5
+ * minutes; a VM never runs it). One function call cannot wait 15 minutes, so each probe is a small state machine across
+ * ticks:
  *
- *   start    every OCTILLION_SANDBOX_PROBE_EVERY_MINUTES (30) per provider, at most MAX_LIVE (2) live at once: create the
- *            smallest sandbox (boat `small`, Vercel 1 vCPU / 2 GB) with a ~25-minute TTL, then wait for it to be ready.
- *            boat counts every create as a start against a daily limit shared with real orchestrators and workers:
- *            no boat probe starts while fewer than START_RESERVE of the day's starts are left (startBlocked)
+ *   start    every OCTILLION_SANDBOX_PROBE_EVERY_MINUTES (30), at most MAX_LIVE (2) live at once: create the smallest
+ *            sandbox (1 vCPU / 2 GB) with a ~25-minute TTL, then wait for it to be ready
  *   each tick  for every live probe, rounds GAP (30 s) apart within BUDGET (150 s) for all probes together: the provider's
  *            get API (does it still exist?) then `echo ok && uptime`. A probe the provider no longer has, or reports
  *            stopped, gets gone_at: that is the number this is for
  *   end      after OCTILLION_SANDBOX_PROBE_LIFETIME_MINUTES (15): delete it, recording how long that took and whether it worked
- *   hygiene  any probe sandbox in a provider's listing older than 30 minutes is deleted; rows stuck in 'starting' are failed
+ *   hygiene  any probe sandbox in the provider's listing older than 30 minutes is deleted; rows stuck in 'starting' are failed
  *
- * Never in the autoscaler's way: its own route and its own key handling (the boat key is never written to the shared
- * BOAT config the autoscaler uses), no lease or lock shared with it, try/catch around every step, and a deadline.
- * Probe sandboxes are named `<namespace>-probe-…`, which matches none of the autoscaler's prefixes (orchestrators
- * `-orch-`, workers `-w-`, the image builder), so its orphan reaper never touches them.
+ * Never in the autoscaler's way: its own route, no lease or lock shared with it, try/catch around every step, and a
+ * deadline. Probe sandboxes are named `<namespace>-probe-…`, which matches none of the other reapers' prefixes
+ * (orchestrators `-vo-`, workers `-vw-`, images), so they never touch it.
  *
  * Vercel Sandbox is called over its REST API with fetch (no SDK in the API bundle): the function's OIDC token
  * (x-vercel-oidc-token header, else VERCEL_OIDC_TOKEN), whose owner_id / project_id claims name the team and project.
  * Without one, an access token in OCTILLION_VERCEL_SANDBOX_TOKEN with OCTILLION_VERCEL_TEAM_ID and
- * OCTILLION_VERCEL_PROJECT_ID. With neither, each start records a `not_configured` row and boat keeps being probed.
+ * OCTILLION_VERCEL_PROJECT_ID. With neither, each start records a `not_configured` row.
+ *
+ * History: boat.dev was probed side by side until its retirement on 2026-11-01. Its rows (provider 'boat') stay in the
+ * table until they age out; the summary and the list show Vercel Sandbox only.
  */
 
-export type ProbeProvider = "boat" | "vercel";
-export const PROBE_PROVIDERS: readonly ProbeProvider[] = ["boat", "vercel"];
-/** Never an orchestrator (`-orch-`), worker (`-w-`) or image (`-img-`) name: the autoscaler reaps only those. */
-export const PROBE_PREFIX = `${lib.BOAT_NAMESPACE}-probe-`;
+export type ProbeProvider = "vercel";
+export const PROBE_PROVIDERS: readonly ProbeProvider[] = ["vercel"];
+/** Never an orchestrator (`-vo-`), worker (`-vw-`) or image name: the other reapers delete only those. */
+export const PROBE_PREFIX = `${lib.SANDBOX_NAMESPACE}-probe-`;
 export const MAX_LIVE = 2;
 /** A probe sandbox in a listing older than this is deleted whatever our rows say. */
 export const STRAY_MINUTES = 30;
@@ -46,8 +45,6 @@ export const STRAY_SWEEP_MS = 15 * 60_000;
 /** Failed deletes are retried on later ticks for this long after the start; then the stray sweep and the TTL take over. */
 const RETRY_DELETE_MS = 2 * 3_600_000;
 export const RETENTION_DAYS = 14;
-/** boat: keep this share of the daily start limit (at least 20 starts) for real work; the probe waits below it. */
-export const START_RESERVE = 0.15;
 const COMMAND = "echo ok && uptime";
 /** Ticks are 5 minutes apart and a step lands a few seconds into its tick: allow that much early. */
 const SLACK_MS = 30_000;
@@ -59,7 +56,7 @@ const num = (k: string, d: number, min: number) => { const v = Number(env(k)); r
 export const PROBE = {
   enabled: () => (env("OCTILLION_SANDBOX_PROBE") ?? "on").toLowerCase() !== "off",
   providers: (): ProbeProvider[] => {
-    const want = (env("OCTILLION_SANDBOX_PROBE_PROVIDERS") ?? "boat,vercel").toLowerCase().split(/[\s,]+/);
+    const want = (env("OCTILLION_SANDBOX_PROBE_PROVIDERS") ?? "vercel").toLowerCase().split(/[\s,]+/);
     return PROBE_PROVIDERS.filter((p) => want.includes(p));
   },
   everyMs: () => num("OCTILLION_SANDBOX_PROBE_EVERY_MINUTES", 30, 5) * 60_000,
@@ -97,11 +94,7 @@ const jsonOf = async (res: Response) => { const t = await res.text(); return t ?
 
 // ---------------------------------------------------------------- providers
 
-/**
- * A probe sandbox as a provider addresses it: `id` (boat: bx_…; Vercel: the name) and `cred`, the vault key that made
- * it (boat; null for Vercel). Every call about a sandbox uses the key that made it: with several boat keys (accounts),
- * another key would not see it and the probe would read "gone" when nothing was lost.
- */
+/** A probe sandbox as the provider addresses it: `id` (the Vercel name) and `cred` (a vault key id; null for Vercel). */
 export interface Ref { id: string; cred: number | null }
 /** What the tick needs from a provider. */
 export interface Driver {
@@ -114,106 +107,11 @@ export interface Driver {
   check(ref: Ref): Promise<{ gone: boolean; state: string; session?: string }>;
   exec(ref: Ref, session?: string): Promise<{ exitCode: number | null }>;
   remove(ref: Ref): Promise<void>;
-  /** Probe sandboxes (our prefix) the provider lists, with their age (boat: under every key in the vault). */
+  /** Probe sandboxes (our prefix) the provider lists, with their age. */
   strays(): Promise<(Ref & { name: string; createdAt: number | null })[]>;
-  /** Why a start must wait now (boat: the day's start budget is nearly used up), else null. */
-  startBlocked?(): Promise<string | null>;
 }
 
-export interface DriverOptions { boatUrl?: string; vercelUrl?: string; oidcToken?: string | null }
-
-/** boat.dev: its v1 REST API with the vault's boat key, kept to this module (never written to the shared BOAT config). */
-export async function boatDriver(o: DriverOptions = {}): Promise<Driver | { not_configured: string }> {
-  let current: { id: number; secret: string }, keys: { id: number; secret: string }[];
-  try { current = await useCredential("boat"); keys = await credentialSecrets("boat"); }
-  catch (e) { return { not_configured: `no boat key in the vault: ${errText(e)}` }; }
-  if (!keys.some((k) => k.id === current.id)) keys.push(current);
-  const base = (o.boatUrl ?? BOAT.apiUrl).replace(/\/+$/, "");
-  // The key that made the sandbox; one deleted from the vault since falls back to the key in use now.
-  const keyOf = (cred: number | null) => keys.find((k) => k.id === cred)?.secret ?? current.secret;
-  const h = (cred: number | null, extra: Record<string, string> = {}) => ({ authorization: `Bearer ${keyOf(cred)}`, ...extra });
-  const path = (id: string) => `/sandboxes/${encodeURIComponent(id)}`;
-  const get = async (r: Ref) => (await jsonOf(await call(base + path(r.id), { headers: h(r.cred), timeoutMs: 20_000 }, `boat GET ${path(r.id)}`)))?.sandbox ?? {};
-  return {
-    provider: "boat", region: null,
-    async create(name) {
-      const cred = current.id;
-      // One attempt, no backoff: a failed create is what we measure. The idempotency key covers a lost answer.
-      const c = await jsonOf(await call(`${base}/sandboxes`, { method: "POST", headers: h(cred, { "idempotency-key": randomUUID() }), timeoutMs: 60_000,
-        json: { type: "small", ttlSeconds: PROBE_TTL_SECONDS, noEnv: true, snapshots: false } }, "boat POST /sandboxes"));
-      const id = String(c?.sandbox?.id ?? "");
-      if (!id) throw new Error("boat create answered without a sandbox id");
-      // Named after the create, as orchestrators are; until then it has no name, which no reaper matches either.
-      await call(base + path(id), { method: "PATCH", headers: h(cred), json: { name }, timeoutMs: 20_000 }, `boat PATCH ${path(id)}`).catch(() => {});
-      return { id, cred };
-    },
-    async ready(ref, deadline) {
-      for (;;) {
-        const st = String((await get(ref)).state ?? "");
-        if (["ready", "idle", "running"].includes(st)) return;
-        if (["error", "cancelled", "archived", "deleted"].includes(st)) throw new Error(`sandbox is ${st}`);
-        if (Date.now() + 2000 > deadline) throw new Error(`not ready before the tick's deadline (state ${st || "unknown"})`);
-        await sleep(2000);
-      }
-    },
-    async check(ref) {
-      try {
-        const sb = await get(ref);
-        const state = String(sb.state ?? "unknown");
-        return { gone: !lib.isLive({ id: ref.id, state }), state };
-      } catch (e) {
-        if (isGoneStatus(e)) return { gone: true, state: "not found" };
-        throw e;
-      }
-    },
-    async exec(ref) {
-      const r = await jsonOf(await call(`${base}${path(ref.id)}/commands`, { method: "POST", headers: h(ref.cred), json: { command: COMMAND, timeoutSeconds: 30 }, timeoutMs: 45_000 }, `boat POST ${path(ref.id)}/commands`));
-      return { exitCode: r?.exitCode ?? null };
-    },
-    async remove(ref) {
-      await call(base + path(ref.id), { method: "DELETE", headers: h(ref.cred, { "x-ascii-confirm-delete": ref.id }), timeoutMs: 30_000 }, `boat DELETE ${path(ref.id)}`)
-        .catch((e) => { if (!isGoneStatus(e)) throw e; });
-    },
-    async strays() {
-      const out: (Ref & { name: string; createdAt: number | null })[] = [];
-      for (const k of keys) {
-        let cursor: string | null = null;
-        for (let i = 0; i < 20; i++) {
-          const r = await jsonOf(await call(`${base}/sandboxes${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`, { headers: h(k.id), timeoutMs: 20_000 }, "boat GET /sandboxes"));
-          for (const s of (r?.sandboxes ?? []) as lib.Sb[])
-            if (s.name?.startsWith(PROBE_PREFIX) && lib.isLive(s)) out.push({ id: s.id, cred: k.id, name: s.name, createdAt: s.createdAt ? Date.parse(s.createdAt) : null });
-          cursor = r?.pageInfo?.nextCursor ?? null;
-          if (!cursor) break;
-        }
-      }
-      return out;
-    },
-    async startBlocked() {
-      // boat reports the daily limit, not the starts used: those are ours from the database (orchestrators, worker
-      // sessions, probes) in the last 24 hours, as the Compute page's Limits counts them. Other deployments' are not seen.
-      const l = await jsonOf(await call(`${base}/limits`, { headers: h(current.id), timeoutMs: 10_000 }, "boat GET /limits"));
-      const perDay = Number(l?.startLimits?.perDay ?? 0);
-      if (!perDay) return null;
-      return startBudgetNote(perDay, await ourBoatStartsToday());
-    },
-  };
-}
-
-/** Pure: why the probe must not take one of boat's starts now (fewer than START_RESERVE of the day's left), else null. */
-export function startBudgetNote(perDay: number, used: number): string | null {
-  const reserve = Math.max(20, Math.ceil(perDay * START_RESERVE));
-  return perDay - used < reserve ? `boat start budget nearly used: ${used} of ${perDay} starts in 24 h, keeping ${reserve} for orchestrators and workers` : null;
-}
-
-/** Our boat starts in the last 24 hours: orchestrator sandboxes, sessions given a worker sandbox, and probes. */
-async function ourBoatStartsToday(): Promise<number> {
-  const [r] = await (await getDb()).query<{ n: unknown }>(
-    `/* tenant: internal: the sandbox probe counts boat starts across all orgs, ids only */
-     SELECT (SELECT count(*) FROM orchestrator_sandboxes WHERE created_at > now() - interval '1 day')
-          + (SELECT count(*) FROM agent_sessions WHERE sandbox_id IS NOT NULL AND sandbox_id NOT LIKE 'vercel:%' AND started_at > now() - interval '1 day')
-          + (SELECT count(*) FROM sandbox_probes WHERE provider = 'boat' AND sandbox_id IS NOT NULL AND started_at > now() - interval '1 day') AS n`);
-  return n(r?.n);
-}
+export interface DriverOptions { vercelUrl?: string; oidcToken?: string | null }
 
 /** The OIDC token's team and project (its owner_id and project_id claims). Not verified: Vercel's API verifies it. */
 export function oidcClaims(token: string): { teamId: string; projectId: string } | null {
@@ -387,16 +285,17 @@ export async function probeTick(o: TickOptions = {}): Promise<ProbeTick> {
   try {
     const db = await getDb();
     out.pruned = await pruneProbes().catch((e) => ({ error: errText(e) }));
+    await closeRetired().catch((e) => console.error(`sandbox probe: closing retired probes: ${errText(e)}`));
     const drivers: Driver[] = [];
     for (const p of PROBE.providers()) {
       const rep: ProbeTick["providers"][string] = out.providers[p] = { configured: false, ended: 0, gone: 0, strays: 0 };
       try {
-        const d = p === "boat" ? await boatDriver(o) : vercelDriver(o);
+        const d = vercelDriver(o);
         if ("not_configured" in d) {
           rep.reason = d.not_configured;
           // One row per start slot, so the page shows the provider as not configured and why.
           if (await startDue(p)) await db.query("INSERT INTO sandbox_probes (provider, state, create_error, last_error, region) VALUES ($1, 'not_configured', $2, $2, $3)",
-            [p, clip(d.not_configured), p === "vercel" ? VERCEL_REGION : null]);
+            [p, clip(d.not_configured), VERCEL_REGION]);
           continue;
         }
         rep.configured = true;
@@ -406,7 +305,7 @@ export async function probeTick(o: TickOptions = {}): Promise<ProbeTick> {
         await endDue(d, rep);
       } catch (e) { rep.error = errText(e); }
     }
-    // Starts in parallel (a slow create on one provider does not delay the other), then the exec rounds.
+    // Starts (in parallel, should there be more than one provider again), then the exec rounds.
     await Promise.all(drivers.map(async (d) => {
       const rep = out.providers[d.provider]!;
       try { rep.started = await startOne(d, deadline); }
@@ -443,9 +342,6 @@ async function startOne(d: Driver, deadline: number): Promise<number | null> {
   if (!(await startDue(d.provider))) return null;
   const [{ live }] = await db.query<{ live: unknown }>("SELECT count(*) AS live FROM sandbox_probes WHERE provider = $1 AND state IN ('starting', 'live')", [d.provider]);
   if (n(live) >= MAX_LIVE) return null;
-  // A budget that cannot be read does not stop the probe: boat still refuses a start over its limit, and we record that.
-  const blocked = d.startBlocked ? await d.startBlocked().catch(() => null) : null;
-  if (blocked) throw Object.assign(new Error(blocked), { skipped: true });
   const name = probeName();
   // The row first: a function frozen mid-create still leaves a trace (hygiene fails it later and deletes the sandbox).
   const [row] = await db.query<{ id: number }>("INSERT INTO sandbox_probes (provider, name, state, region) VALUES ($1, $2, 'starting', $3) RETURNING id", [d.provider, name, d.region]);
@@ -551,7 +447,7 @@ async function probeOnce(d: Driver, row: ProbeRow, deadline: number): Promise<bo
       }
       await db.query("UPDATE sandbox_probes SET state = 'gone', gone_at = now(), gone_reason = $2, last_error = $2, updated_at = now() WHERE id = $1 AND state = 'live'",
         [row.id, `${d.provider} reports it ${c.state}`]);
-      // Clean up what is left of it (a stopped Vercel sandbox, an archived boat one) now, while there is time.
+      // Clean up what is left of it (a stopped sandbox) now, while there is time.
       if (Date.now() + 30_000 < deadline) await deleteProbe(d, row.id, ref);
       return null;
     }
@@ -586,6 +482,16 @@ async function refreshStats(id: number) {
     [id, rows.filter((r) => r.ok).length, rows.filter((r) => !r.ok).length, pctile(okMs, 0.5), pctile(okMs, 0.95), lastErr]);
 }
 
+/**
+ * Probes of a provider no longer probed (boat.dev, retired 2026-11-01) that were still open: never called again, they
+ * stop at their own TTL, so they end as expired. Without this they would stay 'live' and never be pruned.
+ */
+async function closeRetired() {
+  await (await getDb()).query(
+    `UPDATE sandbox_probes SET state = 'expired', last_error = coalesce(last_error, 'provider retired: not checked again (stopped at its TTL)'), updated_at = now()
+      WHERE provider <> ALL($1) AND state IN ('starting', 'live', 'delete_failed')`, [PROBE_PROVIDERS]);
+}
+
 /** 14 days, 5,000 rows a table per call. */
 export async function pruneProbes(): Promise<{ probes: number; execs: number }> {
   const db = await getDb();
@@ -598,18 +504,16 @@ export async function pruneProbes(): Promise<{ probes: number; execs: number }> 
 // ---------------------------------------------------------------- reading it: the Compute › Sandbox probes tab and the admin MCP
 
 /**
- * What the probe costs a day at the smallest size, per provider: probes a day x minutes each.
- * boat: `small` at BOAT_PRICE_PER_HOUR. Vercel Sandbox (Pro, iad1): 2 GB provisioned memory at $0.0212/GB-hour, active
- * CPU at $0.128/hour assuming ~2% of one vCPU (the probe idles), $0.60 per million creations.
+ * What the probe costs a day at the smallest size: probes a day x minutes each. Vercel Sandbox (Pro, iad1): 2 GB
+ * provisioned memory at $0.0212/GB-hour, active CPU at $0.128/hour assuming ~2% of one vCPU (the probe idles), $0.60 per
+ * million creations.
  */
 export function probeCost(everyMs = PROBE.everyMs(), lifetimeMs = PROBE.lifetimeMs()) {
   const perDay = Math.round(86_400_000 / everyMs), hours = lifetimeMs / 3_600_000;
-  const boat = (BOAT_PRICE_PER_HOUR.small ?? 0.018) * hours;
   const vercel = 2 * 0.0212 * hours + 0.02 * 0.128 * hours + 0.6 / 1e6;
   const r = (x: number) => Math.round(x * 100) / 100;
-  return { probes_per_day: perDay, minutes_each: Math.round(lifetimeMs / 60_000), boat_usd_day: r(boat * perDay), vercel_usd_day: r(vercel * perDay),
-    total_usd_day: r((boat + vercel) * perDay), boat_starts_per_day: perDay,
-    note: `${perDay} probe sandboxes a provider a day at ~${Math.round(lifetimeMs / 60_000)} minutes each. boat small $${BOAT_PRICE_PER_HOUR.small}/h; Vercel Sandbox 1 vCPU / 2 GB (2 GB x $0.0212/GB-h, CPU mostly idle). Each boat probe is also one of the account's starts.` };
+  return { probes_per_day: perDay, minutes_each: Math.round(lifetimeMs / 60_000), vercel_usd_day: r(vercel * perDay), total_usd_day: r(vercel * perDay),
+    note: `${perDay} probe sandboxes a day at ~${Math.round(lifetimeMs / 60_000)} minutes each: Vercel Sandbox 1 vCPU / 2 GB (2 GB x $0.0212/GB-h, CPU mostly idle).` };
 }
 
 export interface ProviderSummary {
@@ -677,7 +581,9 @@ export type ProbeOut = ReturnType<typeof probeOut>;
 /** GET /compute/probes: the summary and one row per probe over the window, newest first. */
 export async function listProbes(q: Record<string, unknown> = {}) {
   const summary = await probeSummary(q);
-  const rows = await (await getDb()).query<any>("SELECT * FROM sandbox_probes WHERE started_at > now() - make_interval(hours => $1) ORDER BY started_at DESC, id DESC LIMIT 3000", [summary.hours]);
+  // Vercel Sandbox only: rows of the retired boat.dev stay in the table until they age out, but are not listed.
+  const rows = await (await getDb()).query<any>("SELECT * FROM sandbox_probes WHERE started_at > now() - make_interval(hours => $1) AND provider = ANY($2) ORDER BY started_at DESC, id DESC LIMIT 3000",
+    [summary.hours, PROBE_PROVIDERS]);
   return { ...summary, rows: rows.map(probeOut) };
 }
 

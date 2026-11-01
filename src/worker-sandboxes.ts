@@ -3,13 +3,12 @@ import { randomBytes } from "node:crypto";
 import { getDb, type Queryable } from "./db.js";
 import { canActOnSession, type WorkerAuth } from "./workerauth.js";
 import { isGone, vercelClient, type VercelClient } from "./vercel-sandbox.js";
-import * as lib from "../orchestrator/deploy/boat-lib.js";
+import * as lib from "../orchestrator/deploy/orch-lib.js";
 import { VERCEL_SIZES } from "../orchestrator/core/config.js";
 
 /**
- * Worker sandbox broker (docs/vercel-sandbox-workers.md, sql/migrations/0016_worker_sandboxes.sql). With
- * OCTILLION_SANDBOX_PROVIDER=vercel, orchestrators (still on boat) get their per-session worker sandboxes on Vercel
- * Sandbox through these routes, under /api/worker/sandboxes with their worker token (and, with the fleet token, their
+ * Worker sandbox broker (docs/vercel-sandbox-workers.md, sql/migrations/0016_worker_sandboxes.sql). Orchestrators get
+ * their per-session worker sandboxes on Vercel Sandbox through these routes, under /api/worker/sandboxes with their worker token (and, with the fleet token, their
  * orchestrator id in X-Octillion-Orchestrator):
  *
  *   GET    /config                       is Vercel Sandbox configured here (no secret in the answer)
@@ -68,12 +67,12 @@ const CID_RE = /^[\w-]{1,120}$/;
 const ORCH_FRESH = "interval '5 minutes'";
 
 /**
- * Worker sandbox names on Vercel: `<namespace>-vw-<environment>-…`. Never a boat prefix nor the probe's, so neither reaper
+ * Worker sandbox names on Vercel: `<namespace>-vw-<environment>-…`. Never an orchestrator prefix nor the probe's, so no other reaper
  * touches them, and per environment (production / preview / development share one Vercel project and its OIDC token),
  * so one deployment's stray sweep never deletes another's. OCTILLION_WORKER_SANDBOX_NAMESPACE overrides the environment tag.
  */
 export function workerPrefix(): string {
-  return `${lib.BOAT_NAMESPACE}-vw-${environmentTag()}-`;
+  return `${lib.SANDBOX_NAMESPACE}-vw-${environmentTag()}-`;
 }
 /** `prod`, `prev`, `dev` (VERCEL_ENV) or OCTILLION_WORKER_SANDBOX_NAMESPACE: also in Vercel orchestrator names (`<ns>-vo-<tag>-`). */
 export function environmentTag(): string {

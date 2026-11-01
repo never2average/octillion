@@ -22,7 +22,7 @@ COPY harnesses ./harnesses
 # Curated developer profiles and task library (npm run vault:sync with VAULT_DIR=vault/curated).
 COPY vault ./vault
 # Orchestrator sources (no node_modules, no Pi clone, no tests): the autoscaler (src/autoscaler.ts) imports
-# orchestrator/deploy/boat-lib.ts, and tars these same files for orchestrator sandboxes / the snapshot image.
+# orchestrator/deploy/orch-lib.ts, and tars these same files for orchestrator sandboxes / the snapshot image.
 COPY orchestrator/package.json orchestrator/package-lock.json orchestrator/tsconfig.json orchestrator/worker.ts ./orchestrator/
 COPY orchestrator/core ./orchestrator/core
 COPY orchestrator/deploy ./orchestrator/deploy

@@ -72,11 +72,11 @@ export function classifySession(row: SessionLike, opts: { scheduled?: ReadonlySe
   return cls("other", "Other", null);
 }
 
-/** Launch steps, as `lib.launchOrchestrator` prefixes its errors ("ready (240s): ..."). */
+/** Launch steps, as the host's launch prefixes its errors (orch-lib launchError: "ready (240s): ..."). */
 export const LAUNCH_ERROR = /^(create|name|ready|code upload|configure|preflight|start) \(\d+s\): ?([\s\S]*)$/;
 
 export type ReapKind =
-  | "stale" | "stuck_booting" | "ttl" | "idle_drain" | "job_drain" | "retired" | "job_ended" | "sandbox_gone" | "never_created" | "other";
+  | "stale" | "exited" | "stuck_booting" | "ttl" | "idle_drain" | "job_drain" | "retired" | "job_ended" | "sandbox_gone" | "never_created" | "other";
 
 // Reap reasons as src/autoscaler.ts writes them, with ids and numbers inside.
 const REAP_RULES: { kind: ReapKind; label: string; re: RegExp }[] = [
@@ -86,12 +86,13 @@ const REAP_RULES: { kind: ReapKind; label: string; re: RegExp }[] = [
   { kind: "idle_drain", label: "Idle drain", re: /^drained \(idle/ },
   { kind: "ttl", label: "TTL", re: /^TTL / },
   { kind: "stuck_booting", label: "Stuck booting", re: /^stuck booting/ },
-  { kind: "retired", label: "Retired", re: /^retired/ },
-  { kind: "job_ended", label: "Job ended", re: /^job \S+ is / },
+  { kind: "retired", label: "Retired", re: /^retired|^boat\.dev \(retired\)/ },
+  { kind: "job_ended", label: "Job ended", re: /^job \S+ is |^job over: orchestrator exited/ },
+  { kind: "exited", label: "Exited", re: /^orchestrator exited/ },
   { kind: "stale", label: "Stale", re: /^stale/ },
 ];
 /** Reaps that are the autoscaler doing its job, not failures: shown muted and counted apart. */
-export const ROUTINE_REAPS: ReadonlySet<ReapKind> = new Set(["idle_drain", "job_drain", "retired", "job_ended"]);
+export const ROUTINE_REAPS: ReadonlySet<ReapKind> = new Set(["idle_drain", "job_drain", "retired", "job_ended", "exited"]);
 
 export interface OrchestratorLike {
   launch_step?: string | null;

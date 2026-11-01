@@ -13,7 +13,7 @@ import { transcripts } from "./transcripts.js";
  *     job); no job, or a job that matches neither (shared orchestrators, prospect research), is Octillion (shared).
  *   - Agent (worker) sandboxes (agent_sessions): started_at to ended_at (running: now(); ended without ended_at: its last
  *     heartbeat). Attributed to the session's account, agent and job; the sandbox provider is the runner the worker
- *     reported (metadata.runner, boat by default as orchestrator/core/config.ts has it). "pool" sessions run in an
+ *     reported (metadata.runner; none: from before it was recorded, on the retired boat.dev). "pool" sessions run in an
  *     orchestrator's warm pods, so their hours sit inside that orchestrator's hours too.
  *   - Each interval is clipped to the range and split at UTC midnights.
  *   - Peak running at once: computed from those same intervals (orchestrators plus agent sessions), a sweep over their
@@ -53,7 +53,7 @@ async function orgIndex() {
 const DAYS = `d AS (SELECT g AS d0, g + interval '1 day' AS d1 FROM generate_series($1::timestamptz, $2::timestamptz - interval '1 day', interval '1 day') g)`;
 const ORCH_IV = `oiv AS (
     SELECT * FROM (
-      SELECT o.id, o.job_id, o.pods, coalesce(sim.org_id, pr.org_id) AS org_id,
+      SELECT o.id, o.job_id, o.pods, coalesce(o.provider, 'boat') AS provider, coalesce(sim.org_id, pr.org_id) AS org_id,
              CASE WHEN sim.id IS NOT NULL THEN 'simulation' WHEN pr.id IS NOT NULL THEN 'research' END AS job_kind,
              coalesce(sim.name, pr.input->>'name') AS job_name, o.created_at AS t0,
              greatest(o.created_at, coalesce(o.deleted_at, CASE WHEN o.state = 'deleted' THEN coalesce(o.last_seen, o.created_at) ELSE now() END)) AS t1
@@ -73,19 +73,20 @@ const SES_IV = `siv AS (
 const OVERLAP = "extract(epoch FROM least(t1, d1) - greatest(t0, d0))";
 const DAY_OF = "to_char(d0 AT TIME ZONE 'UTC', 'YYYY-MM-DD')";
 
-/** Where a runner's sandboxes run (orchestrator/core/runners.ts: boat, vercel, docker, local; pool = pods in an orchestrator on boat). */
-const PROVIDERS: Record<string, string> = { boat: "boat.dev", vercel: "Vercel Sandbox", pool: "boat.dev", docker: "Docker", local: "Local machine" };
+/** Where a runner's sandboxes run (orchestrator/core/runners.ts: vercel, docker, local; pool = warm pods in an orchestrator).
+ *  `boat`: sessions and orchestrators from before boat.dev's retirement (2026-11-01), still shown as history. */
+const PROVIDERS: Record<string, string> = { boat: "boat.dev (retired)", vercel: "Vercel Sandbox", pool: "Warm pool", docker: "Docker", local: "Local machine" };
 const providerOf = (runner: string) => PROVIDERS[runner] ?? runner;
 
 export async function computeReport(q: { from?: unknown; to?: unknown } = {}, now = Date.now()) {
   const R = spendRange(q, now);
   const db = await getDb();
   const span = [R.start, R.end];
-  const [orchDays, sesDays, sesStats, peaks, idx, orchType] = await Promise.all([
-    db.query<{ org_id: number | null; job_id: string | null; job_kind: string | null; job_name: string | null; day: string; secs: number; launched: number }>(`${TENANT}
+  const [orchDays, sesDays, sesStats, peaks, idx, vercelOrch] = await Promise.all([
+    db.query<{ org_id: number | null; job_id: string | null; job_kind: string | null; job_name: string | null; provider: string; day: string; secs: number; launched: number }>(`${TENANT}
       WITH ${DAYS}, ${ORCH_IV}
-      SELECT org_id, job_id, job_kind, job_name, ${DAY_OF} AS day, sum(${OVERLAP})::float AS secs, count(*) FILTER (WHERE t0 >= d0 AND t0 < d1)::int AS launched
-        FROM oiv JOIN d ON t0 < d1 AND t1 > d0 GROUP BY 1, 2, 3, 4, 5`, span),
+      SELECT org_id, job_id, job_kind, job_name, provider, ${DAY_OF} AS day, sum(${OVERLAP})::float AS secs, count(*) FILTER (WHERE t0 >= d0 AND t0 < d1)::int AS launched
+        FROM oiv JOIN d ON t0 < d1 AND t1 > d0 GROUP BY 1, 2, 3, 4, 5, 6`, span),
     db.query<{ org_id: number; job_id: string; job_name: string | null; agent: string; runner: string; day: string; secs: number }>(`${TENANT}
       WITH ${DAYS}, ${SES_IV}
       SELECT org_id, job_id, job_name, agent, runner, ${DAY_OF} AS day, sum(${OVERLAP})::float AS secs
@@ -105,7 +106,7 @@ export async function computeReport(q: { from?: unknown; to?: unknown } = {}, no
       run AS (SELECT t, sum(dl) OVER (ORDER BY t, dl ROWS UNBOUNDED PRECEDING) AS c FROM ev)
       SELECT to_char(t AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, max(c)::int AS peak FROM run WHERE t < $2 GROUP BY 1`, span),
     orgIndex(),
-    import("../orchestrator/deploy/boat-lib.js").then((m) => m.ORCH_SANDBOX_TYPE as string).catch(() => null),
+    import("../orchestrator/deploy/vercel-orch.js").then((m) => `vercel-${m.VERCEL_ORCH.size()}`).catch(() => null),
   ]);
   const at = new Map(R.days.map((d, i) => [d, i]));
   const zeros = () => R.days.map(() => 0);
@@ -140,14 +141,14 @@ export async function computeReport(q: { from?: unknown; to?: unknown } = {}, no
     return x;
   };
 
-  // Orchestrators all run on boat.dev (orchestrator/deploy/boat-lib.ts launchOrchestrator).
+  // Orchestrators on their provider (orchestrator_sandboxes.provider): Vercel Sandbox, or boat.dev for older rows.
   for (const r of orchDays) {
     const i = at.get(r.day); if (i == null) continue;
-    const key = idx.key(r.org_id), a = A(key), p = P("boat.dev"), secs = n(r.secs);
+    const key = idx.key(r.org_id), a = A(key), p = P(providerOf(r.provider)), secs = n(r.secs);
     a.orch[i] += secs; a.launched += n(r.launched);
     if (r.job_id) job(a, r.job_id, r.job_kind, r.job_name).orch += secs;
     p.orch[i] += secs; p.launched += n(r.launched); pa(p, key).orch += secs;
-    typeOf(p, "Orchestrator", orchType).secs += secs;
+    typeOf(p, "Orchestrator", r.provider === "vercel" ? vercelOrch : "small").secs += secs;
   }
   for (const r of sesDays) {
     const i = at.get(r.day); if (i == null) continue;

@@ -2,7 +2,7 @@
 # Load provider credentials into the Octillion key vault (AES-256-GCM in Postgres).
 #
 #   ./load-keys.sh                 interactive: hidden prompt per provider, Enter skips
-#   ./load-keys.sh --from-env      non-interactive: reads BOAT_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY, ... from the env
+#   ./load-keys.sh --from-env      non-interactive: reads ANTHROPIC_API_KEY, OPENAI_API_KEY, ... from the env
 #   ./load-keys.sh --list          show what the vault holds (hints only)
 #
 # Options: --project NAME (compose project, default octillion),
@@ -10,7 +10,7 @@
 #
 # Keys never touch argv, shell history, the terminal or logs: they are read silently and piped over stdin into
 # `scripts/keyvault.ts add` inside the running server container, which encrypts them with OCTILLION_VAULT_KEY.
-# Verification calls each provider's read-only "list models" (or boat's /limits) endpoint, passing the key as a
+# Verification calls each provider's read-only "list models" endpoint, passing the key as a
 # header via stdin (curl -H @-), so it is not visible in the process list either.
 set -euo pipefail
 
@@ -30,7 +30,6 @@ done
 
 # provider | env var | what it unlocks
 PROVIDERS="
-boat|BOAT_API_KEY|sandboxes for worker agents (create the key with: boat api-key create octillion --preset ci)
 anthropic|ANTHROPIC_API_KEY|Claude Code, OpenCode, Pi, Cline, Kilo, and the orchestrator itself
 openai|OPENAI_API_KEY|Codex
 google|GEMINI_API_KEY|Gemini CLI, Antigravity (paused agents)
@@ -60,11 +59,6 @@ verify() {
     anthropic) code=$(printf 'x-api-key: %s\nanthropic-version: 2023-06-01\n' "$key" | curl -s -o /dev/null -w '%{http_code}' -m 20 -H @- https://api.anthropic.com/v1/models) ;;
     openai)    code=$(printf 'Authorization: Bearer %s\n' "$key" | curl -s -o /dev/null -w '%{http_code}' -m 20 -H @- https://api.openai.com/v1/models) ;;
     google)    code=$(printf 'x-goog-api-key: %s\n' "$key" | curl -s -o /dev/null -w '%{http_code}' -m 20 -H @- https://generativelanguage.googleapis.com/v1beta/models) ;;
-    boat)
-      code=$(printf 'Authorization: Bearer %s\n' "$key" | curl -s -o /dev/null -w '%{http_code}' -m 20 -H @- https://boat.dev/api/v1/me)
-      # /me only proves the key can read the account. Creating sandboxes needs a key made with `--preset ci`;
-      # otherwise the orchestrator gets 403 api_key_action_forbidden on POST /sandboxes.
-      [ "$code" = 200 ] && echo "    note: account access OK; make sure this key was created with --preset ci (sandbox create)" >&2 ;;
     *) return 2 ;;
   esac
   [ "$code" = 200 ] && return 0

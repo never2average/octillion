@@ -347,7 +347,8 @@ export async function modelKeys() {
     ...(meta?.client_email ? { project_id: meta.project_id || null, client_email: meta.client_email } : {}) }));
   return {
     unlocked: kv.vaultUnlocked(),
-    providers: providers.map((p) => {
+    // Key types of retired services are not offered (their old keys stay listed below, to be deleted).
+    providers: providers.filter((p) => !kv.RETIRED_KEY_TYPES.has(p.slug)).map((p) => {
       const keys = credentials.filter((c) => c.provider === p.slug);
       return { slug: p.slug, name: kv.providerName(p.slug), mode: p.mode, backend: p.backend, has_key: keys.length > 0, keys: keys.length,
                env_set: envSet[p.slug] ?? [] };
@@ -381,32 +382,4 @@ export async function deleteModelKey(actor: string, id: number) {
   if (!Number.isInteger(id)) throw new AdminError("Bad credential id");
   const gone = await kv.deleteCredential(id).catch((e) => { throw new AdminError((e as Error).message, 404); });
   log(actor, "model_key.delete", null, { credential: id, provider: gone.provider, name: gone.name, hint: gone.hint });
-}
-
-// ---------- sandbox provider (boat.dev) ----------
-
-/**
- * The sandbox provider as Compute shows it: boat.dev, the vault key it uses (hint only; replace or rotate it in Key
- * vault), live plan limits and what is running, ours (this deployment's namespace) and anyone else's on the account.
- * Each call asks boat.dev directly, so it doubles as a connection test.
- */
-export async function sandboxProvider() {
-  const lib = await import("../orchestrator/deploy/boat-lib.js");
-  const { BOAT } = await import("../orchestrator/core/config.js");
-  const creds = (await kv.listCredentials()).filter((c) => c.provider === "boat").map(({ key_id: _k, ...c }) => ({ ...c, uses: Number(c.uses) }));
-  const db = await getDb();
-  const orchestrators = await db.query<{ state: string; n: number }>(
-    "SELECT state, count(*)::int AS n FROM orchestrator_sandboxes WHERE state IN ('booting', 'running', 'draining') GROUP BY state");
-  const base = { provider: "boat.dev", api: BOAT.apiUrl, namespace: lib.BOAT_NAMESPACE, keys: creds,
-    orchestrators: Object.fromEntries(orchestrators.map((o) => [o.state, Number(o.n)])) };
-  try {
-    BOAT.apiKey = (await kv.useCredential("boat")).secret;
-    const [limits, list] = await Promise.all([lib.boatLimits(), lib.listSandboxes()]);
-    const live = list.filter((s) => lib.isLive(s));
-    const ours = live.filter((s) => s.name?.startsWith(lib.ORCH_PREFIX) || s.name?.startsWith(lib.WORKER_PREFIX));
-    return { ...base, ok: true, error: null, limits,
-      running: { total: live.length, ours: ours.length, orchestrators: ours.filter((s) => s.name?.startsWith(lib.ORCH_PREFIX)).length, others: live.length - ours.length } };
-  } catch (e) {
-    return { ...base, ok: false, error: (e as Error).message.slice(0, 300), limits: null, running: null };
-  }
 }
