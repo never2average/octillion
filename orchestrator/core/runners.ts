@@ -591,6 +591,7 @@ export function vmRunner(p: SandboxProvider): Runner {
           await put(`${BOAT_DIR}/in-${n}.txt`, input); // byte-for-byte; fed to the CLI on stdin
           await put(`${BOAT_DIR}/launch-${n}.sh`, boatLaunchScript(n, argv, p.name !== "boat"));
           const started = await p.execDetached(id, `bash ${BOAT_DIR}/launch-${n}.sh`);
+          const launchedAt = Date.now(), followUntil = launchedAt + (Math.ceil(CFG.maxSessionMs / 1000) + 60 + 300) * 1000;
           const pidArg = started.pid != null && Number.isFinite(started.pid) ? `--pid=${started.pid}` : `\${P:+--pid=$P}`;
           const pidRead = started.pid != null && Number.isFinite(started.pid) ? "" : `for i in 1 2 3 4 5; do P=$(cat ${BOAT_DIR}/pid-${n} 2>/dev/null); [ -n "$P" ] && break; sleep 1; done; `;
 
@@ -640,7 +641,15 @@ export function vmRunner(p: SandboxProvider): Runner {
                   if (++failures > 10) throw e;
                   log(`${tag} tail stream failed (${failures}), reconnecting:`, String(e));
                 }
+                // No provider pid (Vercel): the launcher's own exit file is the ground truth; the provider's status is a
+                // second opinion (a stale "running" once kept a finished launch polled for 52 minutes).
+                if (started.pid == null) {
+                  const ex = await exec(`test -e ${BOAT_DIR}/exit-${n} && echo exited || true`, 30).catch(() => ({ stdout: "" }));
+                  if (/exited/.test(ex.stdout)) break;
+                }
                 if (!(await p.running(id, started.handle, abort.signal))) break;
+                // Past the harness's own hard limit (timeout -k 30 in the launcher) plus a margin: fail, never poll on.
+                if (Date.now() > followUntil) throw new Error(`the run did not report its exit within ${Math.round((followUntil - launchedAt) / 1000)}s of its launch`);
                 if (Date.now() - t0 < 5000) await sleep(3000); // don't hot-loop if tail returns early
               }
               // The run has exited and its output is on disk: a dropped connection here (ECONNRESET mid-stream) must not

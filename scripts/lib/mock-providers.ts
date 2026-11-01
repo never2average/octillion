@@ -73,6 +73,8 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
     // vsbExec decides what a detached command does (in-process only; unset: exit 0, no output, done at once).
     vsbCmds: new Map<string, any>(), vsbFiles: new Map<string, Map<string, Buffer>>(), vsbPolicies: new Map<string, any>(),
     vsbExec: null as null | ((ctx: { sandbox: string; script: string; files: Map<string, Buffer> }) => VsbResult | Promise<VsbResult>),
+    /** A plain GET .../cmd/:id keeps exitCode null after the exit (what production showed); false: it reports the exit. */
+    vsbPlainGetStale: true,
     // Orchestrator sandboxes (orchestrator/deploy/vercel-orch.ts): names the listing leaves out (listing lag; get still
     // finds them), and snapshots (POST .../snapshot stops the session; GET /v2/sandboxes/snapshots?name=).
     vsbHideFromList: new Set<string>(), vsbSnapshots: new Map<string, { id: string; name: string; status: string; createdAt: number }>(),
@@ -723,8 +725,16 @@ export async function createMockApp(getBase: () => string, persist?: MockPersist
   v.get("/v2/sandboxes/sessions/:sid/cmd/:cmd", async (req, res) => {
     const c = s.vsbCmds.get(req.params.cmd);
     if (!c || c.sessionId !== req.params.sid) return void res.status(404).json({ error: { code: "not_found", message: "Command not found" } });
-    if (req.query.wait === "true") await untilDone(c, () => res.destroyed);
-    res.json({ command: cmdJson(settle(c)) });
+    // ?wait=true blocks until the command exits, then answers CommandFinishedResponse (exitCode set), as the SDK's
+    // Command.wait() relies on. A plain GET answers CommandResponse; with vsbPlainGetStale (the default, as seen live on
+    // 2026-11-01) its exitCode stays null even after the exit, so only ?wait=true tells a finished command apart.
+    if (req.query.wait === "true") {
+      await untilDone(c, () => res.destroyed);
+      if (res.destroyed) return;
+      return void res.json({ command: { ...cmdJson(settle(c)), exitCode: c.exitCode, durationMs: Math.max(0, Math.min(Date.now(), c.endsAt) - c.startedAt) } });
+    }
+    const j = cmdJson(settle(c));
+    res.json({ command: s.vsbPlainGetStale ? { ...j, exitCode: null } : j });
   });
   // Logs: the whole output once the command is done (or killed), then the stream ends; a client that leaves stops waiting.
   v.get("/v2/sandboxes/sessions/:sid/cmd/:cmd/logs", async (req, res) => {

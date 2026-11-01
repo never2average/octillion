@@ -13,6 +13,7 @@ import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select'
 import { Icons } from '@/components/icons';
 import { counted } from '@/lib/octillion-format';
 import { cn } from '@/lib/utils';
+import { SandboxLogsButton } from './compute-sandbox-logs';
 import { useAdmin } from './lib';
 import { copyText, ErrorBox, Mono, Notice, Section, StatusBadge, When, type Tone } from './ui';
 import { AMBER, Chip, cents, dur, jobSessions, since, useComputeParams, useNow, nextPinned, useScrollTo } from './compute-common';
@@ -261,6 +262,7 @@ function OrchPeek({ id, onJob }: { id: number; onJob: (job: string) => void }) {
           {back && <Button variant='outline' size='sm' onClick={() => url.write({ section: 'jobs', job: back, orch: null, back: null })}>← Back to <Mono>{back}</Mono></Button>}
           {o.job_id && <Button variant='outline' size='sm' onClick={() => onJob(o.job_id!)}><Icons.search /> This job&apos;s sessions</Button>}
           {data.logs_command && <Button variant='outline' size='sm' onClick={() => copyLogs(o.sandbox_id!)}><Icons.code /> Copy logs command</Button>}
+          {o.provider === 'vercel' && o.sandbox_id && o.state !== 'deleted' && <SandboxLogsButton orchestrator={o.id} label='Orchestrator log' />}
         </>}
         facts={[
           { label: 'Job', value: o.job_id ? <Mono>{o.job_id}</Mono> : <span className='text-muted-foreground'>shared</span> },

@@ -9,7 +9,8 @@ import assert from "node:assert/strict";
 
 type Db = { query: <T = any>(sql: string, params?: unknown[]) => Promise<T[]> };
 
-export async function workerSandboxChecks({ db, base, mockUrl, mockState, workerToken }: { db: Db; base: string; mockUrl: string; mockState: any; workerToken: string }) {
+export async function workerSandboxChecks({ db, base, mockUrl, mockState, workerToken, adm }: { db: Db; base: string; mockUrl: string; mockState: any; workerToken: string;
+  adm: (method: string, path: string, body?: unknown) => Promise<Response> }) {
   const wa = await import("../src/workerauth.js");
   const ws = await import("../src/worker-sandboxes.js");
   const vs = await import("../src/vercel-sandbox.js");
@@ -90,12 +91,14 @@ export async function workerSandboxChecks({ db, base, mockUrl, mockState, worker
     const cut = (await (await call("POST", `${one}/exec`, tokA, { command: "sleep", timeout_sec: 1, stream: true })).text()).trim().split("\n").map((l) => JSON.parse(l));
     assert.deepEqual(cut.at(-1), { type: "exit", exitCode: null, cut: true }, "an exec past its time limit is cut (and killed), so one call stays under the function's 300 s");
     assert.ok([...mockState.vsbCmds.values()].some((c: any) => c.killed), "the cut command was killed at Vercel");
-    mockState.vsbExec = () => ({ durationMs: 300 });
+    // Longer than the broker's 2.5 s ?wait=true probe: running at first; then finished, though the plain GET (stale, as live) still says null.
+    mockState.vsbExec = () => ({ durationMs: 4000, exitCode: 5 });
     const det = await json(call("POST", `${one}/commands`, tokA, { command: "sleep" }));
     assert.ok(det.command_id, "detached start: a command id");
     assert.deepEqual(await json(call("GET", `${one}/commands/${det.command_id}`, tokA)), { running: true, exit_code: null });
     await new Promise((r) => setTimeout(r, 400));
-    assert.deepEqual(await json(call("GET", `${one}/commands/${det.command_id}`, tokA)), { running: false, exit_code: 0 });
+    await new Promise((r) => setTimeout(r, 2000));
+    assert.deepEqual(await json(call("GET", `${one}/commands/${det.command_id}`, tokA)), { running: false, exit_code: 5 }, "a finished detached command reads as finished, with its exit code");
     assert.equal((await call("GET", `${one}/commands/${encodeURIComponent("../../x")}`, tokA)).status, 400, "a command id must be a plain id");
     mockState.vsbExec = null;
     assert.equal((await call("PUT", `${one}/files`, tokA, { path: "/tmp/octi/in-1.txt", content: "héllo\n" })).status, 200);
@@ -127,8 +130,43 @@ export async function workerSandboxChecks({ db, base, mockUrl, mockState, worker
     assert.ok(r1.deleted_at && /re-claimed/.test(r1.delete_reason) && !mockState.vsbSandboxes.has(f1.id), "orchestrator 1's sandbox for B was deleted when B was re-claimed");
     delete process.env.OCTILLION_WORKER_SANDBOX_CAP_MARGIN;
 
+    // ---- admin diagnostics (src/sandbox-diagnostics.ts): fixed read-only scripts, admins only, secrets redacted ----
+    const diag = await import("../src/sandbox-diagnostics.js");
+    assert.equal(diag.redactSecrets("ANTHROPIC_API_KEY='sk-ant-api03-abcdefgh' Authorization: Bearer abcdefghijkl ogw_0123456789abc https://u:pw@h.example/x"),
+      "ANTHROPIC_API_KEY=*** Authorization: Bearer *** ogw_*** https://u:***@h.example/x", "token-shaped values are redacted");
+    let diagScript = "";
+    mockState.vsbExec = ({ script }: { script: string }) => {
+      diagScript = script;
+      return { stdout: "== /tmp/.octi-x/setup.log\n== exit 1: bash /tmp/octi/prepare.sh\nsudo: a password is required\nOPENAI_API_KEY=sk-proj-secretsecret123 and ogw_leakedtoken123\n" };
+    };
+    const logs = await adm("GET", `/compute/sandbox-logs?session=${encodeURIComponent(A!.id)}&kb=9999`);
+    const lj = await logs.json();
+    assert.equal(logs.status, 200, JSON.stringify(lj));
+    assert.ok(lj.kind === "session" && /sudo: a password is required/.test(lj.output) && !/secretsecret|leakedtoken/.test(lj.output) && lj.kb === 256,
+      `the worker's setup log, redacted, kb clamped: ${JSON.stringify(lj).slice(0, 300)}`);
+    assert.ok(/tail -c 262144 "\$f"/.test(diagScript) && /setup\.log/.test(diagScript), "the fixed worker script ran, with only the clamped byte count in it");
+    assert.equal((await fetch(`${base}/api/admin/onboarding/compute/sandbox-logs?session=${A!.id}`)).status, 401, "admins only");
+    assert.ok([401, 403].includes((await fetch(`${base}/api/admin/onboarding/compute/sandbox-logs?session=${A!.id}`, { headers: { authorization: `Bearer ${workerToken}` } })).status), "not with a worker token");
+    assert.equal((await adm("GET", "/compute/sandbox-logs")).status, 400);
+    assert.equal((await adm("GET", "/compute/sandbox-logs?session=nosuch")).status, 404);
+    // An orchestrator on Vercel: its log; a boat orchestrator is refused (the boat CLI reads those).
+    const orchName = `${ws.workerPrefix().replace("-vw-", "-vo-")}diag`;
+    await fetch(`${mockUrl}/vercel-sandbox/v2/sandboxes?teamId=team_smoke`, { method: "POST", headers: { authorization: "Bearer x", "content-type": "application/json" }, body: JSON.stringify({ name: orchName }) });
+    const [vo] = await db.query<any>("INSERT INTO orchestrator_sandboxes (sandbox_id, orchestrator_id, state, provider) VALUES ($1, 'orch-diag-v', 'running', 'vercel') RETURNING id", [orchName]);
+    const [bo] = await db.query<any>("INSERT INTO orchestrator_sandboxes (sandbox_id, orchestrator_id, state, provider) VALUES ('bx_diag', 'orch-diag-b', 'running', 'boat') RETURNING id");
+    mockState.vsbExec = ({ script }: { script: string }) => { diagScript = script; return { stdout: "orchestrator started\nclaim failed: 401 Bearer owk_abcdefghijklmnop\n" }; };
+    const ol = await adm("GET", `/compute/sandbox-logs?orchestrator=${vo.id}`);
+    const olj = await ol.json();
+    assert.ok(ol.status === 200 && olj.kind === "orchestrator" && /claim failed/.test(olj.output) && !/abcdefghijklmnop/.test(olj.output) && /\/var\/lib\/octi\/orchestrator\.log/.test(diagScript),
+      `the orchestrator log, redacted: ${JSON.stringify(olj).slice(0, 300)}`);
+    assert.equal((await adm("GET", `/compute/sandbox-logs?orchestrator=${bo.id}`)).status, 400, "boat orchestrators are not read here");
+    await db.query("DELETE FROM orchestrator_sandboxes WHERE id = ANY($1)", [[vo.id, bo.id]]);
+    mockState.vsbSandboxes.delete(orchName);
+    mockState.vsbExec = null;
+
     // ---- delete ----
     assert.equal((await call("DELETE", one, tokA)).status, 204);
+    assert.equal((await adm("GET", `/compute/sandbox-logs?session=${encodeURIComponent(A!.id)}`)).status, 200, "the session's other live sandbox (the race winner) is read");
     assert.ok(!mockState.vsbSandboxes.has(sb.id), "deleted at Vercel");
     assert.equal((await call("POST", `${one}/exec`, tokA, { command: "id" })).status, 410, "a deleted sandbox: 410");
     assert.equal((await call("DELETE", one, tokA)).status, 204, "delete is idempotent");

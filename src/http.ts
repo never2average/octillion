@@ -731,6 +731,17 @@ export function createApp() {
   ob.get("/compute/activity", async (req, res) => void res.json(await ticks.computeActivity(req.query as Record<string, unknown>)));
   ob.get("/compute/probes", async (req, res) => void res.json(await (await import("./sandbox-probe.js")).listProbes(req.query as Record<string, unknown>)));
   ob.get("/compute/probes/:id", async (req, res) => void res.json(await (await import("./sandbox-probe.js")).probeDetail(Number(req.params.id))));
+  // Read-only logs from inside a Vercel sandbox (src/sandbox-diagnostics.ts): fixed scripts, platform admins only, redacted.
+  ob.get("/compute/sandbox-logs", async (req, res) => {
+    const d = await import("./sandbox-diagnostics.js");
+    try {
+      const oidc = req.headers["x-vercel-oidc-token"];
+      res.json(await d.sandboxLogs(req.query as Record<string, unknown>, { oidcToken: typeof oidc === "string" ? oidc : null }));
+    } catch (e) {
+      if (e instanceof d.DiagnosticsError) return void res.status(e.status).json({ error: e.message });
+      throw e;
+    }
+  });
   ob.get("/compute/trends",async (req, res) => void res.json(await (await import("./compute-trends.js")).computeTrends(req.query)));
   // Spend (src/spend.ts, src/spend-usage.ts): metered model spend by account and provider, compute hours, data and storage, and one account's
   // breakdown. Read only (GETs: any admin role).

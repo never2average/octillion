@@ -187,7 +187,8 @@ export async function readCommandFrames(res: Response, onStdout: (s: string) => 
 
 const LONG_DIR = "/tmp/.octi-x";
 
-export function vercelProvider(): SandboxProvider {
+/** `graceSec`: how long past its timeout a long (detached) step may still report before it fails (tests shorten it). */
+export function vercelProvider(o2: { graceSec?: number } = {}): SandboxProvider {
   const max = SANDBOX.vercelExecMaxSeconds;
   const longDirReady = new Set<string>();
   const p: SandboxProvider = {
@@ -234,14 +235,24 @@ export function vercelProvider(): SandboxProvider {
       const f = `${LONG_DIR}/${randomBytes(6).toString("hex")}`;
       await withRetry(() => p.writeFile(id, `${f}.sh`, command), 3);
       const { handle } = await p.execDetached(id, `timeout -k 10 ${o.timeoutSec} bash ${f}.sh > ${f}.out 2> ${f}.err < /dev/null; echo $? > ${f}.rc`);
-      const until = Date.now() + (o.timeoutSec + 60) * 1000;
-      while (await p.running(id, handle)) {
-        if (Date.now() > until) break;
-        await sleep(3000);
+      const label = (command.split("\n").find((l) => l.trim() && !l.trim().startsWith("#")) ?? "command").trim().slice(0, 120);
+      // Our wrapper's rc file is the ground truth; the provider's status is a second opinion. Past the step's timeout
+      // (+60 s for `timeout -k`) the step fails with a clear error instead of being polled forever.
+      const grace = o2.graceSec ?? 60, until = Date.now() + (o.timeoutSec + grace) * 1000;
+      for (;;) {
+        const rc = await p.exec(id, `test -e ${f}.rc && echo done || true`, { timeoutSec: 30 }).catch(() => ({ exitCode: null, stdout: "", stderr: "" }));
+        if (/done/.test(rc.stdout)) break;
+        if (!(await p.running(id, handle).catch(() => true))) break;
+        if (Date.now() > until) {
+          await p.exec(id, `pkill -KILL -f ${shq(`${f}.sh`)} || true`, { timeoutSec: 30 }).catch(() => {});
+          throw new Error(`setup step did not finish within ${o.timeoutSec}s (+${grace}s): ${label}`);
+        }
+        await sleep(4000);
       }
       const r = await withRetry(() => brokerJson(`${one(id)}/exec`, { method: "POST", timeoutMs: 120_000,
-        // Each stream read back at most 16 MiB (the broker buffers it), with a marker when cut.
-        json: { command: `o() { s=$(stat -c %s "$1" 2>/dev/null || echo 0); head -c 16777216 "$1" 2>/dev/null; [ "$s" -le 16777216 ] || printf "\\n[output truncated at 16 MiB]\\n"; }; o ${f}.out; o ${f}.err >&2; rc=$(cat ${f}.rc 2>/dev/null || echo 124); rm -f ${shq(f)}.*; exit "$rc"`, timeout_sec: 60 } }), 3);
+        // Each stream read back at most 16 MiB (the broker buffers it), with a marker when cut; the step's tail is also
+        // kept in setup.log for the admin diagnostics (Compute: sandbox logs).
+        json: { command: `o() { s=$(stat -c %s "$1" 2>/dev/null || echo 0); head -c 16777216 "$1" 2>/dev/null; [ "$s" -le 16777216 ] || printf "\\n[output truncated at 16 MiB]\\n"; }; rc=$(cat ${f}.rc 2>/dev/null || echo 124); { echo "== $(date -u +%FT%TZ) exit $rc: "${shq(label)}; tail -c 32768 ${f}.out; tail -c 32768 ${f}.err; } >> ${LONG_DIR}/setup.log 2>/dev/null; o ${f}.out; o ${f}.err >&2; rm -f ${shq(f)}.*; exit "$rc"`, timeout_sec: 60 } }), 3);
       return { exitCode: r?.exitCode ?? null, stdout: r?.stdout ?? "", stderr: r?.stderr ?? "" };
     },
     async execStream(id, command, o) {

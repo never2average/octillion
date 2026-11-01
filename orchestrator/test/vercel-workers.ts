@@ -58,11 +58,16 @@ const vm = (sb: string, script: string, files: Map<string, Buffer>): { exitCode?
   scripts.push(script);
   let m: RegExpExecArray | null;
   // A long command (> one broker call): run the script file, keep its output for the `cat` that reads it back.
+  // Its files appear when it ends (as in a VM), not when it starts; "STUCK" never ends.
   if ((m = /bash (\/tmp\/\.octi-x\/\w+)\.sh > \1\.out/.exec(script))) {
-    const f = m[1]!, r = vm(sb, files.get(`${f}.sh`)?.toString("utf8") ?? "", files);
-    files.set(`${f}.out`, Buffer.from(r.stdout ?? "")); files.set(`${f}.err`, Buffer.from(r.stderr ?? "")); files.set(`${f}.rc`, Buffer.from(String(r.exitCode ?? 0)));
-    return { durationMs: Math.min(r.durationMs ?? 0, 500) + 300 };
+    const f = m[1]!, inner = files.get(`${f}.sh`)?.toString("utf8") ?? "";
+    if (inner === "STUCK") return { durationMs: 1e9 };
+    const r = vm(sb, inner, files), d = Math.min(r.durationMs ?? 0, 500) + 300;
+    setTimeout(() => { files.set(`${f}.out`, Buffer.from(r.stdout ?? "")); files.set(`${f}.err`, Buffer.from(r.stderr ?? "")); files.set(`${f}.rc`, Buffer.from(String(r.exitCode ?? 0))); }, d);
+    return { durationMs: d };
   }
+  if ((m = /^test -e (\/tmp\/\.octi-x\/\w+)\.rc/.exec(script))) return { stdout: files.has(`${m[1]}.rc`) ? "done\n" : "" };
+  if ((m = /^test -e \/tmp\/octi\/exit-(\d+)/.exec(script))) return { stdout: Date.now() >= (runs.get(`${sb}:${m[1]}`) ?? Infinity) ? "exited\n" : "" };
   if ((m = /o (\/tmp\/\.octi-x\/\w+)\.out/.exec(script)))
     return { stdout: files.get(`${m[1]}.out`)?.toString() ?? "", stderr: files.get(`${m[1]}.err`)?.toString() ?? "", exitCode: Number(files.get(`${m[1]}.rc`)?.toString() ?? 1) };
   if (/cur=/.test(script)) return { stdout: "harness claude-code: preinstalled (2.1.296)\n" };
@@ -176,6 +181,41 @@ check("the private run is locked down by the network policy (gateway + registrie
   JSON.stringify(policies.map((p) => p.allow.length)));
 const launches = allFiles.filter(([p]) => /launch-\d+\.sh$/.test(p)).map(([, c]) => c.toString());
 check("launch scripts record their pid for the follower (no pid from Vercel)", launches.length > 0 && launches.every((c) => /echo \$\$ > \/tmp\/octi\/pid-\d+/.test(c)));
+
+// ---- the production bug (sim_r6OJKC3PFtUE): a plain GET of a finished command kept answering exitCode null ----
+// The mock does the same (vsbPlainGetStale): everything above completed only because "finished?" no longer trusts it.
+check("the mock reproduces the stale plain GET (as production did)", st.vsbPlainGetStale === true);
+const { CFG, SANDBOX } = await import("../core/config.js");
+Object.assign(CFG, { url: OCTI, token: WORKER_TOKEN, orchestratorId: "vwtest" });
+SANDBOX.vercelExecMaxSeconds = 30;
+const { vercelProvider } = await import("../core/sandbox-provider.js");
+const vp = vercelProvider({ graceSec: 2 });
+await db.query("UPDATE agent_sessions SET status = 'running' WHERE id = $1", [sessions[0].id]);
+await db.query("INSERT INTO orchestrators (id, capacity, meta) VALUES ('vwtest', 2, '{}') ON CONFLICT (id) DO UPDATE SET last_seen = now()");
+const sbx = await vp.create({ size: "small", timeoutSec: 3600, name: "stuck-check", sessionId: sessions[0].id });
+await vp.waitReady(sbx, 10_000);
+const realVm = st.vsbExec;
+st.vsbExec = () => ({ durationMs: 50, exitCode: 7 });
+const fin = await vp.execDetached(sbx, "true");
+await sleep(300);
+const vsid = st.vsbSandboxes.get(sbx)?.session;
+const plain = await (await fetch(`${mock.url}/vercel-sandbox/v2/sandboxes/sessions/${vsid}/cmd/${fin.handle}?teamId=team_vw`, { headers: { authorization: `Bearer ${OIDC}` } })).json();
+const viaBroker = await (await fetch(`${OCTI}/api/worker/sandboxes/${sbx}/commands/${fin.handle}`, { headers: { authorization: `Bearer ${WORKER_TOKEN}`, "x-octillion-orchestrator": "vwtest" } })).json();
+check("a finished detached command: Vercel's plain GET still says exitCode null, the broker says finished with its exit code (the old mapping said running forever)",
+  plain?.command?.exitCode === null && viaBroker.running === false && viaBroker.exit_code === 7, `plain ${JSON.stringify(plain?.command?.exitCode)} broker ${JSON.stringify(viaBroker)}`);
+const stillRunning = await vp.execDetached(sbx, "sleep");
+st.vsbExec = () => ({ durationMs: 60_000 });
+const busy = await vp.execDetached(sbx, "sleep");
+check("a running command still reads as running", (await vp.running(sbx, busy.handle)) === true);
+void stillRunning;
+st.vsbExec = realVm;
+// A setup step that never ends fails at its timeout (+ grace) with a clear error, instead of being polled forever.
+const t0 = Date.now();
+let stuck = "";
+try { await vp.exec(sbx, "STUCK", { timeoutSec: 31 }); } catch (e) { stuck = String(e instanceof Error ? e.message : e); }
+check("a stuck setup step fails after its timeout with a clear error", /setup step did not finish within 31s \(\+2s\): STUCK/.test(stuck) && Date.now() - t0 < 60_000,
+  `${stuck} after ${Math.round((Date.now() - t0) / 1000)}s`);
+await vp.delete(sbx);
 
 // Selection rules (orchestrator/core/runners.ts selectRunner): boat unless told otherwise; this process's env wins.
 const rn = await import("../core/runners.js");

@@ -42,6 +42,8 @@ export interface VercelClient {
   list(prefix: string, deadline?: number): Promise<{ name: string; createdAt: number | null; status: string }[]>;
   run(session: string, script: string): Promise<string>;
   status(session: string, cmd: string, wait?: boolean, timeoutMs?: number): Promise<{ exitCode: number | null }>;
+  /** Has a detached command exited? (A plain GET first, then a short ?wait=true: see the implementation.) */
+  finished(session: string, cmd: string, probeMs?: number): Promise<{ done: boolean; exitCode: number | null }>;
   logs(session: string, cmd: string, signal: AbortSignal): AsyncGenerator<{ stream: string; data: string }>;
   kill(session: string, cmd: string, signal?: number): Promise<void>;
   writeFile(session: string, path: string, content: Buffer): Promise<void>;
@@ -137,6 +139,24 @@ export function vercelClient(o: { oidcToken?: string | null; baseUrl?: string } 
       const r = await json(await call(`${ses(session)}/cmd/${encodeURIComponent(cmd)}${q(wait ? { wait: "true" } : {})}`, { timeoutMs }, "GET cmd"));
       const c = r?.command ?? r;
       return { exitCode: c?.exitCode == null ? null : Number(c.exitCode) };
+    },
+    async finished(session, cmd, probeMs = 2500) {
+      // A plain GET may keep answering exitCode: null after the command exited (seen live, 2026-11-01: a finished launch
+      // polled as "running" for 52 minutes). The SDK never polls it: Command.wait() asks with ?wait=true, which blocks
+      // until the command exits and then carries its exitCode (CommandFinishedResponse). So: a plain GET first (cheap,
+      // and conclusive when it does carry an exit code), then a short ?wait=true; if that is still waiting when probeMs
+      // runs out, the command is running.
+      const plain = await client.status(session, cmd, false, 20_000);
+      if (plain.exitCode != null) return { done: true, exitCode: plain.exitCode };
+      try {
+        const w = await client.status(session, cmd, true, probeMs);
+        return w.exitCode != null ? { done: true, exitCode: w.exitCode } : { done: false, exitCode: null };
+      } catch (e) {
+        if (e instanceof VercelSandboxError) throw e;
+        const name = String((e as Error)?.name ?? ""), msg = String((e as Error)?.message ?? "");
+        if (/TimeoutError|AbortError/.test(name) || /aborted|timed? ?out/i.test(msg)) return { done: false, exitCode: null };
+        throw e;
+      }
     },
     async *logs(session, cmd, signal) {
       const res = await call(`${ses(session)}/cmd/${encodeURIComponent(cmd)}/logs${q()}`, { timeoutMs: 3600_000, signal }, "GET cmd logs");

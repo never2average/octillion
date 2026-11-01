@@ -2406,7 +2406,7 @@ try {
   // The sandbox reliability probe (src/sandbox-probe.ts) against the mock boat.dev and Vercel Sandbox.
   await (await import("./smoke-sandbox-probe.js")).sandboxProbeChecks({ db, base, mockUrl: mock.url, mockState: mock.state, adm, json, stamp });
   // The worker sandbox broker (src/worker-sandboxes.ts): Vercel Sandbox workers, ownership checks, against the mock.
-  await (await import("./smoke-worker-sandboxes.js")).workerSandboxChecks({ db, base, mockUrl: mock.url, mockState: mock.state, workerToken: WORKER_TOKEN! });
+  await (await import("./smoke-worker-sandboxes.js")).workerSandboxChecks({ db, base, mockUrl: mock.url, mockState: mock.state, workerToken: WORKER_TOKEN!, adm });
   await (await import("./smoke-vercel-orchestrators.js")).vercelOrchestratorChecks({ db, base, mockUrl: mock.url, mockState: mock.state, workerToken: WORKER_TOKEN! });
   /** A Clerk session token (what the UI sends): v2 claims with the active organization, unless told otherwise. */
   const clerkSession = async (userId: string, orgId?: string | null, role = "member", extra: Record<string, unknown> = {}) =>

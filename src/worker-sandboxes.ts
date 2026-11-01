@@ -333,8 +333,9 @@ export function workerSandboxRouter(authOf: (res: Response) => WorkerAuth, opts:
     const c = client(req, res);
     if (!c) return;
     try {
-      const s = await c.status(await sessionOf(c, row), cid);
-      res.json({ running: s.exitCode == null, exit_code: s.exitCode });
+      // Not a plain GET: it can keep saying exitCode null after the exit (see VercelClient.finished).
+      const s = await c.finished(await sessionOf(c, row), cid);
+      res.json({ running: !s.done, exit_code: s.exitCode });
     } catch (e) { fail(res, e); }
   });
 

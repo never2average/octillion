@@ -19,6 +19,7 @@ import { Icons } from '@/components/icons';
 import { counted } from '@/lib/octillion-format';
 import { cn } from '@/lib/utils';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
+import { SandboxLogsButton } from './compute-sandbox-logs';
 import { post, useAdmin, useAdminAction } from './lib';
 import { Gate, useAdminRole } from './role';
 import { copyText, ErrorBox, Mono, Notice, StatusBadge, When, type Tone } from './ui';
@@ -237,6 +238,8 @@ function SessionPeek({ id, onJob, onCancel, cancelling }: { id: string; onJob: (
           <Link href={`/admin/accounts/${encodeURIComponent(s.org.slug)}`} className={buttonVariants({ variant: 'outline', size: 'sm' })}><Icons.account /> {s.org.name}</Link>
           <Button variant='outline' size='sm' onClick={onJob}><Icons.search /> This job&apos;s sessions</Button>
           {orchHref && <SectionLink href={orchHref} className={buttonVariants({ variant: 'outline', size: 'sm' })}><Icons.route /> Orchestrator</SectionLink>}
+          {/* A running session has no sandbox_id yet (set at /complete): offer it while open; the route says if it is not on Vercel. */}
+          {(s.sandbox_id?.startsWith('vercel:') || OPEN.includes(s.status)) && <SandboxLogsButton session={s.id} label='Worker setup logs' />}
           <Button variant='ghost' size='sm' onClick={() => copyText(s.id, 'Session id copied')}>Copy id</Button>
           {OPEN.includes(s.status) && <Gate need='compute'><Button variant='outline' size='sm' className='text-destructive' disabled={cancelling} onClick={() => onCancel(s)}><Icons.close /> Cancel session</Button></Gate>}
         </>}

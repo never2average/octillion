@@ -308,12 +308,59 @@ Vercel orchestrator's row as a boat sandbox that boat's listing lacks and end it
    (each ends with its job, or at its timeout, at most `OCTILLION_VERCEL_ORCH_TIMEOUT_MINUTES`);
 3. then roll back the code. Migration 0017's columns stay; older releases ignore them.
 
+## Command status: what the API returns
+
+The first live run (`sim_r6OJKC3PFtUE`, 2026-11-01) created both worker sandboxes, but the sessions sat at zero events
+for 52 minutes. The broker answered "running" to every 3-second poll of a detached command that had already exited.
+
+What the Vercel Sandbox REST API returns, per the official SDK (`packages/vercel-sandbox/src/api-client`, `validators.ts`, `command.ts`):
+
+| Call | Answer |
+|---|---|
+| `POST /v2/sandboxes/sessions/{sid}/cmd` with `wait: false` | `{command: {id, name, args, cwd, sessionId, exitCode: number \| null, startedAt, durationMs?}}` (`CommandResponse`) |
+| `POST …/cmd` with `wait: true` | ND-JSON: `{command}` when it starts, then log lines `{stream: "stdout"\|"stderr", data}` or `{stream: "error", data: {code, message}}`, then `{command}` with `exitCode` set |
+| `GET …/cmd/{id}` | `CommandResponse`: `exitCode` may be null |
+| `GET …/cmd/{id}?wait=true` | Blocks until the command exits, then `CommandFinishedResponse`: the same command with `exitCode: number` |
+| `GET …/cmd/{id}/logs` | ND-JSON log lines as above; the stream ends with the command |
+| `POST …/cmd/{id}/kill` `{signal}` | `CommandResponse` |
+
+There is no `status` field on a command. The id is `command.id`.
+
+The SDK never polls a plain GET. `Command.wait()` asks with `?wait=true`, and nothing in the SDK refreshes a running
+command's `exitCode` otherwise. In production, the plain GET kept answering `exitCode: null` after the command exited.
+
+So the client no longer trusts it:
+- `VercelClient.finished()` makes a plain GET first, which settles the answer when it does carry an exit code.
+- It then makes a `?wait=true` GET bounded to 2.5 s. An answer with an `exitCode` means finished; still waiting at the bound means running.
+- The worker runner does not rely on the provider's status alone:
+  - A launch is over when its own exit file (`/tmp/octi/exit-N`) exists.
+  - A long setup step is over when its rc file exists.
+  - The provider's status is only a second opinion.
+
+Every wait now has a deadline:
+- A setup step still running 60 s after its timeout (600 s for setup) is killed, and the session fails with "setup step did not finish within 600s (+60s): <step>".
+- A run that reports no exit within the harness's hard limit plus 5 minutes fails with "the run did not report its exit…".
+
+The mock Vercel Sandbox reproduces the stale plain GET (`vsbPlainGetStale`, on by default), so the tests pass only through `?wait=true` and the files.
+
+## Diagnostics: sandbox logs
+
+Compute has a labelled button in the orchestrator peek ("Orchestrator log", Vercel orchestrators) and in the session peek
+("Worker setup logs", open sessions and Vercel sessions). It reads the last 64 KB from inside the sandbox through
+`GET /api/admin/onboarding/compute/sandbox-logs?orchestrator=<row id>|session=<session id>&kb=` (`src/sandbox-diagnostics.ts`).
+
+- **Orchestrator:** `/var/lib/octi/orchestrator.log`, the supervisor pid, processes and disk.
+- **Worker:** the setup log (`/tmp/.octi-x/setup.log`, the tail of every long setup step with its exit code), the harness error logs (`/tmp/octi/err-N.log`), the run files with their pid and exit values, and processes.
+- **Limits:** platform admins only, and two fixed read-only scripts. The only input that reaches a script is the byte count, clamped to 1–256 KB.
+- **Redaction:** token-shaped values are redacted before the answer leaves the API: `ogw_`, `owk_`, provider keys, bearer credentials, `*_KEY=`/`*_TOKEN=` values, JWTs and URL passwords.
+- **Scope:** boat sandboxes are not read here (use the boat CLI).
+
 ## What only a live run can confirm
 
 The mocks follow the official SDK's REST calls, but these have not been seen live yet:
 
 - The `fs/write` archive format and the owner of the files it writes. If extracted files are not readable by the commands' user, set `OCTILLION_VERCEL_WRITE_VIA=exec` (base64 chunks through commands).
-- Whether the logs stream of a finished command still returns its whole output, and whether `GET …/cmd/{id}` reports `exitCode: null` while running.
+- That the logs stream of a finished command still returns its whole output, and that `GET …/cmd/{id}?wait=true` answers within the 2.5 s bound for a finished command (the plain GET's stale `exitCode: null` was seen live).
 - `sudo -n -u agent`, `useradd`, GNU `timeout` and `tail --pid` on the `node24` image.
 - The network policy body (`allow` plus `subnets.deny`) being accepted, and the probe results under it.
 - How long the harness installs take on Amazon Linux 2023.
