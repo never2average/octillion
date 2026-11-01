@@ -89,6 +89,7 @@ const research = await import("../../src/research.js");
 const { Autoscaler, AUTOSCALE } = await import("../../src/autoscaler.js");
 const db = await getDb();
 await kv.addCredential("boat", BOAT_KEY);
+await kv.addCredential("openai", `sk-mock-${randomBytes(8).toString("hex")}`); // runs of codex/default need a vault key for their agent
 const { org: O } = await createOrg("Per Job Test", "pjtest");
 const { org: O2 } = await createOrg("Per Job Other", "pjother");
 await q.saveProduct(O, { name: "Quillmail", packages: ["quillmail"], competitors: [{ name: "Postbox", packages: ["postbox-js"] }] });
