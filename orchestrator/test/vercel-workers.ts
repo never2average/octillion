@@ -78,7 +78,8 @@ const vm = (sb: string, script: string, files: Map<string, Buffer>): { exitCode?
   }
   if (/cat \/tmp\/octi\/exit-/.test(script)) return { stdout: "0\n" };
   if (/diff\.sh/.test(script)) return { stdout: DIFF };
-  if (/egress-probe\.mjs/.test(script)) return { stdout: '{"ok":true,"checks":[{"name":"gateway","want":true,"got":true}]}\n' };
+  if (/sudo -n install .*egress-probe\.mjs/.test(script)) return {}; // the probe is installed where the agent user can read it
+  if (/octi-egress\/probe\.mjs/.test(script)) return { stdout: '{"ok":true,"checks":[{"name":"gateway","want":true,"got":true}]}\n' };
   return {};
 };
 mock.state.vsbExec = ({ sandbox, script, files }) => vm(sandbox, script, files);

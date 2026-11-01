@@ -529,7 +529,11 @@ export function vmRunner(p: SandboxProvider): Runner {
             // Native allow-list (Vercel network policy): the whole VM reaches only these hosts, enforced outside the VM.
             await p.lockdown(id, spec.egress.hosts);
             await put(`${VM_DIR}/egress-probe.mjs`, policyProbeSource(spec.egress.gatewayHost));
-            probeCmd = `cd / && NODE="$(command -v node)" && ${RUN_AS} env -i HOME=${AGENT_HOME} PATH="$(cat ${VM_DIR}/path)" "$NODE" ${VM_DIR}/egress-probe.mjs`;
+            // VM_DIR is 0700 (the sandbox user's): install the probe root-owned and world-readable, as the proxy path does,
+            // so the agent user can run it (it read MODULE_NOT_FOUND from VM_DIR, seen live 2026-11-01).
+            const inst = await exec(`sudo -n install -d -m 755 -o root -g root ${EGRESS_DIR} && sudo -n install -m 644 -o root -g root ${VM_DIR}/egress-probe.mjs ${EGRESS_DIR}/probe.mjs`, 60);
+            if (inst.exitCode !== 0) throw new Error(`egress probe install failed (exit ${inst.exitCode}): ${(inst.stderr || inst.stdout).slice(-400)}`);
+            probeCmd = `cd / && NODE="$(command -v node)" && ${RUN_AS} env -i HOME=${AGENT_HOME} PATH="$(cat ${VM_DIR}/path)" "$NODE" ${EGRESS_DIR}/probe.mjs`;
           } else {
             await put(`${VM_DIR}/egress-proxy.mjs`, proxySource());
             await put(`${VM_DIR}/egress-allow.json`, JSON.stringify({ hosts: spec.egress.hosts }));
