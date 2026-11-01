@@ -33,7 +33,8 @@ export async function keyChecks({ db, worker, call, fails, A, sessionId }: { db:
 export async function healthChecks({ db, sentTo, OPS, stamp, orgId, productId, scenarioId }: { db: Db; sentTo: (to: string, kind?: string) => any[]; OPS: string;
   stamp: string; orgId: number; productId: number; scenarioId: number }) {
   const health = await import("../src/health-alerts.js");
-  const T = new Date(Date.now() + 30 * 24 * 3600_000), at = new Date(T.getTime() - 10 * 60_000);
+  // 10 minutes into an hour, so the "+60s" re-check below never crosses an hour boundary (alerts dedupe per clock hour).
+  const T = new Date(Math.floor((Date.now() + 30 * 24 * 3600_000) / 3600_000) * 3600_000 + 10 * 60_000), at = new Date(T.getTime() - 10 * 60_000);
   const hs = (n: number, status: string, error: string | null, meta: Record<string, unknown> = {}) => db.query(
     `INSERT INTO agent_sessions (id, simulation_id, org_id, product_id, scenario_id, model, harness, status, error_message, metadata, ended_at)
      VALUES ($1, $2, $3, $4, $5, 'm', 'claude-code', $6, $7, $8, $9)`, [`ses_health_${n}_${stamp}`, `sim_budget_${stamp}`, orgId, productId, scenarioId, status, error, JSON.stringify(meta), at]);
