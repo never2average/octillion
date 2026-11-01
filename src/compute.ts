@@ -406,6 +406,11 @@ async function buildSummary(fresh: boolean) {
             coalesce(sum(extract(epoch FROM coalesce(deleted_at, now()) - greatest(created_at, current_date::timestamptz)))
                      FILTER (WHERE coalesce(deleted_at, now()) > current_date::timestamptz), 0) AS seconds_today
        FROM orchestrator_sandboxes WHERE created_at > now() - interval '1 day' OR state <> 'deleted' OR deleted_at >= current_date`);
+  // The sandbox reliability probe's boat creates (src/sandbox-probe.ts) are starts on the same account too.
+  const [probeStarts] = await db.query<Record<string, unknown>>(
+    `SELECT count(*) FILTER (WHERE started_at > now() - interval '1 minute') AS starts_minute,
+            count(*) FILTER (WHERE started_at > now() - interval '1 hour') AS starts_hour, count(*) AS starts_day
+       FROM sandbox_probes WHERE provider = 'boat' AND sandbox_id IS NOT NULL AND started_at > now() - interval '1 day'`);
   const [lastFail] = await db.query<{ launch_step: string; launch_error: string | null }>(
     "SELECT launch_step, launch_error FROM orchestrator_sandboxes WHERE launch_step IS NOT NULL AND created_at > now() - interval '1 hour' ORDER BY created_at DESC LIMIT 1");
   const [orchSpend] = await db.query<{ usd: unknown }>("SELECT coalesce(sum(cost_usd), 0) AS usd FROM gateway_model_usage WHERE consumer = 'orchestrator' AND day = current_date");
@@ -485,7 +490,8 @@ async function buildSummary(fresh: boolean) {
     limits: {
       ok: !!L && sb.ok, error: lim.error ?? sb.error, stale: lim.stale || sb.stale,
       plan: L?.activeSandboxes ?? null, active_now: activeNow, ours_orch: oursOrch, ours_workers: oursWorkers, ours_images: use.ours_images, ours_probes: use.ours_probes, others, other_prefixes: otherPrefixes,
-      our_starts: { minute: n(orch?.starts_minute) + n(ses?.starts_minute), hour: n(orch?.starts_hour) + n(ses?.starts_hour), day: n(orch?.starts_day) + n(ses?.starts_day) },
+      our_starts: { minute: n(orch?.starts_minute) + n(ses?.starts_minute) + n(probeStarts?.starts_minute), hour: n(orch?.starts_hour) + n(ses?.starts_hour) + n(probeStarts?.starts_hour),
+                    day: n(orch?.starts_day) + n(ses?.starts_day) + n(probeStarts?.starts_day) },
       starts: L ? { per_minute: L.startsPerMinute, per_hour: L.startsPerHour, per_day: L.startsPerDay } : null,
       job_orch_live: jobActive.length, job_orch_draining: jobLive.length - jobActive.length, job_orch_cap: jobCap, shared_orch_live: live.length - jobLive.length, shared_orch_cap: AUTOSCALE.maxOrchestrators(), per_job_mode: perJob,
       pods_max_reserved: podsMax, pods_avg_running: jobLive.length ? Math.round(jobLive.reduce((a, r) => a + runningOf(r), 0) / jobLive.length) : 0, pods_cap: podsCap,

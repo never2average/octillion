@@ -9,7 +9,7 @@ any migration, the probe measures both providers the same way, from the same pla
 
 - **Code:** `src/sandbox-probe.ts`
 - **Cron:** `/api/cron/sandbox-probe`, every 5 minutes (`vercel.json`). It is separate from the autoscaler's cron.
-- **Tables:** `sandbox_probes` and `sandbox_probe_execs` (migration `0015_sandbox_probes.sql`)
+- **Tables:** `sandbox_probes`, `sandbox_probe_execs` and `sandbox_probe_meta` (migration `0015_sandbox_probes.sql`)
 - **Admin page:** Operations → Compute → **Sandbox probes**
 - **Admin MCP:** the `sandbox_probe_summary` tool
 
@@ -21,14 +21,18 @@ A function call can't wait 15 minutes, so each probe is a small state machine th
 
 | Step | When | What is recorded |
 |---|---|---|
-| Start | Every 15 minutes per provider (`OCTILLION_SANDBOX_PROBE_EVERY_MINUTES`), with at most 2 live probes per provider | Create-call latency, time from the create call to ready, and the create error if there is one |
+| Start | Every 30 minutes per provider (`OCTILLION_SANDBOX_PROBE_EVERY_MINUTES`), with at most 2 live probes per provider. A boat probe waits while boat's daily start budget is nearly used (see Cost) | Create-call latency, time from the create call to ready, and the create error if there is one |
 | Each tick | For every live probe, a round every 30 s within 150 s per tick (for all probes together), stopping early near the deadline | The provider's get API (does the sandbox still exist?), then `echo ok && uptime`: latency, exit code and error for each |
 | Gone | The get API answers 404, or reports the sandbox stopped or archived, before we delete it | `gone_at` and the provider's state. This is the key number |
-| End | After 15 minutes (`OCTILLION_SANDBOX_PROBE_LIFETIME_MINUTES`) | Delete latency and result |
-| Hygiene | Every tick | Any probe sandbox in a provider's listing that is older than 30 minutes is deleted. Rows left in `starting` for more than 10 minutes are marked failed |
+| End | After 15 minutes (`OCTILLION_SANDBOX_PROBE_LIFETIME_MINUTES`) | Every delete attempt: latency and result. A failed delete leaves the probe `delete_failed` (never "deleted", never counted as survived) and is retried on later ticks for 2 hours |
+| Hygiene | At most every 15 minutes per provider (a claim in `sandbox_probe_meta`), in its own try/catch so a failed listing never skips that tick's ends or starts | Any probe sandbox in a provider's listing that is older than 30 minutes is deleted (boat: under every key in the vault). Rows left in `starting` for more than 10 minutes are marked failed |
 
 A failed get call (a timeout or a 502) is recorded as a failed check. It does not count as "gone"; only the provider
-saying the sandbox no longer exists, or has stopped, counts.
+saying the sandbox no longer exists, or has stopped, counts. A probe found gone within 2 minutes of its 25-minute TTL
+(or past it) is `expired`, not gone: that is its TTL, after a missed end, not an early drop.
+
+Each boat probe records the vault key that made it (`credential_id`), and every later get, exec and delete for it uses
+that key. With several boat keys (accounts), another key would not see the sandbox and the probe would read "gone".
 
 **Sizes and limits:**
 - boat uses `small` with a 25-minute TTL, and no environment or snapshots.
@@ -51,11 +55,12 @@ saying the sandbox no longer exists, or has stopped, counts.
 Per provider, over the last 24 hours or 7 days:
 - probes started and create success %;
 - median and p95 ready time;
-- the share of ended probes that survived 15 minutes (deleted by us, never gone first);
+- the share of ended probes that survived 15 minutes (deleted by us or expired at the TTL, never gone first; a probe
+  whose delete is still failing does not count);
 - the gone-early count, with the median age at disappearance;
 - exec success %, with p50 and p95 exec latency;
 - get API success %;
-- delete success %.
+- delete success % over every attempt, retries included.
 
 Under the summary there is one row per probe. Its peek shows a card with the probe's facts, then two tabs, **Execs**
 (every exec and check) and **Errors**.
@@ -66,7 +71,7 @@ Under the summary there is one row per probe. Its peek shows a card with the pro
 |---|---|---|
 | `OCTILLION_SANDBOX_PROBE` | on | `off` stops it: no new probes start (existing ones stop at their TTL) |
 | `OCTILLION_SANDBOX_PROBE_PROVIDERS` | `boat,vercel` | Which providers to probe |
-| `OCTILLION_SANDBOX_PROBE_EVERY_MINUTES` | 15 | Start interval per provider (minimum 5) |
+| `OCTILLION_SANDBOX_PROBE_EVERY_MINUTES` | 30 | Start interval per provider (minimum 5) |
 | `OCTILLION_SANDBOX_PROBE_LIFETIME_MINUTES` | 15 | How long a probe lives before we delete it |
 | `OCTILLION_SANDBOX_PROBE_BUDGET_SECONDS` | 150 | Time per tick for all exec rounds |
 | `OCTILLION_SANDBOX_PROBE_GAP_SECONDS` | 30 | Time between rounds |
@@ -87,21 +92,25 @@ still probed.
 
 ## Cost
 
-There are about 96 probe sandboxes per provider per day (one every 15 minutes), each living about 15 minutes, at the
+There are about 48 probe sandboxes per provider per day (one every 30 minutes), each living about 15 minutes, at the
 smallest size.
 
 | Provider | Per probe | Per day |
 |---|---|---|
-| boat.dev `small` ($0.018/h) | 0.25 h × $0.018 ≈ $0.0045 | ≈ $0.43 |
-| Vercel Sandbox, 1 vCPU / 2 GB (Pro, iad1) | 2 GB × 0.25 h × $0.0212 ≈ $0.0106 of memory, plus under $0.001 of active CPU (the sandbox is idle) and creations at $0.60 per million | ≈ $1.08 |
-| **Total** | | **≈ $1.51 a day** (about $45 a month) |
+| boat.dev `small` ($0.018/h) | 0.25 h × $0.018 ≈ $0.0045 | ≈ $0.22 |
+| Vercel Sandbox, 1 vCPU / 2 GB (Pro, iad1) | 2 GB × 0.25 h × $0.0212 ≈ $0.0106 of memory, plus under $0.001 of active CPU (the sandbox is idle) and creations at $0.60 per million | ≈ $0.54 |
+| **Total** | | **≈ $0.76 a day** (about $23 a month) |
 
-Each boat probe is also one of the account's starts, so 96 starts a day go against boat's daily start limit (200 a day
-on the $20 plan, shared with real orchestrators and workers). To halve that, raise
-`OCTILLION_SANDBOX_PROBE_EVERY_MINUTES` to 30.
+Each boat probe is also one of the account's starts: 48 starts a day go against boat's daily start limit (200 a day on
+the $20 plan, shared with real orchestrators and workers); Compute → Limits counts them in "Our starts". Before each boat start the probe reads that limit from boat's
+`/limits` and counts our own starts in the last 24 hours from the database (orchestrator sandboxes, sessions given a
+worker sandbox, and boat probes). When fewer than 15% of the day's starts (at least 20) would be left, the boat probe
+does not start and the tick says why. boat does not report starts used, so other deployments' starts on the same
+account are not counted. If the limit cannot be read, the probe starts anyway (boat still refuses a start over its limit,
+and that is recorded as a failed create).
 
 On Vercel Pro, this usage comes out of the $20 monthly credit first. The page shows the estimate under the comparison
-(`probeCost()` in `src/sandbox-probe.ts`).
+(`probeCost()` in `src/sandbox-probe.ts`); it follows `OCTILLION_SANDBOX_PROBE_EVERY_MINUTES`.
 
 ## Retention
 

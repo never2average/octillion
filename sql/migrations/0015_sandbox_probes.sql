@@ -4,7 +4,8 @@
 -- minutes it is deleted. A probe that disappears before we delete it gets gone_at: the number this is for.
 --
 --   sandbox_probes       one row per probe sandbox (or per attempt that never made one: failed, not_configured)
---   sandbox_probe_execs  one row per exec or existence check against a probe
+--   sandbox_probe_execs  one row per exec, existence check or delete attempt against a probe
+--   sandbox_probe_meta   when each provider's listing was last swept for strays (at most every 15 minutes)
 --
 -- Platform (staff) tables: nothing in them belongs to an account. Row-level security is on with no tenant policy, the
 -- tenant role is granted nothing, and src/rls.ts lists them as NO_ACCESS. Kept 14 days (pruned by the probe's cron).
@@ -16,7 +17,10 @@ CREATE TABLE IF NOT EXISTS sandbox_probes (
   provider      TEXT NOT NULL CHECK (provider IN ('boat', 'vercel')),
   sandbox_id    TEXT,                                -- boat: bx_...; Vercel: the sandbox name (its API addresses it by name)
   name          TEXT,                                -- <namespace>-probe-<random>: never an orchestrator or worker prefix
-  state         TEXT NOT NULL CHECK (state IN ('starting', 'live', 'gone', 'deleted', 'failed', 'not_configured')),
+  -- live -> deleted (lived its time) | delete_failed (retried on later ticks) | gone (lost before we deleted it) |
+  -- expired (stopped at its TTL: not an early drop); starting -> failed; not_configured: no credentials, nothing made.
+  state         TEXT NOT NULL CHECK (state IN ('starting', 'live', 'gone', 'deleted', 'delete_failed', 'expired', 'failed', 'not_configured')),
+  credential_id INT,                                 -- boat: the vault key that made it; every later call uses the same key
   region        TEXT,
   started_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   create_ms     INT,                                 -- the create call
@@ -42,7 +46,7 @@ CREATE TABLE IF NOT EXISTS sandbox_probe_execs (
   id         BIGSERIAL PRIMARY KEY,
   probe_id   BIGINT NOT NULL REFERENCES sandbox_probes(id) ON DELETE CASCADE,
   at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-  kind       TEXT NOT NULL CHECK (kind IN ('exec', 'check')),   -- exec: echo + uptime; check: the provider's get API
+  kind       TEXT NOT NULL CHECK (kind IN ('exec', 'check', 'delete')),   -- exec: echo + uptime; check: the get API; delete
   ok         BOOLEAN NOT NULL,
   ms         INT,
   exit_code  INT,
@@ -51,10 +55,16 @@ CREATE TABLE IF NOT EXISTS sandbox_probe_execs (
 CREATE INDEX IF NOT EXISTS sandbox_probe_execs_probe ON sandbox_probe_execs (probe_id, at);
 CREATE INDEX IF NOT EXISTS sandbox_probe_execs_at ON sandbox_probe_execs (at);
 
+CREATE TABLE IF NOT EXISTS sandbox_probe_meta (
+  key  TEXT PRIMARY KEY,                             -- 'strays:<provider>'
+  at   TIMESTAMPTZ NOT NULL
+);
+
 DO $mig$
 DECLARE r TEXT := octillion_tenant_role();
 BEGIN
   ALTER TABLE sandbox_probes ENABLE ROW LEVEL SECURITY;
   ALTER TABLE sandbox_probe_execs ENABLE ROW LEVEL SECURITY;
-  EXECUTE format('REVOKE ALL ON sandbox_probes, sandbox_probe_execs FROM %I', r);
+  ALTER TABLE sandbox_probe_meta ENABLE ROW LEVEL SECURITY;
+  EXECUTE format('REVOKE ALL ON sandbox_probes, sandbox_probe_execs, sandbox_probe_meta FROM %I', r);
 END $mig$;

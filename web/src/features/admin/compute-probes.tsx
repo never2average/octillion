@@ -1,7 +1,7 @@
 'use client';
 // Compute › Sandbox probes (GET /compute/probes, src/sandbox-probe.ts): boat.dev and Vercel Sandbox side by side,
 // measured by the deployment's own probe cron. On top, the two providers compared over the last 24 h (or 7 days):
-// create success, ready time, how many probes lived their full 15 minutes, how many vanished early and at what age,
+// create success, ready time, how many probes lived their full lifetime (15 minutes), how many vanished early and at what age,
 // exec success and latency, delete success, plus what the probe costs a day. Below, one row per probe with a peek: its
 // facts, then its execs and checks, and every error it met. Read only: the cron starts and deletes probes.
 import { useMemo, type ReactNode } from 'react';
@@ -22,7 +22,7 @@ interface ProviderSummary {
   provider: Provider; configured: boolean; not_configured_reason: string | null; started: number; created: number; create_ok_pct: number | null;
   ready_p50_ms: number | null; ready_p95_ms: number | null; finished: number; survived: number; survived_pct: number | null;
   gone_early: number; gone_median_age_s: number | null; execs: number; exec_ok_pct: number | null; exec_p50_ms: number | null; exec_p95_ms: number | null;
-  checks: number; check_ok_pct: number | null; deletes: number; delete_ok_pct: number | null; live: number; last_started_at: string | null; last_error: string | null;
+  checks: number; check_ok_pct: number | null; deletes: number; delete_ok_pct: number | null; delete_failed: number; live: number; last_started_at: string | null; last_error: string | null;
 }
 interface Cost { probes_per_day: number; minutes_each: number; boat_usd_day: number; vercel_usd_day: number; total_usd_day: number; boat_starts_per_day: number; note: string }
 export interface ProbeRow {
@@ -34,15 +34,17 @@ export interface ProbeRow {
 interface Probes { hours: number; enabled: boolean; lifetime_minutes: number; every_minutes: number; providers: ProviderSummary[]; cost: Cost; rows: ProbeRow[] }
 interface Detail {
   row: ProbeRow;
-  execs: { id: number; at: string; kind: 'exec' | 'check'; ok: boolean; ms: number | null; exit_code: number | null; error: string | null }[];
+  execs: { id: number; at: string; kind: 'exec' | 'check' | 'delete'; ok: boolean; ms: number | null; exit_code: number | null; error: string | null }[];
   errors: { at: string; step: string; error: string }[];
 }
 
 const LABEL: Record<Provider, string> = { boat: 'boat.dev', vercel: 'Vercel Sandbox' };
 const STATE: Record<string, { label: string; tone: Tone }> = {
   starting: { label: 'starting', tone: 'info' }, live: { label: 'live', tone: 'ok' }, deleted: { label: 'lived its time', tone: 'neutral' },
-  gone: { label: 'gone early', tone: 'bad' }, failed: { label: 'create failed', tone: 'bad' }, not_configured: { label: 'not configured', tone: 'warn' }
+  gone: { label: 'gone early', tone: 'bad' }, failed: { label: 'create failed', tone: 'bad' }, not_configured: { label: 'not configured', tone: 'warn' },
+  delete_failed: { label: 'delete failed, retrying', tone: 'warn' }, expired: { label: 'expired at its TTL', tone: 'neutral' }
 };
+const CALL: Record<string, string> = { exec: 'echo + uptime', check: 'get (exists?)', delete: 'delete' };
 const ms = (v: number | null | undefined) => (v == null ? '—' : v < 1000 ? `${v} ms` : `${(v / 1000).toFixed(v < 10_000 ? 1 : 0)} s`);
 const pct = (v: number | null | undefined) => (v == null ? '—' : `${v}%`);
 const stateOf = (r: ProbeRow) => STATE[r.state] ?? { label: r.state, tone: 'neutral' as Tone };
@@ -134,13 +136,13 @@ function Comparison({ d }: { d: Probes }) {
     line('Probes started', (s) => s.started),
     line('Create success', (s) => <>{pct(s.create_ok_pct)} <span className='text-muted-foreground text-xs'>{s.created} of {s.started}</span></>),
     line('Ready time, p50 / p95', (s) => <>{ms(s.ready_p50_ms)} <span className='text-muted-foreground'>/ {ms(s.ready_p95_ms)}</span></>, 'from the create call until it can run commands'),
-    line(`Survived ${d.lifetime_minutes} min`, (s) => <>{pct(s.survived_pct)} <span className='text-muted-foreground text-xs'>{s.survived} of {s.finished}</span></>, 'of the probes that ended: deleted by us, not gone first'),
+    line(`Survived ${d.lifetime_minutes} min`, (s) => <>{pct(s.survived_pct)} <span className='text-muted-foreground text-xs'>{s.survived} of {s.finished}</span></>, 'of the probes that ended: deleted by us (or expired at the TTL), never gone first; a failed delete does not count'),
     line('Gone early', (s) => <span className={cn(s.gone_early > 0 && 'text-destructive')}>{s.gone_early}{s.gone_median_age_s != null && <span className='text-muted-foreground text-xs'> · median age {dur(s.gone_median_age_s)}</span>}</span>,
       'the provider lost or stopped it before we deleted it'),
     line('Exec success', (s) => <>{pct(s.exec_ok_pct)} <span className='text-muted-foreground text-xs'>{s.execs} execs</span></>, 'echo ok && uptime, about every 30 s'),
     line('Exec latency, p50 / p95', (s) => <>{ms(s.exec_p50_ms)} <span className='text-muted-foreground'>/ {ms(s.exec_p95_ms)}</span></>),
     line('Get API success', (s) => <>{pct(s.check_ok_pct)} <span className='text-muted-foreground text-xs'>{s.checks} checks</span></>, 'does it still exist?'),
-    line('Delete success', (s) => <>{pct(s.delete_ok_pct)} <span className='text-muted-foreground text-xs'>{s.deletes} deletes</span></>)
+    line('Delete success', (s) => <>{pct(s.delete_ok_pct)} <span className='text-muted-foreground text-xs'>{s.deletes} attempts{s.delete_failed > 0 && <span className={AMBER}> · {s.delete_failed} retrying</span>}</span></>, 'every attempt, retries included')
   ];
   const cell = (s: ProviderSummary, f: (s: ProviderSummary) => ReactNode) =>
     s.configured || s.started ? f(s) : <span className='text-muted-foreground'>—</span>;
@@ -209,10 +211,10 @@ function ProbePeek({ id }: { id: number }) {
       />
       <DetailTabs resetKey={id} tabs={[
         { id: 'execs', label: 'Execs', count: data.execs.length, content: (
-          <DetailTable rows={data.execs} rowKey={(e) => String(e.id)} noun='calls' empty='No execs or checks yet.'
+          <DetailTable rows={data.execs} rowKey={(e) => String(e.id)} noun='calls' empty='No execs, checks or deletes yet.'
             search={(e) => `${e.kind} ${e.error ?? ''}`} cols={[
             { key: 'at', label: 'When', type: 'date', value: (e) => e.at, render: (e) => <When d={e.at} /> },
-            { key: 'kind', label: 'Call', type: 'select', value: (e) => (e.kind === 'exec' ? 'echo + uptime' : 'get (exists?)'), render: (e) => (e.kind === 'exec' ? 'echo + uptime' : 'get (exists?)') },
+            { key: 'kind', label: 'Call', type: 'select', value: (e) => CALL[e.kind] ?? e.kind, render: (e) => CALL[e.kind] ?? e.kind },
             { key: 'ok', label: 'Result', type: 'select', value: (e) => (e.ok ? 'ok' : 'failed'), render: (e) => <StatusBadge tone={e.ok ? 'ok' : 'bad'}>{e.ok ? 'ok' : 'failed'}</StatusBadge> },
             { key: 'ms', label: 'Latency', className: 'text-right tabular-nums', type: 'number', value: (e) => e.ms, render: (e) => ms(e.ms) },
             { key: 'exit', label: 'Exit code', className: 'text-right tabular-nums', type: 'number', value: (e) => e.exit_code, render: (e) => (e.exit_code == null ? '—' : e.exit_code) },

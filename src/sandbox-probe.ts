@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { getDb } from "./db.js";
-import { useCredential } from "./keyvault.js";
+import { credentialSecrets, useCredential } from "./keyvault.js";
 import { BOAT, BOAT_PRICE_PER_HOUR } from "../orchestrator/core/config.js";
 import * as lib from "../orchestrator/deploy/boat-lib.js";
 
@@ -9,8 +9,10 @@ import * as lib from "../orchestrator/deploy/boat-lib.js";
  * side by side, measured from the deployment itself by its own cron (/api/cron/sandbox-probe, every 5 minutes; a VM
  * never runs it). One function call cannot wait 15 minutes, so each probe is a small state machine across ticks:
  *
- *   start    every OCTILLION_SANDBOX_PROBE_EVERY_MINUTES (15) per provider, at most MAX_LIVE (2) live at once: create the
- *            smallest sandbox (boat `small`, Vercel 1 vCPU / 2 GB) with a ~25-minute TTL, then wait for it to be ready
+ *   start    every OCTILLION_SANDBOX_PROBE_EVERY_MINUTES (30) per provider, at most MAX_LIVE (2) live at once: create the
+ *            smallest sandbox (boat `small`, Vercel 1 vCPU / 2 GB) with a ~25-minute TTL, then wait for it to be ready.
+ *            boat counts every create as a start against a daily limit shared with real orchestrators and workers:
+ *            no boat probe starts while fewer than START_RESERVE of the day's starts are left (startBlocked)
  *   each tick  for every live probe, rounds GAP (30 s) apart within BUDGET (150 s) for all probes together: the provider's
  *            get API (does it still exist?) then `echo ok && uptime`. A probe the provider no longer has, or reports
  *            stopped, gets gone_at: that is the number this is for
@@ -37,7 +39,15 @@ export const MAX_LIVE = 2;
 export const STRAY_MINUTES = 30;
 /** Probe sandboxes stop by themselves after this, even if every tick after the start failed. */
 export const PROBE_TTL_SECONDS = 25 * 60;
+/** A probe found gone this close to its TTL (or past it) expired: that is not an early drop. */
+export const EXPIRY_MARGIN_MS = 2 * 60_000;
+/** Each provider's listing is swept for strays at most this often (it is the heaviest call a tick makes). */
+export const STRAY_SWEEP_MS = 15 * 60_000;
+/** Failed deletes are retried on later ticks for this long after the start; then the stray sweep and the TTL take over. */
+const RETRY_DELETE_MS = 2 * 3_600_000;
 export const RETENTION_DAYS = 14;
+/** boat: keep this share of the daily start limit (at least 20 starts) for real work; the probe waits below it. */
+export const START_RESERVE = 0.15;
 const COMMAND = "echo ok && uptime";
 /** Ticks are 5 minutes apart and a step lands a few seconds into its tick: allow that much early. */
 const SLACK_MS = 30_000;
@@ -52,7 +62,7 @@ export const PROBE = {
     const want = (env("OCTILLION_SANDBOX_PROBE_PROVIDERS") ?? "boat,vercel").toLowerCase().split(/[\s,]+/);
     return PROBE_PROVIDERS.filter((p) => want.includes(p));
   },
-  everyMs: () => num("OCTILLION_SANDBOX_PROBE_EVERY_MINUTES", 15, 5) * 60_000,
+  everyMs: () => num("OCTILLION_SANDBOX_PROBE_EVERY_MINUTES", 30, 5) * 60_000,
   lifetimeMs: () => num("OCTILLION_SANDBOX_PROBE_LIFETIME_MINUTES", 15, 1) * 60_000,
   budgetMs: () => num("OCTILLION_SANDBOX_PROBE_BUDGET_SECONDS", 150, 10) * 1000,
   gapMs: () => num("OCTILLION_SANDBOX_PROBE_GAP_SECONDS", 30, 1) * 1000,
@@ -87,84 +97,122 @@ const jsonOf = async (res: Response) => { const t = await res.text(); return t ?
 
 // ---------------------------------------------------------------- providers
 
-/** What the tick needs from a provider. `id` is what its API addresses a sandbox by (boat: bx_…; Vercel: the name). */
+/**
+ * A probe sandbox as a provider addresses it: `id` (boat: bx_…; Vercel: the name) and `cred`, the vault key that made
+ * it (boat; null for Vercel). Every call about a sandbox uses the key that made it: with several boat keys (accounts),
+ * another key would not see it and the probe would read "gone" when nothing was lost.
+ */
+export interface Ref { id: string; cred: number | null }
+/** What the tick needs from a provider. */
 export interface Driver {
   provider: ProbeProvider;
   region: string | null;
-  create(name: string): Promise<{ id: string }>;
+  create(name: string): Promise<Ref>;
   /** Resolves once the sandbox can run commands; throws if it fails or the deadline passes. */
-  ready(id: string, deadline: number): Promise<void>;
+  ready(ref: Ref, deadline: number): Promise<void>;
   /** gone: the provider no longer has it, or reports it stopped. Throws on a transient failure (that is not "gone"). */
-  check(id: string): Promise<{ gone: boolean; state: string; session?: string }>;
-  exec(id: string, session?: string): Promise<{ exitCode: number | null }>;
-  remove(id: string): Promise<void>;
-  /** Probe sandboxes (our prefix) the provider lists, with their age. */
-  strays(): Promise<{ id: string; name: string; createdAt: number | null }[]>;
+  check(ref: Ref): Promise<{ gone: boolean; state: string; session?: string }>;
+  exec(ref: Ref, session?: string): Promise<{ exitCode: number | null }>;
+  remove(ref: Ref): Promise<void>;
+  /** Probe sandboxes (our prefix) the provider lists, with their age (boat: under every key in the vault). */
+  strays(): Promise<(Ref & { name: string; createdAt: number | null })[]>;
+  /** Why a start must wait now (boat: the day's start budget is nearly used up), else null. */
+  startBlocked?(): Promise<string | null>;
 }
 
 export interface DriverOptions { boatUrl?: string; vercelUrl?: string; oidcToken?: string | null }
 
 /** boat.dev: its v1 REST API with the vault's boat key, kept to this module (never written to the shared BOAT config). */
 export async function boatDriver(o: DriverOptions = {}): Promise<Driver | { not_configured: string }> {
-  let key: string;
-  try { key = (await useCredential("boat")).secret; }
+  let current: { id: number; secret: string }, keys: { id: number; secret: string }[];
+  try { current = await useCredential("boat"); keys = await credentialSecrets("boat"); }
   catch (e) { return { not_configured: `no boat key in the vault: ${errText(e)}` }; }
+  if (!keys.some((k) => k.id === current.id)) keys.push(current);
   const base = (o.boatUrl ?? BOAT.apiUrl).replace(/\/+$/, "");
-  const h = (extra: Record<string, string> = {}) => ({ authorization: `Bearer ${key}`, ...extra });
+  // The key that made the sandbox; one deleted from the vault since falls back to the key in use now.
+  const keyOf = (cred: number | null) => keys.find((k) => k.id === cred)?.secret ?? current.secret;
+  const h = (cred: number | null, extra: Record<string, string> = {}) => ({ authorization: `Bearer ${keyOf(cred)}`, ...extra });
   const path = (id: string) => `/sandboxes/${encodeURIComponent(id)}`;
-  const get = async (id: string) => (await jsonOf(await call(base + path(id), { headers: h(), timeoutMs: 20_000 }, `boat GET ${path(id)}`)))?.sandbox ?? {};
+  const get = async (r: Ref) => (await jsonOf(await call(base + path(r.id), { headers: h(r.cred), timeoutMs: 20_000 }, `boat GET ${path(r.id)}`)))?.sandbox ?? {};
   return {
     provider: "boat", region: null,
     async create(name) {
+      const cred = current.id;
       // One attempt, no backoff: a failed create is what we measure. The idempotency key covers a lost answer.
-      const c = await jsonOf(await call(`${base}/sandboxes`, { method: "POST", headers: h({ "idempotency-key": randomUUID() }), timeoutMs: 60_000,
+      const c = await jsonOf(await call(`${base}/sandboxes`, { method: "POST", headers: h(cred, { "idempotency-key": randomUUID() }), timeoutMs: 60_000,
         json: { type: "small", ttlSeconds: PROBE_TTL_SECONDS, noEnv: true, snapshots: false } }, "boat POST /sandboxes"));
       const id = String(c?.sandbox?.id ?? "");
       if (!id) throw new Error("boat create answered without a sandbox id");
       // Named after the create, as orchestrators are; until then it has no name, which no reaper matches either.
-      await call(base + path(id), { method: "PATCH", headers: h(), json: { name }, timeoutMs: 20_000 }, `boat PATCH ${path(id)}`).catch(() => {});
-      return { id };
+      await call(base + path(id), { method: "PATCH", headers: h(cred), json: { name }, timeoutMs: 20_000 }, `boat PATCH ${path(id)}`).catch(() => {});
+      return { id, cred };
     },
-    async ready(id, deadline) {
+    async ready(ref, deadline) {
       for (;;) {
-        const st = String((await get(id)).state ?? "");
+        const st = String((await get(ref)).state ?? "");
         if (["ready", "idle", "running"].includes(st)) return;
         if (["error", "cancelled", "archived", "deleted"].includes(st)) throw new Error(`sandbox is ${st}`);
         if (Date.now() + 2000 > deadline) throw new Error(`not ready before the tick's deadline (state ${st || "unknown"})`);
         await sleep(2000);
       }
     },
-    async check(id) {
+    async check(ref) {
       try {
-        const sb = await get(id);
+        const sb = await get(ref);
         const state = String(sb.state ?? "unknown");
-        return { gone: !lib.isLive({ id, state }), state };
+        return { gone: !lib.isLive({ id: ref.id, state }), state };
       } catch (e) {
         if (isGoneStatus(e)) return { gone: true, state: "not found" };
         throw e;
       }
     },
-    async exec(id) {
-      const r = await jsonOf(await call(`${base}${path(id)}/commands`, { method: "POST", headers: h(), json: { command: COMMAND, timeoutSeconds: 30 }, timeoutMs: 45_000 }, `boat POST ${path(id)}/commands`));
+    async exec(ref) {
+      const r = await jsonOf(await call(`${base}${path(ref.id)}/commands`, { method: "POST", headers: h(ref.cred), json: { command: COMMAND, timeoutSeconds: 30 }, timeoutMs: 45_000 }, `boat POST ${path(ref.id)}/commands`));
       return { exitCode: r?.exitCode ?? null };
     },
-    async remove(id) {
-      await call(base + path(id), { method: "DELETE", headers: h({ "x-ascii-confirm-delete": id }), timeoutMs: 30_000 }, `boat DELETE ${path(id)}`)
+    async remove(ref) {
+      await call(base + path(ref.id), { method: "DELETE", headers: h(ref.cred, { "x-ascii-confirm-delete": ref.id }), timeoutMs: 30_000 }, `boat DELETE ${path(ref.id)}`)
         .catch((e) => { if (!isGoneStatus(e)) throw e; });
     },
     async strays() {
-      const out: { id: string; name: string; createdAt: number | null }[] = [];
-      let cursor: string | null = null;
-      for (let i = 0; i < 20; i++) {
-        const r = await jsonOf(await call(`${base}/sandboxes${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`, { headers: h(), timeoutMs: 20_000 }, "boat GET /sandboxes"));
-        for (const s of (r?.sandboxes ?? []) as lib.Sb[])
-          if (s.name?.startsWith(PROBE_PREFIX) && lib.isLive(s)) out.push({ id: s.id, name: s.name, createdAt: s.createdAt ? Date.parse(s.createdAt) : null });
-        cursor = r?.pageInfo?.nextCursor ?? null;
-        if (!cursor) break;
+      const out: (Ref & { name: string; createdAt: number | null })[] = [];
+      for (const k of keys) {
+        let cursor: string | null = null;
+        for (let i = 0; i < 20; i++) {
+          const r = await jsonOf(await call(`${base}/sandboxes${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`, { headers: h(k.id), timeoutMs: 20_000 }, "boat GET /sandboxes"));
+          for (const s of (r?.sandboxes ?? []) as lib.Sb[])
+            if (s.name?.startsWith(PROBE_PREFIX) && lib.isLive(s)) out.push({ id: s.id, cred: k.id, name: s.name, createdAt: s.createdAt ? Date.parse(s.createdAt) : null });
+          cursor = r?.pageInfo?.nextCursor ?? null;
+          if (!cursor) break;
+        }
       }
       return out;
     },
+    async startBlocked() {
+      // boat reports the daily limit, not the starts used: those are ours from the database (orchestrators, worker
+      // sessions, probes) in the last 24 hours, as the Compute page's Limits counts them. Other deployments' are not seen.
+      const l = await jsonOf(await call(`${base}/limits`, { headers: h(current.id), timeoutMs: 10_000 }, "boat GET /limits"));
+      const perDay = Number(l?.startLimits?.perDay ?? 0);
+      if (!perDay) return null;
+      return startBudgetNote(perDay, await ourBoatStartsToday());
+    },
   };
+}
+
+/** Pure: why the probe must not take one of boat's starts now (fewer than START_RESERVE of the day's left), else null. */
+export function startBudgetNote(perDay: number, used: number): string | null {
+  const reserve = Math.max(20, Math.ceil(perDay * START_RESERVE));
+  return perDay - used < reserve ? `boat start budget nearly used: ${used} of ${perDay} starts in 24 h, keeping ${reserve} for orchestrators and workers` : null;
+}
+
+/** Our boat starts in the last 24 hours: orchestrator sandboxes, sessions given a worker sandbox, and probes. */
+async function ourBoatStartsToday(): Promise<number> {
+  const [r] = await (await getDb()).query<{ n: unknown }>(
+    `/* tenant: internal: the sandbox probe counts boat starts across all orgs, ids only */
+     SELECT (SELECT count(*) FROM orchestrator_sandboxes WHERE created_at > now() - interval '1 day')
+          + (SELECT count(*) FROM agent_sessions WHERE sandbox_id IS NOT NULL AND started_at > now() - interval '1 day')
+          + (SELECT count(*) FROM sandbox_probes WHERE provider = 'boat' AND sandbox_id IS NOT NULL AND started_at > now() - interval '1 day') AS n`);
+  return n(r?.n);
 }
 
 /** The OIDC token's team and project (its owner_id and project_id claims). Not verified: Vercel's API verifies it. */
@@ -207,9 +255,9 @@ export function vercelDriver(o: DriverOptions = {}): Driver | { not_configured: 
       const r = await jsonOf(await call(`${base}/v2/sandboxes${q()}`, { method: "POST", headers: h, timeoutMs: 60_000, json: {
         name, projectId: auth.projectId, runtime: "node24", resources: { vcpus: 1, memory: 2048 }, timeout: PROBE_TTL_SECONDS * 1000,
         persistent: false, region: VERCEL_REGION, tags: { octillion: "probe" } } }, "vercel POST /v2/sandboxes"));
-      return { id: String(r?.sandbox?.name ?? name) };
+      return { id: String(r?.sandbox?.name ?? name), cred: null };
     },
-    async ready(id, deadline) {
+    async ready({ id }, deadline) {
       for (;;) {
         const r = await get(id);
         const st = String(r?.session?.status ?? r?.sandbox?.status ?? "");
@@ -219,7 +267,7 @@ export function vercelDriver(o: DriverOptions = {}): Driver | { not_configured: 
         await sleep(1000);
       }
     },
-    async check(id) {
+    async check({ id }) {
       try {
         const r = await get(id);
         const sb = String(r?.sandbox?.status ?? "unknown"), se = String(r?.session?.status ?? "");
@@ -230,7 +278,7 @@ export function vercelDriver(o: DriverOptions = {}): Driver | { not_configured: 
         throw e;
       }
     },
-    async exec(id, session) {
+    async exec({ id }, session) {
       const sid = session ?? (await get(id))?.sandbox?.currentSessionId;
       if (!sid) throw new Error("no running session");
       const p = `/v2/sandboxes/sessions/${encodeURIComponent(sid)}/cmd`;
@@ -247,18 +295,19 @@ export function vercelDriver(o: DriverOptions = {}): Driver | { not_configured: 
       }
       return { exitCode };
     },
-    async remove(id) {
+    async remove({ id }) {
       await call(`${base}${one(id)}${q({ projectId: auth.projectId })}`, { method: "DELETE", headers: h, timeoutMs: 30_000 }, `vercel DELETE ${one(id)}`)
         .catch((e) => { if (!isGoneStatus(e)) throw e; });
     },
     async strays() {
-      const out: { id: string; name: string; createdAt: number | null }[] = [];
+      const out: (Ref & { name: string; createdAt: number | null })[] = [];
       let cursor: string | null = null;
       for (let i = 0; i < 10; i++) {
+        // The list endpoint names the project `project`; get and delete take `projectId` (Vercel REST API v2 reference).
         const r = await jsonOf(await call(`${base}/v2/sandboxes${q({ project: auth.projectId, sortBy: "name", namePrefix: PROBE_PREFIX, limit: "50", ...(cursor ? { cursor } : {}) })}`,
           { headers: h, timeoutMs: 20_000 }, "vercel GET /v2/sandboxes"));
         for (const s of r?.sandboxes ?? [])
-          if (typeof s?.name === "string" && s.name.startsWith(PROBE_PREFIX)) out.push({ id: s.name, name: s.name, createdAt: Number(s.createdAt) || null });
+          if (typeof s?.name === "string" && s.name.startsWith(PROBE_PREFIX)) out.push({ id: s.name, cred: null, name: s.name, createdAt: Number(s.createdAt) || null });
         cursor = r?.pagination?.next ?? null;
         if (!cursor) break;
       }
@@ -271,8 +320,9 @@ export function vercelDriver(o: DriverOptions = {}): Driver | { not_configured: 
 
 interface ProbeRow {
   id: number; provider: ProbeProvider; sandbox_id: string | null; name: string | null; state: string; started_at: Date; region: string | null;
-  gone_at: Date | null; deleted_at: Date | null;
+  gone_at: Date | null; deleted_at: Date | null; credential_id: number | null;
 }
+const refOf = (r: { sandbox_id: string | null; credential_id: number | null }): Ref => ({ id: r.sandbox_id!, cred: r.credential_id == null ? null : n(r.credential_id) });
 export interface TickOptions extends DriverOptions {
   /** Wall-clock time the caller must be done by (the cron passes its start plus the function's 300 s). */
   deadline?: number;
@@ -282,7 +332,8 @@ export interface TickOptions extends DriverOptions {
   roundMs?: number;
 }
 export interface ProbeTick {
-  enabled: boolean; at: string; providers: Record<string, { configured: boolean; reason?: string; started?: number | null; ended: number; gone: number; strays: number; error?: string }>;
+  enabled: boolean; at: string; providers: Record<string, { configured: boolean; reason?: string; started?: number | null; skipped?: string; ended: number; gone: number; strays: number;
+    swept?: boolean; sweep_error?: string; error?: string }>;
   rounds: number; execs: number; pruned: { probes: number; execs: number } | { error: string } | null; error?: string;
 }
 
@@ -311,15 +362,17 @@ export async function probeTick(o: TickOptions = {}): Promise<ProbeTick> {
           continue;
         }
         rep.configured = true;
-        await hygiene(d, rep);
-        await endDue(d, rep);
         drivers.push(d);
+        // The stray sweep on its own: a failed listing (a 502) never skips this tick's ends, starts or execs.
+        try { await hygiene(d, rep); } catch (e) { rep.sweep_error = errText(e); }
+        await endDue(d, rep);
       } catch (e) { rep.error = errText(e); }
     }
     // Starts in parallel (a slow create on one provider does not delay the other), then the exec rounds.
     await Promise.all(drivers.map(async (d) => {
       const rep = out.providers[d.provider]!;
-      try { rep.started = await startOne(d, deadline); } catch (e) { rep.error = errText(e); }
+      try { rep.started = await startOne(d, deadline); }
+      catch (e) { if ((e as { skipped?: boolean }).skipped) { rep.started = null; rep.skipped = errText(e); } else rep.error = errText(e); }
     }));
     const gap = o.gapMs ?? PROBE.gapMs(), roundMs = o.roundMs ?? 50_000;
     for (;;) {
@@ -352,63 +405,90 @@ async function startOne(d: Driver, deadline: number): Promise<number | null> {
   if (!(await startDue(d.provider))) return null;
   const [{ live }] = await db.query<{ live: unknown }>("SELECT count(*) AS live FROM sandbox_probes WHERE provider = $1 AND state IN ('starting', 'live')", [d.provider]);
   if (n(live) >= MAX_LIVE) return null;
+  // A budget that cannot be read does not stop the probe: boat still refuses a start over its limit, and we record that.
+  const blocked = d.startBlocked ? await d.startBlocked().catch(() => null) : null;
+  if (blocked) throw Object.assign(new Error(blocked), { skipped: true });
   const name = probeName();
   // The row first: a function frozen mid-create still leaves a trace (hygiene fails it later and deletes the sandbox).
   const [row] = await db.query<{ id: number }>("INSERT INTO sandbox_probes (provider, name, state, region) VALUES ($1, $2, 'starting', $3) RETURNING id", [d.provider, name, d.region]);
   const id = n(row!.id);
   const t0 = Date.now();
-  let sandboxId: string | null = null;
+  let sandboxId: string | null = null, cred: number | null = null;
   try {
-    sandboxId = (await d.create(name)).id;
+    const ref = await d.create(name);
+    sandboxId = ref.id; cred = ref.cred;
     const createMs = Date.now() - t0;
-    await db.query("UPDATE sandbox_probes SET sandbox_id = $2, create_ms = $3, updated_at = now() WHERE id = $1", [id, sandboxId, createMs]);
+    await db.query("UPDATE sandbox_probes SET sandbox_id = $2, credential_id = $3, create_ms = $4, updated_at = now() WHERE id = $1", [id, sandboxId, cred, createMs]);
     // Ready within the tick, but never more than 2 minutes of it.
-    await d.ready(sandboxId, Math.min(deadline, t0 + 120_000));
+    await d.ready(ref, Math.min(deadline, t0 + 120_000));
     await db.query("UPDATE sandbox_probes SET state = 'live', ready_ms = $2, updated_at = now() WHERE id = $1", [id, Date.now() - t0]);
   } catch (e) {
     const err = errText(e);
     await db.query("UPDATE sandbox_probes SET state = 'failed', create_error = $2, last_error = $2, create_ms = coalesce(create_ms, $3), updated_at = now() WHERE id = $1", [id, err, sandboxId ? null : Date.now() - t0]);
-    if (sandboxId) await deleteProbe(d, id, sandboxId);
+    if (sandboxId) await deleteProbe(d, id, { id: sandboxId, cred });
   }
   return id;
 }
 
-/** Probes past their lifetime are deleted; rows left in 'starting' by a frozen function are failed. */
+/**
+ * Probes past their lifetime are deleted. Deletes that failed (delete_failed), and what is left of gone, expired and
+ * failed probes, are retried for RETRY_DELETE_MS. Rows left in 'starting' by a frozen function are failed.
+ */
 async function endDue(d: Driver, rep: ProbeTick["providers"][string]) {
   const db = await getDb();
   const due = await db.query<ProbeRow>(
     `SELECT * FROM sandbox_probes WHERE provider = $1 AND deleted_at IS NULL AND sandbox_id IS NOT NULL
-        AND ((state = 'live' AND started_at <= now() - make_interval(secs => $2)) OR (state = 'gone' AND delete_ms IS NULL))`,
-    [d.provider, (PROBE.lifetimeMs() - SLACK_MS) / 1000]);
-  for (const row of due) { await deleteProbe(d, row.id, row.sandbox_id!); rep.ended++; }
+        AND ((state = 'live' AND started_at <= now() - make_interval(secs => $2))
+          OR (state IN ('delete_failed', 'gone', 'expired', 'failed') AND started_at > now() - make_interval(secs => $3)))`,
+    [d.provider, (PROBE.lifetimeMs() - SLACK_MS) / 1000, RETRY_DELETE_MS / 1000]);
+  for (const row of due) { await deleteProbe(d, row.id, refOf(row)); rep.ended++; }
   const stuck = await db.query<ProbeRow>("SELECT * FROM sandbox_probes WHERE provider = $1 AND state = 'starting' AND started_at < now() - interval '10 minutes'", [d.provider]);
   for (const row of stuck) {
     await db.query("UPDATE sandbox_probes SET state = 'failed', create_error = coalesce(create_error, 'interrupted: the function stopped before the sandbox was ready'), updated_at = now() WHERE id = $1", [row.id]);
-    if (row.sandbox_id) await deleteProbe(d, row.id, row.sandbox_id);
+    if (row.sandbox_id) await deleteProbe(d, row.id, refOf(row));
   }
 }
 
-/** Delete and record how long it took. A probe already gone keeps its state; a live one becomes 'deleted'. */
-async function deleteProbe(d: Driver, id: number, sandboxId: string) {
+/**
+ * Delete, and record the attempt (a 'delete' row: how long, whether it worked). On success a live or delete_failed
+ * probe becomes 'deleted' (it lived its time); gone, expired and failed ones keep their state. A failed delete never
+ * counts as deleted: a live probe becomes 'delete_failed', and endDue tries again on later ticks.
+ */
+async function deleteProbe(d: Driver, id: number, ref: Ref) {
   const db = await getDb();
   const t0 = Date.now();
   let error: string | null = null;
-  try { await d.remove(sandboxId); } catch (e) { error = errText(e); }
+  try { await d.remove(ref); } catch (e) { error = errText(e); }
+  const ms = Date.now() - t0;
+  await db.query("INSERT INTO sandbox_probe_execs (probe_id, kind, ok, ms, error) VALUES ($1, 'delete', $2, $3, $4)", [id, error == null, ms, error]);
   await db.query(
-    `UPDATE sandbox_probes SET deleted_at = CASE WHEN $3::text IS NULL THEN now() ELSE deleted_at END, delete_ms = $2, delete_error = $3,
-            state = CASE WHEN state = 'live' THEN 'deleted' ELSE state END, last_error = coalesce($3, last_error), updated_at = now() WHERE id = $1`,
-    [id, Date.now() - t0, error]);
+    `UPDATE sandbox_probes SET deleted_at = CASE WHEN $3::text IS NULL THEN now() ELSE NULL END, delete_ms = $2, delete_error = $3,
+            state = CASE WHEN $3::text IS NULL AND state IN ('live', 'delete_failed') THEN 'deleted'
+                         WHEN $3::text IS NOT NULL AND state = 'live' THEN 'delete_failed' ELSE state END,
+            last_error = coalesce($3, last_error), updated_at = now() WHERE id = $1`,
+    [id, ms, error]);
 }
 
-/** The safety net: any probe sandbox the provider lists that is older than STRAY_MINUTES is deleted. */
+/** Claim this provider's stray sweep: true at most once per STRAY_SWEEP_MS across every function instance. */
+async function claimSweep(p: ProbeProvider): Promise<boolean> {
+  const rows = await (await getDb()).query<{ key: string }>(
+    `INSERT INTO sandbox_probe_meta (key, at) VALUES ($1, now())
+     ON CONFLICT (key) DO UPDATE SET at = excluded.at WHERE sandbox_probe_meta.at <= now() - make_interval(secs => $2)
+     RETURNING key`, [`strays:${p}`, (STRAY_SWEEP_MS - SLACK_MS) / 1000]);
+  return rows.length > 0;
+}
+
+/** The safety net, at most every 15 minutes: any probe sandbox the provider lists older than STRAY_MINUTES is deleted. */
 async function hygiene(d: Driver, rep: ProbeTick["providers"][string]) {
+  if (!(await claimSweep(d.provider))) return;
+  rep.swept = true;
   const db = await getDb();
   const cutoff = Date.now() - STRAY_MINUTES * 60_000;
   for (const s of await d.strays()) {
     if (s.createdAt == null || s.createdAt > cutoff) continue;
     const [row] = await db.query<{ id: number }>("SELECT id FROM sandbox_probes WHERE provider = $1 AND sandbox_id = $2 AND deleted_at IS NULL ORDER BY id DESC LIMIT 1", [d.provider, s.id]);
-    if (row) await deleteProbe(d, row.id, s.id);
-    else await d.remove(s.id).catch(() => {});
+    if (row) await deleteProbe(d, row.id, s);
+    else await d.remove(s).catch(() => {});
     rep.strays++;
   }
 }
@@ -420,14 +500,21 @@ async function probeOnce(d: Driver, row: ProbeRow, deadline: number): Promise<bo
     db.query("INSERT INTO sandbox_probe_execs (probe_id, kind, ok, ms, exit_code, error) VALUES ($1, $2, $3, $4, $5, $6)", [row.id, kind, ok, ms, exitCode, error]);
   let session: string | undefined;
   let t = Date.now();
+  const ref = refOf(row);
   try {
-    const c = await d.check(row.sandbox_id!);
+    const c = await d.check(ref);
     await record("check", true, Date.now() - t, null, null);
     if (c.gone) {
+      // Near or past its TTL the provider stopping it is expiry (a missed end), not an early drop: no gone_at.
+      if (Date.now() - new Date(row.started_at).getTime() >= PROBE_TTL_SECONDS * 1000 - EXPIRY_MARGIN_MS) {
+        await db.query("UPDATE sandbox_probes SET state = 'expired', last_error = $2, updated_at = now() WHERE id = $1 AND state = 'live'",
+          [row.id, `${d.provider} reports it ${c.state} at its TTL (expired, not lost)`]);
+        return null;
+      }
       await db.query("UPDATE sandbox_probes SET state = 'gone', gone_at = now(), gone_reason = $2, last_error = $2, updated_at = now() WHERE id = $1 AND state = 'live'",
         [row.id, `${d.provider} reports it ${c.state}`]);
       // Clean up what is left of it (a stopped Vercel sandbox, an archived boat one) now, while there is time.
-      if (Date.now() + 30_000 < deadline) await deleteProbe(d, row.id, row.sandbox_id!);
+      if (Date.now() + 30_000 < deadline) await deleteProbe(d, row.id, ref);
       return null;
     }
     session = c.session;
@@ -438,7 +525,7 @@ async function probeOnce(d: Driver, row: ProbeRow, deadline: number): Promise<bo
   t = Date.now();
   let ok = false;
   try {
-    const r = await d.exec(row.sandbox_id!, session);
+    const r = await d.exec(ref, session);
     ok = r.exitCode === 0;
     await record("exec", ok, Date.now() - t, r.exitCode, ok ? null : `exit code ${r.exitCode ?? "unknown"}`);
   } catch (e) {
@@ -491,7 +578,7 @@ export interface ProviderSummary {
   provider: ProbeProvider; configured: boolean; not_configured_reason: string | null; started: number; created: number; create_ok_pct: number | null;
   ready_p50_ms: number | null; ready_p95_ms: number | null; finished: number; survived: number; survived_pct: number | null;
   gone_early: number; gone_median_age_s: number | null; execs: number; exec_ok_pct: number | null; exec_p50_ms: number | null; exec_p95_ms: number | null;
-  checks: number; check_ok_pct: number | null; deletes: number; delete_ok_pct: number | null; live: number; last_started_at: string | null; last_error: string | null;
+  checks: number; check_ok_pct: number | null; deletes: number; delete_ok_pct: number | null; delete_failed: number; live: number; last_started_at: string | null; last_error: string | null;
 }
 const pct = (a: number, b: number) => (b ? Math.round((a / b) * 1000) / 10 : null);
 const int = (v: unknown) => (v == null ? null : Math.round(Number(v)));
@@ -505,11 +592,11 @@ export async function probeSummary(q: Record<string, unknown> = {}): Promise<{ h
             count(*) FILTER (WHERE state <> 'not_configured') AS started,
             count(*) FILTER (WHERE state NOT IN ('not_configured', 'failed', 'starting')) AS created,
             percentile_cont(0.5) WITHIN GROUP (ORDER BY ready_ms) AS ready_p50, percentile_cont(0.95) WITHIN GROUP (ORDER BY ready_ms) AS ready_p95,
-            count(*) FILTER (WHERE state IN ('gone', 'deleted')) AS finished,
-            count(*) FILTER (WHERE state = 'deleted' AND gone_at IS NULL) AS survived,
+            count(*) FILTER (WHERE state IN ('gone', 'deleted', 'delete_failed', 'expired')) AS finished,
+            count(*) FILTER (WHERE state IN ('deleted', 'expired') AND gone_at IS NULL) AS survived,
             count(*) FILTER (WHERE gone_at IS NOT NULL) AS gone_early,
             percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM gone_at - started_at)) AS gone_age,
-            count(*) FILTER (WHERE delete_ms IS NOT NULL) AS deletes, count(*) FILTER (WHERE delete_ms IS NOT NULL AND delete_error IS NULL) AS deletes_ok,
+            count(*) FILTER (WHERE state = 'delete_failed') AS delete_failed,
             count(*) FILTER (WHERE state IN ('starting', 'live')) AS live, count(*) FILTER (WHERE state = 'starting') AS starting, max(started_at) FILTER (WHERE state <> 'not_configured') AS last_started
        FROM sandbox_probes WHERE started_at > now() - make_interval(hours => $1) GROUP BY provider`, [hours]);
   const x = await db.query<any>(
@@ -523,6 +610,7 @@ export async function probeSummary(q: Record<string, unknown> = {}): Promise<{ h
   const providers = PROBE_PROVIDERS.map((prov): ProviderSummary => {
     const r = p.find((y) => y.provider === prov) ?? {};
     const ex = x.find((y) => y.provider === prov && y.kind === "exec") ?? {}, ch = x.find((y) => y.provider === prov && y.kind === "check") ?? {};
+    const de = x.find((y) => y.provider === prov && y.kind === "delete") ?? {};
     const last = latest.find((y) => y.provider === prov);
     const lastErr = last?.last_error ?? null;
     return {
@@ -533,14 +621,14 @@ export async function probeSummary(q: Record<string, unknown> = {}): Promise<{ h
       gone_early: n(r.gone_early), gone_median_age_s: int(r.gone_age),
       execs: n(ex.n), exec_ok_pct: pct(n(ex.ok), n(ex.n)), exec_p50_ms: int(ex.p50), exec_p95_ms: int(ex.p95),
       checks: n(ch.n), check_ok_pct: pct(n(ch.ok), n(ch.n)),
-      deletes: n(r.deletes), delete_ok_pct: pct(n(r.deletes_ok), n(r.deletes)), live: n(r.live), last_started_at: iso(r.last_started), last_error: lastErr,
+      deletes: n(de.n), delete_ok_pct: pct(n(de.ok), n(de.n)), delete_failed: n(r.delete_failed), live: n(r.live), last_started_at: iso(r.last_started), last_error: lastErr,
     };
   });
   return { hours, enabled: PROBE.enabled(), lifetime_minutes: Math.round(PROBE.lifetimeMs() / 60_000), every_minutes: Math.round(PROBE.everyMs() / 60_000), providers, cost: probeCost() };
 }
 
 const probeOut = (r: any) => ({
-  id: n(r.id), provider: r.provider as ProbeProvider, sandbox_id: r.sandbox_id ?? null, name: r.name ?? null, state: r.state as string, region: r.region ?? null,
+  id: n(r.id), provider: r.provider as ProbeProvider, sandbox_id: r.sandbox_id ?? null, credential_id: r.credential_id == null ? null : n(r.credential_id), name: r.name ?? null, state: r.state as string, region: r.region ?? null,
   started_at: iso(r.started_at)!, create_ms: int(r.create_ms), ready_ms: int(r.ready_ms), create_error: r.create_error ?? null,
   gone_at: iso(r.gone_at), gone_reason: r.gone_reason ?? null, gone_age_s: r.gone_at ? Math.round((new Date(r.gone_at).getTime() - new Date(r.started_at).getTime()) / 1000) : null,
   deleted_at: iso(r.deleted_at), delete_ms: int(r.delete_ms), delete_error: r.delete_error ?? null,
@@ -557,17 +645,17 @@ export async function listProbes(q: Record<string, unknown> = {}) {
 
 /** GET /compute/probes/:id: the probe, its execs and checks, and every error it met. */
 export async function probeDetail(id: number) {
+  if (!Number.isSafeInteger(id) || id <= 0) throw Object.assign(new Error("probe id must be a positive whole number"), { status: 400 });
   const db = await getDb();
   const [r] = await db.query<any>("SELECT * FROM sandbox_probes WHERE id = $1", [id]);
   if (!r) throw Object.assign(new Error("probe not found"), { status: 404 });
   const execs = (await db.query<any>("SELECT id, at, kind, ok, ms, exit_code, error FROM sandbox_probe_execs WHERE probe_id = $1 ORDER BY at, id", [id]))
-    .map((e) => ({ id: n(e.id), at: iso(e.at)!, kind: e.kind as "exec" | "check", ok: !!e.ok, ms: int(e.ms), exit_code: e.exit_code == null ? null : n(e.exit_code), error: e.error ?? null }));
+    .map((e) => ({ id: n(e.id), at: iso(e.at)!, kind: e.kind as "exec" | "check" | "delete", ok: !!e.ok, ms: int(e.ms), exit_code: e.exit_code == null ? null : n(e.exit_code), error: e.error ?? null }));
   const row = probeOut(r);
   const errors = [
     ...(row.create_error ? [{ at: row.started_at, step: row.state === "not_configured" ? "configuration" : "create", error: row.create_error }] : []),
     ...execs.filter((e) => e.error).map((e) => ({ at: e.at, step: e.kind, error: e.error! })),
     ...(row.gone_reason ? [{ at: row.gone_at!, step: "gone", error: row.gone_reason }] : []),
-    ...(row.delete_error ? [{ at: row.deleted_at ?? row.started_at, step: "delete", error: row.delete_error }] : []),
   ].sort((a, b) => a.at.localeCompare(b.at));
   return { row, execs, errors };
 }
