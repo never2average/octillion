@@ -18,14 +18,20 @@ orchestrator/
   core/           config, sessions, runners (boat; docker/local/pool for tests), host guard, fleet client, sink, boat client
   harnesses/      adapters.ts + credentials.ts: per-harness argv, resume, digest, credential mapping
   fleet/          plan.ts (standalone per-agent plan), status.ts (pods per group)
-  deploy/         boat-orchestrators.ts (launcher, runs on the main VM or a laptop), in-sandbox.ts (helpers it runs inside)
+  deploy/         orchestrator-host.ts (where orchestrators run: boat or Vercel Sandbox), boat-lib.ts + vercel-orch.ts (the two
+                  hosts), boat-orchestrators.ts (boat launcher, runs on the main VM or a laptop), in-sandbox.ts (helpers it runs inside)
   images/         Dockerfile.<harness> (tests) and boat-setup/<harness>.sh (pinned installs on boat VMs)
   test/           integration.ts, research.ts, boat-fleet.ts
   worker.ts       claim loop + deterministic run
   .pi-upstream/   Pi source clone, for reference only (gitignored)
 ```
 
-## Production topology: everything agent-related runs on boat.dev
+## Production topology: everything agent-related runs in provider sandboxes (boat.dev, or Vercel Sandbox)
+
+Orchestrators run on boat.dev by default. With `OCTILLION_SANDBOX_PROVIDER=vercel` on the API (or
+`OCTILLION_ORCHESTRATOR_PROVIDER=vercel`, an override for orchestrators only) the autoscaler launches new orchestrators as
+Vercel Sandboxes instead, and boat ones finish their jobs where they are. The table below is the boat layout; the Vercel
+one is under "Orchestrators on Vercel Sandbox" and in `docs/vercel-sandbox-workers.md`.
 
 | where | what runs there |
 |---|---|
@@ -34,11 +40,14 @@ orchestrator/
 | **Worker sandboxes** (boat, `default`, ephemeral, `octi-w-<orchestrator>-<agent>`) | One fresh VM per agent session, created **from inside** the orchestrator sandbox and deleted when the session ends. Resume and simulated-developer turns stay in it. It holds only per-session gateway tokens, **never the worker token**. |
 
 - **Host guard** (`core/host-guard.ts`). The orchestrator refuses to start unless all of the following hold:
-  - `OCTILLION_HOST_ROLE=boat-orchestrator`;
-  - the launcher's root-owned marker `/etc/octillion/host-role` is present;
-  - boat's own indicators are present (`BOAT_ID`/`BOX_ID` and `/etc/ascii` + `/home/user/.ascii`, seen on live boat VMs);
-  - `BOAT_ID` equals the marker's sandbox id;
-  - `RUNNER=boat`.
+  - `OCTILLION_HOST_ROLE` is `boat-orchestrator` or `vercel-orchestrator`;
+  - the launcher's root-owned marker `/etc/octillion/host-role` names the same role;
+  - that provider's own indicators are present:
+    - boat: `BOAT_ID`/`BOX_ID` and `/etc/ascii` + `/home/user/.ascii` (seen on live boat VMs), and `BOAT_ID` equals the marker's sandbox id;
+    - Vercel: the per-sandbox proxy CA Vercel mounts (`/etc/pki/ca-trust/source/anchors/vercel-proxy-ca.pem` or
+      `/usr/local/share/ca-certificates/vercel-proxy-ca.pem`), the `/vercel` tree (`/vercel/runtimes` or `/vercel/sandbox`),
+      `OCTILLION_SANDBOX_ID` equal to the marker's sandbox, and none of a Vercel *function*'s markers (`VERCEL_REGION`, `AWS_LAMBDA_FUNCTION_NAME`);
+  - `RUNNER` is `boat` or `vercel` (the worker sandboxes; the host is checked above).
   
   `pool`, `docker` and `local` need `OCTILLION_DEV_ALLOW_LOCAL=1`. That flag is for tests only and prints a loud banner. The check runs before any credential is fetched, in the claim loop, in research-only mode and in the Pi CLI extension.
 - **Fleet semantics on boat.** The server's per-agent assignment (`pods`, for example 8/5/3/1/1/1/1 of 20) is the **maximum number of concurrent worker sandboxes per agent group**.
@@ -50,6 +59,39 @@ orchestrator/
   - **Boat VM gotcha (fixed).** `/usr/local/bin/node` is a symlink into `/home/user/.nvm`, which other users can't read, so they fell back to `/usr/bin/node` v20. That broke pi and made cline warn. The runner and `_common.sh` replace it with a real copy.
   - **Next:** named boat snapshots per harness (`images/boat-snapshot.sh`) would make cline/kilo sandboxes start without the install step.
 - **Start rate.** Every create goes through a client-side gate (`BOAT_STARTS_PER_MINUTE` 10, `BOAT_STARTS_PER_HOUR` 50 per orchestrator) and backs off on 429/503 (Retry-After, else 5s → 2min), keeping the same Idempotency-Key.
+
+### Orchestrators on Vercel Sandbox (`OCTILLION_SANDBOX_PROVIDER=vercel`)
+
+`deploy/orchestrator-host.ts` is the interface the autoscaler (and the boat launcher below) drive: launch, list, get by id,
+delete, stop, logs, limits, cost and an optional image. `boatHost()` is `deploy/boat-lib.ts` unchanged. `vercelHost()`
+(`deploy/vercel-orch.ts`) launches orchestrators from the API's autoscaler with the function's OIDC token, through the
+API's REST client (`src/vercel-sandbox.ts`): the token never enters a sandbox. The CLI launcher cannot launch them.
+
+| | boat | Vercel Sandbox |
+|---|---|---|
+| Name (= sandbox id) | `<ns>-orch-<bx id>` | `<ns>-vo-<env>-v<10 hex>` (`<env>`: prod, prev, dev from `VERCEL_ENV`) |
+| Machine | `small` | `OCTILLION_VERCEL_ORCH_SIZE` (`small`: 1 vCPU, 2 GB), node24, non-persistent |
+| Lifetime | 30-day TTL | `OCTILLION_VERCEL_ORCH_TIMEOUT_MINUTES` (default and maximum 1440: Vercel's 24 h on Pro; Hobby allows 45) |
+| Service | systemd unit, `Restart=on-failure` | `/opt/octillion/supervisor.sh`, a bash loop started as a detached command |
+| Code | tarball in chunks + `npm ci` under `/home/user/octillion` | the same tarball in chunks through `fs/write` + `npm ci` under `/opt/octillion` |
+| Fast start | named snapshot `<ns>-orch-img-<hash>` | snapshot of the builder sandbox `<ns>-vimg-<env>-<hash>` (both `OCTILLION_ORCH_SNAPSHOT=on`) |
+| Limits | boat's `/limits` | static: `OCTILLION_VERCEL_MAX_CONCURRENT` (10,000) and our cap `OCTILLION_VERCEL_ORCH_STARTS_PER_HOUR` (120) |
+| Logs | `npm run boat-orchestrators -- logs <id>` (journal) | `/var/lib/octi/orchestrator.log` in the sandbox |
+
+**The supervisor.** It runs as the service user `octi` (no sudo), with only `PATH` and `HOME`, and reads the 0600 env file
+(owned by `octi`) in a subshell on each start. It restarts a crashed orchestrator after 10 s, or 60 s once it has died
+within a minute more than five times. A clean exit (exit 0: idle, or the job is over) is final, as with systemd's
+`Restart=on-failure`. SIGTERM is forwarded and the supervisor waits for the graceful stop.
+
+**Lifetime.** The launch records `expires_at` (create time plus the timeout). From `OCTILLION_VERCEL_ORCH_RELAUNCH_MINUTES`
+before it (default `MAX_SESSION_MINUTES` + 15, at most half the timeout), the orchestrator is retired the way an
+old-code orchestrator is: an empty assignment, a fresh orchestrator for its job, and deletion once it runs nothing.
+5 minutes before the timeout it is deleted regardless.
+
+**Egress.** An orchestrator needs `OCTILLION_URL` (the API and its model gateway, one host), the npm registry for
+`npm ci`, and the open web for research (it fetches product sites through `core/safe-fetch.ts`). So no policy is applied
+by default. `OCTILLION_VERCEL_ORCH_EGRESS=locked` applies a Vercel network policy (that host, `registry.npmjs.org` and
+`OCTILLION_VERCEL_ORCH_EGRESS_HOSTS`, private subnets denied) after `npm ci`; it breaks research on other sites.
 
 ### Launcher (`npm run boat-orchestrators -- <cmd>`, from `orchestrator/`)
 
@@ -481,7 +523,8 @@ Heartbeats and `/complete` always go to the API. The server recounts events from
 | `OCTILLION_URL`, `OCTILLION_WORKER_TOKEN` | `http://localhost:3000`, - | **The only secrets on the host.** The token never enters a sandbox or pod |
 | `CREDENTIALS_MODE` | `broker` | `broker` (vault + gateway through the server) or `env` (dev: provider keys from this env, see Credentials) |
 | `RUNNER` | `boat` | **Production: `boat` only.** `pool`, `docker` and `local` need `OCTILLION_DEV_ALLOW_LOCAL=1` (tests only; loud banner) |
-| `OCTILLION_HOST_ROLE` | - | `boat-orchestrator`. Written by the launcher; the host guard requires it together with the root-owned marker and boat's indicators |
+| `OCTILLION_HOST_ROLE` | - | `boat-orchestrator` or `vercel-orchestrator`. Written by the launcher; the host guard requires it together with the root-owned marker and that provider's indicators |
+| `OCTILLION_SANDBOX_ID` | - | Vercel orchestrators: their sandbox name, written by the launcher; must match the marker |
 | `OCTILLION_DEV_ALLOW_LOCAL` | - | `1` bypasses the host guard. **Tests and local development only** |
 | `ORCHESTRATOR_MODE` | - | `research`: a research-only worker that never claims coding-agent sessions |
 | `FLEET_MODE` | `server` | `server` or `standalone`. For `RUNNER=boat`, `off` means plain `WORKER_CONCURRENCY` with no per-group caps |

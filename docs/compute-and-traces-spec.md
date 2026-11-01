@@ -390,8 +390,8 @@ Two outlined lists side by side; they stack on mobile.
 | `credentials` | Missing provider key | `missing_credential` · `No vault provider supplies` · `No .+ credential in the vault` · `/credentials -> 503` (old rows) | Key vault |
 | `harness_install` | Harness install failed | `^harness \S+ not available` | Harness mix |
 | `gateway_token` | Gateway token expired | `Gateway token is invalid, expired or revoked` | none |
-| `boat_permission` | boat key not allowed | `api_key_action_forbidden` · `not allowed to create sandboxes` | Key vault |
-| `boat_capacity` | boat rate limit or capacity | `rate_limited` · `limit_reached` · `no_ready_machine` · `\b429\b` | none |
+| `sandbox_permission` (was `boat_permission`) | Sandbox provider refused | `api_key_action_forbidden` · `not allowed to create sandboxes` · `vercel POST /v2/sandboxes -> 401/402/403` · `Vercel Sandbox is not configured` | Key vault |
+| `sandbox_capacity` (was `boat_capacity`) | Sandbox rate limit or capacity | `rate_limited` · `limit_reached` · `no_ready_machine` · `\b429\b` | none |
 | `sandbox_boot` | Sandbox not ready | `not ready after \d+s` | none |
 | `sandbox_prepare` | Sandbox setup failed | `sandbox prepare failed` · `egress lockdown failed` | none |
 | `heartbeat` | Lost heartbeat | `No heartbeat for` | none |

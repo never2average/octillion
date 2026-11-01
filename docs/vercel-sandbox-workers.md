@@ -1,7 +1,11 @@
-# Worker sandboxes on Vercel Sandbox
+# Workers and orchestrators on Vercel Sandbox
 
-Phase 1 of moving off boat.dev: the per-session **worker** sandboxes (where the coding agent runs) can run on Vercel
-Sandbox. The orchestrators still run on boat. Nothing changes until `OCTILLION_SANDBOX_PROVIDER=vercel` is set on the API.
+Moving off boat.dev, in two phases. Nothing changes until `OCTILLION_SANDBOX_PROVIDER=vercel` is set on the API.
+
+- **Phase 1:** the per-session **worker** sandboxes (where the coding agent runs) run on Vercel Sandbox, created through
+  the API's broker.
+- **Phase 2:** the **orchestrators** run on Vercel Sandbox too, launched by the autoscaler (see "Orchestrators on Vercel
+  Sandbox" below). The same variable selects both; `OCTILLION_ORCHESTRATOR_PROVIDER` overrides it for orchestrators only.
 
 - **Orchestrator code:** `orchestrator/core/sandbox-provider.ts` (the `SandboxProvider` interface, the `boat` and
   `vercel` providers) and `orchestrator/core/runners.ts` (`vmRunner(provider)`; `boatRunner = vmRunner(boatProvider)`)
@@ -98,6 +102,134 @@ boat's nftables lockdown does.
 The policy covers the whole VM, not only the agent's uid. Everything that needs the network (harness, repo, tools) is
 done before the policy is applied.
 
+## Orchestrators on Vercel Sandbox
+
+- **Code:** `orchestrator/deploy/orchestrator-host.ts` (the `OrchestratorHost` interface, `boatHost()`, provider selection,
+  labels and prices) and `orchestrator/deploy/vercel-orch.ts` (`vercelHost()`: launch, the supervisor, get, list, delete,
+  snapshots). The autoscaler (`src/autoscaler.ts`) and the boat CLI (`orchestrator/deploy/boat-orchestrators.ts`) drive
+  the interface; boat's host is `deploy/boat-lib.ts`, unchanged.
+- **Table:** `orchestrator_sandboxes.provider` (`boat` or `vercel`) and `expires_at` (migration `0017_orchestrator_host_provider.sql`)
+- **Tests:** `orchestrator/test/per-job.ts` and `autoscaler.ts` (the autoscaler against a mock Vercel Sandbox,
+  `orchestrator/test/vercel-orch-mock.ts`), `boat-fleet.ts` (the host guard), and the smoke test's
+  `scripts/smoke-vercel-orchestrators.ts`
+
+### Selection
+
+| `OCTILLION_SANDBOX_PROVIDER` | `OCTILLION_ORCHESTRATOR_PROVIDER` | Orchestrators | Workers |
+|---|---|---|---|
+| unset or `boat` | unset | boat | boat |
+| `vercel` | unset | Vercel | Vercel |
+| `vercel` | `boat` | boat | Vercel (phase 1 alone) |
+| unset or `boat` | `vercel` | Vercel | boat |
+
+### Who launches them
+
+Only the API, from the autoscaler (the 5-minute cron and event kicks on Vercel). It uses the function's OIDC token: the
+latest request's `x-vercel-oidc-token`, kept in memory (`rememberOidcToken`, at most 30 minutes old), else
+`VERCEL_OIDC_TOKEN`, else an access token (`OCTILLION_VERCEL_SANDBOX_TOKEN`). The token never enters a sandbox. The
+orchestrator gets its job's worker token in a 0600 env file, and asks the broker (phase 1) for its worker sandboxes. The
+boat CLI cannot launch Vercel orchestrators and says so.
+
+### The launch
+
+The steps keep boat's names, so failed launches classify the same way (`launch_step`):
+
+| Step | What happens |
+|---|---|
+| create | `POST /v2/sandboxes`: named `<ns>-vo-<env>-v<10 hex>`, `runtime: node24`, `persistent: false`, `OCTILLION_VERCEL_ORCH_SIZE` (`small`: 1 vCPU, 2 GB), timeout `OCTILLION_VERCEL_ORCH_TIMEOUT_MINUTES`, tag `octillion: orchestrator`. From the snapshot image when there is one. The row records the name and `expires_at` at once |
+| ready | the session is `running`; Node is found under `/vercel/runtimes/node*/bin` |
+| code upload | the boat tarball (`tarball()`), 3.5 MB chunks through `fs/write`, assembled and unpacked as root under `/opt/octillion/app`, then `npm ci` |
+| configure | the service user `octi` (`useradd -r`, no sudo); the env file at `/opt/octillion/orchestrator.env` (0600, owned by `octi`); `/opt/octillion/supervisor.sh` (root, 0755); the marker `/etc/octillion/host-role` (root, 0644) `{"role":"vercel-orchestrator","provider":"vercel","sandbox_id":…,"orchestrator_id":…}`. Optional network policy |
+| preflight | as `octi`, with its env: `in-sandbox.ts guard` must pass (else the launch fails here, and the sandbox is deleted, instead of crash-looping), and `in-sandbox.ts preflight` must reach `OCTILLION_URL/healthz` |
+| start | `sudo -u octi env -i PATH=… HOME=/var/lib/octi bash /opt/octillion/supervisor.sh` as a detached Vercel command, never waited on; then its pid file must point at a live process |
+
+The env file holds `OCTILLION_URL`, `OCTILLION_WORKER_TOKEN`, `ORCHESTRATOR_ID`, `RUNNER=boat` (the server's
+`sandbox_provider` then picks the workers, as on boat), `POD_CAPACITY`, `OCTILLION_HOST_ROLE=vercel-orchestrator`,
+`OCTILLION_SANDBOX_ID` and the non-secret tuning knobs. Values are checked against a plain character set before they
+are written, so sourcing the file runs nothing.
+
+### The supervisor
+
+Vercel Sandbox has no systemd. `supervisor.sh` is the boat unit's `Restart=on-failure` in bash:
+- each start reads the env file in a subshell and `exec`s `tsx orchestrator/pi-octillion/main.ts`, appending to `/var/lib/octi/orchestrator.log`;
+- a non-zero exit restarts it after 10 s; more than five deaths in a row, each within a minute of its start, slow that to 60 s;
+- exit 0 (idle, or the job is over) is final: the supervisor exits too, and the autoscaler deletes the sandbox once the orchestrator has left the fleet;
+- SIGTERM (or INT, HUP) is forwarded to the orchestrator, and the supervisor waits for its graceful stop (it kills its sessions and leaves the fleet).
+
+### Lifetime and relaunch
+
+A Vercel session stops at its timeout: at most 24 hours on Pro and Enterprise, 45 minutes on Hobby
+(vercel.com/docs/sandbox/pricing). The default timeout is the Pro maximum, 1440 minutes.
+
+Per-job orchestrators usually end with their job long before that. For one that does not, the autoscaler acts on
+`expires_at`:
+- From `OCTILLION_VERCEL_ORCH_RELAUNCH_MINUTES` before it (default `MAX_SESSION_MINUTES` + 15, never more than half the
+  timeout), `staleOrchestratorIds` (src/fleet.ts) lists it, as it does an orchestrator on old code. It gets an empty
+  assignment and claims nothing new, the job counts as unserved so a fresh orchestrator is launched for it, and the
+  old one is deleted (`retired: sandbox timeout near`) once it has checked in again with nothing running. Its sessions
+  started before the retirement end within `MAX_SESSION_MINUTES`, before the timeout.
+- 5 minutes before the timeout it is deleted regardless (`TTL about to expire (sandbox timeout)`).
+
+### Reconciliation and reaping
+
+Each row is reconciled against its own provider. A sandbox missing from the provider's listing (or listed as stopped) is
+reaped only after the provider's get by id says so: 404 (`sandbox gone from …`) or a stopped status (`sandbox is …`). If
+the get fails, the row is kept and asked again next tick. This applies to boat too, whose listing has dropped live
+sandboxes before (docs/sandbox-probe.md).
+
+Orphans (a live sandbox under our prefix with no row) are deleted per provider: on Vercel, `<ns>-vo-<env>-…` names and
+image builders `<ns>-vimg-<env>-…` older than 30 minutes. Never `-vw-` worker sandboxes (the broker's reaper deletes
+those once the orchestrator's token is revoked) and never another environment's names.
+
+### Capacity and launch rate
+
+Vercel has no limits API. The autoscaler uses static limits:
+- `OCTILLION_VERCEL_MAX_CONCURRENT` (10,000, the Pro concurrency) replaces boat's plan concurrency in the per-job and shared-fleet budgets;
+- `OCTILLION_VERCEL_ORCH_STARTS_PER_HOUR` (120) caps orchestrator launches per hour, counted from `orchestrator_sandboxes`,
+  against a runaway launch loop. Vercel's own vCPU allocation rate (Pro: 150 vCPUs a minute at first, up to 5,000) is far above it.
+
+A job that does not fit waits with `<job> waits for sandbox capacity on Vercel Sandbox (<n> free)`; the rate cap reads
+`launch rate cap: …`. Ticks from before this change read `waits for boat plan capacity`, and the Compute pages read both.
+
+### Snapshots (optional)
+
+With `OCTILLION_ORCH_SNAPSHOT=on`, the autoscaler builds an image per code hash: a builder sandbox named
+`<ns>-vimg-<env>-<hash>` gets the code and `npm ci` (no env file, no marker, no token), then
+`POST /v2/sandboxes/sessions/{id}/snapshot` (Vercel stops it) with an expiration of `OCTILLION_VERCEL_ORCH_SNAPSHOT_DAYS`
+(7) after last use, and the builder is deleted. Launches then create from `{source: {type: "snapshot", snapshotId}}` and
+skip the code upload. Images are found with `GET /v2/sandboxes/snapshots?name=<builder name>`. Old images are not deleted;
+they expire 7 days after their last use.
+
+### Egress
+
+An orchestrator reaches `OCTILLION_URL` (the API and its model gateway: one host), the npm registry during `npm ci`, and,
+for research, any public site (product pages, docs, package registries through `core/safe-fetch.ts`, which already
+refuses private addresses). A domain allow-list would break research, so no policy is applied by default.
+`OCTILLION_VERCEL_ORCH_EGRESS=locked` applies one after `npm ci`: `OCTILLION_URL`'s host, `registry.npmjs.org` and
+`OCTILLION_VERCEL_ORCH_EGRESS_HOSTS` (comma separated), with private, loopback, link-local and CGNAT subnets denied
+(the phase 1 call). Use it for runs without research.
+
+### Host guard
+
+The guard (`orchestrator/core/host-guard.ts`) accepts a Vercel orchestrator only when the env file says
+`OCTILLION_HOST_ROLE=vercel-orchestrator`, the root-owned marker names the same role and the same `OCTILLION_SANDBOX_ID`,
+and Vercel's own indicators are there: the per-sandbox proxy CA Vercel mounts in every sandbox
+(`/etc/pki/ca-trust/source/anchors/vercel-proxy-ca.pem` or `/usr/local/share/ca-certificates/vercel-proxy-ca.pem`, from
+Vercel's "Proxy CA certificates" docs) and the `/vercel` tree (`/vercel/runtimes` on the node24 image, `/vercel/sandbox`
+the default working directory). A Vercel function's markers (`VERCEL_REGION`, `AWS_LAMBDA_FUNCTION_NAME`) make it refuse.
+boat's checks are unchanged. Our VM has none of these files, so a copied env file and marker are still refused there.
+
+### Draining on a switch
+
+When `OCTILLION_SANDBOX_PROVIDER` changes, the next tick launches new orchestrators on the new provider. Live ones on the
+old provider:
+- a **per-job** orchestrator finishes its job where it is (it is not retired), then leaves and is deleted on its provider;
+- a **shared** orchestrator (`OCTILLION_ORCH_PER_JOB=off`) is retired like an old-code one (`retired: orchestrators moved
+  to …`): no new claims, a replacement on the new provider, deleted once idle.
+
+The boat key stays needed while a boat orchestrator is live or workers are on boat. With everything on Vercel, the Compute
+page stops flagging a missing boat key.
+
 ## Accounting
 
 Session metadata gets provider-neutral keys:
@@ -115,6 +247,12 @@ The Vercel estimate uses Pro iad1 rates:
 - **Memory:** $0.0212 per GB-hour, with a 1-minute minimum.
 - **Creations:** $0.60 per million.
 
+Orchestrators are priced by their provider (`orchSandboxCostUsd`): boat's `small` rate, or the same Vercel rates for
+`OCTILLION_VERCEL_ORCH_SIZE` (1 vCPU / 2 GB by default: about $0.08 an hour at a 0.3 busy share). The Compute page labels
+each orchestrator `boat.dev` or `Vercel Sandbox`, says where orchestrators and workers run (Environment), and counts boat
+starts from boat orchestrators only. Session failure classes are provider-neutral: `sandbox_permission` and
+`sandbox_capacity` (they were `boat_permission` and `boat_capacity`; old filter links still work).
+
 ## Switching and rolling back
 
 1. Make sure the Vercel deployment can make sandboxes. Compute → Sandbox probes should show Vercel probes as configured and healthy. That proves the OIDC token works.
@@ -127,6 +265,11 @@ The Vercel estimate uses Pro iad1 rates:
 
 Without a Vercel token on the API, an orchestrator told to use Vercel refuses to start. It reports "Vercel Sandbox is not configured on the Octillion API" and does not silently fall back to boat.
 
+**Orchestrators.** The same variable moves them (unless `OCTILLION_ORCHESTRATOR_PROVIDER` says otherwise): orchestrators
+launched after the change start on Vercel, and the boat ones drain as described above. To roll back, unset it: new
+orchestrators start on boat, and the Vercel ones finish their jobs (or are retired, for shared ones). To try Vercel
+orchestrators alone, set `OCTILLION_ORCHESTRATOR_PROVIDER=vercel` and leave the workers on boat, or the reverse.
+
 ## What only a live run can confirm
 
 The mocks follow the official SDK's REST calls, but these have not been seen live yet:
@@ -137,6 +280,15 @@ The mocks follow the official SDK's REST calls, but these have not been seen liv
 - The network policy body (`allow` plus `subnets.deny`) being accepted, and the probe results under it.
 - How long the harness installs take on Amazon Linux 2023.
 
+For orchestrators:
+- That a detached command keeps running for the session's life (the supervisor is one), and that `sudo -n -u octi env -i …` works for the default user.
+- The guard's indicators: that the proxy CA file and `/vercel/runtimes` exist and are visible to `octi` (a launch whose guard refuses fails at `preflight` with the problems listed, and nothing is left running).
+- `useradd -r` and `install -o` on the node24 image; files written by `fs/write` readable through `sudo cat`.
+- How long the code upload and `npm ci` take from a cron function (the launch must finish within the function's 300 s; `OCTILLION_ORCH_SNAPSHOT=on` skips both).
+- That a 1440-minute timeout is accepted on the team's plan (Hobby: 45 minutes; set `OCTILLION_VERCEL_ORCH_TIMEOUT_MINUTES` lower if create answers 400).
+- The snapshot calls (`POST …/snapshot` with `expiration`, `GET /v2/sandboxes/snapshots?name=`, `source: {type: "snapshot"}`), taken from the REST reference, not seen yet.
+- The network policy for an orchestrator, if `OCTILLION_VERCEL_ORCH_EGRESS=locked` is used.
+
 ## Live test plan
 
 1. In a test account, on a preview deployment with OIDC, set `OCTILLION_SANDBOX_PROVIDER=vercel` and `OCTILLION_MAX_JOB_ORCHESTRATORS=1`.
@@ -145,3 +297,19 @@ The mocks follow the official SDK's REST calls, but these have not been seen liv
 4. Repeat with `OCTILLION_EGRESS=all` to see the network policy and its probe pass.
 5. Repeat once per harness (codex, opencode, cline, kilo, pi, cursor) to record install times and failures.
 6. Unset the variable afterwards; the next orchestrator is on boat again.
+
+### Orchestrators
+
+On a preview deployment (`VERCEL_ENV=preview`: names `<ns>-vo-prev-…`, apart from production's), never production first:
+1. Leave `OCTILLION_SANDBOX_PROVIDER` unset and set `OCTILLION_ORCHESTRATOR_PROVIDER=vercel`, `OCTILLION_MAX_JOB_ORCHESTRATORS=1`
+   and `OCTILLION_VERCEL_ORCH_TIMEOUT_MINUTES=60` (a stray sandbox stops within the hour), and redeploy the preview.
+2. Queue one small onboarding research or a one-session run in a test account and run a tick (Compute → Run a tick now).
+3. Compute → Orchestrators: the row says `Vercel Sandbox` and goes `booting` → `running`. If it ends instead, its
+   `launch_step` and error name what failed (a guard refusal lists the missing indicators).
+4. In the Vercel dashboard (Observability → Sandboxes), the sandbox `<ns>-vo-prev-…` runs. Its log is
+   `/var/lib/octi/orchestrator.log` (`sandbox exec <name> -- sudo tail -n 200 /var/lib/octi/orchestrator.log` with the Vercel CLI).
+5. The job finishes, the orchestrator exits 0, and the next tick deletes the sandbox (`drained (job … over or idle)`).
+6. Relaunch: set `OCTILLION_VERCEL_ORCH_TIMEOUT_MINUTES=20` and `OCTILLION_VERCEL_ORCH_RELAUNCH_MINUTES=10` with a run that
+   lasts longer; after about 10 minutes a second orchestrator takes the job and the first is deleted (`retired: sandbox timeout near`).
+7. Then the workers too: `OCTILLION_SANDBOX_PROVIDER=vercel` (phase 1's test plan), still on the preview.
+8. Unset the variables; new orchestrators start on boat again.
